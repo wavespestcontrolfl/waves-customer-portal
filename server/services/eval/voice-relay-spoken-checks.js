@@ -1228,22 +1228,32 @@ const REPORT_UNRELATED_OR_CLAUSE_RE = /^or\s+(?:(?:the|our|your|their)\s+)?(?:te
 // leading/parenthetical commas or ordinary "with a backpack sprayer" terms.
 function reportAssertionOf(clause, subjectAt) {
   let start = 0;
+  const governingStart = clause.length - claimContext(clause, subjectAt, clause.length).length;
   REPORT_ASSERTION_BOUNDARY_RE.lastIndex = 0;
   for (const boundary of clause.matchAll(REPORT_ASSERTION_BOUNDARY_RE)) {
     if (!REPORT_FINDING_VERB_RE.test(clause.slice(start, boundary.index))) continue;
     if (boundary.index >= subjectAt) return clause.slice(start, boundary.index);
-    start = boundary.index + boundary[0].length;
+    // Keep a conditional introduction that governs the matched assertion.
+    // An ordinary prior treatment still opens a separate assertion here.
+    if (!boundary[0].includes(',') || governingStart > boundary.index) {
+      start = boundary.index + boundary[0].length;
+    }
   }
   return clause.slice(start);
 }
 
-// clauseOf stops at "or", so inspect that boundary's right side long enough
-// to distinguish an alternative location ("exterior or the garage") from a
-// separate action ("or the technician can explain"). "Either" makes the
-// first finding explicitly alternative regardless.
+// Inspect "or" after the matched location whether clauseOf retains a nominal
+// alternative or stops at an independent assertion. This distinguishes an
+// alternative location ("exterior or the garage") from a separate action
+// ("or the technician can explain"). "Either" makes the first finding
+// explicitly alternative regardless.
 function reportHasAlternativeLocation(affirmed, locationAt, orTail) {
-  if (!/^or\b/i.test(orTail) || locationAt < 0) return false;
-  return /\beither\b/i.test(affirmed) || !REPORT_UNRELATED_OR_CLAUSE_RE.test(orTail);
+  if (locationAt < 0) return false;
+  const retainedOr = /\bor\b/i.exec(affirmed.slice(locationAt));
+  const alternativeTail = /^or\b/i.test(orTail)
+    ? orTail : retainedOr && affirmed.slice(locationAt + retainedOr.index);
+  if (!alternativeTail) return false;
+  return /\beither\b/i.test(affirmed) || !REPORT_UNRELATED_OR_CLAUSE_RE.test(alternativeTail);
 }
 
 /** value: { subject: "<regex>", location: "<regex>" } */
