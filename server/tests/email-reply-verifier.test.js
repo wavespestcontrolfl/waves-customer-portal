@@ -117,6 +117,17 @@ describe('email reply verifier', () => {
     }
     expect(verdict('Hi Casey, your $50 payment failed.').ok).toBe(true);
   });
+  test('appointment state claims must match their visit record', () => {
+    const facts = contextWith().facts.filter((fact) => fact.key !== 'upcoming_visit').concat({
+      key: 'upcoming_visit', status: 'present', value: { date: '2026-09-15', status: 'confirmed' },
+    });
+    for (const state of ['cancelled', 'pending', 'rescheduled', 'en route', 'completed']) {
+      expect(verdict(`Hi Casey, your September 15 appointment is ${state}.`, { context: { facts } }).violations)
+        .toContain('visit_status_unsupported');
+    }
+    expect(verdict('Hi Casey, your last service was completed on August 12.').ok).toBe(true);
+  });
+
   test('bare times and extended signatures require review', () => {
     expect(verdict('Hi Casey, your appointment is September 15 at 8:30.').violations).toContain('clock_format_unsupported');
     expect(verdict('Hi Casey, your visit is pending.\n\nBest,\nAdam\nWaves Pest Control').violations).toContain('signature_unsupported');

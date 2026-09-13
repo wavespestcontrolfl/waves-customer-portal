@@ -215,6 +215,12 @@ function statusSupported(sentence, key, context, predicate) {
   return candidates.length > 0 && candidates.every(predicate);
 }
 
+function stateWordsSupported(sentence, key, context, pattern) {
+  const normalized = (value) => String(value || '').toLowerCase().replace('cancelled', 'canceled').replace(/\s+/g, '_');
+  return (sentence.match(pattern) || []).every((claim) => statusSupported(sentence, key, context,
+    (fact) => normalized(fact.value?.status) === normalized(claim)));
+}
+
 function statusViolations(text, context) {
   const violations = [];
   for (const sentence of sentences(text)) {
@@ -225,14 +231,12 @@ function statusViolations(text, context) {
       && !statusSupported(sentence, 'recent_payment', context,
         (fact) => SUCCESS_STATUS_RE.test(String(fact.value?.status || '')))) violations.push('payment_status_unsupported');
 
-    if (/\bpayments?\b/i.test(sentence)) {
-      const claims = sentence.match(/\b(?:failed|declined|pending|processing|refunded|reversed|cancelled|canceled|voided)\b/gi) || [];
-      for (const claim of claims) {
-        const expected = claim.toLowerCase().replace('cancelled', 'canceled');
-        if (!statusSupported(sentence, 'recent_payment', context,
-          (fact) => String(fact.value?.status || '').toLowerCase().replace('cancelled', 'canceled') === expected)) violations.push('payment_status_unsupported');
-      }
-    }
+    if (/\bpayments?\b/i.test(sentence) && !stateWordsSupported(sentence, 'recent_payment', context,
+      /\b(?:failed|declined|pending|processing|refunded|reversed|cancelled|canceled|voided)\b/gi)) violations.push('payment_status_unsupported');
+    if (/\b(?:visit|service|appointment)\b/i.test(sentence) && !stateWordsSupported(sentence, 'upcoming_visit', context,
+      /\b(?:pending|rescheduled|cancelled|canceled|skipped|en route|on site)\b/gi)) violations.push('visit_status_unsupported');
+    if (/\b(?:visit|service|appointment)\b/i.test(sentence) && /\bcompleted\b/i.test(sentence)
+      && (/\b(?:next|upcoming)\b/i.test(sentence) || !statusSupported(sentence, 'last_completed_visit', context, () => true))) violations.push('visit_status_unsupported');
 
     if (/\b(?:visit|service|appointment)\b[^.!?]{0,60}\b(?:confirmed|booked|all set)\b|\b(?:confirmed|booked)\b[^.!?]{0,60}\b(?:visit|service|appointment)\b/i.test(sentence)
       && !statusSupported(sentence, 'upcoming_visit', context,
