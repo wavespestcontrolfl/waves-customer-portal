@@ -2431,6 +2431,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       ? { key: groupKey(target), lines: target.lines, split: appointmentSubmitGroups.length > 1 }
       : null;
   })();
+  const appointmentDiscountHasNoGroup = Boolean(appointmentDiscount && services.length && !appointmentDiscountGroup);
   const appointmentDiscountReaches = (svc) => {
     if (!appointmentDiscount) return false;
     // Only the group this discount actually rides.
@@ -3013,6 +3014,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // Header, footer and second-program CTA share one synchronous lock. React
   // state alone can admit two taps before the first render marks us saving.
   const handleSubmit = async (separateProgram) => {
+    if (appointmentDiscountHasNoGroup) return;
     if (!canSubmitAppointments({
       selectedCustomer,
       services,
@@ -3118,7 +3120,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     ? 'Could not confirm the discount-stacking status — retry before saving.'
     : (percentExclusionsBlockSave
       ? 'Could not confirm which services this percentage discount excludes — retry before saving.'
-      : '');
+      : appointmentDiscountHasNoGroup
+        ? 'This appointment discount does not match any selected service. Change or remove it before saving.'
+        : '');
 
   // While the property list is loading a multi-property customer has no
   // resolved address yet — a submit then would omit propertyId and book the
@@ -3129,7 +3133,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     bookingPropertyState,
     alreadySubmitting: saving,
     addressAskPending,
-  }) && !stackingUnconfirmedBlocksSave && !percentExclusionsBlockSave;
+  }) && !stackingUnconfirmedBlocksSave && !percentExclusionsBlockSave && !appointmentDiscountHasNoGroup;
   const hasRecurringServices = services.some((s) => s.cadence && s.cadence !== 'one_time');
   const firstCustomRecurringIndex = services.findIndex((s) => s.cadence === 'custom');
   const weekendRuleValue = skipWeekends ? weekendShift : 'allow';
@@ -4102,8 +4106,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           {stackingEnabled && services.length > 0 && lineDiscountPresets.length > 0 && (
             <div style={{ borderTop: `1px solid ${D.border}`, marginTop: 12, paddingTop: 12, display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 12 }}>
               <div>
-                <label style={labelStyle}>Appointment discount</label>
+                <label htmlFor="appointment-discount" style={labelStyle}>Appointment discount</label>
                 <select
+                  id="appointment-discount"
                   value={appointmentDiscount?.id || ''}
                   onChange={(e) => pickAppointmentDiscount(e.target.value)}
                   style={inputStyle}
@@ -4148,9 +4153,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               <span>{discountSaveBlockedReason}</span>
               <button
                 type="button"
-                onClick={stackingUnconfirmedBlocksSave ? retryStackingProbe : retryPercentExclusions}
+                onClick={stackingUnconfirmedBlocksSave ? retryStackingProbe : percentExclusionsBlockSave ? retryPercentExclusions : () => pickAppointmentDiscount('')}
                 style={{ background: 'none', border: `1px solid ${D.red}`, color: D.red, borderRadius: 6, padding: '4px 10px', fontSize: 12, fontWeight: 500, cursor: 'pointer', flex: '0 0 auto' }}
-              >Retry</button>
+              >{appointmentDiscountHasNoGroup && !stackingUnconfirmedBlocksSave && !percentExclusionsBlockSave ? 'Remove discount' : 'Retry'}</button>
             </div>
           )}
 
