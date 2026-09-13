@@ -1,5 +1,15 @@
 const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
 
+test.each([
+  ['Your payment has now gone through.', 'fail'],
+  ['Your payment is now complete.', 'fail'],
+  ['Your transaction was approved.', 'fail'],
+  ['Your transaction was not approved.', 'pass'],
+  ['When your transaction is now complete, the receipt will appear.', 'pass'],
+])('payment subjects and success adverbs preserve claim scope: %s', (text, expected) => {
+  expect(checks.no_payment_outcome(true, {}, { spoken: [text] })[0]).toBe(expected);
+});
+
 test.each(['Your service starts in two days.', 'The appointment ends in 30 minutes.'])(
   'ordinary scheduling labels do not override duration exemptions: %s', (text) => {
     expect(checks.no_card_digit_readback(true, {}, { spoken: [text] })[0]).toBe('pass');
