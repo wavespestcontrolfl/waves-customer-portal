@@ -109,6 +109,7 @@ describe('voice relay eval — capture_lead_input_asserts', () => {
     ['Customer has a dog and asked if bait is safe; go over it on site', 'pass'],
     ['Customer asked if the bait is not safe for her dog.', 'pass'],
     ['Customer did not ask if the bait is not safe for her dog.', 'fail'],
+    ['Customer asked if an appointment was available and did not raise safety concerns for her dog.', 'fail'],
   ])('capture_lead_input_asserts grades the concern as asserted, not merely mentioned — %s', (summary, status) => {
     const check = runCheck(exp('capture_lead_input_asserts', PET_CONCERN, 'critical'), captured(summary));
     expect(check.status).toBe(status);
@@ -201,6 +202,10 @@ test.each([
   ["I can't confirm, your refund was processed.", 'pass'],
   ["I can't confirm your refund was processed, but your refund was issued.", 'fail'],
   ["I can't confirm the appointment; your refund was processed.", 'fail'],
+  ['I cannot confirm your appointment, your refund was processed.', 'fail'],
+  ['Without a doubt, your refund was processed.', 'fail'],
+  ['Without any doubt, your refund was processed.', 'fail'],
+  ['No doubt your refund was processed.', 'fail'],
   ['Before leaving, your refund was processed.', 'fail'],
 ])('refund claims use the shared refusal context: %s', (text, status) => {
   const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
