@@ -1298,6 +1298,7 @@ function safetyOnceDryQualifies(text, claim) {
     return text[clauseBounds(text, match.index)[1]] !== '?'
       && !/\b(?:appointment|arrival|schedule|scheduling)\b/i.test(match[0])
       && !PET_TRAILING_CONDITION_RE.test(text.slice(match.index + match[0].length))
+      && !PET_SPECULATIVE_GUIDANCE_RE.test(claim)
       && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim);
   });
 }
