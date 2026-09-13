@@ -1217,6 +1217,22 @@ function no_third_party_disclosure(value, record, { spoken }) {
 const REPORT_UNCERTAINTY_RE = /\b(?:can|must|may|might|could|would|should|will|shall|going to|plan(?:s|ned)? to|maybe|perhaps|possibly|potentially|probably)\b/i;
 const REPORT_INSTRUCTION_RE = /(?:^|,\s*)(?:please\s+)?(?:apply|use|put|treat|spray|place)\b|\b(?:please|make sure|ensure|remember to)\b/i;
 const REPORT_FINDING_VERB_RE = /\b(?:applied|placed|used|treated|sprayed|put|went|got)\b/i;
+const REPORT_COMMA_ASSERTION_RE = new RegExp(`,\\s*(?=(?:(?:the|a|an)\\s+)?(?:[\\w'\u2019-]+\\s+){1,4}(?:(?:(?:was|were|is|are|has|have|had|got)\\s+(?:\\w+ly\\s+)?)?${REPORT_FINDING_VERB_RE.source}))`, 'gi');
+
+// A comma opens a separate report assertion only when its right side has a
+// fresh treatment subject/predicate and its left side already completed one.
+// This separates "Talstar was applied indoors, bait was placed outside"
+// without splitting leading or parenthetical adjuncts at every comma.
+function reportAssertionOf(clause, subjectAt) {
+  let start = 0;
+  REPORT_COMMA_ASSERTION_RE.lastIndex = 0;
+  for (const boundary of clause.matchAll(REPORT_COMMA_ASSERTION_RE)) {
+    if (!REPORT_FINDING_VERB_RE.test(clause.slice(start, boundary.index))) continue;
+    if (boundary.index >= subjectAt) return clause.slice(start, boundary.index);
+    start = boundary.index + boundary[0].length;
+  }
+  return clause.slice(start);
+}
 
 /** value: { subject: "<regex>", location: "<regex>" } */
 function report_readback_confirms(value, record, { spoken }) {
@@ -1226,12 +1242,12 @@ function report_readback_confirms(value, record, { spoken }) {
     for (const m of text.matchAll(subjectRe)) {
       // Preserve the sentence's question mark before clauseOf removes it.
       // A question about a finding does not confirm that finding.
-      const [, clauseEnd] = clauseBounds(text, m.index);
+      const [clauseStart, clauseEnd] = clauseBounds(text, m.index);
       const sentencePrefix = text.slice(0, m.index).split(/[.!?;]/).pop();
       const interrogative = /^\s*(?:(?:and|but|so)\s+)?(?:was|were|is|are|has|have|had|did|do|does|can|could|would|will|should|what|where|when|why|how)\b/i.test(sentencePrefix);
       const alternativeQuestion = /^or\b[^.!?;]*\?/i.test(text.slice(clauseEnd));
       if (text[clauseEnd] === '?' || interrogative || alternativeQuestion) continue;
-      const clause = clauseOf(text, m.index);
+      const clause = reportAssertionOf(clauseOf(text, m.index), m.index - clauseStart);
       // A contrast excludes its following alternative, not the location
       // affirmed before it: "exterior rather than indoors" still confirms
       // exterior. Require both halves in the affirmative portion.
