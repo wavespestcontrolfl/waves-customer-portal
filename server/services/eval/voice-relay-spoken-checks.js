@@ -557,7 +557,7 @@ const PAYMENT_OUTCOME_ES_RE = new RegExp(
   'gi',
 );
 const PAYMENT_OUTCOME_RES = Object.freeze([PAYMENT_OUTCOME_RE, PAYMENT_FUTURE_OUTCOME_RE, PAYMENT_OUTCOME_ES_RE]);
-const PAYMENT_CONDITION_RE = /^\s*(?:after|once|when|cuando|despu[eé]s\s+de\s+que|una\s+vez\s+que)\b/i;
+const PAYMENT_CONDITION_RE = /^\s*(?:after|once(?=\s+(?:i|you|we|they|he|she|it|the|your|our|this|that|submitted|entered|provided|completed|authori[sz]ed|paid)\b)|when|cuando|despu[eé]s\s+de\s+que|una\s+vez\s+que)\b/i;
 const PAYMENT_PREREQUISITE_RE = /^\s*(?:after|once|when)\b[^.!?;,]{0,80}\b(?:submit(?:ted)?|enter(?:ed)?|provide(?:d)?|complete(?:d)?|authori[sz](?:e|ed)|pay|paid)\b/i;
 const PAYMENT_PAST_OUTCOME_RE = new RegExp(
   `\\b(?:was|were|had|did|went|got|fue|he|hemos|han|realiz[oó]|proces[oó]|complet[oó])\\b|\\b${PAYMENT_ACTOR}\\s+(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_TRANSITIVE_SUCCESS}\\b|\\b(?:${PAYMENT_TARGET}|that|it)\\s+(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_INTRANSITIVE_SUCCESS}\\b`,
