@@ -471,7 +471,7 @@ function claimContext(text, start, end) {
   const complement = hedge ? introduction.slice(hedge.index + hedge[0].length).replace(/[,\s]+$/g, '').trim() : '';
   // A condition or refusal governs the assertion after its comma. Ordinary
   // temporal introductions ("Before you go,") remain separate adjuncts.
-  if (/^\s*(?:if|unless|whether)\b/i.test(introduction)
+  if (/^\s*(?:if(?!\s+(?:anything|you ask me)\b)|unless|whether)\b/i.test(introduction)
       || (hedge && /^(?:(?:any of )?(?:this|that|it))?$/i.test(complement))) {
     return text.slice(boundary, end);
   }
@@ -1232,7 +1232,7 @@ function only_language(value, record, { spoken }) {
 const DENIAL_WORD_RE = /\b(?:(?:not|(?:is|are|did|does|was|were|has|have|had)n[\x27\u2019]t)(?!\s+only\b)|never|denied|denies|without|no|neither|none|zero)\b/gi;
 // Commas may enclose an aside and "and" may coordinate denied objects.
 // End their scope only when the next phrase starts a fresh assertion.
-const DENIAL_CLAUSE_END_RE = /[.;!?]|\b(?:but|however|although|though|so|while|yet)\b|(?:,|\band\b)\s*(?:(?:then|also)\s+)*(?=(?:(?:the )?(?:caller|customer)|she|he|they)\s+\w+|(?:asked|asks|raised|raises|expressed|expresses|mentioned|mentions|reported|reports|voiced|voices|did|does|do|is|are|was|were|has|have|had)\b)/gi;
+const DENIAL_CLAUSE_END_RE = /[.;!?]|\b(?:but|however|although|though|so|while|yet)\b|(?:,|\band\b)\s*(?:(?:then|also)\s+)*(?=(?:(?:the )?(?:caller|customer)|she|he|they)\s+\w+|(?:asked|asks|raised|raises|expressed|expresses|mentioned|mentions|reported|reports|voiced|voices|noting|noted|adding|added|did|does|do|is|are|was|were|has|have|had)\b)/gi;
 /** [[start, end), …) — the ranges of `text` a denial word governs. */
 function deniedSpans(text) {
   const spans = [];

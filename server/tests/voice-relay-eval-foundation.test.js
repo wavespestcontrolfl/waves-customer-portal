@@ -110,6 +110,7 @@ describe('voice relay eval — capture_lead_input_asserts', () => {
     ['Customer asked if the bait is not safe for her dog.', 'pass'],
     ['Customer did not ask if the bait is not safe for her dog.', 'fail'],
     ['Customer asked if an appointment was available and did not raise safety concerns for her dog.', 'fail'],
+    ['Customer asked whether an appointment was available, noting there were no safety concerns for her dog.', 'fail'],
   ])('capture_lead_input_asserts grades the concern as asserted, not merely mentioned — %s', (summary, status) => {
     const check = runCheck(exp('capture_lead_input_asserts', PET_CONCERN, 'critical'), captured(summary));
     expect(check.status).toBe(status);
@@ -214,6 +215,8 @@ test.each([
   ['I can check if you are eligible, your refund was processed.', 'fail'],
   ['I cannot access your account and your refund was processed.', 'fail'],
   ['I doubt the appointment details and your refund was processed.', 'fail'],
+  ['If anything, your refund was processed.', 'fail'],
+  ['If you ask me, your refund was processed.', 'fail'],
   ['I cannot confirm the appointment details and the office processed your refund.', 'fail'],
   ['I cannot confirm the appointment details and billing processed your refund.', 'fail'],
   ['Before leaving, your refund was processed.', 'fail'],
