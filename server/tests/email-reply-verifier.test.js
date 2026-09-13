@@ -28,6 +28,7 @@ function verdict(text, overrides = {}) {
 describe('email reply verifier', () => {
   test('accepts grounded amounts, calendar dates, and visit windows', () => {
     expect(verdict('Hi Casey, your outstanding balance is $75. Your pending appointment is September 15 from 9 AM to 11 AM.')).toEqual({ ok: true, violations: [] });
+    expect(verdict('Hi Casey, your pending appointment is September 15 from 9–11 AM.').ok).toBe(true);
     expect(wordCount('Hi Casey, this is four.')).toBe(5);
   });
 
@@ -47,6 +48,13 @@ describe('email reply verifier', () => {
     const result = verdict('Hi Casey, your $50 payment was successful. Your September 15 appointment is confirmed.', { context: { facts } });
     expect(result.violations).toEqual(expect.arrayContaining(['payment_status_unsupported', 'visit_status_unsupported']));
     expect(verdict('Hi Casey, we received your $50 payment.').violations).toContain('payment_status_unsupported');
+
+    const invoicePaymentFacts = contextWith().facts.concat([
+      { key: 'recent_payment', status: 'present', value: { amount: 120, paymentDate: '2026-09-12', status: 'failed' } },
+      { key: 'recent_payment', status: 'present', value: { amount: 25, paymentDate: '2026-09-11', status: 'succeeded' } },
+    ]);
+    expect(verdict('Hi Casey, we received your $120 invoice payment.', { context: { facts: invoicePaymentFacts } }).violations)
+      .toContain('payment_status_unsupported');
   });
 
   test('requires amounts, dates, and windows in one sentence to come from the same record', () => {
@@ -56,6 +64,8 @@ describe('email reply verifier', () => {
     ]);
     expect(verdict('Hi Casey, your $50 payment was on September 11.', { context: { facts } }).violations).toContain('fact_binding_unsupported');
     expect(verdict('Hi Casey, your September 15 appointment is at 1 PM.', { context: { facts } }).violations).toContain('fact_binding_unsupported');
+    expect(verdict('Hi Casey, your September 15 appointment is from 8–11 AM.').violations)
+      .toEqual(expect.arrayContaining(['date_unsupported:8 AM', 'fact_binding_unsupported']));
   });
 
   test('binds monthly dues amounts to total, base, or surcharge semantics', () => {

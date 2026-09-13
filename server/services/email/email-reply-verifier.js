@@ -9,6 +9,7 @@ const LINK_RE = /(?:https?:\/\/|www\.)[^\s<>()]+|\b(?:[a-z0-9-]+\.)+[a-z]{2,63}(
 const MONEY_RE = /\$\s*\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?\s+(?:dollars?|bucks?)\b/gi;
 const DATE_RE = /\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b|\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:,?\s+\d{4})?\b|\b(?:sun|mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|sat)(?:day)?\b|\b(?:today|tomorrow)\b/gi;
 const TIME_RE = /\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)\b/gi;
+const TIME_RANGE_RE = /\b(\d{1,2})(?::(\d{2}))?\s*(?:[-–—]|to)\s*(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)\b/gi;
 const BOILERPLATE_RE = /\bthank you for (?:reaching out|contacting us)\b|\bhope this (?:email )?finds you well\b|\bplease (?:do not|don't) hesitate to (?:reach out|contact us)\b|\blet us know if you have any (?:other |further )?questions\b/i;
 const SUCCESS_STATUS_RE = /^(?:paid|succeeded|successful|completed|processed|received)$/i;
 
@@ -61,8 +62,8 @@ function amountsForClaim(fact, raw, sentence) {
 function semanticFactKeys(sentence) {
   const text = sentence.toLowerCase();
   if (/\b(?:balance|outstanding|account current)\b/.test(text)) return ['outstanding_balance'];
-  if (/\b(?:invoice|amount due)\b/.test(text)) return ['open_invoice'];
   if (/\b(?:payment|paid|went through|received)\b/.test(text)) return ['recent_payment'];
+  if (/\b(?:invoice|amount due)\b/.test(text)) return ['open_invoice'];
   if (/\b(?:monthly|dues|surcharge|card fee)\b/.test(text)) return ['billing_lane'];
   return [];
 }
@@ -121,17 +122,25 @@ function dateFacts(context) {
     for (const value of values) {
       const day = calendarDay(value);
       if (day) dateAliases(day, context?.metadata?.assembledAt).forEach((alias) => aliases.add(alias));
-      const raw = String(value).toLowerCase().replace(/\./g, '');
-      for (const time of raw.match(TIME_RE) || []) aliases.add(time.replace(/\s+/g, ' ').trim());
-      const range = raw.match(/\b(\d{1,2})(?::(\d{2}))?\s*[-–—]\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/);
-      if (range) {
-        aliases.add(`${range[1]}${range[2] ? `:${range[2]}` : ''} ${range[5]}`);
-        aliases.add(`${range[3]}${range[4] ? `:${range[4]}` : ''} ${range[5]}`);
-      }
+      temporalClaims(value).forEach((claim) => aliases.add(normalizeTemporal(claim)));
     }
     if (aliases.size) result.push({ key: fact.key, aliases, fact });
   }
   return result;
+}
+
+function normalizeTemporal(value) {
+  return String(value).toLowerCase().replace(/\./g, '').replace(/\s+/g, ' ').trim();
+}
+
+function temporalClaims(value) {
+  const raw = String(value || '');
+  const claims = [...(raw.match(DATE_RE) || []), ...(raw.match(TIME_RE) || [])];
+  for (const range of raw.matchAll(TIME_RANGE_RE)) {
+    claims.push(`${range[1]}${range[2] ? `:${range[2]}` : ''} ${range[5]}`);
+    claims.push(`${range[3]}${range[4] ? `:${range[4]}` : ''} ${range[5]}`);
+  }
+  return [...new Map(claims.map((claim) => [normalizeTemporal(claim), claim])).values()];
 }
 
 function dateSemanticKeys(sentence) {
@@ -144,10 +153,10 @@ function dateSemanticKeys(sentence) {
 }
 
 function dateSupported(raw, sentence, available) {
-  const normalized = raw.toLowerCase().replace(/\./g, '').replace(/\s+/g, ' ').trim();
+  const normalized = normalizeTemporal(raw);
   const keys = dateSemanticKeys(sentence);
   return keys.length > 0 && available.some((entry) => keys.includes(entry.key)
-    && [...entry.aliases].some((alias) => alias.replace(/\./g, '').replace(/\s+/g, ' ').trim() === normalized));
+    && [...entry.aliases].some((alias) => normalizeTemporal(alias) === normalized));
 }
 
 function factByKey(context, key) {
@@ -160,13 +169,13 @@ function factsMatchingClaims(sentence, key, context) {
   if (amounts.length && semanticFactKeys(sentence).includes(key)) {
     candidates = candidates.filter((fact) => amounts.every((amount) => amountsForClaim(fact, amount, sentence).includes(cents(amount))));
   }
-  const dates = [...(sentence.match(DATE_RE) || []), ...(sentence.match(TIME_RE) || [])];
+  const dates = temporalClaims(sentence);
   if (dates.length && dateSemanticKeys(sentence).includes(key)) {
     const entries = dateFacts(context).filter((entry) => entry.key === key && candidates.includes(entry.fact));
     candidates = candidates.filter((fact) => dates.every((raw) => {
-      const normalized = raw.toLowerCase().replace(/\./g, '').replace(/\s+/g, ' ').trim();
+      const normalized = normalizeTemporal(raw);
       return entries.some((entry) => entry.fact === fact && [...entry.aliases]
-        .some((alias) => alias.replace(/\./g, '').replace(/\s+/g, ' ').trim() === normalized));
+        .some((alias) => normalizeTemporal(alias) === normalized));
     }));
   }
   return candidates;
@@ -174,7 +183,7 @@ function factsMatchingClaims(sentence, key, context) {
 
 function hasSameFactBinding(sentence, context) {
   const amounts = sentence.match(MONEY_RE) || [];
-  const dates = [...(sentence.match(DATE_RE) || []), ...(sentence.match(TIME_RE) || [])];
+  const dates = temporalClaims(sentence);
   if (amounts.length + dates.length < 2) return true;
   const amountKeys = amounts.length ? semanticFactKeys(sentence) : null;
   const dateKeys = dates.length ? dateSemanticKeys(sentence) : null;
@@ -234,9 +243,9 @@ function exemplarLeak(text, exemplars, context) {
     .some((value) => {
       if (!text.toLowerCase().includes(value.toLowerCase())) return false;
       if (value.trim().startsWith('$') && facts.some((fact) => amountsForFact(fact).includes(cents(value)))) return false;
-      const normalized = value.toLowerCase().replace(/\./g, '').replace(/\s+/g, ' ').trim();
+      const normalized = normalizeTemporal(value);
       return !dates.some((entry) => [...entry.aliases]
-        .some((alias) => alias.replace(/\./g, '').replace(/\s+/g, ' ').trim() === normalized));
+        .some((alias) => normalizeTemporal(alias) === normalized));
     }));
 }
 
@@ -276,7 +285,7 @@ function groundingViolations(draft, context, exemplars) {
     for (const amount of sentence.match(MONEY_RE) || []) {
       if (!amountSupported(amount, sentence, facts)) violations.push(`amount_unsupported:${amount}`);
     }
-    for (const date of [...(sentence.match(DATE_RE) || []), ...(sentence.match(TIME_RE) || [])]) {
+    for (const date of temporalClaims(sentence)) {
       if (!dateSupported(date, sentence, availableDates)) violations.push(`date_unsupported:${date}`);
     }
     if (!hasSameFactBinding(sentence, context)) violations.push('fact_binding_unsupported');
