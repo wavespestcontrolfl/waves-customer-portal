@@ -346,3 +346,13 @@ test.each([
 ])('report explicit falsity retracts only its own finding: %s', (text, status) => {
   expect(checks.report_readback_confirms({ subject: 'Talstar P', location: 'exterior' }, {}, { spoken: [text] })[0]).toBe(status);
 });
+
+
+test.each([
+  ['Talstar P was applied to the exterior perimeter, but that never happened.', 'fail'],
+  ["Talstar P was applied to the exterior perimeter — that didn't happen.", 'fail'],
+  ['Talstar P was applied to the exterior perimeter, but that did not actually occur.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, but the follow-up call never happened.', 'pass'],
+])('report event retractions stay tied to the finding: %s', (text, status) => {
+  expect(checks.report_readback_confirms({ subject: 'Talstar P', location: 'exterior' }, {}, { spoken: [text] })[0]).toBe(status);
+});
