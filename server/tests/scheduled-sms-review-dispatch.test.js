@@ -20,6 +20,7 @@ jest.mock('../services/messaging/deferred-replay-registry', () => ({
 const db = require('../models/db');
 const history = require('../services/review-ask-history');
 const { dispatchScheduledSms } = require('../services/scheduled-sms-delivery');
+const { isUnresolvedSendReservation } = require('../services/messaging/review-ask-reservation');
 const { holdFinalReviewUncertainty } = require('../services/scheduler');
 
 let row, reviewRequest, providerRow, updates, reviewUpdates;
@@ -301,6 +302,7 @@ test.each([false, true])('an uncertain queued review handoff retains its reserva
     review_delivery_uncertain_exhausted: true,
     review_delivery_safety_until: expect.any(Date),
   });
+  expect(isUnresolvedSendReservation(row)).toBe(true);
   expect(result.attemptsExhausted).toBe(true);
 });
 
