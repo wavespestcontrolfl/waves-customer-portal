@@ -917,6 +917,7 @@ function alreadyDeliveredForFirstSend(invoice) {
 // "delivery owned elsewhere → report-only".
 const COMPLETION_DEFERRED_PAY_LINK_ENTRY_POINTS = ["dispatch_completion_deferred", "autopay_completion_decline_deferred"];
 const INVOICE_SEND_DEFERRED_ENTRY_POINT = "invoice_send_deferred";
+const QUEUE_ADOPTION_PENDING_KEY = "invoice_send_adoption_pending";
 const PAY_LINK_QUEUE_ENTRY_POINTS = [...COMPLETION_DEFERRED_PAY_LINK_ENTRY_POINTS, INVOICE_SEND_DEFERRED_ENTRY_POINT];
 // Live = queued, mid-send, or delivered-but-unfinalized.
 const LIVE_PAY_LINK_QUEUE_ROW_SQL = "(status IN ('scheduled', 'sending') OR (status = 'sent' AND metadata->>'finalize_pending' = 'true'))";
@@ -947,13 +948,17 @@ async function queuedPayLinkText(invoiceId, { adoptsQueuedInvoiceSend = false, d
 // (restoreConsumedQueuedSend) rather than silently losing it.
 async function consumeQueuedInvoiceSend(invoiceId, database = db) {
   const rows = await database("sms_log")
-    .where({ status: "scheduled" })
     .whereRaw("metadata->>'entry_point' = ?", [INVOICE_SEND_DEFERRED_ENTRY_POINT])
     .whereRaw("metadata->>'invoice_id' = ?", [String(invoiceId)])
+    // A prior attempt can have crashed after cancelling this row but before
+    // restoring it. The marker is written by the original consume itself,
+    // so a later authorized retry can adopt the unresolved row again without
+    // mistaking historical, successfully superseded cancellations for work.
+    .whereRaw(`(status = 'scheduled' OR (status = 'cancelled' AND metadata->>'${QUEUE_ADOPTION_PENDING_KEY}' = 'true'))`)
     .update({
       status: "cancelled",
       updated_at: new Date(),
-      metadata: database.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('cancelled_reason', 'superseded_by_live_send', 'cancelled_at', ?::text)", [new Date().toISOString()]),
+      metadata: database.raw(`COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('cancelled_reason', 'superseded_by_live_send', 'cancelled_at', ?::text, '${QUEUE_ADOPTION_PENDING_KEY}', true)`, [new Date().toISOString()]),
     })
     .returning(["id", "scheduled_for"]);
   return Array.isArray(rows) ? rows : [];
@@ -975,24 +980,55 @@ async function restoreConsumedQueuedSend(consumedRows, database = db) {
       .whereIn("id", ids)
       .where({ status: "cancelled" })
       .whereRaw("metadata->>'cancelled_reason' = 'superseded_by_live_send'")
+      .whereRaw(`metadata->>'${QUEUE_ADOPTION_PENDING_KEY}' = 'true'`)
       .update({
         status: "scheduled",
         updated_at: new Date(),
-        metadata: database.raw("(metadata - 'cancelled_reason') - 'cancelled_at'"),
+        metadata: database.raw(`((metadata - 'cancelled_reason') - 'cancelled_at') - '${QUEUE_ADOPTION_PENDING_KEY}'`),
       });
     if (Number(restored) !== ids.length) {
       throw new Error(`restored ${Number(restored) || 0} of ${ids.length} row(s)`);
     }
   } catch (err) {
     logger.error(`[invoice] queued pay-link SMS restore FAILED for ${ids.join(", ")} — the customer's original scheduled send did not resume: ${err.message}`);
-    // The invoice's 'sending' claim is the recovery marker for this
-    // incomplete hand-off. Propagate so restoreSendClaim cannot expose the
-    // invoice as claimable while its previously promised SMS is still
-    // cancelled; stale-claim recovery will park the send for review.
+    // The pending marker was committed by consumeQueuedInvoiceSend before
+    // the provider attempt. Propagate so restoreSendClaim cannot expose the
+    // invoice as claimable; stale recovery parks it, and a later authorized
+    // retry re-adopts this exact row through consumeQueuedInvoiceSend.
     const restoreErr = new Error(`Could not restore the queued pay-link SMS obligation for invoice send: ${err.message}`);
     restoreErr.code = "queued_sms_restore_failed";
     restoreErr.cause = err;
     throw restoreErr;
+  }
+}
+
+// A provider-accepted SMS, replacement queued SMS, or full-credit outcome
+// discharges the adopted row. Clear its pending marker durably so a later
+// resend cannot mistake a historically superseded row for an owed SMS leg.
+async function resolveConsumedQueuedSend(consumedRows, database = db) {
+  if (!consumedRows?.length) return;
+  const ids = consumedRows.map((row) => row.id).filter(Boolean);
+  if (!ids.length) return;
+  try {
+    // Deliberately matches already-resolved rows too: post-provider recovery
+    // repeats this step when invoice finalization fails after the first
+    // resolution committed, so the transition must be idempotent.
+    const resolved = await database("sms_log")
+      .whereIn("id", ids)
+      .where({ status: "cancelled" })
+      .whereRaw("metadata->>'cancelled_reason' = 'superseded_by_live_send'")
+      .update({
+        updated_at: new Date(),
+        metadata: database.raw(`(metadata - '${QUEUE_ADOPTION_PENDING_KEY}') || jsonb_build_object('adoption_resolved_at', ?::text)`, [new Date().toISOString()]),
+      });
+    if (Number(resolved) !== ids.length) {
+      throw new Error(`resolved ${Number(resolved) || 0} of ${ids.length} row(s)`);
+    }
+  } catch (err) {
+    const resolutionErr = new Error(`Could not resolve adopted queued pay-link SMS rows: ${err.message}`);
+    resolutionErr.code = "queued_sms_resolution_failed";
+    resolutionErr.cause = err;
+    throw resolutionErr;
   }
 }
 
@@ -1752,11 +1788,44 @@ function rodentSetupRebillMarker(invoiceId) {
 // #4131 — extracted so sendViaSMS's own direct callers share this instead
 // of only sendViaSMSAndEmail having it). Retry-idempotent: a second pass
 // adopts the already-queued row instead of double-queuing. Returns
-// { scheduled: true } once a row durably owns the delivery (existing or
-// freshly inserted), or { scheduled: false } when the insert itself failed
-// — the caller decides what an unowned hold means for the rest of its send.
-async function requeueHeldPayLinkSms({ invoiceId, customerId, code, nextAllowedAt, heldBody, heldToPhone }) {
+// { scheduled: true } once a row durably owns the delivery (an adopted row
+// re-armed in place, an existing row, or a fresh insert), or
+// { scheduled: false } when persistence failed — the caller decides what
+// an unowned hold means for the rest of its send.
+async function requeueHeldPayLinkSms({ invoiceId, customerId, code, nextAllowedAt, heldBody, heldToPhone, consumedQueuedSendRows = [] }) {
   try {
+    const consumedIds = consumedQueuedSendRows.map((row) => row.id).filter(Boolean);
+    if (consumedIds.length) {
+      // Re-arm the row this attempt adopted instead of inserting a sibling.
+      // This is one guarded UPDATE: either the same obligation owns the new
+      // hold with its pending marker cleared, or the caller restores/parks
+      // the original. An insert followed by separate cleanup could leave
+      // both rows recoverable when cleanup failed between those operations.
+      const rearmed = await db("sms_log")
+        .whereIn("id", consumedIds)
+        .where({ status: "cancelled" })
+        .whereRaw("metadata->>'cancelled_reason' = 'superseded_by_live_send'")
+        .whereRaw(`metadata->>'${QUEUE_ADOPTION_PENDING_KEY}' = 'true'`)
+        .update({
+          to_phone: heldToPhone,
+          message_body: heldBody,
+          status: "scheduled",
+          scheduled_for: new Date(nextAllowedAt),
+          updated_at: new Date(),
+          metadata: db.raw(`(((metadata - 'cancelled_reason') - 'cancelled_at') - '${QUEUE_ADOPTION_PENDING_KEY}') || ?::jsonb`, [JSON.stringify({
+            original_block_code: code,
+            replay_purpose: "payment_link",
+            refresh_customer_phone: true,
+            resolve_from_by_customer: true,
+            mark_invoice_delivery: true,
+          })]),
+        });
+      if (Number(rearmed) !== consumedIds.length) {
+        throw new Error(`re-armed ${Number(rearmed) || 0} of ${consumedIds.length} adopted row(s)`);
+      }
+      logger.info(`[invoice] Adopted pay-link SMS for invoice ${invoiceId} re-queued for ${nextAllowedAt}`);
+      return { scheduled: true };
+    }
     const existingQueued = await db("sms_log")
       .whereIn("status", ["scheduled", "sending"])
       .whereRaw("metadata->>'entry_point' = 'invoice_send_deferred'")
@@ -1809,9 +1878,10 @@ async function requeueHeldPayLinkSms({ invoiceId, customerId, code, nextAllowedA
 // silently losing them. Kept as its own function rather than inline: the
 // new outer try/finally guard around sendViaSMS was already pushing this
 // branch's existing nesting past the max-depth threshold.
-async function recoverPostDeliverySmsBookkeeping({ invoiceId, invoice, payUrl, previousStatus, allowClaimed, actorTechnicianId, finalizeInvoiceAfterSms, err }) {
+async function recoverPostDeliverySmsBookkeeping({ invoiceId, invoice, payUrl, previousStatus, allowClaimed, actorTechnicianId, finalizeInvoiceAfterSms, consumedQueuedSendRows, err }) {
   logger.error(`[invoice] SMS DELIVERED for ${invoice.invoice_number} but post-delivery bookkeeping failed: ${err.message} — retrying finalize`);
   try {
+    await resolveConsumedQueuedSend(consumedQueuedSendRows);
     await finalizeInvoiceAfterSms();
   } catch (retryErr) {
     logger.error(`[invoice] finalize retry failed for ${invoice.invoice_number}: ${retryErr.message} — row left under its send claim; do NOT auto-resend`);
@@ -3338,7 +3408,7 @@ const InvoiceService = {
   /**
    * Send invoice via Twilio SMS — the unified service recap + invoice message.
    */
-  async sendViaSMS(invoiceId, { allowClaimed = false, payUrlParams = null, operatorInitiated = false, actorTechnicianId = null } = {}) {
+  async sendViaSMS(invoiceId, { allowClaimed = false, payUrlParams = null, operatorInitiated = false, actorTechnicianId = null, adoptsQueuedInvoiceSend = true } = {}) {
     // Direct callers (batch sendImmediately, the AI-assistant send tool, the
     // from-service SMS-only path) bypass sendViaSMSAndEmail, which applies credit
     // before its own claim — so apply it here too, or those pay links bill the
@@ -3360,17 +3430,17 @@ const InvoiceService = {
       pre = await db("invoices").where({ id: invoiceId }).first("visit_completion_packet_id", "payer_id");
       const packetClaim = pre?.visit_completion_packet_id && !pre.payer_id
         ? await claimPacketInvoiceForSend(invoiceId, pre.visit_completion_packet_id, {
-          adoptsQueuedInvoiceSend: true,
+          adoptsQueuedInvoiceSend,
           operatorInitiated,
         }) : null;
       if (packetClaim?.payerBilled) {
         return { sent: false, reason: "Suppressed — the visit is now billed to a third-party payer", code: "payer_billed" };
       }
-      claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed, adoptsQueuedInvoiceSend: true, operatorInitiated });
+      claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed, adoptsQueuedInvoiceSend, operatorInitiated });
     } else {
       claim = await claimInvoiceForSend(invoiceId, {
         allowClaimed,
-        adoptsQueuedInvoiceSend: true,
+        adoptsQueuedInvoiceSend,
         operatorInitiated,
       });
     }
@@ -3388,6 +3458,7 @@ const InvoiceService = {
       smsCreditResult = await autoApplyAccountCreditIfEnabled(invoiceId);
       if (smsCreditResult?.fullyCovered) {
         await enrollPacketReviewAfterCredit(invoiceId, pre?.visit_completion_packet_id);
+        await resolveConsumedQueuedSend(consumedQueuedSendRows);
         // Covered by credit IS success for the caller (the invoice is now 'prepaid',
         // settled — nothing to send). Direct callers check `sent || ok`, so flag
         // ok:true; sent stays false because no SMS went out. No claim to restore —
@@ -3440,6 +3511,7 @@ const InvoiceService = {
     let reverseCreditOnExit = true;
     try {
       if (smsCreditResult?.fullyCovered) {
+        await resolveConsumedQueuedSend(consumedQueuedSendRows);
         delivered = true;
         // Covered by credit IS success for the caller (the invoice is now 'prepaid',
         // settled — nothing to send). Direct callers check `sent || ok`, so flag
@@ -3737,6 +3809,7 @@ const InvoiceService = {
 
         smsDelivered = true;
         delivered = true;
+        await resolveConsumedQueuedSend(consumedQueuedSendRows);
         await finalizeInvoiceAfterSms();
 
         // Kick off the per-invoice automated follow-up sequence (Day 0/3/7/14/30)
@@ -3812,7 +3885,7 @@ const InvoiceService = {
           // operator review (delivery unverified, no automatic resend) — and
           // report the send as delivered.
           return await recoverPostDeliverySmsBookkeeping({
-            invoiceId, invoice, payUrl, previousStatus, allowClaimed, actorTechnicianId, finalizeInvoiceAfterSms, err,
+            invoiceId, invoice, payUrl, previousStatus, allowClaimed, actorTechnicianId, finalizeInvoiceAfterSms, consumedQueuedSendRows, err,
           });
         }
         // NOT delivered. A DIRECT caller (batch sendImmediately, the
@@ -3830,8 +3903,11 @@ const InvoiceService = {
           const requeue = await requeueHeldPayLinkSms({
             invoiceId, customerId: invoice.customer_id, code: err.code,
             nextAllowedAt: err.nextAllowedAt, heldBody: err.smsBody, heldToPhone: err.toPhone,
+            consumedQueuedSendRows,
           });
-          queuedReplacementSecured = requeue.scheduled === true;
+          if (requeue.scheduled === true) {
+            queuedReplacementSecured = true;
+          }
         }
         logger.error(
           `[invoice] SMS failed for ${invoice.invoice_number}: ${err.message}`,
@@ -3939,6 +4015,7 @@ const InvoiceService = {
     const sendCreditResult = await autoApplyAccountCreditIfEnabled(invoiceId);
     if (sendCreditResult?.fullyCovered) {
       await enrollPacketReviewAfterCredit(invoiceId, accrualPre?.visit_completion_packet_id);
+      await resolveConsumedQueuedSend(claim.consumedQueuedSendRows);
       // Enumerated pre-delivery exit (Codex r12 follow-on P1 #4131 round
       // 3): this is the ONE exit in this function between claim and
       // delivery that is NOT already covered by the final ok/else
@@ -3986,6 +4063,10 @@ const InvoiceService = {
       try {
         const smsResult = await this.sendViaSMS(invoiceId, {
           allowClaimed: true,
+          // The wrapper's outer claim already adopted and owns any queued
+          // SMS rows. The nested channel claim must not re-adopt its own
+          // in-flight pending marker as if it came from an older attempt.
+          adoptsQueuedInvoiceSend: false,
           payUrlParams,
           operatorInitiated,
         });
@@ -4041,6 +4122,7 @@ const InvoiceService = {
         nextAllowedAt: sms.nextAllowedAt,
         heldBody: sms.heldBody,
         heldToPhone: sms.heldToPhone,
+        consumedQueuedSendRows,
       });
       if (requeue.scheduled) {
         sms.scheduled = true;
@@ -4112,6 +4194,7 @@ const InvoiceService = {
     // itself reached provider accept, not on whether email also succeeded.
     const smsQueueRowsNeedRestore = !sms.ok && !sms.scheduled;
     if (ok) {
+      if (sms.ok) await resolveConsumedQueuedSend(consumedQueuedSendRows);
       // Email alone can satisfy this attempt while the adopted, promised SMS
       // still needs to resume. Restore that durable queue obligation BEFORE
       // releasing/finalizing the invoice claim. A failed restore propagates

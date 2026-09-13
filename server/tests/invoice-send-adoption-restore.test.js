@@ -299,6 +299,76 @@ describe('claimInvoiceForSend adoption survives a failed replacement delivery', 
     const anyReleasedToDraft = fallback.update.mock.calls.some((c) => c[0]?.status === 'draft');
     expect(anyReleasedToDraft).toBe(false);
   });
+
+  test('queue resolution is idempotent when invoice finalization fails after the first resolution committed', async () => {
+    const consumed = { id: 'sms-queued-1', scheduled_for: new Date('2026-09-11T09:00:00.000Z') };
+    const firstResolve = chain();
+    const secondResolve = chain();
+    const finalizeErr = new Error('invoice finalize failed after queue resolution');
+    const fallback = chain();
+    db
+      .mockReturnValueOnce(chain({ first: { visit_completion_packet_id: null, payer_id: null } }))
+      .mockReturnValueOnce(chain({ first: draftInvoice }))
+      .mockReturnValueOnce(chain({ first: undefined }))
+      .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending' }] }))
+      .mockReturnValueOnce(chain({ first: undefined }))
+      .mockReturnValueOnce(chain({ returning: [consumed] }))
+      .mockReturnValueOnce(chain({ first: undefined }))
+      .mockReturnValueOnce(chain({ first: { id: 'cust-1', phone: '+19415550123', first_name: 'Pat' } }))
+      .mockReturnValueOnce(firstResolve)
+      .mockReturnValueOnce(throwingChain(finalizeErr))
+      .mockReturnValueOnce(secondResolve)
+      .mockReturnValueOnce(chain())
+      .mockReturnValue(fallback);
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true });
+
+    const result = await InvoiceService.sendViaSMS('inv-1');
+
+    expect(result).toMatchObject({ sent: true, finalizeError: finalizeErr.message });
+    expect(firstResolve.whereIn).toHaveBeenCalledWith('id', ['sms-queued-1']);
+    expect(secondResolve.whereIn).toHaveBeenCalledWith('id', ['sms-queued-1']);
+    expect(firstResolve.update).toHaveBeenCalledTimes(1);
+    expect(secondResolve.update).toHaveBeenCalledTimes(1);
+  });
+
+  test('a held retry re-arms the adopted row so no separately recoverable sibling is created', async () => {
+    const consumed = { id: 'sms-old', scheduled_for: new Date('2026-09-11T09:00:00.000Z') };
+    const requeueUpdate = chain();
+    const restoreClaim = chain();
+    db
+      .mockReturnValueOnce(chain({ first: { visit_completion_packet_id: null, payer_id: null } }))
+      .mockReturnValueOnce(chain({ first: draftInvoice }))
+      .mockReturnValueOnce(chain({ first: undefined }))
+      .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending' }] }))
+      .mockReturnValueOnce(chain({ first: undefined }))
+      .mockReturnValueOnce(chain({ returning: [consumed] }))
+      .mockReturnValueOnce(chain({ first: undefined }))
+      .mockReturnValueOnce(chain({ first: { id: 'cust-1', phone: '+19415550123', first_name: 'Pat' } }))
+      .mockReturnValueOnce(requeueUpdate)
+      .mockReturnValueOnce(restoreClaim);
+    sendCustomerMessage.mockResolvedValueOnce({
+      sent: false,
+      code: 'QUIET_HOURS_HOLD',
+      reason: 'outside send window',
+      deferred: true,
+      nextAllowedAt: NEXT_WINDOW_OPEN,
+    });
+
+    await expect(InvoiceService.sendViaSMS('inv-1'))
+      .rejects.toMatchObject({ code: 'QUIET_HOURS_HOLD' });
+
+    expect(requeueUpdate.whereIn).toHaveBeenCalledWith('id', ['sms-old']);
+    expect(requeueUpdate.insert).not.toHaveBeenCalled();
+    expect(requeueUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'scheduled',
+      scheduled_for: new Date(NEXT_WINDOW_OPEN),
+      message_body: expect.stringContaining('https://pay.example/abc'),
+    }));
+    // The same row owns the replacement hold, so the finally block only
+    // releases the invoice claim and cannot schedule a sibling obligation.
+    expect(restoreClaim.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'draft' }));
+    expect(db).toHaveBeenCalledTimes(10);
+  });
 });
 
 // Codex r12 follow-on P1 #4131 round 3: EVERY pre-delivery exit in
@@ -491,8 +561,6 @@ describe('sendViaSMSAndEmail: the SMS queue restore decision is per-channel, not
       .mockReturnValueOnce(chain({ first: undefined })) // outer strict re-check
       .mockReturnValueOnce(chain({ first: sendingInvoice })) // inner sendViaSMS's own claim read (allowClaimed)
       .mockReturnValueOnce(chain({ first: undefined })) // inner pre-check
-      .mockReturnValueOnce(chain({ returning: [] })) // inner consume — nothing left, outer already took it
-      .mockReturnValueOnce(chain({ first: undefined })) // inner strict re-check
       .mockReturnValueOnce(chain({ first: { id: 'cust-1', phone: null } })) // customer lookup — NO PHONE, the SMS leg fails
       .mockReturnValueOnce(chain({ first: sendingInvoice })) // second-channel collectibility recheck
       .mockReturnValueOnce(restoreQueueChain) // THE TARGET: restore before releasing/finalizing the invoice claim
@@ -528,8 +596,6 @@ describe('sendViaSMSAndEmail: the SMS queue restore decision is per-channel, not
       .mockReturnValueOnce(chain({ first: undefined }))
       .mockReturnValueOnce(chain({ first: sendingInvoice }))
       .mockReturnValueOnce(chain({ first: undefined }))
-      .mockReturnValueOnce(chain({ returning: [] }))
-      .mockReturnValueOnce(chain({ first: undefined }))
       .mockReturnValueOnce(chain({ first: { id: 'cust-1', phone: null } }))
       .mockReturnValueOnce(chain({ first: sendingInvoice }))
       .mockReturnValueOnce(throwingChain(restoreErr));
@@ -542,7 +608,7 @@ describe('sendViaSMSAndEmail: the SMS queue restore decision is per-channel, not
     // The failed queue update is the final DB operation. In particular, no
     // invoices finalize follows it and the durable 'sending' marker remains.
     expect(db.mock.calls.at(-1)[0]).toBe('sms_log');
-    expect(db).toHaveBeenCalledTimes(14);
+    expect(db).toHaveBeenCalledTimes(12);
   });
 
   test('email ok + SMS accepted by the provider: the consumed SMS queue row stays cancelled', async () => {
@@ -559,8 +625,6 @@ describe('sendViaSMSAndEmail: the SMS queue restore decision is per-channel, not
       .mockReturnValueOnce(chain({ first: undefined })) // outer strict re-check
       .mockReturnValueOnce(chain({ first: sendingInvoice })) // inner sendViaSMS's own claim read
       .mockReturnValueOnce(chain({ first: undefined })) // inner pre-check
-      .mockReturnValueOnce(chain({ returning: [] })) // inner consume — nothing left
-      .mockReturnValueOnce(chain({ first: undefined })) // inner strict re-check
       .mockReturnValueOnce(chain({ first: { id: 'cust-1', phone: '+19415550123', first_name: 'Pat' } })) // customer lookup — has a phone
       .mockReturnValue(fallback); // provider-accepted send's own finalize, activity_log, follow-ups, the outer finalize, lead conversion — none of them matter here
 
@@ -595,8 +659,6 @@ describe('sendViaSMSAndEmail: the SMS queue restore decision is per-channel, not
       .mockReturnValueOnce(chain({ first: undefined })) // outer strict re-check
       .mockReturnValueOnce(chain({ first: sendingInvoice })) // inner sendViaSMS's own claim read (allowClaimed)
       .mockReturnValueOnce(chain({ first: undefined })) // inner pre-check
-      .mockReturnValueOnce(chain({ returning: [] })) // inner consume — nothing left, outer already took it
-      .mockReturnValueOnce(chain({ first: undefined })) // inner strict re-check
       .mockReturnValueOnce(chain({ first: { id: 'cust-1', phone: null } })) // customer lookup — NO PHONE, the SMS leg fails
       .mockReturnValueOnce(chain({ first: sendingInvoice })) // second-channel collectibility recheck
       .mockReturnValueOnce(restoreQueueChain) // queue obligation is durable before claim release/finalize

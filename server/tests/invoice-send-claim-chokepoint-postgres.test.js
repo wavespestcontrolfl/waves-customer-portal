@@ -18,6 +18,13 @@
  */
 jest.mock('../models/db', () => {
   const db = (table, ...args) => {
+    if (table === 'sms_log' && mockFault.smsRestoreOnce) {
+      mockFault.smsRestoreOnce = false;
+      const failing = {};
+      for (const method of ['whereIn', 'where', 'whereRaw']) failing[method] = () => failing;
+      failing.update = () => Promise.reject(new Error('transient queued-SMS restore failure (injected)'));
+      return failing;
+    }
     if (table === 'sms_log' && mockFault.smsLogOnce) {
       mockFault.smsLogOnce = false;
       // Rejects a few ms later, not synchronously: the claim token is a
@@ -99,7 +106,7 @@ const InvoiceService = require('../services/invoice');
 const { completeScheduledService } = require('../services/complete-scheduled-service');
 const connection = process.env.VISIT_PACKET_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
-const mockFault = { smsLogOnce: false, scheduledServicesLookupOnce: false };
+const mockFault = { smsLogOnce: false, smsRestoreOnce: false, scheduledServicesLookupOnce: false };
 let database;
 let mockPg; // the per-test transaction while a test runs; the pool between tests
 jest.setTimeout(90000);
@@ -117,6 +124,7 @@ postgres('the shared send claim on a migrated database', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
     mockFault.smsLogOnce = false;
+    mockFault.smsRestoreOnce = false;
     mockFault.scheduledServicesLookupOnce = false;
     mockRace.afterMint = null;
     sendCustomerMessage.mockImplementation(async () => ({ sent: true, channel: 'sms', providerMessageId: `SM${randomUUID().slice(0, 8)}` }));
@@ -661,6 +669,63 @@ postgres('the shared send claim on a migrated database', () => {
       expect(result.email.error).toMatch(/voided invoice/);
       expect(sendInvoiceEmail).not.toHaveBeenCalled();
       expect((await readInvoice(f.invoiceId)).status).toBe('void');
+    });
+
+    test('a failed queue restore survives stale parking and is re-adopted by the next authorized retry', async () => {
+      await draftInvoiceFixture();
+      await mockPg('customers').where({ id: f.customerId }).update({ phone: '' });
+      const queueId = randomUUID();
+      const originalSchedule = new Date('2026-09-12T12:00:00.000Z');
+      await mockPg('sms_log').insert({
+        id: queueId,
+        customer_id: f.customerId,
+        direction: 'outbound',
+        from_phone: '+19415550100',
+        to_phone: '+12025550123',
+        message_type: 'invoice',
+        message_body: 'Fixture deferred pay link',
+        status: 'scheduled',
+        scheduled_for: originalSchedule,
+        metadata: {
+          entry_point: 'invoice_send_deferred',
+          invoice_id: f.invoiceId,
+        },
+      });
+      const { sendInvoiceEmail } = require('../services/invoice-email');
+      sendInvoiceEmail.mockImplementationOnce(async () => {
+        // The email has succeeded and the SMS has definitely failed. Fail
+        // only the following restore UPDATE, after consume committed its
+        // durable unresolved-adoption marker.
+        mockFault.smsRestoreOnce = true;
+        return { ok: true, messageId: 'email-first-attempt' };
+      });
+
+      await expect(InvoiceService.sendViaSMSAndEmail(f.invoiceId))
+        .rejects.toMatchObject({ code: 'queued_sms_restore_failed' });
+      let queued = await mockPg('sms_log').where({ id: queueId }).first();
+      expect(queued.status).toBe('cancelled');
+      expect(queued.metadata.invoice_send_adoption_pending).toBe(true);
+      expect((await readInvoice(f.invoiceId)).status).toBe('sending');
+
+      // The ordinary stale sweep parks the ambiguous provider attempt. It
+      // must not erase the row-level evidence needed by an operator retry.
+      await mockPg('invoices').where({ id: f.invoiceId }).update({ updated_at: new Date(Date.now() - 11 * 60 * 1000) });
+      await InvoiceService.processScheduledSends({ limit: 5 });
+      expect((await readInvoice(f.invoiceId))).toMatchObject({ status: 'scheduled', scheduled_send_at: null });
+      queued = await mockPg('sms_log').where({ id: queueId }).first();
+      expect(queued.metadata.invoice_send_adoption_pending).toBe(true);
+
+      // A later explicit retry re-adopts the unresolved cancelled row. Its
+      // SMS also fails, so the known row is restored before email-only
+      // success can finalize the invoice.
+      sendInvoiceEmail.mockResolvedValueOnce({ ok: true, messageId: 'email-retry' });
+      const retried = await InvoiceService.sendViaSMSAndEmail(f.invoiceId, { operatorInitiated: true });
+      expect(retried).toMatchObject({ ok: true, sms: { ok: false }, email: { ok: true } });
+      queued = await mockPg('sms_log').where({ id: queueId }).first();
+      expect(queued.status).toBe('scheduled');
+      expect(queued.scheduled_for).toEqual(originalSchedule);
+      expect(queued.metadata.invoice_send_adoption_pending).toBeUndefined();
+      expect((await readInvoice(f.invoiceId)).status).toBe('sent');
     });
   });
 
