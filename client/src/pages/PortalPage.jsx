@@ -13727,6 +13727,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
             { label: 'Latest', value: latestDoc ? formatDate(latestDoc) : 'None', sub: latestDoc?.title || 'No paperwork yet' },
           ].map((item) => (
             <div key={item.label} style={{
+              minWidth: 0,
               border: '1px solid #E7E2D7',
               borderRadius: 8,
               background: subtle,
