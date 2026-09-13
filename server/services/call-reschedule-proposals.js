@@ -29,8 +29,8 @@ function proposalEvidence(v2, transcript) {
   const quotes = (v2?.evidence || []).filter((e) => e.field_path === '/scheduling/proposed_start_at' && e.speaker === 'caller');
   const turns = String(transcript || '').split('\n').map((line) => line.match(/^\s*(caller|customer)\s*:\s*(.*)$/i))
     .filter(Boolean).map((m) => norm(m[2]));
-  // No speaker labels means review the transcript in the existing triage
-  // inbox; a model's claimed speaker alone must not mint an Apply button.
+  // Match evidence to the labelled transcript, whose labels may be inferred.
+  // This is review evidence, not independent verification of the speaker.
   return quotes.find((e) => norm(e.quote).length >= 8 && turns.some((t) => t.includes(norm(e.quote))))?.quote || null;
 }
 
@@ -51,7 +51,7 @@ function customerWindow(date, start) {
   return { start_at: startAt.toISOString(), end_at: endAt.toISOString() };
 }
 
-async function stageProposal(conn, { callId, procGeneration = null, now = new Date() } = {}) {
+async function stageProposal(conn, { callId, procGeneration = null, now = new Date(), retireOnly = false } = {}) {
   if (!enabled() || !callId) return { staged: false };
   return conn.transaction(async (trx) => {
     await lockTriageCall(trx, callId);
@@ -68,6 +68,7 @@ async function stageProposal(conn, { callId, procGeneration = null, now = new Da
       }
       return { staged: false };
     };
+    if (retireOnly) return retire();
     if (!call.customer_id || call.v2_extraction_status !== 'valid') return retire();
     const v2 = call.ai_extraction_enriched;
     if (v2?.meta?.is_spam || v2?.meta?.is_voicemail || v2?.scheduling?.status !== 'reschedule_requested'
@@ -142,21 +143,23 @@ async function listProposals(conn, { limit = 100, offset = 0, now = new Date() }
 
 async function dismissProposal(conn, id, { actorId, expectedAt } = {}) {
   if (!enabled()) throw fail('Reschedule proposals are disabled');
-  const card = await conn('triage_items').where({ id }).first('call_log_id');
-  if (!card) throw fail('Proposal not found', 404);
-  return conn.transaction(async (trx) => {
-    await lockTriageCall(trx, card.call_log_id);
-    const live = await trx('triage_items').where({ id }).forUpdate().first();
-    if (!enabled() || !live?.payload?.reschedule_proposal || !openStates.includes(live.status)
-      || !expectedAt || new Date(live.updated_at).getTime() !== new Date(expectedAt).getTime()) throw fail('The proposal changed. Refresh before dismissing.');
-    await trx('triage_items').where({ id }).update({ status: 'dismissed', resolution_source: 'human', assigned_to: actorId,
-      resolution_note: 'Dismissed by staff.', resolved_at: new Date(), updated_at: new Date() });
-    const remaining = await trx('triage_items').where({ call_log_id: card.call_log_id }).whereIn('status', openStates).first('id');
-    await trx('call_log').where({ id: card.call_log_id }).update({ review_status: remaining ? 'open' : 'dismissed', updated_at: new Date() });
-    await recordAuditEvent({ actor_type: 'technician', actor_id: actorId, action: 'reschedule_proposal_dismissed',
-      resource_type: 'triage_item', resource_id: id, critical: true, trx });
-    return { dismissed: true };
+  if (!expectedAt) throw fail('The proposal changed. Refresh before dismissing.');
+  const { transitionCore } = require('../routes/admin-triage');
+  const result = await transitionCore({
+    conn, id, nextStatus: 'dismissed', note: 'Dismissed by staff.', assignedTo: actorId,
+    expectedUpdatedAt: expectedAt, requireVersion: true,
+    beforeTransition: async (trx) => {
+      const live = await trx('triage_items').where({ id }).first('payload');
+      if (!enabled() || !live?.payload?.reschedule_proposal) throw fail('The proposal changed. Refresh before dismissing.');
+    },
+    afterTransition: (trx) => recordAuditEvent({
+      actor_type: 'technician', actor_id: actorId, action: 'reschedule_proposal_dismissed',
+      resource_type: 'triage_item', resource_id: id, critical: true, trx,
+    }),
   });
+  if (result.outcome === 'not_found') throw fail('Proposal not found', 404);
+  if (result.outcome !== 'ok') throw fail('The proposal changed. Refresh before dismissing.');
+  return { dismissed: true };
 }
 
 module.exports = { enabled, proposalAddress, proposalEvidence, customerWindow, stageProposal, listProposals, dismissProposal };

@@ -8197,6 +8197,13 @@ const CallRecordingProcessor = {
       // lead: the send validator still resolves it by sid, so the draft
       // must be INVALIDATED. Runs after the token-fenced terminal write
       // (the pass no longer owns processing_token) and never blocks.
+      if (isEnabled('rescheduleProposalCard')) {
+        try {
+          await require('./call-reschedule-proposals').stageProposal(db, { callId: call.id, procGeneration, retireOnly: true });
+        } catch (err) {
+          logger.warn(`[call-proc] proposal retirement failed for ${call.id}: ${err.code || err.name || 'error'}`);
+        }
+      }
       logger.info(`[call-proc] Skipping ${callSid}: ${extracted.is_spam ? 'spam' : 'voicemail'}`);
       return { success: true, skipped: true, reason: extracted.is_spam ? 'spam' : 'voicemail' };
     }
@@ -9239,6 +9246,13 @@ const CallRecordingProcessor = {
         { procGeneration },
       );
       await updateUnifiedVoiceMessage({ ...call, transcription }, { body: transcription });
+      if (isEnabled('rescheduleProposalCard')) {
+        try {
+          await require('./call-reschedule-proposals').stageProposal(db, { callId: call.id, procGeneration, retireOnly: true });
+        } catch (err) {
+          logger.warn(`[call-proc] proposal retirement failed for ${call.id}: ${err.code || err.name || 'error'}`);
+        }
+      }
       logger.info(`[call-proc] V2 hard veto for ${callSid}; skipped canonical writes (customer/lead/appointment)`);
       return { success: true, skipped: true, reason: 'v2_canonical_write_blocked' };
     }

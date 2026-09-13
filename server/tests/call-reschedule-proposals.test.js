@@ -177,3 +177,20 @@ describe('superseded proposal staging', () => {
     }
   });
 });
+
+test('terminal cleanup retires old evidence under the successful processing generation only', async () => {
+  const priorGate = process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
+  process.env.GATE_RESCHEDULE_PROPOSAL_CARD = 'true';
+  const call = { id: 'call', customer_id: 'customer', processing_generation: 2, v2_extraction_status: 'valid' };
+  const card = { id: 'card', call_log_id: 'call', reason_code: 'reschedule_or_cancel', status: 'open',
+    assigned_to: null, payload: { keep: true, reschedule_proposal: { call_generation: 1 } } };
+  try {
+    await stageProposal(stageConn(call, card), { callId: 'call', procGeneration: 1, retireOnly: true });
+    expect(card.payload.reschedule_proposal).toBeDefined();
+    await stageProposal(stageConn(call, card), { callId: 'call', procGeneration: 2, retireOnly: true });
+    expect(card.payload).toEqual({ keep: true });
+  } finally {
+    if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
+    else process.env.GATE_RESCHEDULE_PROPOSAL_CARD = priorGate;
+  }
+});
