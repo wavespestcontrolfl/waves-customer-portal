@@ -1554,6 +1554,31 @@ async function handleDepositIntentCanceled(paymentIntent) {
   return { handled: true };
 }
 
+// Automatic collection needs invoice-specific backing. Partially consumed
+// historical pools without that attribution remain manual reconciliation.
+async function invoiceDepositCreditIsBacked(invoice, trx = db) {
+  const lines = require('./invoice')._parseInvoiceLineItems(invoice.line_items)
+    .filter((line) => line.category === 'deposit_credit');
+  const required = new Map();
+  for (const line of lines) {
+    const cents = -Math.round(Number(line.amount) * 100);
+    if (!line.estimate_id || !Number.isSafeInteger(cents) || cents <= 0) return false;
+    required.set(line.estimate_id, (required.get(line.estimate_id) || 0) + cents);
+  }
+  if (!required.size) return true;
+  const rows = await trx('estimate_deposits').where({ credited_invoice_id: invoice.id,
+    customer_id: invoice.customer_id }).whereIn('estimate_id', [...required.keys()])
+    .orderBy('id').forUpdate().noWait();
+  for (const row of rows) {
+    const credited = Math.round(Number(row.credited_amount) * 100);
+    const remaining = Math.round((Number(row.amount) - Number(row.refunded_amount || 0)) * 100);
+    if (!['received', 'credited'].includes(row.status) || !Number.isSafeInteger(credited)
+        || !Number.isSafeInteger(remaining) || credited <= 0 || credited > remaining) return false;
+    required.set(row.estimate_id, required.get(row.estimate_id) - credited);
+  }
+  return [...required.values()].every((cents) => cents === 0);
+}
+
 // Reverse a voided invoice's deposit consumption. The voided invoice's own
 // deposit_credit line items are the application record — each is stamped
 // with its estimate_id by InvoiceService.create(). Per-row attribution is
@@ -1708,6 +1733,7 @@ module.exports = {
   computeDepositAmount,
   DEPOSIT_FOLLOWUP_WINDOW,
   consumeDepositCredit,
+  invoiceDepositCreditIsBacked,
   handleDepositChargeReversed,
   handleDepositDisputeClosed,
   handleDepositIntentCanceled,

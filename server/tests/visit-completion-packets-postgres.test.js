@@ -94,7 +94,7 @@ async function prepareAcceptanceInvoice({ coverage = 'exact', status = 'draft', 
   const estimateId = randomUUID();
   fixture.estimateIds.push(estimateId);
   await mockPg('estimates').insert({ id: estimateId, customer_id: fixture.customerId, status: 'accepted',
-    accepted_at: mockPg.fn.now() });
+    accepted_at: mockPg.fn.now(), estimate_data: { acceptedSetupFeeAmount: 99 } });
   const [pestId, lawnId] = fixture.serviceIds;
   await mockPg('scheduled_services').where({ id: pestId }).update({ source_estimate_id: estimateId,
     service_type: 'Quarterly Pest Control', estimated_price: withAdjustments ? 110 : 120, recurring_parent_id: null });
@@ -2360,6 +2360,39 @@ postgres('visit completion packet records on PostgreSQL', () => {
     const result = await saveVisitCompletionPacket(submission());
     expect(result.body.billing).toMatchObject({ state: 'office_required', reason: 'setup_fee_requires_review' });
     expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
+  test.each(['refunded', 'refunding', 'unattributed', 'shortfall'])(
+    'parks acceptance adoption when its deposit is %s', async (state) => {
+      const { invoice, deposit } = await prepareAcceptanceInvoice({ withAdjustments: true });
+      const updates = { refunded: { status: 'refunded', refunded_amount: 50 },
+        refunding: { status: 'refunding' }, unattributed: { credited_invoice_id: null },
+        shortfall: { refunded_amount: 10 } };
+      await mockPg('estimate_deposits').where({ id: deposit.id }).update(updates[state]);
+      const result = await saveVisitCompletionPacket(submission());
+      expect(result.body.billing).toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
+      expect(await mockPg('invoices').where({ id: invoice.id }).first())
+        .toMatchObject({ visit_completion_packet_id: null, service_record_id: null });
+      expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    });
+
+  test('the charge fence refuses a deposit reversed after invoice adoption', async () => {
+    const { invoice, deposit } = await prepareAcceptanceInvoice({ withAdjustments: true });
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing.state).toBe('invoice_ready');
+    await mockPg('estimate_deposits').where({ id: deposit.id }).update({ status: 'refunded', refunded_amount: 50 });
+    await expect(mockPg.transaction(async (trx) => assertVisitCompletionCharge(trx,
+      await trx('invoices').where({ id: invoice.id }).forUpdate().first(), saved.body.packetId)))
+      .rejects.toMatchObject({ code: 'VISIT_PAYMENT_REVIEW_REQUIRED', reason: 'deposit_credit_changed' });
+  });
+
+  test.each([199, 0])('rejects a setup fee changed from the accepted amount to %s', async (amount) => {
+    const { invoice } = await prepareAcceptanceInvoice();
+    await InvoiceService.update(invoice.id, { line_items: invoice.line_items.map((line) =>
+      /setup fee/i.test(line.description) ? { ...line, unit_price: amount, amount } : line) });
+    const result = await saveVisitCompletionPacket(submission());
+    expect(result.body.billing).toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
   });
 

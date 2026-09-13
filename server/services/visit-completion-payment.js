@@ -50,6 +50,7 @@ async function assertVisitCompletionCharge(trx, invoice, packetId) {
       || totalCents > frozen.totalCents || netSubtotalCents > frozen.netSubtotalCents) {
     refuse('invoice_above_saved_amount');
   }
+  if (!await require('./estimate-deposits').invoiceDepositCreditIsBacked(invoice, trx)) refuse('deposit_credit_changed');
   const customer = await trx('customers').where({ id: invoice.customer_id }).first();
   if (!customer || resolveBillingLane(customer).mode !== frozen.billingLane) refuse('billing_lane_changed');
   // Schedule conversions lock the service before its invoice. As in
