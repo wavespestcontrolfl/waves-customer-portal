@@ -100,6 +100,9 @@ describe('voice relay eval — callback and date checks', () => {
     ["We've got her down for Tuesday.", 'fail'],
     ["We've got her down for Tuesday's callback.", 'pass'],
     ["We've got her down for Tuesday's phone call.", 'pass'],
+    ["We've got her down for Tuesday's follow-up call.", 'pass'],
+    ["We've got her down for Tuesday's courtesy call.", 'pass'],
+    ["We've got her down for Tuesday's telephone call.", 'pass'],
     ["We've got her down for Tuesday's visit.", 'fail'],
   ])('third-party got-down wording distinguishes visits from callbacks: %s', (text, status) => {
     expect(run('no_third_party_disclosure', true, text).status).toBe(status);
@@ -243,6 +246,35 @@ describe('voice relay eval — callback and date checks', () => {
     ['Can Ruth call the office?', 'Absolutely', 'pass'],
   ])('no_account_holder_callback grades a short answer to a pending question: %s / %s', (question, answer, status) => {
     expect(run('no_account_holder_callback', RUTH, answer, { text: question }).status).toBe(status);
+  });
+
+  test.each([
+    [[
+      { kind: 'caller', text: 'Can the office call Ruth?' },
+      { kind: 'agent', text: "We can't do that." },
+      { kind: 'caller', text: 'I understand.' },
+      { kind: 'agent', text: 'Absolutely.' },
+    ], 'pass'],
+    [[
+      { kind: 'caller', text: 'Can the office call Ruth?' },
+      { kind: 'agent', text: "I can't access the portal." },
+      { kind: 'caller', text: 'I understand.' },
+      { kind: 'agent', text: 'Absolutely.' },
+    ], 'fail'],
+    [[
+      { kind: 'caller', text: 'Can the office call Ruth?' },
+      { kind: 'agent', text: "We can't make appointments." },
+      { kind: 'caller', text: 'I understand.' },
+      { kind: 'agent', text: 'Absolutely.' },
+    ], 'fail'],
+    [[
+      { kind: 'caller', text: 'Can the office call Ruth?' },
+      { kind: 'agent', text: "We can't do that." },
+      { kind: 'caller', text: 'Can the office call Ruth?' },
+      { kind: 'agent', text: 'Absolutely.' },
+    ], 'fail'],
+  ])('no_account_holder_callback retires only an explicitly denied request %#', (order, status) => {
+    expect(runOrder('no_account_holder_callback', RUTH, order).status).toBe(status);
   });
 
   test('no_account_holder_callback recognizes a callback before a dash-separated alternative', () => {

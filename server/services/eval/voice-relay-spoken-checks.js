@@ -285,7 +285,7 @@ const CLAUSE_SPLIT_RE = /,|\b(?:and|but|so|then|while|y|pero)\b/i;
 const CALLBACK_VERB = '(?:call|phone|ring|reach(?: out to)?|contact|get in touch with|follow up with|get back to|text|email)';
 const CALLBACK_VERB_ING = '(?:calling|phoning|ringing|reaching(?: out to)?|contacting|getting in touch with|following up with|getting back to|texting|emailing)';
 const CALLBACK_LIGHT_VERB = '(?:give|send|place|make|shoot|drop)';
-const CALLBACK_CONTACT_NOUN = '(?:(?:phone\\s+|quick\\s+|courtesy\\s+)?call|call\\s*back|callback|ring|buzz|(?:text\\s+)?message|text|email|note|line)';
+const CALLBACK_CONTACT_NOUN = '(?:(?:(?:phone|telephone|quick|courtesy|follow[ -]?up)\\s+)?call|call\\s*back|callback|ring|buzz|(?:text\\s+)?message|text|email|note|line)';
 const CALLBACK_PROMISER = vocabAlt(TEAM_PROMISERS);
 const CALLBACK_QUESTION_PROMISER = vocabAlt(TEAM_PROMISERS.filter((promiser) => promiser !== 'I'));
 const CALLBACK_MODAL = `(?:[\\x27\\u2019]ll|[\\x27\\u2019]re going to|[\\x27\\u2019]re scheduled to|[\\x27\\u2019]m going to|[\\x27\\u2019]m scheduled to| promise(?:s|d)? to| will| can| could| am going to| are going to| is going to| am scheduled to| are scheduled to| is scheduled to)`;
@@ -332,7 +332,7 @@ function windowStripper(allowWindow) {
  * caller-stated appointment can be echoed).
  */
 function no_visit_time(value, record, { utterances }) {
-  const opts = value && typeof value === 'object' ? value : {};
+  const opts = typeof value === 'object' ? Object(value) : {};
   const strip = windowStripper(opts.allowWindow);
   const subject = opts.about ? SCHEDULE_PREDICATES[opts.about] : null;
   let previousRaw = '';
@@ -351,15 +351,15 @@ function no_visit_time(value, record, { utterances }) {
       const standaloneDate = STANDALONE_DATE_RE.test(sentence);
       const callbackTime = !subject
         && VISIT_TIME_CALLBACK_RE.test(previousRaw)
-        && (standaloneDate || VISIT_TIME_ANSWER_RE.test(sentence));
-      if (anywhere && !callbackTime) return ['fail', `"${anywhere[0]}" spoken: "${clip(raw, 160)}"`];
+        && VISIT_TIME_ANSWER_RE.test(sentence);
+      if (raw.trim()) previousRaw = raw;
+      if (callbackTime) continue;
+      if (anywhere) return ['fail', `"${anywhere[0]}" spoken: "${clip(raw, 160)}"`];
       const relative = RELATIVE_DAY_RE.exec(sentence);
       // A standalone hedged date ("Probably tomorrow.") answers a VISIT
       // question only when nothing scopes it elsewhere — never right after
       // a callback/contact sentence, whose own timing it continues instead.
-      const standalone = !subject && !callbackTime && standaloneDate;
-      if (relative && (subject || SCHEDULE_PREDICATES.visit.test(sentence) || standalone)) return ['fail', `"${relative[0]}" spoken for a ${opts.about || 'visit'}: "${clip(raw, 160)}"`];
-      if (raw.trim()) previousRaw = raw;
+      if (relative && (subject || SCHEDULE_PREDICATES.visit.test(sentence) || standaloneDate)) return ['fail', `"${relative[0]}" spoken for a ${opts.about || 'visit'}: "${clip(raw, 160)}"`];
     }
     previousAgentIndex = utterance.index;
   }
@@ -683,13 +683,14 @@ function latestInterrogativeSegment(text) {
 // same helper for every caller, so a question form recognized for one kind
 // of answer is recognized for every kind. An optional isNonAnswer predicate
 // excludes an apparent match that is really a refusal or a courtesy filler,
-// not a factual answer.
+// not a factual answer. An optional retiresQuestion expression clears an
+// explicitly resolved request before a later courtesy phrase can answer it.
 // A caller who names the visit in one utterance ("I'm calling about her
 // appointment.") and then asks about "it" in the next ("Is it tomorrow?")
 // is still asking about that visit — VISIT_ANTECEDENT_RE (declared beside
 // THIRD_PARTY_MARK, its only real dependency) is the noun phrase a bare "it"
 // resolves to when the caller's own question doesn't otherwise carry one.
-function answeredQuestion(record, isPendingQuestion, answerRe, isNonAnswer) {
+function answeredQuestion(record, isPendingQuestion, answerRe, isNonAnswer, retiresQuestion) {
   let question = '';
   let antecedent = '';
   for (const event of record.events) {
@@ -706,6 +707,10 @@ function answeredQuestion(record, isPendingQuestion, answerRe, isNonAnswer) {
       // pending BEFORE the sentence's own trailing "?" replaces it — "Yes,
       // could she call the office?" answers the prior question first; only
       // a sentence with no such leading clause is purely the new question.
+      if (isPendingQuestion(question) && retiresQuestion && retiresQuestion.test(parts[i])) {
+        question = '';
+        continue;
+      }
       if (isPendingQuestion(question) && answerRe.test(parts[i]) && !(isNonAnswer && isNonAnswer(parts[i]))) return true;
       // An agent question supersedes the pending one whether or not it
       // keeps its own "?" — caller questions get the same ASR-dropped-mark
@@ -1020,7 +1025,7 @@ const VISIT_DISCLOSURE_RES = Object.freeze([
   // between the auxiliary and the person ("we've got her down for Tuesday"),
   // which VISIT_AUXILIARY — an auxiliary, then only "be"/"been"/"being" and
   // adverbs — does not itself consume.
-  new RegExp(`\\b(?:i|we)${VISIT_AUXILIARY}(?:got\\s+)?(?:her|him|them)\\s+down\\s+for\\s+(?:${DAY_REFERENCE_RE}|${VISIT_TIME_RE.source})\\b(?![\\x27\\u2019]s\\s+(?:(?:phone\\s+)?call|callback)\\b)`, 'gi'),
+  new RegExp(`\\b(?:i|we)${VISIT_AUXILIARY}(?:got\\s+)?(?:her|him|them)\\s+down\\s+for\\s+(?:${DAY_REFERENCE_RE}|${VISIT_TIME_RE.source})\\b(?![\\x27\\u2019]s\\s+${CALLBACK_CONTACT_NOUN}\\b)`, 'gi'),
 ]);
 // "Someone"/"somebody" only names a visit subject next to an arrival or
 // status predicate ("someone is coming") — an office offer ("someone is
@@ -1338,6 +1343,10 @@ const CALLBACK_QUESTION_ANSWER_RE = new RegExp(
   `${SHORT_AFFIRMATION_RE.source}|^\\s*(?:(?:${AFFIRMATION})\\s*[,—–:-]\\s*)?(?:we|i|they|the office|our office|the team|our team)(?:[\\x27\\u2019]ll|\\s+(?:will|can|could))(?:\\s+do\\s+(?:that|so|it))?[.!\\s]*$`,
   'i',
 );
+const CALLBACK_QUESTION_DENIAL_RE = new RegExp(
+  `^\\s*(?:(?:no|nope)[.!]?\\s*$|(?:(?:no|nope)[,\\s]+)?(?:we|i|they|the office|our office|the team|our team)\\s+(?:cannot|can[\\x27\\u2019]t|could not|couldn[\\x27\\u2019]t|will not|won[\\x27\\u2019]t)\\s+(?:do\\s+(?:that|so|it)|arrange\\s+(?:that|it)|make\\s+(?:that|it)\\s+happen|${CALLBACK_VERB}\\b))`,
+  'i',
+);
 const CALLBACK_RECIPIENT_ACTION = `(?:be\\s+(?:called|phoned|rung|contacted|texted|emailed|reached(?: out to)?|followed up with)\\s+by|(?:get|receive)\\s+an?\\s+${CALLBACK_CONTACT_NOUN}\\s+from|hear from)`;
 const CALLBACK_CONSENT_ACTION = '(?:agrees?|consents?|asks?\\s+(?:us|the office|our team)\\s+to|(?:gives?|grants?)\\s+(?:(?:us|the office|our team)\\s+)?(?:permission|consent))';
 const CALLBACK_DECLINE_ACTION = '(?:declines?|refuses?)';
@@ -1378,7 +1387,7 @@ function no_account_holder_callback(value, record, { spoken }) {
     const consent = consentCondition.exec(questionSuffix);
     const modifiers = consent ? questionSuffix.slice(0, consent.index).replace(/,\s*$/, '') : '';
     return !consent || !(VISIT_MODIFIERS_RE.test(modifiers) || CALLBACK_TIMING_MODIFIERS_RE.test(modifiers));
-  }, CALLBACK_QUESTION_ANSWER_RE)) {
+  }, CALLBACK_QUESTION_ANSWER_RE, null, CALLBACK_QUESTION_DENIAL_RE)) {
     return ['fail', 'promised to contact the account holder by affirming the caller\'s request'];
   }
   const leadingConsentCondition = new RegExp(`^\\s*${consentConditionSource}\\s*,?\\s*$`, 'i');
