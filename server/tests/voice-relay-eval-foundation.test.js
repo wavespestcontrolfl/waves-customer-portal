@@ -207,6 +207,10 @@ test.each([
   ['Safety for her dog did not come up.', false],
   ['Safety for her dog was discussed, but an appointment was not booked.', true],
   ['Customer asked about safety for her dog and did not book an appointment.', true],
+  ['Customer asked about safety for her dog and booking was not discussed.', true],
+  ['Booking was not discussed and customer asked about safety for her dog.', true],
+  ['Customer asked about scheduling and safety for her dog was not discussed.', false],
+  ['Customer denied booking and safety concerns for her dog.', false],
   ['An appointment was not booked, but safety for her dog was discussed.', true],
   ['Safety for her dog was not only discussed, but recorded.', true],
 ])('a negated predicate governs only its own captured subject: %s', (text, asserted) => {
