@@ -141,6 +141,17 @@ test.each([
   }
 });
 
+test('coordinated products do not borrow one another\'s treatment location', () => {
+  const spoken = ['Talstar P went around the exterior perimeter and bait along the foundation.'];
+  const swappedFindings = [
+    { subject: '\\btalstar p\\b', location: '\\bfoundation\\b' },
+    { subject: '\\b(?:granular\\s+)?bait\\b', location: '\\bexterior perimeter\\b' },
+  ];
+  for (const finding of swappedFindings) {
+    expect(checks.report_readback_confirms(finding, {}, { spoken })[0]).toBe('fail');
+  }
+});
+
 test.each([
   ['I doubt it, but your next visit is free.', 'fail'],
   ["I can't confirm it, so your next visit is free.", 'fail'],

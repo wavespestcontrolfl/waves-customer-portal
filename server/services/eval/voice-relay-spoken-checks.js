@@ -1290,8 +1290,12 @@ function reportHasAlternativeLocation(affirmed, locationAt, orTail) {
   return /\beither\b/i.test(affirmed) || !REPORT_UNRELATED_OR_CLAUSE_RE.test(alternativeTail);
 }
 
-function reportLocationIsTreatmentTarget(affirmed, subjectAt, subjectLength, locationAt, locationRecipient) {
+function reportLocationIsTreatmentTarget(affirmed, subjectAt, subjectLength, locationAt, locationLength, locationRecipient) {
   if (locationRecipient) return true;
+  const findingGap = locationAt < subjectAt
+    ? affirmed.slice(locationAt + locationLength, subjectAt) : affirmed.slice(subjectAt + subjectLength, locationAt);
+  // In a shared-verb list, each product owns the location on its side of "and".
+  if (/\band\b/i.test(findingGap)) return false;
   const locationLink = locationAt < subjectAt
     ? affirmed.slice(0, locationAt) : affirmed.slice(subjectAt + subjectLength, locationAt);
   if (locationAt < subjectAt) return REPORT_FRONTED_LOCATION_PREFIX_RE.test(locationLink);
@@ -1333,7 +1337,9 @@ function reportHasCompletedFinding(affirmed, subjectAt, subjectLength, locationA
   const predicateIntroduction = affirmed.slice(0, findingVerb.index);
   if (REPORT_NONCOMPLETION_GOVERNOR_RE.test(predicateIntroduction)
       || REPORT_NONCOMPLETION_MODIFIER_RE.test(predicateIntroduction)) return false;
-  if (!reportLocationIsTreatmentTarget(affirmed, subjectAt, subjectLength, locationAt, locationRecipient)) return false;
+  if (!reportLocationIsTreatmentTarget(
+    affirmed, subjectAt, subjectLength, locationAt, locationLength, locationRecipient,
+  )) return false;
   return reportVerbGovernsProduct(affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb);
 }
 
