@@ -18,8 +18,9 @@ const { dateOnly, lockStop, stopBaseKey } = require('./visit-groups');
 const { parseETDateTime } = require('../utils/datetime-et');
 const { RETAINED_HISTORY_STATUSES } = require('./visit-context/statuses');
 const { cleanupUploadedServicePhotoObjects } = require('./service-photos');
-const { finiteDate } = require('../utils/service-duration-capture');
+const { finiteDate, firstFiniteDate } = require('../utils/service-duration-capture');
 const { minutesFromElapsed } = require('../utils/duration-minutes');
+const { parseJsonObject } = require('./job-costing');
 
 // A packet's stored payload, parsed once: pg returns json columns as
 // objects and the fixtures/older rows as strings.
@@ -88,6 +89,35 @@ function packetSnapshot(request, actor, members, existing) {
   return { items, actor, retainedMembers };
 }
 
+// Retention is a membership rule, not proof that a record belongs to this
+// physical stop. Require matching identity and a completion inside its live
+// bounds; an earlier arrival or a quiet backfill is separate historical work.
+function retainedWorkInStop(visit, members, records, start, end) {
+  if (!start) return [];
+  return members.flatMap((member) => {
+    const record = records.find((row) => row.scheduled_service_id === member.id);
+    if (!record || member.status !== 'completed'
+      || member.customer_id !== visit.customer_id
+      || (member.property_id || null) !== (visit.property_id || null)
+      || dateOnly(member.scheduled_date) !== dateOnly(visit.scheduled_date)
+      || dateOnly(record.service_date) !== dateOnly(visit.scheduled_date)) return [];
+    const notes = parseJsonObject(record.structured_notes);
+    const ended = firstFiniteDate(member.actual_end_time, member.check_out_time, member.completed_at, record.ended_at);
+    const started = firstFiniteDate(member.actual_start_time, member.check_in_time, member.arrived_at, record.started_at);
+    if (notes.backfill === true || !ended || ended < start || ended > end
+      || (started && (started < start || started > ended))) return [];
+    const corrected = minutesFromElapsed(member.time_on_site_adjusted_minutes)
+      || (notes.timeOnSiteAdjusted === true ? minutesFromElapsed(notes.timeOnSite) : null);
+    const allocation = notes.visitDurationAllocation;
+    const minutes = corrected ?? (allocation?.version === 1
+      ? allocation.allocatedMinutes
+      : (minutesFromElapsed(member.service_time_minutes)
+        ?? minutesFromElapsed(member.actual_duration_minutes) ?? minutesFromElapsed(notes.timeOnSite)));
+    return [{ serviceId: member.id, serviceRecordId: record.id, completedAt: ended.toISOString(),
+      minutes: Number.isInteger(minutes) && minutes >= 0 ? minutes : null }];
+  });
+}
+
 // A grouped closeout represents one physical stop. Its linked rows share the
 // same arrival/completion lifecycle, so copying the visit span onto every row
 // would multiply labor by the number of services. Freeze one server-measured
@@ -100,7 +130,7 @@ function packetSnapshot(request, actor, members, existing) {
 // (service id breaks ties). Missing/nonpositive estimates receive zero when
 // any positive estimate exists; if all estimates are missing, use a
 // deterministic equal-weight fallback that preserves the measured total.
-function buildVisitDurationAllocation({ visit, members, items, actor, completedAt = new Date() }) {
+function buildVisitDurationAllocation({ visit, members, items, actor, retainedRecords = [], completedAt = new Date() }) {
   const memberById = new Map(members.map((member) => [String(member.id), member]));
   const timingMembers = items.filter((item) => item.body?.backfill !== true)
     .map((item) => memberById.get(String(item.serviceId))).filter(Boolean);
@@ -116,7 +146,7 @@ function buildVisitDurationAllocation({ visit, members, items, actor, completedA
     && timingMembers.every((member) => String(member.status) === 'completed')
     && memberEnds.every(Boolean);
   const capturedEnd = finiteDate(completedAt) || new Date();
-  const end = allPreviouslyEnded
+  let end = allPreviouslyEnded
     ? memberEnds.sort((a, b) => b.getTime() - a.getTime())[0]
     : capturedEnd;
   const automatic = [];
@@ -162,9 +192,23 @@ function buildVisitDurationAllocation({ visit, members, items, actor, completedA
     .map(finiteDate).filter(Boolean).sort((a, b) => a.getTime() - b.getTime());
   const visitStart = finiteDate(visit?.arrived_at);
   const start = visitStart || memberStarts[0] || null;
+  const retainedWork = retainedWorkInStop(visit, members, retainedRecords, start,
+    allPreviouslyEnded ? capturedEnd : end);
+  // A reportless member can have ended before another already-recorded
+  // member. Both ends describe the same stop; reporting later must use its
+  // actual last completion, not the earlier member or today's reporting time.
+  if (allPreviouslyEnded) {
+    for (const member of retainedWork) {
+      const retainedEnd = finiteDate(member.completedAt);
+      if (retainedEnd > end) end = retainedEnd;
+    }
+  }
   const elapsed = start ? (end.getTime() - start.getTime()) / 60000 : null;
   const totalMinutes = Number.isFinite(elapsed) && elapsed >= 0 ? Math.round(elapsed) : null;
-  const allocatableMinutes = totalMinutes == null ? null : Math.max(0, totalMinutes - explicitMinutes);
+  const retainedMinutes = retainedWork.some((member) => member.minutes == null)
+    ? null : retainedWork.reduce((sum, member) => sum + member.minutes, 0);
+  const allocatableMinutes = totalMinutes == null || retainedMinutes == null
+    ? null : Math.max(0, totalMinutes - explicitMinutes - retainedMinutes);
 
   const weighted = automatic.map((item) => ({ ...item }));
   const positiveWeight = weighted.reduce((sum, item) => sum + item.estimatedMinutes, 0);
@@ -194,6 +238,13 @@ function buildVisitDurationAllocation({ visit, members, items, actor, completedA
     completedAt: end.toISOString(),
     totalMinutes,
     explicitMinutes,
+    retainedMinutes,
+    retainedWork,
+    // Keep the drive charge on previously recorded same-stop work when it
+    // exists; otherwise one stable submitted live member owns it. Historical
+    // backfills are separate work and keep their own accounting semantics.
+    driveCostOwnerServiceId: retainedWork.map((member) => member.serviceId).sort()[0]
+      || timingMembers.map((member) => member.id).sort()[0] || null,
     items: weighted.sort((a, b) => String(a.serviceId).localeCompare(String(b.serviceId)))
       .map(({ serviceId, estimatedMinutes, allocatedMinutes }) => ({ serviceId, estimatedMinutes, allocatedMinutes })),
   };
@@ -336,9 +387,17 @@ async function saveVisitCompletionPacket(input, database = db) {
       }
       const keyOwner = await trx('visit_completion_packets').where({ idempotency_key: request.key }).first('id');
       if (keyOwner) return failure(409, 'visit_closeout_key_reused', 'The idempotency key belongs to another visit.');
+      const retainedCompletedIds = members.filter((member) => retainedIds.has(member.id)
+        && member.status === 'completed').map((member) => member.id);
+      // Member locks also serialize time-on-site corrections. Match the
+      // costing reader's latest FK-linked record, never a historical soft join.
+      const retainedRecords = retainedCompletedIds.length
+        ? await trx('service_records').whereIn('scheduled_service_id', retainedCompletedIds)
+          .where({ customer_id: visit.customer_id })
+          .distinctOn('scheduled_service_id').orderBy('scheduled_service_id').orderBy('created_at', 'desc')
+        : [];
       snapshot.durationAllocation = buildVisitDurationAllocation({
-        visit, members: members.filter((member) => !retainedIds.has(member.id)),
-        items: request.items, actor, completedAt: new Date(),
+        visit, members, retainedRecords, items: request.items, actor, completedAt: new Date(),
       });
       const [packet] = await trx('visit_completion_packets').insert({
         visit_id: visit.id, idempotency_key: request.key, request_hash: request.hash,
@@ -362,6 +421,7 @@ async function saveVisitCompletionPacket(input, database = db) {
           packetId: packet.id,
           completionAt: snapshot.durationAllocation.completedAt,
           durationAllocation: memberDurationAllocation(snapshot, item.serviceId),
+          driveCostOwnerServiceId: snapshot.durationAllocation.driveCostOwnerServiceId,
         });
         if (result.status !== 202 || !result.body.serviceRecordId) {
           const rejected = new Error('Visit member completion rejected');

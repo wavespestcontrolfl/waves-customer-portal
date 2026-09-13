@@ -18,7 +18,8 @@
  *                   × company_financials.loaded_labor_rate
  *   material_cost — product_inventory_movements.cost_used, plus
  *                   property_application_history fallback costs
- *   drive_cost    — company_financials.drive_cost_per_stop (one stop per visit)
+ *   drive_cost    — company_financials.drive_cost_per_stop (once per physical
+ *                   stop when a combined-closeout allocation marker is present)
  *   expenses      — expenses WHERE scheduled_service_id=?
  *
  * Idempotent: re-running replaces the prior job_costs row and re-writes the
@@ -363,6 +364,21 @@ async function resolveServiceRecord(db, svc, srCols) {
   return { record, viaFk: false, ambiguous };
 }
 
+// Stable comparison key for the canonical record and the persisted allocation
+// fields that control drive cost. Array positions avoid depending on JSON object
+// key order when historic structured_notes arrive as serialized text.
+function serviceRecordDriveAllocationStamp({ record, ambiguous }) {
+  const canonicalRecord = ambiguous ? null : record;
+  const allocation = parseJsonObject(canonicalRecord?.structured_notes).visitDriveCostAllocation;
+  return JSON.stringify([
+    ambiguous,
+    canonicalRecord?.id ?? null,
+    allocation?.version ?? null,
+    allocation?.packetId ?? null,
+    allocation?.ownerServiceId ?? null,
+  ]);
+}
+
 /**
  * calculateJobCost(scheduledServiceId, db?, opts?)
  * Upserts a job_costs row AND writes the financials through to service_records.
@@ -500,8 +516,19 @@ async function calculateJobCost(scheduledServiceId, db, {
     ? await calcProductsCost(db, record.id)
     : { productsCost: 0, breakdown: [] };
   const expensesCost = await calcExpenses(db, scheduledServiceId);
-  // A completed visit is one route stop, so it carries one stop's drive cost.
-  const driveCost = driveCostPerStop;
+  // A versioned combined-closeout marker freezes one drive-cost owner for the
+  // physical stop. The owner carries exactly one configured stop cost and all
+  // other marked members carry zero on completion and every later recalculation.
+  // Unmarked records retain the legacy one-cost-per-visit behavior, including a
+  // retained same-stop owner whose historical record is deliberately untouched.
+  const driveAllocation = recordNotes.visitDriveCostAllocation;
+  const driveCost = driveAllocation?.version === 1
+    ? (svc.id === driveAllocation.ownerServiceId ? driveCostPerStop : 0)
+    : driveCostPerStop;
+  const recordDriveStamp = serviceRecordDriveAllocationStamp({
+    record: resolvedRecord,
+    ambiguous,
+  });
 
   const fin = computeServiceRecordFinancials({
     revenue, laborHours, laborCost, productsCost, driveCost, expensesCost,
@@ -544,6 +571,15 @@ async function calculateJobCost(scheduledServiceId, db, {
   let staleSkipped = false;
   await db.transaction(async (trx) => {
     const rowNow = await trx('scheduled_services').where({ id: scheduledServiceId }).forUpdate().first();
+    // Completion creates/updates the canonical service record while holding this
+    // same scheduled-service lock. Re-resolve through the identical FK/legacy
+    // ambiguity path after the lock is granted: a reportless calculation may
+    // have started before packet completion, then resumed after the packet's
+    // marked non-owner calculation already wrote the correct zero drive cost.
+    // Its correction stamps would still match, so record identity + allocation
+    // are part of the stale-write fence too.
+    const currentResolution = await resolveServiceRecord(trx, rowNow, srCols);
+    const currentRecordDriveStamp = serviceRecordDriveAllocationStamp(currentResolution);
     const norm = (v) => (v == null ? null : Number(v));
     // The fence compares the monotonic correction seq as well as the minutes
     // value (codex P2 #3152 round 19): two saves of the SAME minutes are
@@ -553,11 +589,13 @@ async function calculateJobCost(scheduledServiceId, db, {
     // Missing column (pre-migration) compares null === null and proceeds,
     // same as the minutes leg.
     if (norm(rowNow?.time_on_site_adjusted_minutes) !== norm(svc.time_on_site_adjusted_minutes)
-      || norm(rowNow?.time_on_site_correction_seq) !== norm(svc.time_on_site_correction_seq)) {
+      || norm(rowNow?.time_on_site_correction_seq) !== norm(svc.time_on_site_correction_seq)
+      || currentRecordDriveStamp !== recordDriveStamp) {
       logger.warn(
-        `[job-costing] ${scheduledServiceId} — correction stamp moved during recalculation `
+        `[job-costing] ${scheduledServiceId} — costing inputs moved during recalculation `
         + `(${norm(svc.time_on_site_adjusted_minutes)} rev ${norm(svc.time_on_site_correction_seq)} → `
-        + `${norm(rowNow?.time_on_site_adjusted_minutes)} rev ${norm(rowNow?.time_on_site_correction_seq)}); skipping stale financial writes`,
+        + `${norm(rowNow?.time_on_site_adjusted_minutes)} rev ${norm(rowNow?.time_on_site_correction_seq)}, `
+        + `record/drive ${recordDriveStamp} → ${currentRecordDriveStamp}); skipping stale financial writes`,
       );
       staleSkipped = true;
       return;

@@ -227,7 +227,15 @@ describe('calculateJobCost — durable backfill labor guard (Codex P1)', () => {
   // apart by their where shape: { job_id } = direct job entries, { technician_id }
   // = the clock-in-window fallback, whose use is tracked so tests can pin that
   // an untrusted span never even consults it.
-  function fakeCostingDb({ svc, record, jobEntries = [], windowEntries = [] } = {}) {
+  function fakeCostingDb({
+    svc,
+    record,
+    jobEntries = [],
+    windowEntries = [],
+    financials = null,
+    existingJobCost = null,
+    transactionHook = null,
+  } = {}) {
     const SR_COLS = {
       scheduled_service_id: {},
       status: {},
@@ -241,7 +249,15 @@ describe('calculateJobCost — durable backfill labor guard (Codex P1)', () => {
       gross_margin_pct: {},
       revenue_per_man_hour: {},
     };
-    const writes = { jobCosts: [], serviceRecordUpdates: [], windowQueried: false };
+    let currentRecord = record;
+    let currentJobCost = existingJobCost;
+    const writes = {
+      jobCosts: [],
+      jobCostUpdates: [],
+      serviceRecordUpdates: [],
+      windowQueried: false,
+      get currentJobCost() { return currentJobCost; },
+    };
     const db = (table) => {
       const wheres = [];
       const chain = {
@@ -250,6 +266,7 @@ describe('calculateJobCost — durable backfill labor guard (Codex P1)', () => {
         whereBetween: () => chain,
         leftJoin: () => chain,
         orderBy: () => chain,
+        limit: () => Promise.resolve(currentRecord ? [currentRecord] : []),
         columnInfo: () => Promise.resolve(SR_COLS),
         select: () => {
           if (table === 'time_entries') {
@@ -261,11 +278,28 @@ describe('calculateJobCost — durable backfill labor guard (Codex P1)', () => {
         },
         first: () => {
           if (table === 'scheduled_services') return Promise.resolve(svc);
-          if (table === 'service_records') return Promise.resolve(record);
-          return Promise.resolve(null); // customers / dispositions / financials / job_costs
+          if (table === 'service_records') return Promise.resolve(currentRecord);
+          if (table === 'company_financials') return Promise.resolve(financials);
+          if (table === 'job_costs') return Promise.resolve(currentJobCost);
+          return Promise.resolve(null); // customers / dispositions
         },
-        insert: (row) => { writes.jobCosts.push(row); return Promise.resolve([1]); },
-        update: (upd) => { writes.serviceRecordUpdates.push(upd); return Promise.resolve(1); },
+        insert: (row) => {
+          if (table === 'job_costs') {
+            currentJobCost = { id: currentJobCost?.id || 'cost-1', ...row };
+            writes.jobCosts.push(row);
+          }
+          return Promise.resolve([1]);
+        },
+        update: (upd) => {
+          if (table === 'job_costs') {
+            currentJobCost = { ...currentJobCost, ...upd };
+            writes.jobCostUpdates.push(upd);
+          } else if (table === 'service_records') {
+            Object.assign(currentRecord, upd);
+            writes.serviceRecordUpdates.push(upd);
+          }
+          return Promise.resolve(1);
+        },
         forUpdate: () => chain,
       };
       return chain;
@@ -273,7 +307,13 @@ describe('calculateJobCost — durable backfill labor guard (Codex P1)', () => {
     // The stamp fence wraps the financial writes in a transaction holding
     // the scheduled_services row lock (codex P2 #3152 round 9) — the fake
     // hands the same handle back as the trx.
-    db.transaction = async (fn) => fn(db);
+    let transactionCount = 0;
+    db.transaction = async (fn) => {
+      transactionCount += 1;
+      if (transactionHook) await transactionHook(transactionCount);
+      return fn(db);
+    };
+    db.setRecord = (nextRecord) => { currentRecord = nextRecord; };
     db.writes = writes;
     return db;
   }
@@ -353,6 +393,7 @@ describe('calculateJobCost — durable backfill labor guard (Codex P1)', () => {
     const res = await calculateJobCost('svc-1', db);
     expect(res.laborHours).toBe(1.5);
     expect(res.labor_cost).toBe(52.5);
+    expect(res.drive_cost).toBe(6);
   });
 
   test.each([
@@ -391,6 +432,109 @@ describe('calculateJobCost — durable backfill labor guard (Codex P1)', () => {
     const res = await calculateJobCost('svc-1', db);
     expect(res.laborHours).toBe(0.75);
     expect(res.labor_cost).toBe(26.25);
+  });
+
+  test('the marked drive owner gets exactly one configured stop cost in the record and ledger', async () => {
+    const record = {
+      ...NORMAL_RECORD,
+      structured_notes: {
+        visitDriveCostAllocation: { version: 1, packetId: 'packet-1', ownerServiceId: 'svc-1' },
+      },
+    };
+    const db = fakeCostingDb({
+      svc: NORMAL_SVC,
+      record,
+      financials: { loaded_labor_rate: 35, drive_cost_per_stop: 8.75 },
+    });
+
+    const res = await calculateJobCost('svc-1', db);
+
+    expect(res.drive_cost).toBe(8.75);
+    expect(res.total_cost).toBe(61.25);
+    expect(db.writes.currentJobCost).toMatchObject({ drive_cost: 8.75, total_cost: 61.25 });
+    expect(db.writes.serviceRecordUpdates[0]).toMatchObject({
+      drive_cost: 8.75,
+      total_job_cost: 61.25,
+    });
+  });
+
+  test('a marked non-owner replaces legacy drive cost with zero in both stores and stays zero on rerun', async () => {
+    const record = {
+      ...NORMAL_RECORD,
+      drive_cost: 8.75,
+      total_job_cost: 61.25,
+      structured_notes: {
+        visitDriveCostAllocation: { version: 1, packetId: 'packet-1', ownerServiceId: 'svc-owner' },
+      },
+    };
+    const db = fakeCostingDb({
+      svc: NORMAL_SVC,
+      record,
+      financials: { loaded_labor_rate: 35, drive_cost_per_stop: 8.75 },
+      existingJobCost: { id: 'cost-1', drive_cost: 8.75, total_cost: 61.25 },
+    });
+
+    const first = await calculateJobCost('svc-1', db);
+    const second = await calculateJobCost('svc-1', db);
+
+    expect(first.drive_cost).toBe(0);
+    expect(first.total_cost).toBe(52.5);
+    expect(second.drive_cost).toBe(0);
+    expect(second.total_cost).toBe(52.5);
+    expect(db.writes.jobCosts).toHaveLength(0);
+    expect(db.writes.jobCostUpdates).toHaveLength(2);
+    expect(db.writes.currentJobCost).toMatchObject({ drive_cost: 0, total_cost: 52.5 });
+    expect(db.writes.serviceRecordUpdates).toHaveLength(2);
+    expect(db.writes.serviceRecordUpdates[1]).toMatchObject({
+      drive_cost: 0,
+      total_job_cost: 52.5,
+    });
+  });
+
+  test('a stale reportless calculation cannot overwrite a packet non-owner after resuming last', async () => {
+    let signalStaleAtFence;
+    let releaseStale;
+    const staleAtFence = new Promise((resolve) => { signalStaleAtFence = resolve; });
+    const staleCanResume = new Promise((resolve) => { releaseStale = resolve; });
+    const db = fakeCostingDb({
+      svc: NORMAL_SVC,
+      record: null,
+      financials: { loaded_labor_rate: 35, drive_cost_per_stop: 6 },
+      transactionHook: async (transactionNumber) => {
+        if (transactionNumber !== 1) return;
+        signalStaleAtFence();
+        await staleCanResume;
+      },
+    });
+
+    const staleCalculation = calculateJobCost('svc-1', db);
+    await staleAtFence;
+    db.setRecord({
+      ...NORMAL_RECORD,
+      structured_notes: {
+        visitDriveCostAllocation: { version: 1, packetId: 'packet-1', ownerServiceId: 'svc-owner' },
+      },
+    });
+
+    let current;
+    try {
+      current = await calculateJobCost('svc-1', db);
+    } finally {
+      releaseStale();
+    }
+    const stale = await staleCalculation;
+
+    expect(current.drive_cost).toBe(0);
+    expect(current.total_cost).toBe(52.5);
+    expect(stale.staleSkipped).toBe(true);
+    expect(db.writes.jobCosts).toHaveLength(1);
+    expect(db.writes.jobCostUpdates).toHaveLength(0);
+    expect(db.writes.currentJobCost).toMatchObject({ drive_cost: 0, total_cost: 52.5 });
+    expect(db.writes.serviceRecordUpdates).toHaveLength(1);
+    expect(db.writes.serviceRecordUpdates[0]).toMatchObject({
+      drive_cost: 0,
+      total_job_cost: 52.5,
+    });
   });
 
   test('only boolean true triggers — a string "true" marker never flips the policy', async () => {
