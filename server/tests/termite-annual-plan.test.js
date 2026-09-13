@@ -342,10 +342,16 @@ describe('replay-stamp provenance (pre-push audit #4424)', () => {
     expect(issued.pricingKnobs.plan).toBe('quarterly');
 
     // Admin V2 persists the mapped envelope, so exercise the production
-    // representation rather than relying only on the raw-line reader.
+    // representation rather than relying only on the raw-line reader. A
+    // revision can retain the draft's older raw engineResult; the mapped
+    // quarterly result must remain exclusive for program identity.
     const mapped = mapV1ToLegacyShape(generateEstimate(inputs));
     expect(mapped.results.tmBait.pricingKnobs.plan).toBe('quarterly');
-    const stored = { engineInputs: inputs, result: mapped };
+    process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
+    const staleAnnual = termiteLine(generateEstimate(inputs));
+    delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    expect(staleAnnual.plan).toBe('annual_protection');
+    const stored = { engineInputs: inputs, result: mapped, engineResult: { lineItems: [staleAnnual] } };
     process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
     try {
       const replayInput = extractEngineInputs(stored);

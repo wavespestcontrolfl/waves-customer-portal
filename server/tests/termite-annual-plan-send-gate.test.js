@@ -113,6 +113,18 @@ describe('selectedTermiteAnnualPlanRows — every shape a stored plan can take',
     expect(selectedTermiteAnnualPlanRows(null)).toHaveLength(0);
     expect(selectedTermiteAnnualPlanRows({ result: { lineItems: 'nope' } })).toHaveLength(0);
   });
+
+  test('a revised mapped quarterly result outranks a stale raw annual draft', () => {
+    const revised = {
+      result: { results: { tmBait: { plan: 'quarterly' } } },
+      engineResult: { lineItems: [PLAN_LINE] },
+    };
+    expect(selectedTermiteAnnualPlanRows(revised)).toHaveLength(0);
+    expect(selectedTermiteAnnualPlanRows({
+      result: { results: { tmBait: { plan: 'annual_protection' } } },
+      engineResult: { lineItems: [QUARTERLY_LINE] },
+    })).toHaveLength(1);
+  });
 });
 
 describe('assertEstimateSendable — GATE_TERMITE_ANNUAL_PLAN at delivery', () => {
@@ -142,6 +154,20 @@ describe('assertEstimateSendable — GATE_TERMITE_ANNUAL_PLAN at delivery', () =
 
   test('gate OFF: a quarterly termite draft is untouched by this gate', () => {
     expect(caught(row({ result: { lineItems: [QUARTERLY_LINE] } }))).toBeNull();
+  });
+
+  test('gate OFF: a quarterly revision sends despite its retained stale annual engine result; a mapped annual revision is still refused', () => {
+    const revisedQuarterly = row({
+      result: { results: { tmBait: { plan: 'quarterly' } } },
+      engineResult: { lineItems: [PLAN_LINE] },
+    });
+    expect(caught(revisedQuarterly)).toBeNull();
+
+    const revisedAnnual = row({
+      result: { results: { tmBait: { plan: 'annual_protection' } } },
+      engineResult: { lineItems: [QUARTERLY_LINE] },
+    });
+    expect(caught(revisedAnnual)?.code).toBe('TERMITE_ANNUAL_PLAN_DISABLED');
   });
 
   test('gate OFF: a client-fallback payload carrying only the MAPPED plan shape is refused too', () => {
