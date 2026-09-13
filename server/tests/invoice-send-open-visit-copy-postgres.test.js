@@ -9,11 +9,11 @@
  * generic `invoice_sent` copy, which asserts "...completed on {date}" to a
  * customer who has not been visited yet.
  *
- * The fix reads the linked visit's own completion state for a same-day
- * service date, not the date alone. This suite drives all six combinations
- * against a migrated database: only today+open (including today+en_route
- * and today+on_site, added round 2) must select the pre-service copy; the
- * rest keep their pre-existing behavior.
+ * The fix reads the linked visit's own completion state for a service date
+ * that is today or earlier, not the date alone. This suite drives the date
+ * and status combinations against a migrated database: today+open (including
+ * today+en_route and today+on_site, added round 2) and past+open must select
+ * the pre-service copy; the rest keep their pre-existing behavior.
  *
  * Round 2 (#4131 P1): the original fix reused isLiveVisitStatus from
  * invoice-issued-closeout.js — a predicate that exists to gate quiet-
@@ -147,5 +147,12 @@ postgres('invoice_sent copy selection for a linked visit (pre-push P1 #4131)', (
     const result = await InvoiceService.sendViaSMS(invoiceId, { operatorInitiated: true });
     expect(result.sent).toBe(true);
     expect(sentBody()).not.toMatch(/get started/i);
+  });
+
+  test('past + OPEN visit: selects the pre-service copy rather than claiming completion', async () => {
+    const { invoiceId } = await fixture({ visitStatus: 'confirmed', serviceYmd: etDateString(addETDays(new Date(), -3)) });
+    const result = await InvoiceService.sendViaSMS(invoiceId, { operatorInitiated: true });
+    expect(result.sent).toBe(true);
+    expect(sentBody()).toMatch(/get started/i);
   });
 });

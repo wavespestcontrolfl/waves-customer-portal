@@ -3594,12 +3594,12 @@ const InvoiceService = {
         }
       }
 
-      // A linked visit scheduled for TODAY that has not actually happened yet
-      // (the office invoice picker's whole point — texting a pay link before
-      // the technician arrives, P1 #4131 pre-push audit) must not fall through
-      // to invoice_sent's "...completed on {service_date}" claim just because
-      // "today" isn't "future". Date alone can't tell completed from open on
-      // the service date itself — only the visit's own status can.
+      // A linked visit whose service date is today or earlier but that has not
+      // actually happened yet (the office invoice picker's whole point —
+      // texting a pay link before the technician arrives, P1 #4131 pre-push
+      // audit) must not fall through to invoice_sent's
+      // "...completed on {service_date}" claim. Date alone can't tell completed
+      // from open — only the visit's own status can.
       //
       // isVisitIncompleteForInvoiceCopy (round-2 P1 #4131), NOT
       // invoice-issued-closeout's isLiveVisitStatus: that predicate governs
@@ -3610,25 +3610,24 @@ const InvoiceService = {
       // "open" here or the send tells the customer the work is done while
       // the tech is still at the property. See invoice-helpers.js for the
       // full comment on why this is its own predicate rather than a widened
-      // isLiveVisitStatus. Never checked for a future/past date: future
-      // already selects pre-service copy on the date alone, and a past-dated
-      // linked visit reaching send is completed by every existing invariant,
-      // so a status lookup there would be a no-op at best.
-      let linkedVisitOpenToday = false;
-      if (serviceDateIsTodayET && invoice.scheduled_service_id) {
+      // isLiveVisitStatus. Future dates already select pre-service copy from
+      // the date alone. Today and past dates require the status lookup because
+      // a delayed open visit must not be described as completed.
+      let linkedVisitIncomplete = false;
+      if (!serviceDateIsFutureET && invoice.scheduled_service_id) {
         try {
           const { isVisitIncompleteForInvoiceCopy } = require("./invoice-helpers");
           const linkedVisit = await db("scheduled_services")
             .where({ id: invoice.scheduled_service_id })
             .first("status");
-          linkedVisitOpenToday = isVisitIncompleteForInvoiceCopy(linkedVisit?.status);
+          linkedVisitIncomplete = isVisitIncompleteForInvoiceCopy(linkedVisit?.status);
         } catch (err) {
           // Unknown beats a false "completed" claim: a lookup failure defaults
           // to the pre-service copy (no completion assertion either way)
           // rather than risking invoice_sent's "...completed on {date}" text
           // reaching a customer who has not been visited yet.
           logger.warn(`[invoice] Linked visit status lookup failed for ${invoiceId}: ${err.message}`);
-          linkedVisitOpenToday = true;
+          linkedVisitIncomplete = true;
         }
       }
 
@@ -3687,16 +3686,16 @@ const InvoiceService = {
         // copy, which asserts a not-yet-performed service AND prints a date
         // the reader would read as already past. A service date still in the
         // future selects the pre-service variant on the date alone; a service
-        // date of TODAY selects it too when the linked visit hasn't completed
-        // (linkedVisitOpenToday, above) — the office invoice picker's whole
-        // point is billing a visit before the technician arrives, and date
-        // alone can't distinguish that from a same-day visit that already
-        // ran (P1 #4131 pre-push audit). Gated on the same base `invoice`
+        // date of today or earlier selects it too when the linked visit hasn't
+        // completed (linkedVisitIncomplete, above) — the office invoice
+        // picker's whole point is billing a visit before the technician
+        // arrives, and date alone can't distinguish that from a visit that
+        // already ran (P1 #4131 pre-push audit). Gated on the same base `invoice`
         // kill switch as the prepay variant (a disabled invoice_sent skips
         // this too, keeping the invoice retryable); a missing/disabled
         // variant row falls through to the standard copy below so the send
         // is never blocked.
-        if (!body && (serviceDateIsFutureET || linkedVisitOpenToday) && invoiceSmsActive) {
+        if (!body && (serviceDateIsFutureET || linkedVisitIncomplete) && invoiceSmsActive) {
           body = await templates.getTemplate("invoice_sent_upfront", {
             first_name: customer.first_name || "",
             service_type: serviceType,
