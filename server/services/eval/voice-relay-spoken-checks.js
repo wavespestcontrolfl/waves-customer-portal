@@ -1295,7 +1295,7 @@ const CALLBACK_QUESTION_DENIAL_RE = new RegExp(
 );
 const CALLBACK_RECIPIENT_ACTION = `(?:be\\s+(?:called|phoned|rung|contacted|texted|emailed|reached(?: out to)?|followed up with)\\s+by|(?:get|receive)\\s+an?\\s+${CALLBACK_CONTACT_NOUN}\\s+from|hear from)`;
 const CALLBACK_DECLINE_ACTION = '(?:declines?|refuses?)';
-const CALLBACK_TIMING_COMPONENT = `(?:${VISIT_TIME_RE.source}|${CALLBACK_TIMING_ADVERB}|morning|afternoon|evening|night|(?:before|after|until|till)\\s+(?:noon|midday|midnight))`;
+const CALLBACK_TIMING_COMPONENT = `(?:${VISIT_TIME_RE.source}|${CALLBACK_TIMING_ADVERB}|now|later|morning|afternoon|evening|night|(?:before|after|until|till)\\s+(?:noon|midday|midnight))`;
 const CALLBACK_TIMING_MODIFIERS_RE = new RegExp(
   `^(?:\\s*(?:(?:for|on|at|by|from|between|around|about)\\s+)?${CALLBACK_TIMING_COMPONENT})*(?:\\s+or\\s+not)?\\s*$`,
   'i',
@@ -1359,7 +1359,8 @@ function no_account_holder_callback(value, record, { spoken }) {
     const questionMatch = callbackQuestion.exec(question);
     if (!questionMatch
         || clauseIsNegated(question.slice(questionMatch.index, questionMatch.index + questionMatch[0].length))) return false;
-    const questionSuffix = question.slice(questionMatch.index + questionMatch[0].length);
+    const questionSuffix = question.slice(questionMatch.index + questionMatch[0].length)
+      .replace(/^\s*back\b/i, '');
     const { condition } = callbackConsentCondition(targets, value.targets, questionMatch[0], contact);
     const consent = condition.exec(questionSuffix);
     const modifiers = consent ? questionSuffix.slice(0, consent.index).replace(/,\s*$/, '') : '';
