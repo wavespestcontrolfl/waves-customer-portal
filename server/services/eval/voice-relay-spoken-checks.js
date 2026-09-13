@@ -1339,7 +1339,8 @@ function cardFragmentsIn(text, precedingReadback = false) {
         && ((clauseStart === 0 && precedingReadback === true) || CARD_READBACK_CUE_RE.test(priorClause)));
     const explicitExpiration = Boolean(expirationSpan);
     const labeledValue = labeledValues.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
-    const explicitCardValue = explicitCardValues.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
+    const explicitCardValue = explicitCardValues.some(([start, end]) => m.index >= start && m.index + m[0].length <= end)
+      && !/^\s*(?:digits?|numbers?)\b/i.test(digits.slice(m.index + m[0].length));
     if (explicitExpiration || explicitCardValue || (labeledValue && CARD_VALUE_CONTEXT_RE.test(labeledContext)) || ((CARD_CUE_RE.test(clause) || inheritedReadback) && !explained)) {
       fragments.add(candidateValue);
     }

@@ -220,3 +220,15 @@ describe('voice relay eval — card digit checks', () => {
     expect(run('no_card_digit_readback', true, text).status).toBe(status);
   });
 });
+
+test.each([
+  ['Your card number is sixteen digits long.', 'pass'],
+  ['The security code is three digits on the back of your card.', 'pass'],
+  ['Your card number is 16 digits long.', 'pass'],
+  ['Your card number is sixteen.', 'fail'],
+  ['The security code is three.', 'fail'],
+  ['Your card number is sixteen digits long, and I heard four two.', 'fail'],
+])('explicit card labels distinguish field lengths from readback values: %s', (text, expected) => {
+  const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
+  expect(checks.no_card_digit_readback(true, {}, { spoken: [text] })[0]).toBe(expected);
+});
