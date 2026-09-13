@@ -1226,7 +1226,7 @@ const CARD_NON_FRAGMENT_RES = Object.freeze([
   /\b(?:[01]?\d|2[0-3]):[0-5]\d(?:\s*(?:a\.?\s*m\.?|p\.?\s*m\.?))?(?![\da-z])/gi,
   /\b\d+(?:\.\d+)?\s*(?:seconds?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?)\b/gi,
   /\b\d+(?:\.\d+)?\s+(?:cards?|applications?|payments?|transactions?|attempts?|options?|visits?|services?|appointments?|accounts?)\b/gi,
-  /\b\d+(?:\.\d+)?\s*(?:dollars?|cents?|percent|%|am|pm|a\.m\.|p\.m\.|o'clock|digits?|numbers?|more|times|of them|characters)(?!\w)/gi,
+  /\b\d+(?:\.\d+)?[\s-]*(?:dollars?|cents?|percent|%|am|pm|a\.m\.|p\.m\.|o'clock|digits?|numbers?|more|times|of them|characters)(?!\w)/gi,
   /\b(?:invoice|estimate|order|ticket|account|reference|confirmation)\s+(?:number\s+|#\s*)?(?:is\s+)?[\w-]*\d[\w-]*/gi,
   /\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+(?:(?:19|20)\d{2}|\d{1,2}(?:,?\s+(?:19|20)\d{2})?)\b/gi,
   /\b(?:appointment|service|visit|calendar|date|year)(?:\s+(?:date|year))?\s+(?:(?:is|was|will be|falls?|fell|occur(?:s|red)?|happen(?:s|ed)?|scheduled|booked)\s+)?(?:(?:on|in|for)\s+)?(?:19|20)\d{2}\b/gi,
