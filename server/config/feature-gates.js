@@ -98,6 +98,7 @@
  *   GATE_LAWN_PROPERTY_HISTORY=true (property-scoped confirmed lawn history, one installed row per visit, report-date/reset windows and confirm-time baseline; dark in dev AND prod; consumers read at call time)
  *   GATE_LAWN_COMPLETION_DEFAULTS=true (appointment-plan completion defaults; requires GATE_LAWN_PROPERTY_HISTORY; opt-in in every environment)
  *   GATE_LAWN_ACTUALS_LEDGER=true (lawn actuals ledger for EVERY lawn visit — one-time, commercial and incomplete-with-products included, no protocol attribution invented; off = WaveGuard-only writer, byte-identical; read at call time)
+ *   GATE_LAWN_DELIVERY_RECOVERY=true (resume a confirmed lawn visit's interrupted customer delivery; FAILS CLOSED everywhere — off = the sweep shadow-logs candidates and sends nothing)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -135,6 +136,14 @@ const gates = {
   lawnCompletionDefaults: gateEnvValue('GATE_LAWN_COMPLETION_DEFAULTS'),
   // Registered for startup logging; the completion writer reads it at call time (strict 'true').
   lawnActualsLedger: process.env.GATE_LAWN_ACTUALS_LEDGER === 'true',
+  // Lawn delivery recovery sweep. Resuming a confirmed visit's delivery can put
+  // a real customer SMS on the wire, so it FAILS CLOSED in every environment per
+  // the house rule — a dev box or preview pointed at a production-seeded database
+  // must never text a customer on boot. Off → the sweep shadow-logs its candidate
+  // count and delivers nothing. Double-gated: the cron also needs cronJobs.
+  // gateEnvValue here and in the sweep, so startup logging can never report this
+  // safety gate as disabled while it is actually open ('1' / 'on').
+  lawnDeliveryRecovery: gateEnvValue('GATE_LAWN_DELIVERY_RECOVERY'),
   // Complete Service: job-matched estimate evidence and reviewed discounts.
   completionServicePricing: process.env.GATE_COMPLETION_SERVICE_PRICING === 'true',
   // Customer selects one available visit; later cadence dates await auto-dispatch ±3 days.

@@ -318,6 +318,85 @@ async function releasePipeline(assessmentId, ownerToken, knex, { staleAfterMs = 
   return rows.length === 1;
 }
 
+// An intentional wait is not a never-attempted run. Drop exclusive ownership
+// while retaining a recent attempt timestamp, so the normal lease interval is
+// its retry backoff and the sweep's NULL-first ordering cannot let a batch of
+// deferred old runs starve fresh confirmation work.
+async function deferPipeline(assessmentId, ownerToken, knex, { staleAfterMs = PIPELINE_STALE_MS } = {}) {
+  const rows = await ownedPipelineQuery(assessmentId, ownerToken, knex, staleAfterMs)
+    .update({ pipeline_owner_token: null, pipeline_claimed_at: knex.raw('clock_timestamp()'), updated_at: knex.raw('clock_timestamp()') })
+    .returning('id');
+  return rows.length === 1;
+}
+
+function calibrationForRun(assessment, run) {
+  const snapshot = parseObject(run?.reconciliation)?.confirmation;
+  const technicianId = snapshot?.technician_id || assessment?.technician_id;
+  if (snapshot?.calibration_eligible !== true || !technicianId) return null;
+  return { aiScores: snapshot.ai_scores, finalScores: snapshot.final_scores, technicianId };
+}
+
+// A confirmation snapshot is the only record of what the technician changed. A
+// run without one cannot have its comparison reconstructed — the assessment row
+// may have been edited since — so the loss is surfaced at completion rather
+// than silently passing as a visit that owed no calibration.
+function calibrationEvidenceMissing(run) {
+  return !parseObject(run?.reconciliation)?.confirmation;
+}
+
+function completedRecommendations(value) {
+  const parsed = parseObject(value);
+  return !!parsed && (parsed._sanitizationFinal === true || parsed._groundedInApplications === true
+    || (typeof parsed.summary === 'string' && parsed.summary.trim().length > 0)
+    || (Array.isArray(parsed.recommendations) && parsed.recommendations.length > 0));
+}
+
+// Customer steps retain their canonical stamps. Only health needs a new
+// success stamp; calibration is proven by its persisted comparison row.
+async function deliveryState(assessmentId, knex) {
+  const assessment = await knex('lawn_assessments').where({ id: assessmentId }).first();
+  const run = await loadRun(assessmentId, knex);
+  if (!assessment?.confirmed_by_tech || !run) return { assessment, run, gaps: ['assessment'], calibration: null };
+  const calibration = calibrationForRun(assessment, run);
+  const gaps = [];
+  const calibrationRecorded = await knex('tech_calibration').where({ assessment_id: assessmentId }).first('id');
+  if (calibration && !calibrationRecorded) gaps.push('calibration');
+  // Reported, not owed. A run with no snapshot has no recoverable comparison —
+  // blocking on it would strand every other step behind evidence this runner
+  // cannot produce — so completion says so instead of pretending it was fine.
+  const calibrationEvidenceLost = !calibrationRecorded && calibrationEvidenceMissing(run);
+  if (!completedRecommendations(assessment.recommendations)) gaps.push('recommendations');
+  if (!run.pipeline_health_completed_at) gaps.push('health');
+  if (!assessment.service_id && !assessment.notification_sent) gaps.push('notification');
+  // A claim with no settle mark is a send whose outcome was never recorded — the
+  // release could not be written, or the worker died mid-flight. It is NOT owed
+  // (the carrier may hold the message) and it is NOT proof of delivery either,
+  // so surface it rather than letting completion read it as a delivered text.
+  const notificationUnsettled = !assessment.service_id
+    && assessment.notification_sent === true && !assessment.notification_sent_at;
+  if (!(assessment.report_auto_generated === true || assessment.report_id)) gaps.push('report');
+  return { assessment, run, gaps, calibration, notificationUnsettled, calibrationEvidenceLost };
+}
+
+async function markPipelineHealthComplete(assessmentId, ownerToken, knex, { staleAfterMs = PIPELINE_STALE_MS } = {}) {
+  const rows = await ownedPipelineQuery(assessmentId, ownerToken, knex, staleAfterMs)
+    .update({ pipeline_health_completed_at: knex.raw('clock_timestamp()'), updated_at: knex.raw('clock_timestamp()') }).returning('id');
+  return rows.length === 1;
+}
+
+async function completePipeline(assessmentId, ownerToken, knex, { staleAfterMs = PIPELINE_STALE_MS } = {}) {
+  return knex.transaction(async (trx) => {
+    await trx('lawn_assessments').where({ id: assessmentId }).forUpdate().first('id');
+    const owned = await ownedPipelineQuery(assessmentId, ownerToken, trx, staleAfterMs).forUpdate().first('id');
+    if (!owned) return { owned: false, gaps: [] };
+    const { gaps } = await deliveryState(assessmentId, trx);
+    if (gaps.length) return { owned: true, gaps };
+    const rows = await ownedPipelineQuery(assessmentId, ownerToken, trx, staleAfterMs)
+      .update({ pipeline_completed_at: trx.raw('clock_timestamp()'), updated_at: trx.raw('clock_timestamp()') }).returning('id');
+    return { owned: rows.length === 1, gaps };
+  });
+}
+
 // Eligibility to compare a reconstructed prompt with the original input
 // hash, not proof that the photos or current rubric still match that hash.
 function replayContextForRun(run) {
@@ -334,5 +413,6 @@ function replayContextForRun(run) {
 
 module.exports = {
   billedUsage, runRowFor, recordRun, attachRunPhotos, loadRun, priorAssessmentCount, responseForRun,
-  reviewRun, confirmRun, replayContextForRun, PIPELINE_STALE_MS, claimPipeline, renewPipeline, ownsPipeline, releasePipeline,
+  reviewRun, confirmRun, replayContextForRun, PIPELINE_STALE_MS, claimPipeline, renewPipeline, ownsPipeline, releasePipeline, deferPipeline,
+  calibrationForRun, deliveryState, markPipelineHealthComplete, completePipeline,
 };
