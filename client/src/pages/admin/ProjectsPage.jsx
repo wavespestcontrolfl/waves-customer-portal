@@ -1562,8 +1562,6 @@ export function ProjectDetail({
   const [editTitle, setEditTitle] = useState("");
   const [editProjectDate, setEditProjectDate] = useState("");
   const [dirty, setDirty] = useState(false);
-  const editRevisionRef = useRef(0);
-  const [dirtyPhotoIds, setDirtyPhotoIds] = useState(() => new Set());
   const [sentLink, setSentLink] = useState("");
   const [aiWriting, setAiWriting] = useState(false);
   const [notice, setNotice] = useState("");
@@ -1576,13 +1574,8 @@ export function ProjectDetail({
   // option (WDO + gate enabled + not yet delivered).
   const [holdReportUntilPaid, setHoldReportUntilPaid] = useState(true);
 
-  function markDirty() {
-    editRevisionRef.current += 1;
-    setDirty(true);
-  }
-
   async function load(options = {}) {
-    const { preserveEdits = false, background = false, hydrateRevision } = options;
+    const { preserveEdits = false, background = false } = options;
     // background: refresh without tripping the full-editor loading swap —
     // the render gate is `loading || !project`, so a loud reload behind a
     // mounted, possibly-dirty editor replaced the whole form with a
@@ -1605,8 +1598,7 @@ export function ProjectDetail({
       );
       d.activity = activityData.activity || [];
       setData(d);
-      if (!preserveEdits
-          && (hydrateRevision === undefined || editRevisionRef.current === hydrateRevision)) {
+      if (!preserveEdits) {
         setEditFindings(d.project.findings || {});
         setEditRecs(d.project.recommendations || "");
         setEditTitle(d.project.title || "");
@@ -1628,7 +1620,7 @@ export function ProjectDetail({
       // mounted editor (Codex r11 P2 + house review): keep the stale data,
       // and only surface the failure when this was a foreground load.
       if (!background) setError(e.message || "Could not load project");
-      if (!background && !preserveEdits) setData(null);
+      if (!preserveEdits) setData(null);
     } finally {
       if (!background) setLoading(false);
     }
@@ -1639,7 +1631,6 @@ export function ProjectDetail({
     // The drawer instance survives across projects (dispatch overlay) — an
     // unchecked hold must not silently carry over to the next WDO.
     setHoldReportUntilPaid(true);
-    setDirtyPhotoIds(new Set());
   }, [projectId]);
 
   // Host-driven data refresh (Codex r10 P2 on #2717): after an in-editor
@@ -1661,20 +1652,10 @@ export function ProjectDetail({
 
   // Host-visible dirty signal (Codex r14 P2 on #2717): the dispatch
   // overlay's backdrop close needs to know when discarding would lose
-  // unsaved edits — both the report fields and each photo caption editor
-  // keep drafts only in component state.
+  // unsaved edits — this editor keeps them only in component state.
   useEffect(() => {
-    onDirtyChange?.(dirty || dirtyPhotoIds.size > 0);
-  }, [dirty, dirtyPhotoIds, onDirtyChange]);
-  const handlePhotoCaptionDirtyChange = useCallback((photoId, isDirty) => {
-    setDirtyPhotoIds((current) => {
-      if (current.has(photoId) === isDirty) return current;
-      const next = new Set(current);
-      if (isDirty) next.add(photoId);
-      else next.delete(photoId);
-      return next;
-    });
-  }, []);
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
 
   const project = data?.project;
   const typeCfg =
@@ -1729,12 +1710,11 @@ export function ProjectDetail({
       ...(hasEpaField && epaRegistration ? { epa_registration: epaRegistration } : {}),
       ...(hasActiveIngredientField && activeIngredient ? { active_ingredient: activeIngredient } : {}),
     }));
-    markDirty();
+    setDirty(true);
   }
 
   async function saveDirtyProjectEdits(fallbackMessage) {
     if (!dirty) return;
-    const savedRevision = editRevisionRef.current;
     const saveRes = await adminFetch(`/admin/projects/${projectId}`, {
       method: "PUT",
       body: {
@@ -1745,11 +1725,10 @@ export function ProjectDetail({
       },
     });
     await readJsonResponse(saveRes, fallbackMessage);
-    if (editRevisionRef.current === savedRevision) setDirty(false);
+    setDirty(false);
   }
 
   async function saveEdits() {
-    const savedRevision = editRevisionRef.current;
     setSaving(true);
     setError("");
     setNotice("");
@@ -1764,8 +1743,8 @@ export function ProjectDetail({
         },
       });
       await readJsonResponse(r, "Could not save project changes");
-      if (editRevisionRef.current === savedRevision) setDirty(false);
-      await load({ background: true, hydrateRevision: savedRevision });
+      setDirty(false);
+      await load();
       onChanged?.();
       setNotice("Changes saved.");
     } catch (e) {
@@ -1877,7 +1856,7 @@ export function ProjectDetail({
       } else {
         setNotice(`Report delivered. ${deliverySummary(d.channels)}`.trim());
       }
-      await load({ preserveEdits: true, background: true });
+      await load();
       onChanged?.();
     } catch (e) {
       setError(e.message || "Could not send report");
@@ -2031,7 +2010,7 @@ export function ProjectDetail({
           `Report + invoice ${d.invoice?.invoice_number || ""} delivered. ${deliverySummary(d.channels)}`.trim(),
         );
       }
-      await load({ preserveEdits: true, background: true });
+      await load();
       onChanged?.();
     } catch (e) {
       setError(e.message || "Could not send report + invoice");
@@ -2060,7 +2039,7 @@ export function ProjectDetail({
       });
       const d = await readJsonResponse(r, "Could not send prep guide");
       setNotice(`Prep guide sent${d.template_key ? ` (${d.template_key})` : ""}.`);
-      await load({ preserveEdits: true, background: true });
+      await load({ preserveEdits: true });
       onChanged?.();
     } catch (e) {
       setError(e.message || "Could not send prep guide");
@@ -2085,7 +2064,7 @@ export function ProjectDetail({
       });
       await readJsonResponse(r, "Could not send portal invite");
       setNotice("Portal invite sent.");
-      await load({ preserveEdits: true, background: true });
+      await load({ preserveEdits: true });
       onChanged?.();
     } catch (e) {
       setError(e.message || "Could not send portal invite");
@@ -2111,7 +2090,6 @@ export function ProjectDetail({
       ))
     )
       return;
-    const savedRevision = editRevisionRef.current;
     setAiWriting(true);
     setError("");
     setNotice("");
@@ -2147,12 +2125,12 @@ export function ProjectDetail({
             saveRes,
             "AI draft created but autosave failed",
           );
-          if (editRevisionRef.current === savedRevision) setDirty(false);
-          await load({ preserveEdits: true, background: true });
+          setDirty(false);
+          await load();
           setNotice("AI draft saved.");
         } catch {
           // Autosave failed — leave it marked dirty so manual Save still works.
-          markDirty();
+          setDirty(true);
           setNotice("AI draft created. Save changes to keep it.");
         }
       }
@@ -2253,7 +2231,7 @@ export function ProjectDetail({
       // just-completed visit (Codex r10 P1). Consumers that take no args
       // (loadProjects) are unaffected by the earlier emission.
       onChanged?.({ visitCompleted: !!d.serviceCompleted });
-      await load({ preserveEdits: true, background: true });
+      await load();
     } catch (e) {
       if (e.payload?.code === "project_completion_billing_required") {
         setError(
@@ -2281,7 +2259,7 @@ export function ProjectDetail({
         { method: "DELETE" },
       );
       await readJsonResponse(r, "Could not remove photo");
-      await load({ preserveEdits: true, background: true });
+      await load();
       setNotice("Photo removed.");
     } catch (e) {
       setError(e.message || "Could not remove photo");
@@ -2316,7 +2294,7 @@ export function ProjectDetail({
         failed.push(`${f.name}: ${e.message || "upload failed"}`);
       }
     }
-    await load({ preserveEdits: true, background: true });
+    await load();
     if (failed.length) {
       setError(`Some photos did not upload: ${failed.join("; ")}`);
     } else {
@@ -2337,7 +2315,7 @@ export function ProjectDetail({
         category: "previous_treatment",
         caption: "Previous treatment evidence review",
       });
-      await load({ preserveEdits: true, background: true });
+      await load({ preserveEdits: true });
       setNotice("Previous-treatment photo uploaded.");
     } catch (e) {
       setError(e.message || "Could not upload previous-treatment photo");
@@ -2350,31 +2328,31 @@ export function ProjectDetail({
     setEditRecs((prev) =>
       prev.trim() ? `${prev.trimEnd()}\n\n${text}` : text,
     );
-    markDirty();
+    setDirty(true);
   }
 
   function fillWdoAddressFromCustomer() {
     const address = formatProjectCustomerAddress(project);
     if (!address) return;
     setEditFindings((f) => ({ ...f, property_address: address }));
-    markDirty();
+    setDirty(true);
   }
 
   function applyWdoSuggestions(suggestions, options = {}) {
     setEditFindings((f) =>
       mergeWdoSuggestions(f, suggestions, options.overwrite),
     );
-    markDirty();
+    setDirty(true);
   }
 
   function applyWdoProfile(profile) {
     setEditFindings((f) => applyProfileToWdoFindings(f, profile, { overwrite: true }));
-    markDirty();
+    setDirty(true);
   }
 
   function applyWdoHistory(history) {
     setEditFindings((f) => applyHistoryToWdoFindings(f, history, { overwrite: true }));
-    markDirty();
+    setDirty(true);
   }
 
   if (loading || !project) {
@@ -2632,7 +2610,7 @@ export function ProjectDetail({
             value={editTitle}
             onChange={(e) => {
               setEditTitle(e.target.value);
-              markDirty();
+              setDirty(true);
             }}
             placeholder={typeCfg?.label || "Project"}
             style={inputStyle}
@@ -2652,7 +2630,7 @@ export function ProjectDetail({
             value={editProjectDate}
             onChange={(e) => {
               setEditProjectDate(e.target.value);
-              markDirty();
+              setDirty(true);
             }}
             // iOS WebKit gives date inputs an intrinsic shadow-DOM width that
             // can exceed width:100% — clamp it and drop the native appearance
@@ -2767,7 +2745,7 @@ export function ProjectDetail({
                   ...f,
                   [field.key]: value,
                 }));
-                markDirty();
+                setDirty(true);
               }}
               inputStyle={inputStyle}
               products={productCatalog}
@@ -2866,7 +2844,7 @@ export function ProjectDetail({
             value={editRecs}
             onChange={(e) => {
               setEditRecs(e.target.value);
-              markDirty();
+              setDirty(true);
             }}
             rows={8}
             placeholder={`Write freely, or tap "Write with AI" to draft the customer-facing report sections from findings, communication context, tech notes, and photos.`}
@@ -2957,8 +2935,7 @@ export function ProjectDetail({
                   photo={ph}
                   projectId={projectId}
                   onDelete={() => handlePhotoDelete(ph.id)}
-                  onCaptionSaved={() => load({ preserveEdits: true, background: true })}
-                  onDirtyChange={handlePhotoCaptionDirtyChange}
+                  onCaptionSaved={() => load({ preserveEdits: true })}
                 />
               ))}
             </div>
@@ -3078,7 +3055,7 @@ export function ProjectDetail({
             signature={project.wdo_signature}
             defaultSignerName={project.wdo_applicator?.name || project.tech_name || ""}
             defaultSignerIdCard={project.wdo_applicator?.idCardNo || ""}
-            onChanged={() => load({ preserveEdits: true, background: true })}
+            onChanged={() => load({ preserveEdits: true })}
           />
         </div>
       )}
@@ -3394,7 +3371,7 @@ function ProjectHistoryPanel({ activity }) {
 
 // Named export so the caption editor can be mounted standalone in tests and
 // UI verification (the drawer needs a full project fixture to render).
-export function PhotoThumb({ photo, projectId, onDelete, onCaptionSaved, onDirtyChange }) {
+export function PhotoThumb({ photo, projectId, onDelete, onCaptionSaved }) {
   const [url, setUrl] = useState(null);
   const [loadFailed, setLoadFailed] = useState(false);
   // Inline caption editing — captions print on the FDACS photo addendum, and
@@ -3403,16 +3380,6 @@ export function PhotoThumb({ photo, projectId, onDelete, onCaptionSaved, onDirty
   const [editingCaption, setEditingCaption] = useState(false);
   const [captionDraft, setCaptionDraft] = useState(photo.caption || "");
   const [captionSaving, setCaptionSaving] = useState(false);
-  const captionDirty = editingCaption && captionDraft !== (photo.caption || "");
-  const captionDirtyRef = useRef(captionDirty);
-  captionDirtyRef.current = captionDirty;
-
-  useEffect(() => {
-    onDirtyChange?.(photo.id, captionDirty);
-  }, [captionDirty, onDirtyChange, photo.id]);
-  useEffect(() => () => {
-    if (captionDirtyRef.current) onDirtyChange?.(photo.id, false);
-  }, [onDirtyChange, photo.id]);
 
   async function saveCaption() {
     setCaptionSaving(true);
