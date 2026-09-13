@@ -1148,7 +1148,7 @@ const InvoiceService = {
     // (the best-effort tax/discount catches then abort with it — accepted
     // for linked money writes; plain unlinked creates keep the
     // untransacted path).
-    const stampedEstimateIdInNotes = (String(notes || "").match(/accepted estimate #([0-9a-fA-F-]{8,})/) || [])[1] || null;
+    const stampedEstimateIdInNotes = ((String(notes || "").match(/accepted estimate #([0-9a-fA-F-]{8,})/i) || [])[1] || "").toLowerCase() || null;
     if (linkedScheduledServiceId || stampedEstimateIdInNotes) {
       if (database && database.isTransaction) {
         if (linkedScheduledServiceId) {
@@ -1177,7 +1177,8 @@ const InvoiceService = {
       const packetOwner = await database('invoices as i')
         .join('visit_completion_packet_items as p', 'p.invoice_id', 'i.id')
         .join('scheduled_services as s', 's.id', 'p.scheduled_service_id')
-        .where({ 'i.customer_id': customerId, 's.source_estimate_id': stampedEstimateIdInNotes })
+        .where({ 'i.customer_id': customerId })
+        .whereRaw('s.source_estimate_id::text = ?', [stampedEstimateIdInNotes])
         .whereNotNull('i.visit_completion_packet_id').first('i.visit_completion_packet_id');
       if (packetOwner?.visit_completion_packet_id) {
         throw Object.assign(new Error('This estimate is billed by its saved visit closeout. Resume that closeout.'),

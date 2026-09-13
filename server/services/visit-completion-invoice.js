@@ -75,6 +75,23 @@ async function buildMemberLines(member, customer, trx) {
 }
 
 async function mintPacketInvoice({ packet, visit, members, customer, trx }) {
+  // Unlinked accepted-estimate writers use this same lock. Try rather than
+  // wait while holding the packet's customer/member rows, then recheck a
+  // writer that already committed before minting any packet invoice.
+  const estimateIds = [...new Set(members.map((member) => member.source_estimate_id).filter(Boolean))].sort();
+  for (const estimateId of estimateIds) {
+    const lock = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?)) AS locked',
+      [`unminted_setup_fee_manual_billing:${estimateId}`]);
+    if (!lock.rows[0].locked) return office('existing_member_invoice');
+    const unlinked = await trx('invoices').where({ customer_id: customer.id })
+      .whereNull('scheduled_service_id')
+      .where('notes', 'ilike', `%accepted estimate #${estimateId}%`)
+      .where(function relevantApplication() {
+        this.where('service_date', dateOnly(visit.scheduled_date)).orWhereNull('service_date');
+      }).forUpdate().noWait().select('line_items');
+    const { invoiceContainsOnlySetupFeeCharges } = require('./estimate-first-application-invoice');
+    if (unlinked.some((invoice) => !invoiceContainsOnlySetupFeeCharges(invoice))) return office('existing_member_invoice');
+  }
   const existing = await trx('invoices').where(function linkedMember() {
     this.whereIn('scheduled_service_id', members.map((member) => member.id))
       .orWhereIn('service_record_id', members.map((member) => member.record_id));

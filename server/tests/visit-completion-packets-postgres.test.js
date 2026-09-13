@@ -104,6 +104,25 @@ async function assertPacketCharge(saved) {
   });
 }
 
+async function linkFixtureEstimate() {
+  const estimateId = randomUUID();
+  fixture.estimateIds.push(estimateId);
+  await mockPg('estimates').insert({ id: estimateId, customer_id: fixture.customerId, status: 'accepted' });
+  await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ source_estimate_id: estimateId });
+  return estimateId;
+}
+
+async function waitForPgBlocker(blockerPid, message) {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    const { rows } = await mockPg.raw(
+      'SELECT pid FROM pg_stat_activity WHERE ?::int = ANY(pg_blocking_pids(pid))', [blockerPid]);
+    if (rows.length) return rows[0].pid;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(message);
+}
+
 // Inject a real failed SQL statement; a JS rejection cannot prove transaction recovery.
 async function withReadFailure(matches, run) {
   const shared = mockPg;
@@ -1470,11 +1489,13 @@ postgres('visit completion packet records on PostgreSQL', () => {
     const atProvider = new Promise((resolve) => { reachedProvider = resolve; });
     let releaseProvider;
     const providerReleased = new Promise((resolve) => { releaseProvider = resolve; });
+    let collectionPid;
     chargeInvoiceWithSavedCard.mockImplementation(async (invoiceId, _methodId, options) => {
       await mockPg.transaction(async (trx) => {
         const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
         await trx('customers').where({ id: fixture.customerId }).forUpdate().first('id');
         await assertVisitCompletionCharge(trx, invoice, options.requireVisitCompletionPacketId);
+        ({ rows: [{ pid: collectionPid }] } = await trx.raw('SELECT pg_backend_pid() AS pid'));
         reachedProvider();
         await providerReleased;
         await trx('invoices').where({ id: invoiceId })
@@ -1484,12 +1505,9 @@ postgres('visit completion packet records on PostgreSQL', () => {
 
     const collection = collectVisitCompletionInvoice(saved.body.packetId);
     await atProvider;
-    let writerPid;
     let writer;
     const writerStarted = new Promise((resolve) => {
       writer = mockPg.transaction(async (trx) => {
-        const { rows } = await trx.raw('SELECT pg_backend_pid() AS pid');
-        writerPid = rows[0].pid;
         resolve();
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?::text))', [String(fixture.customerId)]);
         await trx('retention_offers').insert({ customer_id: fixture.customerId, family_key: 'pest_control',
@@ -1498,14 +1516,8 @@ postgres('visit completion packet records on PostgreSQL', () => {
     });
     await writerStarted;
     try {
-      let blockers = 0;
-      const deadline = Date.now() + 5000;
-      while (blockers === 0 && Date.now() < deadline) {
-        ({ rows: [{ blockers }] } = await mockPg.raw(
-          'SELECT cardinality(pg_blocking_pids(?))::int AS blockers', [writerPid]));
-        if (blockers === 0) await new Promise((resolve) => setTimeout(resolve, 25));
-      }
-      expect(blockers).toBeGreaterThan(0);
+      await expect(waitForPgBlocker(collectionPid, 'Retention writer did not wait at the provider boundary'))
+        .resolves.toEqual(expect.any(Number));
     } finally {
       releaseProvider();
       await writer;
@@ -2334,20 +2346,136 @@ postgres('visit completion packet records on PostgreSQL', () => {
   });
 
   test('an edited packet invoice still owns an unlinked accepted-estimate mint', async () => {
-    const estimateId = randomUUID();
-    fixture.estimateIds.push(estimateId);
-    await mockPg('estimates').insert({ id: estimateId, customer_id: fixture.customerId, status: 'accepted' });
-    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ source_estimate_id: estimateId });
+    const estimateId = await linkFixtureEstimate();
     const saved = await saveVisitCompletionPacket(submission());
     await mockPg('invoices').where({ id: saved.body.billing.invoiceId })
       .update({ notes: 'Office edited these notes after the visit invoice was minted.' });
 
     await expect(InvoiceService.create({
       customerId: fixture.customerId,
-      lineItems: [{ description: 'Synthetic accepted-estimate charge', quantity: 1, unit_price: 99 }],
-      notes: `Auto-generated from accepted estimate #${estimateId}.`,
+      lineItems: [{ description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99 }],
+      notes: `Auto-generated from accepted estimate #${estimateId.toUpperCase()}.`,
     })).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 });
     expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+  });
+
+  test('a malformed accepted-estimate stamp does not enter PostgreSQL as a UUID', async () => {
+    const invoice = await InvoiceService.create({
+      customerId: fixture.customerId,
+      lineItems: [{ description: 'Synthetic manual charge', quantity: 1, unit_price: 99 }],
+      notes: 'Auto-generated from accepted estimate #deadbeef.',
+    });
+    expect(invoice).toMatchObject({ customer_id: fixture.customerId, notes: expect.stringContaining('#deadbeef') });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+  });
+
+  test.each([
+    ['a paid setup-only acceptance invoice', {
+      serviceDate: etDateString(), description: 'WaveGuard Membership — one-time setup fee', amount: 99,
+      note: 'Customer selected pay per application — $99 setup fee only.',
+    }],
+    ['a paid Bait Station setup-only acceptance invoice', {
+      serviceDate: etDateString(), description: 'Bait Station Setup — one-time setup fee', amount: 99,
+      note: 'Customer selected pay per application — $99 setup fee only.',
+    }],
+    ['a prior-date paid application', {
+      serviceDate: etDateString(new Date(Date.now() - 2 * 86400000)), description: 'First service application', amount: 120,
+      note: 'Customer selected pay per application — first application.',
+    }],
+  ])('%s does not block a later ordinary packet invoice', async (_label, prior) => {
+    const estimateId = await linkFixtureEstimate();
+    const invoice = await InvoiceService.create({
+      customerId: fixture.customerId, serviceDate: prior.serviceDate,
+      lineItems: [{ description: prior.description, quantity: 1, unit_price: prior.amount }],
+      notes: `Auto-generated from accepted estimate #${estimateId}. ${prior.note}`,
+    });
+    await mockPg('invoices').where({ id: invoice.id }).update({ status: 'paid', paid_at: new Date() });
+
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'invoice_ready', total: 240 });
+    expect(saved.body.billing.invoiceId).not.toBe(invoice.id);
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(2);
+  });
+
+  test.each([
+    ['same-date', etDateString(), 'First service application'],
+    ['missing-date', null, 'First service application'],
+    ['same-date combined setup and application', etDateString(), 'WaveGuard Membership — $99 setup fee plus first application'],
+  ])('a paid %s unlinked acceptance application parks ordinary packet mint', async (_label, serviceDate, description) => {
+    const estimateId = await linkFixtureEstimate();
+    const invoice = await InvoiceService.create({
+      customerId: fixture.customerId, ...(serviceDate ? { serviceDate } : {}),
+      lineItems: [{ description, quantity: 1, unit_price: 120 }],
+      notes: `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — first application.`,
+    });
+    await mockPg('invoices').where({ id: invoice.id }).update({ status: 'paid', paid_at: new Date() });
+
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+  });
+
+  test('an unlinked accepted-estimate writer that wins the shared lock parks ordinary packet mint', async () => {
+    const estimateId = await linkFixtureEstimate();
+    const writer = await mockPg.transaction();
+    let closeout;
+    try {
+      await InvoiceService.create({
+        database: writer, customerId: fixture.customerId,
+        lineItems: [{ description: 'Synthetic accepted-estimate charge', quantity: 1, unit_price: 99 }],
+        notes: `Auto-generated from Accepted estimate #${estimateId.toUpperCase()}.`,
+      });
+      closeout = saveVisitCompletionPacket(submission());
+      const saved = await closeout;
+      expect(saved.body.billing).toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
+      await writer.commit();
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+    } finally {
+      if (!writer.isCompleted()) await writer.rollback();
+      if (closeout) await closeout;
+    }
+  });
+
+  test('ordinary packet mint holds the estimate lock until a waiting manual writer observes its owner', async () => {
+    const estimateId = await linkFixtureEstimate();
+    const create = InvoiceService.create;
+    let packetPid;
+    let reachedMint;
+    const packetMinted = new Promise((resolve) => { reachedMint = resolve; });
+    let releaseMint;
+    const mintReleased = new Promise((resolve) => { releaseMint = resolve; });
+    const pause = jest.spyOn(InvoiceService, 'create').mockImplementation(async (...args) => {
+      const invoice = await create.apply(InvoiceService, args);
+      if (args[1]?.packetId) {
+        const { rows } = await args[0].database.raw('SELECT pg_backend_pid() AS pid');
+        packetPid = rows[0].pid;
+        reachedMint();
+        await mintReleased;
+      }
+      return invoice;
+    });
+    let closeout;
+    let manual;
+    try {
+      closeout = saveVisitCompletionPacket(submission());
+      await packetMinted;
+      manual = InvoiceService.create({
+        customerId: fixture.customerId,
+        lineItems: [{ description: 'Synthetic accepted-estimate charge', quantity: 1, unit_price: 99 }],
+        notes: `Auto-generated from accepted estimate #${estimateId.toUpperCase()}.`,
+      }).then((invoice) => ({ invoice }), (error) => ({ error }));
+      await waitForPgBlocker(packetPid, 'Manual writer did not wait on the packet estimate lock');
+      releaseMint();
+      const [saved, manualResult] = await Promise.all([closeout, manual]);
+      expect(saved.body.billing).toMatchObject({ state: 'invoice_ready' });
+      expect(manualResult.error).toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 });
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+    } finally {
+      releaseMint();
+      await Promise.allSettled([closeout, manual].filter(Boolean));
+      pause.mockRestore();
+    }
   });
 
   test.each(['paid', 'refunded', 'draft', 'void'])('a member with a %s invoice parks billing without creating another invoice', async (status) => {
