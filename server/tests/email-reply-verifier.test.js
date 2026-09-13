@@ -87,6 +87,12 @@ describe('email reply verifier', () => {
       .toContain('payment_status_unsupported');
   });
 
+  test.each(['failed', 'pending', 'succeeded', 'completed'])('completed-payment wording respects the recorded status %s', (status) => {
+    const facts = [{ key: 'recent_payment', status: 'present', value: { amount: 50, status } }];
+    expect(verdict('Hi Casey, your $50 payment was completed.', { context: { facts } }).ok)
+      .toBe(['succeeded', 'completed'].includes(status));
+  });
+
   test('requires amounts, dates, and windows in one sentence to come from the same record', () => {
     const facts = contextWith().facts.concat([
       { key: 'recent_payment', status: 'present', value: { amount: 25, paymentDate: '2026-09-11', status: 'succeeded' } },

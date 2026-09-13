@@ -248,7 +248,7 @@ function statusViolations(text, context) {
     const statusRules = [
       {
         matches: /\b(?:payment|paid)\b/i.test(sentence)
-          && /\b(?:received|processed|successful|succeeded|paid|went through)\b/i.test(sentence),
+          && /\b(?:received|processed|successful|succeeded|completed|paid|went through)\b/i.test(sentence),
         key: 'recent_payment', violation: 'payment_status_unsupported',
         supports: (fact) => SUCCESS_STATUS_RE.test(String(fact.value?.status || '')),
       },
