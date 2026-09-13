@@ -71,6 +71,8 @@ test.each([
   ['Talstar P went around the exterior perimeter.', 'pass'],
   ['Bait was applied indoors, the exterior perimeter received Talstar P.', 'pass'],
   ['Talstar P was applied indoors with bait placed on the exterior perimeter.', 'fail'],
+  ['Talstar P was applied indoors with bait on the exterior perimeter.', 'fail'],
+  ['Talstar P was applied indoors with granular bait along the exterior perimeter.', 'fail'],
   ['You asked about Talstar P on the exterior perimeter.', 'fail'],
   ['Talstar P around the exterior perimeter.', 'pass'],
   ['Talstar P is on the exterior perimeter, and the bait is along the foundation, and it is totally harmless.', 'pass'],
@@ -117,6 +119,8 @@ test.each([
   ['Talstar P, according to the report, was applied to the exterior perimeter.', 'pass'],
   ['Talstar P was applied, as scheduled, to the exterior perimeter.', 'pass'],
   ['Talstar P was applied to the exterior perimeter with a backpack sprayer.', 'pass'],
+  ['Talstar P was applied with a backpack sprayer to the exterior perimeter.', 'pass'],
+  ['Talstar P was applied to the exterior perimeter with application equipment.', 'pass'],
   ['Talstar P was applied with care to the exterior perimeter.', 'pass'],
   ['Talstar P was applied to the exterior perimeter before the technician left.', 'pass'],
   ['Talstar P was applied to the exterior perimeter before noon.', 'pass'],
@@ -191,6 +195,12 @@ test.each([
 
 test('a location recipient confirms the product it got before a later product mention', () => {
   const spoken = ['The exterior perimeter got bait after the technician ordered Talstar P.'];
+  const bait = { subject: '\\bbait\\b', location: '\\bexterior perimeter\\b' };
+  expect(checks.report_readback_confirms(bait, {}, { spoken })[0]).toBe('pass');
+});
+
+test('a verbless with-assertion confirms only the product and location it names', () => {
+  const spoken = ['Talstar P was applied indoors with bait on the exterior perimeter.'];
   const bait = { subject: '\\bbait\\b', location: '\\bexterior perimeter\\b' };
   expect(checks.report_readback_confirms(bait, {}, { spoken })[0]).toBe('pass');
 });
