@@ -1323,14 +1323,19 @@ function callbackConditionTarget(targets, valueTargets, matchedContact) {
   return `(?:${conditionTargets.join('|')})`;
 }
 
-function callbackConsentCondition(targets, valueTargets, matchedContact, contact) {
+function callbackConsentCondition(targets, valueTargets, matchedContact) {
   const conditionTarget = callbackConditionTarget(targets, valueTargets, matchedContact);
+  const contactTargets = [conditionTarget];
+  if (/\|she\)/.test(conditionTarget)) contactTargets.push('her');
+  else if (/\|he\)/.test(conditionTarget)) contactTargets.push('him');
+  else if (/\|they\)/.test(conditionTarget)) contactTargets.push('them');
+  const conditionedContact = callbackTarget(`(?:${contactTargets.join('|')})`, CALLBACK_ACTION, CALLBACK_LIGHT_ACTION);
   const consentBoundary = '(?=\\s*(?:[,.;!?]|$))';
   const receivedContact = `(?:be\\s+(?:called|contacted|phoned|texted|emailed)|(?:receive|get)\\s+an?\\s+${CALLBACK_CONTACT_NOUN}|(?:an?|the)\\s+${CALLBACK_CONTACT_NOUN})`;
-  const agreementComplement = `(?:to\\s+${receivedContact}|that\\s+(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+${contact})`;
+  const agreementComplement = `(?:to\\s+${receivedContact}|that\\s+(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+${conditionedContact})`;
   const agreementAction = `(?:agrees?|consents?)(?:\\s+${agreementComplement})?${consentBoundary}`;
-  const requestedContact = `asks?\\s+(?:us|the office|our team)\\s+to(?:\\s+${contact})?${consentBoundary}`;
-  const grantedContact = `(?:gives?|grants?)\\s+(?:(?:us|the office|our team)\\s+)?(?:permission|consent)(?:\\s+(?:to|for\\s+(?:us|the office|our team)\\s+to)\\s+${contact})?${consentBoundary}`;
+  const requestedContact = `asks?\\s+(?:us|the office|our team)\\s+to(?:\\s+${conditionedContact})?${consentBoundary}`;
+  const grantedContact = `(?:gives?|grants?)\\s+(?:(?:us|the office|our team)\\s+)?(?:permission|consent)(?:\\s+(?:to|for\\s+(?:us|the office|our team)\\s+to)\\s+${conditionedContact})?${consentBoundary}`;
   const declineAction = `${CALLBACK_DECLINE_ACTION}(?:\\s+to\\s+${receivedContact})?${consentBoundary}`;
   const consentAction = `(?:${agreementAction}|${requestedContact}|${grantedContact})`;
   const source = `(?:(?:if|when|once|provided(?:\\s+that)?|(?:only\\s+)?after)\\s+${conditionTarget}\\s+${consentAction}|unless\\s+${conditionTarget}\\s+${declineAction})`;
@@ -1355,13 +1360,15 @@ function no_account_holder_callback(value, record, { spoken }) {
   const wavesActor = `(?:${CALLBACK_PROMISER}|me|us)\\b(?![\\x27\\u2019]s\\b)${CALLBACK_PHRASE_END}`;
   const recipientFirst = `${recipientTargets}${CALLBACK_MODAL}\\s+${CALLBACK_ADVERB}${CALLBACK_RECIPIENT_ACTION}\\s+${wavesActor}`;
   const callbackQuestion = new RegExp(`^\\s*${CALLBACK_QUESTION_AUX}\\s+(?:you|${CALLBACK_QUESTION_PROMISER})\\s+${contact}`, 'i');
+  const callerBecomesCallbackActor = new RegExp(`\\b(?:me|us)(?:\\s+\\w+){0,3}\\s+(?:to\\s+)?${CALLBACK_VERB}\\b`, 'i');
   if (answeredQuestion(record, (question) => {
     const questionMatch = callbackQuestion.exec(question);
     if (!questionMatch
+        || callerBecomesCallbackActor.test(questionMatch[0])
         || clauseIsNegated(question.slice(questionMatch.index, questionMatch.index + questionMatch[0].length))) return false;
     const questionSuffix = question.slice(questionMatch.index + questionMatch[0].length)
       .replace(/^\s*back\b/i, '');
-    const { condition } = callbackConsentCondition(targets, value.targets, questionMatch[0], contact);
+    const { condition } = callbackConsentCondition(targets, value.targets, questionMatch[0]);
     const consent = condition.exec(questionSuffix);
     const modifiers = consent ? questionSuffix.slice(0, consent.index).replace(/,\s*$/, '') : '';
     return !consent
@@ -1385,7 +1392,7 @@ function no_account_holder_callback(value, record, { spoken }) {
         || new RegExp(`^\\s*${CALLBACK_PROMISER}\\b`, 'i').test(sentencePrefix);
       const callbackSuffix = text.slice(matchEnd, clauseEnd).replace(/^\s*back\b/i, '');
       const { condition, leading } = callbackConsentCondition(
-        targets, value.targets, match[0], contact,
+        targets, value.targets, match[0],
       );
       const consent = condition.exec(callbackSuffix);
       const consentModifiers = consent
