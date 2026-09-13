@@ -1215,7 +1215,8 @@ const CARD_DIGIT_WORDS_ES = Object.freeze({ cero: '0', uno: '1', dos: '2', tres:
 const CARD_DIGIT_TOKEN_ES = `(?:(?:doble|triple)[\\s-]+)?(?:${Object.keys(CARD_DIGIT_WORDS_ES).join('|')})`;
 const CARD_DIGIT_WORD_ES_RE = new RegExp(`\\b${CARD_DIGIT_TOKEN_ES}(?:[\\s,.-]+${CARD_DIGIT_TOKEN_ES})*\\b`, 'gi');
 function cardSpokenDigits(text) {
-  return spokenDigits(text, true).replace(CARD_DIGIT_WORD_ES_RE, (run) => {
+  const bounded = String(text || '').replace(CARD_COMMA_VALUE_BOUNDARY_RE, '; ');
+  return spokenDigits(bounded, true).replace(CARD_DIGIT_WORD_ES_RE, (run) => {
     let repeat = 1;
     let out = '';
     for (const word of run.toLowerCase().split(/[\s,.-]+/).filter(Boolean)) {
@@ -1232,6 +1233,15 @@ function cardSpokenDigits(text) {
 const CARD_PHONE_VALUE = '(?:(?:\\(\\d{3}\\)|\\b\\d{3})[\\s.-]\\d{3}[\\s.-]\\d{4}\\b|\\b\\d{10}\\b)';
 const CARD_MENU_OPTION_RE = /\b(?:option|choice|key)\s+(?:number\s+)?\d+\b|\bpress\s+\d+\b/gi;
 const CARD_COUNT_NOUN = '(?:applications?|treatments?|services?|visits?|appointments?|accounts?|payments?|transactions?|attempts?|options?|cards?|rooms?|bedrooms?|bathrooms?|properties|homes?|lawns?|yards?|dogs?|cats?|pets?|animals?|children|kids?|bab(?:y|ies)|adults?|people|men|women|mice|geese|feet|fish|sheep)';
+const CARD_MEASUREMENT_UNIT = '(?:sq(?:uare)?\\.?\\s*(?:ft|feet|foot)|acres?)';
+// Preserve a comma that introduces a separately explained numeric value or a
+// reverse card-position label before spokenDigits can join the digit words.
+const CARD_COMMA_VALUE_BOUNDARY_RE = new RegExp(
+  `,\\s*(?=(?:\\d+|${DIGIT_TOKEN})\\s+(?:(?:${CARD_COUNT_NOUN}|${CARD_MEASUREMENT_UNIT})\\b|`
+    + `(?:is|was)\\s+(?:the\\s+)?(?:first|last|next|middle)\\s+(?:digit|number|one)\\s+(?:of|on)\\s+`
+    + `(?:(?:your|the|my|this|that)\\s+)?(?:card|pan|cvv|cvc|security code)\\b))`,
+  'gi',
+);
 const CARD_MONTH_DATE_VALUE = `(?:${MONTHS})\\s+(?:(?:19|20)\\d{2}|\\d{1,2}(?:st|nd|rd|th)?(?:,?\\s+(?:19|20)\\d{2})?)`;
 const CARD_NUMERIC_DATE_VALUE = '(?:0?[1-9]|1[0-2])\\s*[/.-]\\s*(?:0?[1-9]|[12]\\d|3[01])\\s*[/.-]\\s*(?:19|20)\\d{2}';
 const CARD_CALENDAR_VALUE_RES = Object.freeze([
@@ -1249,7 +1259,7 @@ const CARD_NON_FRAGMENT_RES = Object.freeze([
   new RegExp(`\\b(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})(?:[\\s-]+(?:and\\s+)?(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})){0,6}\\s+(?:dollars?|cents?|bucks)\\b`, 'gi'),
   new RegExp(`\\$\\s*${DIGITS}`, 'gi'),
   new RegExp(`\\b${PRICE_NUMBER}\\s*(?:per|an?|each|every|for each|for every)\\s+(?:applications?|treatments?|services?|visits?)\\b`, 'gi'),
-  /\b\d[\d,]*(?:\.\d+)?\s*(?:sq(?:uare)?\.?\s*(?:ft|feet|foot)|acres?)\b/gi,
+  new RegExp(`\\b\\d[\\d,]*(?:\\.\\d+)?\\s*${CARD_MEASUREMENT_UNIT}\\b`, 'gi'),
   /\b(?:[01]?\d|2[0-3]):[0-5]\d(?:\s*(?:a\.?\s*m\.?|p\.?\s*m\.?))?(?![\da-z])/gi,
   /\b\d+(?:\.\d+)?\s*(?:seconds?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?)\b/gi,
   /\b\d+(?:\.\d+)?\s+(?:cards?|applications?|payments?|transactions?|attempts?|options?|visits?|services?|appointments?|accounts?)\b/gi,
