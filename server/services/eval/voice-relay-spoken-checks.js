@@ -423,6 +423,12 @@ function clauseBounds(text, at) {
   let m = CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
   while (m) {
     const left = text.slice(start, m.index);
+    // "whether X or Y" presents two alternatives under the same inquiry,
+    // even when both alternatives have their own subject and predicate.
+    if (/^or$/i.test(m[0]) && /\bwhether\b/i.test(left)) {
+      m = CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
+      continue;
+    }
     const nominal = left.split(new RegExp(`,|\\b(?:if|unless|whether|${COORDINATED_REPORT_VERBS})\\b`, 'i')).pop().trim();
     // A pair of subjects/objects has no completed predicate on the left:
     // "whether a cancellation or refund was processed", or "Talstar P
