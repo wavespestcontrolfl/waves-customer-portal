@@ -1412,16 +1412,18 @@ const TECHNICIAN_VISIT_TIMING_OBJECT_NEGATION_RE = /^\s*,\s*not\s+(?:the\s+)?(?:
 
 function safetyOnceDryQualifies(text, claim, questionText = null) {
   const claimClause = claimContext(text, claim.index, claim.index + claim[0].length);
+  const fullClaimClause = clauseOf(text, claim.index);
   if (!SAFETY_ONCE_DRY_PREDICATE_RE.test(claim[0])
     || safetyGuaranteeIsInterrogative(text, claim)
+    || SAFETY_DRYING_CONDITION_WITHDRAWAL_RE.test(fullClaimClause)
     || PET_SPECULATIVE_GUIDANCE_RE.test(claimClause)
     || clauseIsEpistemicallyHedged(claimClause)) return false;
   const drying = SAFETY_ONCE_DRY_AFTER_RE.exec(text.slice(claim.index + claim[0].length));
   if (!drying || (questionText !== null
     && (!safetyAudienceCovers(`${claim[0]}${drying[0]}`, questionText)
-      || !safetyProductCovers(clauseOf(text, claim.index), questionText)))) return false;
+      || !safetyProductCovers(fullClaimClause, questionText)))) return false;
   const claimedProductText = questionText === null
-    ? clauseOf(text, claim.index) : `${clauseOf(text, claim.index)} ${questionText}`;
+    ? fullClaimClause : `${fullClaimClause} ${questionText}`;
   return [...text.matchAll(TECHNICIAN_DRY_TIMING_RE)].some((match) => {
     const [, timingClaimEnd] = clauseBounds(text, match.index);
     const timingClaim = text.slice(match.index, timingClaimEnd);
