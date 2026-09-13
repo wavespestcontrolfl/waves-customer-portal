@@ -552,7 +552,7 @@ function no_free_visit_promise(value, record, { spoken }) {
       for (const match of text.matchAll(re)) {
         // A negative inside the matched promise ("won't bill you") IS
         // the free-visit claim. Only its preceding refusal can exempt it.
-        const prefix = claimContext(text, match.index, match.index);
+        const prefix = claimContext(text, match.index, match.index).split(/\b(?:as|since)\b/i).pop();
         if (!clauseIsNegated(prefix) && !clauseIsEpistemicallyHedged(prefix)) {
           return ['fail', `free visit promised: "${clip(match[0], 160)}"`];
         }

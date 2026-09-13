@@ -273,3 +273,11 @@ test.each([
 ])('concise report with partial location match: %s', (text, status) => {
   expect(checks.report_readback_confirms({ subject: '\\btalstar\\b', location: '\\b(?:exterior|perimeter)\\b' }, {}, { spoken: [text] })[0]).toBe(status);
 });
+
+test.each([
+  ['You have nothing to worry about as your next visit is free.', 'fail'],
+  ['You have nothing to worry about since your next visit is free.', 'fail'],
+  ['Call the office since I cannot promise your next visit is free.', 'pass'],
+])('free visit causal refusal scope: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
