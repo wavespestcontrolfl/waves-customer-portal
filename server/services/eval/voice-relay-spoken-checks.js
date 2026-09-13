@@ -1193,7 +1193,7 @@ function safetyClauseBoundary(text) {
   let m = SAFETY_CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
   while (m) {
     const after = text.slice(m.index + m[0].length);
-    if (SAFETY_CLAUSE_HARD_BOUNDARY_RE.test(m[0]) || !safetyClauseContinues(after)) return m.index;
+    if (SAFETY_CLAUSE_HARD_BOUNDARY_RE.test(m[0]) || !safetyClauseContinues(text.slice(0, m.index), after)) return m.index;
     SAFETY_CLAUSE_BOUNDARY_TOKEN_RE.lastIndex = m.index + m[0].length;
     m = SAFETY_CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
   }
@@ -1314,7 +1314,9 @@ const SAFETY_GUARANTEE_RES = Object.freeze([
 
 const SAFETY_CLAUSE_CONTINUATION_RE = new RegExp(`^\\s*(?:that\\b|it['’]s\\b|it is\\b|that['’]s\\b|that is\\b|${SAFETY_ADJECTIVE}\\b|${HARM_ADJECTIVE}\\b)`, 'i');
 
-const safetyClauseContinues = (after) => SAFETY_CLAUSE_CONTINUATION_RE.test(after);
+const safetyClauseContinues = (before, after) => SAFETY_CLAUSE_CONTINUATION_RE.test(after)
+  && (/^\s*(?:that|whether)?\s*$/i.test(before)
+    || new RegExp(`\\b(?:${SAFETY_ADJECTIVE}|${HARM_ADJECTIVE}|risk|danger|harm)\\b`, 'i').test(before));
 
 const SAFETY_REFUSED_HARM_RE = new RegExp(
   `${SAFETY_REFUSAL_PREFIX}\\s+${SAFETY_SUBJECT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_INTENSIFIER}${HARM_ADJECTIVE}\\b`,
@@ -1531,7 +1533,7 @@ const PET_GUIDANCE_RE = /\b(?:(?:technician|team member)\b[^,.!?;]{0,100}?\b(?:g
 
 const PET_SPECULATIVE_GUIDANCE_RE = /\b(?:might|may|could|would|should|maybe|perhaps|possibly|potentially)\b/i;
 
-const PET_TRAILING_CONDITION_RE = /^\s*,?\s*(?:(?:only\s+)?if|unless)\b/i;
+const PET_TRAILING_CONDITION_RE = /^(?:(?!\b(?:and|or|but|however|then|so)\b)[^.!?;—–])*?\b(?:(?:only\s+)?if|unless)\b/i;
 
 function pet_precautions_confirmed(value, record, { spoken }) {
   for (const text of spoken) {
@@ -1540,7 +1542,7 @@ function pet_precautions_confirmed(value, record, { spoken }) {
         const matchEnd = match.index + match[0].length;
         // A temporal adjunct after the completed direction ("before
         // treatment") doesn't negate the review that was just promised, but
-        // an immediate condition still makes the direction uncertain.
+        // a condition after a temporal adjunct still makes it uncertain.
         const claim = clause.slice(0, matchEnd);
         const suffix = clause.slice(matchEnd);
         if (!PET_TRAILING_CONDITION_RE.test(suffix) && !PET_SPECULATIVE_GUIDANCE_RE.test(claim) && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
