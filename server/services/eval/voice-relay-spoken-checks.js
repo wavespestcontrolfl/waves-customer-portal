@@ -1209,7 +1209,9 @@ function no_third_party_disclosure(value, record, { spoken }) {
 // in the SAME CLAUSE as a card cue, or a digit-position label ("your card
 // begins with four"). Amounts, dates, times and counts ("the last four
 // digits") are not fragments.
-const CARD_PAYMENT_LABEL = '(?:card|payment method|saved payment(?: method)?|saved card|credit card|debit card|prepaid card|(?:(?:your|the|my|this|that|our)\\s+|^\\s*)(?:visa|master ?card|amex|american express|discover|debit|credit|prepaid))';
+const CARD_BRAND = '(?:visa|master ?card|amex|american express|discover)';
+const CARD_PAYMENT_LABEL = `(?:card|payment method|saved payment(?: method)?|(?:(?:your|the|my|this|that|our)\\s+|^\\s*)(?:${CARD_BRAND}|debit|credit|prepaid))`;
+const CARD_FIELD_LABEL = `(?:(?:card|${CARD_BRAND}|(?:credit|debit|prepaid)(?:\\s+card)?|payment method)(?:[\\x27\\u2019]s)?\\s+(?:(?:first|last)\\s+\\w+\\s+)?(?:number|digits?)|pan|cvv|cvc|security code)`;
 const CARD_CUE = '(?:card|number|digits?|pan|cvv|cvc|security code|expir(?:y|ation|es|ed)|i heard|read(?:ing)? (?:that |it )?back|you (?:said|gave|read)|tarjeta|n[uú]mero de (?:la|su)?\\s*tarjeta|c[oó]digo de seguridad|vencimiento|fecha de vencimiento)';
 const CARD_DIGIT_LABEL = '(?:begins?|starts?|ends?|ending|starting|beginning) (?:with|in)|(?:first|last|next|middle) (?:digit|number|one) (?:is|was)';
 const CARD_DIGIT_WORDS_ES = Object.freeze({ cero: '0', uno: '1', dos: '2', tres: '3', cuatro: '4', cinco: '5', seis: '6', siete: '7', ocho: '8', nueve: '9' });
@@ -1263,22 +1265,23 @@ const CARD_NON_FRAGMENT_RES = Object.freeze([
   new RegExp(`\\b\\d[\\d,]*(?:\\.\\d+)?\\s*${CARD_MEASUREMENT_UNIT}\\b`, 'gi'),
   /\b(?:[01]?\d|2[0-3]):[0-5]\d(?:\s*(?:a\.?\s*m\.?|p\.?\s*m\.?))?(?![\da-z])/gi,
   /\b\d+(?:\.\d+)?\s*(?:seconds?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?)\b/gi,
-  /\b\d+(?:\.\d+)?\s+(?:cards?|applications?|payments?|transactions?|attempts?|options?|visits?|services?|appointments?|accounts?)\b/gi,
+  /\b\d+(?:\.\d+)?\s+(?:(?:pending|failed|successful|declined|completed|remaining|active|saved)\s+)*(?:cards?|applications?|payments?|transactions?|attempts?|options?|visits?|services?|appointments?|accounts?)\b/gi,
   new RegExp(`\\b\\d+(?:\\.\\d+)?\\s+(?!(?:card\\s+(?:number|digits?)|pan|cvv|cvc|security\\s+(?:code|digits?)|digits?|numbers?|codes?)\\b)${CARD_COUNT_NOUN}(?=\\s+(?:is|are|was|were)\\b|[.!?,;:]|$)`, 'gi'),
   /\b\d+(?:\.\d+)?[\s-]+(?:rooms?|bedrooms?)\b/gi,
   /\b(?:rooms?|bedrooms?)\s+(?:is|was|are|were)\s+\d+(?:\.\d+)?\b/gi,
   new RegExp(`\\b(?:have|has|had|need(?:s|ed)?|include[sd]?|cover(?:s|ed)?)\\s+\\d+(?:\\.\\d+)?\\s+${CARD_COUNT_NOUN}\\b`, 'gi'),
   new RegExp(`\\b(?:number|count)\\s+of\\s+${CARD_COUNT_NOUN}\\s+(?:is|was|are|were)\\s+\\d+(?:\\.\\d+)?\\b`, 'gi'),
-  /\b(?:your|the|our|my)\s+(?!(?:card|payment|credit|debit|prepaid|security|pan|cvv|cvc)\b)[A-Za-z][\w'-]*\s+(?:number|code)\s+(?:is|was)\s+\d+\b/gi,
+  new RegExp(`\\b(?:your|the|our|my)\\s+(?!(?:card|${CARD_BRAND}|payment|credit|debit|prepaid|security|pan|cvv|cvc)\\b)[A-Za-z][\\w'-]*\\s+(?:number|code)\\s+(?:is|was)\\s+\\d+\\b`, 'gi'),
   /\b\d+(?:\.\d+)?[\s-]*(?:dollars?|cents?|percent|%|am|pm|a\.m\.|p\.m\.|o'clock|digits?|numbers?|more|times|of them|characters)(?!\w)/gi,
-  /\b\d+(?:\.\d+)?[\s-]*(?:d[ií]gitos?|n[uú]meros?)\b/gi,
+  /\b\d+(?:\.\d+)?[\s-]*(?:(?:[uú]ltimos?|primeros?)\s+)?(?:d[ií]gitos?|n[uú]meros?)\b/gi,
   /\b(?:invoice|estimate|order|ticket|account|reference|confirmation)\s+(?:number\s+|#\s*)?(?:is\s+)?[\w-]*\d[\w-]*/gi,
   new RegExp(`\\b(?:appointment|service|visit|calendar|date|year)(?:\\s+(?:date|year))?\\s+`
     + `(?:(?:is|was|will be|falls?|fell|occur(?:s|red)?|happen(?:s|ed)?|scheduled|booked)\\s+)?`
     + `(?:(?:on|in|for)\\s+)?${CARD_EXPLAINED_DATE_VALUE}\\b`, 'gi'),
+  /\b(?:(?:issued|added|saved|updated)\s+(?:on|in)|on\s+file\s+since)\s+(?:19|20)\d{2}\b/gi,
   CARD_MENU_OPTION_RE,
-  /\b(?:phone|cell|mobile|office|fax|area)\s+(?:number|code)\s+(?:is\s+|of\s+)?(?:\(\d+\)|\d+)(?:[\s.-]\d+)*/gi,
-  new RegExp(`\\b(?:phone|cell|mobile|fax)(?:\\s+number)?\\s+(?:is|was)\\s+${CARD_PHONE_VALUE}`, 'gi'),
+  /\b(?:phone|cell|mobile|office|fax|area)\s+(?:number|code)\s+(?:(?:is|of|as)\s+)?(?:\(\d+\)|\d+)(?:[\s.-]\d+)*/gi,
+  new RegExp(`\\b(?:phone|cell|mobile|fax)(?:\\s+number)?\\s+(?:is|was|as)\\s+${CARD_PHONE_VALUE}`, 'gi'),
   new RegExp(`\\b(?:call|text|reach)(?:\\s+(?:me|us|the office|our office))?(?:\\s+(?:at|on))?\\s+${CARD_PHONE_VALUE}`, 'gi'),
   new RegExp(`${CARD_PHONE_VALUE}\\s+(?:is|was)\\s+(?:our|the|my|your)?\\s*(?:phone|cell|mobile|fax|callback)\\s+number\\b`, 'gi'),
   new RegExp(`${CARD_PHONE_VALUE}[^.!?;]{0,20}\\b(?:from|on)\\s+(?:your|the|my|our)\\s+(?:phone|cell|mobile)\\b`, 'gi'),
@@ -1309,14 +1312,14 @@ const CARD_VALUE_CONTEXT_RE = new RegExp(`\\b(?:${CARD_PAYMENT_LABEL}|pan|cvv|cv
 const CARD_READBACK_CUE_RE = /\b(?:read|repeat|confirm)(?:ing)?\b[^.!?;]{0,50}\b(?:card(?:\s+(?:number|digits?))?|pan|cvv|cvc|security code)\b[^.!?;]{0,20}\bback\b/i;
 // Carry only requests for sensitive card fields, not any question mentioning
 // a card: billing ZIP, promo codes and account phones retain their own meaning.
-const CARD_REQUEST_CUE_RE = /\b(?:what\s+(?:are|is)|which|tell|give|read|say|provide|repeat|confirm|enter|input|type|(?:can|could|may)\s+(?:i|we)\s+(?:have|get)|d[ií]game|dime|ingrese|introduzca|proporcione|lea|confirme|(?:puede|podr[ií]a)\s+(?:darme|decirme)|cu[aá]l(?:es)?\s+(?:es|son))\b[^.!?;]{0,80}\b(?:card(?:[\x27\u2019]s)?\s+(?:(?:first|last)\s+\w+\s+)?(?:number|digits?)|(?:digits?|numbers?)\s+(?:of|on|from)\s+(?:(?:your|the|this|that)\s+)?(?:(?:credit|debit|prepaid)\s+)?card|pan|cvv|cvc|security code|expir(?:y|ation)|n[uú]mero\s+de\s+(?:(?:la|su|tu)\s+)?tarjeta|d[ií]gitos?\s+de\s+(?:(?:la|su|tu)\s+)?tarjeta|c[oó]digo\s+de\s+seguridad|(?:fecha\s+de\s+)?vencimiento)\b/i;
+const CARD_REQUEST_CUE_RE = new RegExp(`\\b(?:what\\s+(?:are|is)|which|tell|give|read|say|provide|share|repeat|confirm|enter|input|type|(?:can|could|may)\\s+(?:i|we)\\s+(?:have|get)|d[ií]game|dime|ingrese|introduzca|proporcione|lea|confirme|(?:puede|podr[ií]a)\\s+(?:darme|decirme)|cu[aá]l(?:es)?\\s+(?:es|son))\\b[^.!?;]{0,80}\\b(?:${CARD_FIELD_LABEL}|(?:digits?|numbers|(?:the|your|first|last|next|middle)\\s+number)\\s+(?:of|on|from|for)\\s+(?:(?:your|the|this|that)\\s+)?(?:(?:credit|debit|prepaid)\\s+)?card|expir(?:y|ation)|n[uú]mero\\s+de\\s+(?:(?:la|su|tu)\\s+)?tarjeta|d[ií]gitos?\\s+de\\s+(?:(?:la|su|tu)\\s+)?tarjeta|c[oó]digo\\s+de\\s+seguridad|(?:fecha\\s+de\\s+)?vencimiento)\\b`, 'i');
 const CARD_BARE_FRAGMENT_RE = /^\s*(?:(?:yes|yeah|okay|sure)[\s,:-]+)?(?:(?:it (?:is|was)|the (?:number|digits?) (?:is|are|was|were))[\s,:-]+)?\d+(?:[\s/.-]+\d+)*\s*(?:(?:,\s*)?(?:(?:is|that(?:[\x27\u2019]s| is))\s+)?(?:correct|right)|,\s*got it)?\s*$/i;
 // A positional cue owns only the digit run immediately after it. That run is
 // card data even when it looks like a year ("card ends in 2029"), while an
 // appointment year or dollar amount elsewhere in the clause keeps its own
 // non-card explanation.
 const CARD_LABELED_VALUE_RE = new RegExp(`\\b(?:${CARD_DIGIT_LABEL})\\s+(\\d+(?:[\\s-]\\d+)*)\\b`, 'gi');
-const CARD_EXPLICIT_VALUE_RE = /\b(?:card\s+(?:number|digits?)|pan|cvv|cvc|security code)\b(?:\s+(?:is|was))?\s*[:#]?\s*((?:\(\d+\)|\d+)(?:[\s./-]\d+)*)\b/gi;
+const CARD_EXPLICIT_VALUE_RE = new RegExp(`\\b${CARD_FIELD_LABEL}\\b(?:\\s+(?:is|was))?\\s*[:#]?\\s*((?:\\(\\d+\\)|\\d+)(?:[\\s./-]\\d+)*)\\b`, 'gi');
 const CARD_SLASHED_VALUE_RE = /\b\d+(?:[/.]\d+)+\b/g;
 const DIGIT_RUN_RE = /\d+(?:[\s-]\d+)*/g;
 // Numeric digits spoken one at a time — "4-1-1", "4 1 1", "4, 1, 1" (how
@@ -1342,10 +1345,7 @@ function cardValuesMatch(supplied, candidate) {
   if (suppliedExpiration && candidateExpiration) return suppliedExpiration.includes(candidateExpiration);
   const candidateDigits = String(candidate).replace(/\D/g, '');
   const suppliedDigits = String(supplied).replace(/\D/g, '');
-  if (suppliedExpiration && candidateDigits.length <= 2) {
-    return suppliedExpiration.includes(candidateDigits) || suppliedDigits.includes(candidateDigits);
-  }
-  return suppliedDigits.includes(candidateDigits);
+  return (suppliedExpiration || '').includes(candidateDigits) || suppliedDigits.includes(candidateDigits);
 }
 function cardValueInheritsReadback(precedingReadback, calendarSpan, precedingValueMatches) {
   return precedingValueMatches || (precedingReadback === true && Boolean(calendarSpan));

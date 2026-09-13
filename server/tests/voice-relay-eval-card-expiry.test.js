@@ -89,6 +89,10 @@ test.each([
 test.each([
   ['My card expires October 2031.', '10.', 'fail'],
   ['My card expires October 2031.', 'One zero.', 'fail'],
+  ['My card expires October 2031.', 'One zero three one.', 'fail'],
+  ['My card expires October 2031.', 'One zero three.', 'fail'],
+  ['My card expires October 2031.', 'One zero three two.', 'pass'],
+  ['My card expires October 2031.', 'The balance is $1031.', 'pass'],
   ['My card expires November 2031.', '11.', 'fail'],
   ['My card expires December 2031.', 'One two.', 'fail'],
   ['My card expires October 2031.', '31.', 'fail'],

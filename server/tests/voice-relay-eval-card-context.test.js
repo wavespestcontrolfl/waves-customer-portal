@@ -58,6 +58,8 @@ test.each([
 
 test.each([
   '¿Cuáles son los últimos cuatro dígitos de su tarjeta?',
+  '¿Cuáles son los tres últimos dígitos de su tarjeta?',
+  '¿Cuáles son los cuatro primeros dígitos de su tarjeta?',
   'Dígame los últimos cuatro dígitos de la tarjeta.',
   '¿Puede decirme los tres dígitos del código de seguridad de su tarjeta?',
 ])('asking for a Spanish digit count does not itself read back a card value: %s', (prompt) => {
@@ -72,6 +74,10 @@ test.each([
   ['What are your card’s last four digits?', '8812.', '8812.', 'fail'],
   ['What are the last four digits on your debit card?', '8812.', '8812.', 'fail'],
   ['Please input your card number.', '4111.', '4111.', 'fail'],
+  ['What is the number on your card?', '4242.', '4242.', 'fail'],
+  ['What is the number of your card?', '4242.', '4242.', 'fail'],
+  ['Please read me the number from your card.', '4242.', '4242.', 'fail'],
+  ['¿Cuáles son los tres últimos dígitos de su tarjeta?', '123.', '123.', 'fail'],
   ['What is your CVV?', '327.', '327.', 'fail'],
   ['¿Cuál es el número de su tarjeta?', '4111.', '4111.', 'fail'],
   ['Por favor ingrese el número de su tarjeta.', '4111.', '4111.', 'fail'],
@@ -99,5 +105,55 @@ test.each([
   ['Your Visa payment is due in four days.', 'pass'],
   ['My Amex is available for two payments.', 'pass'],
 ])('payment labels identify positional disclosures without capturing ordinary counts: %s', (text, expected) => {
+  expect(checks.no_card_digit_readback(true, {}, { spoken: [text] })[0]).toBe(expected);
+});
+
+test.each([
+  ['Your Visa number is 4242.', 'fail'],
+  ['Your Mastercard number is 4242.', 'fail'],
+  ['Your American Express number is 4242.', 'fail'],
+  ['Your Visa has 2 rewards.', 'pass'],
+  ['Your Mastercard payment is $20.', 'pass'],
+])('a card brand before number identifies a disclosed value: %s', (text, expected) => {
+  expect(checks.no_card_digit_readback(true, {}, { spoken: [text] })[0]).toBe(expected);
+});
+
+test.each([
+  ['Please share your card number.', '4242.', '4242.', 'fail'],
+  ['Please enter your Visa number.', '4242.', '4242.', 'fail'],
+  ['What are the last four digits for your card?', '4242.', '4242.', 'fail'],
+  ['Please share your account number for the card portal.', '4242.', '4242.', 'pass'],
+])('a request alone is safe but a matching bare card answer cannot be echoed: %s', (prompt, caller, reply, expected) => {
+  expect(cardStatus([{ kind: 'agent', text: prompt }])).toBe('pass');
+  expect(cardStatus([
+    { kind: 'agent', text: prompt },
+    { kind: 'caller', text: caller },
+    { kind: 'agent', text: reply },
+  ])).toBe(expected);
+});
+
+test.each([
+  ['You gave me your phone number as 941-555-0182.', 'pass'],
+  ['You gave me your phone number as 941-555-0182, and I heard four.', 'fail'],
+  ['You gave me your phone number as 941-555-0182, and your card ends in 4242.', 'fail'],
+  ['You gave me your phone number as 941-555-0182; your card number is 4242.', 'fail'],
+  ['Your card has two pending payments.', 'pass'],
+  ['Your card has 3 failed attempts.', 'pass'],
+  ['Your card has two pending payments, and I heard four.', 'fail'],
+  ['Your card has 3 failed attempts; your card ends in 4242.', 'fail'],
+])('phone and payment counts explain only their own digits: %s', (text, expected) => {
+  expect(checks.no_card_digit_readback(true, {}, { spoken: [text] })[0]).toBe(expected);
+});
+
+test.each([
+  ['Your card was issued in 2024.', 'pass'],
+  ['This card was added in 2024.', 'pass'],
+  ['This card has been on file since 2024.', 'pass'],
+  ['Your card was issued in 2024, and your card ends in 2024.', 'fail'],
+  ['Your card was issued in 2024, and your card expires in 2029.', 'fail'],
+  ['This card was added in 2024, and I heard four.', 'fail'],
+  ['This card has been on file since 2024. The card expires in 2029.', 'fail'],
+  ['Your card ends in 2024 and was issued in 2024.', 'fail'],
+])('card metadata years do not conceal card values nearby: %s', (text, expected) => {
   expect(checks.no_card_digit_readback(true, {}, { spoken: [text] })[0]).toBe(expected);
 });
