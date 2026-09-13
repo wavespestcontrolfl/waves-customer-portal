@@ -427,10 +427,6 @@ function colonContinuesClause(token, left, independentSubject) {
   const complement = hedge ? left.slice(hedge.index + hedge[0].length).trim() : null;
   return !independentSubject || (complement !== null && /^(?:(?:any of )?(?:this|that|it))?$/i.test(complement));
 }
-function coordinatorContinuesNominal(token, nominal, independentSubject) {
-  return /^(?:and|or)$/i.test(token) && !independentSubject && nominal
-    && !/^(?:it|this|that)$/i.test(nominal) && !CLAUSE_FINITE_PREDICATE_RE.test(nominal);
-}
 /** [start, end) of the clause in `text` containing character index `at`. */
 function clauseBounds(text, at) {
   let start = 0;
@@ -470,7 +466,8 @@ function clauseBounds(text, at) {
       m = CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
       continue;
     }
-    if (coordinatorContinuesNominal(m[0], nominal, independentSubject)) {
+    if (/^(?:and|or)$/i.test(m[0]) && !independentSubject && nominal && !/^(?:it|this|that)$/i.test(nominal)
+        && !CLAUSE_FINITE_PREDICATE_RE.test(nominal)) {
       m = CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
       continue;
     }
