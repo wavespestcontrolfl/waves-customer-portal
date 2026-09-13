@@ -392,6 +392,13 @@ async function applyReviewedCallReschedule({ conn, call, v2, customer, candidate
       skipCallFollowUpShift: true,
       sourceSurface: 'call_reschedule',
       operationKey,
+      // Rechecked by the unit mover under its planning lock, before any
+      // member moves. A newly joined sibling was never part of this approval.
+      memberGuard: async ({ members }) => {
+        if (members.length !== 1 || String(members[0].id) !== String(visit.id)) {
+          throw Object.assign(new Error('The visit group changed. Use the schedule editor.'), { status: 409 });
+        }
+      },
       beforeMove,
       ...(plan.dateMove ? { expectOccurrenceIds: occurrenceIds, expectOccurrences: occurrences } : { seriesPolicy: 'single' }),
       expect: {
@@ -438,7 +445,7 @@ async function applyReviewedCallReschedule({ conn, call, v2, customer, candidate
       await require('./appointment-reminders').handleReschedule(
         visit.id,
         `${plan.newDate}T${plan.newWindow.start}`,
-        { sendNotification: false },
+        { sendNotification: false, expectSchedule: { date: plan.newDate, windowStart: plan.newWindow.start } },
       );
     } catch (err) {
       logger.warn(`[call-reschedule] reminder sync failed for ${visit.id}: ${err.message}`);
