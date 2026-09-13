@@ -49,11 +49,34 @@ function sendSeal(KnowledgeBridge, knex, assessmentId, renewMs = SEAL_RENEW_MS, 
   let timer = null;
   let taken = false;
   let lost = false;
+  let released = false;
+  let renewing = null;
+  let releasePromise = null;
+  const renew = () => {
+    if (renewing) return renewing;
+    const startedAt = Date.now();
+    const promise = (async () => {
+      try {
+        const renewed = await KnowledgeBridge.renewRecommendationSendSeal(assessmentId, owner);
+        if (!renewed) lost = true;
+        return { renewed: !!renewed, startedAt };
+      } catch (err) {
+        // Unverifiable is lost: a generator may already hold the copy.
+        lost = true;
+        logger.warn('[lawn-visit-delivery] send-seal renew failed', { assessmentId, message: err.message });
+        return { renewed: false, startedAt };
+      }
+    })();
+    const current = { promise, startedAt };
+    renewing = current;
+    void promise.then(() => { if (renewing === current) renewing = null; });
+    return current;
+  };
   return {
     async ensure() {
       // A seal lost mid-run cannot be re-taken here: an earlier step may already
       // have rendered the copy that lapsed. The run defers and starts clean.
-      if (lost) return false;
+      if (lost || released) return false;
       if (taken) return true;
       if (typeof KnowledgeBridge.sealRecommendationsForSend !== 'function') return true;
       const row = await knex('lawn_assessments').where({ id: assessmentId }).first('recommendations', 'ai_summary', 'updated_at');
@@ -61,32 +84,31 @@ function sendSeal(KnowledgeBridge, knex, assessmentId, renewMs = SEAL_RENEW_MS, 
       if (!taken) return false;
       // A slow step must not outlive a fixed TTL.
       timer = setInterval(() => {
-        void KnowledgeBridge.renewRecommendationSendSeal(assessmentId, owner)
-          .then((renewed) => { if (!renewed) lost = true; })
-          .catch((err) => {
-            // Unverifiable is lost: a generator may already hold the copy.
-            lost = true;
-            logger.warn('[lawn-visit-delivery] send-seal renew failed', { assessmentId, message: err.message });
-          });
+        if (!released && !lost) renew();
       }, renewMs);
       timer.unref?.();
       return true;
     },
     // Checked immediately before the customer dispatch, like the lease.
     async assertHeld() {
-      const renewalStartedAt = Date.now();
-      if (taken && !lost) {
-        lost = !(await KnowledgeBridge.renewRecommendationSendSeal(assessmentId, owner).catch(() => false));
-      }
-      if (!taken || lost) throw Object.assign(new Error('Lawn delivery copy seal lost'), { code: 'LAWN_COPY_SEAL_LOST', retryable: true });
-      return renewalStartedAt + KnowledgeBridge.SEND_SEAL_MS;
+      if (!taken || lost || released) throw Object.assign(new Error('Lawn delivery copy seal lost'), { code: 'LAWN_COPY_SEAL_LOST', retryable: true });
+      const renewal = renew();
+      const result = await renewal.promise;
+      if (!result.renewed || lost || released || !taken) throw Object.assign(new Error('Lawn delivery copy seal lost'), { code: 'LAWN_COPY_SEAL_LOST', retryable: true });
+      return renewal.startedAt + KnowledgeBridge.SEND_SEAL_MS;
     },
     async release() {
+      if (releasePromise) return releasePromise;
+      released = true;
       if (timer) { clearInterval(timer); timer = null; }
-      if (!taken || typeof KnowledgeBridge.releaseRecommendationSendSeal !== 'function') return;
-      taken = false;
-      await KnowledgeBridge.releaseRecommendationSendSeal(assessmentId, owner)
-        .catch((err) => logger.warn('[lawn-visit-delivery] send-seal release failed, expires by TTL', { assessmentId, message: err.message }));
+      releasePromise = (async () => {
+        if (renewing) await renewing.promise;
+        if (!taken || typeof KnowledgeBridge.releaseRecommendationSendSeal !== 'function') return;
+        taken = false;
+        await KnowledgeBridge.releaseRecommendationSendSeal(assessmentId, owner)
+          .catch((err) => logger.warn('[lawn-visit-delivery] send-seal release failed, expires by TTL', { assessmentId, message: err.message }));
+      })();
+      return releasePromise;
     },
   };
 }
@@ -372,4 +394,4 @@ function scheduleRecovery(cron, { sweep = sweepAbandonedDeliveries } = {}) {
   }, { timezone: 'America/New_York' });
 }
 
-module.exports = { deliverConfirmedAssessment, replayDeferredNotification, sweepAbandonedDeliveries, scheduleRecovery, RECOVERY_RETRY_HORIZON_MS, WEATHER_WINDOW_MS };
+module.exports = { deliverConfirmedAssessment, replayDeferredNotification, sweepAbandonedDeliveries, scheduleRecovery, RECOVERY_RETRY_HORIZON_MS, WEATHER_WINDOW_MS, _test: { sendSeal } };
