@@ -341,6 +341,20 @@ describe('commercial bid authoring', () => {
     expect(anchor.expires_at.toISOString()).toBe('2099-01-08T12:00:00.000Z');
     expect(ordinarySibling.expires_at.toISOString()).toBe('2100-02-01T12:00:00.000Z');
   });
+  test('clearing a sibling fixed hold keeps the delivered link open through its restored ordinary expiry', async () => {
+    const anchor = savedEstimate({ id: 'short-anchor', status: 'sent', estimate_group_id: 'synthetic-group',
+      sent_at: new Date('2099-01-02T12:00:00.000Z'), expires_at: new Date('2099-01-03T12:00:00.000Z'),
+      estimate_data: { groupLinkViewableThrough: '2099-01-04T12:00:00.000Z' } });
+    groupRows.push(anchor);
+    Object.assign(row, { status: 'sent', sent_at: new Date('2099-01-02T12:00:00.000Z'),
+      estimate_group_id: 'synthetic-group',
+      estimate_data: { groupPublishedByEstimateId: anchor.id, proposal: { ...proposal(), validThrough: '2099-01-04' } } });
+    const result = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '' } });
+    expect(result.statusCode).toBe(200);
+    expect(row.expires_at.toISOString()).toBe('2099-01-09T12:00:00.000Z');
+    expect(dataOf(anchor).groupLinkViewableThrough).toBe('2099-01-09T12:00:00.000Z');
+    expect(anchor.expires_at.toISOString()).toBe('2099-01-03T12:00:00.000Z');
+  });
   test('a stale publication marker never extends an anchor from another group', async () => {
     const formerAnchor = savedEstimate({
       id: 'former-anchor', status: 'sent', estimate_group_id: 'former-group',
