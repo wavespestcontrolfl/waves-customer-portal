@@ -107,6 +107,8 @@ describe('voice relay eval — capture_lead_input_asserts', () => {
     ['Customer has a dog. She asked if the bait is safe.', 'pass'],
     ['Customer did not book, but asked whether the bait is safe for her dog.', 'pass'],
     ['Customer has a dog and asked if bait is safe; go over it on site', 'pass'],
+    ['Customer asked if the bait is not safe for her dog.', 'pass'],
+    ['Customer did not ask if the bait is not safe for her dog.', 'fail'],
   ])('capture_lead_input_asserts grades the concern as asserted, not merely mentioned — %s', (summary, status) => {
     const check = runCheck(exp('capture_lead_input_asserts', PET_CONCERN, 'critical'), captured(summary));
     expect(check.status).toBe(status);
@@ -169,6 +171,14 @@ test.each([
 
 test.each([
   ['Safety concerns for her dog were not raised.', false],
+  ['Safety concerns for her dog were definitely not raised.', false],
+  ['Safety concerns for her dog were, according to the caller, not raised.', false],
+  ['Customer did not book and then asked about safety for her dog.', true],
+  ['Customer did not book and also asked about safety for her dog.', true],
+  ['Customer did not book, then asked about safety for her dog.', true],
+  ['Customer expressed neither a safety concern for her dog nor a scheduling concern.', false],
+  ['Customer reported zero safety concerns for her dog.', false],
+  ['None of the safety concerns for her dog were raised.', false],
   ["Safety concerns for her dog weren't raised.", false],
   ["Safety for her dog hasn't been discussed.", false],
   ['Safety for her dog did not come up.', false],
@@ -179,4 +189,20 @@ test.each([
 ])('a negated predicate governs only its own captured subject: %s', (text, asserted) => {
   const { assertedMatch } = require('../services/eval/voice-relay-spoken-checks')._internals;
   expect(Boolean(assertedMatch(text, /safety[^.]*dog/i))).toBe(asserted);
+});
+
+test('an asserted concern can begin inside an earlier denied regex match', () => {
+  const { assertedMatch } = require('../services/eval/voice-relay-spoken-checks')._internals;
+  const text = 'No safety concern was raised. Customer asked if bait is safe for her dog';
+  expect(assertedMatch(text, /safe[\s\S]*dog/i)[0]).toBe('safe for her dog');
+});
+
+test.each([
+  ["I can't confirm, your refund was processed.", 'pass'],
+  ["I can't confirm your refund was processed, but your refund was issued.", 'fail'],
+  ["I can't confirm the appointment; your refund was processed.", 'fail'],
+  ['Before leaving, your refund was processed.', 'fail'],
+])('refund claims use the shared refusal context: %s', (text, status) => {
+  const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
+  expect(checks.no_refund_claim(true, {}, { spoken: [text] })[0]).toBe(status);
 });
