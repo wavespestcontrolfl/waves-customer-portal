@@ -395,3 +395,14 @@ test.each([
 ])('report standalone uncertainty retains its finding: %s', (text, status) => {
   expect(checks.report_readback_confirms({ subject: 'Talstar P', location: 'exterior perimeter' }, {}, { spoken: [text] })[0]).toBe(status);
 });
+
+
+test.each([
+  ['Talstar P was applied to the exterior perimeter, but maybe not.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, but I am not sure it was.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter — perhaps not.', 'fail'],
+  ["Talstar P was applied to the exterior perimeter, but I'm uncertain it was applied.", 'fail'],
+  ['Talstar P was applied to the exterior perimeter, but I am not sure it was Tuesday.', 'pass'],
+])('qualified report retractions preserve anaphoric scope: %s', (text, status) => {
+  expect(checks.report_readback_confirms({ subject: 'Talstar P', location: 'exterior perimeter' }, {}, { spoken: [text] })[0]).toBe(status);
+});
