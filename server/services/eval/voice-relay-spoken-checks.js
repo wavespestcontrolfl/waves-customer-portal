@@ -1238,6 +1238,7 @@ const REPORT_INSTRUCTION_RE = /(?:^|,\s*)(?:please\s+)?(?:apply|use|put|treat|sp
 const REPORT_FINDING_VERB_RE = /\b(?:applied|placed|used|treated|sprayed|put|went|got|received)\b/i;
 const REPORT_PARTICIPLE_RE = /^(?:applied|placed|used|treated|sprayed|put|received)$/i;
 const REPORT_COMPLETED_PASSIVE_RE = /\b(?:(?:was|were|got)|(?:has|have|had)(?:\s+(?:\w+ly|already|just|now))*\s+been)\s+(?:(?:\w+ly|already|just|now)\s+)*$/i;
+const REPORT_NONCOMPLETION_GOVERNOR_RE = /\b(?:supposed|expected|required|meant|scheduled|instructed|asked|told|directed|ordered|needed|intended|planned|ought)\s+to(?:\s+have)?(?:\s+(?:\w+ly|already|just|now))*\s*$/i;
 const REPORT_ASSERTION_START = `(?:(?:the|a|an)\\s+)?(?:[\\w'\u2019-]+\\s+){1,4}(?:(?:(?:was|were|is|are|has|have|had|got)\\s+(?:\\w+ly\\s+)?)?${REPORT_FINDING_VERB_RE.source})`;
 const REPORT_ASSERTION_BOUNDARY_RE = new RegExp(`(?:,\\s*|\\bwith\\s+)(?=${REPORT_ASSERTION_START})`, 'gi');
 const REPORT_UNRELATED_OR_CLAUSE_RE = /^or\s+(?:(?:the|our|your|their)\s+)?(?:technician|tech|crew|team|office|report|i|we|you|he|she|they|it)\s+(?:is|are|was|were|has|have|had|will|would|should|can|could|did|does|do)\b/i;
@@ -1283,7 +1284,10 @@ function reportHasAlternativeLocation(affirmed, locationAt, orTail) {
 // "get Talstar applied" while retaining actual past treatment assertions.
 function reportHasCompletedFinding(affirmed, subjectAt, subjectLength, findingVerb) {
   if (subjectAt < 0 || !findingVerb) return false;
-  if (!REPORT_PARTICIPLE_RE.test(findingVerb[0]) || findingVerb.index < subjectAt) return true;
+  if (!REPORT_PARTICIPLE_RE.test(findingVerb[0])) return true;
+  if (findingVerb.index < subjectAt) {
+    return !REPORT_NONCOMPLETION_GOVERNOR_RE.test(affirmed.slice(0, findingVerb.index));
+  }
   const predicatePrefix = affirmed.slice(subjectAt + subjectLength, findingVerb.index);
   const tersePastFinding = /^\s*(?:(?:the|a|an)\s*)?$/i.test(affirmed.slice(0, subjectAt)) && !predicatePrefix.trim();
   return tersePastFinding || REPORT_COMPLETED_PASSIVE_RE.test(predicatePrefix);
