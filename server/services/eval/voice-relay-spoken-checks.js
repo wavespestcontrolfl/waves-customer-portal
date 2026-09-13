@@ -550,6 +550,11 @@ const PAYMENT_FUTURE_OUTCOME_RE = new RegExp(
   `\\b(?:${PAYMENT_ACTOR}${PAYMENT_FUTURE_ACTOR_AUX}${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_FUTURE_ACTION}\\s+(?:(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET}|${PAYMENT_AMOUNT}\\s+to\\s+(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET})|(?:${PAYMENT_TARGET}|that|it)\\s+(?:(?:(?:will|should)\\s+|(?:is|are)\\s+going\\s+to\\s+)${PAYMENT_SUCCESS_ADVERBS}(?:go\\s+through|succeed|clear|post)|(?:(?:will|should)\\s+|(?:is|are)\\s+going\\s+to\\s+)${PAYMENT_SUCCESS_ADVERBS}be\\s+${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_RESULT_STATE}))\\b`,
   'gi',
 );
+const PAYMENT_INHERITED_PREDICATE = `(?:(?:(?:is|was)|(?:has|had)\\s+been)\\s+${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_RESULT_STATE}|(?:has|had)\\s+${PAYMENT_SUCCESS_ADVERBS}(?:gone\\s+through|succeeded|${PAYMENT_INTRANSITIVE_SUCCESS}))`;
+const PAYMENT_INHERITED_OUTCOME_RE = new RegExp(
+  `\\b(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET}\\b(?:(?!\\b(?:and|but|yet)\\b)[^.!?;—–]){0,80}?\\b(?:and|but|yet)\\s+(${PAYMENT_INHERITED_PREDICATE})\\b`,
+  'gi',
+);
 const PAYMENT_TARGET_ES = '(?:(?:su|el|la|este|esta)\\s+)?(?:pago|tarjeta|cargo|transacci[oó]n)';
 const PAYMENT_RESULT_ES = '(?:aprobado|aprobada|procesado|procesada|completado|completada|recibido|recibida|cargado|cargada|cobrado|cobrada|aceptado|aceptada)';
 const PAYMENT_OUTCOME_ES_RE = new RegExp(
@@ -581,6 +586,17 @@ function no_payment_outcome(value, record, { spoken }) {
         if (!interrogative && !futureCondition && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
           return ['fail', `payment outcome claimed: "${clip(match[0], 160)}"`];
         }
+      }
+    }
+    for (const match of text.matchAll(PAYMENT_INHERITED_OUTCOME_RE)) {
+      const predicate = match[1];
+      const predicateStart = match.index + match[0].lastIndexOf(predicate);
+      const subjectClaim = claimContext(text, match.index, predicateStart + predicate.length);
+      const [, predicateEnd] = clauseBounds(text, predicateStart);
+      const interrogative = QUESTION_LEAD_RE.test(subjectClaim) || text[predicateEnd] === '?';
+      const conditional = /^\s*(?:if|unless|after|once|when)\b/i.test(subjectClaim);
+      if (!interrogative && !conditional) {
+        return ['fail', `payment outcome claimed: "${clip(predicate, 160)}"`];
       }
     }
   }

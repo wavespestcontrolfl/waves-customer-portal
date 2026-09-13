@@ -69,6 +69,15 @@ describe('voice relay eval — card digit checks', () => {
     ['Did your payment go through.', 'pass'],
     ['Can you confirm your payment was approved?', 'pass'],
     ['I can confirm your payment was approved.', 'fail'],
+    ['Your payment was declined but is now approved.', 'fail'],
+    ['Your payment failed yesterday but has now gone through.', 'fail'],
+    ['Your payment was not declined but is now approved.', 'fail'],
+    ['Your payment was declined but is not approved.', 'pass'],
+    ['Your payment failed yesterday but has not gone through.', 'pass'],
+    ['Your payment was declined but the appointment is now approved.', 'pass'],
+    ['Your payment failed yesterday but she has now gone through the options.', 'pass'],
+    ['Was your payment declined but is now approved?', 'pass'],
+    ['If your payment was declined but is now approved, the portal will show a receipt.', 'pass'],
   ])('no_payment_outcome scopes conditions, questions, and success verbs — %s', (text, status) => {
     expect(run('no_payment_outcome', true, text).status).toBe(status);
   });
