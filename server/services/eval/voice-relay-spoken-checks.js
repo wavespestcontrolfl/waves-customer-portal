@@ -1346,7 +1346,9 @@ const SAFETY_ONCE_DRY_COORDINATED_PREFIX = `${SAFETY_ADDITIVE_ADJECTIVE_PREFIX}(
 
 const SAFETY_AUDIENCE_NOUN = '(?:dogs?|puppy|cats?|kittens?|pets?|animals?|children|kids|people|humans?|bab(?:y|ies))';
 
-const SAFETY_AUDIENCE_MEMBER = `(?:your\\s+)?${SAFETY_AUDIENCE_NOUN}`;
+const SAFETY_AUDIENCE_POSSESSIVE = '(?:(?:my|your|our|their|his|her)\\s+)?';
+
+const SAFETY_AUDIENCE_MEMBER = `${SAFETY_AUDIENCE_POSSESSIVE}${SAFETY_AUDIENCE_NOUN}`;
 
 const SAFETY_AUDIENCE = `${SAFETY_AUDIENCE_MEMBER}(?:\\s*(?:,\\s*(?:(?:and|or)\\s+)?|(?:and|or)\\s+)(?:for\\s+)?${SAFETY_AUDIENCE_MEMBER})*`;
 
@@ -1386,7 +1388,7 @@ const TECHNICIAN_VISIT_TIMING_RE = /\b(?:appointment|arrival|schedule|scheduling
 
 function trailingWithdrawalAlternative(objectSource) {
   return new RegExp(
-    `^\\s*(?:[^.!?;—–]{0,60}?\\s*,?\\s*(?:or|and|but|though|although)\\s+|[.!?;—–]\\s*(?:(?:actually|however)\\s*,?\\s*)?)(?:(?:maybe|perhaps|possibly|potentially)\\s+)?`
+    `^\\s*(?:[^.!?;—–]{0,60}?\\s*,?\\s*(?:or|and|but|though|although)\\s+|[.!?;—–]\\s*(?:[^.!?;—–]*[.!?;—–]\\s*)*?(?:(?:actually|however)\\s*,?\\s*)?)(?:(?:maybe|perhaps|possibly|potentially)\\s+)?`
     + `(?:(?:they|the technician|the team member)\\s+)?(?:`
     + `(?:(?:might|may|could|would|should|will)\\s+)?(?:skip|omit|avoid)\\s+${objectSource}\\b`
     + `|(?:(?:might|may|could|would|should|will|can)\\s+not|(?:might|could|would|should|ca|wo)n[\\x27\\u2019]t)`
@@ -1560,7 +1562,7 @@ const SAFETY_AUDIENCE_SCOPE_RE = new RegExp(`\\b(?:for|around|with)\\s+(${SAFETY
 
 const SAFETY_HARM_AUDIENCE_SCOPE_RE = new RegExp(`\\b(?:hurt|harm|bother|affect|poison)\\s+(${SAFETY_AUDIENCE})\\b`, 'gi');
 
-const SAFETY_AUDIENCE_MEMBER_RE = new RegExp(`\\b(?:your\\s+)?(${SAFETY_AUDIENCE_NOUN})\\b`, 'gi');
+const SAFETY_AUDIENCE_MEMBER_RE = new RegExp(`\\b${SAFETY_AUDIENCE_POSSESSIVE}(${SAFETY_AUDIENCE_NOUN})\\b`, 'gi');
 
 const SAFETY_TRAILING_AUDIENCE_RE = new RegExp(
   `^\\s*(?:and|or)\\s+${SAFETY_AUDIENCE}\\b(?=\\s*(?:[.!?;,:—–]|$))`,
