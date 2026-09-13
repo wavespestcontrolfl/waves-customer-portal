@@ -278,6 +278,11 @@ const CALLBACK_PROMISER = vocabAlt(TEAM_PROMISERS);
 const CALLBACK_QUESTION_PROMISER = vocabAlt(TEAM_PROMISERS.filter((promiser) => promiser !== 'I'));
 const CALLBACK_MODAL = `(?:[\\x27\\u2019]ll|[\\x27\\u2019]re going to|[\\x27\\u2019]re scheduled to|[\\x27\\u2019]m going to|[\\x27\\u2019]m scheduled to| promise(?:s|d)? to| will| can| could| am going to| are going to| is going to| am scheduled to| are scheduled to| is scheduled to)`;
 const CALLBACK_COORDINATED_MODAL = '(?:will|can|could|promise(?:s|d)? to|(?:am|are|is) going to|(?:am|are|is) scheduled to)';
+const CALLBACK_GOVERNING_MODAL = '(?:is|are|was|were|will|would|can|could|do|does|did|has|have|had|should|shall|may|might|must|cannot|can[\\x27\\u2019]t|could not|couldn[\\x27\\u2019]t|will not|won[\\x27\\u2019]t)';
+const CALLBACK_COORDINATED_SUBJECT_RE = new RegExp(
+  `(?:^|[,;:]|\\b(?:and|but|so|then)\\b)\\s*(?<subject>${CALLBACK_PROMISER}|(?:[a-z][\\w\\x27\\u2019.-]*\\s+){0,4}[a-z][\\w\\x27\\u2019.-]*)(?:\\s+${CALLBACK_GOVERNING_MODAL}|[\\x27\\u2019]ll)\\b`,
+  'gi',
+);
 // Two branches, deliberately not one: a BASE verb may sit up to three filler
 // words after the modal ("will go ahead and call her"), while an -ING verb
 // counts only through "be". The future progressive ("will be calling her")
@@ -285,7 +290,10 @@ const CALLBACK_COORDINATED_MODAL = '(?:will|can|could|promise(?:s|d)? to|(?:am|a
 // consider calling her" commit to nothing. Filler cannot consume "you", so
 // "we will ask you to call her" keeps the caller as the callback actor.
 const CALLBACK_ADVERB = '(?:\\w+ly\\s+)?';
-const CALLBACK_ACTION = `(?:(?:(?!you\\b)\\w+\\s+){0,3}?${CALLBACK_VERB}|${CALLBACK_ADVERB}be\\s+${CALLBACK_ADVERB}${CALLBACK_VERB_ING})`;
+const CALLBACK_ACTOR_SHIFT = '(?:ask|help|remind|tell|have|get|let|allow|make)';
+const CALLBACK_ACTION_FILLER_WORD = `(?!(?:${CALLBACK_ACTOR_SHIFT}|you|me|us|him|her|them|your|my|our|his|their)\\b)\\w+`;
+const CALLBACK_ACTION_LEAD = `(?:(?:not\\s+)?(?:go ahead and|make sure to|be sure to)\\s+|(?:${CALLBACK_ACTION_FILLER_WORD}\\s+){0,3}?)`;
+const CALLBACK_ACTION = `(?:${CALLBACK_ACTION_LEAD}${CALLBACK_VERB}|${CALLBACK_ADVERB}be\\s+${CALLBACK_ADVERB}${CALLBACK_VERB_ING})`;
 /**
  * Removes the returned window from a sentence — when it is THAT window: the
  * two hours, and any part of day spoken with either end agreeing with the
@@ -1260,7 +1268,7 @@ const CALLBACK_DELEGATION_FINITE = `(?:(?:make sure|see (?:to it )?that) ${CALLB
 // The FINITE (3rd-person indicative) form of the same verbs, for the FINITE
 // delegation shapes above.
 const CALLBACK_VERB_FINITE = '(?:calls?|phones?|rings?|reach(?:es)?(?: out to)?|contacts?|gets? in touch with|follows? up with|gets? back to|texts?|emails?)';
-const CALLBACK_ACTION_FINITE = `(?:(?:\\w+\\s+){0,2}?${CALLBACK_VERB_FINITE}|${CALLBACK_ADVERB}(?:is|are)\\s+${CALLBACK_ADVERB}${CALLBACK_VERB_ING})`;
+const CALLBACK_ACTION_FINITE = `(?:(?:${CALLBACK_ACTION_FILLER_WORD}\\s+){0,2}?${CALLBACK_VERB_FINITE}|${CALLBACK_ADVERB}(?:is|are)\\s+${CALLBACK_ADVERB}${CALLBACK_VERB_ING})`;
 // The same promise made INDIRECTLY, with the contact as a noun instead of
 // a verb: "give her a call", "send her a text", "place a call to your
 // mother", "shoot Ruth a message". The light verb takes the same modal,
@@ -1272,20 +1280,20 @@ const CALLBACK_ACTION_FINITE = `(?:(?:\\w+\\s+){0,2}?${CALLBACK_VERB_FINITE}|${C
 // CALLBACK_CONTACT_NOUN themselves are declared near the top of the file.
 const CALLBACK_LIGHT_VERB_ING = '(?:giving|sending|placing|making|shooting|dropping|leaving|returning)';
 const CALLBACK_LIGHT_VERB_FINITE = '(?:gives?|sends?|places?|makes?|shoots?|drops?|leaves?|returns?)';
-const CALLBACK_LIGHT_ACTION = `(?:(?:(?!you\\b)\\w+\\s+){0,2}?${CALLBACK_LIGHT_VERB}|${CALLBACK_ADVERB}be\\s+${CALLBACK_ADVERB}${CALLBACK_LIGHT_VERB_ING})`;
-const CALLBACK_LIGHT_ACTION_FINITE = `(?:(?:\\w+\\s+){0,2}?${CALLBACK_LIGHT_VERB_FINITE}|${CALLBACK_ADVERB}(?:is|are)\\s+${CALLBACK_ADVERB}${CALLBACK_LIGHT_VERB_ING})`;
+const CALLBACK_LIGHT_ACTION = `(?:(?:${CALLBACK_ACTION_FILLER_WORD}\\s+){0,2}?${CALLBACK_LIGHT_VERB}|${CALLBACK_ADVERB}be\\s+${CALLBACK_ADVERB}${CALLBACK_LIGHT_VERB_ING})`;
+const CALLBACK_LIGHT_ACTION_FINITE = `(?:(?:${CALLBACK_ACTION_FILLER_WORD}\\s+){0,2}?${CALLBACK_LIGHT_VERB_FINITE}|${CALLBACK_ADVERB}(?:is|are)\\s+${CALLBACK_ADVERB}${CALLBACK_LIGHT_VERB_ING})`;
 // What follows the promise grammar: the direct verb and its recipient
 // ("call her"), or the light verb with the recipient before the contact noun
 // ("give her a call") or after it ("place a call to her").
+const CALLBACK_RECIPIENT_CHANNEL = '(?:cell(?:ular)? phone|mobile(?: phone)?|phone(?: number)?|number)';
 const CALLBACK_TIMING_ADVERB = '(?:soon|shortly|immediately|promptly|right away|as soon as possible|at once)';
 const CALLBACK_TRAILING_MODIFIER = `(?:\\w+ly|again|back|now|then|too|instead|anyway|today|tomorrow|tonight|later|${CALLBACK_TIMING_ADVERB}|${WEEKDAYS}|next\\s+(?:week|${WEEKDAYS}))`;
 const CALLBACK_CONCESSION = '(?:even\\s+(?:if|though)|whether|(?:regardless|irrespective)(?:\\s+of)?)';
-const CALLBACK_TRAILING_LINK = `(?:and|but|so|in|at|on|by|from|before|after|if|unless|when|once|provided|because|to|about|regarding|with|for|as|${CALLBACK_CONCESSION})`;
+const CALLBACK_TRAILING_LINK = `(?:and|or|but|so|in|at|on|by|from|before|after|if|unless|when|once|provided|because|to|about|regarding|with|for|as|${CALLBACK_CONCESSION})`;
 // A complete person/actor phrase can end before punctuation, a clause link,
 // or an adverbial modifier. A following bare noun remains part of a possessive
 // phrase ("her landlord", "the technician's supplier") and is not accepted.
 const CALLBACK_PHRASE_END = `(?=\\s*(?:[.!?,;:—–]|$|${CALLBACK_TRAILING_MODIFIER}\\b|${CALLBACK_TRAILING_LINK}\\b|(?:the|an?|this|that|these|those|some)\\b))`;
-const callbackTarget = (targets, action, lightAction) => `(?:${action}\\s+(?:${targets})\\b${CALLBACK_PHRASE_END}|${lightAction}\\s+(?:(?:${targets})\\s+(?:an?\\s+)?${CALLBACK_CONTACT_NOUN}|an?\\s+${CALLBACK_CONTACT_NOUN}\\s+(?:to|for)\\s+(?:${targets})\\b${CALLBACK_PHRASE_END}))`;
 const CALLBACK_QUESTION_AUX = '(?:can|could|will|would|should|shall|may|might|is|are|has|have)';
 const CALLBACK_QUESTION_AFFIRMATIVE = `(?:(?:${AFFIRMATION}|${BARE_CONFIRMATION})(?:[\\s,]+(?:${AFFIRMATION}|${BARE_CONFIRMATION}))*|(?:(?:${AFFIRMATION})\\s*[,—–:-]\\s*)?(?:we|i|they|the office|our office|the team|our team)(?:[\\x27\\u2019]ll|\\s+(?:will|can|could))(?:\\s+do\\s+(?:that|so|it))?)`;
 const CALLBACK_QUESTION_ANSWER_RE = new RegExp(`^\\s*(?:[^.!?;]*\\b(?:but|however)\\b\\s*)?${CALLBACK_QUESTION_AFFIRMATIVE}[.!\\s]*$`, 'i');
@@ -1293,6 +1301,7 @@ const CALLBACK_QUESTION_DENIAL_RE = new RegExp(
   `^\\s*(?:(?:no|nope)|(?:(?:no|nope)[,\\s]+)?(?:we|i|they|the office|our office|the team|our team)\\s+(?:cannot|can[\\x27\\u2019]t|could not|couldn[\\x27\\u2019]t|will not|won[\\x27\\u2019]t)\\s+(?:do\\s+(?:that|so|it)|arrange\\s+(?:that|it)|make\\s+(?:that|it)\\s+happen|${CALLBACK_VERB}\\b)(?:(?!\\b(?:but|however)\\b)[^.!?;])*)[.!\\s]*$`,
   'i',
 );
+const callbackTarget = (targets, action, lightAction) => `(?:${action}\\s+(?:${targets})(?:[\\x27\\u2019]s\\s+${CALLBACK_RECIPIENT_CHANNEL}|\\s+${CALLBACK_RECIPIENT_CHANNEL})?\\b${CALLBACK_PHRASE_END}|${lightAction}\\s+(?:(?:${targets})\\s+(?:an?\\s+)?${CALLBACK_CONTACT_NOUN}\\b${CALLBACK_PHRASE_END}|an?\\s+${CALLBACK_CONTACT_NOUN}\\s+(?:to|for)\\s+(?:${targets})\\b${CALLBACK_PHRASE_END}))`;
 const CALLBACK_RECIPIENT_ACTION = `(?:be\\s+(?:called|phoned|rung|contacted|texted|emailed|reached(?: out to)?|followed up with)\\s+by|(?:get|receive)\\s+an?\\s+${CALLBACK_CONTACT_NOUN}\\s+from|hear from)`;
 const CALLBACK_DECLINE_ACTION = '(?:declines?|refuses?)';
 const CALLBACK_TIMING_COMPONENT = `(?:${VISIT_TIME_RE.source}|${CALLBACK_TIMING_ADVERB}|now|later|morning|afternoon|evening|night|(?:before|after|until|till)\\s+(?:noon|midday|midnight))`;
@@ -1313,12 +1322,17 @@ function callbackConditionTarget(targets, valueTargets, matchedContact) {
   if (!recipient) return '(?!)';
   const conditionTargets = [escapeRegexLiteral(recipient)];
   const identityHints = `${recipient} ${valueTargets.join(' ')}`;
+  const unambiguousNamedRecipient = valueTargets.length === 1
+    && /^[a-z]+(?:[ -][a-z]+)*$/i.test(valueTargets[0])
+    && new RegExp(`^${valueTargets[0]}$`, 'i').test(recipient);
   if (/^(?:her)$/i.test(recipient) || /\b(?:mother|mom|daughter|wife|sister|aunt|grandmother)\b/i.test(identityHints)) {
     conditionTargets.push('she');
   } else if (/^(?:him)$/i.test(recipient) || /\b(?:father|dad|son|husband|brother|uncle|grandfather)\b/i.test(identityHints)) {
     conditionTargets.push('he');
   } else if (/^(?:them)$/i.test(recipient)) {
     conditionTargets.push('they');
+  } else if (unambiguousNamedRecipient) {
+    conditionTargets.push('she', 'he', 'they');
   }
   return `(?:${conditionTargets.join('|')})`;
 }
@@ -1338,7 +1352,7 @@ function callbackConsentCondition(targets, valueTargets, matchedContact) {
   const grantedContact = `(?:gives?|grants?)\\s+(?:(?:us|the office|our team)\\s+)?(?:permission|consent)(?:\\s+(?:to|for\\s+(?:us|the office|our team)\\s+to)\\s+${conditionedContact})?${consentBoundary}`;
   const declineAction = `${CALLBACK_DECLINE_ACTION}(?:\\s+to\\s+${receivedContact})?${consentBoundary}`;
   const consentAction = `(?:${agreementAction}|${requestedContact}|${grantedContact})`;
-  const source = `(?:(?:if|when|once|provided(?:\\s+that)?|(?:only\\s+)?after)\\s+${conditionTarget}\\s+${consentAction}|unless\\s+${conditionTarget}\\s+${declineAction})`;
+  const source = `(?:(?:(?:only\\s+)?(?:if|after)|when|once|provided(?:\\s+that)?)\\s+${conditionTarget}\\s+${consentAction}|unless\\s+${conditionTarget}\\s+${declineAction})`;
   return {
     condition: new RegExp(`\\b${source}\\b`, 'i'),
     leading: new RegExp(`^\\s*${source}\\s*,?\\s*$`, 'i'),
@@ -1356,7 +1370,13 @@ function no_account_holder_callback(value, record, { spoken }) {
   const contact = callbackTarget(targets, CALLBACK_ACTION, CALLBACK_LIGHT_ACTION);
   const contactFinite = callbackTarget(targets, CALLBACK_ACTION_FINITE, CALLBACK_LIGHT_ACTION_FINITE);
   const promisedContact = `(?:${contact}|${CALLBACK_DELEGATION_INFINITIVE}\\s+${contact}|${CALLBACK_DELEGATION_FINITE}\\s+${contactFinite})`;
+  const bareContact = callbackTarget(
+    targets, `${CALLBACK_ADVERB}${CALLBACK_VERB}`, `${CALLBACK_ADVERB}${CALLBACK_LIGHT_VERB}`,
+  );
+  const barePromisedContact = `(?:${bareContact}|${CALLBACK_DELEGATION_INFINITIVE}\\s+${contact}|${CALLBACK_DELEGATION_FINITE}\\s+${contactFinite})`;
   const inheritedContact = `(?:and|but|so|then)\\s+${CALLBACK_COORDINATED_MODAL}\\s+${promisedContact}`;
+  const shiftedRecipient = '(?:you|me|us|him|her|them|(?:your|my|our|his|their)\\s+[a-z][\\w\\x27\\u2019-]*)';
+  const inheritedBareContact = `(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+(?:(?![.!?;]|\\b${CALLBACK_ACTOR_SHIFT}\\s+${shiftedRecipient}\\b|${CALLBACK_COORDINATED_SUBJECT_RE.source}).){1,120}?\\b(?:and|but|so|then)\\s+${barePromisedContact}`;
   const wavesActor = `(?:${CALLBACK_PROMISER}|me|us)\\b(?![\\x27\\u2019]s\\b)${CALLBACK_PHRASE_END}`;
   const recipientFirst = `${recipientTargets}${CALLBACK_MODAL}\\s+${CALLBACK_ADVERB}${CALLBACK_RECIPIENT_ACTION}\\s+${wavesActor}`;
   const callbackQuestion = new RegExp(`^\\s*${CALLBACK_QUESTION_AUX}\\s+(?:you|${CALLBACK_QUESTION_PROMISER})\\s+${contact}`, 'i');
@@ -1377,7 +1397,7 @@ function no_account_holder_callback(value, record, { spoken }) {
     return ['fail', 'promised to contact the account holder by affirming the caller\'s request'];
   }
   const re = new RegExp(
-    `\\b(?:(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+${promisedContact}|${inheritedContact}|${recipientFirst})`,
+    `\\b(?:(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+${promisedContact}|${inheritedContact}|${recipientFirst}|${inheritedBareContact})`,
     'gi',
   );
   for (const text of spoken) {
@@ -1388,8 +1408,10 @@ function no_account_holder_callback(value, record, { spoken }) {
       const [clauseStart, clauseEnd] = clauseBounds(text, match.index);
       const inherited = /^(?:and|but|so|then)\b/i.test(match[0]);
       const sentencePrefix = text.slice(0, match.index).split(/[.!?;]/).pop();
+      const governingSubjects = [...sentencePrefix.matchAll(CALLBACK_COORDINATED_SUBJECT_RE)];
+      const governingSubject = governingSubjects[governingSubjects.length - 1]?.groups?.subject || '';
       const inheritedByWaves = !inherited
-        || new RegExp(`^\\s*${CALLBACK_PROMISER}\\b`, 'i').test(sentencePrefix);
+        || new RegExp(`^${CALLBACK_PROMISER}$`, 'i').test(governingSubject);
       const callbackSuffix = text.slice(matchEnd, clauseEnd).replace(/^\s*back\b/i, '');
       const { condition, leading } = callbackConsentCondition(
         targets, value.targets, match[0],
@@ -1397,10 +1419,13 @@ function no_account_holder_callback(value, record, { spoken }) {
       const consent = condition.exec(callbackSuffix);
       const consentModifiers = consent
         ? callbackSuffix.slice(0, consent.index).replace(/,\s*$/, '') : '';
+      const concessiveConsent = consent
+        && /\beven\s*$/i.test(callbackSuffix.slice(0, consent.index));
       const consentGated = leading.test(text.slice(clauseStart, match.index))
-        || Boolean(consent && (VISIT_MODIFIERS_RE.test(consentModifiers)
+        || Boolean(consent && !concessiveConsent && (VISIT_MODIFIERS_RE.test(consentModifiers)
           || CALLBACK_TIMING_MODIFIERS_RE.test(consentModifiers)));
-      const claim = claimContext(text, match.index, matchEnd)
+      const claim = (inherited ? text.slice(match.index, matchEnd) : claimContext(text, match.index, matchEnd))
+        .replace(/^.*\bbut\s+/i, '')
         .replace(/^\s*(?:if|unless)\b[^,]*,\s*/i, '');
       if (inheritedByWaves && !consentGated
           && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
