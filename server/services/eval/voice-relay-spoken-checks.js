@@ -349,14 +349,16 @@ function no_visit_time(value, record, { utterances }) {
       const sentence = strip ? strip(raw) : raw;
       const anywhere = TIME_ANYWHERE_RES.map((re) => re.exec(sentence)).find(Boolean);
       const standaloneDate = STANDALONE_DATE_RE.test(sentence);
-      const callbackTime = [!subject, VISIT_TIME_CALLBACK_RE.test(previousRaw), [standaloneDate, VISIT_TIME_ANSWER_RE.test(sentence)].some(Boolean)].every(Boolean);
-      if ([anywhere, !callbackTime].every(Boolean)) return ['fail', `"${anywhere[0]}" spoken: "${clip(raw, 160)}"`];
+      const callbackTime = !subject
+        && VISIT_TIME_CALLBACK_RE.test(previousRaw)
+        && (standaloneDate || VISIT_TIME_ANSWER_RE.test(sentence));
+      if (anywhere && !callbackTime) return ['fail', `"${anywhere[0]}" spoken: "${clip(raw, 160)}"`];
       const relative = RELATIVE_DAY_RE.exec(sentence);
       // A standalone hedged date ("Probably tomorrow.") answers a VISIT
       // question only when nothing scopes it elsewhere — never right after
       // a callback/contact sentence, whose own timing it continues instead.
-      const standalone = [!subject, !callbackTime, standaloneDate].every(Boolean);
-      if ([relative, [subject, SCHEDULE_PREDICATES.visit.test(sentence), standalone].some(Boolean)].every(Boolean)) return ['fail', `"${relative[0]}" spoken for a ${opts.about || 'visit'}: "${clip(raw, 160)}"`];
+      const standalone = !subject && !callbackTime && standaloneDate;
+      if (relative && (subject || SCHEDULE_PREDICATES.visit.test(sentence) || standalone)) return ['fail', `"${relative[0]}" spoken for a ${opts.about || 'visit'}: "${clip(raw, 160)}"`];
       if (raw.trim()) previousRaw = raw;
     }
     previousAgentIndex = utterance.index;
@@ -1329,7 +1331,7 @@ const CALLBACK_LIGHT_ACTION_FINITE = `(?:(?:\\w+\\s+){0,2}?${CALLBACK_LIGHT_VERB
 // What follows the promise grammar: the direct verb and its recipient
 // ("call her"), or the light verb with the recipient before the contact noun
 // ("give her a call") or after it ("place a call to her").
-const CALLBACK_RECIPIENT_END = '(?=\\s*(?:[.!?,;:]|$|back\\b|again\\b|directly\\b|personally\\b|today\\b|tomorrow\\b|tonight\\b|later\\b|soon\\b|at\\b|on\\b|by\\b|before\\b|after\\b|if\\b|unless\\b|when\\b|once\\b|provided\\b|because\\b|to\\b|about\\b|regarding\\b|with\\b|(?:the|an?|this|that|these|those|some)\\b))';
+const CALLBACK_RECIPIENT_END = '(?=\\s*(?:[.!?,;:—–]|$|back\\b|again\\b|directly\\b|personally\\b|today\\b|tomorrow\\b|tonight\\b|later\\b|soon\\b|at\\b|on\\b|by\\b|before\\b|after\\b|if\\b|unless\\b|when\\b|once\\b|provided\\b|because\\b|to\\b|about\\b|regarding\\b|with\\b|(?:the|an?|this|that|these|those|some)\\b))';
 const callbackTarget = (targets, action, lightAction) => `(?:${action}\\s+(?:${targets})\\b${CALLBACK_RECIPIENT_END}|${lightAction}\\s+(?:(?:${targets})\\s+an?\\s+${CALLBACK_CONTACT_NOUN}|an?\\s+${CALLBACK_CONTACT_NOUN}\\s+(?:to|for)\\s+(?:${targets})\\b${CALLBACK_RECIPIENT_END}))`;
 const CALLBACK_QUESTION_AUX = '(?:can|could|will|would|should|shall|may|might|is|are|has|have)';
 const CALLBACK_QUESTION_ANSWER_RE = new RegExp(
@@ -1337,8 +1339,8 @@ const CALLBACK_QUESTION_ANSWER_RE = new RegExp(
   'i',
 );
 const CALLBACK_RECIPIENT_ACTION = `(?:be\\s+(?:called|phoned|rung|contacted|texted|emailed|reached(?: out to)?|followed up with)\\s+by|(?:get|receive)\\s+an?\\s+${CALLBACK_CONTACT_NOUN}\\s+from|hear from)`;
-const CALLBACK_CONSENT_ACTION = '(?:agrees?|consents?|declines?|refuses?|asks?\\s+(?:us|the office|our team)\\s+to|(?:gives?|grants?)\\s+(?:(?:us|the office|our team)\\s+)?(?:permission|consent))';
-const CALLBACK_CONSENT_MARKER = '(?:if|unless|when|once|provided(?:\\s+that)?|(?:only\\s+)?after)';
+const CALLBACK_CONSENT_ACTION = '(?:agrees?|consents?|asks?\\s+(?:us|the office|our team)\\s+to|(?:gives?|grants?)\\s+(?:(?:us|the office|our team)\\s+)?(?:permission|consent))';
+const CALLBACK_DECLINE_ACTION = '(?:declines?|refuses?)';
 // Callback timing is compositional: a day, bare part of day, and clock can
 // appear together ("tomorrow morning at nine") without requiring a bespoke
 // phrase for each combination. Named clock boundaries such as "before noon"
@@ -1366,7 +1368,8 @@ function no_account_holder_callback(value, record, { spoken }) {
   const recipientTargets = `(?:she|he|they|${targets})`;
   const contact = callbackTarget(targets, CALLBACK_ACTION, CALLBACK_LIGHT_ACTION);
   const contactFinite = callbackTarget(targets, CALLBACK_ACTION_FINITE, CALLBACK_LIGHT_ACTION_FINITE);
-  const consentCondition = new RegExp(`\\b${CALLBACK_CONSENT_MARKER}\\s+${recipientTargets}\\s+${CALLBACK_CONSENT_ACTION}\\b`, 'i');
+  const consentConditionSource = `(?:(?:if|when|once|provided(?:\\s+that)?|(?:only\\s+)?after)\\s+${recipientTargets}\\s+${CALLBACK_CONSENT_ACTION}|unless\\s+${recipientTargets}\\s+${CALLBACK_DECLINE_ACTION})`;
+  const consentCondition = new RegExp(`\\b${consentConditionSource}\\b`, 'i');
   const callbackQuestion = new RegExp(`^\\s*${CALLBACK_QUESTION_AUX}\\s+(?:you|${CALLBACK_QUESTION_PROMISER})\\s+${contact}`, 'i');
   if (answeredQuestion(record, (question) => {
     const questionMatch = callbackQuestion.exec(question);
@@ -1378,7 +1381,7 @@ function no_account_holder_callback(value, record, { spoken }) {
   }, CALLBACK_QUESTION_ANSWER_RE)) {
     return ['fail', 'promised to contact the account holder by affirming the caller\'s request'];
   }
-  const leadingConsentCondition = new RegExp(`^\\s*${CALLBACK_CONSENT_MARKER}\\s+${recipientTargets}\\s+${CALLBACK_CONSENT_ACTION}\\s*,?\\s*$`, 'i');
+  const leadingConsentCondition = new RegExp(`^\\s*${consentConditionSource}\\s*,?\\s*$`, 'i');
   const recipientFirst = `${recipientTargets}${CALLBACK_MODAL}\\s+${CALLBACK_ADVERB}${CALLBACK_RECIPIENT_ACTION}\\s+(?:${CALLBACK_PROMISER}|me|us)`;
   // Round-6 P1: the direct branch only excluded a negation sitting RIGHT
   // after its own modal, and the delegation branches only excluded one

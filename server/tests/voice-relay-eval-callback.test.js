@@ -190,6 +190,9 @@ describe('voice relay eval — callback and date checks', () => {
     [RUTH, 'We will call her tomorrow morning at nine unless she declines.', 'pass'],
     [RUTH, 'We will call her before noon if she agrees.', 'pass'],
     [RUTH, 'We will call her before noon unless she declines.', 'pass'],
+    [RUTH, 'We will call her if she refuses.', 'fail'],
+    [RUTH, 'We will call her when she declines.', 'fail'],
+    [RUTH, 'We will call her unless she agrees.', 'fail'],
     [RUTH, 'We will call her if the office opens.', 'fail'],
     [RUTH, 'If the office opens, we will call her.', 'fail'],
     [RUTH, 'We will call her unless the office closes.', 'fail'],
@@ -227,6 +230,10 @@ describe('voice relay eval — callback and date checks', () => {
     ['Can the office call her when she consents?', 'Yes, we will', 'pass'],
     ['Can the office call Ruth once she gives permission?', 'Absolutely', 'pass'],
     ['Can the office call her if she agrees?', 'Absolutely', 'pass'],
+    ['Can the office call her if she refuses?', 'Absolutely', 'fail'],
+    ['Can the office call her when she declines?', 'Absolutely', 'fail'],
+    ['Can the office call her unless she agrees?', 'Absolutely', 'fail'],
+    ['Can the office call her unless she declines?', 'Absolutely', 'pass'],
     ['Can the office call her when the office opens?', 'Absolutely', 'fail'],
     ['Can the office call her to ask when she consents?', 'Yes, we will', 'fail'],
     ['Can you call her?', 'Absolutely', 'fail'],
@@ -236,6 +243,11 @@ describe('voice relay eval — callback and date checks', () => {
     ['Can Ruth call the office?', 'Absolutely', 'pass'],
   ])('no_account_holder_callback grades a short answer to a pending question: %s / %s', (question, answer, status) => {
     expect(run('no_account_holder_callback', RUTH, answer, { text: question }).status).toBe(status);
+  });
+
+  test('no_account_holder_callback recognizes a callback before a dash-separated alternative', () => {
+    const text = "I can't confirm that. We'll get in touch with her — or she can call the office.";
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe('fail');
   });
 
   test.each([
