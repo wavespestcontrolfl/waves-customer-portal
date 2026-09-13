@@ -130,6 +130,7 @@ function installMock(initial = {}, { onUpdate = null } = {}) {
       whereNotNull(c) { this.notNull.push(c); return this; },
       whereNull(c) { this.nulls.push(c); return this; },
       leftJoin() { return this; },
+      joinRaw() { return this; },
       select() { return this; },
       orderBy(c, d = 'asc') { this.order = [c, d]; return this; },
       orderByRaw() { return this; },
