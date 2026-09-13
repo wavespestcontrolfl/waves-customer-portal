@@ -88,7 +88,7 @@ module.exports = {
         'monthly_total', 'annual_total', 'onetime_total', 'accepted_at', 'accepted_service_mode',
         'accepted_frequency_key', 'notes', 'token', 'sent_at', 'viewed_at', 'view_count', 'declined_at',
         'expires_at', 'archived_at', 'created_at', 'updated_at', 'estimate_data',
-        'price_locked_at', 'customer_phone', 'customer_email', 'terms_version',
+        'price_locked_at', 'customer_phone', 'customer_email', 'terms_version', 'property_id',
       ],
       // Exactly the .select(...) list in getEstimateDetail(), plus the
       // orderBy column.
@@ -116,13 +116,15 @@ module.exports = {
       scheduled_services: [
         'id', 'status', 'scheduled_date', 'customer_id', 'reservation_expires_at',
         'is_callback', 'service_id', 'source_estimate_id',
+        'window_start', 'window_end', 'window_display', 'service_type', 'property_id',
+        'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip',
       ],
       services: ['id', 'service_key', 'name'],
       // The customer row the composer reads on two paths: every linked
       // estimate through estimateRendersMonthlyBilling → billing-cadence
       // (pipeline_stage, monthly_rate, billing_mode — codex round 7 P2),
       // and an authored proposal through resolveProposalBillingContext.
-      customers: ['id', 'pipeline_stage', 'monthly_rate', 'billing_mode'],
+      customers: ['id', 'pipeline_stage', 'monthly_rate', 'billing_mode', 'address_line1', 'address_line2', 'city', 'zip'],
       annual_prepay_terms: ['source_estimate_id'],
     },
     reason: 'get_estimate_detail\'s DB reads live in estimate-detail.js, not its registered sourcePath (estimate-tools.js) — the automatic scan can\'t see them.',

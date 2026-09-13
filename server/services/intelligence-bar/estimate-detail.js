@@ -127,7 +127,8 @@ function siblingEntry(sibling) {
     // Wrapped as a link, never the raw token — the same rule the primary
     // estimate's own block follows. A sibling token opens that property's
     // full estimate page to whoever holds it.
-    ...(token ? { link: estimateLink(token) } : {}),
+    // The current estimate's link is governed by the top-level link state.
+    ...(token && !sibling.isCurrent ? { link: estimateLink(token) } : {}),
     displayed_one_time_total: displayed,
     // Enough for the operator to know a sibling is a plan without giving a
     // figure its own page may have withheld.

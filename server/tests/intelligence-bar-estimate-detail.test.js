@@ -213,7 +213,7 @@ test('floor-clamped lawn tiers retained for stale accept requests are not report
 test('sibling estimates report only the one-time figure the switcher displays, never their stored recurring totals', async () => {
   const shaped = await shapeEstimate(estimateRow());
   expect(shaped.page.propertyGroup).toEqual([
-    { link: 'https://portal.wavespestcontrol.com/estimate/sib-a', address: '100 Test St', status: 'sent', isCurrent: true, displayed_one_time_total: null, has_recurring_plan: true },
+    { address: '100 Test St', status: 'sent', isCurrent: true, displayed_one_time_total: null, has_recurring_plan: true },
     { link: 'https://portal.wavespestcontrol.com/estimate/sib-b', address: '200 Test St', status: 'sent', isCurrent: false, displayed_one_time_total: 450, has_recurring_plan: false },
   ]);
   expect(JSON.stringify(shaped.page.propertyGroup)).not.toMatch(/1104/);
@@ -424,10 +424,12 @@ test.each(['linkage_invalidated_at', 'invalidation_pending_at'])('an estimate-si
   expect(mockCompose).not.toHaveBeenCalled();
 });
 
-test('an EXPIRED estimate still reports its amounts — the page\'s 404 is a customer-surface rule, not a staff-disclosure one', async () => {
-  const shaped = await shapeEstimate(estimateRow({ status: 'expired' }));
+test.each(['expired', 'send_failed'])('a %s estimate reports amounts without a broken current-property link', async (status) => {
+  const shaped = await shapeEstimate(estimateRow({ status }));
   expect(shaped.link_state).toBe('not_openable');
   expect(shaped.customer_link).toBeNull();
+  expect(shaped.page.propertyGroup.find((sibling) => sibling.isCurrent).link).toBeUndefined();
+  expect(shaped.page.propertyGroup.find((sibling) => !sibling.isCurrent).link).toBeDefined();
   expect(shaped.page.pricing).toEqual(PAGE_PAYLOAD.pricing);
   expect(mockCompose.mock.calls[0][1]).toMatchObject({ adminDraftPreview: false, isPdfRenderPass: false });
 });
