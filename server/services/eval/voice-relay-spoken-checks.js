@@ -460,6 +460,7 @@ const NEGATION_RE = /\b(?:not(?!\s+only\b)|never|cannot|can[\x27\u2019]?t|\w+n[\
 // coordinator instead gets both directions right with one mechanism.
 const CLAUSE_BOUNDARY_TOKEN_RE = /[.!?;]|[—–]|\b(?:but|and|or|though|although|however|yet|so|then|while|because|pero|sin embargo|aunque)\b/gi;
 const COORDINATED_REPORT_VERBS = vocabAlt([...EPISTEMIC_REFUSAL_VERBS, 'deny']);
+const REFUND_PAYMENT_ACTION_RE = /\b(?:refund(?:ed|ing)?|revers(?:e|ed|ing)|return(?:ed|ing)?)\s+(?:(?:your|the|that|a|an)\s+)?(?:last\s+|full\s+|partial\s+|original\s+)?(?:payment|charge|amount)\b/i;
 const CLAUSE_FINITE_PREDICATE_RE = /\b(?:is|are|was|were|has|have|had|will|would|should|can|cannot|could|did|does|do|\w+n[\x27\u2019]t|applied|placed|processed)\b/i;
 const RIGHT_NOUN_PHRASE_SUBJECT_RE = new RegExp(
   `^\\s*(?:an?|the|this|that|these|those)\\s+(?:[\\w\\x27\\u2019-]+\\s+){0,5}${CLAUSE_FINITE_PREDICATE_RE.source}`,
@@ -497,7 +498,7 @@ function clauseBounds(text, at) {
       // An article-led noun phrase with its own predicate starts a fresh
       // assertion: "... appointment details and a refund was issued".
       || (/^and$/i.test(m[0]) && (RIGHT_NOUN_PHRASE_SUBJECT_RE.test(right)
-        || new RegExp(`^\\s*${CLAUSE_FINITE_PREDICATE_RE.source}`, 'i').test(right)));
+        || new RegExp(`^\\s*(?:${CLAUSE_FINITE_PREDICATE_RE.source}|${REFUND_PAYMENT_ACTION_RE.source})`, 'i').test(right)));
     if (/^(?:and|or)$/i.test(m[0]) && !independentSubject && nominal && !/^(?:it|this|that)$/i.test(nominal)
         && !CLAUSE_FINITE_PREDICATE_RE.test(nominal)) {
       m = CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
@@ -575,7 +576,7 @@ const REFUND_CLAIM_RES = Object.freeze([
   new RegExp(`\\b${SUBJECT}\\s*(?:not only\\s+)?(?:just\\s+|already\\s+|now\\s+)?(?:process(?:ed|ing)?|issu(?:e|ed|ing)|approv(?:e|ed|ing)|authori[sz](?:e|ed|ing)|complet(?:e|ed|ing)|finali[sz](?:e|ed|ing)|grant(?:ed|ing)?|confirm(?:ed|ing)?|post(?:ed|ing)?|appl(?:y|ied|ying)|send|sent|sending|submit(?:ted|ting)?|put through|refund(?:ed|ing)?|credit(?:ed|ing)?|handl(?:e|ed|ing)|resolv(?:e|ed|ing)|(?:take|took|taken|taking) care of|sort(?:ed|ing)?(?: out)?|settl(?:e|ed|ing)|deal(?:t|ing)? with)\\s+(?:(?:a|an|your|the|that|you)\\s+)?(?:full\\s+|partial\\s+|the\\s+)?(?:refund|credit|money|reimbursement)\\b`, 'i'),
   new RegExp(`\\b${SUBJECT}\\s+(?:just\\s+|already\\s+|now\\s+)?(?:refund|credit)(?:ed)?\\s+you\\b`, 'i'),
   // "refund your payment", "your charge was reversed"
-  /\b(?:refund(?:ed|ing)?|revers(?:e|ed|ing)|return(?:ed|ing)?)\s+(?:(?:your|the|that|a|an)\s+)?(?:last\s+|full\s+|partial\s+|original\s+)?(?:payment|charge|amount)\b/i,
+  REFUND_PAYMENT_ACTION_RE,
   /\b(?:your|the|that) (?:payment|charge|amount) (?:is|was|has been|will be|is being|gets|got) (?:refunded|reversed|returned|credited)\b/i,
 ]);
 
@@ -1424,7 +1425,7 @@ function only_language(value, record, { spoken }) {
 // clause (DENIAL_CLAUSE_END_RE), so "did not raise a safety concern" denies
 // the concern, while "did not book, but asked if the bait is safe for her
 // dog" asserts it — the "but" ends the denial's clause before the concern.
-const DENIAL_WORD_RE = /\b(?:(?:not|cannot|(?:is|are|did|does|was|were|has|have|had|ca|could|would|wo)n[\x27\u2019]t)(?!\s+only\b)|never|denied|denies|without|no(?![-\u2010-\u2015])|neither|none|zero)\b/gi;
+const DENIAL_WORD_RE = /\b(?:(?:not|cannot|(?:is|are|do|did|does|was|were|has|have|had|ca|could|would|wo)n[\x27\u2019]t)(?!\s+only\b)|never|denied|denies|without|no(?![-\u2010-\u2015])|neither|none|zero)\b/gi;
 // Commas may enclose an aside and "and" may coordinate denied objects.
 // End their scope only when the next phrase starts a fresh assertion.
 const CAPTURE_NOUN_ASSERTION_START_SOURCE = `(?:[\\w\\x27\\u2019-]+\\s+){1,5}${CLAUSE_FINITE_PREDICATE_RE.source}`;
