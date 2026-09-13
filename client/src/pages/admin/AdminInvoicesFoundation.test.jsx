@@ -29,6 +29,8 @@ beforeEach(() => {
     if (key === "GET /api/admin/invoices/customers/search") return response({ customers: [customer] });
     if (key === `GET /api/admin/invoices/service-records/${customer.id}`) return response({ records: [] });
     if (key === "GET /api/admin/discounts") return response({ discounts: [] });
+    // GATE_DISCOUNT_STACKING, as the builder reads it (dark = prod default).
+    if (key === "GET /api/admin/discounts/stacking") return response({ enabled: false });
     if (key === "GET /api/admin/services") return response({ services: [] });
     if (key === `GET /api/admin/invoices/${invoice.id}`) return response(rows[0]);
     if (key === `GET /api/admin/invoices/${invoice.id}/recipients`) return response(recipients);
