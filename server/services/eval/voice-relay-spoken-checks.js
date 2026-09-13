@@ -34,7 +34,7 @@ const vocabAlt = (words) => `(?:${wordAlt(words)})`;
 // than a flat assertion — "I can't SAY it's safe", "I don't THINK it's
 // safe" — the refusal/hedge grammar scopes its exemption to exactly these,
 // never to any nearby negative word.
-const EPISTEMIC_REFUSAL_VERBS = Object.freeze(['say', 'promise', 'guarantee', 'confirm', 'be sure', 'be certain', 'know', 'think', 'believe', 'tell you', 'vouch', 'speak to']);
+const EPISTEMIC_REFUSAL_VERBS = Object.freeze(['say', 'promise', 'guarantee', 'confirm', 'check', 'verify', 'be sure', 'be certain', 'know', 'think', 'believe', 'tell you', 'vouch', 'speak to']);
 // The same hedge with the negation BUILT IN — "I DOUBT it's safe", "I'm
 // UNSURE whether the next visit is free" — so no "not"/"can't" precedes
 // the verb; these open a refused/uncertain clause exactly as "not" + an
@@ -412,7 +412,7 @@ const NEGATION_RE = /\b(?:not|never|cannot|can[\x27\u2019]?t|\w+n[\x27\u2019]t|w
 // cap can't see — and, symmetrically, drops a refusal that sits a little
 // further from its claim than the cap happens to reach. Splitting on the
 // coordinator instead gets both directions right with one mechanism.
-const CLAUSE_BOUNDARY_TOKEN_RE = /[.!?;]|[—–]|\b(?:but|and|or|though|although|however|yet|so|then|pero|sin embargo|aunque)\b/gi;
+const CLAUSE_BOUNDARY_TOKEN_RE = /[.!?;]|[—–]|\b(?:but|and|or|though|although|however|yet|so|then|while|because|pero|sin embargo|aunque)\b/gi;
 const COORDINATED_REPORT_VERBS = vocabAlt([...EPISTEMIC_REFUSAL_VERBS, 'deny']);
 const CLAUSE_FINITE_PREDICATE_RE = /\b(?:is|are|was|were|has|have|had|will|would|should|can|cannot|could|did|does|do|applied|placed|processed)\b/i;
 /** [start, end) of the clause in `text` containing character index `at`. */
@@ -471,7 +471,7 @@ function claimContext(text, start, end) {
   const complement = hedge ? introduction.slice(hedge.index + hedge[0].length).replace(/[,\s]+$/g, '').trim() : '';
   // A condition or refusal governs the assertion after its comma. Ordinary
   // temporal introductions ("Before you go,") remain separate adjuncts.
-  if (/^\s*(?:if|unless|whether)\b/i.test(introduction)
+  if (/^\s*(?:if(?!\s+(?:anything|you ask me)\b)|unless|whether)\b/i.test(introduction)
       || (hedge && /^(?:(?:any of )?(?:this|that|it))?$/i.test(complement))) {
     return text.slice(boundary, end);
   }
@@ -1343,7 +1343,7 @@ function only_language(value, record, { spoken }) {
 const DENIAL_WORD_RE = /\b(?:(?:not|(?:is|are|did|does|was|were|has|have|had)n[\x27\u2019]t)(?!\s+only\b)|never|denied|denies|without|no|neither|none|zero)\b/gi;
 // Commas may enclose an aside and "and" may coordinate denied objects.
 // End their scope only when the next phrase starts a fresh assertion.
-const DENIAL_CLAUSE_END_RE = /[.;!?]|\b(?:but|however|although|though|so|while|yet)\b|(?:,|\band\b)\s*(?:(?:then|also)\s+)*(?=(?:(?:the )?(?:caller|customer)|she|he|they)\s+\w+|(?:asked|asks|raised|raises|expressed|expresses|mentioned|mentions|reported|reports|voiced|voices|did|does|do|is|are|was|were|has|have|had)\b)/gi;
+const DENIAL_CLAUSE_END_RE = /[.;!?]|\b(?:but|however|although|though|so|while|yet)\b|(?:,|\band\b)\s*(?:(?:then|also)\s+)*(?=(?:(?:the )?(?:caller|customer)|she|he|they)\s+\w+|(?:asked|asks|raised|raises|expressed|expresses|mentioned|mentions|reported|reports|voiced|voices|noting|noted|adding|added|did|does|do|is|are|was|were|has|have|had)\b)/gi;
 /** [[start, end), …) — the ranges of `text` a denial word governs. */
 function deniedSpans(text) {
   const spans = [];

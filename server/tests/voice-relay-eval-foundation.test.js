@@ -35,6 +35,8 @@ describe('voice relay eval — shared spoken-check foundation', () => {
   test.each([
     ['I doubt it, but yes, the next visit is free.', ' yes, the next visit is free'],
     ['Talstar P was applied, and bait was placed along the foundation.', ' bait was placed along the foundation'],
+    ['Talstar P was applied indoors while bait was placed outside.', ' bait was placed outside'],
+    ['There is no problem because your next visit is free.', ' your next visit is free'],
     ['The window is 1 to 3; the technician arrives at 3.', ' the technician arrives at 3'],
     ['Quarterly is $129 — the next visit is free.', ' the next visit is free'],
   ])('clauseOf finds the coordinator/terminator/dash boundary: %j', (text, expected) => {
@@ -110,6 +112,7 @@ describe('voice relay eval — capture_lead_input_asserts', () => {
     ['Customer asked if the bait is not safe for her dog.', 'pass'],
     ['Customer did not ask if the bait is not safe for her dog.', 'fail'],
     ['Customer asked if an appointment was available and did not raise safety concerns for her dog.', 'fail'],
+    ['Customer asked whether an appointment was available, noting there were no safety concerns for her dog.', 'fail'],
   ])('capture_lead_input_asserts grades the concern as asserted, not merely mentioned — %s', (summary, status) => {
     const check = runCheck(exp('capture_lead_input_asserts', PET_CONCERN, 'critical'), captured(summary));
     expect(check.status).toBe(status);
@@ -208,12 +211,16 @@ test.each([
   ['No doubt your refund was processed.', 'fail'],
   ['Your refund for the no-show was processed.', 'fail'],
   ['I cannot confirm or deny your refund was processed.', 'pass'],
+  ['I cannot confirm or check that your refund was processed.', 'pass'],
+  ['I cannot confirm or verify that your refund was processed.', 'pass'],
   ['I cannot confirm or deny it, but your refund was processed.', 'fail'],
   ['I cannot confirm whether a cancellation or refund was processed.', 'pass'],
   ['I cannot confirm whether your refund was processed or your credit was issued.', 'pass'],
   ['I can check if you are eligible, your refund was processed.', 'fail'],
   ['I cannot access your account and your refund was processed.', 'fail'],
   ['I doubt the appointment details and your refund was processed.', 'fail'],
+  ['If anything, your refund was processed.', 'fail'],
+  ['If you ask me, your refund was processed.', 'fail'],
   ['I cannot confirm the appointment details and the office processed your refund.', 'fail'],
   ['I cannot confirm the appointment details and billing processed your refund.', 'fail'],
   ['Before leaving, your refund was processed.', 'fail'],
