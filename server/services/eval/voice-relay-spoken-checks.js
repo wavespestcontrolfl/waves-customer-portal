@@ -1305,6 +1305,12 @@ const SAFETY_ONCE_DRY_COORDINATED_PREFIX = `(?:(?:${SAFETY_ONCE_DRY_COORDINATED_
 
 const SAFETY_AUDIENCE = '(?:your\\s+)?(?:dogs?|puppy|cats?|kittens?|pets?|animals?|children|kids)';
 
+const SAFETY_NO_HARM_PREDICATE = '(?:won[\\x27\\u2019]?t|will not)\\s+(?:hurt|harm|bother|affect|poison)';
+
+// A bare product pronoun needs an animate safety target to distinguish
+// "It won't hurt him" from ordinary appointment or service reassurance.
+const SAFETY_HARM_TARGET = '(?:him|her|them|(?:(?:your|the)\\s+)?(?:dogs?|puppy|cats?|kittens?|pets?|animals?|children|kids))';
+
 // The drying condition must qualify this exact predicate. Only an optional
 // audience may sit between "safe" and "once dry"; arbitrary text could cross
 // into a second claim and incorrectly excuse the first one.
@@ -1371,7 +1377,9 @@ const SAFETY_GUARANTEE_RES = Object.freeze([
   new RegExp(`${SAFETY_BRAND_SUBJECT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_COORDINATED_ADJECTIVE_PREFIX}${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\b`, 'g'),
   new RegExp(`(?<!\\b(?:pet|family)[-\\s])${SAFETY_ADJECTIVE_NEGATION}\\b${SAFETY_ADJECTIVE}\\s+(?:for|around|with)\\s+${SAFETY_AUDIENCE}\\b`, 'gi'),
   SAFETY_NO_RISK_RE,
-  new RegExp(`\\b(?:won[\\x27\\u2019]?t|will not)\\s+(?:hurt|harm|bother|affect|poison)\\b`, 'gi'),
+  new RegExp(`\\b${SAFETY_SUBJECT_WITH_PRODUCT}\\s+${SAFETY_NO_HARM_PREDICATE}\\b`, 'gi'),
+  new RegExp(`\\b(?:it|this|that|they|these|those)\\s+${SAFETY_NO_HARM_PREDICATE}\\s+${SAFETY_HARM_TARGET}\\b`, 'gi'),
+  new RegExp(`${SAFETY_BRAND_SUBJECT}\\s+${SAFETY_NO_HARM_PREDICATE}\\b`, 'g'),
   // "not harmful (at all)", "never toxic", "no longer dangerous" — negating
   // the HARM word is itself the safety claim.
   new RegExp(`\\b(?:not|never|no longer|(?:is|are)n[\\x27\\u2019]t)\\s+${SAFETY_INTENSIFIER}${HARM_ADJECTIVE}\\b`, 'gi'),
