@@ -9,7 +9,9 @@ This first slice checks reply budget, greeting, HTML/bullets, boilerplate,
 recognized instruction-like content, signatures, links/access codes and
 existing customer-copy rules. It reuses the canonical customer-copy and
 report-access-code helpers. Customer-copy and boilerplate checks normalize
-Unicode dashes and apostrophes. Regression cases cover equivalent visit-based
+Unicode dashes and apostrophes; greetings fold the same punctuation on both
+sides, and credential screening folds compatibility digits. Boilerplate
+screening also folds internal whitespace. Regression cases cover equivalent visit-based
 price units, common closing phrases and dashed names, plus-prefixed bullets,
 HTML comments/declarations, and Markdown links with relative or fragment
 destinations. Paired plain-prose cases protect ordinary mentions of visits,
