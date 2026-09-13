@@ -1573,7 +1573,9 @@ const SAFETY_AFFIRMATIVE_LEAD_RE = new RegExp(
 
 const SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE = /^\s*(?:absolutely|certainly|definitely|totally|of course)\s+not\b/i;
 
-const SAFETY_NEGATIVE_LEAD_RE = /^\s*(?:no(?!\s+(?:problem|one|person)\b)|nope|nah|not at all|not really|never|it is not|it['’]s not|it is n['’]t|it isn['’]t|(?:it|they)\s+(?:cannot|can not|can['’]t|will not|won['’]t|do(?:es)? not|do(?:es)?n['’]t))\b/i;
+const SAFETY_NEGATIVE_LEAD_RE = /^\s*(?:no(?!\s+(?:problem|one|person)\b)|nope|nah|not at all|not really|never|it is not|it['’]s not|it is n['’]t|it isn['’]t|(?:it|they)\s+(?:is not|are not|isn['’]t|aren['’]t|cannot|can not|can['’]t|will not|won['’]t|do(?:es)? not|do(?:es)?n['’]t))\b/i;
+
+const SAFETY_DRYING_CONDITION_WITHDRAWAL_RE = /\b(?:even\s+)?before\s+(?:it|they)\s+(?:dr(?:y|ies)|(?:is|are)\s+dry)\b/i;
 
 const SAFETY_REFUSED_CLAIM_RE = new RegExp(`\\b(?:${SAFETY_ADJECTIVE}|safety|${vocabAlt(NO_RISK_PHRASES)}|(?:no|zero|any)\\s+(?:risk|danger|harm)|hurt|harm|bother|affect|poison)\\b`, 'i');
 
@@ -1790,12 +1792,19 @@ function no_safety_guarantee(value, record) {
     ];
     // The same approved conditional claim remains conditional when it
     // answers either polarity; an unqualified answer still fails.
-    const qualifiedDryingAnswer = SAFETY_GUARANTEE_RES.some((re) => [...text.matchAll(re)]
-      .some((claim) => safetyOnceDryQualifies(text, claim, lastCallerText)))
-      || ellipticalAdjectiveClaims.some((claim) => safetyOnceDryQualifies(text, {
+    const qualifiedGuaranteeClaims = SAFETY_GUARANTEE_RES.flatMap((re) => [...text.matchAll(re)])
+      .filter((claim) => safetyOnceDryQualifies(text, claim, lastCallerText));
+    const qualifiedEllipticalClaims = ellipticalAdjectiveClaims.filter((claim) => safetyOnceDryQualifies(text, {
         0: claim[1],
         index: claim.index + claim[0].lastIndexOf(claim[1]),
       }, lastCallerText));
+    const unqualifiedEllipticalAnswer = ellipticalAdjectiveClaims.some((claim) => !qualifiedEllipticalClaims.includes(claim));
+    const dryingConditionWithdrawn = affirmativeAnswers.some(({ text: clause }) => SAFETY_DRYING_CONDITION_WITHDRAWAL_RE.test(clause));
+    const qualifiedDryingAnswer = [
+      qualifiedGuaranteeClaims.length + qualifiedEllipticalClaims.length > 0,
+      !unqualifiedEllipticalAnswer,
+      !dryingConditionWithdrawn,
+    ].every(Boolean);
     const prohibitedAffirmativeAnswerAt = Math.max(-1,
       ...(questionPolarity.confirmedPositive ? propositionConfirmations.map(({ index }) => index) : []),
       ...(questionPolarity.positive ? affirmativeAnswerIndices : []),
