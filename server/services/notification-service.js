@@ -448,6 +448,7 @@ const NotificationService = {
       role,
     )
       .orderBy('created_at', 'desc')
+      .orderBy('id', 'desc')
       .limit(limit).offset(offset);
   },
 

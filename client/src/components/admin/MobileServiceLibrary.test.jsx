@@ -110,7 +110,7 @@ describe("MobileServiceLibrary", () => {
       await screen.findByRole("button", { name: /Pest Control/i }),
     );
     expect(screen.getByText("All Services").parentElement).toHaveTextContent(
-      "Categories are set per service. Edit a service from All Servicesto move it.",
+      "Categories are set per service. Edit a service from All Services to move it.",
     );
   });
 
