@@ -1355,11 +1355,6 @@ const CALLBACK_QUESTION_DENIAL_RE = new RegExp(
   'i',
 );
 const CALLBACK_RECIPIENT_ACTION = `(?:be\\s+(?:called|phoned|rung|contacted|texted|emailed|reached(?: out to)?|followed up with)\\s+by|(?:get|receive)\\s+an?\\s+${CALLBACK_CONTACT_NOUN}\\s+from|hear from)`;
-// A bare agreement ends at the condition boundary. If the caller states what
-// she agreed to, it must itself authorize contact rather than another action.
-const CALLBACK_AGREEMENT_COMPLEMENT = `(?:to\\s+(?:be\\s+(?:called|contacted|phoned|texted|emailed)|(?:receive|get)\\s+an?\\s+${CALLBACK_CONTACT_NOUN}|(?:an?|the)\\s+${CALLBACK_CONTACT_NOUN})|that\\s+(?:we|the office|our team)\\s+(?:can|could|may|will|would)\\s+(?:${CALLBACK_VERB}|${CALLBACK_LIGHT_VERB})(?:\\s+(?:her|him|them))?)`;
-const CALLBACK_AGREEMENT_ACTION = `agrees?(?:\\s+${CALLBACK_AGREEMENT_COMPLEMENT})?(?=\\s*(?:[,.;!?]|$))`;
-const CALLBACK_CONSENT_ACTION = `(?:${CALLBACK_AGREEMENT_ACTION}|consents?|asks?\\s+(?:us|the office|our team)\\s+to|(?:gives?|grants?)\\s+(?:(?:us|the office|our team)\\s+)?(?:permission|consent))`;
 const CALLBACK_DECLINE_ACTION = '(?:declines?|refuses?)';
 // Callback timing is compositional: a day, bare part of day, and clock can
 // appear together ("tomorrow morning at nine") without requiring a bespoke
@@ -1388,7 +1383,17 @@ function no_account_holder_callback(value, record, { spoken }) {
   const recipientTargets = `(?:she|he|they|${targets})`;
   const contact = callbackTarget(targets, CALLBACK_ACTION, CALLBACK_LIGHT_ACTION);
   const contactFinite = callbackTarget(targets, CALLBACK_ACTION_FINITE, CALLBACK_LIGHT_ACTION_FINITE);
-  const consentConditionSource = `(?:(?:if|when|once|provided(?:\\s+that)?|(?:only\\s+)?after)\\s+${recipientTargets}\\s+${CALLBACK_CONSENT_ACTION}|unless\\s+${recipientTargets}\\s+${CALLBACK_DECLINE_ACTION})`;
+  // A bare consent action ends at the condition boundary. If the caller says
+  // what was authorized, that complement must promise contact with this
+  // scenario's account holder rather than an unrelated action or recipient.
+  const consentBoundary = '(?=\\s*(?:[,.;!?]|$))';
+  const receivedContact = `(?:be\\s+(?:called|contacted|phoned|texted|emailed)|(?:receive|get)\\s+an?\\s+${CALLBACK_CONTACT_NOUN}|(?:an?|the)\\s+${CALLBACK_CONTACT_NOUN})`;
+  const agreementComplement = `(?:to\\s+${receivedContact}|that\\s+(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+${contact})`;
+  const agreementAction = `(?:agrees?|consents?)(?:\\s+${agreementComplement})?${consentBoundary}`;
+  const requestedContact = `asks?\\s+(?:us|the office|our team)\\s+to(?:\\s+${contact})?${consentBoundary}`;
+  const grantedContact = `(?:gives?|grants?)\\s+(?:(?:us|the office|our team)\\s+)?(?:permission|consent)(?:\\s+(?:to|for\\s+(?:us|the office|our team)\\s+to)\\s+${contact})?${consentBoundary}`;
+  const consentAction = `(?:${agreementAction}|${requestedContact}|${grantedContact})`;
+  const consentConditionSource = `(?:(?:if|when|once|provided(?:\\s+that)?|(?:only\\s+)?after)\\s+${recipientTargets}\\s+${consentAction}|unless\\s+${recipientTargets}\\s+${CALLBACK_DECLINE_ACTION})`;
   const consentCondition = new RegExp(`\\b${consentConditionSource}\\b`, 'i');
   const callbackQuestion = new RegExp(`^\\s*${CALLBACK_QUESTION_AUX}\\s+(?:you|${CALLBACK_QUESTION_PROMISER})\\s+${contact}`, 'i');
   if (answeredQuestion(record, (question) => {
