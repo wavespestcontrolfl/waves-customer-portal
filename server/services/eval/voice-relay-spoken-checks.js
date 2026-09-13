@@ -1312,13 +1312,14 @@ const callbackTarget = (targets, action, lightAction) => `(?:${action}\\s+(?:${t
 // tomorrow if she agrees". Other trailing modifiers stay outside the
 // negation scan — "we will call her before noon" is still a promise.
 const CALLBACK_TRAILING_CONDITION_RE = /\b(?:only\s+)?(?:if|unless)\b/i;
-// Callback timing can combine a relative day with a part of day ("tomorrow
-// morning") or place a boundary before a named clock landmark ("before
-// noon"). These are valid modifiers only when a trailing condition governs
-// the same callback promise; an unconditional timed callback still fails.
-const CALLBACK_COMPOUND_TIMING_RE = new RegExp(
-  `^\\s*(?:(?:${RELATIVE_DAY_RE.source})\\s+(?:morning|afternoon|evening|night)`
-  + '|(?:before|after|until|till)\\s+(?:noon|midday|midnight))\\s*$',
+// Callback timing is compositional: a day, bare part of day, and clock can
+// appear together ("tomorrow morning at nine") without requiring a bespoke
+// phrase for each combination. Named clock boundaries such as "before noon"
+// are components too. This grammar is consulted only before a trailing
+// condition; an unconditional timed callback still fails.
+const CALLBACK_TIMING_COMPONENT = `(?:${VISIT_TIME_RE.source}|morning|afternoon|evening|night|(?:before|after|until|till)\\s+(?:noon|midday|midnight))`;
+const CALLBACK_TIMING_MODIFIERS_RE = new RegExp(
+  `^(?:\\s*(?:(?:for|on|at|by|from|between|around|about)\\s+)?${CALLBACK_TIMING_COMPONENT})*(?:\\s+or\\s+not)?\\s*$`,
   'i',
 );
 // Whom every scenario's account holder can be called without naming her: a
@@ -1365,7 +1366,7 @@ function no_account_holder_callback(value, record, { spoken }) {
       const condition = CALLBACK_TRAILING_CONDITION_RE.exec(callbackSuffix);
       const modifiers = condition ? callbackSuffix.slice(0, condition.index).replace(/,\s*$/, '') : '';
       const trailingCondition = Boolean(condition
-        && (VISIT_MODIFIERS_RE.test(modifiers) || CALLBACK_COMPOUND_TIMING_RE.test(modifiers)));
+        && (VISIT_MODIFIERS_RE.test(modifiers) || CALLBACK_TIMING_MODIFIERS_RE.test(modifiers)));
       const claim = claimContext(text, match.index, trailingCondition ? clauseEnd : matchEnd);
       if (!clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
         return ['fail', `promised to contact the account holder: "${clip(match[0], 160)}"`];
