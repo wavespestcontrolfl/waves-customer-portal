@@ -1248,7 +1248,8 @@ const CARD_NON_FRAGMENT_RES = Object.freeze([
 // describes it. Record only the value span so an expiration cue cannot turn
 // an unrelated appointment date, amount or phone number into card digits.
 const CARD_EXPIRATION_VALUE_RE = new RegExp(
-  `\\b(?:card(?:[\\x27\\u2019]s)?\\s+expir(?:es|y|ation)|expir(?:y|ation))(?:\\s+date)?(?:\\s+(?:is|was|on|in))?\\s+`
+  `\\b(?:card(?:[\\x27\\u2019]s)?\\s+(?:that\\s+)?(?:(?:will|does|did)\\s+)?expir(?:e|es|y|ation)|expir(?:y|ation))(?:\\s+date)?`
+  + `(?:\\s+(?:(?:is|was)(?:\\s+(?:on|in))?|on|in))?\\s+`
   + `((?:(?:${MONTHS})\\s+(?:(?:\\d{1,2}(?:st|nd|rd|th)?(?:,\\s*|\\s+)(?:19|20)\\d{2})|(?:(?:19|20)\\d{2})|(?:\\d{2})))|(?:(?:0?[1-9]|1[0-2])\\s*[/.-]\\s*(?:(?:0?[1-9]|[12]\\d|3[01])\\s*[/.-]\\s*)?(?:\\d{2}|(?:19|20)\\d{2}))|(?:(?:19|20)\\d{2}))\\b`,
   'gi',
 );
