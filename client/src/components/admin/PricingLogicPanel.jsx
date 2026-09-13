@@ -1,33 +1,35 @@
-import React, { useState, useEffect, useCallback } from "react";
-import { createPortal } from "react-dom";
-import useIsMobile from "../../hooks/useIsMobile";
+import React, { useCallback, useEffect, useState } from "react";
+import { ChevronDown, ChevronRight, Plus, Trash2 } from "lucide-react";
 import { getAdminUser } from "../../lib/adminAuth";
+import {
+  ActionFeedback,
+  Badge,
+  Button,
+  Card,
+  CardBody,
+  CardHeader,
+  CardTitle,
+  Dialog,
+  DialogBody,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  Field,
+  Input,
+  Select,
+  Switch,
+  Table,
+  TBody,
+  TD,
+  Textarea,
+  TH,
+  THead,
+  TR,
+} from "../ui";
 
-// Pricing writes are admin-only server-side (requireAdmin on every mutating
-// pricing-config route). Mirror that here so a technician sees read-only
-// values instead of optimistic edits that silently 403 — the calculators
-// and read views stay available to both roles.
 const canEditPricing = () => getAdminUser()?.role === "admin";
-
-const ROBOTO = "'Roboto', Arial, sans-serif";
-
-// V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
-const D = {
-  bg: "#F4F4F5",
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  teal: "#18181B",
-  green: "#15803D",
-  amber: "#A16207",
-  red: "#991B1B",
-  purple: "#18181B",
-  text: "#27272A",
-  muted: "#71717A",
-  white: "#FFFFFF",
-  input: "#FFFFFF",
-};
-
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
+
 const af = (p, o = {}) =>
   fetch(`${API_BASE}${p}`, {
     ...o,
@@ -44,37 +46,56 @@ const af = (p, o = {}) =>
     return body;
   });
 
-// ── Category tabs ──
 const TABS = [
-  { key: "global", label: "Global Constants" },
-  { key: "lawn", label: "Lawn Care" },
-  { key: "pest", label: "Pest Control" },
-  { key: "tree_shrub", label: "Tree & Shrub" },
-  { key: "palm", label: "Palm Injection" },
+  { key: "global", label: "Global constants" },
+  { key: "lawn", label: "Lawn care" },
+  { key: "pest", label: "Pest control" },
+  { key: "tree_shrub", label: "Tree & shrub" },
+  { key: "palm", label: "Palm injection" },
   { key: "mosquito", label: "Mosquito" },
   { key: "termite", label: "Termite" },
   { key: "rodent", label: "Rodent" },
-  { key: "one_time", label: "One-Time" },
+  { key: "one_time", label: "One-time" },
   { key: "waveguard", label: "WaveGuard" },
   { key: "products", label: "Products" },
   { key: "proposals", label: "Proposals" },
   { key: "changelog", label: "Changelog" },
 ];
 
-// Category pill color map for changelog entries
-// Explicit map so bug/leak keep their semantic red/amber while the rest
-// stay on the zinc ramp (the label carries the category).
-const CATEGORY_COLORS = {
-  bug: "#991B1B", // red — a defect
-  leak: "#A16207", // amber — money leaking
-  rule: "#18181B",
-  cost: "#3F3F46",
-  architecture: "#18181B",
-  documentation: "#71717A",
-  infrastructure: "#3F3F46",
+const formatDate = (value, includeSeconds = false) => value ? new Date(value).toLocaleString(undefined, {
+  year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+  second: includeSeconds ? "2-digit" : undefined,
+}) : "—";
+
+const formatValue = (value) => {
+  if (value == null) return "—";
+  return typeof value === "object" ? JSON.stringify(value) : String(value);
 };
 
-// ── Changelog Tab ──
+const prettyJson = (value) => {
+  if (typeof value !== "string") return JSON.stringify(value, null, 2);
+  try { return JSON.stringify(JSON.parse(value), null, 2); } catch { return value; }
+};
+
+function StatusBadge({ status }) {
+  // Main: pending amber, approved green, rejected red. The kit has no success
+  // tone, so approved keeps the emphasis tone and pending gets its amber back.
+  const tone = status === "pending" ? "warn" : status === "approved" ? "strong" : status === "rejected" ? "alert" : "neutral";
+  return <Badge tone={tone}>{status || "Unknown"}</Badge>;
+}
+
+// Main coloured a changelog category by what it means: bug red, leak amber,
+// everything else plain ink.
+const CATEGORY_TONES = { bug: "alert", leak: "warn" };
+
+function PercentBadge({ value }) {
+  if (value == null) return null;
+  const number = Number(value);
+  // A 10%+ proposed change is a "look at this" threshold, not a failure — main
+  // painted it amber, and alert red is reserved for genuine alerts.
+  return <Badge tone={Math.abs(number) >= 10 ? "warn" : "neutral"}>{number > 0 ? "+" : ""}{number.toFixed(1)}%</Badge>;
+}
+
 function ChangelogTab() {
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -83,2544 +104,297 @@ function ChangelogTab() {
 
   useEffect(() => {
     setLoading(true);
-    const qs =
-      filter === "all" ? "" : `?category=${encodeURIComponent(filter)}`;
+    const qs = filter === "all" ? "" : `?category=${encodeURIComponent(filter)}`;
     af(`/admin/pricing-config/changelog${qs}`)
-      .then((d) => {
-        setEntries(d.entries || []);
-        setLoading(false);
-      })
-      .catch(() => {
-        setEntries([]);
-        setLoading(false);
-      });
+      .then((data) => setEntries(data.entries || []))
+      .catch(() => setEntries([]))
+      .finally(() => setLoading(false));
   }, [filter]);
 
-  const formatDate = (iso) => {
-    if (!iso) return "—";
-    const d = new Date(iso);
-    return d.toLocaleString(undefined, {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  };
-
-  const catPill = (category) => {
-    const color = CATEGORY_COLORS[category] || D.muted;
-    return (
-      <span
-        style={{
-          fontSize: 10,
-          padding: "2px 8px",
-          borderRadius: 12,
-          fontWeight: 700,
-          background: `${color}18`,
-          color,
-          border: `1px solid ${color}55`,
-          textTransform: "uppercase",
-          letterSpacing: 0.3,
-        }}
-      >
-        {category}
-      </span>
-    );
-  };
-
-  const filterOptions = [
-    "all",
-    "bug",
-    "leak",
-    "rule",
-    "cost",
-    "architecture",
-    "documentation",
-    "infrastructure",
-  ];
-
+  const filterOptions = ["all", "bug", "leak", "rule", "cost", "architecture", "documentation", "infrastructure"];
   return (
-    <div
-      style={{
-        background: D.card,
-        borderRadius: 12,
-        border: `1px solid ${D.border}`,
-        padding: 20,
-      }}
-    >
-      {" "}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          marginBottom: 16,
-        }}
-      >
-        {" "}
-        <h2
-          style={{
-            margin: 0,
-            fontSize: 12,
-            fontWeight: 500,
-            color: "#0F172A",
-            fontFamily: ROBOTO,
-            letterSpacing: "0.02em",
-          }}
-        >
-          Pricing changelog
-        </h2>{" "}
-        <label style={{ fontSize: 12, color: D.muted }}>
-          Filter
-          <select
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-            style={{
-              marginLeft: 8,
-              padding: "6px 10px",
-              background: D.input,
-              border: `1px solid ${D.border}`,
-              borderRadius: 6,
-              color: "#0F172A",
-              fontSize: 12,
-              outline: "none",
-            }}
-          >
-            {filterOptions.map((c) => (
-              <option key={c} value={c}>
-                {c === "all" ? "All categories" : c}
-              </option>
-            ))}
-          </select>{" "}
-        </label>{" "}
-      </div>
-      {loading ? (
-        <div
-          style={{
-            color: D.muted,
-            padding: 40,
-            textAlign: "center",
-            fontSize: 13,
-          }}
-        >
-          Loading changelog...
-        </div>
-      ) : entries.length === 0 ? (
-        <div
-          style={{
-            color: D.muted,
-            padding: 40,
-            textAlign: "center",
-            fontSize: 13,
-          }}
-        >
-          No changelog entries
-          {filter !== "all" ? ` for category "${filter}"` : ""} yet.
-        </div>
-      ) : (
-        <div style={{ overflowX: "auto" }}>
-          {" "}
-          <table
-            style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}
-          >
-            {" "}
-            <thead>
-              {" "}
-              <tr>
-                {" "}
-                <th
-                  style={{
-                    padding: "8px 10px",
-                    textAlign: "left",
-                    color: D.muted,
-                    borderBottom: `2px solid ${D.border}`,
-                    fontSize: 11,
-                    fontWeight: 700,
-                    width: 150,
-                  }}
-                >
-                  Changed At
-                </th>{" "}
-                <th
-                  style={{
-                    padding: "8px 10px",
-                    textAlign: "left",
-                    color: D.muted,
-                    borderBottom: `2px solid ${D.border}`,
-                    fontSize: 11,
-                    fontWeight: 700,
-                    width: 120,
-                  }}
-                >
-                  Version
-                </th>{" "}
-                <th
-                  style={{
-                    padding: "8px 10px",
-                    textAlign: "left",
-                    color: D.muted,
-                    borderBottom: `2px solid ${D.border}`,
-                    fontSize: 11,
-                    fontWeight: 700,
-                    width: 130,
-                  }}
-                >
-                  Category
-                </th>{" "}
-                <th
-                  style={{
-                    padding: "8px 10px",
-                    textAlign: "left",
-                    color: D.muted,
-                    borderBottom: `2px solid ${D.border}`,
-                    fontSize: 11,
-                    fontWeight: 700,
-                  }}
-                >
-                  Summary
-                </th>{" "}
-                <th
-                  style={{
-                    padding: "8px 10px",
-                    textAlign: "left",
-                    color: D.muted,
-                    borderBottom: `2px solid ${D.border}`,
-                    fontSize: 11,
-                    fontWeight: 700,
-                    width: 160,
-                  }}
-                >
-                  Changed By
-                </th>{" "}
-              </tr>{" "}
-            </thead>{" "}
-            <tbody>
-              {entries.map((e) => {
-                const isOpen = expandedId === e.id;
-                return (
-                  <React.Fragment key={e.id}>
-                    {" "}
-                    <tr
-                      onClick={() => setExpandedId(isOpen ? null : e.id)}
-                      style={{
-                        borderBottom: `1px solid ${D.border}22`,
-                        cursor: "pointer",
-                        background: isOpen ? `${D.teal}08` : "transparent",
-                      }}
-                    >
-                      {" "}
-                      <td
-                        style={{
-                          padding: "10px",
-                          fontFamily: ROBOTO,
-                          fontSize: 11,
-                          color: D.text,
-                        }}
-                      >
-                        {formatDate(e.changed_at)}
-                      </td>{" "}
-                      <td
-                        style={{
-                          padding: "10px",
-                          fontFamily: ROBOTO,
-                          fontSize: 11,
-                          color: D.text,
-                        }}
-                      >
-                        {e.version_from}
-                        {e.version_from !== e.version_to
-                          ? ` → ${e.version_to}`
-                          : ""}
-                      </td>{" "}
-                      <td style={{ padding: "10px" }}>{catPill(e.category)}</td>{" "}
-                      <td
-                        style={{
-                          padding: "10px",
-                          color: "#0F172A",
-                          fontSize: 13,
-                        }}
-                      >
-                        {e.summary}
-                      </td>{" "}
-                      <td
-                        style={{
-                          padding: "10px",
-                          fontFamily: ROBOTO,
-                          fontSize: 11,
-                          color: D.muted,
-                        }}
-                      >
-                        {e.changed_by}
-                      </td>{" "}
-                    </tr>
-                    {isOpen && (
-                      <tr style={{ background: `${D.teal}06` }}>
-                        {" "}
-                        <td
-                          colSpan={5}
-                          style={{
-                            padding: "14px 16px",
-                            borderBottom: `1px solid ${D.border}22`,
-                          }}
-                        >
-                          {" "}
-                          <div
-                            style={{
-                              fontSize: 11,
-                              fontWeight: 700,
-                              color: D.muted,
-                              marginBottom: 4,
-                              textTransform: "uppercase",
-                              letterSpacing: 0.5,
-                            }}
-                          >
-                            Rationale
-                          </div>{" "}
-                          <div
-                            style={{
-                              fontSize: 13,
-                              color: "#0F172A",
-                              lineHeight: 1.5,
-                              marginBottom: 14,
-                            }}
-                          >
-                            {e.rationale}
-                          </div>
-                          {Array.isArray(e.affected_services) &&
-                            e.affected_services.length > 0 && (
-                              <>
-                                {" "}
-                                <div
-                                  style={{
-                                    fontSize: 11,
-                                    fontWeight: 700,
-                                    color: D.muted,
-                                    marginBottom: 4,
-                                    textTransform: "uppercase",
-                                    letterSpacing: 0.5,
-                                  }}
-                                >
-                                  Affected Services
-                                </div>{" "}
-                                <div
-                                  style={{
-                                    fontSize: 12,
-                                    color: D.text,
-                                    marginBottom: 14,
-                                    fontFamily: ROBOTO,
-                                  }}
-                                >
-                                  {e.affected_services.join(", ")}
-                                </div>{" "}
-                              </>
-                            )}
-                          {(e.before_value != null ||
-                            e.after_value != null) && (
-                            <div
-                              style={{
-                                display: "grid",
-                                gridTemplateColumns: "1fr 1fr",
-                                gap: 12,
-                              }}
-                            >
-                              {" "}
-                              <div>
-                                {" "}
-                                <div
-                                  style={{
-                                    fontSize: 11,
-                                    fontWeight: 700,
-                                    color: D.muted,
-                                    marginBottom: 4,
-                                    textTransform: "uppercase",
-                                    letterSpacing: 0.5,
-                                  }}
-                                >
-                                  Before
-                                </div>{" "}
-                                <pre
-                                  style={{
-                                    fontSize: 11,
-                                    background: D.bg,
-                                    border: `1px solid ${D.border}`,
-                                    borderRadius: 6,
-                                    padding: 10,
-                                    margin: 0,
-                                    overflow: "auto",
-                                    fontFamily: ROBOTO,
-                                    color: D.text,
-                                  }}
-                                >
-                                  {e.before_value != null
-                                    ? JSON.stringify(e.before_value, null, 2)
-                                    : "—"}
-                                </pre>{" "}
-                              </div>{" "}
-                              <div>
-                                {" "}
-                                <div
-                                  style={{
-                                    fontSize: 11,
-                                    fontWeight: 700,
-                                    color: D.muted,
-                                    marginBottom: 4,
-                                    textTransform: "uppercase",
-                                    letterSpacing: 0.5,
-                                  }}
-                                >
-                                  After
-                                </div>{" "}
-                                <pre
-                                  style={{
-                                    fontSize: 11,
-                                    background: D.bg,
-                                    border: `1px solid ${D.border}`,
-                                    borderRadius: 6,
-                                    padding: 10,
-                                    margin: 0,
-                                    overflow: "auto",
-                                    fontFamily: ROBOTO,
-                                    color: D.text,
-                                  }}
-                                >
-                                  {e.after_value != null
-                                    ? JSON.stringify(e.after_value, null, 2)
-                                    : "—"}
-                                </pre>{" "}
-                              </div>{" "}
-                            </div>
-                          )}
-                        </td>{" "}
-                      </tr>
-                    )}
-                  </React.Fragment>
-                );
-              })}
-            </tbody>{" "}
-          </table>{" "}
-        </div>
-      )}
-    </div>
+    <Card>
+      <CardHeader className="flex flex-wrap items-end justify-between gap-3">
+        <CardTitle className="text-16">Pricing changelog</CardTitle>
+        <Field label="Filter"><Select value={filter} onChange={(event) => setFilter(event.target.value)}>{filterOptions.map((option) => <option key={option} value={option}>{option === "all" ? "All categories" : option}</option>)}</Select></Field>
+      </CardHeader>
+      <CardBody>
+        {loading ? <ActionFeedback>Loading changelog...</ActionFeedback> : entries.length === 0 ? (
+          <p className="py-8 text-center text-ink-secondary">No changelog entries{filter !== "all" ? ` for category “${filter}”` : ""} yet.</p>
+        ) : (
+          <Table className="min-w-[820px]" aria-label="Pricing changelog">
+            <THead><TR><TH>Changed at</TH><TH>Version</TH><TH>Category</TH><TH>Summary</TH><TH>Changed by</TH></TR></THead>
+            <TBody>{entries.map((entry) => {
+              const open = expandedId === entry.id;
+              return <React.Fragment key={entry.id}>
+                <TR className="cursor-pointer" onClick={() => setExpandedId(open ? null : entry.id)} aria-expanded={open}>
+                  <TD nums>{formatDate(entry.changed_at)}</TD><TD nums>{entry.version_from}{entry.version_from !== entry.version_to ? ` → ${entry.version_to}` : ""}</TD><TD><Badge tone={CATEGORY_TONES[entry.category] || "neutral"}>{entry.category}</Badge></TD><TD className="font-medium">{entry.summary}</TD><TD>{entry.changed_by}</TD>
+                </TR>
+                {open && <TR><TD colSpan="5" className="bg-zinc-50 p-4">
+                  <div className="space-y-4">
+                    <div><div className="font-medium text-zinc-900">Rationale</div><p className="mt-1 text-ui-body text-zinc-700">{entry.rationale || "—"}</p></div>
+                    {Array.isArray(entry.affected_services) && entry.affected_services.length > 0 && <div><div className="font-medium text-zinc-900">Affected services</div><p className="mt-1 text-ui-body text-zinc-700">{entry.affected_services.join(", ")}</p></div>}
+                    {(entry.before_value != null || entry.after_value != null) && <div className="grid gap-3 md:grid-cols-2"><JsonBlock title="Before" value={entry.before_value} /><JsonBlock title="After" value={entry.after_value} /></div>}
+                  </div>
+                </TD></TR>}
+              </React.Fragment>;
+            })}</TBody>
+          </Table>
+        )}
+      </CardBody>
+    </Card>
   );
 }
 
-// ── Proposals Tab ──
+function JsonBlock({ title, value }) {
+  return <div><div className="mb-1 font-medium text-zinc-900">{title}</div><pre className="max-h-48 overflow-auto rounded-md border-hairline border-zinc-200 bg-white p-3 text-ui-body text-zinc-700 u-nums">{value == null ? "—" : prettyJson(value)}</pre></div>;
+}
+
 function ProposalsTab() {
-  const isMobile = useIsMobile();
   const [proposals, setProposals] = useState([]);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState("pending");
   const [selected, setSelected] = useState(null);
   const [reviewNotes, setReviewNotes] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [toast, setToast] = useState(null);
+  const [feedback, setFeedback] = useState(null);
 
   const loadProposals = useCallback(() => {
     setLoading(true);
     af(
       `/admin/pricing-proposals?status=${encodeURIComponent(statusFilter)}&limit=50`,
     )
-      .then((d) => {
-        setProposals(d.proposals || []);
-        setLoading(false);
-      })
-      .catch(() => {
-        setProposals([]);
-        setLoading(false);
-      });
+      .then((data) => setProposals(data.proposals || []))
+      .catch(() => setProposals([]))
+      .finally(() => setLoading(false));
   }, [statusFilter]);
+  useEffect(() => { loadProposals(); }, [loadProposals]);
 
-  useEffect(() => {
-    loadProposals();
-  }, [loadProposals]);
-
-  const formatDate = (iso) => {
-    if (!iso) return "—";
-    return new Date(iso).toLocaleString(undefined, {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  };
-
-  const formatValue = (v) => {
-    if (v === null || v === undefined) return "—";
-    if (typeof v === "object") return JSON.stringify(v);
-    return String(v);
-  };
-
-  const pctBadge = (pct) => {
-    if (pct == null) return null;
-    const n = Number(pct);
-    const color = Math.abs(n) >= 10 ? D.amber : D.muted;
-    return (
-      <span
-        style={{
-          fontSize: 10,
-          padding: "2px 8px",
-          borderRadius: 12,
-          fontWeight: 700,
-          background: `${color}18`,
-          color,
-          border: `1px solid ${color}55`,
-          fontFamily: ROBOTO,
-        }}
-      >
-        {n > 0 ? "+" : ""}
-        {n.toFixed(1)}%
-      </span>
-    );
-  };
-
-  const statusPill = (status) => {
-    const color =
-      status === "pending"
-        ? D.amber
-        : status === "approved"
-          ? D.green
-          : status === "rejected"
-            ? D.red
-            : D.muted;
-    return (
-      <span
-        style={{
-          fontSize: 10,
-          padding: "2px 8px",
-          borderRadius: 12,
-          fontWeight: 700,
-          background: `${color}18`,
-          color,
-          border: `1px solid ${color}55`,
-          textTransform: "uppercase",
-          letterSpacing: 0.3,
-        }}
-      >
-        {status}
-      </span>
-    );
-  };
-
+  const openProposal = (proposal) => { setSelected(proposal); setReviewNotes(proposal.review_notes || ""); };
   const submitAction = async (action) => {
     if (!selected) return;
     setSubmitting(true);
     try {
-      const res = await af(
+      const response = await af(
         `/admin/pricing-proposals/${selected.id}/${action}`,
         {
           method: "POST",
           body: JSON.stringify({ review_notes: reviewNotes || null }),
         },
       );
-      if (res && res.success) {
-        setToast({
-          kind: "success",
-          msg:
-            action === "approve"
-              ? `Proposal ${selected.id} approved. Changelog id=${res.changelog_id}. Engine caches busted.`
-              : `Proposal ${selected.id} rejected.`,
-        });
-        setSelected(null);
-        setReviewNotes("");
-        loadProposals();
-      } else {
-        setToast({ kind: "error", msg: res?.error || "Action failed" });
-      }
-    } catch (err) {
-      setToast({ kind: "error", msg: err.message || "Action failed" });
-    }
-    setSubmitting(false);
-    setTimeout(() => setToast(null), 5000);
+      if (!response?.success) throw new Error(response?.error || "Action failed");
+      setFeedback({ error: false, message: action === "approve" ? `Proposal ${selected.id} approved. Changelog id=${response.changelog_id}. Engine caches busted.` : `Proposal ${selected.id} rejected.` });
+      setSelected(null); setReviewNotes(""); loadProposals();
+    } catch (error) { setFeedback({ error: true, message: error.message || "Action failed" }); }
+    finally { setSubmitting(false); setTimeout(() => setFeedback(null), 5000); }
   };
 
   const statusOptions = ["pending", "approved", "rejected", "all"];
-
   return (
-    <div
-      style={{
-        background: D.card,
-        borderRadius: 12,
-        border: `1px solid ${D.border}`,
-        padding: 20,
-      }}
-    >
-      {" "}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          marginBottom: 12,
-        }}
-      >
-        {" "}
-        <h2
-          style={{
-            margin: 0,
-            fontSize: 12,
-            fontWeight: 500,
-            color: "#0F172A",
-            fontFamily: ROBOTO,
-            letterSpacing: "0.02em",
-          }}
-        >
-          Pricing proposals
-        </h2>{" "}
-        <div style={{ display: "flex", gap: 6 }}>
-          {statusOptions.map((s) => (
-            <button
-              key={s}
-              onClick={() => setStatusFilter(s)}
-              style={{
-                padding: "4px 10px",
-                borderRadius: 6,
-                fontSize: 11,
-                fontWeight: 500,
-                border: `1px solid ${statusFilter === s ? D.teal : D.border}`,
-                background: statusFilter === s ? D.teal : "transparent",
-                color: statusFilter === s ? D.white : D.muted,
-                cursor: "pointer",
-                textTransform: "capitalize",
-              }}
-            >
-              {s}
-            </button>
-          ))}
-        </div>{" "}
-      </div>
-      {toast && (
-        <div
-          style={{
-            padding: "8px 12px",
-            marginBottom: 12,
-            borderRadius: 6,
-            fontSize: 12,
-            fontWeight: 500,
-            background:
-              toast.kind === "success" ? `${D.green}18` : `${D.red}18`,
-            color: toast.kind === "success" ? D.green : D.red,
-            border: `1px solid ${toast.kind === "success" ? D.green : D.red}55`,
-          }}
-        >
-          {toast.msg}
-        </div>
-      )}
-      {loading ? (
-        <div
-          style={{
-            color: D.muted,
-            padding: 40,
-            textAlign: "center",
-            fontSize: 13,
-          }}
-        >
-          Loading proposals...
-        </div>
-      ) : proposals.length === 0 ? (
-        <div
-          style={{
-            color: D.muted,
-            padding: 40,
-            textAlign: "center",
-            fontSize: 13,
-          }}
-        >
-          No {statusFilter === "all" ? "" : statusFilter} proposals.
-        </div>
-      ) : (
-        <div style={{ overflowX: "auto" }}>
-          {" "}
-          <table
-            style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}
-          >
-            {" "}
-            <thead>
-              {" "}
-              <tr>
-                {" "}
-                <th
-                  style={{
-                    padding: "8px 10px",
-                    textAlign: "left",
-                    color: D.muted,
-                    borderBottom: `2px solid ${D.border}`,
-                    fontSize: 11,
-                    fontWeight: 700,
-                  }}
-                >
-                  Config Key
-                </th>{" "}
-                <th
-                  style={{
-                    padding: "8px 10px",
-                    textAlign: "left",
-                    color: D.muted,
-                    borderBottom: `2px solid ${D.border}`,
-                    fontSize: 11,
-                    fontWeight: 700,
-                  }}
-                >
-                  Change
-                </th>{" "}
-                <th
-                  style={{
-                    padding: "8px 10px",
-                    textAlign: "center",
-                    color: D.muted,
-                    borderBottom: `2px solid ${D.border}`,
-                    fontSize: 11,
-                    fontWeight: 700,
-                  }}
-                >
-                  % Δ
-                </th>{" "}
-                <th
-                  style={{
-                    padding: "8px 10px",
-                    textAlign: "left",
-                    color: D.muted,
-                    borderBottom: `2px solid ${D.border}`,
-                    fontSize: 11,
-                    fontWeight: 700,
-                  }}
-                >
-                  Source
-                </th>{" "}
-                <th
-                  style={{
-                    padding: "8px 10px",
-                    textAlign: "center",
-                    color: D.muted,
-                    borderBottom: `2px solid ${D.border}`,
-                    fontSize: 11,
-                    fontWeight: 700,
-                  }}
-                >
-                  Status
-                </th>{" "}
-                <th
-                  style={{
-                    padding: "8px 10px",
-                    textAlign: "left",
-                    color: D.muted,
-                    borderBottom: `2px solid ${D.border}`,
-                    fontSize: 11,
-                    fontWeight: 700,
-                  }}
-                >
-                  Created
-                </th>{" "}
-                <th
-                  style={{
-                    padding: "8px 10px",
-                    textAlign: "center",
-                    color: D.muted,
-                    borderBottom: `2px solid ${D.border}`,
-                    fontSize: 11,
-                    fontWeight: 700,
-                  }}
-                >
-                  Actions
-                </th>{" "}
-              </tr>{" "}
-            </thead>{" "}
-            <tbody>
-              {proposals.map((p) => (
-                <tr
-                  key={p.id}
-                  style={{
-                    borderBottom: `1px solid ${D.border}22`,
-                    cursor: "pointer",
-                  }}
-                  onClick={() => {
-                    setSelected(p);
-                    setReviewNotes(p.review_notes || "");
-                  }}
-                >
-                  {" "}
-                  <td
-                    style={{
-                      padding: "8px 10px",
-                      color: "#0F172A",
-                      fontFamily: ROBOTO,
-                      fontSize: 12,
-                      fontWeight: 500,
-                    }}
-                  >
-                    {p.config_key}
-                  </td>{" "}
-                  <td
-                    style={{
-                      padding: "8px 10px",
-                      color: D.text,
-                      fontFamily: ROBOTO,
-                      fontSize: 12,
-                    }}
-                  >
-                    {" "}
-                    <span style={{ color: D.muted }}>
-                      {formatValue(p.current_value)}
-                    </span>{" "}
-                    <span style={{ margin: "0 6px", color: D.muted }}>→</span>{" "}
-                    <span style={{ color: "#0F172A", fontWeight: 500 }}>
-                      {formatValue(p.proposed_value)}
-                    </span>{" "}
-                  </td>{" "}
-                  <td style={{ padding: "8px 10px", textAlign: "center" }}>
-                    {pctBadge(p.pct_change)}
-                  </td>{" "}
-                  <td
-                    style={{
-                      padding: "8px 10px",
-                      color: D.muted,
-                      fontSize: 11,
-                    }}
-                  >
-                    {p.trigger_source || "—"}
-                  </td>{" "}
-                  <td style={{ padding: "8px 10px", textAlign: "center" }}>
-                    {statusPill(p.status)}
-                  </td>{" "}
-                  <td
-                    style={{
-                      padding: "8px 10px",
-                      color: D.muted,
-                      fontSize: 11,
-                    }}
-                  >
-                    {formatDate(p.created_at)}
-                  </td>{" "}
-                  <td style={{ padding: "8px 10px", textAlign: "center" }}>
-                    {p.status === "pending" && (
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setSelected(p);
-                          setReviewNotes(p.review_notes || "");
-                        }}
-                        style={{
-                          padding: "4px 10px",
-                          borderRadius: 4,
-                          border: "none",
-                          cursor: "pointer",
-                          fontSize: 11,
-                          fontWeight: 500,
-                          background: D.teal,
-                          color: D.white,
-                        }}
-                      >
-                        Review
-                      </button>
-                    )}
-                  </td>{" "}
-                </tr>
-              ))}
-            </tbody>{" "}
-          </table>{" "}
-        </div>
-      )}
-      {selected &&
-        createPortal(
-        <div
-          onClick={() => !submitting && setSelected(null)}
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(15,23,42,0.6)",
-            zIndex: 1000,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: isMobile ? 0 : 20,
-          }}
-        >
-          {" "}
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              background: D.card,
-              borderRadius: 12,
-              border: `1px solid ${D.border}`,
-              padding: 24,
-              maxWidth: 640,
-              width: "100%",
-              maxHeight: "90vh",
-              overflowY: "auto",
-              ...(isMobile
-                ? {
-                    width: "100%",
-                    maxWidth: "none",
-                    height: "100%",
-                    maxHeight: "none",
-                    borderRadius: 0,
-                    boxSizing: "border-box",
-                    overflowY: "auto",
-                    paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
-                    paddingBottom: "calc(24px + env(safe-area-inset-bottom, 0px))",
-                    paddingLeft: "calc(24px + env(safe-area-inset-left, 0px))",
-                    paddingRight: "calc(24px + env(safe-area-inset-right, 0px))",
-                  }
-                : {}),
-            }}
-          >
-            {" "}
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                marginBottom: 16,
-              }}
-            >
-              {" "}
-              <div style={{ fontSize: 16, fontWeight: 700, color: "#0F172A" }}>
-                Proposal #{selected.id}
-              </div>
-              {statusPill(selected.status)}
-            </div>{" "}
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "120px 1fr",
-                gap: "8px 12px",
-                fontSize: 12,
-                marginBottom: 16,
-              }}
-            >
-              {" "}
-              <div style={{ color: D.muted, fontWeight: 500 }}>
-                Config Key
-              </div>{" "}
-              <div style={{ fontFamily: ROBOTO, color: "#0F172A" }}>
-                {selected.config_key}
-              </div>{" "}
-              <div style={{ color: D.muted, fontWeight: 500 }}>Current</div>{" "}
-              <div style={{ fontFamily: ROBOTO, color: D.text }}>
-                {formatValue(selected.current_value)}
-              </div>{" "}
-              <div style={{ color: D.muted, fontWeight: 500 }}>Proposed</div>{" "}
-              <div
-                style={{
-                  fontFamily: ROBOTO,
-                  color: "#0F172A",
-                  fontWeight: 500,
-                }}
-              >
-                {formatValue(selected.proposed_value)}
-              </div>{" "}
-              <div style={{ color: D.muted, fontWeight: 500 }}>% Change</div>{" "}
-              <div>
-                {pctBadge(selected.pct_change) || (
-                  <span style={{ color: D.muted }}>—</span>
-                )}
-              </div>{" "}
-              <div style={{ color: D.muted, fontWeight: 500 }}>Source</div>{" "}
-              <div style={{ color: D.text }}>
-                {selected.trigger_source || "—"}
-              </div>{" "}
-              <div style={{ color: D.muted, fontWeight: 500 }}>Created</div>{" "}
-              <div style={{ color: D.text }}>
-                {formatDate(selected.created_at)}
-              </div>
-              {selected.reviewed_at && (
-                <>
-                  {" "}
-                  <div style={{ color: D.muted, fontWeight: 500 }}>
-                    Reviewed
-                  </div>{" "}
-                  <div style={{ color: D.text }}>
-                    {formatDate(selected.reviewed_at)} by tech{" "}
-                    {selected.reviewed_by}
-                  </div>{" "}
-                </>
-              )}
-            </div>
-            {selected.evidence && (
-              <div style={{ marginBottom: 12 }}>
-                {" "}
-                <div
-                  style={{
-                    fontSize: 12,
-                    color: D.muted,
-                    fontWeight: 500,
-                    marginBottom: 4,
-                  }}
-                >
-                  Evidence
-                </div>{" "}
-                <pre
-                  style={{
-                    background: D.bg,
-                    padding: 10,
-                    borderRadius: 6,
-                    fontSize: 11,
-                    fontFamily: ROBOTO,
-                    color: D.text,
-                    overflowX: "auto",
-                    margin: 0,
-                    maxHeight: 160,
-                  }}
-                >
-                  {JSON.stringify(
-                    typeof selected.evidence === "string"
-                      ? JSON.parse(selected.evidence)
-                      : selected.evidence,
-                    null,
-                    2,
-                  )}
-                </pre>{" "}
-              </div>
-            )}
-            {selected.price_impact && (
-              <div style={{ marginBottom: 12 }}>
-                {" "}
-                <div
-                  style={{
-                    fontSize: 12,
-                    color: D.muted,
-                    fontWeight: 500,
-                    marginBottom: 4,
-                  }}
-                >
-                  Price Impact
-                </div>{" "}
-                <pre
-                  style={{
-                    background: D.bg,
-                    padding: 10,
-                    borderRadius: 6,
-                    fontSize: 11,
-                    fontFamily: ROBOTO,
-                    color: D.text,
-                    overflowX: "auto",
-                    margin: 0,
-                    maxHeight: 160,
-                  }}
-                >
-                  {JSON.stringify(
-                    typeof selected.price_impact === "string"
-                      ? JSON.parse(selected.price_impact)
-                      : selected.price_impact,
-                    null,
-                    2,
-                  )}
-                </pre>{" "}
-              </div>
-            )}
-            <div style={{ marginBottom: 16 }}>
-              {" "}
-              <div
-                style={{
-                  fontSize: 12,
-                  color: D.muted,
-                  fontWeight: 500,
-                  marginBottom: 4,
-                }}
-              >
-                Review Notes
-              </div>{" "}
-              <textarea
-                value={reviewNotes}
-                onChange={(e) => setReviewNotes(e.target.value)}
-                disabled={selected.status !== "pending" || submitting}
-                placeholder="Optional notes captured with approval/rejection (included in changelog rationale on approve)"
-                style={{
-                  width: "100%",
-                  minHeight: 80,
-                  padding: 10,
-                  borderRadius: 6,
-                  border: `1px solid ${D.border}`,
-                  background: D.input,
-                  color: "#0F172A",
-                  fontSize: 12,
-                  fontFamily: ROBOTO,
-                  resize: "vertical",
-                  outline: "none",
-                }}
-              />{" "}
-            </div>{" "}
-            <div
-              style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}
-            >
-              {" "}
-              <button
-                onClick={() => !submitting && setSelected(null)}
-                disabled={submitting}
-                style={{
-                  padding: "8px 16px",
-                  borderRadius: 6,
-                  border: `1px solid ${D.border}`,
-                  background: D.white,
-                  color: D.text,
-                  fontSize: 12,
-                  fontWeight: 500,
-                  cursor: submitting ? "not-allowed" : "pointer",
-                }}
-              >
-                Close
-              </button>
-              {selected.status === "pending" && canEditPricing() && (
-                <>
-                  {" "}
-                  <button
-                    onClick={() => {
-                      if (
-                        window.confirm(
-                          `Reject proposal #${selected.id}? This cannot be undone.`,
-                        )
-                      )
-                        submitAction("reject");
-                    }}
-                    disabled={submitting}
-                    style={{
-                      padding: "8px 16px",
-                      borderRadius: 6,
-                      border: "none",
-                      background: D.red,
-                      color: D.white,
-                      fontSize: 12,
-                      fontWeight: 700,
-                      cursor: submitting ? "not-allowed" : "pointer",
-                      opacity: submitting ? 0.6 : 1,
-                    }}
-                  >
-                    Reject
-                  </button>{" "}
-                  <button
-                    onClick={() => {
-                      if (
-                        window.confirm(
-                          `Approve proposal #${selected.id}?\n\nThis will:\n• UPDATE pricing_config (${selected.config_key})\n• INSERT pricing_changelog entry\n• Bust engine caches (takes effect immediately)`,
-                        )
-                      )
-                        submitAction("approve");
-                    }}
-                    disabled={submitting}
-                    style={{
-                      padding: "8px 16px",
-                      borderRadius: 6,
-                      border: "none",
-                      background: D.green,
-                      color: D.white,
-                      fontSize: 12,
-                      fontWeight: 700,
-                      cursor: submitting ? "not-allowed" : "pointer",
-                      opacity: submitting ? 0.6 : 1,
-                    }}
-                  >
-                    {submitting ? "Working..." : "Approve"}
-                  </button>{" "}
-                </>
-              )}
-            </div>{" "}
-          </div>{" "}
-        </div>,
-        document.body,
+    <Card>
+      <CardHeader className="flex flex-wrap items-center justify-between gap-3">
+        <CardTitle className="text-16">Pricing proposals</CardTitle>
+        <div className="flex flex-wrap gap-2" aria-label="Proposal status">{statusOptions.map((status) => <Button key={status} variant={statusFilter === status ? "primary" : "secondary"} aria-pressed={statusFilter === status} onClick={() => setStatusFilter(status)}>{status[0].toUpperCase() + status.slice(1)}</Button>)}</div>
+      </CardHeader>
+      <CardBody className="space-y-4">
+        {feedback && <ActionFeedback error={feedback.error}>{feedback.message}</ActionFeedback>}
+        {loading ? <ActionFeedback>Loading proposals...</ActionFeedback> : proposals.length === 0 ? <p className="py-8 text-center text-ink-secondary">No {statusFilter === "all" ? "" : `${statusFilter} `}proposals.</p> : (
+          <Table className="min-w-[900px]" aria-label="Pricing proposals">
+            <THead><TR><TH>Config key</TH><TH>Change</TH><TH align="center">% change</TH><TH>Source</TH><TH>Status</TH><TH>Created</TH><TH align="right">Actions</TH></TR></THead>
+            <TBody>{proposals.map((proposal) => <TR key={proposal.id} className="cursor-pointer" onClick={() => openProposal(proposal)}>
+              <TD nums className="font-medium">{proposal.config_key}</TD><TD nums><span className="text-ink-secondary">{formatValue(proposal.current_value)}</span> → <span className="font-medium">{formatValue(proposal.proposed_value)}</span></TD><TD align="center"><PercentBadge value={proposal.pct_change} /></TD><TD>{proposal.trigger_source || "—"}</TD><TD><StatusBadge status={proposal.status} /></TD><TD nums>{formatDate(proposal.created_at)}</TD><TD align="right">{proposal.status === "pending" && <Button size="sm" onClick={(event) => { event.stopPropagation(); openProposal(proposal); }}>Review</Button>}</TD>
+            </TR>)}</TBody>
+          </Table>
         )}
-    </div>
+      </CardBody>
+      <Dialog open={Boolean(selected)} onClose={submitting ? undefined : () => setSelected(null)} size="md">
+        {selected && <>
+          <DialogHeader><DialogTitle>Proposal #{selected.id}</DialogTitle><StatusBadge status={selected.status} /></DialogHeader>
+          <DialogBody className="space-y-4">
+            <dl className="grid grid-cols-[130px_minmax(0,1fr)] gap-x-3 gap-y-2 text-ui-body">
+              <dt className="text-ink-secondary">Config key</dt><dd className="break-words u-nums">{selected.config_key}</dd>
+              <dt className="text-ink-secondary">Current</dt><dd className="break-words u-nums">{formatValue(selected.current_value)}</dd>
+              <dt className="text-ink-secondary">Proposed</dt><dd className="break-words font-medium u-nums">{formatValue(selected.proposed_value)}</dd>
+              <dt className="text-ink-secondary">% change</dt><dd><PercentBadge value={selected.pct_change} />{selected.pct_change == null && "—"}</dd>
+              <dt className="text-ink-secondary">Source</dt><dd>{selected.trigger_source || "—"}</dd>
+              <dt className="text-ink-secondary">Created</dt><dd className="u-nums">{formatDate(selected.created_at)}</dd>
+              {selected.reviewed_at && <><dt className="text-ink-secondary">Reviewed</dt><dd>{formatDate(selected.reviewed_at)} by tech {selected.reviewed_by}</dd></>}
+            </dl>
+            {selected.evidence && <JsonBlock title="Evidence" value={selected.evidence} />}
+            {selected.price_impact && <JsonBlock title="Price impact" value={selected.price_impact} />}
+            <Textarea aria-label="Review notes" value={reviewNotes} onChange={(event) => setReviewNotes(event.target.value)} disabled={selected.status !== "pending" || submitting} placeholder="Optional notes captured with approval/rejection (included in changelog rationale on approve)" rows={4} />
+          </DialogBody>
+          <DialogFooter>
+            <Button variant="secondary" onClick={() => setSelected(null)} disabled={submitting}>Close</Button>
+            {selected.status === "pending" && canEditPricing() && <>
+              <Button variant="danger" loading={submitting} onClick={() => { if (window.confirm(`Reject proposal #${selected.id}? This cannot be undone.`)) submitAction("reject"); }}>Reject</Button>
+              <Button loading={submitting} onClick={() => { if (window.confirm(`Approve proposal #${selected.id}?\n\nThis will:\n• UPDATE pricing_config (${selected.config_key})\n• INSERT pricing_changelog entry\n• Bust engine caches (takes effect immediately)`)) submitAction("approve"); }}>{submitting ? "Working..." : "Approve"}</Button>
+            </>}
+          </DialogFooter>
+        </>}
+      </Dialog>
+    </Card>
   );
 }
 
-// ── Reusable inline-edit cell ──
-function EditCell({ value, onSave, type = "number", width = 70 }) {
+function EditCell({ value, onSave, type = "number" }) {
   const [editing, setEditing] = useState(false);
-  const [val, setVal] = useState(value);
-
-  if (editing) {
-    return (
-      <input
-        autoFocus
-        type={type}
-        value={val}
-        onChange={(e) => setVal(e.target.value)}
-        onBlur={() => {
-          onSave(type === "number" ? Number(val) : val);
-          setEditing(false);
-        }}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            onSave(type === "number" ? Number(val) : val);
-            setEditing(false);
-          }
-          if (e.key === "Escape") setEditing(false);
-        }}
-        style={{
-          width,
-          padding: "4px 6px",
-          background: D.input,
-          border: `1px solid ${D.teal}`,
-          borderRadius: 4,
-          color: "#0F172A",
-          fontSize: 13,
-          fontFamily: ROBOTO,
-          textAlign: "right",
-          outline: "none",
-        }}
-      />
-    );
-  }
+  const [draft, setDraft] = useState(value);
   const editable = canEditPricing();
-  return (
-    <span
-      onClick={editable ? () => {
-        setVal(value);
-        setEditing(true);
-      } : undefined}
-      style={{
-        cursor: editable ? "pointer" : "default",
-        padding: "4px 6px",
-        borderRadius: 4,
-        fontSize: 13,
-        fontFamily: ROBOTO,
-        color: "#0F172A",
-        display: "inline-block",
-        minWidth: width,
-        textAlign: "right",
-      }}
-      title={editable ? "Click to edit" : "Read-only — pricing edits are admin-only"}
-    >
-      {typeof value === "number"
-        ? value < 1 && value > 0
-          ? `${(value * 100).toFixed(1)}%`
-          : value.toLocaleString(undefined, {
-              minimumFractionDigits: value % 1 ? 2 : 0,
-              maximumFractionDigits: 4,
-            })
-        : value}
-    </span>
-  );
+  const finish = () => { onSave(type === "number" ? Number(draft) : draft); setEditing(false); };
+  if (editing) return <Input autoFocus type={type} value={draft} onChange={(event) => setDraft(event.target.value)} onBlur={finish} onKeyDown={(event) => { if (event.key === "Enter") finish(); if (event.key === "Escape") setEditing(false); }} className="min-w-20 text-right u-nums" />;
+  return <button type="button" disabled={!editable} onClick={() => { setDraft(value); setEditing(true); }} className="min-h-11 min-w-20 rounded-sm px-2 text-right text-ui-body text-zinc-900 u-focus-ring u-nums enabled:hover:bg-zinc-100 disabled:cursor-default" title={editable ? "Click to edit" : "Read-only — pricing edits are admin-only"}>{typeof value === "number" ? (value < 1 && value > 0 ? `${(value * 100).toFixed(1)}%` : value.toLocaleString(undefined, { minimumFractionDigits: value % 1 ? 2 : 0, maximumFractionDigits: 4 })) : String(value)}</button>;
 }
 
-// ── Config card for key-value JSON data ──
 function ConfigCard({ config, onUpdate }) {
   const data = config.data;
-  const isSimple =
-    typeof data === "object" && !Array.isArray(data) && data !== null;
   const [expanded, setExpanded] = useState(false);
   const [rawEdit, setRawEdit] = useState(false);
   const [rawText, setRawText] = useState("");
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
 
-  // Immutable set at a nested path — the structured editors below recurse
-  // into nested blobs (e.g. pest_base.initial_roach.display.regular), so a
-  // leaf save must rewrite its ancestors, not stamp the leaf's key at the
-  // config root (that silently added a junk top-level key and left the real
-  // nested value untouched — codex P2 on PR #3078).
-  const setAtPath = (obj, path, value) => {
+  const setAtPath = (object, path, value) => {
     if (!path.length) return value;
     const [head, ...rest] = path;
-    const base = Array.isArray(obj) ? [...obj] : { ...(obj || {}) };
+    const base = Array.isArray(object) ? [...object] : { ...(object || {}) };
     base[head] = setAtPath(base[head], rest, value);
     return base;
   };
-
-  const handlePathUpdate = async (path, newVal) => {
-    const updated = setAtPath(data, path, newVal);
-    setSaving(true);
+  const saveData = async (updated) => {
+    setSaving(true); setError("");
     try {
-      await af(`/admin/pricing-config/${config.config_key}`, {
-        method: "PUT",
-        body: JSON.stringify({ data: updated }),
-      });
+      await af(`/admin/pricing-config/${config.config_key}`, { method: "PUT", body: JSON.stringify({ data: updated }) });
       onUpdate(config.config_key, updated);
-    } catch (e) {
-      alert("Save failed: " + e.message);
-    } finally {
-      setSaving(false);
+      return true;
+    } catch (nextError) {
+      setError(`Save failed: ${nextError.message}`);
+      return false;
     }
+    finally { setSaving(false); }
   };
-
+  const handlePathUpdate = (path, value) => saveData(setAtPath(data, path, value));
   const handleRawSave = async () => {
-    try {
-      const parsed = JSON.parse(rawText);
-      setSaving(true);
-      await af(`/admin/pricing-config/${config.config_key}`, {
-        method: "PUT",
-        body: JSON.stringify({ data: parsed }),
-      });
-      onUpdate(config.config_key, parsed);
-      setRawEdit(false);
-    } catch (e) {
-      alert("Save failed: " + e.message);
-    } finally {
-      setSaving(false);
-    }
+    try { const parsed = JSON.parse(rawText); if (await saveData(parsed)) setRawEdit(false); }
+    catch (nextError) { setError(`Save failed: ${nextError.message}`); }
   };
 
-  // Render nested objects (like WaveGuard tiers)
-  const renderValue = (key, val, parentPath = []) => {
-    const path = [...parentPath, key];
-    if (Array.isArray(val)) {
-      return (
-        <div
-          key={key}
-          style={{
-            marginBottom: 8,
-            paddingLeft: 12,
-            borderLeft: `2px solid ${D.border}`,
-          }}
-        >
-          {" "}
-          <div
-            style={{
-              fontSize: 12,
-              fontWeight: 500,
-              color: D.teal,
-              marginBottom: 4,
-              textTransform: "capitalize",
-            }}
-          >
-            {key.replace(/_/g, " ")}
-          </div>
-          {renderArray(val, path)}
-        </div>
-      );
-    }
-    if (typeof val === "object" && val !== null) {
-      return (
-        <div
-          key={key}
-          style={{
-            marginBottom: 8,
-            paddingLeft: 12,
-            borderLeft: `2px solid ${D.border}`,
-          }}
-        >
-          {" "}
-          <div
-            style={{
-              fontSize: 12,
-              fontWeight: 500,
-              color: D.teal,
-              marginBottom: 4,
-              textTransform: "capitalize",
-            }}
-          >
-            {key.replace(/_/g, " ")}
-          </div>
-          {Object.entries(val).map(([k, v]) =>
-            typeof v === "object" && v !== null ? (
-              renderValue(k, v, path)
-            ) : (
-              <div
-                key={k}
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  padding: "3px 0",
-                }}
-              >
-                {" "}
-                <span
-                  style={{
-                    fontSize: 12,
-                    color: D.muted,
-                    textTransform: "capitalize",
-                  }}
-                >
-                  {k.replace(/_/g, " ")}
-                </span>{" "}
-                <EditCell
-                  value={v}
-                  onSave={(newV) => {
-                    const nested = { ...val, [k]: newV };
-                    handlePathUpdate(path, nested);
-                  }}
-                  type={typeof v === "number" ? "number" : "text"}
-                />{" "}
-              </div>
-            ),
-          )}
-        </div>
-      );
-    }
-    return (
-      <div
-        key={key}
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          padding: "4px 0",
-          borderBottom: `1px solid ${D.border}22`,
-        }}
-      >
-        {" "}
-        <span
-          style={{ fontSize: 12, color: D.muted, textTransform: "capitalize" }}
-        >
-          {key.replace(/_/g, " ")}
-        </span>{" "}
-        <EditCell
-          value={val}
-          onSave={(newV) => handlePathUpdate(path, newV)}
-          type={typeof val === "number" ? "number" : "text"}
-        />{" "}
-      </div>
-    );
-  };
-
-  // Handle array data (breakpoints, brackets)
-  // parentPath: full path of this array inside the config blob (array of
-  // keys), or null for the read-only top-level array view. Editable cells
-  // rewrite the array at its real nested path (see setAtPath above).
-  const renderArray = (arr, parentPath = null) => {
-    if (arr.length === 0)
-      return <div style={{ color: D.muted, fontSize: 12 }}>Empty</div>;
+  const renderArray = (array, parentPath = null) => {
+    if (array.length === 0) return <p className="text-ink-secondary">Empty</p>;
     const parentKey = Array.isArray(parentPath) && parentPath.length > 0 ? parentPath : null;
-    const first = arr[0];
-    if (typeof first === "object" && !Array.isArray(first)) {
-      const cols = Object.keys(first);
-      const updateCell = (rowIdx, col, newVal) => {
-        const next = arr.map((r, i) =>
-          i === rowIdx ? { ...r, [col]: newVal } : r,
-        );
-        if (parentKey) handlePathUpdate(parentKey, next);
-      };
-      const deleteRow = (rowIdx) => {
-        const next = arr.filter((_, i) => i !== rowIdx);
-        if (parentKey) handlePathUpdate(parentKey, next);
-      };
-      const addRow = () => {
-        const blank = Object.fromEntries(
-          cols.map((c) => [c, typeof first[c] === "number" ? 0 : ""]),
-        );
-        const next = [...arr, blank];
-        if (parentKey) handlePathUpdate(parentKey, next);
-      };
-      return (
-        <div style={{ overflowX: "auto" }}>
-          {" "}
-          <table
-            style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}
-          >
-            {" "}
-            <thead>
-              {" "}
-              <tr>
-                {cols.map((c) => (
-                  <th
-                    key={c}
-                    style={{
-                      padding: "4px 8px",
-                      textAlign: "left",
-                      color: D.muted,
-                      borderBottom: `1px solid ${D.border}`,
-                      fontSize: 11,
-                      textTransform: "capitalize",
-                    }}
-                  >
-                    {c.replace(/_/g, " ")}
-                  </th>
-                ))}
-                {parentKey && (
-                  <th
-                    style={{ borderBottom: `1px solid ${D.border}`, width: 30 }}
-                  />
-                )}
-              </tr>{" "}
-            </thead>{" "}
-            <tbody>
-              {arr.map((row, i) => (
-                <tr key={i}>
-                  {cols.map((c) => (
-                    <td
-                      key={c}
-                      style={{
-                        padding: "3px 8px",
-                        color: "#0F172A",
-                        fontFamily: ROBOTO,
-                      }}
-                    >
-                      {parentKey ? (
-                        <EditCell
-                          value={row[c]}
-                          onSave={(v) => updateCell(i, c, v)}
-                          type={typeof row[c] === "number" ? "number" : "text"}
-                          width={70}
-                        />
-                      ) : typeof row[c] === "number" ? (
-                        row[c].toLocaleString()
-                      ) : (
-                        String(row[c])
-                      )}
-                    </td>
-                  ))}
-                  {parentKey && (
-                    <td style={{ padding: "3px 4px", textAlign: "right" }}>
-                      {" "}
-                      <button
-                        onClick={() => deleteRow(i)}
-                        title="Delete row"
-                        style={{
-                          background: "transparent",
-                          border: "none",
-                          color: D.red,
-                          cursor: "pointer",
-                          fontSize: 14,
-                          padding: "0 4px",
-                        }}
-                      >
-                        ×
-                      </button>{" "}
-                    </td>
-                  )}
-                </tr>
-              ))}
-            </tbody>{" "}
-          </table>
-          {parentKey && (
-            <button
-              onClick={addRow}
-              style={{
-                marginTop: 6,
-                fontSize: 11,
-                padding: "3px 10px",
-                borderRadius: 4,
-                border: `1px solid ${D.border}`,
-                background: "transparent",
-                color: D.teal,
-                cursor: "pointer",
-              }}
-            >
-              + Add row
-            </button>
-          )}
-        </div>
-      );
-    }
-    // Array of arrays (bracket data)
-    return (
-      <pre
-        style={{
-          fontSize: 11,
-          color: D.muted,
-          margin: 0,
-          fontFamily: ROBOTO,
-          whiteSpace: "pre-wrap",
-        }}
-      >
-        {JSON.stringify(arr, null, 2)}
-      </pre>
-    );
+    const first = array[0];
+    if (typeof first !== "object" || Array.isArray(first)) return <pre className="overflow-auto rounded-md bg-zinc-50 p-3 text-ui-body text-zinc-700 u-nums">{JSON.stringify(array, null, 2)}</pre>;
+    const columns = Object.keys(first);
+    const updateCell = (rowIndex, column, value) => { if (parentKey) handlePathUpdate(parentKey, array.map((row, index) => index === rowIndex ? { ...row, [column]: value } : row)); };
+    const deleteRow = (rowIndex) => { if (parentKey) handlePathUpdate(parentKey, array.filter((_, index) => index !== rowIndex)); };
+    const addRow = () => { if (parentKey) handlePathUpdate(parentKey, [...array, Object.fromEntries(columns.map((column) => [column, typeof first[column] === "number" ? 0 : ""]))]); };
+    return <div className="space-y-2"><Table className="min-w-[580px]"><THead><TR>{columns.map((column) => <TH key={column}>{column.replace(/_/g, " ")}</TH>)}{parentKey && canEditPricing() && <TH aria-label="Actions" />}</TR></THead><TBody>{array.map((row, rowIndex) => <TR key={`row-${rowIndex}`}>{columns.map((column) => <TD key={column}>{parentKey ? <EditCell value={row[column]} onSave={(value) => updateCell(rowIndex, column, value)} type={typeof row[column] === "number" ? "number" : "text"} /> : formatValue(row[column])}</TD>)}{parentKey && canEditPricing() && <TD align="right"><Button variant="ghost" size="sm" aria-label={`Delete row ${rowIndex + 1}`} onClick={() => deleteRow(rowIndex)}><Trash2 size={16} aria-hidden /></Button></TD>}</TR>)}</TBody></Table>{parentKey && canEditPricing() && <Button variant="secondary" size="sm" onClick={addRow}><Plus size={16} aria-hidden /> Add row</Button>}</div>;
   };
 
-  return (
-    <div
-      style={{
-        background: D.card,
-        borderRadius: 10,
-        border: `1px solid ${D.border}`,
-        marginBottom: 8,
-        overflow: "hidden",
-      }}
-    >
-      {" "}
-      <div
-        onClick={() => setExpanded(!expanded)}
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          padding: "12px 16px",
-          cursor: "pointer",
-        }}
-      >
-        {" "}
-        <div>
-          {" "}
-          <span style={{ fontSize: 13, fontWeight: 500, color: "#0F172A" }}>
-            {config.name}
-          </span>
-          {saving && (
-            <span style={{ marginLeft: 8, fontSize: 10, color: D.green }}>
-              Saving...
-            </span>
-          )}
-        </div>{" "}
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          {expanded && canEditPricing() && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                setRawEdit(!rawEdit);
-                if (!rawEdit) setRawText(JSON.stringify(data, null, 2));
-              }}
-              style={{
-                fontSize: 10,
-                padding: "2px 8px",
-                borderRadius: 4,
-                border: `1px solid ${D.border}`,
-                background: "transparent",
-                color: D.muted,
-                cursor: "pointer",
-              }}
-            >
-              {rawEdit ? "Structured" : "Raw JSON"}
-            </button>
-          )}
-          <span style={{ fontSize: 12, color: D.muted }}>
-            {expanded ? "Collapse" : "Expand"}
-          </span>{" "}
-        </div>{" "}
-      </div>
-      {expanded && (
-        <div style={{ padding: "0 16px 14px" }}>
-          {rawEdit ? (
-            <div>
-              {" "}
-              <textarea
-                value={rawText}
-                onChange={(e) => setRawText(e.target.value)}
-                rows={Math.min(20, rawText.split("\n").length + 1)}
-                style={{
-                  width: "100%",
-                  padding: 10,
-                  background: "#FFFFFF",
-                  border: `1px solid ${D.border}`,
-                  borderRadius: 8,
-                  color: "#0F172A",
-                  fontSize: 12,
-                  fontFamily: ROBOTO,
-                  resize: "vertical",
-                  outline: "none",
-                  boxSizing: "border-box",
-                }}
-              />{" "}
-              <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
-                {" "}
-                <button
-                  onClick={handleRawSave}
-                  disabled={saving}
-                  style={{
-                    fontSize: 11,
-                    padding: "4px 12px",
-                    borderRadius: 4,
-                    border: "none",
-                    cursor: "pointer",
-                    background: D.green,
-                    color: D.white,
-                  }}
-                >
-                  {saving ? "..." : "Save"}
-                </button>{" "}
-                <button
-                  onClick={() => setRawEdit(false)}
-                  style={{
-                    fontSize: 11,
-                    padding: "4px 12px",
-                    borderRadius: 4,
-                    cursor: "pointer",
-                    background: "transparent",
-                    color: D.muted,
-                    border: `1px solid ${D.border}`,
-                  }}
-                >
-                  Cancel
-                </button>{" "}
-              </div>{" "}
-            </div>
-          ) : isSimple ? (
-            <div>{Object.entries(data).map(([k, v]) => renderValue(k, v))}</div>
-          ) : Array.isArray(data) ? (
-            renderArray(data)
-          ) : (
-            <pre
-              style={{
-                fontSize: 11,
-                color: D.muted,
-                margin: 0,
-                fontFamily: ROBOTO,
-                whiteSpace: "pre-wrap",
-              }}
-            >
-              {JSON.stringify(data, null, 2)}
-            </pre>
-          )}
-        </div>
-      )}
-    </div>
-  );
+  const renderValue = (key, value, parentPath = []) => {
+    const path = [...parentPath, key];
+    if (Array.isArray(value)) return <div key={key} className="mb-3 border-l-2 border-zinc-200 pl-3"><div className="mb-2 font-medium capitalize text-zinc-900">{key.replace(/_/g, " ")}</div>{renderArray(value, path)}</div>;
+    if (typeof value === "object" && value !== null) return <div key={key} className="mb-3 border-l-2 border-zinc-200 pl-3"><div className="mb-2 font-medium capitalize text-zinc-900">{key.replace(/_/g, " ")}</div>{Object.entries(value).map(([nestedKey, nestedValue]) => renderValue(nestedKey, nestedValue, path))}</div>;
+    return <div key={key} className="flex min-h-11 items-center justify-between gap-3 border-b border-zinc-100 py-1"><span className="capitalize text-ink-secondary">{key.replace(/_/g, " ")}</span>{typeof value === "boolean" ? <Switch checked={value} disabled={!canEditPricing()} aria-label={key.replace(/_/g, " ")} onChange={(checked) => handlePathUpdate(path, checked)} /> : <EditCell value={value} onSave={(nextValue) => handlePathUpdate(path, nextValue)} type={typeof value === "number" ? "number" : "text"} />}</div>;
+  };
+
+  const isObject = typeof data === "object" && data !== null && !Array.isArray(data);
+  return <Card>
+    <CardHeader className="flex flex-wrap items-center justify-between gap-3">
+      <button type="button" onClick={() => setExpanded(!expanded)} className="flex min-h-11 flex-1 items-center gap-2 text-left text-ui-body font-medium text-zinc-900 u-focus-ring" aria-expanded={expanded}>{expanded ? <ChevronDown size={17} aria-hidden /> : <ChevronRight size={17} aria-hidden />}{config.name}</button>
+      <div className="flex items-center gap-2">{saving && <Badge tone="strong">Saving...</Badge>}{expanded && canEditPricing() && <Button variant="secondary" size="sm" onClick={() => { setRawEdit(!rawEdit); if (!rawEdit) setRawText(JSON.stringify(data, null, 2)); }}>{rawEdit ? "Structured" : "Raw JSON"}</Button>}</div>
+    </CardHeader>
+    {expanded && <CardBody className="space-y-3">{error && <ActionFeedback error>{error}</ActionFeedback>}{rawEdit ? <><Textarea aria-label="Configuration JSON" value={rawText} onChange={(event) => setRawText(event.target.value)} rows={Math.min(20, rawText.split("\n").length + 1)} className="u-nums" /><div className="flex gap-2"><Button onClick={handleRawSave} loading={saving}>Save</Button><Button variant="secondary" onClick={() => setRawEdit(false)}>Cancel</Button></div></> : isObject ? <div>{Object.entries(data).map(([key, value]) => renderValue(key, value))}</div> : Array.isArray(data) ? renderArray(data) : <pre className="overflow-auto rounded-md bg-zinc-50 p-3 text-ui-body text-zinc-700 u-nums">{JSON.stringify(data, null, 2)}</pre>}</CardBody>}
+  </Card>;
 }
 
-// ── Lawn Brackets Tab ──
 function LawnBracketsTab() {
   const [tracks, setTracks] = useState({});
   const [loading, setLoading] = useState(true);
   const [activeTrack, setActiveTrack] = useState("st_augustine");
   const [saving, setSaving] = useState(false);
-  // basic/4x fully retired (owner 2026-08-04); header shows application
-  // counts only — no Standard/Enhanced/Premium naming.
+  const [error, setError] = useState("");
   const tiers = ["standard", "enhanced", "premium"];
-  const trackLabels = {
-    st_augustine: "St. Augustine",
-    bermuda: "Bermuda",
-    zoysia: "Zoysia",
-    bahia: "Bahia",
-  };
-
-  useEffect(() => {
-    af("/admin/pricing-config/lawn-brackets")
-      .then((d) => {
-        setTracks(d.tracks || {});
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, []);
-
+  const trackLabels = { st_augustine: "St. Augustine", bermuda: "Bermuda", zoysia: "Zoysia", bahia: "Bahia" };
+  useEffect(() => { af("/admin/pricing-config/lawn-brackets").then((data) => setTracks(data.tracks || {})).catch(() => {}).finally(() => setLoading(false)); }, []);
   const handleCellUpdate = async (sqft, tier, newPrice) => {
-    const trackData = tracks[activeTrack] || [];
-    const updated = trackData.map((r) =>
-      r.sqft_bracket === sqft && r.tier === tier
-        ? { ...r, monthly_price: newPrice }
-        : r,
-    );
-    setTracks((prev) => ({ ...prev, [activeTrack]: updated }));
-    setSaving(true);
-    try {
-      await af(`/admin/pricing-config/lawn-brackets/${activeTrack}`, {
+    const updated = (tracks[activeTrack] || []).map((row) => row.sqft_bracket === sqft && row.tier === tier ? { ...row, monthly_price: newPrice } : row);
+    setTracks((previous) => ({ ...previous, [activeTrack]: updated })); setSaving(true); setError("");
+    try { await af(`/admin/pricing-config/lawn-brackets/${activeTrack}`, {
         method: "PUT",
         body: JSON.stringify({
           brackets: [{ sqft_bracket: sqft, tier, monthly_price: newPrice }],
         }),
-      });
-    } catch (e) {
-      alert("Save failed: " + e.message);
-    } finally {
-      setSaving(false);
-    }
+      }); }
+    catch (nextError) { setError(`Save failed: ${nextError.message}`); }
+    finally { setSaving(false); }
   };
-
-  if (loading)
-    return (
-      <div style={{ color: D.muted, padding: 20 }}>Loading brackets...</div>
-    );
-
+  if (loading) return <ActionFeedback>Loading brackets...</ActionFeedback>;
   const trackKeys = Object.keys(tracks);
-  if (trackKeys.length === 0)
-    return (
-      <div style={{ color: D.muted, padding: 20 }}>
-        No bracket data found. Run the pricing_config migration first.
-      </div>
-    );
-
+  if (trackKeys.length === 0) return <ActionFeedback>No bracket data found. Run the pricing_config migration first.</ActionFeedback>;
   const trackData = tracks[activeTrack] || [];
-  // Group by sqft_bracket
-  const sqftBrackets = [...new Set(trackData.map((r) => r.sqft_bracket))].sort(
-    (a, b) => a - b,
-  );
-
-  return (
-    <div style={{ fontFamily: ROBOTO }}>
-      {" "}
-      <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
-        {trackKeys.map((tk) => (
-          <button
-            key={tk}
-            onClick={() => setActiveTrack(tk)}
-            style={{
-              padding: "6px 14px",
-              borderRadius: 6,
-              fontSize: 12,
-              fontWeight: 500,
-              cursor: "pointer",
-              background: activeTrack === tk ? D.green : D.card,
-              color: activeTrack === tk ? D.white : D.muted,
-              border: `1px solid ${activeTrack === tk ? D.green : D.border}`,
-            }}
-          >
-            {trackLabels[tk] || tk}
-          </button>
-        ))}
-        {saving && (
-          <span style={{ fontSize: 11, color: D.green, padding: "6px 0" }}>
-            Saving...
-          </span>
-        )}
-      </div>{" "}
-      <div style={{ overflowX: "auto" }}>
-        {" "}
-        <table
-          style={{ width: "100%", fontSize: 13, borderCollapse: "collapse" }}
-        >
-          {" "}
-          <thead>
-            {" "}
-            <tr>
-              {" "}
-              <th
-                style={{
-                  padding: "8px 12px",
-                  textAlign: "left",
-                  color: D.muted,
-                  borderBottom: `2px solid ${D.border}`,
-                  fontSize: 11,
-                  fontWeight: 700,
-                }}
-              >
-                Lawn SqFt
-              </th>
-              {tiers.map((t) => (
-                <th
-                  key={t}
-                  style={{
-                    padding: "8px 12px",
-                    textAlign: "right",
-                    color: D.muted,
-                    borderBottom: `2px solid ${D.border}`,
-                    fontSize: 11,
-                    fontWeight: 700,
-                    textTransform: "capitalize",
-                  }}
-                >
-                  {`${t === "standard" ? "6 Applications" : t === "enhanced" ? "9 Applications" : "12 Applications"} / yr`}
-                </th>
-              ))}
-            </tr>{" "}
-          </thead>{" "}
-          <tbody>
-            {sqftBrackets.map((sqft) => (
-              <tr
-                key={sqft}
-                style={{ borderBottom: `1px solid ${D.border}22` }}
-              >
-                {" "}
-                <td
-                  style={{
-                    padding: "6px 12px",
-                    color: D.text,
-                    fontFamily: ROBOTO,
-                    fontSize: 13,
-                  }}
-                >
-                  {sqft === 0 ? "0" : sqft.toLocaleString()}
-                </td>
-                {tiers.map((tier) => {
-                  const row = trackData.find(
-                    (r) => r.sqft_bracket === sqft && r.tier === tier,
-                  );
-                  const price = row ? Number(row.monthly_price) : 0;
-                  return (
-                    <td
-                      key={tier}
-                      style={{ padding: "4px 12px", textAlign: "right" }}
-                    >
-                      {" "}
-                      <span style={{ color: D.muted, fontSize: 12 }}>
-                        $
-                      </span>{" "}
-                      <EditCell
-                        value={price}
-                        onSave={(v) => handleCellUpdate(sqft, tier, v)}
-                        width={50}
-                      />{" "}
-                    </td>
-                  );
-                })}
-              </tr>
-            ))}
-          </tbody>{" "}
-        </table>{" "}
-      </div>{" "}
-    </div>
-  );
+  const squareFootBrackets = [...new Set(trackData.map((row) => row.sqft_bracket))].sort((a, b) => a - b);
+  return <Card><CardHeader className="flex flex-wrap items-center justify-between gap-3"><CardTitle className="text-16">Monthly price brackets</CardTitle>{saving && <Badge tone="strong">Saving...</Badge>}</CardHeader><CardBody className="space-y-4">
+    {error && <ActionFeedback error>{error}</ActionFeedback>}
+    <div className="flex flex-wrap gap-2" aria-label="Lawn type">{trackKeys.map((track) => <Button key={track} variant={activeTrack === track ? "primary" : "secondary"} aria-pressed={activeTrack === track} onClick={() => setActiveTrack(track)}>{trackLabels[track] || track}</Button>)}</div>
+    <Table className="min-w-[650px]" aria-label="Monthly lawn price brackets"><THead><TR><TH>Lawn SqFt</TH>{tiers.map((tier) => <TH key={tier} align="right">{tier === "standard" ? "6 applications / yr" : tier === "enhanced" ? "9 applications / yr" : "12 applications / yr"}</TH>)}</TR></THead><TBody>{squareFootBrackets.map((squareFeet) => <TR key={squareFeet}><TD nums>{squareFeet.toLocaleString()}</TD>{tiers.map((tier) => { const row = trackData.find((item) => item.sqft_bracket === squareFeet && item.tier === tier); return <TD key={tier} align="right"><span className="mr-1 text-ink-secondary">$</span><EditCell value={row ? Number(row.monthly_price) : 0} onSave={(value) => handleCellUpdate(squareFeet, tier, value)} /></TD>; })}</TR>)}</TBody></Table>
+  </CardBody></Card>;
 }
 
-// ── Discount Rules Tab ──
 function DiscountRulesTab() {
   const [rules, setRules] = useState([]);
   const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    af("/admin/pricing-config/discount-rules")
-      .then((d) => {
-        setRules(d.rules || []);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, []);
-
+  const [error, setError] = useState("");
+  useEffect(() => { af("/admin/pricing-config/discount-rules").then((data) => setRules(data.rules || [])).catch(() => {}).finally(() => setLoading(false)); }, []);
   const handleUpdate = async (serviceKey, field, value) => {
-    setRules((prev) =>
-      prev.map((r) =>
-        r.service_key === serviceKey ? { ...r, [field]: value } : r,
-      ),
-    );
-    try {
-      await af(`/admin/pricing-config/discount-rules/${serviceKey}`, {
+    setRules((previous) => previous.map((rule) => rule.service_key === serviceKey ? { ...rule, [field]: value } : rule)); setError("");
+    try { await af(`/admin/pricing-config/discount-rules/${serviceKey}`, {
         method: "PUT",
         body: JSON.stringify({ [field]: value }),
-      });
-    } catch (e) {
-      alert("Save failed: " + e.message);
-    }
+      }); }
+    catch (nextError) { setError(`Save failed: ${nextError.message}`); }
   };
-
-  if (loading)
-    return <div style={{ color: D.muted, padding: 20 }}>Loading...</div>;
-  if (rules.length === 0)
-    return (
-      <div style={{ color: D.muted, padding: 20 }}>
-        No discount rules found. Run the pricing_config migration.
-      </div>
-    );
-
-  return (
-    <div>
-      {" "}
-      <h2
-        style={{
-          margin: "0 0 12px",
-          fontSize: 12,
-          fontWeight: 500,
-          color: "#0F172A",
-          fontFamily: ROBOTO,
-          letterSpacing: "0.02em",
-        }}
-      >
-        Service discount rules
-      </h2>{" "}
-      <div style={{ overflowX: "auto" }}>
-        {" "}
-        <table
-          style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}
-        >
-          {" "}
-          <thead>
-            {" "}
-            <tr>
-              {" "}
-              <th
-                style={{
-                  padding: "8px",
-                  textAlign: "left",
-                  color: D.muted,
-                  borderBottom: `2px solid ${D.border}`,
-                  fontSize: 11,
-                }}
-              >
-                Service
-              </th>{" "}
-              <th
-                style={{
-                  padding: "8px",
-                  textAlign: "center",
-                  color: D.muted,
-                  borderBottom: `2px solid ${D.border}`,
-                  fontSize: 11,
-                }}
-              >
-                Tier Qualifier
-              </th>{" "}
-              <th
-                style={{
-                  padding: "8px",
-                  textAlign: "center",
-                  color: D.muted,
-                  borderBottom: `2px solid ${D.border}`,
-                  fontSize: 11,
-                }}
-              >
-                Max Discount
-              </th>{" "}
-              <th
-                style={{
-                  padding: "8px",
-                  textAlign: "center",
-                  color: D.muted,
-                  borderBottom: `2px solid ${D.border}`,
-                  fontSize: 11,
-                }}
-              >
-                Exclude %
-              </th>{" "}
-              <th
-                style={{
-                  padding: "8px",
-                  textAlign: "center",
-                  color: D.muted,
-                  borderBottom: `2px solid ${D.border}`,
-                  fontSize: 11,
-                }}
-              >
-                Flat Credit
-              </th>{" "}
-              <th
-                style={{
-                  padding: "8px",
-                  textAlign: "center",
-                  color: D.muted,
-                  borderBottom: `2px solid ${D.border}`,
-                  fontSize: 11,
-                }}
-              >
-                Min Tier
-              </th>{" "}
-              <th
-                style={{
-                  padding: "8px",
-                  textAlign: "left",
-                  color: D.muted,
-                  borderBottom: `2px solid ${D.border}`,
-                  fontSize: 11,
-                }}
-              >
-                Notes
-              </th>{" "}
-            </tr>{" "}
-          </thead>{" "}
-          <tbody>
-            {rules.map((r) => (
-              <tr
-                key={r.service_key}
-                style={{ borderBottom: `1px solid ${D.border}22` }}
-              >
-                {" "}
-                <td
-                  style={{
-                    padding: "8px",
-                    color: D.text,
-                    fontWeight: 500,
-                    textTransform: "capitalize",
-                    fontSize: 12,
-                  }}
-                >
-                  {r.service_key.replace(/_/g, " ")}
-                </td>{" "}
-                <td style={{ padding: "8px", textAlign: "center" }}>
-                  {" "}
-                  <input
-                    type="checkbox"
-                    checked={r.tier_qualifier}
-                    disabled={!canEditPricing()}
-                    onChange={(e) =>
-                      handleUpdate(
-                        r.service_key,
-                        "tier_qualifier",
-                        e.target.checked,
-                      )
-                    }
-                    style={{
-                      accentColor: D.teal,
-                      width: 16,
-                      height: 16,
-                      cursor: canEditPricing() ? "pointer" : "default",
-                    }}
-                  />{" "}
-                </td>{" "}
-                <td
-                  style={{
-                    padding: "8px",
-                    textAlign: "center",
-                    fontFamily: ROBOTO,
-                  }}
-                >
-                  {r.max_discount_pct !== null &&
-                  r.max_discount_pct !== undefined ? (
-                    <EditCell
-                      value={Number(r.max_discount_pct)}
-                      onSave={(v) =>
-                        handleUpdate(r.service_key, "max_discount_pct", v)
-                      }
-                      width={50}
-                    />
-                  ) : (
-                    <span style={{ color: D.muted, fontSize: 11 }}>—</span>
-                  )}
-                </td>{" "}
-                <td style={{ padding: "8px", textAlign: "center" }}>
-                  {" "}
-                  <input
-                    type="checkbox"
-                    checked={r.exclude_from_pct_discount}
-                    disabled={!canEditPricing()}
-                    onChange={(e) =>
-                      handleUpdate(
-                        r.service_key,
-                        "exclude_from_pct_discount",
-                        e.target.checked,
-                      )
-                    }
-                    style={{
-                      accentColor: D.red,
-                      width: 16,
-                      height: 16,
-                      cursor: canEditPricing() ? "pointer" : "default",
-                    }}
-                  />{" "}
-                </td>{" "}
-                <td
-                  style={{
-                    padding: "8px",
-                    textAlign: "center",
-                    fontFamily: ROBOTO,
-                  }}
-                >
-                  {r.flat_credit ? (
-                    <EditCell
-                      value={Number(r.flat_credit)}
-                      onSave={(v) =>
-                        handleUpdate(r.service_key, "flat_credit", v)
-                      }
-                      width={50}
-                    />
-                  ) : (
-                    <span style={{ color: D.muted, fontSize: 11 }}>—</span>
-                  )}
-                </td>{" "}
-                <td
-                  style={{
-                    padding: "8px",
-                    textAlign: "center",
-                    color: D.muted,
-                    fontSize: 11,
-                    textTransform: "capitalize",
-                  }}
-                >
-                  {r.flat_credit_min_tier || "—"}
-                </td>{" "}
-                <td
-                  style={{
-                    padding: "8px",
-                    color: D.muted,
-                    fontSize: 11,
-                    maxWidth: 200,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {r.notes || "—"}
-                </td>{" "}
-              </tr>
-            ))}
-          </tbody>{" "}
-        </table>{" "}
-      </div>{" "}
-    </div>
-  );
+  if (loading) return <ActionFeedback>Loading discount rules...</ActionFeedback>;
+  if (rules.length === 0) return <ActionFeedback>No discount rules found. Run the pricing_config migration.</ActionFeedback>;
+  return <Card><CardHeader><CardTitle className="text-16">Service discount rules</CardTitle></CardHeader><CardBody className="space-y-3">{error && <ActionFeedback error>{error}</ActionFeedback>}<Table className="min-w-[900px]" aria-label="Service discount rules"><THead><TR><TH>Service</TH><TH align="center">Tier qualifier</TH><TH align="center">Max discount</TH><TH align="center">Exclude %</TH><TH align="center">Flat credit</TH><TH align="center">Min tier</TH><TH>Notes</TH></TR></THead><TBody>{rules.map((rule) => <TR key={rule.service_key}><TD className="font-medium capitalize">{rule.service_key.replace(/_/g, " ")}</TD><TD align="center"><Switch checked={rule.tier_qualifier} disabled={!canEditPricing()} aria-label={`${rule.service_key} tier qualifier`} onChange={(value) => handleUpdate(rule.service_key, "tier_qualifier", value)} /></TD><TD align="center">{rule.max_discount_pct != null ? <EditCell value={Number(rule.max_discount_pct)} onSave={(value) => handleUpdate(rule.service_key, "max_discount_pct", value)} /> : "—"}</TD><TD align="center"><Switch checked={rule.exclude_from_pct_discount} disabled={!canEditPricing()} aria-label={`${rule.service_key} exclude from percent discount`} onChange={(value) => handleUpdate(rule.service_key, "exclude_from_pct_discount", value)} /></TD><TD align="center">{rule.flat_credit ? <EditCell value={Number(rule.flat_credit)} onSave={(value) => handleUpdate(rule.service_key, "flat_credit", value)} /> : "—"}</TD><TD align="center" className="capitalize">{rule.flat_credit_min_tier || "—"}</TD><TD className="max-w-[240px] truncate text-ink-secondary" title={rule.notes || ""}>{rule.notes || "—"}</TD></TR>)}</TBody></Table></CardBody></Card>;
 }
 
-// ── Products Tab ──
 function ProductsTab() {
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    af("/admin/inventory?limit=200")
-      .then((d) => {
-        setProducts(d.products || []);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, []);
-
-  if (loading)
-    return (
-      <div style={{ color: D.muted, padding: 20 }}>Loading products...</div>
-    );
-
-  return (
-    <div>
-      {" "}
-      <h2
-        style={{
-          margin: "0 0 4px",
-          fontSize: 12,
-          fontWeight: 500,
-          color: "#0F172A",
-          fontFamily: ROBOTO,
-          letterSpacing: "0.02em",
-        }}
-      >
-        Product cost reference
-      </h2>{" "}
-      <div style={{ fontSize: 12, color: D.muted, marginBottom: 16 }}>
-        {products.length} products loaded. Full catalog available under
-        Inventory tab.
-      </div>{" "}
-      <div style={{ overflowX: "auto", maxHeight: 500, overflow: "auto" }}>
-        {" "}
-        <table
-          style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}
-        >
-          {" "}
-          <thead style={{ position: "sticky", top: 0, background: D.card }}>
-            {" "}
-            <tr>
-              {" "}
-              <th
-                style={{
-                  padding: "6px 8px",
-                  textAlign: "left",
-                  color: D.muted,
-                  borderBottom: `2px solid ${D.border}`,
-                  fontSize: 11,
-                }}
-              >
-                Product
-              </th>{" "}
-              <th
-                style={{
-                  padding: "6px 8px",
-                  textAlign: "left",
-                  color: D.muted,
-                  borderBottom: `2px solid ${D.border}`,
-                  fontSize: 11,
-                }}
-              >
-                Category
-              </th>{" "}
-              <th
-                style={{
-                  padding: "6px 8px",
-                  textAlign: "left",
-                  color: D.muted,
-                  borderBottom: `2px solid ${D.border}`,
-                  fontSize: 11,
-                }}
-              >
-                Active Ingredient
-              </th>{" "}
-              <th
-                style={{
-                  padding: "6px 8px",
-                  textAlign: "right",
-                  color: D.muted,
-                  borderBottom: `2px solid ${D.border}`,
-                  fontSize: 11,
-                }}
-              >
-                Best Price
-              </th>{" "}
-              <th
-                style={{
-                  padding: "6px 8px",
-                  textAlign: "right",
-                  color: D.muted,
-                  borderBottom: `2px solid ${D.border}`,
-                  fontSize: 11,
-                }}
-              >
-                Unit Price
-              </th>{" "}
-            </tr>{" "}
-          </thead>{" "}
-          <tbody>
-            {products
-              .filter((p) => p.best_price > 0)
-              .sort((a, b) =>
-                (a.category || "").localeCompare(b.category || ""),
-              )
-              .map((p) => (
-                <tr
-                  key={p.id}
-                  style={{ borderBottom: `1px solid ${D.border}22` }}
-                >
-                  {" "}
-                  <td
-                    style={{ padding: "5px 8px", color: D.text, fontSize: 12 }}
-                  >
-                    {p.product_name || p.name}
-                  </td>{" "}
-                  <td
-                    style={{ padding: "5px 8px", color: D.muted, fontSize: 11 }}
-                  >
-                    {p.category}
-                  </td>{" "}
-                  <td
-                    style={{
-                      padding: "5px 8px",
-                      color: D.muted,
-                      fontSize: 11,
-                      maxWidth: 150,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    {p.active_ingredient || "—"}
-                  </td>{" "}
-                  <td
-                    style={{
-                      padding: "5px 8px",
-                      textAlign: "right",
-                      fontFamily: ROBOTO,
-                      fontSize: 12,
-                      color: D.green,
-                    }}
-                  >
-                    ${Number(p.best_price || 0).toFixed(2)}
-                  </td>{" "}
-                  <td
-                    style={{
-                      padding: "5px 8px",
-                      textAlign: "right",
-                      fontFamily: ROBOTO,
-                      fontSize: 11,
-                      color: D.muted,
-                    }}
-                  >
-                    {p.unit_price ? `$${Number(p.unit_price).toFixed(4)}` : "—"}
-                  </td>{" "}
-                </tr>
-              ))}
-          </tbody>{" "}
-        </table>{" "}
-      </div>{" "}
-    </div>
-  );
+  useEffect(() => { af("/admin/inventory?limit=200").then((data) => setProducts(data.products || [])).catch(() => {}).finally(() => setLoading(false)); }, []);
+  if (loading) return <ActionFeedback>Loading products...</ActionFeedback>;
+  const pricedProducts = products.filter((product) => product.best_price > 0).sort((a, b) => (a.category || "").localeCompare(b.category || ""));
+  return <Card><CardHeader><CardTitle className="text-16">Product cost reference</CardTitle><p className="mt-1 text-ui-body text-ink-secondary">{products.length} products loaded. Full catalog available under Inventory tab.</p></CardHeader><CardBody><Table className="min-w-[760px]" aria-label="Product cost reference"><THead><TR><TH>Product</TH><TH>Category</TH><TH>Active ingredient</TH><TH align="right">Best price</TH><TH align="right">Unit price</TH></TR></THead><TBody>{pricedProducts.map((product) => <TR key={product.id}><TD className="font-medium">{product.product_name || product.name}</TD><TD>{product.category}</TD><TD className="max-w-[220px] truncate text-ink-secondary" title={product.active_ingredient || ""}>{product.active_ingredient || "—"}</TD><TD align="right" nums>${Number(product.best_price || 0).toFixed(2)}</TD><TD align="right" nums>{product.unit_price ? `$${Number(product.unit_price).toFixed(4)}` : "—"}</TD></TR>)}</TBody></Table></CardBody></Card>;
 }
 
-// ── Audit Log ──
 function AuditLog() {
   const [logs, setLogs] = useState([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    af("/admin/pricing-config/audit-log?limit=30")
-      .then((d) => {
-        setLogs(d.logs || []);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, []);
-
-  if (loading) return null;
+  useEffect(() => { af("/admin/pricing-config/audit-log?limit=30").then((data) => setLogs(data.logs || [])).catch(() => {}); }, []);
   if (logs.length === 0) return null;
-
-  return (
-    <div
-      style={{
-        marginTop: 24,
-        background: D.card,
-        borderRadius: 10,
-        border: `1px solid ${D.border}`,
-        padding: 16,
-      }}
-    >
-      {" "}
-      <div
-        style={{
-          fontSize: 13,
-          fontWeight: 500,
-          color: "#0F172A",
-          marginBottom: 12,
-        }}
-      >
-        Recent Changes
-      </div>
-      {logs.map((l, i) => (
-        <div
-          key={i}
-          style={{
-            fontSize: 11,
-            color: D.muted,
-            padding: "4px 0",
-            borderBottom: `1px solid ${D.border}22`,
-          }}
-        >
-          {" "}
-          <span style={{ color: D.teal }}>{l.config_key}</span>{" "}
-          <span style={{ margin: "0 6px" }}>changed by</span>{" "}
-          <span style={{ color: D.text }}>{l.changed_by || "admin"}</span>{" "}
-          <span style={{ margin: "0 6px" }}>—</span>{" "}
-          <span>{new Date(l.changed_at).toLocaleString()}</span>
-          {l.reason && (
-            <span style={{ marginLeft: 8, color: D.amber }}>({l.reason})</span>
-          )}
-        </div>
-      ))}
-    </div>
-  );
+  return <Card><CardHeader><CardTitle className="text-16">Recent changes</CardTitle></CardHeader><CardBody className="divide-y divide-zinc-200">{logs.map((log, index) => <div key={`${log.config_key}-${log.changed_at}-${index}`} className="py-2 text-ui-body text-ink-secondary"><span className="font-medium text-zinc-900 u-nums">{log.config_key}</span> changed by <span className="text-zinc-900">{log.changed_by || "admin"}</span> — <span className="u-nums">{formatDate(log.changed_at, true)}</span>{log.reason && <span> ({log.reason})</span>}</div>)}</CardBody></Card>;
 }
 
-// ── Main Panel ──
 export default function PricingLogicPanel() {
   const [activeTab, setActiveTab] = useState("global");
   const [configs, setConfigs] = useState([]);
   const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    af("/admin/pricing-config")
-      .then((d) => {
-        setConfigs(d.configs || []);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, []);
-
-  const handleConfigUpdate = useCallback((key, newData) => {
-    setConfigs((prev) =>
-      prev.map((c) => (c.config_key === key ? { ...c, data: newData } : c)),
-    );
-  }, []);
-
-  const filteredConfigs = configs.filter((c) => c.category === activeTab);
-
-  return (
-    <div style={{ fontFamily: ROBOTO }}>
-      {/* Tab strip */}
-      <div
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          gap: 4,
-          marginBottom: 20,
-          padding: "4px 0",
-          borderBottom: `1px solid ${D.border}`,
-        }}
-      >
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            onClick={() => setActiveTab(t.key)}
-            style={{
-              padding: "6px 12px",
-              borderRadius: "6px 6px 0 0",
-              fontSize: 11,
-              fontWeight: 500,
-              border: "none",
-              cursor: "pointer",
-              background: activeTab === t.key ? D.teal : "transparent",
-              color: activeTab === t.key ? D.white : D.muted,
-              borderBottom:
-                activeTab === t.key
-                  ? `2px solid ${D.teal}`
-                  : "2px solid transparent",
-            }}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
-      {loading ? (
-        <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
-          Loading pricing configuration...
-        </div>
-      ) : (
-        <>
-          {/* Lawn tab has special bracket grid */}
-          {activeTab === "lawn" && (
-            <div style={{ marginBottom: 20 }}>
-              {" "}
-              <h2
-                style={{
-                  margin: "0 0 12px",
-                  fontSize: 12,
-                  fontWeight: 500,
-                  color: "#0F172A",
-                  fontFamily: ROBOTO,
-                  letterSpacing: "0.02em",
-                }}
-              >
-                Monthly price brackets
-              </h2>{" "}
-              <LawnBracketsTab />{" "}
-            </div>
-          )}
-
-          {/* WaveGuard tab has discount rules */}
-          {activeTab === "waveguard" && (
-            <div style={{ marginBottom: 20 }}>
-              {" "}
-              <DiscountRulesTab /> <div style={{ height: 20 }} />{" "}
-            </div>
-          )}
-
-          {/* Products tab */}
-          {activeTab === "products" && <ProductsTab />}
-
-          {/* Changelog tab */}
-          {activeTab === "proposals" && <ProposalsTab />}
-
-          {activeTab === "changelog" && <ChangelogTab />}
-
-          {/* Config cards for this category */}
-          {activeTab !== "products" &&
-            activeTab !== "changelog" &&
-            activeTab !== "proposals" &&
-            filteredConfigs.length > 0 && (
-              <div>
-                {activeTab !== "lawn" && activeTab !== "waveguard" && (
-                  <h2
-                    style={{
-                      margin: "0 0 12px",
-                      fontSize: 12,
-                      fontWeight: 500,
-                      color: "#0F172A",
-                      fontFamily: ROBOTO,
-                      letterSpacing: "0.02em",
-                    }}
-                  >
-                    {TABS.find((t) => t.key === activeTab)?.label || activeTab}{" "}
-                    Configuration
-                  </h2>
-                )}
-                {activeTab === "waveguard" && (
-                  <h2
-                    style={{
-                      margin: "12px 0 12px",
-                      fontSize: 12,
-                      fontWeight: 500,
-                      color: "#0F172A",
-                      fontFamily: ROBOTO,
-                      letterSpacing: "0.02em",
-                    }}
-                  >
-                    Tier configuration
-                  </h2>
-                )}
-                {activeTab === "lawn" && (
-                  <h2
-                    style={{
-                      margin: "12px 0 12px",
-                      fontSize: 12,
-                      fontWeight: 500,
-                      color: "#0F172A",
-                      fontFamily: ROBOTO,
-                      letterSpacing: "0.02em",
-                    }}
-                  >
-                    Lawn pricing config
-                  </h2>
-                )}
-                {filteredConfigs.map((c) => (
-                  <ConfigCard
-                    key={c.config_key}
-                    config={c}
-                    onUpdate={handleConfigUpdate}
-                  />
-                ))}
-              </div>
-            )}
-
-          {activeTab !== "products" &&
-            activeTab !== "changelog" &&
-            activeTab !== "proposals" &&
-            filteredConfigs.length === 0 &&
-            activeTab !== "lawn" &&
-            activeTab !== "waveguard" && (
-              <div
-                style={{
-                  color: D.muted,
-                  padding: 20,
-                  textAlign: "center",
-                  fontSize: 13,
-                }}
-              >
-                No configuration data for this category yet. Run the
-                pricing_config migration to seed data.
-              </div>
-            )}
-
-          {/* Audit log on relevant tabs */}
-          {["global", "waveguard", "lawn"].includes(activeTab) && <AuditLog />}
-        </>
-      )}
-    </div>
-  );
+  useEffect(() => { af("/admin/pricing-config").then((data) => setConfigs(data.configs || [])).catch(() => {}).finally(() => setLoading(false)); }, []);
+  const handleConfigUpdate = useCallback((key, data) => setConfigs((previous) => previous.map((config) => config.config_key === key ? { ...config, data } : config)), []);
+  const filteredConfigs = configs.filter((config) => config.category === activeTab);
+  const specialTab = ["products", "proposals", "changelog"].includes(activeTab);
+  const sectionLabel = TABS.find((tab) => tab.key === activeTab)?.label || activeTab;
+  return <div className="space-y-5 text-ui-body text-ink-primary">
+    <div className="flex flex-wrap gap-2" aria-label="Pricing configuration category">{TABS.map((tab) => <Button key={tab.key} variant={activeTab === tab.key ? "primary" : "secondary"} aria-pressed={activeTab === tab.key} onClick={() => setActiveTab(tab.key)}>{tab.label}</Button>)}</div>
+    {loading ? <ActionFeedback className="min-h-20">Loading pricing configuration...</ActionFeedback> : <>
+      {activeTab === "lawn" && <LawnBracketsTab />}
+      {activeTab === "waveguard" && <DiscountRulesTab />}
+      {activeTab === "products" && <ProductsTab />}
+      {activeTab === "proposals" && <ProposalsTab />}
+      {activeTab === "changelog" && <ChangelogTab />}
+      {!specialTab && filteredConfigs.length > 0 && <div className="space-y-3"><h2 className="text-18 font-medium text-zinc-900">{activeTab === "waveguard" ? "Tier configuration" : activeTab === "lawn" ? "Lawn pricing config" : `${sectionLabel} configuration`}</h2>{filteredConfigs.map((config) => <ConfigCard key={config.config_key} config={config} onUpdate={handleConfigUpdate} />)}</div>}
+      {!specialTab && filteredConfigs.length === 0 && activeTab !== "lawn" && activeTab !== "waveguard" && <ActionFeedback>No configuration data for this category yet. Run the pricing_config migration to seed data.</ActionFeedback>}
+      {["global", "waveguard", "lawn"].includes(activeTab) && <AuditLog />}
+    </>}
+  </div>;
 }

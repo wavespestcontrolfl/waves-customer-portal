@@ -5,14 +5,30 @@
  * Ambiguous messages remain eligible for the caller's normal handling.
  */
 
+// A message that asks Waves for its own service or a quote — including a
+// referral to people the sender knows — is never solicitation, even when it
+// also contains wording that would otherwise match a strong vendor marker.
+// This is a single veto applied to EVERY marker below (not a per-regex
+// exclusion): deterministic, regex-confidence-1 enforcement is reserved for
+// pure vendor pitches with no request for our own service; anything else
+// must reach the model (codex P1, 2026-09-11 — a strong marker's own
+// wording, e.g. "qualified leads" or "qualified jobs available", kept
+// enforcing genuine referrals and multi-property service requests because
+// earlier fixes only vetoed individual markers instead of the whole class).
+// Codex P1 follow-up, 2026-09-11: a property manager's own scheduling
+// request ("Can you schedule them?") wasn't recognized as service-request
+// wording (only "quote" was), first-person "I manage" wasn't recognized
+// (only "we manage" was), and "buildings" wasn't in the possessive
+// property-noun list — so "I manage five apartment buildings... Can you
+// schedule them?" still enforced on a strong vendor marker.
+const SERVICE_REQUEST_OR_REFERRAL_VETO = /\bcan\s+(?:you|we)\s+(?:get\s+)?(?:a\s+)?(?:quotes?|schedule)\b|\b(?:quotes?|schedule)\s+(?:them|us|all|it|this|me)\b|\bneed\s+(?:a\s+)?quotes?\b|\bneed\s+service\b|\b(?:we|i)\s+manage\b|\b(?:my|our)\s+(?:rentals?|propert(?:y|ies)|homes?|units?|buildings?|neighbou?r(?:s|hood)?|friends?|family)\b|\bproperty\s+manager\b/i;
+
 const SOLICITATION_MARKERS = [
   { key: 'leads_pitch', strong: true, re: /\b(?:exclusive|qualified|unlimited)\s+(?:\w+\s+){0,3}leads?\b/i },
   // Referring neighbors is ordinary intake; more leads or "leads for you"
   // needs independent vendor evidence, such as a supplier offer or footer.
   { key: 'lead_referral', strong: false, re: /\b(?:more|extra)\s+(?:[\w-]+\s+){0,3}leads?\b|\bleads?\s+for\s+(?:you|your)\b/i },
-  // A sender's own neighbors/neighborhood establishes referral context
-  // across the message, including when the sender offers to deliver leads.
-  { key: 'lead_supplier', strong: false, outreach: true, re: /^(?![\s\S]*\b(?:my|our)\s+neighbou?r(?:s|hood)?\b)[\s\S]*\b(?:we|i|(?:my|our)\s+(?:network|team|company))\s+(?:(?:can|could|will)\s+)?(?:provide|offer|send|bring)s?\s+(?:you\s+(?:with\s+)?)?(?:more|extra)\s+(?:[\w-]+\s+){0,3}leads?\b/i },
+  { key: 'lead_supplier', strong: false, outreach: true, re: /\b(?:we|i|(?:my|our)\s+(?:network|team|company))\s+(?:(?:can|could|will)\s+)?(?:provide|offer|send|bring)s?\s+(?:you\s+(?:with\s+)?)?(?:more|extra)\s+(?:[\w-]+\s+){0,3}leads?\b/i },
   { key: 'ad_spend', strong: true, re: /\bfund\s+your\s+ads?\b|\bad[\s-]?spend\b/i },
   // A prospect can offer enough service work to fill our schedule.
   // This needs an independent outreach clue, like other capacity wording.
@@ -43,10 +59,15 @@ const SOLICITATION_MARKERS = [
   { key: 'more_details', strong: false, re: /\b(?:want|like)\s+(?:more\s+)?details\?/i },
 ];
 
-/** Pure. A strong marker, or two weak categories including an outreach clue. */
+/**
+ * Pure. A strong marker, or two weak categories including an outreach
+ * clue — unless the service-request/referral veto applies, which always
+ * wins and sends the message to the model instead.
+ */
 function isSolicitationPitch(text) {
   const t = String(text || '');
   if (!t.trim()) return false;
+  if (SERVICE_REQUEST_OR_REFERRAL_VETO.test(t)) return false;
   const hits = SOLICITATION_MARKERS.filter((m) => m.re.test(t));
   return hits.some((m) => m.strong) || (hits.length >= 2 && hits.some((m) => m.outreach));
 }

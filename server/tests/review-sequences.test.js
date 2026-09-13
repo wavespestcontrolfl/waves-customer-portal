@@ -5,6 +5,10 @@ const mockRenderSmsTemplate = jest.fn((...args) => jest.requireActual('../servic
 jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: (...args) => mockRenderSmsTemplate(...args) }));
 
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/visit-completion-packets', () => ({
+  enrollVisitCompletionReview: jest.fn(),
+  enrollVisitCompletionReviewForInvoice: jest.fn(),
+}));
 // Mutable gate flags for the 2026-07-30 revamp tests (post-service auto-enroll
 // + direct Google link). Both default OFF = pre-rollout behavior.
 const mockGates = { reviewSequences: false, reviewDirectLink: false };
@@ -167,8 +171,7 @@ function makeMock(initial = {}, opts = {}) {
 }
 
 beforeEach(() => {
-  mockSendCustomerMessage.mockClear();
-  mockSendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-1' });
+  mockSendCustomerMessage.mockReset().mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-1' });
   mockEmailSendTemplate.mockClear();
   mockRenderSmsTemplate.mockReset().mockImplementation((...args) => jest.requireActual('../services/sms-template-renderer').renderSmsTemplate(...args));
   mockGates.reviewSequences = false;
@@ -362,6 +365,23 @@ describe('review sequences — cadence engine', () => {
     // Body is the friendly-ask copy, not an empty/no_template failure.
     expect(mockSendCustomerMessage.mock.calls[0][0].body).toMatch(/quick Google review/i);
     expect(mock.__state.rows.review_requests[0].template_key).toBe('friendly_ask');
+  });
+
+  test('a suppressed outreach ask does not enter the retry queue', async () => {
+    const mock = makeMock({ customers: [{ id: 'suppressed-ask', first_name: 'Sam', phone: '+19410000001', nearest_location_id: 'bradenton' }] });
+    db.mockImplementation(mock);
+    mockSendCustomerMessage.mockResolvedValueOnce({
+      sent: true, deliveryOutcome: 'not_sent', providerMessageId: 'template-disabled',
+    });
+
+    const out = await ReviewService.sendOutreachTouch({
+      customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', manageRetryVia: 'cron',
+    });
+
+    expect(out).toMatchObject({ ok: false, blocked: true, terminal: true, code: 'template-disabled' });
+    expect(mock.__state.rows.review_requests[0].status).toBe('suppressed');
+    expect(mock.__state.rows.review_requests[0].scheduled_for ?? null).toBeNull();
+    expect(mock.__state.rows.sms_log || []).not.toContainEqual(expect.objectContaining({ status: 'sending' }));
   });
 
   test('an SMS-opted-out customer who allows email gets the email touch instead of stalling', async () => {
@@ -672,6 +692,35 @@ describe('review sequences — cadence engine', () => {
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(out.stopped).toBe(1);
     expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('opted_out');
+  });
+
+  test('a step parked by a summary bounce after the provider accepted it is still advanced, so recovery resumes the next step', async () => {
+    const Summary = require('../services/visit-completion-summary');
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'cust-pk', first_name: 'Pia', last_name: 'K', nearest_location_id: 'venice' }],
+      review_sequences: [{
+        id: 'seq-pk', customer_id: 'cust-pk', service_record_id: 'sr-pk', status: 'active', current_step: 0, touches_sent: 0,
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }, { day: 3, channel: 'sms', templateKey: 'soft_reminder' }]),
+        started_at: new Date(Date.now() - 60000), next_run_at: new Date(Date.now() - 60000),
+      }],
+    });
+    db.mockImplementation(mock);
+    mockSendCustomerMessage.mockImplementationOnce(async () => {
+      // The bounce reconciliation parks the sequence between the provider's
+      // return and this step's bookkeeping (the packet handoff ends at return).
+      Object.assign(mock.__state.rows.review_sequences[0], { status: 'stopped', stop_reason: Summary.PARKED_REVIEW_REASON, completed_at: new Date() });
+      return { sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-pk' };
+    });
+
+    await ReviewService.processReviewSequences();
+
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    const seq = mock.__state.rows.review_sequences[0];
+    // Parked stays parked (never re-activated here), but the delivered step is
+    // recorded so a resume schedules step 1 instead of replaying step 0.
+    expect(seq).toMatchObject({ status: 'stopped', stop_reason: Summary.PARKED_REVIEW_REASON, current_step: 1, touches_sent: 1 });
+    expect(seq.next_run_at).toBeInstanceOf(Date);
   });
 });
 
@@ -1440,18 +1489,22 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(row.scheduled_for == null).toBe(true);
     });
 
-    test('a send that failed AND could not be queued is reported as failed, not as a held send (codex #4156 r1 P2)', async () => {
+    test('a send whose pre-provider fence cannot be stored is refused before transport', async () => {
       const mock = makeMock({
         customers: [{ id: 'uq-1', first_name: 'Ida', last_name: 'V', phone: '+19410000164', nearest_location_id: 'venice' }],
         review_requests: [{ id: 'rr-uq1', customer_id: 'uq-1', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tuq1', location_id: 'venice', created_at: new Date() }],
-      }, { throwUpdateFor: ['review_requests'] });
+        // Every REAL write throws; the ask branch's no-op send-state recheck
+        // (status → 'pending', codex #4331 P1) passes, so this case still
+        // reaches the provider and fails there, which is what it pins.
+      }, { onUpdate: (table, patch) => { if (table === 'review_requests' && patch.status !== 'pending') throw new Error('pg blip on update'); } });
       db.mockImplementation(mock);
       mockSendCustomerMessage.mockRejectedValueOnce(new Error('network down'));
 
       const out = await ReviewService.sendSMS('rr-uq1');
 
-      expect(out).toEqual({ sent: false, failed: 'send_failed_unqueued' });
+      expect(out).toEqual({ refused: 'send_fence_unstored' });
       expect(out.deferred).toBeUndefined();
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     });
 
     test('a non-ask send whose pre-send fence cannot be stored is refused before the provider', async () => {
@@ -1467,6 +1520,46 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       // reservation, so the pending row itself must be fenced BEFORE the
       // provider call. If that fence cannot be stored, nothing is sent — a
       // due row simply retries on its own, with no duplicate risk.
+      expect(out).toEqual({ refused: 'send_fence_unstored' });
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('an ask superseded by a fresh enrollment is refused at the reservation boundary', async () => {
+      // sendSMS's own entry read sees a pending row; startReviewSequence's
+      // supersede write lands in the window between that read and the send.
+      // Commit it as the recheck arrives, so the recheck sees what a real
+      // concurrent enrollment would have left behind.
+      const mock = makeMock({
+        customers: [{ id: 'uq-sup', first_name: 'Ida', phone: '+19410000164', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-uq-sup', customer_id: 'uq-sup', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tuqs', location_id: 'venice', created_at: new Date() }],
+      }, { onUpdate: (table, patch, state) => {
+        if (table === 'review_requests' && patch.status === 'pending') {
+          state.rows.review_requests[0].status = 'suppressed';
+        }
+      } });
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.sendSMS('rr-uq-sup');
+
+      // Codex #4331 P1: the ask branch's marker is the sms_log reservation,
+      // not the pending row, so it must re-assert 'pending' itself. Sending
+      // here would duplicate the new cadence's own Day-0 touch.
+      expect(out).toEqual({ refused: 'request_not_sendable' });
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(mock.__state.rows.sms_log || []).toHaveLength(0);
+    });
+
+    test('an ask whose send-state recheck throws is refused before the reservation', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'uq-rc', first_name: 'Ida', phone: '+19410000164', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-uq-rc', customer_id: 'uq-rc', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tuqrc', location_id: 'venice', created_at: new Date() }],
+      }, { throwUpdateFor: ['review_requests'] });
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.sendSMS('rr-uq-rc');
+
+      // Fail closed, exactly as the non-ask fence does: an unverifiable row
+      // state is not a sendable one, and a due row retries on its own.
       expect(out).toEqual({ refused: 'send_fence_unstored' });
       expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     });
@@ -1572,6 +1665,172 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
 
       expect(request.sendOutcome).toEqual({ sent: false, failed: 'blocked', code: 'OPTED_OUT', nextAllowedAt: null });
       expect(mock.__state.rows.review_requests[0].status).toBe('suppressed');
+    });
+
+    test('an upstream suppression sentinel suppresses the ask instead of queueing a provider retry', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'ss-1', first_name: 'Ida', phone: '+19410000164', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-ss1', customer_id: 'ss-1', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tss1', location_id: 'venice', created_at: new Date() }],
+      });
+      db.mockImplementation(mock);
+      // The kill switch's shape: sent:true, but the sid is a sentinel and no
+      // customer SMS left. No blocked/retryable flag rides along.
+      mockSendCustomerMessage.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'not_sent', providerMessageId: 'template-disabled', auditLogId: 'audit-ss' });
+
+      const out = await ReviewService.sendSMS('rr-ss1');
+
+      // Codex #4331 P1: this used to reach the blind five-minute provider
+      // retry, so suppressed rows piled up and would all fire at once the
+      // moment the template was re-enabled.
+      expect(out).toMatchObject({ blocked: true });
+      expect(out.deferred).toBeUndefined();
+      expect(mock.__state.rows.review_requests[0].status).toBe('suppressed');
+    });
+
+    test('a request whose earlier attempt was accepted is repaired and never re-sent', async () => {
+      const acceptedAt = new Date(Date.now() - 80 * 3600000);
+      const mock = makeMock({
+        customers: [{ id: 'ad-1', first_name: 'Ida', phone: '+19410000164', nearest_location_id: 'venice' }],
+        // Due again: the reservation has aged past the 72-hour window, so
+        // nothing else holds this row back any more.
+        review_requests: [{ id: 'rr-ad1', customer_id: 'ad-1', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tad1', location_id: 'venice', created_at: acceptedAt, scheduled_for: new Date(Date.now() - 60000) }],
+        // The promoted reservation from that accepted-but-unstamped attempt.
+        sms_log: [{ id: 'res-ad1', customer_id: 'ad-1', direction: 'outbound', status: 'sent', message_body: 'Would you leave us a quick review?', created_at: acceptedAt, updated_at: acceptedAt, metadata: JSON.stringify({ review_ask_reservation: true, review_request_id: 'rr-ad1' }) }],
+      });
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.sendSMS('rr-ad1');
+
+      expect(out).toEqual({ refused: 'already_delivered' });
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      const row = mock.__state.rows.review_requests[0];
+      expect(row.status).toBe('sent');
+      expect(row.sms_sent_at).toEqual(acceptedAt);
+    });
+
+    test('a resolved reservation belonging to a DIFFERENT request never blocks this one', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'ad-2', first_name: 'Ida', phone: '+19410000164', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-ad2', customer_id: 'ad-2', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tad2', location_id: 'venice', created_at: new Date() }],
+        sms_log: [{ id: 'res-other', customer_id: 'ad-2', direction: 'outbound', status: 'sent', message_body: 'Would you leave us a quick review?', created_at: new Date(Date.now() - 200 * 3600000), updated_at: new Date(Date.now() - 200 * 3600000), metadata: JSON.stringify({ review_ask_reservation: true, review_request_id: 'rr-someone-else' }) }],
+      });
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.sendSMS('rr-ad2');
+
+      expect(out).not.toMatchObject({ refused: 'already_delivered' });
+    });
+
+    test('an accepted ask whose sent stamp fails keeps its reservation as durable delivery evidence', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'un-1', first_name: 'Ida', phone: '+19410000164', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-un1', customer_id: 'un-1', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tun1', location_id: 'venice', created_at: new Date() }],
+        // Only the sent stamp fails; the recheck's no-op write still passes.
+      }, { onUpdate: (table, patch) => { if (table === 'review_requests' && patch.sms_sent_at) throw new Error('pg blip on sent stamp'); } });
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.sendSMS('rr-un1');
+
+      // Codex #4331 P1: left 'sending', the reservation would be expired by
+      // the 72-hour sweep as an unresolved marker and processScheduled would
+      // re-send this still-pending row. Definite acceptance must not decay
+      // the way uncertainty does.
+      expect(out).toEqual({ sent: true, unrecorded: true });
+      const reservation = mock.__state.rows.sms_log[0];
+      expect(reservation.status).toBe('sent');
+      expect(JSON.parse(reservation.metadata).review_ask_reservation).toBe(true);
+    });
+
+    test('an ask refused before the provider is reported unsent by its reason, never sent (codex #4331 P1)', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'rf-1', first_name: 'Ona', last_name: 'P', phone: '+19410000168', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-rf1', customer_id: 'rf-1', service_record_id: 'sr-rf1', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'trf1', location_id: 'venice', triggered_by: 'tech', created_at: new Date(Date.now() - 600000) }],
+        // The enrollment's supersede write lands in the recheck window.
+      }, { onUpdate: (table, patch, state) => {
+        if (table === 'review_requests' && patch.status === 'pending') {
+          state.rows.review_requests[0].status = 'suppressed';
+        }
+      } });
+      db.mockImplementation(mock);
+
+      const request = await ReviewService.create({ customerId: 'rf-1', serviceRecordId: 'sr-rf1', triggeredBy: 'tech' });
+
+      // The provider was never called, so /tech-trigger must not report a
+      // send. Only approved_phone_drift skips this, because its callers turn
+      // it into a thrown 409 instead.
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(request.sendOutcome).toEqual({ sent: false, failed: 'request_not_sendable', nextAllowedAt: null });
+    });
+
+    test('a reconciliation-only send is reported as uncertain, never as an automatic retry', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'unc-tech', first_name: 'Ona', phone: '+19410000168', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-unc-tech', customer_id: 'unc-tech', service_record_id: 'sr-unc-tech', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'unc-tech-token', location_id: 'venice', triggered_by: 'tech', created_at: new Date() }],
+      });
+      db.mockImplementation(mock);
+      mockSendCustomerMessage.mockImplementationOnce(async () => {
+        mock.__state.rows.review_requests[0].status = 'sending';
+        return { sent: false, code: 'PROVIDER_FAILURE', retryable: true };
+      });
+
+      const request = await ReviewService.create({ customerId: 'unc-tech', serviceRecordId: 'sr-unc-tech', triggeredBy: 'tech' });
+
+      expect(request.sendOutcome).toEqual({ sent: false, uncertain: true, nextAllowedAt: null });
+      expect(mock.__state.rows.review_requests[0].status).toBe('sending');
+    });
+
+    test('a repaired already-delivered ask is reported DELIVERED to /tech-trigger, not as an unsent failure', async () => {
+      // The opposite error from the unsent-outcome rule above: the earlier
+      // attempt WAS accepted, so the customer holds this ask. Reporting it
+      // as a failure ('this customer cannot receive review texts right now')
+      // sends a tech chasing the same customer through another channel over
+      // a text that already landed (pre-push P1 on the main merge).
+      const acceptedAt = new Date(Date.now() - 80 * 3600000);
+      const mock = makeMock({
+        customers: [{ id: 'adr-1', first_name: 'Ida', phone: '+19410000164', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-adr1', customer_id: 'adr-1', service_record_id: 'sr-adr1', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tadr1', location_id: 'venice', triggered_by: 'tech', created_at: acceptedAt, scheduled_for: new Date(Date.now() - 60000) }],
+        sms_log: [{ id: 'res-adr1', customer_id: 'adr-1', direction: 'outbound', status: 'sent', message_body: 'Would you leave us a quick review?', created_at: acceptedAt, updated_at: acceptedAt, metadata: JSON.stringify({ review_ask_reservation: true, review_request_id: 'rr-adr1' }) }],
+      });
+      db.mockImplementation(mock);
+
+      const request = await ReviewService.create({ customerId: 'adr-1', serviceRecordId: 'sr-adr1', triggeredBy: 'tech' });
+
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(request.sendOutcome).toEqual({ sent: true, alreadyDelivered: true });
+      expect(request.sendOutcome.failed).toBeUndefined();
+    });
+
+    test('one row that THROWS does not abort the rest of the scheduled batch', async () => {
+      // sendSMS has throw paths of its own now (_askSpacingHold's
+      // REVIEW_RETRY_PERSISTENCE_FAILED, the pin-persistence write). Before
+      // the per-row guard, the first such row ended the tick and every later
+      // due request went unprocessed (pre-push P1 on the main merge).
+      const due = new Date(Date.now() - 60000);
+      const mock = makeMock({
+        customers: [
+          { id: 'batch-1', first_name: 'Ann', phone: '+19410000181', nearest_location_id: 'venice' },
+          { id: 'batch-2', first_name: 'Bea', phone: '+19410000182', nearest_location_id: 'venice' },
+        ],
+        review_requests: [
+          { id: 'rr-b1', customer_id: 'batch-1', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tb1', location_id: 'venice', scheduled_for: due, created_at: due },
+          { id: 'rr-b2', customer_id: 'batch-2', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tb2', location_id: 'venice', scheduled_for: due, created_at: due },
+        ],
+      });
+      db.mockImplementation(mock);
+      const realSend = ReviewService.sendSMS.bind(ReviewService);
+      const sendSpy = jest.spyOn(ReviewService, 'sendSMS').mockImplementation(async (id) => {
+        if (id === 'rr-b1') throw Object.assign(new Error('spacing hold could not be stored'), { code: 'review_retry_persistence_failed' });
+        return realSend(id);
+      });
+      mockSendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-b2', auditLogId: 'audit-b2' });
+
+      try {
+        const out = await ReviewService.processScheduled();
+        expect(sendSpy).toHaveBeenCalledTimes(2); // the throw did not end the loop
+        expect(out.sent).toBe(1);
+        expect(out.held).toBe(1);
+        expect(mock.__state.rows.review_requests.find(row => row.id === 'rr-b2').status).toBe('sent');
+      } finally { sendSpy.mockRestore(); }
     });
 
     test('an immediate ask with no consented recipient is reported unsent (suppressed), never sent (codex #4156 r2 P2)', async () => {
@@ -3646,6 +3905,17 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(scheduled).toBeLessThanOrEqual(before + 31 * 60000);
   });
 
+  test('paid webhook projections delegate packet ownership before the representative record review policy', async () => {
+    const enroll = require('../services/visit-completion-packets').enrollVisitCompletionReviewForInvoice;
+    enroll.mockResolvedValueOnce({ enrolled: false, reason: 'member_review_suppressed' });
+    const individual = jest.spyOn(ReviewService, 'enrollPostService');
+    const result = await ReviewService.enrollForPaidInvoice({ id: 'packet-invoice', customer_id: 'customer-1', service_record_id: 'representative-record' });
+    expect(enroll).toHaveBeenCalledWith('packet-invoice');
+    expect(individual).not.toHaveBeenCalled();
+    expect(result).toEqual({ enrolled: false, reason: 'member_review_suppressed' });
+    individual.mockRestore();
+  });
+
   test('enrollForPaidInvoice parses a naive ET reviewScheduledFor as Eastern wall-clock', async () => {
     mockGates.reviewSequences = true;
     // The completion panel posts timezone-less ET ('YYYY-MM-DDTHH:mm'). Build
@@ -4994,6 +5264,60 @@ describe('codex #3235 r19 — first-send re-resolution failure defers', () => {
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+// The Twilio adapter catches provider errors and reports them as
+// `sent: false` / PROVIDER_FAILURE instead of raising. On a row the summary
+// handoff left `sending`, the request WAS made and its response was lost, so
+// the deferral bookkeeping would reset the row and send a second ask on top of
+// a delivered one (audit P1).
+describe('legacy sendSMS — ambiguous returned provider failure', () => {
+  const rows = () => ({
+    customers: [{ id: 'unc-1', first_name: 'Lee', last_name: 'P', phone: '+19410000195', nearest_location_id: 'venice' }],
+    review_requests: [{
+      id: 'rr-unc-1', customer_id: 'unc-1', channel: 'sms', status: 'sending', template_key: 'day0_ask',
+      tech_name: null, token: 'tok-unc-1', location_id: 'venice', claimed_at: new Date(),
+    }],
+  });
+
+  test('keeps the claim standing instead of requeuing it', async () => {
+    // The row is `pending` when sendSMS starts (the pre-send fence only
+    // stores against a pending row); the summary handoff inside the
+    // provider call is what marks it `sending` before the request is made.
+    const state = rows();
+    state.review_requests[0].status = 'pending';
+    const mock = makeMock(state);
+    db.mockImplementation(mock);
+    mockSendCustomerMessage.mockImplementationOnce(async () => {
+      mock.__state.rows.review_requests[0].status = 'sending';
+      return {
+        sent: false, blocked: false, code: 'PROVIDER_FAILURE', reason: 'connection reset',
+        retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 300000).toISOString(),
+      };
+    });
+
+    const out = await ReviewService.sendSMS('rr-unc-1');
+
+    expect(out).toMatchObject({ sent: false, uncertain: true, reason: 'provider_uncertain' });
+    expect(mock.__state.rows.review_requests[0].status).toBe('sending');
+    expect(mock.__state.rows.review_requests[0].sms_sent_at).toBeFalsy();
+  });
+
+  test('a released row takes the ordinary deferral', async () => {
+    const state = rows();
+    state.review_requests[0].status = 'pending';
+    state.review_requests[0].claimed_at = null;
+    const mock = makeMock(state);
+    db.mockImplementation(mock);
+    mockSendCustomerMessage.mockResolvedValueOnce({
+      sent: false, deliveryOutcome: 'not_sent', blocked: false, code: 'PROVIDER_FAILURE', reason: 'connection reset',
+      retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 300000).toISOString(),
+    });
+
+    expect(await ReviewService.sendSMS('rr-unc-1')).toMatchObject({ deferred: 'provider_retry' });
+    expect(mock.__state.rows.review_requests[0].status).toBe('pending');
+    expect(mock.__state.rows.review_requests[0].scheduled_for).toBeTruthy();
   });
 });
 

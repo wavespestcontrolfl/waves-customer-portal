@@ -50,6 +50,17 @@ const HELP_RESPONSE_TEMPLATE =
 const STOP_CONFIRMATION_TEMPLATE =
   "You've been unsubscribed from Waves Pest Control SMS. Reply START to re-subscribe.";
 
+// Footer-stripping (a set of regexes that removed a vendor's own reply
+// instruction before matching) was removed 2026-09-11 (codex round 3 P0
+// 3987949450 / P1 3987949459 design fix). It existed only to keep a
+// NON-eligible sender's own compliance footer ("Reply STOP to stop
+// messages.") from being misread as their opt-out \u2014 but this detector now
+// only ever runs against a COMPLIANCE-ELIGIBLE sender's full, untouched
+// text (server/routes/twilio-webhook.js resolves eligibility before calling
+// this at all); a non-eligible sender's text never reaches
+// `detectSmsOptCommand` for opt-out purposes in the first place, so there is
+// nothing left to strip. See docs/public-route-contracts.md:200-260 and the
+// "Consent-before-classification" section of PR #4244.
 function normalizeBody(body) {
   return String(body || '')
     .replace(/[\u2018\u2019]/g, "'")

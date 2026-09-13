@@ -9,8 +9,16 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => null) }));
+// Stamped sessions are classified through Stripe (pay-combined
+// stampedSessionOutcome): tests plant intents in mockStripePis by id.
+let mockStripePis = {};
+jest.mock('../services/stripe', () => ({
+  retrievePaymentIntent: jest.fn(async (id) => mockStripePis[id] || null),
+  cancelPaymentIntent: jest.fn(async () => ({})),
+}));
 
 const db = require('../models/db');
+const StripeService = require('../services/stripe');
 const dedupe = require('../services/customer-dedupe');
 const {
   phone10, normalizeStreetKey, namesCompatible, addressCompat, pickWinner,
@@ -39,7 +47,7 @@ function makeChain(table, route) {
     // defer pin test plants a row via DIALING_CASE.
     if (table === 'collection_cases') {
       if (COLLECTION_CASES_ERROR) throw COLLECTION_CASES_ERROR;
-      return q.called('first') ? DIALING_CASE : [];
+      return q.called('first') ? DIALING_CASE : COLLECTION_CASES_ROWS;
     }
     return route(q);
   }).then(resolve, reject);
@@ -48,7 +56,8 @@ function makeChain(table, route) {
 
 let DIALING_CASE = null;
 let COLLECTION_CASES_ERROR = null;
-afterEach(() => { DIALING_CASE = null; COLLECTION_CASES_ERROR = null; });
+let COLLECTION_CASES_ROWS = [];
+afterEach(() => { DIALING_CASE = null; COLLECTION_CASES_ERROR = null; COLLECTION_CASES_ROWS = []; mockStripePis = {}; });
 
 function installDb(router) {
   db.mockImplementation((table) => makeChain(table, (q) => router(table, q)));
@@ -615,8 +624,10 @@ describe('executeMerge', () => {
   const WINNER = 'bbbbbbbb-0000-0000-0000-000000000001';
   const LOSER = 'bbbbbbbb-0000-0000-0000-000000000002';
 
-  function buildTrx({ winner, loser, fkRows, updates = {}, journalId = 'j1', prefsConflict = false }) {
-    const state = { repointUpdates: [], retired: null, backfilled: null, journal: null, prefsDeleted: false, prefsMerged: null };
+  function buildTrx({ winner, loser, fkRows, updates = {}, journalId = 'j1', prefsConflict = false, sessions = null, queueCustomers = null }) {
+    // `events` is an ORDERED log (the stamped-session reads and every repoint
+    // update) so a test can assert what the executor does before the sweep.
+    const state = { repointUpdates: [], retired: null, backfilled: null, journal: null, prefsDeleted: false, prefsMerged: null, events: [] };
     const route = (table, q) => {
       if (table === 'customers') {
         if (q.called('forUpdate')) return [winner, loser].filter(Boolean);
@@ -630,7 +641,9 @@ describe('executeMerge', () => {
           state.backfilled = payload;
           return 1;
         }
-        return [];
+        // The unlocked scan behind requireQueueEligibility (findDuplicateGroups):
+        // tests that need a live queue plant its rows here; default = empty.
+        return queueCustomers || [];
       }
       if (table === 'customer_merge_journal') {
         state.journal = q.args('insert')[0];
@@ -684,6 +697,12 @@ describe('executeMerge', () => {
       if ((table === 'scheduled_services' || table === 'invoices') && q.called('first')) {
         return (state.billingArtifacts && state.billingArtifacts[table]) || null;
       }
+      // Stamped combined-session read (pay-combined stampedCombinedSessionRows).
+      if (table === 'invoices' && q.called('whereNotNull') && q.called('select')) {
+        const owner = q.args('where')[0].customer_id;
+        state.events.push(['sessions_read', owner]);
+        return (sessions && sessions[owner]) || [];
+      }
       if (table === 'scheduled_services' && q.called('update')) {
         state.serviceStamp = { whereNull: q.args('whereNull'), payload: q.args('update')[0] };
         return 2;
@@ -691,6 +710,7 @@ describe('executeMerge', () => {
       if (q.called('del')) { state.prefsDeleted = true; return 1; }
       if (q.called('update')) {
         state.repointUpdates.push(table);
+        state.events.push(['update', table]);
         return updates[table] ?? 1;
       }
       // blocker count checks (auto mode)
@@ -719,6 +739,37 @@ describe('executeMerge', () => {
     db.transaction.mockImplementation(async (fn) => fn(trx));
     await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' }))
       .rejects.toThrow(/deferred — a collection call is in flight/);
+  });
+
+  it('resolves both sides\' stamped payment sessions BEFORE the FK sweep repoints the loser\'s invoices, and still cancels them after (Codex r8 P1)', async () => {
+    // The sweep moves invoices.customer_id from the loser to the winner. A
+    // release that read AFTER it would find nothing on the loser (its
+    // sessions silently survive the retire) and the union on the winner
+    // (refusing a pin that never actually changed).
+    mockStripePis = { pi_loser: { id: 'pi_loser', status: 'requires_payment_method', metadata: { combined_allocation: '{"x":1}' } } };
+    const winner = { id: WINNER, first_name: 'Diana', last_name: 'Blowers', phone: '+19995550003' };
+    const loser = { id: LOSER, first_name: 'Diana', last_name: null, phone: '9995550003' };
+    const { trx, state } = buildTrx({
+      winner, loser,
+      fkRows: [...FK_ROWS, { table_name: 'invoices', column_name: 'customer_id' }],
+      sessions: { [LOSER]: [{ id: 'inv-1', invoice_number: 'INV-1', stripe_payment_intent_id: 'pi_loser' }] },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+
+    const loserRead = state.events.findIndex(([kind, id]) => kind === 'sessions_read' && id === LOSER);
+    const winnerRead = state.events.findIndex(([kind, id]) => kind === 'sessions_read' && id === WINNER);
+    const invoiceSweep = state.events.findIndex(([kind, table]) => kind === 'update' && table === 'invoices');
+    expect(loserRead).toBeGreaterThanOrEqual(0);
+    expect(winnerRead).toBeGreaterThanOrEqual(0);
+    expect(invoiceSweep).toBeGreaterThan(loserRead);
+    expect(invoiceSweep).toBeGreaterThan(winnerRead);
+    // And NOTHING re-reads a side's sessions after the sweep: a post-sweep
+    // read is the bug itself (the loser reads empty, the winner reads the
+    // union), so the executor must work from the snapshot alone.
+    expect(state.events.slice(invoiceSweep).filter(([kind]) => kind === 'sessions_read')).toEqual([]);
+    // ...and the loser's session is still actually cancelled in Stripe.
+    expect(StripeService.cancelPaymentIntent).toHaveBeenCalledWith('pi_loser');
   });
 
   it('takes the invoice-issued-closeout gate lock right after the property-preferences pair, sorted, before any customer row lock (GitHub r7 P2 #4127)', async () => {
@@ -762,6 +813,72 @@ describe('executeMerge', () => {
     COLLECTION_CASES_ERROR = Object.assign(new Error('relation "collection_cases" does not exist'), { code: '42P01' });
     await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' }))
       .resolves.toBeTruthy();
+  });
+
+  it('validates an approved snapshot (expectedVersions) under the row locks and refuses drift with previewChanged', async () => {
+    const build = () => buildTrx({
+      winner: { id: WINNER, first_name: 'Synthetic', last_name: 'Winner', phone: '+19995550003', version: '2026-09-10 20:00:00.000001+00' },
+      loser: { id: LOSER, first_name: 'Synthetic', last_name: null, phone: '9995550003', version: '2026-09-10 20:05:00.000002+00' },
+      fkRows: FK_ROWS,
+    });
+    db.transaction.mockImplementation(async (fn) => fn(build().trx));
+    await expect(dedupe.executeMerge({
+      winnerId: WINNER, loserId: LOSER, performedBy: 'test',
+      expectedVersions: { winner: '2026-09-10 20:00:00.000001+00', loser: '2026-09-10 20:05:00.000002+00' },
+    })).resolves.toBeTruthy();
+    db.transaction.mockImplementation(async (fn) => fn(build().trx));
+    const drift = dedupe.executeMerge({
+      winnerId: WINNER, loserId: LOSER, performedBy: 'test',
+      expectedVersions: { winner: '2026-09-10 20:00:00.000001+00', loser: '2026-09-10 20:06:00.000000+00' },
+    });
+    await expect(drift).rejects.toMatchObject({ previewChanged: true, message: expect.stringMatching(/loser customer changed since this merge was approved/) });
+  });
+
+  it('validates an approved effect fingerprint (expectedEffectsFingerprint) over the LOCKED rows and refuses drift with previewChanged', async () => {
+    const winner = { id: WINNER, first_name: 'Synthetic', last_name: 'Winner', phone: '+19995550003', account_credits: '0' };
+    const loser = { id: LOSER, first_name: 'Synthetic', last_name: null, phone: '9995550003', account_credits: '5' };
+    const build = () => buildTrx({ winner, loser, fkRows: FK_ROWS });
+    const approved = (await dedupe.describeMergeEffects(build().trx, winner, loser)).fingerprint;
+    db.transaction.mockImplementation(async (fn) => fn(build().trx));
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test', expectedEffectsFingerprint: approved }))
+      .resolves.toBeTruthy();
+    db.transaction.mockImplementation(async (fn) => fn(build().trx));
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test', expectedEffectsFingerprint: 'stale-card' }))
+      .rejects.toMatchObject({ previewChanged: true, message: expect.stringMatching(/rows that would move changed since this merge was approved/) });
+  });
+
+  it('requireQueueEligibility re-decides duplicate eligibility INSIDE the transaction under the pair adjudication lock and refuses a pair that is no longer in the queue', async () => {
+    const { trx } = buildTrx({
+      winner: { id: WINNER, first_name: 'Synthetic', last_name: 'Winner', phone: '+19995550003' },
+      loser: { id: LOSER, first_name: 'Synthetic', last_name: null, phone: '9995550003' },
+      fkRows: FK_ROWS,
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    // The harness serves no queue rows to the unlocked customers read → not_in_queue.
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test', requireQueueEligibility: true }))
+      .rejects.toMatchObject({ previewChanged: true, message: expect.stringMatching(/no longer mergeable \(not_in_queue\)/) });
+    const lockCall = trx.raw.mock.calls.find(([sql]) => /pg_advisory_xact_lock\(hashtext\(\?\)\)/.test(String(sql)));
+    expect(lockCall).toBeTruthy();
+    expect(lockCall[1]).toEqual([`customer-duplicate-pair:${[WINNER, LOSER].sort().join(':')}`]);
+  });
+
+  it('requireQueueEligibility + allowAddressConflict: an address_conflict pair merges ONLY when the caller admits it (link-as-property), and still refuses without the flag', async () => {
+    // A live yellow candidate whose only refusal is the loser's different
+    // street — exactly the pair /link-as-property exists for. The winner's
+    // Stripe profile pins it as the cluster winner in the scan.
+    const winner = { id: WINNER, first_name: 'Synthetic', last_name: 'Winner', phone: '+19995550003', address_line1: '100 Test Street', zip: '34207', stripe_customer_id: 'cus_winner', pipeline_stage: 'active_customer', created_at: '2026-07-08' };
+    const loser = { id: LOSER, first_name: 'Synthetic', last_name: null, phone: '9995550003', address_line1: '999 Different St', zip: '34211', pipeline_stage: 'new_lead', created_at: '2026-07-09' };
+    const build = () => buildTrx({ winner, loser, fkRows: FK_ROWS, queueCustomers: [winner, loser] });
+    db.transaction.mockImplementation(async (fn) => fn(build().trx));
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test', requireQueueEligibility: true }))
+      .rejects.toMatchObject({ previewChanged: true, message: expect.stringMatching(/no longer mergeable \(address_conflict\)/) });
+    db.transaction.mockImplementation(async (fn) => fn(build().trx));
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test', requireQueueEligibility: true, allowAddressConflict: true }))
+      .resolves.toBeTruthy();
+    // The flag admits address_conflict and nothing else: an empty queue is still not_in_queue.
+    db.transaction.mockImplementation(async (fn) => fn(buildTrx({ winner, loser, fkRows: FK_ROWS }).trx));
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test', requireQueueEligibility: true, allowAddressConflict: true }))
+      .rejects.toMatchObject({ previewChanged: true, message: expect.stringMatching(/no longer mergeable \(not_in_queue\)/) });
   });
 
   it('refuses when both rows have Stripe profiles', async () => {
@@ -1374,6 +1491,92 @@ describe('executeMerge', () => {
       .rejects.toThrow(/different third-party payers/);
   });
 
+  it('defers a payer-changing merge while a combined-visit invoice send is in flight on either side', async () => {
+    const Packets = require('../services/visit-completion-packets');
+    const inFlight = jest.spyOn(Packets, 'packetInvoiceSendInFlight').mockImplementation(async ({ customerId }) => customerId === WINNER);
+    try {
+      const { trx } = buildTrx({
+        winner: { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', payer_id: null },
+        loser: { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', payer_id: 5 },
+        fkRows: FK_ROWS,
+      });
+      db.transaction.mockImplementation(async (fn) => fn(trx));
+      await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' }))
+        .rejects.toThrow(/surviving record is being sent/);
+      // The merged-away side: a self-pay loser absorbed by a payer-linked winner.
+      inFlight.mockImplementation(async ({ customerId }) => customerId === LOSER);
+      const reverse = buildTrx({
+        winner: { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', payer_id: 5 },
+        loser: { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', payer_id: null },
+        fkRows: FK_ROWS,
+      });
+      db.transaction.mockImplementation(async (fn) => fn(reverse.trx));
+      await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' }))
+        .rejects.toThrow(/merged-away record is being sent/);
+    } finally {
+      inFlight.mockRestore();
+    }
+  });
+
+  it('withdraws the surviving record\'s packet invoices when the merge inherits a payer', async () => {
+    // The in-flight fence above only refuses a send mid-dispatch. An invoice
+    // the homeowner already holds a link for needs the withdrawal, and the
+    // merge is the ownership writer that must run it (round-24 P1).
+    const Packets = require('../services/visit-completion-packets');
+    const inFlight = jest.spyOn(Packets, 'packetInvoiceSendInFlight').mockResolvedValue(false);
+    const withdraw = jest.spyOn(Packets, 'withdrawPacketInvoicesForOwner').mockResolvedValue(['inv-withdrawn-1']);
+    try {
+      const { trx } = buildTrx({
+        winner: { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', payer_id: null },
+        loser: { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', payer_id: 5 },
+        fkRows: FK_ROWS,
+      });
+      db.transaction.mockImplementation(async (fn) => fn(trx));
+      await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+      // The WINNER, in the merge's own transaction: after the sweep repointed
+      // the loser's invoices onto it, its ownership covers them too.
+      expect(withdraw).toHaveBeenCalledWith(trx, { customerId: WINNER });
+
+      // A merge that changes nothing about Bill-To runs no withdrawal.
+      withdraw.mockClear();
+      const { trx: noPayer } = buildTrx({
+        winner: { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', payer_id: null },
+        loser: { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', payer_id: null },
+        fkRows: FK_ROWS,
+      });
+      db.transaction.mockImplementation(async (fn) => fn(noPayer));
+      await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+      expect(withdraw).not.toHaveBeenCalled();
+    } finally {
+      inFlight.mockRestore();
+      withdraw.mockRestore();
+    }
+  });
+
+  it('withdraws the surviving record\'s packet invoices when the WINNER already had the payer', async () => {
+    // The opposite merge direction (codex r25 P1): a payer-linked winner
+    // absorbing a self-pay loser writes no backfill at all, yet the sweep just
+    // repointed the loser's sent/viewed/overdue packet invoices onto a
+    // payer-owned record. Gating the withdrawal on `backfills.payer_id` left
+    // exactly this direction collectible through the homeowner's link.
+    const Packets = require('../services/visit-completion-packets');
+    const inFlight = jest.spyOn(Packets, 'packetInvoiceSendInFlight').mockResolvedValue(false);
+    const withdraw = jest.spyOn(Packets, 'withdrawPacketInvoicesForOwner').mockResolvedValue(['inv-withdrawn-1']);
+    try {
+      const { trx } = buildTrx({
+        winner: { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', payer_id: 5 },
+        loser: { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', payer_id: null },
+        fkRows: FK_ROWS,
+      });
+      db.transaction.mockImplementation(async (fn) => fn(trx));
+      await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+      expect(withdraw).toHaveBeenCalledWith(trx, { customerId: WINNER });
+    } finally {
+      inFlight.mockRestore();
+      withdraw.mockRestore();
+    }
+  });
+
   it('transfers a loser-only payer default and clears it on the retired row', async () => {
     const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', payer_id: null };
     const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', payer_id: 5 };
@@ -1684,7 +1887,10 @@ describe('executeMerge', () => {
     const trx = jest.fn((table) => makeChain(table, (q) => {
       if (table === 'customers' && q.called('forUpdate')) return [winner, loser];
       if (table === 'payment_methods' && q.called('select')) {
-        const w = q.args('where')[0];
+        // The transaction-wide FOR UPDATE lock reads both sides by whereIn
+        // and selects only ids; the per-side derivation uses where().
+        const w = q.args('where')?.[0];
+        if (!w) return [];
         return w.customer_id === WINNER ? [{ stripe_customer_id: 'cus_x' }] : [];
       }
       return [];
@@ -1707,7 +1913,9 @@ describe('executeMerge', () => {
         if (table === 'payment_methods') {
           return makeChain(table, (q) => {
             if (q.called('select')) {
-              const w = q.args('where')[0];
+              // whereIn = the transaction-wide FOR UPDATE lock over both sides.
+              const w = q.args('where')?.[0];
+              if (!w) return [];
               const ids = w.customer_id === WINNER ? winnerPm : loserPm;
               return ids.map((id) => ({ stripe_customer_id: id }));
             }
@@ -1839,7 +2047,18 @@ describe('executeMerge', () => {
   it('demotes the loser cards when the winner already has a default payment method, journaling their ORIGINAL flags', async () => {
     const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', stripe_customer_id: 'cus_shared' };
     const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', stripe_customer_id: 'cus_shared' };
-    const state = { demoted: null, journal: null };
+    const state = { demoted: null, journal: null, events: [] };
+    // A REAL card table: the FK sweep repoints payment_methods.customer_id
+    // onto the winner, and every later read sees the moved rows. The
+    // demotion reader looks for the LOSER's cards, so a post-sweep
+    // derivation finds none and the demotion silently vanishes (pre-push
+    // Codex P0) — this harness reproduces that, the old unconditional
+    // fixture could not.
+    const cards = [
+      { id: 'pm-loser-1', customer_id: LOSER, is_default: true, autopay_enabled: true, stripe_customer_id: 'cus_shared' },
+      { id: 'pm-loser-2', customer_id: LOSER, is_default: false, autopay_enabled: false, stripe_customer_id: 'cus_shared' },
+      { id: 'pm-winner-default', customer_id: WINNER, is_default: true, autopay_enabled: true, stripe_customer_id: 'cus_shared' },
+    ];
     const trx = jest.fn((table) => makeChain(table, (q) => {
       if (table === 'customers') {
         if (q.called('forUpdate')) return [winner, loser];
@@ -1851,26 +2070,38 @@ describe('executeMerge', () => {
         return [{ id: 'j1' }];
       }
       if (table === 'payment_methods') {
-        if (q.called('first')) return { id: 'pm-winner-default' };
-        if (q.called('select')) {
-          return q.args('select')[0] === 'stripe_customer_id'
-            ? [{ stripe_customer_id: 'cus_shared' }] // cards live on the shared profile
-            : [
-              { id: 'pm-loser-1', is_default: true, autopay_enabled: true },
-              { id: 'pm-loser-2', is_default: false, autopay_enabled: false },
-            ];
-        }
+        const w = q.args('where')?.[0];
+        const owned = (id) => cards.filter((c) => c.customer_id === id);
         if (q.called('update') && q.called('whereIn')) {
           state.demoted = { ids: q.args('whereIn')[1], payload: q.args('update')[0] };
-          return 2;
+          state.events.push('demote');
+          return state.demoted.ids.length;
         }
-        if (q.called('update')) return 1;
+        if (q.called('update')) {
+          // The sweep: loser → winner.
+          const moving = owned(q.args('where')[1]);
+          moving.forEach((c) => { c.customer_id = q.args('update')[0].customer_id; });
+          state.events.push('sweep');
+          return moving.length;
+        }
+        if (q.called('first')) {
+          return owned(w.customer_id).find((c) => c.is_default) ? { id: 'pm-winner-default' } : undefined;
+        }
+        if (q.called('whereIn')) return cards.map((c) => ({ id: c.id })); // the FOR UPDATE lock
+        if (q.called('select')) {
+          const mine = typeof w === 'object' ? owned(w.customer_id) : owned(q.args('where')[1]);
+          if (q.args('select')[0] === 'stripe_customer_id') return mine.map((c) => ({ stripe_customer_id: c.stripe_customer_id }));
+          // The demotion reader's flag filter is a nested where callback.
+          const flagFilter = q._calls.some(([name, args]) => name === 'where' && typeof args[0] === 'function');
+          if (flagFilter) return mine.filter((c) => c.is_default || c.autopay_enabled).map((c) => ({ id: c.id, is_default: c.is_default, autopay_enabled: c.autopay_enabled }));
+          return mine.map((c) => ({ id: c.id, is_default: c.is_default, autopay_enabled: c.autopay_enabled }));
+        }
       }
       if (table === 'referral_promoters' && q.called('first')) return null;
       if (q.called('update')) return 1;
       return [];
     }));
-    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.raw = jest.fn(async () => ({ rows: [{ table_name: 'payment_methods', column_name: 'customer_id' }] }));
     trx.transaction = jest.fn(async (fn) => fn(trx));
     trx.fn = { now: () => 'NOW' };
     db.transaction.mockImplementation(async (fn) => fn(trx));
@@ -1878,9 +2109,12 @@ describe('executeMerge', () => {
     const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
     // The winner's own pre-merge default stays THE default: every loser card
     // arrives demoted from default/autopay.
-    expect(state.demoted.ids).toEqual(['pm-loser-1', 'pm-loser-2']);
+    expect(state.demoted).not.toBeNull();
+    expect(state.demoted.ids).toEqual(['pm-loser-1']);
     expect(state.demoted.payload).toMatchObject({ is_default: false, autopay_enabled: false });
-    expect(result.repointed['payment_methods.demoted_defaults']).toBe(2);
+    expect(result.repointed['payment_methods.demoted_defaults']).toBe(1);
+    // The demotion is written BEFORE the sweep moves the cards.
+    expect(state.events).toEqual(['demote', 'sweep']);
     // The journal keeps each card's PRE-demotion flags so the revert can
     // restore the loser's default/autopay setup exactly.
     const recorded = JSON.parse(state.journal.repointed_ids);
@@ -2025,5 +2259,803 @@ describe('collections_flags merge (codex 2026-08-15 r6)', () => {
       { rowId: 'f2', patch: { customer_id: 'W', released_at: 'CURRENT_TIMESTAMP' } },
     ]);
     expect(result).toMatch(/moved 1, released 1/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// duplicatePairEligibility — canonical merge eligibility recheck, reused by
+// admin-customer-duplicates.js handleMerge, the IB merge_customers tool, and
+// task-context.js's pair authority (never re-derived in any of them).
+// ---------------------------------------------------------------------------
+describe('duplicatePairEligibility', () => {
+  const winner = {
+    id: 'bbbbbbbb-0000-0000-0000-000000000001',
+    first_name: 'Synthetic', last_name: 'Winner', phone: '+15550100123',
+    address_line1: '100 Test Street', zip: '34207',
+    // stripe_customer_id pins this row as the cluster winner regardless of
+    // created_at tie-break — findDuplicateGroups() picks the strongest
+    // business-signal row, not the fixture the test author calls "winner".
+    stripe_customer_id: 'cus_winner',
+    pipeline_stage: 'active_customer', created_at: '2026-07-08',
+  };
+  const shellLoser = {
+    id: 'bbbbbbbb-0000-0000-0000-000000000002',
+    first_name: 'Synthetic', last_name: null, phone: '5550100123',
+    address_line1: null, zip: null,
+    pipeline_stage: 'new_lead', created_at: '2026-07-09',
+  };
+  const addressConflictLoser = {
+    id: 'bbbbbbbb-0000-0000-0000-000000000003',
+    first_name: 'Synthetic', last_name: null, phone: '5550100123',
+    address_line1: '999 Different St', zip: '34211',
+    pipeline_stage: 'new_lead', created_at: '2026-07-09',
+  };
+  const strangerLoser = {
+    id: 'bbbbbbbb-0000-0000-0000-000000000004',
+    first_name: 'Other', last_name: 'Person', phone: '+15550100123',
+    address_line1: '200 Different Test Street', zip: '34211',
+    pipeline_stage: 'active_customer', created_at: '2026-07-01',
+  };
+
+  function router({ customers = [], dismissals = [], blockerRows = {} }) {
+    return (table) => {
+      if (table === 'customers') return customers;
+      if (table === 'customer_duplicate_dismissals') return dismissals;
+      return blockerRows[table] || [];
+    };
+  }
+
+  it('fails CLOSED when the dismissals table is unreadable (pre-push Codex P1): a merge decision never falls open past operator verdicts', async () => {
+    const base = router({ customers: [winner, shellLoser] });
+    installDb((table) => { if (table === 'customer_duplicate_dismissals') throw new Error('relation unreadable'); return base(table); });
+    const result = await dedupe.duplicatePairEligibility(winner.id, shellLoser.id);
+    expect(result).toEqual({ eligible: false, code: 'dismissals_unreadable', reason: expect.stringMatching(/could not be read/), candidate: null });
+  });
+
+  it('eligible: returns the live candidate with its tier and reasons', async () => {
+    installDb(router({ customers: [winner, shellLoser] }));
+    const result = await dedupe.duplicatePairEligibility(winner.id, shellLoser.id);
+    expect(result).toMatchObject({ eligible: true, code: 'eligible', reason: null });
+    expect(result.candidate.tier).toBe('green');
+  });
+
+  it('not_in_queue: the pair is not a live candidate under this winner', async () => {
+    installDb(router({ customers: [winner, shellLoser] }));
+    // A real, unrelated id — never appears as a candidate under `winner`.
+    const result = await dedupe.duplicatePairEligibility(winner.id, 'bbbbbbbb-0000-0000-0000-000000000099');
+    expect(result).toMatchObject({ eligible: false, code: 'not_in_queue', reason: 'Pair is no longer in the duplicate queue', candidate: null });
+  });
+
+  it('not_in_queue: the winner id itself is not a live winner (e.g. it lost its own group)', async () => {
+    installDb(router({ customers: [winner, shellLoser] }));
+    const result = await dedupe.duplicatePairEligibility(shellLoser.id, winner.id);
+    expect(result.eligible).toBe(false);
+    expect(result.code).toBe('not_in_queue');
+  });
+
+  it('red_pair: different last names at a conflicting address', async () => {
+    installDb(router({ customers: [winner, strangerLoser] }));
+    const result = await dedupe.duplicatePairEligibility(winner.id, strangerLoser.id);
+    expect(result).toMatchObject({ eligible: false, code: 'red_pair' });
+    expect(result.candidate.tier).toBe('red');
+  });
+
+  it('address_conflict: a positive address_* reason refuses even though the pair is otherwise a live yellow candidate', async () => {
+    installDb(router({ customers: [winner, addressConflictLoser] }));
+    const result = await dedupe.duplicatePairEligibility(winner.id, addressConflictLoser.id);
+    expect(result.eligible).toBe(false);
+    expect(result.code).toBe('address_conflict');
+    expect(result.candidate.reasons.some((r) => r.startsWith('address_'))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// customerFkColumns — FK discovery export, cached per process.
+// ---------------------------------------------------------------------------
+describe('inheritedAutopayRestrictions (pure rule shared by executeMerge and the IB preview)', () => {
+  const NOW = Date.parse('2026-09-10T12:00:00Z');
+  it('nothing inherited when the loser is no more restrictive', () => {
+    expect(dedupe.inheritedAutopayRestrictions({ autopay_enabled: true, auto_apply_account_credit: true }, { autopay_enabled: true, auto_apply_account_credit: true, autopay_paused_until: '2026-01-01T00:00:00Z' }, NOW)).toEqual({});
+  });
+  it('loser autopay off, credit opt-out, and a longer future pause (with reason) all carry to the winner', () => {
+    expect(dedupe.inheritedAutopayRestrictions(
+      { autopay_enabled: true, auto_apply_account_credit: true, autopay_paused_until: '2026-10-01T00:00:00Z' },
+      { autopay_enabled: false, auto_apply_account_credit: false, autopay_paused_until: '2026-12-01T00:00:00Z', autopay_pause_reason: 'disputed charge' },
+      NOW,
+    )).toEqual({ autopay_enabled: false, auto_apply_account_credit: false, autopay_paused_until: '2026-12-01T00:00:00Z', autopay_pause_reason: 'disputed charge' });
+  });
+  it('a shorter or expired loser pause does not shorten the winner\'s', () => {
+    expect(dedupe.inheritedAutopayRestrictions({ autopay_paused_until: '2026-12-01T00:00:00Z' }, { autopay_paused_until: '2026-10-01T00:00:00Z' }, NOW)).toEqual({});
+    expect(dedupe.inheritedAutopayRestrictions({}, { autopay_paused_until: '2026-01-01T00:00:00Z', autopay_pause_reason: 'old' }, NOW)).toEqual({});
+  });
+});
+
+describe('predictWinnerBackfills (pure — the executor\'s rule, disclosed by the IB preview)', () => {
+  it('fills empty identity fields, replaces a partial address as a TUPLE and journals the overwritten prior values', () => {
+    const winner = { id: 'W', first_name: 'Real', last_name: null, email: null, address_line1: null, city: 'Bradenton', state: 'FL', zip: '34207' };
+    const loser = { id: 'L', first_name: 'Unknown', last_name: 'Customer', email: 'stub@example.com', address_line1: '100 Test St', address_line2: null, city: 'Sarasota', state: 'FL', zip: '34231' };
+    const { backfills, winnerPriorValues } = dedupe.predictWinnerBackfills(winner, loser);
+    expect(backfills).toMatchObject({ last_name: 'Customer', email: 'stub@example.com', address_line1: '100 Test St', address_line2: null, city: 'Sarasota', state: 'FL', zip: '34231' });
+    expect(backfills.first_name).toBeUndefined();
+    expect(winnerPriorValues).toEqual({ city: 'Bradenton', state: 'FL', zip: '34207' });
+  });
+
+  it('carries a loser-side rented-termite-station flag onto the winner with OR semantics — the flag is the only ownership evidence when no stations were ever mapped, and clearing it makes a later cancellation report no_rented_stations (Codex r15 P1)', () => {
+    const winner = { id: 'W', termite_stations_rented: false };
+    const loser = { id: 'L', termite_stations_rented: true };
+    const carried = dedupe.predictWinnerBackfills(winner, loser);
+    expect(carried.backfills.termite_stations_rented).toBe(true);
+    // The column is NOT NULL, and revertMerge vacates any backfill without a
+    // journaled prior to null — so the winner's own `false` must be recorded
+    // or the undo throws and rolls back entirely.
+    expect(carried.winnerPriorValues.termite_stations_rented).toBe(false);
+    // Nothing to carry when the survivor already rents, or when neither does —
+    // the backfill must not churn the row or the fingerprint.
+    expect(dedupe.predictWinnerBackfills({ id: 'W', termite_stations_rented: true }, loser).backfills.termite_stations_rented).toBeUndefined();
+    expect(dedupe.predictWinnerBackfills(winner, { id: 'L', termite_stations_rented: false }).backfills.termite_stations_rented).toBeUndefined();
+  });
+
+  it('a street-only winner absorbing a same-street unit-bearing loser keeps the unit; loser-only billing mode + fee and payer transfer', () => {
+    const winner = { id: 'W', address_line1: '100 Test St', address_line2: null, billing_mode: null, per_application_fee: null, payer_id: null };
+    const loser = { id: 'L', address_line1: '100 Test St Apt 4B', address_line2: null, billing_mode: 'per_application', per_application_fee: '85.00', payer_id: 'payer-1' };
+    const { backfills } = dedupe.predictWinnerBackfills(winner, loser);
+    expect(backfills.address_line1).toBeUndefined();
+    expect(backfills.address_line2).toMatch(/4B/);
+    expect(backfills).toMatchObject({ billing_mode: 'per_application', per_application_fee: '85.00', payer_id: 'payer-1' });
+  });
+
+  it('a loser-only Stripe profile (or the executor\'s saved-card derivation) transfers; contact slots move slot-wise with their consent stamp only when the winner had none', () => {
+    const winner = { id: 'W', stripe_customer_id: null, service_contact_name: null, service_contact_phone: null, service_contact_email: null, service_contact_role: null, service_contacts_consent_at: null };
+    const loser = { id: 'L', stripe_customer_id: null, service_contact_name: 'Pat', service_contact_phone: '9415550199', service_contact_email: null, service_contact_role: 'tenant', service_contacts_consent_at: '2026-08-01T00:00:00Z', service_contacts_consent_source: 'portal', service_contacts_consent_text_version: 'v3' };
+    const rowOnly = dedupe.predictWinnerBackfills(winner, loser).backfills;
+    expect(rowOnly.stripe_customer_id).toBeUndefined();
+    expect(rowOnly).toMatchObject({ service_contact_name: 'Pat', service_contact_phone: '9415550199', service_contact_role: 'tenant', service_contacts_consent_at: '2026-08-01T00:00:00Z', service_contacts_consent_source: 'portal', service_contacts_consent_text_version: 'v3' });
+    const derived = dedupe.predictWinnerBackfills(winner, loser, { derivedStripeCustomerId: 'cus_derived' }).backfills;
+    expect(derived.stripe_customer_id).toBe('cus_derived');
+    expect(dedupe.predictWinnerBackfills(winner, { ...loser, stripe_customer_id: 'cus_loser' }).backfills.stripe_customer_id).toBe('cus_loser');
+  });
+
+  it('same-account primary handoff promotes the winner; a newer accepted-terms version is absorbed', () => {
+    const winner = { id: 'W', account_id: 'acct', is_primary_profile: false, accepted_terms_version: 'v2026-01' };
+    const loser = { id: 'L', account_id: 'acct', is_primary_profile: true, accepted_terms_version: 'v2026-08' };
+    const { backfills, winnerPriorValues } = dedupe.predictWinnerBackfills(winner, loser);
+    expect(backfills).toMatchObject({ is_primary_profile: true, accepted_terms_version: 'v2026-08' });
+    expect(winnerPriorValues).toEqual({ accepted_terms_version: 'v2026-01' });
+  });
+});
+
+describe('predictLoserStateDiscarded (the loser state the merge never copies — Codex r14 P1)', () => {
+  it('names the rate, tier, live stage and portal login the archived record carries and the survivor will not, both-sided', () => {
+    const winner = { monthly_rate: '98.00', waveguard_tier: null, pipeline_stage: 'active_customer', password_hash: null };
+    const loser = { monthly_rate: '122.00', waveguard_tier: 'gold', pipeline_stage: 'won', password_hash: 'x' };
+    expect(dedupe.predictLoserStateDiscarded(winner, loser)).toEqual({
+      monthly_rate: { loser: 122, winner: 98 },
+      membership_tier: { loser: 'gold', winner: null },
+      pipeline_stage: { loser: 'won', winner: 'active_customer' },
+      portal_login: { loser: true, winner: false },
+    });
+  });
+  it('is null when the loser carries nothing the winner would not keep anyway (same rate, no tier, a lead stage, no login)', () => {
+    expect(dedupe.predictLoserStateDiscarded({ monthly_rate: '98', pipeline_stage: 'active_customer' }, { monthly_rate: '98.00', pipeline_stage: 'new_lead' })).toBeNull();
+    expect(dedupe.predictLoserStateDiscarded({ monthly_rate: null }, { monthly_rate: '0', waveguard_tier: null })).toBeNull();
+  });
+});
+
+describe('stableStringify / normalizeDisclosedTimestamps (Codex r15 P1)', () => {
+  const { stableStringify, normalizeDisclosedTimestamps } = dedupe._test;
+  const d = new Date('2026-03-04T05:06:07.000Z');
+
+  it('serializes a Date as its ISO string instead of {}, at any depth', () => {
+    expect(stableStringify(d)).toBe('"2026-03-04T05:06:07.000Z"');
+    expect(stableStringify({ a: d })).toBe('{"a":"2026-03-04T05:06:07.000Z"}');
+    expect(stableStringify([{ a: d }])).toBe('[{"a":"2026-03-04T05:06:07.000Z"}]');
+  });
+
+  it('normalizes Dates through nested objects and arrays and leaves everything else identical', () => {
+    expect(normalizeDisclosedTimestamps({ a: [{ b: d }], c: 1, e: null })).toEqual({ a: [{ b: '2026-03-04T05:06:07.000Z' }], c: 1, e: null });
+    // Non-plain objects other than Date are returned as-is, never rebuilt
+    // into an index map.
+    const buf = Buffer.from('x');
+    expect(normalizeDisclosedTimestamps({ buf }).buf).toBe(buf);
+  });
+});
+
+describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-owned)', () => {
+  const FK_ROWS = { rows: [{ table_name: 'invoices', column_name: 'customer_id' }] };
+  const winner = { id: 'W', first_name: 'Real', last_name: 'Customer', billing_mode: null, per_application_fee: null, account_credits: '0', address_line1: '100 Test St', email: null };
+  const loser = { id: 'L', first_name: 'Unknown', last_name: '', billing_mode: 'per_application', per_application_fee: '85.00', account_credits: '12.50', address_line1: null, email: 'stub@example.com', autopay_enabled: false };
+  // `defaults`: { W: true } plants a winner default card; `flagged`:
+  // { L: [{ id, is_default, autopay_enabled }] } are the loser cards the
+  // demotion reader lists (predictSavedCardDemotions).
+  function install(counts = {}, { sessions = {}, cards = {}, defaults = {}, flagged = {}, collisions = {} } = {}) {
+    db.raw = jest.fn(async () => FK_ROWS);
+    installDb((table, q) => {
+      if (table === 'referral_promoters') return null;
+      // The collision-fold prediction reads both sides' rows of each
+      // unique-keyed table (predictCollisionFolds).
+      if (['notification_prefs', 'property_preferences', 'customer_tags', 'conversations'].includes(table)) return collisions[table] || [];
+      if (table === 'payment_methods') {
+        const owner = q.args('where')[0].customer_id;
+        if (q.called('first')) return defaults[owner] ? { id: `${owner}-default` } : null;
+        if (q.called('orderBy')) return flagged[owner] || [];
+        return (cards[owner] || []).map((id) => ({ stripe_customer_id: id }));
+      }
+      if (table === 'invoices' && !q.called('count')) return sessions[q.args('where')[0].customer_id] || [];
+      if (table === 'customer_plan_rates') return { n: counts.customer_plan_rates || 0 };
+      return { n: counts[table] || 0 };
+    });
+  }
+  it('predicts every deterministic collision fold from the current rows — singleton prefs on both sides, shared tags, shared conversation threads — pins them and turns the undo state off (Codex r14 P2)', async () => {
+    install({}, { collisions: {
+      notification_prefs: [{ customer_id: 'W' }, { customer_id: 'L' }],
+      property_preferences: [{ customer_id: 'L' }],
+      customer_tags: [{ customer_id: 'W', tag: 'vip' }, { customer_id: 'W', tag: 'lawn' }, { customer_id: 'L', tag: 'vip' }, { customer_id: 'L', tag: 'pets' }],
+      conversations: [{ customer_id: 'W', channel: 'sms', our_endpoint_id: 'ep1' }, { customer_id: 'L', channel: 'sms', our_endpoint_id: 'ep1' }, { customer_id: 'L', channel: 'email', our_endpoint_id: null }],
+    } });
+    const out = await dedupe.describeMergeEffects(db, winner, loser);
+    expect(out.financial_effects.predicted_collision_handlers).toEqual(['conversations', 'customer_tags', 'notification_prefs']);
+    expect(out.financial_effects.predicted_collision_folds).toEqual({
+      notification_prefs: expect.stringMatching(/both records have a row/),
+      customer_tags: { shared: ['vip'] },
+      conversations: { shared_threads: ['sms:ep1'] },
+    });
+    expect(out.financial_effects.revertible_from_queue).toBe(false);
+    expect(JSON.parse(out.fingerprint).financial_effects.predicted_collision_folds).toEqual(out.financial_effects.predicted_collision_folds);
+    // A pref row on ONE side only, tags that do not overlap, threads on different endpoints: nothing folds.
+    install({}, { collisions: { property_preferences: [{ customer_id: 'L' }], customer_tags: [{ customer_id: 'W', tag: 'a' }, { customer_id: 'L', tag: 'b' }], conversations: [{ customer_id: 'W', channel: 'sms', our_endpoint_id: 'ep1' }, { customer_id: 'L', channel: 'sms', our_endpoint_id: 'ep2' }] } });
+    expect((await dedupe.describeMergeEffects(db, winner, loser)).financial_effects.predicted_collision_handlers).toEqual([]);
+  });
+
+  it('renders and pins transferred timestamps as ISO strings — Postgres returns a Date, a Date has no own keys, so it used to serialize as {} in both the card and the fingerprint (Codex r15 P1)', async () => {
+    const loserWithConsent = (iso) => ({
+      ...loser,
+      service_contact_name: 'Tenant',
+      service_contacts_consent_at: new Date(iso),
+      service_contacts_consent_source: 'portal',
+      service_contacts_consent_text_version: 'v3',
+    });
+    install({});
+    const out = await dedupe.describeMergeEffects(db, winner, loserWithConsent('2026-03-04T05:06:07.000Z'));
+    expect(out.financial_effects.winner_backfills.service_contacts_consent_at).toBe('2026-03-04T05:06:07.000Z');
+    expect(JSON.parse(out.fingerprint).financial_effects.winner_backfills.service_contacts_consent_at).toBe('2026-03-04T05:06:07.000Z');
+    // And it MOVES the fingerprint: the bug pinned EVERY Date as the same
+    // `{}`, so an edited consent stamp during the pending window read as no
+    // change at all.
+    install({});
+    const later = await dedupe.describeMergeEffects(db, winner, loserWithConsent('2026-03-04T05:06:08.000Z'));
+    expect(later.fingerprint).not.toBe(out.fingerprint);
+  });
+
+  it('discloses and pins the loser state the merge never copies (Codex r14 P1)', async () => {
+    install({});
+    const out = await dedupe.describeMergeEffects(db, { ...winner, monthly_rate: '98.00' }, { ...loser, monthly_rate: '122.00', password_hash: 'h' });
+    expect(out.financial_effects.loser_state_discarded).toEqual({ monthly_rate: { loser: 122, winner: 98 }, portal_login: { loser: true, winner: false } });
+    expect(JSON.parse(out.fingerprint).financial_effects.loser_state_discarded).toEqual(out.financial_effects.loser_state_discarded);
+  });
+
+  it('states moving counts, money effects, inherited restrictions, predicted backfills (row-derived, with the Stripe caveat) and the undo state, key-sorted in one fingerprint', async () => {
+    install({ invoices: 2, customer_plan_rates: 1 });
+    const out = await dedupe.describeMergeEffects(db, winner, loser);
+    expect(out.moving).toEqual({ invoices: 2, total_rows: 2 });
+    expect(out.financial_effects).toEqual({
+      account_credits_moved_to_winner: 12.5,
+      billing_mode_adopted_from_loser: 'per_application',
+      per_application_fee_adopted_from_loser: 85,
+      loser_plan_rate_rows_deleted: 1,
+      note_appends: {},
+      referral_fold: { loser_enrolled: false },
+      autopay_restrictions_inherited: { autopay_enabled: false },
+      winner_backfills: { email: 'stub@example.com', billing_mode: 'per_application', per_application_fee: '85.00' },
+      stripe_profile_from_saved_cards: null,
+      saved_card_profile_conflict: false,
+      saved_card_demotions: { winner_has_default: false, cards: [] },
+      combined_payment_sessions: { winner: [], loser: [] },
+      collection_cases: { available: true, live: [], demoted_to_proposed: [], defers_on_dialing: false },
+      loser_state_discarded: null,
+      predicted_collision_handlers: [],
+      predicted_collision_folds: {},
+      revertible_from_queue: expect.stringMatching(/unless the sweep has to fold/),
+    });
+    const parsed = JSON.parse(out.fingerprint);
+    expect(parsed).toEqual({ moving: out.moving, financial_effects: out.financial_effects });
+    expect(Object.keys(parsed.financial_effects)).toEqual([...Object.keys(parsed.financial_effects)].sort());
+    // Same rows, same answer: the executor recomputes this over its locked rows and compares strings.
+    install({ invoices: 2, customer_plan_rates: 1 });
+    expect((await dedupe.describeMergeEffects(db, winner, loser)).fingerprint).toBe(out.fingerprint);
+    // One more invoice on the loser → a different fingerprint.
+    install({ invoices: 3, customer_plan_rates: 1 });
+    expect((await dedupe.describeMergeEffects(db, winner, loser)).fingerprint).not.toBe(out.fingerprint);
+  });
+
+  it('discloses and pins the loser cards the merge strips of default/autopay when the winner already has a default (Codex r6 P1)', async () => {
+    const loserCards = [
+      { id: 'pm_l1', is_default: true, autopay_enabled: true },
+      { id: 'pm_l2', is_default: false, autopay_enabled: true },
+    ];
+    install({}, { defaults: { W: true }, flagged: { L: loserCards } });
+    const out = await dedupe.describeMergeEffects(db, winner, loser);
+    expect(out.financial_effects.saved_card_demotions).toEqual({ winner_has_default: true, cards: loserCards });
+    // The same rows → the same pin; a flag flip on one card with the SAME
+    // count → a different pin (the executor recomputes under its locks).
+    install({}, { defaults: { W: true }, flagged: { L: loserCards } });
+    expect((await dedupe.describeMergeEffects(db, winner, loser)).fingerprint).toBe(out.fingerprint);
+    install({}, { defaults: { W: true }, flagged: { L: [{ ...loserCards[0], is_default: false }, loserCards[1]] } });
+    expect((await dedupe.describeMergeEffects(db, winner, loser)).fingerprint).not.toBe(out.fingerprint);
+    // No winner default → nothing is demoted, whatever the loser's flags.
+    install({}, { defaults: {}, flagged: { L: loserCards } });
+    expect((await dedupe.describeMergeEffects(db, winner, loser)).financial_effects.saved_card_demotions).toEqual({ winner_has_default: false, cards: [] });
+  });
+
+  it('discloses and pins the saved-card Stripe profile the winner will adopt and every stamped combined payment session (Codex r4 P1s)', async () => {
+    mockStripePis = {
+      pi_a: { id: 'pi_a', status: 'requires_payment_method', metadata: { combined_allocation: '1' } },
+      pi_b: { id: 'pi_b', status: 'requires_confirmation', metadata: { invoice_id: 'inv-2' } },
+    };
+    install({}, {
+      cards: { W: ['cus_shared'], L: ['cus_shared'] },
+      sessions: { L: [{ id: 'inv-2', invoice_number: 'INV-2', stripe_payment_intent_id: 'pi_b' }, { id: 'inv-1', invoice_number: 'INV-1', stripe_payment_intent_id: 'pi_a' }] },
+    });
+    const out = await dedupe.describeMergeEffects(db, winner, loser);
+    expect(out.financial_effects.stripe_profile_from_saved_cards).toEqual({ stripe_customer_id: 'cus_shared', from: 'both' });
+    expect(out.financial_effects.winner_backfills.stripe_customer_id).toBe('cus_shared'); // the backfill prediction uses the REAL derivation
+    expect(out.financial_effects.saved_card_profile_conflict).toBe(false);
+    expect(out.financial_effects.combined_payment_sessions).toEqual({
+      winner: [],
+      // Per-intent outcome from the same Stripe read the release makes (r5 P1). pi_b is a single-invoice checkout — kept on the WINNER, but this is
+      // the LOSER's, and its PI metadata names the record about to be retired, so the merge cancels it too (r7 P1).
+      loser: [{ invoice_id: 'inv-1', invoice_number: 'INV-1', payment_intent_id: 'pi_a', outcome: 'cancel' }, { invoice_id: 'inv-2', invoice_number: 'INV-2', payment_intent_id: 'pi_b', outcome: 'cancel_single_invoice' }],
+    });
+    // The same session moving to money-in-flight → a different fingerprint (the outcome is pinned, not just the id).
+    mockStripePis.pi_a = { ...mockStripePis.pi_a, status: 'processing' };
+    install({}, { cards: { W: ['cus_shared'], L: ['cus_shared'] }, sessions: { L: [{ id: 'inv-2', invoice_number: 'INV-2', stripe_payment_intent_id: 'pi_b' }, { id: 'inv-1', invoice_number: 'INV-1', stripe_payment_intent_id: 'pi_a' }] } });
+    const moved = await dedupe.describeMergeEffects(db, winner, loser);
+    expect(moved.financial_effects.combined_payment_sessions.loser[0].outcome).toBe('in_flight');
+    expect(moved.fingerprint).not.toBe(out.fingerprint);
+    // An unverifiable intent fails the preview closed — no card.
+    mockStripePis = {};
+    install({}, { cards: { W: ['cus_shared'], L: ['cus_shared'] }, sessions: { L: [{ id: 'inv-1', invoice_number: 'INV-1', stripe_payment_intent_id: 'pi_a' }] } });
+    await expect(dedupe.describeMergeEffects(db, winner, loser)).rejects.toThrow(/Could not verify payment session pi_a/);
+    mockStripePis = { pi_a: { id: 'pi_a', status: 'requires_payment_method', metadata: { combined_allocation: '1' } }, pi_b: { id: 'pi_b', status: 'requires_confirmation', metadata: {} } };
+    // A new session on the loser → a different fingerprint.
+    install({}, { cards: { W: ['cus_shared'], L: ['cus_shared'] }, sessions: { L: [{ id: 'inv-1', invoice_number: 'INV-1', stripe_payment_intent_id: 'pi_a' }] } });
+    expect((await dedupe.describeMergeEffects(db, winner, loser)).fingerprint).not.toBe(out.fingerprint);
+    // Cards on a third profile: the executor would refuse — the disclosure says so.
+    install({}, { cards: { W: ['cus_other'], L: ['cus_shared'] } });
+    expect((await dedupe.describeMergeEffects(db, winner, loser)).financial_effects.saved_card_profile_conflict).toBe(true);
+  });
+
+  it('cancels the single-invoice checkouts the merge invalidates — the loser\'s always, the winner\'s only on a payer transfer (Codex r7 P1)', async () => {
+    // A single-invoice PI is NOT a combined session, so nothing in its
+    // metadata says who owns it except waves_customer_id — which keeps
+    // naming the record the merge is about to retire.
+    mockStripePis = {
+      pi_l: { id: 'pi_l', status: 'requires_confirmation', metadata: { invoice_id: 'inv-l' } },
+      pi_w: { id: 'pi_w', status: 'requires_confirmation', metadata: { invoice_id: 'inv-w' } },
+    };
+    const sessions = {
+      W: [{ id: 'inv-w', invoice_number: 'INV-W', stripe_payment_intent_id: 'pi_w' }],
+      L: [{ id: 'inv-l', invoice_number: 'INV-L', stripe_payment_intent_id: 'pi_l' }],
+    };
+    // Self-pay merge (neither side has a payer): only the LOSER's checkout
+    // is invalidated — a save-card success on it would mirror consent and
+    // autopay onto the archived customer.
+    install({}, { sessions });
+    const selfPay = await dedupe.describeMergeEffects(db, winner, loser);
+    expect(selfPay.financial_effects.combined_payment_sessions.loser[0].outcome).toBe('cancel_single_invoice');
+    expect(selfPay.financial_effects.combined_payment_sessions.winner[0].outcome).toBe('kept_single_invoice');
+    // A merge that transfers the loser's third-party payer onto a
+    // blank-payer winner invalidates the SURVIVOR's self-pay checkout too:
+    // the homeowner would otherwise pay a debt that now belongs to the payer.
+    install({}, { sessions });
+    const payerMove = await dedupe.describeMergeEffects(db, { ...winner }, { ...loser, payer_id: 'payer-1' });
+    expect(payerMove.financial_effects.combined_payment_sessions.winner[0].outcome).toBe('cancel_single_invoice');
+    // A winner that ALREADY has that payer changes nothing about who pays,
+    // so its open checkout survives.
+    install({}, { sessions });
+    const samePayer = await dedupe.describeMergeEffects(db, { ...winner, payer_id: 'payer-1' }, { ...loser, payer_id: 'payer-1' });
+    expect(samePayer.financial_effects.combined_payment_sessions.winner[0].outcome).toBe('kept_single_invoice');
+    // Money already moving is never cancelled, single-invoice or not — it
+    // is reported so the executor defers.
+    mockStripePis.pi_l = { ...mockStripePis.pi_l, status: 'processing' };
+    install({}, { sessions });
+    expect((await dedupe.describeMergeEffects(db, winner, loser)).financial_effects.combined_payment_sessions.loser[0].outcome).toBe('in_flight');
+    // Already cancelled in Stripe → only the stamp cleanup, never a second
+    // cancel promised on the card.
+    mockStripePis.pi_l = { ...mockStripePis.pi_l, status: 'canceled' };
+    install({}, { sessions });
+    expect((await dedupe.describeMergeEffects(db, winner, loser)).financial_effects.combined_payment_sessions.loser[0].outcome).toBe('stamps_cleared');
+  });
+
+  it('fingerprints deterministically: nested keys sorted at every depth, and one PaymentIntent across several invoices in a fixed order (Codex r9 P2)', async () => {
+    // A combined session is stamped onto EVERY invoice in its allocation, so
+    // the same PI id comes back once per invoice. Without a unique
+    // tie-breaker the two reads (unlocked card, locked recheck) could order
+    // those rows differently and the exact string compare would refuse a
+    // merge nothing had touched.
+    mockStripePis = { pi_a: { id: 'pi_a', status: 'requires_payment_method', metadata: { combined_allocation: '{"x":1}' } } };
+    const rows = [
+      { id: 'inv-b', invoice_number: 'INV-B', stripe_payment_intent_id: 'pi_a' },
+      { id: 'inv-a', invoice_number: 'INV-A', stripe_payment_intent_id: 'pi_a' },
+    ];
+    install({}, { sessions: { L: rows } });
+    const first = await dedupe.describeMergeEffects(db, winner, loser);
+    expect(first.financial_effects.combined_payment_sessions.loser.map((sess) => sess.invoice_id)).toEqual(['inv-a', 'inv-b']);
+    // The SAME rows handed back in the opposite order fingerprint identically.
+    install({}, { sessions: { L: [...rows].reverse() } });
+    expect((await dedupe.describeMergeEffects(db, winner, loser)).fingerprint).toBe(first.fingerprint);
+    // Keys are sorted at every depth, not just the two top-level objects:
+    // collection_cases is built { available, live, demoted_to_proposed,
+    // defers_on_dialing } and must serialize alphabetically.
+    expect(first.fingerprint).toContain('"collection_cases":{"available":true,"defers_on_dialing"');
+    // ...and the string still round-trips to exactly what the card shows.
+    expect(JSON.parse(first.fingerprint)).toEqual({ moving: first.moving, financial_effects: first.financial_effects });
+  });
+
+  it('re-derives the saved-card demotion set at write time and refuses if it moved since the card (pre-push audit P1)', async () => {
+    // The early snapshot cannot see a card INSERTED mid-merge (no row to
+    // lock), and applying a stale id list would leave the winner with two
+    // default/autopay cards — the exact thing this demotion prevents.
+    const src = require('fs').readFileSync(require.resolve('../services/customer-dedupe.js'), 'utf8');
+    // The write applies the FRESH set, never the snapshot.
+    expect(src).toContain("const demotionsNow = await predictSavedCardDemotions(trx, winnerId, loserId);");
+    expect(src).toContain(".whereIn('id', demotionsNow.cards.map((c) => c.id))");
+    expect(src).not.toContain(".whereIn('id', savedCardDemotions.cards.map((c) => c.id))");
+    // A pinned merge whose demotion set moved refuses with previewChanged,
+    // and it does so BEFORE the Stripe fence (nothing external yet).
+    const body = src.split('const demotionsNow = await predictSavedCardDemotions')[1];
+    expect(body.indexOf('previewChanged = true')).toBeLessThan(body.indexOf('planStampedSessionRelease'));
+    // Both sides' cards are locked for the life of the transaction.
+    expect(src).toContain("await trx('payment_methods').whereIn('customer_id', [winnerId, loserId]).orderBy('id').forUpdate().select('id');");
+  });
+
+  it('locks both promoter rows under the executor transaction before fingerprinting the fold, and re-reads them (Codex r10 P1)', async () => {
+    // Referral writes take neither the customer nor the pair lock (a unique
+    // click increments total_clicks straight off the row), so the balances
+    // the card states must be read under FOR UPDATE and held to the fold.
+    const promoters = {
+      'promo-L': { id: 'promo-L', customer_id: 'L', total_clicks: 4 },
+      'promo-W': { id: 'promo-W', customer_id: 'W', total_clicks: 9 },
+    };
+    const calls = [];
+    const trxDb = jest.fn((table) => {
+      const q = makeChain(table, (qq) => {
+        calls.push({ table, locked: qq.called('forUpdate'), where: qq.args('where')?.[0] });
+        if (table !== 'referral_promoters') return { n: 0 };
+        const w = qq.args('where')?.[0] || {};
+        if (qq.called('whereIn')) return [{ id: 'promo-L' }, { id: 'promo-W' }];
+        if (w.customer_id === 'L') return promoters['promo-L'];
+        if (w.customer_id === 'W') return promoters['promo-W'];
+        if (w.id) return promoters[w.id];
+        return null;
+      });
+      return q;
+    });
+    trxDb.isTransaction = true;
+    trxDb.raw = jest.fn(async () => FK_ROWS);
+    const out = await dedupe.previewMergeEffects(trxDb, 'W', 'L');
+    expect(out.referral).toMatchObject({ loser_enrolled: true, folded_into_winner_promoter: true, loser_promoter_id: 'promo-L', winner_promoter_id: 'promo-W' });
+    // Exactly one id-ordered FOR UPDATE over both promoter rows...
+    const locking = calls.filter((c) => c.table === 'referral_promoters' && c.locked);
+    expect(locking).toHaveLength(1);
+    // ...and the rows are re-read AFTER it, not trusted from before.
+    const lockIndex = calls.findIndex((c) => c.locked);
+    expect(calls.slice(lockIndex + 1).filter((c) => c.table === 'referral_promoters' && c.where?.id)).toHaveLength(2);
+  });
+
+  it('does not take row locks on the unlocked card read (no transaction, nothing to hold)', async () => {
+    install({});
+    const seen = [];
+    const plain = jest.fn((table) => makeChain(table, (q) => {
+      seen.push(q.called('forUpdate'));
+      return table === 'referral_promoters' ? null : { n: 0 };
+    }));
+    plain.raw = jest.fn(async () => FK_ROWS);
+    await dedupe.previewMergeEffects(plain, 'W', 'L');
+    expect(seen.some(Boolean)).toBe(false);
+  });
+
+  it('discloses and pins the non-FK rewrites the row sweep cannot see (Codex r9 P2)', async () => {
+    // jsonb-embedded ids and trigger-id identities: not FK columns, so the
+    // sweep's counts never mention them, yet the executor rewrites them.
+    const movedHome = { ...loser, address_line1: '900 Other Ave' };
+    const route = (counts) => (table, q) => {
+      if (table === 'referral_promoters') return null;
+      if (table === 'payment_methods') return q.called('first') ? null : [];
+      if (['notification_prefs', 'property_preferences', 'customer_tags', 'conversations'].includes(table)) return [];
+      if (table === 'invoices' && !q.called('count')) return [];
+      if (table === 'customer_plan_rates') return { n: 0 };
+      return { n: counts[table] || 0 };
+    };
+    db.raw = jest.fn(async () => FK_ROWS);
+    installDb(route({ scheduled_services: 3, call_log: 2, email_messages: 1 }));
+    const out = await dedupe.describeMergeEffects(db, winner, movedHome);
+    expect(out.moving.non_fk_rewrites).toEqual({
+      'scheduled_services.service_address_stamp': 3,
+      'call_log.customer_link_override': 2,
+      'email_messages.trigger_event_id': 1,
+      // winner '100 Test St' vs loser '900 Other Ave' — different homes.
+      'property_preferences.irrigation_home_changed_at': 'stamped',
+    });
+    // Pinned: it is inside `moving`, which the fingerprint covers, so a row
+    // added during the pending window invalidates the approval.
+    expect(JSON.parse(out.fingerprint).moving.non_fk_rewrites['call_log.customer_link_override']).toBe(2);
+    const before = out.fingerprint;
+    // One hand-linked call appears during the pending window.
+    installDb(route({ scheduled_services: 3, call_log: 3, email_messages: 1 }));
+    expect((await dedupe.describeMergeEffects(db, winner, movedHome)).fingerprint).not.toBe(before);
+    // An addressless loser is not a different home and has no visits to stamp.
+    install({});
+    const quiet = await dedupe.describeMergeEffects(db, winner, loser);
+    expect(quiet.moving.non_fk_rewrites).toBeUndefined();
+  });
+
+  it('discloses and pins the CRM / technician notes the merge appends onto the winner (Codex r7 P2)', async () => {
+    const withNotes = { ...loser, crm_notes: 'Gate code 4417', technician_notes: 'Dog in the back yard' };
+    install({});
+    const out = await dedupe.describeMergeEffects(db, { ...winner, crm_notes: 'Prefers morning' }, withNotes);
+    expect(out.financial_effects.note_appends).toEqual({
+      crm_notes: 'Prefers morning\n\n[From merged duplicate L]: Gate code 4417',
+      technician_notes: 'Dog in the back yard',
+    });
+    // Editing the loser's notes during the pending window moves the pin.
+    install({});
+    const edited = await dedupe.describeMergeEffects(db, { ...winner, crm_notes: 'Prefers morning' }, { ...withNotes, technician_notes: 'Dog in the back yard — muzzle' });
+    expect(edited.fingerprint).not.toBe(out.fingerprint);
+    // Text the winner already carries is not re-appended, so the card does
+    // not claim a change that will not happen.
+    install({});
+    const already = await dedupe.describeMergeEffects(db, { ...winner, technician_notes: 'Note: Dog in the back yard today' }, { ...loser, technician_notes: 'Dog in the back yard' });
+    expect(already.financial_effects.note_appends).toEqual({});
+  });
+});
+
+describe('dbLevelMergeConflict (the executor\'s DB-dependent refusals, shared with the preview — Codex r7 P2)', () => {
+  const winner = { id: 'W', billing_mode: null, account_id: null };
+  const loser = { id: 'L', billing_mode: 'per_application', account_id: null };
+  function install({ artifacts = {}, sibling = null } = {}) {
+    installDb((table, q) => {
+      if (table === 'customers') return sibling;
+      return artifacts[q.args('where')[0].customer_id] ? { id: 'row-1' } : null;
+    });
+  }
+
+  it('refuses a legacy/special billing-mode pair only when the flipping side has live billing history', async () => {
+    // The winner is the flipping side (null mode adopting per_application).
+    install({ artifacts: { W: true } });
+    expect(await dedupe.dbLevelMergeConflict(db, winner, loser)).toEqual({
+      code: 'billing_mode_history_conflict',
+      message: expect.stringMatching(/legacy and special billing modes/),
+    });
+    // History on the OTHER side does not flip anyone's cadence.
+    install({ artifacts: { L: true } });
+    expect(await dedupe.dbLevelMergeConflict(db, winner, loser)).toBeNull();
+    // Same mode on both sides is not a cadence flip at all.
+    install({ artifacts: { W: true, L: true } });
+    expect(await dedupe.dbLevelMergeConflict(db, { ...winner, billing_mode: 'per_application' }, loser)).toBeNull();
+  });
+
+  it('refuses a loser whose multi-property account still has other live members', async () => {
+    install({ sibling: { id: 'sibling-1' } });
+    expect(await dedupe.dbLevelMergeConflict(db, { ...winner, billing_mode: 'per_application' }, { ...loser, account_id: 'acct-9' })).toEqual({
+      code: 'multi_property_account_conflict',
+      message: expect.stringMatching(/multi-property account/),
+    });
+    // No siblings left → nothing is stranded.
+    install({ sibling: null });
+    expect(await dedupe.dbLevelMergeConflict(db, { ...winner, billing_mode: 'per_application' }, { ...loser, account_id: 'acct-9' })).toBeNull();
+    // Same account on both sides is not a multi-property group.
+    install({ sibling: { id: 'sibling-1' } });
+    expect(await dedupe.dbLevelMergeConflict(db, { ...winner, billing_mode: 'per_application', account_id: 'acct-9' }, { ...loser, account_id: 'acct-9' })).toBeNull();
+  });
+});
+
+describe('previewCollectionCaseReconciliation (the executor\'s reconcile rule, disclosed and pinned — Codex r5 P1)', () => {
+  const FK_ROWS = { rows: [{ table_name: 'invoices', column_name: 'customer_id' }] };
+  const winner = { id: 'W', first_name: 'Real', last_name: 'Customer', account_credits: '0' };
+  const loser = { id: 'L', first_name: 'Unknown', last_name: '', account_credits: '0' };
+  function install() {
+    db.raw = jest.fn(async () => FK_ROWS);
+    installDb((table, q) => {
+      if (table === 'referral_promoters') return null;
+      if (table === 'payment_methods') return [];
+      if (['notification_prefs', 'property_preferences', 'customer_tags', 'conversations'].includes(table)) return [];
+      if (table === 'invoices' && !q.called('count')) return [];
+      return { n: 0 };
+    });
+  }
+  it('plans BOTH sides before cancelling anything, so a deferring in-flight session never leaves a cancelled checkout behind (Codex r11 P1)', async () => {
+    // The merge aborts on a loser-side in-flight session. If the winner's
+    // cancellable checkout had already been cancelled in Stripe, the
+    // rollback could not undo it — the invoice would point at a dead
+    // payment link on a merge that never happened.
+    const pay = require('../services/pay-combined');
+    const order = [];
+    const planSpy = jest.spyOn(pay, 'planStampedSessionRelease').mockImplementation(async (_db, rows) => {
+      const side = rows[0]?.side;
+      order.push(`plan:${side}`);
+      return { intents: [{ piId: `pi_${side}`, outcome: side === 'loser' ? 'in_flight' : 'cancel' }], inFlight: side === 'loser' ? 1 : 0 };
+    });
+    const applySpy = jest.spyOn(pay, 'applyStampedSessionRelease').mockImplementation(async (_db, plan) => {
+      order.push(`apply:${plan.intents[0].piId}`);
+      return { released: 1, inFlight: plan.inFlight };
+    });
+    try {
+      // Both sides are planned; the loser's in-flight verdict aborts before
+      // either apply runs.
+      const plans = [
+        await pay.planStampedSessionRelease(null, [{ side: 'winner' }]),
+        await pay.planStampedSessionRelease(null, [{ side: 'loser' }]),
+      ];
+      expect(order).toEqual(['plan:winner', 'plan:loser']);
+      expect(plans[1].inFlight).toBe(1);
+      expect(applySpy).not.toHaveBeenCalled();
+      // The executor's fence reads exactly this way: every plan first, the
+      // defer checks next, applies last.
+      const src = require('fs').readFileSync(require.resolve('../services/customer-dedupe.js'), 'utf8');
+      const fence = src.split('const winnerPlan = await PayCombined.planStampedSessionRelease')[1].split('if (Object.keys(backfills).length)')[0];
+      expect(fence.indexOf('loserPlan.inFlight')).toBeLessThan(fence.indexOf('applyStampedSessionRelease'));
+      expect(fence.indexOf('winnerPlan.inFlight')).toBeLessThan(fence.indexOf('applyStampedSessionRelease'));
+    } finally {
+      planSpy.mockRestore();
+      applySpy.mockRestore();
+    }
+  });
+
+  it('the pair adjudication lock folds UUID case, so an uppercase dismissal and a lowercase merge take the SAME lock (Codex r10 P1)', async () => {
+    const keys = [];
+    const trx = { raw: jest.fn(async (_sql, bindings) => { keys.push(bindings[0]); return { rows: [] }; }) };
+    await dedupe.acquirePairAdjudicationLock(trx, 'A1B2C3D4-0000-4000-8000-00000000000F', 'b0000000-0000-4000-8000-000000000001');
+    await dedupe.acquirePairAdjudicationLock(trx, 'a1b2c3d4-0000-4000-8000-00000000000f', 'B0000000-0000-4000-8000-000000000001');
+    // ...and in the opposite argument order, since the key is sorted.
+    await dedupe.acquirePairAdjudicationLock(trx, 'b0000000-0000-4000-8000-000000000001', 'A1B2C3D4-0000-4000-8000-00000000000F');
+    expect(new Set(keys).size).toBe(1);
+    expect(keys[0]).toBe('customer-duplicate-pair:a1b2c3d4-0000-4000-8000-00000000000f:b0000000-0000-4000-8000-000000000001');
+  });
+
+  it('surplusApprovedCollectionCases is the executor rule: newest approval survives, all revert beside a dialing/held row', () => {
+    const a1 = { id: 'c1', current_state: 'approved', case_version: 3 };
+    const a2 = { id: 'c2', current_state: 'approved', case_version: 1 };
+    expect(dedupe.surplusApprovedCollectionCases([a1, a2])).toEqual([a2]);
+    expect(dedupe.surplusApprovedCollectionCases([a1])).toEqual([]);
+    expect(dedupe.surplusApprovedCollectionCases([{ id: 'h', current_state: 'held', case_version: 1 }, a1, a2])).toEqual([a1, a2]);
+  });
+  it('orders live cases the SAME way in the preview and the executor, so a tied approved_at cannot revoke the approval the card promised to keep (pre-push Codex P1)', async () => {
+    // surplusApprovedCollectionCases keeps the FIRST row and reverts the
+    // rest, so the two sides must agree on "first" — on an approved_at tie
+    // only the unique id decides, and the fingerprint matches either way.
+    const orderOf = (calls) => calls.filter(([m]) => m === 'orderBy').map(([, args]) => args.join(' '));
+    const seen = [];
+    db.raw = jest.fn(async () => FK_ROWS);
+    db.mockImplementation((table) => {
+      const q = makeChain(table, () => (table === 'customer_plan_rates' ? { n: 0 } : { n: 0 }));
+      if (table === 'collection_cases') seen.push(q);
+      return q;
+    });
+    COLLECTION_CASES_ROWS = [
+      { id: 'c-b', customer_id: 'W', current_state: 'approved', case_version: 1 },
+      { id: 'c-a', customer_id: 'W', current_state: 'approved', case_version: 1 },
+    ];
+    await dedupe.previewCollectionCaseReconciliation(db, 'W', 'L');
+    expect(orderOf(seen[0]._calls)).toEqual(['approved_at desc', 'id']);
+    // The executor's own query, read from the source it shares with nobody:
+    // both orderBy clauses must be present, in the same order.
+    const executorQuery = require('fs').readFileSync(require.resolve('../services/customer-dedupe.js'), 'utf8')
+      .split("const liveCases = await sp('collection_cases')")[1].split('.select(')[0];
+    expect(executorQuery).toContain(".orderBy('approved_at', 'desc')");
+    expect(executorQuery).toContain(".orderBy('id')");
+  });
+
+  it('states every live case with state + version, the approvals the merge revokes, and a dialing defer; a new approval in the pending window changes the fingerprint', async () => {
+    COLLECTION_CASES_ROWS = [
+      { id: 'c-w', customer_id: 'W', current_state: 'approved', case_version: 4 },
+      { id: 'c-l', customer_id: 'L', current_state: 'approved', case_version: 2 },
+    ];
+    install();
+    const out = await dedupe.describeMergeEffects(db, winner, loser);
+    expect(out.financial_effects.collection_cases).toEqual({
+      available: true,
+      live: [{ id: 'c-w', side: 'winner', state: 'approved', case_version: 4 }, { id: 'c-l', side: 'loser', state: 'approved', case_version: 2 }],
+      demoted_to_proposed: ['c-l'],
+      defers_on_dialing: false,
+    });
+    expect(JSON.parse(out.fingerprint).financial_effects.collection_cases.demoted_to_proposed).toEqual(['c-l']);
+    // The loser's case was 'proposed' at card time and got approved since → different fingerprint (the executor refuses with previewChanged).
+    COLLECTION_CASES_ROWS = [{ id: 'c-w', customer_id: 'W', current_state: 'approved', case_version: 4 }];
+    install();
+    const before = await dedupe.describeMergeEffects(db, winner, loser);
+    expect(before.financial_effects.collection_cases.demoted_to_proposed).toEqual([]);
+    expect(before.fingerprint).not.toBe(out.fingerprint);
+    // A held row beside approvals: every approval reverts. A dialing row: the merge defers.
+    COLLECTION_CASES_ROWS = [{ id: 'h', customer_id: 'L', current_state: 'held', case_version: 1 }, { id: 'c-w', customer_id: 'W', current_state: 'approved', case_version: 4 }];
+    install();
+    expect((await dedupe.describeMergeEffects(db, winner, loser)).financial_effects.collection_cases.demoted_to_proposed).toEqual(['c-w']);
+    COLLECTION_CASES_ROWS = [{ id: 'd', customer_id: 'W', current_state: 'dialing', case_version: 1 }];
+    install();
+    expect((await dedupe.describeMergeEffects(db, winner, loser)).financial_effects.collection_cases.defers_on_dialing).toBe(true);
+  });
+  it('an absent table reads as unavailable; any other read error fails the preview closed (as the executor\'s reconcile does)', async () => {
+    COLLECTION_CASES_ERROR = Object.assign(new Error('relation "collection_cases" does not exist'), { code: '42P01' });
+    install();
+    expect((await dedupe.describeMergeEffects(db, winner, loser)).financial_effects.collection_cases).toEqual({ available: false, live: [], demoted_to_proposed: [], defers_on_dialing: false });
+    COLLECTION_CASES_ERROR = Object.assign(new Error('statement timeout'), { code: '57014' });
+    install();
+    await expect(dedupe.describeMergeEffects(db, winner, loser)).rejects.toThrow(/statement timeout/);
+  });
+});
+
+describe('deriveSavedCardStripeCustomer (shared by the executor and the preview)', () => {
+  const rowsFor = (cards) => (table, q) => (table === 'payment_methods' ? (cards[q.args('where')[0].customer_id] || []).map((id) => ({ stripe_customer_id: id })) : []);
+  it('no foreign cards → nothing derived, no conflict', async () => {
+    installDb(rowsFor({ W: ['cus_w'] }));
+    expect(await dedupe.deriveSavedCardStripeCustomer(db, { id: 'W', stripe_customer_id: 'cus_w' }, { id: 'L' })).toEqual({ derivedStripeCustomerId: null, stripeDerivedFrom: null, conflict: false });
+  });
+  it('neither row names a profile, the cards agree on one → derived, with whose cards identified it', async () => {
+    installDb(rowsFor({ L: ['cus_x'] }));
+    expect(await dedupe.deriveSavedCardStripeCustomer(db, { id: 'W' }, { id: 'L' })).toEqual({ derivedStripeCustomerId: 'cus_x', stripeDerivedFrom: 'loser', conflict: false });
+    installDb(rowsFor({ W: ['cus_x'], L: ['cus_x'] }));
+    expect((await dedupe.deriveSavedCardStripeCustomer(db, { id: 'W' }, { id: 'L' })).stripeDerivedFrom).toBe('both');
+  });
+  it('cards on a profile other than the survivor\'s, or on two profiles → conflict', async () => {
+    installDb(rowsFor({ L: ['cus_other'] }));
+    expect((await dedupe.deriveSavedCardStripeCustomer(db, { id: 'W', stripe_customer_id: 'cus_w' }, { id: 'L' })).conflict).toBe(true);
+    installDb(rowsFor({ W: ['cus_a'], L: ['cus_b'] }));
+    expect((await dedupe.deriveSavedCardStripeCustomer(db, { id: 'W' }, { id: 'L' })).conflict).toBe(true);
+  });
+});
+
+describe('previewMergeEffects (shared merge-effect reader)', () => {
+  const FK_ROWS = { rows: [
+    { table_name: 'scheduled_services', column_name: 'customer_id' },
+    { table_name: 'invoices', column_name: 'customer_id' },
+    { table_name: 'sms_log', column_name: 'customer_id' },
+    { table_name: 'customer_merge_journal', column_name: 'winner_customer_id' }, // repoint-excluded
+  ] };
+  const PROMOTER_TABLES = ['referrals', 'referral_invites', 'referral_clicks', 'referral_payouts'];
+
+  it('counts the FK sweep (information_schema once, cached, excluded tables dropped) + polymorphic pointers; a failing table is unknown, zero counts drop', async () => {
+    db.raw = jest.fn(async () => FK_ROWS);
+    const counts = { scheduled_services: 3, sms_log: 5, notifications: 2 };
+    installDb((table, q) => {
+      if (table === 'invoices') throw new Error('relation "invoices" is unreadable');
+      if (table === 'referral_promoters') return null; // not enrolled
+      return { n: counts[table] || 0 };
+    });
+    const out = await dedupe.previewMergeEffects(db, 'W', 'L');
+    expect(out.moving).toEqual({ scheduled_services: 3, invoices: 'unknown', sms_log: 5, 'notifications.recipient_id': 2, total_rows: 10 });
+    expect(out.referral).toEqual({ loser_enrolled: false });
+    expect(db.raw).toHaveBeenCalledTimes(1);
+    await dedupe.previewMergeEffects(db, 'W', 'L');
+    expect(db.raw).toHaveBeenCalledTimes(1); // cached — no second information_schema query
+  });
+
+  it('reads the referral fold through the executor\'s own counter list when both customers are enrolled', async () => {
+    db.raw = jest.fn(async () => FK_ROWS);
+    const loserPromoter = { id: 'p-loser', available_balance_cents: 2500, total_clicks: 4, total_paid_out_cents: 0 };
+    installDb((table, q) => {
+      if (table === 'referral_promoters') return q.args('where')[0].customer_id === 'L' ? loserPromoter : { id: 'p-winner' };
+      if (PROMOTER_TABLES.includes(table)) {
+        expect(q.args('where')[0]).toEqual({ promoter_id: 'p-loser' });
+        return { n: table === 'referral_clicks' ? 4 : 0 };
+      }
+      return { n: 0 };
+    });
+    const out = await dedupe.previewMergeEffects(db, 'W', 'L');
+    expect(out.moving).toEqual({ total_rows: 0 });
+    expect(out.referral).toEqual({
+      loser_enrolled: true, folded_into_winner_promoter: true, loser_promoter_id: 'p-loser', winner_promoter_id: 'p-winner',
+      balances_added: { available_balance_cents: 2500, total_clicks: 4 },
+      promoter_rows: { referrals: 0, referral_invites: 0, referral_clicks: 4, referral_payouts: 0 },
+    });
+    expect(dedupe.REFERRAL_FOLD_COUNTERS).toEqual(expect.arrayContaining(['available_balance_cents', 'pending_earnings_cents', 'total_clicks']));
+  });
+
+  it('loser enrolled, winner not: no fold — the enrollment row repoints unchanged', async () => {
+    db.raw = jest.fn(async () => FK_ROWS);
+    installDb((table, q) => {
+      if (table === 'referral_promoters') return q.args('where')[0].customer_id === 'L' ? { id: 'p-loser', available_balance_cents: 900 } : null;
+      return { n: 0 };
+    });
+    const out = await dedupe.previewMergeEffects(db, 'W', 'L');
+    expect(out.referral).toMatchObject({ loser_enrolled: true, folded_into_winner_promoter: false, loser_promoter_id: 'p-loser', winner_promoter_id: null, balances_added: {} });
   });
 });

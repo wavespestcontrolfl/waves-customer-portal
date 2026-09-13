@@ -11,6 +11,12 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import EstimatesPageV2 from "./EstimatesPageV2";
 
+vi.mock("../../components/admin/customer360/CustomerSmsPanel", () => ({
+  useCustomerSms: () => vi.fn(),
+  CustomerSmsProvider: ({ children }) => children,
+  openEstimateMessages: vi.fn(),
+}));
+
 const EDIT_SOURCE = {
   id: "est-1",
   status: "sent",

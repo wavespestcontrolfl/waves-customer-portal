@@ -877,7 +877,7 @@ describe('admin communications SMS route', () => {
       });
 
       test('a throw the provider ACCEPTED still writes the marker; one it did not accept writes nothing', async () => {
-        sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit write failed'), { providerOutcome: { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-accepted' } }));
+        sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit write failed'), { providerOutcome: { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-card' } }));
         await withServer(async (baseUrl) => {
           const res = await send(baseUrl, { customerId: 'cust-A', body: PREP_BODY });
           expect(res.status).toBe(500);
@@ -1520,7 +1520,7 @@ describe('admin communications SMS route', () => {
     test('a throw after provider acceptance still emails the Both copy and says so', async () => {
       const ReviewService = require('../services/review-request');
       const accepted = new Error('audit write failed');
-      accepted.providerOutcome = { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-accepted' };
+      accepted.providerOutcome = { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-review' };
       sendCustomerMessage.mockRejectedValue(accepted);
       // The error path fires the async Twilio failure alert (a promise).
       require('../services/twilio-failure-alerts').alertTwilioFailure.mockResolvedValue(undefined);
@@ -2309,6 +2309,35 @@ describe('Communications review ask serialization', () => {
       expect((await send(baseUrl, inline)).status).toBe(500);
       expect(reviews.markInlineDelivered).toHaveBeenCalledTimes(1);
       expect(reviews.releaseInlineClaim).not.toHaveBeenCalled();
+    });
+  });
+  test('an UNCLASSIFIED throw after provider entry retains the inline claim — it is not proof the ask never left', async () => {
+    // Deliberate, and the one case the pre-provider normalization above does
+    // not cover: every throw raised before `reviewProviderStarted` is stamped
+    // { sent: false, deliveryOutcome: 'not_sent' } by the route and releases
+    // the claim immediately. A throw with NO providerOutcome can therefore
+    // only come from inside sendCustomerMessage — at or past the provider
+    // handoff — where the text may already have gone out. Releasing there
+    // would let a second operator re-send the same ask; the claim instead
+    // ages out through the normal 10-minute stale-claim reconciliation.
+    sendCustomerMessage.mockRejectedValue(new Error('provider adapter blew up with no outcome'));
+    await withServer(async baseUrl => {
+      expect((await send(baseUrl, inline)).status).toBe(500);
+      expect(reviews.releaseInlineClaim).not.toHaveBeenCalled();
+      expect(reviews.markInlineDelivered).not.toHaveBeenCalled();
+    });
+  });
+  test('a throw raised BEFORE provider entry still releases the inline claim at once', async () => {
+    // The counterpart: the route stamps a definitive not_sent on a throw that
+    // never reached the provider, so an operator can re-insert the link
+    // straight away rather than waiting out the stale window.
+    // The claim recheck sits inside sendAndSettle's try, one line before
+    // reviewProviderStarted flips — a throw here is definitively a non-send.
+    reviews.inlineClaimStillHeld.mockRejectedValueOnce(new Error('claim recheck unavailable'));
+    await withServer(async baseUrl => {
+      expect((await send(baseUrl, inline)).status).toBe(503);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(reviews.releaseInlineClaim).toHaveBeenCalledWith('rr-1', expect.anything());
     });
   });
   test.each([

@@ -89,8 +89,78 @@ function isInvoiceCollectibleStatus(status) {
   return !INVOICE_UNCOLLECTIBLE_STATUSES.includes(invoiceStatusKey(status));
 }
 
-function assertInvoiceCollectible(currentStatus) {
-  const status = invoiceStatusKey(currentStatus);
+// A combined-visit packet invoice whose Bill-To moved to a third-party payer
+// AFTER the homeowner already held a pay link (sent / viewed / overdue) cannot
+// be recalled: withdrawPacketInvoiceForPayer leaves the status collectible and
+// payer_id NULL, and records the withdrawal ONLY in this stamp
+// (`payer_billed:<payerId>[:hold]`, cleared by reconcileWithdrawnPacketInvoices
+// when ownership returns to self-pay).
+//
+// Collectibility is therefore not a property of `status` alone. Rather than ask
+// every money seam to re-derive it — the public pay routes, the saved-card
+// charges, admin manual payment, credit application — the one gate they all
+// already share reads the stamp here. That keeps the invariant in a single
+// place instead of a convention each new collection path has to remember.
+const PACKET_WITHDRAWN_SEND_ERROR = /^payer_billed:/;
+
+// The stale-send recovery parks an ambiguous claim here: status `scheduled`
+// with a NULL scheduled_send_at (so no worker picks it up) and this text as
+// the operator's evidence. A withdrawal has to preserve that state — the row
+// may already have reached the customer — instead of turning it into a fresh
+// draft the release would re-queue.
+// Every writer that CLEARS scheduled_send_error must keep a `payer_billed:`
+// withdrawal stamp: the stamp is the only record that a combined-visit
+// invoice's Bill-To moved to a third-party payer while the homeowner already
+// held its pay link, and clearing it makes the invoice collectible from the
+// homeowner again (Codex #4311 r29 P0). Use in place of `scheduled_send_error:
+// null`; a row with no stamp still ends up NULL.
+/**
+ * The freshest ownership verdict, as a sendCustomerMessage preDispatchCheck:
+ * the canonical sender runs it immediately before provider preparation, which
+ * is the last point a dunning rail can abort without holding a lock across
+ * provider I/O (Codex #4311 r42 P1). Fail closed — an unreadable row blocks
+ * the send, because "cannot tell" and "self-pay" are not the same answer.
+ */
+function selfPayAtDispatch(invoiceId, database) {
+  return async () => {
+    try {
+      const live = await database('invoices').where({ id: invoiceId }).first('payer_id', 'scheduled_send_error');
+      if (!live) return { ok: false, code: 'INVOICE_UNREADABLE', reason: 'invoice could not be re-read before dispatch' };
+      if (live.payer_id || invoiceWithdrawnFromCustomer(live)) {
+        return { ok: false, code: 'INVOICE_PAYER_BILLED', reason: 'invoice is billed to a third-party payer' };
+      }
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, code: 'INVOICE_UNREADABLE', reason: err.message };
+    }
+  };
+}
+
+function preserveWithdrawalStamp(database) {
+  return database.raw("CASE WHEN scheduled_send_error LIKE 'payer_billed:%' THEN scheduled_send_error ELSE NULL END");
+}
+
+const STALE_SEND_PARK_ERROR = 'Recovered from stale sending claim — delivery unverified; check whether the customer received it, then resend or re-schedule manually';
+
+function invoiceWithdrawnFromCustomer(invoice) {
+  return !!invoice
+    && typeof invoice === 'object'
+    && PACKET_WITHDRAWN_SEND_ERROR.test(String(invoice.scheduled_send_error || ''));
+}
+
+// Takes the invoice ROW — the only shape that can see the withdrawal stamp.
+// There is deliberately no status-string overload (Codex #4311 r27 P2,
+// AGENTS.md: no compatibility shims for callers this repo controls): a second
+// internal contract that silently skips the withdrawal check would let the
+// payer-owned collection bug back in the first time a new seam followed the
+// old shape. Every call site in this repo passes the row; anything else is a
+// programming error and fails loudly rather than collecting.
+function assertInvoiceCollectible(invoice) {
+  if (!invoice || typeof invoice !== 'object') {
+    throw new Error('assertInvoiceCollectible requires the invoice row (a status string cannot show a payer withdrawal)');
+  }
+  const row = invoice;
+  const status = invoiceStatusKey(row.status);
   if (status === 'paid') {
     throw new Error('Invoice already paid');
   }
@@ -108,6 +178,24 @@ function assertInvoiceCollectible(currentStatus) {
   }
   if (status === 'canceled' || status === 'cancelled') {
     throw new Error('Invoice is canceled and cannot be paid');
+  }
+  // Checked last so a terminal status still reports its own, more accurate
+  // reason (a withdrawal never stamps a terminal row, but a row that settled
+  // between the withdrawal and this read can carry both).
+  assertInvoiceNotWithdrawnFromCustomer(row);
+}
+
+// The withdrawal half of assertInvoiceCollectible on its own, for the seams
+// that deliberately let a terminal status through (the /confirm rails accept
+// an already-`paid` row so a replayed PaymentIntent returns its recorded
+// payment idempotently). Those call sites gate assertInvoiceCollectible on a
+// terminal-status list, which is exactly the set a withdrawn invoice is NOT
+// in — `sent`/`viewed`/`overdue` with a NULL payer_id — so the row-aware gate
+// never ran for them. Call this AFTER the terminal-status handling so a
+// settled row still reports its own reason first.
+function assertInvoiceNotWithdrawnFromCustomer(invoice) {
+  if (invoiceWithdrawnFromCustomer(invoice)) {
+    throw new Error('This visit is now billed to a third-party payer and is no longer payable here');
   }
 }
 
@@ -147,13 +235,18 @@ function formatCardLine(brand, last4) {
 
 module.exports = {
   INVOICE_UPDATE_ALLOWED_FIELDS,
+  STALE_SEND_PARK_ERROR,
+  preserveWithdrawalStamp,
+  selfPayAtDispatch,
   INVOICE_UNCOLLECTIBLE_STATUSES,
   VISIT_NEVER_RAN_STATUSES,
   visitRefusesSettlement,
   lockVisitForSettlement,
   assertInvoiceCollectible,
+  assertInvoiceNotWithdrawnFromCustomer,
   assertInvoiceVoidable,
   isInvoiceCollectibleStatus,
+  invoiceWithdrawnFromCustomer,
   invoiceAmountDue,
   formatCardLine,
 };

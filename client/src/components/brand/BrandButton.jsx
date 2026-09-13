@@ -62,8 +62,13 @@ export default function BrandButton({
   // Native glass tags (inert without html[data-glass-theme]): primary CTAs
   // go gold-accent, secondary reads as a chip — mirrors the estimate
   // walker's dark-CTA / white-chip classification for these primitives.
+  // `data-glass-size="primary"` is how the 48px document primary is claimed on
+  // glass (owner ruling C3, DECISIONS 2026-09-11). The inline `minHeight: 48`
+  // below is the floor OFF glass; on glass the sheet's control floors are
+  // `!important`, so an authored height cannot assert itself and this tag is
+  // what tells the sheet the control is a primary and not a generic 44 (G-03).
   const glassAttrs = variant === 'primary'
-    ? { 'data-glass-accent': '' }
+    ? { 'data-glass-accent': '', 'data-glass-size': 'primary' }
     : variant === 'secondary'
       ? { 'data-glass': 'chip' }
       : {};

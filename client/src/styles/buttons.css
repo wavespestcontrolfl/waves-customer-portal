@@ -41,10 +41,12 @@
   border-radius: 9999px;
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
   letter-spacing: 0.04em;
-  /* Design brief: UPPERCASE CTAs are part of the brand identity on customer
-     surfaces. Applied at .btn level so every variant inherits; the tertiary
-     variant (inline text link) flips this back to "none" below. */
-  text-transform: uppercase;
+  /* Sentence case (owner ruling C1, DECISIONS 2026-09-11). The design brief
+     called UPPERCASE CTAs brand identity; DECISIONS 2026-09-04 is newer and
+     glass-specific and rules sentence case. This declaration was the route by
+     which uppercase leaked onto /book ("FIND MY BEST TIMES", "CONTINUE") while
+     every other glass CTA rendered sentence case. */
+  text-transform: none;
 }
 .btn[data-surface="customer"]:focus-visible,
 .btn:not([data-surface]):focus-visible {
@@ -56,9 +58,9 @@
 .btn-primary[data-surface="customer"],
 .btn-primary:not([data-surface]) {
   background: #FFD700;
-  color: #1B2C5B;
+  color: #04395E;   /* CTA ink on gold — owner ruling C2 */
   font-size: 15px;
-  font-weight: 800;
+  font-weight: 700; /* sheet ceiling (G-04) */
   line-height: 1;
   padding: 14px 24px;
   min-height: 48px;
@@ -86,8 +88,7 @@
   background: #E3F5FD;
 }
 
-/* TERTIARY — text link on brand blue. Reads as inline prose, so opt out of
-   the uppercase treatment inherited from .btn above. */
+/* TERTIARY — text link on brand blue. Reads as inline prose. */
 .btn-tertiary[data-surface="customer"],
 .btn-tertiary:not([data-surface]) {
   background: transparent;
@@ -97,7 +98,6 @@
   line-height: 1.2;
   padding: 8px 0;
   min-height: 44px;
-  text-transform: none;
   letter-spacing: 0.01em;
 }
 .btn-tertiary[data-surface="customer"]:hover:not(:disabled),
@@ -109,12 +109,12 @@
 .btn-nav[data-surface="customer"],
 .btn-nav:not([data-surface]) {
   background: #FFD700;
-  color: #1B2C5B;
-  font-size: 13px;
-  font-weight: 800;
+  color: #04395E;   /* CTA ink on gold — owner ruling C2 */
+  font-size: 14px;  /* 14px floor */
+  font-weight: 700; /* sheet ceiling (G-04) */
   line-height: 1;
   padding: 10px 16px;
-  min-height: 40px;
+  min-height: 44px; /* touch floor — owner ruling C3 */
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
 }
 .btn-nav[data-surface="customer"]:hover:not(:disabled),
@@ -126,36 +126,26 @@
 .btn-utility[data-surface="customer"],
 .btn-utility:not([data-surface]) {
   background: transparent;
-  color: #1B2C5B;
-  font-size: 13px;
+  color: #04395E;   /* one navy — owner ruling C2 */
+  font-size: 14px;  /* 14px floor */
   font-weight: 600;
   line-height: 1;
   padding: 8px 12px;
-  min-height: 36px;
-  border: 1.5px solid #1B2C5B;
+  min-height: 44px; /* touch floor — owner ruling C3 */
+  border: 1.5px solid #04395E;
 }
 .btn-utility[data-surface="customer"]:hover:not(:disabled),
 .btn-utility:not([data-surface]):hover:not(:disabled) {
   background: #E3F5FD;
 }
 
-/* GLASS-SCOPED NAVY SPLIT (owner ruling 2026-07-12): on glass-mounted
-   customer pages (RatePage, ReviewPage, …) the authoritative navy is the
-   glass navy #04395E. The base customer variant above keeps the marketing
-   navy #1B2C5B for retained non-glass legacy consumers.
-   Non-glass customer consumers (PublicBookingPage /book) override the ink
-   per-Button inline with COLORS.glassNavy instead. */
-html[data-glass-theme] .btn-primary[data-surface="customer"],
-html[data-glass-theme] .btn-primary:not([data-surface]),
-html[data-glass-theme] .btn-nav[data-surface="customer"],
-html[data-glass-theme] .btn-nav:not([data-surface]) {
-  color: #04395E;
-}
-html[data-glass-theme] .btn-utility[data-surface="customer"],
-html[data-glass-theme] .btn-utility:not([data-surface]) {
-  color: #04395E;
-  border-color: #04395E;
-}
+/* The glass-scoped navy split (owner ruling 2026-07-12) is retired here.
+   It existed because the base customer variants carried the marketing navy
+   #1B2C5B and only glass-mounted pages were repainted to the glass navy
+   #04395E, which left two navies in one token file and an email twin that
+   drifted from both. Owner ruling C2 (DECISIONS 2026-09-11) makes #04395E the
+   CTA ink everywhere, so the base variants above carry it and these overrides
+   have nothing left to override. */
 
 /* Customer surface — tablet (640px+) */
 @media (min-width: 640px) {

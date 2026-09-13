@@ -6,8 +6,13 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import ScheduleFlowPage from './ScheduleFlowPage';
 
-vi.mock('../components/brand', () => ({
+// PublicStateCard and BrandCard come through for real: they are leaf
+// presentational components, and these suites assert on the terminal-state
+// markup they produce. Everything heavier stays stubbed.
+vi.mock('../components/brand', async (importOriginal) => ({
+  ...(await importOriginal()),
   WavesShell: ({ children }) => <div>{children}</div>,
+  CustomerColumn: ({ children, ...props }) => <div {...props}>{children}</div>,
 }));
 
 function jsonResponse(body, status = 200) {

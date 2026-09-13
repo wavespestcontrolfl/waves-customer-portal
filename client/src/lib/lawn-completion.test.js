@@ -144,6 +144,24 @@ it('a plan outage withdraws every still-derived suggestion and keeps entered val
   expect(withdrawLawnPlanSuggestions([governed])[0]).toMatchObject({ totalAmount: '', rate: '', areaValue: '', applicationMethod: 'broadcast_spray', rateUnit: 'fl_oz', amountUnit: 'fl_oz', areaUnit: 'sqft' });
   const unitOnly = { ...governed, amountUnit: 'gal', rateUnit: 'lb', lawnPlanManualFields: ['amountUnit', 'rateUnit'] };
   expect(withdrawLawnPlanSuggestions([unitOnly], { planUnverified: true })[0]).toMatchObject({ amountUnit: 'gal', rateUnit: 'lb', areaUnit: '', applicationMethod: '' });
+  // A tank calculation is an actual the technician measured: the dose, the
+  // rate and the units that label them all survive an unverified restore —
+  // 20 without fl_oz is not a record (Codex r1 P1).
+  const tank = { ...governed, rate: '0.8', rateUnit: 'fl_oz/gal', carrierGallons: '25', totalAmount: 20, amountUnit: 'fl_oz' };
+  expect(withdrawLawnPlanSuggestions([tank], { planUnverified: true })[0]).toMatchObject({
+    rate: '0.8', rateUnit: 'fl_oz/gal', totalAmount: 20, amountUnit: 'fl_oz', carrierGallons: '25', areaValue: '', areaUnit: '',
+  });
+});
+
+it('a plan refresh never blanks a measured tank dose, and the treated area still follows', () => {
+  const tank = { productId: 'k', lawnPlanDefaults: {}, lawnPlanManualFields: [], rate: '0.8', rateUnit: 'fl_oz/gal',
+    carrierGallons: '25', totalAmount: 20, amountUnit: 'fl_oz', areaValue: 4000, areaUnit: 'sqft', applicationMethod: 'broadcast_spray' };
+  // The plan cannot express a per-gallon quantity, so its row arrives blank.
+  const fresh = { productId: 'k', lawnPlanDefaults: {}, rate: '', rateUnit: 'fl_oz', totalAmount: '', amountUnit: 'fl_oz',
+    areaValue: 5000, areaUnit: 'sqft', applicationMethod: 'broadcast_spray', applicationArea: 'Front yard', lawnAmountReason: null };
+  const [row] = reconcileLawnPlanSelections([tank], [fresh]);
+  expect(row).toMatchObject({ rate: '0.8', rateUnit: 'fl_oz/gal', totalAmount: 20, amountUnit: 'fl_oz', carrierGallons: '25' });
+  expect(String(row.areaValue)).toBe('5000');
 });
 
 it('a chosen rate unit never relabels the plan rate: the still-derived rate and total stay withdrawn while the units differ, return when they agree, and the area still follows the visit', () => {

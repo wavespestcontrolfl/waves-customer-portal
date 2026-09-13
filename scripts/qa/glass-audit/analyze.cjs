@@ -68,7 +68,7 @@ lines.push('');
 //    Every captured width is read (320/375/430/768/1024 extra viewports included: a 320px overflow is a
 //    finding), and each interaction's own metrics snapshot (opened sheet / menu / dialog / later booking
 //    step) is read as a virtual record labelled `/<interaction>`, so overlay-only defects are listed too.
-const ixRecords = (r) => (r.interactions || []).filter((i) => i.ok && i.metrics).map((i) => ({ ...r, metrics: i.metrics, contrast: [], focusProbe: [], interactions: [], unmatched: [], pageErrors: [], ix: i.name }));
+const ixRecords = (r) => (r.interactions || []).filter((i) => i.ok && i.metrics).map((i) => ({ ...r, metrics: i.metrics, contrast: i.contrast || [], focusProbe: [], interactions: [], unmatched: [], pageErrors: [], ix: i.name }));
 function section(title, getter, fmt, limitPer = 12, source = withMetrics) {
   lines.push(`## ${title}`, '');
   const seen = new Set();
