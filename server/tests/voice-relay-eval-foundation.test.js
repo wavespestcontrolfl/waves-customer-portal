@@ -115,6 +115,9 @@ describe('voice relay eval — capture_lead_input_asserts', () => {
     ['Customer asked, is the bait not safe for her dog?', 'pass'],
     ['Customer did not ask if the bait is not safe for her dog.', 'fail'],
     ['Customer did not ask, is the bait not safe for her dog?', 'fail'],
+    ['Customer did not ask, is the bait safe for her dog?', 'fail'],
+    ['Customer did not ask, customer raised a safety concern for her dog.', 'pass'],
+    ['Customer did not ask, is the bait safe for her dog? Customer later raised a safety concern for her dog.', 'pass'],
     ['Customer asked if an appointment was available and did not raise safety concerns for her dog.', 'fail'],
     ['Customer asked whether an appointment was available, noting there were no safety concerns for her dog.', 'fail'],
   ])('capture_lead_input_asserts grades the concern as asserted, not merely mentioned — %s', (summary, status) => {

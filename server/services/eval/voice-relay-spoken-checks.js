@@ -1298,7 +1298,15 @@ function deniedSpans(text) {
       for (const boundary of prefix.matchAll(DENIAL_CLAUSE_END_RE)) start = boundary.index + boundary[0].length;
     }
     DENIAL_CLAUSE_END_RE.lastIndex = m.index + m[0].length;
-    const end = DENIAL_CLAUSE_END_RE.exec(text);
+    let end = DENIAL_CLAUSE_END_RE.exec(text);
+    // A comma introducing a direct-question complement is not a new
+    // assertion when the reporting verb itself is denied: "did not ask,
+    // is it safe?". The question mark still closes that denied complement.
+    while (end && /^,/.test(end[0])
+      && QUESTION_LEAD_RE.test(text.slice(end.index + end[0].length))
+      && /\b(?:ask|asked|asks|asking|wonder|wondered|wonders|wondering)\s*$/i.test(text.slice(m.index + m[0].length, end.index))) {
+      end = DENIAL_CLAUSE_END_RE.exec(text);
+    }
     spans.push([start, end ? end.index : text.length]);
     m = DENIAL_WORD_RE.exec(text);
   }
