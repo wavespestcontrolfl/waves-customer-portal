@@ -1327,10 +1327,10 @@ const SAFETY_QUESTION_PRONOUN_RE = '(?:it|that|they|this|these|those)\\b';
 const SAFETY_QUESTION_AUXILIARY = `(?:is|are|does|do|would|will|can|could|isn[\\x27\\u2019]t|aren[\\x27\\u2019]t|doesn[\\x27\\u2019]t|don[\\x27\\u2019]t|wouldn[\\x27\\u2019]t|won[\\x27\\u2019]t|can[\\x27\\u2019]t|couldn[\\x27\\u2019]t)`;
 
 function questionAboutProduct(text, keywordAlt) {
-  const productSubject = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\b[^?]{0,20}?\\b${SAFETY_QUESTION_PRODUCT_SUBJECT_RE}([^?]{0,80}?\\b(?:${keywordAlt})\\b)[^?]{0,60}?\\?`, 'i');
+  const productSubject = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\b[^.!?;]{0,20}?\\b${SAFETY_QUESTION_PRODUCT_SUBJECT_RE}([^.!?;]{0,80}?\\b(?:${keywordAlt})\\b)[^.!?;]{0,60}?\\?`, 'i');
   const productMatch = productSubject.exec(text);
   if (productMatch) return { predicate: productMatch[1] };
-  const pronounSubject = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\b\\s+${SAFETY_QUESTION_PRONOUN_RE}([^?]{0,80}?\\b(?:${keywordAlt})\\b)[^?]{0,60}?\\?`, 'i');
+  const pronounSubject = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\b\\s+${SAFETY_QUESTION_PRONOUN_RE}([^.!?;]{0,80}?\\b(?:${keywordAlt})\\b)[^.!?;]{0,60}?\\?`, 'i');
   const match = pronounSubject.exec(text);
   if (!match) return null;
   // A pronoun subject needs an earlier product mention in the SAME turn to
