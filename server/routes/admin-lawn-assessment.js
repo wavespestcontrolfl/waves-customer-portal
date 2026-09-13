@@ -1051,26 +1051,18 @@ router.post('/confirm', async (req, res, next) => {
       observationEdit,
     } = req.body;
 
-    if (!assessmentId) return res.status(400).json({ error: 'assessmentId is required' });
-    if (observationEdit != null && typeof observationEdit !== 'string') {
-      return res.status(400).json({ error: 'observationEdit must be text or null' });
-    }
-
     // Validate stress_flags up front so a bad payload doesn't reach
     // the DB write path.
     const { errors: stressErrors, normalized: normalizedStressFlags } = normalizeStressFlags(stressFlagsInput);
-    if (stressErrors.length) {
-      return res.status(400).json({ error: 'Invalid stress_flags', details: stressErrors });
-    }
     const protocolFieldChecksProvided = Object.prototype.hasOwnProperty.call(req.body, 'protocol_field_checks');
-    let protocolFieldChecks = null;
-    if (protocolFieldChecksProvided) {
-      const { errors: protocolCheckErrors, normalized } = normalizeProtocolFieldChecks(protocolFieldChecksInput);
-      if (protocolCheckErrors.length) {
-        return res.status(400).json({ error: 'Invalid protocol_field_checks', details: protocolCheckErrors });
-      }
-      protocolFieldChecks = normalized;
-    }
+    const { errors: protocolCheckErrors, normalized: protocolFieldChecks } = normalizeProtocolFieldChecks(protocolFieldChecksInput);
+    const invalidRequest = [
+      [Boolean(assessmentId), { error: 'assessmentId is required' }],
+      [observationEdit == null || typeof observationEdit === 'string', { error: 'observationEdit must be text or null' }],
+      [stressErrors.length === 0, { error: 'Invalid stress_flags', details: stressErrors }],
+      [protocolCheckErrors.length === 0, { error: 'Invalid protocol_field_checks', details: protocolCheckErrors }],
+    ].find(([valid]) => !valid);
+    if (invalidRequest) return res.status(400).json(invalidRequest[1]);
 
     const assessment = await db('lawn_assessments').where({ id: assessmentId }).first();
     if (!assessment) return res.status(404).json({ error: 'Assessment not found' });
