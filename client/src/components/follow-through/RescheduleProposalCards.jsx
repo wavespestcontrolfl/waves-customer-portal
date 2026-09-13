@@ -105,7 +105,7 @@ function CandidateReview({ candidates, selected, selection, busy, who, ui, onSel
       <Text tone="muted">Appointment discussed on the call</Text>
       <Select aria-label={`Appointment discussed for ${who}`} value={selection} disabled={!!busy}
         onChange={(event) => onSelection(row, event.target.value)}>
-        {candidates.length > 1 && <option value="">Select the appointment discussed…</option>}
+        <option value="">Select the appointment discussed…</option>
         {candidates.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidateLabel(candidate)}</option>)}
       </Select>
     </label>
@@ -192,7 +192,6 @@ export default function RescheduleProposalCards({ ui, pollMs = DEFAULT_POLL_MS }
   const dataRef = useRef(data);
   const selectionsRef = useRef(selections);
   const previewsRef = useRef(previews);
-  const explicitSelectionsRef = useRef(new Set());
 
   const replacePreviews = useCallback((value) => {
     const next = typeof value === 'function' ? value(previewsRef.current) : value;
@@ -205,17 +204,12 @@ export default function RescheduleProposalCards({ ui, pollMs = DEFAULT_POLL_MS }
   const reconcile = useCallback((rows, { invalidate = false } = {}) => {
     setSelections((old) => {
       const next = {};
-      const retainedExplicit = new Set();
       for (const row of rows) {
         const candidateIds = new Set((row.candidates || []).map((candidate) => candidate.id));
-        const prior = old[row.id];
-        if (candidateIds.size > 1 && explicitSelectionsRef.current.has(row.id) && prior && candidateIds.has(prior)) {
-          next[row.id] = prior;
-          retainedExplicit.add(row.id);
-        } else if (candidateIds.size === 1) next[row.id] = row.candidates[0].id;
-        else next[row.id] = '';
+        // Every selection came from staff, including a sole candidate. A
+        // later candidate cannot turn an inferred match into authorization.
+        next[row.id] = candidateIds.has(old[row.id]) ? old[row.id] : '';
       }
-      explicitSelectionsRef.current = retainedExplicit;
       selectionsRef.current = next;
       return next;
     });
@@ -305,8 +299,6 @@ export default function RescheduleProposalCards({ ui, pollMs = DEFAULT_POLL_MS }
     if (mounted.current) setError(message);
   };
   const select = (row, visitId) => {
-    if (visitId) explicitSelectionsRef.current.add(row.id);
-    else explicitSelectionsRef.current.delete(row.id);
     selectionsRef.current = { ...selectionsRef.current, [row.id]: visitId };
     setSelections(selectionsRef.current);
     replacePreviews((old) => ({ ...old, [row.id]: null }));

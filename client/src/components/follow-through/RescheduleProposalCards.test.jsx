@@ -162,15 +162,31 @@ describe('reschedule proposal review', () => {
     expect(screen.queryByLabelText('Preview for Synthetic Caller')).not.toBeInTheDocument();
   });
 
-  it('requires a choice when a refresh expands one automatic match into an ambiguous list', async () => {
+  it('requires a staff choice for a sole candidate and when another candidate appears', async () => {
     const unique = { ...ROW, candidates: [FIRST], matched_visit_id: FIRST.id };
     adminFetch.mockResolvedValueOnce({ ...FEED, proposals: [unique] }).mockResolvedValue(FEED);
     render(<RescheduleProposalCards ui={ui} />);
-    expect(await screen.findByLabelText('Appointment discussed for Synthetic Caller')).toHaveValue(FIRST.id);
+    expect(await screen.findByLabelText('Appointment discussed for Synthetic Caller')).toHaveValue('');
+    expect(screen.getByRole('button', { name: 'Preview change' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Apply change' })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     await waitFor(() => expect(screen.getByLabelText('Appointment discussed for Synthetic Caller')).toHaveValue(''));
     expect(screen.getByRole('button', { name: 'Preview change' })).toBeDisabled();
+  });
+
+  it('retains only a deliberate staff selection when the candidate list expands', async () => {
+    const unique = { ...ROW, candidates: [FIRST], matched_visit_id: FIRST.id };
+    adminFetch.mockResolvedValueOnce({ ...FEED, proposals: [unique] }).mockResolvedValue(FEED);
+    render(<RescheduleProposalCards ui={ui} />);
+    const select = await screen.findByLabelText('Appointment discussed for Synthetic Caller');
+    expect(select).toHaveValue('');
+    fireEvent.change(select, { target: { value: FIRST.id } });
+    expect(screen.getByRole('button', { name: 'Preview change' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await screen.findByRole('option', { name: /200 Test Lane/ });
+    expect(select).toHaveValue(FIRST.id);
+    expect(screen.queryByRole('button', { name: 'Apply change' })).not.toBeInTheDocument();
   });
 
   it('rejects an incomplete preview instead of exposing Apply', async () => {
@@ -317,6 +333,7 @@ describe('reschedule proposal review', () => {
 it('requires an address to preview an appointment', async () => {
   adminFetch.mockResolvedValue({ ...FEED, proposals: [{ ...ROW, candidates: [{ ...FIRST, display_address: null }] }] });
   render(<RescheduleProposalCards ui={ui} />);
+  fireEvent.change(await screen.findByLabelText('Appointment discussed for Synthetic Caller'), { target: { value: FIRST.id } });
   await screen.findByText('The appointment address needs review. Use the schedule editor.');
   expect(screen.getByRole('button', { name: 'Preview change' })).toBeDisabled();
   expect(screen.queryByRole('button', { name: 'Apply change' })).not.toBeInTheDocument();
