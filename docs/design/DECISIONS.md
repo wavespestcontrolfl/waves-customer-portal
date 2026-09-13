@@ -2563,3 +2563,9 @@ Debt: **two fewer, and one fewer file**. `Icon.jsx` delisted (a stale entry
 fails the gate, so the line had to go), `GlassEstimateExtras` 4 → 3. Landing
 after R3b's weight sweep, that leaves **73 across 24 files**. No customer pixel
 changes; the remaining 73 are real, and still R3/R4 work.
+
+## 2026-09-11 — Termite annual protection plan: ruling A-1 = P1; pricing core ships dark
+
+**Ruling (owner):** the Waves Subterranean Termite Protection plan uses price shape P1 — station setup fee `stations × $30` (one-time, never tier-discounted) plus a prepaid annual protection fee `$249 + $50 per 5-station bracket above 10` (tier-discounted like monitoring), 12-month coverage, one inspection a year, no term. The setup runs ≈ −10% at real cost ($24 hardware + $6 buildup + install labor ≈ $33/station); the owner accepts that loss.
+
+**This pricing-core PR:** defines `TERMITE.annualPlan` and the `pricing_config.termite_annual_plan` row, validates and overlays its approved knobs, and teaches `priceTermiteBait({ plan: 'annual_protection' })` the setup and annual fee shape. No estimate selection path invokes the new program in this slice. The follow-up server-selection, admin/client, and customer service-mix PRs own assembly, replay, and surfaces; `GATE_TERMITE_ANNUAL_PLAN` stays OFF until converter/prepay, agreement v3, renewal notices, all surfaces, and counsel/certified-operator signoff are complete (ruling A-11).

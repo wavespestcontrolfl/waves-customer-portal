@@ -431,7 +431,7 @@ describe('termite install knobs — every price-driving knob replays (codex r5)'
 
   test('a later multiplier / buildup / floor edit does not move a sent install; the stamp carries them all', () => {
     const sent = priceTermiteBait(HOME, { system: 'trelona' });
-    expect(sent.pricingKnobs).toEqual({ system: 'trelona', stationCost: 24, stationCostSource: 'config', laborMaterial: 5.25, misc: 0.75, installMultiplier: 1.45, minStations: 8 });
+    expect(sent.pricingKnobs).toEqual({ system: 'trelona', plan: 'quarterly', stationCost: 24, stationCostSource: 'config', laborMaterial: 5.25, misc: 0.75, installMultiplier: 1.45, minStations: 8 });
     expect(sent.installation.price).toBe(653);
     constants.TERMITE.installMultiplier = 1.5;
     constants.TERMITE.systems.trelona.laborMaterial = 6;
@@ -471,4 +471,3 @@ describe('unstamped Advance quotes recover their era (codex r7)', () => {
     expect(priceTermiteBait({ footprint: 2000, features: { complexity: 'standard' } }, { system: 'advance', knobs: tuned }).installation.price).toBe(700);
   });
 });
-
