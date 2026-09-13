@@ -60,6 +60,11 @@ function jsonResponse(payload) {
   return Promise.resolve({ ok: true, json: () => Promise.resolve(payload) });
 }
 
+function deferred() {
+  let resolve;
+  return { promise: new Promise((done) => { resolve = done; }), resolve };
+}
+
 beforeEach(() => {
   customerPayload = { ...baseCustomer };
   vi.stubGlobal('confirm', vi.fn(() => true));
@@ -428,6 +433,38 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
     await waitFor(() => expect(uploadCount).toBe(2));
     await screen.findByText('✓ Report draft saved');
     await waitFor(() => expect(onPendingPhotosChange).toHaveBeenLastCalledWith(false));
+  });
+
+  it.each(['project POST', 'signer prefill GET'])('holds a late first photo at the %s boundary', async (boundary) => {
+    const gate = deferred();
+    const originalFetch = fetch.getMockImplementation();
+    let waitingAtBoundary = false;
+    fetch.mockImplementation((url, opts = {}) => {
+      const u = String(url);
+      const gatedPost = boundary === 'project POST' && /\/admin\/projects$/.test(u) && opts.method === 'POST';
+      const gatedDetail = boundary === 'signer prefill GET' && u.endsWith('/admin/projects/p-1') && !opts.method;
+      if (gatedPost || gatedDetail) {
+        waitingAtBoundary = true;
+        return gate.promise;
+      }
+      return originalFetch(url, opts);
+    });
+    renderWdoSheet();
+    if (boundary === 'signer prefill GET') await queueReportPhoto('uploaded-first.jpg');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Report' }));
+    await waitFor(() => expect(waitingAtBoundary).toBe(true));
+    await queueReportPhoto('late-first.jpg');
+    gate.resolve({
+      ok: true,
+      json: async () => boundary === 'project POST'
+        ? { project: { id: 'p-1', project_type: 'wdo_inspection' } }
+        : { project: detailPayload },
+    });
+
+    await screen.findByText('1 photo was added while this draft was saving. Save again to upload it.');
+    expect(screen.getByText('late-first.jpg')).toBeTruthy();
+    expect(screen.queryByText('✓ Report draft saved')).toBeNull();
   });
 
   it('hands off a partially saved project before opening appointment details', async () => {

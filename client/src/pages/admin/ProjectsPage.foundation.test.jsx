@@ -138,16 +138,14 @@ describe("Project photo caption dirty signal", () => {
     { id: "photo-1", caption: "Front entry", category: "exterior" },
     { id: "photo-2", caption: "Kitchen", category: "interior" },
   ];
+  const renderDetail = (onDirtyChange) => render(<MemoryRouter><ProjectDetail
+    projectId="project-1" typesRegistry={types} onClose={vi.fn()} onDirtyChange={onDirtyChange}
+  /></MemoryRouter>);
 
   it("keeps separate caption drafts dirty until each one is cancelled", async () => {
     projectPhotos = photos;
     const onDirtyChange = vi.fn();
-    render(<MemoryRouter><ProjectDetail
-      projectId="project-1"
-      typesRegistry={types}
-      onClose={vi.fn()}
-      onDirtyChange={onDirtyChange}
-    /></MemoryRouter>);
+    renderDetail(onDirtyChange);
 
     const editButtons = await screen.findAllByRole("button", { name: "Edit caption" });
     fireEvent.click(editButtons[0]);
@@ -166,12 +164,7 @@ describe("Project photo caption dirty signal", () => {
   it("keeps another caption draft mounted and dirty while one caption saves", async () => {
     projectPhotos = photos;
     const onDirtyChange = vi.fn();
-    render(<MemoryRouter><ProjectDetail
-      projectId="project-1"
-      typesRegistry={types}
-      onClose={vi.fn()}
-      onDirtyChange={onDirtyChange}
-    /></MemoryRouter>);
+    renderDetail(onDirtyChange);
 
     const editButtons = await screen.findAllByRole("button", { name: "Edit caption" });
     fireEvent.click(editButtons[0]);
@@ -200,12 +193,7 @@ describe("Project photo caption dirty signal", () => {
       }
       return response(fixtureFor(url, options));
     });
-    render(<MemoryRouter><ProjectDetail
-      projectId="project-1"
-      typesRegistry={types}
-      onClose={vi.fn()}
-      onDirtyChange={onDirtyChange}
-    /></MemoryRouter>);
+    renderDetail(onDirtyChange);
 
     fireEvent.click(await screen.findByRole("button", { name: "Edit caption" }));
     fireEvent.change(screen.getByPlaceholderText("Photo caption"), { target: { value: "Pending through refresh" } });
@@ -228,12 +216,7 @@ describe("Project photo caption dirty signal", () => {
       }
       return response(fixtureFor(url, options));
     });
-    render(<MemoryRouter><ProjectDetail
-      projectId="project-1"
-      typesRegistry={types}
-      onClose={vi.fn()}
-      onDirtyChange={onDirtyChange}
-    /></MemoryRouter>);
+    renderDetail(onDirtyChange);
 
     fireEvent.click(await screen.findByRole("button", { name: "Edit caption" }));
     fireEvent.change(screen.getByPlaceholderText("Photo caption"), { target: { value: "Unsaved caption" } });

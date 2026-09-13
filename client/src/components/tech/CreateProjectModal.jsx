@@ -1294,6 +1294,13 @@ export default function CreateProjectModal({
     setPhotoQueue(next);
   }
 
+  function holdSaveForQueuedPhotos() {
+    const count = photoQueueRef.current.length;
+    if (!count) return false;
+    setError(`${count} photo${count === 1 ? ' was' : 's were'} added while this draft was saving. Save again to upload ${count === 1 ? 'it' : 'them'}.`);
+    return true;
+  }
+
   // "Extract from photo" on the Previous Treatment observations field: send
   // the photo to AI transcription and write the result into the Section-3
   // fields. The photo also joins the upload queue as prior-treatment evidence
@@ -1529,11 +1536,12 @@ export default function CreateProjectModal({
           setError(`Project draft was saved, but some photos did not upload. Retry Save Draft to upload the remaining photo${failedUploads.length === 1 ? '' : 's'}. ${failedUploads.join('; ')}`);
           return;
         }
-        if (remainingQueue.length) {
-          setError(`${remainingQueue.length} photo${remainingQueue.length === 1 ? ' was' : 's were'} added while this draft was saving. Save again to upload ${remainingQueue.length === 1 ? 'it' : 'them'}.`);
-          return;
-        }
+        if (holdSaveForQueuedPhotos()) return;
       }
+
+      // A picker may have opened before Save and resolve during the project
+      // POST even when the queue was empty at click time.
+      if (holdSaveForQueuedPhotos()) return;
 
       try { localStorage.removeItem(draftKey); } catch { /* ignore */ }
       if ([WDO_PROJECT_TYPE, PRE_TREATMENT_CERTIFICATE_TYPE].includes(projectType) && !signStep) {
@@ -1549,6 +1557,9 @@ export default function CreateProjectModal({
             if (dr.ok) detailPayload = dd || null;
           } catch { /* prefill only */ }
         }
+        // The signer-prefill request is another await boundary where a native
+        // picker can finish. Keep that File on the editable step for retry.
+        if (holdSaveForQueuedPhotos()) return;
         const detail = detailPayload?.project || null;
         setSignStep({
           project: data.project,
@@ -1562,6 +1573,7 @@ export default function CreateProjectModal({
         });
         return;
       }
+      if (holdSaveForQueuedPhotos()) return;
       if (onCreated) onCreated(data.project);
       onClose?.();
     } catch (e) {
@@ -1959,7 +1971,7 @@ export default function CreateProjectModal({
                     return;
                   }
                   if (createdProject && onCreated) onCreated(createdProject);
-                  onViewDetails();
+                  onViewDetails(createdProject || null);
                 }}
                 style={{
                   height: 36, minWidth: 72, borderRadius: 999,
