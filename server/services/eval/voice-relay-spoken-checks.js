@@ -346,7 +346,7 @@ function no_visit_time(value, record, { utterances }) {
     // your cancellation for tomorrow, and the office will reopen during
     // regular hours" carries the caller's date, not a reopening one.
     const text = utterance.text;
-    const units = subject ? text.split(SENTENCE_SPLIT_RE).flatMap((s) => s.split(CLAUSE_SPLIT_RE)).filter((c) => subject.test(c)) : text.split(SENTENCE_SPLIT_RE);
+    const units = subject ? text.split(SENTENCE_SPLIT_RE).flatMap((s) => s.split(CLAUSE_SPLIT_RE)).filter((c) => subject.test(c)) : text.split(SENTENCE_SPLIT_RE).filter((s) => s.trim());
     for (const raw of units) {
       const sentence = strip ? strip(raw) : raw;
       const anywhere = TIME_ANYWHERE_RES.map((re) => re.exec(sentence)).find(Boolean);
@@ -357,7 +357,7 @@ function no_visit_time(value, record, { utterances }) {
       const callbackTime = !subject
         && isAffirmativeCallbackContext(previousContext)
         && VISIT_TIME_ANSWER_RE.test(sentence);
-      if (raw.trim()) previousRaw = raw;
+      if (!callbackTime) previousRaw = raw;
       if (callbackTime) continue;
       if (anywhere) return ['fail', `"${anywhere[0]}" spoken: "${clip(raw, 160)}"`];
       const relative = RELATIVE_DAY_RE.exec(sentence) || ORDINAL_DATE_RE.exec(sentence) || standaloneDate;

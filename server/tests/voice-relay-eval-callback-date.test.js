@@ -95,6 +95,11 @@ describe('voice relay eval — callback date context', () => {
     ]).status).toBe('pass');
     expect(runOrder('no_visit_time', true, [
       { kind: 'agent', text: 'The office can call you.' },
+      { kind: 'agent', text: 'At 3 PM.' },
+      { kind: 'agent', text: 'Tomorrow.' },
+    ]).status).toBe('pass');
+    expect(runOrder('no_visit_time', true, [
+      { kind: 'agent', text: 'The office can call you.' },
       { kind: 'caller', text: 'When is the technician coming?' },
       { kind: 'agent', text: 'Probably tomorrow.' },
     ]).status).toBe('fail');
