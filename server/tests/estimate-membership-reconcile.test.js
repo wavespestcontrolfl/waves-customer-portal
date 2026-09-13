@@ -136,7 +136,8 @@ describe('reconcileFrozenMembershipSnapshot — frozen recurring flags', () => {
     serverRecomputeFromEstimateData.mockResolvedValue({ recomputed: false, reason: 'NO_INPUTS' });
     const estimate = estimateRow(frozenEstData());
 
-    await reconcileFrozenMembershipSnapshot(estimate);
+    const result = await reconcileFrozenMembershipSnapshot(estimate, { strictMembership: true });
+    expect(result).toEqual({ ok: false, error: 'NO_INPUTS' });
 
     const estData = JSON.parse(estimate.estimate_data);
     expect(estData.membershipLapsedRequote).toBe(true);
@@ -371,7 +372,8 @@ describe('reconcileFrozenMembershipSnapshot — the rodent setup waiver is re-va
     isActivePlanCustomer.mockResolvedValue(true);
     loadExistingQualifyingServiceKeys.mockRejectedValue(new Error('db down'));
     const estimate = estimateRow(waivedRodentEstData());
-    await reconcileFrozenMembershipSnapshot(estimate);
+    const result = await reconcileFrozenMembershipSnapshot(estimate, { strictMembership: true });
+    expect(result).toEqual({ ok: false, error: 'setup_waiver_unverified_requote' });
     const estData = JSON.parse(estimate.estimate_data);
     expect(estData.setupWaiverPriorQualifyingServices).toEqual(['pest_control']);
     expect(estData.engineInputs.setupWaiverPriorQualifyingServices).toEqual(['pest_control']);
