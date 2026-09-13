@@ -293,7 +293,11 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
             {showProtocol && (
               <button
                 type="button"
-                onClick={(e) => { e.stopPropagation(); onProtocol(service); }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  e.currentTarget.focus({ preventScroll: true });
+                  onProtocol(service);
+                }}
                 className={actionBtnClass}
                 title="Protocol"
                 aria-label="Protocol"

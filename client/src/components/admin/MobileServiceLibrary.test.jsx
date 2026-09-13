@@ -110,21 +110,48 @@ describe("MobileServiceLibrary", () => {
       await screen.findByRole("button", { name: /Pest Control/i }),
     );
     expect(screen.getByText("All Services").parentElement).toHaveTextContent(
-      "Categories are set per service. Edit a service from All Servicesto move it.",
+      "Categories are set per service. Edit a service from All Services to move it.",
     );
   });
 
-  it("keeps the original empty category state when loading fails", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => Promise.reject(new Error("down"))));
+  it("distinguishes category read failures from empty results and retries", async () => {
+    let resolveRetry;
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 503,
+          json: async () => ({}),
+        })
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              resolveRetry = resolve;
+            }),
+        ),
+    );
     render(<MobileServiceLibrary />);
-
     fireEvent.click(screen.getByRole("button", { name: /Categories/i }));
-
-    expect(await screen.findByText("No categories")).toBeInTheDocument();
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Could not load categories.",
+    );
+    expect(screen.queryByText("No categories")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Loading…")).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Try again" }),
     ).not.toBeInTheDocument();
+    resolveRetry({ ok: true, json: async () => ({ services: [] }) });
+    expect(await screen.findByText("No categories")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(
+      fetch.mock.calls.every(
+        ([, options]) => !options.method || options.method === "GET",
+      ),
+    ).toBe(true);
   });
 
   it.each([

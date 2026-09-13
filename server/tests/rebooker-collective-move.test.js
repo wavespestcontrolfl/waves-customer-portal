@@ -20,9 +20,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/tech-status', () => ({
   clearTechCurrentJob: jest.fn().mockResolvedValue(null),
 }));
-jest.mock('../sockets', () => ({
-  getIo: jest.fn(() => ({ to: jest.fn(() => ({ emit: jest.fn() })) })),
-}));
+const mockIoEmit = jest.fn();
+const mockIoTo = jest.fn(() => ({ emit: mockIoEmit }));
+jest.mock('../sockets', () => ({ getIo: jest.fn(() => ({ to: mockIoTo })) }));
 jest.mock('../services/scheduling/occupancy', () => ({
   ...jest.requireActual('../services/scheduling/occupancy'),
   findConflictingVisits: jest.fn().mockResolvedValue([]),
@@ -31,12 +31,16 @@ jest.mock('../services/scheduling/blackout-dates', () => ({
   isBlackoutDate: jest.fn().mockResolvedValue(false),
   getBlackoutDates: jest.fn().mockResolvedValue(new Set()),
 }));
+jest.mock('../services/outbound-review-confirm', () => ({
+  activateLegacyOutboundReviewRowIfNeeded: jest.fn().mockResolvedValue(false),
+}));
 
 const fs = require('fs');
 const path = require('path');
 const db = require('../models/db');
 const SmartRebooker = require('../services/rebooker');
 const { findConflictingVisits } = require('../services/scheduling/occupancy');
+const { activateLegacyOutboundReviewRowIfNeeded } = require('../services/outbound-review-confirm');
 const { parseETDateTime, addETDays, etDateString, etParts } = require('../utils/datetime-et');
 
 const dayOffset = (n) => etDateString(addETDays(parseETDateTime(`${etDateString()}T12:00`), n));
@@ -116,7 +120,8 @@ function anchorRow(overrides = {}) {
 // sibling SELECT, the same SELECT again under the locks (lockedSiblings =
 // what that read returns; defaults to the same rows), same-series clash
 // probe, then one UPDATE chain per sibling in order.
-function wireSeriesMocks(siblings, { anchor = anchorRow(), priorMove = null, updateResults = null, freshAnchor = null, lockedSiblings = null, lockedParent = null } = {}) {
+function wireSeriesMocks(siblings, { anchor = anchorRow(), priorMove = null, updateResults = null, freshAnchor = null,
+  lockedSiblings = null, lockedParent = null, reviewedMaintenanceLocked = true } = {}) {
   const anchorLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
   const parentLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
   const siblingsQuery = chain({ select: jest.fn().mockResolvedValue(siblings) });
@@ -140,7 +145,10 @@ function wireSeriesMocks(siblings, { anchor = anchorRow(), priorMove = null, upd
     if (table === 'series_moves') return seriesMovesInsert;
     throw new Error(`Unexpected trx table ${table}`);
   });
-  trx.raw = rawFactory('trx.raw');
+  const ordinaryRaw = rawFactory('trx.raw');
+  trx.raw = jest.fn((sql, bindings) => String(sql).includes('pg_try_advisory_xact_lock')
+    ? Promise.resolve({ rows: [{ locked: reviewedMaintenanceLocked }] })
+    : ordinaryRaw(sql, bindings));
   trx.fn = { now: jest.fn(() => 'NOW()') };
   db.transaction = jest.fn(async (callback) => callback(trx));
 
@@ -294,6 +302,25 @@ describe('reschedule() choke point', () => {
     expect(seriesOperationKey('svc-1', TARGET, { start: '09:00', end: '11:00' }, {}).requestKey).not.toMatch(/:tech=/);
   });
 
+  test('the longest derived pending key fits series_moves.operation_key and stays distinct from the default key', async () => {
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    const serviceId = '11111111-1111-4111-8111-111111111111';
+    const technicianId = '22222222-2222-4222-8222-222222222222';
+    const service = anchorRow({ id: serviceId });
+    const window = { start: '08:00', end: '18:00' };
+    const common = { ...ADMIN_OPTS, clearAnchorWindow: true, technicianId };
+    const { priorLookup: pendingLookup } = wireLookup(service);
+    await SmartRebooker.reschedule(serviceId, TARGET, window, 'admin', 'admin', { ...common, pendingConfirmation: true });
+    const pendingKey = pendingLookup.where.mock.calls.map(([arg]) => arg?.operation_key).find(Boolean);
+    const { priorLookup: defaultLookup } = wireLookup(service);
+    await SmartRebooker.reschedule(serviceId, TARGET, window, 'admin', 'admin', common);
+    const defaultKey = defaultLookup.where.mock.calls.map(([arg]) => arg?.operation_key).find(Boolean);
+    expect(pendingKey).toBe(`${serviceId}:${TARGET}:08:00:18:00:clear:pending:tech=${technicianId}`);
+    expect(pendingKey.length).toBeLessThanOrEqual(120);
+    expect(defaultKey).toBe(`${serviceId}:${TARGET}:08:00:18:00:clear:tech=${technicianId}`);
+    expect(pendingKey).not.toBe(defaultKey);
+  });
+
   test('a completed ROUND TRIP (A→B, B→A, A→B within the horizon) proceeds: a later committed move of this anchor makes the A→B row history, not this request\'s earlier attempt', async () => {
     process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
     const priorMove = { id: 'sm-prior', original_date: BASE, new_date: TARGET, created_at: new Date(Date.now() - 5 * 60 * 1000), result: { rescheduledOccurrences: [{ id: 'svc-1', date: TARGET, windowStart: '13:00', windowEnd: '15:00' }] } };
@@ -396,6 +423,41 @@ describe('single-path date exceptions', () => {
     await SmartRebooker.reschedule('svc-2', BASE, { start: '13:00', end: '15:00' }, 'admin', 'admin', { seriesPolicy: 'single' });
     expect(trxScheduled.update.mock.calls[0][0]).not.toHaveProperty('date_exception');
   });
+
+  test.each([
+    ['default', {}, 'confirmed', false],
+    ['reviewed proposal', { pendingConfirmation: true }, 'pending', true],
+  ])('%s single move preserves its confirmation semantics', async (_label, extra, status, clearsConfirmation) => {
+    const { trxScheduled } = wireSingleMocks(anchorRow({
+      id: 'svc-2', recurring_parent_id: 'svc-1', customer_confirmed: true,
+    }));
+    await SmartRebooker.reschedule('svc-2', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
+      seriesPolicy: 'single', ...extra,
+    });
+    const update = trxScheduled.update.mock.calls[0][0];
+    expect(update.status).toBe(status);
+    if (clearsConfirmation) {
+      expect(update).toMatchObject({ customer_confirmed: false, confirmed_at: null });
+    } else {
+      expect(update).not.toHaveProperty('customer_confirmed');
+      expect(update).not.toHaveProperty('confirmed_at');
+    }
+    const confirmationPins = trxScheduled.where.mock.calls
+      .map(([predicate]) => predicate)
+      .filter((predicate) => predicate?.customer_confirmed === true);
+    expect(confirmationPins).toHaveLength(clearsConfirmation ? 1 : 0);
+    expect(activateLegacyOutboundReviewRowIfNeeded).toHaveBeenCalledTimes(clearsConfirmation ? 0 : 1);
+  });
+
+  test('a reviewed live single move refreshes the customer with its pending landing', async () => {
+    wireSingleMocks(anchorRow({ id: 'svc-2', recurring_parent_id: 'svc-1', status: 'on_site' }));
+    await SmartRebooker.reschedule('svc-2', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
+      seriesPolicy: 'single', allowLive: true, pendingConfirmation: true,
+    });
+    expect(mockIoEmit).toHaveBeenCalledWith('customer:job_update', expect.objectContaining({
+      job_id: 'svc-2', status: 'pending',
+    }));
+  });
 });
 
 describe('rescheduleSeries — date-only sweep', () => {
@@ -413,25 +475,59 @@ describe('rescheduleSeries — date-only sweep', () => {
   });
 
   test('a reviewed move returns only the anchor to pending confirmation and records that transition', async () => {
-    const { updates, historyInsert } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1)]);
+    const { updates, historyInsert, seriesMovesDb } = wireSeriesMocks([
+      sib('svc-1', BASE, { customer_confirmed: true }),
+      sib('svc-2', SIB1),
+    ]);
     await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
       ...ADMIN_OPTS, pendingConfirmation: true,
     });
-    expect(updates[0].update.mock.calls[0][0]).toMatchObject({ status: 'pending', customer_confirmed: false });
+    expect(updates[0].update.mock.calls[0][0]).toMatchObject({ status: 'pending', customer_confirmed: false, confirmed_at: null });
+    expect(updates[0].where).toHaveBeenCalledWith(expect.objectContaining({ customer_confirmed: true }));
     expect(updates[1].update.mock.calls[0][0]).toMatchObject({ status: 'confirmed' });
     expect(updates[1].update.mock.calls[0][0]).not.toHaveProperty('customer_confirmed');
     expect(historyInsert.insert).toHaveBeenCalledWith({ job_id: 'svc-1', from_status: 'confirmed', to_status: 'pending', transitioned_by: null });
+    expect(seriesMovesDb.where).toHaveBeenCalledWith(expect.objectContaining({ operation_key: expect.stringMatching(/:pending$/) }));
+    expect(activateLegacyOutboundReviewRowIfNeeded).not.toHaveBeenCalled();
   });
 
-  test.each(['to_date', 'to_start', 'duration', 'property_id'])('a stale disclosed occurrence %s refuses the entire reviewed move', async (field) => {
+  test('a reviewed occurrence pins customer confirmation in its write CAS', async () => {
+    const row = sib('svc-1', BASE, { customer_confirmed: false, estimated_duration_minutes: 90 });
+    const { updates } = wireSeriesMocks([row]);
+    const disclosed = {
+      id: 'svc-1', from_date: BASE, status: 'confirmed', customer_confirmed: false,
+      from_start: '09:00:00', from_end: '11:00:00', duration: 90, property_id: null,
+      date_exception: false, cadence_date: null,
+      to_date: TARGET, to_start: '09:00', to_end: '11:00',
+    };
+    await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
+      ...ADMIN_OPTS, expectOccurrenceIds: ['svc-1'], expectOccurrences: [disclosed],
+    });
+    expect(updates[0].where).toHaveBeenCalledWith(expect.objectContaining({ customer_confirmed: false }));
+    expect(updates[0].where).toHaveBeenCalledWith(expect.objectContaining({ estimated_duration_minutes: 90 }));
+    expect(updates[0].update.mock.calls[0][0]).not.toHaveProperty('customer_confirmed');
+  });
+
+  test.each(['id', 'from_date', 'status', 'customer_confirmed', 'from_start', 'from_end', 'duration', 'property_id', 'date_exception', 'cadence_date', 'to_date', 'to_start', 'to_end'])('a stale disclosed occurrence %s refuses the entire reviewed move', async (field) => {
     const { updates } = wireSeriesMocks([sib('svc-1', BASE)]);
-    const disclosed = { id: 'svc-1', from_date: BASE, status: 'confirmed', from_start: '09:00:00', from_end: '11:00:00',
+    const disclosed = { id: 'svc-1', from_date: BASE, status: 'confirmed', customer_confirmed: null, from_start: '09:00:00', from_end: '11:00:00',
       duration: null, property_id: null, date_exception: false, cadence_date: null,
       to_date: TARGET, to_start: '09:00', to_end: '11:00', [field]: 'stale' };
     await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
       ...ADMIN_OPTS, expectOccurrenceIds: ['svc-1'], expectOccurrences: [disclosed],
     })).rejects.toMatchObject({ statusCode: 409, code: 'SERIES_CHANGED' });
     expect(updates[0].update).not.toHaveBeenCalled();
+  });
+
+  test('a reviewed live series move refreshes the customer with its pending landing', async () => {
+    const anchor = anchorRow({ status: 'on_site' });
+    wireSeriesMocks([sib('svc-1', BASE, { status: 'on_site' })], { anchor });
+    await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
+      ...ADMIN_OPTS, pendingConfirmation: true,
+    });
+    expect(mockIoEmit).toHaveBeenCalledWith('customer:job_update', expect.objectContaining({
+      job_id: 'svc-1', status: 'pending',
+    }));
   });
 
   test('anchor takes the new window + confirmed; siblings keep window, status and tech (a pending placeholder stays pending)', async () => {
@@ -576,6 +672,16 @@ describe('rescheduleSeries — one recorded operation', () => {
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
+  test('a client operation_key cannot replay a normal move as pending confirmation', async () => {
+    wireSeriesMocks([sib('svc-1', BASE)], {
+      priorMove: { id: 'sm-prior', new_date: TARGET, request_key: `svc-1:${TARGET}:09:00:11:00`, result: { success: true, newDate: TARGET } },
+    });
+    await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
+      ...ADMIN_OPTS, operationKey: 'op-123', pendingConfirmation: true,
+    })).rejects.toMatchObject({ statusCode: 409, code: 'OPERATION_KEY_REUSED' });
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
   test('an operation_key reused for a DIFFERENT target of the same appointment is rejected, never replayed', async () => {
     wireSeriesMocks([sib('svc-1', BASE)], {
       priorMove: { id: 'sm-prior', new_date: SIB1, result: { success: true, newDate: SIB1 } },
@@ -688,12 +794,15 @@ describe('rescheduleSeries — one recorded operation', () => {
       priorMove: {
         id: 'sm-prior', new_date: TARGET, customer_id: 'cust-1',
         result: { success: true, newDate: TARGET, occurrencesRescheduled: 1, rescheduledOccurrences: [{ id: 'svc-1', date: TARGET, windowStart: '09:00', windowEnd: '11:00' }] },
-        rows: [{ id: 'svc-1', anchor: true, before: { status: 'on_site', technician_id: 'tech-9' }, after: {} }],
+        rows: [{ id: 'svc-1', anchor: true, before: { status: 'on_site', technician_id: 'tech-9' }, after: { status: 'pending' } }],
       },
       anchor: anchorRow({ scheduled_date: TARGET }),
     });
     await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00' }, 'admin', 'admin', { ...ADMIN_OPTS, operationKey: 'op-123' });
     expect(clearTechCurrentJob).toHaveBeenCalledWith({ tech_id: 'tech-9', current_job_id: 'svc-1', status: 'idle' });
+    expect(mockIoEmit).toHaveBeenCalledWith('customer:job_update', expect.objectContaining({
+      job_id: 'svc-1', status: 'pending',
+    }));
     expect(shiftCallFollowUpsForParentMove).not.toHaveBeenCalled();
   });
 
@@ -794,6 +903,44 @@ describe('rescheduleSeries — one recorded operation', () => {
     expect(lastOccupancy).toBeLessThan(maintenance);
     expect(maintenance).toBeLessThan(lockedRead);
     expect(lockedRead).toBeLessThan(updates[0].update.mock.invocationCallOrder[0]);
+  });
+
+  test('reviewed Apply preflights maintenance before its callback and visit-stop locks', async () => {
+    const rows = [sib('svc-1', BASE)];
+    const { trx } = wireSeriesMocks(rows);
+    const disclosed = [{ id: 'svc-1', from_date: BASE, status: 'confirmed', customer_confirmed: null, from_start: '09:00:00', from_end: '11:00:00',
+      duration: null, property_id: null, date_exception: false, cadence_date: null,
+      to_date: TARGET, to_start: '09:00', to_end: '11:00' }];
+    const beforeMove = jest.fn(async (moveTrx) => moveTrx.raw('SELECT 1', ['reviewed-before-move']));
+    await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
+      ...ADMIN_OPTS, beforeMove, expectOccurrenceIds: ['svc-1'], expectOccurrences: disclosed,
+    });
+    const order = (predicate) => {
+      const index = trx.raw.mock.calls.findIndex(predicate);
+      expect(index).toBeGreaterThan(-1);
+      return trx.raw.mock.invocationCallOrder[index];
+    };
+    const occupancy = Math.max(...trx.raw.mock.calls.map((call, index) =>
+      String(call[1]?.[1] || '').startsWith('occupancy:') ? trx.raw.mock.invocationCallOrder[index] : -1));
+    const preflight = order(([sql]) => String(sql).includes('pg_try_advisory_xact_lock'));
+    const callback = order(([, bindings]) => bindings?.[0] === 'reviewed-before-move');
+    const stop = order(([, bindings]) => bindings?.[0] === 'visit.stop');
+    const maintenance = order(([sql, bindings]) => !String(sql).includes('pg_try') && bindings?.[0] === 'recurring-series-maintenance');
+    expect(occupancy).toBeLessThan(preflight);
+    expect(preflight).toBeLessThan(callback);
+    expect(callback).toBeLessThan(stop);
+    expect(stop).toBeLessThan(maintenance);
+    expect(beforeMove).toHaveBeenCalledTimes(1);
+  });
+
+  test('a single preview that became recurring still preflights maintenance from its empty expected-id pin', async () => {
+    const { updates } = wireSeriesMocks([sib('svc-1', BASE)], { reviewedMaintenanceLocked: false });
+    const beforeMove = jest.fn();
+    await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
+      ...ADMIN_OPTS, beforeMove, expectOccurrenceIds: [],
+    })).rejects.toMatchObject({ statusCode: 409, code: 'VISIT_CHANGED_RETRY', message: expect.stringContaining('reload') });
+    expect(beforeMove).not.toHaveBeenCalled();
+    expect(updates[0].update).not.toHaveBeenCalled();
   });
 
   test('a series that changed between the unlocked read and the locked re-read (an auto-extend child landed) aborts 409 SERIES_CHANGED — nothing written, failure recorded', async () => {
@@ -931,7 +1078,7 @@ describe('previewSeriesMove', () => {
     expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({ date: dayOffset(28), excludeServiceIds: ['svc-1', 'svc-3', 'svc-4'] }));
   });
 
-  test('the disclosed anchor window retains its duration and can be applied unchanged', async () => {
+  test('the disclosed anchor window retains its duration and applies after transport reorders object keys', async () => {
     const anchor = anchorRow({ window_end: '10:30:00', estimated_duration_minutes: 90 });
     const rows = [{ ...anchor }];
     const queries = [chain({ first: jest.fn().mockResolvedValue(anchor) }),
@@ -941,9 +1088,88 @@ describe('previewSeriesMove', () => {
     expect(preview.occurrences[0]).toMatchObject({ to_start: '13:00', to_end: '14:30', duration: 90 });
     const { updates } = wireSeriesMocks(rows, { anchor });
     await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '13:00' }, 'admin', 'admin', {
-      pendingConfirmation: true, expectOccurrenceIds: preview.occurrenceIds, expectOccurrences: preview.occurrences,
+      pendingConfirmation: true, expectOccurrenceIds: preview.occurrenceIds,
+      expectOccurrences: preview.occurrences.map((row) => Object.fromEntries(Object.entries(row).reverse())),
     });
     expect(updates[0].update.mock.calls[0][0]).toMatchObject({ scheduled_date: TARGET, window_start: '13:00', window_end: '14:30', status: 'pending' });
+  });
+
+  test('an explicit anchor clear is disclosed and guarded as windowless', async () => {
+    const anchor = anchorRow();
+    const rows = [{ ...anchor }];
+    const queries = [chain({ first: jest.fn().mockResolvedValue(anchor) }),
+      chain({ first: jest.fn().mockResolvedValue(anchor) }), chain({ select: jest.fn().mockResolvedValue(rows) })];
+    db.mockImplementation((table) => table === 'scheduled_services' ? queries.shift() : chain({ first: jest.fn().mockResolvedValue(null) }));
+    const preview = await SmartRebooker.previewSeriesMove('svc-1', TARGET, {}, { clearAnchorWindow: true });
+    expect(preview.occurrences[0]).toMatchObject({ to_start: null, to_end: null });
+
+    const { updates } = wireSeriesMocks(rows, { anchor });
+    const AppointmentReminders = require('../services/appointment-reminders');
+    const preclose = jest.spyOn(AppointmentReminders, 'precloseWindowlessReminderInTx').mockResolvedValue(undefined);
+    try {
+      await SmartRebooker.rescheduleSeries('svc-1', TARGET, {}, 'admin', 'admin', {
+        clearAnchorWindow: true, expectOccurrenceIds: preview.occurrenceIds, expectOccurrences: preview.occurrences,
+      });
+      expect(updates[0].update.mock.calls[0][0]).toMatchObject({ window_start: null, window_end: null });
+    } finally {
+      preclose.mockRestore();
+    }
+  });
+
+  test('a far seeded-placeholder clash is disclosed and guarded with the sibling window cleared', async () => {
+    const anchor = anchorRow({ recurring_pattern: 'custom', recurring_interval_days: 90 });
+    const rows = [{ ...anchor }, { id: 'svc-2', status: 'pending', scheduled_date: dayOffset(100),
+      window_start: '09:00:00', window_end: '11:00:00', technician_id: null,
+      is_recurring: true, recurring_parent_id: 'svc-1' }];
+    const placeholder = { id: 'other-plan-placeholder', is_recurring: true, recurring_parent_id: 'plan-2',
+      status: 'pending', customer_confirmed: false, reservation_expires_at: null };
+    const queries = [chain({ first: jest.fn().mockResolvedValue(anchor) }),
+      chain({ first: jest.fn().mockResolvedValue(anchor) }), chain({ select: jest.fn().mockResolvedValue(rows) })];
+    db.mockImplementation((table) => table === 'scheduled_services' ? queries.shift() : chain({ first: jest.fn().mockResolvedValue(null) }));
+    findConflictingVisits.mockResolvedValueOnce([placeholder]);
+    const preview = await SmartRebooker.previewSeriesMove('svc-1', TARGET, { start: '09:00', end: '11:00' });
+    expect(preview.occurrences[1]).toMatchObject({ to_start: null, to_end: null });
+
+    const { updates } = wireSeriesMocks(rows, { anchor });
+    const AppointmentReminders = require('../services/appointment-reminders');
+    const preclose = jest.spyOn(AppointmentReminders, 'precloseWindowlessReminderInTx').mockResolvedValue(undefined);
+    findConflictingVisits.mockResolvedValueOnce([placeholder]).mockResolvedValueOnce([]).mockResolvedValueOnce([placeholder]);
+    try {
+      await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_self_serve', {
+        expectOccurrenceIds: preview.occurrenceIds, expectOccurrences: preview.occurrences,
+      });
+      expect(updates[1].update.mock.calls[0][0]).toMatchObject({ window_start: null, window_end: null });
+    } finally {
+      preclose.mockRestore();
+    }
+  });
+
+  test('reviewed staff moves preserve disclosed sibling windows across far placeholder clashes', async () => {
+    const anchor = anchorRow({ recurring_pattern: 'custom', recurring_interval_days: 90 });
+    const rows = [{ ...anchor }, { id: 'svc-2', status: 'pending', scheduled_date: dayOffset(100),
+      window_start: '09:00:00', window_end: '11:00:00', technician_id: null,
+      is_recurring: true, recurring_parent_id: 'svc-1' }];
+    const placeholder = { id: 'other-plan-placeholder', is_recurring: true, recurring_parent_id: 'plan-2',
+      status: 'pending', customer_confirmed: false, reservation_expires_at: null };
+    const queries = [chain({ first: jest.fn().mockResolvedValue(anchor) }),
+      chain({ first: jest.fn().mockResolvedValue(anchor) }), chain({ select: jest.fn().mockResolvedValue(rows) })];
+    db.mockImplementation((table) => table === 'scheduled_services' ? queries.shift() : chain({ first: jest.fn().mockResolvedValue(null) }));
+    findConflictingVisits.mockResolvedValueOnce([placeholder]);
+    const preview = await SmartRebooker.previewSeriesMove('svc-1', TARGET, { start: '09:00', end: '11:00' }, ADMIN_OPTS);
+    expect(preview.occurrences[1]).toMatchObject({ to_start: '09:00:00', to_end: '11:00:00' });
+
+    const { updates } = wireSeriesMocks(rows, { anchor });
+    const AppointmentReminders = require('../services/appointment-reminders');
+    const preclose = jest.spyOn(AppointmentReminders, 'precloseWindowlessReminderInTx').mockResolvedValue(undefined);
+    findConflictingVisits.mockResolvedValueOnce([placeholder]).mockResolvedValueOnce([]).mockResolvedValueOnce([placeholder]);
+    try {
+      await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
+        ...ADMIN_OPTS, expectOccurrenceIds: preview.occurrenceIds, expectOccurrences: preview.occurrences,
+      });
+      expect(updates[1].update.mock.calls[0][0]).toMatchObject({ window_start: '09:00:00', window_end: '11:00:00' });
+    } finally {
+      preclose.mockRestore();
+    }
   });
 
   test('admin preview rejects a future occurrence whose stored window cannot pass Apply rules', async () => {

@@ -8,12 +8,17 @@
  *
  * Tier 1 admin surface using the shared comfortable foundation.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActionFeedback,
   Badge,
   Button,
   Card,
+  Dialog,
+  DialogBody,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
   UiSurface,
 } from "../../components/ui";
 import { adminFetch } from "../../utils/admin-fetch";
@@ -148,6 +153,30 @@ const MODE_TOGGLE = {
 };
 const modeToggle = (mode) => MODE_TOGGLE[mode] || MODE_TOGGLE.shadow;
 
+function ShadowConfirmationDialog({ confirmation, busy, error, onCancel, onConfirm }) {
+  return (
+    <Dialog open={Boolean(confirmation)} onClose={onCancel} size="sm">
+      <DialogHeader>
+        <DialogTitle>{confirmation?.title}</DialogTitle>
+      </DialogHeader>
+      <DialogBody className="space-y-4">
+        <p className="m-0 whitespace-pre-line text-14 leading-6 text-ink-secondary">
+          {confirmation?.description}
+        </p>
+        {error && <ActionFeedback error>{error}</ActionFeedback>}
+      </DialogBody>
+      <DialogFooter>
+        <Button autoFocus variant="secondary" onClick={onCancel} disabled={busy}>
+          Cancel
+        </Button>
+        <Button onClick={onConfirm} loading={busy}>
+          {confirmation?.confirmLabel}
+        </Button>
+      </DialogFooter>
+    </Dialog>
+  );
+}
+
 // Phase E readiness: shows how close an intent is to its next ladder rung, or
 // a green chip when it has earned it. Recommend-only — flips stay manual.
 function GraduationNote({ g }) {
@@ -226,7 +255,7 @@ function IntentModeCard({ row, busy, onToggle, onPromote, autoSendGateOff }) {
         <Button
           type="button"
           disabled={busy}
-          onClick={() => onPromote(row)}
+          onClick={(event) => onPromote(row, event.currentTarget)}
           loading={busy}
         >
           Enable auto-send
@@ -300,7 +329,7 @@ function VoiceProfileSection({ profiles, busy, onReview }) {
             <Button
               type="button"
               disabled={busy}
-              onClick={() => onReview(pending, "approve")}
+              onClick={(event) => onReview(pending, "approve", event.currentTarget)}
               loading={busy}
             >
               Approve — make this the live voice
@@ -308,7 +337,7 @@ function VoiceProfileSection({ profiles, busy, onReview }) {
             <Button
               type="button"
               disabled={busy}
-              onClick={() => onReview(pending, "reject")}
+              onClick={(event) => onReview(pending, "reject", event.currentTarget)}
               loading={busy}
               variant="secondary"
             >
@@ -330,7 +359,7 @@ function VoiceProfileSection({ profiles, busy, onReview }) {
           <Button
             type="button"
             disabled={busy}
-            onClick={() => onReview(approved, "revoke")}
+            onClick={(event) => onReview(approved, "revoke", event.currentTarget)}
             loading={busy}
             variant="secondary"
           >
@@ -451,7 +480,7 @@ function SealedExamSection({ exam, busy, onSeal, onRun, onResume }) {
                     key={leg}
                     type="button"
                     disabled={busy || exam.gateEnabled === false || !items.active}
-                    onClick={() => onRun(leg)}
+                    onClick={(event) => onRun(leg, event.currentTarget)}
                     variant="secondary"
                   >
                     Run exam — {label}
@@ -514,7 +543,7 @@ function ProposalCard({ proposal, busy, onReview }) {
           <Button
             type="button"
             disabled={busy}
-            onClick={() => onReview(proposal, "accept")}
+            onClick={(event) => onReview(proposal, "accept", event.currentTarget)}
             loading={busy}
           >
             Accept — worth building (ships as a new prompt version)
@@ -522,7 +551,7 @@ function ProposalCard({ proposal, busy, onReview }) {
           <Button
             type="button"
             disabled={busy}
-            onClick={() => onReview(proposal, "dismiss")}
+            onClick={(event) => onReview(proposal, "dismiss", event.currentTarget)}
             loading={busy}
             variant="secondary"
           >
@@ -586,10 +615,61 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
   const [intentFilter, setIntentFilter] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [errorRetry, setErrorRetry] = useState(null);
+  const [confirmation, setConfirmation] = useState(null);
+  const [confirmationBusy, setConfirmationBusy] = useState(false);
+  const [confirmationError, setConfirmationError] = useState("");
+  const confirmationInFlightRef = useRef(false);
+
+  const requestConfirmation = useCallback((nextConfirmation, trigger) => {
+    trigger?.focus({ preventScroll: true });
+    setConfirmationError("");
+    setConfirmation(nextConfirmation);
+  }, []);
+
+  const closeConfirmation = useCallback(() => {
+    if (confirmationBusy) return;
+    setConfirmation(null);
+    setConfirmationError("");
+  }, [confirmationBusy]);
+
+  const confirmPendingAction = useCallback(async () => {
+    if (!confirmation || confirmationInFlightRef.current) return;
+    confirmationInFlightRef.current = true;
+    setConfirmationBusy(true);
+    setConfirmationError("");
+    try {
+      const result = await confirmation.run();
+      if (result.ok) {
+        setConfirmation(null);
+      } else {
+        setConfirmationError(result.error);
+      }
+    } catch (err) {
+      setConfirmationError(err.message || "The action failed. Try again.");
+    } finally {
+      confirmationInFlightRef.current = false;
+      setConfirmationBusy(false);
+    }
+  }, [confirmation]);
+
+  const refreshAfterWrite = useCallback(async function retryRead(read, apply, failureMessage) {
+    try {
+      apply(await read());
+      setError("");
+      setErrorRetry(null);
+      return true;
+    } catch {
+      setError(failureMessage);
+      setErrorRetry(() => () => retryRead(read, apply, failureMessage));
+      return false;
+    }
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError("");
+    setErrorRetry(null);
     try {
       const qs = intentFilter ? `?intent=${encodeURIComponent(intentFilter)}` : "";
       const [drafts, scoreRows, modeRows] = await Promise.all([
@@ -630,34 +710,51 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
     }
   }, [intentFilter]);
 
-  const reviewProfile = useCallback(async (row, action) => {
-    if (action === "approve") {
-      const ok = window.confirm(
-        `Approve voice profile v${row.version}?\n\nIt becomes the live voice guidance for the phone agent (and any future consumer). The previous approved version is superseded.`
-      );
-      if (!ok) return;
-    }
-    if (action === "revoke") {
-      const ok = window.confirm(
-        `Revoke voice profile v${row.version}?\n\nThe phone agent goes back to its base voice until the next green profile auto-applies.`
-      );
-      if (!ok) return;
-    }
+  const applyProfileReview = useCallback(async (row, action) => {
     setProfileBusy(true);
     setError("");
+    setErrorRetry(null);
     try {
       await adminFetch(`/admin/agents/voice-profiles/${row.id}/review`, {
         method: "POST",
         body: JSON.stringify({ action }),
       });
-      const fresh = await adminFetch("/admin/agents/voice-profiles");
-      setProfiles(fresh);
+      await refreshAfterWrite(
+        () => adminFetch("/admin/agents/voice-profiles"),
+        setProfiles,
+        "Voice profile updated, but the refreshed profile could not be loaded. Try again to refresh it.",
+      );
+      return { ok: true };
     } catch (err) {
-      setError(err.message || "Failed to review the voice profile.");
+      const message = err.message || "Failed to review the voice profile.";
+      setError(message);
+      return { ok: false, error: message };
     } finally {
       setProfileBusy(false);
     }
-  }, []);
+  }, [refreshAfterWrite]);
+
+  const reviewProfile = useCallback((row, action, trigger) => {
+    if (action === "approve") {
+      requestConfirmation({
+        title: `Approve voice profile v${row.version}?`,
+        description: "It becomes the live voice guidance for the phone agent (and any future consumer). The previous approved version is superseded.",
+        confirmLabel: "Approve — make this the live voice",
+        run: () => applyProfileReview(row, action),
+      }, trigger);
+      return;
+    }
+    if (action === "revoke") {
+      requestConfirmation({
+        title: `Revoke voice profile v${row.version}?`,
+        description: "The phone agent goes back to its base voice until the next green profile auto-applies.",
+        confirmLabel: "Revoke — back to base voice",
+        run: () => applyProfileReview(row, action),
+      }, trigger);
+      return;
+    }
+    void applyProfileReview(row, action);
+  }, [applyProfileReview, requestConfirmation]);
 
   useEffect(() => {
     load();
@@ -687,47 +784,75 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
     }
   }, []);
 
-  const sealItems = useCallback(async () => {
-    const ok = window.confirm(
-      "Top up the sealed exam set?\n\nUp to the target count of judged past texts (with that day's frozen facts) are added permanently. Sealed items are excluded from drafter training forever."
-    );
-    if (!ok) return;
+  const sealItemsNow = useCallback(async () => {
     setExamBusy(true);
     setError("");
+    setErrorRetry(null);
     try {
       await adminFetch("/admin/agents/sealed-eval/seal", { method: "POST" });
-      await refreshExam();
+      await refreshAfterWrite(
+        () => adminFetch("/admin/agents/sealed-eval"),
+        setExam,
+        "Sealed items were updated, but the refreshed exam data could not be loaded. Try again to refresh it.",
+      );
+      return { ok: true };
     } catch (err) {
-      setError(err.message || "Failed to seal eval items.");
+      const message = err.message || "Failed to seal eval items.";
+      setError(message);
+      return { ok: false, error: message };
     } finally {
       setExamBusy(false);
     }
-  }, [refreshExam]);
+  }, [refreshAfterWrite]);
 
-  const runExam = useCallback(async (providerLeg) => {
-    const n = exam?.items?.active || 0;
-    const ok = window.confirm(
-      `Run the sealed exam on the ${LEG_LABELS[providerLeg] || providerLeg}?\n\nReplays all ${n} sealed items through the current drafter and judges each one — roughly ${n * 2}–${n * 5} AI calls. Takes several minutes; progress shows here.`
-    );
-    if (!ok) return;
+  const sealItems = useCallback((event) => {
+    requestConfirmation({
+      title: "Top up the sealed exam set?",
+      description: "Up to the target count of judged past texts (with that day's frozen facts) are added permanently. Sealed items are excluded from drafter training forever.",
+      confirmLabel: "Top up sealed items",
+      run: sealItemsNow,
+    }, event.currentTarget);
+  }, [requestConfirmation, sealItemsNow]);
+
+  const runExamNow = useCallback(async (providerLeg) => {
     setExamBusy(true);
     setError("");
+    setErrorRetry(null);
     try {
       await adminFetch("/admin/agents/sealed-eval/runs", {
         method: "POST",
         body: JSON.stringify({ providerLeg }),
       });
-      await refreshExam();
+      await refreshAfterWrite(
+        () => adminFetch("/admin/agents/sealed-eval"),
+        setExam,
+        "The exam run started, but the refreshed exam data could not be loaded. Try again to refresh it.",
+      );
+      return { ok: true };
     } catch (err) {
-      setError(err.message || "Failed to start the exam run.");
+      const message = err.message || "Failed to start the exam run.";
+      setError(message);
+      return { ok: false, error: message };
     } finally {
       setExamBusy(false);
     }
-  }, [exam, refreshExam]);
+  }, [refreshAfterWrite]);
+
+  const runExam = useCallback((providerLeg, trigger) => {
+    const n = exam?.items?.active || 0;
+    const legLabel = LEG_LABELS[providerLeg] || providerLeg;
+    requestConfirmation({
+      title: `Run the sealed exam on the ${legLabel}?`,
+      description: `Replays all ${n} sealed items through the current drafter and judges each one — roughly ${n * 2}–${n * 5} AI calls. Takes several minutes; progress shows here.`,
+      confirmLabel: `Run exam — ${legLabel}`,
+      run: () => runExamNow(providerLeg),
+    }, trigger);
+  }, [exam, requestConfirmation, runExamNow]);
 
   const resumeExam = useCallback(async (run) => {
     setExamBusy(true);
     setError("");
+    setErrorRetry(null);
     try {
       await adminFetch("/admin/agents/sealed-eval/runs", {
         method: "POST",
@@ -741,27 +866,42 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
     }
   }, [refreshExam]);
 
-  const reviewProposal = useCallback(async (proposal, action) => {
-    if (action === "accept") {
-      const ok = window.confirm(
-        `Accept this patch proposal (${cellLabel(proposal.surface, proposal.failure_mode)})?\n\nThis records your go-ahead — the change itself still ships as a new prompt version you review as a PR. Nothing changes today.`
-      );
-      if (!ok) return;
-    }
+  const applyProposalReview = useCallback(async (proposal, action) => {
     setPathologyBusy(true);
     setError("");
+    setErrorRetry(null);
     try {
       await adminFetch(`/admin/agents/pathology/proposals/${proposal.id}/review`, {
         method: "POST",
         body: JSON.stringify({ action }),
       });
-      setPathology(await adminFetch("/admin/agents/pathology"));
+      await refreshAfterWrite(
+        () => adminFetch("/admin/agents/pathology"),
+        setPathology,
+        "Patch proposal updated, but the refreshed pathology data could not be loaded. Try again to refresh it.",
+      );
+      return { ok: true };
     } catch (err) {
-      setError(err.message || "Failed to review the patch proposal.");
+      const message = err.message || "Failed to review the patch proposal.";
+      setError(message);
+      return { ok: false, error: message };
     } finally {
       setPathologyBusy(false);
     }
-  }, []);
+  }, [refreshAfterWrite]);
+
+  const reviewProposal = useCallback((proposal, action, trigger) => {
+    if (action === "accept") {
+      requestConfirmation({
+        title: `Accept this patch proposal (${cellLabel(proposal.surface, proposal.failure_mode)})?`,
+        description: "This records your go-ahead — the change itself still ships as a new prompt version you review as a PR. Nothing changes today.",
+        confirmLabel: "Accept — worth building",
+        run: () => applyProposalReview(proposal, action),
+      }, trigger);
+      return;
+    }
+    void applyProposalReview(proposal, action);
+  }, [applyProposalReview, requestConfirmation]);
 
   const toggleMode = useCallback(async (row) => {
     // Step shadow⇄suggest, or demote auto_send→suggest — always an explicit,
@@ -771,6 +911,7 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
     const nextMode = modeToggle(row.mode).next;
     setModeBusy(row.intent);
     setError("");
+    setErrorRetry(null);
     try {
       const updated = await adminFetch(`/admin/agents/intent-modes/${encodeURIComponent(row.intent)}`, {
         method: "PUT",
@@ -793,19 +934,10 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
     }
   }, []);
 
-  const promoteToAutoSend = useCallback(async (row) => {
-    // Enabling autonomous customer sends — confirm deliberately.
-    const ok = window.confirm(
-      `Enable AUTONOMOUS auto-send for "${intentLabel(row.intent)}"?\n\n` +
-      `Verified house-voice drafts for this intent will be sent to customers automatically, with NO human review. ` +
-      `The server re-checks readiness on every send, and escalation / scheduling messages never auto-send.` +
-      (modes?.autoSendGateEnabled === false
-        ? `\n\nNote: GATE_SMS_AUTO_SEND is currently OFF, so drafts keep going to the review queue until the gate is enabled.`
-        : ``)
-    );
-    if (!ok) return;
+  const promoteToAutoSendNow = useCallback(async (row) => {
     setModeBusy(row.intent);
     setError("");
+    setErrorRetry(null);
     try {
       const updated = await adminFetch(`/admin/agents/intent-modes/${encodeURIComponent(row.intent)}`, {
         method: "PUT",
@@ -814,22 +946,43 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
       setModes((current) => current
         ? { ...current, intents: current.intents.map((r) => (r.intent === updated.intent ? { ...r, ...updated, graduation: null } : r)) }
         : current);
-      const fresh = await adminFetch("/admin/agents/intent-modes");
-      setModes(fresh);
+      await refreshAfterWrite(
+        () => adminFetch("/admin/agents/intent-modes"),
+        setModes,
+        "Auto-send mode was enabled, but readiness could not be refreshed. Try again to refresh it.",
+      );
+      return { ok: true };
     } catch (err) {
       // The server 409s if eligibility slipped between render and click.
-      setError(err.message || "Failed to enable auto-send.");
+      const message = err.message || "Failed to enable auto-send.";
+      setError(message);
+      return { ok: false, error: message };
     } finally {
       setModeBusy("");
     }
-  }, [modes]);
+  }, [refreshAfterWrite]);
+
+  const promoteToAutoSend = useCallback((row, trigger) => {
+    // Enabling autonomous customer sends — confirm deliberately.
+    requestConfirmation({
+      title: `Enable AUTONOMOUS auto-send for "${intentLabel(row.intent)}"?`,
+      description:
+        `Verified house-voice drafts for this intent will be sent to customers automatically, with NO human review. ` +
+        `The server re-checks readiness on every send, and escalation / scheduling messages never auto-send.` +
+        (modes?.autoSendGateEnabled === false
+          ? `\n\nNote: GATE_SMS_AUTO_SEND is currently OFF, so drafts keep going to the review queue until the gate is enabled.`
+          : ``),
+      confirmLabel: "Enable auto-send",
+      run: () => promoteToAutoSendNow(row),
+    }, trigger);
+  }, [modes, promoteToAutoSendNow, requestConfirmation]);
 
   const intents = useMemo(() => (scores?.intents || []).map((row) => row.intent), [scores]);
   const drafts = data?.drafts || [];
 
   return (
     <UiSurface density="comfortable" className="min-h-full space-y-5 text-zinc-800">
-      {error && <ActionFeedback error>{error}</ActionFeedback>}
+      {error && <ActionFeedback error onRetry={errorRetry || undefined}>{error}</ActionFeedback>}
 
       {(modes?.intents || []).length > 0 && (
         <section className="space-y-3">
@@ -894,6 +1047,14 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
           No shadow drafts yet. They appear as customers text the location numbers; the judge scores each one nightly at 3:55am ET once the 24-hour human-reply window closes.
         </ActionFeedback>
       )}
+
+      <ShadowConfirmationDialog
+        confirmation={confirmation}
+        busy={confirmationBusy}
+        error={confirmationError}
+        onCancel={closeConfirmation}
+        onConfirm={confirmPendingAction}
+      />
     </UiSurface>
   );
 }

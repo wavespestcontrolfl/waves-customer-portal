@@ -78,13 +78,29 @@ function seriesOccurrenceWindow(win, sib, options = {}) {
 
 // A proposal's disclosed recurring dates/windows must match the locked
 // move, including a cadence edit that leaves the same occurrence IDs.
-function reviewedOccurrence(row, date, window = {}, options = {}) {
-  const target = seriesOccurrenceWindow(window, row, options);
+function reviewedOccurrence(row, date, window = {}, options = {}, clearWindow = false) {
+  const target = clearWindow ? { start: null, end: null } : seriesOccurrenceWindow(window, row, options);
   return { id: String(row.id), from_date: dateOnly(row.scheduled_date), status: row.status,
+    customer_confirmed: row.customer_confirmed ?? null,
     from_start: row.window_start || null, from_end: row.window_end || null,
     duration: row.estimated_duration_minutes || null, property_id: row.property_id || null,
     date_exception: row.date_exception === true, cadence_date: dateOnly(row.date_exception_cadence_date) || null,
     to_date: date, to_start: target.start || null, to_end: target.end || null };
+}
+
+const REVIEWED_OCCURRENCE_FIELDS = [
+  'id', 'from_date', 'status', 'customer_confirmed', 'from_start', 'from_end', 'duration', 'property_id',
+  'date_exception', 'cadence_date', 'to_date', 'to_start', 'to_end',
+];
+
+function reviewedOccurrencesMatch(actual, expected) {
+  if (actual.length !== expected.length) return false;
+  return actual.every((row, index) => {
+    const disclosed = expected[index];
+    return disclosed && Object.keys(disclosed).length === REVIEWED_OCCURRENCE_FIELDS.length
+      && REVIEWED_OCCURRENCE_FIELDS.every((field) => Object.prototype.hasOwnProperty.call(disclosed, field)
+        && disclosed[field] === row[field]);
+  });
 }
 
 // Seasonal mosquito cadence lives in the seeder — single source of truth for
@@ -266,7 +282,8 @@ function seriesOperationKey(serviceId, newDate, newWindow, options = {}) {
   // request of its own, distinct from an omitted technician (codex r16 P2).
   const techRequested = Object.prototype.hasOwnProperty.call(options, 'technicianId');
   const techKey = techRequested ? `:tech=${options.technicianId ? String(options.technicianId) : '-'}` : '';
-  const requestKey = `${serviceId}:${dateOnly(newDate)}:${hm(win.start)}:${hm(win.end)}${options.clearAnchorWindow === true ? ':clear' : ''}${techKey}`;
+  const confirmationKey = options.pendingConfirmation === true ? ':pending' : '';
+  const requestKey = `${serviceId}:${dateOnly(newDate)}:${hm(win.start)}:${hm(win.end)}${options.clearAnchorWindow === true ? ':clear' : ''}${confirmationKey}${techKey}`;
   const technician = techRequested ? { id: options.technicianId ? String(options.technicianId) : null } : null;
   if (typeof options.operationKey === 'string' && options.operationKey) {
     return { key: options.operationKey, derived: false, requestKey, technician };
@@ -414,7 +431,10 @@ async function replaySeriesMoveCleanup(prior) {
         logger.error(`[rebooker] tech_status clear on series replay failed for ${anchor.id}: ${err.message}`);
       }
     }
-    emitCustomerJobRefresh({ id: anchor.id, customer_id: prior.customer_id }, 'confirmed');
+    emitCustomerJobRefresh(
+      { id: anchor.id, customer_id: prior.customer_id },
+      String(anchor.after?.status ?? 'confirmed'),
+    );
   }
   for (const row of rows) {
     if (row.anchor || !rewound.has(String(row.id))) continue;
@@ -1195,7 +1215,7 @@ class SmartRebooker {
       window_start: win.start || service.window_start,
       window_end: windowEnd,
       status: landedStatus,
-      ...(options.pendingConfirmation === true ? { customer_confirmed: false } : {}),
+      ...(options.pendingConfirmation === true ? { customer_confirmed: false, confirmed_at: null } : {}),
       ...(initiatedBy !== 'auto_dispatch' ? recurringDispatchDuePatch(service, {
         scheduled_date: newDate, window_start: win.start || service.window_start,
       }) : {}),
@@ -1499,6 +1519,12 @@ class SmartRebooker {
           // onto the new date. Any tracker change makes the write miss and
           // surface the concurrent-change 409 below instead.
           .where({ id: serviceId, status: service.status })
+          // A pending landing clears the confirmation receipt. Pin the
+          // observed flag so a customer confirmation arriving after the
+          // pre-read wins instead of being overwritten by this move.
+          .where(options.pendingConfirmation === true
+            ? { customer_confirmed: service.customer_confirmed ?? null }
+            : {})
           .whereIn('status', Array.from(allowedStatuses)),
         service,
       )
@@ -1638,7 +1664,7 @@ class SmartRebooker {
           logger.error(`[rebooker] tech_status clear after live reschedule failed for ${serviceId}: ${err.message}`);
         }
       }
-      emitCustomerJobRefresh({ ...service, ...updates, id: serviceId }, 'confirmed');
+      emitCustomerJobRefresh({ ...service, ...updates, id: serviceId }, landedStatus);
     }
 
     // Keep a call-created follow-up (visit 2) spaced from its parent —
@@ -1690,11 +1716,13 @@ class SmartRebooker {
     // and message the customer while still unactivated: reminders unarmed,
     // lead unconverted, review card open (Codex #3361 r2 P0). Best-effort
     // post-commit, at-most-once via the helper's guarded stamp.
-    try {
-      const { activateLegacyOutboundReviewRowIfNeeded } = require('./outbound-review-confirm');
-      await activateLegacyOutboundReviewRowIfNeeded(db, serviceId, 'rebooker-reschedule');
-    } catch (activateErr) {
-      logger.warn(`[rebooker] legacy outbound activation failed for ${serviceId}: ${activateErr.message}`);
+    if (options.pendingConfirmation !== true) {
+      try {
+        const { activateLegacyOutboundReviewRowIfNeeded } = require('./outbound-review-confirm');
+        await activateLegacyOutboundReviewRowIfNeeded(db, serviceId, 'rebooker-reschedule');
+      } catch (activateErr) {
+        logger.warn(`[rebooker] legacy outbound activation failed for ${serviceId}: ${activateErr.message}`);
+      }
     }
 
     // Visit-group seam (visit-group-scope.md §2): a moved child whose stop
@@ -1959,6 +1987,24 @@ class SmartRebooker {
       // rung-1 site fires it, and the no-projected-dates path falls through to
       // the call below, whichever comes first.
       let beforeMoveRan = false;
+      let reviewedMaintenancePreflightRan = false;
+      const preflightReviewedMaintenance = async () => {
+        if (reviewedMaintenancePreflightRan
+          || (!Array.isArray(options.expectOccurrenceIds) && !Array.isArray(options.expectOccurrences))
+          || typeof options.beforeMove !== 'function') return;
+        const result = await trx.raw(
+          'SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked',
+          ['recurring-series-maintenance', String(parentId)],
+        );
+        if (result.rows[0]?.locked !== true) {
+          throw Object.assign(new Error('This plan is being updated — reload and save again.'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'VISIT_CHANGED_RETRY',
+          });
+        }
+        reviewedMaintenancePreflightRan = true;
+      };
       const runBeforeMove = async () => {
         if (beforeMoveRan) return;
         beforeMoveRan = true;
@@ -2157,10 +2203,14 @@ class SmartRebooker {
           });
           const followUpDays = followUpPlan.map((k) => k.new_day);
           await acquireOccupancyLocks(trx, [...projectedDates, ...followUpDays]);
+          // Reviewed Apply's callback takes customer-comms. Maintenance owns
+          // that lock in the opposite order, so never wait for maintenance
+          // after the callback: try it here while only occupancy is held.
+          await preflightReviewedMaintenance();
           await runBeforeMove();
-          // Visit stop locks for EVERY swept occurrence, right after
-          // rung 1 — the same occupancy-then-stop order the single-row
-          // writers take (codex #3609 r31 P1 + uncapped audit):
+          // Visit stop locks for EVERY swept occurrence, after the reviewed
+          // maintenance/comms preflight — the same occupancy-first order the
+          // single-row writers take (codex #3609 r31 P1 + uncapped audit):
           // createOrJoinVisit serializes on the stop lock, never on the
           // occupancy/maintenance locks, so a grouping racing this sweep
           // either committed (visible in the locked read below) or waits
@@ -2180,9 +2230,9 @@ class SmartRebooker {
               await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit.stop', vgKey]);
             }
           }
-          // Rung 1 → the per-parent recurring-series maintenance lock, the
-          // order update-details already takes (occupancy, then
-          // maintenance, then comms). Byte-identical key to admin-schedule's
+          // Acquire the per-parent recurring-series maintenance lock; reviewed
+          // Apply already owns it from the nonblocking preflight above, so
+          // this is reentrant. Byte-identical key to admin-schedule's
           // acquireRecurringSeriesMaintenanceLock (a service cannot import
           // a route file): it serializes this sweep against the completion
           // auto-extend, the series cancel and the plan-length reconcile,
@@ -2401,13 +2451,41 @@ class SmartRebooker {
       }
 
       if (Array.isArray(options.expectOccurrences)) {
-        const actual = siblings.slice(startIdx).map((row, i) => sweptIds.includes(String(row.id))
-          ? reviewedOccurrence(row, projectOccurrenceDate(i, row), String(row.id) === String(serviceId) ? win : {}, options) : null).filter(Boolean)
-          .sort((a, b) => a.id.localeCompare(b.id));
-        if (JSON.stringify(actual) !== JSON.stringify(options.expectOccurrences)) {
+        const actual = [];
+        for (let i = startIdx; i < siblings.length; i++) {
+          const row = siblings[i];
+          if (!sweptIds.includes(String(row.id))) continue;
+          const occurrenceIndex = i - startIdx;
+          const isAnchor = String(row.id) === String(serviceId);
+          const date = projectOccurrenceDate(occurrenceIndex, row);
+          const occurrenceWindow = isAnchor ? win : {};
+          const disclosed = reviewedOccurrence(
+            row, date, occurrenceWindow, options,
+            isAnchor && options.clearAnchorWindow === true,
+          );
+          if (!isAnchor && disclosed.to_start && options.overlapAdvisory !== true) {
+            const clash = await findConflictingVisits({
+              db: trx,
+              date,
+              windowStart: disclosed.to_start,
+              windowEnd: occupancyProbeEnd(disclosed.to_start, disclosed.to_end, row.estimated_duration_minutes),
+              excludeServiceIds: sweptIds,
+              excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
+              travel: seriesTravel,
+            });
+            if (clash.length && !siblingClashWithinHorizon(date) && clash.every(isSeededPlaceholderRow)) {
+              disclosed.to_start = null;
+              disclosed.to_end = null;
+            }
+          }
+          actual.push(disclosed);
+        }
+        actual.sort((a, b) => a.id.localeCompare(b.id));
+        if (!reviewedOccurrencesMatch(actual, options.expectOccurrences)) {
           throw Object.assign(new Error('The recurring dates or windows changed. Refresh the proposal.'), { statusCode: 409, code: 'SERIES_CHANGED' });
         }
       }
+      await preflightReviewedMaintenance();
       await runBeforeMove();
       // The call/proposal guard runs on the locked series before its first write.
       if (typeof options.moveGuard === 'function') {
@@ -2512,7 +2590,7 @@ class SmartRebooker {
           window_start: occurrenceWindow.start,
           window_end: occurrenceWindow.end,
           status: isAnchor ? (options.pendingConfirmation === true ? 'pending' : (options.keepStatus === true && !sibRewound ? sib.status : 'confirmed')) : sib.status,
-          ...(isAnchor && options.pendingConfirmation === true ? { customer_confirmed: false } : {}),
+          ...(isAnchor && options.pendingConfirmation === true ? { customer_confirmed: false, confirmed_at: null } : {}),
           updated_at: trx.fn.now(),
           ...exceptionUpdate,
           ...(sibRewound ? LIVE_LIFECYCLE_RESET : {}),
@@ -2786,16 +2864,25 @@ class SmartRebooker {
               ...(deferFuturePlacement ? {
                 auto_dispatch_locked: sib.auto_dispatch_locked ?? null,
                 auto_dispatch_excluded: sib.auto_dispatch_excluded ?? null,
-                customer_confirmed: sib.customer_confirmed ?? null,
               } : {}),
+              // Deferred placement decisions already depend on this value.
+              // A reviewed proposal compares it above, and a pending landing
+              // overwrites it. Pin every case so a customer confirmation
+              // arriving after the read wins the race.
+              ...((deferFuturePlacement || Array.isArray(options.expectOccurrences) || options.pendingConfirmation === true)
+                ? { customer_confirmed: sib.customer_confirmed ?? null }
+                : {}),
               technician_id: sib.technician_id ?? null,
-              // Duration pin, only when the occupancy probes above derived
-              // their span from it (null landing end + gate on): a
+              // Reviewed proposals compare duration above, so their write
+              // always pins it. Otherwise pin only when the occupancy probes
+              // derived their span from it (null landing end + gate on): a
               // concurrent duration-only edit must invalidate the match —
               // same rationale as the single-path CAS (codex #3377 P1).
               // Also pinned when a start-only move derived this row's end
               // from its own duration (seriesOccurrenceWindow).
-              ...(((!updateData.window_end && process.env.REBOOKER_NULL_END_OCCUPANCY !== 'off') || (win.start && !win.end))
+              ...((Array.isArray(options.expectOccurrences)
+                || (!updateData.window_end && process.env.REBOOKER_NULL_END_OCCUPANCY !== 'off')
+                || (win.start && !win.end))
                 ? { estimated_duration_minutes: sib.estimated_duration_minutes ?? null }
                 : {}),
             }),
@@ -3028,7 +3115,10 @@ class SmartRebooker {
           logger.error(`[rebooker] tech_status clear after live series reschedule failed for ${serviceId}: ${err.message}`);
         }
       }
-      emitCustomerJobRefresh({ ...service, ...(rewoundAnchorRow || {}), id: serviceId }, 'confirmed');
+      emitCustomerJobRefresh(
+        { ...service, ...(rewoundAnchorRow || {}), id: serviceId },
+        options.pendingConfirmation === true ? 'pending' : 'confirmed',
+      );
     }
     // Rewound non-anchor siblings get the same cleanup: release any tech
     // pinned to them and refresh open trackers. Siblings keep their own
@@ -3067,11 +3157,13 @@ class SmartRebooker {
     // outbound-review anchor moved (and possibly texted) here would stay
     // customer_confirmed=false with its reminders, lead, and review card
     // stranded. Best-effort post-commit, at-most-once via the helper.
-    try {
-      const { activateLegacyOutboundReviewRowIfNeeded } = require('./outbound-review-confirm');
-      await activateLegacyOutboundReviewRowIfNeeded(db, serviceId, 'rebooker-reschedule-series');
-    } catch (activateErr) {
-      logger.warn(`[rebooker] legacy outbound activation failed for series anchor ${serviceId}: ${activateErr.message}`);
+    if (options.pendingConfirmation !== true) {
+      try {
+        const { activateLegacyOutboundReviewRowIfNeeded } = require('./outbound-review-confirm');
+        await activateLegacyOutboundReviewRowIfNeeded(db, serviceId, 'rebooker-reschedule-series');
+      } catch (activateErr) {
+        logger.warn(`[rebooker] legacy outbound activation failed for series anchor ${serviceId}: ${activateErr.message}`);
+      }
     }
 
     // Same payload the row stores (originalDate as the raw column value,
@@ -3139,7 +3231,7 @@ class SmartRebooker {
       .whereRaw('COALESCE(date_exception_cadence_date, scheduled_date) >= ?::date', [seriesPosition(service)])
       .whereNotIn('status', TERMINAL)
       .orderByRaw('COALESCE(date_exception_cadence_date, scheduled_date) asc, scheduled_date asc')
-      .select('id', 'status', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'date_exception', 'date_exception_cadence_date', 'property_id');
+      .select('id', 'status', 'customer_confirmed', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'date_exception', 'date_exception_cadence_date', 'property_id');
     const droppedIdx = siblings.findIndex((s) => String(s.id) === String(serviceId));
     if (droppedIdx === -1) return empty;
     const { deltaDays, cadenceSlotDate, projectOccurrenceDate } = await makeSeriesProjector({ service, parent, newDate, seriesDateStr });
@@ -3162,19 +3254,28 @@ class SmartRebooker {
       }
       const date = projectOccurrenceDate(i, row);
       dates.push(date);
-      const occurrenceWindow = String(row.id) === String(serviceId) ? newWindow : {};
-      occurrences.push(reviewedOccurrence(row, date, occurrenceWindow, options));
-      const targetWindow = seriesOccurrenceWindow(occurrenceWindow, row, options);
-      if (i === 0 || !targetWindow.start) continue;
-      const clash = await findConflictingVisits({
-        db,
-        date,
-        windowStart: targetWindow.start,
-        windowEnd: occupancyProbeEnd(targetWindow.start, targetWindow.end, row.estimated_duration_minutes),
-        excludeServiceIds: sweptIds,
-        excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
-      });
-      if (clash.length) conflictCount += 1;
+      const isAnchor = String(row.id) === String(serviceId);
+      const occurrenceWindow = isAnchor ? newWindow : {};
+      const anchorCleared = isAnchor && options.clearAnchorWindow === true;
+      const disclosed = reviewedOccurrence(row, date, occurrenceWindow, options, anchorCleared);
+      if (!isAnchor && disclosed.to_start) {
+        const clash = await findConflictingVisits({
+          db,
+          date,
+          windowStart: disclosed.to_start,
+          windowEnd: occupancyProbeEnd(disclosed.to_start, disclosed.to_end, row.estimated_duration_minutes),
+          excludeServiceIds: sweptIds,
+          excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
+        });
+        if (clash.length) {
+          conflictCount += 1;
+          if (options.overlapAdvisory !== true && !siblingClashWithinHorizon(date) && clash.every(isSeededPlaceholderRow)) {
+            disclosed.to_start = null;
+            disclosed.to_end = null;
+          }
+        }
+      }
+      occurrences.push(disclosed);
     }
     dates.sort();
     return {

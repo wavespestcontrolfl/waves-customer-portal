@@ -64,8 +64,9 @@
  * callRescheduleApply); the processor never blocks on this step.
  */
 
-const { etParts, etDateString, etCalendarDayOf, deriveWindowEnd, windowDurationMinutes } = require('../utils/datetime-et');
+const { etParts, etDateString, addETDays, etCalendarDayOf, deriveWindowEnd, windowDurationMinutes } = require('../utils/datetime-et');
 const { lockTriageCall } = require('../utils/triage-locks');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
 const { hasAgentCommittedEvidence, confirmedStartOnTheHour, etWallClockOfConfirmedStart, statesNewAddress } = require('./call-triage-flags');
 const { addressKey } = require('./customer-properties');
@@ -152,9 +153,6 @@ async function pendingSmsOffer(conn, customerId, serviceId, now) {
   return (rows || []).find(offerOptions) || null;
 }
 
-// Canonical predicate shared by the automatic and staff-reviewed paths. A
-// resolved request is only history; every other lifecycle remains owned by
-// the portal request workflow and must stand a reschedule down.
 function openPortalRequest(conn, customerId, serviceId) {
   return conn('service_requests')
     .where({ customer_id: customerId, category: 'schedule_change' })
@@ -163,10 +161,8 @@ function openPortalRequest(conn, customerId, serviceId) {
     .first('id');
 }
 
-// One human-handled predicate for both automatic and reviewed application.
-// The reviewed path excludes its own proposal card so a staff member may
-// apply a card they have claimed, while a claimed/resolved/dismissed sibling
-// still proves that the call's appointment request is already being handled.
+// Excluding the proposal under review lets staff apply a claimed card while
+// another claimed or human-closed card still proves the request was handled.
 function humanHandledRescheduleCard(conn, callLogId, { excludeId = null } = {}) {
   const query = conn('triage_items').where({ call_log_id: callLogId })
     .whereIn('reason_code', CARD_REASON_CODES)
@@ -190,6 +186,8 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
   const scheduling = v2.scheduling || {};
   if (scheduling.status === 'canceled') return skip('cancel_not_automated');
   if (scheduling.status !== 'reschedule_requested') return skip('not_a_reschedule');
+  if (humanOverride && scheduling.agent_committed_booking === true) return skip('agent_committed_booking');
+  if (humanOverride && scheduling.confirmed_start_at) return skip('confirmed_start_supersedes_proposal');
   if (!humanOverride && scheduling.agent_committed_booking !== true) return skip('agent_did_not_commit');
   const targetStart = humanOverride ? scheduling.proposed_start_at : scheduling.confirmed_start_at;
   if (!targetStart) return skip(humanOverride ? 'no_proposed_start' : 'no_confirmed_start');
@@ -254,11 +252,8 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
     // A row that names a catalog service is matched on THAT catalog name only:
     // a repoint leaves scheduled_services.service_type stale, so the label alone
     // can name the requested program while the row now belongs to a different
-    // one (admin-schedule.js:14115-14118 documents the same hazard; GH codex
-    // #4204 r8 P1). A row whose service_id no longer resolves to a catalog row
-    // has no authoritative identity and matches nothing. A row with NO
-    // service_id cannot have been repointed — its free-text label is the only
-    // identity it ever had, so it keeps matching on that.
+    // one. A row whose service_id no longer resolves has no authoritative
+    // identity. A row with no service_id keeps its only identity: its label.
     const matchingServices = atProperty.filter((row) => {
       const authoritative = row.service_id ? row.catalog_service_name : row.service_type;
       if (!authoritative) return false;
@@ -300,13 +295,7 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
     || DEFAULT_DURATION_MINUTES;
   const newEnd = deriveWindowEnd(newStart, duration);
   if (!newEnd) return skip('window_runs_past_midnight', { visitId: visit.id });
-  if (humanOverride) {
-    // This is an admin-authored move even though the requested wall clock came
-    // from a call. Keep it on the same hour/day-end contract as every other
-    // admin schedule writer; the rebooker option below repeats the rule for
-    // every independently-sized occurrence in a recurring move.
-    assertAdminAppointmentWindow({ windowStart: newStart, windowEnd: newEnd });
-  }
+  if (humanOverride) assertAdminAppointmentWindow({ windowStart: newStart, windowEnd: newEnd });
 
   const interiorNote = typeof v2.property?.access_notes === 'string' && v2.property.access_notes.trim()
     ? v2.property.access_notes.trim().slice(0, 300)
@@ -332,7 +321,7 @@ async function loadCandidates(conn, customerId, now = new Date(), { includePast 
   return conn('scheduled_services')
     .where({ 'scheduled_services.customer_id': customerId })
     .whereIn('scheduled_services.status', LIVE_STATUSES)
-    .where('scheduled_services.scheduled_date', '>=', includePast ? etDateString(new Date(now.getTime() - 60 * 86400000)) : etDateString(now))
+    .where('scheduled_services.scheduled_date', '>=', includePast ? etDateString(addETDays(now, -60)) : etDateString(now))
     .orderBy('scheduled_services.scheduled_date', 'asc')
     // The catalog row is joined because a repoint leaves scheduled_services
     // .service_type stale: matching the label alone can move a DIFFERENT
@@ -353,7 +342,7 @@ async function loadCandidates(conn, customerId, now = new Date(), { includePast 
 
 // Human review chooses the source visit and requested time, then shares the
 // automatic path's planner and SmartRebooker choke point. The proposal guard,
-// note and audit all commit in the move transaction, including a series move.
+// audit, and move commit in one transaction, including for a series move.
 async function applyReviewedCallReschedule({ conn, call, v2, customer, candidates, visitId, actorId,
   operationKey, guard, proposalCardId = null, occurrenceIds = [], occurrences, now = new Date(), rebooker = null } = {}) {
   if (!actorId || !operationKey || typeof guard !== 'function') {
@@ -362,13 +351,12 @@ async function applyReviewedCallReschedule({ conn, call, v2, customer, candidate
   const plan = planRescheduleFromCall({ call, v2, customer, candidates, now, humanOverride: { visitId } });
   if (plan.action === 'skip') return { outcome: 'skipped', reason: plan.reason };
   const visit = candidates.find((row) => String(row.id) === String(plan.visitId));
-  // A date move can sweep the exact recurring set the operator previewed.
-  // Lock every affected appointment before checking any competing workflow:
-  // the portal request producer holds the same appointment lock through its
-  // insert, so each request is either visible here or starts after this move.
-  const affectedVisitIds = [...new Set(plan.dateMove && occurrenceIds.length
-    ? [visit.id, ...occurrenceIds].map(String) : [String(visit.id)])].sort();
+  const seriesIds = plan.dateMove ? occurrenceIds : [];
+  const affectedVisitIds = [...new Set([visit.id, ...seriesIds].map(String))].sort();
   const beforeMove = async (trx) => {
+    // The call-booking creator takes this canonical fence before reading the
+    // primary and creating a follow-up. Take it before every identity row lock.
+    await lockCustomerComms(trx, customer.id);
     await trx('customers').where({ id: customer.id }).forShare().first('id');
     await trx('customer_properties').where({ customer_id: customer.id, active: true }).forShare().select('id');
     await lockTriageCall(trx, call.id);
@@ -399,26 +387,12 @@ async function applyReviewedCallReschedule({ conn, call, v2, customer, candidate
       throw Object.assign(new Error('Another staff action handled this appointment request. Refresh the proposal.'), { status: 409 });
     }
     await guard(trx);
-    if (plan.interiorNote) {
-      // Append against the locked row's current notes so a simultaneous note
-      // edit that happened before this transaction is preserved.
-      await trx('scheduled_services').where({ id: visit.id }).update({
-        internal_notes: trx.raw("concat_ws(E'\\n', NULLIF(internal_notes, ''), ?)",
-          [`Call ${etCalendarDayOf(call.created_at || now)}: ${plan.interiorNote}`]),
-      });
-    }
     await trx('activity_log').insert({
       customer_id: customer.id,
       action: ACTIVITY_ACTION,
       description: 'Requested time applied by staff. No immediate customer message; normal appointment reminders continue.',
-      metadata: {
-        call_log_id: call.id,
-        scheduled_service_id: visit.id,
-        actor_id: actorId,
-        from: plan.from || null,
-        to: { date: plan.newDate, ...plan.newWindow },
-        human_override: true,
-      },
+      metadata: { call_log_id: call.id, scheduled_service_id: visit.id, actor_id: actorId,
+        from: plan.from || null, to: { date: plan.newDate, ...plan.newWindow }, human_override: true },
     });
   };
   if (plan.action === 'already_at_requested_time') {
@@ -429,12 +403,7 @@ async function applyReviewedCallReschedule({ conn, call, v2, customer, candidate
     return { outcome: 'noop', visitId: visit.id };
   }
   const result = await (rebooker || require('./rebooker')).reschedule(
-    visit.id,
-    plan.newDate,
-    plan.newWindow,
-    RESCHEDULE_REASON_CODE,
-    'admin',
-    {
+    visit.id, plan.newDate, plan.newWindow, RESCHEDULE_REASON_CODE, 'admin', {
       actorId,
       pendingConfirmation: true,
       notifyRequested: false,
@@ -443,8 +412,6 @@ async function applyReviewedCallReschedule({ conn, call, v2, customer, candidate
       operationKey,
       adminWindowRules: true,
       overlapAdvisory: true,
-      // Rechecked by the unit mover under its planning lock, before any
-      // member moves. A newly joined sibling was never part of this approval.
       memberGuard: async ({ members }) => {
         if (members.length !== 1 || String(members[0].id) !== String(visit.id)) {
           throw Object.assign(new Error('The visit group changed. Use the schedule editor.'), { status: 409 });
@@ -453,17 +420,10 @@ async function applyReviewedCallReschedule({ conn, call, v2, customer, candidate
       beforeMove,
       ...(plan.dateMove ? { expectOccurrenceIds: occurrenceIds, expectOccurrences: occurrences } : { seriesPolicy: 'single' }),
       expect: {
-        scheduled_date: dateOnly(visit.scheduled_date),
-        window_start: visit.window_start,
-        window_end: visit.window_end,
-        estimated_duration_minutes: visit.estimated_duration_minutes,
-        customer_id: visit.customer_id,
-        property_id: visit.property_id,
-        service_id: visit.service_id,
-        service_type: visit.service_type,
-        status: visit.status,
-        visit_id: visit.visit_id || null,
-        source_action: visit.source_action,
+        scheduled_date: dateOnly(visit.scheduled_date), window_start: visit.window_start, window_end: visit.window_end,
+        estimated_duration_minutes: visit.estimated_duration_minutes, customer_id: visit.customer_id,
+        property_id: visit.property_id, service_id: visit.service_id, service_type: visit.service_type,
+        status: visit.status, visit_id: visit.visit_id || null, source_action: visit.source_action,
         is_recurring: visit.is_recurring,
       },
       moveGuard: writeReview,
@@ -472,10 +432,7 @@ async function applyReviewedCallReschedule({ conn, call, v2, customer, candidate
   if (visit.self_booking_id) {
     try {
       await conn('self_booked_appointments').where({ id: visit.self_booking_id }).update({
-        date: plan.newDate,
-        start_time: plan.newWindow.start,
-        end_time: plan.newWindow.end,
-        updated_at: new Date(),
+        date: plan.newDate, start_time: plan.newWindow.start, end_time: plan.newWindow.end, updated_at: new Date(),
       });
     } catch (err) {
       logger.warn(`[call-reschedule] self-booking snapshot sync failed for ${visit.id}: ${err.message}`);
@@ -483,19 +440,13 @@ async function applyReviewedCallReschedule({ conn, call, v2, customer, candidate
   }
   if (result?.seriesMoveId) {
     await require('../routes/admin-dispatch').applySeriesMoveEffects({
-      result,
-      serviceId: visit.id,
-      newDate: plan.newDate,
-      newWindow: plan.newWindow,
-      notify: false,
-      actorId,
-      reasonText: null,
+      result, serviceId: visit.id, newDate: plan.newDate, newWindow: plan.newWindow,
+      notify: false, actorId, reasonText: null,
     });
   } else {
     try {
       await require('./appointment-reminders').handleReschedule(
-        visit.id,
-        `${plan.newDate}T${plan.newWindow.start}`,
+        visit.id, `${plan.newDate}T${plan.newWindow.start}`,
         { sendNotification: false, expectSchedule: { date: plan.newDate, windowStart: plan.newWindow.start } },
       );
     } catch (err) {

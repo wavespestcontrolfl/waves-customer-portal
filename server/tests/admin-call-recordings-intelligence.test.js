@@ -10,8 +10,10 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), ga
 jest.mock('../services/sms-operational-actions', () => ({
   smsCommitmentsEnabled: jest.fn(() => false), listSmsCommitments: jest.fn(async () => []), applySmsCommitmentUpdate: jest.fn(),
 }));
+jest.mock('../services/call-reschedule-proposals', () => ({
+  enabled: jest.fn(), listProposals: jest.fn(), previewProposal: jest.fn(), applyProposal: jest.fn(), dismissProposal: jest.fn(),
+}));
 jest.mock('../services/call-intelligence', () => ({ loadCallIntelligence: jest.fn() }));
-jest.mock('../services/call-reschedule-proposals', () => ({ previewProposal: jest.fn() }));
 jest.mock('../services/callback-cards', () => ({
   enabled: jest.fn(() => false), prepareCallbackCards: jest.fn(), decorateCallbackRows: jest.fn(async (_db, rows) => rows), actOnCallback: jest.fn(),
 }));
@@ -56,32 +58,6 @@ const CALL_ID = '11111111-2222-4333-8444-555555555555';
 const CUSTOMER_ID = '66666666-7777-4888-9999-aaaaaaaaaaaa';
 const COMMIT_ID = 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff';
 const SID = 'CA' + '4'.repeat(32);
-
-test('proposal preview returns only the reviewed identity with its authorization hash', async () => {
-  const selected = { id: COMMIT_ID, status: 'confirmed', scheduled_date: '2027-03-15',
-    current_window: { start_at: '2027-03-15T13:00:00Z', end_at: '2027-03-15T15:00:00Z' },
-    service_name: 'Reviewed service', property: { id: 'reviewed-property', address_line1: '200 Example Court' } };
-  require('../services/call-reschedule-proposals').previewProposal.mockResolvedValue({
-    displayAddress: selected.property, preview_hash: 'a'.repeat(64), selected: { ...selected, internal_notes: 'must stay private' },
-    customer: { id: CUSTOMER_ID, first_name: 'Synthetic', last_name: 'Caller', secondary_phone: 'private' },
-    card: { payload: { reschedule_proposal: { quote: 'Move the pest appointment to Tuesday.' } } },
-    series: { collective: false }, overlap: { count: 1, appointments: [{ id: 'overlap-1' }] },
-    plan: { newDate: '2027-03-16', newWindow: { start: '14:00', end: '15:30' } },
-  });
-  await withServer(async (base) => {
-    const res = await fetch(`${base}/admin/call-recordings/proposals/${CALL_ID}/preview`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ visit_id: COMMIT_ID }),
-    });
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body).toMatchObject({ preview_hash: 'a'.repeat(64), selected,
-      overlap: { count: 1, appointments: [{ id: 'overlap-1' }] },
-      customer: { id: CUSTOMER_ID, first_name: 'Synthetic', last_name: 'Caller' }, quote: 'Move the pest appointment to Tuesday.' });
-    expect(body.selected.display_address).toEqual(selected.property);
-    expect(body.selected).not.toHaveProperty('internal_notes');
-    expect(body.customer).not.toHaveProperty('secondary_phone');
-  });
-});
 
 // Minimal query recorder: `first()` answers from a queue, `update()` records
 // its patch, `where` chains accumulate.
@@ -919,4 +895,53 @@ describe('POST /calls/:id/adopt-recording', () => {
     });
     expect(processor.processRecording).not.toHaveBeenCalled();
   });
+});
+
+
+describe('proposal lifecycle routes', () => {
+  const proposals = require('../services/call-reschedule-proposals');
+  beforeEach(() => { jest.clearAllMocks(); proposals.enabled.mockReturnValue(true); });
+  test('invalid pagination refuses before loading; a full page returns a next offset', () => withServer(async (base) => {
+    const invalid = await fetch(`${base}/admin/call-recordings/proposals?offset=-1`);
+    expect(invalid.status).toBe(400);
+    expect(proposals.listProposals).not.toHaveBeenCalled();
+    proposals.listProposals.mockResolvedValue(Array.from({ length: 101 }, (_, id) => ({ id })));
+    const response = await fetch(`${base}/admin/call-recordings/proposals?offset=100`);
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.proposals).toHaveLength(100);
+    expect(body).toMatchObject({ proposals_enabled: true, has_more: true, next_offset: 200 });
+    expect(proposals.listProposals).toHaveBeenCalledWith(db, { limit: 101, offset: 100 });
+  }));
+  test('dismissal passes the authenticated actor and preserves stale-version refusal', () => withServer(async (base) => {
+    proposals.dismissProposal.mockRejectedValue(Object.assign(new Error('The proposal changed.'), { status: 409 }));
+    const expectedAt = '2026-09-13T03:00:00Z';
+    const response = await fetch(`${base}/admin/call-recordings/proposals/${COMMIT_ID}/dismiss`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expected_at: expectedAt, actorId: 'forged' }),
+    });
+    expect(response.status).toBe(409);
+    expect(proposals.dismissProposal).toHaveBeenCalledWith(db, COMMIT_ID, { actorId: 'tech-1', expectedAt });
+  }));
+  test('preview hides appointment internals and Apply uses the authenticated actor', () => withServer(async (base) => {
+    const selected = { id: COMMIT_ID, status: 'confirmed', scheduled_date: '2027-03-15',
+      current_window: {}, service_name: 'Reviewed service', property: { id: 'property' }, internal_notes: 'private' };
+    proposals.previewProposal.mockResolvedValue({
+      selected, displayAddress: selected.property, preview_hash: 'a'.repeat(64), series: { collective: false },
+      overlap: { count: 0, appointments: [] }, customer: { id: CUSTOMER_ID, first_name: 'Synthetic', last_name: 'Caller' },
+      card: { payload: { reschedule_proposal: { quote: 'Please move the visit.' } } },
+      plan: { newDate: '2027-03-16', newWindow: { start: '14:00', end: '15:00' } },
+    });
+    const preview = await fetch(`${base}/admin/call-recordings/proposals/${CALL_ID}/preview`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ visit_id: COMMIT_ID }),
+    });
+    expect((await preview.json()).selected).not.toHaveProperty('internal_notes');
+    proposals.applyProposal.mockResolvedValue({ outcome: 'applied', visitId: COMMIT_ID });
+    const apply = await fetch(`${base}/admin/call-recordings/proposals/${CALL_ID}/apply`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ visit_id: COMMIT_ID, preview_hash: 'a'.repeat(64), actorId: 'forged' }),
+    });
+    expect(apply.status).toBe(200);
+    expect(proposals.applyProposal).toHaveBeenCalledWith(db, CALL_ID,
+      { actorId: 'tech-1', visitId: COMMIT_ID, previewHash: 'a'.repeat(64) });
+  }));
 });
