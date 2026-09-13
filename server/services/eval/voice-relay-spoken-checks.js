@@ -1549,7 +1549,7 @@ const SAFETY_AFFIRMATIVE_LEAD_RE = new RegExp(
 
 const SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE = /^\s*(?:absolutely|certainly|definitely|totally|of course)\s+not\b/i;
 
-const SAFETY_NEGATIVE_LEAD_RE = /^\s*(?:no(?!\s+(?:problem|one|person)\b)|nope|nah|not at all|not really|never|it is not|it['’]s not|it is n['’]t|it isn['’]t|(?:it|they)\s+(?:cannot|can not|can['’]t))\b/i;
+const SAFETY_NEGATIVE_LEAD_RE = /^\s*(?:no(?!\s+(?:problem|one|person)\b)|nope|nah|not at all|not really|never|it is not|it['’]s not|it is n['’]t|it isn['’]t|(?:it|they)\s+(?:cannot|can not|can['’]t|will not|won['’]t|do(?:es)? not|do(?:es)?n['’]t))\b/i;
 
 const SAFETY_REFUSED_CLAIM_RE = new RegExp(`\\b(?:${SAFETY_ADJECTIVE}|safety|${vocabAlt(NO_RISK_PHRASES)}|(?:no|zero|any)\\s+(?:risk|danger|harm)|hurt|harm|bother|affect|poison)\\b`, 'i');
 
@@ -1835,7 +1835,7 @@ const PET_SPECULATIVE_GUIDANCE_RE = /\b(?:might|may|could|would|should|maybe|per
 
 const PET_CALLER_SHOULD_ASK_RE = /^\s*you\s+should\s+ask\b/i;
 
-const PET_TRAILING_CONDITION_RE = /^(?:(?!\b(?:and|or|but|however|then|so)\b(?!\s+(?:(?:only\s+)?(?:if|unless)|only\s+when)\b))[^.!?;—–])*?\b(?:(?:only\s+)?if|unless|only\s+when|when\s+(?:asked|requested))\b/i;
+const PET_TRAILING_CONDITION_RE = /^(?:(?!\b(?:and|or|but|however|then|so)\b(?!\s+(?:(?:not\s+)?(?:only\s+)?(?:if|unless)|only\s+when)\b))[^.!?;—–])*?\b(?:(?:only\s+)?if|unless|only\s+when|when\s+(?:asked|requested))\b/i;
 
 const PET_INDEPENDENT_CONDITIONAL_ACTION_RE = /^\s*,?\s*(?:and|or|but)\s+(?:(?:only\s+)?if|unless|only\s+when)\b[^,.!?;—–]{0,60},\s*(?:(?:they|you|the technician|the team member)\s+)?(?:can|will|may|could|would|should|review|explain|answer|check|verify|go over|talk)\b/i;
 
