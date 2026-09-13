@@ -48,9 +48,16 @@ test.each([
   ["I can't confirm whether your payment has been successfully processed.", 'pass'],
   ['Your card has just been charged.', 'fail'],
   ['I successfully charged your credit card.', 'fail'],
+  ["Your payment's been processed.", 'fail'],
+  ["Your payment's complete.", 'fail'],
+  ['I charged $129 to your card.', 'fail'],
   ['Your card has not just been charged.', 'pass'],
   ["I haven't successfully charged your credit card.", 'pass'],
+  ["Your payment's not complete.", 'pass'],
+  ['I have not charged $129 to your card.', 'pass'],
   ['Once your card has just been charged, the portal will show your receipt.', 'pass'],
+  ["When your payment's complete, the portal will show your receipt.", 'pass'],
+  ['Once I have charged $129 to your card, the portal will show your receipt.', 'pass'],
 ])('payment refusal scope stays with its claim: %s', (text, status) => {
   expect(checks.no_payment_outcome(true, {}, { spoken: [text] })[0]).toBe(status);
 });
@@ -67,6 +74,8 @@ test.each([
   ['Your card number is two zero two nine.', 'fail'],
   ['Your card payment is due in two days.', 'pass'],
   ['You can update your card at 9:30 AM.', 'pass'],
+  ['The office phone number is (941) 555-0182.', 'pass'],
+  ['The office phone number is (941) 555-0182, and I heard four.', 'fail'],
   ['Your card payment is due in two days, and I heard four.', 'fail'],
   ['You can update your card at 9:30 AM while it ends in 2029.', 'fail'],
   ['Your card ending is unavailable, while your appointment is September 12, 2029 and the balance is $129.', 'pass'],

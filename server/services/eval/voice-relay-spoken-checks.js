@@ -504,8 +504,9 @@ function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)
 const PAYMENT_ACTOR = '(?:i|we|they|the office|the team|billing|someone|(?:a|the|our) (?:team member|billing team|manager))';
 const PAYMENT_SUCCESS_ADVERBS = '(?:(?:already|just|now|successfully)\\s+)*';
 const PAYMENT_TARGET = '(?:payment|(?:(?:credit|debit|prepaid)\\s+)?card|charge|transaction)';
+const PAYMENT_AMOUNT = `(?:\\$\\s*${DIGITS}|${DIGITS}\\s+(?:dollars?|bucks))`;
 const PAYMENT_OUTCOME_RE = new RegExp(
-  `\\b(?:${PAYMENT_ACTOR}(?:(?:\\s+(?:have|has|had)(?:n[\\x27\\u2019]t)?|[\\x27\\u2019](?:ve|d))\\s+|\\s+)(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:processed|charged|accepted|approved|completed)\\s+(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET}|(?:${PAYMENT_TARGET}|that|it) (?:(?:has|had) )?(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:go|goes|went|gone) through|(?:${PAYMENT_TARGET}|that|it) (?:(?:(?:is|was|got|went) (?:not )?|(?:has|had) (?:not )?${PAYMENT_SUCCESS_ADVERBS}been ))${PAYMENT_SUCCESS_ADVERBS}(?:processed|charged|accepted|approved|complete|completed|successful)|(?:${PAYMENT_TARGET}|that|it) succeeded|you[\\x27\\u2019]re all paid)\\b`,
+  `\\b(?:${PAYMENT_ACTOR}(?:(?:\\s+(?:have|has|had)(?:n[\\x27\\u2019]t)?|[\\x27\\u2019](?:ve|d))\\s+|\\s+)(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:processed|charged|accepted|approved|completed)\\s+(?:(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET}|${PAYMENT_AMOUNT}\\s+to\\s+(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET})|(?:${PAYMENT_TARGET}|that|it) (?:(?:has|had) )?(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:go|goes|went|gone) through|(?:${PAYMENT_TARGET}|that|it)[\\x27\\u2019]s\\s+(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:been\\s+${PAYMENT_SUCCESS_ADVERBS})?(?:processed|charged|accepted|approved|complete|completed|successful)|(?:${PAYMENT_TARGET}|that|it) (?:(?:(?:is|was|got|went) (?:not )?|(?:has|had) (?:not )?${PAYMENT_SUCCESS_ADVERBS}been ))${PAYMENT_SUCCESS_ADVERBS}(?:processed|charged|accepted|approved|complete|completed|successful)|(?:${PAYMENT_TARGET}|that|it) succeeded|you[\\x27\\u2019]re all paid)\\b`,
   'gi',
 );
 const PAYMENT_CONDITION_RE = /^\s*(?:once|when)\b/i;
@@ -1213,7 +1214,8 @@ const CARD_NON_FRAGMENT_RES = Object.freeze([
   /\b(?:invoice|estimate|order|ticket|account|reference|confirmation)\s+(?:number\s+|#\s*)?(?:is\s+)?[\w-]*\d[\w-]*/gi,
   /\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+(?:(?:19|20)\d{2}|\d{1,2}(?:,?\s+(?:19|20)\d{2})?)\b/gi,
   /\b(?:appointment|service|visit|calendar|date|year)(?:\s+(?:date|year))?\s+(?:(?:is|was|will be|falls?|fell|occur(?:s|red)?|happen(?:s|ed)?|scheduled|booked)\s+)?(?:(?:on|in|for)\s+)?(?:19|20)\d{2}\b/gi,
-  /\b(?:phone|cell|mobile|office|fax|area)\s+(?:number|code)\s+(?:is\s+|of\s+)?\d+(?:[\s.-]\d+)*/gi,
+  /\b(?:phone|cell|mobile|office|fax|area)\s+(?:number|code)\s+(?:is\s+|of\s+)?(?:\(\d+\)|\d+)(?:[\s.-]\d+)*/gi,
+  /\(\d{3}\)\s*\d{3}[\s.-]\d{4}\b/g,
   /\bzip(?:\s+code)?\s+(?:is\s+)?\d{5}(?:-\d{4})?\b/gi,
   /\b\d{3}[\s.-]\d{3}[\s.-]\d{4}\b/g,
   /\b\d+\s+[A-Za-z]+\s+(?:lane|ln|street|st|road|rd|avenue|ave|drive|dr|court|ct|way|boulevard|blvd|circle|cir|place|pl|terrace|trail|trl)\b(?:,\s*[A-Za-z]+(?:\s+[A-Za-z]+)?,\s*\d{5}\b)?/gi,
