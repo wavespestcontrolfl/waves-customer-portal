@@ -1640,7 +1640,7 @@ describe('job costing durable re-derivation from the timeOnSiteAdjusted marker',
     // lock in the SAME transaction as both financial writes — no window
     // between check and write remains.
     expect(costingSource).toMatch(/await db\.transaction\(async \(trx\) => \{\s*\n\s*const rowNow = await trx\('scheduled_services'\)\.where\(\{ id: scheduledServiceId \}\)\.forUpdate\(\)\.first\(\);/);
-    const fenceAt = costingSource.indexOf('correction stamp moved during recalculation');
+    const fenceAt = costingSource.indexOf('costing inputs moved during recalculation');
     const jobCostsWriteAt = costingSource.indexOf("await trx('job_costs').insert(row);");
     const writeThroughAt = costingSource.indexOf("await trx('service_records').where({ id: record.id }).update(upd);");
     expect(fenceAt).toBeGreaterThan(-1);

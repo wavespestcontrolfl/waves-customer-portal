@@ -103,20 +103,22 @@ function notificationIssueLimit(value) {
 // — escalation history (older counts) stays.
 router.get('/', async (req, res, next) => {
   try {
-    const page = parseInt(req.query.page) || 1;
-    const limit = Math.min(parseInt(req.query.limit) || 50, 100);
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 100);
     const offset = (page - 1) * limit;
-    const persisted = await NotificationService.getAdminNotifications(limit, offset, { role: req.techRole });
+    const persisted = await NotificationService.getAdminNotifications(limit + 1, offset, { role: req.techRole });
     // Bell policy on: computed dashboard aggregates stay on the dashboard
     // banner (/admin/dashboard/alerts) but no longer merge into the bell.
     // Live overlay is ADMIN-ONLY regardless of policy: dashboard alerts
     // carry finance totals and owner-only links, matching the fail-closed
     // persisted-feed scope (codex P1).
-    const liveCtx = page === 1 && !isBellPolicyEnabled() && req.techRole === 'admin'
+    const liveCtx = !isBellPolicyEnabled() && req.techRole === 'admin'
       ? await liveAlertNotifications(req.technicianId)
       : { live: [], liveKeys: new Set() };
-    const dedupedPersisted = persisted.filter((n) => !isLiveDuplicate(n, liveCtx.liveKeys));
-    res.json({ notifications: [...liveCtx.live, ...dedupedPersisted], page, limit });
+    // Page availability follows persisted rows before overlay deduplication:
+    // a page containing only live-alert duplicates must still allow paging.
+    const dedupedPersisted = persisted.slice(0, limit).filter((n) => !isLiveDuplicate(n, liveCtx.liveKeys));
+    res.json({ notifications: [...(page === 1 ? liveCtx.live : []), ...dedupedPersisted], page, limit, hasMore: persisted.length > limit });
   } catch (err) { next(err); }
 });
 

@@ -5488,6 +5488,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
                 allocatedMinutes: packetDurationAllocation.allocatedMinutes,
               },
             } : {}),
+            ...(packetRecords && !isBackfillCompletion && packetContext.driveCostOwnerServiceId ? {
+              visitDriveCostAllocation: {
+                version: 1,
+                packetId: packetContext.packetId,
+                ownerServiceId: packetContext.driveCostOwnerServiceId,
+              },
+            } : {}),
             customerInteraction: normalizedCustomerInteraction,
             invoiceAlreadySent: !!invoiceAlreadySent,
             // Backfill frozen on the record: a crash-resumed retry may lack
