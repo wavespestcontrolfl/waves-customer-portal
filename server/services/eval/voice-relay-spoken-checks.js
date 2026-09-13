@@ -1333,7 +1333,7 @@ function cardFragmentsIn(text, precedingReadback = false) {
     const valueSpan = expirationSpan || slashedSpan;
     const candidateValue = valueSpan ? digits.slice(...valueSpan) : m[0];
     const precedingValueMatches = Array.isArray(precedingReadback)
-      && precedingReadback.some((value) => value.replace(/\D/g, '') === candidateValue.replace(/\D/g, ''));
+      && precedingReadback.some((value) => value.replace(/\D/g, '').includes(candidateValue.replace(/\D/g, '')));
     const inheritedReadback = precedingValueMatches
       || (CARD_BARE_FRAGMENT_RE.test(clause)
         && ((clauseStart === 0 && precedingReadback === true) || CARD_READBACK_CUE_RE.test(priorClause)));
