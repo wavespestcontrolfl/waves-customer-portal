@@ -1311,6 +1311,11 @@ function callbackConditionTarget(targets, valueTargets, matchedContact) {
 
 const CALLBACK_CONSENT_BOUNDARY = '(?=\\s*(?:[,.;!?]|$))';
 const CALLBACK_RECEIVED_CONTACT = `(?:be\\s+(?:called|contacted|phoned|texted|emailed)|(?:receive|get)\\s+an?\\s+${CALLBACK_CONTACT_NOUN}|(?:an?|the)\\s+${CALLBACK_CONTACT_NOUN})`;
+const CALLBACK_TIMING_COMPONENT = `(?:${VISIT_TIME_RE.source}|${CALLBACK_TIMING_ADVERB}|now|later|morning|afternoon|evening|night|(?:before|after|until|till)\\s+(?:noon|midday|midnight))`;
+const CALLBACK_TIMING_MODIFIERS_RE = new RegExp(
+  `^(?:\\s*(?:(?:for|on|at|by|from|between|around|about)\\s+)?${CALLBACK_TIMING_COMPONENT})*(?:\\s+or\\s+not)?\\s*$`,
+  'i',
+);
 function callbackAgreementAction(additionalComplement = '') {
   const complement = additionalComplement
     ? `(?:to\\s+${CALLBACK_RECEIVED_CONTACT}|${additionalComplement})`
@@ -1354,10 +1359,14 @@ function no_account_holder_callback(value, record, { spoken }) {
       );
       const leadingConsent = new RegExp(`^\\s*${consentCondition.source}\\s*,?\\s*$`, 'i');
       const trailingConsent = consentCondition.exec(callbackSuffix);
+      const consentModifiers = trailingConsent
+        ? callbackSuffix.slice(0, trailingConsent.index).replace(/,\s*$/, '') : '';
       const concessiveConsent = trailingConsent
         && /\beven\s*$/i.test(callbackSuffix.slice(0, trailingConsent.index));
       const consentGated = leadingConsent.test(text.slice(clauseStart, match.index))
-        || Boolean(trailingConsent && !concessiveConsent);
+        || Boolean(trailingConsent && !concessiveConsent
+          && (VISIT_MODIFIERS_RE.test(consentModifiers)
+            || CALLBACK_TIMING_MODIFIERS_RE.test(consentModifiers)));
       const claim = (inherited ? text.slice(match.index, matchEnd) : claimContext(text, match.index, matchEnd))
         .replace(/^\s*(?:if|unless)\b[^,]*,\s*/i, '');
       if (inheritedByWaves && !consentGated
