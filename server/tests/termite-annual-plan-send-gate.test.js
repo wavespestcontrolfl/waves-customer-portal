@@ -8,8 +8,8 @@
  * on carries it too. Unsetting the gate must therefore stop that draft from
  * being DELIVERED (a delivered estimate is viewable and acceptable; a draft is
  * neither — UNPUBLISHED_ESTIMATE_STATUSES keeps draft/scheduled rows off every
- * public money path). deliveryState.firstDeliveredAt is the durable real-
- * provider-handoff witness; sent_at can also describe a suppressed SMS.
+ * public money path). The real-provider-handoff witness must be bound to the
+ * annual offer delivered; sent_at can also describe a suppressed SMS.
  */
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
@@ -68,7 +68,7 @@ jest.mock('../config/feature-gates', () => {
 const adminEstimatesRouter = require('../routes/admin-estimates');
 
 const { selectedTermiteAnnualPlanRows } = require('../services/estimate-termite-program-rows');
-const { assertEstimateSendable } = adminEstimatesRouter._internals;
+const { assertEstimateSendable, annualPlanOfferFingerprint } = adminEstimatesRouter._internals;
 
 const PLAN_LINE = { service: 'termite_bait', plan: 'annual_protection', stations: 15 };
 const QUARTERLY_LINE = { service: 'termite_bait', plan: 'quarterly', stations: 15 };
@@ -145,11 +145,39 @@ describe('assertEstimateSendable — GATE_TERMITE_ANNUAL_PLAN at delivery', () =
   });
 
   test('gate OFF: a RESEND of an already-delivered plan still goes out — the switch stops new contracts, it does not retract issued ones', () => {
-    expect(caught(planDraft({
+    const delivered = planDraft({
       status: 'sent',
       sent_at: new Date('2026-09-12T00:00:00Z'),
-      estimate_data: { result: { lineItems: [PLAN_LINE] }, deliveryState: { firstDeliveredAt: '2026-09-12T00:00:00.000Z' } },
-    }))).toBeNull();
+    });
+    delivered.estimate_data.deliveryState = {
+      firstDeliveredAt: '2026-09-12T00:00:00.000Z',
+      annualPlanOfferFingerprint: annualPlanOfferFingerprint(delivered),
+    };
+    expect(caught(delivered)).toBeNull();
+  });
+
+  test('gate OFF: an earlier quarterly handoff does not authorize a revised annual quote', () => {
+    const revised = planDraft({
+      status: 'sent', sent_at: new Date('2026-09-12T00:00:00Z'),
+      estimate_data: {
+        result: { lineItems: [PLAN_LINE] },
+        deliveryState: { firstDeliveredAt: '2026-09-12T00:00:00.000Z' },
+      },
+    });
+    expect(caught(revised)?.code).toBe('TERMITE_ANNUAL_PLAN_DISABLED');
+  });
+
+  test('gate OFF: revising the delivered annual price or recipient is a new offer', () => {
+    const delivered = planDraft({ status: 'sent', customer_id: 'customer-1' });
+    const fingerprint = annualPlanOfferFingerprint(delivered);
+    delivered.estimate_data.deliveryState = {
+      firstDeliveredAt: '2026-09-12T00:00:00.000Z', annualPlanOfferFingerprint: fingerprint,
+    };
+    delivered.estimate_data.result.lineItems[0] = { ...PLAN_LINE, annual: 399 };
+    expect(caught(delivered)?.code).toBe('TERMITE_ANNUAL_PLAN_DISABLED');
+    delivered.estimate_data.result.lineItems[0] = PLAN_LINE;
+    delivered.customer_id = 'customer-2';
+    expect(caught(delivered)?.code).toBe('TERMITE_ANNUAL_PLAN_DISABLED');
   });
 
   test('gate OFF: a suppressed-only SMS sent_at is not publication and cannot bypass the kill switch', () => {

@@ -115,6 +115,27 @@ function parseEstimateData(estimateData) {
   return typeof estimateData === 'object' ? estimateData : null;
 }
 
+// A delivery witness must describe this annual offer, not merely an earlier
+// handoff of the same estimate row (which can be revised from quarterly).
+// Hash the authoritative priced result and the recipient/property/totals;
+// operational send metadata changes do not mint a new contract.
+function annualPlanOfferFingerprint(estimate) {
+  const data = parseEstimateData(estimate?.estimate_data || estimate?.estimateData);
+  if (!data || !selectedTermiteAnnualPlanRows(data).length) return null;
+  const priced = data.result && typeof data.result === 'object'
+    ? data.result : data.engineResult;
+  if (!priced || typeof priced !== 'object') return null;
+  return crypto.createHash('sha256').update(JSON.stringify([
+    estimate.customer_id || null,
+    estimate.property_id || null,
+    estimate.address || null,
+    estimate.monthly_total ?? null,
+    estimate.annual_total ?? null,
+    estimate.onetime_total ?? null,
+    priced,
+  ])).digest('hex');
+}
+
 // Operational delivery stamps may change while the claim is taken. Contact,
 // property, scope, terms and dollars must still be the offer that was reviewed.
 function estimateOfferVersion(row) {
@@ -580,16 +601,17 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
   // — but that stamp is written at PRICING time, not publication time, so a
   // draft priced while the gate was on would otherwise still be deliverable
   // once the switch went off, and a delivered estimate IS viewable and
-  // acceptable. deliveryState.firstDeliveredAt is the durable publication
-  // witness: unlike sent_at, it is stamped only after a REAL provider handoff,
-  // never for a suppressed SMS sentinel. A resend of an already-delivered plan
-  // stays allowed (killing the switch stops new contracts, it does not retract
-  // issued ones); a never-delivered plan is refused until the gate is back on
-  // or the estimate is re-saved on the quarterly program (codex #4424 P1).
+  // acceptable. The real-handoff delivery witness is paired with a fingerprint
+  // of the annual offer actually sent. An earlier quarterly handoff, or a
+  // revision of a delivered annual offer, cannot authorize a new annual
+  // contract after the gate is switched off.
   const annualPlanGateOn = ['1', 'true', 'on']
     .includes(String(process.env.GATE_TERMITE_ANNUAL_PLAN || '').toLowerCase());
   const estimateData = parseEstimateData(estimate.estimate_data || estimate.estimateData);
-  const annualPlanDelivered = !!estimateData?.deliveryState?.firstDeliveredAt;
+  const annualFingerprint = annualPlanOfferFingerprint(estimate);
+  const annualPlanDelivered = !!estimateData?.deliveryState?.firstDeliveredAt
+    && !!annualFingerprint
+    && estimateData.deliveryState.annualPlanOfferFingerprint === annualFingerprint;
   if (!annualPlanGateOn && !annualPlanDelivered
     && selectedTermiteAnnualPlanRows(estimateData).length > 0) {
     const err = new Error('The termite annual protection plan is disabled (GATE_TERMITE_ANNUAL_PLAN) — reopen the estimate in the estimate tool and save it on the quarterly program before sending.');
@@ -2775,6 +2797,9 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // forward untouched by suppressed attempts.
   const priorDeliveredAt = Array.isArray(priorDeliveryState?.deliveredAt) ? priorDeliveryState.deliveredAt.filter((t) => typeof t === 'string') : [];
   const deliveredAt = (stampChannels.length ? [...priorDeliveredAt, lastDeliveredAt] : priorDeliveredAt).slice(-DELIVERY_HISTORY_MAX);
+  const deliveredAnnualFingerprint = stampChannels.length
+    ? annualPlanOfferFingerprint(estimate)
+    : priorDeliveryState?.annualPlanOfferFingerprint;
   const deliveryStatePatch = {
     deliveryState: {
       attemptedAt: now().toISOString(),
@@ -2784,6 +2809,9 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       ...(firstDeliveredAt ? { firstDeliveredAt } : {}),
       ...(lastDeliveredAt ? { lastDeliveredAt } : {}),
       ...(deliveredAt.length ? { deliveredAt } : {}),
+      // Only a REAL provider handoff can authorize an annual resend while
+      // the gate is OFF. Suppressed attempts retain the prior fingerprint.
+      ...(deliveredAnnualFingerprint ? { annualPlanOfferFingerprint: deliveredAnnualFingerprint } : {}),
     },
     // The per-park handoff witness rides the finalization write too, so a
     // transient failure of the in-branch stamp can never leave a delivered
@@ -5135,6 +5163,7 @@ router._internals = {
   resolveBlockingAutomationForProposal,
   clearStaleProposalDelivery,
   assertEstimateSendable,
+  annualPlanOfferFingerprint,
   sendRequiresServerPricingFor,
   isAuthoredProposalRow,
   PROPOSAL_PROVENANCE_SOURCE,
