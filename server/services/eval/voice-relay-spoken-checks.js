@@ -1267,7 +1267,7 @@ const SAFETY_SUBJECT_DETERMINER_WORDS = Object.freeze(['this', 'that', 'the', 'o
 
 const SAFETY_SUBJECT_DETERMINER = `(?:${SAFETY_SUBJECT_DETERMINER_WORDS.join('|')})`;
 
-const SAFETY_SUBJECT_MODIFIER = '(?:ants?|roach(?:es)?|termites?|baits?|gels?|sprays?|granules?|products?|treatments?|chemicals?|stuff|materials?|applications?|pesticides?|insecticides?|herbicides?)';
+const SAFETY_SUBJECT_MODIFIER = '(?:ants?|roach(?:es)?|termites?|baits?|gels?|sprays?|granules?|products?|treatments?|chemicals?|stuff|materials?|applications?|pesticides?|insecticides?|herbicides?|rodenticides?|termiticides?|larvicides?|adulticides?|miticides?|poisons?|repellents?|fumigants?)';
 
 const SAFETY_SUBJECT = `(?:${SAFETY_SUBJECT_DETERMINER}(?:\\s+${SAFETY_SUBJECT_MODIFIER}){0,3}|${SAFETY_SUBJECT_MODIFIER}(?:\\s+${SAFETY_SUBJECT_MODIFIER}){0,2})`;
 
