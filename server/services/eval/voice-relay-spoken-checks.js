@@ -1343,9 +1343,9 @@ function questionAboutProduct(text, keywordAlt) {
   return { predicate: match[1] };
 }
 
-const SAFETY_KEYWORDS_POSITIVE = 'safe|safety|ok(?:ay)?|fine';
+const SAFETY_KEYWORDS_POSITIVE = `${SAFETY_ADJECTIVE}|safety`;
 
-const SAFETY_KEYWORDS_HARM = 'unsafe|harmful|harm|toxic|dangerous|risky|poisonous|hazardous|hurt';
+const SAFETY_KEYWORDS_HARM = `(?<!non[-\\s])(?:${HARM_ADJECTIVE}|harm|hurt)`;
 
 function questionNegatesKeyword(text, keywordAlt) {
   const adjacentNegation = new RegExp(`\\bnot\\s+(?:${SAFETY_INTENSIFIER})?(?:${keywordAlt})\\b`, 'i');
