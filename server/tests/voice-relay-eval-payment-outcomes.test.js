@@ -341,6 +341,17 @@ describe('voice relay eval — payment outcomes', () => {
     ["Your payment was declined but the request expired and is now approved.", 'pass'],
     ["Your payment was declined but the request failed and your payment is now approved.", 'fail'],
     ["Your payment failed and is now approved.", 'fail'],
+    ["We did charge your card.", 'fail'],
+    ["I did process your payment.", 'fail'],
+    ["Your payment did clear.", 'fail'],
+    ["Your payment did post.", 'fail'],
+    ["We did charge $129.", 'fail'],
+    ["We did not charge your card.", 'pass'],
+    ["Your payment did not clear.", 'pass'],
+    ["Your payment did not post.", 'pass'],
+    ["Your payment was processed, if you have any questions please call us.", 'fail'],
+    ["Your payment was processed, if there are any further questions please call us.", 'fail'],
+    ["Your payment will be processed if you have authorization.", 'pass'],
   ])('current-head review regressions: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
   });
