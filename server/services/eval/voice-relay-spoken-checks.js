@@ -427,7 +427,9 @@ function clauseBounds(text, at) {
     // A pair of subjects/objects has no completed predicate on the left:
     // "whether a cancellation or refund was processed", or "Talstar P
     // and bait were applied". Keep its governing refusal/condition.
-    const independentSubject = /^\s*(?:i|we|you|he|she|they|it|your|our|their|his|her)\b/i.test(text.slice(m.index + m[0].length));
+    const right = text.slice(m.index + m[0].length);
+    const independentSubject = /^\s*(?:i|we|you|he|she|they|it|your|our|their|his|her)\b/i.test(right)
+      || new RegExp(`^\\s*${SUBJECT}\\b`, 'i').test(right);
     if (/^(?:and|or)$/i.test(m[0]) && !independentSubject && nominal && !/^(?:it|this|that)$/i.test(nominal)
         && !CLAUSE_FINITE_PREDICATE_RE.test(nominal)) {
       m = CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
