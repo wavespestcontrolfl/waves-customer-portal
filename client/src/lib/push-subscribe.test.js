@@ -42,18 +42,18 @@ describe('disablePush', () => {
     expect(JSON.parse(localStorage.getItem(OPT_IN_KEY))).toEqual({ 'admin-1': false });
   }
 
-  it('still removes the browser subscription when the server request rejects', async () => {
+  it('preserves the browser endpoint for retry when the server request rejects', async () => {
     fetch.mockRejectedValueOnce(new TypeError('Network unavailable'));
 
     await expect(disablePush({ apiBase: '/api', token })).rejects.toThrow(
       'Push could not be fully disabled. The server could not be reached: Network unavailable. Please try again.',
     );
 
-    expect(unsubscribe).toHaveBeenCalledOnce();
+    expect(unsubscribe).not.toHaveBeenCalled();
     expectOptedOut();
   });
 
-  it('checks an unsuccessful server response and still removes the browser subscription', async () => {
+  it('preserves the browser endpoint after an unsuccessful server response', async () => {
     fetch.mockResolvedValueOnce({
       ok: false,
       status: 503,
@@ -64,6 +64,18 @@ describe('disablePush', () => {
       'Push could not be fully disabled. The server rejected the request (HTTP 503). Please try again.',
     );
 
+    expect(unsubscribe).not.toHaveBeenCalled();
+    expectOptedOut();
+  });
+
+  it('retries server cleanup with the same endpoint after a network failure', async () => {
+    fetch.mockRejectedValueOnce(new TypeError('Offline'));
+    await expect(disablePush({ token })).rejects.toThrow('Offline');
+    expect(unsubscribe).not.toHaveBeenCalled();
+
+    await expect(disablePush({ token })).resolves.toEqual({ ok: true });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch.mock.calls[1][1].body).toBe(fetch.mock.calls[0][1].body);
     expect(unsubscribe).toHaveBeenCalledOnce();
     expectOptedOut();
   });

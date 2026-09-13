@@ -272,26 +272,22 @@ export async function disablePush({ apiBase = '/api', token } = {}) {
   // push, so there is no endpoint to unregister from the server.
   if (!sub) return { ok: true };
 
-  const [serverResult, browserResult] = await Promise.allSettled([
-    fetch(`${apiBase}/admin/push/unsubscribe`, {
+  // Keep the browser endpoint available for retry until server cleanup is
+  // confirmed. The opt-out above prevents automatic re-enrollment meanwhile.
+  let response;
+  try {
+    response = await fetch(`${apiBase}/admin/push/unsubscribe`, {
       method: 'POST', headers,
       body: JSON.stringify({ endpoint: sub.endpoint }),
-    }),
-    sub.unsubscribe(),
-  ]);
-
-  // Promise.allSettled guarantees browser cleanup is attempted even when
-  // server unregistering fails.
-  // PushSubscription.unsubscribe() resolves false when the browser cannot
-  // confirm removal; treat that as a failure rather than showing success.
-  let serverError = '';
-  if (serverResult.status === 'rejected') {
-    const detail = serverResult.reason?.message;
-    serverError = `The server could not be reached${detail ? `: ${detail}` : ''}.`;
-  } else if (!serverResult.value.ok) {
-    serverError = `The server rejected the request (HTTP ${serverResult.value.status}).`;
+    });
+  } catch (e) {
+    throw new Error(`Push could not be fully disabled. The server could not be reached${e?.message ? `: ${e.message}` : ''}. Please try again.`);
+  }
+  if (!response.ok) {
+    throw new Error(`Push could not be fully disabled. The server rejected the request (HTTP ${response.status}). Please try again.`);
   }
 
+  const [browserResult] = await Promise.allSettled([sub.unsubscribe()]);
   let browserError = '';
   if (browserResult.status === 'rejected') {
     const detail = browserResult.reason?.message;
@@ -300,8 +296,8 @@ export async function disablePush({ apiBase = '/api', token } = {}) {
     browserError = 'The browser did not confirm that its subscription was removed.';
   }
 
-  if (serverError || browserError) {
-    throw new Error(`Push could not be fully disabled. ${[serverError, browserError].filter(Boolean).join(' ')} Please try again.`);
+  if (browserError) {
+    throw new Error(`Push could not be fully disabled. ${browserError} Please try again.`);
   }
 
   return { ok: true };
