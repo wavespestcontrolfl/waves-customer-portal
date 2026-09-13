@@ -40,6 +40,8 @@ test.each([
   ['The technician got Talstar P for the exterior perimeter.', 'fail'],
   ['The technician used the report to recommend Talstar P for the exterior perimeter.', 'fail'],
   ['The technician used the label when recommending Talstar P for the exterior perimeter.', 'fail'],
+  ['Talstar P was applied indoors after inspecting the exterior perimeter.', 'fail'],
+  ['The technician at the exterior perimeter applied Talstar P indoors.', 'fail'],
   ['The technician at the exterior perimeter received Talstar P.', 'fail'],
   ['At the exterior perimeter, the technician got Talstar P.', 'fail'],
   ['The exterior perimeter technician received Talstar P.', 'fail'],
@@ -123,6 +125,20 @@ test.each([
 ])('coordinated location recipients preserve each report finding: %j', (finding, status) => {
   const spoken = ['The perimeter got Talstar P and the foundation got bait.'];
   expect(checks.report_readback_confirms(finding, {}, { spoken })[0]).toBe(status);
+});
+
+test.each([
+  'Talstar P went around the exterior perimeter and bait along the foundation.',
+  'Talstar P went around the exterior perimeter and granular bait along the foundation.',
+  'On August 14 the technician put Talstar P around the exterior perimeter and granular bait along the foundation.',
+])('a completed treatment verb governs coordinated product-location findings: %s', (spoken) => {
+  const findings = [
+    { subject: '\\btalstar p\\b', location: '\\bexterior perimeter\\b' },
+    { subject: '\\b(?:granular\\s+)?bait\\b', location: '\\bfoundation\\b' },
+  ];
+  for (const finding of findings) {
+    expect(checks.report_readback_confirms(finding, {}, { spoken: [spoken] })[0]).toBe('pass');
+  }
 });
 
 test.each([

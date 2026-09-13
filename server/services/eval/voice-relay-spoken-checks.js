@@ -1241,7 +1241,11 @@ const REPORT_LOCATION_RECIPIENT_VERB_RE = /^(?:got|received)$/i;
 const REPORT_NOUN_LED_PREFIX_RE = /^\s*(?:(?:the|a|an)\s*)?$/i;
 const REPORT_LOCATION_RECIPIENT_PREDICATE_RE = /^\s*(?:(?:itself|has|have|had|already|also|just|now|\w+ly)\s+)*$/i;
 const REPORT_DIRECT_OBJECT_GAP_RE = /^\s*(?:(?:the|a|an)\s+)?$/i;
+const REPORT_COORDINATED_OBJECT_GAP_RE = /\b(?:around|along|on|to|at|in)\b[^.!?;]*\band\s+(?:[\w'\u2019-]+\s+){0,2}$/i;
 const REPORT_WENT_LOCATION_RE = /^\s*(?:around|along|on|to|at|in)\b/i;
+const REPORT_TREATMENT_LOCATION_LINK_RE = /\b(?:around|along|on|to|at|in)\b/i;
+const REPORT_FRONTED_LOCATION_PREFIX_RE = /^\s*(?:around|along|on|to|at|in)\s+(?:(?:almost|nearly)\s+)?(?:(?:the|an?)\s+)?(?:[\w'\u2019-]+\s+){0,2}$/i;
+const REPORT_LOCATION_DETOUR_RE = /\b(?:after|before|while|when|because|since|following|until|unless)\b/i;
 const REPORT_COMPLETED_PASSIVE_RE = /\b(?:(?:was|were|got)|(?:has|have|had)(?:\s+(?:\w+ly|already|just|now))*\s+been)\s+(?:(?:\w+ly|already|just|now)\s+)*$/i;
 const REPORT_NONCOMPLETION_GOVERNOR_RE = /(?:\b(?:supposed|expected|required|meant|scheduled|instructed|asked|told|directed|ordered|needed|intended|planned|ought)\s+to(?:\s+(?:\w+ly|already|just|now))*(?:\s+have(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?)?(?:\s+(?:\w+ly|already|just|now))*|\bplan(?:s|ned|ning)?\s+on\s+having(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?(?:\s+(?:\w+ly|already|just|now))*)\s*$/i;
 const REPORT_NONCOMPLETION_MODIFIER_RE = /\b(?:almost|nearly)(?:\s+(?:has|have|had|was|were|got|been)){0,2}\s*$/i;
@@ -1286,17 +1290,41 @@ function reportHasAlternativeLocation(affirmed, locationAt, orTail) {
   return /\beither\b/i.test(affirmed) || !REPORT_UNRELATED_OR_CLAUSE_RE.test(alternativeTail);
 }
 
+function reportLocationIsTreatmentTarget(affirmed, subjectAt, subjectLength, locationAt, locationRecipient) {
+  if (locationRecipient) return true;
+  const locationLink = locationAt < subjectAt
+    ? affirmed.slice(0, locationAt) : affirmed.slice(subjectAt + subjectLength, locationAt);
+  if (locationAt < subjectAt) return REPORT_FRONTED_LOCATION_PREFIX_RE.test(locationLink);
+  return REPORT_TREATMENT_LOCATION_LINK_RE.test(locationLink) && !REPORT_LOCATION_DETOUR_RE.test(locationLink);
+}
+
+function reportVerbGovernsProduct(affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb) {
+  const objectGap = findingVerb.index < subjectAt
+    ? affirmed.slice(findingVerb.index + findingVerb[0].length, subjectAt) : '';
+  const coordinatedObject = REPORT_COORDINATED_OBJECT_GAP_RE.test(objectGap);
+  if (!REPORT_PARTICIPLE_RE.test(findingVerb[0])) {
+    if (!/^went$/i.test(findingVerb[0])) return true;
+    return (subjectAt < findingVerb.index && findingVerb.index < locationAt
+        && REPORT_WENT_LOCATION_RE.test(affirmed.slice(findingVerb.index + findingVerb[0].length, locationAt + locationLength)))
+      || coordinatedObject;
+  }
+  if (findingVerb.index < subjectAt) return REPORT_DIRECT_OBJECT_GAP_RE.test(objectGap) || coordinatedObject;
+  const predicatePrefix = affirmed.slice(subjectAt + subjectLength, findingVerb.index);
+  const tersePastFinding = REPORT_NOUN_LED_PREFIX_RE.test(affirmed.slice(0, subjectAt)) && !predicatePrefix.trim();
+  return tersePastFinding || REPORT_COMPLETED_PASSIVE_RE.test(predicatePrefix);
+}
+
 // A noncompletion governor or near-miss modifier excludes active-order and
 // passive frames alike: "planned on having applied Talstar", "almost applied
 // Talstar", and "Talstar was nearly applied" do not establish completion.
-// Otherwise, an active past treatment takes the matched product directly;
-// an earlier verb governing some other object does not establish the finding.
-// A participle after the product needs a completed passive auxiliary.
+// Otherwise, the verb must govern both the matched product and its treatment
+// location, including a verb shared across coordinated product-location pairs.
 function reportHasCompletedFinding(affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb) {
   if (subjectAt < 0 || !findingVerb) return false;
   // "The perimeter received Talstar" describes treatment at the location;
   // "the technician received Talstar for the perimeter" describes custody.
-  if (REPORT_LOCATION_RECIPIENT_VERB_RE.test(findingVerb[0])) {
+  const locationRecipient = REPORT_LOCATION_RECIPIENT_VERB_RE.test(findingVerb[0]);
+  if (locationRecipient) {
     const receiverPrefix = affirmed.slice(0, locationAt).trim();
     const receiverPredicate = affirmed.slice(locationAt + locationLength, findingVerb.index);
     if (locationAt > findingVerb.index || !REPORT_NOUN_LED_PREFIX_RE.test(receiverPrefix)
@@ -1305,18 +1333,8 @@ function reportHasCompletedFinding(affirmed, subjectAt, subjectLength, locationA
   const predicateIntroduction = affirmed.slice(0, findingVerb.index);
   if (REPORT_NONCOMPLETION_GOVERNOR_RE.test(predicateIntroduction)
       || REPORT_NONCOMPLETION_MODIFIER_RE.test(predicateIntroduction)) return false;
-  if (!REPORT_PARTICIPLE_RE.test(findingVerb[0])) {
-    if (!/^went$/i.test(findingVerb[0])) return true;
-    return subjectAt < findingVerb.index && findingVerb.index < locationAt
-      && REPORT_WENT_LOCATION_RE.test(affirmed.slice(findingVerb.index + findingVerb[0].length, locationAt + locationLength));
-  }
-  if (findingVerb.index < subjectAt) {
-    const directObjectGap = affirmed.slice(findingVerb.index + findingVerb[0].length, subjectAt);
-    return REPORT_DIRECT_OBJECT_GAP_RE.test(directObjectGap);
-  }
-  const predicatePrefix = affirmed.slice(subjectAt + subjectLength, findingVerb.index);
-  const tersePastFinding = REPORT_NOUN_LED_PREFIX_RE.test(affirmed.slice(0, subjectAt)) && !predicatePrefix.trim();
-  return tersePastFinding || REPORT_COMPLETED_PASSIVE_RE.test(predicatePrefix);
+  if (!reportLocationIsTreatmentTarget(affirmed, subjectAt, subjectLength, locationAt, locationRecipient)) return false;
+  return reportVerbGovernsProduct(affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb);
 }
 
 function reportHasConciseFinding(affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb) {
