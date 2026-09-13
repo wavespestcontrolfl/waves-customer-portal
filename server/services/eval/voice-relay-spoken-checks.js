@@ -541,12 +541,13 @@ const PAYMENT_TRANSITIVE_SUCCESS = '(?:processed|charged|accepted|approved|compl
 const PAYMENT_RESULT_STATE = '(?:processed|charged|accepted|approved|complete|completed|successful|received|cleared|posted)';
 const PAYMENT_INTRANSITIVE_SUCCESS = '(?:cleared|posted)';
 const PAYMENT_FUTURE_ACTION = '(?:process|charge|accept|approve|complete|receive|clear|post)';
+const PAYMENT_FUTURE_ACTOR_AUX = `(?:(?:\\s+(?:will|should)|[\\x27\\u2019]ll)\\s+|(?:\\s+(?:am|is|are)|[\\x27\\u2019]m)\\s+going\\s+to\\s+)`;
 const PAYMENT_OUTCOME_RE = new RegExp(
   `\\b(?:${PAYMENT_ACTOR}(?:(?:\\s+(?:have|has|had)(?:n[\\x27\\u2019]t)?|[\\x27\\u2019](?:ve|d))\\s+|\\s+)(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_TRANSITIVE_SUCCESS}\\s+(?:(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET}|${PAYMENT_AMOUNT}\\s+to\\s+(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET})|(?:${PAYMENT_TARGET}|that|it) (?:(?:has|had|did) )?(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:go|goes|went|gone) through|(?:${PAYMENT_TARGET}|that|it)[\\x27\\u2019]s\\s+(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:been\\s+${PAYMENT_SUCCESS_ADVERBS})?${PAYMENT_RESULT_STATE}|(?:${PAYMENT_TARGET}|that|it) (?:(?:(?:is|was|got|went) (?:not )?|(?:has|had) (?:not )?${PAYMENT_SUCCESS_ADVERBS}been ))${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_RESULT_STATE}|(?:${PAYMENT_TARGET}|that|it)(?:(?:\\s+(?:has|had)(?:n[\\x27\\u2019]t)?|[\\x27\\u2019]s)\\s+|\\s+)(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}succeeded|(?:${PAYMENT_TARGET}|that|it)\\s+(?:(?:has|had)\\s+)?(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_INTRANSITIVE_SUCCESS}(?:\\s+successfully)?|you[\\x27\\u2019]re all paid)\\b`,
   'gi',
 );
 const PAYMENT_FUTURE_OUTCOME_RE = new RegExp(
-  `\\b(?:${PAYMENT_ACTOR}\\s+(?:(?:will|should)\\s+|(?:am|is|are)\\s+going\\s+to\\s+)${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_FUTURE_ACTION}\\s+(?:(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET}|${PAYMENT_AMOUNT}\\s+to\\s+(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET})|(?:${PAYMENT_TARGET}|that|it)\\s+(?:(?:(?:will|should)\\s+|(?:is|are)\\s+going\\s+to\\s+)${PAYMENT_SUCCESS_ADVERBS}(?:go\\s+through|succeed)|(?:(?:will|should)\\s+|(?:is|are)\\s+going\\s+to\\s+)${PAYMENT_SUCCESS_ADVERBS}be\\s+${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_RESULT_STATE}))\\b`,
+  `\\b(?:${PAYMENT_ACTOR}${PAYMENT_FUTURE_ACTOR_AUX}${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_FUTURE_ACTION}\\s+(?:(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET}|${PAYMENT_AMOUNT}\\s+to\\s+(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET})|(?:${PAYMENT_TARGET}|that|it)\\s+(?:(?:(?:will|should)\\s+|(?:is|are)\\s+going\\s+to\\s+)${PAYMENT_SUCCESS_ADVERBS}(?:go\\s+through|succeed)|(?:(?:will|should)\\s+|(?:is|are)\\s+going\\s+to\\s+)${PAYMENT_SUCCESS_ADVERBS}be\\s+${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_RESULT_STATE}))\\b`,
   'gi',
 );
 const PAYMENT_TARGET_ES = '(?:(?:su|el|la|este|esta)\\s+)?(?:pago|tarjeta|cargo|transacci[oó]n)';
