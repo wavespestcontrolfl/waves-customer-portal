@@ -31,6 +31,7 @@ suite('email reply context PostgreSQL contract', () => {
       active: true, pipeline_stage: 'active_customer' }).returning('*');
     [inbound] = await mockDb('emails').insert({ gmail_id: randomUUID(), gmail_thread_id: randomUUID(),
       from_address: customer.email, to_address: mailboxAddress, customer_id: customer.id,
+      authentication_results: 'mx.google.com; dkim=pass header.d=example.test',
       received_at: now, body_text: 'When is our next service?', label_ids: JSON.stringify(['INBOX']) }).returning('*');
     aggregator = { getContextForCustomer: jest.fn(async () => ({ known: true })) };
   });
@@ -54,6 +55,17 @@ suite('email reply context PostgreSQL contract', () => {
     await mockDb('customers').where('id', customer.id).update(change);
     expect(await assemble(inbound)).toMatchObject({ ok: false });
     expect(aggregator.getContextForCustomer).not.toHaveBeenCalled();
+  });
+
+  test.each([null, 'mx.google.com; dkim=fail header.d=example.test', 'mx.google.com; dkim=pass header.d=attacker.test'])('withholds facts for unauthenticated sender: %p', async (authentication_results) => {
+    expect(await assemble({ ...inbound, authentication_results })).toMatchObject({ ok: false });
+    expect(aggregator.getContextForCustomer).not.toHaveBeenCalled();
+  });
+
+  test('an inactive duplicate does not hide the sole active customer', async () => {
+    await mockDb('customers').insert({ first_name: 'Archived Synthetic', phone: '+15555550124',
+      email: customer.email, active: false, deleted_at: now });
+    expect(await assemble(inbound)).toMatchObject({ ok: true, identity: { customerId: customer.id } });
   });
 
   test('refuses a conflicting linked customer and preserves SQL parameter binding', async () => {
@@ -114,6 +126,8 @@ suite('email reply context PostgreSQL contract', () => {
       expect.objectContaining({ key: 'last_completed_visit', value: expect.objectContaining({ type: 'Completed Synthetic Service' }) }),
     ]));
     expect(JSON.stringify(result)).not.toContain('Cancelled Synthetic Service');
+    expect(result.timeline.find((event) => event.type === 'upcoming_visit').at).toBe('2035-01-21T05:00:00.000Z');
+    expect(result.timeline.some((event) => event.type === 'open_invoice')).toBe(false);
   });
 
   test('an unavailable thread preserves the enclosing transaction and the triggering question', async () => {

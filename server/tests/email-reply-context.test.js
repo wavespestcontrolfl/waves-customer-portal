@@ -9,6 +9,7 @@ const EMAIL = {
   id: 'email-current', gmail_thread_id: 'thread-1', from_address: CUSTOMER.email,
   to_address: `Waves <${MAILBOX}>`, subject: 'Service question', body_text: 'Can you confirm my visit?',
   label_ids: ['INBOX'], received_at: '2026-09-10T16:00:00Z', customer_id: CUSTOMER.id,
+  authentication_results: 'mx.google.com; dkim=pass header.d=example.test',
 };
 
 function queryFor(rows) {
@@ -23,12 +24,16 @@ function queryFor(rows) {
       }
       return query;
     },
+    whereNull(column) { result = result.filter((row) => row[column] == null); return query; },
     whereRaw(sql, bindings = []) {
       if (/LOWER\(TRIM\(email\)\)/.test(sql)) {
         result = result.filter((row) => String(row.email || '').trim().toLowerCase() === bindings[0]);
       }
       if (/COALESCE\(label_ids/.test(sql)) {
         result = result.filter((row) => !(row.label_ids || []).includes('DRAFT'));
+      }
+      if (/customer_id IS NULL/.test(sql)) {
+        result = result.filter((row) => row.customer_id == null || String(row.customer_id) === String(bindings[0]));
       }
       if (/LOWER\(TRIM\(from_address\)\)/.test(sql)) {
         const [sender, mailboxPattern, mailbox, senderPattern] = bindings;
@@ -97,8 +102,8 @@ function aggregatorContext(overrides = {}) {
 describe('assembleEmailReplyContext', () => {
   test.each([
     ['shared address', [CUSTOMER, { ...CUSTOMER, id: 'customer-2' }], null, 'identity_ambiguous'],
-    ['deleted customer', [{ ...CUSTOMER, deleted_at: '2026-09-01T00:00:00Z' }], null, 'identity_inactive'],
-    ['inactive customer', [{ ...CUSTOMER, active: false }], null, 'identity_inactive'],
+    ['deleted customer', [{ ...CUSTOMER, deleted_at: '2026-09-01T00:00:00Z' }], null, 'identity_unavailable'],
+    ['inactive customer', [{ ...CUSTOMER, active: false }], null, 'identity_unavailable'],
     ['conflicting linked id', [CUSTOMER], { ...EMAIL, customer_id: 'customer-2' }, 'identity_conflict'],
   ])('fails closed for %s before aggregation', async (name, customers, emailOverride, reason) => {
     const aggregator = { getContextForCustomer: jest.fn() };
@@ -121,6 +126,31 @@ describe('assembleEmailReplyContext', () => {
     expect(aggregator.getContextForCustomer).not.toHaveBeenCalled();
   });
 
+  test.each([
+    null,
+    'mx.google.com; dkim=fail header.d=example.test',
+    'mx.google.com; dkim=pass header.d=attacker.test',
+  ])('rejects unverified sender auth before reads: %p', async (authenticationResults) => {
+    const database = fakeDatabase();
+    const aggregator = { getContextForCustomer: jest.fn() };
+    const result = await assembleEmailReplyContext({ ...EMAIL, authentication_results: authenticationResults }, {
+      database, aggregator, mailboxAddress: MAILBOX,
+    });
+    expect(result).toMatchObject({ ok: false, reason: 'sender_auth_unverified' });
+    expect(database).not.toHaveBeenCalled();
+    expect(aggregator.getContextForCustomer).not.toHaveBeenCalled();
+  });
+
+  test('ignores archived duplicates when exactly one live customer matches', async () => {
+    const aggregator = { getContextForCustomer: jest.fn(async () => aggregatorContext()) };
+    const result = await assembleEmailReplyContext(EMAIL, {
+      database: fakeDatabase({ customers: [CUSTOMER, { ...CUSTOMER, id: 'archived', active: false, deleted_at: '2026-09-01T00:00:00Z' }] }),
+      aggregator, mailboxAddress: MAILBOX,
+    });
+    expect(result).toMatchObject({ ok: true, identity: { customerId: CUSTOMER.id } });
+    expect(aggregator.getContextForCustomer).toHaveBeenCalledTimes(1);
+  });
+
   test('refuses a missing or oversized triggering body before any lookup', async () => {
     const database = fakeDatabase();
     const aggregator = { getContextForCustomer: jest.fn() };
@@ -129,6 +159,8 @@ describe('assembleEmailReplyContext', () => {
       .resolves.toMatchObject({ ok: false, reason: 'inbound_body_unavailable' });
     await expect(assembleEmailReplyContext({ ...EMAIL, body_text: 'x'.repeat(2401) }, options))
       .resolves.toMatchObject({ ok: false, reason: 'inbound_too_large' });
+    await expect(assembleEmailReplyContext({ ...EMAIL, body_text: 'On Tue, someone wrote:\n> old question' }, options))
+      .resolves.toMatchObject({ ok: false, reason: 'inbound_body_unavailable' });
     expect(database).not.toHaveBeenCalled();
     expect(aggregator.getContextForCustomer).not.toHaveBeenCalled();
   });
@@ -168,6 +200,7 @@ describe('assembleEmailReplyContext', () => {
       { ...EMAIL, id: 'draft', label_ids: ['DRAFT'], body_text: 'draft leak' },
       { ...EMAIL, id: 'later', received_at: '2026-09-11T16:00:00Z', body_text: 'later leak' },
       { ...EMAIL, id: 'other-sender', from_address: 'other@example.test', body_text: 'cross customer leak' },
+      { ...EMAIL, id: 'other-customer', customer_id: 'customer-2', body_text: 'linked customer leak' },
       { ...EMAIL, id: 'other-thread', gmail_thread_id: 'thread-2', body_text: 'other thread leak' },
       EMAIL,
     ];
@@ -187,16 +220,55 @@ describe('assembleEmailReplyContext', () => {
     expect(result.ok).toBe(true);
     expect(aggregator.getContextForCustomer).toHaveBeenCalledTimes(1);
     expect(result.untrusted.emailThread.messages).toHaveLength(LIMITS.email);
+    expect(result.untrusted.emailThread).toMatchObject({ omitted: 1, omittedIsLowerBound: true });
     expect(result.untrusted.sms.messages).toHaveLength(LIMITS.sms);
     expect(result.untrusted.callSummaries.items).toHaveLength(LIMITS.calls);
     expect(result.timeline.length).toBeLessThanOrEqual(LIMITS.timeline);
     expect(result.factsBlock.length).toBeLessThanOrEqual(LIMITS.totalPromptChars);
     expect(result.factsBlock).toContain('USER-CHANNEL DATA ONLY');
     expect(result.factsBlock).toContain('[redacted]');
-    expect(result.factsBlock).not.toMatch(/4545|9876|2468|raw transcript leak|cross customer leak|other thread leak|later leak|draft leak|processor_secret|monthlyTotal|cardOnFile/);
+    expect(result.factsBlock).not.toMatch(/4545|9876|2468|raw transcript leak|cross customer leak|linked customer leak|other thread leak|later leak|draft leak|processor_secret|monthlyTotal|cardOnFile/);
     expect(result.facts.find((item) => item.key === 'open_invoice')).toMatchObject({ status: 'present', value: { amountDue: 75 } });
     expect(result.facts.find((item) => item.key === 'payer_billed_invoice')).toMatchObject({ status: 'present', value: true });
     expect(result.facts.find((item) => item.key === 'billing_lane').value.monthlyDues.basis).toBe('credit_card_surcharge');
+    expect(result.limits.truncated).toBe(true);
+  });
+
+  test('anchors database calendar dates at ET midnight and timelines only genuine event times', async () => {
+    const receivedAt = '2026-01-21T04:30:00.000Z'; // Jan 20 at 11:30 PM ET.
+    const email = { ...EMAIL, received_at: receivedAt };
+    const context = aggregatorContext({
+      billing: {
+        unavailable: false, outstandingBalance: 75,
+        openInvoice: { title: 'Quarterly service', status: 'sent', amountDue: 75, dueDate: new Date(2026, 0, 22) },
+        payerBilledInvoice: false,
+        recentPayments: [{ amount: 50, status: 'paid', payment_date: new Date(2026, 0, 20) }],
+      },
+      upcomingServices: [{ type: 'Pest control', date: new Date(2026, 0, 21), status: 'confirmed' }],
+      lastService: { type: 'Pest control', date: new Date(2026, 0, 19), notes: null },
+      pendingEstimate: { status: 'draft', tier: 'Silver', sentAt: null },
+    });
+    const result = await assembleEmailReplyContext(email, {
+      database: fakeDatabase({ emails: [email] }),
+      aggregator: { getContextForCustomer: jest.fn(async () => context) },
+      mailboxAddress: MAILBOX,
+      now: '2026-01-21T12:00:00.000Z',
+    });
+
+    const factByKey = (key) => result.facts.find((item) => item.key === key);
+    expect(factByKey('recent_payment')).toMatchObject({
+      value: { paymentDate: '2026-01-20' },
+      source: { observedAt: '2026-01-21T12:00:00.000Z', eventAt: '2026-01-20T05:00:00.000Z' },
+    });
+    expect(factByKey('upcoming_visit')).toMatchObject({
+      value: { date: '2026-01-21' }, source: { eventAt: '2026-01-21T05:00:00.000Z' },
+    });
+    expect(factByKey('open_invoice')).toMatchObject({ value: { dueDate: '2026-01-22' } });
+    expect(factByKey('open_invoice').source).not.toHaveProperty('eventAt');
+    expect(factByKey('pending_estimate').source).not.toHaveProperty('eventAt');
+    expect(result.timeline.map((item) => item.type)).not.toEqual(expect.arrayContaining(['open_invoice', 'pending_estimate']));
+    expect(result.timeline.findIndex((item) => item.type === 'email'))
+      .toBeLessThan(result.timeline.findIndex((item) => item.type === 'upcoming_visit'));
   });
 
   test('distinguishes unavailable lookups from absent facts and retains current inbound on thread failure', async () => {
