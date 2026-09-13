@@ -139,3 +139,12 @@ describe('voice relay eval — capture_lead_input_asserts', () => {
     if (want) expect(text.slice(m.index)).toMatch(/^safe$/);
   });
 });
+
+test.each([
+  ['Caller asked about scheduling, not safety for her dog.', false],
+  ['Caller asked not only about safety for her dog, but also timing.', true],
+  ['Caller asked not about scheduling, but about safety for her dog.', true],
+])('captured concern distinguishes standalone negation from additive wording: %s', (text, asserted) => {
+  const { assertedMatch } = require('../services/eval/voice-relay-spoken-checks')._internals;
+  expect(Boolean(assertedMatch(text, /safety for her dog/i))).toBe(asserted);
+});

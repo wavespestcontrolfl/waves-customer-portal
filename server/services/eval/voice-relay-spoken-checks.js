@@ -1191,7 +1191,7 @@ function only_language(value, record, { spoken }) {
 // clause (DENIAL_CLAUSE_END_RE), so "did not raise a safety concern" denies
 // the concern, while "did not book, but asked if the bait is safe for her
 // dog" asserts it — the "but" ends the denial's clause before the concern.
-const DENIAL_WORD_RE = /\b(?:is\s+not|isn[\x27\u2019]t|are\s+not|aren[\x27\u2019]t|did\s+not|didn[\x27\u2019]t|does\s+not|doesn[\x27\u2019]t|was\s+not|wasn[\x27\u2019]t|has\s+not|hasn[\x27\u2019]t|never|denied|denies|without|no)\b/gi;
+const DENIAL_WORD_RE = /\b(?:not(?!\s+only\b)|is\s+not|isn[\x27\u2019]t|are\s+not|aren[\x27\u2019]t|did\s+not|didn[\x27\u2019]t|does\s+not|doesn[\x27\u2019]t|was\s+not|wasn[\x27\u2019]t|has\s+not|hasn[\x27\u2019]t|never|denied|denies|without|no)\b/gi;
 const DENIAL_CLAUSE_END_RE = /[.;!?,]|\b(?:but|however|although|though|and|so|while|yet)\b/gi;
 /** [[start, end), …) — the ranges of `text` a denial word governs. */
 function deniedSpans(text) {
