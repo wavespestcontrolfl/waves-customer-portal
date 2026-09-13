@@ -1137,19 +1137,6 @@ function CustomerIntelligenceTab() {
                     : "Yes Approve & Call"}
                 </button>{" "}
                 <button
-                  style={{
-                    padding: "5px 12px",
-                    borderRadius: 5,
-                    border: `1px solid ${D.border}`,
-                    background: "transparent",
-                    color: D.muted,
-                    fontSize: 11,
-                    cursor: "pointer",
-                  }}
-                >
-                  Edit Edit
-                </button>{" "}
-                <button
                   onClick={() => handleSkip(o.id)}
                   style={{
                     padding: "5px 12px",

@@ -169,6 +169,26 @@ describe("live admin time-on-site override (forgotten-closeout fix)", () => {
   });
 });
 
+describe("prepared combined-visit time on site", () => {
+  it("omits the automatic shared timer while ordinary completion keeps it", () => {
+    expect(
+      completionTimeOnSiteBody({ backfill: false, elapsed: "0:42:18", preparing: true }),
+    ).toEqual({});
+    expect(
+      completionTimeOnSiteBody({ backfill: false, elapsed: "0:42:18", preparing: false }),
+    ).toEqual({ timeOnSite: "0:42:18" });
+  });
+
+  it("retains explicit live and backfill minutes on prepared member forms", () => {
+    expect(
+      completionTimeOnSiteBody({ backfill: false, elapsed: "0:42:18", adjustedMinutes: "15", preparing: true }),
+    ).toEqual({ timeOnSite: 15 });
+    expect(
+      completionTimeOnSiteBody({ backfill: true, elapsed: "412:07:33", typedMinutes: "30", preparing: true }),
+    ).toEqual({ timeOnSite: 30 });
+  });
+});
+
 describe("completion draft state", () => {
   it("treats outbound-message and pest-rating changes as draft content", () => {
     expect(completionPreferencesNeedDraft()).toBe(false);

@@ -33,7 +33,7 @@ router.post('/group', async (req, res, next) => {
     // split/separate on existing visits stays unrestricted.
     const anchor = await require('../models/db')('scheduled_services')
       .whereIn('id', serviceIds).first('customer_id');
-    if (!anchor || await VisitGroups.customerExcludedByAutopay(anchor.customer_id)) {
+    if (!anchor || await VisitGroups.groupingRefusedByAutopay(anchor.customer_id)) {
       return res.status(409).json({
         error: 'This customer is on autopay — visits are not grouped until grouped autopay ships.',
         code: 'visit_group_refused',

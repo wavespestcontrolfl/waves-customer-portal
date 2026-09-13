@@ -514,7 +514,8 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
     // enrollment UPDATE's own NO KEY UPDATE lock — the serialization the
     // TOCTOU fix needs is intact.
     await t('customers').where({ id: stopCustomerId }).forNoKeyUpdate().first('id');
-    if (await customerExcludedByAutopay(stopCustomerId, t)) {
+    const behaviorVersion = combinedCloseoutBehaviorVersion();
+    if (await groupingRefusedByAutopay(stopCustomerId, t)) {
       throw new Error('rows not mutually groupable: autopay_enrolled');
     }
     await lockStop(t, baseKeyFor(peek[0]));
@@ -588,6 +589,9 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
       if (!target || String(target.status) !== 'open' || target.stop_base_key !== baseKey) {
         throw new Error('visit membership conflict: attached visit not open for joining');
       }
+      if (Number(target.behavior_version) !== behaviorVersion) {
+        throw new Error('visit membership conflict: closeout behavior differs');
+      }
       // Membership freeze applies to JOINS too (codex #3590 r4): once the
       // visit has a packet, child artifact, issued link, or payment
       // attempt, its member set is frozen — a late join would desync
@@ -621,6 +625,7 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
         .whereIn('status', OPEN_STATUSES)
         .orderBy('stop_seq', 'asc');
       for (const v of openVisits) {
+        if (Number(v.behavior_version) !== behaviorVersion) continue;
         if (rowTechs.length && v.technician_id && String(v.technician_id) !== rowTechs[0]) continue;
         const vAnchor = { ...v, window_start: null, window_end: null };
         if (!fresh.every((r) => canJoin(r, vAnchor).ok)) continue;
@@ -648,6 +653,7 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
           stop_seq: seq,
           technician_id: rowTechs[0] || null,
           group_family: first.group_family || null,
+          behavior_version: behaviorVersion,
           status: 'open',
           created_by: createdBy || 'admin:unknown',
         })
@@ -1065,9 +1071,10 @@ async function ensureLegacyCompletable(scheduledServiceId, database = db) {
   const row = await database('scheduled_services').where({ id: scheduledServiceId }).first('id', 'visit_id');
   if (!row) return { ok: false, reason: 'not_found' };
   if (!row.visit_id) return { ok: true };
-  const visit = await database('service_visits').where({ id: row.visit_id }).first('id', 'status');
+  const visit = await database('service_visits').where({ id: row.visit_id }).first('id', 'status', 'behavior_version');
   if (!visit) return { ok: false, reason: 'orphan', visitId: row.visit_id }; // fail closed
   if (String(visit.status) === 'dissolved') return { ok: true };
+  if (Number(visit.behavior_version) >= 2) return { ok: false, reason: 'visit_closeout_required', visitId: visit.id };
   if (['closing', 'closed'].includes(String(visit.status))) {
     return { ok: false, reason: 'visit_' + visit.status, visitId: visit.id };
   }
@@ -1079,7 +1086,7 @@ async function ensureLegacyCompletable(scheduledServiceId, database = db) {
 async function dissolveForLegacyCompletion(visitId, { expectChildId = null, trx = null } = {}) {
   const body = async (t) => {
       const visit = await t('service_visits').where({ id: visitId }).first();
-      if (!visit || String(visit.status) !== 'open') return false;
+      if (!visit || String(visit.status) !== 'open' || Number(visit.behavior_version) >= 2) return false;
       await lockStop(t, visit.stop_base_key);
       // The completed child must STILL belong to this visit (codex r10):
       // a split/move landing between the recheck and this cleanup means
@@ -1139,6 +1146,19 @@ async function dissolveForLegacyCompletion(visitId, { expectChildId = null, trx 
  * the enrollment-time refuse/dissolve seam belongs to that lane
  * (spec §6/§7, GATE_VISIT_GROUP_AUTOPAY) — not to a money flow here.
  */
+// Version 2 (combined closeout live with its encryption key) bills a grouped
+// visit through one packet, so Auto Pay customers may be grouped; version 1
+// keeps the Phase-1 exclusion. One decision for automatic stamping and the
+// staff grouping route alike.
+function combinedCloseoutBehaviorVersion() {
+  return require('../config/feature-gates').isEnabled('visitCloseout') && process.env.DATA_HYGIENE_VAULT_KEY ? 2 : 1;
+}
+
+async function groupingRefusedByAutopay(customerId, database = db) {
+  if (combinedCloseoutBehaviorVersion() === 2) return false;
+  return customerExcludedByAutopay(customerId, database);
+}
+
 async function customerExcludedByAutopay(customerId, database = db) {
   try {
     const customer = await database('customers').where({ id: customerId })
@@ -1234,7 +1254,8 @@ async function groupRowOn(database, rowId, createdBy) {
   // customer that will be refused anyway. Unit moves of existing visits
   // never pass through createOrJoinVisit, so later enrollment cannot
   // break them.
-  if (await customerExcludedByAutopay(row.customer_id, database)) return null;
+  const closeoutEnabled = require('../config/feature-gates').isEnabled('visitCloseout') && process.env.DATA_HYGIENE_VAULT_KEY;
+  if (!closeoutEnabled && await customerExcludedByAutopay(row.customer_id, database)) return null;
   const partnersQ = database('scheduled_services as ss')
     .leftJoin('services as svc', 'ss.service_id', 'svc.id')
     .leftJoin('service_visits as sv', 'sv.id', 'ss.visit_id')
@@ -1245,7 +1266,8 @@ async function groupRowOn(database, rowId, createdBy) {
     .where('svc.groupable', true)
     .where('svc.group_family', row.group_family)
     .whereNotNull('ss.window_start')
-    .where((q) => q.whereNull('ss.visit_id').orWhere('sv.status', 'open'))
+    .where((q) => q.whereNull('ss.visit_id').orWhere((attached) => attached
+      .where('sv.status', 'open').where('sv.behavior_version', closeoutEnabled ? 2 : 1)))
     .select('ss.id', 'ss.visit_id');
   if (row.property_id) partnersQ.where('ss.property_id', row.property_id);
   else partnersQ.whereNull('ss.property_id');
@@ -3282,6 +3304,8 @@ module.exports = {
   createOrJoinVisit,
   maybeGroupRow,
   customerExcludedByAutopay,
+  combinedCloseoutBehaviorVersion,
+  groupingRefusedByAutopay,
   splitChild,
   handleChildTerminal,
   handleChildStopChanged,

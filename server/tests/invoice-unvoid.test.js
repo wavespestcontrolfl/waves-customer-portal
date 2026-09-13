@@ -136,7 +136,13 @@ describe('InvoiceService.unvoidInvoice', () => {
         stripe_payment_intent_id: null,
         scheduled_send_at: null,
         scheduled_send_attempts: 0,
-        scheduled_send_error: null,
+        // A `payer_billed:` withdrawal stamp SURVIVES the restore (Codex
+        // #4311 r29 P0): it is the only record that this invoice's Bill-To
+        // moved to a third-party payer, and a restored draft with the stamp
+        // cleared would be collectible from the homeowner again.
+        scheduled_send_error: expect.objectContaining({
+          __raw: expect.stringContaining("payer_billed:%"),
+        }),
         scheduled_request_review: false,
         scheduled_review_delay_minutes: null,
       }),

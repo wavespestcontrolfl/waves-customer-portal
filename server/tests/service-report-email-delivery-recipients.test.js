@@ -196,6 +196,62 @@ describe('service report email recipient delivery', () => {
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 
+  test('checks rendered copy, takes the re-entry seal, rechecks the send seal, then dispatches', async () => {
+    const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
+    const order = [];
+    const originalTransaction = db.transaction;
+    db.transaction = async (work) => {
+      const result = await originalTransaction(work);
+      order.push('reentry-sealed');
+      return result;
+    };
+    const verifyBeforeSend = jest.fn(async () => {
+      order.push('copy-verified');
+      return true;
+    });
+    const verifySendSealHeld = jest.fn(async () => {
+      order.push('send-seal-held');
+      return true;
+    });
+    EmailTemplateLibrary.sendTemplate.mockImplementation(async () => {
+      order.push('provider-dispatch');
+      return { sent: true, message: { provider_message_id: 'fixture-message' } };
+    });
+
+    try {
+      const result = await sendServiceReportV1Email('record-1', {
+        token: 'token-1', verifyBeforeSend, verifySendSealHeld,
+      });
+      expect(result).toMatchObject({ ok: true, recipientCount: 2 });
+    } finally {
+      db.transaction = originalTransaction;
+    }
+
+    expect(order.slice(0, 4)).toEqual([
+      'copy-verified', 'reentry-sealed', 'send-seal-held', 'provider-dispatch',
+    ]);
+    expect(verifyBeforeSend).toHaveBeenCalledTimes(1);
+    expect(verifySendSealHeld).toHaveBeenCalledTimes(1);
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(2);
+  });
+
+  test('a lost send seal after the re-entry transaction defers before provider dispatch', async () => {
+    const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
+    const verifySendSealHeld = jest.fn().mockResolvedValue(false);
+    EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true, message: { provider_message_id: 'fixture-message' } });
+
+    const result = await sendServiceReportV1Email('record-1', {
+      token: 'token-1',
+      verifyBeforeSend: jest.fn().mockResolvedValue(true),
+      verifySendSealHeld,
+    });
+
+    expect(result).toMatchObject({ ok: false, retryable: true });
+    expect(verifySendSealHeld).toHaveBeenCalledTimes(1);
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
   test('keeps queue retryable when one service-report recipient fails', async () => {
     const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
 

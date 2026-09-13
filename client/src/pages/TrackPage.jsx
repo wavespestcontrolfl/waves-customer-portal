@@ -5,7 +5,7 @@ import { Fragment, useState, useEffect, useRef, useCallback, useMemo } from 'rea
 import { useParams } from 'react-router-dom';
 import { io } from 'socket.io-client';
 import { GoogleMap, useJsApiLoader, Marker } from '@react-google-maps/api';
-import { WavesShell, CustomerColumn } from '../components/brand';
+import { WavesShell, CustomerColumn, PublicStateCard } from '../components/brand';
 import { useGlassSurface } from '../glass/glass-engine';
 import {
   WAVES_SUPPORT_PHONE_DISPLAY,
@@ -782,49 +782,26 @@ function SkeletonCard() {
 }
 
 function NotFoundCard() {
+  // contact="none": this page's affordance has always been the phone number
+  // inside the sentence, not a button. Unifying the three no-CTA 404s
+  // (estimate, pay, track) onto the button pair means rewriting that sentence,
+  // which is a copy decision for the owner — deferred, see DECISIONS.
   return (
-    <Card>
-      <div style={{ fontSize: 32, textAlign: 'center' }}></div>
-      <div style={{ fontSize: 18, fontWeight: 600, textAlign: 'center', marginTop: 8 }}>
-        Tracking link unavailable
-      </div>
-      <div style={{ fontSize: 16, color: TRACK_SURFACE.body, marginTop: 12, textAlign: 'center', lineHeight: 1.5 }}>
-        This tracking link has expired or isn't valid. Call us at{' '}
-        <a href={WAVES_SUPPORT_PHONE_TEL} style={{ color: TRACK_SURFACE.text }}>{WAVES_SUPPORT_PHONE_DISPLAY}</a>{' '}
-        if you need help with your service.
-      </div>
-    </Card>
+    <PublicStateCard state="not-found" title="Tracking link unavailable" contact="none">
+      This tracking link has expired or isn&rsquo;t valid. Call us at{' '}
+      <a href={WAVES_SUPPORT_PHONE_TEL} style={{ color: TRACK_SURFACE.text }}>{WAVES_SUPPORT_PHONE_DISPLAY}</a>{' '}
+      if you need help with your service.
+    </PublicStateCard>
   );
 }
 
-// A valid token that hit a server hiccup (500/502/429) is NOT an expired
-// link — telling the customer their link is invalid during an outage sends
-// them to the phone line for nothing. Offer a retry instead.
 function TransientErrorCard({ onRetry }) {
   return (
-    <Card>
-      <div style={{ fontSize: 18, fontWeight: 600, textAlign: 'center', marginTop: 8 }}>
-        We couldn&rsquo;t load your tracker
-      </div>
-      <div style={{ fontSize: 16, color: TRACK_SURFACE.body, marginTop: 12, textAlign: 'center', lineHeight: 1.5 }}>
-        Something went wrong on our end — your tracking link is still good.
-        Try again in a moment, or call us at{' '}
-        <a href={WAVES_SUPPORT_PHONE_TEL} style={{ color: TRACK_SURFACE.text }}>{WAVES_SUPPORT_PHONE_DISPLAY}</a>.
-      </div>
-      <div style={{ textAlign: 'center', marginTop: 16 }}>
-        <button
-          type="button"
-          onClick={onRetry}
-          style={{
-            minHeight: 44, padding: '0 24px', borderRadius: 10, border: 'none',
-            background: TRACK_SURFACE.text, color: '#fff',
-            fontSize: 16, fontWeight: 700, cursor: 'pointer',
-          }}
-        >
-          Try again
-        </button>
-      </div>
-    </Card>
+    <PublicStateCard state="error" title={<>We couldn&rsquo;t load your tracker</>} onRetry={onRetry}>
+      Something went wrong on our end — your tracking link is still good.
+      Try again in a moment, or call us at{' '}
+      <a href={WAVES_SUPPORT_PHONE_TEL} style={{ color: TRACK_SURFACE.text }}>{WAVES_SUPPORT_PHONE_DISPLAY}</a>.
+    </PublicStateCard>
   );
 }
 

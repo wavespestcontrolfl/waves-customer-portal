@@ -153,12 +153,17 @@ describe('collective disclosure contract (GATE_ADMIN_COLLECTIVE_MOVE)', () => {
     SmartRebooker.reschedule.mockResolvedValueOnce({ success: true, visitMove: { visitId: 'v1', moved: ['a', 'b'], failed: [], unchanged: [], visitStart: '10:00' } });
     const { status } = await reschedule({ newDate: TARGET, newWindow: { start: '11:00', end: '12:00' }, scope: 'this_only', notifyCustomer: true });
     expect(status).toBe(200);
-    expect(sendRescheduleNoticeForVisit).toHaveBeenCalledWith(expect.any(String), TARGET, '10:00');
+    // ...and recorded as STOP-WIDE copy, so the no-show detector treats it as
+    // superseding every member's own promise rather than only the tapped
+    // service's (codex P1, PR #4403 round 26).
+    expect(sendRescheduleNoticeForVisit).toHaveBeenCalledWith(expect.any(String), TARGET, '10:00',
+      expect.objectContaining({ stopWideFor: expect.any(String) }));
     // ungrouped: the requested start
     jest.clearAllMocks();
     mockVisitRow = { ...recurringRow(), is_recurring: false, visit_id: null };
     await reschedule({ newDate: TARGET, newWindow: { start: '11:00', end: '12:00' }, scope: 'this_only', notifyCustomer: true });
-    expect(sendRescheduleNoticeForVisit).toHaveBeenCalledWith(expect.any(String), TARGET, '11:00');
+    expect(sendRescheduleNoticeForVisit).toHaveBeenCalledWith(expect.any(String), TARGET, '11:00',
+      expect.objectContaining({ stopWideFor: null }));
   });
 
   test('a grouped move that only PARTLY succeeded texts nobody and returns a hard needsAttention (owner ruling 2026-08-30)', async () => {

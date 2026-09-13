@@ -144,10 +144,12 @@ const NotificationDispatcher = {
    *
    * @param {string} customerId
    * @param {string} notificationType — key from TYPE_MAP
-   * @param {object} options — { smsMessage, emailSubject, emailBody }
+   * @param {object} options — { smsMessage, emailSubject, emailBody, preSendCheck }
    * @returns {{ sent: boolean, channel: string|null, results: object }}
    */
-  async notify(customerId, notificationType, { smsMessage, emailSubject, emailBody } = {}) {
+  async notify(customerId, notificationType, {
+    smsMessage, emailSubject, emailBody, preSendCheck,
+  } = {}) {
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) {
       logger.warn(`[notify] Customer ${customerId} not found`);
@@ -211,6 +213,7 @@ const NotificationDispatcher = {
           customerId: customer.id,
           identityTrustLevel: 'phone_matches_customer',
           entryPoint: 'notification_dispatcher',
+          preSendCheck,
           consentBasis: marketingPurpose ? {
             status: 'opted_in',
             source: `notification_prefs.${marketingConsentColumn}`,
@@ -225,11 +228,14 @@ const NotificationDispatcher = {
           sent = true;
         } else if (smsResult.code === 'QUIET_HOURS_HOLD'
           && smsResult.deferred
-          && smsResult.nextAllowedAt) {
-          // Send-window hold: this dispatcher's callers stamp "notified"
+          && smsResult.nextAllowedAt
+          && typeof preSendCheck !== 'function') {
+          // Unguarded send-window hold: this dispatcher's callers stamp "notified"
           // off `sent` and never retry, so a held notification must be
           // durably queued for the window open — the queued row owns
-          // delivery, so it counts as sent for the caller's stamp.
+          // delivery, so it counts as sent for the caller's stamp. A guarded
+          // send retains its recovery owner: its closure cannot be serialized
+          // with the frozen body, so that owner must prepare fresh copy later.
           try {
             const TWILIO_NUMBERS = require('../config/twilio-numbers');
             await db('sms_log').insert({

@@ -88,6 +88,7 @@ import {
   isETToday as isETTodayStr,
 } from "../../lib/timezone";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
+import VisitCloseoutSheet from '../../components/admin/VisitCloseoutSheet';
 import {
   mergePostPaymentService,
   shouldReopenCompletionAfterPayment,
@@ -125,6 +126,7 @@ export function completedVisitOwesCompletion(service) {
   // typed visit with a leftover linked project and a failed profile lookup
   // would otherwise lose its resume — Codex #3799 r5).
   if (completionResumeMarked(service)) return true;
+  if (service?.visitCloseoutPacket) return true;
   // A completed project-backed visit is closed by definition — handleComplete
   // refuses it (projectCompletionIsClosed) and CompletionPanel never owns
   // it, so a status-only reopen would be a dead end (Codex #3799 r1).
@@ -427,6 +429,7 @@ export default function DispatchPageV2({
   const [error, setError] = useState(null);
   const [products, setProducts] = useState([]);
   const [completingService, setCompletingService] = useState(null);
+  const [closingVisitId, setClosingVisitId] = useState(null);
   const [projectService, setProjectService] = useState(null);
   // In-place project editor (owner ask 2026-07-13): a project-backed visit's
   // report opens right here in the schedule — the same interaction as the
@@ -841,6 +844,10 @@ export default function DispatchPageV2({
       setCompletingService(service);
       return;
     }
+    if (service.visitId && (data?.visitCloseout === true || service.visitCloseoutEnabled === true || service.visitCloseoutPacket)) {
+      setClosingVisitId(service.visitId);
+      return;
+    }
     if (isProjectBackedCompletion(service)) {
       if (projectCompletionIsClosed(service)) return;
       if (service?.linkedProject?.id) {
@@ -853,7 +860,7 @@ export default function DispatchPageV2({
       return;
     }
     setCompletingService(service);
-  }, []);
+  }, [data?.visitCloseout]);
 
   // Second half of the ?completeService deep-link: once the day's schedule
   // is loaded, open the completion for the pending id through
@@ -1329,7 +1336,7 @@ export default function DispatchPageV2({
       )}
 
       {/* Mobile-only ViewMode selector — Day + Week only on phones. */}
-      <div className="md:hidden mb-3 grid grid-cols-2 gap-1.5">
+      {activeTab === "board" && (<div className="md:hidden mb-3 grid grid-cols-2 gap-1.5">
         {[
           { id: "day", label: "Day" },
           { id: "week", label: "Week" },
@@ -1350,7 +1357,7 @@ export default function DispatchPageV2({
             {m.label}
           </button>
         ))}
-      </div>
+      </div>)}
       {showNewAppt && (
         <CreateAppointmentModal
           defaultDate={newApptDefaults?.date || date}
@@ -1410,7 +1417,7 @@ export default function DispatchPageV2({
           onEdit={(svc) => {
             // A row wearing the "Closeout owed" chip resumes through the
             // completion panel, same as the day grid and the mobile list.
-            if (completionResumeMarked(svc)) {
+            if (completionResumeMarked(svc) || (svc.visitId && svc.visitCloseoutEnabled === true) || svc.visitCloseoutPacket) {
               handleComplete(svc);
             } else {
               setEditingService(svc);
@@ -1441,7 +1448,7 @@ export default function DispatchPageV2({
           onEdit={(svc) => {
             // A row wearing the "Closeout owed" chip resumes through the
             // completion panel, same as the day grid and the mobile list.
-            if (completionResumeMarked(svc)) {
+            if (completionResumeMarked(svc) || (svc.visitId && svc.visitCloseoutEnabled === true) || svc.visitCloseoutPacket) {
               handleComplete(svc);
             } else {
               setEditingService(svc);
@@ -1718,7 +1725,7 @@ export default function DispatchPageV2({
                 // A block wearing the "Closeout owed" chip must open the
                 // completion panel (resume), not the appointment editor —
                 // same routing the mobile list uses.
-                if (completionResumeMarked(svc)) {
+                if (completionResumeMarked(svc) || (svc.visitId && svc.visitCloseoutEnabled === true) || svc.visitCloseoutPacket) {
                   handleComplete(svc);
                 } else {
                   setEditingService(svc);
@@ -1774,6 +1781,14 @@ export default function DispatchPageV2({
       )}
 
       {/* Modals — V1 components, unchanged */}
+      {closingVisitId && <VisitCloseoutSheet
+        key={closingVisitId} visitId={closingVisitId} products={products}
+        onClose={() => setClosingVisitId(null)}
+        onSaved={() => {
+          setScheduleRefreshKey((value) => value + 1);
+          void fetchSchedule(date, { silent: true });
+        }}
+      />}
       {completingService && (
         <CompletionPanel
           service={completingService}

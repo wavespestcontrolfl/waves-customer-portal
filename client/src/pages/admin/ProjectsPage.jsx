@@ -1296,6 +1296,7 @@ export default function ProjectsPage() {
         action={{
           label: "New Reports",
           icon: Plus,
+          className: "!text-14",
           onClick: () => setCreateMode("general"),
         }}
       />
@@ -1346,9 +1347,9 @@ export default function ProjectsPage() {
         >
           {showRegularProjects &&
             (loading ? (
-              <div className="p-6 text-13 text-zinc-500">Loading…</div>
+              <div className="p-6 text-14 text-zinc-500">Loading…</div>
             ) : regularProjects.length === 0 ? (
-              <div className="p-6 bg-white rounded-sm border border-dashed border-zinc-300 text-13 text-zinc-500 text-center">
+              <div className="p-6 bg-white rounded-sm border border-dashed border-zinc-300 text-14 text-zinc-500 text-center">
                 No reports match these filters.
               </div>
             ) : (
@@ -1429,15 +1430,15 @@ function WdoReportsSection({ projects, selectedId, onSelect }) {
         {" "}
         <div>
           {" "}
-          <div className="text-11 font-medium text-zinc-500 uppercase tracking-label">
+          <div className="text-14 font-medium text-zinc-500 uppercase tracking-label">
             WDO Inspection Reports
           </div>{" "}
-          <div className="text-13 text-ink-primary mt-1">
+          <div className="text-14 text-ink-primary mt-1">
             Real-estate reports, realtor sharing, and closing-sensitive
             documentation.
           </div>
           {urgentCount > 0 && (
-            <div className="text-11 text-alert-fg font-medium mt-1">
+            <div className="text-14 text-alert-fg font-medium mt-1">
               {urgentCount} draft{urgentCount === 1 ? "" : "s"} older than 24h
             </div>
           )}
@@ -1447,7 +1448,7 @@ function WdoReportsSection({ projects, selectedId, onSelect }) {
             portal, never ad hoc. */}
       </div>
       {projects.length === 0 ? (
-        <div className="p-4 bg-white rounded-sm border border-dashed border-zinc-300 text-12 text-zinc-500 text-center">
+        <div className="p-4 bg-white rounded-sm border border-dashed border-zinc-300 text-14 text-zinc-500 text-center">
           No WDO reports match these filters.
         </div>
       ) : (
@@ -1473,7 +1474,7 @@ function FilterSelect({ value, onChange, children }) {
       size="sm"
       value={value}
       onChange={onChange}
-      className={`sm:!w-auto cursor-pointer ${value ? "text-ink-primary" : "text-zinc-500"}`}
+      className={`sm:!w-auto cursor-pointer md:!text-14 ${value ? "text-ink-primary" : "text-zinc-500"}`}
     >
       {children}
     </Select>
@@ -1482,6 +1483,7 @@ function FilterSelect({ value, onChange, children }) {
 
 function ProjectRow({ project, active, onSelect, compactType }) {
   const status = STATUS_STYLES[project.status] || STATUS_STYLES.draft;
+  const isComplete = project.status === "sent" || project.status === "closed";
   return (
     <button
       type="button"
@@ -1491,7 +1493,7 @@ function ProjectRow({ project, active, onSelect, compactType }) {
       }`}
     >
       {" "}
-      <div className="flex-shrink-0 w-12 h-12 rounded-sm bg-zinc-100 flex items-center justify-center font-mono text-11 font-medium text-ink-primary">
+      <div className="flex-shrink-0 w-12 h-12 rounded-sm bg-zinc-100 flex items-center justify-center font-mono text-14 font-medium text-ink-primary">
         {compactType || TYPE_LABELS[project.project_type] || "Proj"}
       </div>{" "}
       <div className="flex-1 min-w-0">
@@ -1501,16 +1503,26 @@ function ProjectRow({ project, active, onSelect, compactType }) {
           <div className="text-14 font-medium text-ink-primary whitespace-nowrap overflow-hidden text-ellipsis">
             {project.customer_name || "Customer"}
           </div>{" "}
-          <Badge tone={status.tone} className="whitespace-nowrap">
+          <span
+            className={`inline-flex items-center gap-1.5 whitespace-nowrap text-14 font-medium uppercase tracking-label ${
+              isComplete ? "text-zinc-500" : "text-zinc-700"
+            }`}
+          >
+            <span
+              aria-hidden="true"
+              className={`project-status-dot h-[5px] w-[5px] rounded-full box-border ${
+                isComplete ? "border-[1px] border-solid border-zinc-500" : "border-[1px] border-solid border-zinc-700"
+              }`}
+            />
             {status.label}
-          </Badge>{" "}
+          </span>{" "}
         </div>{" "}
-        <div className="text-12 text-zinc-500 mt-0.5">
+        <div className="text-14 text-zinc-500 mt-0.5">
           {project.title ||
             TYPE_LABELS[project.project_type] ||
             project.project_type}
         </div>{" "}
-        <div className="flex gap-2.5 mt-1.5 text-11 text-zinc-500">
+        <div className="flex gap-2.5 mt-1.5 text-14 text-zinc-500">
           {" "}
           <span>
             {fmtDate(project.project_date || project.created_at)}

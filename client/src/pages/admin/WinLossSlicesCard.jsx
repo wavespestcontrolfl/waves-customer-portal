@@ -1,5 +1,14 @@
 import React, { useEffect, useState } from "react";
-import { Card, cn } from "../../components/ui";
+import {
+  Button,
+  Card,
+  Table,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TR,
+} from "../../components/ui";
 import { adminFetch } from "../../utils/admin-fetch";
 
 // Verify-flag win/loss card (estimator accuracy loop). Answers: do
@@ -29,17 +38,21 @@ function n(cell) {
 
 function RateTable({ rows }) {
   return (
-    <table className="w-full text-13">
-      <tbody>
+    <Table>
+      <TBody>
         {rows.map((row) => (
-          <tr key={row.key} className="border-b border-hairline last:border-0">
-            <td className="py-1 text-zinc-700">{row.label}</td>
-            <td className="py-1 text-right font-medium text-zinc-900 tabular-nums">{pct(row)}</td>
-            <td className="py-1 text-right text-zinc-500 w-16 tabular-nums">n={row.total}</td>
-          </tr>
+          <TR key={row.key} className="border-b border-hairline last:border-0">
+            <TD className="py-1 text-zinc-700">{row.label}</TD>
+            <TD className="py-1 text-right font-medium text-zinc-900 tabular-nums">
+              {pct(row)}
+            </TD>
+            <TD className="py-1 text-right text-zinc-500 w-16 tabular-nums">
+              n={row.total}
+            </TD>
+          </TR>
         ))}
-      </tbody>
-    </table>
+      </TBody>
+    </Table>
   );
 }
 
@@ -77,7 +90,10 @@ export default function WinLossSlicesCard() {
   // "Still deciding" (soft-exit signal): a side channel next to the
   // dispositions so the office can tell went-quiet-while-deciding from
   // never-engaged (GH codex r3 P2). Absent on older payloads.
-  const stillDeciding = data?.stillDeciding && data.stillDeciding.signaled > 0 ? data.stillDeciding : null;
+  const stillDeciding =
+    data?.stillDeciding && data.stillDeciding.signaled > 0
+      ? data.stillDeciding
+      : null;
   const serviceLines = (data?.byServiceLine || []).slice(0, 8);
   const leadSources = (data?.byLeadSource || []).slice(0, 8);
   const tiers = data?.byWaveguardTier || [];
@@ -89,11 +105,12 @@ export default function WinLossSlicesCard() {
   // 30-60d back) while the recent window is empty — gate on the buckets,
   // not the recent-send total (GH codex P2).
   const hasCohorts = (cohorts?.cohorts || []).some((c) => c.sent > 0);
-  const hasAuditData = dispositions.length > 0
-    || !!stillDeciding
-    || serviceLines.length > 0
-    || leadSources.length > 0
-    || hasCohorts;
+  const hasAuditData =
+    dispositions.length > 0 ||
+    !!stillDeciding ||
+    serviceLines.length > 0 ||
+    leadSources.length > 0 ||
+    hasCohorts;
   // Headline counts REAL losses only — dead leads / converted-elsewhere
   // rows stay listed below with a null percentage (mirrors the server).
   const lossTotal = dispositions
@@ -107,38 +124,34 @@ export default function WinLossSlicesCard() {
           <div className="text-14 font-medium text-zinc-900">
             Verify-flag win/loss
           </div>
-          <div className="text-13 text-zinc-500">
+          <div className="text-ui-body text-zinc-500">
             Resolved estimates only — does unverified property data cost
             conversions?
           </div>
         </div>
         <div className="flex gap-1">
           {DAY_OPTIONS.map((option) => (
-            <button
+            <Button
               key={option}
               type="button"
               onClick={() => setDays(option)}
-              className={cn(
-                "text-13 px-2 py-1 rounded-xs border-hairline",
-                option === days
-                  ? "bg-zinc-900 text-white"
-                  : "bg-white text-zinc-600 hover:bg-zinc-50",
-              )}
+              variant={option === days ? "primary" : "secondary"}
+              size="sm"
             >
               {option}d
-            </button>
+            </Button>
           ))}
         </div>
       </div>
 
-      {loading && <div className="text-13 text-zinc-500">Loading…</div>}
+      {loading && <div className="text-ui-body text-zinc-500">Loading…</div>}
       {error && (
-        <div className="text-13 text-zinc-500">
+        <div className="text-ui-body text-zinc-500">
           Couldn&apos;t load win/loss slices ({error.message}).
         </div>
       )}
       {!loading && !error && data && data.resolved === 0 && !hasAuditData && (
-        <div className="text-13 text-zinc-500">
+        <div className="text-ui-body text-zinc-500">
           No resolved estimates in the last {days} days.
         </div>
       )}
@@ -146,159 +159,188 @@ export default function WinLossSlicesCard() {
       {!loading && !error && data && (data.resolved > 0 || hasAuditData) && (
         <div className="grid gap-4 md:grid-cols-2">
           {data.resolved > 0 && (
-          <div>
-            <div className="text-13 text-zinc-500 mb-1">
-              Win rate by lookup state ({data.resolved} resolved,{" "}
-              {data.winRatePct ?? 0}% overall)
-            </div>
-            <table className="w-full text-13">
-              <tbody>
-                <tr className="border-b border-hairline">
-                  <td className="py-1 text-zinc-700">Clean lookup</td>
-                  <td className="py-1 text-right font-medium text-zinc-900">
-                    {pct(data.byFlagPresence?.clean)}
-                  </td>
-                  <td className="py-1 text-right text-zinc-500 w-16">
-                    n={n(data.byFlagPresence?.clean)}
-                  </td>
-                </tr>
-                <tr className="border-b border-hairline">
-                  <td className="py-1 text-zinc-700">Verify-flagged</td>
-                  <td className="py-1 text-right font-medium text-zinc-900">
-                    {pct(data.byFlagPresence?.flagged)}
-                  </td>
-                  <td className="py-1 text-right text-zinc-500">
-                    n={n(data.byFlagPresence?.flagged)}
-                  </td>
-                </tr>
-                <tr>
-                  <td className="py-1 text-zinc-700">No lookup profile</td>
-                  <td className="py-1 text-right font-medium text-zinc-900">
-                    {pct(data.byFlagPresence?.noProfile)}
-                  </td>
-                  <td className="py-1 text-right text-zinc-500">
-                    n={n(data.byFlagPresence?.noProfile)}
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+            <div>
+              <div className="text-ui-body text-zinc-500 mb-1">
+                Win rate by lookup state ({data.resolved} resolved,{" "}
+                {data.winRatePct ?? 0}% overall)
+              </div>
+              <Table>
+                <TBody>
+                  <TR className="border-b border-hairline">
+                    <TD className="py-1 text-zinc-700">Clean lookup</TD>
+                    <TD className="py-1 text-right font-medium text-zinc-900">
+                      {pct(data.byFlagPresence?.clean)}
+                    </TD>
+                    <TD className="py-1 text-right text-zinc-500 w-16">
+                      n={n(data.byFlagPresence?.clean)}
+                    </TD>
+                  </TR>
+                  <TR className="border-b border-hairline">
+                    <TD className="py-1 text-zinc-700">Verify-flagged</TD>
+                    <TD className="py-1 text-right font-medium text-zinc-900">
+                      {pct(data.byFlagPresence?.flagged)}
+                    </TD>
+                    <TD className="py-1 text-right text-zinc-500">
+                      n={n(data.byFlagPresence?.flagged)}
+                    </TD>
+                  </TR>
+                  <TR>
+                    <TD className="py-1 text-zinc-700">No lookup profile</TD>
+                    <TD className="py-1 text-right font-medium text-zinc-900">
+                      {pct(data.byFlagPresence?.noProfile)}
+                    </TD>
+                    <TD className="py-1 text-right text-zinc-500">
+                      n={n(data.byFlagPresence?.noProfile)}
+                    </TD>
+                  </TR>
+                </TBody>
+              </Table>
 
-            {topFields.length > 0 && (
-              <>
-                <div className="text-13 text-zinc-500 mt-3 mb-1">
-                  Most common verify flags
-                </div>
-                <table className="w-full text-13">
-                  <tbody>
-                    {topFields.map((row) => (
-                      <tr key={row.field} className="border-b border-hairline last:border-0">
-                        <td className="py-1 text-zinc-700">{row.field}</td>
-                        <td className="py-1 text-right font-medium text-zinc-900">
-                          {pct(row)}
-                        </td>
-                        <td className="py-1 text-right text-zinc-500 w-16">
-                          n={row.total}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </>
-            )}
-          </div>
+              {topFields.length > 0 && (
+                <>
+                  <div className="text-ui-body text-zinc-500 mt-3 mb-1">
+                    Most common verify flags
+                  </div>
+                  <Table>
+                    <TBody>
+                      {topFields.map((row) => (
+                        <TR
+                          key={row.field}
+                          className="border-b border-hairline last:border-0"
+                        >
+                          <TD className="py-1 text-zinc-700">{row.field}</TD>
+                          <TD className="py-1 text-right font-medium text-zinc-900">
+                            {pct(row)}
+                          </TD>
+                          <TD className="py-1 text-right text-zinc-500 w-16">
+                            n={row.total}
+                          </TD>
+                        </TR>
+                      ))}
+                    </TBody>
+                  </Table>
+                </>
+              )}
+            </div>
           )}
 
           {data.resolved > 0 && (
-          <div>
-            <div className="text-13 text-zinc-500 mb-1">
-              Recurring price band × lookup state (win rate)
+            <div>
+              <div className="text-ui-body text-zinc-500 mb-1">
+                Recurring price band × lookup state (win rate)
+              </div>
+              <Table>
+                <THead>
+                  <TR className="text-zinc-500">
+                    <TH className="text-left font-normal py-1">Band</TH>
+                    <TH className="text-right font-normal py-1">Clean</TH>
+                    <TH className="text-right font-normal py-1">Flagged</TH>
+                  </TR>
+                </THead>
+                <TBody>
+                  {bands.map((band) => (
+                    <TR
+                      key={band.key}
+                      className="border-b border-hairline last:border-0"
+                    >
+                      <TD className="py-1 text-zinc-700">{band.label}</TD>
+                      <TD className="py-1 text-right text-zinc-900">
+                        {pct(band.clean)}
+                        <span className="text-zinc-500">
+                          {" "}
+                          ({n(band.clean)})
+                        </span>
+                      </TD>
+                      <TD className="py-1 text-right text-zinc-900">
+                        {pct(band.flagged)}
+                        <span className="text-zinc-500">
+                          {" "}
+                          ({n(band.flagged)})
+                        </span>
+                      </TD>
+                    </TR>
+                  ))}
+                </TBody>
+              </Table>
+              <div className="text-ui-body text-zinc-500 mt-2">
+                Bands are display buckets, not pricing config.
+              </div>
             </div>
-            <table className="w-full text-13">
-              <thead>
-                <tr className="text-zinc-500">
-                  <th className="text-left font-normal py-1">Band</th>
-                  <th className="text-right font-normal py-1">Clean</th>
-                  <th className="text-right font-normal py-1">Flagged</th>
-                </tr>
-              </thead>
-              <tbody>
-                {bands.map((band) => (
-                  <tr key={band.key} className="border-b border-hairline last:border-0">
-                    <td className="py-1 text-zinc-700">{band.label}</td>
-                    <td className="py-1 text-right text-zinc-900">
-                      {pct(band.clean)}
-                      <span className="text-zinc-500"> ({n(band.clean)})</span>
-                    </td>
-                    <td className="py-1 text-right text-zinc-900">
-                      {pct(band.flagged)}
-                      <span className="text-zinc-500"> ({n(band.flagged)})</span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            <div className="text-13 text-zinc-500 mt-2">
-              Bands are display buckets, not pricing config.
-            </div>
-          </div>
           )}
 
           {dispositions.length > 0 && (
             <div>
-              <div className="text-13 text-zinc-500 mb-1">
+              <div className="text-ui-body text-zinc-500 mb-1">
                 Why we lose ({lossTotal} losses
                 {data.excludedFromRates > 0
                   ? `, ${data.excludedFromRates} never winnable and kept out of rates`
                   : ""}
                 )
               </div>
-              <table className="w-full text-13">
-                <tbody>
+              <Table>
+                <TBody>
                   {dispositions.map((d) => (
-                    <tr key={d.code} className="border-b border-hairline last:border-0">
-                      <td className="py-1 text-zinc-700">{d.label}</td>
-                      <td className="py-1 text-right font-medium text-zinc-900 tabular-nums">
+                    <TR
+                      key={d.code}
+                      className="border-b border-hairline last:border-0"
+                    >
+                      <TD className="py-1 text-zinc-700">{d.label}</TD>
+                      <TD className="py-1 text-right font-medium text-zinc-900 tabular-nums">
                         {d.count}
-                      </td>
-                      <td className="py-1 text-right text-zinc-500 w-16 tabular-nums">
+                      </TD>
+                      <TD className="py-1 text-right text-zinc-500 w-16 tabular-nums">
                         {d.pctOfLosses == null ? "—" : `${d.pctOfLosses}%`}
-                      </td>
-                    </tr>
+                      </TD>
+                    </TR>
                   ))}
-                </tbody>
-              </table>
+                </TBody>
+              </Table>
             </div>
           )}
 
           {stillDeciding && (
             <div>
-              <div className="text-13 text-zinc-500 mb-1">Said &ldquo;still deciding&rdquo; on the estimate</div>
-              <table className="w-full text-13">
-                <tbody>
-                  <tr className="border-b border-hairline">
-                    <td className="py-1 text-zinc-700">Signaled</td>
-                    <td className="py-1 text-right font-medium text-zinc-900 tabular-nums">{stillDeciding.signaled}</td>
-                  </tr>
-                  <tr className="border-b border-hairline">
-                    <td className="py-1 text-zinc-700">Accepted afterwards</td>
-                    <td className="py-1 text-right font-medium text-zinc-900 tabular-nums">{stillDeciding.wonAfter}</td>
-                  </tr>
-                  <tr className="border-b border-hairline">
-                    <td className="py-1 text-zinc-700">Lost afterwards</td>
-                    <td className="py-1 text-right font-medium text-zinc-900 tabular-nums">{stillDeciding.lostAfter}</td>
-                  </tr>
-                  <tr>
-                    <td className="py-1 text-zinc-700">Expired after opening (vs. went silent)</td>
-                    <td className="py-1 text-right font-medium text-zinc-900 tabular-nums">{stillDeciding.expiredViewedAfter}</td>
-                  </tr>
-                </tbody>
-              </table>
+              <div className="text-ui-body text-zinc-500 mb-1">
+                Said &ldquo;still deciding&rdquo; on the estimate
+              </div>
+              <Table>
+                <TBody>
+                  <TR className="border-b border-hairline">
+                    <TD className="py-1 text-zinc-700">Signaled</TD>
+                    <TD className="py-1 text-right font-medium text-zinc-900 tabular-nums">
+                      {stillDeciding.signaled}
+                    </TD>
+                  </TR>
+                  <TR className="border-b border-hairline">
+                    <TD className="py-1 text-zinc-700">Accepted afterwards</TD>
+                    <TD className="py-1 text-right font-medium text-zinc-900 tabular-nums">
+                      {stillDeciding.wonAfter}
+                    </TD>
+                  </TR>
+                  <TR className="border-b border-hairline">
+                    <TD className="py-1 text-zinc-700">Lost afterwards</TD>
+                    <TD className="py-1 text-right font-medium text-zinc-900 tabular-nums">
+                      {stillDeciding.lostAfter}
+                    </TD>
+                  </TR>
+                  <TR>
+                    <TD className="py-1 text-zinc-700">
+                      Expired after opening (vs. went silent)
+                    </TD>
+                    <TD className="py-1 text-right font-medium text-zinc-900 tabular-nums">
+                      {stillDeciding.expiredViewedAfter}
+                    </TD>
+                  </TR>
+                </TBody>
+              </Table>
             </div>
           )}
 
           {serviceLines.length > 0 && (
             <div>
-              <div className="text-13 text-zinc-500 mb-1">Win rate by service line</div>
+              <div className="text-ui-body text-zinc-500 mb-1">
+                Win rate by service line
+              </div>
               <RateTable rows={serviceLines} />
             </div>
           )}
@@ -307,13 +349,17 @@ export default function WinLossSlicesCard() {
             <div>
               {leadSources.length > 0 && (
                 <>
-                  <div className="text-13 text-zinc-500 mb-1">Win rate by lead source</div>
+                  <div className="text-ui-body text-zinc-500 mb-1">
+                    Win rate by lead source
+                  </div>
                   <RateTable rows={leadSources} />
                 </>
               )}
               {tiers.length > 0 && (
                 <>
-                  <div className="text-13 text-zinc-500 mt-3 mb-1">Win rate by WaveGuard tier</div>
+                  <div className="text-ui-body text-zinc-500 mt-3 mb-1">
+                    Win rate by WaveGuard tier
+                  </div>
                   <RateTable rows={tiers} />
                 </>
               )}
@@ -322,45 +368,53 @@ export default function WinLossSlicesCard() {
 
           {hasCohorts && (
             <div>
-              <div className="text-13 text-zinc-500 mb-1">
+              <div className="text-ui-body text-zinc-500 mb-1">
                 Sent cohorts — outcome as of N days after send
               </div>
-              <table className="w-full text-13">
-                <thead>
-                  <tr className="text-zinc-500">
-                    <th className="text-left font-normal py-1">Age</th>
-                    <th className="text-right font-normal py-1">Won</th>
-                    <th className="text-right font-normal py-1">Lost</th>
-                    <th className="text-right font-normal py-1">Open</th>
-                  </tr>
-                </thead>
-                <tbody>
+              <Table>
+                <THead>
+                  <TR className="text-zinc-500">
+                    <TH className="text-left font-normal py-1">Age</TH>
+                    <TH className="text-right font-normal py-1">Won</TH>
+                    <TH className="text-right font-normal py-1">Lost</TH>
+                    <TH className="text-right font-normal py-1">Open</TH>
+                  </TR>
+                </THead>
+                <TBody>
                   {cohorts.cohorts
                     .filter((c) => c.sent > 0)
                     .map((c) => (
-                      <tr key={c.maturityDays} className="border-b border-hairline last:border-0">
-                        <td className="py-1 text-zinc-700">
-                          {c.maturityDays}d <span className="text-zinc-500">(n={c.sent})</span>
-                        </td>
-                        <td className="py-1 text-right text-zinc-900 tabular-nums">{c.winRatePct}%</td>
-                        <td className="py-1 text-right text-zinc-900 tabular-nums">{c.lossRatePct}%</td>
-                        <td className="py-1 text-right text-zinc-900 tabular-nums">
-                          {Math.round(((c.open / c.sent) * 1000)) / 10}%
-                        </td>
-                      </tr>
+                      <TR
+                        key={c.maturityDays}
+                        className="border-b border-hairline last:border-0"
+                      >
+                        <TD className="py-1 text-zinc-700">
+                          {c.maturityDays}d{" "}
+                          <span className="text-zinc-500">(n={c.sent})</span>
+                        </TD>
+                        <TD className="py-1 text-right text-zinc-900 tabular-nums">
+                          {c.winRatePct}%
+                        </TD>
+                        <TD className="py-1 text-right text-zinc-900 tabular-nums">
+                          {c.lossRatePct}%
+                        </TD>
+                        <TD className="py-1 text-right text-zinc-900 tabular-nums">
+                          {Math.round((c.open / c.sent) * 1000) / 10}%
+                        </TD>
+                      </TR>
                     ))}
-                </tbody>
-              </table>
+                </TBody>
+              </Table>
               {cohorts.sentTotal > 0 && (
-              <div className="text-13 text-zinc-500 mt-2">
-                Opened {cohorts.viewRatePct ?? 0}% of {cohorts.sentTotal} sent
-                {cohorts.medianHoursToFirstView != null
-                  ? ` · median ${cohorts.medianHoursToFirstView} h to first view`
-                  : ""}
-                {cohorts.medianDaysToDecision != null
-                  ? ` · median ${cohorts.medianDaysToDecision} d to decision`
-                  : ""}
-              </div>
+                <div className="text-ui-body text-zinc-500 mt-2">
+                  Opened {cohorts.viewRatePct ?? 0}% of {cohorts.sentTotal} sent
+                  {cohorts.medianHoursToFirstView != null
+                    ? ` · median ${cohorts.medianHoursToFirstView} h to first view`
+                    : ""}
+                  {cohorts.medianDaysToDecision != null
+                    ? ` · median ${cohorts.medianDaysToDecision} d to decision`
+                    : ""}
+                </div>
               )}
             </div>
           )}

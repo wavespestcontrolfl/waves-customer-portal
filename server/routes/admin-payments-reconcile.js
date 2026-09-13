@@ -97,6 +97,7 @@ router.get('/recent-charges', recentChargesLimiter, async (req, res, next) => {
  * manual reconciliation (cash/check/off-platform).
  */
 router.post('/reconcile', requireAdmin, async (req, res, next) => {
+  let reviewUnrecordedWarning = null;
   try {
     const { invoiceId, stripeChargeId, collectedVia, amount, note } = req.body || {};
     if (!invoiceId) return res.status(400).json({ error: 'invoiceId required' });
@@ -119,7 +120,7 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
     // reconciled — 'processing' especially: an ACH payment in flight will
     // settle on its own, so a cash/check reconcile would double-collect.
     try {
-      assertInvoiceCollectible(invoice.status);
+      assertInvoiceCollectible(invoice);
     } catch (e) {
       return res.status(409).json({ error: e.message });
     }
@@ -301,6 +302,21 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
         }
       }
 
+      // The withdrawal check re-run on the LOCKED row (Codex #4311 r29 P1):
+      // a Bill-To assignment committing after the route's preflight leaves a
+      // sent/viewed/overdue invoice in the SAME status with a NULL payer_id
+      // and records the move only in `scheduled_send_error`, so neither the
+      // status predicate below nor the combined-session re-read (a projection
+      // without that column) can see it — and this route would attach cash,
+      // a check or a Stripe charge to debt that now belongs to AP.
+      const lockedInvoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+      if (!lockedInvoice) return { updated: 0 };
+      if (lockedInvoice.payer_id) return { conflict: 'Invoice is billed to a third-party payer — do not collect or reconcile it against the service recipient' };
+      try {
+        assertInvoiceCollectible(lockedInvoice);
+      } catch (e) {
+        return { conflict: e.message };
+      }
       const rows = await trx('invoices')
         .where({ id: invoiceId })
         .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
@@ -424,10 +440,53 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
       await closeOutVisitForIssuedInvoice({ invoiceId, trigger: 'paid', actorTechnicianId: req.technicianId || null });
     }
 
+    // A combined-visit packet defers its review ask behind an unpaid invoice,
+    // and closeOutVisitForIssuedInvoice refuses packet-owned visits — so an
+    // off-platform settlement reconciled here never enrolled the ask the
+    // technician requested (Codex #4311 r29 P1). Same shared path the Stripe
+    // webhook, record-payment and credit rails use. Best-effort after the
+    // commit; an unrecorded enrollment is logged for the packet sweep.
+    try {
+      const settled = await db('invoices').where({ id: invoiceId }).first('id', 'invoice_number', 'customer_id', 'service_record_id', 'visit_completion_packet_id');
+      if (settled) {
+        const outcome = await require('../services/review-request').enrollForPaidInvoice(settled, { source: 'payments_reconcile' });
+        if (outcome && outcome.recorded === false) {
+          logger.error(`[reconcile] invoice ${settled.invoice_number || invoiceId} settled with an UNRECORDED review enrollment — the packet recovery sweep owns it`);
+          // No redelivery owns this rail (Codex #4311 r31 P1): without a
+          // durable record the ask is simply lost, so the office is told.
+          const alerted = await require('../services/dispatch-alerts').createAlert({
+            type: 'visit_closeout_review',
+            severity: 'warn',
+            payload: {
+              reason: 'review_enrollment_unrecorded',
+              source: 'payments_reconcile',
+              invoiceIds: [invoiceId],
+              detail: 'This settled invoice owes a review ask that could not be recorded — re-run the enrollment or ask manually.',
+            },
+          }).catch((alertErr) => {
+            logger.error(`[reconcile] could not raise the unrecorded-enrollment alert: ${alertErr.message}`);
+            return null;
+          });
+          // The alert is the durable signal; when it cannot be persisted the
+          // OPERATOR is the last one (Codex #4311 r40 P1) — this rail has no
+          // redelivery, and reporting a clean reconciliation would lose the
+          // requested review silently. The payment is recorded either way, so
+          // this rides the success response as a warning.
+          if (!alerted) reviewUnrecordedWarning = invoiceId;
+        }
+      }
+    } catch (enrollErr) {
+      logger.error(`[reconcile] review enrollment failed for invoice ${invoiceId}: ${enrollErr.message}`);
+    }
+
     const refreshed = await db('invoices').where({ id: invoiceId }).first();
     res.json({ success: true, invoice: refreshed, stripe_charge: chargeDetails ? {
       id: chargeDetails.id, amount: chargeDetails.amount / 100, receipt_url: chargeDetails.receipt_url,
-    } : null });
+    } : null,
+    ...(reviewUnrecordedWarning ? {
+      reviewsUnrecorded: [reviewUnrecordedWarning],
+      warning: 'The payment is recorded, but the review ask for this visit could not be recorded and no alert could be raised — enroll it from the visit or ask manually.',
+    } : {}) });
   } catch (err) { next(err); }
 });
 

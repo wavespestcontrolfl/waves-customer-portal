@@ -186,7 +186,39 @@ async function resolveRecipients(customer, { scheduledServiceId = null } = {}) {
   return recipients;
 }
 
-async function logEmailAttempt({ customerId, templateKey, eventType, status, providerMessageId = null, sentAt = null, failureReason = null, metadata = {} }) {
+// rendered_slot_ms is the communicated window at send time — persisted so
+// no-show-detector.js's loadPromiseEvents can prove what was promised without
+// re-deriving it from the (mutable) current schedule. Gated on
+// scheduledServiceId (the visit this email is actually about), not
+// moveHoldServiceId — that param controls the unrelated move-hold re-check
+// and is not always the same id a future caller might pass; messaging/audit.js
+// gates the identical field the same way, off appointmentId (codex P1). Its
+// own function so the already-oversized sender gains no decisions from it
+// (codex P2 round 13).
+function withPromisedSlot(metadata, { renderedSlotMs, scheduledServiceId }) {
+  return Number.isFinite(renderedSlotMs) && scheduledServiceId
+    ? { ...metadata, rendered_slot_ms: renderedSlotMs } : metadata;
+}
+
+// What the attempt log records about ONE provider result: its outcome, both
+// message identifiers, and the failure text. Lifted out of the sender, which
+// is far over the complexity budget already and must not grow with it (codex
+// P2 round 13). emailMessageId is the email_messages PRIMARY KEY, stamped
+// alongside the provider id because the provider id is MUTABLE — the
+// transactional retry worker reuses the same row and clears/replaces it on
+// every claim, so a reader joining on it loses the row's live delivery state
+// after the first retry (codex P1, PR #4403).
+function attemptOutcome(result) {
+  return {
+    status: result.sent ? 'sent' : result.blocked ? 'blocked' : 'failed',
+    providerMessageId: result.message?.provider_message_id || null,
+    emailMessageId: result.message?.id || null,
+    sentAt: result.message?.sent_at || null,
+    failureReason: result.sent ? null : result.reason || result.message?.error_message || 'email_not_sent',
+  };
+}
+
+async function logEmailAttempt({ customerId, templateKey, eventType, status, providerMessageId = null, emailMessageId = null, sentAt = null, failureReason = null, metadata = {} }) {
   try {
     await db('customer_interactions').insert({
       customer_id: customerId,
@@ -201,6 +233,9 @@ async function logEmailAttempt({ customerId, templateKey, eventType, status, pro
         channel: 'email',
         event_type: eventType,
         provider_message_id: providerMessageId,
+        // The stable link between this attempt log and the message's current
+        // delivery state — see attemptOutcome.
+        email_message_id: emailMessageId,
         status,
         sent_at: sentAt,
         failure_reason: failureReason,
@@ -236,6 +271,7 @@ async function moveHoldLive(scheduledServiceId, renderedSlotMs = null) {
 }
 
 async function sendTemplate({ customerId, templateKey, eventType, payload = {}, idempotencyKey, categories = [], triggerEventId, metadata = {}, recipientFilter = null, moveHoldServiceId = null, renderedSlotMs = null, scheduledServiceId = null }) {
+  metadata = withPromisedSlot(metadata, { renderedSlotMs, scheduledServiceId });
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
 
@@ -324,17 +360,7 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
       }
       outcomes.push(result);
       if (!result.deduped) {
-        const status = result.sent ? 'sent' : result.blocked ? 'blocked' : 'failed';
-        await logEmailAttempt({
-          customerId: customer.id,
-          templateKey,
-          eventType,
-          status,
-          providerMessageId: result.message?.provider_message_id || null,
-          sentAt: result.message?.sent_at || null,
-          failureReason: result.sent ? null : result.reason || result.message?.error_message || 'email_not_sent',
-          metadata,
-        });
+        await logEmailAttempt({ customerId: customer.id, templateKey, eventType, metadata, ...attemptOutcome(result) });
       }
     } catch (err) {
       // Keep the library's error code (e.g. EMAIL_TEMPLATE_DISABLED) so a

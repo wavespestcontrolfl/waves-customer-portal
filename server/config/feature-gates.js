@@ -386,6 +386,9 @@ const gates = {
   // creation) and issued /visit/:token links keep resolving. Fail-closed
   // ==='true' in EVERY environment; kill switch: unset.
   visitGroups: process.env.GATE_VISIT_GROUPS === 'true',
+  // Creation only. Saved packets and issued summary links survive the kill
+  // switch. Read at call time so grouping and closeout share one decision.
+  get visitCloseout() { return process.env.GATE_VISIT_CLOSEOUT === 'true'; },
 
   // Creation only: stamped reservations retain their full service capacity
   // through acceptance even after this gate is disabled. Strict opt-in.
@@ -1338,6 +1341,16 @@ const gates = {
   callRescheduleApply: process.env.GATE_CALL_RESCHEDULE_APPLY === 'true',
   callbackCard: gateEnvValue('GATE_CALLBACK_CARD'),
   smsAdditionalProperty: gateEnvValue('GATE_SMS_ADDITIONAL_PROPERTY'),
+  // Missing-departure/arrival tracking: flags a scheduled_services row whose
+  // promised window (the last communicated arrival window — SMS/email/call
+  // evidence, never the raw schedule) has passed with no en_route/arrived
+  // evidence. Stage 1 (45 min) notifies the assigned tech; stage 2 (150 min,
+  // or any unassigned visit) also raises an office Action Queue alert
+  // through the existing tech_late/unassigned_overdue dispatch-alert
+  // lifecycle. Off → services/no-show-detector.js#sweep is a no-op; the
+  // READ-ONLY replay CLI (ops/agents/replay-no-show-detector.js) still runs
+  // regardless of this gate. Staff alerts only — no customer comms.
+  noShowDetector: gateEnvValue('GATE_NOSHOW_DETECTOR'),
   // Unrecorded-call alert: the "Twilio has no recording either" step of the
   // existing 5-min missing-recording sweep (call-recording-processor
   // .recoverMissingRecentRecordings). Rings an admin bell for any answered

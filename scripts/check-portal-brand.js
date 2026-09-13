@@ -91,24 +91,24 @@ const EXCLUDED_DIR_HINTS = [
 // - estimate/* is the ~35-item legacy cluster the old SCAN_DIRS comment
 //   described (13px labels, ★ glyphs, the local W palette in tokens.js);
 //   ReportShowcaseCard's 8.5–13px is a scaled-down phone mockup.
-// - NotificationBell / InstallPrompt / NewsletterSignup are the 09-07 audit's
-//   own findings, invisible to CI until now.
+// - NotificationBell / NewsletterSignup are the 09-07 audit's own findings,
+//   invisible to CI until now. Their weights are cleared; the undersized
+//   labels are what is left. InstallPrompt and VanScene were weight-only and
+//   are gone from this list entirely.
 // - BrandFooter and AppShowcaseCard's 7.5px is App Store / Google Play badge
 //   artwork reproduced as inline SVG — fixed proportions, not page type.
 // - ServiceRecapModal and Icon carry emoji the Icon sweep has not reached.
 const LEGACY_BASELINE = {
-  'client/src/App.jsx': { 'banned-font-size': 2, 'heavy-weight': 7 },
+  'client/src/App.jsx': { 'banned-font-size': 2 },
   'client/src/components/ActivityCard.jsx': { 'banned-font-size': 1 },
   'client/src/components/BrandFooter.jsx': { 'banned-font-size': 2 },
-  'client/src/components/GlassNewsletterCard.jsx': { 'banned-font-size': 1, 'heavy-weight': 1 },
+  'client/src/components/GlassNewsletterCard.jsx': { 'banned-font-size': 1 },
   'client/src/components/Icon.jsx': { 'emoji': 1 },
-  'client/src/components/InstallPrompt.jsx': { 'heavy-weight': 1 },
-  'client/src/components/NewsletterSignup.jsx': { 'banned-font-size': 2, 'heavy-weight': 1 },
-  'client/src/components/NotificationBell.jsx': { 'banned-font-size': 9, 'heavy-weight': 2 },
+  'client/src/components/NewsletterSignup.jsx': { 'banned-font-size': 2 },
+  'client/src/components/NotificationBell.jsx': { 'banned-font-size': 9 },
   'client/src/components/PestPressureCard.jsx': { 'banned-font-size': 6 },
   'client/src/components/ServiceRecapModal.jsx': { 'emoji': 8 },
-  'client/src/components/StationMapCard.jsx': { 'banned-font-size': 3, 'heavy-weight': 1 },
-  'client/src/components/VanScene.jsx': { 'heavy-weight': 1 },
+  'client/src/components/StationMapCard.jsx': { 'banned-font-size': 3 },
   'client/src/components/estimate/AppShowcaseCard.jsx': { 'banned-font-size': 2 },
   'client/src/components/estimate/CustomerReviews.jsx': { 'emoji': 1 },
   'client/src/components/estimate/GoogleProfilesCard.jsx': { 'emoji': 1 },
@@ -119,7 +119,7 @@ const LEGACY_BASELINE = {
   'client/src/components/estimate/glass/GlassEstimateExtras.jsx': { 'emoji': 4 },
   'client/src/components/estimate/glass/glass-components.css': { 'banned-font-size': 3 },
   'client/src/components/estimate/tokens.js': { 'local-palette': 1 },
-  'client/src/index.css': { 'banned-font-size': 2, 'heavy-weight': 1 },
+  'client/src/index.css': { 'banned-font-size': 2 },
   'client/src/pages/ServiceOutlinePage.jsx': { 'banned-font-size': 3 },
   'client/src/styles/buttons.css': { 'banned-font-size': 2 },
   'client/src/styles/tokens.css': { 'banned-font-size': 1 },

@@ -49,7 +49,13 @@ const NOW = new Date('2026-08-13T08:10:00Z');
 const BAND = ['2026-08-14', '2026-08-15', '2026-08-16', '2026-08-17', '2026-08-18', '2026-08-19'];
 
 function stop(id, over = {}) {
-  return { id, technician_id: 't1', route_order: null, window_start: '09:00', time_window: null, service_type: 'pest', zone: null, lat: 1, lng: 1, ...over };
+  // service_address_line1 present-but-null, as the day-load select returns
+  // it for a row that inherits the customer's address.
+  return { id, technician_id: 't1', route_order: null, window_start: '09:00', time_window: null, service_type: 'pest', zone: null, lat: 1, lng: 1, service_address_line1: null, visit_id: null,
+    // A real row: unstamped, so its premise is the customer's own
+    // primary address (the columns the day load aliases).
+    customer_address_line1: '100 Main St', customer_address_line2: null,
+    customer_city: 'Bradenton', customer_state: 'FL', customer_zip: '34205', ...over };
 }
 
 // A tech-day whose CURRENT order backtracks (B@lng3 first, then A@lng1, C@lng2
@@ -128,7 +134,14 @@ beforeEach(() => {
           // Unchanged tech-day: mirror the loaded stops for this date+tech.
           return (stopsByDate[filters.scheduled_date] || [])
             .filter((s) => s.technician_id === filters.technician_id)
-            .map((s) => ({ id: s.id, window_start: s.window_start, window_end: s.window_end, visit_id: s.visit_id, time_window: s.time_window, estimated_duration_minutes: s.estimated_duration_minutes, auto_dispatch_locked: s.auto_dispatch_locked, auto_dispatch_excluded: s.auto_dispatch_excluded, route_order: s.route_order, lat: s.lat, lng: s.lng }));
+            .map((s) => ({ id: s.id, window_start: s.window_start, window_end: s.window_end, visit_id: s.visit_id, time_window: s.time_window, estimated_duration_minutes: s.estimated_duration_minutes, auto_dispatch_locked: s.auto_dispatch_locked, auto_dispatch_excluded: s.auto_dispatch_excluded, route_order: s.route_order, lat: s.lat, lng: s.lng,
+              // The commit fence hashes the EFFECTIVE premise, so the live
+              // read projects the same columns the day load selected.
+              service_address_line1: s.service_address_line1, service_address_line2: s.service_address_line2,
+              service_address_city: s.service_address_city, service_address_zip: s.service_address_zip,
+              customer_id: s.customer_id,
+              customer_address_line1: s.customer_address_line1, customer_address_line2: s.customer_address_line2,
+              customer_city: s.customer_city, customer_state: s.customer_state, customer_zip: s.customer_zip }));
         },
         update: async (u) => { attempted.push({ id: filters.id, ...u }); return 1; },
       };
@@ -535,6 +548,34 @@ test('feasibility uses the optimizer\'s ACTUAL leg durations when aligned (fallb
   expect(violatesWindowFeasibility(RO, [a, b], [a, b], [legs[0]])).toBe(false);
 });
 
+test('feasibility guard: a same-customer same-slot pair merges into one stop (phantom-hour fix, Sat 2026-09-12); a different customer does not', () => {
+  // Mirrors advanceSim's co-visit branch (route-reorder-window-fit.js) but
+  // exercises violatesWindowFeasibility's OWN inline simulation loop
+  // directly — it does not call simulateArrivalRoute, so it needed its own
+  // co-visit check. a+b share the 09:00-11:00 promise (arrival deadline
+  // 11:00) and carry no real estimate, so each falls back to its 120-minute
+  // window span: summed, the pair's four phantom hours blow c's own 10:30
+  // deadline (12:30); merged (same customer_id) it is the one promised
+  // block and fits. Unmerged (different customer_id, i.e. two genuinely different
+  // visits) it does not — and a chain that really does carry additive
+  // estimates is charged both (see route-reorder-window-fit's (i)).
+  const { violatesWindowFeasibility } = require('../services/route-reorder')._internals;
+  const RO = require('../services/route-optimizer');
+  const a = stop('a', { customer_id: 'cust_b', window_start: '09:00', window_end: '11:00', estimated_duration_minutes: null, lat: 1, lng: 1 });
+  const b = stop('b', { customer_id: 'cust_b', window_start: '09:00', window_end: '11:00', estimated_duration_minutes: null, lat: 1, lng: 1 });
+  const c = stop('c', { window_start: '10:30' });
+  expect(violatesWindowFeasibility(RO, [a, b, c], [a, b, c])).toBe(false);
+  const bOtherCustomer = { ...b, customer_id: 'someone_else' };
+  expect(violatesWindowFeasibility(RO, [a, bOtherCustomer, c], [a, bOtherCustomer, c])).toBe(true);
+});
+
+test('the day load selects customer_id — required for the co-visit collapse (phantom-hour fix)', async () => {
+  stopsByDate['2026-08-18'] = backtrackDay();
+  await runRouteReorder({ now: NOW });
+  const [, args] = dayStopsQuery.mock.calls.find(([, a]) => a.dateStr === '2026-08-18');
+  expect(args.select).toContain('scheduled_services.customer_id');
+});
+
 test('effectiveWindowRange: arrival deadline is ALWAYS start+120 (stored window_end = service end, ignored), real band ends', () => {
   const { effectiveWindowRange } = require('../services/route-reorder')._internals;
   // A 3-hour 09:00 job has a noon window_end, but the promised ARRIVAL
@@ -874,4 +915,84 @@ describe('runScheduleQualityAlertsOnly (reorder off, quality gates own the night
     expect(dayStopsQuery).not.toHaveBeenCalled();
     expect(ledgerInserts).toHaveLength(0);
   });
+});
+
+// ── Round-0 fallback audit P1 ────────────────────────────────────────────
+// chooseWindowSafeOrder relaxes a window whose promised deadline has already
+// passed relative to `startMin` (the admin "today, mid-route" clock), so an
+// overdue stop no longer dictates order. Every figure it returns has to be
+// measured under that SAME relaxed view: re-simulating the accepted order
+// against the true, now-unreachable deadline returns null, and the multi-tech
+// /optimize response sums `afterSeconds || 0` — charging that whole truck
+// zero drive time.
+test('chooseWindowSafeOrder: a legal order whose promise already elapsed still reports afterSeconds', () => {
+  const { chooseWindowSafeOrder } = require('../services/route-reorder');
+  const stops = [
+    // 09:00-10:00 promise, deadline 10:00 — long past a 15:30 startMin.
+    { id: 'E1', technician_id: 't1', route_order: 1, window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60, lat: 1, lng: 3 },
+    { id: 'E2', technician_id: 't1', route_order: 2, window_start: null, window_end: null, estimated_duration_minutes: 60, lat: 1, lng: 1 },
+  ];
+  const out = chooseWindowSafeOrder({
+    RouteOptimizer, googleOrder: stops, sourceStops: stops, googleSource: 'google_routes_api', startMin: 15 * 60 + 30,
+  });
+  expect(out.orderedStops.map((s) => s.id)).toEqual(['E1', 'E2']);
+  expect(out.source).toBe('google_routes_api');
+  // 0 (this harness's legs are 0-minute), never null — null is the bug.
+  expect(out.afterSeconds).toBe(0);
+});
+
+// ── Codex #4435 round 2 ──────────────────────────────────────────────────
+// The commit-time fence hashed workDuration, which is max(window span, real
+// estimate) — so a pair of 60-minute-span rows could go from 20+20 to 20+50
+// real minutes with every workDuration still 60 and the fence none the wiser,
+// committing an order certified against a 60-minute stop that is now 70. The
+// signature carries the RAW estimate (and the merge's own customer/premise
+// inputs) for exactly that.
+test('commit-time revalidation: a raw estimate change that leaves workDuration alone still rolls back', async () => {
+  stopsByDate['2026-08-18'] = backtrackDay('', { window_end: '10:00', estimated_duration_minutes: 20 });
+  liveRowsOverride = [
+    { id: 'A', window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 20, route_order: 2, lat: 1, lng: 1 },
+    // 20 → 50: still under the 60-minute span, so workDuration is unchanged.
+    { id: 'B', window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 50, route_order: 1, lat: 1, lng: 3 },
+    { id: 'C', window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 20, route_order: 3, lat: 1, lng: 2 },
+  ];
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.applied).toBe(0);
+  expect(trxUpdates).toEqual([]);
+  const ledger = JSON.parse(ledgerInserts[0].result);
+  expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'STALE_TECH_DAY' }));
+});
+
+test('commit-time revalidation: a premise re-stamp mid-run rolls back (it is a merge input)', async () => {
+  stopsByDate['2026-08-18'] = backtrackDay('', { service_address_line1: '100 Main St' });
+  liveRowsOverride = [
+    { id: 'A', window_start: '09:00', route_order: 2, lat: 1, lng: 1, service_address_line1: '100 Main St' },
+    { id: 'B', window_start: '09:00', route_order: 1, lat: 1, lng: 3, service_address_line1: '100 Main St', service_address_line2: 'Apt 2' },
+    { id: 'C', window_start: '09:00', route_order: 3, lat: 1, lng: 2, service_address_line1: '100 Main St' },
+  ];
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.applied).toBe(0);
+  expect(trxUpdates).toEqual([]);
+  const ledger = JSON.parse(ledgerInserts[0].result);
+  expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'STALE_TECH_DAY' }));
+});
+
+// ── Codex #4435 round 4 ──────────────────────────────────────────────────
+// isCoVisitPair resolves an UNSTAMPED row's premise from the customer's
+// primary address, so that address is a merge input: edited mid-run it
+// changes the workload the order was certified against, while every stamped
+// column and coordinate stays exactly where it was.
+test('commit-time revalidation: a CUSTOMER address change mid-run rolls back', async () => {
+  stopsByDate['2026-08-18'] = backtrackDay('', { customer_address_line1: '100 Main St' });
+  liveRowsOverride = [
+    { id: 'A', window_start: '09:00', route_order: 2, lat: 1, lng: 1, customer_address_line1: '100 Main St' },
+    // Re-stamped on the customer record — the service rows are untouched.
+    { id: 'B', window_start: '09:00', route_order: 1, lat: 1, lng: 3, customer_address_line1: '200 Oak Ave' },
+    { id: 'C', window_start: '09:00', route_order: 3, lat: 1, lng: 2, customer_address_line1: '100 Main St' },
+  ];
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.applied).toBe(0);
+  expect(trxUpdates).toEqual([]);
+  const ledger = JSON.parse(ledgerInserts[0].result);
+  expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'STALE_TECH_DAY' }));
 });

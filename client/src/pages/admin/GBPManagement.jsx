@@ -1,25 +1,22 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
-
+import React, { useState, useEffect, useCallback, useMemo } from "react";
+import {
+  Badge,
+  Button,
+  buttonStyles,
+  Card,
+  Checkbox,
+  Field,
+  Input,
+  Select,
+  Table,
+  THead,
+  TBody,
+  TR,
+  TH,
+  TD,
+  Textarea,
+} from "../../components/ui";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
-// V2 token pass: teal/blue/purple fold to zinc-900. Semantic green/amber/red preserved.
-const D = {
-  bg: "#F4F4F5",
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  teal: "#18181B",
-  green: "#15803D",
-  amber: "#A16207",
-  red: "#991B1B",
-  blue: "#18181B",
-  purple: "#18181B",
-  text: "#27272A",
-  muted: "#71717A",
-  white: "#FFFFFF",
-  input: "#FFFFFF",
-  heading: "#09090B",
-  inputBorder: "#D4D4D8",
-};
-
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     headers: {
@@ -32,62 +29,6 @@ function adminFetch(path, options = {}) {
     return r.json();
   });
 }
-
-// ── Shared styles ──
-const sCard = {
-  background: D.card,
-  border: `1px solid ${D.border}`,
-  borderRadius: 12,
-  padding: 20,
-  marginBottom: 12,
-  boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
-};
-const sBtn = (bg, color) => ({
-  padding: "8px 16px",
-  background: bg,
-  color,
-  border: "none",
-  borderRadius: 8,
-  fontSize: 13,
-  fontWeight: 500,
-  cursor: "pointer",
-  fontFamily: "'Roboto', Arial, sans-serif",
-});
-const sBtnOutline = {
-  ...sBtn("transparent", D.muted),
-  border: `1px solid ${D.border}`,
-};
-const sInput = {
-  width: "100%",
-  padding: "10px 12px",
-  background: D.input,
-  border: `1px solid ${D.border}`,
-  borderRadius: 8,
-  color: D.text,
-  fontSize: 13,
-  fontFamily: "'Roboto', Arial, sans-serif",
-  outline: "none",
-  boxSizing: "border-box",
-};
-const sLabel = {
-  fontSize: 11,
-  color: D.muted,
-  textTransform: "uppercase",
-  letterSpacing: 0.8,
-  fontWeight: 500,
-  marginBottom: 4,
-  display: "block",
-};
-const sBadge = (bg, color) => ({
-  fontSize: 12, // UI audit F0470
-  padding: "2px 8px",
-  borderRadius: 4,
-  background: bg,
-  color,
-  fontWeight: 500,
-  display: "inline-block",
-});
-
 const DAYS = [
   "monday",
   "tuesday",
@@ -102,49 +43,27 @@ const DAYS = [
 // `subTab` state still holds the LEAF key, so every {subTab === "..."} block
 // below is unchanged.
 const GBP_TAB_GROUPS = [
-  { key: "overview", label: "Overview", tabs: ["overview"] },
+  {
+    key: "overview",
+    label: "Overview",
+    tabs: ["overview"],
+  },
   {
     key: "profile",
     label: "Profile",
     tabs: ["info", "hours", "services", "photos"],
   },
-  { key: "updates", label: "Updates", tabs: ["updates", "history", "bulk"] },
-  { key: "alerts", label: "Alerts", tabs: ["notifications"] },
+  {
+    key: "updates",
+    label: "Updates",
+    tabs: ["updates", "history", "bulk"],
+  },
+  {
+    key: "alerts",
+    label: "Alerts",
+    tabs: ["notifications"],
+  },
 ];
-const gbpPillRow = {
-  display: "flex",
-  flexWrap: "wrap",
-  gap: 4,
-  marginBottom: 20,
-  background: "#F4F4F5",
-  borderRadius: 10,
-  padding: 4,
-  border: "1px solid #E4E4E7",
-};
-const gbpPill = (isActive) => ({
-  padding: "10px 24px",
-  borderRadius: 8,
-  border: "none",
-  cursor: "pointer",
-  background: isActive ? "#18181B" : "transparent",
-  color: isActive ? "#FFFFFF" : "#A1A1AA",
-  fontSize: 14,
-  fontWeight: 700,
-  transition: "all 0.2s",
-  fontFamily: "'Roboto', Arial, sans-serif",
-  display: "flex",
-  alignItems: "center",
-  gap: 6,
-});
-const gbpPillBadge = (isActive) => ({
-  fontSize: 12, // UI audit F0470 (was 9px, ~2.3:1 contrast)
-  padding: "1px 6px",
-  borderRadius: 10,
-  background: isActive ? "rgba(255,255,255,0.2)" : "#E4E4E7",
-  color: isActive ? "#FFFFFF" : "#52525B",
-  fontWeight: 700,
-});
-
 // ══════════════════════════════════════════════════════════════
 // MAIN COMPONENT
 // ══════════════════════════════════════════════════════════════
@@ -184,7 +103,6 @@ export default function GBPManagement() {
     }
     setLoading(false);
   }, []);
-
   const loadUpdates = useCallback(
     async (status) => {
       try {
@@ -198,19 +116,16 @@ export default function GBPManagement() {
     },
     [updatesFilter],
   );
-
   useEffect(() => {
     loadLocations();
   }, [loadLocations]);
   useEffect(() => {
     loadUpdates(updatesFilter);
   }, [updatesFilter]);
-
   const showToast = (msg) => {
     setToast(msg);
     setTimeout(() => setToast(""), 3500);
   };
-
   const handleSync = async (locId) => {
     setSyncing(true);
     try {
@@ -225,7 +140,6 @@ export default function GBPManagement() {
     }
     setSyncing(false);
   };
-
   const handleSyncAll = async () => {
     setSyncing(true);
     for (const loc of locations) {
@@ -242,7 +156,6 @@ export default function GBPManagement() {
     await loadUpdates();
     setSyncing(false);
   };
-
   const handlePush = async (locId) => {
     setPushing(true);
     try {
@@ -255,7 +168,6 @@ export default function GBPManagement() {
     }
     setPushing(false);
   };
-
   const handleApprove = async (updateId) => {
     try {
       await adminFetch(`/admin/gbp/updates/${updateId}/approve`, {
@@ -268,7 +180,6 @@ export default function GBPManagement() {
       showToast(`Approve failed: ${e.message}`);
     }
   };
-
   const handleReject = async (updateId) => {
     try {
       await adminFetch(`/admin/gbp/updates/${updateId}/reject`, {
@@ -280,7 +191,6 @@ export default function GBPManagement() {
       showToast(`Reject failed: ${e.message}`);
     }
   };
-
   const handleBulkReject = async (ids) => {
     try {
       await adminFetch("/admin/gbp/updates/bulk-reject", {
@@ -293,111 +203,91 @@ export default function GBPManagement() {
       showToast(`Bulk reject failed: ${e.message}`);
     }
   };
-
   const loc = selectedLoc;
   const gbp = loc?.gbp;
-
   const subTabs = [
-    { key: "overview", label: "Overview" },
-    { key: "info", label: "Business Info" },
-    { key: "hours", label: "Hours" },
-    { key: "services", label: "Services" },
-    { key: "photos", label: "Photos" },
+    {
+      key: "overview",
+      label: "Overview",
+    },
+    {
+      key: "info",
+      label: "Business Info",
+    },
+    {
+      key: "hours",
+      label: "Hours",
+    },
+    {
+      key: "services",
+      label: "Services",
+    },
+    {
+      key: "photos",
+      label: "Photos",
+    },
     {
       key: "updates",
       label: "Update Queue",
       badge: locations.reduce((s, l) => s + (l.pendingUpdates || 0), 0),
     },
-    { key: "history", label: "Change History" },
-    { key: "bulk", label: "Bulk Edit" },
-    { key: "notifications", label: "Alerts" },
+    {
+      key: "history",
+      label: "Change History",
+    },
+    {
+      key: "bulk",
+      label: "Bulk Edit",
+    },
+    {
+      key: "notifications",
+      label: "Alerts",
+    },
   ];
   const subTabByKey = Object.fromEntries(subTabs.map((t) => [t.key, t]));
   const activeGroup =
     GBP_TAB_GROUPS.find((g) => g.tabs.includes(subTab)) || GBP_TAB_GROUPS[0];
-
   if (loading)
     return (
-      <div style={{ color: D.muted, padding: 60, textAlign: "center" }}>
+      <div className="text-ink-secondary p-[60px] text-center">
         Loading GBP data...
       </div>
     );
-
   return (
     <div>
       {/* Location Selector */}
-      <div
-        style={{
-          display: "flex",
-          gap: 10,
-          marginBottom: 20,
-          flexWrap: "wrap",
-          alignItems: "center",
-        }}
-      >
+      <div className="flex gap-[10px] mb-[20px] flex-wrap items-center">
         {locations.map((l) => (
-          <button
+          <Button
             key={l.id}
             onClick={() => {
               setSelectedLoc(l);
               setSubTab("overview");
             }}
-            style={{
-              padding: "12px 18px",
-              borderRadius: 10,
-              border: `1px solid ${selectedLoc?.id === l.id ? D.teal : D.border}`,
-              background: selectedLoc?.id === l.id ? `${D.teal}15` : D.card,
-              cursor: "pointer",
-              minWidth: 170,
-              textAlign: "left",
-            }}
+            variant={selectedLoc?.id === l.id ? "primary" : "secondary"}
+            className="min-w-[170px] text-left flex-col items-start"
           >
             {" "}
-            <div
-              style={{
-                fontSize: 14,
-                fontWeight: 500,
-                color: selectedLoc?.id === l.id ? D.teal : D.heading,
-              }}
-            >
-              {l.name}
-            </div>{" "}
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                marginTop: 4,
-              }}
-            >
+            <div className="text-ui-body font-medium">{l.name}</div>{" "}
+            <div className="flex items-center gap-[6px] mt-[4px]">
               {l.rating && (
-                <span
-                  style={{
-                    fontSize: 13,
-                    fontWeight: 700,
-                    color: D.amber,
-                    fontFamily: "'JetBrains Mono', monospace",
-                  }}
-                >
-                  {l.rating}
-                </span>
+                <span className="text-ui-body font-medium">{l.rating}</span>
               )}
-              <span style={{ fontSize: 11, color: D.muted }}>
-                ({l.totalReviews || 0})
-              </span>
+              <span className="text-ui-body">({l.totalReviews || 0})</span>
               {l.pendingUpdates > 0 && (
-                <span style={sBadge(`${D.amber}22`, D.amber)}>
-                  {l.pendingUpdates} pending
-                </span>
+                <Badge tone="warn">{l.pendingUpdates} pending</Badge>
               )}
             </div>{" "}
             <div
               title={l.authError || ""}
-              style={{
-                fontSize: 11,
-                marginTop: 4,
-                color: l.hasCredentials ? D.green : l.authError ? D.red : D.muted,
-              }}
+              className={
+                "text-ui-body mt-[4px] " +
+                (selectedLoc?.id === l.id
+                  ? "text-white"
+                  : l.authError
+                    ? "text-alert-fg"
+                    : "text-ink-secondary")
+              }
             >
               {l.hasCredentials
                 ? "● API Connected"
@@ -405,18 +295,14 @@ export default function GBPManagement() {
                   ? "● API auth error"
                   : "○ Places API only"}
             </div>{" "}
-          </button>
+          </Button>
         ))}
-        <button
-          onClick={handleSyncAll}
-          disabled={syncing}
-          style={{ ...sBtn(D.teal, D.white), opacity: syncing ? 0.5 : 1 }}
-        >
+        <Button onClick={handleSyncAll} disabled={syncing} variant="primary">
           {syncing ? "Syncing..." : "Sync All"}
-        </button>{" "}
+        </Button>{" "}
       </div>
       {/* Sub-tabs: parent groups + leaf sub-row */}
-      <div style={gbpPillRow}>
+      <div className="mb-2 flex flex-wrap gap-1">
         {GBP_TAB_GROUPS.map((g) => {
           const badge = g.tabs.reduce(
             (s, k) => s + (subTabByKey[k]?.badge || 0),
@@ -424,43 +310,39 @@ export default function GBPManagement() {
           );
           const isActive = activeGroup.key === g.key;
           return (
-            <button
+            <Button
               key={g.key}
               onClick={() => setSubTab(g.tabs[0])}
-              style={gbpPill(isActive)}
+              variant={isActive ? "primary" : "secondary"}
             >
               {g.label}
-              {badge > 0 && <span style={gbpPillBadge(isActive)}>{badge}</span>}
-            </button>
+              {badge > 0 && <span>{badge}</span>}
+            </Button>
           );
         })}
       </div>
       {activeGroup.tabs.length > 1 && (
-        <div style={gbpPillRow}>
+        <div className="mb-4 flex flex-wrap gap-1">
           {activeGroup.tabs.map((k) => {
             const t = subTabByKey[k];
             const isActive = subTab === k;
             return (
-              <button
+              <Button
                 key={k}
                 onClick={() => setSubTab(k)}
-                style={gbpPill(isActive)}
+                variant={isActive ? "primary" : "secondary"}
               >
                 {t.label}
-                {t.badge > 0 && (
-                  <span style={gbpPillBadge(isActive)}>{t.badge}</span>
-                )}
-              </button>
+                {t.badge > 0 && <span>{t.badge}</span>}
+              </Button>
             );
           })}
         </div>
       )}
       {!loc ? (
-        <div
-          style={{ ...sCard, textAlign: "center", padding: 40, color: D.muted }}
-        >
+        <Card className="mb-3 text-center p-[40px] text-ink-secondary">
           No locations available
-        </div>
+        </Card>
       ) : (
         <>
           {subTab === "overview" && (
@@ -529,32 +411,14 @@ export default function GBPManagement() {
         </>
       )}
       {/* Toast */}
-      <div
-        style={{
-          position: "fixed",
-          bottom: 20,
-          right: 20,
-          background: D.card,
-          border: `1px solid ${D.green}`,
-          borderRadius: 8,
-          padding: "10px 16px",
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          boxShadow: "0 8px 32px rgba(0,0,0,.4)",
-          zIndex: 300,
-          fontSize: 12,
-          fontWeight: 500,
-          transform: toast ? "translateY(0)" : "translateY(80px)",
-          opacity: toast ? 1 : 0,
-          transition: "all .3s",
-          pointerEvents: "none",
-        }}
-      >
-        {" "}
-        <span style={{ color: D.green }}></span>
-        <span style={{ color: D.text }}>{toast}</span>{" "}
-      </div>{" "}
+      {toast && (
+        <Card
+          role="status"
+          className="fixed bottom-5 right-5 z-[130] p-3 text-ui-body font-medium shadow-lg pointer-events-none"
+        >
+          {toast}
+        </Card>
+      )}
     </div>
   );
 }
@@ -565,31 +429,43 @@ export default function GBPManagement() {
 function OverviewTab({ loc, gbp, onSync, onPush, syncing, pushing }) {
   const info = gbp || {};
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+    <div className="grid gap-4 lg:grid-cols-[minmax(0,1.5fr)_minmax(280px,1fr)]">
       {/* Left — Profile Summary */}
-      <div style={sCard}>
+      <Card className="p-5 mb-3">
         {" "}
-        <div
-          style={{
-            fontSize: 16,
-            fontWeight: 500,
-            color: D.heading,
-            marginBottom: 16,
-          }}
-        >
+        <div className="text-ui-body font-medium text-zinc-900 mb-[16px]">
           Profile Summary
         </div>
         {[
-          { label: "Business Name", value: info.business_name || loc.name },
-          { label: "Address", value: info.address || loc.address },
-          { label: "Phone", value: info.phone || loc.phone },
-          { label: "Website", value: info.website_url, link: true },
+          {
+            label: "Business Name",
+            value: info.business_name || loc.name,
+          },
+          {
+            label: "Address",
+            value: info.address || loc.address,
+          },
+          {
+            label: "Phone",
+            value: info.phone || loc.phone,
+          },
+          {
+            label: "Website",
+            value: info.website_url,
+            link: true,
+          },
           {
             label: "Primary Category",
             value: info.primary_category || "pest_control",
           },
-          { label: "Store Code", value: info.store_code || "—" },
-          { label: "Place ID", value: loc.googlePlaceId },
+          {
+            label: "Store Code",
+            value: info.store_code || "—",
+          },
+          {
+            label: "Place ID",
+            value: loc.googlePlaceId,
+          },
           {
             label: "Last Synced",
             value: info.last_synced_at
@@ -599,25 +475,10 @@ function OverviewTab({ loc, gbp, onSync, onPush, syncing, pushing }) {
         ].map((f, i) => (
           <div
             key={i}
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "flex-start",
-              padding: "8px 0",
-              borderBottom: `1px solid ${D.border}33`,
-            }}
+            className="flex justify-between items-start py-2 border-b border-hairline border-zinc-200"
           >
             {" "}
-            <span
-              style={{
-                fontSize: 12,
-                color: D.muted,
-                fontWeight: 500,
-                textTransform: "uppercase",
-                letterSpacing: 0.5,
-                minWidth: 120,
-              }}
-            >
+            <span className="text-ui-body text-ink-secondary font-medium min-w-[120px]">
               {f.label}
             </span>
             {f.link ? (
@@ -625,67 +486,39 @@ function OverviewTab({ loc, gbp, onSync, onPush, syncing, pushing }) {
                 href={f.value}
                 target="_blank"
                 rel="noopener noreferrer"
-                style={{
-                  fontSize: 13,
-                  color: D.teal,
-                  textDecoration: "none",
-                  textAlign: "right",
-                  maxWidth: 280,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
+                className="text-ui-body text-zinc-900 text-right max-w-[280px] overflow-hidden whitespace-nowrap"
               >
                 {f.value || "—"}
               </a>
             ) : (
-              <span
-                style={{
-                  fontSize: 13,
-                  color: D.heading,
-                  textAlign: "right",
-                  maxWidth: 280,
-                }}
-              >
+              <span className="text-ui-body text-zinc-900 text-right max-w-[280px]">
                 {f.value || "—"}
               </span>
             )}
           </div>
         ))}
-      </div>
+      </Card>
       {/* Right — Rating + Actions */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div className="flex flex-col gap-[16px]">
         {" "}
-        <div style={{ ...sCard, textAlign: "center" }}>
+        <Card className="p-5 mb-3 text-center">
           {" "}
-          <div
-            style={{
-              fontSize: 48,
-              fontWeight: 700,
-              color: D.amber,
-              fontFamily: "'JetBrains Mono', monospace",
-            }}
-          >
+          <div className="text-[48px] font-medium text-zinc-900">
             {loc.rating || "—"}
           </div>{" "}
-          <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
+          <div className="text-ui-body text-ink-secondary mt-[4px]">
             {loc.totalReviews || 0} reviews on Google
           </div>{" "}
-          <div
-            style={{
-              display: "flex",
-              gap: 8,
-              marginTop: 16,
-              justifyContent: "center",
-              flexWrap: "wrap",
-            }}
-          >
+          <div className="flex gap-[8px] mt-[16px] justify-center flex-wrap">
             {loc.mapsUrl && (
               <a
                 href={loc.mapsUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                style={{ ...sBtn(D.teal, D.white), textDecoration: "none" }}
+                className={buttonStyles({
+                  variant: "primary",
+                  density: "comfortable",
+                })}
               >
                 View on Maps
               </a>
@@ -695,97 +528,78 @@ function OverviewTab({ loc, gbp, onSync, onPush, syncing, pushing }) {
                 href={loc.googleReviewUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                style={{ ...sBtnOutline, textDecoration: "none" }}
+                className={buttonStyles({
+                  variant: "secondary",
+                  density: "comfortable",
+                })}
               >
                 Review Link
               </a>
             )}
           </div>{" "}
-        </div>{" "}
-        <div style={sCard}>
+        </Card>{" "}
+        <Card className="p-5 mb-3">
           {" "}
-          <div
-            style={{
-              fontSize: 14,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 12,
-            }}
-          >
+          <div className="text-ui-body font-medium text-zinc-900 mb-[12px]">
             Actions
           </div>{" "}
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <div className="flex flex-col gap-[8px]">
             {" "}
-            <button
+            <Button
               onClick={onSync}
               disabled={syncing}
-              style={{
-                ...sBtn(D.teal, D.white),
-                width: "100%",
-                opacity: syncing ? 0.5 : 1,
-              }}
+              variant="primary"
+              className="w-full"
             >
               {syncing ? "Syncing from Google..." : "Sync from Google"}
-            </button>{" "}
-            <button
+            </Button>{" "}
+            <Button
               onClick={onPush}
               disabled={pushing || !loc.hasCredentials}
-              style={{
-                ...sBtn(D.green, D.white),
-                width: "100%",
-                opacity: pushing || !loc.hasCredentials ? 0.5 : 1,
-              }}
+              variant="primary"
+              className="w-full"
             >
               {pushing ? "Pushing..." : "Push to Google"}
-            </button>
+            </Button>
             {!loc.hasCredentials && (
-              <div
-                style={{ fontSize: 11, color: D.amber, textAlign: "center" }}
-              >
+              <div className="text-ui-body text-alert-fg text-center">
                 OAuth not configured — push disabled
               </div>
             )}
             <a
               href={`https://business.google.com/dashboard/l/${loc.googlePlaceId}`}
+              className={buttonStyles({
+                variant: "secondary",
+                density: "comfortable",
+                className: "text-center",
+              })}
               target="_blank"
               rel="noopener noreferrer"
-              style={{
-                ...sBtnOutline,
-                textDecoration: "none",
-                textAlign: "center",
-              }}
             >
               Open Google Business
             </a>{" "}
             <a
               href={`https://business.google.com/posts/l/${loc.googlePlaceId}`}
+              className={buttonStyles({
+                variant: "secondary",
+                density: "comfortable",
+                className: "text-center",
+              })}
               target="_blank"
               rel="noopener noreferrer"
-              style={{
-                ...sBtnOutline,
-                textDecoration: "none",
-                textAlign: "center",
-              }}
             >
               Create Google Post
             </a>{" "}
           </div>{" "}
-        </div>
+        </Card>
         {/* SAB indicator */}
         {info.hide_address && (
-          <div style={{ ...sCard, borderColor: D.amber }}>
+          <Card className="p-5 mb-3">
             {" "}
-            <div
-              style={{
-                fontSize: 13,
-                fontWeight: 500,
-                color: D.amber,
-                marginBottom: 4,
-              }}
-            >
+            <div className="text-ui-body font-medium text-zinc-900 mb-[4px]">
               Service-Area Business
             </div>{" "}
-            <div style={{ fontSize: 12, color: D.muted }}>
+            <div className="text-ui-body text-ink-secondary">
               Address is hidden on Google. This location serves customers at
               their premises.
             </div>
@@ -797,13 +611,13 @@ function OverviewTab({ loc, gbp, onSync, onPush, syncing, pushing }) {
                     : info.service_areas;
                 return (
                   areas.length > 0 && (
-                    <div style={{ fontSize: 12, color: D.text, marginTop: 8 }}>
+                    <div className="text-ui-body text-zinc-900 mt-[8px]">
                       Areas: {areas.map((a) => a.name || a).join(", ")}
                     </div>
                   )
                 );
               })()}
-          </div>
+          </Card>
         )}
       </div>{" "}
     </div>
@@ -824,7 +638,6 @@ function BusinessInfoTab({ loc, gbp, onSave, showToast }) {
     hide_address: false,
   });
   const [saving, setSaving] = useState(false);
-
   useEffect(() => {
     if (gbp) {
       setForm({
@@ -838,7 +651,6 @@ function BusinessInfoTab({ loc, gbp, onSave, showToast }) {
       });
     }
   }, [gbp, loc]);
-
   const handleSave = async () => {
     setSaving(true);
     try {
@@ -853,128 +665,114 @@ function BusinessInfoTab({ loc, gbp, onSave, showToast }) {
     }
     setSaving(false);
   };
-
   return (
-    <div style={{ maxWidth: 700 }}>
+    <div className="max-w-[700px]">
       {" "}
-      <div style={sCard}>
+      <Card className="p-5 mb-3">
         {" "}
-        <div
-          style={{
-            fontSize: 16,
-            fontWeight: 500,
-            color: D.heading,
-            marginBottom: 16,
-          }}
-        >
+        <div className="text-ui-body font-medium text-zinc-900 mb-[16px]">
           Edit Business Information
         </div>{" "}
         <FieldGroup>
           {" "}
           <Field label="Business Name">
-            {" "}
-            <input
+            <Input
               value={form.business_name}
               onChange={(e) =>
-                setForm((f) => ({ ...f, business_name: e.target.value }))
+                setForm((f) => ({
+                  ...f,
+                  business_name: e.target.value,
+                }))
               }
-              style={sInput}
-            />{" "}
+            />
           </Field>{" "}
           <Field label="Phone">
-            {" "}
-            <input
+            <Input
               value={form.phone}
               onChange={(e) =>
-                setForm((f) => ({ ...f, phone: e.target.value }))
+                setForm((f) => ({
+                  ...f,
+                  phone: e.target.value,
+                }))
               }
-              style={sInput}
-            />{" "}
+            />
           </Field>{" "}
         </FieldGroup>{" "}
         <Field label="Website URL">
-          {" "}
-          <input
+          <Input
             value={form.website_url}
             onChange={(e) =>
-              setForm((f) => ({ ...f, website_url: e.target.value }))
+              setForm((f) => ({
+                ...f,
+                website_url: e.target.value,
+              }))
             }
-            style={sInput}
-          />{" "}
+          />
         </Field>{" "}
         <Field label="Primary Category">
-          {" "}
-          <input
+          <Input
             value={form.primary_category}
             onChange={(e) =>
-              setForm((f) => ({ ...f, primary_category: e.target.value }))
+              setForm((f) => ({
+                ...f,
+                primary_category: e.target.value,
+              }))
             }
-            style={sInput}
             placeholder="e.g. pest_control_service"
-          />{" "}
+          />
         </Field>{" "}
         <Field label="Store Code">
-          {" "}
-          <input
+          <Input
             value={form.store_code}
             onChange={(e) =>
-              setForm((f) => ({ ...f, store_code: e.target.value }))
+              setForm((f) => ({
+                ...f,
+                store_code: e.target.value,
+              }))
             }
-            style={sInput}
             placeholder="Optional identifier"
-          />{" "}
+          />
         </Field>{" "}
         <Field label="Description">
-          {" "}
-          <textarea
+          <Textarea
             value={form.description}
             onChange={(e) =>
-              setForm((f) => ({ ...f, description: e.target.value }))
+              setForm((f) => ({
+                ...f,
+                description: e.target.value,
+              }))
             }
             rows={4}
-            style={{ ...sInput, resize: "vertical" }}
             placeholder="Business description shown on Google..."
-          />{" "}
+            className="resize-y"
+          />
         </Field>{" "}
-        <label
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            cursor: "pointer",
-            fontSize: 13,
-            color: D.text,
-            marginBottom: 16,
-          }}
-        >
+        <label className="flex items-center gap-[10px] cursor-pointer text-ui-body text-zinc-900 mb-[16px]">
           {" "}
-          <input
-            type="checkbox"
+          <Checkbox
             checked={form.hide_address}
             onChange={(e) =>
-              setForm((f) => ({ ...f, hide_address: e.target.checked }))
+              setForm((f) => ({
+                ...f,
+                hide_address: e.target.checked,
+              }))
             }
-            style={{ accentColor: D.teal }}
           />
           Service-Area Business (hide address)
         </label>{" "}
-        <div style={{ display: "flex", gap: 8 }}>
+        <div className="flex gap-[8px]">
           {" "}
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            style={{ ...sBtn(D.teal, D.white), opacity: saving ? 0.5 : 1 }}
-          >
+          <Button onClick={handleSave} disabled={saving} variant="primary">
             {saving ? "Saving..." : "Save Changes"}
-          </button>{" "}
-          <button
+          </Button>{" "}
+          <Button
             onClick={() => showToast("Push to Google to apply changes")}
-            style={sBtnOutline}
+            variant="secondary"
           >
             Push to Google
-          </button>{" "}
+          </Button>{" "}
         </div>{" "}
-      </div>{" "}
+      </Card>{" "}
     </div>
   );
 }
@@ -986,7 +784,6 @@ function HoursTab({ loc, gbp, onSave, showToast }) {
   const [hours, setHours] = useState({});
   const [specialHours, setSpecialHours] = useState([]);
   const [saving, setSaving] = useState(false);
-
   useEffect(() => {
     if (gbp?.regular_hours) {
       const h =
@@ -1003,31 +800,41 @@ function HoursTab({ loc, gbp, onSave, showToast }) {
       setSpecialHours(sh);
     }
   }, [gbp]);
-
   const updateDay = (day, field, value) => {
     setHours((prev) => ({
       ...prev,
-      [day]: { ...(prev[day] || {}), [field]: value },
+      [day]: {
+        ...(prev[day] || {}),
+        [field]: value,
+      },
     }));
   };
-
   const addSpecialHour = () => {
     setSpecialHours((prev) => [
       ...prev,
-      { date: "", open: "08:00", close: "17:00", closed: false },
+      {
+        date: "",
+        open: "08:00",
+        close: "17:00",
+        closed: false,
+      },
     ]);
   };
-
   const updateSpecial = (idx, field, value) => {
     setSpecialHours((prev) =>
-      prev.map((s, i) => (i === idx ? { ...s, [field]: value } : s)),
+      prev.map((s, i) =>
+        i === idx
+          ? {
+              ...s,
+              [field]: value,
+            }
+          : s,
+      ),
     );
   };
-
   const removeSpecial = (idx) => {
     setSpecialHours((prev) => prev.filter((_, i) => i !== idx));
   };
-
   const handleSave = async () => {
     setSaving(true);
     try {
@@ -1048,23 +855,14 @@ function HoursTab({ loc, gbp, onSave, showToast }) {
     }
     setSaving(false);
   };
-
   const isToday = (day) =>
     DAYS[new Date().getDay() === 0 ? 6 : new Date().getDay() - 1] === day;
-
   return (
-    <div style={{ maxWidth: 600 }}>
+    <div className="max-w-[600px]">
       {" "}
-      <div style={sCard}>
+      <Card className="p-5 mb-3">
         {" "}
-        <div
-          style={{
-            fontSize: 16,
-            fontWeight: 500,
-            color: D.heading,
-            marginBottom: 16,
-          }}
-        >
+        <div className="text-ui-body font-medium text-zinc-900 mb-[16px]">
           Regular Hours
         </div>
         {DAYS.map((day) => {
@@ -1073,158 +871,91 @@ function HoursTab({ loc, gbp, onSave, showToast }) {
           return (
             <div
               key={day}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 12,
-                padding: "10px 14px",
-                borderRadius: 8,
-                marginBottom: 4,
-                background: today ? `${D.teal}10` : "transparent",
-                border: today
-                  ? `1px solid ${D.teal}33`
-                  : "1px solid transparent",
-              }}
+              className={`flex items-center gap-3 rounded-md mb-1 border border-hairline px-3 py-2 ${today ? "border-zinc-400 bg-zinc-50" : "border-zinc-200"}`}
             >
               {" "}
-              <span
-                style={{
-                  fontSize: 13,
-                  fontWeight: today ? 600 : 400,
-                  color: today ? D.teal : D.text,
-                  width: 100,
-                  textTransform: "capitalize",
-                }}
-              >
-                {day}
-              </span>{" "}
-              <input
+              <span className="text-ui-body w-[100px]">{day}</span>{" "}
+              <Input
                 type="time"
                 value={h.open || "08:00"}
                 onChange={(e) => updateDay(day, "open", e.target.value)}
-                style={{ ...sInput, width: 120 }}
+                className="w-[120px]"
               />{" "}
-              <span style={{ color: D.muted, fontSize: 12 }}>to</span>{" "}
-              <input
+              <span className="text-ink-secondary text-ui-body">to</span>{" "}
+              <Input
                 type="time"
                 value={h.close || "17:00"}
                 onChange={(e) => updateDay(day, "close", e.target.value)}
-                style={{ ...sInput, width: 120 }}
+                className="w-[120px]"
               />{" "}
             </div>
           );
         })}
-      </div>{" "}
-      <div style={sCard}>
+      </Card>{" "}
+      <Card className="p-5 mb-3">
         {" "}
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            marginBottom: 16,
-          }}
-        >
+        <div className="flex justify-between items-center mb-[16px]">
           {" "}
-          <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
+          <div className="text-ui-body font-medium text-zinc-900">
             Special Hours
           </div>{" "}
-          <button onClick={addSpecialHour} style={sBtn(D.teal, D.white)}>
+          <Button onClick={addSpecialHour} variant="primary">
             + Add
-          </button>{" "}
+          </Button>{" "}
         </div>
         {specialHours.length === 0 ? (
-          <div
-            style={{
-              color: D.muted,
-              fontSize: 13,
-              textAlign: "center",
-              padding: 20,
-            }}
-          >
+          <div className="text-ink-secondary text-ui-body text-center p-[20px]">
             No special hours set. Add holidays, seasonal hours, etc.
           </div>
         ) : (
           specialHours.map((sh, i) => (
             <div
               key={i}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                marginBottom: 8,
-                padding: 10,
-                background: D.input,
-                borderRadius: 8,
-              }}
+              className="flex items-center gap-[8px] mb-[8px] p-[10px] bg-white rounded-md"
             >
               {" "}
-              <input
+              <Input
                 type="date"
                 value={sh.date}
                 onChange={(e) => updateSpecial(i, "date", e.target.value)}
-                style={{ ...sInput, width: 150 }}
+                className="w-[150px]"
               />{" "}
-              <label
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 4,
-                  fontSize: 12,
-                  color: D.muted,
-                  cursor: "pointer",
-                }}
-              >
+              <label className="flex items-center gap-[4px] text-ui-body text-ink-secondary cursor-pointer">
                 {" "}
-                <input
-                  type="checkbox"
+                <Checkbox
                   checked={sh.closed}
                   onChange={(e) => updateSpecial(i, "closed", e.target.checked)}
-                  style={{ accentColor: D.red }}
                 />
                 Closed
               </label>
               {!sh.closed && (
                 <>
                   {" "}
-                  <input
+                  <Input
                     type="time"
                     value={sh.open}
                     onChange={(e) => updateSpecial(i, "open", e.target.value)}
-                    style={{ ...sInput, width: 110 }}
+                    className="w-[110px]"
                   />{" "}
-                  <span style={{ color: D.muted, fontSize: 12 }}>to</span>{" "}
-                  <input
+                  <span className="text-ink-secondary text-ui-body">to</span>{" "}
+                  <Input
                     type="time"
                     value={sh.close}
                     onChange={(e) => updateSpecial(i, "close", e.target.value)}
-                    style={{ ...sInput, width: 110 }}
+                    className="w-[110px]"
                   />{" "}
                 </>
               )}
-              <button
-                onClick={() => removeSpecial(i)}
-                style={{
-                  background: "none",
-                  border: "none",
-                  color: D.red,
-                  cursor: "pointer",
-                  fontSize: 16,
-                }}
-              >
+              <Button onClick={() => removeSpecial(i)} variant="danger">
                 ×
-              </button>{" "}
+              </Button>{" "}
             </div>
           ))
         )}
-      </div>{" "}
-      <button
-        onClick={handleSave}
-        disabled={saving}
-        style={{ ...sBtn(D.teal, D.white), opacity: saving ? 0.5 : 1 }}
-      >
+      </Card>{" "}
+      <Button onClick={handleSave} disabled={saving} variant="primary">
         {saving ? "Saving..." : "Save Hours"}
-      </button>{" "}
+      </Button>{" "}
     </div>
   );
 }
@@ -1238,7 +969,6 @@ function ServicesTab({ loc, gbp, onSave, showToast }) {
   const [newService, setNewService] = useState("");
   const [saving, setSaving] = useState(false);
   const [loadingSugg, setLoadingSugg] = useState(false);
-
   useEffect(() => {
     if (gbp?.services) {
       const s =
@@ -1248,7 +978,6 @@ function ServicesTab({ loc, gbp, onSave, showToast }) {
       setServices(s);
     }
   }, [gbp]);
-
   const loadSuggestions = async () => {
     setLoadingSugg(true);
     try {
@@ -1261,21 +990,17 @@ function ServicesTab({ loc, gbp, onSave, showToast }) {
     }
     setLoadingSugg(false);
   };
-
   useEffect(() => {
     loadSuggestions();
   }, [gbp?.primary_category]);
-
   const addService = (name) => {
     if (!name.trim() || services.includes(name.trim())) return;
     setServices((prev) => [...prev, name.trim()]);
     setNewService("");
   };
-
   const removeService = (idx) => {
     setServices((prev) => prev.filter((_, i) => i !== idx));
   };
-
   const handleSave = async () => {
     setSaving(true);
     try {
@@ -1290,148 +1015,89 @@ function ServicesTab({ loc, gbp, onSave, showToast }) {
     }
     setSaving(false);
   };
-
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-[16px]">
       {/* Current services */}
-      <div style={sCard}>
+      <Card className="p-5 mb-3">
         {" "}
-        <div
-          style={{
-            fontSize: 16,
-            fontWeight: 500,
-            color: D.heading,
-            marginBottom: 16,
-          }}
-        >
+        <div className="text-ui-body font-medium text-zinc-900 mb-[16px]">
           Current Services ({services.length})
         </div>{" "}
-        <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+        <div className="flex gap-[8px] mb-[16px]">
           {" "}
-          <input
+          <Input
             value={newService}
             onChange={(e) => setNewService(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && addService(newService)}
             placeholder="Add a service..."
-            style={{ ...sInput, flex: 1 }}
+            className="flex-[1]"
           />{" "}
-          <button
-            onClick={() => addService(newService)}
-            style={sBtn(D.teal, D.white)}
-          >
+          <Button onClick={() => addService(newService)} variant="primary">
             Add
-          </button>{" "}
+          </Button>{" "}
         </div>
         {services.length === 0 ? (
-          <div
-            style={{
-              color: D.muted,
-              fontSize: 13,
-              textAlign: "center",
-              padding: 20,
-            }}
-          >
+          <div className="text-ink-secondary text-ui-body text-center p-[20px]">
             No services listed yet
           </div>
         ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <div className="flex flex-col gap-[4px]">
             {services.map((s, i) => (
               <div
                 key={i}
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  padding: "8px 12px",
-                  background: D.input,
-                  borderRadius: 8,
-                  fontSize: 13,
-                  color: D.text,
-                }}
+                className="flex justify-between items-center bg-white rounded-md text-ui-body text-zinc-900"
               >
                 {s}
-                <button
-                  onClick={() => removeService(i)}
-                  style={{
-                    background: "none",
-                    border: "none",
-                    color: D.red,
-                    cursor: "pointer",
-                    fontSize: 14,
-                  }}
-                >
+                <Button onClick={() => removeService(i)} variant="danger">
                   ×
-                </button>{" "}
+                </Button>{" "}
               </div>
             ))}
           </div>
         )}
-        <button
+        <Button
           onClick={handleSave}
           disabled={saving}
-          style={{
-            ...sBtn(D.teal, D.white),
-            marginTop: 16,
-            opacity: saving ? 0.5 : 1,
-          }}
+          variant="primary"
+          className="mt-[16px]"
         >
           {saving ? "Saving..." : "Save Services"}
-        </button>{" "}
-      </div>
+        </Button>{" "}
+      </Card>
       {/* Suggested services */}
-      <div style={sCard}>
+      <Card className="p-5 mb-3">
         {" "}
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            marginBottom: 16,
-          }}
-        >
+        <div className="flex justify-between items-center mb-[16px]">
           {" "}
-          <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
+          <div className="text-ui-body font-medium text-zinc-900">
             Google Suggestions
           </div>{" "}
-          <button
+          <Button
             onClick={loadSuggestions}
             disabled={loadingSugg}
-            style={sBtnOutline}
+            variant="secondary"
           >
             {loadingSugg ? "Loading..." : "Refresh"}
-          </button>{" "}
+          </Button>{" "}
         </div>{" "}
-        <div style={{ fontSize: 12, color: D.muted, marginBottom: 12 }}>
+        <div className="text-ui-body text-ink-secondary mb-[12px]">
           Click to add to your profile
         </div>{" "}
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+        <div className="flex flex-wrap gap-[6px]">
           {suggestions
             .filter((s) => !services.includes(s))
             .map((s, i) => (
-              <button
-                key={i}
-                onClick={() => addService(s)}
-                style={{
-                  padding: "6px 12px",
-                  borderRadius: 20,
-                  border: `1px solid ${D.border}`,
-                  background: "transparent",
-                  color: D.muted,
-                  fontSize: 12,
-                  cursor: "pointer",
-                  transition: "all .15s",
-                }}
-              >
+              <Button key={i} onClick={() => addService(s)} variant="secondary">
                 {s}
-              </button>
+              </Button>
             ))}
           {suggestions.length === 0 && (
-            <div style={{ color: D.muted, fontSize: 13 }}>
+            <div className="text-ink-secondary text-ui-body">
               No suggestions available
             </div>
           )}
         </div>{" "}
-      </div>{" "}
+      </Card>{" "}
     </div>
   );
 }
@@ -1446,73 +1112,48 @@ function PhotosTab({ loc, gbp }) {
       typeof gbp.photos === "string" ? JSON.parse(gbp.photos) : gbp.photos;
     return p.length > 0 ? p : loc.photos || [];
   }, [gbp, loc]);
-
   return (
     <div>
       {" "}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          marginBottom: 16,
-        }}
-      >
+      <div className="flex justify-between items-center mb-[16px]">
         {" "}
-        <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
+        <div className="text-ui-body font-medium text-zinc-900">
           {loc.name} Photos ({photos.length})
         </div>{" "}
         <a
           href={`https://business.google.com/photos/l/${loc.googlePlaceId}`}
+          className={buttonStyles({
+            variant: "secondary",
+            density: "comfortable",
+          })}
           target="_blank"
           rel="noopener noreferrer"
-          style={{ ...sBtnOutline, textDecoration: "none" }}
         >
           Manage on Google
         </a>{" "}
       </div>
       {photos.length === 0 ? (
-        <div
-          style={{ ...sCard, textAlign: "center", padding: 40, color: D.muted }}
-        >
+        <Card className="mb-3 text-center p-[40px] text-ink-secondary">
           No photos found
-        </div>
+        </Card>
       ) : (
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
-            gap: 12,
-          }}
-        >
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-[12px]">
           {photos.map((photo, i) => (
             <div
               key={i}
-              style={{
-                borderRadius: 10,
-                overflow: "hidden",
-                border: `1px solid ${D.border}`,
-                background: D.card,
-              }}
+              className="rounded-md overflow-hidden border-hairline border-zinc-200 bg-white"
             >
               {" "}
               <img
                 src={photo.url || photo.name}
                 alt={`${loc.name} photo ${i + 1}`}
-                style={{
-                  width: "100%",
-                  height: 180,
-                  objectFit: "cover",
-                  display: "block",
-                }}
                 loading="lazy"
                 onError={(e) => {
                   e.target.style.display = "none";
                 }}
+                className="w-full h-[180px] block object-cover"
               />{" "}
-              <div
-                style={{ padding: "8px 10px", fontSize: 11, color: D.muted }}
-              >
+              <div className="text-ui-body text-ink-secondary">
                 {photo.widthPx || photo.width}x{photo.heightPx || photo.height}
               </div>{" "}
             </div>
@@ -1534,7 +1175,6 @@ function UpdateQueueTab({
   onBulkReject,
 }) {
   const [selectedIds, setSelectedIds] = useState(new Set());
-
   const toggleSel = (id) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -1543,198 +1183,96 @@ function UpdateQueueTab({
       return next;
     });
   };
-
   const locName = (id) => locations.find((l) => l.id === id)?.name || id;
   const fieldLabel = (f) =>
     f.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-
   return (
     <div>
       {" "}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          marginBottom: 16,
-        }}
-      >
+      <div className="flex justify-between items-center mb-[16px]">
         {" "}
-        <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
+        <div className="text-ui-body font-medium text-zinc-900">
           Pending Updates ({updates.length})
         </div>
         {selectedIds.size > 0 && (
-          <button
+          <Button
             onClick={() => {
               onBulkReject([...selectedIds]);
               setSelectedIds(new Set());
             }}
-            style={sBtn(D.red, D.white)}
+            variant="danger"
           >
             Reject Selected ({selectedIds.size})
-          </button>
+          </Button>
         )}
       </div>
       {updates.length === 0 ? (
-        <div
-          style={{ ...sCard, textAlign: "center", padding: 40, color: D.muted }}
-        >
+        <Card className="mb-3 text-center p-[40px] text-ink-secondary">
           {" "}
-          <div style={{ fontSize: 24, marginBottom: 8 }}></div>{" "}
-          <div style={{ fontSize: 15 }}>No pending updates</div>{" "}
-          <div style={{ fontSize: 13, marginTop: 4 }}>
+          <div className="text-[24px] mb-[8px]"></div>{" "}
+          <div className="text-ui-body">No pending updates</div>{" "}
+          <div className="text-ui-body mt-[4px]">
             All changes have been reviewed
           </div>{" "}
-        </div>
+        </Card>
       ) : (
-        <div style={{ display: "grid", gap: 8 }}>
+        <div className="grid gap-[8px]">
           {updates.map((u) => (
-            <div
-              key={u.id}
-              style={{
-                ...sCard,
-                marginBottom: 0,
-                display: "flex",
-                alignItems: "flex-start",
-                gap: 12,
-                borderColor: D.amber + "44",
-              }}
-            >
+            <Card key={u.id} className="p-5 flex items-start gap-[12px]">
               {" "}
-              <input
-                type="checkbox"
+              <Checkbox
                 checked={selectedIds.has(u.id)}
                 onChange={() => toggleSel(u.id)}
-                style={{ accentColor: D.teal, marginTop: 4, cursor: "pointer" }}
+                className="mt-[4px] cursor-pointer"
               />{" "}
-              <div style={{ flex: 1 }}>
+              <div className="flex-[1]">
                 {" "}
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                    marginBottom: 6,
-                  }}
-                >
+                <div className="flex justify-between items-center mb-[6px]">
                   {" "}
-                  <div
-                    style={{ display: "flex", alignItems: "center", gap: 8 }}
-                  >
+                  <div className="flex items-center gap-[8px]">
                     {" "}
-                    <span
-                      style={{
-                        fontSize: 13,
-                        fontWeight: 500,
-                        color: D.heading,
-                      }}
-                    >
+                    <span className="text-ui-body font-medium text-zinc-900">
                       {fieldLabel(u.field_name)}
                     </span>{" "}
-                    <span style={sBadge(`${D.teal}22`, D.teal)}>
-                      {locName(u.location_id)}
-                    </span>{" "}
-                    <span style={sBadge(`${D.purple}22`, D.purple)}>
-                      {u.source}
-                    </span>{" "}
+                    <Badge tone="neutral">{locName(u.location_id)}</Badge>{" "}
+                    <Badge tone="neutral">{u.source}</Badge>{" "}
                   </div>{" "}
-                  <span
-                    style={{
-                      fontSize: 11,
-                      color: D.muted,
-                      fontFamily: "'JetBrains Mono', monospace",
-                    }}
-                  >
+                  <span className="text-ui-body text-ink-secondary">
                     {new Date(u.detected_at).toLocaleString()}
                   </span>{" "}
                 </div>{" "}
-                <div
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "1fr 1fr",
-                    gap: 8,
-                    fontSize: 12,
-                  }}
-                >
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-[8px] text-ui-body">
                   {" "}
-                  <div
-                    style={{
-                      padding: 10,
-                      background: `${D.red}11`,
-                      borderRadius: 8,
-                      border: `1px solid ${D.red}22`,
-                    }}
-                  >
+                  <div className="p-[10px] rounded-md border-hairline border-zinc-200">
                     {" "}
-                    <div
-                      style={{
-                        fontSize: 11,
-                        color: D.red,
-                        fontWeight: 500,
-                        marginBottom: 4,
-                      }}
-                    >
+                    <div className="text-ui-body text-ink-secondary font-medium mb-[4px]">
                       OLD VALUE
                     </div>{" "}
-                    <div
-                      style={{
-                        color: D.muted,
-                        wordBreak: "break-all",
-                        maxHeight: 60,
-                        overflow: "hidden",
-                      }}
-                    >
+                    <div className="text-ink-secondary max-h-[60px] overflow-hidden break-all">
                       {u.old_value || "(empty)"}
                     </div>{" "}
                   </div>{" "}
-                  <div
-                    style={{
-                      padding: 10,
-                      background: `${D.green}11`,
-                      borderRadius: 8,
-                      border: `1px solid ${D.green}22`,
-                    }}
-                  >
+                  <div className="p-[10px] rounded-md border-hairline border-zinc-200">
                     {" "}
-                    <div
-                      style={{
-                        fontSize: 11,
-                        color: D.green,
-                        fontWeight: 500,
-                        marginBottom: 4,
-                      }}
-                    >
+                    <div className="text-ui-body text-zinc-900 font-medium mb-[4px]">
                       NEW VALUE
                     </div>{" "}
-                    <div
-                      style={{
-                        color: D.text,
-                        wordBreak: "break-all",
-                        maxHeight: 60,
-                        overflow: "hidden",
-                      }}
-                    >
+                    <div className="text-zinc-900 max-h-[60px] overflow-hidden break-all">
                       {u.new_value || "(empty)"}
                     </div>{" "}
                   </div>{" "}
                 </div>{" "}
               </div>{" "}
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <div className="flex flex-col gap-[6px]">
                 {" "}
-                <button
-                  onClick={() => onApprove(u.id)}
-                  style={sBtn(D.green, D.white)}
-                >
+                <Button onClick={() => onApprove(u.id)} variant="primary">
                   Approve
-                </button>{" "}
-                <button
-                  onClick={() => onReject(u.id)}
-                  style={sBtn(D.red, D.white)}
-                >
+                </Button>{" "}
+                <Button onClick={() => onReject(u.id)} variant="danger">
                   Reject
-                </button>{" "}
+                </Button>{" "}
               </div>{" "}
-            </div>
+            </Card>
           ))}
         </div>
       )}
@@ -1755,142 +1293,90 @@ function ChangeHistoryTab({
   const locName = (id) => locations.find((l) => l.id === id)?.name || id;
   const fieldLabel = (f) =>
     f.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-  const statusColor = { pending: D.amber, approved: D.green, rejected: D.red };
-
+  // Main colored pending amber, approved green, rejected red; approved
+  // (done) gets strong, pending gets warn, rejected keeps the genuine-alert
+  // tone.
+  const statusTone = (status) =>
+    status === "approved"
+      ? "strong"
+      : status === "rejected"
+        ? "alert"
+        : status === "pending"
+          ? "warn"
+          : "neutral";
   useEffect(() => {
     loadUpdates(filter);
   }, [filter, loadUpdates]);
-
   return (
     <div>
       {" "}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          marginBottom: 16,
-        }}
-      >
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-[16px]">
         {" "}
-        <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
+        <div className="text-ui-body font-medium text-zinc-900">
           Change History
         </div>{" "}
-        <div style={{ display: "flex", gap: 4 }}>
+        <div className="flex flex-wrap gap-[4px]">
           {["all", "pending", "approved", "rejected"].map((f) => (
-            <button
+            <Button
               key={f}
               onClick={() => {
                 setFilter(f === "all" ? "" : f);
               }}
-              style={{
-                padding: "6px 12px",
-                borderRadius: 20,
-                border: `1px solid ${(filter || "") === (f === "all" ? "" : f) ? D.teal : D.border}`,
-                background:
-                  (filter || "") === (f === "all" ? "" : f)
-                    ? `${D.teal}15`
-                    : "transparent",
-                color:
-                  (filter || "") === (f === "all" ? "" : f) ? D.teal : D.muted,
-                fontSize: 12,
-                cursor: "pointer",
-                textTransform: "capitalize",
-              }}
+              variant={
+                (filter || "") === (f === "all" ? "" : f)
+                  ? "primary"
+                  : "secondary"
+              }
             >
               {f}
-            </button>
+            </Button>
           ))}
         </div>{" "}
       </div>{" "}
-      <table style={{ width: "100%", borderCollapse: "collapse" }}>
-        {" "}
-        <thead>
-          {" "}
-          <tr>
+      <Table className="w-full">
+        <THead>
+          <TR>
             {["Location", "Field", "Source", "Status", "Old → New", "Date"].map(
               (h) => (
-                <th
-                  key={h}
-                  style={{
-                    fontSize: 11,
-                    color: D.muted,
-                    textTransform: "uppercase",
-                    letterSpacing: 1,
-                    textAlign: "left",
-                    padding: "8px 10px",
-                    borderBottom: `1px solid ${D.border}`,
-                  }}
-                >
+                <TH key={h} className="text-ink-secondary text-left">
                   {h}
-                </th>
+                </TH>
               ),
             )}
-          </tr>{" "}
-        </thead>{" "}
-        <tbody>
+          </TR>
+        </THead>
+        <TBody>
           {updates.map((u) => (
-            <tr key={u.id} style={{ borderBottom: `1px solid ${D.border}22` }}>
-              {" "}
-              <td style={{ padding: "10px", fontSize: 13 }}>
-                {locName(u.location_id)}
-              </td>{" "}
-              <td style={{ padding: "10px", fontSize: 13, color: D.teal }}>
-                {fieldLabel(u.field_name)}
-              </td>{" "}
-              <td style={{ padding: "10px" }}>
-                <span style={sBadge(`${D.purple}22`, D.purple)}>
-                  {u.source}
-                </span>
-              </td>{" "}
-              <td style={{ padding: "10px" }}>
-                <span
-                  style={sBadge(
-                    `${statusColor[u.status]}22`,
-                    statusColor[u.status],
-                  )}
-                >
-                  {u.status}
-                </span>
-              </td>{" "}
-              <td
-                style={{
-                  padding: "10px",
-                  fontSize: 11,
-                  color: D.muted,
-                  maxWidth: 250,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
+            <TR key={u.id}>
+              <TD>{locName(u.location_id)}</TD>
+              <TD className="text-zinc-900">{fieldLabel(u.field_name)}</TD>
+              <TD>
+                <Badge tone="neutral">{u.source}</Badge>
+              </TD>
+              <TD>
+                <Badge tone={statusTone(u.status)}>{u.status}</Badge>
+              </TD>
+              <TD className="text-ink-secondary max-w-[250px] overflow-hidden whitespace-nowrap">
                 {(u.old_value || "").substring(0, 30)} →{" "}
                 {(u.new_value || "").substring(0, 30)}
-              </td>{" "}
-              <td
-                style={{
-                  padding: "10px",
-                  fontSize: 11,
-                  color: D.muted,
-                  fontFamily: "'JetBrains Mono', monospace",
-                }}
-              >
+              </TD>
+              <TD className="text-ink-secondary">
                 {new Date(u.detected_at).toLocaleDateString()}
-              </td>{" "}
-            </tr>
+              </TD>
+            </TR>
           ))}
           {updates.length === 0 && (
-            <tr>
-              <td
+            <TR>
+              <TD
                 colSpan={6}
-                style={{ padding: 30, textAlign: "center", color: D.muted }}
+                className="p-[30px] text-center text-ink-secondary"
               >
                 No changes found
-              </td>
-            </tr>
+              </TD>
+            </TR>
           )}
-        </tbody>{" "}
-      </table>{" "}
+        </TBody>
+      </Table>{" "}
     </div>
   );
 }
@@ -1903,15 +1389,28 @@ function BulkEditTab({ locations, onSave, showToast }) {
   const [field, setField] = useState("description");
   const [value, setValue] = useState("");
   const [saving, setSaving] = useState(false);
-
   const fields = [
-    { value: "description", label: "Description" },
-    { value: "phone", label: "Phone" },
-    { value: "website_url", label: "Website URL" },
-    { value: "services", label: "Services (JSON)" },
-    { value: "hide_address", label: "Hide Address" },
+    {
+      value: "description",
+      label: "Description",
+    },
+    {
+      value: "phone",
+      label: "Phone",
+    },
+    {
+      value: "website_url",
+      label: "Website URL",
+    },
+    {
+      value: "services",
+      label: "Services (JSON)",
+    },
+    {
+      value: "hide_address",
+      label: "Hide Address",
+    },
   ];
-
   const toggleLoc = (id) => {
     setSelectedLocs((prev) => {
       const n = new Set(prev);
@@ -1920,12 +1419,10 @@ function BulkEditTab({ locations, onSave, showToast }) {
       return n;
     });
   };
-
   const selectAll = () => {
     if (selectedLocs.size === locations.length) setSelectedLocs(new Set());
     else setSelectedLocs(new Set(locations.map((l) => l.id)));
   };
-
   const handleApply = async () => {
     if (selectedLocs.size === 0) {
       showToast("Select at least one location");
@@ -1951,58 +1448,33 @@ function BulkEditTab({ locations, onSave, showToast }) {
     }
     setSaving(false);
   };
-
   return (
-    <div style={{ maxWidth: 700 }}>
+    <div className="max-w-[700px]">
       {" "}
-      <div style={sCard}>
+      <Card className="p-5 mb-3">
         {" "}
-        <div
-          style={{
-            fontSize: 16,
-            fontWeight: 500,
-            color: D.heading,
-            marginBottom: 16,
-          }}
-        >
+        <div className="text-ui-body font-medium text-zinc-900 mb-[16px]">
           Bulk Edit Locations
         </div>{" "}
-        <div style={{ marginBottom: 16 }}>
+        <div className="mb-[16px]">
           {" "}
-          <span style={sLabel}>Select Locations</span>{" "}
-          <div
-            style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 4 }}
-          >
+          <span>Select Locations</span>{" "}
+          <div className="flex gap-[8px] flex-wrap mt-[4px]">
             {" "}
-            <button onClick={selectAll} style={sBtnOutline}>
+            <Button onClick={selectAll} variant="secondary">
               {selectedLocs.size === locations.length
                 ? "Deselect All"
                 : "Select All"}
-            </button>
+            </Button>
             {locations.map((l) => (
               <label
                 key={l.id}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 6,
-                  cursor: "pointer",
-                  fontSize: 13,
-                  color: selectedLocs.has(l.id) ? D.teal : D.muted,
-                  padding: "6px 12px",
-                  borderRadius: 8,
-                  border: `1px solid ${selectedLocs.has(l.id) ? D.teal : D.border}`,
-                  background: selectedLocs.has(l.id)
-                    ? `${D.teal}11`
-                    : "transparent",
-                }}
+                className="flex items-center gap-[6px] cursor-pointer text-ui-body rounded-md border-hairline border-zinc-200"
               >
                 {" "}
-                <input
-                  type="checkbox"
+                <Checkbox
                   checked={selectedLocs.has(l.id)}
                   onChange={() => toggleLoc(l.id)}
-                  style={{ accentColor: D.teal }}
                 />
                 {l.name}
               </label>
@@ -2012,59 +1484,45 @@ function BulkEditTab({ locations, onSave, showToast }) {
         <FieldGroup>
           {" "}
           <Field label="Field to Edit">
-            {" "}
-            <select
-              value={field}
-              onChange={(e) => setField(e.target.value)}
-              style={{ ...sInput, cursor: "pointer" }}
-            >
+            <Select value={field} onChange={(e) => setField(e.target.value)}>
               {fields.map((f) => (
                 <option key={f.value} value={f.value}>
                   {f.label}
                 </option>
               ))}
-            </select>{" "}
+            </Select>
           </Field>{" "}
         </FieldGroup>{" "}
         <Field label="New Value">
           {field === "description" ? (
-            <textarea
+            <Textarea
               value={value}
               onChange={(e) => setValue(e.target.value)}
               rows={4}
-              style={{ ...sInput, resize: "vertical" }}
               placeholder="Enter the value to apply to all selected locations..."
+              className="resize-y"
             />
           ) : field === "hide_address" ? (
-            <select
-              value={value}
-              onChange={(e) => setValue(e.target.value)}
-              style={{ ...sInput, cursor: "pointer" }}
-            >
-              {" "}
-              <option value="false">Show Address</option>{" "}
-              <option value="true">Hide Address (SAB)</option>{" "}
-            </select>
+            <Select value={value} onChange={(e) => setValue(e.target.value)}>
+              <option value="false">Show Address</option>
+              <option value="true">Hide Address (SAB)</option>
+            </Select>
           ) : (
-            <input
+            <Input
               value={value}
               onChange={(e) => setValue(e.target.value)}
-              style={sInput}
               placeholder="Enter value..."
             />
           )}
         </Field>{" "}
-        <button
+        <Button
           onClick={handleApply}
           disabled={saving || selectedLocs.size === 0}
-          style={{
-            ...sBtn(D.teal, D.white),
-            opacity: saving || selectedLocs.size === 0 ? 0.5 : 1,
-          }}
+          variant="primary"
         >
           {saving ? "Applying..." : `Apply to ${selectedLocs.size} Location(s)`}
-        </button>{" "}
-      </div>{" "}
+        </Button>{" "}
+      </Card>{" "}
     </div>
   );
 }
@@ -2079,7 +1537,6 @@ function NotificationsTab({ showToast }) {
     enabled: true,
   });
   const [saving, setSaving] = useState(false);
-
   useEffect(() => {
     adminFetch("/admin/gbp/notifications?email=admin@wavespestcontrol.com")
       .then((d) => {
@@ -2087,7 +1544,6 @@ function NotificationsTab({ showToast }) {
       })
       .catch(() => {});
   }, []);
-
   const handleSave = async () => {
     setSaving(true);
     try {
@@ -2105,7 +1561,6 @@ function NotificationsTab({ showToast }) {
     }
     setSaving(false);
   };
-
   const fieldOptions = [
     "business_name",
     "phone",
@@ -2118,7 +1573,6 @@ function NotificationsTab({ showToast }) {
     "services",
     "attributes",
   ];
-
   const toggleField = (f) => {
     const filters = prefs.field_filters || [];
     if (filters.includes(f))
@@ -2126,119 +1580,81 @@ function NotificationsTab({ showToast }) {
         ...p,
         field_filters: filters.filter((x) => x !== f),
       }));
-    else setPrefs((p) => ({ ...p, field_filters: [...filters, f] }));
+    else
+      setPrefs((p) => ({
+        ...p,
+        field_filters: [...filters, f],
+      }));
   };
-
   return (
-    <div style={{ maxWidth: 600 }}>
+    <div className="max-w-[600px]">
       {" "}
-      <div style={sCard}>
+      <Card className="p-5 mb-3">
         {" "}
-        <div
-          style={{
-            fontSize: 16,
-            fontWeight: 500,
-            color: D.heading,
-            marginBottom: 16,
-          }}
-        >
+        <div className="text-ui-body font-medium text-zinc-900 mb-[16px]">
           GBP Change Alerts
         </div>{" "}
-        <label
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            cursor: "pointer",
-            fontSize: 14,
-            color: D.text,
-            marginBottom: 16,
-          }}
-        >
+        <label className="flex items-center gap-[10px] cursor-pointer text-ui-body text-zinc-900 mb-[16px]">
           {" "}
-          <input
-            type="checkbox"
+          <Checkbox
             checked={prefs.enabled}
             onChange={(e) =>
-              setPrefs((p) => ({ ...p, enabled: e.target.checked }))
+              setPrefs((p) => ({
+                ...p,
+                enabled: e.target.checked,
+              }))
             }
-            style={{ accentColor: D.teal, width: 18, height: 18 }}
+            className="w-[18px] h-[18px]"
           />
           Enable notifications
         </label>{" "}
         <Field label="Frequency">
-          {" "}
-          <select
+          <Select
             value={prefs.frequency}
             onChange={(e) =>
-              setPrefs((p) => ({ ...p, frequency: e.target.value }))
+              setPrefs((p) => ({
+                ...p,
+                frequency: e.target.value,
+              }))
             }
-            style={{ ...sInput, cursor: "pointer" }}
           >
-            {" "}
-            <option value="realtime">Real-time (every change)</option>{" "}
-            <option value="daily">Daily digest</option>{" "}
-            <option value="weekly">Weekly digest</option>{" "}
-            <option value="monthly">Monthly digest</option>{" "}
-          </select>{" "}
+            <option value="realtime">Real-time (every change)</option>
+            <option value="daily">Daily digest</option>
+            <option value="weekly">Weekly digest</option>
+            <option value="monthly">Monthly digest</option>
+          </Select>
         </Field>{" "}
-        <div style={{ marginBottom: 16 }}>
+        <div className="mb-[16px]">
           {" "}
-          <span style={sLabel}>
+          <span>
             Alert on these fields only (leave empty = all fields)
           </span>{" "}
-          <div
-            style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}
-          >
+          <div className="flex flex-wrap gap-[6px] mt-[8px]">
             {fieldOptions.map((f) => {
               const active = (prefs.field_filters || []).includes(f);
               return (
-                <button
+                <Button
                   key={f}
                   onClick={() => toggleField(f)}
-                  style={{
-                    padding: "6px 12px",
-                    borderRadius: 20,
-                    fontSize: 12,
-                    cursor: "pointer",
-                    border: `1px solid ${active ? D.teal : D.border}`,
-                    background: active ? `${D.teal}15` : "transparent",
-                    color: active ? D.teal : D.muted,
-                    textTransform: "capitalize",
-                  }}
+                  variant={active ? "primary" : "secondary"}
                 >
                   {f.replace(/_/g, " ")}
-                </button>
+                </Button>
               );
             })}
           </div>{" "}
         </div>{" "}
-        <button
-          onClick={handleSave}
-          disabled={saving}
-          style={{ ...sBtn(D.teal, D.white), opacity: saving ? 0.5 : 1 }}
-        >
+        <Button onClick={handleSave} disabled={saving} variant="primary">
           {saving ? "Saving..." : "Save Preferences"}
-        </button>{" "}
-      </div>{" "}
+        </Button>{" "}
+      </Card>{" "}
     </div>
   );
 }
 
 // ── Shared layout helpers ──
-function Field({ label, children }) {
-  return (
-    <div style={{ marginBottom: 16 }}>
-      <span style={sLabel}>{label}</span>
-      {children}
-    </div>
-  );
-}
-
 function FieldGroup({ children }) {
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-      {children}
-    </div>
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-[12px]">{children}</div>
   );
 }
