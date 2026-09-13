@@ -1441,8 +1441,13 @@ function reportSharedLocationContinuation(text, clauseEnd, location) {
       + `${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+(?:(?:the|a|an)\\s+)?(?:${location}))`,
     'i',
   ).exec(remainder);
-  if (!locationTail || /^\s+(?:(?:perimeter|area|wall|walls|zone|edge)\s+)?(?:was|were|is|are|has|have|had|will|can|could|would|should)\b/i
-    .test(remainder.slice(locationTail[0].length))) return { text: '', question: false };
+  if (!locationTail) return { text: '', question: false };
+  const qualifier = remainder.slice(locationTail[0].length).trim()
+    .replace(/^(?:perimeter|area|wall|walls|zone|edge)\b\s*/i, '');
+  // A shared list ends the location noun or adds an adjunct, not a new predicate.
+  if (!/^(?:$|[.!?;]|(?:,\s*)?(?:and|or|before|after|with|as|according|which)\b)/i.test(qualifier)) {
+    return { text: '', question: false };
+  }
   const end = remainder.search(/[.!?;]/);
   return {
     text: remainder.slice(0, end >= 0 ? end : undefined),

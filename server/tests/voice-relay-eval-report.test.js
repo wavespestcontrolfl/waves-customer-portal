@@ -41,6 +41,8 @@ test.each([
   ['Talstar P was applied to the garage and the exterior perimeter was left untreated.', 'fail'],
   ['Talstar P was applied to the garage and the exterior perimeter was inspected.', 'fail'],
   ['Talstar P was applied to the garage and the exterior perimeter was skipped.', 'fail'],
+  ['Talstar P was applied to the garage and the exterior perimeter remained untreated.', 'fail'],
+  ['Talstar P was applied to the garage and the exterior perimeter stayed untreated.', 'fail'],
   ['Talstar P was applied indoors, bait was placed on the exterior perimeter.', 'fail'],
   ['Talstar P was applied indoors, the exterior perimeter received bait.', 'fail'],
   ['Talstar P was applied indoors, with the exterior perimeter receiving bait.', 'fail'],
