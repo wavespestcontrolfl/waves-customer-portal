@@ -2,13 +2,21 @@
 import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { MemoryRouter } from "react-router-dom";
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import EstimatesPageV2 from "./EstimatesPageV2";
 import {
   IntelligenceBarPageDataProvider,
   useIntelligenceBarActions,
 } from "../../hooks/useIntelligenceBarPageData";
+
+const appointmentModalState = vi.hoisted(() => ({ props: null }));
+vi.mock("../../components/schedule/CreateAppointmentModal", () => ({
+  default: (props) => {
+    appointmentModalState.props = props;
+    return <div role="dialog">Schedule appointment</div>;
+  },
+}));
 
 function SavedAction() {
   const { notifyMutation } = useIntelligenceBarActions();
@@ -188,6 +196,71 @@ describe("estimate filter request recovery", () => {
   });
 });
 
+it("keeps a reopened estimate booking draft while a cancelled booking refreshes", async () => {
+  const refresh = deferred();
+  mount(1440);
+  await screen.findByText("Synthetic Active");
+  fireEvent.click(screen.getByRole("button", { name: "Schedule", exact: true }));
+  const firstOnChange = appointmentModalState.props.onChange;
+  act(() => appointmentModalState.props.onClose());
+  fireEvent.click(screen.getByRole("button", { name: "Schedule", exact: true }));
+  expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+  loadActive.mockReturnValueOnce(refresh.promise);
+  act(() => firstOnChange({ id: "appointment-1" }, { background: true }));
+  expect(screen.getByRole("dialog")).toBeInTheDocument();
+  expect(screen.getByText("Synthetic Active")).toBeInTheDocument();
+  expect(screen.queryByText("Loading estimates…")).not.toBeInTheDocument();
+  await act(async () => {
+    refresh.resolve(response({
+      estimates: [{ ...active, customerName: "Background estimate refresh" }],
+    }));
+  });
+  expect(await screen.findByText("Background estimate refresh")).toBeInTheDocument();
+  expect(screen.getByRole("dialog")).toBeInTheDocument();
+});
+
+it.each(["success", "failure"])(
+  "lets an overlapping foreground %s settle before a queued silent refresh failure",
+  async (outcome) => {
+    const foreground = deferred();
+    const silent = deferred();
+    mount(1440);
+    await screen.findByText("Synthetic Active");
+    fireEvent.click(screen.getByRole("button", { name: "Schedule", exact: true }));
+    const lateRefresh = appointmentModalState.props.onChange;
+    act(() => appointmentModalState.props.onClose());
+
+    loadArchive
+      .mockReturnValueOnce(foreground.promise)
+      .mockReturnValueOnce(silent.promise);
+    fireEvent.click(screen.getByRole("button", { name: "Archived", exact: true }));
+    await screen.findByText("Loading estimates…");
+    act(() => lateRefresh({}, { background: true }));
+    expect(loadArchive).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      foreground.resolve(outcome === "success"
+        ? response({ estimates: [{ ...archived, customerName: "Foreground archive" }] })
+        : response({ error: "Foreground unavailable" }, 503));
+    });
+    if (outcome === "success") await screen.findByText("Foreground archive");
+    else await screen.findByText("Foreground unavailable");
+    await waitFor(() => expect(loadArchive).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      silent.resolve(response({ error: "Silent unavailable" }, 503));
+    });
+    if (outcome === "success") {
+      expect(screen.getByText("Foreground archive")).toBeInTheDocument();
+      expect(screen.queryByText(/^No estimates in "Archived"/)).not.toBeInTheDocument();
+    } else {
+      expect(screen.getByText("Foreground unavailable")).toBeInTheDocument();
+      expect(screen.queryByText(/Silent unavailable/)).not.toBeInTheDocument();
+    }
+  },
+);
+
 it.each([1440, 390])(
   "refreshes the %i-wide estimate list after a persisted assistant outcome",
   async (width) => {
@@ -211,3 +284,18 @@ it.each([1440, 390])(
     expect(screen.queryByText("Synthetic Active")).not.toBeInTheDocument();
   },
 );
+
+
+it("recovers a failed filter when a late booking refresh succeeds", async () => {
+  mount(1440);
+  await screen.findByText("Synthetic Active");
+  fireEvent.click(screen.getByRole("button", { name: "Schedule", exact: true }));
+  const lateRefresh = appointmentModalState.props.onChange;
+  act(() => appointmentModalState.props.onClose());
+  loadArchive.mockResolvedValueOnce(response({ error: "Archive unavailable" }, 503));
+  fireEvent.click(screen.getByRole("button", { name: "Archived", exact: true }));
+  await screen.findByText("Failed to load estimates");
+  act(() => lateRefresh({}, { background: true }));
+  expect(await screen.findByText("Synthetic Archived")).toBeInTheDocument();
+  expect(screen.queryByText("Failed to load estimates")).not.toBeInTheDocument();
+});
