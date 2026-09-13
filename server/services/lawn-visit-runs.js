@@ -259,7 +259,8 @@ async function confirmRun(args, knex) {
     // Match the baseline installer's order and the assess property stamper:
     // baseline advisory -> property fence/customer -> assessment -> run.
     const write = (connection) => confirmLockedRun(args, original.customer_id, connection);
-    if (args.propertyHistoryEnabled) {
+    // Protocol persistence also writes the turf profile, regardless of history.
+    if (args.propertyHistoryEnabled || args.persistChecks) {
       const { withTurfProfileFence } = require('./customer-pricing-ai');
       return withTurfProfileFence(trx, original.customer_id, write);
     }
