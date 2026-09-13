@@ -16077,13 +16077,14 @@ async function claimNotifyOnlyExtensionRequest(estimateId, dedupeOpen) {
     const initial = await trx('estimates').where({ id: estimateId }).first();
     if (!initial) return { claimed: 0, blocked: true };
     const groupId = initial.estimate_group_id || null;
-    let fresh = initial;
     if (groupId) {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['estimate-group-send', String(groupId)]);
-      fresh = await trx('estimates').where({ id: estimateId }).forUpdate().first();
-      if (!fresh || (fresh.estimate_group_id || null) !== groupId) return { claimed: 0, blocked: true };
     }
+    // Ungrouped proposal saves also take this row lock. Re-read after it so
+    // a newly added fixed hold or group move cannot slip past the claim.
+    const fresh = await trx('estimates').where({ id: estimateId }).forUpdate().first();
+    if (!fresh || (fresh.estimate_group_id || null) !== groupId) return { claimed: 0, blocked: true };
     if (await require('../services/estimate-extension').fixedBidBlocksExtension(trx, fresh)) return { claimed: 0, blocked: true };
     let query = trx('estimates').where({ id: estimateId });
     query = groupId ? query.where({ estimate_group_id: groupId }) : query.whereNull('estimate_group_id');
