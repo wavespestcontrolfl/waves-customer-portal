@@ -1300,16 +1300,25 @@ function reportCoordinatorSharesLocation(affirmed, subjectAt, subjectLength, loc
   if (!coordinator) return true;
   if (locationAt < subjectAt) return false;
   const coordinatorAt = gapStart + coordinator.index;
-  return findingVerb.index > coordinatorAt && findingVerb.index < locationAt
+  const verbBeforeCoordinator = affirmed.slice(
+    findingVerb.index + findingVerb[0].length, coordinatorAt,
+  );
+  const afterCoordinator = affirmed.slice(coordinatorAt + coordinator[0].length, locationAt);
+  const sharedProductList = findingVerb.index > coordinatorAt && findingVerb.index < locationAt
     && !REPORT_FINDING_VERB_RE.test(affirmed.slice(subjectAt + subjectLength, coordinatorAt));
+  const sharedLocationList = findingVerb.index < coordinatorAt
+    && /^\s*(?:(?:the|an?)\s*)?$/i.test(afterCoordinator)
+    && REPORT_TREATMENT_LOCATION_LINK_RE.test(verbBeforeCoordinator);
+  return sharedProductList || sharedLocationList;
 }
 
 function reportLocationIsTreatmentTarget(
   affirmed, subjectAt, subjectLength, locationAt, locationLength, locationRecipient, findingVerb,
 ) {
   if (locationRecipient) return true;
-  // A product list may share the following predicate and location. Once a
-  // treatment verb precedes "and", the coordinator instead separates pairs.
+  // A product list may share the following predicate and location, while a
+  // location list may share the preceding predicate. Other coordinators split
+  // product-location pairs and cannot lend either side to the other.
   if (!reportCoordinatorSharesLocation(
     affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb,
   )) return false;
@@ -1395,7 +1404,11 @@ function report_readback_confirms(value, record, { spoken }) {
       const interrogative = /^\s*(?:(?:and|but|so)\s+)?(?:was|were|is|are|has|have|had|did|do|does|can|could|would|will|should|what|where|when|why|how)\b/i.test(sentencePrefix);
       const alternativeQuestion = /^or\b[^.!?;]*\?/i.test(text.slice(clauseEnd));
       if (text[clauseEnd] === '?' || interrogative || alternativeQuestion) continue;
-      const clause = reportAssertionOf(clauseOf(text, m.index), m.index - clauseStart);
+      const sharedLocationTail = new RegExp(
+        `^and\\s+(?:(?:the|a|an)\\s+)?(?:${value.location})`, 'i',
+      ).exec(text.slice(clauseEnd));
+      const reportClause = clauseOf(text, m.index) + (sharedLocationTail ? sharedLocationTail[0] : '');
+      const clause = reportAssertionOf(reportClause, m.index - clauseStart);
       // A contrast excludes its following alternative, not the location
       // affirmed before it: "exterior rather than indoors" and "exterior,
       // not indoors" still confirm exterior. Require both halves in the

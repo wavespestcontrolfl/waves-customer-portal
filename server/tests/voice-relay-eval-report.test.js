@@ -150,6 +150,13 @@ test.each([
   expect(checks.report_readback_confirms(finding, {}, { spoken })[0]).toBe('pass');
 });
 
+test.each([
+  'Talstar P was applied to the garage and the exterior perimeter.',
+  'Talstar P was applied to the exterior perimeter and the garage.',
+])('a location list shares its preceding treatment predicate: %s', (spoken) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken: [spoken] })[0]).toBe('pass');
+});
+
 test('coordinated products do not borrow one another\'s treatment location', () => {
   const spoken = ['Talstar P went around the exterior perimeter and bait along the foundation.'];
   const swappedFindings = [
