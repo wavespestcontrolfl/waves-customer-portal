@@ -2,7 +2,7 @@
 import { StrictMode } from 'react';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CompletionPanel } from './SchedulePage';
+import { CompletionPanel, createCompletionIdempotencyKey } from './SchedulePage';
 
 vi.mock('../../hooks/useFeatureFlag', () => ({
   useFeatureFlagReady: () => ({ enabled: false, ready: true }),
@@ -42,6 +42,31 @@ afterEach(() => {
 });
 
 describe('completion draft departure', () => {
+  it('creates a usable completion key when WebKit has no randomUUID', () => {
+    vi.stubGlobal('crypto', {});
+    const first = createCompletionIdempotencyKey(service.id);
+    const second = createCompletionIdempotencyKey(service.id);
+    expect(first).toMatch(/^complete_draft-test-visit_\d+-[a-z0-9]+$/);
+    expect(first).not.toBe(second);
+    expect(first.length).toBeLessThanOrEqual(120);
+  });
+  it('prepares the canonical form and restores its photos without completing a service', async () => {
+    const onSubmit = vi.fn();
+    const onPrepared = vi.fn().mockResolvedValue(undefined);
+    const photos = [{ data: 'data:image/jpeg;base64,c3ludGhldGlj', name: 'fixture.jpg', capturedAt: '2020-01-01T12:00:00Z' }];
+    await mount({ onSubmit, onPrepared, preparedDraft: { serviceId: service.id, notes: 'Prepared report note', servicePhotos: photos } });
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    expect(notes().value).toBe('Prepared report note');
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^Save service form/i }));
+    });
+    expect(onPrepared).toHaveBeenCalledTimes(1);
+    expect(onPrepared.mock.calls[0][1]).toMatchObject({ technicianNotes: 'Prepared report note', completionPhotos: [expect.objectContaining(photos[0])] });
+    expect(onPrepared.mock.calls[0][1]).not.toHaveProperty('timeOnSite');
+    expect(onPrepared.mock.calls[0][2].servicePhotos).toEqual(photos);
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: /^Save service form/i })).toBeTruthy();
+  });
   it('saves the latest note and preference when leaving before autosave', async () => {
     const view = await mount();
     fireEvent.change(notes(), { target: { value: 'Older saved note' } });
@@ -54,6 +79,38 @@ describe('completion draft departure', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
     expect(notes().value).toBe('Latest unsaved note');
     expect(screen.getByLabelText('Send completion SMS to customer').checked).toBe(false);
+  });
+
+  it('restores edits newer than the prepared form and retains its photos', async () => {
+    const photos = [{ data: 'data:image/jpeg;base64,c3ludGhldGlj', name: 'fixture.jpg' }];
+    const preparedDraft = { serviceId: service.id, draftId: 'prepared-photo-revision', savedAt: new Date(Date.now() - 1000).toISOString(),
+      notes: 'Prepared note', servicePhotos: photos };
+    const onPrepared = vi.fn().mockResolvedValue(undefined);
+    const first = await mount({ preparedDraft, onPrepared });
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    fireEvent.change(notes(), { target: { value: 'Newer unsaved edit' } });
+    first.unmount();
+    await mount({ preparedDraft, onPrepared });
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    expect(notes().value).toBe('Newer unsaved edit');
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: /^Save service form/i })));
+    expect(onPrepared.mock.calls[0][1].technicianNotes).toBe('Newer unsaved edit');
+    expect(onPrepared.mock.calls[0][2].servicePhotos).toEqual(photos);
+  });
+
+  it('does not resurrect prepared photos when a newer draft names another photo revision', async () => {
+    const photos = [{ data: 'data:image/jpeg;base64,c3RhbGU=', name: 'removed-fixture.jpg' }];
+    const preparedDraft = { serviceId: service.id, draftId: 'prepared-photo-revision',
+      savedAt: new Date(Date.now() - 1000).toISOString(), notes: 'Prepared note', servicePhotos: photos };
+    localStorage.setItem(key, JSON.stringify({ serviceId: service.id, owner: '', draftId: 'newer-photo-revision',
+      savedAt: new Date().toISOString(), notes: 'Photos removed in newer draft', generationPhotoCount: 0 }));
+    const onPrepared = vi.fn().mockResolvedValue(undefined);
+    await mount({ preparedDraft, onPrepared });
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    expect(notes().value).toBe('Photos removed in newer draft');
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: /^Save service form/i })));
+    expect(onPrepared.mock.calls[0][1].completionPhotos).toEqual([]);
+    expect(onPrepared.mock.calls[0][2].servicePhotos).toEqual([]);
   });
 
   it('keeps an unopened saved draft intact and does not resurrect a discarded draft', async () => {
@@ -76,6 +133,7 @@ describe('completion draft departure', () => {
       fireEvent.click(screen.getByRole('button', { name: /^Complete & Send Recap/i }));
     });
     expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit.mock.calls[0][1]).toEqual(expect.objectContaining({ timeOnSite: expect.any(String) }));
     view.unmount();
     act(() => vi.advanceTimersByTime(1500));
     expect(readDraft()).toBeNull();

@@ -1409,6 +1409,27 @@ describe('service report v1', () => {
     expect(computeOnSiteMin({ timeOnSite: '10:05' })).toBe(10);
   });
 
+  test.each([
+    ['zero', 0],
+    ['unknown', null],
+  ])('on-site minutes keep a grouped %s allocation ahead of the shared visit span', (_label, allocatedMinutes) => {
+    expect(computeOnSiteMin({
+      timeOnSite: allocatedMinutes,
+      visitDurationAllocation: { version: 1, allocatedMinutes },
+      started_at: '2026-05-18T14:00:00.000Z',
+      ended_at: '2026-05-18T16:00:00.000Z',
+    })).toBe(allocatedMinutes);
+  });
+
+  test('on-site minutes let a later admin correction supersede the grouped allocation', () => {
+    expect(computeOnSiteMin({
+      timeOnSite: 45,
+      visitDurationAllocation: { version: 1, allocatedMinutes: 20 },
+      started_at: '2026-05-18T14:00:00.000Z',
+      ended_at: '2026-05-18T16:00:00.000Z',
+    })).toBe(45);
+  });
+
   test('fallback map zones only use actual location labels', () => {
     expect(locationAreaLabels([
       'Perimeter',
@@ -2303,6 +2324,44 @@ describe('service report v1', () => {
     expect(data.protocol.observations).toEqual(['Light ant activity at front entry']);
     expect(data.recommendations).toContain('Seal the small gap under the front door');
     expect(data.metrics.find((metric) => metric.key === 'on_site_min')).toMatchObject({ value: 42 });
+  });
+
+  test('report payload forwards a grouped unknown allocation to the on-site metric', async () => {
+    const fixtures = {
+      service_products: [], property_geometries: [], property_zones: [],
+      service_findings: [], service_photos: [],
+    };
+    const knex = (table) => {
+      const rows = fixtures[table] || [];
+      const query = {
+        where: () => query,
+        orderBy: () => query,
+        first: () => Promise.resolve(rows[0] || null),
+        catch: () => Promise.resolve(rows),
+        then: (resolve) => Promise.resolve(rows).then(resolve),
+      };
+      return query;
+    };
+
+    const data = await buildReportV1Data({
+      id: 'service-grouped-unknown',
+      customer_id: 'customer-1',
+      service_line: 'pest',
+      service_type: 'Residential Pest Control',
+      service_date: '2026-05-15',
+      started_at: '2026-05-15T13:00:00.000Z',
+      ended_at: '2026-05-15T13:42:00.000Z',
+      first_name: 'Test',
+      last_name: 'Customer',
+      structured_notes: JSON.stringify({
+        timeOnSite: null,
+        visitDurationAllocation: { version: 1, allocatedMinutes: null },
+      }),
+      service_data: '{}',
+    }, 'token-grouped-unknown', knex);
+
+    expect(data.visitTiming.onSiteMinutes).toBeNull();
+    expect(data.metrics.find((metric) => metric.key === 'on_site_min')).toMatchObject({ value: null });
   });
 
   test('v1 data filters saved property zones to the report service line', async () => {

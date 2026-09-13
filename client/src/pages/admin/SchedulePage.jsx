@@ -864,7 +864,7 @@ function lawnDerivedTotal(product, areaSqft) {
   return derivedTotalAmount(product.rate, areaSqft);
 }
 
-function createCompletionIdempotencyKey(serviceId) {
+export function createCompletionIdempotencyKey(serviceId) {
   const randomPart =
     window.crypto?.randomUUID?.() ||
     `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -1004,8 +1004,11 @@ export function completionPreferencesNeedDraft({
 // is an admin-typed override of the running timer (validated 1..720 —
 // out-of-range falls back to the elapsed string so a stray value never
 // ships as operator input; handleSubmit blocks it with an alert first), a
-// string is the auto-elapsed timer, recorded exactly as before.
-export function completionTimeOnSiteBody({ backfill, typedMinutes, elapsed, adjustedMinutes = "" }) {
+// string is the auto-elapsed timer, recorded exactly as before. A prepared
+// combined-visit form omits only that automatic string so packet save can
+// allocate the shared canonical duration across members; explicit numeric
+// operator input remains attached to its member.
+export function completionTimeOnSiteBody({ backfill, typedMinutes, elapsed, adjustedMinutes = "", preparing = false }) {
   if (!backfill) {
     const trimmed = String(adjustedMinutes ?? "").trim();
     if (trimmed !== "") {
@@ -1014,7 +1017,7 @@ export function completionTimeOnSiteBody({ backfill, typedMinutes, elapsed, adju
         return { timeOnSite: minutes };
       }
     }
-    return { timeOnSite: elapsed };
+    return preparing ? {} : { timeOnSite: elapsed };
   }
   const minutes = Math.round(Number(typedMinutes));
   return Number.isFinite(minutes) && minutes > 0 ? { timeOnSite: minutes } : {};
@@ -10505,6 +10508,9 @@ export function CompletionPanel({
   products,
   onClose,
   onSubmit,
+  // The stop sheet prepares every canonical form before one visit submit.
+  onPrepared,
+  preparedDraft,
   onViewDetails,
   // Typed specialty completion (PR 4): parent-owned success-screen
   // follow-up CTA (the button only renders when provided).
@@ -12502,9 +12508,11 @@ export function CompletionPanel({
     "Complete & Send Invoice": "Apply discounts & send invoice",
     "Complete & Send Recap": "Apply discounts & send recap",
   };
-  const completionCtaLabel = applyingCompletionDiscounts
-    ? discountCompletionLabels[baseCompletionCtaLabel] || baseCompletionCtaLabel
-    : baseCompletionCtaLabel;
+  const completionCtaLabel = onPrepared
+    ? (submitting ? "Saving form…" : "Save service form")
+    : applyingCompletionDiscounts
+      ? discountCompletionLabels[baseCompletionCtaLabel] || baseCompletionCtaLabel
+      : baseCompletionCtaLabel;
 
   useEffect(() => {
     const iv = setInterval(() => setElapsed(elapsedSince(onSiteTime)), 1000);
@@ -12865,19 +12873,33 @@ export function CompletionPanel({
         ? { ...metadata, servicePhotos: metadata.draftId && metadata.draftId === stored?.draftId
           ? stored.servicePhotos : undefined }
         : stored || metadata;
-      if (draft?.serviceId === service.id) {
-        if (draft.pendingPhotoCompletion && (draft.servicePhotos?.length || draft.reconcileOwed)) {
+      const prepared = preparedDraft?.serviceId === service.id ? preparedDraft : null;
+      const deviceIsNewer = draft?.serviceId === service.id
+        && (!prepared || (Date.parse(draft.savedAt) || 0) > (Date.parse(prepared.savedAt) || 0));
+      const selectedDraft = deviceIsNewer
+        ? {
+            ...draft,
+            ...(!Array.isArray(draft.servicePhotos)
+              && draft.draftId
+              && draft.draftId === prepared?.draftId
+              && Array.isArray(prepared.servicePhotos)
+              ? { servicePhotos: prepared.servicePhotos }
+              : {}),
+          }
+        : prepared || draft;
+      if (selectedDraft?.serviceId === service.id) {
+        if (selectedDraft.pendingPhotoCompletion && (selectedDraft.servicePhotos?.length || selectedDraft.reconcileOwed)) {
           // Closeout already succeeded. Reopen only the outstanding photo
           // uploads (or the report reconciliation the uploads still owe);
           // never submit completion or collect payment again.
-          draftSnapshotRef.current = draft;
-          setCompletionResult(draft.pendingPhotoCompletion);
+          draftSnapshotRef.current = selectedDraft;
+          setCompletionResult(selectedDraft.pendingPhotoCompletion);
           setSuccess(true);
         } else {
-          setSavedDraft(draft);
+          setSavedDraft(selectedDraft);
           setShowDraftPrompt(true);
         }
-        if (draft.generationPhotoCount > 0 && !draft.servicePhotos?.length && !draft.reconcileOwed) {
+        if (selectedDraft.generationPhotoCount > 0 && !selectedDraft.servicePhotos?.length && !selectedDraft.reconcileOwed) {
           setDraftStorageNotice("The saved photos could not be restored. Reattach them before completing this visit.");
         }
       }
@@ -15585,6 +15607,7 @@ export function CompletionPanel({
           typedMinutes: backfillTimeOnSite,
           elapsed,
           adjustedMinutes: liveAdjustEligible ? adjustedTimeOnSite : "",
+          preparing: !!onPrepared,
         }),
         // Re-entry steppers: only sides the tech moved off their seed post.
         // An untouched panel sends nothing and the server's computed
@@ -15775,6 +15798,13 @@ export function CompletionPanel({
       // byte-for-byte through replayCommittedCompletion above; a fresh build
       // reaching here becomes the candidate snapshot.
       lastSubmitBodyRef.current = body;
+      if (onPrepared) {
+        await onPrepared(service.id, body, {
+          ...draftSnapshotRef.current, serviceId: service.id, servicePhotos,
+        });
+        setSubmitting(false);
+        return;
+      }
       const result = await onSubmit(service.id, body);
       if (await finishCompletionSuccess(result) === "closed") return;
     } catch (e) {
@@ -16768,7 +16798,7 @@ export function CompletionPanel({
                   textOverflow: "ellipsis",
                 }}
               >
-                Complete service
+                {onPrepared ? "Service form" : "Complete service"}
               </div>{" "}
             </div>
             {onViewDetails ? (
@@ -19140,7 +19170,7 @@ export function CompletionPanel({
               id={`completion-panel-title-${service.id}`}
               style={{ fontSize: 18, fontWeight: 500, color: D.heading }}
             >
-              Complete Service
+              {onPrepared ? "Service form" : "Complete Service"}
             </div>{" "}
             <button
               type="button"
@@ -21114,8 +21144,8 @@ export function CompletionPanel({
                 <span style={{ fontSize: 15, fontWeight: 500 }}>
                   {completionCtaLabel}
                 </span>{" "}
-                <span style={{ fontSize: 11, fontWeight: 400, opacity: 0.85 }}>
-                  {isIncompleteVisit
+                <span style={{ fontSize: 14, fontWeight: 400, opacity: 0.85 }}>
+                  {onPrepared ? "Saved with the other services in this visit" : isIncompleteVisit
                     ? "Office follow-up alert will be created"
                     : effectiveSendSms
                       ? `SMS + Report sent to ${service.customerName}`
