@@ -8,8 +8,12 @@ The checker returns `{ok, violations}` for the complete visible reply.
 This first slice checks reply budget, greeting, HTML/bullets, boilerplate,
 recognized instruction-like content, signatures, links/access codes and
 existing customer-copy rules. It reuses the canonical customer-copy and
-report-access-code helpers. Unicode name normalization and dash variants are
-covered by focused regression cases.
+report-access-code helpers. Customer-copy and boilerplate checks normalize
+Unicode dashes and apostrophes. Regression cases cover equivalent visit-based
+price units, common closing phrases and dashed names, plus-prefixed bullets,
+HTML comments/declarations, and Markdown links with relative or fragment
+destinations. Paired plain-prose cases protect ordinary mentions of visits,
+names, punctuation, and bracketed placeholders.
 
 This is a structure check, not fact verification. It does not validate
 amounts, statuses, dates, arrival windows, technician names, placeholders or

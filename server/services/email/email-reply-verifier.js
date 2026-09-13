@@ -5,6 +5,8 @@ const { reentrySafetyClaimFinding } = require('../content/content-guardrails');
 
 const LINK_RE = /(?:https?:\/\/|www\.)[^\s<>()]+|\b(?:[a-z0-9-]+\.)+[a-z]{2,63}(?:\/[^\s<>()]*)?/i;
 const PHONE_URI_RE = /\b(?:tel|sms):(?:\/\/)?(?:\+?\d|\(\d)[\d()+.,;*#?=&%-]*/i;
+const MARKDOWN_LINK_RE = /\[[^\]\n]+\]\(\s*(?:<[^>\n]*>|[^)\n]*)\s*\)|\[[^\]\n]+\]\[[^\]\n]*\]/i;
+const MARKDOWN_LINK_DEFINITION_RE = /^\s*\[[^\]\n]+\]:\s*\S+/im;
 const BOILERPLATE_RE = /\bthank you for (?:reaching out|contacting us)\b|\bhope this (?:email )?finds you well\b|\bplease (?:do not|don't) hesitate to (?:reach out|contact us)\b|\blet us know if you have any (?:other |further )?questions\b/i;
 
 function wordCount(text) {
@@ -15,8 +17,11 @@ function wordCount(text) {
 function forgedSignature(text) {
   const lines = text.trim().split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const tail = lines.slice(-2).join('\n');
-  return lines.slice(1).some((line) => /^(?:best|best regards|kind regards|regards|sincerely|thanks|thank you)[,.]?$/i.test(line))
-    || /(?:^|\n)\s*(?:[-–—]\s*)?(?:adam|virginia|the waves pest control team|waves team)\s*$/i.test(tail);
+  const closing = /^(?:best|best regards|kind regards|warm regards|regards|sincerely|thanks|thank you|cheers|warmly)[,.]?$/i;
+  const dashedName = /(?:^|\n)\s*[-–—]\s*\p{Lu}[\p{L}\p{M}'’.-]*(?:\s+\p{Lu}[\p{L}\p{M}'’.-]*){0,2}[,.]?\s*$/u;
+  return lines.slice(1).some((line) => closing.test(line))
+    || /(?:^|\n)\s*(?:[-–—]\s*)?(?:adam|virginia|the waves pest control team|waves team)\s*$/i.test(tail)
+    || dashedName.test(tail);
 }
 
 function greetingMatches(draft, customer) {
@@ -26,9 +31,19 @@ function greetingMatches(draft, customer) {
   return new RegExp(`^(?:hi|hello|hey)\\s+${escapedName}(?=$|[\\s,!.:;—–-])`, 'i').test(draft.normalize('NFC'));
 }
 
+function visitPriceUnitViolation(normalizedCopy) {
+  // Bind the unit to a price, not an unrelated visit in the same sentence.
+  // Whitespace includes soft line wraps within a pricing phrase.
+  return /\bper[\s-]+visit\b/i.test(normalizedCopy)
+    || /(?:\$\s*\d[\d,.]*|\b\d[\d,.]*\s+dollars?)\s*(?:(?:for\s+)?(?:each|every|a)\s+visit\b|\/\s*visit\b)/i.test(normalizedCopy)
+    || /\b(?:price|amount|cost|charge|rate)\s+(?:for\s+)?(?:each|every|a)\s+visit\b/i.test(normalizedCopy)
+    || /\b(?:each|every|a)\s+visit\s+(?:costs?|is|will\s+(?:cost|be))\s+\$\s*\d/i.test(normalizedCopy);
+}
+
 function customerCopyViolation(draft, normalizedCopy) {
-  return findBannedCustomerCopy(draft).length > 0
-    || /\bper[\s-]+visit\b|\bWaves\s+Lawn\s*(?:&|and)\s*Pest\b/i.test(normalizedCopy)
+  return findBannedCustomerCopy(normalizedCopy).length > 0
+    || visitPriceUnitViolation(normalizedCopy)
+    || /\bWaves\s+Lawn\s*(?:&|and)\s*Pest\b/i.test(normalizedCopy)
     || !!reentrySafetyClaimFinding(draft);
 }
 
@@ -36,17 +51,18 @@ function customerCopyViolation(draft, normalizedCopy) {
 // not establish that any amount, date, status, or other factual claim is true.
 function verifyEmailReplyStructure({ text, customer, wordBudget } = {}) {
   const draft = String(text || '').trim();
-  const normalizedCopy = draft.normalize('NFKC').replace(/[\u2010-\u2015\u2212]/g, '-');
+  const normalizedCopy = draft.normalize('NFKC').replace(/[\u2010-\u2015\u2212]/g, '-').replace(/[‘’]/g, "'");
   const violations = [];
 
   if (!draft) violations.push('empty_reply');
   if (!Number.isInteger(wordBudget) || wordBudget < 1 || wordCount(draft) > wordBudget) violations.push('word_budget_exceeded');
-  if (/<\/?[a-z][^>]*>/i.test(draft)) violations.push('html_not_allowed');
-  if (/^\s*(?:[-*•]|\d+[.)])\s+/m.test(normalizedCopy)) violations.push('bullets_not_allowed');
-  if (BOILERPLATE_RE.test(draft)) violations.push('boilerplate_not_allowed');
+  if (/<!--[\s\S]*?-->|<![^>]*>|<\/?[a-z][^>]*>/i.test(draft)) violations.push('html_not_allowed');
+  if (/^\s*(?:[-+*•]|\d+[.)])\s+/m.test(normalizedCopy)) violations.push('bullets_not_allowed');
+  if (BOILERPLATE_RE.test(normalizedCopy)) violations.push('boilerplate_not_allowed');
   if (!exemplarLooksClean('', draft)) violations.push('untrusted_instruction');
   if (forgedSignature(draft)) violations.push('signature_unsupported');
-  if (LINK_RE.test(draft) || PHONE_URI_RE.test(draft)) violations.push('link_unsupported');
+  if (LINK_RE.test(draft) || PHONE_URI_RE.test(draft) || MARKDOWN_LINK_RE.test(draft)
+    || MARKDOWN_LINK_DEFINITION_RE.test(draft)) violations.push('link_unsupported');
   if (containsReportAccessCode(draft)) violations.push('access_code');
   if (customerCopyViolation(draft, normalizedCopy)) violations.push('customer_copy_compliance');
   if (!greetingMatches(draft, customer)) violations.push('greeting_mismatch');
