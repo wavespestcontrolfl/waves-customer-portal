@@ -6566,6 +6566,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
   const hasBillingEmail = !!(String(billingEmail || '').trim() || customer?.email) && emailPrefEnabled;
 
   const saveBillingPrefs = () => {
+    if (billingPrefsSaving) return;
     setBillingPrefsSaving(true);
     setBillingPrefsStatus(null);
     api.updateNotificationPrefs({
@@ -7294,7 +7295,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
       </div>
 
       {!cancelledAccount && (
-      <div data-glass="card" style={{ ...card, padding: 20 }}>
+      <form onSubmit={event => { event.preventDefault(); saveBillingPrefs(); }} data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={sectionTitle}><Icon name="mail" size={14} strokeWidth={2} />Billing Preferences</div>
         <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Recipients</div>
         <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45, marginBottom: 14 }}>Where invoices, receipts, and reminders go.</div>
@@ -7514,7 +7515,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
             Couldn&rsquo;t save your billing preferences. Please try again.
           </div>
         )}
-        <button type="button" onClick={saveBillingPrefs} disabled={billingPrefsSaving} data-glass-accent="" style={{
+        <button type="submit" disabled={billingPrefsSaving} data-glass-accent="" style={{
           ...primaryButton,
           opacity: billingPrefsSaving ? 0.6 : 1,
           width: '100%',
@@ -7523,7 +7524,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
           {billingPrefsSaving ? 'Saving...' : billingPrefsStatus === 'saved' ? 'Saved' : 'Save billing preferences'}
         </button>
         </>}
-      </div>
+      </form>
       )}
     </div>
   );
