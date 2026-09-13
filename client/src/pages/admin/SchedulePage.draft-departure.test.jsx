@@ -27,6 +27,7 @@ async function mount(props = {}) {
 }
 
 beforeEach(() => {
+  vi.stubGlobal('scrollTo', vi.fn());
   vi.useFakeTimers();
   localStorage.clear();
   vi.stubGlobal('alert', vi.fn());
