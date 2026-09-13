@@ -1398,7 +1398,7 @@ function trailingWithdrawalAlternative(objectSource) {
     `^\\s*(?:[^.!?;—–]{0,60}?\\s*,?\\s*(?:or|and|but|though|although)\\s+|[.!?;—–]\\s*(?:[^.!?;—–]*[.!?;—–]\\s*)*?(?:(?:actually|however)\\s*,?\\s*)?)(?:(?:maybe|perhaps|possibly|potentially)\\s+)?`
     + `(?:(?:i|we)\\s+${EPISTEMIC_HEDGE_PREFIX_SOURCE}\\s+${objectSource}(?=\\s*(?:[,.!?;—–]|$))|(?:(?:they|the technician|the team member)\\s+)?(?:`
     + `not(?=\\s*(?:[,.!?;—–]|$))|(?:(?:might|may|could|would|should|will)\\s+)?(?:skip|omit|avoid)\\s+${objectSource}\\b`
-    + `|(?:(?:might|may|could|would|should|will|can)\\s+not|(?:might|could|would|should|ca|wo)n[\\x27\\u2019]t)`
+    + `|(?:(?:might|may|could|would|should|will|can)\\s+not|cannot|(?:might|could|would|should|ca|wo)n[\\x27\\u2019]t)`
     + `(?:\\s+(?:be able to\\s+)?(?:(?:confirm|verify|check|review|explain|go over|talk(?: you)? through)\\s+${objectSource}\\b|do\\s+(?:so|that)\\b)|(?=\\s*(?:[,.!?;—–]|$)))))`,
     'i',
   );
