@@ -1274,6 +1274,8 @@ function firstUnexemptGuarantee(text, antecedentText = '') {
       const prefix = claimContext(text, m.index, m.index);
       const locallyNegatedNoRisk = re === SAFETY_NO_RISK_RE
         && SAFETY_NO_RISK_NEGATION_RE.test(prefix);
+      const noRiskDescribesScheduling = re === SAFETY_NO_RISK_RE
+        && SAFETY_NO_RISK_SCHEDULING_COMPLEMENT_RE.test(text.slice(m.index + m[0].length));
       const locallyNegatedAttributive = re === SAFETY_ATTRIBUTIVE_GUARANTEE_RE
         && SAFETY_ATTRIBUTIVE_NEGATION_RE.test(prefix);
       const antecedent = `${antecedentText} ${text.slice(Math.max(0, m.index - 160), m.index)}`;
@@ -1284,6 +1286,7 @@ function firstUnexemptGuarantee(text, antecedentText = '') {
         && /^\s+to\s+(?:reschedule|schedule|move|change|cancel|book)\b/i.test(text.slice(m.index + m[0].length));
       if (!insideAnySpan(spans, m.index)
         && !locallyNegatedNoRisk
+        && !noRiskDescribesScheduling
         && !locallyNegatedAttributive
         && !contextualNoHarmWithoutProduct
         && !contextualAdjectiveDescribesScheduling
@@ -1424,6 +1427,8 @@ const SAFETY_ADJECTIVE_NEGATION = `(?<!anything but )(?<!\\b(?:not|(?:is|are)n[\
 const SAFETY_NO_RISK_RE = new RegExp(`\\b(?:no|zero)\\s+(?:risk|danger|harm)\\b|${vocabAlt(NO_RISK_PHRASES)}`, 'gi');
 
 const SAFETY_NO_RISK_NEGATION_RE = /(?:\b(?:not|never)\s+|\b(?:do|does|did)(?:\s+not|n[\x27\u2019]t)\s+mean(?:\s+there\s+(?:is|was))?\s*)$/i;
+
+const SAFETY_NO_RISK_SCHEDULING_COMPLEMENT_RE = /^\s+of\s+(?:losing|missing|rescheduling|moving|changing|cancel(?:l)?ing)\s+(?:your|the|an?)\s+(?:appointment|visit|booking)\b/i;
 
 const SAFETY_ATTRIBUTIVE_GUARANTEE_RE = new RegExp(
   `\\b${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\s+${SAFETY_SUBJECT_MODIFIER}\\b`,
