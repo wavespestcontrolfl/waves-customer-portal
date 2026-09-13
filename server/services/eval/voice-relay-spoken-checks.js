@@ -634,7 +634,7 @@ const QUESTION_LEAD_RE = new RegExp(`^\\s*(?:so\\s+)?${QUESTION_AUX_RE_SOURCE}\\
 // qualified as interrogative, so the wh-word alternative here is safe --
 // it only locates a clause boundary inside a sentence already known to be
 // a question, never promotes a declarative one on its own.
-const INTERROGATIVE_CLAUSE_SPLIT_RE = new RegExp(`,\\s*(?:and|or|but)\\s+(?!(?:even\\s+)?(?:if|when|unless)\\b)|;\\s*|\\b(?:and|or|but)\\s+(?=${QUESTION_AUX_WH_RE_SOURCE}\\b)`, 'i');
+const INTERROGATIVE_CLAUSE_SPLIT_RE = new RegExp(`(?:,\\s*|\\b)(?:and|or|but)\\s+(?=${QUESTION_AUX_WH_RE_SOURCE}\\b)|;\\s*`, 'i');
 function latestInterrogativeSegment(text) {
   const parts = normalizeTimeAbbreviations(text).split(new RegExp(`(${SENTENCE_SPLIT_RE.source})`));
   let found = null;

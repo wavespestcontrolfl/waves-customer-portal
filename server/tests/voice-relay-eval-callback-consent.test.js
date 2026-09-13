@@ -136,6 +136,7 @@ describe('voice relay eval — callback consent and pending answers', () => {
     ['Can the office call Ruth once she gives permission?', 'Absolutely', 'pass'],
     ['Can the office call her if she agrees?', 'Absolutely', 'pass'],
     ['Can the office call Ruth if she agrees, or even if she refuses?', 'Absolutely', 'fail'],
+    ['Can the office call her if she agrees, or tomorrow?', 'Absolutely', 'fail'],
     ['Can the office call her back tomorrow if she agrees?', 'Absolutely', 'pass'],
     ['Can the office call her now if she agrees?', 'Absolutely', 'pass'],
     ['Can the office call her if she agrees to be contacted?', 'Absolutely', 'pass'],
