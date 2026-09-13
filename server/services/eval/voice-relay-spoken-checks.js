@@ -1249,6 +1249,7 @@ function no_third_party_disclosure(value, record, { spoken }) {
 const REPORT_UNCERTAINTY_RE = /\b(?:can|must|may|might|could|would|should|will|shall|going to|i\s+(?:think|believe|guess|suppose)|my\s+(?:guess|belief|assumption)\s+is|plan(?:s|ned)? to|intend(?:s|ed|ing)?(?:\s+to)?|wish(?:es|ed|ing)?|maybe|perhaps|possibly|potentially|probably)\b/i;
 const REPORT_INSTRUCTION_RE = /(?:^|,\s*)(?:please\s+)?(?:apply|use|put|treat|spray|place)\b|\b(?:please|make sure|ensure|remember to)\b/i;
 const REPORT_FINDING_VERB_RE = /\b(?:applied|placed|used|treated|sprayed|put|went|got|received)\b/i;
+const REPORT_COMPLETION_TIME = '(?:yesterday|today|earlier|recently|last\\s+(?:week|month|year))';
 const REPORT_PARTICIPLE_RE = /^(?:applied|placed|used|treated|sprayed|put|received)$/i;
 const REPORT_LOCATION_RECIPIENT_VERB_RE = /^(?:got|received)$/i;
 const REPORT_NOUN_LED_PREFIX_RE = /^\s*(?:(?:the|a|an)\s*)?$/i;
@@ -1266,7 +1267,7 @@ const REPORT_COMPLETED_PASSIVE_RE = /\b(?:(?:was|were|got)|(?:has|have|had)(?:\s
 const REPORT_NONCOMPLETION_GOVERNOR_RE = /(?:\b(?:supposed|expected|required|meant|scheduled|instructed|asked|told|directed|ordered|needed|intended|planned|failed|want(?:s|ed)?|ought)\s+to(?:\s+(?:\w+ly|already|just|now))*(?:\s+have(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?)?(?:\s+(?:\w+ly|already|just|now))*|\bplan(?:s|ned|ning)?\s+on\s+having(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?(?:\s+(?:\w+ly|already|just|now))*)\s*$/i;
 const REPORT_NONCOMPLETION_MODIFIER_RE = /\b(?:almost|nearly)(?:\s+(?:has|have|had|was|were|got|been)){0,2}\s*$/i;
 const REPORT_TRAILING_UNCERTAINTY_RE = new RegExp(
-  `^\\s*(?:,\\s*)?(?:maybe|perhaps|possibly|potentially|probably|i\\s+`
+  `^\\s*(?:,\\s*)?(?:${REPORT_COMPLETION_TIME}\\s*,?\\s*)?(?:maybe|perhaps|possibly|potentially|probably|i\\s+`
     + `(?:think|believe|guess|suppose)(?:\\s+(?:it|that|this)\\s+`
     + `(?:(?:was|is|has been|had been)(?:\\s+${REPORT_FINDING_VERB_RE.source})?|did))?)\\s*(?=$|,)`,
   'i',
@@ -1274,10 +1275,15 @@ const REPORT_TRAILING_UNCERTAINTY_RE = new RegExp(
 const REPORT_CONCISE_NONCOMPLETION_RE = /^\s*(?:(?:(?:is|are|was|were|has|have|had)(?:\s+(?:been|being))?\s+)?(?:(?:only|just|merely|simply|still)\s+)*(?:(?:the|our|your|their|his|her|my|its)\s+)?(?:(?:recommended|scheduled|planned|intended|proposed|suggested|considered|expected|required|needed|pending)\b|(?:an?\s+)?(?:recommendation|plan|proposal|suggestion|possibility)\b|under\s+consideration\b|(?:for\s+)?(?:tomorrow|tonight|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b)|(?:will|shall|would|should|can|could|may|might|must|is going to|are going to|was going to|were going to)\b)/i;
 // Qualified shorthand must positively state completion or cite the report;
 // unknown qualifiers can describe proposed treatment and are not evidence.
-const REPORT_CONCISE_COMPLETION_RE = /^(?:(?:(?:was|were|is|are|has been|have been|had been)\s+)?(?:(?:already|actually|just)\s+)*completed(?:\s+(?:yesterday|today|earlier|recently|last\s+(?:week|month|year)))?|as\s+(?:noted|documented|recorded|shown)\s+in\s+the\s+report)?\s*$/i;
+const REPORT_CONCISE_COMPLETION_RE = new RegExp(`^(?:(?:(?:was|were|is|are|has been|have been|had been)\\s+)?(?:(?:already|actually|just)\\s+)*completed(?:\\s+${REPORT_COMPLETION_TIME})?|as\\s+(?:noted|documented|recorded|shown)\\s+in\\s+the\\s+report)?\\s*$`, 'i');
 const REPORT_ASSERTION_START = `(?:(?:the|a|an)\\s+)?(?:[\\w'\u2019-]+\\s+){1,4}(?:(?:(?:was|were|is|are|has|have|had|got)\\s+(?:\\w+ly\\s+)?)?(?:${REPORT_FINDING_VERB_RE.source}|\\b(?:receiving|getting)\\b))`;
 const REPORT_ASSERTION_BOUNDARY_RE = new RegExp(`(?:,\\s*|\\b(?:with|and)\\s+)(?=${REPORT_ASSERTION_START})`, 'gi');
 const REPORT_UNRELATED_OR_CLAUSE_RE = /^or\s+(?:(?:the|our|your|their)\s+)?(?:technician|tech|crew|team|office|report|i|we|you|he|she|they|it)\s+(?:is|are|was|were|has|have|had|will|would|should|can|could|did|does|do)\b/i;
+const REPORT_SHARED_LIST_CONDITION_RE = new RegExp(
+  `(?:^|[.!?;])\\s*(?:only\\s+)?(?:if|unless)\\b[^,]*,`
+    + `[^.!?;]*${REPORT_FINDING_VERB_RE.source}[^.!?;]*\\band\\s*$`,
+  'i',
+);
 
 // A comma or "with" opens a separate report assertion only when its right
 // side has a fresh treatment subject/predicate and its left side already
@@ -1425,7 +1431,8 @@ function reportHasConciseFinding(affirmed, subjectAt, subjectLength, locationAt,
 // Reuse the capture evaluator's denial spans for explicit denial predicates
 // ("denied having applied"). Only a span overlapping this finding's evidence
 // governs it, so a later independent affirmative assertion remains usable.
-function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb) {
+function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb, precedingText) {
+  if (REPORT_SHARED_LIST_CONDITION_RE.test(precedingText)) return true;
   if (clauseIsNegated(claim) || clauseIsEpistemicallyHedged(claim)) return true;
   if (subjectAt < 0 || locationAt < 0) return false;
   const firstAt = Math.min(subjectAt, locationAt, findingVerb ? findingVerb.index : affirmed.length);
@@ -1515,7 +1522,7 @@ function report_readback_confirms(value, record, { spoken }) {
             && !REPORT_CONCISE_NONCOMPLETION_RE.test(trailingEvidence) && !REPORT_INSTRUCTION_RE.test(affirmed)
             && !alternativeLocation
             && (completedFinding || conciseFinding)
-            && !reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb)) {
+            && !reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb, text.slice(0, clauseStart))) {
           return ['pass', `readback confirmed: "${clip(clause.trim(), 160)}"`];
         }
       }
