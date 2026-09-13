@@ -37,6 +37,11 @@ describe('email reply verifier', () => {
     expect(wordCount('Hi Casey, this is four.')).toBe(5);
   });
 
+  test.each(['September 15 2026', 'Sep 15, 2026', 'Sept 15, 2026', '09/15/2026', '09/15/26'])('accepts equivalent calendar formatting: %s', (date) => {
+    expect(verdict(`Hi Casey, your pending appointment is ${date}.`).ok).toBe(true);
+    expect(verdict(`Hi Casey, your pending appointment is ${date.replace('15', '16')}.`).ok).toBe(false);
+  });
+
   test('binds amounts and dates to the fact named in the sentence', () => {
     const result = verdict('Hi Casey, your outstanding balance is $50. Your appointment is August 12. Your last completed service was September 15.');
     expect(result.ok).toBe(false);

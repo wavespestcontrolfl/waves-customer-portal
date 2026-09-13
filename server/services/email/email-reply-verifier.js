@@ -148,7 +148,8 @@ function dateFacts(context) {
 function normalizeTemporal(value) {
   const normalized = String(value).toLowerCase().replace(/\./g, '').replace(/\s+/g, ' ').trim();
   const clock = /^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$/.exec(normalized);
-  if (!clock) return normalized;
+  if (!clock) return normalized.replace(/,/g, '').replace(/^([a-z]{3})[a-z]*(?= \d)/, '$1')
+    .replace(/(^|\/)0+(?=\d)/g, '$1');
   return `${Number(clock[1])}${Number(clock[2]) ? `:${clock[2]}` : ''} ${clock[3]}`;
 }
 
