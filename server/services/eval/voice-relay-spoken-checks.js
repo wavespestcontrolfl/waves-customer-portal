@@ -1279,7 +1279,7 @@ const SAFETY_BRAND_CODE = '(?:[A-Z]{1,4}\\d{0,3}|\\d{1,4}[A-Z]{0,3})';
 
 const SAFETY_BRAND_SUBJECT = `\\b(?!${SAFETY_SUBJECT_DETERMINER_CAPITALIZED}\\b)[A-Z][a-z]+\\s+${SAFETY_BRAND_CODE}\\b`;
 
-const SAFETY_PRODUCT_RELATIVE = '(?:\\s+(?:(?:that|which)\\s+)?(?:we|they|you|the technician)\\s+(?:(?:have|had|has|just|already|recently)\\s+)*(?:use|used|apply|applied|spray|sprayed|put down))?';
+const SAFETY_PRODUCT_RELATIVE = '(?:\\s+(?:(?:(?:that|which)\\s+)?(?:we|they|you|the technician)\\s+(?:(?:have|had|has|just|already|recently)\\s+)*(?:use|used|apply|applied|spray|sprayed|put down)|(?:(?:just|already|recently)\\s+)*(?:used|applied|sprayed|put down)))?';
 
 const SAFETY_SUBJECT_VERB = `${SAFETY_PRODUCT_RELATIVE}(?:[\\x27\\u2019](?:s|re)|\\s+(?:is|are|was|were|will be|would be|should be))`;
 
