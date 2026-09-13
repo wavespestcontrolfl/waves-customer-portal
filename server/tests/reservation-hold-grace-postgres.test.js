@@ -49,19 +49,21 @@ const isolatedTarget = (() => {
   if (!connection) return false;
   let url;
   try { url = new URL(connection); } catch { return false; }
-  const localCI = ['localhost', '127.0.0.1'].includes(url.hostname);
+  const local = ['localhost', '127.0.0.1'].includes(url.hostname);
+  // The existing CI service is migrated once and shared by serial test steps.
+  const localCI = process.env.CI === 'true' && local && url.pathname === '/waves_test';
   const ownedQA = process.env.WAVES_LOCAL_DEV === '1'
     && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
-  // Belt and braces: never a non-qa database name, even on localhost.
+  // Outside that exact CI target, keep the private-QA database name guard.
   const qaName = /^\/waves_qa_[a-z0-9]+$/i.test(url.pathname);
-  return (localCI || ownedQA) && qaName;
+  return localCI || ((local || ownedQA) && qaName);
 })();
 if (connection && !isolatedTarget) {
   // Loud, not silently skipped: a misconfigured URL should be fixed, and an
   // operator who set it expects the suite to run.
   throw new Error(
     'RESERVATION_HOLD_TEST_DATABASE_URL must point at a disposable localhost waves_qa_* database '
-    + '— this suite runs releaseExpiredReservations(), whose sweep is unrestricted.',
+    + 'or localhost waves_test with CI=true — this suite runs releaseExpiredReservations(), whose sweep is unrestricted.',
   );
 }
 const postgres = isolatedTarget ? describe : describe.skip;

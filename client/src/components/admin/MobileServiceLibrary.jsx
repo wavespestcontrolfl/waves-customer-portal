@@ -208,17 +208,29 @@ function Thumb({ icon }) {
 function CategoriesView({ onBack }) {
   const [services, setServices] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [query, setQuery] = useState("");
   const [expandedKey, setExpandedKey] = useState(null);
 
   useEffect(() => {
+    let current = true;
+    setLoading(true);
+    setLoadError(false);
     fetchAllServices(new URLSearchParams({ is_active: "true" }))
       .then((rows) => {
-        setServices(rows);
-        setLoading(false);
+        if (current) setServices(rows);
       })
-      .catch(() => setLoading(false));
-  }, []);
+      .catch(() => {
+        if (current) setLoadError(true);
+      })
+      .finally(() => {
+        if (current) setLoading(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [loadAttempt]);
 
   const groups = useMemo(() => {
     // Group services by `category`. Count distinct subcategories within each
@@ -248,10 +260,7 @@ function CategoriesView({ onBack }) {
   return (
     <div className="mx-auto max-w-[640px] px-4 pb-10 pt-4">
       {" "}
-      <Header
-        title="Categories"
-        onBack={onBack}
-      />{" "}
+      <Header title="Categories" onBack={onBack} />{" "}
       <LargeTitle>Categories</LargeTitle>{" "}
       <SearchBar
         value={query}
@@ -262,6 +271,14 @@ function CategoriesView({ onBack }) {
         <div className="p-10 text-center text-ui-body text-ink-secondary">
           Loading…
         </div>
+      ) : loadError ? (
+        <ActionFeedback
+          error
+          onRetry={() => setLoadAttempt((attempt) => attempt + 1)}
+          className="my-4"
+        >
+          Could not load categories.
+        </ActionFeedback>
       ) : groups.length === 0 ? (
         <div className="p-10 text-center text-ui-body text-ink-secondary">
           No categories

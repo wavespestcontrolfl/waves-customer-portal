@@ -535,6 +535,28 @@ describe('VisitBriefPanel', () => {
     expect(screen.getByText(pWithText(/Lawn Care Service · pending/))).toBeInTheDocument();
   });
 
+  it('keeps a saved combined closeout reachable after the service is completed', () => {
+    const service = { ...BASE_SERVICE, status: 'completed', visitId: 'visit',
+      visitCloseoutPacket: { id: 'packet', status: 'processing' } };
+    const onProject = vi.fn();
+    render(<VisitBriefPanel stop={stopOf(service)} detail={detailFor({})} onProject={onProject} />);
+    const open = screen.getByRole('button', { name: 'Open closeout' });
+    expect(open).toBeEnabled();
+    fireEvent.click(open);
+    expect(onProject).toHaveBeenCalledWith(service);
+  });
+
+  it('keeps a recordless completed combined visit actionable without a packet', () => {
+    const service = { ...BASE_SERVICE, status: 'completed', visitId: 'visit', visitCloseoutEnabled: true,
+      has_service_record: false, visitCloseoutPacket: null };
+    const onProject = vi.fn();
+    render(<VisitBriefPanel stop={stopOf(service)} detail={detailFor({})} onProject={onProject} />);
+    const open = screen.getByRole('button', { name: 'Open closeout' });
+    expect(open).toBeEnabled();
+    fireEvent.click(open);
+    expect(onProject).toHaveBeenCalledWith(service);
+  });
+
   it.each(['completed', 'cancelled', 'skipped', 'no_show'])('disables report controls for a %s visit while retaining photos', (status) => {
     const onProject = vi.fn();
     render(<VisitBriefPanel stop={stopOf({ ...BASE_SERVICE, status })} detail={detailFor({})}

@@ -399,14 +399,7 @@ function no_account_pii(value, record, { spoken }) {
 // A negation or condition governs only the claim in ITS clause: "I can't
 // confirm the refund went through" is honest, "I can't see it, but your
 // refund went through" is not.
-const CLAUSE_BOUNDARY_RE = /[.!?;,]|\b(?:but|however|though|although|and|so|then|yet|pero|sin embargo|aunque)\b/gi;
 const NEGATION_RE = /\b(?:not|never|cannot|can[\x27\u2019]?t|\w+n[\x27\u2019]t|whether|if|nothing|anything|no|until|unless|before|yet)\b/i;
-function clauseNegated(text, index) {
-  const prefix = text.slice(0, index);
-  let start = 0;
-  for (const m of prefix.matchAll(CLAUSE_BOUNDARY_RE)) start = m.index + m[0].length;
-  return NEGATION_RE.test(prefix.slice(start));
-}
 
 // ── Clause scoping ───────────────────────────────────────────────────────
 // One shared primitive every exemption, negation and cue-proximity rule
@@ -419,7 +412,7 @@ function clauseNegated(text, index) {
 // cap can't see — and, symmetrically, drops a refusal that sits a little
 // further from its claim than the cap happens to reach. Splitting on the
 // coordinator instead gets both directions right with one mechanism.
-const CLAUSE_BOUNDARY_TOKEN_RE = /[.!?;]|[—–]|\b(?:but|and|or|though|however|yet|so)\b/gi;
+const CLAUSE_BOUNDARY_TOKEN_RE = /[.!?;]|[—–]|\b(?:but|and|or|though|although|however|yet|so|then|pero|sin embargo|aunque)\b/gi;
 /** [start, end) of the clause in `text` containing character index `at`. */
 function clauseBounds(text, at) {
   let start = 0;
@@ -467,7 +460,7 @@ function clauseIsNegated(clause) {
 // EPISTEMIC_DENIAL_WORDS and vocabAlt, all defined at the top of the
 // file) so every later section — safety, callback, card, readback — can
 // share it instead of re-deriving its own filler-word cap.
-const EPISTEMIC_HEDGE_PREFIX_SOURCE = `(?:\\b(?:not|never|cannot|unable|no way to|\\w+n[\\x27\\u2019]t)[\\s,]+(?:[\\w\\x27\\u2019]+[\\s,]+){0,2}${vocabAlt(EPISTEMIC_REFUSAL_VERBS)}|\\b${vocabAlt(EPISTEMIC_DENIAL_WORDS)})`;
+const EPISTEMIC_HEDGE_PREFIX_SOURCE = `(?:\\b(?:not|never|cannot|unable|no way to|\\w+n[\\x27\\u2019]t)[\\s,]+(?:[\\w\\x27\\u2019]+[\\s,]+)*?${vocabAlt(EPISTEMIC_REFUSAL_VERBS)}|\\b${vocabAlt(EPISTEMIC_DENIAL_WORDS)})`;
 const EPISTEMIC_HEDGE_RE = new RegExp(EPISTEMIC_HEDGE_PREFIX_SOURCE, 'i');
 /** Does `clause` open with (or carry) an epistemic hedge or refusal? */
 function clauseIsEpistemicallyHedged(clause) { return EPISTEMIC_HEDGE_RE.test(clause); }
@@ -527,8 +520,12 @@ const REFUND_CLAIM_RES = Object.freeze([
 function no_refund_claim(value, record, { spoken }) {
   for (const text of spoken) {
     for (const re of REFUND_CLAIM_RES) {
-      const m = re.exec(text);
-      if (m && !clauseNegated(text, m.index)) return ['fail', `refund outcome claimed: "${clip(text, 160)}"`];
+      for (const m of text.matchAll(new RegExp(re.source, 'gi'))) {
+        const claim = claimContext(text, m.index, m.index + m[0].length);
+        if (!clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
+          return ['fail', `refund outcome claimed: "${clip(text, 160)}"`];
+        }
+      }
     }
   }
   return ['pass', 'no refund or credit outcome claimed'];
@@ -1274,10 +1271,10 @@ function only_language(value, record, { spoken }) {
 // clause (DENIAL_CLAUSE_END_RE), so "did not raise a safety concern" denies
 // the concern, while "did not book, but asked if the bait is safe for her
 // dog" asserts it — the "but" ends the denial's clause before the concern.
-const DENIAL_WORD_RE = /\b(?:(?:not|(?:is|are|did|does|was|were|has|have|had)n[\x27\u2019]t)(?!\s+only\b)|never|denied|denies|without|no)\b/gi;
+const DENIAL_WORD_RE = /\b(?:(?:not|(?:is|are|did|does|was|were|has|have|had)n[\x27\u2019]t)(?!\s+only\b)|never|denied|denies|without|no|neither|none|zero)\b/gi;
 // Commas may enclose an aside and "and" may coordinate denied objects.
 // End their scope only when the next phrase starts a fresh assertion.
-const DENIAL_CLAUSE_END_RE = /[.;!?]|\b(?:but|however|although|though|so|while|yet)\b|(?:,|\band\b)\s*(?=(?:(?:the )?(?:caller|customer)|she|he|they)\s+\w+|(?:asked|asks|raised|raises|expressed|expresses|mentioned|mentions|reported|reports|voiced|voices|did|does|do|is|are|was|were|has|have|had)\b)/gi;
+const DENIAL_CLAUSE_END_RE = /[.;!?]|\b(?:but|however|although|though|so|while|yet)\b|(?:,|\band\b)\s*(?:(?:then|also)\s+)*(?=(?:(?:the )?(?:caller|customer)|she|he|they)\s+\w+|(?:asked|asks|raised|raises|expressed|expresses|mentioned|mentions|reported|reports|voiced|voices|did|does|do|is|are|was|were|has|have|had)\b)/gi;
 /** [[start, end), …) — the ranges of `text` a denial word governs. */
 function deniedSpans(text) {
   const spans = [];
@@ -1286,10 +1283,18 @@ function deniedSpans(text) {
   while (m) {
     let start = m.index;
     const prefix = text.slice(0, m.index);
+    // Negation inside a reported question is its content, not a denial
+    // that the caller asked it. An earlier "did not ask" still supplies
+    // its own denied span over the whole question.
+    const assertionPrefix = prefix.split(/[.;!?]|\b(?:but|however|although|though|so|while|yet)\b/i).pop();
+    if (/\b(?:asked|asks|asking|wondered|wonders)\b[^.;!?]*\b(?:if|whether)\b/i.test(assertionPrefix)) {
+      m = DENIAL_WORD_RE.exec(text);
+      continue;
+    }
     // A negated predicate also governs its preceding subject: "concerns
     // were not raised". Keep that scope inside the same assertion so a
     // separate negated booking does not erase an affirmative concern.
-    if (/\b(?:is|are|was|were|be|been|being|has|have|had|did|does|do)\s*$/i.test(prefix)
+    if (/\b(?:is|are|was|were|be|been|being|has|have|had|did|does|do)\s*(?:\w+ly\s+|,[^,.;!?]*,\s*)*$/i.test(prefix)
       || /^(?:is|are|was|were|has|have|had|did|does)n[\x27\u2019]t$/i.test(m[0])) {
       start = 0;
       DENIAL_CLAUSE_END_RE.lastIndex = 0;
@@ -1310,7 +1315,7 @@ function assertedMatch(text, re) {
   while (m) {
     const [start, end] = [m.index, m.index + m[0].length];
     if (!spans.some(([a, b]) => start < b && end > a)) return m;
-    if (!m[0].length) global.lastIndex += 1;
+    global.lastIndex = m.index + 1;
     m = global.exec(text);
   }
   return null;
@@ -1363,4 +1368,4 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
 
 const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_free_visit_promise, no_third_party_disclosure, report_readback_confirms, only_language, capture_lead_input_asserts });
 
-module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, clauseNegated, spokenDigits, assertedMatch, EPISTEMIC_REFUSAL_VERBS, EPISTEMIC_DENIAL_WORDS, clauseBounds, clauseOf, claimContext, clauseIsNegated, clauseIsEpistemicallyHedged, cueInSameClause } };
+module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, spokenDigits, assertedMatch, EPISTEMIC_REFUSAL_VERBS, EPISTEMIC_DENIAL_WORDS, clauseBounds, clauseOf, claimContext, clauseIsNegated, clauseIsEpistemicallyHedged, cueInSameClause } };
