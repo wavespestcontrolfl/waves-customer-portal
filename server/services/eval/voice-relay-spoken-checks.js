@@ -1246,6 +1246,9 @@ const REPORT_DIRECT_OBJECT_GAP_RE = /^\s*(?:(?:the|a|an)\s+)?$/i;
 const REPORT_COORDINATED_OBJECT_GAP_RE = /\b(?:around|along|on|to|at|in)\b[^.!?;]*\band\s+(?:[\w'\u2019-]+\s+){0,2}$/i;
 const REPORT_WENT_LOCATION_RE = /^\s*(?:around|along|on|to|at|in)\b/i;
 const REPORT_TREATMENT_LOCATION_LINK_RE = /\b(?:around|along|on|to|at|in)\b/i;
+const REPORT_COORDINATED_LOCATION_PREFIX_RE = new RegExp(
+  `^\\s*(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+)?(?:(?:the|an?)\\s*)?$`, 'i',
+);
 const REPORT_FRONTED_LOCATION_PREFIX_RE = /^\s*(?:around|along|on|to|at|in)\s+(?:(?:almost|nearly)\s+)?(?:(?:the|an?)\s+)?(?:[\w'\u2019-]+\s+){0,2}$/i;
 const REPORT_LOCATION_DETOUR_RE = /\b(?:after|before|while|when|because|since|following|until|unless)\b/i;
 const REPORT_COMPLETED_PASSIVE_RE = /\b(?:(?:was|were|got)|(?:has|have|had)(?:\s+(?:\w+ly|already|just|now))*\s+been)\s+(?:(?:\w+ly|already|just|now)\s+)*$/i;
@@ -1307,7 +1310,7 @@ function reportCoordinatorSharesLocation(affirmed, subjectAt, subjectLength, loc
   const sharedProductList = findingVerb.index > coordinatorAt && findingVerb.index < locationAt
     && !REPORT_FINDING_VERB_RE.test(affirmed.slice(subjectAt + subjectLength, coordinatorAt));
   const sharedLocationList = findingVerb.index < coordinatorAt
-    && /^\s*(?:(?:the|an?)\s*)?$/i.test(afterCoordinator)
+    && REPORT_COORDINATED_LOCATION_PREFIX_RE.test(afterCoordinator)
     && REPORT_TREATMENT_LOCATION_LINK_RE.test(verbBeforeCoordinator);
   return sharedProductList || sharedLocationList;
 }
@@ -1405,7 +1408,9 @@ function report_readback_confirms(value, record, { spoken }) {
       const alternativeQuestion = /^or\b[^.!?;]*\?/i.test(text.slice(clauseEnd));
       if (text[clauseEnd] === '?' || interrogative || alternativeQuestion) continue;
       const sharedLocationTail = new RegExp(
-        `^and\\s+(?:(?:the|a|an)\\s+)?(?:${value.location})`, 'i',
+        `^and\\s+(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+)?`
+          + `(?:(?:the|a|an)\\s+)?(?:${value.location})`,
+        'i',
       ).exec(text.slice(clauseEnd));
       const reportClause = clauseOf(text, m.index) + (sharedLocationTail ? sharedLocationTail[0] : '');
       const clause = reportAssertionOf(reportClause, m.index - clauseStart);

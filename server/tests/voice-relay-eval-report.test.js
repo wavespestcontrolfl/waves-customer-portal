@@ -153,6 +153,8 @@ test.each([
 test.each([
   'Talstar P was applied to the garage and the exterior perimeter.',
   'Talstar P was applied to the exterior perimeter and the garage.',
+  'Talstar P was applied to the garage and to the exterior perimeter.',
+  'Talstar P was applied around the garage and around the exterior perimeter.',
 ])('a location list shares its preceding treatment predicate: %s', (spoken) => {
   expect(checks.report_readback_confirms(report, {}, { spoken: [spoken] })[0]).toBe('pass');
 });
