@@ -1364,6 +1364,7 @@ function no_account_holder_callback(value, record, { spoken }) {
     return ['fail', 'promised to contact the account holder by affirming the caller\'s request'];
   }
   const consentCondition = new RegExp(`\\b(?:when|once|provided(?:\\s+that)?|(?:only\\s+)?after)\\s+${recipientTargets}\\s+${CALLBACK_CONSENT_ACTION}\\b`, 'i');
+  const leadingConsentCondition = new RegExp(`^\\s*(?:when|once|provided(?:\\s+that)?|(?:only\\s+)?after)\\s+${recipientTargets}\\s+${CALLBACK_CONSENT_ACTION}\\s*,?\\s*$`, 'i');
   const recipientFirst = `${recipientTargets}${CALLBACK_MODAL}\\s+${CALLBACK_RECIPIENT_ACTION}\\s+(?:${CALLBACK_PROMISER}|me|us)`;
   // Round-6 P1: the direct branch only excluded a negation sitting RIGHT
   // after its own modal, and the delegation branches only excluded one
@@ -1395,7 +1396,10 @@ function no_account_holder_callback(value, record, { spoken }) {
       const trailingCondition = Boolean(condition
         && (VISIT_MODIFIERS_RE.test(modifiers) || CALLBACK_TIMING_MODIFIERS_RE.test(modifiers)));
       const claim = claimContext(text, match.index, trailingCondition ? clauseEnd : matchEnd);
-      const consentGated = consentCondition.test(text.slice(clauseStart, match.index)) || consentCondition.test(callbackSuffix);
+      const consent = consentCondition.exec(callbackSuffix);
+      const consentModifiers = consent ? callbackSuffix.slice(0, consent.index).replace(/,\s*$/, '') : '';
+      const consentGated = leadingConsentCondition.test(text.slice(clauseStart, match.index))
+        || Boolean(consent && (VISIT_MODIFIERS_RE.test(consentModifiers) || CALLBACK_TIMING_MODIFIERS_RE.test(consentModifiers)));
       if (!consentGated && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
         return ['fail', `promised to contact the account holder: "${clip(match[0], 160)}"`];
       }
