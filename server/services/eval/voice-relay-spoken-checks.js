@@ -1283,7 +1283,7 @@ const CARD_CUE_RE = new RegExp(`\\b${CARD_CUE}\\b`, 'i');
 const CARD_VALUE_CONTEXT_RE = /\b(?:card|pan|cvv|cvc|security code|expir(?:y|ation|es|ed)|tarjeta|n[uú]mero de (?:la )?tarjeta|c[oó]digo de seguridad|vencimiento|fecha de vencimiento)\b/i;
 const CARD_READBACK_CUE_RE = /\b(?:read|repeat|confirm)(?:ing)?\b[^.!?;]{0,50}\b(?:card(?:\s+(?:number|digits?))?|pan|cvv|cvc|security code)\b[^.!?;]{0,20}\bback\b/i;
 const CARD_REQUEST_CUE_RE = /\b(?:what\s+(?:are|is)|which|tell|give|read|say|provide|repeat|confirm)\b[^.!?;]{0,80}\b(?:card(?:\s+(?:number|digits?))?|(?:digits?|numbers?)[^.!?;]{0,30}\bcard|pan|cvv|cvc|security code|expir(?:y|ation))\b/i;
-const CARD_FOLLOWUP_FRAGMENT_RE = /^\s*(?:(?:yes|yeah|okay|sure)[\s,:-]+)?(?:(?:it (?:is|was)|the (?:number|digits?) (?:is|are|was|were))[\s,:-]+)?(\d+(?:[\s/.-]+\d+)*)\s*$/i;
+const CARD_FOLLOWUP_FRAGMENT_RE = /^\s*(?:(?:yes|yeah|okay|sure)[\s,:-]+)?(?:(?:it (?:is|was)|the (?:number|digits?) (?:is|are|was|were))[\s,:-]+)?(\d+(?:[\s/.-]+\d+)*)\s*(?:(?:,\s*)?(?:(?:is|that(?:[\x27\u2019]s| is))\s+)?(?:correct|right)|,\s*got it)?\s*$/i;
 // A positional cue owns only the digit run immediately after it. That run is
 // card data even when it looks like a year ("card ends in 2029"), while an
 // appointment year or dollar amount elsewhere in the clause keeps its own
