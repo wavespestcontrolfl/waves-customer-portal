@@ -8245,7 +8245,7 @@ async function reconcileFrozenMembershipSnapshot(estimate, { strictMembership = 
         invalidateSendSnapshotPricingBundle(estData);
         estimate.estimate_data = isString ? JSON.stringify(estData) : estData;
         clearEstimatePricingCache(estimate.id);
-        return;
+        return { ok: false, error: 'setup_waiver_unverified_requote' };
       }
     }
     // Gained-family probe (codex #3591 r78 P1): the stored positive setup
@@ -8352,6 +8352,7 @@ async function reconcileFrozenMembershipSnapshot(estimate, { strictMembership = 
     // here to force a fresh recompute with the new-customer setup fee + annual
     // prepay restored.
     clearEstimatePricingCache(estimate.id);
+    if (!reprice.recomputed) return { ok: false, error: reprice.reason || 'membership_lapsed_requote' };
   } catch (err) {
     logger.warn(`[estimate-public] membership snapshot reconcile skipped: ${err.message}`);
     // Never throws (the public renderers fall back to the stored row), but
