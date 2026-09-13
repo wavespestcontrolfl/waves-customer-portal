@@ -1215,7 +1215,7 @@ class SmartRebooker {
       window_start: win.start || service.window_start,
       window_end: windowEnd,
       status: landedStatus,
-      ...(options.pendingConfirmation === true ? { customer_confirmed: false } : {}),
+      ...(options.pendingConfirmation === true ? { customer_confirmed: false, confirmed_at: null } : {}),
       ...(initiatedBy !== 'auto_dispatch' ? recurringDispatchDuePatch(service, {
         scheduled_date: newDate, window_start: win.start || service.window_start,
       }) : {}),
@@ -2561,7 +2561,7 @@ class SmartRebooker {
           window_start: occurrenceWindow.start,
           window_end: occurrenceWindow.end,
           status: isAnchor ? (options.pendingConfirmation === true ? 'pending' : (options.keepStatus === true && !sibRewound ? sib.status : 'confirmed')) : sib.status,
-          ...(isAnchor && options.pendingConfirmation === true ? { customer_confirmed: false } : {}),
+          ...(isAnchor && options.pendingConfirmation === true ? { customer_confirmed: false, confirmed_at: null } : {}),
           updated_at: trx.fn.now(),
           ...exceptionUpdate,
           ...(sibRewound ? LIVE_LIFECYCLE_RESET : {}),
@@ -2835,8 +2835,14 @@ class SmartRebooker {
               ...(deferFuturePlacement ? {
                 auto_dispatch_locked: sib.auto_dispatch_locked ?? null,
                 auto_dispatch_excluded: sib.auto_dispatch_excluded ?? null,
-                customer_confirmed: sib.customer_confirmed ?? null,
               } : {}),
+              // Deferred placement decisions already depend on this value.
+              // A reviewed proposal compares it above, and a pending landing
+              // overwrites it. Pin every case so a customer confirmation
+              // arriving after the read wins the race.
+              ...((deferFuturePlacement || Array.isArray(options.expectOccurrences) || options.pendingConfirmation === true)
+                ? { customer_confirmed: sib.customer_confirmed ?? null }
+                : {}),
               technician_id: sib.technician_id ?? null,
               // Duration pin, only when the occupancy probes above derived
               // their span from it (null landing end + gate on): a

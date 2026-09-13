@@ -411,8 +411,12 @@ describe('single-path date exceptions', () => {
     });
     const update = trxScheduled.update.mock.calls[0][0];
     expect(update.status).toBe(status);
-    if (clearsConfirmation) expect(update.customer_confirmed).toBe(false);
-    else expect(update).not.toHaveProperty('customer_confirmed');
+    if (clearsConfirmation) {
+      expect(update).toMatchObject({ customer_confirmed: false, confirmed_at: null });
+    } else {
+      expect(update).not.toHaveProperty('customer_confirmed');
+      expect(update).not.toHaveProperty('confirmed_at');
+    }
     expect(activateLegacyOutboundReviewRowIfNeeded).toHaveBeenCalledTimes(clearsConfirmation ? 0 : 1);
   });
 
@@ -442,16 +446,36 @@ describe('rescheduleSeries — date-only sweep', () => {
   });
 
   test('a reviewed move returns only the anchor to pending confirmation and records that transition', async () => {
-    const { updates, historyInsert, seriesMovesDb } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1)]);
+    const { updates, historyInsert, seriesMovesDb } = wireSeriesMocks([
+      sib('svc-1', BASE, { customer_confirmed: true }),
+      sib('svc-2', SIB1),
+    ]);
     await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
       ...ADMIN_OPTS, pendingConfirmation: true,
     });
-    expect(updates[0].update.mock.calls[0][0]).toMatchObject({ status: 'pending', customer_confirmed: false });
+    expect(updates[0].update.mock.calls[0][0]).toMatchObject({ status: 'pending', customer_confirmed: false, confirmed_at: null });
+    expect(updates[0].where).toHaveBeenCalledWith(expect.objectContaining({ customer_confirmed: true }));
     expect(updates[1].update.mock.calls[0][0]).toMatchObject({ status: 'confirmed' });
     expect(updates[1].update.mock.calls[0][0]).not.toHaveProperty('customer_confirmed');
     expect(historyInsert.insert).toHaveBeenCalledWith({ job_id: 'svc-1', from_status: 'confirmed', to_status: 'pending', transitioned_by: null });
     expect(seriesMovesDb.where).toHaveBeenCalledWith(expect.objectContaining({ operation_key: expect.stringMatching(/:pending-confirmation$/) }));
     expect(activateLegacyOutboundReviewRowIfNeeded).not.toHaveBeenCalled();
+  });
+
+  test('a reviewed occurrence pins customer confirmation in its write CAS', async () => {
+    const row = sib('svc-1', BASE, { customer_confirmed: false });
+    const { updates } = wireSeriesMocks([row]);
+    const disclosed = {
+      id: 'svc-1', from_date: BASE, status: 'confirmed', customer_confirmed: false,
+      from_start: '09:00:00', from_end: '11:00:00', duration: null, property_id: null,
+      date_exception: false, cadence_date: null,
+      to_date: TARGET, to_start: '09:00', to_end: '11:00',
+    };
+    await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
+      ...ADMIN_OPTS, expectOccurrenceIds: ['svc-1'], expectOccurrences: [disclosed],
+    });
+    expect(updates[0].where).toHaveBeenCalledWith(expect.objectContaining({ customer_confirmed: false }));
+    expect(updates[0].update.mock.calls[0][0]).not.toHaveProperty('customer_confirmed');
   });
 
   test.each(['id', 'from_date', 'status', 'customer_confirmed', 'from_start', 'from_end', 'duration', 'property_id', 'date_exception', 'cadence_date', 'to_date', 'to_start', 'to_end'])('a stale disclosed occurrence %s refuses the entire reviewed move', async (field) => {
