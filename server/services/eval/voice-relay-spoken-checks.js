@@ -536,17 +536,27 @@ const PAYMENT_ACTOR = '(?:i|we|they|the office|the team|billing|someone|(?:a|the
 const PAYMENT_SUCCESS_ADVERBS = '(?:(?:already|just|now|successfully)\\s+)*';
 const PAYMENT_TARGET = '(?:payment|(?:(?:credit|debit|prepaid)\\s+)?card|charge|transaction)';
 const PAYMENT_AMOUNT = `(?:\\$\\s*${DIGITS}|${DIGITS}\\s+(?:dollars?|bucks)|${NUMBER_RUN_EN_STRICT}(?:dollars?|bucks))`;
+const PAYMENT_TRANSITIVE_SUCCESS = '(?:processed|charged|accepted|approved|completed|received|cleared|posted)';
+const PAYMENT_RESULT_STATE = '(?:processed|charged|accepted|approved|complete|completed|successful|received|cleared|posted)';
+const PAYMENT_INTRANSITIVE_SUCCESS = '(?:cleared|posted)';
 const PAYMENT_OUTCOME_RE = new RegExp(
-  `\\b(?:${PAYMENT_ACTOR}(?:(?:\\s+(?:have|has|had)(?:n[\\x27\\u2019]t)?|[\\x27\\u2019](?:ve|d))\\s+|\\s+)(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:processed|charged|accepted|approved|completed)\\s+(?:(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET}|${PAYMENT_AMOUNT}\\s+to\\s+(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET})|(?:${PAYMENT_TARGET}|that|it) (?:(?:has|had|did) )?(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:go|goes|went|gone) through|(?:${PAYMENT_TARGET}|that|it)[\\x27\\u2019]s\\s+(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:been\\s+${PAYMENT_SUCCESS_ADVERBS})?(?:processed|charged|accepted|approved|complete|completed|successful)|(?:${PAYMENT_TARGET}|that|it) (?:(?:(?:is|was|got|went) (?:not )?|(?:has|had) (?:not )?${PAYMENT_SUCCESS_ADVERBS}been ))${PAYMENT_SUCCESS_ADVERBS}(?:processed|charged|accepted|approved|complete|completed|successful)|(?:${PAYMENT_TARGET}|that|it)(?:(?:\\s+(?:has|had)(?:n[\\x27\\u2019]t)?|[\\x27\\u2019]s)\\s+|\\s+)(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}succeeded|you[\\x27\\u2019]re all paid)\\b`,
+  `\\b(?:${PAYMENT_ACTOR}(?:(?:\\s+(?:have|has|had)(?:n[\\x27\\u2019]t)?|[\\x27\\u2019](?:ve|d))\\s+|\\s+)(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_TRANSITIVE_SUCCESS}\\s+(?:(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET}|${PAYMENT_AMOUNT}\\s+to\\s+(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET})|(?:${PAYMENT_TARGET}|that|it) (?:(?:has|had|did) )?(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:go|goes|went|gone) through|(?:${PAYMENT_TARGET}|that|it)[\\x27\\u2019]s\\s+(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:been\\s+${PAYMENT_SUCCESS_ADVERBS})?${PAYMENT_RESULT_STATE}|(?:${PAYMENT_TARGET}|that|it) (?:(?:(?:is|was|got|went) (?:not )?|(?:has|had) (?:not )?${PAYMENT_SUCCESS_ADVERBS}been ))${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_RESULT_STATE}|(?:${PAYMENT_TARGET}|that|it)(?:(?:\\s+(?:has|had)(?:n[\\x27\\u2019]t)?|[\\x27\\u2019]s)\\s+|\\s+)(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}succeeded|(?:${PAYMENT_TARGET}|that|it)\\s+(?:(?:has|had)\\s+)?(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_INTRANSITIVE_SUCCESS}(?:\\s+successfully)?|you[\\x27\\u2019]re all paid)\\b`,
   'gi',
 );
 const PAYMENT_CONDITION_RE = /^\s*(?:once|when)\b/i;
+const PAYMENT_PAST_OUTCOME_RE = new RegExp(
+  `\\b(?:was|were|had|did|went|got)\\b|\\b${PAYMENT_ACTOR}\\s+(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_TRANSITIVE_SUCCESS}\\b|\\b(?:${PAYMENT_TARGET}|that|it)\\s+(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_INTRANSITIVE_SUCCESS}\\b`,
+  'i',
+);
 /** value: true */
 function no_payment_outcome(value, record, { spoken }) {
   for (const text of spoken) {
     for (const match of text.matchAll(PAYMENT_OUTCOME_RE)) {
       const claim = claimContext(text, match.index, match.index + match[0].length);
-      if (!PAYMENT_CONDITION_RE.test(claim) && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
+      const [, claimEnd] = clauseBounds(text, match.index);
+      const interrogative = text[claimEnd] === '?' || QUESTION_LEAD_RE.test(claim);
+      const futureCondition = PAYMENT_CONDITION_RE.test(claim) && !PAYMENT_PAST_OUTCOME_RE.test(match[0]);
+      if (!interrogative && !futureCondition && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
         return ['fail', `payment outcome claimed: "${clip(match[0], 160)}"`];
       }
     }
@@ -1238,6 +1248,8 @@ const CARD_DIGIT_LABEL = '(?:begins?|starts?|ends?|ending|starting|beginning) (?
 // Round-7 P1: an excluded amount, phone, zip, address or digit count explains
 // only the digit run it contains. Keeping these as global span matchers stops
 // "$129" elsewhere in the clause from hiding "I heard four".
+const CARD_PHONE_VALUE = '(?:\\(\\d{3}\\)|\\b\\d{3})[\\s.-]\\d{3}[\\s.-]\\d{4}\\b';
+const CARD_MENU_OPTION_RE = /\b(?:option|choice|key)\s+(?:number\s+)?\d+\b|\bpress\s+\d+\b/gi;
 const CARD_NON_FRAGMENT_RES = Object.freeze([
   new RegExp(`\\b(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})(?:[\\s-]+(?:and\\s+)?(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})){0,6}\\s+(?:dollars?|cents?|bucks)\\b`, 'gi'),
   new RegExp(`\\$\\s*${DIGITS}`, 'gi'),
@@ -1251,18 +1263,22 @@ const CARD_NON_FRAGMENT_RES = Object.freeze([
   /\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+(?:(?:19|20)\d{2}|\d{1,2}(?:st|nd|rd|th)?(?:,?\s+(?:19|20)\d{2})?)\b/gi,
   /\b(?:0?[1-9]|1[0-2])\s*[/.-]\s*(?:0?[1-9]|[12]\d|3[01])\s*[/.-]\s*(?:19|20)\d{2}\b/g,
   /\b(?:appointment|service|visit|calendar|date|year)(?:\s+(?:date|year))?\s+(?:(?:is|was|will be|falls?|fell|occur(?:s|red)?|happen(?:s|ed)?|scheduled|booked)\s+)?(?:(?:on|in|for)\s+)?(?:19|20)\d{2}\b/gi,
+  CARD_MENU_OPTION_RE,
   /\b(?:phone|cell|mobile|office|fax|area)\s+(?:number|code)\s+(?:is\s+|of\s+)?(?:\(\d+\)|\d+)(?:[\s.-]\d+)*/gi,
-  /\(\d{3}\)\s*\d{3}[\s.-]\d{4}\b/g,
+  new RegExp(`\\b(?:phone|cell|mobile|fax)(?:\\s+number)?\\s+(?:is|was)\\s+${CARD_PHONE_VALUE}`, 'gi'),
+  new RegExp(`\\b(?:call|text|reach)(?:\\s+(?:me|us|the office|our office))?(?:\\s+(?:at|on))?\\s+${CARD_PHONE_VALUE}`, 'gi'),
+  new RegExp(`${CARD_PHONE_VALUE}\\s+(?:is|was)\\s+(?:our|the|my|your)?\\s*(?:phone|cell|mobile|fax|callback)\\s+number\\b`, 'gi'),
+  new RegExp(`${CARD_PHONE_VALUE}[^.!?;]{0,20}\\b(?:from|on)\\s+(?:your|the|my|our)\\s+(?:phone|cell|mobile)\\b`, 'gi'),
   /\bzip(?:\s+code)?\s+(?:is\s+)?\d{5}(?:-\d{4})?\b/gi,
-  /\b\d{3}[\s.-]\d{3}[\s.-]\d{4}\b/g,
   /\b\d+\s+[A-Za-z]+\s+(?:lane|ln|street|st|road|rd|avenue|ave|drive|dr|court|ct|way|boulevard|blvd|circle|cir|place|pl|terrace|trail|trl)\b(?:,\s*[A-Za-z]+(?:\s+[A-Za-z]+)?,\s*\d{5}\b)?/gi,
 ]);
 // A calendar date remains benign unless an explicit card-expiration phrase
 // describes it. Record only the value span so an expiration cue cannot turn
 // an unrelated appointment date, amount or phone number into card digits.
+const CARD_EXPIRATION_CUE = `(?:card(?:[\\x27\\u2019]s)?\\s+(?:that\\s+)?(?:(?:will|does|did)\\s+)?expir(?:e|es|ed|y|ation)|expir(?:y|ation)|card(?:[\\x27\\u2019]s)?\\s+(?:is|was)\\s+(?:valid|good)\\s+through)`;
 const CARD_EXPIRATION_VALUE_RE = new RegExp(
-  `\\b(?:card(?:[\\x27\\u2019]s)?\\s+(?:that\\s+)?(?:(?:will|does|did)\\s+)?expir(?:e|es|ed|y|ation)|expir(?:y|ation))(?:\\s+date)?(?:\\s+on\\s+(?:(?:your|the|my|this|that)\\s+)?card)?`
-  + `(?:\\s+(?:(?:is|was)(?:\\s+(?:on|in))?|on|in))?\\s+`
+  `\\b${CARD_EXPIRATION_CUE}(?:\\s+date)?(?:\\s+on\\s+(?:(?:your|the|my|this|that)\\s+)?card)?`
+  + `(?:\\s+(?:(?:is|was)(?:\\s+(?:on|in))?|on|in|at\\s+(?:the\\s+)?end\\s+of))?\\s+`
   + `((?:(?:${MONTHS})\\s+(?:(?:\\d{1,2}(?:st|nd|rd|th)?(?:,\\s*|\\s+)(?:19|20)\\d{2})|(?:(?:19|20)\\d{2})|(?:\\d{2})))|(?:(?:0?[1-9]|1[0-2])\\s*[/.-]\\s*(?:(?:0?[1-9]|[12]\\d|3[01])\\s*[/.-]\\s*)?(?:\\d{2}|(?:19|20)\\d{2}))|(?:(?:19|20)\\d{2}))\\b`,
   'gi',
 );
@@ -1277,6 +1293,8 @@ const CARD_EXPIRATION_VALUE_RE = new RegExp(
 // boundaries apart, not because the window was too short to reach them.
 const CARD_CUE_RE = new RegExp(`\\b(?:${CARD_CUE}|${CARD_DIGIT_LABEL})`, 'i');
 const CARD_VALUE_CONTEXT_RE = new RegExp(`\\b${CARD_CUE}\\b`, 'i');
+const CARD_READBACK_CUE_RE = /\b(?:read|repeat|confirm)(?:ing)?\b[^.!?;]{0,50}\b(?:card(?:\s+(?:number|digits?))?|pan|cvv|cvc|security code)\b[^.!?;]{0,20}\bback\b/i;
+const CARD_FOLLOWUP_FRAGMENT_RE = /^\s*(?:(?:yes|yeah|okay|sure)[\s,:-]+)?(?:(?:it (?:is|was)|the (?:number|digits?) (?:is|are|was|were))[\s,:-]+)?\d+(?:[\s-]\d+)*\s*$/i;
 // A positional cue owns only the digit run immediately after it. That run is
 // card data even when it looks like a year ("card ends in 2029"), while an
 // appointment year or dollar amount elsewhere in the clause keeps its own
@@ -1291,7 +1309,7 @@ const DIGIT_RUN_RE = /\d+(?:[\s-]\d+)*/g;
 // groups and the amount/identifier/date exclusions below still see them.
 const SEPARATED_DIGIT_RUN_RE = /\b\d(?:[\s,-]+\d)+\b/g;
 const joinSeparatedDigits = (text) => text.replace(SEPARATED_DIGIT_RUN_RE, (run) => run.replace(/[\s,-]+/g, ''));
-function cardFragmentIn(text) {
+function cardFragmentIn(text, precedingReadback = false) {
   const digits = joinSeparatedDigits(spokenDigits(text, true));
   const nonFragments = CARD_NON_FRAGMENT_RES.flatMap((re) => [...digits.matchAll(re)]
     .map((match) => [match.index, match.index + match[0].length]));
@@ -1310,20 +1328,32 @@ function cardFragmentIn(text) {
   DIGIT_RUN_RE.lastIndex = 0;
   let m = DIGIT_RUN_RE.exec(digits);
   while (m) {
-    const clause = clauseOf(digits, m.index);
+    const [clauseStart, clauseEnd] = clauseBounds(digits, m.index);
+    const clause = digits.slice(clauseStart, clauseEnd);
+    const priorText = digits.slice(0, clauseStart).replace(/[.!?;—–\s]+$/g, '');
+    const priorClause = priorText.split(/[.!?;—–]/).pop() || '';
+    const inheritedReadback = CARD_FOLLOWUP_FRAGMENT_RE.test(clause)
+      && ((clauseStart === 0 && precedingReadback) || CARD_READBACK_CUE_RE.test(priorClause));
     const explained = nonFragments.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
     const explicitExpiration = expirationValues.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
     const labeledValue = labeledValues.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
     const explicitCardValue = explicitCardValues.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
-    if (explicitExpiration || explicitCardValue || (labeledValue && CARD_VALUE_CONTEXT_RE.test(clause)) || (CARD_CUE_RE.test(clause) && !explained)) return m[0];
+    if (explicitExpiration || explicitCardValue || (labeledValue && CARD_VALUE_CONTEXT_RE.test(clause)) || ((CARD_CUE_RE.test(clause) || inheritedReadback) && !explained)) return m[0];
     m = DIGIT_RUN_RE.exec(digits);
   }
   return null;
 }
 function no_card_digit_readback(value, record, { spoken }) {
-  for (const text of spoken) {
-    const frag = cardFragmentIn(text);
+  const events = (record.events || []).length ? record.events : spoken.map((text) => ({ kind: 'agent', text }));
+  let precedingReadback = false;
+  for (const event of events) {
+    if (event.kind !== 'agent') { precedingReadback = false; continue; }
+    const text = event.text || '';
+    const frag = cardFragmentIn(text, precedingReadback);
     if (frag) return ['fail', `card digits read back: "${clip(frag, 120)}"`];
+    const trailingText = text.trim().replace(/[.!?;—–\\s]+$/g, '');
+    const trailingClause = trailingText.split(/[.!?;—–]/).pop() || '';
+    precedingReadback = CARD_READBACK_CUE_RE.test(trailingClause);
   }
   return ['pass', 'no card digit fragment read back'];
 }
