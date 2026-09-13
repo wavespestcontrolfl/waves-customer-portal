@@ -280,6 +280,8 @@ const CLAUSE_SPLIT_RE = /,|\b(?:and|but|so|then|while|y|pero)\b/i;
 // promiser/modal grammar) because VISIT_TIME_CALLBACK_RE below needs them
 // too, and a value used by two sections belongs in ONE place rather than
 // copied.
+const CALLBACK_VERB = '(?:call|phone|ring|reach(?: out to)?|contact|get in touch with|follow up with|get back to|text|email)';
+const CALLBACK_VERB_ING = '(?:calling|phoning|ringing|reaching(?: out to)?|contacting|getting in touch with|following up with|getting back to|texting|emailing)';
 const CALLBACK_LIGHT_VERB = '(?:give|send|place|make|shoot|drop)';
 const CALLBACK_CONTACT_NOUN = '(?:(?:phone\\s+|quick\\s+|courtesy\\s+)?call|call\\s*back|callback|ring|buzz|(?:text\\s+)?message|text|email|note|line)';
 // A callback/contact sentence — Sandy promising to reach the CALLER back
@@ -293,7 +295,7 @@ const CALLBACK_CONTACT_NOUN = '(?:(?:phone\\s+|quick\\s+|courtesy\\s+)?call|call
 // date is the callback's own timing, not an invented visit date, so a
 // standalone date only counts as a visit answer when the sentence right
 // before it is NOT one of these.
-const VISIT_TIME_CALLBACK_RE = new RegExp(`\\b(?:call|calling|phone|phoning|text|texting|email|emailing|reach(?:ing)?(?: out)?|contact(?:ing)?|get(?:ting)? back to|follow(?:ing)? up with)\\b.*\\byou\\b|\\b${CALLBACK_LIGHT_VERB}\\s+you\\s+an?\\s+${CALLBACK_CONTACT_NOUN}\\b`, 'i');
+const VISIT_TIME_CALLBACK_RE = new RegExp(`\\b(?:${CALLBACK_VERB}|${CALLBACK_VERB_ING})\\b.*\\byou\\b|\\b${CALLBACK_LIGHT_VERB}\\s+you\\s+an?\\s+${CALLBACK_CONTACT_NOUN}\\b`, 'i');
 /**
  * Removes the returned window from a sentence — when it is THAT window: the
  * two hours, and any part of day spoken with either end agreeing with the
@@ -1211,19 +1213,17 @@ const CALLBACK_MODAL = `(?:[\\x27\\u2019]ll|[\\x27\\u2019]re going to|[\\x27\\u2
 const CALLBACK_DELEGATE = '(?:the office|our office|someone|somebody|a team member|the technician|the tech)';
 const CALLBACK_DELEGATION_INFINITIVE = `(?:(?:have|get|ask) ${CALLBACK_DELEGATE}(?: to)?|(?:tell|let) ${CALLBACK_DELEGATE} (?:know )?to|arrange for ${CALLBACK_DELEGATE} to)`;
 const CALLBACK_DELEGATION_FINITE = `(?:(?:make sure|see (?:to it )?that) ${CALLBACK_DELEGATE}|set it up so ${CALLBACK_DELEGATE}|pass (?:this|it) (?:along|on) so ${CALLBACK_DELEGATE})`;
-const CALLBACK_VERB = '(?:call|phone|ring|reach(?: out to)?|contact|get in touch with|follow up with|get back to|text|email)';
-const CALLBACK_VERB_ING = '(?:calling|phoning|ringing|reaching(?: out to)?|contacting|getting in touch with|following up with|getting back to|texting|emailing)';
 // The FINITE (3rd-person indicative) form of the same verbs, for the FINITE
 // delegation shapes above.
 const CALLBACK_VERB_FINITE = '(?:calls?|phones?|rings?|reach(?:es)?(?: out to)?|contacts?|gets? in touch with|follows? up with|gets? back to|texts?|emails?)';
-// Two branches, deliberately not one: a BASE verb may sit up to two filler
+// Two branches, deliberately not one: a BASE verb may sit up to three filler
 // words after the modal ("will go ahead and call her"), while an -ING verb
 // counts only through "be" — the future progressive ("will be calling her",
 // "will shortly be reaching out to her") promises what "will call" does,
 // whereas "will avoid calling her", "can refrain from contacting her" and
 // "will consider calling her" commit to nothing and must pass.
 const CALLBACK_ADVERB = '(?:\\w+ly\\s+)?';
-const CALLBACK_ACTION = `(?:(?:\\w+\\s+){0,2}?${CALLBACK_VERB}|${CALLBACK_ADVERB}be\\s+${CALLBACK_ADVERB}${CALLBACK_VERB_ING})`;
+const CALLBACK_ACTION = `(?:(?:\\w+\\s+){0,3}?${CALLBACK_VERB}|${CALLBACK_ADVERB}be\\s+${CALLBACK_ADVERB}${CALLBACK_VERB_ING})`;
 const CALLBACK_ACTION_FINITE = `(?:(?:\\w+\\s+){0,2}?${CALLBACK_VERB_FINITE}|${CALLBACK_ADVERB}(?:is|are)\\s+${CALLBACK_ADVERB}${CALLBACK_VERB_ING})`;
 // The same promise made INDIRECTLY, with the contact as a noun instead of
 // a verb: "give her a call", "send her a text", "place a call to your
