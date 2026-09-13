@@ -130,9 +130,11 @@ async function claimNotificationSend(assessmentId) {
     .update({ notification_sent: true, notification_sent_at: null });
 }
 
-// A pre-dispatch throw or an explicit not_sent result proves no handoff.
+// A pre-dispatch throw, or a handed-off result that neither delivered nor
+// created a durable queue obligation and explicitly proves not_sent, frees the
+// claim. sent:true includes dispatcher-owned scheduled delivery.
 async function releaseUnhandedClaim(assessmentId, claimed, handedOff, result) {
-  if (!claimed || (handedOff && result?.deliveryOutcome !== 'not_sent')) return;
+  if (!claimed || (handedOff && (result?.sent || result?.deliveryOutcome !== 'not_sent'))) return;
   await releaseNotificationSend(assessmentId, null);
 }
 
@@ -346,9 +348,9 @@ const LawnIntelligence = {
       return result;
     } catch (err) {
       if (isOwnershipLoss(err)) throw err;
-      // Preserve accepted/uncertain evidence, but release a proven-unsent
-      // claim even if a later enqueue or settlement write failed. Otherwise
-      // the next recovery would mistake the abandoned claim for delivery.
+      // Preserve delivered, durably queued, accepted, or uncertain evidence.
+      // Release only a proven-unsent result that transferred no delivery
+      // ownership; otherwise recovery could either strand work or send twice.
       await releaseUnhandedClaim(assessmentId, claimed, handedOff, dispatchResult);
       logger.error(`[lawn-intel] sendAssessmentNotification failed: ${err.message}`);
       // A replay must retain provider evidence even when its local settlement

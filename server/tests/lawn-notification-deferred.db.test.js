@@ -225,6 +225,37 @@ postgres('deferred standalone lawn assessment notification (real PostgreSQL)', (
     }
   });
 
+  test('a queued dispatcher success keeps its claim when the sent-at settlement fails', async () => {
+    const seeded = await seed();
+    const held = holdSms();
+    mockNotify.mockImplementation((...args) => RealNotificationDispatcher.notify(...args));
+    mockSendCustomerMessage.mockResolvedValue(held);
+    await fixture.knex.raw(`ALTER TABLE lawn_assessments
+      ADD CONSTRAINT fixture_notification_settlement_failure CHECK (notification_sent_at IS NULL)`);
+    try {
+      await expect(LawnIntel.sendAssessmentNotification(seeded.assessment.id)).resolves.toBeNull();
+      expect(mockNotify).toHaveBeenCalledTimes(1);
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+      const rows = await fixture.knex('sms_log').where({ customer_id: seeded.customerId });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        status: 'scheduled',
+        message_type: 'service_complete',
+        message_body: expect.stringContaining('Score 80'),
+      });
+      expect(rows[0].metadata).toMatchObject({ entry_point: 'notification_dispatcher_deferred' });
+      expect(await fixture.knex('lawn_assessments').where({ id: seeded.assessment.id }).first())
+        .toMatchObject({ notification_sent: true, notification_sent_at: null });
+
+      mockNotify.mockClear();
+      await expect(LawnIntel.sendAssessmentNotification(seeded.assessment.id)).resolves.toBeNull();
+      expect(mockNotify).not.toHaveBeenCalled();
+      expect(await fixture.knex('sms_log').where({ customer_id: seeded.customerId })).toHaveLength(1);
+    } finally {
+      await fixture.knex.raw('ALTER TABLE lawn_assessments DROP CONSTRAINT fixture_notification_settlement_failure');
+    }
+  });
+
   test('replay renders fresh copy under a new lease/seal, forwards queue identity, and cannot resend an acceptance', async () => {
     const seeded = await seed();
     const { queued } = await queueHeld(seeded.assessment.id);
