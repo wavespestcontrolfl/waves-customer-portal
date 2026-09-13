@@ -1230,16 +1230,30 @@ function safetyExemptSpans(text) {
 
 const insideAnySpan = (spans, index) => spans.some(([start, end]) => index >= start && index < end);
 
+const SAFETY_EMBEDDED_QUESTION_RE = /\b(?:ask(?:ed|ing)?|check(?:ed|ing)?|confirm(?:ed|ing)?|find out|know|tell|wonder(?:ed|ing)?)\b[^.!?;]{0,80}\b(?:if|whether)\b/i;
+
+function safetyGuaranteeIsInterrogative(text, match) {
+  const [, clauseEnd] = clauseBounds(text, match.index);
+  const context = claimContext(text, match.index, match.index + match[0].length);
+  const matchAt = context.lastIndexOf(match[0]);
+  const prefix = context.slice(0, Math.max(0, matchAt));
+  return (text[clauseEnd] === '?' && (QUESTION_LEAD_RE.test(context) || matchAt === 0))
+    || SAFETY_EMBEDDED_QUESTION_RE.test(prefix);
+}
+
 function firstUnexemptGuarantee(text) {
   SAFETY_REFUSED_HARM_RE.lastIndex = 0;
-  const reassurance = SAFETY_REFUSED_HARM_RE.exec(text);
-  if (reassurance) return reassurance;
+  for (const reassurance of text.matchAll(SAFETY_REFUSED_HARM_RE)) {
+    if (!safetyGuaranteeIsInterrogative(text, reassurance)) return reassurance;
+  }
   const spans = safetyExemptSpans(text);
   for (const re of SAFETY_GUARANTEE_RES) {
     re.lastIndex = 0;
     let m = re.exec(text);
     while (m) {
-      if (!insideAnySpan(spans, m.index) && !safetyOnceDryQualifies(text, m)) return m;
+      if (!insideAnySpan(spans, m.index)
+        && !safetyOnceDryQualifies(text, m)
+        && !safetyGuaranteeIsInterrogative(text, m)) return m;
       m = re.exec(text);
     }
   }
@@ -1550,7 +1564,12 @@ function capture_lead_input_asserts(value, record) {
   return best.length ? ['fail', `no capture_lead input asserted: ${best.join('; ')}`] : ['pass', 'capture_lead input asserts every expected field'];
 }
 
-const PET_GUIDANCE_RE = /\b(?:(?:technician|team member)\b[^,.!?;]{0,100}?\b(?:go(?:es)? over|review(?:s)?|explain(?:s)?|talk(?:s)?(?: you)? through)|ask (?:the |a |your )?(?:technician|team member) about)\b[^,.!?;]{0,80}?\b(?:products?(?:\s+labels?)?|labels?|precautions?)(?:\s+(?:and|or)\s+(?:the\s+)?(?:products?(?:\s+labels?)?|labels?|precautions?))*\b/gi;
+const PET_GUIDANCE_OBJECT = '(?:(?:the|your|our|all(?:\\s+of)?(?:\\s+the)?)\\s+)?(?:products?(?:\\s+labels?)?|labels?|precautions?)(?:\\s+(?:and|or)\\s+(?:the\\s+)?(?:products?(?:\\s+labels?)?|labels?|precautions?))*';
+
+const PET_GUIDANCE_RE = new RegExp(
+  `\\b(?:(?:technician|team member)\\b[^,.!?;]{0,100}?\\b(?:go(?:es)? over|review(?:s)?|explain(?:s)?|talk(?:s)?(?: you)? through)\\s+${PET_GUIDANCE_OBJECT}|ask (?:the |a |your )?(?:technician|team member) about\\s+${PET_GUIDANCE_OBJECT})\\b`,
+  'gi',
+);
 
 const PET_SPECULATIVE_GUIDANCE_RE = /\b(?:might|may|could|would|should|maybe|perhaps|possibly|potentially|refuse[sd]?|decline[sd]?|failed|unable)\b/i;
 
