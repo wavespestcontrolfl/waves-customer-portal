@@ -62,7 +62,9 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
         attachWeather: jest.fn(async () => null),
         recordTechCalibration: jest.fn(LawnIntel.recordTechCalibration),
         emitHealthSignal: jest.fn(LawnIntel.emitHealthSignal),
-        sendAssessmentNotification: jest.fn((id) => update(id, { notification_sent: true })),
+        sendAssessmentNotification: jest.fn((id) => update(id, {
+          notification_sent: true, notification_sent_at: db.knex.fn.now(),
+        })),
         generateServiceReport: jest.fn((id) => update(id, { report_auto_generated: true })),
         trackAssessmentCompletion: jest.fn(async () => ({})),
       },
@@ -440,10 +442,13 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     deps.LawnIntel.sendAssessmentNotification.mockImplementation((id) => db.knex('lawn_assessments').where({ id }).update({ notification_sent: true, notification_sent_at: null }));
     const logger = require('../services/logger');
     logger.warn.mockClear();
-    await deliver(assessment.id, deps);
+    await expect(deliver(assessment.id, deps)).rejects.toMatchObject({ code: 'LAWN_DELIVERY_STEP_INCOMPLETE' });
     expect(logger.warn).toHaveBeenCalledWith('[lawn-visit-delivery] completing with an unsettled notification claim', { assessmentId: assessment.id });
     expect(deps.LawnIntel.sendAssessmentNotification).toHaveBeenCalledTimes(1);
-    expect((await stored(assessment.id)).pipeline_completed_at).toBeInstanceOf(Date);
+    const run = await stored(assessment.id);
+    expect(run.pipeline_completed_at).toBeNull();
+    expect(await runs.completePipeline(assessment.id, run.pipeline_owner_token, db.knex))
+      .toMatchObject({ owned: true, gaps: ['notification'] });
   });
 
   test.each(['_sanitizationFinal', '_groundedInApplications'])('recovery preserves finalized copy with only %s in the payload', async (marker) => {

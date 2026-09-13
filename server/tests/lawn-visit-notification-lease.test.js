@@ -19,14 +19,27 @@ jest.mock('../models/db', () => {
     // The claim's second .where((q) => …) narrows an unsent row; the fixture row is unsent.
     where: () => query(name),
   });
-  return (name) => ({ where: () => query(name) });
+  const mockDb = (name) => ({ where: () => query(name) });
+  mockDb.transaction = jest.fn();
+  return mockDb;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+jest.mock('../services/lawn-visit-runs', () => ({
+  recoverNotificationNotSent: jest.fn(),
+  claimNotificationAttempt: jest.fn(),
+  releaseNotificationAttempt: jest.fn(),
+  settleNotificationAttempt: jest.fn(),
+  recordNotificationNotSent: jest.fn(),
+}));
 jest.mock('../services/sms-template-renderer', () => ({ renderRequiredSmsTemplate: jest.fn(async () => 'Your report is ready') }));
-jest.mock('../services/notification-dispatcher', () => ({ notify: jest.fn(async () => ({ sent: true, results: { sms: 'sent' } })) }));
+jest.mock('../services/notification-dispatcher', () => ({
+  notify: jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted', results: { sms: 'sent' } })),
+}));
 
 const NotificationDispatcher = require('../services/notification-dispatcher');
 const LawnIntel = require('../services/lawn-intelligence');
+const visitRuns = require('../services/lawn-visit-runs');
+const db = require('../models/db');
 
 const ownershipLost = () => Object.assign(new Error('Lawn delivery ownership lost'), { code: 'LAWN_DELIVERY_OWNERSHIP_LOST' });
 
@@ -34,6 +47,21 @@ describe('sendAssessmentNotification lease check', () => {
   beforeEach(() => {
     updates.length = 0;
     jest.clearAllMocks();
+    visitRuns.recoverNotificationNotSent.mockResolvedValue(false);
+    visitRuns.claimNotificationAttempt.mockImplementation(async () => {
+      updates.push(['lawn_assessments', { notification_sent: true, notification_sent_at: null }]);
+      return { attemptId: 'attempt-1' };
+    });
+    visitRuns.releaseNotificationAttempt.mockImplementation(async () => {
+      updates.push(['lawn_assessments', { notification_sent: false, notification_sent_at: null }]);
+      return true;
+    });
+    visitRuns.settleNotificationAttempt.mockImplementation(async () => {
+      if (rows.failSettle) throw rows.settleError || new Error('settle write failed');
+      updates.push(['lawn_assessments', { notification_sent_at: new Date() }]);
+      return true;
+    });
+    visitRuns.recordNotificationNotSent.mockResolvedValue(true);
     jest.spyOn(LawnIntel, 'computeAssessmentScoreParts').mockResolvedValue({ overall: 72, deltaStr: '', tip: null });
   });
 
@@ -59,9 +87,43 @@ describe('sendAssessmentNotification lease check', () => {
     ]);
   });
 
+  test('an unguarded dispatcher-owned quiet-hours queue settles without creating a second queue', async () => {
+    NotificationDispatcher.notify.mockResolvedValueOnce({
+      sent: true,
+      deliveryOutcome: 'not_sent',
+      results: { sms: 'scheduled' },
+      smsResult: {
+        sent: false,
+        deliveryOutcome: 'not_sent',
+        code: 'QUIET_HOURS_HOLD',
+        deferred: true,
+        nextAllowedAt: '2026-09-14T12:00:00.000Z',
+      },
+    });
+
+    await expect(LawnIntel.sendAssessmentNotification('a-1')).resolves.toMatchObject({
+      sent: true, deliveryOutcome: 'not_sent',
+    });
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(updates.map(([, fields]) => fields)).toEqual([
+      expect.objectContaining({ notification_sent: true, notification_sent_at: null }),
+      expect.objectContaining({ notification_sent_at: expect.any(Date) }),
+    ]);
+  });
+
   test('a dispatcher that definitely delivered nothing releases the claim for a re-send', async () => {
     NotificationDispatcher.notify.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', results: { sms: 'blocked' } });
     await expect(LawnIntel.sendAssessmentNotification('a-1')).resolves.toMatchObject({ sent: false });
+    expect(updates.map(([, f]) => f.notification_sent)).toEqual([true, false]);
+  });
+
+  test('a canonical dispatcher early refusal is definite non-delivery', async () => {
+    NotificationDispatcher.notify.mockResolvedValueOnce({
+      sent: false, deliveryOutcome: 'not_sent', results: { reason: 'type_disabled' },
+    });
+    await expect(LawnIntel.sendAssessmentNotification('a-1')).resolves.toMatchObject({
+      sent: false, deliveryOutcome: 'not_sent',
+    });
     expect(updates.map(([, f]) => f.notification_sent)).toEqual([true, false]);
   });
 
@@ -98,21 +160,39 @@ describe('sendAssessmentNotification lease check', () => {
     expect(updates).toEqual([]);
   });
 
-  test('a settle write that fails after dispatch keeps the claim rather than re-sending', async () => {
+  test('captured dispatch evidence wins when a later settle error carries a conflicting outcome', async () => {
     rows.failSettle = true;
+    rows.settleError = Object.assign(new Error('settle write failed'), {
+      providerOutcome: { sent: false, deliveryOutcome: 'not_sent', code: 'STALE_ERROR_METADATA' },
+    });
     try {
       await expect(LawnIntel.sendAssessmentNotification('a-1')).resolves.toBeNull();
-    } finally { delete rows.failSettle; }
+    } finally {
+      delete rows.failSettle;
+      delete rows.settleError;
+    }
     // The text went out; only its timestamp is missing. Releasing here would
     // hand the customer a second copy.
     expect(updates.map(([, f]) => f.notification_sent)).toEqual([true]);
   });
 
-  test('a throw out of the dispatcher happened before any handoff, so the claim comes back', async () => {
-    NotificationDispatcher.notify.mockRejectedValueOnce(new Error('prefs lookup failed'));
+  test('a dispatcher throw without canonical outcome leaves the unknown attempt fenced', async () => {
+    NotificationDispatcher.notify.mockRejectedValueOnce(new Error('provider handoff outcome lost'));
     await expect(LawnIntel.sendAssessmentNotification('a-1')).resolves.toBeNull();
-    // Provider failures arrive in the result; a throw means nothing was sent.
+    expect(updates.map(([, f]) => f.notification_sent)).toEqual([true]);
+  });
+
+  test('a thrown canonical not_sent provider outcome releases the claim', async () => {
+    const providerOutcome = { sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'UPSTREAM_BUSY' };
+    NotificationDispatcher.notify.mockRejectedValueOnce(Object.assign(new Error('provider refused'), { providerOutcome }));
+    await expect(LawnIntel.sendAssessmentNotification('a-1')).resolves.toBeNull();
     expect(updates.map(([, f]) => f.notification_sent)).toEqual([true, false]);
-    expect(updates[1][1].notification_sent_at).toBeNull();
+  });
+
+  test.each(['accepted', 'uncertain'])('a thrown canonical %s outcome remains fenced', async (deliveryOutcome) => {
+    const providerOutcome = { sent: false, deliveryOutcome, code: 'AUDIT_FAILED' };
+    NotificationDispatcher.notify.mockRejectedValueOnce(Object.assign(new Error('audit failed'), { providerOutcome }));
+    await expect(LawnIntel.sendAssessmentNotification('a-1')).resolves.toBeNull();
+    expect(updates.map(([, f]) => f.notification_sent)).toEqual([true]);
   });
 });

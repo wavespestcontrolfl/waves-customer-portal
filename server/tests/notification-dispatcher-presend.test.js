@@ -4,14 +4,17 @@ jest.mock('../config/twilio-numbers', () => ({ getOutboundNumber: jest.fn(() => 
 
 const mockInsert = jest.fn(async () => []);
 let mockPrefs = { service_complete_channel: 'sms' };
+let mockCustomer = { id: 'customer-1', phone: '+19415550123' };
+let mockCustomerError;
+let mockPrefsError;
 jest.mock('../models/db', () => jest.fn((table) => {
   if (table === 'customers') return {
     where: jest.fn().mockReturnThis(),
-    first: jest.fn(async () => ({ id: 'customer-1', phone: '+19415550123' })),
+    first: jest.fn(async () => { if (mockCustomerError) throw mockCustomerError; return mockCustomer; }),
   };
   if (table === 'notification_prefs') return {
     where: jest.fn().mockReturnThis(),
-    first: jest.fn(async () => mockPrefs),
+    first: jest.fn(async () => { if (mockPrefsError) throw mockPrefsError; return mockPrefs; }),
   };
   if (table === 'sms_log') return { insert: mockInsert };
   throw new Error(`Unexpected table: ${table}`);
@@ -29,6 +32,9 @@ const MESSAGE = {
 beforeEach(() => {
   jest.clearAllMocks();
   mockPrefs = { service_complete_channel: 'sms' };
+  mockCustomer = { id: 'customer-1', phone: '+19415550123' };
+  mockCustomerError = null;
+  mockPrefsError = null;
   sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
 });
 
@@ -110,7 +116,9 @@ test.each([
     await expect(NotificationDispatcher.notify('customer-1', 'service_complete', {
       ...MESSAGE,
       ...(preSendCheck ? { preSendCheck } : {}),
-    })).resolves.toEqual({ sent: false, channel: null, results: { reason: 'quiet_hours' } });
+    })).resolves.toEqual({
+      sent: false, channel: null, results: { reason: 'quiet_hours' }, deliveryOutcome: 'not_sent',
+    });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(mockInsert).not.toHaveBeenCalled();
   } finally {
@@ -129,7 +137,9 @@ test('a guarded quiet window covering the global send window is suppressed witho
     await expect(NotificationDispatcher.notify('customer-1', 'service_complete', {
       ...MESSAGE,
       preSendCheck: async () => ({ ok: true }),
-    })).resolves.toEqual({ sent: false, channel: null, results: { reason: 'quiet_hours' } });
+    })).resolves.toEqual({
+      sent: false, channel: null, results: { reason: 'quiet_hours' }, deliveryOutcome: 'not_sent',
+    });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(mockInsert).not.toHaveBeenCalled();
   } finally {
@@ -156,12 +166,40 @@ test.each([
     await expect(NotificationDispatcher.notify('customer-1', type, {
       ...MESSAGE,
       preSendCheck: async () => ({ ok: true }),
-    })).resolves.toEqual({ sent: false, channel: null, results });
+    })).resolves.toEqual({ sent: false, channel: null, results, deliveryOutcome: 'not_sent' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(mockInsert).not.toHaveBeenCalled();
   } finally {
     jest.useRealTimers();
   }
+});
+
+test.each([
+  ['email-only preference', { service_complete_channel: 'email' }, { id: 'customer-1', phone: '+19415550123' }],
+  ['missing phone', { service_complete_channel: 'sms' }, { id: 'customer-1', phone: null }],
+])('%s without a provider attempt is explicit non-delivery', async (_label, prefs, customer) => {
+  mockPrefs = prefs;
+  mockCustomer = customer;
+  await expect(NotificationDispatcher.notify('customer-1', 'service_complete', MESSAGE)).resolves.toMatchObject({
+    sent: false, deliveryOutcome: 'not_sent',
+  });
+  expect(sendCustomerMessage).not.toHaveBeenCalled();
+});
+
+test.each(['customer', 'preferences'])('%s read failure carries explicit retryable non-delivery evidence', async (read) => {
+  const err = new Error(`${read} read failed`);
+  if (read === 'customer') mockCustomerError = err;
+  else mockPrefsError = err;
+  await expect(NotificationDispatcher.notify('customer-1', 'service_complete', MESSAGE)).rejects.toMatchObject({
+    providerOutcome: {
+      sent: false,
+      deliveryOutcome: 'not_sent',
+      code: 'NOTIFICATION_PREPARATION_FAILED',
+      retryable: true,
+      deferred: true,
+    },
+  });
+  expect(sendCustomerMessage).not.toHaveBeenCalled();
 });
 
 test('an unguarded send-window hold keeps the existing frozen-body queue behavior', async () => {
