@@ -439,7 +439,7 @@ function clauseBounds(text, at) {
     // A refusal also governs the alternatives when "whether" is omitted:
     // "can't confirm X or Y". Keep both complements intact without teaching
     // the general clause splitter more finite predicates.
-    if (/^or$/i.test(m[0]) && (/\bwhether\b/i.test(left) || EPISTEMIC_HEDGE_RE.test(left))) {
+    if (/^or$/i.test(m[0]) && new RegExp(`(?:\\bwhether\\b|${EPISTEMIC_HEDGE_PREFIX_SOURCE})`, 'i').test(left)) {
       m = CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
       continue;
     }
@@ -454,20 +454,17 @@ function clauseBounds(text, at) {
     // "whether a cancellation or refund was processed", or "Talstar P
     // and bait were applied". Keep its governing refusal/condition.
     const right = text.slice(m.index + m[0].length);
-    const independentSubject = /^\s*(?:i|we|you|he|she|they|it|your|our|their|his|her)\b/i.test(right)
-      || new RegExp(`^\\s*${SUBJECT}\\b`, 'i').test(right)
+    const independentSubject = new RegExp(`^\\s*(?:(?:you|he|she|it|your|our|their|his|her)|${SUBJECT})\\b`, 'i').test(right)
       // An article-led noun phrase with its own predicate starts a fresh
-      // assertion: "... appointment details and a refund was issued".
-      || (/^and$/i.test(m[0]) && (RIGHT_NOUN_PHRASE_SUBJECT_RE.test(right)
-        || new RegExp(`^\\s*(?:${CLAUSE_FINITE_PREDICATE_RE.source}|${REFUND_PAYMENT_ACTION_RE.source})`, 'i').test(right)));
+      // assertion after a coordinator or colon.
+      || (/^(?:and|:)$/i.test(m[0]) && RIGHT_NOUN_PHRASE_SUBJECT_RE.test(right))
+      || (/^and$/i.test(m[0])
+        && new RegExp(`^\\s*(?:${CLAUSE_FINITE_PREDICATE_RE.source}|${REFUND_PAYMENT_ACTION_RE.source})`, 'i').test(right));
     // A colon only separates a fresh subject. A bare hedge or deictic
     // object still governs its colon-introduced complement.
-    if (colonContinuesClause(m[0], left, independentSubject)) {
-      m = CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
-      continue;
-    }
-    if (/^(?:and|or)$/i.test(m[0]) && !independentSubject && nominal && !/^(?:it|this|that)$/i.test(nominal)
-        && !CLAUSE_FINITE_PREDICATE_RE.test(nominal)) {
+    if (colonContinuesClause(m[0], left, independentSubject)
+        || (/^(?:and|or)$/i.test(m[0]) && !independentSubject && nominal && !/^(?:it|this|that)$/i.test(nominal)
+          && !CLAUSE_FINITE_PREDICATE_RE.test(nominal))) {
       m = CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
       continue;
     }
@@ -1275,7 +1272,7 @@ function denialContinuesPastBoundary(text, denial, boundary) {
     && new RegExp(`^\\s*${REPORTED_QUESTION_AUX_SOURCE}\\b`, 'i').test(text.slice(boundary.index + boundary[0].length))
     && /\b(?:ask|asked|asks|asking|wonder|wondered|wonders|wondering)\s*$/i.test(complement);
   const namedComplement = /^:/.test(boundary[0]) && /^deni/i.test(denial[0])
-    && /^\s+the\s+following\s*$/i.test(complement);
+    && /^\s+(?:the\s+following|(?:this|that|the)\s+(?:statement|claim|allegation))\s*$/i.test(complement);
   return directQuestion || namedComplement;
 }
 /** [[start, end), …) — the ranges of `text` a denial word governs. */
@@ -1330,8 +1327,8 @@ function deniedSpans(text) {
     }
     DENIAL_CLAUSE_END_RE.lastIndex = m.index + m[0].length;
     let end = DENIAL_CLAUSE_END_RE.exec(text);
-    // A comma introducing a direct question or a colon after "denied the
-    // following" opens the denial's complement, not a fresh assertion.
+    // A comma introducing a direct question or a colon after a named
+    // denied statement opens the denial's complement, not a fresh assertion.
     while (end && denialContinuesPastBoundary(text, m, end)) {
       end = DENIAL_CLAUSE_END_RE.exec(text);
     }
