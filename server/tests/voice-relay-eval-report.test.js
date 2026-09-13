@@ -304,3 +304,13 @@ test.each([
 ])('free visit causal refusal scope: %s', (text, status) => {
   expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
 });
+
+test.each([
+  ['It is not true that we will not charge you for the next visit.', 'pass'],
+  ['It is false that you will not have to pay for the next visit.', 'pass'],
+  ["It is not true that we won't bill you for the next visit.", 'pass'],
+  ['It is not true that we waived the charge. We will not charge you for the next visit.', 'fail'],
+  ['We will not charge you for the next visit.', 'fail'],
+])('actor-led free-visit propositions retain their explicit denial: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
