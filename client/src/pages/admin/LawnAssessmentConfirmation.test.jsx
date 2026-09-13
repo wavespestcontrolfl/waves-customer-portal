@@ -12,6 +12,7 @@ const service = { id: 'fixture-service', customerId: 'fixture-customer', service
 let confirmation;
 let loadedAssessment;
 let analysisScores;
+let visitAssessment;
 beforeEach(() => {
   localStorage.clear();
   localStorage.setItem('waves_admin_token', 'fixture-token');
@@ -22,12 +23,13 @@ beforeEach(() => {
   confirmation = { success: true, confirmed: false, missingScores: ['color_health'], assessment };
   loadedAssessment = assessment;
   analysisScores = scores;
+  visitAssessment = null;
   vi.stubGlobal('fetch', vi.fn(async (url) => {
     let data = {};
     if (url.includes('feature-flags')) data = { flags: {} };
     if (url.includes('lawn-assessment/customers')) data = { customers: [{ id: 'fixture-customer', firstName: 'Fixture', lastName: 'Lawn' }] };
-    if (url.includes('lawn-assessment/service/')) data = { assessment: loadedAssessment };
-    if (url.endsWith('lawn-assessment/assess')) data = { assessment, adjustedScores: analysisScores, displayScores: analysisScores };
+    if (url.includes('lawn-assessment/service/')) data = { assessment: loadedAssessment, visitAssessment };
+    if (url.endsWith('lawn-assessment/assess')) data = { assessment, adjustedScores: analysisScores, displayScores: analysisScores, visitAssessment };
     if (url.endsWith('lawn-assessment/confirm')) data = confirmation;
     if (url.includes('lawn-assessment/history')) data = { history: [] };
     if (url.includes('treatment-plans')) data = { plan: { protocol: {}, mixCalculator: { items: [] } } };
@@ -137,4 +139,89 @@ it('keeps known underlying scores out of the normal four-control workflow', asyn
   expect(screen.queryByRole('button', { name: 'Increase Fungus control' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Increase Thatch condition' })).toBeNull();
   expect(screen.getAllByRole('button', { name: /^Increase / })).toHaveLength(4);
+});
+
+const savedVisit = () => ({
+  runId: 'fixture-run', status: 'complete',
+  findings: [{ finding_id: 'F1', name: 'Possible drought', confidence: 'low', photo_refs: [1], observed_evidence: ['Dry leaf blades'], confirmation_step: 'Check soil moisture' }],
+  reviewedFindings: [{ finding_id: 'F1', keep: false, name: 'thinning turf', renamed: true, tech_note: 'Checked soil moisture' }],
+  addedDetails: [{ finding_id: 'T3', name: 'Thin patch by front walkway', zone: 'front' }],
+  observations: 'Photo observations',
+  reconciliation: { products: [{ product_name: 'Stored treatment', addresses_findings: ['T3'] }] },
+  photoQuality: [],
+});
+
+it('restores saved review decisions in closeout and preserves them across a pending confirmation', async () => {
+  visitAssessment = savedVisit();
+  loadedAssessment = { ...assessment, observations: 'Previously edited observations' };
+  confirmation = { ...confirmation, visitAssessment };
+  render(<CompletionPanel service={service} products={[]} onClose={() => {}} onSubmit={() => {}} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Confirm assessment' }));
+  await screen.findByText(message);
+  let sent = JSON.parse(fetch.mock.calls.filter(([url]) => url.endsWith('lawn-assessment/confirm')).at(-1)[1].body);
+  expect(sent.reviewedFindings).toEqual([{ finding_id: 'F1', keep: false, name: 'thinning turf', tech_note: 'Checked soil moisture' }]);
+  expect(sent.addedDetails).toEqual([{ text: 'Thin patch by front walkway', zone: 'front' }]);
+  expect(sent).not.toHaveProperty('appliedProducts');
+  expect(sent).not.toHaveProperty('observationEdit');
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm assessment' }));
+  await waitFor(() => expect(fetch.mock.calls.filter(([url]) => url.endsWith('lawn-assessment/confirm'))).toHaveLength(2));
+  sent = JSON.parse(fetch.mock.calls.filter(([url]) => url.endsWith('lawn-assessment/confirm')).at(-1)[1].body);
+  expect(sent.reviewedFindings[0]).toMatchObject({ finding_id: 'F1', keep: false, name: 'thinning turf' });
+});
+
+it('sends visit review state from the field panel and adopts saved decisions returned by confirmation', async () => {
+  visitAssessment = savedVisit();
+  confirmation = { ...confirmation, visitAssessment: { ...savedVisit(), reviewedFindings: [{ finding_id: 'F1', keep: true, name: 'Possible drought', renamed: false, tech_note: 'Saved note' }] } };
+  const view = render(<LawnAssessmentPanel embedded />);
+  fireEvent.click(await screen.findByText('Fixture Lawn'));
+  fireEvent.change(view.container.querySelector('input[type="file"]'), {
+    target: { files: [new File(['fixture'], 'lawn.jpg', { type: 'image/jpeg' })] },
+  });
+  fireEvent.click(await screen.findByRole('button', { name: /Analyze 1 Photo/ }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Confirm Scores' }));
+  await waitFor(() => expect(alert).toHaveBeenCalledWith(message));
+  const first = JSON.parse(fetch.mock.calls.find(([url]) => url.endsWith('lawn-assessment/confirm'))[1].body);
+  expect(first.reviewedFindings[0]).toMatchObject({ keep: false, name: 'thinning turf' });
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm Scores' }));
+  await waitFor(() => expect(fetch.mock.calls.filter(([url]) => url.endsWith('lawn-assessment/confirm'))).toHaveLength(2));
+  const second = JSON.parse(fetch.mock.calls.filter(([url]) => url.endsWith('lawn-assessment/confirm')).at(-1)[1].body);
+  expect(second.reviewedFindings[0]).toEqual({ finding_id: 'F1', keep: true, name: null, tech_note: 'Saved note' });
+});
+
+it('shows a confirmed saved review read-only and preserves an explicitly cleared observation', async () => {
+  visitAssessment = savedVisit();
+  loadedAssessment = { ...assessment, confirmed_by_tech: true, observations: null };
+  render(<CompletionPanel service={service} products={[]} onClose={() => {}} onSubmit={() => {}} />);
+  await screen.findByText('Assessment confirmed');
+  const observation = screen.getByLabelText('Observation');
+  expect(observation.value).toBe('');
+  expect(observation.disabled).toBe(true);
+  expect(screen.getByRole('checkbox', { name: 'Keep Possible drought' }).disabled).toBe(true);
+  expect(screen.getByLabelText('Technician detail 1').disabled).toBe(true);
+  expect(screen.getByRole('button', { name: 'Add detail' }).disabled).toBe(true);
+  expect(screen.queryByRole('button', { name: 'Confirm assessment' })).toBeNull();
+});
+
+it('posts explicit empty observation edits and locks the field review after final confirmation', async () => {
+  visitAssessment = savedVisit();
+  confirmation = { success: true, confirmed: true, assessment: { ...assessment, observations: '', confirmed_by_tech: true }, visitAssessment };
+  const view = render(<LawnAssessmentPanel embedded />);
+  fireEvent.click(await screen.findByText('Fixture Lawn'));
+  fireEvent.change(view.container.querySelector('input[type="file"]'), {
+    target: { files: [new File(['fixture'], 'lawn.jpg', { type: 'image/jpeg' })] },
+  });
+  fireEvent.click(await screen.findByRole('button', { name: /Analyze 1 Photo/ }));
+  const observation = await screen.findByLabelText('Observation');
+  fireEvent.change(observation, { target: { value: '' } });
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Keep Possible drought' }));
+  fireEvent.change(screen.getByLabelText('Technician note for Possible drought'), { target: { value: 'Confirmed in field' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Remove technician detail 1' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm Scores' }));
+  await screen.findByRole('button', { name: 'Done' });
+  const sent = JSON.parse(fetch.mock.calls.find(([url]) => url.endsWith('lawn-assessment/confirm'))[1].body);
+  expect(sent.observationEdit).toBe('');
+  expect(sent.reviewedFindings[0]).toMatchObject({ keep: true, tech_note: 'Confirmed in field' });
+  expect(sent.addedDetails).toEqual([]);
+  expect(screen.getByLabelText('Observation').disabled).toBe(true);
+  expect(screen.getByRole('checkbox', { name: 'Keep Possible drought' }).disabled).toBe(true);
 });
