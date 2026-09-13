@@ -107,9 +107,28 @@ function slug(text) {
 // send_reschedule_link is repeatable for a different reason: one call can
 // promise a link for TWO existing appointments, and a party:kind key would
 // upsert the second over the first, silently dropping one obligation (codex
-// #4293 r2 P2). The quote anchor gives each promise its own row, and each
-// carries its own grounded subject naming its visit.
+// #4293 r2 P2). The quote and current-visit subject give each promise its
+// own row, even when the agent used one sentence for two visits.
 const REPEATABLE_KINDS = new Set(['send_report', 'send_paperwork', 'provide_info', 'send_reschedule_link', 'other']);
+
+function rescheduleSubjectFingerprint(subject) {
+  if (!subject || typeof subject !== 'object') return null;
+  const appointmentClaims = (Array.isArray(subject.date_claims) ? subject.date_claims : [])
+    .filter((claim) => claim?.binding === 'appointment');
+  const fullDates = [...new Set(appointmentClaims
+    .filter((claim) => claim.year && claim.month && claim.day)
+    .map((claim) => `${claim.year}-${String(claim.month).padStart(2, '0')}-${String(claim.day).padStart(2, '0')}`))];
+  const statedDate = String(subject.visit_date || '').trim();
+  // Once the current visit has a full date, a partial/full claim about that
+  // same visit adds evidence, not identity. Likewise one full appointment
+  // claim without visit_date identifies the same absolute date.
+  const visitDate = /^\d{4}-\d{2}-\d{2}$/.test(statedDate) ? statedDate : (fullDates.length === 1 ? fullDates[0] : '');
+  const claims = visitDate ? [] : [...new Set(appointmentClaims
+    .map((claim) => [claim.year ?? '', claim.month ?? '', claim.day ?? '', claim.weekday ?? ''].join('-')))]
+    .sort();
+  const parts = [visitDate, normalizeForMatch(subject.service), normalizeForMatch(subject.address), ...claims];
+  return parts.some(Boolean) ? JSON.stringify(parts) : null;
+}
 
 function commitmentKey(item) {
   const party = item.party === 'customer' ? 'customer' : 'waves';
@@ -125,7 +144,10 @@ function commitmentKey(item) {
   const s = anchor
     ? `q${crypto.createHash('sha1').update(anchor).digest('hex').slice(0, 12)}`
     : (slug(item.description) || crypto.createHash('sha1').update(String(item.description || '')).digest('hex').slice(0, 10));
-  return `${party}:${kind}:${s}`.slice(0, 160);
+  const base = `${party}:${kind}:${s}`.slice(0, 160);
+  if (kind !== 'send_reschedule_link') return base;
+  const subject = rescheduleSubjectFingerprint(item.subject);
+  return subject ? `${base}:s${crypto.createHash('sha1').update(subject).digest('hex').slice(0, 12)}` : base;
 }
 
 // ── Evidence ───────────────────────────────────────────────────────────────
@@ -626,6 +648,21 @@ function toRow(callLogId, item, { generation, extractorVersion, recordingSid = n
   };
 }
 
+// A quote-only reschedule key may already hold delivery/office history from
+// an earlier extractor. Reuse it only when its known CURRENT-visit fields
+// identify exactly one new subject. New date_claims may be richer than the
+// old row, so compare the old fields it actually recorded rather than
+// requiring byte-identical JSON across extractor versions.
+function legacyRescheduleMatches(oldSubject, newSubject) {
+  const old = typeof oldSubject === 'string' ? JSON.parse(oldSubject) : oldSubject;
+  if (!old || !newSubject) return false;
+  const oldFields = [String(old.visit_date || '').trim(), normalizeForMatch(old.service), normalizeForMatch(old.address)];
+  const newFields = [String(newSubject.visit_date || '').trim(), normalizeForMatch(newSubject.service), normalizeForMatch(newSubject.address)];
+  if (oldFields.some(Boolean)) return oldFields.every((value, index) => !value || value === newFields[index]);
+  const oldClaims = rescheduleSubjectFingerprint(old);
+  return Boolean(oldClaims) && oldClaims === rescheduleSubjectFingerprint(newSubject);
+}
+
 // Upsert the AI's view of this pass. The whole write runs in one
 // transaction that first takes a SHARE lock on the call_log row WITH the
 // pass's fence: while the pass holds its claim that is the
@@ -701,6 +738,30 @@ async function upsertCommitments(conn, callLogId, items, { generation = null, ex
             AND recording_sid IS NOT NULL AND recording_sid <> ?`,
         [callLogId, recordingSid],
       );
+    }
+    // A deployed quote-only row can be fulfilled or already staged. Before
+    // inserting subject-keyed siblings, resolve which one (if any) owns
+    // that old identity. If the old subject is too sparse or matches more
+    // than one, keep every sibling visible but park it via the existing
+    // incomplete-date guard; never mint a second auto-send for an identity
+    // that may already have been delivered.
+    const legacyGroups = new Map();
+    for (const row of rows.filter((candidate) => candidate.kind === 'send_reschedule_link')) {
+      const base = row.commitment_key.replace(/:s[0-9a-f]{12}$/, '');
+      if (base === row.commitment_key) continue;
+      if (!legacyGroups.has(base)) legacyGroups.set(base, []);
+      legacyGroups.get(base).push(row);
+    }
+    for (const [base, siblings] of legacyGroups) {
+      const old = await trx('call_commitments').where({ call_log_id: callLogId, commitment_key: base }).forUpdate().first('subject');
+      if (!old) continue;
+      let matches = [];
+      try { matches = siblings.filter((row) => legacyRescheduleMatches(old.subject, JSON.parse(row.subject))); } catch { /* malformed legacy subject is ambiguous */ }
+      if (matches.length === 1 && !rows.some((row) => row.commitment_key === base)) {
+        matches[0].commitment_key = base;
+      } else {
+        for (const row of siblings) row.subject = JSON.stringify({ ...JSON.parse(row.subject), date_claims: null });
+      }
     }
     // Recompute unreviewed callback fallbacks after extraction, including
     // source-call timing corrections. Gate-off never references the new column.

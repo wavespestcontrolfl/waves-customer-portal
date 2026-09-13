@@ -1468,6 +1468,13 @@ async function dispatch(conn, row, context, { now, send, buildLink, render, plan
       return { ok: false, code: 'LINK_FLOOR_NOT_REACHED', reason: 'The promised delivery time moved out', retryable: true };
     }
     manual = await matchingSend(conn, live, evidenceSince);
+    // Staff can dismiss/reopen while this send waits for the customer lock.
+    // A still-open commitment is insufficient: this exact claimed attempt
+    // must remain active at the same generation immediately before handoff.
+    const activeAttempt = await conn('outbox_messages').where({ id: row.id, status: 'sending',
+      commitment_id: commitment.id, commitment_generation: live.commitment.processing_generation ?? 0 }).first('id');
+    if (!activeAttempt) return { ok: false, code: 'LINK_SOURCE_CHANGED', reason: 'The promised-link attempt was superseded' };
+
     return manual ? { ok: false, code: 'LINK_ALREADY_SENT', reason: 'The link was already sent' } : { ok: true };
   };
   try {

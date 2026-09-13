@@ -65,6 +65,29 @@ describe('commitmentKey', () => {
     const other = commitmentKey({ party: 'waves', kind: 'send_report', description: 'Send the inspection report', evidence: [{ quote: 'and the treatment plan goes out Friday', speaker: 'agent' }] });
     expect(other).not.toBe(a);
   });
+  test('one quoted link promise for two current visits has two stable keys', () => {
+    const common = { party: 'waves', kind: 'send_reschedule_link', description: 'Text both links',
+      evidence: [{ quote: 'I will text you both reschedule links', speaker: 'agent' }] };
+    const first = { ...common, subject: { visit_date: '2026-09-20', service: 'Pest Service', address: '123 Main St',
+      date_claims: [{ binding: 'appointment', month: 9, day: 20, quote: 'September 20' }, { binding: 'delivery', weekday: 1, quote: 'Monday' }] } };
+    const second = { ...common, subject: { visit_date: '2026-09-27', service: 'Pest Service', address: '123 Main St',
+      date_claims: [{ binding: 'appointment', month: 9, day: 27, quote: 'September 27' }] } };
+    expect(commitmentKey(first)).not.toBe(commitmentKey(second));
+    expect(commitmentKey(first)).toMatch(/^waves:send_reschedule_link:q[0-9a-f]{12}:s[0-9a-f]{12}$/);
+    expect(commitmentKey({ ...first, description: 'Email two links', subject: { ...first.subject, service: 'pest service', address: '123 MAIN ST',
+      date_claims: [...first.subject.date_claims].reverse().concat(first.subject.date_claims[0], { binding: 'requested', month: 10, day: 1, quote: 'October 1' }) } })).toBe(commitmentKey(first));
+  });
+  test('a richer claim for the same full visit date does not mint a new key', () => {
+    const base = { party: 'waves', kind: 'send_reschedule_link', description: 'Send link',
+      evidence: [{ quote: 'I will send your reschedule link', speaker: 'agent' }] };
+    const partial = { ...base, subject: { visit_date: '2030-09-20', service: 'Pest Service', address: '123 Main St',
+      date_claims: [{ binding: 'appointment', month: 9, day: 20, quote: 'September 20' }] } };
+    const full = { ...base, subject: { ...partial.subject, date_claims: [
+      { binding: 'appointment', year: 2030, month: 9, day: 20, quote: 'September 20, 2030' },
+    ] } };
+    expect(commitmentKey(full)).toBe(commitmentKey(partial));
+    expect(commitmentKey({ ...full, subject: { ...full.subject, visit_date: null } })).toBe(commitmentKey(partial));
+  });
   test('a human key keeps its :h suffix even for a very long description', () => {
     const { REPEATABLE_KINDS } = require('../services/call-commitments');
     expect(REPEATABLE_KINDS.has('provide_info')).toBe(true);
@@ -419,6 +442,58 @@ describe('structured reschedule-link dates and delivery timing', () => {
     expect(groundModelCommitments([{ ...base, due_type: 'deadline', due_at: 'tomorrow-ish' }], transcript).kept[0].due_type).toBeNull();
     expect(groundModelCommitments([{ ...base, due_type: 'deadline', due_at: null }], transcript).kept[0].due_type).toBeNull();
     expect(groundModelCommitments([{ ...base, due_type: undefined }], transcript).kept[0].due_type).toBeNull();
+  });
+});
+
+describe('reschedule-link upsert identity across quote-only rows', () => {
+  const { upsertCommitments } = require('../services/call-commitments');
+  const quote = 'I will text both reschedule links';
+  const item = (visitDate) => ({ party: 'waves', kind: 'send_reschedule_link', description: 'Text a reschedule link',
+    evidence: [{ quote, speaker: 'agent' }], subject: { visit_date: visitDate, date_claims: [
+      { binding: 'appointment', year: 2026, month: 9, day: Number(visitDate.slice(-2)), quote: `the ${visitDate} visit` },
+    ] } });
+  const write = async (oldSubject, items = [item('2026-09-20'), item('2026-09-27')]) => {
+    const raw = jest.fn(async (sql) => ({ rows: String(sql).includes('INSERT INTO call_commitments') ? [{ id: 'row' }] : [] }));
+    const trx = Object.assign(jest.fn((table) => {
+      if (table !== 'call_commitments') throw new Error(`unexpected table ${table}`);
+      return { where: () => ({ forUpdate: () => ({ first: async () => oldSubject === undefined ? null : { subject: oldSubject } }) }) };
+    }), { raw });
+    const activation = jest.spyOn(require('../services/reschedule-link-promises'), 'recordLiveActivation').mockResolvedValue();
+    try {
+      const result = await upsertCommitments({ transaction: async (fn) => fn(trx) }, 'call', items);
+      const insertCalls = raw.mock.calls.filter(([sql]) => String(sql).includes('INSERT INTO call_commitments'));
+      return { result, inserts: insertCalls.map(([, values]) => values), insertSql: insertCalls[0]?.[0] };
+    } finally { activation.mockRestore(); }
+  };
+  test('two visits with one promise quote insert separately and a matching legacy row keeps its key', async () => {
+    const fresh = await write(undefined);
+    expect(fresh.result.written).toBe(2);
+    expect(new Set(fresh.inserts.map((values) => values[1])).size).toBe(2);
+    const legacy = await write({ visit_date: '2026-09-20' });
+    expect(legacy.result.written).toBe(2);
+    expect(legacy.inserts[0][1]).toBe(commitmentKey({ ...item('2026-09-20'), subject: null }));
+    expect(legacy.inserts[1][1]).toBe(commitmentKey(item('2026-09-27')));
+    expect(JSON.parse(legacy.inserts[1].at(-1)).date_claims).toHaveLength(1);
+  });
+  test('an unidentifiable legacy row leaves all new obligations visible but parked', async () => {
+    for (const oldSubject of [null, { visit_date: '2026-10-04' }]) {
+      const ambiguous = await write(oldSubject);
+      expect(ambiguous.result.written).toBe(2);
+      expect(new Set(ambiguous.inserts.map((values) => values[1])).size).toBe(2);
+      for (const values of ambiguous.inserts) expect(JSON.parse(values.at(-1)).date_claims).toBeNull();
+    }
+  });
+  test('a dismissed row keeps its conflict identity when reprocessed with a richer equivalent date claim', async () => {
+    const partial = item('2026-09-20');
+    partial.subject.date_claims = [{ binding: 'appointment', month: 9, day: 20, quote: 'September 20' }];
+    const richer = item('2026-09-20');
+    const first = await write(undefined, [partial]);
+    const reprocessed = await write(undefined, [richer]);
+    expect(reprocessed.inserts[0][1]).toBe(first.inserts[0][1]);
+    // The same-key ON CONFLICT path cannot clear a human dismissal or
+    // replace its reviewed subject; those fields are guarded in SQL.
+    expect(reprocessed.insertSql).toMatch(/subject = CASE WHEN call_commitments\.human_state IS NULL/);
+    expect(reprocessed.insertSql).not.toMatch(/status = EXCLUDED\.status/);
   });
 });
 

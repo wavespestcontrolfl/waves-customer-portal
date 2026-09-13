@@ -97,6 +97,49 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
     for (const table of TABLES) await mockPg(table).delete();
   });
 
+  test('identical promise wording persists distinct visits and reprocessing preserves legacy delivery history', async () => {
+    const callId = randomUUID();
+    const quote = 'I will text you a reschedule link.';
+    await mockPg('call_log').insert({ id: callId, direction: 'inbound', processing_generation: 0 });
+    const make = (day) => ({ party: 'waves', kind: 'send_reschedule_link', description: 'Send the reschedule link',
+      confidence: 0.95, evidence: [{ quote, speaker: 'agent' }],
+      subject: { quote: `The January ${day} appointment.`, visit_date: `2030-01-${day}`,
+        date_claims: [{ binding: 'appointment', month: 1, day, quote: `The January ${day} appointment.` }] } });
+    const first = make(20);
+    const second = make(21);
+    const { commitmentKey } = require('../services/call-commitments');
+    const legacyKey = commitmentKey(first).replace(/:s[0-9a-f]{12}$/, '');
+    const [legacy] = await mockPg('call_commitments').insert({ call_log_id: callId,
+      commitment_key: legacyKey, party: 'waves', kind: 'send_reschedule_link', description: first.description,
+      source: 'ai', status: 'fulfilled', fulfilled_at: new Date(), subject: { visit_date: first.subject.visit_date },
+      processing_generation: 0, last_seen_generation: 0 }).returning('id');
+    await upsertCommitments(mockPg, callId, [first, second], { generation: 0, procGeneration: 0 });
+    const rows = await mockPg('call_commitments').where({ call_log_id: callId }).orderBy('commitment_key');
+    expect(rows).toHaveLength(2);
+    expect(rows.find((row) => row.id === legacy.id)).toMatchObject({ commitment_key: legacyKey, status: 'fulfilled' });
+    expect(rows.find((row) => row.id !== legacy.id).subject.visit_date).toBe(second.subject.visit_date);
+    await upsertCommitments(mockPg, callId, [second, first], { generation: 0, procGeneration: 0 });
+    expect(await mockPg('call_commitments').where({ call_log_id: callId }).count('* as n').first()).toMatchObject({ n: '2' });
+  });
+
+  test('richer equivalent date claims preserve a subject-keyed office dismissal on reprocess', async () => {
+    const callId = randomUUID();
+    const quote = 'I will text you a reschedule link.';
+    await mockPg('call_log').insert({ id: callId, direction: 'inbound', processing_generation: 0 });
+    const item = { party: 'waves', kind: 'send_reschedule_link', description: 'Send the link', confidence: 0.95,
+      evidence: [{ quote, speaker: 'agent' }], subject: { quote: 'The September 20 appointment.',
+        visit_date: '2030-09-20', date_claims: [{ binding: 'appointment', month: 9, day: 20, quote: 'The September 20 appointment.' }] } };
+    await upsertCommitments(mockPg, callId, [item], { generation: 0, procGeneration: 0 });
+    const before = await mockPg('call_commitments').where({ call_log_id: callId }).first();
+    await applyHumanUpdate(mockPg, before.id, { action: 'dismiss', reviewedBy: randomUUID() });
+    const richer = { ...item, subject: { ...item.subject,
+      date_claims: [{ ...item.subject.date_claims[0], year: 2030, weekday: 5 }] } };
+    await upsertCommitments(mockPg, callId, [richer], { generation: 1, procGeneration: 0 });
+    const after = await mockPg('call_commitments').where({ call_log_id: callId });
+    expect(after).toHaveLength(1);
+    expect(after[0]).toMatchObject({ id: before.id, human_state: 'dismissed', status: 'dismissed' });
+  });
+
   test('the persisted activation boundary uses the DATABASE transaction clock, not a JS wall-clock sample — a commitment written in the SAME transaction is never before its own boundary (codex #4293 P1)', async () => {
     const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
     const priorActivatedAt = process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT;
@@ -1872,6 +1915,26 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       expect(sendSpy).toHaveBeenCalledTimes(1);
       const sent = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
       expect(sent.status).toBe('sent');
+    });
+
+    test('dismiss and reopen while a claimed send waits blocks the cancelled attempt at handoff', async () => {
+      const now = new Date('2030-01-07T14:00:00Z');
+      const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link.' });
+      await links.stagePromises(mockPg);
+      const row = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
+      let verdict;
+      const send = async (input) => {
+        await applyHumanUpdate(mockPg, commitmentId, { action: 'dismiss', reviewedBy: randomUUID() });
+        await applyHumanUpdate(mockPg, commitmentId, { action: 'reopen', reviewedBy: randomUUID() });
+        verdict = await input.preProviderCheck();
+        return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: verdict.code };
+      };
+      await links.runOne(mockPg, row, { now, send, buildLink: stubBuildLink, render: stubRender });
+      expect(verdict).toMatchObject({ ok: false, code: 'LINK_SOURCE_CHANGED' });
+      const retired = await mockPg('outbox_messages').where({ id: row.id }).first();
+      expect(retired.status).toBe('cancelled');
+      expect(retired.provider_message_id).toBeNull();
+      expect(await links.stagePromises(mockPg)).toBe(1);
     });
 
     test('a persisted deadline permits delivery before the deadline', async () => {
