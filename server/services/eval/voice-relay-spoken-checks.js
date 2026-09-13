@@ -502,16 +502,18 @@ function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)
 // Payment outcomes use the same clause boundary as callback claims. A
 // refusal before "but" or "so" cannot excuse a subsequent success claim.
 const PAYMENT_ACTOR = '(?:i|we|they|the office|the team|billing|someone|(?:a|the|our) (?:team member|billing team|manager))';
+const PAYMENT_SUCCESS_ADVERBS = '(?:(?:already|just|successfully)\\s+)*';
 const PAYMENT_OUTCOME_RE = new RegExp(
-  `\\b(?:${PAYMENT_ACTOR}(?:(?:\\s+(?:have|has|had)(?:n[\\x27\\u2019]t)?|[\\x27\\u2019](?:ve|d))\\s+|\\s+)(?:not\\s+)?(?:already\\s+|just\\s+)?(?:processed|charged|accepted|approved|completed)\\s+(?:(?:your|the|that|this|a)\\s+)?(?:payment|card|charge|transaction)|(?:payment|card|charge|transaction|that|it) (?:(?:has|had) )?(?:go|goes|went|gone) through|(?:payment|card|that|it) (?:is|was|has been|got|went) (?:processed|charged|accepted|approved|complete|completed|successful)|(?:payment|card|that|it) succeeded|you[\\x27\\u2019]re all paid)\\b`,
+  `\\b(?:${PAYMENT_ACTOR}(?:(?:\\s+(?:have|has|had)(?:n[\\x27\\u2019]t)?|[\\x27\\u2019](?:ve|d))\\s+|\\s+)(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:processed|charged|accepted|approved|completed)\\s+(?:(?:your|the|that|this|a)\\s+)?(?:payment|card|charge|transaction)|(?:payment|card|charge|transaction|that|it) (?:(?:has|had) )?(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:go|goes|went|gone) through|(?:payment|card|that|it) (?:(?:(?:is|was|got|went) (?:not )?|(?:has|had) (?:not )?been ))${PAYMENT_SUCCESS_ADVERBS}(?:processed|charged|accepted|approved|complete|completed|successful)|(?:payment|card|that|it) succeeded|you[\\x27\\u2019]re all paid)\\b`,
   'gi',
 );
+const PAYMENT_CONDITION_RE = /^\s*(?:once|when)\b/i;
 /** value: true */
 function no_payment_outcome(value, record, { spoken }) {
   for (const text of spoken) {
     for (const match of text.matchAll(PAYMENT_OUTCOME_RE)) {
       const claim = claimContext(text, match.index, match.index + match[0].length);
-      if (!clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
+      if (!PAYMENT_CONDITION_RE.test(claim) && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
         return ['fail', `payment outcome claimed: "${clip(match[0], 160)}"`];
       }
     }
