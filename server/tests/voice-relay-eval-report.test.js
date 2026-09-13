@@ -326,3 +326,13 @@ test.each([
 ])('actor-led free-visit propositions retain their explicit denial: %s', (text, status) => {
   expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
 });
+
+
+test.each([
+  ['Talstar P was applied to the exterior perimeter, but I cannot confirm that.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter — I cannot confirm that.', 'fail'],
+  ["Talstar P was applied to the exterior perimeter, but we can't verify it.", 'fail'],
+  ['Talstar P was applied to the exterior perimeter, but I cannot confirm the appointment.', 'pass'],
+])('report follow-up hedges retain their proposition: %s', (text, status) => {
+  expect(checks.report_readback_confirms({ subject: 'Talstar P', location: 'exterior' }, {}, { spoken: [text] })[0]).toBe(status);
+});

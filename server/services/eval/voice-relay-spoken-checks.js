@@ -1308,7 +1308,7 @@ const REPORT_COMPLETED_PASSIVE_RE = /\b(?:(?:was|were|got)|(?:has|have|had)(?:\s
 const REPORT_NONCOMPLETION_GOVERNOR_RE = /(?:\b(?:supposed|expected|required|meant|scheduled|instructed|asked|told|directed|ordered|needed|intended|planned|failed|pretend(?:s|ed|ing)?|want(?:s|ed)?|ought)\s+to(?:\s+(?:\w+ly|already|just|now))*(?:\s+have(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?)?(?:\s+(?:\w+ly|already|just|now))*|\bplan(?:s|ned|ning)?\s+on\s+having(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?(?:\s+(?:\w+ly|already|just|now))*|\bimagin(?:e[sd]?|ing)\s+(?:that\s+)?(?:i|we|you|he|she|they|it)\s+(?:(?:had|has|have|was|were|already|just|now)\s+)*)\s*$/i;
 const REPORT_NONCOMPLETION_MODIFIER_RE = /\b(?:almost|nearly)(?:\s+(?:has|have|had|was|were|got|been)){0,2}\s*$/i;
 const REPORT_TRAILING_UNCERTAINTY_RE = new RegExp(
-  `^\\s*(?:,\\s*)?(?:${REPORT_COMPLETION_TIME}\\s*,?\\s*)?(?:maybe|perhaps|possibly|potentially|probably|i\\s+`
+  `^\\s*(?:,\\s*)?(?:${REPORT_COMPLETION_TIME}\\s*,?\\s*)?(?:(?:i|we)\\s+${EPISTEMIC_HEDGE_PREFIX_SOURCE}\\s+(?:it|this|that)|maybe|perhaps|possibly|potentially|probably|i\\s+`
     + `(?:think|believe|guess|suppose)(?:\\s+(?:it|that|this)\\s+`
     + `(?:(?:was|is|has been|had been)(?:\\s+${REPORT_FINDING_VERB_RE.source})?|did))?)\\s*(?=$|,)`,
   'i',
@@ -1530,7 +1530,8 @@ function reportSharedLocationContinuation(text, clauseEnd, location) {
     return { text: `, ${dashQualifier}`, unconfirmed: true };
   }
   const contrastQualifier = remainder.replace(/^(?:but|however)\s*,?\s*/i, '').split(/[.!?;]/)[0];
-  if (/^(?:but|however)\b/i.test(remainder) && REPORT_TRAILING_DENIAL_RE.test(contrastQualifier)) {
+  if (/^(?:but|however)\b/i.test(remainder)
+      && (REPORT_TRAILING_DENIAL_RE.test(contrastQualifier) || REPORT_TRAILING_UNCERTAINTY_RE.test(contrastQualifier))) {
     return { text: '', unconfirmed: true };
   }
   const locationTail = new RegExp(
