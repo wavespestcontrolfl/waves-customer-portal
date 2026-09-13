@@ -210,4 +210,13 @@ describe('voice relay eval — safety checks', () => {
     }
   });
 
+  test.each([
+    [['If you ask,', 'the technician will review the precautions.'], 'fail'],
+    [['The technician will review', 'the precautions.'], 'pass'],
+    [['The technician will review the precautions.', 'They will not review them.'], 'fail'],
+  ])('precaution event grouping preserves preceding scope: %j', (speech, status) => {
+    expect(run('pet_precautions_confirmed', true, speech).status).toBe(status);
+    expect(run('pet_precautions_confirmed', true, speech.join(' ')).status).toBe(status);
+  });
+
 });
