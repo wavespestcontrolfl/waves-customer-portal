@@ -237,7 +237,7 @@ const SCORING = {
     expect(await db.knex('lawn_assessments').where({ customer_id: first.f.customerId, is_baseline: true })).toHaveLength(1);
   });
 
-  test('a property writer can finish its assessment update while confirmation waits on its fence', async () => {
+  test.each([false, true])('a property writer can finish while protocol confirmation waits on its fence (history: %s)', async (propertyHistoryEnabled) => {
     const { assessment, f } = await seed(COMPLETE);
     const { withTurfProfileFence } = require('../services/customer-pricing-ai');
     const propertyWriter = await db.knex.transaction();
@@ -246,7 +246,12 @@ const SCORING = {
     let pending;
     try {
       await withTurfProfileFence(propertyWriter, f.customerId, async () => {});
-      pending = save(assessment.id, { propertyHistoryEnabled: true }, confirmConnection);
+      pending = save(assessment.id, {
+        propertyHistoryEnabled,
+        persistChecks: (row, trx) => trx('customer_turf_profiles')
+          .insert({ customer_id: row.customer_id, irrigation_inches_per_week: 1.25 })
+          .onConflict('customer_id').merge({ irrigation_inches_per_week: 1.25 }),
+      }, confirmConnection);
       let blocked = false;
       for (let attempt = 0; attempt < 100 && !blocked; attempt += 1) {
         const { rows: [{ blockers }] } = await db.knex.raw('SELECT cardinality(pg_blocking_pids(?)) AS blockers', [pid]);

@@ -4,7 +4,7 @@
  *
  * Every send path that requeues a held text (QUIET_HOURS_HOLD →
  * sms_log status 'scheduled') registers its entry_point here with up to
- * four hooks, and the executor consults the registry generically:
+ * five hooks, and the executor consults the registry generically:
  *
  *   recheck(claimMeta)   — BEFORE dispatch: is this message still valid?
  *                          The world moves overnight — estimates get
@@ -21,6 +21,11 @@
  *                          then runs `dispatch(trx)` while those rows are
  *                          still held, so nothing can change under the
  *                          provider request.
+ *   dispatch(claimMeta) — replace the frozen-body replay with a fresh,
+ *                          guarded canonical send. It must return the same
+ *                          canonical send outcome as the default dispatcher;
+ *                          its outcome or error is final, with no fallback to
+ *                          the frozen queued body.
  *   finalize(claimMeta, ctx) — AFTER the provider accepts: the state
  *                          transitions the immediate path would have run
  *                          inline (invoice draft→sent, review delivered
@@ -81,6 +86,19 @@ const failClosed = (label, id, err) => {
 };
 
 const REGISTRY = {
+  lawn_assessment_notification_deferred: {
+    async recheck(meta) {
+      // The durable descriptor carries the customer identity. Reuse
+      // the dispatcher's live service-complete preferences so a quiet window
+      // that extends past 08:00 waits on the scheduler's named retry rail,
+      // while a later opt-out remains a terminal suppression.
+      const { deferredNotificationStillWanted } = require('../notification-dispatcher');
+      return deferredNotificationStillWanted('service_complete', meta.customer_id || null);
+    },
+    async dispatch(meta) {
+      return require('../lawn-visit-delivery').replayDeferredNotification(meta);
+    },
+  },
   request_app_deferred: {
     async recheck(meta) {
       try {
@@ -296,6 +314,13 @@ const REGISTRY = {
         if (!inv) return { eligible: false, reason: 'invoice-missing' };
         if (isTerminalInvoice(inv)) return { eligible: false, reason: `invoice-terminal:${inv.status}` };
         if (inv.payer_id) return { eligible: false, reason: 'payer-billed' };
+        // A combined-visit invoice WITHDRAWN to a payer keeps a collectible
+        // status and a NULL payer_id — the move lives only in its stamp
+        // (local audit) — so a notice queued before the Bill-To change would
+        // still reach the homeowner about debt the payer now owes.
+        if (require('../invoice-helpers').invoiceWithdrawnFromCustomer(inv)) {
+          return { eligible: false, reason: 'payer-billed-withdrawn' };
+        }
         return { eligible: true };
       } catch (err) {
         return failClosed('decline-notice', meta.invoice_id, err);
@@ -1141,6 +1166,13 @@ async function invoiceStillCollectible(meta) {
     // reach the homeowner — same rule the decline-notice recheck and the
     // receipt paths enforce.
     if (inv.payer_id) return { eligible: false, reason: 'payer-billed' };
+    // …and the withdrawal stamp, which records the same ownership move on a
+    // row whose payer_id stays NULL (local audit): a reminder queued before
+    // the Bill-To change would still ask the homeowner to pay payer-owned
+    // debt.
+    if (require('../invoice-helpers').invoiceWithdrawnFromCustomer(inv)) {
+      return { eligible: false, reason: 'payer-billed-withdrawn' };
+    }
     if (meta.followup_sequence_id) {
       const seq = await db('invoice_followup_sequences')
         .where({ id: meta.followup_sequence_id })
@@ -1177,6 +1209,25 @@ async function recheckDeferredReplay(entryPoint, claimMeta = {}) {
   } catch (err) {
     return failClosed(entryPoint, claimMeta.invoice_id || claimMeta.estimate_id || 'unknown', err);
   }
+}
+
+// Registered dispatchers own the complete replay, including preparation of
+// fresh copy and its final send guard. Their outcome/error propagates as-is:
+// falling back after either one could send the frozen queued body. The marker
+// protects rows produced during a rolling deploy until their entry is loaded.
+async function dispatchDeferredReplay(entryPoint, claimMeta = {}, defaultDispatch) {
+  const entry = entryFor(entryPoint);
+  if (entry && typeof entry.dispatch === 'function') return entry.dispatch(claimMeta);
+  if (claimMeta.requires_registered_dispatch === true) {
+    return {
+      sent: false,
+      blocked: true,
+      code: 'DEFERRED_DISPATCH_UNAVAILABLE',
+      retryable: true,
+      deliveryOutcome: 'not_sent',
+    };
+  }
+  return defaultDispatch();
 }
 
 // undefined = no locked handoff registered: the sender dispatches normally.
@@ -1355,6 +1406,7 @@ const DURABLE_FINALIZE_ENTRY_POINTS = Object.entries(REGISTRY)
 
 module.exports = {
   recheckDeferredReplay,
+  dispatchDeferredReplay,
   deferredSmsHandoff,
   finalizeDeferredReplay,
   onTerminalDeferredReplay,

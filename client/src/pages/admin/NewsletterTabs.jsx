@@ -37,10 +37,12 @@ import {
   DialogTitle,
   DialogBody,
   DialogFooter,
+  ActionFeedback,
   Badge,
   Button,
   Card,
   cn,
+  Field,
   Input,
   Checkbox,
   Select,
@@ -3239,9 +3241,44 @@ export function SubscribersView() {
   const [hasMore, setHasMore] = useState(false);
   const [offset, setOffset] = useState(0);
   const [status, setStatus] = useState("");
+  const [statusError, setStatusError] = useState(false);
   const [importPreConsented, setImportPreConsented] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
+  const [addEmail, setAddEmail] = useState("");
+  const [addError, setAddError] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [importConfirmation, setImportConfirmation] = useState(null);
+  const [importError, setImportError] = useState("");
+  const [importing, setImporting] = useState(false);
+  const [unsubscribeTarget, setUnsubscribeTarget] = useState(null);
+  const [unsubscribeError, setUnsubscribeError] = useState("");
+  const [unsubscribing, setUnsubscribing] = useState(false);
   const importInputRef = useRef(null);
   const subscribersAbortRef = useRef(null);
+  const addInFlightRef = useRef(false);
+  const importInFlightRef = useRef(false);
+  const unsubscribeInFlightRef = useRef(false);
+
+  const showStatus = (message, error = false) => {
+    setStatus(message);
+    setStatusError(error);
+  };
+  const closeAddDialog = () => {
+    if (addInFlightRef.current) return;
+    setAddOpen(false);
+    setAddEmail("");
+    setAddError("");
+  };
+  const closeImportDialog = () => {
+    if (importInFlightRef.current) return;
+    setImportConfirmation(null);
+    setImportError("");
+  };
+  const closeUnsubscribeDialog = () => {
+    if (unsubscribeInFlightRef.current) return;
+    setUnsubscribeTarget(null);
+    setUnsubscribeError("");
+  };
 
   // Initial / filter-changed fetch — resets the list. Re-runs whenever
   // the filter or search query changes (via the useEffect below).
@@ -3292,13 +3329,13 @@ export function SubscribersView() {
       setOffset((cur) => cur + next.length);
       setHasMore(next.length === SUBSCRIBERS_PAGE_SIZE);
     } catch (e) {
-      setStatus("Load more failed: " + e.message);
+      showStatus("Load more failed: " + e.message, true);
     } finally {
       setLoadingMore(false);
     }
   };
   const exportCsv = async () => {
-    setStatus("Building CSV…");
+    showStatus("Building CSV…");
     try {
       const qs = new URLSearchParams();
       if (filter !== "all") qs.set("status", filter);
@@ -3322,24 +3359,30 @@ export function SubscribersView() {
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      setStatus("CSV downloaded.");
+      showStatus("CSV downloaded.");
     } catch (e) {
-      setStatus("Export failed: " + e.message);
+      showStatus("Export failed: " + e.message, true);
     }
   };
   const addSubscriber = async () => {
-    const email = prompt("Email address to add:");
-    if (!email) return;
-    setStatus("Adding...");
+    if (!addEmail || addInFlightRef.current) return;
+    addInFlightRef.current = true;
+    setAdding(true);
+    setAddError("");
     try {
       await adminFetch("/admin/newsletter/subscribers", {
         method: "POST",
-        body: JSON.stringify({ email }),
+        body: JSON.stringify({ email: addEmail }),
       });
-      setStatus(`Added ${email}.`);
+      showStatus(`Added ${addEmail}.`);
+      setAddOpen(false);
+      setAddEmail("");
       load();
     } catch (e) {
-      setStatus("Failed: " + e.message);
+      setAddError("Failed: " + e.message);
+    } finally {
+      addInFlightRef.current = false;
+      setAdding(false);
     }
   };
   const importCsv = async (event) => {
@@ -3349,37 +3392,51 @@ export function SubscribersView() {
     try {
       const subscribers = parseSubscriberCsv(await file.text());
       if (!subscribers.length) throw new Error("No subscriber rows found");
-      const destination = importPreConsented
-        ? "active and immediately mailable"
-        : "pending confirmation";
-      if (
-        !confirm(
-          `Import ${subscribers.length.toLocaleString()} subscriber rows as ${destination}?`,
-        )
-      )
-        return;
-      setStatus(`Importing ${subscribers.length.toLocaleString()} rows…`);
-      const result = await adminFetch("/admin/newsletter/subscribers/import", {
-        method: "POST",
-        body: JSON.stringify({ subscribers, source: "admin_import", preConsented: importPreConsented }),
-      });
-      setStatus(
-        `Imported ${result.inserted.toLocaleString()} subscriber${result.inserted === 1 ? "" : "s"}; ${result.skipped.toLocaleString()} skipped or already present.`,
-      );
-      load();
+      setImportError("");
+      setImportConfirmation({ subscribers, preConsented: importPreConsented });
     } catch (e) {
-      setStatus("Import failed: " + e.message);
+      showStatus("Import failed: " + e.message, true);
     }
   };
-  const removeSubscriber = async (id, email) => {
-    if (!confirm(`Unsubscribe ${email}?`)) return;
+  const confirmImport = async () => {
+    if (!importConfirmation || importInFlightRef.current) return;
+    importInFlightRef.current = true;
+    setImporting(true);
+    setImportError("");
+    const { subscribers, preConsented } = importConfirmation;
     try {
-      await adminFetch(`/admin/newsletter/subscribers/${id}`, {
-        method: "DELETE",
+      const result = await adminFetch("/admin/newsletter/subscribers/import", {
+        method: "POST",
+        body: JSON.stringify({ subscribers, source: "admin_import", preConsented }),
       });
+      showStatus(
+        `Imported ${result.inserted.toLocaleString()} subscriber${result.inserted === 1 ? "" : "s"}; ${result.skipped.toLocaleString()} skipped or already present.`,
+      );
+      setImportConfirmation(null);
       load();
     } catch (e) {
-      alert("Failed: " + e.message);
+      setImportError("Import failed: " + e.message);
+    } finally {
+      importInFlightRef.current = false;
+      setImporting(false);
+    }
+  };
+  const removeSubscriber = async () => {
+    if (!unsubscribeTarget || unsubscribeInFlightRef.current) return;
+    unsubscribeInFlightRef.current = true;
+    setUnsubscribing(true);
+    setUnsubscribeError("");
+    try {
+      await adminFetch(`/admin/newsletter/subscribers/${unsubscribeTarget.id}`, {
+        method: "DELETE",
+      });
+      setUnsubscribeTarget(null);
+      load();
+    } catch (e) {
+      setUnsubscribeError("Failed: " + e.message);
+    } finally {
+      unsubscribeInFlightRef.current = false;
+      setUnsubscribing(false);
     }
   };
   return (
@@ -3418,7 +3475,10 @@ export function SubscribersView() {
               Existing opt-in consent
             </label>
             <Button
-              onClick={() => importInputRef.current?.click()}
+              onClick={(event) => {
+                event.currentTarget.focus({ preventScroll: true });
+                importInputRef.current?.click();
+              }}
               variant="secondary"
             >
               <Upload
@@ -3439,7 +3499,14 @@ export function SubscribersView() {
               />
               Export CSV
             </Button>{" "}
-            <Button onClick={addSubscriber} variant="secondary">
+            <Button
+              onClick={(event) => {
+                event.currentTarget.focus({ preventScroll: true });
+                setAddError("");
+                setAddOpen(true);
+              }}
+              variant="secondary"
+            >
               {" "}
               <UserPlus
                 size={14}
@@ -3501,9 +3568,9 @@ export function SubscribersView() {
           </div>{" "}
         </div>
         {status && (
-          <div className="mx-4 mt-3 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-3 text-ui-body text-ink-secondary">
+          <ActionFeedback error={statusError} className="mx-4 mt-3">
             {status}
-          </div>
+          </ActionFeedback>
         )}
         {loading ? (
           <div className="text-ui-body text-ink-secondary p-6 text-center">
@@ -3551,7 +3618,11 @@ export function SubscribersView() {
                 {s.status === "active" && (
                   <Button
                     type="button"
-                    onClick={() => removeSubscriber(s.id, s.email)}
+                    onClick={(event) => {
+                      event.currentTarget.focus({ preventScroll: true });
+                      setUnsubscribeError("");
+                      setUnsubscribeTarget({ id: s.id, email: s.email });
+                    }}
                     className=""
                     variant="secondary"
                   >
@@ -3583,6 +3654,94 @@ export function SubscribersView() {
           </div>
         )}
       </Card>
+      <Dialog
+        open={addOpen}
+        onClose={closeAddDialog}
+        size="sm"
+      >
+        <DialogHeader>
+          <DialogTitle>Add subscriber</DialogTitle>
+        </DialogHeader>
+        <form onSubmit={(event) => { event.preventDefault(); addSubscriber(); }}>
+          <DialogBody className="space-y-3">
+            <Field label="Email address" required>
+              <Input
+                autoFocus
+                type="text"
+                inputMode="email"
+                value={addEmail}
+                onChange={(event) => setAddEmail(event.target.value)}
+              />
+            </Field>
+            {addError && <ActionFeedback error>{addError}</ActionFeedback>}
+          </DialogBody>
+          <DialogFooter>
+            <Button variant="secondary" onClick={closeAddDialog} disabled={adding}>
+              Cancel
+            </Button>
+            <Button type="submit" loading={adding} disabled={!addEmail}>
+              Add subscriber
+            </Button>
+          </DialogFooter>
+        </form>
+      </Dialog>
+      <Dialog
+        open={Boolean(importConfirmation)}
+        onClose={closeImportDialog}
+        size="sm"
+      >
+        <DialogHeader>
+          <DialogTitle>Import subscribers?</DialogTitle>
+        </DialogHeader>
+        <form onSubmit={(event) => { event.preventDefault(); confirmImport(); }}>
+          <DialogBody className="space-y-3">
+            {importConfirmation && (
+              <p className="text-ui-body text-ink-secondary">
+                Import {importConfirmation.subscribers.length.toLocaleString()} subscriber rows as{" "}
+                {importConfirmation.preConsented
+                  ? "active and immediately mailable"
+                  : "pending confirmation"}?
+              </p>
+            )}
+            {importError && <ActionFeedback error>{importError}</ActionFeedback>}
+          </DialogBody>
+          <DialogFooter>
+            <Button variant="secondary" onClick={closeImportDialog} disabled={importing}>
+              Cancel
+            </Button>
+            <Button type="submit" loading={importing} autoFocus>
+              Import subscribers
+            </Button>
+          </DialogFooter>
+        </form>
+      </Dialog>
+      <Dialog
+        open={Boolean(unsubscribeTarget)}
+        onClose={closeUnsubscribeDialog}
+        size="sm"
+      >
+        <DialogHeader>
+          <DialogTitle>Unsubscribe subscriber?</DialogTitle>
+        </DialogHeader>
+        <form onSubmit={(event) => { event.preventDefault(); removeSubscriber(); }}>
+          <DialogBody className="space-y-3">
+            {unsubscribeTarget && (
+              <p className="text-ui-body text-ink-secondary u-nums">
+                Unsubscribe {unsubscribeTarget.email}?
+              </p>
+            )}
+            {unsubscribeError && <ActionFeedback error>{unsubscribeError}</ActionFeedback>}
+          </DialogBody>
+          <DialogFooter>
+            <Button variant="secondary" onClick={closeUnsubscribeDialog} disabled={unsubscribing}>
+              Cancel
+            </Button>
+            <Button type="submit" variant="danger" loading={unsubscribing} autoFocus>
+              Unsubscribe
+            </Button>
+          </DialogFooter>
+        </form>
+      </Dialog>
     </UiSurface>
   );
 }

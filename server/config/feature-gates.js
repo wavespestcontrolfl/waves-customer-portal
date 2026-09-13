@@ -98,6 +98,7 @@
  *   GATE_LAWN_PROPERTY_HISTORY=true (property-scoped confirmed lawn history, one installed row per visit, report-date/reset windows and confirm-time baseline; dark in dev AND prod; consumers read at call time)
  *   GATE_LAWN_COMPLETION_DEFAULTS=true (appointment-plan completion defaults; requires GATE_LAWN_PROPERTY_HISTORY; opt-in in every environment)
  *   GATE_LAWN_ACTUALS_LEDGER=true (lawn actuals ledger for EVERY lawn visit — one-time, commercial and incomplete-with-products included, no protocol attribution invented; off = WaveGuard-only writer, byte-identical; read at call time)
+ *   GATE_LAWN_DELIVERY_RECOVERY=true (resume a confirmed lawn visit's interrupted customer delivery; FAILS CLOSED everywhere — off = the sweep shadow-logs candidates and sends nothing)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -135,6 +136,14 @@ const gates = {
   lawnCompletionDefaults: gateEnvValue('GATE_LAWN_COMPLETION_DEFAULTS'),
   // Registered for startup logging; the completion writer reads it at call time (strict 'true').
   lawnActualsLedger: process.env.GATE_LAWN_ACTUALS_LEDGER === 'true',
+  // Lawn delivery recovery sweep. Resuming a confirmed visit's delivery can put
+  // a real customer SMS on the wire, so it FAILS CLOSED in every environment per
+  // the house rule — a dev box or preview pointed at a production-seeded database
+  // must never text a customer on boot. Off → the sweep shadow-logs its candidate
+  // count and delivers nothing. Double-gated: the cron also needs cronJobs.
+  // gateEnvValue here and in the sweep, so startup logging can never report this
+  // safety gate as disabled while it is actually open ('1' / 'on').
+  lawnDeliveryRecovery: gateEnvValue('GATE_LAWN_DELIVERY_RECOVERY'),
   // Complete Service: job-matched estimate evidence and reviewed discounts.
   completionServicePricing: process.env.GATE_COMPLETION_SERVICE_PRICING === 'true',
   // Customer selects one available visit; later cadence dates await auto-dispatch ±3 days.
@@ -385,6 +394,9 @@ const gates = {
   // creation) and issued /visit/:token links keep resolving. Fail-closed
   // ==='true' in EVERY environment; kill switch: unset.
   visitGroups: process.env.GATE_VISIT_GROUPS === 'true',
+  // Creation only. Saved packets and issued summary links survive the kill
+  // switch. Read at call time so grouping and closeout share one decision.
+  get visitCloseout() { return process.env.GATE_VISIT_CLOSEOUT === 'true'; },
 
   // Creation only: stamped reservations retain their full service capacity
   // through acceptance even after this gate is disabled. Strict opt-in.
@@ -787,6 +799,11 @@ const gates = {
   // voice_corpus_examples (redacted text only, reader-not-ingestor).
   // No sends, no customer-visible effect; prod opt-in per house pattern.
   voiceCorpusMiner: isProd ? process.env.GATE_VOICE_CORPUS_MINER === 'true' : true,
+
+  // Reviewed human-email pairs only; strict opt-in in every environment.
+  // The miner re-reads the gate at call time and requires a reviewed selection.
+  voiceCorpusEmailSource: gateEnvValue('GATE_VOICE_CORPUS_EMAIL_SOURCE'),
+  emailVoiceProfile: gateEnvValue('GATE_EMAIL_VOICE_PROFILE'),
 
   // Call-Research Miner (voice-of-customer corpus) — nightly extraction of
   // verbatim double-redacted quote chunks from call transcripts into
@@ -1337,6 +1354,16 @@ const gates = {
   callRescheduleApply: process.env.GATE_CALL_RESCHEDULE_APPLY === 'true',
   callbackCard: gateEnvValue('GATE_CALLBACK_CARD'),
   smsAdditionalProperty: gateEnvValue('GATE_SMS_ADDITIONAL_PROPERTY'),
+  // Missing-departure/arrival tracking: flags a scheduled_services row whose
+  // promised window (the last communicated arrival window — SMS/email/call
+  // evidence, never the raw schedule) has passed with no en_route/arrived
+  // evidence. Stage 1 (45 min) notifies the assigned tech; stage 2 (150 min,
+  // or any unassigned visit) also raises an office Action Queue alert
+  // through the existing tech_late/unassigned_overdue dispatch-alert
+  // lifecycle. Off → services/no-show-detector.js#sweep is a no-op; the
+  // READ-ONLY replay CLI (ops/agents/replay-no-show-detector.js) still runs
+  // regardless of this gate. Staff alerts only — no customer comms.
+  noShowDetector: gateEnvValue('GATE_NOSHOW_DETECTOR'),
   // Unrecorded-call alert: the "Twilio has no recording either" step of the
   // existing 5-min missing-recording sweep (call-recording-processor
   // .recoverMissingRecentRecordings). Rings an admin bell for any answered

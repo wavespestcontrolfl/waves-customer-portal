@@ -5,9 +5,8 @@
 // recurring service has no fixed term).
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
-import { WavesShell, CustomerColumn } from '../components/brand';
+import { WavesShell, CustomerColumn, PublicStateCard } from '../components/brand';
 import DocumentActionBar from '../components/DocumentActionBar';
-import PublicLoadError from '../components/PublicLoadError';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
 import { useGlassSurface } from '../glass/glass-engine';
 import {
@@ -20,7 +19,6 @@ import {
   SP,
   RADIUS,
   SHADOW,
-  docButton,
 } from '../theme-doc';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -56,22 +54,6 @@ function LoadingSkeleton() {
   );
 }
 
-function NotFound() {
-  return (
-    <div style={{ padding: `${SP.gap}px ${SP.xl}px`, textAlign: 'center', maxWidth: 440, margin: '0 auto' }}>
-      <h2 style={{ fontSize: FS.h3, fontWeight: FW.semibold, color: SURFACE.text, margin: `0 0 ${SP.sm}px`, lineHeight: LH.heading, fontFamily: DOC_FONT_SERIF }}>
-        Notice not found
-      </h2>
-      <p style={{ fontSize: FS.bodyLg, color: SURFACE.body, lineHeight: LH.body, margin: `0 0 ${SP.xl}px` }}>
-        This link is no longer available. If you have a question about your service pricing, give us a call — we're happy to help.
-      </p>
-      <a href={WAVES_SUPPORT_PHONE_TEL} data-glass-accent="" style={docButton('primary')}>
-        Call {WAVES_SUPPORT_PHONE_DISPLAY}
-      </a>
-    </div>
-  );
-}
-
 export default function PriceChangeNoticePage() {
   const { token } = useParams();
   useGlassSurface(true);
@@ -104,9 +86,21 @@ export default function PriceChangeNoticePage() {
   const content = loading
     ? <LoadingSkeleton />
     : error === 'temporary'
-      ? <PublicLoadError resource="pricing notice" onRetry={() => setLoadAttempt(a => a + 1)} />
+      ? (
+        <CustomerColumn>
+          <PublicStateCard state="error" title="We couldn&rsquo;t load that pricing notice" onRetry={() => setLoadAttempt(a => a + 1)}>
+            This looks temporary. Your link is still valid&mdash;check your connection and try again.
+          </PublicStateCard>
+        </CustomerColumn>
+      )
     : error === 'notfound' || !data
-      ? <NotFound />
+      ? (
+        <CustomerColumn>
+          <PublicStateCard state="not-found" title="Notice not found" contact="call">
+            This link is no longer available. If you have a question about your service pricing, give us a call — we're happy to help.
+          </PublicStateCard>
+        </CustomerColumn>
+      )
       : (
         <CustomerColumn style={{ fontFamily: DOC_FONT, color: SURFACE.text }}>
           <DocumentActionBar shareTitle="Waves service pricing update" />

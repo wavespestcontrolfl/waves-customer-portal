@@ -44,6 +44,7 @@ const ReviewService = require('../services/review-request');
 function chain(overrides = {}) {
   return {
     where: jest.fn(function () { return this; }),
+    whereNot: jest.fn(function () { return this; }),
     whereIn: jest.fn(function () { return this; }),
     whereNotIn: jest.fn(function () { return this; }),
     whereNull: jest.fn(function () { return this; }),
@@ -774,6 +775,10 @@ describe('review request follow-up flow', () => {
 
   test('stale claim, provider confirms nothing left → pre-provider crash, claim released', async () => {
     const { findOutboundMessageSince } = require('../services/twilio');
+    // The numbers the customer holds now, then the recipient-less pass that
+    // covers a number changed or merged since the claim — "nothing left"
+    // means both came back empty.
+    findOutboundMessageSince.mockResolvedValueOnce({ found: false });
     findOutboundMessageSince.mockResolvedValueOnce({ found: false });
     const { rrQuery } = wireStaleClaimNoLocalEvidence();
     rrQuery.update.mockResolvedValueOnce(1); // the reclaim
@@ -873,6 +878,7 @@ describe('review request follow-up flow', () => {
         if (table === 'customers') return customersQuery;
         throw new Error(`Unexpected table query: ${table}`);
       });
+      require('../services/twilio').findOutboundMessageSince.mockResolvedValueOnce({ found: false });
       require('../services/twilio').findOutboundMessageSince.mockResolvedValueOnce({ found: false });
       expect(await ReviewService.findInlineAwaitingEmail('cust-1')).toBeNull();
       expect(rrQuery.update).not.toHaveBeenCalled();
@@ -1073,7 +1079,9 @@ describe('review request follow-up flow', () => {
     test('_sendOutreachEmail (one-off): a post-dispatch throw is uncertain — counted as the ask, never "try again" (r9 P2)', async () => {
       const rrUpdateOneOff = jest.fn().mockResolvedValue(1);
       db.mockImplementation((table) => {
-        if (table === 'review_requests') return chain({ update: rrUpdateOneOff });
+        // The row's status stays 'sent'/'failed' here, never 'sending': these
+        // throws are all a definite provider outcome, not the uncertain hold.
+        if (table === 'review_requests') return chain({ update: rrUpdateOneOff, first: jest.fn().mockResolvedValue({ status: 'sent' }) });
         throw new Error(`Unexpected table query: ${table}`);
       });
       const args = { request: { id: 'rr-7' }, customer: { id: 'cust-1', first_name: 'Megan' }, contact: { email: 'megan@example.com', name: 'Megan' }, reviewUrl: 'https://x/rate/t', techName: 'Adam', manageRetryVia: null };

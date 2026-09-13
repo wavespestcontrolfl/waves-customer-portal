@@ -117,6 +117,21 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   if (invoice.payer_statement_id) {
     return { ok: false, error: 'Invoice is billed on the payer’s monthly statement; not sent individually.' };
   }
+  // A WITHDRAWN combined-visit invoice is payer-owned on a row whose payer_id
+  // stays NULL (Codex #4311 r45 P1): the send fence only recognises `sending`,
+  // and sendViaSMSAndEmail flips the invoice to `sent` on the text leg — so a
+  // Bill-To edit landing between the legs would reach this one, and the
+  // payer_id checks below would let the homeowner receive the PDF and pay
+  // link for debt that now belongs to AP. This is the email chokepoint; fail
+  // closed here as the statement guard above does.
+  // An explicit recipientOverride is an operator naming the recipient (the
+  // AP re-bill), so it is allowed through; the default homeowner delivery is
+  // not (local audit on r46 — the same distinction the provider-boundary
+  // guard below draws).
+  if (!options.recipientOverride && require('./invoice-helpers').invoiceWithdrawnFromCustomer(invoice)) {
+    logger.warn(`[invoice-email] Invoice ${invoice.invoice_number} was withdrawn to a third-party payer — not emailing the customer.`);
+    return { ok: false, error: 'Invoice is billed to a third-party payer; not sent to the customer.' };
+  }
   // Amount the customer pays = total − applied account credit (what Stripe charges).
   const amountDue = invoiceAmountDue(invoice);
   const customer = await db('customers').where({ id: invoice.customer_id })
@@ -342,6 +357,23 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
         triggerEventId: `invoice_sent:${invoice.id}`,
         categories: ['invoice_sent'],
         attachments: [pdfAttachment(`invoice-${invoice.invoice_number}.pdf`, pdfBuffer)],
+        // Ownership AGAIN at the provider boundary (Codex #4311 r46 P1): the
+        // send fence only recognises `sending`, and the combined send flips
+        // the invoice to `sent` on the text leg — so a Bill-To change can
+        // commit while the short link, the PDF and the template render are
+        // awaited, and this email would still carry the homeowner the pay
+        // link for AP-owned debt. Fail-closed, no lock across provider I/O.
+        // …for a HOMEOWNER delivery only (local audit on r46): a payer
+        // invoice is legitimately emailed to the AP recipient resolved above,
+        // and an unconditional self-pay check would refuse every one of them.
+        // What must not happen is the homeowner receiving a pay link for debt
+        // that moved to AP while this send was being prepared.
+        withProviderHandoff: effectiveOverride ? undefined : async (dispatch) => {
+          const verdict = await require('./invoice-helpers').selfPayAtDispatch(invoice.id, db)();
+          if (verdict.ok !== true) return verdict;
+          await dispatch();
+          return { ok: true };
+        },
       });
       // A suppressed/blocked recipient (unsubscribed, on the suppression list)
       // resolves with sent:false — it was NOT delivered, so don't report ok:true.

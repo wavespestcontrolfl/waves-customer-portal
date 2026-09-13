@@ -13,7 +13,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import NewsletterSignup from '../components/NewsletterSignup';
 import { COLORS as B, FONTS } from '../theme-brand';
-import { WavesShell, CustomerColumn } from '../components/brand';
+import { WavesShell, CustomerColumn, PublicStateCard } from '../components/brand';
 import { DOC_COLUMN_MAX } from '../theme-doc';
 import { useGlassSurface } from '../glass/glass-engine';
 import PublicLoadError from '../components/PublicLoadError';
@@ -123,42 +123,45 @@ export default function NewsletterArchivePage() {
   if (status === 'error') {
     return (
       <WavesShell variant="customer" topBar="solid">
-        <div data-glass-clear="" style={{ background: PAGE_BG, flex: 1, padding: '48px 20px' }}>
+        {/* The shared column, same as the not-found branch below: the 48/20
+            wrapper gave this state a 20px gutter while its sibling had 16. */}
+        <CustomerColumn data-glass-clear="" style={{ background: PAGE_BG }}>
           <PublicLoadError resource="newsletter issue" onRetry={() => setLoadAttempt(a => a + 1)} />
-        </div>
+        </CustomerColumn>
       </WavesShell>
     );
   }
   if (status === 'notfound') {
     return (
       <WavesShell variant="customer" topBar="solid">
-      <div data-glass-clear="" style={{ background: PAGE_BG, flex: 1, padding: '56px 24px', textAlign: 'center' }}>
-        <h1 style={{ fontFamily: FONTS.serif, fontSize: 32, fontWeight: 500, letterSpacing: 0, color: TEXT, margin: '0 0 8px' }}>
-          We couldn't find that issue.
-        </h1>
-        <p style={{ fontFamily: FONTS.body, color: BODY, marginBottom: 24 }}>
-          It may have been removed or the link is incorrect.
-        </p>
-        <a
-          href="https://www.wavespestcontrol.com/newsletter/"
-          data-glass-accent=""
-          style={{
-            fontFamily: FONTS.ui,
-            fontSize: 14,
-            fontWeight: 700,
-            letterSpacing: 0,
-            color: '#fff',
-            background: B.glassNavy,
-            border: `1px solid ${B.glassNavy}`,
-            borderRadius: 8,
-            padding: '12px 22px',
-            textDecoration: 'none',
-            display: 'inline-block',
-          }}
-        >
-          See the latest issues
-        </a>
-      </div>
+        <CustomerColumn data-glass-clear="" style={{ background: PAGE_BG }}>
+          {/* contact="none": this page's terminal action has never been a phone
+              number — it points back at the newsletter index. */}
+          <PublicStateCard state="not-found" title="We couldn't find that issue." contact="none">
+            <p style={{ margin: '0 0 24px' }}>It may have been removed or the link is incorrect.</p>
+            <a
+              href="https://www.wavespestcontrol.com/newsletter/"
+              data-glass-accent=""
+              data-glass-size="primary"
+              style={{
+                fontFamily: FONTS.ui,
+                fontSize: 16,
+                fontWeight: 700,
+                letterSpacing: 0,
+                color: '#fff',
+                background: B.glassNavy,
+                border: `1px solid ${B.glassNavy}`,
+                borderRadius: 8,
+                minHeight: 48,
+                padding: '12px 22px',
+                textDecoration: 'none',
+                display: 'inline-block',
+              }}
+            >
+              See the latest issues
+            </a>
+          </PublicStateCard>
+        </CustomerColumn>
       </WavesShell>
     );
   }

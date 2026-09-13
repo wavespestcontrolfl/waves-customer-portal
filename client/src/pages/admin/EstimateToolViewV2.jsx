@@ -29,6 +29,7 @@ import { useNavigate } from "react-router-dom";
 import { useIntelligenceBarActions, usePublishIntelligenceBarPageData } from "../../hooks/useIntelligenceBarPageData";
 import { ActionFeedback, Button, Badge, Card, Checkbox, Field, Input, Select, Textarea, UiSurface, cn } from "../../components/ui";
 import "../../styles/estimate-workflow.css";
+import { addressAskNotice, filterAddressAsks } from "../../lib/addressAsks";
 import PestProductionDiagnosticsPanel from "../../components/admin/PestProductionDiagnosticsPanel";
 import { ExternalLink } from "lucide-react";
 import { useEstimateSend } from "../../components/admin/EstimateSendDialog";
@@ -328,18 +329,6 @@ function buildAiProviderWarnings({ sources, errors = [], providerStatus = {} } =
   }
   return warnings;
 }
-
-// Triage reason codes that mean the lead's address itself is still owed
-// or unverified (call-routing-gates address_review lane, validation half).
-const ADDRESS_ASK_REASONS = new Set([
-  "missing_unit_number",
-  "address_unverified",
-  "missing_service_address",
-  "low_confidence_address",
-  "address_validation_unavailable",
-  "address_unverifiable",
-  "address_not_validated",
-]);
 
 // A dwelling unit designator anywhere in a typed address (the server's
 // unit-scope model reads the same forms; "#" alone counts).
@@ -2334,6 +2323,7 @@ export default function EstimateToolViewV2({
   // bare complex address quoted as a 358-unit commercial property).
   // Read-only context, same fail-open contract as customerSpend.
   const [openAddressAsks, setOpenAddressAsks] = useState([]);
+  const openAddressNotice = addressAskNotice(openAddressAsks);
   useEffect(() => {
     setOpenAddressAsks([]);
     const customerId = existingCustomerMatch?.id || form.customerId;
@@ -2344,7 +2334,7 @@ export default function EstimateToolViewV2({
         const r = await adminFetch(
           // active = open OR in_progress: a card the office already claimed
           // is still an owed callback (pre-push codex P1).
-          `/admin/triage?status=active&customer_id=${encodeURIComponent(customerId)}`,
+          `/admin/triage?address_confirmation=true&status=active&customer_id=${encodeURIComponent(customerId)}`,
         );
         if (!r.ok) return;
         const d = await r.json();
@@ -2352,9 +2342,7 @@ export default function EstimateToolViewV2({
         // Validation-ask cards only: the address_review lane also files
         // multi-property / second-address / property-role / dropped-call
         // cards, which are not "this address may be wrong" (codex r1 P2).
-        setOpenAddressAsks(
-          (Array.isArray(d.items) ? d.items : []).filter((i) => ADDRESS_ASK_REASONS.has(i.reason_code)),
-        );
+        setOpenAddressAsks(filterAddressAsks(d.items));
       } catch {
         if (!cancelled) setOpenAddressAsks([]);
       }
@@ -4773,23 +4761,20 @@ export default function EstimateToolViewV2({
                     </div>
                   </div>
                 )}
-              {openAddressAsks.length > 0 && (
+              {openAddressNotice && (
                 <div className="mb-2.5 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs text-14 text-zinc-900">
                   <span className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-900 mr-1.5 align-middle" />
                   <strong>Address still being confirmed</strong>
                   {" — "}
-                  {openAddressAsks.some((i) => i.reason_code === "missing_unit_number")
-                    ? "the caller gave the building but no unit number"
-                    : "the address from the call did not validate"}
-                  {(() => {
-                    const b = openAddressAsks.find((i) => i.payload?.unit_ask_building?.street_line_1)?.payload
-                      ?.unit_ask_building;
-                    return b
-                      ? ` (${[b.street_line_1, b.city, b.postal_code].filter(Boolean).join(", ")})`
-                      : "";
-                  })()}
-                  . Callback pending in the Triage Inbox — this lookup may be the whole building, not
-                  the unit.
+                  {openAddressNotice.reason}
+                  {openAddressNotice.heard ? ` (heard as "${openAddressNotice.heard}")` : ""}
+                  {". "}
+                  {openAddressNotice.building ? `Unit needed for: ${openAddressNotice.building}. ` : ""}
+                  {openAddressNotice.candidates.length > 0
+                    ? `The caller more likely said: ${openAddressNotice.candidates.join("; ")}. `
+                    : ""}
+                  Callback pending in the Triage Inbox
+                  {openAddressNotice.unitOnly ? " — this lookup may be the whole building, not the unit." : "."}
                 </div>
               )}
               {/* Gated on the DATA, not on existingCustomerMatch — the

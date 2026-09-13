@@ -49,6 +49,9 @@ function chain({ result = [], first } = {}) {
   q.where = jest.fn((arg) => { if (typeof arg === 'function') arg.call(q); return q; });
   q.whereIn = jest.fn(() => q);
   q.whereNull = jest.fn(() => q);
+  q.whereNot = jest.fn(() => q);
+  q.orWhereNot = jest.fn(() => q);
+  q.orWhereNull = jest.fn(() => q);
   q.whereRaw = jest.fn(() => q);
   q.andWhere = jest.fn(() => q);
   q.orWhere = jest.fn((arg) => { if (typeof arg === 'function') arg.call(q); return q; });
@@ -100,7 +103,14 @@ describe('late-payment micro-deposit diversion', () => {
   test('sends the verification re-nudge (not the overdue dunning) for a micro-deposit-blocked invoice', async () => {
     StripeService.isInvoiceAwaitingMicrodepositVerification.mockResolvedValue(true);
     setDbQueues({
-      invoices: [chain({ result: [invoice] })],
+      invoices: [
+        chain({ result: [invoice] }),
+        // the pre-guard ownership re-read, the last one before dispatch, and
+        // the email leg's own check
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
+      ],
       activity_log: [chain({ first: null }), chain()], // dedupe miss, then the reminder log insert
       customers: [chain({ first: customer })],
     });
@@ -133,7 +143,14 @@ describe('late-payment micro-deposit diversion', () => {
   test('falls through to normal dunning when the invoice has a PI but is NOT micro-deposit-blocked', async () => {
     StripeService.isInvoiceAwaitingMicrodepositVerification.mockResolvedValue(false);
     setDbQueues({
-      invoices: [chain({ result: [invoice] })],
+      invoices: [
+        chain({ result: [invoice] }),
+        // the pre-guard ownership re-read, the last one before dispatch, and
+        // the email leg's own check
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
+      ],
       activity_log: [chain({ first: null }), chain()],
       customers: [chain({ first: customer })],
     });

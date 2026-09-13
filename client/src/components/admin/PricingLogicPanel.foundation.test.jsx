@@ -32,6 +32,27 @@ afterEach(() => {
 });
 
 describe("PricingLogicPanel foundation", () => {
+  it("keeps seconds in Recent changes audit timestamps", async () => {
+    const changedAt = "2026-09-12T19:08:09Z";
+    vi.stubGlobal("fetch", vi.fn(async (url) => {
+      if (url === "/api/admin/pricing-config") return response({ configs: [] });
+      if (url === "/api/admin/pricing-config/audit-log?limit=30") {
+        return response({ logs: [{
+          config_key: "pest_base", changed_by: "Fixture admin", changed_at: changedAt,
+        }] });
+      }
+      throw new Error(`Unexpected request: GET ${url}`);
+    }));
+
+    render(<PricingLogicPanel />);
+
+    const expectedTimestamp = new Date(changedAt).toLocaleString(undefined, {
+      year: "numeric", month: "short", day: "numeric", hour: "2-digit",
+      minute: "2-digit", second: "2-digit",
+    });
+    expect(await screen.findByText(expectedTimestamp)).toBeInTheDocument();
+  });
+
   it("keeps an unsaved raw JSON draft open when its request fails", async () => {
     vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
       if (url === "/api/admin/pricing-config") return response({ configs: [pricingConfig] });

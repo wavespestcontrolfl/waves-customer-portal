@@ -111,3 +111,24 @@ describe('MobileDispatchList closeout-owed badge', () => {
     expect(screen.queryByText('Closeout owed')).not.toBeInTheDocument();
   });
 });
+
+describe('MobileDispatchList protocol opener', () => {
+  it('focuses the trigger before opening the protocol panel', () => {
+    let focusedAtOpen = null;
+    const onProtocol = vi.fn(() => { focusedAtOpen = document.activeElement; });
+    render(
+      <MobileDispatchList
+        mode="day"
+        date="2026-07-15"
+        services={[SERVICE]}
+        onProtocol={onProtocol}
+      />,
+    );
+
+    const trigger = screen.getByRole('button', { name: 'Protocol' });
+    fireEvent.click(trigger);
+
+    expect(onProtocol).toHaveBeenCalledWith(SERVICE);
+    expect(focusedAtOpen).toBe(trigger);
+  });
+});

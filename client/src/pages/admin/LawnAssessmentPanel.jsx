@@ -1,27 +1,22 @@
-import { useState, useEffect, useCallback, useRef } from "react";
-import useIsMobile from "../../hooks/useIsMobile";
+import { useState, useEffect, useRef } from "react";
 import { ArrowLeft, Leaf } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import {
+  ActionFeedback,
+  Badge,
+  Button,
+  Card,
+  Checkbox,
+  Field,
+  Input,
+  Select,
+  Textarea,
+  UiSurface,
+  cn,
+} from "../../components/ui";
+import lawnScores from "@lawn-scores";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
-// V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
-const D = {
-  bg: "#F4F4F5",
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  teal: "#18181B",
-  green: "#15803D",
-  amber: "#A16207",
-  red: "#991B1B",
-  purple: "#18181B",
-  text: "#27272A",
-  muted: "#71717A",
-  white: "#FFFFFF",
-  input: "#FFFFFF",
-  heading: "#09090B",
-  inputBorder: "#D4D4D8",
-};
-const MONO = "'JetBrains Mono', monospace";
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -36,7 +31,10 @@ function adminFetch(path, options = {}) {
   });
 }
 
-const scoreColor = (v) => (v >= 75 ? D.green : v >= 50 ? D.amber : D.red);
+// Preserve the accepted score semantics while the surrounding workspace uses
+// the shared zinc admin system.
+const scoreColor = (v) =>
+  v >= 75 ? "#15803D" : v >= 50 ? "#A16207" : "#991B1B";
 
 function resizeImage(dataUrl, maxEdge = 1600, quality = 0.85) {
   return new Promise((resolve) => {
@@ -100,7 +98,6 @@ const EMPTY_TURF_PROFILE = {
 // AssessmentsHubPage: the hub owns the AdminCommandHeader, so skip ours and
 // render the Back action as an inline button instead.
 export default function LawnAssessmentPanel({ embedded = false }) {
-  const isMobile = useIsMobile(768);
   // 'profile' step lets the tech edit a customer's turf profile from
   // the lawn-care surface — feeds the WaveGuard plan engine later.
   const [step, setStep] = useState("select"); // select, capture, analyzing, review, history, profile
@@ -108,7 +105,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
   const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [search, setSearch] = useState("");
   const [photos, setPhotos] = useState([]); // { data, preview, file }
-  const [analyzing, setAnalyzing] = useState(false);
+  const [, setAnalyzing] = useState(false);
   const [result, setResult] = useState(null);
   const [turfProfile, setTurfProfile] = useState(EMPTY_TURF_PROFILE);
   const [profileLoading, setProfileLoading] = useState(false);
@@ -220,13 +217,15 @@ export default function LawnAssessmentPanel({ embedded = false }) {
       // so the tech sees + can confirm/override. The server already COALESCE-
       // persisted it; this just surfaces it in the profile form.
       if (r.detectedGrassType) {
-        setTurfProfile((prev) => (prev.grass_type ? prev : { ...prev, grass_type: r.detectedGrassType }));
+        setTurfProfile((prev) =>
+          prev.grass_type ? prev : { ...prev, grass_type: r.detectedGrassType },
+        );
       }
       setAssessmentConfirmed(false);
       // Seed from the server's season-adjusted scores so the review
       // tiles match what will be persisted if the tech makes no changes.
       const initialScores = r.adjustedScores || r.displayScores;
-      setTechScores(initialScores ? { ...initialScores } : null);
+      setTechScores({ ...initialScores });
       setProtocolChecks({
         irrigation_inches_per_week: "",
         protocol_field_notes: "",
@@ -245,14 +244,18 @@ export default function LawnAssessmentPanel({ embedded = false }) {
     try {
       // Send the tech-confirmed scores. Falls back to the server-adjusted
       // scores when the tech didn't change anything.
-      const adjustedScores = { ...(techScores || result.adjustedScores || result.displayScores || {}) };
+      const adjustedScores = {
+        ...(techScores || result.adjustedScores || result.displayScores || {}),
+      };
       // This panel still edits Fungus/Thatch directly (no consolidated Stress chip),
       // so never post a stale stress_damage — /confirm would treat it as an explicit
       // override and ignore the Fungus/Thatch correction. Drop it so the server
       // re-derives Stress from the corrected fungus/thatch.
       delete adjustedScores.stress_damage;
       const protocol_field_checks = Object.fromEntries(
-        Object.entries(protocolChecks).filter(([, value]) => value !== "" && value !== null),
+        Object.entries(protocolChecks).filter(
+          ([, value]) => value !== "" && value !== null,
+        ),
       );
       const response = await adminFetch("/admin/lawn-assessment/confirm", {
         method: "POST",
@@ -266,8 +269,13 @@ export default function LawnAssessmentPanel({ embedded = false }) {
         ...prev,
         assessment: response.assessment || prev.assessment,
       }));
-      setAssessmentConfirmed(true);
-      alert("Assessment confirmed.");
+      if (response.confirmed === false) {
+        setAssessmentConfirmed(false);
+        alert("Scores saved. Complete the missing scores before confirming.");
+      } else {
+        setAssessmentConfirmed(true);
+        alert("Assessment confirmed.");
+      }
     } catch (e) {
       alert("Confirm failed: " + e.message);
     }
@@ -398,79 +406,55 @@ export default function LawnAssessmentPanel({ embedded = false }) {
   // First-use guide
   if (showGuide) {
     return (
-      <div>
-        {" "}
-        {!embedded && <AdminCommandHeader title="Lawn assessment" icon={Leaf} />}{" "}
-        <div
-          style={{
-            ...cardStyle,
-            maxWidth: 420,
-            margin: "0 auto",
-            textAlign: "center",
-            padding: 30,
-          }}
-        >
-          {" "}
-          <div style={{ fontSize: 40, marginBottom: 12 }}></div>{" "}
-          <div
-            style={{
-              fontSize: 18,
-              fontWeight: 700,
-              color: D.heading,
-              marginBottom: 8,
-            }}
-          >
+      <UiSurface
+        density="comfortable"
+        className="mx-auto max-w-[1200px] text-ui-body"
+      >
+        {!embedded && (
+          <AdminCommandHeader title="Lawn assessment" icon={Leaf} />
+        )}
+        <Card className="mx-auto max-w-[420px] p-6 text-center">
+          <h2 className="mb-2 text-18 font-medium text-zinc-900">
             Lawn Assessment Guide
-          </div>{" "}
-          <div
-            style={{
-              fontSize: 13,
-              color: D.muted,
-              lineHeight: 1.7,
-              marginBottom: 20,
-            }}
-          >
-            {" "}
-            <p style={{ marginBottom: 8 }}>
+          </h2>
+          <div className="mb-5 space-y-2 text-ui-body text-ink-secondary">
+            <p>
               Stand upright, point camera at the turf at roughly 45°, capture a
               6–8 ft area of lawn.
-            </p>{" "}
-            <p style={{ marginBottom: 8 }}>Avoid shadows and feet in frame.</p>{" "}
+            </p>
+            <p>Avoid shadows and feet in frame.</p>
             <p>
               Take 1-3 photos per visit: front yard, side yard, trouble spots.
-            </p>{" "}
-          </div>{" "}
-          <button
+            </p>
+          </div>
+          <Button
             onClick={() => {
               setShowGuide(false);
               localStorage.setItem("lawn_guide_seen", "1");
             }}
-            style={btnStyle(D.teal)}
           >
-            Got It — Let's Go
-          </button>{" "}
-        </div>{" "}
-      </div>
+            Got It — Let&apos;s Go
+          </Button>
+        </Card>
+      </UiSurface>
     );
   }
 
   return (
-    <div>
+    <UiSurface
+      density="comfortable"
+      className="mx-auto max-w-[1200px] text-ui-body text-ink-primary"
+    >
       {" "}
       {embedded ? (
         step !== "select" && (
-          <button
+          <Button
             onClick={backToSelect}
-            style={{
-              ...btnOutline,
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 6,
-              marginBottom: 12,
-            }}
+            variant="secondary"
+            className="mb-3 gap-1.5"
           >
-            <ArrowLeft size={14} /> Back
-          </button>
+            <ArrowLeft size={14} aria-hidden="true" /> Back
+          </Button>
         )
       ) : (
         <AdminCommandHeader
@@ -492,27 +476,20 @@ export default function LawnAssessmentPanel({ embedded = false }) {
       {step === "select" && (
         <div>
           {" "}
-          <input
+          <Input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search today's lawn customers..."
-            style={inputStyle}
+            aria-label="Search today's lawn customers"
           />{" "}
-          <div style={{ marginTop: 12, display: "grid", gap: 8 }}>
+          <div className="mt-3 grid gap-2">
             {filteredCustomers.slice(0, 20).map((c) => (
               // key uses serviceId when present so a customer with two
               // scheduled visits on the same day renders as two distinct
               // rows. Falls back to customer id on the no-services path.
-              <div
+              <Card
                 key={c.serviceId || c.id}
-                style={{
-                  ...cardStyle,
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  padding: "12px 16px",
-                  cursor: "pointer",
-                }}
+                className="flex cursor-pointer flex-col justify-between gap-3 p-4 sm:flex-row sm:items-center"
                 onClick={() => {
                   setSelectedCustomer(c);
                   setStep("capture");
@@ -521,144 +498,106 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                 {" "}
                 <div>
                   {" "}
-                  <div
-                    style={{ fontSize: 14, fontWeight: 500, color: D.heading }}
-                  >
+                  <div className="text-ui-body font-medium text-zinc-900">
                     {c.windowStart && (
-                      <span style={{ color: D.teal, marginRight: 8 }}>
-                        {c.windowStart}
-                      </span>
+                      <span className="mr-2">{c.windowStart}</span>
                     )}
                     {c.firstName} {c.lastName}
                   </div>{" "}
-                  <div style={{ fontSize: 11, color: D.muted }}>
+                  <div className="text-ui-caption text-ink-secondary">
                     {c.address} · {c.phone}
                   </div>
                   {c.serviceType && (
-                    <div style={{ fontSize: 10, color: D.green, marginTop: 2 }}>
+                    <div className="mt-1 text-ui-caption text-ink-secondary">
                       {c.serviceType}
                     </div>
                   )}
                 </div>{" "}
-                <div style={{ display: "flex", gap: 6 }}>
+                <div className="flex flex-wrap items-center gap-2">
                   {c.lastAssessment && (
-                    <span style={{ fontSize: 10, color: D.muted }}>
+                    <span className="text-ui-caption text-ink-secondary">
                       Last: {new Date(c.lastAssessment).toLocaleDateString()}
                     </span>
                   )}
-                  <button
+                  <Button
+                    variant="secondary"
                     onClick={(e) => {
                       e.stopPropagation();
                       setSelectedCustomer(c);
                       loadTurfProfile(c.id);
                     }}
-                    style={{ ...btnOutline, padding: "4px 8px", fontSize: 10 }}
                   >
                     Profile
-                  </button>{" "}
-                  <button
+                  </Button>{" "}
+                  <Button
+                    variant="secondary"
                     onClick={(e) => {
                       e.stopPropagation();
                       loadHistory(c.id);
                       setSelectedCustomer(c);
                     }}
-                    style={{ ...btnOutline, padding: "4px 8px", fontSize: 10 }}
                   >
                     History
-                  </button>{" "}
+                  </Button>{" "}
                 </div>{" "}
-              </div>
+              </Card>
             ))}
             {filteredCustomers.length === 0 && (
-              <div style={{ color: D.muted, textAlign: "center", padding: 30 }}>
+              <ActionFeedback className="justify-center p-8 text-center">
                 No lawn services scheduled today (or all assessed)
-              </div>
+              </ActionFeedback>
             )}
           </div>{" "}
         </div>
       )}
       {/* STEP 2: Capture Photos */}
       {step === "capture" && selectedCustomer && (
-        <div style={{ maxWidth: 480, margin: "0 auto" }}>
+        <div className="mx-auto max-w-[480px]">
           {" "}
-          <div style={{ ...cardStyle, textAlign: "center", marginBottom: 16 }}>
+          <Card className="mb-4 p-4 text-center">
             {" "}
-            <div style={{ fontSize: 14, fontWeight: 500, color: D.teal }}>
+            <div className="text-ui-body font-medium text-zinc-900">
               {selectedCustomer.firstName} {selectedCustomer.lastName}
             </div>{" "}
-            <div style={{ fontSize: 12, color: D.muted }}>
+            <div className="text-ui-caption text-ink-secondary">
               {selectedCustomer.address}
             </div>{" "}
-          </div>
+          </Card>
           {/* Photo grid */}
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: isMobile
-                ? "repeat(2, 1fr)"
-                : "repeat(3, 1fr)",
-              gap: 10,
-              marginBottom: 16,
-            }}
-          >
+          <div className="mb-4 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
             {photos.map((p, i) => (
               <div
                 key={i}
-                style={{
-                  position: "relative",
-                  aspectRatio: "4/3",
-                  borderRadius: 10,
-                  overflow: "hidden",
-                  border: `1px solid ${D.border}`,
-                }}
+                className="relative aspect-[4/3] overflow-hidden rounded-md border-hairline border-zinc-200"
               >
                 {" "}
                 <img
                   src={p.preview}
                   alt=""
-                  style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                  className="h-full w-full object-cover"
                 />{" "}
-                <button
+                <Button
                   onClick={() => removePhoto(i)}
-                  style={{
-                    position: "absolute",
-                    top: 4,
-                    right: 4,
-                    background: D.red,
-                    color: "#fff",
-                    border: "none",
-                    borderRadius: "50%",
-                    width: 24,
-                    height: 24,
-                    fontSize: 12,
-                    cursor: "pointer",
-                  }}
+                  variant="danger"
+                  aria-label={`Remove photo ${i + 1}`}
+                  className="absolute right-1 top-1 !h-11 !min-h-11 !w-11 !min-w-11 !rounded-full !p-0"
                 >
                   ×
-                </button>{" "}
+                </Button>{" "}
               </div>
             ))}
             {photos.length < 3 && (
-              <div
+              <Button
                 onClick={() => fileRef.current?.click()}
-                style={{
-                  aspectRatio: "4/3",
-                  borderRadius: 10,
-                  border: `2px dashed ${D.border}`,
-                  display: "flex",
-                  flexDirection: "column",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  cursor: "pointer",
-                  color: D.muted,
-                }}
+                variant="secondary"
+                className="aspect-[4/3] h-auto flex-col border-dashed text-ui-body"
               >
                 {" "}
-                <span style={{ fontSize: 28 }}>+</span>{" "}
-                <span style={{ fontSize: 11, marginTop: 4 }}>
-                  Add Photo
+                <span className="text-24 leading-none" aria-hidden="true">
+                  +
                 </span>{" "}
-              </div>
+                <span>Add Photo</span>{" "}
+              </Button>
             )}
           </div>{" "}
           <input
@@ -668,84 +607,44 @@ export default function LawnAssessmentPanel({ embedded = false }) {
             capture="environment"
             multiple
             onChange={handlePhotoCapture}
-            style={{ display: "none" }}
+            className="hidden"
           />{" "}
-          <button
+          <Button
             onClick={handleAnalyze}
             disabled={photos.length === 0}
-            style={{
-              ...btnStyle(D.green),
-              width: "100%",
-              padding: 14,
-              fontSize: 15,
-              opacity: photos.length === 0 ? 0.5 : 1,
-            }}
+            className="w-full"
           >
             Analyze {photos.length} Photo{photos.length !== 1 ? "s" : ""} with
             AI
-          </button>{" "}
+          </Button>{" "}
         </div>
       )}
       {/* STEP 3: Analyzing */}
       {step === "analyzing" && (
-        <div style={{ textAlign: "center", padding: 60 }}>
-          {" "}
-          <div style={{ fontSize: 32, marginBottom: 16 }}></div>{" "}
-          <div
-            style={{
-              fontSize: 16,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 8,
-            }}
-          >
+        <ActionFeedback className="flex-col justify-center gap-2 p-10 text-center">
+          <span className="text-16 font-medium text-zinc-900">
             Analyzing with Claude + Gemini...
-          </div>{" "}
-          <div style={{ fontSize: 12, color: D.muted }}>
-            Running dual-model vision analysis for accuracy
-          </div>{" "}
-          <div
-            style={{
-              marginTop: 20,
-              display: "flex",
-              gap: 8,
-              justifyContent: "center",
-            }}
-          >
+          </span>{" "}
+          <span>Running dual-model vision analysis for accuracy</span>{" "}
+          <span className="mt-2 flex flex-wrap justify-center gap-2">
             {["Claude Sonnet", "Gemini Flash"].map((m) => (
-              <div
-                key={m}
-                style={{
-                  padding: "8px 16px",
-                  background: D.input,
-                  borderRadius: 8,
-                  fontSize: 12,
-                  color: D.teal,
-                }}
-              >
+              <Badge key={m} tone="neutral">
                 {m}
-              </div>
+              </Badge>
             ))}
-          </div>{" "}
-        </div>
+          </span>{" "}
+        </ActionFeedback>
       )}
       {/* STEP 4: Review Scores */}
       {step === "review" && result && (
-        <div style={{ maxWidth: 520, margin: "0 auto" }}>
+        <div className="mx-auto max-w-[520px]">
           {" "}
-          <div style={{ ...cardStyle, marginBottom: 16 }}>
+          <Card className="mb-4 p-4">
             {" "}
-            <div
-              style={{
-                fontSize: 15,
-                fontWeight: 500,
-                color: D.heading,
-                marginBottom: 12,
-              }}
-            >
+            <h2 className="mb-3 text-18 font-medium text-zinc-900">
               AI Scorecard — {selectedCustomer?.firstName}{" "}
               {selectedCustomer?.lastName}
-            </div>
+            </h2>
             {/* Divergence summary — shown when Claude and Gemini disagreed on at least one metric.
                 Multi-photo assessments emit one flag per photo, so dedupe by metric to match the
                 number of highlighted tiles below. */}
@@ -755,38 +654,19 @@ export default function LawnAssessmentPanel({ embedded = false }) {
               );
               if (uniqueMetrics.size === 0) return null;
               return (
-                <div
-                  style={{
-                    marginBottom: 12,
-                    padding: 10,
-                    background: `${D.amber}15`,
-                    border: `1px solid ${D.amber}`,
-                    borderRadius: 8,
-                  }}
-                >
+                <ActionFeedback className="mb-3 block rounded-md border-hairline border-warn-fg bg-warn-bg p-3 text-warn-fg">
                   {" "}
-                  <div
-                    style={{
-                      fontSize: 12,
-                      fontWeight: 700,
-                      color: D.amber,
-                      marginBottom: 4,
-                    }}
-                  >
+                  <div className="mb-1 text-ui-body font-medium">
                     AI models disagreed on {uniqueMetrics.size} metric
                     {uniqueMetrics.size === 1 ? "" : "s"}
                   </div>{" "}
-                  <div
-                    style={{ fontSize: 11, color: D.muted, lineHeight: 1.5 }}
-                  >
+                  <div className="text-ui-caption text-ink-secondary">
                     Tiles below marked{" "}
-                    <span style={{ color: D.amber, fontWeight: 500 }}>
-                      DIVERGENCE
-                    </span>
+                    <span className="font-medium text-warn-fg">DIVERGENCE</span>{" "}
                     are where Claude and Gemini gave scores that differed by
                     more than 20 points. Verify by eye before confirming.
                   </div>{" "}
-                </div>
+                </ActionFeedback>
               );
             })()}
             {/* Scores — AI value on top, tech-confirmed value below with
@@ -794,13 +674,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                 /confirm, which is what recordTechCalibration measures
                 AI-vs-tech delta against. Step 5 to keep the input
                 coarse and the calibration signal stable. */}
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: isMobile ? "1fr 1fr" : "repeat(3, 1fr)",
-                gap: 10,
-              }}
-            >
+            <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
               {[
                 // Tech review stays granular so the tech can correct the
                 // underlying signals (disease/thatch) that drive Stress
@@ -812,188 +686,107 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                 { key: "fungus_control", label: "Fungus Control" },
                 { key: "thatch_level", label: "Thatch Level" },
               ].map((m) => {
-                const aiVal = result.adjustedScores?.[m.key] ?? result.displayScores?.[m.key] ?? 0;
+                const aiVal = lawnScores.lawnScoreValue(
+                  (result.adjustedScores || result.displayScores)?.[m.key],
+                );
                 const techVal = techScores?.[m.key] ?? aiVal;
                 const flag = (result.divergenceFlags || []).find(
                   (f) => f.metric === m.key,
                 );
                 const overridden = techVal !== aiVal;
                 return (
-                  <div
+                  <Card
                     key={m.key}
-                    style={{
-                      padding: 14,
-                      background: D.input,
-                      borderRadius: 10,
-                      textAlign: "center",
-                      border: flag
-                        ? `2px solid ${D.amber}`
-                        : `1px solid ${D.border}`,
-                    }}
+                    className={cn(
+                      "p-3 text-center",
+                      flag && "border-2 border-warn-fg",
+                    )}
                   >
                     {" "}
-                    <div
-                      style={{
-                        fontSize: 9,
-                        color: D.muted,
-                        fontWeight: 500,
-                        letterSpacing: 0.5,
-                      }}
-                    >
+                    <div className="text-ui-caption font-medium text-ink-secondary">
                       AI
                     </div>{" "}
                     <div
-                      style={{
-                        fontFamily: MONO,
-                        fontSize: 22,
-                        fontWeight: 700,
-                        color: scoreColor(aiVal),
-                      }}
+                      style={
+                        aiVal == null ? undefined : { color: scoreColor(aiVal) }
+                      }
+                      className={cn(
+                        "u-nums text-22 font-medium",
+                        aiVal == null && "text-ink-secondary",
+                      )}
                     >
-                      {aiVal}%
+                      {aiVal == null ? "—" : `${aiVal}%`}
                     </div>{" "}
-                    <div
-                      style={{
-                        fontSize: 12,
-                        fontWeight: 500,
-                        color: D.heading,
-                        marginTop: 2,
-                      }}
-                    >
+                    <div className="mt-0.5 text-ui-body font-medium text-zinc-900">
                       {m.label}
                     </div>
                     {flag && (
                       <>
                         {" "}
-                        <div
-                          style={{ fontSize: 10, color: D.muted, marginTop: 4 }}
-                        >
+                        <div className="mt-1 text-ui-caption text-ink-secondary">
                           Claude: {flag.claude}% · Gemini: {flag.gemini}%
                         </div>{" "}
-                        <div
-                          style={{
-                            fontSize: 9,
-                            color: D.amber,
-                            fontWeight: 700,
-                            marginTop: 2,
-                          }}
-                        >
+                        <div className="mt-0.5 text-ui-caption font-medium text-warn-fg">
                           DIVERGENCE — verify
                         </div>{" "}
                       </>
                     )}
-                    <div
-                      style={{
-                        marginTop: 10,
-                        paddingTop: 8,
-                        borderTop: `1px solid ${D.border}`,
-                      }}
-                    >
+                    <div className="mt-2.5 border-t border-hairline border-zinc-200 pt-2">
                       {" "}
                       <div
-                        style={{
-                          fontSize: 9,
-                          color: overridden ? D.teal : D.muted,
-                          fontWeight: 500,
-                          letterSpacing: 0.5,
-                        }}
+                        className={cn(
+                          "text-ui-caption font-medium",
+                          overridden ? "text-zinc-900" : "text-ink-secondary",
+                        )}
                       >
                         TECH {overridden ? "· EDITED" : ""}
                       </div>{" "}
-                      <div
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          gap: 6,
-                          marginTop: 4,
-                        }}
-                      >
+                      <div className="mt-1 flex items-center justify-center gap-1.5">
                         {" "}
-                        <button
+                        <Button
                           type="button"
                           onClick={() => adjustTechScore(m.key, -5)}
                           aria-label={`Decrease ${m.label}`}
-                          style={{
-                            width: 28,
-                            height: 28,
-                            borderRadius: 6,
-                            border: `1px solid ${D.border}`,
-                            background: D.white,
-                            fontSize: 16,
-                            fontWeight: 700,
-                            cursor: "pointer",
-                            color: D.heading,
-                          }}
+                          variant="secondary"
+                          className="!w-11 !min-w-11 !p-0 text-16"
                         >
                           −
-                        </button>{" "}
+                        </Button>{" "}
                         <div
-                          style={{
-                            fontFamily: MONO,
-                            fontSize: 20,
-                            fontWeight: 700,
-                            minWidth: 56,
-                            color: scoreColor(techVal),
-                          }}
+                          style={
+                            techVal == null
+                              ? undefined
+                              : { color: scoreColor(techVal) }
+                          }
+                          className={cn(
+                            "min-w-14 u-nums text-20 font-medium",
+                            techVal == null && "text-ink-secondary",
+                          )}
                         >
-                          {techVal}%
+                          {techVal == null ? "—" : `${techVal}%`}
                         </div>{" "}
-                        <button
+                        <Button
                           type="button"
                           onClick={() => adjustTechScore(m.key, 5)}
                           aria-label={`Increase ${m.label}`}
-                          style={{
-                            width: 28,
-                            height: 28,
-                            borderRadius: 6,
-                            border: `1px solid ${D.border}`,
-                            background: D.white,
-                            fontSize: 16,
-                            fontWeight: 700,
-                            cursor: "pointer",
-                            color: D.heading,
-                          }}
+                          variant="secondary"
+                          className="!w-11 !min-w-11 !p-0 text-16"
                         >
                           +
-                        </button>{" "}
+                        </Button>{" "}
                       </div>{" "}
                     </div>{" "}
-                  </div>
+                  </Card>
                 );
               })}
             </div>
-            <div
-              style={{
-                marginTop: 12,
-                padding: 12,
-                background: D.input,
-                borderRadius: 8,
-                border: `1px solid ${D.border}`,
-              }}
-            >
-              <div
-                style={{
-                  fontSize: 11,
-                  fontWeight: 700,
-                  color: D.heading,
-                  marginBottom: 8,
-                }}
-              >
+            <Card className="mt-3 p-3">
+              <div className="mb-2 text-ui-body font-medium text-zinc-900">
                 Irrigation check
               </div>
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "1fr",
-                  gap: 10,
-                }}
-              >
-                <div>
-                  <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
-                    Inches per week
-                  </div>
-                  <input
+              <div className="grid gap-2.5">
+                <Field label="Inches per week">
+                  <Input
                     type="number"
                     min="0"
                     max="5"
@@ -1006,15 +799,11 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                       }))
                     }
                     placeholder="1.00"
-                    style={{ ...inputStyle, marginBottom: 0 }}
                   />
-                </div>
+                </Field>
               </div>
-              <div style={{ marginTop: 10 }}>
-                <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
-                  Irrigation notes
-                </div>
-                <textarea
+              <Field label="Irrigation notes" className="mt-2.5">
+                <Textarea
                   value={protocolChecks.protocol_field_notes || ""}
                   onChange={(e) =>
                     setProtocolChecks((prev) => ({
@@ -1024,83 +813,49 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                   }
                   placeholder="Dry spots, overwatering, runoff, broken heads, or customer controller notes"
                   rows={2}
-                  style={{ ...inputStyle, marginBottom: 0, resize: "vertical" }}
                 />
-              </div>
-            </div>
+              </Field>
+            </Card>
             {/* Observations */}
             {result.observations && (
-              <div
-                style={{
-                  marginTop: 12,
-                  padding: 12,
-                  background: D.input,
-                  borderRadius: 8,
-                  fontSize: 12,
-                  color: D.muted,
-                  lineHeight: 1.6,
-                }}
-              >
+              <Card className="mt-3 p-3 text-ui-body text-ink-secondary">
                 {" "}
-                <div
-                  style={{
-                    fontSize: 11,
-                    fontWeight: 500,
-                    color: D.heading,
-                    marginBottom: 4,
-                  }}
-                >
+                <div className="mb-1 text-ui-body font-medium text-zinc-900">
                   AI Observations
                 </div>
                 {result.observations}
-              </div>
+              </Card>
             )}
             {/* Season badge */}
-            <div style={{ marginTop: 12, fontSize: 11, color: D.muted }}>
-              Season:{" "}
-              <span style={{ color: D.teal, fontWeight: 500 }}>
-                {result.season}
-              </span>
+            <div className="mt-3 flex flex-wrap items-center gap-2 text-ui-caption text-ink-secondary">
+              Season: <Badge tone="neutral">{result.season}</Badge>
               {result.isBaseline && (
-                <span
-                  style={{ color: D.amber, marginLeft: 8, fontWeight: 500 }}
-                >
-                  This is the baseline assessment
-                </span>
+                <Badge tone="warn">This is the baseline assessment</Badge>
               )}
             </div>{" "}
-          </div>{" "}
-          <div style={{ display: "flex", gap: 8 }}>
+          </Card>{" "}
+          <div className="flex gap-2">
             {" "}
             {assessmentConfirmed ? (
-              <button
-                onClick={finishAssessment}
-                style={{ ...btnStyle(D.teal), flex: 1, padding: 14, fontSize: 15 }}
-              >
+              <Button onClick={finishAssessment} className="flex-1">
                 Done
-              </button>
+              </Button>
             ) : (
-              <button
+              <Button
                 onClick={handleConfirm}
                 disabled={confirming}
-                style={{
-                  ...btnStyle(D.green),
-                  flex: 1,
-                  padding: 14,
-                  fontSize: 15,
-                  opacity: confirming ? 0.5 : 1,
-                }}
+                className="flex-1"
               >
                 {confirming ? "Confirming..." : "Confirm Scores"}
-              </button>
+              </Button>
             )}{" "}
-            <button
+            <Button
               onClick={() => setStep("capture")}
               disabled={assessmentConfirmed}
-              style={{ ...btnOutline, padding: "14px 20px" }}
+              variant="secondary"
             >
               Retake
-            </button>{" "}
+            </Button>{" "}
           </div>{" "}
         </div>
       )}
@@ -1108,88 +863,30 @@ export default function LawnAssessmentPanel({ embedded = false }) {
       {step === "history" && (
         <div>
           {" "}
-          <div
-            style={{
-              fontSize: 15,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 12,
-            }}
-          >
+          <h2 className="mb-3 text-18 font-medium text-zinc-900">
             {selectedCustomer?.firstName} {selectedCustomer?.lastName} —
             Assessment History
-          </div>
+          </h2>
           {history.length === 0 ? (
-            <div
-              style={{
-                ...cardStyle,
-                textAlign: "center",
-                padding: 40,
-                color: D.muted,
-              }}
-            >
+            <ActionFeedback className="justify-center p-10 text-center">
               No assessments yet
-            </div>
+            </ActionFeedback>
           ) : (
             history.map((a, i) => (
-              <div key={a.id || i} style={{ ...cardStyle, marginBottom: 8 }}>
+              <Card key={a.id || i} className="mb-2 p-4">
                 {" "}
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                    marginBottom: 8,
-                  }}
-                >
+                <div className="mb-2 flex items-center justify-between">
                   {" "}
-                  <div
-                    style={{ display: "flex", gap: 8, alignItems: "center" }}
-                  >
+                  <div className="flex flex-wrap items-center gap-2">
                     {" "}
-                    <span
-                      style={{
-                        fontSize: 13,
-                        fontWeight: 500,
-                        color: D.heading,
-                      }}
-                    >
+                    <span className="text-ui-body font-medium text-zinc-900">
                       {new Date(a.service_date).toLocaleDateString()}
                     </span>{" "}
-                    <span
-                      style={{
-                        fontSize: 10,
-                        padding: "2px 8px",
-                        borderRadius: 4,
-                        background: `${D.teal}22`,
-                        color: D.teal,
-                      }}
-                    >
-                      {a.season}
-                    </span>
-                    {a.is_baseline && (
-                      <span
-                        style={{
-                          fontSize: 10,
-                          padding: "2px 8px",
-                          borderRadius: 4,
-                          background: `${D.amber}22`,
-                          color: D.amber,
-                        }}
-                      >
-                        Baseline
-                      </span>
-                    )}
+                    <Badge tone="neutral">{a.season}</Badge>
+                    {a.is_baseline && <Badge tone="warn">Baseline</Badge>}
                   </div>{" "}
                 </div>{" "}
-                <div
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "repeat(5, 1fr)",
-                    gap: isMobile ? 4 : 12,
-                    fontSize: 12,
-                  }}
-                >
+                <div className="grid grid-cols-5 gap-1 md:gap-3">
                   {[
                     ["Turf", a.turf_density],
                     ["Weed", a.weed_suppression],
@@ -1197,74 +894,44 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                     ["Fungus", a.fungus_control],
                     ["Thatch", a.thatch_level],
                   ].map(([label, val]) => (
-                    <div
-                      key={label}
-                      style={{ textAlign: "center", minWidth: 0 }}
-                    >
+                    <div key={label} className="min-w-0 text-center">
                       {" "}
                       <div
-                        style={{
-                          fontFamily: MONO,
-                          fontSize: isMobile ? 13 : 16,
-                          fontWeight: 700,
-                          color: scoreColor(val || 0),
-                        }}
+                        style={{ color: scoreColor(val || 0) }}
+                        className="u-nums text-ui-body font-medium md:text-16"
                       >
                         {val || 0}%
                       </div>{" "}
-                      <div
-                        style={{ fontSize: isMobile ? 9 : 10, color: D.muted }}
-                      >
+                      <div className="truncate text-ui-caption text-ink-secondary">
                         {label}
                       </div>{" "}
                     </div>
                   ))}
                 </div>
                 {a.observations && (
-                  <div
-                    style={{
-                      fontSize: 11,
-                      color: D.muted,
-                      marginTop: 8,
-                      lineHeight: 1.5,
-                    }}
-                  >
+                  <div className="mt-2 text-ui-caption text-ink-secondary">
                     {a.observations}
                   </div>
                 )}
-              </div>
+              </Card>
             ))
           )}
         </div>
       )}
       {/* TURF PROFILE VIEW — minimal form for the WaveGuard plan engine inputs */}
       {step === "profile" && (
-        <div style={{ maxWidth: 520, margin: "0 auto" }}>
+        <div className="mx-auto max-w-[520px]">
           {" "}
-          <div
-            style={{
-              fontSize: 15,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 12,
-            }}
-          >
+          <h2 className="mb-3 text-18 font-medium text-zinc-900">
             {selectedCustomer?.firstName} {selectedCustomer?.lastName} — Turf
             Profile
-          </div>
+          </h2>
           {profileLoading ? (
-            <div
-              style={{
-                ...cardStyle,
-                textAlign: "center",
-                padding: 40,
-                color: D.muted,
-              }}
-            >
+            <ActionFeedback className="justify-center p-10 text-center">
               Loading…
-            </div>
+            </ActionFeedback>
           ) : (
-            <div style={{ ...cardStyle, padding: 16 }}>
+            <Card className="p-4">
               {/* Selects */}
               {[
                 ["grass_type", "Grass type", TURF_PROFILE_OPTIONS.grass_type],
@@ -1279,14 +946,8 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                   TURF_PROFILE_OPTIONS.irrigation_type,
                 ],
               ].map(([key, label, opts]) => (
-                <div key={key} style={{ marginBottom: 12 }}>
-                  {" "}
-                  <div
-                    style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}
-                  >
-                    {label}
-                  </div>{" "}
-                  <select
+                <Field key={key} label={label} className="mb-3">
+                  <Select
                     value={turfProfile[key] || ""}
                     // Reviewing the grass without changing it (Bahia → Bahia
                     // move) must still count as a review — a native select
@@ -1294,13 +955,13 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                     // (codex #3565 gh-r46), so focusing the field marks it
                     // reviewed; a value with no review stays unconfirmed.
                     onFocus={() => {
-                      if (key === "grass_type" && (turfProfile[key] || "")) setGrassTouched(true);
+                      if (key === "grass_type" && (turfProfile[key] || ""))
+                        setGrassTouched(true);
                     }}
                     onChange={(e) => {
                       if (key === "grass_type") setGrassTouched(true);
                       updateProfileField(key, e.target.value);
                     }}
-                    style={{ ...inputStyle, marginBottom: 0 }}
                   >
                     {" "}
                     <option value="">—</option>
@@ -1309,15 +970,19 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                         {o.replace(/_/g, " ")}
                       </option>
                     ))}
-                  </select>{" "}
-                </div>
+                  </Select>
+                </Field>
               ))}
               {/* Text/numeric inputs */}
               {[
                 ["track_key", "Track key (e.g. st_augustine)", "text"],
                 ["cultivar", "Cultivar (e.g. Floratam, Palmetto)", "text"],
                 ["lawn_sqft", "Lawn area (sqft)", "number"],
-                ["irrigation_inches_per_week", "Irrigation inches / week", "number"],
+                [
+                  "irrigation_inches_per_week",
+                  "Irrigation inches / week",
+                  "number",
+                ],
                 ["municipality", "Municipality (e.g. North Port)", "text"],
                 ["county", "County (e.g. Sarasota)", "text"],
                 ["soil_test_date", "Last soil test date", "date"],
@@ -1328,14 +993,17 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                   "number",
                 ],
               ].map(([key, label, type]) => (
-                <div key={key} style={{ marginBottom: 12 }}>
-                  {" "}
-                  <div
-                    style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}
-                  >
-                    {label}
-                  </div>{" "}
-                  <input
+                <Field
+                  key={key}
+                  label={label}
+                  className="mb-3"
+                  help={
+                    key === "county"
+                      ? "Sets the watering-restriction jurisdiction. After an address change, re-enter it here to confirm it for the new home."
+                      : undefined
+                  }
+                >
+                  <Input
                     type={type}
                     step={
                       type === "number" &&
@@ -1343,117 +1011,48 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                         ? "0.1"
                         : key === "irrigation_inches_per_week"
                           ? "0.25"
-                        : undefined
+                          : undefined
                     }
                     value={turfProfile[key] ?? ""}
                     onChange={(e) => {
                       if (key === "county") setCountyTouched(true);
                       updateProfileField(key, e.target.value);
                     }}
-                    style={{ ...inputStyle, marginBottom: 0 }}
-                  />{" "}
-                  {key === "county" && (
-                    <div style={{ fontSize: 10, color: D.muted, marginTop: 4 }}>
-                      Sets the watering-restriction jurisdiction. After an
-                      address change, re-enter it here to confirm it for the
-                      new home.
-                    </div>
-                  )}
-                </div>
+                  />
+                </Field>
               ))}
               {/* Boolean history flags */}
-              <div style={{ marginTop: 8, marginBottom: 12 }}>
-                {" "}
-                <div style={{ fontSize: 11, color: D.muted, marginBottom: 6 }}>
+              <fieldset className="mb-3 mt-2 grid gap-2 border-0 p-0">
+                <legend className="mb-1 text-ui-body font-medium text-zinc-900">
                   Known pressure history
-                </div>
+                </legend>
                 {[
                   ["known_chinch_history", "Chinch bug history"],
                   ["known_disease_history", "Disease history"],
                   ["known_drought_stress", "Drought stress history"],
                 ].map(([key, label]) => (
-                  <label
+                  <Checkbox
                     key={key}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 8,
-                      fontSize: 13,
-                      color: D.heading,
-                      padding: "4px 0",
-                      cursor: "pointer",
-                    }}
-                  >
-                    {" "}
-                    <input
-                      type="checkbox"
-                      checked={!!turfProfile[key]}
-                      onChange={(e) =>
-                        updateProfileField(key, e.target.checked)
-                      }
-                    />
-                    {label}
-                  </label>
+                    label={label}
+                    checked={!!turfProfile[key]}
+                    onChange={(e) => updateProfileField(key, e.target.checked)}
+                  />
                 ))}
-              </div>{" "}
-              <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+              </fieldset>{" "}
+              <div className="mt-3 flex gap-2">
                 {" "}
-                <button
+                <Button
                   onClick={saveTurfProfile}
                   disabled={profileSaving}
-                  style={{
-                    ...btnStyle(D.green),
-                    flex: 1,
-                    padding: 12,
-                    fontSize: 14,
-                    opacity: profileSaving ? 0.5 : 1,
-                  }}
+                  className="flex-1"
                 >
                   {profileSaving ? "Saving…" : "Save Turf Profile"}
-                </button>{" "}
+                </Button>{" "}
               </div>{" "}
-            </div>
+            </Card>
           )}
         </div>
       )}
-    </div>
+    </UiSurface>
   );
 }
-
-const cardStyle = {
-  background: D.card,
-  border: `1px solid ${D.border}`,
-  borderRadius: 12,
-  padding: 20,
-  marginBottom: 12,
-};
-const btnStyle = (bg) => ({
-  padding: "8px 16px",
-  background: bg,
-  color: D.white,
-  border: "none",
-  borderRadius: 8,
-  fontSize: 13,
-  fontWeight: 500,
-  cursor: "pointer",
-});
-const btnOutline = {
-  padding: "8px 16px",
-  background: "transparent",
-  border: `1px solid ${D.border}`,
-  borderRadius: 8,
-  color: D.muted,
-  fontSize: 13,
-  cursor: "pointer",
-};
-const inputStyle = {
-  width: "100%",
-  padding: "10px 12px",
-  background: D.input,
-  border: `1px solid ${D.border}`,
-  borderRadius: 8,
-  color: D.text,
-  fontSize: 13,
-  outline: "none",
-  boxSizing: "border-box",
-};

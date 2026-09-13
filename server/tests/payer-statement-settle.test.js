@@ -4,6 +4,7 @@
 
 let stmtRow = null;
 let invoiceUpdateCount = 0;
+let packetChildren = [];
 const captured = { statementUpdates: [], invoiceUpdates: [], paymentInserts: [], processingUpdates: [], viewedUpdates: [] };
 
 let mockDbHandler = () => { throw new Error('db handler not configured'); };
@@ -18,6 +19,7 @@ jest.mock('../utils/datetime-et', () => ({ etDateString: () => '2026-06-21' }));
 
 const {
   settleStatementPaid,
+  enrollSettledPacketReviews,
   markStatementProcessing,
   revertStatementProcessing,
   markStatementViewed,
@@ -46,8 +48,15 @@ function handler(table) {
   }
   if (table === 'invoices') {
     return {
-      where() { return this; },
+      where(clause) { if (clause && clause.id) this._id = clause.id; return this; },
       whereNotIn() { return this; },
+      // The packet-owned children are read before the cascade so their
+      // deferred review asks can be enrolled after the settlement commits.
+      whereNotNull() { return this; },
+      whereNot() { return this; },
+      async select() { return packetChildren; },
+      async pluck() { return packetChildren.map((row) => row.id); },
+      async first() { return packetChildren.find((row) => row.id === this._id) || packetChildren[0]; },
       async update(patch) { captured.invoiceUpdates.push(patch); return invoiceUpdateCount; },
     };
   }
@@ -65,12 +74,55 @@ function handler(table) {
 beforeEach(() => {
   stmtRow = null;
   invoiceUpdateCount = 0;
+  packetChildren = [];
   captured.statementUpdates = []; captured.invoiceUpdates = []; captured.paymentInserts = [];
   captured.processingUpdates = []; captured.viewedUpdates = [];
   mockDbHandler = handler;
 });
 
 describe('settleStatementPaid (cascade)', () => {
+  test('a NET statement payment enrolls the deferred review of every packet-owned child', async () => {
+    // The closeout defers a combined-visit review behind its unpaid invoice,
+    // and closeOutVisitForIssuedInvoice refuses packet-owned visits — so this
+    // rail is the only settlement signal those asks ever get.
+    const Review = require('../services/review-request');
+    stmtRow = { id: 11, payer_id: 4, status: 'sent', sent_at: 'T' };
+    invoiceUpdateCount = 2;
+    packetChildren = [
+      { id: 'inv-a', invoice_number: 'WPC-A', customer_id: 'cust-a', visit_completion_packet_id: 'pkt-a' },
+      { id: 'inv-b', invoice_number: 'WPC-B', customer_id: 'cust-b', visit_completion_packet_id: 'pkt-b' },
+    ];
+    const enroll = jest.spyOn(Review, 'enrollForPaidInvoice')
+      .mockImplementation(async (invoice) => (invoice.id === 'inv-b' ? { recorded: false } : { enrolled: true }));
+    try {
+      const res = await settleStatementPaid(11, { paymentMethod: 'check', processor: 'manual', amountCents: 5000, source: 'admin' });
+      expect(res.ok).toBe(true);
+      // The settle itself enrolls NOTHING: it runs inside the caller's
+      // transaction, where every child still reads as unpaid. It hands the
+      // ids back instead (local audit r29 P1).
+      expect(enroll).not.toHaveBeenCalled();
+      expect(res.packetInvoiceIds).toEqual(['inv-a', 'inv-b']);
+
+      // A redelivery finds the statement already paid and STILL reports the
+      // packet children, so the caller can finish an enrollment that failed
+      // after the first settlement committed (r30 P1).
+      stmtRow = { id: 11, payer_id: 4, status: 'paid', paid_at: 'T' };
+      const replay = await settleStatementPaid(11, { paymentMethod: 'check', processor: 'manual', amountCents: 5000, source: 'admin' });
+      expect(replay).toMatchObject({ ok: true, alreadyPaid: true });
+      expect(replay.packetInvoiceIds).toEqual(['inv-a', 'inv-b']);
+
+      // The caller enrolls after its commit, on the root connection.
+      const unrecorded = await enrollSettledPacketReviews(res.packetInvoiceIds);
+      expect(enroll).toHaveBeenCalledTimes(2);
+      expect(enroll).toHaveBeenCalledWith(expect.objectContaining({ id: 'inv-a' }), { source: 'payer_statement' });
+      // An enrollment whose recovery write also failed is REPORTED, never
+      // rolled back over captured money.
+      expect(unrecorded).toEqual(['inv-b']);
+    } finally {
+      enroll.mockRestore();
+    }
+  });
+
   test('settles a sent statement → paid, cascades children, writes ONE payer-scoped row', async () => {
     stmtRow = { id: 7, payer_id: 9, status: 'sent', sent_at: 'T', stripe_payment_intent_id: 'pi_1' };
     invoiceUpdateCount = 3;

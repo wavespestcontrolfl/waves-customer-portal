@@ -3755,7 +3755,12 @@ function initScheduledJobs() {
             }
             // 'sms_fallback' — fall through to the normal replay send below.
           }
-          const smsResult = await sendCustomerMessage({
+          const replayDispatchMeta = {
+            ...claimMeta,
+            scheduled_sms_log_id: msg.id,
+            customer_id: msg.customer_id,
+          };
+          const replayInput = {
             to: toPhone,
             body: msg.message_body,
             channel: 'sms',
@@ -3864,8 +3869,19 @@ function initScheduledJobs() {
                 ? claimMeta.parked_decision_ids
                 : undefined,
             },
-          });
+          };
+          const smsResult = await require('./messaging/deferred-replay-registry')
+            .dispatchDeferredReplay(claimMeta.entry_point, replayDispatchMeta, () => sendCustomerMessage(replayInput));
           const completedAt = new Date();
+          const lawnPipelineRetryAt = claimMeta.entry_point === 'lawn_assessment_notification_deferred'
+            && smsResult.sent === false
+            && smsResult.deliveryOutcome === 'not_sent'
+            && smsResult.code === 'LAWN_NOTIFICATION_BUSY'
+            && smsResult.retryable === true
+            && smsResult.nextAllowedAt
+            && !Number.isNaN(new Date(smsResult.nextAllowedAt).getTime())
+            ? new Date(smsResult.nextAllowedAt)
+            : null;
           if (smsResult.sent) {
             // created_at is re-stamped to send time on purpose — comms
             // threads order by it, and a scheduled SMS composed days ago
@@ -3947,6 +3963,31 @@ function initScheduledJobs() {
                 reviewedBy: msg.admin_user_id || 'Admin',
               });
             }
+          } else if (lawnPipelineRetryAt) {
+            // A concurrent lawn pipeline prevented this replay from owning the
+            // delivery and may be deduping its quiet-hours obligation against
+            // this sending row. Wait through its reported lease/backoff without
+            // spending one of the provider retries: no handoff occurred.
+            await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+              status: 'scheduled',
+              scheduled_for: lawnPipelineRetryAt,
+              updated_at: completedAt,
+              metadata: db.raw(`
+                COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                  'lawn_pipeline_hold_at', ?::timestamptz,
+                  'scheduled_sms_attempts',
+                  GREATEST(
+                    CASE
+                      WHEN COALESCE(metadata->>'scheduled_sms_attempts', '') ~ '^[0-9]+$'
+                        THEN (metadata->>'scheduled_sms_attempts')::int - 1
+                      ELSE 0
+                    END,
+                    0
+                  )
+                )
+              `, [completedAt]),
+            });
+            logger.info(`[scheduled-sms] lawn notification ${msg.id} waiting after a concurrent pipeline claim — rescheduled for ${lawnPipelineRetryAt.toISOString()} (attempt refunded)`);
           } else if (smsResult.code === 'QUIET_HOURS_HOLD' && smsResult.nextAllowedAt) {
             // Send-window hold: a validator deferral, not a delivery
             // attempt — no provider send was tried. Handled BEFORE the

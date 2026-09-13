@@ -424,7 +424,14 @@ const TwilioService = {
    */
   async findOutboundMessageSince({ to, sentAfter, bodyFragment, limit = 1000 }) {
     const twilioClient = getClient();
-    if (!twilioClient || !to) return { unavailable: true };
+    if (!twilioClient) return { unavailable: true };
+    // `to` may be omitted deliberately (Codex #4311 r32 P1): a recipient that
+    // changed or merged after the claim means the number this send actually
+    // used is no longer on the customer, so the caller asks about the whole
+    // window and relies on the body fragment — a unique ask token — to
+    // identify the message. A truncated page still reports `unavailable`, so
+    // the wider search can only fail closed.
+    if (!to && !bodyFragment) return { unavailable: true };
     try {
       // The SDK serializes dateSentAfter to whole seconds as a STRICT
       // DateSent> filter, so an acceptance in the same second as the claim
@@ -432,13 +439,21 @@ const TwilioService = {
       // body-fragment checks below keep the match exact.
       const from = sentAfter ? new Date(new Date(sentAfter).getTime() - 60 * 1000) : undefined;
       const messages = await twilioClient.messages.list({
-        to,
+        ...(to ? { to } : {}),
         dateSentAfter: from,
         limit,
       });
       const frag = String(bodyFragment || "").toLowerCase();
+      // TERMINAL NON-DELIVERY IS NOT EVIDENCE (Codex #4311 r43 P1): Twilio
+      // records failed/undelivered/canceled messages too, and a caller asking
+      // "did this ask reach the customer?" would otherwise read one of those
+      // as proof, stamp the request sent and advance the cadence on a message
+      // nobody received. The local sms_log evidence excludes exactly these.
+      const TERMINAL_TWILIO_STATUSES = new Set(["failed", "undelivered", "canceled", "cancelled"]);
       const found = messages.some(
-        (m) => m.direction !== "inbound" && String(m.body || "").toLowerCase().includes(frag),
+        (m) => m.direction !== "inbound"
+          && !TERMINAL_TWILIO_STATUSES.has(String(m.status || "").toLowerCase())
+          && String(m.body || "").toLowerCase().includes(frag),
       );
       if (found) return { found: true };
       if (messages.length >= limit) return { unavailable: true, truncated: true };
@@ -979,6 +994,7 @@ const TwilioService = {
               ? { parked_decision_ids: options.parkedDecisionIds }
               : {}),
             ...(options.scheduledSmsLogId ? { scheduled_sms_log_id: options.scheduledSmsLogId } : {}),
+            ...(options.reviewRequestId ? { review_request_id: options.reviewRequestId } : {}),
           }),
         });
       } catch (logErr) {

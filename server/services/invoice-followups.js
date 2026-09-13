@@ -26,6 +26,8 @@
  */
 
 const db = require('../models/db');
+const invoiceHelpers = require('./invoice-helpers');
+const { invoiceWithdrawnFromCustomer } = invoiceHelpers;
 const logger = require('./logger');
 const { invoiceAmountDue } = require('./invoice-helpers');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
@@ -166,6 +168,13 @@ async function sendFollowupEmail({ row, customer, step, ctx }) {
   if (!latestInvoice || isTerminalInvoice(latestInvoice)) {
     return { ok: false, skipped: true, reason: 'invoice_not_eligible' };
   }
+  // OWNERSHIP on the email leg's own fresh row (local audit on r42): the
+  // pre-dispatch guard added for the text protects only that leg, and this
+  // read checked terminal status alone — a payer assigned since the batch
+  // would still email the homeowner a payment demand for AP-owned debt.
+  if (latestInvoice.payer_id || invoiceWithdrawnFromCustomer(latestInvoice)) {
+    return { ok: false, skipped: true, reason: 'invoice_payer_billed' };
+  }
 
   const prefs = await db('notification_prefs')
     .where({ customer_id: customer.id })
@@ -201,6 +210,16 @@ async function sendFollowupEmail({ row, customer, step, ctx }) {
       idempotencyKey: `invoice_followup_email:${row.invoice_id}:${step.id}`,
       categories: ['invoice_followup', step.id],
       suppressionGroupKey: 'transactional_required',
+      // …and again at the provider boundary, inside the library's own handoff
+      // (local audit on r42): the recipient resolution and payload render are
+      // awaited after the read above. Fail-closed — an unreadable invoice
+      // aborts before dispatch, like every other ownership guard here.
+      withProviderHandoff: async (dispatch) => {
+        const verdict = await invoiceHelpers.selfPayAtDispatch(row.invoice_id, db)();
+        if (verdict.ok !== true) return verdict;
+        await dispatch();
+        return { ok: true };
+      },
     });
 
     if (result.deduped) {
@@ -300,7 +319,12 @@ async function scheduleForInvoice(invoiceId) {
   // homeowner with the pay link, but a payer-billed invoice's AR rolls to the
   // payer's AP inbox — never chase the homeowner for it. Phase 1 has no payer
   // dunning sequence, so we simply don't arm follow-ups for payer invoices.
-  if (preview.payer_id) return null;
+  // The withdrawal stamp is the same signal in the other direction (Codex
+  // #4311 r31 P1): a combined-visit invoice whose Bill-To moved AFTER the
+  // homeowner already held its pay link keeps `payer_id` NULL and a
+  // collectible status, so a payer_id-only guard would arm dunning that
+  // chases the homeowner for debt the payer now owes.
+  if (preview.payer_id || invoiceWithdrawnFromCustomer(preview)) return null;
 
   // OWNERSHIP IS DERIVED UNDER THE INVOICE LOCK (r19 P1).
   //
@@ -327,7 +351,7 @@ async function scheduleForInvoice(invoiceId) {
     // Re-verify post-lock: an edit or payment that committed while we waited
     // can have made this invoice non-schedulable or payer-billed.
     if (!isSchedulableInvoice(invoice)) return null;
-    if (invoice.payer_id) return null;
+    if (invoice.payer_id || invoiceWithdrawnFromCustomer(invoice)) return null;
 
     // Existing-row check moved under the lock too: it and the INSERT must be
     // one atomic decision, or two concurrent arms race the unique(invoice_id).
@@ -514,10 +538,16 @@ async function runPending() {
     // payer invoices issued, or an older/manual sequence); exclude them here and
     // guard fireStep too.
     .whereNull('i.payer_id')
+    // …and the withdrawal stamp, which records exactly the same ownership
+    // move on a row whose payer_id stays NULL (Codex #4311 r31 P1).
+    .where(function withdrawnExcluded() {
+      this.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'payer_billed:%');
+    })
     .select(
       's.*',
       'i.id as invoice_id', 'i.token', 'i.title', 'i.total', 'i.credit_applied', 'i.status as invoice_status',
-      'i.payer_id as invoice_payer_id', 'i.stripe_payment_intent_id as invoice_stripe_pi',
+      'i.payer_id as invoice_payer_id', 'i.scheduled_send_error as invoice_send_error',
+      'i.stripe_payment_intent_id as invoice_stripe_pi',
       'i.service_date', 'i.due_date', 'i.invoice_number',
       'i.sent_at as invoice_sent_at', 'i.sms_sent_at as invoice_sms_sent_at',
       'i.created_at as invoice_created_at',
@@ -764,12 +794,29 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   // this covers sendNextTouchNow's direct call too. Pause terminally (not a bare
   // return) so a later re-arm can't fire a stale touch. Prefer the selected
   // invoice_payer_id; fall back to a lookup when the caller didn't select it.
-  let payerId = row.invoice_payer_id;
-  if (payerId === undefined) {
-    const inv = await db('invoices').where({ id: row.invoice_id }).first('payer_id').catch(() => null);
-    payerId = inv?.payer_id ?? null;
+  // RE-READ, always (Codex #4311 r32 P1). The batch select happens before the
+  // sequence claim and the provider request; a Bill-To change committing in
+  // that window stamps the invoice and pauses the sequence, and this worker —
+  // already claimed — would text the homeowner a pay link for debt that now
+  // belongs to AP. The selected columns are only a fast path for what the
+  // fence used to read; ownership itself is judged on the live row.
+  const liveInvoice = await db('invoices').where({ id: row.invoice_id })
+    .first('payer_id', 'scheduled_send_error').catch(() => undefined);
+  if (liveInvoice === undefined) {
+    // Unreadable ownership is not "self-pay" — but it is not a Bill-To change
+    // either (local audit): pausing here would retire the sequence over a
+    // transient DB blip, and neither this engine nor the legacy sweep would
+    // ever pick it up again. Skip THIS touch and keep a schedule, so the next
+    // sweep re-judges it.
+    await db('invoice_followup_sequences').where({ id: row.id }).where({ status: 'active' })
+      .update({ updated_at: db.fn.now(), next_touch_at: new Date(Date.now() + 30 * 60 * 1000) })
+      .catch(() => {});
+    logger.warn(`[invoice-followups] skipped sequence ${row.id} — could not re-read invoice ${row.invoice_id} ownership before the touch; retrying in 30m`);
+    return;
   }
-  if (payerId) {
+  const payerId = liveInvoice.payer_id ?? null;
+  const sendError = liveInvoice.scheduled_send_error ?? null;
+  if (payerId || invoiceWithdrawnFromCustomer({ scheduled_send_error: sendError })) {
     await db('invoice_followup_sequences').where({ id: row.id }).update({
       updated_at: db.fn.now(),
       status: 'paused',
@@ -830,7 +877,26 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   // state) — a credit-helper failure above must not bypass it.
   try {
     const fresh = await db('invoices').where({ id: row.invoice_id })
-      .first('total', 'credit_applied', 'status', 'title', 'token', 'due_date', 'invoice_number');
+      .first('total', 'credit_applied', 'status', 'title', 'token', 'due_date', 'invoice_number',
+        'payer_id', 'scheduled_send_error');
+    // FAIL CLOSED on an unreadable row (Codex #4311 r38 P1): this read is the
+    // last-minute ownership backstop, and it sits inside a refresh block that
+    // was written to fail OPEN for the price fields. Continuing on stale batch
+    // data is exactly the case the backstop exists for, so a missing row stops
+    // the touch and the sweep re-judges it next run.
+    if (!fresh) {
+      logger.warn(`[invoice-followups] skipped sequence ${row.id} — invoice ${row.invoice_id} could not be re-read before the send`);
+      return;
+    }
+    // OWNERSHIP AGAIN, on this last read before the provider (local audit):
+    // the policy, credit and ledger work above is all awaited, and a Bill-To
+    // assignment landing in that window would otherwise be invisible to this
+    // already-claimed worker. The pause it wrote is authoritative; this send
+    // simply stops.
+    if (fresh && (fresh.payer_id || invoiceWithdrawnFromCustomer(fresh))) {
+      logger.info(`[invoice-followups] dropped touch for sequence ${row.id} — invoice ${row.invoice_id} moved to a third-party payer during this run`);
+      return;
+    }
     if (fresh) {
       row.total = fresh.total;
       row.credit_applied = fresh.credit_applied;
@@ -844,7 +910,13 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
       }
     }
   } catch (refreshErr) {
-    logger.warn(`[invoice-followups] invoice refresh before dun failed for ${row.invoice_id}: ${refreshErr.message}`);
+    // FAIL CLOSED (Codex #4311 r38 P1): this block carries the last-minute
+    // ownership backstop now, so an unreadable refresh can no longer fall
+    // through to the provider on stale batch data — precisely when a Bill-To
+    // change may have landed. The sequence keeps its schedule and the next
+    // sweep re-judges it.
+    logger.warn(`[invoice-followups] skipped sequence ${row.id} — invoice refresh before dun failed for ${row.invoice_id}: ${refreshErr.message}`);
+    return;
   }
   // Dun for amount DUE (total − applied account credit), not the pre-credit total.
   const amount = invoiceAmountDue(row).toFixed(2);
@@ -968,6 +1040,12 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
           original_message_type: messageType,
           notificationEventKey: `invoice-followup:${row.id}:${step.id}`,
         },
+        // The LAST ownership check, run by the canonical sender immediately
+        // before provider preparation (Codex #4311 r42 P1): the short-link
+        // round-trip and the contact-ledger writes are awaited after the
+        // re-read above, and this rail holds no claim a Bill-To writer
+        // fences on. Fail-closed, with no lock held across provider I/O.
+        preDispatchCheck: invoiceHelpers.selfPayAtDispatch(row.invoice_id, db),
       }) : null;
       if (sendResult && (sendResult.blocked || sendResult.sent === false)) {
         await ContactLedger.markSendFailed(smsLedger, { code: sendResult.code || 'sms_blocked' });

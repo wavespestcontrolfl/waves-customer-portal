@@ -52,7 +52,7 @@ import {
   docButton,
   docTransition,
 } from '../theme-doc';
-import { CustomerColumn } from '../components/brand';
+import { CustomerColumn, PublicStateCard } from '../components/brand';
 import ServiceReportDocument from './ServiceReportDocument';
 import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
@@ -5553,27 +5553,20 @@ function LoadingState({ glass = false }) {
   );
 }
 
-function NotFoundState({ glass = false }) {
+function NotFoundState() {
+  // `glass` is gone: PublicStateCard carries data-glass="card", so the sheet
+  // styles it on glass and BrandCard's own tokens style it off glass — the
+  // two hand-authored branches this used to switch between.
+  //
+  // The lone "Call Waves" button becomes the standard pair. That is a CTA-set
+  // change, not a copy change: no sentence is rewritten, and G-02 lists "Call
+  // Waves alone (report)" as one of the sets it exists to unify.
   return (
-    <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', background: glass ? 'transparent' : ESTIMATE_BG, padding: 20, fontFamily: FONT_BODY }}>
-      <div
-        data-glass={glass ? 'card' : undefined}
-        style={{
-          background: glass ? undefined : '#fff',
-          border: glass ? undefined : `1px solid ${ESTIMATE_BORDER}`,
-          borderRadius: 16,
-          padding: 32,
-          maxWidth: 420,
-          textAlign: 'center',
-        }}
-      >
-        <div style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, color: glass ? '#04395E' : ESTIMATE_TEXT }}>Report unavailable</div>
-        <div style={{ fontSize: 16, color: glass ? '#3F4A65' : ESTIMATE_BODY, lineHeight: 1.5, marginTop: 8 }}>
-          This link may have expired or is not valid.
-        </div>
-        <a href={`tel:${WAVES_PHONE_TEL}`} data-glass-accent={glass ? '' : undefined} style={{ ...actionButtonStyle('primary'), marginTop: 16 }}>Call Waves</a>
-      </div>
-    </div>
+    <CustomerColumn>
+      <PublicStateCard state="not-found" title="Report unavailable">
+        This link may have expired or is not valid.
+      </PublicStateCard>
+    </CustomerColumn>
   );
 }
 
@@ -9621,12 +9614,15 @@ export default function ReportViewPage() {
   }, [data]);
 
   if (loading) return <LoadingState glass={glassActive} />;
+  // Was a full-viewport centred grid, which pushed the shell footer below the
+  // fold (G-02; DECISIONS 09-04 says page roots use flex:1 so the footer
+  // follows the content). The shared column is what every other state uses.
   if (loadError) return (
-    <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', background: glassActive ? '#F8FCFE' : '#FAF8F3' }}>
+    <CustomerColumn>
       <PublicLoadError resource="service report" onRetry={() => setLoadAttempt(a => a + 1)} />
-    </div>
+    </CustomerColumn>
   );
-  if (!data || data.error) return <NotFoundState glass={glassActive} />;
+  if (!data || data.error) return <NotFoundState />;
   if (data.reportVersion === 'service_report_v1') {
     // The PDF artifact is the work-order document (owner 2026-08-03):
     // the renderer hits ?mode=pdf, so the download, the share sheet, and

@@ -69,10 +69,16 @@ async function packetHasPublishableSummary(packetId, database = db) {
 /** Explicit customer projection. Notes, addresses and billing tokens stay out. */
 async function getVisitCompletionSummary(token, database = db) {
   if (!VISIT_SUMMARY_TOKEN_RE.test(String(token || ''))) return null;
+  // The projection runs in one transaction that holds the visit row FOR
+  // SHARE from the authorization read to the response data: a revocation
+  // (an UPDATE of that row) either committed before this read, which then
+  // refuses the link, or waits behind it — never a read that authorized on
+  // a stale row while the revocation committed underneath it.
+  if (!database.isTransaction) return database.transaction((trx) => getVisitCompletionSummary(token, trx));
   const visit = await database('service_visits').where({
     summary_token_hash: crypto.createHash('sha256').update(token).digest('hex'),
   }).whereNull('summary_token_revoked_at').whereNotNull('summary_token_issued_at')
-    .whereIn('status', ['closing', 'closed']).first();
+    .whereIn('status', ['closing', 'closed']).forShare().first();
   if (!visit) return null;
   const packet = await database('visit_completion_packets').where({ visit_id: visit.id })
     .whereIn('status', ['processing', 'done']).first('id');
@@ -559,10 +565,20 @@ async function summaryEmailEvidence(message, database) {
 async function reconcileSummaryEmailBounce(message, database = db) {
   const match = /^visit_summary:([0-9a-f-]{36})$/.exec(String(message?.trigger_event_id || ''));
   if (!match || message.template_key !== 'service.visit_summary') return { reconciled: false };
+  // A caller outside a transaction (the retry rail's exhaustion) gets one
+  // here: the packet and effect locks below must outlive their SELECTs, or a
+  // review handoff can take the packet row between the read and the flip,
+  // see the still-sent effect and send the ask this parks.
+  if (!database.isTransaction) return database.transaction((trx) => reconcileSummaryEmailBounce(message, trx));
   const visitId = match[1];
   // Two recipients can bounce in concurrent webhook transactions; holding
   // the shared effect serializes them so the second reads the first's
   // committed outcome instead of its stale 'sent'.
+  // The packet row is held first so this reconciliation serializes with the
+  // coordinator's close: a bounce that lands while the packet is closing
+  // waits for the close (and then alerts on the done packet), and a close
+  // that starts after this commits sees the uncertain effect under its lock.
+  await database('visit_completion_packets').where({ visit_id: visitId }).forUpdate().first('id');
   const effect = await database('visit_effects').where({ visit_id: visitId, effect_type: 'completion_email', status: 'sent' })
     .forUpdate().first('id');
   if (!effect) return { reconciled: false };
@@ -571,7 +587,14 @@ async function reconcileSummaryEmailBounce(message, database = db) {
   const flipped = await database('visit_effects').where({ id: effect.id, status: 'sent' })
     .update({ status: 'unknown_delivery', last_error: 'provider_bounce', updated_at: database.fn.now() }).returning('id');
   if (!flipped.length) return { reconciled: false };
-  const packet = await database('visit_completion_packets').where({ visit_id: visitId, status: 'done' }).first('id');
+  // The review ask follows the summary. Outreach enrolled while the summary
+  // looked delivered is parked now that a required recipient failed, whether
+  // the packet already closed or is still closing (the coordinator's close
+  // re-reads the effects under its lock); the coordinator resumes it when
+  // the recovery settles the summary.
+  const anyPacket = await database('visit_completion_packets').where({ visit_id: visitId }).first('id', 'status');
+  if (anyPacket) await parkVisitReviewOutreach(anyPacket.id, database);
+  const packet = anyPacket?.status === 'done' ? anyPacket : null;
   const member = packet ? await VisitGroups.recordedPacketMember(packet.id, database) : null;
   if (packet && member) {
     // Same transaction as the effect flip: a webhook that fails after this
@@ -617,6 +640,216 @@ async function summaryRetryAuthorized(message, database = db, { destination = nu
   return { ok: true };
 }
 
+const PARKED_REVIEW_REASON = 'visit_summary_bounced';
+// The review asks the closeout owns: the packet's own enrollment and the
+// cadence touches it starts. An admin- or technician-triggered ask is the
+// operator's (its copy, channel and timing cannot be rebuilt by the
+// recovery), so parking leaves it pending for the scheduler to defer.
+const PACKET_OWNED_REVIEW_TRIGGERS = ['auto', 'sequence'];
+// stop_reason is varchar(24).
+const PARKED_SUPERSEDED_REASON = 'summary_park_superseded';
+
+// True while the visit that recorded this service record has a summary leg
+// parked as uncertain: review outreach for it must not reach a provider.
+// true = parked, false = clear, null = the state could not be read (callers
+// defer rather than send on a guess).
+async function visitSummaryUncertainForRecord(serviceRecordId, database = db) {
+  if (!serviceRecordId) return false;
+  try {
+    const item = await database('visit_completion_packet_items').where({ service_record_id: serviceRecordId }).first('packet_id');
+    if (!item) return false;
+    const packet = await database('visit_completion_packets').where({ id: item.packet_id }).first('visit_id');
+    if (!packet) return false;
+    const uncertain = await database('visit_effects').where({ visit_id: packet.visit_id, status: 'unknown_delivery' })
+      .whereIn('effect_type', ['completion_sms', 'completion_email']).first('id');
+    return Boolean(uncertain);
+  } catch (err) {
+    require('./logger').warn(`[visit-closeout] summary uncertainty check failed for record ${serviceRecordId}: ${err.message}`);
+    return null;
+  }
+}
+
+// Parks the cadence sequences enrolled for this packet's recorded service
+// records (stopped with a reason of their own and their schedule kept, so
+// the recovery can resume them without a fresh enrollment that the cadence
+// cooldown might refuse) and removes the pending automatic asks. An ask whose
+// provider handoff has started is `sending` (see reviewSendThroughSummaryHandoff)
+// and is kept: its delivery is recorded by its own sender. A manual ask is
+// kept too (PACKET_OWNED_REVIEW_TRIGGERS). A delivered ask's follow-up is
+// held by processFollowups while the summary stays uncertain.
+async function parkVisitReviewOutreach(packetId, database = db) {
+  const records = await database('visit_completion_packet_items').where({ packet_id: packetId })
+    .whereNotNull('service_record_id').pluck('service_record_id');
+  if (!records.length) return { parked: 0 };
+  const parked = await database('review_sequences').whereIn('service_record_id', records).where({ status: 'active' })
+    .update({ status: 'stopped', stop_reason: PARKED_REVIEW_REASON, completed_at: database.fn.now(), updated_at: database.fn.now() });
+  const removed = await database('review_requests').whereIn('service_record_id', records).where({ status: 'pending' })
+    .whereIn('triggered_by', PACKET_OWNED_REVIEW_TRIGGERS).del();
+  return { parked: Number(parked || 0) + Number(removed || 0) };
+}
+
+// Resumes the sequences parkVisitReviewOutreach stopped, at their kept
+// schedule or now, whichever is later, unless the customer has since gained
+// another active sequence. Returns how many resumed.
+async function resumeVisitReviewOutreach(packetId, database = db) {
+  // With the cadence gate off the sequence cron advances nothing: a parked
+  // cadence stays parked, and the enrollment that follows takes the
+  // documented legacy single-ask path instead.
+  if (!require('../config/feature-gates').isEnabled('reviewSequences')) return 0;
+  const packet = await database('visit_completion_packets').where({ id: packetId }).first('visit_id');
+  const records = await database('visit_completion_packet_items').where({ packet_id: packetId })
+    .whereNotNull('service_record_id').pluck('service_record_id');
+  if (!packet || !records.length) return 0;
+  const visit = await database('service_visits').where({ id: packet.visit_id }).first('customer_id');
+  if (await database('review_sequences').where({ customer_id: visit.customer_id, status: 'active' }).first('id')) return 0;
+  // A customer holds at most one active sequence (uq_review_sequences_active_customer):
+  // when several were parked for this packet (a later member's enrollment
+  // parked on arrival), the most recently parked one resumes and the others
+  // retire under a reason of their own, so nothing re-parks them again.
+  const parked = await database('review_sequences').whereIn('service_record_id', records)
+    .where({ status: 'stopped', stop_reason: PARKED_REVIEW_REASON }).orderBy('updated_at', 'desc').orderBy('id').select('id');
+  if (!parked.length) return 0;
+  const [chosen, ...others] = parked.map((row) => row.id);
+  if (others.length) {
+    await database('review_sequences').whereIn('id', others).where({ status: 'stopped', stop_reason: PARKED_REVIEW_REASON })
+      .update({ stop_reason: PARKED_SUPERSEDED_REASON, updated_at: database.fn.now() });
+  }
+  // A step whose send is still UNRESOLVED keeps its empty schedule (local
+  // audit): the parked sequence may hold a request left `sending` by a send
+  // whose outcome was never proven, and scheduling it now would let the
+  // runner build a second request for the same step — a no-link check-in
+  // bypasses ask spacing, so the customer could get two. It would also strand
+  // the original, since _advanceStrandedSequenceStep only advances a sequence
+  // with no schedule. The stranded-send reconciliation owns that row: it
+  // advances the step on proof of delivery, or releases it and schedules the
+  // retry itself.
+  const seq = await database('review_sequences').where({ id: chosen }).first('id', 'current_step');
+  const unresolved = await database('review_requests').where({ sequence_id: chosen, status: 'sending' })
+    .modify((q) => { if (seq?.current_step !== null && seq?.current_step !== undefined) q.where({ sequence_step: seq.current_step }); })
+    .first('id');
+  const resumed = await database('review_sequences').where({ id: chosen, status: 'stopped', stop_reason: PARKED_REVIEW_REASON })
+    .update({ status: 'active', stop_reason: null, completed_at: null, updated_at: database.fn.now(),
+      ...(unresolved ? {} : { next_run_at: database.raw('GREATEST(COALESCE(next_run_at, NOW()), NOW())') }) });
+  return Number(resumed || 0);
+}
+
+// A review ask's provider request runs while the packet row of the visit
+// that recorded its service record is shared, so a summary bounce (which
+// takes that row FOR UPDATE before parking outreach) serializes with the
+// send: the ask goes out before the bounce lands, or is parked before it
+// could go out. Records outside a combined visit dispatch unfenced.
+// `requestId` names the legacy/touch row the send belongs to: it becomes
+// `sending` in this same transaction immediately before the request, so a
+// bounce reconciliation that waits on the packet row and then parks the
+// outreach removes only asks that have not reached a provider, never one
+// whose delivery is about to be recorded (a throw from the request rolls
+// the mark back with the transaction).
+async function reviewSendThroughSummaryHandoff(serviceRecordId, dispatch, database = db, { requestId = null, claimRef = null } = {}) {
+  // The pre-provider mark is durable BEFORE the held handoff, on the marker
+  // connection (never inside the transaction it would roll back with): a
+  // worker lost after the provider accepted but before this transaction
+  // commits leaves a `sending` row the stranded-send reconciliation
+  // (review-request.js) proves or releases, never a pending row the
+  // scheduler would send again. claimed_at is written at JavaScript
+  // precision so the reconciliation's guards compare it losslessly.
+  const claimedAt = new Date();
+  const marked = requestId
+    ? Number(await require('../models/marker-db')()('review_requests').where({ id: requestId, status: 'pending' })
+      .update({ status: 'sending', claimed_at: claimedAt })) : 0;
+  // A claim that moved NO row is not a send permit (audit P1): the row is
+  // already `sending` under another sender, or it was suppressed, parked or
+  // deleted between batching and here. Dispatching anyway lets two senders
+  // reach the provider for one ask, or sends an ask that has been withdrawn.
+  // The verdict is decided INSIDE the transaction below, after the summary
+  // check, so a park (which removes the row) still reports itself as a park
+  // rather than as a lost claim. Nothing is written either way — the row
+  // belongs to whoever holds the claim, or to the state that replaced it.
+  // The caller's handle on the claim THIS send took (local audit): any
+  // bookkeeping it does afterwards must name this exact claim, or it can
+  // reset a `sending` marker belonging to another sender — including one that
+  // already reached the provider.
+  if (claimRef) {
+    claimRef.claimedAt = claimedAt;
+    claimRef.marked = marked > 0;
+  }
+  let claimLost = !!requestId && !marked;
+  const release = () => database('review_requests').where({ id: requestId, status: 'sending', claimed_at: claimedAt })
+    .update({ status: 'pending', claimed_at: null });
+  let dispatched = false;
+  let verdict;
+  try {
+    verdict = await database.transaction(async (trx) => {
+      const item = serviceRecordId
+        ? await trx('visit_completion_packet_items').where({ service_record_id: serviceRecordId }).first('packet_id') : null;
+      const packet = item && await trx('visit_completion_packets').where({ id: item.packet_id }).forShare().first('visit_id');
+      // The claim is re-verified on the row itself once the packet row is
+      // held (Codex r27 P1): a wait on that row longer than the stranded-send
+      // window lets the reconciliation release this `sending` mark and a
+      // later worker claim the same ask, and `marked` only records the update
+      // that ran before the wait. FOR UPDATE, not a plain read (r29 P1): the
+      // row stays locked through the provider request, so the reconciliation
+      // cannot flip this claim back to `pending` between the check and the
+      // send and let a second sender take it.
+      if (!claimLost && marked) {
+        const held = await trx('review_requests').where({ id: requestId, status: 'sending', claimed_at: claimedAt }).forUpdate().first('id');
+        claimLost = !held;
+      }
+      // A claim held by ANOTHER SENDER outranks the summary verdict (r29 P1):
+      // reporting a park here would have the caller delete any
+      // `pending`/`sending` row for this ask — the durable marker of the
+      // worker that does own the claim, which may already have reached the
+      // provider. A row that is simply GONE (a bounce reconciliation parked
+      // it) is not that case, and still reports itself as a park below, so
+      // the cadence is parked rather than left running.
+      if (claimLost) {
+        const live = await trx('review_requests').where({ id: requestId }).forUpdate().first('id', 'status');
+        if (live?.status === 'sending') {
+          return { ok: false, code: 'REVIEW_CLAIM_LOST', reason: 'This review ask is being sent by another worker' };
+        }
+      }
+      if (packet) {
+        const uncertain = await trx('visit_effects').where({ visit_id: packet.visit_id, status: 'unknown_delivery' })
+          .whereIn('effect_type', ['completion_sms', 'completion_email']).first('id');
+        if (uncertain) return { ok: false, code: 'VISIT_SUMMARY_UNCERTAIN', reason: 'The visit summary this review follows is awaiting recovery' };
+      }
+      // No claim and no summary verdict to explain it: the row was suppressed,
+      // deleted or re-claimed since it was batched. Nothing is sent and
+      // nothing is written — the row belongs to whatever replaced this claim.
+      if (claimLost) {
+        return { ok: false, code: 'REVIEW_CLAIM_LOST', reason: 'This review ask is already being sent or is no longer pending' };
+      }
+      // `dispatched` flips at the PROVIDER BOUNDARY, not here (Codex #4311
+      // r35 P2): the sender's own fresh consent/suppression/window rechecks
+      // run inside dispatch() before the Twilio request, and a throw from one
+      // of those is provably unsent — marking dispatch started up front left
+      // such a row `sending` with nothing to prove its absence (a no-link
+      // cadence touch has no sms_log for the evidence reader). The callback
+      // the send layer invokes immediately before the request is what sets it.
+      return dispatch(trx, () => { dispatched = true; });
+    });
+  } catch (err) {
+    // A throw before the request is provably unsent; one from the request
+    // is not, and the row stays marked for the reconciliation to judge.
+    if (marked && !dispatched) await release().catch(() => {});
+    throw err;
+  }
+  // A refusal before the request (consent, suppression, send window, an
+  // uncertain summary) is provably unsent: the row returns to pending, so a
+  // worker lost before the sender's own bookkeeping strands nothing. The
+  // release names this sender's own claim, so a mark that was taken over in
+  // the meantime (claim lost above) is left to its new holder.
+  if (marked && verdict && verdict.ok === false) {
+    await release();
+    // The claim is NO LONGER OWNED once it is released (Codex #4311 r45 P1):
+    // another worker can take the row in the gap before the caller's
+    // bookkeeping runs, and a caller that still believed it held the claim
+    // would write by id and could reset or suppress that replacement's live
+    // `sending` row. Reporting the release makes the caller's writes skip a
+    // `sending` row while still moving its own, now-`pending` one.
+    if (claimRef) claimRef.marked = false;
+  }
+  return verdict;
+}
 // The retry rail's provider request runs while the customer and preference
 // rows are held, so the recipient the fence approved is the recipient the
 // provider receives. `dispatch()` performs the request.
@@ -657,6 +890,12 @@ async function reconcileSummaryEmailRecovery(message, database = db) {
   if (!match || message.template_key !== 'service.visit_summary') return { reconciled: false };
   const visitId = match[1];
   const run = async (trx) => {
+    // PACKET ROW FIRST, then the effect (local audit): the bounce
+    // reconciliation takes them in exactly that order, and this path updates
+    // the packet below — holding the effect first is the inverse order, and
+    // a bounce and a recovery running side by side deadlock-abort one
+    // reconciliation.
+    await trx('visit_completion_packets').where({ visit_id: visitId }).forUpdate().first('id');
     // provider_bounce: a bounce reopened a sent aggregate. provider_outcome_unknown:
     // the bounce landed before the initial send returned, or the handoff was
     // ambiguous — a delivery event is the proof either lacked.
@@ -684,8 +923,10 @@ async function reconcileSummaryEmailRecovery(message, database = db) {
     // The bounce alert, or the coordinator's delivery-review alert when the
     // email leg was the only reason for review: an SMS leg still parked as
     // unknown_delivery is terminal and needs the office, so that alert stays.
+    // Only the summary's own legs count: an older tracker effect parked as
+    // uncertain is unrelated to this delivery and its deferred review.
     const otherUncertain = await trx('visit_effects').where({ visit_id: visitId, status: 'unknown_delivery' })
-      .whereNot('id', effect.id).first('id');
+      .whereIn('effect_type', ['completion_sms', 'completion_email']).whereNot('id', effect.id).first('id');
     const alerts = await trx('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
       .whereRaw("payload->>'visitId' = ?", [visitId])
       .where(function reviewOnlyForDelivery() {
@@ -697,6 +938,20 @@ async function reconcileSummaryEmailRecovery(message, database = db) {
         }
       }).select('id');
     for (const alert of alerts) await require('./dispatch-alerts').resolveAlert({ id: alert.id, resolvedBy: null, trx });
+    // The review ask was deferred while this delivery was uncertain. A packet
+    // that already closed goes back on the recovery queue so the coordinator
+    // re-observes the settled summary and enrolls the review it still owes.
+    if (!otherUncertain) {
+      // A packet closed for office review of its payment (a payer owns the
+      // invoice, the visit is on billing hold) owes no review enrollment:
+      // reopening it would only re-record the payer alert it already holds.
+      const closed = await trx('visit_completion_packets').where({ visit_id: visitId, status: 'done' }).first('id', 'error');
+      const state = require('./visit-completion-packets').parseOfficeReviewState(closed?.error);
+      if (closed && state?.payment !== 'office_required') {
+        await trx('visit_completion_packets').where({ id: closed.id, status: 'done' })
+          .update({ status: 'processing', error: 'review_enrollment_pending', updated_at: trx.fn.now() });
+      }
+    }
     return { reconciled: true };
   };
   // Composable with a caller's own transaction (the retry rail's stopRetry
@@ -718,7 +973,7 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
   const prefs = await database('notification_prefs').where({ customer_id: customer.id }).first() || {};
   // A recorded member owns the effects; retained history never qualifies.
   const member = await VisitGroups.recordedPacketMember(packet.id, database);
-  const payload = typeof packet.payload === 'string' ? JSON.parse(packet.payload) : packet.payload;
+  const payload = require('./visit-completion-packets').packetPayload(packet);
   const summary = token ? await getVisitCompletionSummary(token, database) : null;
   const visibleMembers = await database('visit_completion_packet_items').where({ packet_id: packet.id })
     .whereIn('service_record_id', (summary?.services || []).map((service) => service.id)).pluck('scheduled_service_id');
@@ -745,4 +1000,6 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
 module.exports = { VISIT_SUMMARY_TOKEN_RE, ensureVisitSummaryToken, packetHasPublishableSummary, getVisitCompletionSummary,
   deliverVisitCompletionSummary, reconcileSummaryEmailBounce, reconcileSummaryEmailRecovery, summaryRetryAuthorized,
   recheckDeferredSummarySms, beginDeferredSummarySms, finalizeDeferredSummarySms, terminalDeferredSummarySms,
-  retrySummaryThroughHandoff, summaryEmailOptOutDrop, _settleAbandonedSummaryEmailRow: settleAbandonedSummaryEmailRow };
+  retrySummaryThroughHandoff, parkVisitReviewOutreach, resumeVisitReviewOutreach, visitSummaryUncertainForRecord,
+  reviewSendThroughSummaryHandoff, PARKED_REVIEW_REASON, PACKET_OWNED_REVIEW_TRIGGERS, summaryEmailOptOutDrop,
+  _settleAbandonedSummaryEmailRow: settleAbandonedSummaryEmailRow };

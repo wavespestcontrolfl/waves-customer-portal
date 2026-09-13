@@ -1541,10 +1541,24 @@ router.post('/:id/schedule-send', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: 'Invoice is billed on the payer’s monthly statement; it cannot be scheduled for individual send.' });
     }
 
+    // A combined-visit invoice WITHDRAWN to a third-party payer records that
+    // move only in scheduled_send_error, and this route would clear it —
+    // making the invoice collectible from the homeowner again and queuing it
+    // for delivery to them (Codex #4311 r29 P0). The Bill-To reconciliation
+    // is what releases such a row; scheduling is refused until then.
+    const scheduleTarget = await db('invoices').where({ id: req.params.id }).first('scheduled_send_error');
+    if (require('../services/invoice-helpers').invoiceWithdrawnFromCustomer(scheduleTarget)) {
+      return res.status(409).json({
+        error: 'This invoice is billed to a third-party payer and has been withdrawn from the customer — clear the Bill-To first.',
+        code: 'invoice_withdrawn_from_customer',
+      });
+    }
+
     const [invoice] = await db('invoices')
       .where({ id: req.params.id })
       .whereIn('status', ['draft', 'scheduled'])
       .whereNull('payer_statement_id')
+      .whereRaw("(scheduled_send_error IS NULL OR scheduled_send_error NOT LIKE 'payer_billed:%')")
       .update({
         status: 'scheduled',
         scheduled_send_at: when,
@@ -2195,7 +2209,7 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: 'Invoice is billed to a third-party payer — account credit cannot be applied to payer invoices' });
     }
     try {
-      assertInvoiceCollectible(invoice.status);
+      assertInvoiceCollectible(invoice);
     } catch (err) {
       return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
     }
@@ -2231,7 +2245,7 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
           const err = new Error('Invoice not found'); err.statusCode = 404; err.isOperational = true; throw err;
         }
         try {
-          assertInvoiceCollectible(locked.status);
+          assertInvoiceCollectible(locked);
         } catch (err) {
           err.statusCode = locked.status === 'processing' ? 409 : 400; err.isOperational = true; throw err;
         }
@@ -2538,7 +2552,7 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: 'Invoice is billed to a third-party payer — payment plans are not supported for payer invoices' });
     }
     try {
-      assertInvoiceCollectible(invoice.status);
+      assertInvoiceCollectible(invoice);
     } catch (err) {
       return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
     }
@@ -2602,7 +2616,7 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
         // just-settled invoice would edit-lock it all over again with
         // nothing left to collect (codex r1 P1).
         try {
-          assertInvoiceCollectible(lockedInvoice.status);
+          assertInvoiceCollectible(lockedInvoice);
         } catch (err) {
           err.statusCode = 409; throw err;
         }

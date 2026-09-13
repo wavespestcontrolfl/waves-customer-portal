@@ -76,7 +76,8 @@ async function persistAudit(record) {
     sent_at: providerOutcome && providerOutcome.sentAt ? new Date(providerOutcome.sentAt) : null,
     provider_error: providerOutcome ? providerOutcome.error : null,
 
-    metadata: input.metadata || null,
+    metadata: Number.isFinite(input.renderedSlotMs) && input.appointmentId
+      ? { ...input.metadata, rendered_slot_ms: input.renderedSlotMs } : (input.metadata || null),
   };
 
   try {

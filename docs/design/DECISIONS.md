@@ -2375,6 +2375,111 @@ fails on a stale entry, so a file that reaches zero has to lose its line.
 `font-family-literal` or `local-palette`. No behaviour changes; 96 tests across
 the seven suites that render these components pass unchanged.
 
+## 2026-09-11 — R2b: one terminal-state card (PublicStateCard)
+
+G-02 measured the not-found / expired / error card as a different component on
+every page family: card padding 20 / 24 / 32 at 390, gutter 20 vs 16, the heading
+an `h1` on two pages, a styled `div` on five and absent on four (G-07's
+`h1Count = 0`), and a CTA set running from nothing at all, through "Try again" at
+three different heights, to a two-button Text+Call row. `PublicLoadError` covered
+the load-error branch on eight of fifteen token pages; every page hand-rolled its
+own not-found, and four flow pages hand-rolled both.
+
+`components/brand/PublicStateCard.jsx` is the one card. `state` is
+`"not-found" | "expired" | "error"`. It fixes three things BY CONSTRUCTION so a
+page cannot drift again: the card grammar comes from `BrandCard` (whose padding
+is already the single responsive `clamp(20px, 4vw, 32px)` — this file authors
+none of its own, and exposes no padding or width knob); the title is always an
+`h1` with no authored font-size, because the sheet's `h1` rule is `!important` on
+glass and an authored size would be dead style; and the contact actions are built
+from `constants/business.js`, never a retyped number.
+
+**One primary per card** (style guide §2). When the state is recoverable the
+retry owns the 48 tier and contact drops to the 44 chip; when it is not, the Call
+action is the primary and "Text Waves" the chip. The two-gold `ContactRow` that
+`/secure` and `/reschedule` each authored is what that resolves. The first cut
+gated that promotion on the two-button mode, so every `contact="call"` page —
+both report pages, the project report's not-found, the service outline's
+expired — rendered its ONLY action as the 44 chip: a regression from the solid
+buttons they had, and a contradiction of the invariant in the same file. The
+promotion depends on there being no retry, not on which contact mode is in play.
+
+**`PublicLoadError` is now a preset, not a ninth recipe** — `state="error"` plus
+the resource noun, with the copy every caller already got. Nine call sites are
+unchanged. A page with a hand-rolled terminal branch uses `PublicStateCard`
+directly; `PublicLoadError` stays for the load-error branch, where the resource
+noun is the only thing that varies.
+
+**Migrated:** `ScheduleFlowPage` (both `/reschedule` and `/reservice`), `TrackPage`,
+`AppointmentPage` (not-found + load-error), `SecureAppointmentPage`, `ReceiptPage`,
+`ContractSignPage`, `StatementPayPage`, `ReportViewPage`, `ProjectReportViewPage`,
+`LawnReportViewPage`, `PestReportViewPage`, `PriceChangeNoticePage`, `PrepGuidePage`,
+`ServiceOutlinePage`, `CardPage`, `NewsletterArchivePage`, `PayPageV2`.
+
+`NewsletterArchivePage` is the one whose terminal action is not a phone number —
+it points back at the newsletter index — so it takes `contact="none"` and keeps
+that link as the card's content. It was missed by the first pass of this PR
+because it reached the card through `PublicLoadError` for its error branch while
+hand-rolling its not-found, which is precisely the split G-02 describes.
+
+### What this did NOT decide
+
+**The wording.** Four live phrasings for the same condition survive verbatim
+("We couldn't find that X" / "This X isn't available" / "X not found" / "This X
+link has expired"). Which one Waves says is a content decision for the owner, not
+a refactor; the card makes them structurally identical without rewriting them.
+
+**The three no-CTA 404s** (estimate, pay, track) keep `contact="none"`. On those
+pages — and on receipt, contract and statement — the phone number lives *inside a
+sentence*, so replacing it with the button pair means rewriting that sentence.
+Same reason. Where the affordance was already a standalone button, unifying it
+was structural and was done: `ReportViewPage`'s lone "Call Waves" became the
+standard pair.
+
+**`EstimateViewPage` keeps its own card on purpose.** It doubles as the
+estimate-extension request flow and flips to a success headline ("You're all
+set"), so `role="alert"` would be wrong on it. It takes the `h1` G-07 asks for
+and nothing else — the heading element was the finding there, not the card.
+
+### Two things that fell out of the migration
+
+`SecureAppointmentPage`'s `unavailable` state — set whenever the payload fetch
+throws, on both the initial load and `refresh()` — **had no render branch at
+all**. It fell through every `if` to the ready render and showed the
+card-capture form for an appointment that never loaded (`data` is null there;
+only the visit summary was guarded). It now renders the error card with a retry.
+
+`ProjectReportViewPage`'s not-found lost its `<Icon name="document">` glyph: no
+other terminal card has one, and a slot for a single caller is exactly the
+speculative config rule 16 forbids. `TrackPage`'s empty 32px decorative `div`
+went the same way.
+
+### The evidence run caught a regression this PR had shipped
+
+`qa:glass` runs `r2b` / `r2b-fix` (six error scenarios x two states x two
+widths, 32 captures, 0 failed) reported `estimate-404 / load-error` at
+**`h1:2`**: that branch renders `<Header/>`, which carries an `h1`, alongside
+the card, which now carries one too. `PublicLoadError` rendered a `div` before
+this PR, so promoting it is what created the duplicate. The header was blank
+there anyway and is gone.
+
+After the fix, every terminal state at both widths: `h1:1`, no text under 14px,
+no weight over 700, no horizontal overflow. Card geometry, measured: at 390 all
+twelve cards are `x:16 w:358` — a 16px gutter on both sides; at 1440 eleven are
+`x:440 w:560`, the twelfth being the EstimateViewPage card in the 760 document
+column. G-02 measured padding 20 / 24 / 32 and gutters 20 vs 16 across these
+same pages.
+
+### Testing
+
+Six suites replace-mock `../components/brand` wholesale, so a new export is
+invisible to them. Rather than hand-stub the card — duplicating its action logic
+in six places — the mocks now spread `importOriginal()`, so `PublicStateCard` and
+`BrandCard` render for real (both are leaf presentational components) and only
+the heavier primitives stay stubbed. `PublicStateCard.test.jsx` asserts the
+invariants, not the pixels: an `h1` on every state, no authored font-size, one
+primary, actions from the shared constants, no width or padding knob.
+
 ## 2026-09-11 — The brand gate was counting comments (R3a)
 
 Two of the baselined violations were never on a customer surface: `Icon.jsx`'s

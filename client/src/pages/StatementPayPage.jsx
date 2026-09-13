@@ -25,7 +25,7 @@ import { useParams } from "react-router-dom";
 // pattern as PayPageV2). All inline page styles use theme-doc roles.
 import { COLORS } from "../theme-brand";
 import { DOC, DOC_FONT, FS, FW, LH, SP, RADIUS, SHADOW } from "../theme-doc";
-import { WavesShell, CustomerColumn, BrandCard, BrandButton, SerifHeading, HelpPhoneLink } from "../components/brand";
+import { WavesShell, CustomerColumn, BrandCard, BrandButton, SerifHeading, HelpPhoneLink, PublicStateCard } from "../components/brand";
 import PublicLoadError from '../components/PublicLoadError';
 import DocumentActionBar from "../components/DocumentActionBar";
 import { getStripe } from "../lib/stripeLoader";
@@ -498,17 +498,18 @@ export default function StatementPayPage() {
   if (loading) return shell(<BrandCard><p style={{ margin: 0, color: DOC.muted }}>Loading…</p></BrandCard>);
 
   if (error === 'temporary') {
-    return shell(<BrandCard><PublicLoadError resource="statement" onRetry={() => setLoadAttempt(a => a + 1)} /></BrandCard>);
+    // PublicLoadError renders its own card now — the BrandCard it used to sit
+    // inside would nest one card in another.
+    return shell(<PublicLoadError resource="statement" onRetry={() => setLoadAttempt(a => a + 1)} />);
   }
 
   if (error === 'notfound' || !data) {
     return shell(
-      <BrandCard>
-        <SerifHeading style={{ marginBottom: SP.sm }}>We couldn&rsquo;t find that statement</SerifHeading>
-        <p style={{ margin: 0, fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
-          The link may have expired or been mistyped. Give us a call and we&rsquo;ll sort it out — <HelpPhoneLink tone="dark" inline />.
-        </p>
-      </BrandCard>,
+      // contact="none": the affordance here has always been the phone number
+      // inside the sentence, not a button pair.
+      <PublicStateCard state="not-found" title={<>We couldn&rsquo;t find that statement</>} contact="none">
+        The link may have expired or been mistyped. Give us a call and we&rsquo;ll sort it out — <HelpPhoneLink tone="dark" inline />.
+      </PublicStateCard>,
     );
   }
 

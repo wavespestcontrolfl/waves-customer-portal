@@ -121,3 +121,60 @@ describe('paymentIntentOwnsInvoice', () => {
     expect(paymentIntentOwnsInvoice(bad, anchorId)).toBe(true);
   });
 });
+
+// The allocation lock is the last fence before a combined charge moves money.
+// A WITHDRAWN packet invoice — Bill-To moved to a third-party payer after the
+// homeowner already held its link — keeps a collectible status and a NULL
+// payer_id, so neither the status check nor the payer-column check sees it,
+// and the live resolve reads only this invoice's own representative service
+// while the payer may sit on another billed member of the same packet
+// (pre-push P0).
+describe('verifyAllocationLocked withdrawal fence', () => {
+  const { verifyAllocationLocked } = require('../services/pay-combined');
+  const ANCHOR = 'aaaaaaaa-0000-0000-0000-000000000001';
+
+  // Only the anchor is allocated, so the sibling dunning lookup never runs and
+  // the fence is reached with no other collaborators.
+  const trxFor = (row) => () => {
+    const q = {};
+    ['whereIn', 'orderBy'].forEach((m) => { q[m] = () => q; });
+    q.forUpdate = async () => [row];
+    return q;
+  };
+
+  const row = (overrides) => ({
+    id: ANCHOR,
+    invoice_number: 'WPC-2026-0378',
+    status: 'overdue',
+    payer_id: null,
+    payer_statement_id: null,
+    total: '105.30',
+    credit_applied: 0,
+    ...overrides,
+  });
+
+  test('refuses as stale when the anchor carries the withdrawal stamp', async () => {
+    await expect(verifyAllocationLocked(
+      trxFor(row({ scheduled_send_error: 'payer_billed:5:hold' })),
+      [{ invoiceId: ANCHOR, cents: 10530 }],
+      { anchorInvoiceId: ANCHOR, allowUnbound: true },
+    )).rejects.toMatchObject({
+      statusCode: 409,
+      staleBalance: true,
+      reason: 'invoice WPC-2026-0378 was withdrawn to a third-party payer',
+    });
+  });
+
+  // Only the `payer_billed:` prefix means the debt moved — a retry failure
+  // must not refuse the allocation. (This row still stops at a later seam in
+  // this stripped-down harness; what matters is WHICH fence it reaches.)
+  test('an ordinary delivery failure is not a withdrawal', async () => {
+    await expect(verifyAllocationLocked(
+      trxFor(row({ scheduled_send_error: 'smtp 550 mailbox unavailable' })),
+      [{ invoiceId: ANCHOR, cents: 10530 }],
+      { anchorInvoiceId: ANCHOR, allowUnbound: true },
+    )).rejects.not.toMatchObject({
+      reason: 'invoice WPC-2026-0378 was withdrawn to a third-party payer',
+    });
+  });
+});
