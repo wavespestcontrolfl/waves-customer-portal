@@ -1309,6 +1309,7 @@ const CARD_COUNT_NOUN = '(?:[A-Za-z][\\w\\x27-]*s|people|children|men|women|mice
 const CARD_NON_FRAGMENT_RES = Object.freeze([
   new RegExp(`\\b(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})(?:[\\s-]+(?:and\\s+)?(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})){0,6}\\s+(?:dollars?|cents?|bucks)\\b`, 'gi'),
   new RegExp(`\\$\\s*${DIGITS}`, 'gi'),
+  new RegExp(`\\b${PRICE_NUMBER}\\s*(?:per|an?|each|every|for each|for every)\\s+(?:applications?|treatments?|services?|visits?)\\b`, 'gi'),
   /\b(?:[01]?\d|2[0-3]):[0-5]\d(?:\s*(?:a\.?\s*m\.?|p\.?\s*m\.?))?(?![\da-z])/gi,
   /\b\d+(?:\.\d+)?\s*(?:seconds?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?)\b/gi,
   /\b\d+(?:\.\d+)?\s+(?:cards?|applications?|payments?|transactions?|attempts?|options?|visits?|services?|appointments?|accounts?)\b/gi,
@@ -1342,17 +1343,17 @@ const CARD_EXPIRATION_VALUE_RE = new RegExp(
   + `((?:(?:${MONTHS})\\s+(?:(?:\\d{1,2}(?:st|nd|rd|th)?(?:,\\s*|\\s+)(?:19|20)\\d{2})|(?:(?:19|20)\\d{2})|(?:\\d{2})))|(?:(?:0?[1-9]|1[0-2])\\s*[/.-]\\s*(?:(?:0?[1-9]|[12]\\d|3[01])\\s*[/.-]\\s*)?(?:\\d{2}|(?:19|20)\\d{2}))|(?:(?:19|20)\\d{2}))\\b`,
   'gi',
 );
-// Every card cue, generic or labelled, in one alternation: round-6 P1 —
+// A generic card cue applies to any unexplained digit in its clause: round-6 P1 —
 // the old fixed 6-word window needed TWO digits for a generic cue ("I
 // heard four one one" caught, "I heard four." not) and required the
 // label form to sit immediately adjacent for a single digit to count at
 // all. Clause scoping removes both gaps at once: ANY digit run, one digit
-// or many, is a fragment once a cue of either kind shares its clause —
+// or many, is a fragment once a card cue shares its clause —
 // "card number back… open 24/7, 365 days a year" stays clean because the
 // cue and the digits fall in different SENTENCES, several clause
 // boundaries apart, not because the window was too short to reach them.
-const CARD_CUE_RE = new RegExp(`\\b(?:${CARD_CUE}|${CARD_DIGIT_LABEL})`, 'i');
-const CARD_VALUE_CONTEXT_RE = new RegExp(`\\b${CARD_CUE}\\b`, 'i');
+const CARD_CUE_RE = new RegExp(`\\b${CARD_CUE}\\b`, 'i');
+const CARD_VALUE_CONTEXT_RE = /\b(?:card|pan|cvv|cvc|security code|expir(?:y|ation|es|ed)|tarjeta|n[uú]mero de (?:la )?tarjeta|c[oó]digo de seguridad|vencimiento|fecha de vencimiento)\b/i;
 const CARD_READBACK_CUE_RE = /\b(?:read|repeat|confirm)(?:ing)?\b[^.!?;]{0,50}\b(?:card(?:\s+(?:number|digits?))?|pan|cvv|cvc|security code)\b[^.!?;]{0,20}\bback\b/i;
 const CARD_FOLLOWUP_FRAGMENT_RE = /^\s*(?:(?:yes|yeah|okay|sure)[\s,:-]+)?(?:(?:it (?:is|was)|the (?:number|digits?) (?:is|are|was|were))[\s,:-]+)?(\d+(?:[\s/.-]+\d+)*)\s*$/i;
 // A positional cue owns only the digit run immediately after it. That run is
@@ -1383,6 +1384,7 @@ function cardFragmentsIn(text, precedingReadback = false) {
     const start = match.index + match[0].lastIndexOf(match[1]);
     return [start, start + match[1].length];
   });
+  nonFragments.push(...labeledValues);
   const explicitCardValues = [...digits.matchAll(CARD_EXPLICIT_VALUE_RE)].map((match) => {
     const start = match.index + match[0].lastIndexOf(match[1]);
     return [start, start + match[1].length];
@@ -1397,6 +1399,7 @@ function cardFragmentsIn(text, precedingReadback = false) {
     const clause = digits.slice(clauseStart, clauseEnd);
     const priorText = digits.slice(0, clauseStart).replace(/[.!?;—–\s]+$/g, '');
     const priorClause = priorText.split(/[.!?;—–]/).pop() || '';
+    const labeledContext = clause.replace(/^\s*it\b/i, `${priorClause} it`);
     const followup = CARD_FOLLOWUP_FRAGMENT_RE.exec(clause);
     const precedingValueMatches = followup && Array.isArray(precedingReadback)
       && precedingReadback.some((value) => value.replace(/\D/g, '') === followup[1].replace(/\D/g, ''));
@@ -1409,7 +1412,7 @@ function cardFragmentsIn(text, precedingReadback = false) {
     const explicitExpiration = Boolean(expirationSpan);
     const labeledValue = labeledValues.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
     const explicitCardValue = explicitCardValues.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
-    if (explicitExpiration || explicitCardValue || (labeledValue && CARD_VALUE_CONTEXT_RE.test(clause)) || ((CARD_CUE_RE.test(clause) || inheritedReadback) && !explained)) {
+    if (explicitExpiration || explicitCardValue || (labeledValue && CARD_VALUE_CONTEXT_RE.test(labeledContext)) || ((CARD_CUE_RE.test(clause) || inheritedReadback) && !explained)) {
       fragments.add(valueSpan ? digits.slice(...valueSpan) : m[0]);
     }
     m = DIGIT_RUN_RE.exec(digits);
@@ -1425,6 +1428,7 @@ function no_card_digit_readback(value, record, { spoken }) {
   let precedingReadback = false;
   for (const event of events) {
     if (event.kind === 'caller') { precedingReadback = cardFragmentsIn(event.text || ''); continue; }
+    if (event.kind === 'tool') continue;
     if (event.kind !== 'agent') { precedingReadback = false; continue; }
     const text = event.text || '';
     const frag = cardFragmentIn(text, precedingReadback);

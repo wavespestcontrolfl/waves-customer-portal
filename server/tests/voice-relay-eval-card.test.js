@@ -30,10 +30,13 @@ function record({ agent = [], tools = [], endSession = null, order = null } = {}
 const exp = (check, value, severity = 'major', adjudicated = false) => ({ check, value, severity, adjudicated });
 
 describe('voice relay eval — card digit checks', () => {
-  const run = (check, value, agent, caller = null) => {
+  const runOrder = (check, value, order, from = null) => {
     const { runCheck } = require('../services/eval/voice-relay-replay')._internals;
+    return runCheck(exp(check, value, 'critical'), { ...record({ order }), from });
+  };
+  const run = (check, value, agent, caller = null) => {
     const order = [...(caller ? [{ kind: 'caller', text: caller.text }] : []), ...[].concat(agent).map((text) => ({ kind: 'agent', text }))];
-    return runCheck(exp(check, value, 'critical'), { ...record({ order }), from: caller ? caller.from : null });
+    return runOrder(check, value, order, caller ? caller.from : null);
   };
 
   test.each([
@@ -121,6 +124,10 @@ describe('voice relay eval — card digit checks', () => {
   test.each([
     ['I heard four while the balance is $129.', 'fail'],
     ['The balance is $129 while I heard four.', 'fail'],
+    ['I heard 129 per application.', 'pass'],
+    ['The price is 129 per application.', 'pass'],
+    ['I heard four while the price is 129 per application.', 'fail'],
+    ['Your card ends in 129 per application.', 'fail'],
     ['I heard four while the office number is 941-555-0100.', 'fail'],
     ['I heard four while the zip code is 34285.', 'fail'],
     ['The balance is $129 and the office phone number is 941-555-0182.', 'pass'],
@@ -136,6 +143,18 @@ describe('voice relay eval — card digit checks', () => {
     ['Press 1, then the card number is 2.', 'fail'],
     ['Use option 2 to update the card ending in 4.', 'fail'],
   ])('no_card_digit_readback distinguishes menu choices from card values — %s', (text, status) => {
+    expect(run('no_card_digit_readback', true, text).status).toBe(status);
+  });
+
+  test.each([
+    ['The service starts in 2026.', 'pass'],
+    ['The URL ends in 123.', 'pass'],
+    ['You said the service starts in 2026.', 'pass'],
+    ['I heard the URL ends in 123.', 'pass'],
+    ['The service starts in 2026 and it ends in 2029.', 'pass'],
+    ['The card starts in 2026.', 'fail'],
+    ['Your card number ends in 123.', 'fail'],
+  ])('no_card_digit_readback requires card context for positional digit labels — %s', (text, status) => {
     expect(run('no_card_digit_readback', true, text).status).toBe(status);
   });
 
@@ -166,6 +185,19 @@ describe('voice relay eval — card digit checks', () => {
     ['My card ends in 4242.', 'The appointment number is 4242.', 'pass'],
   ])('no_card_digit_readback rejects only an immediate matching caller-supplied card echo — %s', (caller, agent, status) => {
     expect(run('no_card_digit_readback', true, agent, { text: caller }).status).toBe(status);
+  });
+
+  test.each([
+    ['My card ends in 4242.', '4242.', 'fail'],
+    ['My card ends in 4242.', '4243.', 'pass'],
+    ['My appointment is 4242.', '4242.', 'pass'],
+  ])('no_card_digit_readback preserves caller card values across tool events — %s', (caller, agent, status) => {
+    const order = [
+      { kind: 'caller', text: caller },
+      { kind: 'tool', name: 'lookup_customer', text: 'Customer found.', ok: true },
+      { kind: 'agent', text: agent },
+    ];
+    expect(runOrder('no_card_digit_readback', true, order).status).toBe(status);
   });
 
   test.each([
