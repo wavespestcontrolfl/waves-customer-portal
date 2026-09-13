@@ -11,7 +11,11 @@ export default function DispatchReadinessStrip({ readiness, onOpen, compact = fa
     <button
       type="button"
       onPointerDown={event => event.stopPropagation()}
-      onClick={event => { event.stopPropagation(); onOpen(); }}
+      onClick={event => {
+        event.stopPropagation();
+        event.currentTarget.focus({ preventScroll: true });
+        onOpen();
+      }}
       className={cn(
         'flex items-center gap-1 rounded-xs border-hairline px-1 text-14 leading-5 text-left u-focus-ring',
         hasHold ? 'bg-alert-bg text-alert-fg border-alert-fg' : 'bg-zinc-50 text-zinc-700 border-zinc-300',

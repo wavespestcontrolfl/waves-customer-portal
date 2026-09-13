@@ -6,6 +6,17 @@
 // exclusively in MobileCheckoutSheet — the brief displays, checkout charges.
 import { attachedVisitInvoice, visitInvoiceStatusNote } from '../../components/schedule/visitInvoice';
 
+// A status-only completion still needs the combined closeout to create its
+// canonical service record. Require the explicit false from the current day
+// payload; missing/true means the completed member is retained history.
+export function recordlessVisitNeedsCloseout(service) {
+  return String(service?.status || '') === 'completed'
+    && service?.has_service_record === false
+    && !!(service?.visitId || service?.visit_id)
+    && service?.visitCloseoutEnabled === true
+    && !service?.visitCloseoutPacket;
+}
+
 export function fmtMoney(n) {
   // null/undefined/'' are "no value", never $0 — Number(null) is 0.
   if (n == null || n === '') return null;

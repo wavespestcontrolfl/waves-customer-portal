@@ -14,6 +14,9 @@ import {
   deleteCompletionDraft,
   pruneCompletionDrafts,
   DRAFT_RETENTION_MS,
+  deleteVisitCompletionDraft,
+  getVisitCompletionDraft,
+  putVisitCompletionDraft,
 } from "./completion-resume-store";
 import {
   clearCompletionResumeOwed,
@@ -46,6 +49,22 @@ beforeEach(() => {
 });
 
 describe("completion resume store (IndexedDB)", () => {
+  it("keeps prepared visit forms outside the store an older completion panel prunes", async () => {
+    const draft = { visitId: 'visit-1', key: 'visit-key', forms: { 'svc-1': { body: committedBody() } } };
+    const past = Date.now() - PRUNE_GRACE_MS * 10;
+    await putVisitCompletionDraft('visit-1', draft, 'tech-a', past);
+    // This unmarked row models where the first closeout UI stored visit
+    // drafts. The current pruner deliberately has the same key-agnostic
+    // behavior as an already-open previous-version CompletionPanel tab.
+    await putCompletionResumeBody('visit:legacy-location', draft, past);
+    expect(await pruneCompletionResumeBodies(() => false)).toBe(1);
+    expect(await getCompletionResumeBody('visit:legacy-location')).toBeNull();
+    expect(await getVisitCompletionDraft('visit-1', 'tech-a')).toEqual(draft);
+    expect(await getVisitCompletionDraft('visit-1', 'tech-b')).toBeNull();
+    await deleteVisitCompletionDraft('visit-1', 'tech-a');
+    expect(await getVisitCompletionDraft('visit-1', 'tech-a')).toBeNull();
+  });
+
   it("orders draft writes and deletion while leaving a committed retry body intact", async () => {
     await putCompletionResumeBody('svc-1', committedBody());
     const first = putCompletionDraft('svc-1', { servicePhotos: [photo(1)] });

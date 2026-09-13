@@ -34,6 +34,8 @@ import lawnScores from '@lawn-scores';
 //   chosen slot is taken between modal open and submit?
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import useIsMobile from "../../hooks/useIsMobile";
+import useLockBodyScroll from "../../hooks/useLockBodyScroll";
+import useModalFocus from "../../hooks/useModalFocus";
 import CompletionPricingCard from "../../components/schedule/CompletionPricingCard";
 import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
@@ -862,7 +864,7 @@ function lawnDerivedTotal(product, areaSqft) {
   return derivedTotalAmount(product.rate, areaSqft);
 }
 
-function createCompletionIdempotencyKey(serviceId) {
+export function createCompletionIdempotencyKey(serviceId) {
   const randomPart =
     window.crypto?.randomUUID?.() ||
     `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -1002,8 +1004,11 @@ export function completionPreferencesNeedDraft({
 // is an admin-typed override of the running timer (validated 1..720 —
 // out-of-range falls back to the elapsed string so a stray value never
 // ships as operator input; handleSubmit blocks it with an alert first), a
-// string is the auto-elapsed timer, recorded exactly as before.
-export function completionTimeOnSiteBody({ backfill, typedMinutes, elapsed, adjustedMinutes = "" }) {
+// string is the auto-elapsed timer, recorded exactly as before. A prepared
+// combined-visit form omits only that automatic string so packet save can
+// allocate the shared canonical duration across members; explicit numeric
+// operator input remains attached to its member.
+export function completionTimeOnSiteBody({ backfill, typedMinutes, elapsed, adjustedMinutes = "", preparing = false }) {
   if (!backfill) {
     const trimmed = String(adjustedMinutes ?? "").trim();
     if (trimmed !== "") {
@@ -1012,7 +1017,7 @@ export function completionTimeOnSiteBody({ backfill, typedMinutes, elapsed, adju
         return { timeOnSite: minutes };
       }
     }
-    return { timeOnSite: elapsed };
+    return preparing ? {} : { timeOnSite: elapsed };
   }
   const minutes = Math.round(Number(typedMinutes));
   return Number.isFinite(minutes) && minutes > 0 ? { timeOnSite: minutes } : {};
@@ -5598,6 +5603,8 @@ function JobCardTab({ card, loading, error, D }) {
 export function ProtocolPanel({ service, onClose }) {
   // Reactive (rotation-safe) — the module-level snapshot never recomputes.
   const isMobile = useIsMobile(640);
+  const panelRef = useModalFocus(true, onClose);
+  useLockBodyScroll();
   // Monochrome admin V2 palette — shadows the module-level D inside this panel
   // so the Service Protocol flyout matches the zinc admin shell instead of the
   // warmer legacy slate/teal/amber accents.
@@ -5890,31 +5897,46 @@ export function ProtocolPanel({ service, onClose }) {
 
   return createPortal(
     <div
+      onClick={(event) => {
+        event.stopPropagation();
+        if (event.target === event.currentTarget) onClose();
+      }}
       style={{
         position: "fixed",
-        top: 0,
-        right: 0,
-        width: isMobile ? "100%" : "60%",
-        maxWidth: isMobile ? "100%" : 600,
-        minWidth: isMobile ? 0 : 380,
-        height: "100vh",
-        background: D.card,
-        borderLeft: isMobile ? "none" : `1px solid ${D.border}`,
+        inset: 0,
         zIndex: 1000,
         display: "flex",
-        flexDirection: "column",
-        boxShadow: "-8px 0 32px rgba(0,0,0,0.3)",
-        ...(isMobile
-          ? {
-              height: "100dvh",
-              boxSizing: "border-box",
-              paddingBottom: "env(safe-area-inset-bottom, 0px)",
-              paddingLeft: "env(safe-area-inset-left, 0px)",
-              paddingRight: "env(safe-area-inset-right, 0px)",
-            }
-          : {}),
+        justifyContent: "flex-end",
+        background: "rgba(24, 24, 27, 0.35)",
       }}
     >
+      <section
+        ref={panelRef}
+        tabIndex={-1}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="service-protocol-title"
+        style={{
+          width: isMobile ? "100%" : "60%",
+          maxWidth: isMobile ? "100%" : 600,
+          minWidth: isMobile ? 0 : 380,
+          height: "100%",
+          background: D.card,
+          borderLeft: isMobile ? "none" : `1px solid ${D.border}`,
+          display: "flex",
+          flexDirection: "column",
+          boxShadow: "-8px 0 32px rgba(0,0,0,0.3)",
+          outline: "none",
+          ...(isMobile
+            ? {
+                boxSizing: "border-box",
+                paddingBottom: "env(safe-area-inset-bottom, 0px)",
+                paddingLeft: "env(safe-area-inset-left, 0px)",
+                paddingRight: "env(safe-area-inset-right, 0px)",
+              }
+            : {}),
+        }}
+      >
       {/* Header */}
       <div
         style={{
@@ -5931,9 +5953,9 @@ export function ProtocolPanel({ service, onClose }) {
         {" "}
         <div>
           {" "}
-          <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
+          <h2 id="service-protocol-title" style={{ fontSize: 16, fontWeight: 500, color: D.heading, margin: 0 }}>
             Service Protocol
-          </div>{" "}
+          </h2>{" "}
           {!jobCardEnabled && service && (
             <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
               {service.serviceType} — {service.customerName}
@@ -5946,16 +5968,20 @@ export function ProtocolPanel({ service, onClose }) {
           )}
         </div>{" "}
         <button
+          type="button"
           onClick={onClose}
+          aria-label="Close service protocol"
           style={{
             background: "none",
             border: "none",
             color: D.muted,
             fontSize: 20,
             cursor: "pointer",
+            width: 44,
+            height: 44,
           }}
         >
-          ×
+          <span aria-hidden="true">×</span>
         </button>{" "}
       </div>
       {/* Ask bar — the dispatch IB context, scoped to this stop */}
@@ -7298,6 +7324,7 @@ export function ProtocolPanel({ service, onClose }) {
           </>
         )}
       </div>{" "}
+      </section>
     </div>,
     document.body,
   );
@@ -10481,6 +10508,9 @@ export function CompletionPanel({
   products,
   onClose,
   onSubmit,
+  // The stop sheet prepares every canonical form before one visit submit.
+  onPrepared,
+  preparedDraft,
   onViewDetails,
   // Typed specialty completion (PR 4): parent-owned success-screen
   // follow-up CTA (the button only renders when provided).
@@ -12478,9 +12508,11 @@ export function CompletionPanel({
     "Complete & Send Invoice": "Apply discounts & send invoice",
     "Complete & Send Recap": "Apply discounts & send recap",
   };
-  const completionCtaLabel = applyingCompletionDiscounts
-    ? discountCompletionLabels[baseCompletionCtaLabel] || baseCompletionCtaLabel
-    : baseCompletionCtaLabel;
+  const completionCtaLabel = onPrepared
+    ? (submitting ? "Saving form…" : "Save service form")
+    : applyingCompletionDiscounts
+      ? discountCompletionLabels[baseCompletionCtaLabel] || baseCompletionCtaLabel
+      : baseCompletionCtaLabel;
 
   useEffect(() => {
     const iv = setInterval(() => setElapsed(elapsedSince(onSiteTime)), 1000);
@@ -12841,19 +12873,33 @@ export function CompletionPanel({
         ? { ...metadata, servicePhotos: metadata.draftId && metadata.draftId === stored?.draftId
           ? stored.servicePhotos : undefined }
         : stored || metadata;
-      if (draft?.serviceId === service.id) {
-        if (draft.pendingPhotoCompletion && (draft.servicePhotos?.length || draft.reconcileOwed)) {
+      const prepared = preparedDraft?.serviceId === service.id ? preparedDraft : null;
+      const deviceIsNewer = draft?.serviceId === service.id
+        && (!prepared || (Date.parse(draft.savedAt) || 0) > (Date.parse(prepared.savedAt) || 0));
+      const selectedDraft = deviceIsNewer
+        ? {
+            ...draft,
+            ...(!Array.isArray(draft.servicePhotos)
+              && draft.draftId
+              && draft.draftId === prepared?.draftId
+              && Array.isArray(prepared.servicePhotos)
+              ? { servicePhotos: prepared.servicePhotos }
+              : {}),
+          }
+        : prepared || draft;
+      if (selectedDraft?.serviceId === service.id) {
+        if (selectedDraft.pendingPhotoCompletion && (selectedDraft.servicePhotos?.length || selectedDraft.reconcileOwed)) {
           // Closeout already succeeded. Reopen only the outstanding photo
           // uploads (or the report reconciliation the uploads still owe);
           // never submit completion or collect payment again.
-          draftSnapshotRef.current = draft;
-          setCompletionResult(draft.pendingPhotoCompletion);
+          draftSnapshotRef.current = selectedDraft;
+          setCompletionResult(selectedDraft.pendingPhotoCompletion);
           setSuccess(true);
         } else {
-          setSavedDraft(draft);
+          setSavedDraft(selectedDraft);
           setShowDraftPrompt(true);
         }
-        if (draft.generationPhotoCount > 0 && !draft.servicePhotos?.length && !draft.reconcileOwed) {
+        if (selectedDraft.generationPhotoCount > 0 && !selectedDraft.servicePhotos?.length && !selectedDraft.reconcileOwed) {
           setDraftStorageNotice("The saved photos could not be restored. Reattach them before completing this visit.");
         }
       }
@@ -15561,6 +15607,7 @@ export function CompletionPanel({
           typedMinutes: backfillTimeOnSite,
           elapsed,
           adjustedMinutes: liveAdjustEligible ? adjustedTimeOnSite : "",
+          preparing: !!onPrepared,
         }),
         // Re-entry steppers: only sides the tech moved off their seed post.
         // An untouched panel sends nothing and the server's computed
@@ -15751,6 +15798,13 @@ export function CompletionPanel({
       // byte-for-byte through replayCommittedCompletion above; a fresh build
       // reaching here becomes the candidate snapshot.
       lastSubmitBodyRef.current = body;
+      if (onPrepared) {
+        await onPrepared(service.id, body, {
+          ...draftSnapshotRef.current, serviceId: service.id, servicePhotos,
+        });
+        setSubmitting(false);
+        return;
+      }
       const result = await onSubmit(service.id, body);
       if (await finishCompletionSuccess(result) === "closed") return;
     } catch (e) {
@@ -16744,7 +16798,7 @@ export function CompletionPanel({
                   textOverflow: "ellipsis",
                 }}
               >
-                Complete service
+                {onPrepared ? "Service form" : "Complete service"}
               </div>{" "}
             </div>
             {onViewDetails ? (
@@ -19116,7 +19170,7 @@ export function CompletionPanel({
               id={`completion-panel-title-${service.id}`}
               style={{ fontSize: 18, fontWeight: 500, color: D.heading }}
             >
-              Complete Service
+              {onPrepared ? "Service form" : "Complete Service"}
             </div>{" "}
             <button
               type="button"
@@ -21090,8 +21144,8 @@ export function CompletionPanel({
                 <span style={{ fontSize: 15, fontWeight: 500 }}>
                   {completionCtaLabel}
                 </span>{" "}
-                <span style={{ fontSize: 11, fontWeight: 400, opacity: 0.85 }}>
-                  {isIncompleteVisit
+                <span style={{ fontSize: 14, fontWeight: 400, opacity: 0.85 }}>
+                  {onPrepared ? "Saved with the other services in this visit" : isIncompleteVisit
                     ? "Office follow-up alert will be created"
                     : effectiveSendSms
                       ? `SMS + Report sent to ${service.customerName}`
