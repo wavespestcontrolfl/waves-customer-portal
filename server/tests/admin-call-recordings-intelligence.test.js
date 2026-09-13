@@ -62,7 +62,7 @@ test('proposal preview returns only the reviewed identity with its authorization
     current_window: { start_at: '2027-03-15T13:00:00Z', end_at: '2027-03-15T15:00:00Z' },
     service_name: 'Reviewed service', property: { id: 'reviewed-property', address_line1: '200 Example Court' } };
   require('../services/call-reschedule-proposals').previewProposal.mockResolvedValue({
-    preview_hash: 'a'.repeat(64), selected: { ...selected, internal_notes: 'must stay private' },
+    displayAddress: selected.property, preview_hash: 'a'.repeat(64), selected: { ...selected, internal_notes: 'must stay private' },
     customer: { id: CUSTOMER_ID, first_name: 'Synthetic', last_name: 'Caller', secondary_phone: 'private' },
     card: { payload: { reschedule_proposal: { quote: 'Move the pest appointment to Tuesday.' } } },
     series: { collective: false }, plan: { newDate: '2027-03-16', newWindow: { start: '14:00', end: '15:30' } },
@@ -75,6 +75,7 @@ test('proposal preview returns only the reviewed identity with its authorization
     const body = await res.json();
     expect(body).toMatchObject({ preview_hash: 'a'.repeat(64), selected,
       customer: { id: CUSTOMER_ID, first_name: 'Synthetic', last_name: 'Caller' }, quote: 'Move the pest appointment to Tuesday.' });
+    expect(body.selected.display_address).toEqual(selected.property);
     expect(body.selected).not.toHaveProperty('internal_notes');
     expect(body.customer).not.toHaveProperty('secondary_phone');
   });

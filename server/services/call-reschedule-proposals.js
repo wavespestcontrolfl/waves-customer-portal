@@ -12,8 +12,19 @@ const fail = (message, status = 409) => Object.assign(new Error(message), { stat
 const digest = (value) => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const norm = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 const openStates = ['open', 'in_progress'];
-const CUSTOMER_COLUMNS = ['id', 'first_name', 'last_name', 'phone', 'secondary_phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone', 'address_line1', 'address_line2', 'city', 'state', 'zip'];
-const PROPERTY_COLUMNS = ['id', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'updated_at'];
+const ADDRESS_COLUMNS = ['address_line1', 'address_line2', 'city', 'state', 'zip'];
+const CUSTOMER_COLUMNS = ['id', 'first_name', 'last_name', 'deleted_at', 'phone', 'secondary_phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone', ...ADDRESS_COLUMNS];
+const PROPERTY_COLUMNS = ['id', ...ADDRESS_COLUMNS, 'updated_at'];
+
+// Display only: keep the raw property identity untouched for the Apply guard.
+function proposalAddress(visit, customer) {
+  const source = visit.property || (visit.service_address_line1 ? {
+    address_line1: visit.service_address_line1, address_line2: visit.service_address_line2,
+    city: visit.service_address_city, zip: visit.service_address_zip,
+  } : customer);
+  if (!String(source?.address_line1 || '').trim()) return null;
+  return Object.fromEntries(ADDRESS_COLUMNS.map((field) => [field, source[field] || null]));
+}
 
 function proposalEvidence(v2, transcript) {
   const quotes = (v2?.evidence || []).filter((e) => e.field_path === '/scheduling/proposed_start_at' && e.speaker === 'caller');
@@ -87,10 +98,10 @@ async function visitsForCard(conn, customerId, now) {
 async function listProposals(conn, { limit = 100, offset = 0, now = new Date() } = {}) {
   if (!enabled()) return [];
   const rows = await conn('triage_items as t').join('call_log as cl', 'cl.id', 't.call_log_id')
-    .leftJoin('customers as c', 'c.id', 'cl.customer_id').whereIn('t.status', openStates)
+    .leftJoin('customers as c', 'c.id', 'cl.customer_id').whereNull('c.deleted_at').whereIn('t.status', openStates)
     .whereRaw("t.payload->'reschedule_proposal' IS NOT NULL").orderBy('t.created_at', 'asc').orderBy('t.id').limit(limit).offset(offset)
     .select('t.id', 't.call_log_id', 't.updated_at', 't.payload', 'cl.customer_id', 'cl.created_at as call_at',
-      'c.first_name', 'c.last_name', 'c.phone');
+      'c.first_name', 'c.last_name', 'c.phone', ...ADDRESS_COLUMNS.map((field) => `c.${field}`));
   for (const row of rows) {
     row.card_kind = 'reschedule_proposal';
     row.proposal = row.payload.reschedule_proposal;
@@ -102,8 +113,11 @@ async function listProposals(conn, { limit = 100, offset = 0, now = new Date() }
     row.requested_window = { start_at: requested.toISOString(), end_at: new Date(requested.getTime() + 120 * 60000).toISOString() };
     // Preserve appointment internals on the server; the card needs only the
     // identity and customer-facing window for choosing the discussed visit.
-    row.candidates = row.candidates.map(({ id, status, scheduled_date, current_window, service_name, property }) =>
-      ({ id, status, scheduled_date, current_window, service_name, property }));
+    row.candidates = row.candidates.map((visit) => {
+      const { id, status, scheduled_date, current_window, service_name, property } = visit;
+      return { id, status, scheduled_date, current_window, service_name, property, display_address: proposalAddress(visit, row) };
+    });
+    for (const field of ADDRESS_COLUMNS) delete row[field];
   }
   return rows;
 }
@@ -118,11 +132,13 @@ async function previewProposal(conn, id, { visitId, now = new Date(), rebooker =
     throw fail('The call changed. Refresh the proposal.');
   }
   const customer = await conn('customers').where({ id: call.customer_id }).first(CUSTOMER_COLUMNS);
+  if (!customer || customer.deleted_at) throw fail('The customer is no longer active. Review this request in the schedule.');
   const candidates = await visitsForCard(conn, customer?.id, now);
   const selection = visitId || (candidates.length === 1 ? candidates[0].id : null);
   if (!selection) throw fail('Select the appointment discussed on the call', 400);
   const reviewedVisit = candidates.find((v) => v.id === selection);
   if (reviewedVisit?.property_id && !reviewedVisit.property) throw fail('The appointment property needs review. Use the schedule editor.');
+  if (reviewedVisit && !proposalAddress(reviewedVisit, customer)) throw fail('The appointment address needs review. Use the schedule editor.');
   if (reviewedVisit) reviewedVisit.follow_through_group_eligible = await require('./reschedule-link').hasUnblockedVisitGroup(conn, reviewedVisit.visit_id);
   const v2 = call.ai_extraction_enriched;
   if (!proposalEvidence(v2, call.transcription) || v2.scheduling.proposed_start_at !== card.payload.reschedule_proposal.proposed_start_at) {
@@ -146,7 +162,8 @@ async function previewProposal(conn, id, { visitId, now = new Date(), rebooker =
       service_address_line1: selected.service_address_line1, service_address_line2: selected.service_address_line2,
       service_address_city: selected.service_address_city, service_address_zip: selected.service_address_zip },
     target: v2.scheduling.proposed_start_at, series };
-  return { preview_hash: digest(snapshot), card, call, customer, candidates, v2, plan, selected, series };
+  return { preview_hash: digest(snapshot), card, call, customer, candidates, v2, plan, selected, series,
+    displayAddress: proposalAddress(selected, customer) };
 }
 
 async function applyProposal(conn, id, { actorId, visitId, previewHash, now = new Date(), rebooker = null } = {}) {
@@ -170,7 +187,7 @@ async function applyProposal(conn, id, { actorId, visitId, previewHash, now = ne
       if (!staff) throw fail('Active staff account required', 403);
       if (!liveCard || !openStates.includes(liveCard.status) || new Date(liveCard.updated_at).getTime() !== new Date(card.updated_at).getTime()
         || !liveCall || liveCall.processing_token || liveCall.v2_extraction_status !== 'valid' || liveCall.customer_id !== customer.id
-        || digest(liveCustomer) !== digest(customer) || digest(liveProperty) !== digest(selected.property)
+        || liveCustomer?.deleted_at || digest(liveCustomer) !== digest(customer) || digest(liveProperty) !== digest(selected.property)
         || digest([liveCall.transcription, liveCall.ai_extraction_enriched]) !== digest([call.transcription, v2])
         || Number(liveCall.processing_generation) !== Number(call.processing_generation)) throw fail('The proposal changed. Refresh before applying.');
       await trx('triage_items').where({ id }).update({ status: 'resolved', resolution_source: 'human', assigned_to: actorId,
@@ -203,4 +220,4 @@ async function dismissProposal(conn, id, { actorId, expectedAt } = {}) {
   });
 }
 
-module.exports = { enabled, proposalEvidence, customerWindow, stageProposal, listProposals, previewProposal, applyProposal, dismissProposal };
+module.exports = { enabled, proposalAddress, proposalEvidence, customerWindow, stageProposal, listProposals, previewProposal, applyProposal, dismissProposal };

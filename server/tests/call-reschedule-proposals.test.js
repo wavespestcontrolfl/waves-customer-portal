@@ -3,7 +3,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/call-booking-catalog', () => ({
   ...jest.requireActual('../services/call-booking-catalog'), planCallFollowUpShift: jest.fn().mockResolvedValue([]),
 }));
-const { proposalEvidence, customerWindow, previewProposal, applyProposal } = require('../services/call-reschedule-proposals');
+const { proposalEvidence, proposalAddress, customerWindow, previewProposal, applyProposal } = require('../services/call-reschedule-proposals');
 const { planRescheduleFromCall } = require('../services/call-reschedule-apply');
 const { classifyTriageItem } = require('../services/triage-auto-resolve');
 
@@ -35,7 +35,7 @@ describe('reviewed proposed times', () => {
 
 
 describe('proposal preview identity', () => {
-  test.each(['service_id', 'service_type'])('changing %s after preview cannot apply the old approval', async (field) => {
+  test.each(['service_id', 'service_type', 'deleted_at', 'address_missing'])('changing %s after preview cannot apply the old approval', async (field) => {
     const priorGate = process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
     process.env.GATE_RESCHEDULE_PROPOSAL_CARD = 'true';
     const now = new Date('2099-09-09T08:00:00-04:00');
@@ -50,7 +50,7 @@ describe('proposal preview identity', () => {
         direction: 'inbound', from_phone: '+15555550101', transcription: `Caller: ${quote}`, created_at: now,
         ai_extraction_enriched: { scheduling: { status: 'reschedule_requested', proposed_start_at: target },
           evidence: [{ field_path: '/scheduling/proposed_start_at', speaker: 'caller', quote }] } }],
-      customers: [{ id: 'customer', phone: '+15555550101' }],
+      customers: [{ id: 'customer', phone: '+15555550101', address_line1: '100 Example Avenue' }],
       scheduled_services: [selected], services: [{ id: 'service-a', name: 'Original service' }, { id: 'service-b', name: 'Other service' }],
     };
     const conn = (table) => {
@@ -61,7 +61,10 @@ describe('proposal preview identity', () => {
     const rebooker = { collectiveMoveGateOn: () => false, reschedule: jest.fn() };
     try {
       const preview = await previewProposal(conn, 'card', { visitId: 'visit', now, rebooker });
-      selected[field] = field === 'service_id' ? 'service-b' : 'Changed service';
+      expect(preview.displayAddress.address_line1).toBe('100 Example Avenue');
+      if (field === 'deleted_at') tables.customers[0].deleted_at = now;
+      else if (field === 'address_missing') tables.customers[0].address_line1 = null;
+      else selected[field] = field === 'service_id' ? 'service-b' : 'Changed service';
       await expect(applyProposal(conn, 'card', { actorId: 'staff', visitId: 'visit', previewHash: preview.preview_hash, now, rebooker }))
         .rejects.toMatchObject({ status: 409 });
       expect(rebooker.reschedule).not.toHaveBeenCalled();
@@ -69,5 +72,23 @@ describe('proposal preview identity', () => {
       if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
       else process.env.GATE_RESCHEDULE_PROPOSAL_CARD = priorGate;
     }
+  });
+});
+
+
+describe('proposal display addresses preserve the raw property identity', () => {
+  const customer = { address_line1: '100 Example Avenue', city: 'Example City', state: 'FL', zip: '00000' };
+  test('an active property outranks legacy and customer addresses', () => {
+    const visit = { property: { address_line1: '300 Property Lane' }, service_address_line1: '200 Visit Court' };
+    expect(proposalAddress(visit, customer).address_line1).toBe('300 Property Lane');
+  });
+  test('a legacy visit keeps its own address and null property', () => {
+    const visit = { property: null, service_address_line1: '200 Visit Court', service_address_city: 'Visit City' };
+    expect(proposalAddress(visit, customer)).toMatchObject({ address_line1: '200 Visit Court', city: 'Visit City' });
+    expect(visit.property).toBeNull();
+  });
+  test('customer address is the last fallback; no usable address stays unavailable', () => {
+    expect(proposalAddress({ property: null }, customer)).toEqual({ ...customer, address_line2: null });
+    expect(proposalAddress({ property: null }, {})).toBeNull();
   });
 });

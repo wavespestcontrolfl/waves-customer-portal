@@ -48,14 +48,18 @@ function visit(overrides = {}) {
   };
 }
 
-function makeConn({ lockedVisit = visit(), offers = [] } = {}) {
+function makeConn({ lockedVisit = visit(), offers = [], portalRequest = null } = {}) {
   const events = [];
   const inserts = [];
   const updates = [];
   const builder = (table) => {
-    const state = { update: null };
+    const state = { update: null, excludedStatuses: [] };
     const query = {
       where() { return query; },
+      whereNotIn(column, values) {
+        if (table === 'service_requests' && column === 'status') state.excludedStatuses = values;
+        return query;
+      },
       whereNull() { return query; },
       forShare() { events.push(`${table}:share`); return query; },
       forUpdate() { events.push(`${table}:update-lock`); return query; },
@@ -64,6 +68,11 @@ function makeConn({ lockedVisit = visit(), offers = [] } = {}) {
         if (table === 'customers') return Promise.resolve(customer);
         if (table === 'call_log') return Promise.resolve(call);
         if (table === 'scheduled_services') return Promise.resolve(lockedVisit);
+        if (table === 'service_requests') {
+          events.push('service_requests:select');
+          return Promise.resolve(portalRequest && !state.excludedStatuses.includes(portalRequest.status)
+            ? portalRequest : undefined);
+        }
         return Promise.resolve(undefined);
       },
       update(arg) { state.update = arg; updates.push({ table, arg }); return query; },
@@ -106,10 +115,10 @@ describe('applyReviewedCallReschedule', () => {
 
   test('locks identity rows in order, applies the guarded move, and resyncs without an immediate send', async () => {
     const conn = makeConn();
-    const rebooker = mover(conn);
+    const rebooker = mover(conn, { warnings: ['Both appointments remain on the calendar.'] });
     const result = await applyReviewedCallReschedule(applyArgs(conn, rebooker));
 
-    expect(result).toMatchObject({ outcome: 'applied', visitId: VISIT_ID, newDate: '2026-09-15' });
+    expect(result).toMatchObject({ outcome: 'applied', visitId: VISIT_ID, newDate: '2026-09-15', warnings: ['Both appointments remain on the calendar.'] });
     expect(conn.events.slice(0, 5)).toEqual([
       'customers:share',
       'customer_properties:share',
@@ -119,6 +128,7 @@ describe('applyReviewedCallReschedule', () => {
     ]);
     const options = rebooker.reschedule.mock.calls[0][5];
     expect(options).toMatchObject({ pendingConfirmation: true, notifyRequested: false, skipCallFollowUpShift: true,
+      adminWindowRules: true, overlapAdvisory: true,
       sourceSurface: 'call_reschedule', operationKey: OPERATION_KEY, expect: { customer_id: CUSTOMER_ID,
         scheduled_date: '2026-09-14', status: 'confirmed', visit_id: null } });
     expect(conn.events.indexOf('proposal:guard')).toBeLessThan(conn.events.indexOf('activity_log:insert'));
@@ -175,6 +185,39 @@ describe('applyReviewedCallReschedule', () => {
     expect(conn.events.indexOf('scheduled_services:update-lock')).toBeLessThan(conn.events.indexOf('reschedule_log:select'));
     expect(guard).not.toHaveBeenCalled();
     expect(conn.inserts).toHaveLength(0);
+  });
+
+  test('an open portal request is refused under the selected visit lock before proposal mutation', async () => {
+    const conn = makeConn({ portalRequest: { id: 'request-1', status: 'new' } });
+    const rebooker = mover(conn);
+    const guard = jest.fn();
+
+    await expect(applyReviewedCallReschedule(applyArgs(conn, rebooker, guard))).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining('portal reschedule request'),
+    });
+    expect(conn.events.indexOf('scheduled_services:update-lock')).toBeLessThan(conn.events.indexOf('service_requests:select'));
+    expect(guard).not.toHaveBeenCalled();
+    expect(conn.inserts).toHaveLength(0);
+  });
+
+  test('a resolved portal request is history and does not block a reviewed no-op', async () => {
+    const alreadyThere = visit({ scheduled_date: '2026-09-15', window_start: '14:00:00', window_end: '15:00:00' });
+    const conn = makeConn({ lockedVisit: alreadyThere, portalRequest: { id: 'request-1', status: 'resolved' } });
+    const guard = jest.fn(async () => { conn.events.push('proposal:guard'); });
+
+    const result = await applyReviewedCallReschedule({ ...applyArgs(conn, mover(conn), guard), candidates: [alreadyThere] });
+    expect(result).toEqual({ outcome: 'noop', visitId: VISIT_ID });
+    expect(guard).toHaveBeenCalledTimes(1);
+    expect(conn.inserts.map(({ table }) => table)).toEqual(['activity_log']);
+  });
+
+  test('reviewed destinations must fit the canonical admin appointment window', () => {
+    const candidate = visit({ estimated_duration_minutes: 60 });
+    const late = { ...extraction, scheduling: { ...extraction.scheduling, proposed_start_at: '2026-09-15T20:00:00-04:00' } };
+
+    expect(() => planRescheduleFromCall({ v2: late, call, customer, candidates: [candidate], now: NOW,
+      humanOverride: { visitId: VISIT_ID } })).toThrow('end by 20:00');
   });
 
   test.each([

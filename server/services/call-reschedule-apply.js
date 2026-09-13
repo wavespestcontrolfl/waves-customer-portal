@@ -73,6 +73,7 @@ const { phoneMatchDigits } = require('../utils/phone');
 const { KNOWN_CALLER_PHONE_COLS } = require('../utils/known-caller-phone');
 const { stripServiceSuffixes } = require('../utils/service-normalizer');
 const { serviceNameCandidates } = require('./service-completion-profiles');
+const { assertAdminAppointmentWindow } = require('./scheduling/window-rules');
 const { isEnabled } = require('../config/feature-gates');
 const { createHash } = require('crypto');
 const logger = require('./logger');
@@ -149,6 +150,17 @@ async function pendingSmsOffer(conn, customerId, serviceId, now) {
     .where('created_at', '>', new Date(now.getTime() - OFFER_WINDOW_MS))
     .select('id', 'notes');
   return (rows || []).find(offerOptions) || null;
+}
+
+// Canonical predicate shared by the automatic and staff-reviewed paths. A
+// resolved request is only history; every other lifecycle remains owned by
+// the portal request workflow and must stand a reschedule down.
+function openPortalRequest(conn, customerId, serviceId) {
+  return conn('service_requests')
+    .where({ customer_id: customerId, category: 'schedule_change' })
+    .whereNotIn('status', ['resolved', 'closed', 'cancelled'])
+    .where('description', 'like', `Appointment ${serviceId}:%`)
+    .first('id');
 }
 
 /**
@@ -275,6 +287,13 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
     || DEFAULT_DURATION_MINUTES;
   const newEnd = deriveWindowEnd(newStart, duration);
   if (!newEnd) return skip('window_runs_past_midnight', { visitId: visit.id });
+  if (humanOverride) {
+    // This is an admin-authored move even though the requested wall clock came
+    // from a call. Keep it on the same hour/day-end contract as every other
+    // admin schedule writer; the rebooker option below repeats the rule for
+    // every independently-sized occurrence in a recurring move.
+    assertAdminAppointmentWindow({ windowStart: newStart, windowEnd: newEnd });
+  }
 
   const interiorNote = typeof v2.property?.access_notes === 'string' && v2.property.access_notes.trim()
     ? v2.property.access_notes.trim().slice(0, 300)
@@ -345,6 +364,9 @@ async function applyReviewedCallReschedule({ conn, call, v2, customer, candidate
       || snapshotColumns.some((key) => (lockedService[key] ?? null) !== (visit[key] ?? null))) {
       throw Object.assign(new Error('The visit changed. Refresh the proposal.'), { status: 409 });
     }
+    if (await openPortalRequest(trx, customer.id, visit.id)) {
+      throw Object.assign(new Error('A customer portal reschedule request is still open. Use the schedule editor.'), { status: 409 });
+    }
     if (await pendingSmsOffer(trx, customer.id, visit.id, now)) {
       throw Object.assign(new Error('A text-message reschedule offer is still open. Use the schedule editor.'), { status: 409 });
     }
@@ -392,6 +414,8 @@ async function applyReviewedCallReschedule({ conn, call, v2, customer, candidate
       skipCallFollowUpShift: true,
       sourceSurface: 'call_reschedule',
       operationKey,
+      adminWindowRules: true,
+      overlapAdvisory: true,
       // Rechecked by the unit mover under its planning lock, before any
       // member moves. A newly joined sibling was never part of this approval.
       memberGuard: async ({ members }) => {
@@ -456,7 +480,7 @@ async function applyReviewedCallReschedule({ conn, call, v2, customer, candidate
       logger.warn(`[call-reschedule] board broadcast failed for ${visit.id}: ${err.message}`);
     }
   }
-  return { outcome: 'applied', visitId: visit.id, newDate: plan.newDate, newWindow: plan.newWindow };
+  return { outcome: 'applied', visitId: visit.id, newDate: plan.newDate, newWindow: plan.newWindow, warnings: result?.warnings || [] };
 }
 
 // Resolve the call's open reschedule cards and re-sync review_status —
@@ -544,11 +568,6 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
   // a newer customer preference (GH codex #4204 r6 P1); the automation stands
   // down and leaves the whole request to staff. Predicate mirrors the dedup
   // lookup routes/schedule.js runs against its own rows.
-  const openPortalRequest = (trx, serviceId) => trx('service_requests')
-    .where({ customer_id: settled.customer_id, category: 'schedule_change' })
-    .whereNotIn('status', ['resolved', 'closed', 'cancelled'])
-    .where('description', 'like', `Appointment ${serviceId}:%`)
-    .first('id');
   // An unanswered reschedule-OPTIONS text is a live offer: reschedule-sms's
   // reply handler still honors a '1' or '2' for seven days and rebooks that
   // row's own visit onto the offered slot, which would drag the visit this
@@ -597,7 +616,7 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
     return { outcome: 'skipped', reason: plan.reason, visitId: plan.visitId || null };
   }
   const visit = candidates.find((r) => r.id === plan.visitId);
-  if (await openPortalRequest(conn, plan.visitId)) {
+  if (await openPortalRequest(conn, settled.customer_id, plan.visitId)) {
     await stampSkipOnCards(conn, call.id, { reason: 'portal_request_open', visitId: plan.visitId });
     return { outcome: 'skipped', reason: 'portal_request_open', visitId: plan.visitId };
   }
@@ -633,7 +652,7 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
     // touches only notes/updated_at, neither of which is in this path's CAS,
     // so an unserialized check could be overwritten (GH codex #4204 r7 P2).
     await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('id');
-    const portalRequest = await openPortalRequest(trx, visit.id);
+    const portalRequest = await openPortalRequest(trx, settled.customer_id, visit.id);
     // Under the visit's row lock, taken just above. The rebooker writes its
     // own reschedule_log row AFTER this guard, and that row carries no
     // options, so this never stands down on the move it is guarding.

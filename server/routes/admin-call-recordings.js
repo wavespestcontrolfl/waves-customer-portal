@@ -288,7 +288,7 @@ router.post('/proposals/:id/preview', async (req, res, next) => {
     // Render the identity covered by this hash, not a potentially older list row.
     const { id, status, scheduled_date, current_window, service_name, property } = p.selected;
     res.json({ preview_hash: p.preview_hash, visit_id: p.selected.id, series: p.series,
-      selected: { id, status, scheduled_date, current_window, service_name, property },
+      selected: { id, status, scheduled_date, current_window, service_name, property, display_address: p.displayAddress },
       customer: { id: p.customer.id, first_name: p.customer.first_name, last_name: p.customer.last_name },
       quote: p.card.payload.reschedule_proposal.quote,
       from: p.plan.from || null, new_date: p.plan.newDate, new_window: p.plan.newWindow });
