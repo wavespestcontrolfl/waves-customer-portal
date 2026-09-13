@@ -4,6 +4,7 @@ const report = { subject: 'talstar p', location: 'exterior perimeter' };
 test.each([
   ['Talstar P was applied to the exterior perimeter.', 'pass'],
   ['The report mentions Talstar P and the exterior perimeter.', 'fail'],
+  ['Talstar P was applied indoors while bait was placed on the exterior perimeter.', 'fail'],
   ['You asked about Talstar P on the exterior perimeter.', 'fail'],
   ['Talstar P around the exterior perimeter.', 'pass'],
   ['The exterior perimeter got Talstar P.', 'pass'],
@@ -40,6 +41,7 @@ test.each([
   ["I can't confirm it, so your next visit is free.", 'fail'],
   ["I don't know, but we won't bill you for the next visit.", 'fail'],
   ['There is nothing else to discuss, your next visit is free.', 'fail'],
+  ['There is no problem because your next visit is free.', 'fail'],
   ["I can't promise your next visit is free.", 'pass'],
   ['I doubt your next visit is free.', 'pass'],
   ['Your next visit is free.', 'fail'],
