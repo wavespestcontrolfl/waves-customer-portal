@@ -22,6 +22,7 @@ const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
 const { etDateString } = require('../utils/datetime-et');
 const { renderRequiredSmsTemplate } = require('./sms-template-renderer');
+const visitRuns = require('./lawn-visit-runs');
 
 // Structured-output contract for the photo-quality gate (llm/call.js
 // jsonSchema). The weighted score and the usable flag decide the verdict.
@@ -125,48 +126,88 @@ async function reportInsertData(reportData) {
 // that cannot be written therefore leaves an in-flight claim, not delivery
 // evidence, and callers can tell the difference.
 async function claimNotificationSend(assessmentId) {
-  return db('lawn_assessments').where({ id: assessmentId })
-    .where((q) => q.whereNull('notification_sent').orWhere('notification_sent', false))
-    .update({ notification_sent: true, notification_sent_at: null });
+  return visitRuns.claimNotificationAttempt(assessmentId, db);
 }
 
-// A pre-dispatch throw, or a handed-off result that neither delivered nor
-// created a durable queue obligation and explicitly proves not_sent, frees the
-// claim. sent:true includes dispatcher-owned scheduled delivery.
-async function releaseUnhandedClaim(assessmentId, claimed, handedOff, result) {
-  if (!claimed || (handedOff && (result?.sent || result?.deliveryOutcome !== 'not_sent'))) return;
-  await releaseNotificationSend(assessmentId, null);
+const DEFINITE_UNSENT_REASONS = new Set(['customer_not_found', 'type_disabled', 'unknown_type']);
+
+function normalizeNotificationResult(result) {
+  if (!result || result.deliveryOutcome) return result;
+  if (result.sent === true) return { ...result, deliveryOutcome: 'accepted' };
+  const reason = result.results?.error || result.results?.reason;
+  if (result.sent === false && DEFINITE_UNSENT_REASONS.has(reason)) {
+    return { ...result, deliveryOutcome: 'not_sent' };
+  }
+  return result.sent === false ? { ...result, deliveryOutcome: 'uncertain' } : result;
 }
 
-async function settleNotificationSend(assessmentId) {
-  await db('lawn_assessments').where({ id: assessmentId }).update({ notification_sent_at: new Date() });
+function notificationResultFromError(err) {
+  const providerOutcome = err?.providerOutcome;
+  if (!providerOutcome || typeof providerOutcome !== 'object') return null;
+  const deliveryOutcome = providerOutcome.deliveryOutcome
+    || (providerOutcome.sent === true ? 'accepted' : null);
+  if (!['accepted', 'uncertain', 'not_sent'].includes(deliveryOutcome)) return null;
+  return {
+    sent: providerOutcome.sent === true,
+    deliveryOutcome,
+    results: { sms: `error: ${providerOutcome.code || err.message}` },
+    smsResult: { ...providerOutcome, deliveryOutcome },
+  };
+}
+
+// Only a result that explicitly proves no handoff and created no durable queue
+// frees the claim. An arbitrary dispatcher throw is unknown and stays fenced.
+async function releaseUnhandedClaim(assessmentId, claim, result) {
+  if (!claim || result?.sent || result?.deliveryOutcome !== 'not_sent') return;
+  await releaseNotificationSend(assessmentId, claim.attemptId, result);
+}
+
+async function settleNotificationSend(assessmentId, attemptId) {
+  await visitRuns.settleNotificationAttempt(assessmentId, attemptId, db);
 }
 
 // Only a definite non-delivery frees the claim.
-async function resolveUnsentClaim(assessmentId, result) {
-  const outcome = result?.deliveryOutcome || 'not_sent';
+async function resolveUnsentClaim(assessmentId, attemptId, result) {
+  const outcome = result?.deliveryOutcome || 'uncertain';
   if (outcome !== 'not_sent') {
     logger.warn(`[lawn-intel] assessment ${assessmentId}: notification outcome ${outcome}; claim settled, never re-sent`);
-    await settleNotificationSend(assessmentId);
+    await settleNotificationSend(assessmentId, attemptId);
     return;
   }
-  await releaseNotificationSend(assessmentId, result);
+  await releaseNotificationSend(assessmentId, attemptId, result);
 }
 
-async function releaseNotificationSend(assessmentId, result) {
-  logger.warn(`[lawn-intel] assessment ${assessmentId}: no notification channel delivered (${JSON.stringify(result?.results || {})}); released for re-send`);
-  await db('lawn_assessments').where({ id: assessmentId }).update({ notification_sent: false, notification_sent_at: null });
+async function releaseNotificationSend(assessmentId, attemptId, result) {
+  try {
+    const released = await visitRuns.releaseNotificationAttempt(assessmentId, attemptId, db);
+    if (released) logger.warn(`[lawn-intel] assessment ${assessmentId}: no notification channel delivered (${JSON.stringify(result?.results || {})}); released for re-send`);
+    return released;
+  } catch (err) {
+    // Provider non-delivery is the only authority for retry. Preserve that
+    // evidence independently if the assessment release itself could not commit.
+    if (attemptId && result?.sent !== true && result?.deliveryOutcome === 'not_sent'
+      && !result.notificationQueued) {
+      try {
+        await visitRuns.recordNotificationNotSent(assessmentId, attemptId, db);
+      } catch (evidenceErr) {
+        logger.error(`[lawn-intel] assessment ${assessmentId}: notification non-delivery evidence write failed: ${evidenceErr.message}`);
+      }
+      err.notificationResult = result;
+    }
+    throw err;
+  }
 }
 
 // The normal scheduled-SMS rail owns an after-hours retry even when the lawn
 // recovery sweep is off. Persist identity, never a body that can outlive its
 // copy seal. The registry dispatch reacquires ownership and renders on replay.
-async function deferAssessmentNotification(assessment, customer, nextAllowedAt) {
+async function deferAssessmentNotification(assessment, customer, nextAllowedAt, attemptId) {
   return db.transaction(async (trx) => {
     const current = await trx('lawn_assessments').where({ id: assessment.id }).forUpdate().first();
     if (!current?.notification_sent || current.notification_sent_at) return false;
-    const run = await trx('lawn_assessment_runs').where({ assessment_id: assessment.id }).first('id');
+    const run = await trx('lawn_assessment_runs').where({ assessment_id: assessment.id }).forUpdate().first();
     if (!run) throw new Error('Deferred lawn notification requires its stored run');
+    if (run.reconciliation?.notification?.attempt_id !== attemptId) return false;
     const existing = await trx('sms_log').where({ customer_id: customer.id })
       .whereIn('status', ['scheduled', 'sending'])
       .whereRaw("metadata->>'entry_point' = ? AND metadata->>'assessment_id' = ?",
@@ -190,9 +231,10 @@ async function deferAssessmentNotification(assessment, customer, nextAllowedAt) 
         refresh_customer_phone: true,
       }),
     });
-    // Obligation creation and proven-unsent claim release must commit together.
-    await trx('lawn_assessments').where({ id: assessment.id })
-      .update({ notification_sent: false, notification_sent_at: null });
+    // Obligation creation and exact-attempt claim release commit together.
+    if (!(await visitRuns.releaseNotificationAttempt(assessment.id, attemptId, trx))) {
+      throw Object.assign(new Error('Deferred lawn notification attempt ownership lost'), { code: 'LAWN_NOTIFICATION_ATTEMPT_LOST' });
+    }
     return true;
   });
 }
@@ -275,10 +317,10 @@ const LawnIntelligence = {
   // claim and at the provider handoff; recovery passes its lease/copy check
   // so provider preparation cannot outlive ownership and still send.
   async sendAssessmentNotification(assessmentId, options) {
-    let claimed = false;
-    let handedOff = false;
+    let claim = null;
     let dispatchResult = null;
     try {
+      await visitRuns.recoverNotificationNotSent(assessmentId, db);
       const assessment = await db('lawn_assessments').where({ id: assessmentId, confirmed_by_tech: true }).first();
       // service_id set → the visit's completion text carries the report link.
       if (!assessment || assessment.notification_sent || assessment.service_id) return null;
@@ -309,10 +351,10 @@ const LawnIntelligence = {
       // looking unsent, and delivery recovery would text the customer a second
       // time. At-most-once is the right side to fail on here: the report is in
       // the portal either way, and a duplicate text is not retractable.
-      if (!(await claimNotificationSend(assessmentId))) return null;
-      claimed = true;
+      claim = await claimNotificationSend(assessmentId);
+      if (!claim) return null;
       const NotificationDispatcher = require('./notification-dispatcher');
-      const result = await NotificationDispatcher.notify(customer.id, 'service_complete', {
+      const result = normalizeNotificationResult(await NotificationDispatcher.notify(customer.id, 'service_complete', {
         smsMessage,
         emailSubject: `Your Lawn Health Report — Score: ${overall}/100`,
         emailBody: smsMessage,
@@ -323,39 +365,47 @@ const LawnIntelligence = {
           },
         } : {}),
         ...(options?.scheduledSmsLogId ? { scheduledSmsLogId: options.scheduledSmsLogId } : {}),
-      });
-      // Past this line the dispatcher has run, so a later throw — a failed
-      // settle write, say — says nothing about whether a text went out. Only a
-      // throw BEFORE this point is a definite non-delivery.
-      handedOff = true;
+      }));
+      // Past this line the dispatcher has returned a normalized outcome. A
+      // later failed write cannot change that provider evidence.
       dispatchResult = result;
 
       if (typeof options?.beforeSend === 'function' && !options?.scheduledSmsLogId
         && result?.deliveryOutcome === 'not_sent' && result.smsResult?.code === 'QUIET_HOURS_HOLD'
         && result.smsResult.deferred && result.smsResult.nextAllowedAt) {
-        const queued = await deferAssessmentNotification(assessment, customer, result.smsResult.nextAllowedAt);
+        const queued = await deferAssessmentNotification(
+          assessment, customer, result.smsResult.nextAllowedAt, claim.attemptId,
+        );
         if (queued) return { ...result, notificationQueued: true, deferred: true, nextAllowedAt: result.smsResult.nextAllowedAt };
       }
 
-      if (result?.sent) await settleNotificationSend(assessmentId);
+      if (result?.sent) await settleNotificationSend(assessmentId, claim.attemptId);
       // Nothing delivered (email-preferring customer, blocked SMS) is not a
       // send: release the claim so the miss stays visible and re-sendable
       // rather than being permanently recorded as "notified". An accepted or
       // UNCERTAIN handoff keeps its claim — the carrier may already have the
       // text, and recovery must not send a second one to find out.
-      if (!result?.sent) await resolveUnsentClaim(assessmentId, result);
+      if (!result?.sent) await resolveUnsentClaim(assessmentId, claim.attemptId, result);
 
       return result;
     } catch (err) {
       if (isOwnershipLoss(err)) throw err;
+      if (err.notificationResult) {
+        logger.error(`[lawn-intel] sendAssessmentNotification failed: ${err.message}`);
+        throw err;
+      }
+      const providerResult = notificationResultFromError(err);
+      if (!dispatchResult && providerResult) {
+        dispatchResult = providerResult;
+      }
       // Preserve delivered, durably queued, accepted, or uncertain evidence.
       // Release only a proven-unsent result that transferred no delivery
       // ownership; otherwise recovery could either strand work or send twice.
-      await releaseUnhandedClaim(assessmentId, claimed, handedOff, dispatchResult);
+      await releaseUnhandedClaim(assessmentId, claim, dispatchResult);
       logger.error(`[lawn-intel] sendAssessmentNotification failed: ${err.message}`);
       // A replay must retain provider evidence even when its local settlement
       // write fails. Its queue row can settle without sending a second copy.
-      if (options?.scheduledSmsLogId && handedOff) return dispatchResult;
+      if (options?.scheduledSmsLogId && dispatchResult) return dispatchResult;
       return null;
     }
   },

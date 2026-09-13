@@ -440,10 +440,10 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     deps.LawnIntel.sendAssessmentNotification.mockImplementation((id) => db.knex('lawn_assessments').where({ id }).update({ notification_sent: true, notification_sent_at: null }));
     const logger = require('../services/logger');
     logger.warn.mockClear();
-    await deliver(assessment.id, deps);
+    await expect(deliver(assessment.id, deps)).rejects.toMatchObject({ code: 'LAWN_DELIVERY_STEP_INCOMPLETE' });
     expect(logger.warn).toHaveBeenCalledWith('[lawn-visit-delivery] completing with an unsettled notification claim', { assessmentId: assessment.id });
     expect(deps.LawnIntel.sendAssessmentNotification).toHaveBeenCalledTimes(1);
-    expect((await stored(assessment.id)).pipeline_completed_at).toBeInstanceOf(Date);
+    expect((await stored(assessment.id)).pipeline_completed_at).toBeNull();
   });
 
   test.each(['_sanitizationFinal', '_groundedInApplications'])('recovery preserves finalized copy with only %s in the payload', async (marker) => {

@@ -130,6 +130,10 @@ async function deliverConfirmedAssessment({ assessmentId, scheduledSmsLogId }, d
   let notificationResult = null;
   try {
     await guard();
+    // A prior attempt may have proved non-delivery but failed to release its
+    // assessment claim. Repair only that current UUID journal before deciding
+    // which delivery steps remain owed.
+    await runs.recoverNotificationNotSent(assessmentId, knex);
     // Weather may legitimately be unavailable. It is an enrichment, while the
     // steps below require their own durable proof before proceeding. The stored
     // snapshot is the VISIT's conditions and feeds later reports and outcome
@@ -251,6 +255,9 @@ async function replayDeferredNotification(meta, deps = {}) {
       ) AS pipeline_live`, [staleAfterMs]),
       knex.raw('clock_timestamp() AS database_now'),
     );
+  // Consume only exact-attempt not_sent evidence before a claimed assessment
+  // can take the replay's terminal uncertain branch.
+  await runs.recoverNotificationNotSent(meta.assessment_id, knex);
   const snapshot = await loadSnapshot();
   const blocked = (code) => ({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code });
   const busy = (state) => {
