@@ -12,6 +12,7 @@ test.each([
 
 test.each([
   ['If the report is correct, Talstar P was applied to the exterior perimeter.', 'Talstar P was applied', true],
+  ['If eligible, then your refund was processed.', 'your refund was processed', true],
   ['Unless the report is wrong, Talstar P was applied to the exterior perimeter.', 'Talstar P was applied', true],
   ['If the report is correct, Talstar P and bait were applied.', 'bait were applied', true],
   ["I can't confirm Talstar P or bait was applied.", 'bait was applied', true],
