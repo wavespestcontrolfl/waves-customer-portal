@@ -96,6 +96,8 @@ test.each([
   ['Bait was applied indoors, Talstar P was applied to the exterior perimeter.', 'pass'],
   ['Talstar P may have been applied to the exterior perimeter.', 'fail'],
   ['The technician may have applied Talstar P to the exterior perimeter.', 'fail'],
+  ['The technician failed to have applied Talstar P to the exterior perimeter.', 'fail'],
+  ['The technician applied Talstar P to the exterior perimeter before failing to print the report.', 'pass'],
   ['Talstar P might have been applied to the exterior perimeter.', 'fail'],
   ['Perhaps, Talstar P was applied to the exterior perimeter.', 'fail'],
   ['Talstar P was applied to the exterior perimeter, possibly.', 'fail'],
