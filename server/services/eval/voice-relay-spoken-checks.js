@@ -555,7 +555,11 @@ const PAYMENT_INHERITED_OUTCOME_RE = new RegExp(
   `\\b(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET}\\b(?<bridge>[^.!?;—–]{0,120}?)\\b(?:and|but|yet)\\s+(?<predicate>${PAYMENT_INHERITED_PREDICATE})\\b`,
   'gi',
 );
-const PAYMENT_INTERVENING_SUBJECT_RE = /\b(?:because|while|although|since|as|and|but|yet)\s+(?:(?:(?:the|your|our|this|that|an?|his|her|their)\s+)(?!payment\b|(?:(?:credit|debit|prepaid)\s+)?card\b|charge\b|transaction\b)[a-z][\w'-]*(?:\s+[a-z][\w'-]*){0,3}|(?:appointment|estimate|service|visit|invoice|receipt|account|request|office|manager|technician|customer))\s+(?:is|was|are|were|has|had|will|should|does|did)\b/i;
+const PAYMENT_NON_TARGET_ANTECEDENT = '(?:appointment|estimate|service|visit|invoice|receipt|account|request|office|manager|technician|customer)';
+const PAYMENT_INTERVENING_SUBJECT_RE = new RegExp(
+  `\\b(?:because|while|although|since|as|and|but|yet)\\s+(?:(?:(?:the|your|our|this|that|an?|his|her|their)\\s+)(?!payment\\b|(?:(?:credit|debit|prepaid)\\s+)?card\\b|charge\\b|transaction\\b)[a-z][\\w'-]*(?:\\s+[a-z][\\w'-]*){0,3}|${PAYMENT_NON_TARGET_ANTECEDENT})\\s+(?:is|was|are|were|has|had|will|should|does|did)\\b`,
+  'i',
+);
 const PAYMENT_TARGET_ES = '(?:(?:su|el|la|este|esta)\\s+)?(?:pago|tarjeta|cargo|transacci[oó]n)';
 const PAYMENT_RESULT_ES = '(?:aprobado|aprobada|procesado|procesada|completado|completada|recibido|recibida|cargado|cargada|cobrado|cobrada|aceptado|aceptada)';
 const PAYMENT_OUTCOME_ES_RE = new RegExp(
@@ -563,7 +567,7 @@ const PAYMENT_OUTCOME_ES_RE = new RegExp(
   'gi',
 );
 const PAYMENT_OUTCOME_RES = Object.freeze([PAYMENT_OUTCOME_RE, PAYMENT_FUTURE_OUTCOME_RE, PAYMENT_OUTCOME_ES_RE]);
-const PAYMENT_CONDITION_RE = /^\s*(?:(?:after|once|when)(?=\s+(?:i|you|we|they|he|she|it|the|your|our|this|that|submitt(?:ed|ing)|enter(?:ed|ing)|provid(?:ed|ing)|complet(?:ed|ing)|authori[sz](?:ed|ing)|paying|paid)\b)|cuando|despu[eé]s\s+de\s+que|una\s+vez\s+que)\b/i;
+const PAYMENT_CONDITION_RE = /^\s*(?:(?:after|before|once|when)(?=\s+(?:i|you|we|they|he|she|it|the|your|our|this|that|submitt(?:ed|ing)|enter(?:ed|ing)|provid(?:ed|ing)|complet(?:ed|ing)|authori[sz](?:ed|ing)|paying|paid)\b)|cuando|despu[eé]s\s+de\s+que|una\s+vez\s+que)\b/i;
 const PAYMENT_PREREQUISITE_RE = /^\s*(?:after|once|when)\b[^.!?;,]{0,80}\b(?:submit(?:ted)?|enter(?:ed)?|provide(?:d)?|complete(?:d)?|authori[sz](?:e|ed)|pay|paid)\b/i;
 const PAYMENT_PAST_OUTCOME_RE = new RegExp(
   `\\b(?:was|were|had|did|went|got|fue|he|hemos|han|realiz[oó]|proces[oó]|complet[oó])\\b|\\b${PAYMENT_ACTOR}\\s+(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_TRANSITIVE_SUCCESS}\\b|\\b(?:${PAYMENT_TARGET}|that|it)\\s+(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_INTRANSITIVE_SUCCESS}\\b`,
@@ -609,11 +613,19 @@ function paymentOutcomeHasTemporalCondition(text, claim, claimStart, outcome, ou
   return (outcomeCondition && (!pastOutcome || completedPresentPerfect))
     || (attachedPrerequisite && !pastOutcome && !completedPresentPerfect);
 }
+function paymentOutcomePronounHasNonTargetAntecedent(text, match) {
+  if (!/^(?:it|that)\b/i.test(match[0])) return false;
+  const sentencePrefix = text.slice(0, match.index).split(/[.!?;]/).pop();
+  const payment = [...sentencePrefix.matchAll(new RegExp(`\\b${PAYMENT_TARGET}\\b`, 'gi'))].pop();
+  const nonTarget = [...sentencePrefix.matchAll(new RegExp(`\\b${PAYMENT_NON_TARGET_ANTECEDENT}\\b`, 'gi'))].pop();
+  return Boolean(nonTarget && (!payment || nonTarget.index > payment.index));
+}
 /** value: true */
 function no_payment_outcome(value, record, { spoken }) {
   for (const text of spoken) {
     for (const outcomeRe of PAYMENT_OUTCOME_RES) {
       for (const match of text.matchAll(outcomeRe)) {
+        if (paymentOutcomePronounHasNonTargetAntecedent(text, match)) continue;
         const claim = claimContext(text, match.index, match.index + match[0].length);
         const [claimStart, claimEnd] = clauseBounds(text, match.index);
         const matchEnd = match.index + match[0].length;
