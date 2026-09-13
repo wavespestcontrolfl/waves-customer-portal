@@ -1203,7 +1203,7 @@ const SAFETY_REFUSAL_PREFIX = EPISTEMIC_HEDGE_PREFIX_SOURCE;
 
 const SAFETY_REFUSAL_VERB_RE = new RegExp(`${SAFETY_REFUSAL_PREFIX}\\b[\"\\x27\\u201c\\u2018(]?`, 'gi');
 
-const SAFETY_CLAUSE_BOUNDARY_TOKEN_RE = /[.!?;—–]|\b(?:but|though|however|that said)\b|,|\b(?:and|or|so|then|while)\b/gi;
+const SAFETY_CLAUSE_BOUNDARY_TOKEN_RE = new RegExp(`${CLAUSE_BOUNDARY_TOKEN_RE.source}|,|\\bthat said\\b`, 'gi');
 
 const SAFETY_CLAUSE_HARD_BOUNDARY_RE = /^(?:[.!?;—–]|but|though|however|that said)$/i;
 
