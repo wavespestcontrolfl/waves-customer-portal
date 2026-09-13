@@ -1229,7 +1229,7 @@ function cardSpokenDigits(text) {
 // Round-7 P1: an excluded amount, phone, zip, address or digit count explains
 // only the digit run it contains. Keeping these as global span matchers stops
 // "$129" elsewhere in the clause from hiding "I heard four".
-const CARD_PHONE_VALUE = '(?:\\(\\d{3}\\)|\\b\\d{3})[\\s.-]\\d{3}[\\s.-]\\d{4}\\b';
+const CARD_PHONE_VALUE = '(?:(?:\\(\\d{3}\\)|\\b\\d{3})[\\s.-]\\d{3}[\\s.-]\\d{4}\\b|\\b\\d{10}\\b)';
 const CARD_MENU_OPTION_RE = /\b(?:option|choice|key)\s+(?:number\s+)?\d+\b|\bpress\s+\d+\b/gi;
 const CARD_COUNT_NOUN = '(?:applications?|treatments?|services?|visits?|appointments?|accounts?|payments?|transactions?|attempts?|options?|cards?|rooms?|bedrooms?|bathrooms?|properties|homes?|lawns?|yards?|dogs?|cats?|pets?|animals?|children|kids?|bab(?:y|ies)|adults?|people|men|women|mice|geese|feet|fish|sheep)';
 const CARD_MONTH_DATE_VALUE = `(?:${MONTHS})\\s+(?:(?:19|20)\\d{2}|\\d{1,2}(?:st|nd|rd|th)?(?:,?\\s+(?:19|20)\\d{2})?)`;
