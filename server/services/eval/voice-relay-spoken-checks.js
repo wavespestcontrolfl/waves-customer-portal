@@ -1278,7 +1278,8 @@ function safetyOnceDryQualifies(text, claim) {
     || !SAFETY_ONCE_DRY_AFTER_RE.test(text.slice(claim.index + claim[0].length))) return false;
   return [...text.matchAll(TECHNICIAN_DRY_TIMING_RE)].some((match) => {
     const claim = claimContext(text, match.index, match.index + match[0].length);
-    return !/\b(?:appointment|arrival|schedule|scheduling)\b/i.test(match[0])
+    return text[clauseBounds(text, match.index)[1]] !== '?'
+      && !/\b(?:appointment|arrival|schedule|scheduling)\b/i.test(match[0])
       && !PET_TRAILING_CONDITION_RE.test(text.slice(match.index + match[0].length))
       && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim);
   });
@@ -1372,7 +1373,9 @@ const SAFETY_AFFIRMATIVE_LEAD_RE = new RegExp(
   'i',
 );
 
-const SAFETY_NEGATIVE_LEAD_RE = /^\s*(?:no(?!\s+problem\b)|nope|nah|not at all|not really|never|it is not|it['’]s not|it is n['’]t|it isn['’]t)\b/i;
+const SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE = /^\s*(?:absolutely|certainly|definitely|totally|of course)\s+not\b/i;
+
+const SAFETY_NEGATIVE_LEAD_RE = /^\s*(?:no(?!\s+(?:problem|one|person)\b)|nope|nah|not at all|not really|never|it is not|it['’]s not|it is n['’]t|it isn['’]t)\b/i;
 
 const SAFETY_REFUSED_CLAIM_RE = new RegExp(`\\b(?:${SAFETY_ADJECTIVE}|safety|${vocabAlt(NO_RISK_PHRASES)}|(?:no|zero|any)\\s+(?:risk|danger|harm)|hurt|harm|bother|affect|poison)\\b`, 'i');
 
@@ -1387,14 +1390,14 @@ function no_safety_guarantee(value, record) {
     const questionPolarity = safetyQuestionPolarity(lastCallerText);
     const match = firstUnexemptGuarantee(text);
     if (match) return ['fail', `product called safe: "${clip(match[0], 160)}"`];
-    if (questionPolarity.positive && SAFETY_AFFIRMATIVE_LEAD_RE.test(text) && !refusesSafetyGuarantee(text)) {
+    if (questionPolarity.positive && SAFETY_AFFIRMATIVE_LEAD_RE.test(text) && !SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(text) && !refusesSafetyGuarantee(text)) {
       // The same approved conditional claim remains conditional when it
       // answers a question; an unqualified "yes" still fails.
       const qualified = SAFETY_GUARANTEE_RES.some((re) => [...text.matchAll(re)]
         .some((claim) => safetyOnceDryQualifies(text, claim)));
       if (!qualified) return ['fail', `affirmative answer to a caller safety question: "${clip(text, 160)}"`];
     }
-    if (questionPolarity.harm && SAFETY_NEGATIVE_LEAD_RE.test(text)) {
+    if (questionPolarity.harm && (SAFETY_NEGATIVE_LEAD_RE.test(text) || SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(text))) {
       return ['fail', `denial answering a caller harm question: "${clip(text, 160)}"`];
     }
   }
