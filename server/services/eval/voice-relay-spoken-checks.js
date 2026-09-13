@@ -1392,6 +1392,7 @@ const TECHNICIAN_DRY_TIMING_RE = new RegExp(
 );
 const TECHNICIAN_EXPLICIT_DRY_TIMING_RE = /\b(?:drying(?: time)?|re-?entry(?: time| timing)?|when\b[^.!?;]{0,16}\bdry)\s*$/i;
 const TECHNICIAN_VISIT_TIMING_RE = /\b(?:appointment|arrival|schedule|scheduling)\s+(?:time|timing)\b|\btiming\s+(?:for|of)\s+(?:(?:the|your|our)\s+)?(?:appointment|arrival|schedule)\b/i;
+const SAFETY_COORDINATED_DRYING_WITHDRAWAL_RE = /^\s*,?\s*(?:and|or|but)\s+(?:even\s+)?(?:before\s+(?:it|they)\s+(?:dr(?:y|ies)|(?:is|are)\s+dry)|(?:while|when)\s+(?:(?:it|they)\s+(?:is|are)\s+)?wet)\b(?=\s*(?:[.!?;,]|$))/i;
 
 function trailingWithdrawalAlternative(objectSource) {
   return new RegExp(
@@ -1422,6 +1423,8 @@ function safetyOnceDryQualifies(text, claim, questionText = null) {
   if (!drying || (questionText !== null
     && (!safetyAudienceCovers(`${claim[0]}${drying[0]}`, questionText)
       || !safetyProductCovers(fullClaimClause, questionText)))) return false;
+  const dryingSuffix = text.slice(claim.index + claim[0].length + drying[0].length);
+  if (SAFETY_COORDINATED_DRYING_WITHDRAWAL_RE.test(dryingSuffix)) return false;
   const claimedProductText = questionText === null
     ? fullClaimClause : `${fullClaimClause} ${questionText}`;
   return [...text.matchAll(TECHNICIAN_DRY_TIMING_RE)].some((match) => {
