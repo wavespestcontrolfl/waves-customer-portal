@@ -137,6 +137,22 @@ async function deferredNotificationStillWanted(notificationType, customerId, now
   }
 }
 
+// Canonical SMS outcome for callers holding a durable send-once claim:
+// 'accepted' | 'uncertain' | 'not_sent'. Only a definite 'not_sent' is safe to
+// retry. A throw past the provider carries the KNOWN outcome on the error;
+// without one the send is uncertain, never assumed undelivered.
+function outcomeOfResult(smsResult) {
+  if (smsResult.deliveryOutcome) return smsResult.deliveryOutcome;
+  return smsResult.sent ? 'accepted' : 'not_sent';
+}
+
+function outcomeOfThrow(err) {
+  const known = err && err.providerOutcome;
+  if (known && known.deliveryOutcome) return known.deliveryOutcome;
+  if (known && known.sent) return 'accepted';
+  return 'uncertain';
+}
+
 const NotificationDispatcher = {
 
   /**
@@ -148,7 +164,7 @@ const NotificationDispatcher = {
    * @returns {{ sent: boolean, channel: string|null, results: object }}
    */
   async notify(customerId, notificationType, {
-    smsMessage, emailSubject, emailBody, preSendCheck,
+    smsMessage, emailSubject, emailBody, preSendCheck, scheduledSmsLogId,
   } = {}) {
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) {
@@ -171,18 +187,10 @@ const NotificationDispatcher = {
       return { sent: false, channel: null, results: { reason: 'type_disabled' } };
     }
 
-    // Check quiet hours (shared helper — also enforced by the deferred-
-    // replay recheck so a queued notification honors the same window)
-    if (inCustomerQuietHours(prefs)) {
-      logger.info(`[notify] Quiet hours active for customer ${customerId} (${prefs.quiet_hours_start}-${prefs.quiet_hours_end})`);
-      return { sent: false, channel: null, results: { reason: 'quiet_hours' } };
-    }
-
-    // Determine channel
+    // Resolve the existing channel/consent rules before a guarded quiet-hours
+    // return. Only a call that would otherwise have an SMS leg may hand its
+    // recovery owner a durable, retryable obligation.
     const channel = prefs?.[typeConfig.channel] || 'sms';
-    const results = {};
-    let sent = false;
-
     // Marketing-purpose SMS is opt-IN (TCPA), not merely not-opted-out:
     // the consentBasis below reads stored prefs as captured consent, so the
     // SMS leg requires an EXPLICIT true on the notification type's OWN
@@ -196,13 +204,54 @@ const NotificationDispatcher = {
     const marketingConsentColumn = purpose === 'marketing_seasonal' ? 'seasonal_tips' : 'marketing_offers';
     const marketingSmsOptIn = !marketingPurpose
       || (prefs && prefs[marketingConsentColumn] === true);
+    const smsEligible = Boolean(
+      ['sms', 'both', 'push'].includes(channel) && smsMessage && customer.phone,
+    );
+
+    // Check quiet hours (shared helper — also enforced by the deferred-
+    // replay recheck so a queued notification honors the same window)
+    if (inCustomerQuietHours(prefs)) {
+      logger.info(`[notify] Quiet hours active for customer ${customerId} (${prefs.quiet_hours_start}-${prefs.quiet_hours_end})`);
+      if (typeof preSendCheck === 'function'
+        && smsEligible && marketingSmsOptIn
+        && !customerQuietHoursCoverSendWindow(prefs)) {
+        const nextAllowedAt = nextCustomerQuietHoursEndET(prefs).toISOString();
+        const smsResult = {
+          sent: false,
+          blocked: true,
+          deliveryOutcome: 'not_sent',
+          code: 'QUIET_HOURS_HOLD',
+          reason: 'customer_quiet_hours',
+          retryable: true,
+          deferred: true,
+          nextAllowedAt,
+        };
+        return {
+          sent: false,
+          channel,
+          results: { sms: 'blocked: QUIET_HOURS_HOLD' },
+          deliveryOutcome: 'not_sent',
+          smsResult,
+        };
+      }
+      return { sent: false, channel: null, results: { reason: 'quiet_hours' } };
+    }
+
+    const results = {};
+    let sent = false;
+    let smsDelivery = null;
+    // The SMS leg's canonical outcome ('accepted' | 'uncertain' | 'not_sent'),
+    // kept alongside `sent` for callers holding a durable send-once claim: only
+    // a definite 'not_sent' is safe to retry. An accepted-but-unaudited send
+    // throws with the outcome attached, and a lost outcome must read uncertain.
+    let smsOutcome = null;
 
     // Send SMS
-    if (['sms', 'both', 'push'].includes(channel) && smsMessage && customer.phone && !marketingSmsOptIn) {
+    if (smsEligible && !marketingSmsOptIn) {
       logger.info(`[notify] ${notificationType} SMS skipped — no stored marketing opt-in for customer ${customerId}`);
       results.sms = 'no_marketing_consent';
     }
-    if (['sms', 'both', 'push'].includes(channel) && smsMessage && customer.phone && marketingSmsOptIn) {
+    if (smsEligible && marketingSmsOptIn) {
       try {
         const smsResult = await sendCustomerMessage({
           to: customer.phone,
@@ -221,8 +270,11 @@ const NotificationDispatcher = {
           } : undefined,
           metadata: {
             original_message_type: notificationType,
+            ...(scheduledSmsLogId ? { scheduled_sms_log_id: scheduledSmsLogId } : {}),
           },
         });
+        smsDelivery = smsResult;
+        smsOutcome = outcomeOfResult(smsResult);
         if (smsResult.sent) {
           results.sms = 'sent';
           sent = true;
@@ -269,7 +321,22 @@ const NotificationDispatcher = {
           logger.warn(`[notify] SMS blocked/failed for ${customerId}: ${smsResult.code || smsResult.reason || 'unknown'}`);
         }
       } catch (err) {
-        logger.error(`[notify] SMS failed for ${customerId}: ${err.message}`);
+        // A throw past the provider carries the KNOWN outcome; without one the
+        // send is uncertain, never assumed undelivered.
+        smsOutcome = outcomeOfThrow(err);
+        if (err?.providerOutcome && typeof err.providerOutcome === 'object') {
+          smsDelivery = { ...err.providerOutcome };
+          if (smsOutcome === 'not_sent') {
+            // sendCustomerMessage attaches its initialized not_sent outcome to
+            // failures before provider handoff as well as classified provider
+            // refusals. Both are safe to retry unless the attached evidence
+            // explicitly says terminal/nonretryable.
+            const retryable = smsDelivery.retryable !== false && smsDelivery.terminal !== true;
+            smsDelivery.retryable = retryable;
+            smsDelivery.deferred = retryable;
+          }
+        }
+        logger.error(`[notify] SMS failed for ${customerId}: ${err.message} (outcome: ${smsOutcome})`);
         results.sms = `error: ${err.message}`;
       }
     }
@@ -285,7 +352,7 @@ const NotificationDispatcher = {
       results.email = 'unavailable: email channel not implemented';
     }
 
-    return { sent, channel, results };
+    return { sent, channel, results, deliveryOutcome: smsOutcome, ...(smsDelivery ? { smsResult: smsDelivery } : {}) };
   },
 };
 
