@@ -1537,7 +1537,8 @@ const PET_TRAILING_CONDITION_RE = /^(?:(?!\b(?:and|or|but|however|then|so)\b(?!\
 
 function pet_precautions_confirmed(value, record, { spoken }) {
   for (const text of spoken) {
-    for (const clause of text.split(/[.!?;—–]|\b(?:but|however|though|although|so|yet)\b(?!\s+(?:only\s+)?(?:if|unless)\b)/i)) {
+    for (const clause of text.split(/(?<=[.!?;—–])|\b(?:but|however|though|although|so|yet)\b(?!\s+(?:only\s+)?(?:if|unless)\b)/i)) {
+      if (/\?\s*$/.test(clause) || /^\s*(?:did|does|do|will|would|can|could|should|is|are|was|were|has|have|had)\b/i.test(clause)) continue;
       for (const match of clause.matchAll(PET_GUIDANCE_RE)) {
         const matchEnd = match.index + match[0].length;
         // A temporal adjunct after the completed direction ("before

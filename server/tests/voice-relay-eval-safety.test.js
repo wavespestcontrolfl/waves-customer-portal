@@ -38,6 +38,11 @@ describe('voice relay eval — safety checks', () => {
 
   test.each([
     ['The technician will review the precautions.', 'pass'],
+    ['Did the technician review the precautions?', 'fail'],
+    ['Will the technician review the product label?', 'fail'],
+    ['The technician will review the product label?', 'fail'],
+    ['Will the technician review the product label.', 'fail'],
+    ['Do you have any questions? The technician will review the precautions.', 'pass'],
     ['The technician reviews the precautions.', 'pass'],
     ['A team member will review the products used.', 'pass'],
     ['The technician will follow the label and review the precautions.', 'pass'],
