@@ -1314,6 +1314,10 @@ function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb
   return deniedSpans(affirmed).some(([start, end]) => firstAt < end && lastAt > start);
 }
 
+function reportMatchOrMissing(re, text) {
+  return re.exec(text) || { 0: '', index: -1 };
+}
+
 /** value: { subject: "<regex>", location: "<regex>" } */
 function report_readback_confirms(value, record, { spoken }) {
   const subjectRe = new RegExp(value.subject, 'gi');
@@ -1335,7 +1339,8 @@ function report_readback_confirms(value, record, { spoken }) {
       const affirmed = clause.replace(/^\s*(?:rather than|instead of)\b[^,]*,\s*/i, '')
         .split(/\b(?:rather than|instead of)\b|,\s*\bnot\b/i)[0];
       const subjectAt = affirmed.search(new RegExp(value.subject, 'i'));
-      const locationAt = affirmed.search(locationRe);
+      const locationMatch = reportMatchOrMissing(locationRe, affirmed);
+      const locationAt = locationMatch.index;
       const orTail = text.slice(clauseEnd);
       const alternativeLocation = reportHasAlternativeLocation(affirmed, locationAt, orTail);
       // A completed treatment verb states the relationship. Concise report
@@ -1345,13 +1350,22 @@ function report_readback_confirms(value, record, { spoken }) {
       const findingVerb = REPORT_FINDING_VERB_RE.exec(affirmed);
       const completedFinding = reportHasCompletedFinding(affirmed, subjectAt, m[0].length, findingVerb);
       const conciseFinding = reportHasConciseFinding(affirmed, subjectAt, locationAt, findingVerb);
+      // Modals and uncertainty govern the treatment only through its matched
+      // evidence. A later explanatory clause ("which you can see" or "as the
+      // report will show") does not make the completed treatment uncertain.
+      const findingEvidenceEnd = Math.max(
+        subjectAt + m[0].length,
+        locationAt + locationMatch[0].length,
+        findingVerb ? findingVerb.index + findingVerb[0].length : -1,
+      );
+      const findingEvidence = affirmed.slice(0, findingEvidenceEnd);
       // A trailing "before" dates completed evidence. Remove only that
       // temporal marker, preserving any actual denial or condition later.
       const evidenceEnd = Math.max(subjectAt, locationAt, completedFinding ? findingVerb.index : -1);
       const claimText = evidenceEnd >= 0 && (completedFinding || conciseFinding)
         ? affirmed.slice(0, evidenceEnd) + affirmed.slice(evidenceEnd).replace(/\bbefore\b/gi, 'prior to') : affirmed;
       const claim = claimContext(claimText, Math.min(subjectAt, locationAt), claimText.length);
-      if (subjectAt >= 0 && locationAt >= 0 && !REPORT_UNCERTAINTY_RE.test(affirmed) && !REPORT_INSTRUCTION_RE.test(affirmed)
+      if (subjectAt >= 0 && locationAt >= 0 && !REPORT_UNCERTAINTY_RE.test(findingEvidence) && !REPORT_INSTRUCTION_RE.test(affirmed)
           && !alternativeLocation
           && (completedFinding || conciseFinding)
           && !reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb)) {
