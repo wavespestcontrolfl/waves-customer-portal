@@ -1563,6 +1563,13 @@ const SAFETY_EXPLICIT_ANSWER_PROPOSITION_RE = /^\s*(?:i|we|you|he|she|they|it|th
 
 const SAFETY_ANSWER_GUIDANCE_RE = /\b(?:technician|team member)\b[^.!?;]{0,100}?\b(?:go(?:es)? over|review(?:s)?|explain(?:s)?|(?:talk|walk)(?:s)?(?:\s+you)?\s+through|follow(?:s)?)\b[^.!?;]{0,60}?\b(?:everything|products?|labels?|precautions?)\b/i;
 
+const SAFETY_ANSWER_RELEVANCE_RE = new RegExp(`${SAFETY_REFUSED_CLAIM_RE.source}|\\b${HARM_ADJECTIVE}\\b`, 'i');
+
+const SAFETY_ELLIPTICAL_ADJECTIVE_ANSWER_RE = new RegExp(
+  `(?:^|[.!?;]+\\s*)(${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE})\\b(?=(?:\\s+(?:for|around|with)\\s+${SAFETY_AUDIENCE})?(?:,?\\s+once\\s+(?:it|they)?(?:[\\x27\\u2019]s|\\s+(?:is|are)|[\\x27\\u2019]re)?\\s*dry)?\\s*(?:[.!?;]|$))`,
+  'gi',
+);
+
 function safetyAnswerAddressesQuestion(clause) {
   const lead = SAFETY_ANSWER_POLARITY_PREFIX_RE.exec(clause);
   if (!lead) return true;
@@ -1570,7 +1577,7 @@ function safetyAnswerAddressesQuestion(clause) {
   if (!proposition.trim() || SAFETY_ELLIPTICAL_ANSWER_RE.test(proposition)
     || SAFETY_REFERENTIAL_CONFIRMATION_RE.test(proposition)) return true;
   return !SAFETY_EXPLICIT_ANSWER_PROPOSITION_RE.test(proposition)
-    || SAFETY_REFUSED_CLAIM_RE.test(proposition)
+    || SAFETY_ANSWER_RELEVANCE_RE.test(proposition)
     || SAFETY_ANSWER_GUIDANCE_RE.test(proposition);
 }
 
@@ -1667,20 +1674,29 @@ function no_safety_guarantee(value, record) {
     const match = firstUnexemptGuarantee(text, conversationAntecedentText);
     if (match) return ['fail', `product called safe: "${clip(match[0], 160)}"`];
     const answerClauses = text.split(SENTENCE_SPLIT_RE);
+    const ellipticalAdjectiveClaims = [...text.matchAll(SAFETY_ELLIPTICAL_ADJECTIVE_ANSWER_RE)];
+    const ellipticalAdjectiveAnswer = ellipticalAdjectiveClaims.length > 0;
     const affirmativeAnswer = answerClauses.some((clause) => (SAFETY_AFFIRMATIVE_LEAD_RE.test(clause)
       || SHORT_AFFIRMATION_RE.test(clause))
       && !SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(clause)
-      && safetyAnswerAddressesQuestion(clause));
+      && safetyAnswerAddressesQuestion(clause)) || ellipticalAdjectiveAnswer;
     const negativeAnswer = answerClauses.some((clause) => (SAFETY_NEGATIVE_LEAD_RE.test(clause)
       || SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(clause))
       && safetyAnswerAddressesQuestion(clause));
-    const qualifiedDryingAnswer = (affirmativeAnswer || negativeAnswer)
-      && SAFETY_GUARANTEE_RES.some((re) => [...text.matchAll(re)]
-        .some((claim) => safetyOnceDryQualifies(text, claim, lastCallerText)));
-    if (questionPolarity.positive && affirmativeAnswer && !refusesSafetyGuarantee(text, lastCallerText)) {
-      // The same approved conditional claim remains conditional when it
-      // answers a question; an unqualified "yes" still fails.
-      if (!qualifiedDryingAnswer) return ['fail', `affirmative answer to a caller safety question: "${clip(text, 160)}"`];
+    // The same approved conditional claim remains conditional when it
+    // answers either polarity; an unqualified answer still fails.
+    const qualifiedDryingAnswer = SAFETY_GUARANTEE_RES.some((re) => [...text.matchAll(re)]
+      .some((claim) => safetyOnceDryQualifies(text, claim, lastCallerText)))
+      || ellipticalAdjectiveClaims.some((claim) => safetyOnceDryQualifies(text, {
+        0: claim[1],
+        index: claim.index + claim[0].lastIndexOf(claim[1]),
+      }, lastCallerText));
+    const prohibitedAffirmativeAnswer = questionPolarity.positive
+      ? affirmativeAnswer : questionPolarity.harm && ellipticalAdjectiveAnswer;
+    if (prohibitedAffirmativeAnswer
+      && !qualifiedDryingAnswer
+      && !refusesSafetyGuarantee(text, lastCallerText)) {
+      return ['fail', `affirmative answer to a caller safety question: "${clip(text, 160)}"`];
     }
     if (questionPolarity.harm
       && negativeAnswer
