@@ -537,7 +537,7 @@ const REFUND_CLAIM_RES = Object.freeze([
   new RegExp(`\\b(?:refund|credit(?!\\s+card)|reimbursement)\\b[^.!?;,]{0,20}?\\b(?:went|gone|go(?:es)?|will go|should go|is going) through\\b`, 'i'),
   /\byou[\x27\u2019]?(?:ll| will)\s+(?:get|receive|see|have)\s+(?:a|your|the|that)\s+(?:full\s+|partial\s+)?(?:refund|credit|money back|reimbursement)\b/i,
   // "I've processed / issued / put through / taken care of a refund", "we refunded you"
-  new RegExp(`\\b${SUBJECT}\\s*(?:just\\s+|already\\s+|now\\s+)?(?:process(?:ed|ing)?|issu(?:e|ed|ing)|approv(?:e|ed|ing)|authori[sz](?:e|ed|ing)|complet(?:e|ed|ing)|finali[sz](?:e|ed|ing)|grant(?:ed|ing)?|confirm(?:ed|ing)?|post(?:ed|ing)?|appl(?:y|ied|ying)|send|sent|sending|submit(?:ted|ting)?|put through|refund(?:ed|ing)?|credit(?:ed|ing)?|handl(?:e|ed|ing)|resolv(?:e|ed|ing)|(?:take|took|taken|taking) care of|sort(?:ed|ing)?(?: out)?|settl(?:e|ed|ing)|deal(?:t|ing)? with)\\s+(?:(?:a|an|your|the|that|you)\\s+)?(?:full\\s+|partial\\s+|the\\s+)?(?:refund|credit|money|reimbursement)\\b`, 'i'),
+  new RegExp(`\\b${SUBJECT}\\s*(?:not only\\s+)?(?:just\\s+|already\\s+|now\\s+)?(?:process(?:ed|ing)?|issu(?:e|ed|ing)|approv(?:e|ed|ing)|authori[sz](?:e|ed|ing)|complet(?:e|ed|ing)|finali[sz](?:e|ed|ing)|grant(?:ed|ing)?|confirm(?:ed|ing)?|post(?:ed|ing)?|appl(?:y|ied|ying)|send|sent|sending|submit(?:ted|ting)?|put through|refund(?:ed|ing)?|credit(?:ed|ing)?|handl(?:e|ed|ing)|resolv(?:e|ed|ing)|(?:take|took|taken|taking) care of|sort(?:ed|ing)?(?: out)?|settl(?:e|ed|ing)|deal(?:t|ing)? with)\\s+(?:(?:a|an|your|the|that|you)\\s+)?(?:full\\s+|partial\\s+|the\\s+)?(?:refund|credit|money|reimbursement)\\b`, 'i'),
   new RegExp(`\\b${SUBJECT}\\s+(?:just\\s+|already\\s+|now\\s+)?(?:refund|credit)(?:ed)?\\s+you\\b`, 'i'),
   // "refund your payment", "your charge was reversed"
   /\b(?:refund(?:ed|ing)?|revers(?:e|ed|ing)|return(?:ed|ing)?)\s+(?:(?:your|the|that|a|an)\s+)?(?:last\s+|full\s+|partial\s+|original\s+)?(?:payment|charge|amount)\b/i,
@@ -1498,12 +1498,12 @@ function only_language(value, record, { spoken }) {
 // clause (DENIAL_CLAUSE_END_RE), so "did not raise a safety concern" denies
 // the concern, while "did not book, but asked if the bait is safe for her
 // dog" asserts it — the "but" ends the denial's clause before the concern.
-const DENIAL_WORD_RE = /\b(?:(?:not|cannot|(?:is|are|did|does|was|were|has|have|had|ca|could|would|wo)n[\x27\u2019]t)(?!\s+only\b)|never|denied|denies|without|no|neither|none|zero)\b/gi;
+const DENIAL_WORD_RE = /\b(?:(?:not|cannot|(?:is|are|did|does|was|were|has|have|had|ca|could|would|wo)n[\x27\u2019]t)(?!\s+only\b)|never|denied|denies|without|no(?![-\u2010-\u2015])|neither|none|zero)\b/gi;
 // Commas may enclose an aside and "and" may coordinate denied objects.
 // End their scope only when the next phrase starts a fresh assertion.
 const CAPTURE_NOUN_ASSERTION_START_SOURCE = `(?:[\\w\\x27\\u2019-]+\\s+){1,5}${CLAUSE_FINITE_PREDICATE_RE.source}`;
 const CAPTURE_ASSERTION_START_SOURCE = `(?:(?:(?:the )?(?:caller|customer)|she|he|they)\\s+\\w+|(?:asked|asks|raised|raises|expressed|expresses|mentioned|mentions|reported|reports|voiced|voices|noting|noted|adding|added|did|does|do|is|are|was|were|has|have|had)\\b|${CAPTURE_NOUN_ASSERTION_START_SOURCE})`;
-const DENIAL_CLAUSE_END_RE = new RegExp(`[.;!?—–]|\\s-\\s|\\b(?:but|however|although|though|so|while|yet)\\b|(?::|,|\\band\\b)\\s*(?:(?:then|also)\\s+)*(?=${CAPTURE_ASSERTION_START_SOURCE})`, 'gi');
+const DENIAL_CLAUSE_END_RE = new RegExp(`[.;!?—–]|\\s-\\s|\\b(?:but|because|however|although|though|so|while|yet)\\b|(?::|,|\\band\\b)\\s*(?:(?:then|also)\\s+)*(?=${CAPTURE_ASSERTION_START_SOURCE})`, 'gi');
 /** [[start, end), …) — the ranges of `text` a denial word governs. */
 function deniedSpans(text) {
   const spans = [];
