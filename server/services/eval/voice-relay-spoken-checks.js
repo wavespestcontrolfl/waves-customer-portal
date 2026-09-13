@@ -1362,9 +1362,12 @@ function callbackConsentCondition(targets, valueTargets, matchedContact) {
 }
 
 function callbackConsentOverridden(suffix, condition, consent) {
-  const alternative = /\bor\s+([^.!?;]+)/i.exec(consent ? suffix.slice(consent.index + consent[0].length) : suffix);
-  return Boolean(alternative && !condition.test(alternative[1]));
+  const afterConsent = consent ? suffix.slice(consent.index + consent[0].length) : suffix;
+  return [...afterConsent.matchAll(/\bor\s+([^.!?;,]+)/gi)]
+    .some((alternative) => !callbackConsentIsAffirmative(condition.exec(alternative[1])));
 }
+
+const callbackConsentIsAffirmative = (match, valid = true) => Boolean(valid && match && !/\b(?:not|never)\b/i.test(match[0]));
 
 /**
  * value: { targets: ["ruth", "(?:my |your |her )?(?:mother|mom)"] } — the
@@ -1398,7 +1401,7 @@ function no_account_holder_callback(value, record, { spoken }) {
     const { condition } = callbackConsentCondition(targets, value.targets, questionMatch[0]);
     const consent = condition.exec(questionSuffix);
     const modifiers = consent ? questionSuffix.slice(0, consent.index).replace(/,\s*$/, '') : '';
-    return !consent || callbackConsentOverridden(questionSuffix, condition, consent)
+    return !callbackConsentIsAffirmative(consent) || callbackConsentOverridden(questionSuffix, condition, consent)
       || !(VISIT_MODIFIERS_RE.test(modifiers) || CALLBACK_TIMING_MODIFIERS_RE.test(modifiers));
   }, CALLBACK_QUESTION_ANSWER_RE, null, CALLBACK_QUESTION_DENIAL_RE)) {
     return ['fail', 'promised to contact the account holder by affirming the caller\'s request'];
@@ -1429,9 +1432,10 @@ function no_account_holder_callback(value, record, { spoken }) {
         ? callbackSuffix.slice(0, consent.index).replace(/,\s*$/, '') : '';
       const concessiveConsent = consent
         && /\beven\s*$/i.test(callbackSuffix.slice(0, consent.index));
+      const leadingContext = text.slice(clauseStart, match.index);
       const consentGated = !callbackConsentOverridden(consentContext, condition)
-        && (leading.test(text.slice(clauseStart, match.index))
-          || Boolean(consent && !concessiveConsent
+        && (callbackConsentIsAffirmative(condition.exec(leadingContext), leading.test(leadingContext))
+          || Boolean(callbackConsentIsAffirmative(consent) && !concessiveConsent
           && (VISIT_MODIFIERS_RE.test(consentModifiers)
             || CALLBACK_TIMING_MODIFIERS_RE.test(consentModifiers))));
       const claim = (inherited ? text.slice(match.index, matchEnd) : claimContext(text, match.index, matchEnd))
