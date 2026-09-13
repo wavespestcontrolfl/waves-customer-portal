@@ -1582,7 +1582,7 @@ export function ProjectDetail({
   }
 
   async function load(options = {}) {
-    const { preserveEdits = false, background = false } = options;
+    const { preserveEdits = false, background = false, hydrateRevision } = options;
     // background: refresh without tripping the full-editor loading swap —
     // the render gate is `loading || !project`, so a loud reload behind a
     // mounted, possibly-dirty editor replaced the whole form with a
@@ -1605,7 +1605,8 @@ export function ProjectDetail({
       );
       d.activity = activityData.activity || [];
       setData(d);
-      if (!preserveEdits) {
+      if (!preserveEdits
+          && (hydrateRevision === undefined || editRevisionRef.current === hydrateRevision)) {
         setEditFindings(d.project.findings || {});
         setEditRecs(d.project.recommendations || "");
         setEditTitle(d.project.title || "");
@@ -1764,7 +1765,7 @@ export function ProjectDetail({
       });
       await readJsonResponse(r, "Could not save project changes");
       if (editRevisionRef.current === savedRevision) setDirty(false);
-      await load({ preserveEdits: true, background: true });
+      await load({ background: true, hydrateRevision: savedRevision });
       onChanged?.();
       setNotice("Changes saved.");
     } catch (e) {

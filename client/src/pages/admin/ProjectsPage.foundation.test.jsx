@@ -231,6 +231,27 @@ describe("Project photo caption dirty signal", () => {
     await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(true));
   });
 
+  it("hydrates canonical project values when no newer edit occurs during save", async () => {
+    const onDirtyChange = vi.fn();
+    let saved = false;
+    fetch.mockImplementation(async (url, options = {}) => {
+      const path = String(url).replace(/^\/api/, "");
+      if (path === "/admin/projects/project-1" && options.method === "PUT") saved = true;
+      if (saved && path === "/admin/projects/project-1" && (!options.method || options.method === "GET")) {
+        return response({ ...fixtureFor(url, options), project: { ...project, title: "Canonical report title" } });
+      }
+      return response(fixtureFor(url, options));
+    });
+    renderDetail(onDirtyChange);
+
+    fireEvent.change(await screen.findByLabelText("Report title"), { target: { value: "  Unnormalized report title  " } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await screen.findByText("Changes saved.");
+    expect(screen.getByLabelText("Report title")).toHaveValue("Canonical report title");
+    await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(false));
+  });
+
   it("keeps a failed caption save dirty", async () => {
     projectPhotos = [photos[0]];
     const onDirtyChange = vi.fn();
