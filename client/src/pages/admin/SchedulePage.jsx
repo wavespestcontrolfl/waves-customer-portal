@@ -1,3 +1,4 @@
+import LawnVisitReview, { createVisitReview, visitReviewPayload } from "../../components/lawn/LawnVisitReview";
 import lawnScores from '@lawn-scores';
 // client/src/pages/admin/SchedulePage.jsx
 //
@@ -8537,6 +8538,7 @@ function LawnAssessmentCompletionBlock({
 }) {
   const [photos, setPhotos] = useState([]);
   const [result, setResult] = useState(null);
+  const [visitReview, setVisitReview] = useState(null);
   const [techScores, setTechScores] = useState(null);
   const [confirmedId, setConfirmedId] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -8548,6 +8550,7 @@ function LawnAssessmentCompletionBlock({
     let cancelled = false;
     setPhotos([]);
     setResult(null);
+    setVisitReview(null);
     setTechScores(null);
     setConfirmedId(null);
     setError("");
@@ -8566,12 +8569,14 @@ function LawnAssessmentCompletionBlock({
         const scores = parseAssessmentScores(assessment);
         setResult({
           success: true,
+          visitAssessment: data.visitAssessment,
           assessment,
           adjustedScores: scores,
           displayScores: scores,
           observations: assessment.observations || "",
         });
         setTechScores(scores);
+        setVisitReview(createVisitReview(data.visitAssessment, assessment.observations));
         if (assessment.confirmed_by_tech) {
           setConfirmedId(assessment.id);
           onConfirmed?.(assessment.id);
@@ -8653,6 +8658,7 @@ function LawnAssessmentCompletionBlock({
       }
       const scores = response.adjustedScores || response.displayScores || {};
       setResult(response);
+      setVisitReview(createVisitReview(response.visitAssessment, response.assessment?.observations !== undefined ? response.assessment.observations : response.observations));
       setTechScores({ ...scores });
       setConfirmedId(null);
       onConfirmed?.(null);
@@ -8676,14 +8682,22 @@ function LawnAssessmentCompletionBlock({
     onReady?.(false);
     setError("");
     try {
-      const { confirmed: confirmationComplete, assessment: savedAssessment } = await adminFetch("/admin/lawn-assessment/confirm", {
+      const { confirmed: confirmationComplete, assessment: savedAssessment, visitAssessment } = await adminFetch("/admin/lawn-assessment/confirm", {
         method: "POST",
         body: JSON.stringify({
           assessmentId: result.assessment.id,
           adjustedScores: techScores || result.adjustedScores || result.displayScores,
+          ...visitReviewPayload(visitReview),
         }),
       });
-      setResult((prev) => ({ ...prev, assessment: savedAssessment || prev.assessment }));
+      setResult((prev) => ({
+        ...prev,
+        assessment: savedAssessment || prev.assessment,
+        visitAssessment: visitAssessment ?? prev.visitAssessment,
+      }));
+      if (visitAssessment) {
+        setVisitReview(createVisitReview(visitAssessment, savedAssessment?.observations));
+      }
       const assessmentId = confirmationComplete === false ? null : savedAssessment?.id || result.assessment.id;
       setConfirmedId(assessmentId);
       onConfirmed?.(assessmentId);
@@ -8879,6 +8893,12 @@ function LawnAssessmentCompletionBlock({
               );
             })}
           </div>
+          <LawnVisitReview
+            visitAssessment={result.visitAssessment}
+            value={visitReview}
+            onChange={setVisitReview}
+            disabled={disabled || confirming || analyzing || confirmed}
+          />
           <div style={{ display: "flex", gap: 8 }}>
             {confirmed ? (
               <div
