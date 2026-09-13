@@ -150,7 +150,7 @@ async function mintPacketInvoice({ packet, visit, members, customer, trx }) {
   return { state: 'invoice_ready', invoiceId: invoice.id, total: Number(invoice.total) };
 }
 
-async function linkPacketInvoice({ packet, invoice, members, customer, trx }) {
+async function linkPacketInvoice({ packet, invoice, members, customer, trx, acceptedLineItems }) {
   await trx('visit_completion_packet_items').where({ packet_id: packet.id })
     .whereIn('scheduled_service_id', members.map((member) => member.id))
     .update({ invoice_id: invoice.id, updated_at: trx.fn.now() });
@@ -158,6 +158,7 @@ async function linkPacketInvoice({ packet, invoice, members, customer, trx }) {
   // It is recorded beside the submitted forms, never accepted from a client.
   await trx('visit_completion_packets').where({ id: packet.id }).update({
     payload: trx.raw('payload || ?::jsonb', [JSON.stringify({ billingSnapshot: {
+      ...(acceptedLineItems ? { acceptedLineItems } : {}),
       invoiceId: invoice.id, totalCents: Math.round(Number(invoice.total) * 100),
       netSubtotalCents: Math.round((Number(invoice.subtotal) - Number(invoice.discount_amount || 0)) * 100),
       billedServiceIds: members.map((member) => member.id),
@@ -209,6 +210,12 @@ async function adoptAcceptanceInvoice({ packet, members, customer, trx, invoices
     if (await memberBillingEligibility(member, customer, trx)) return rejected;
     if (await require('./annual-prepay-renewals').annualPrepayCoversVisit(member, trx, { throwOnError: true })) return rejected;
   }
+  const retainedFamilies = members.filter((member) => member.is_recurring || member.recurring_ongoing)
+    .map(require('./cancellation-processor').familyOfServiceRow).filter(Boolean);
+  const offers = await trx('retention_offers').where({ customer_id: customer.id, status: 'granted' })
+    .whereIn('family_key', retainedFamilies).forUpdate().noWait();
+  const retentionNeedsReview = offers.some((offer) => require('./cancellation-resolution/retention-offer')
+    .retentionDiscountForInvoice(offer, applicationNet / 100));
   const owner = members.find((member) => member.id === invoice.scheduled_service_id);
   // The locked lookup matched this scheduled ID: record-linked invoices were
   // rejected above, so the owner is necessarily one of these members.
@@ -228,11 +235,11 @@ async function adoptAcceptanceInvoice({ packet, members, customer, trx, invoices
   const arrangements = await trx('payment_plans').where({ invoice_id: invoice.id }).first('id');
   const attempt = await trx('stripe_invoice_charge_attempts').where({ invoice_id: invoice.id }).first('id');
   const addons = await trx('scheduled_service_addons').whereIn('scheduled_service_id', members.map((member) => member.id)).first('id');
-  if ([competing, arrangements, attempt, addons].some(Boolean)) return rejected;
+  if ([competing, arrangements, attempt, addons, retentionNeedsReview].some(Boolean)) return rejected;
   if (!await require('./estimate-deposits').invoiceDepositCreditIsBacked(invoice, trx)) return rejected;
   await trx('invoices').where({ id: invoice.id }).update({ visit_completion_packet_id: packet.id,
     service_record_id: owner.record_id, updated_at: trx.fn.now() });
-  await linkPacketInvoice({ packet, invoice, members, customer, trx });
+  await linkPacketInvoice({ packet, invoice, members, customer, trx, acceptedLineItems: lines });
   return { state: 'invoice_ready', invoiceId: invoice.id, total: Number(invoice.total) };
 }
 

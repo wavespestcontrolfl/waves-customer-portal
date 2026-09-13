@@ -2412,6 +2412,45 @@ postgres('visit completion packet records on PostgreSQL', () => {
       expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
     });
 
+  test.each(['custom', 'setup'])('charge rejects a same-total %s edit after adoption', async (edit) => {
+    const { invoice } = await prepareAcceptanceInvoice();
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing.state).toBe('invoice_ready');
+    const lines = invoice.line_items.map((line) => ({ ...line }));
+    if (edit === 'custom') {
+      lines[1] = { description: 'Custom repair', quantity: 1, unit_price: 120, amount: 120 };
+    } else {
+      lines[0].unit_price += 20; lines[0].amount += 20;
+      lines[1].unit_price -= 20; lines[1].amount -= 20;
+    }
+    await InvoiceService.update(invoice.id, { line_items: lines });
+    await expect(mockPg.transaction(async (trx) => assertVisitCompletionCharge(trx,
+      await trx('invoices').where({ id: invoice.id }).forUpdate().first(), saved.body.packetId)))
+      .rejects.toMatchObject({ code: 'VISIT_PAYMENT_REVIEW_REQUIRED', reason: 'accepted_invoice_lines_changed' });
+  });
+
+  test('stamped creation still sees packet ownership after staff changes invoice notes', async () => {
+    const { invoice, estimateId } = await prepareAcceptanceInvoice();
+    expect((await saveVisitCompletionPacket(submission())).body.billing.state).toBe('invoice_ready');
+    await InvoiceService.update(invoice.id, { notes: 'Office reviewed this invoice.' });
+    await expect(InvoiceService.create({ database: mockPg, customerId: fixture.customerId,
+      notes: acceptanceInvoiceNotes(estimateId),
+      lineItems: [{ description: 'First service application', quantity: 1, unit_price: 220 }] }))
+      .rejects.toMatchObject({ status: 409, code: 'VISIT_PACKET_OWNS_BILLING' });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+  });
+
+  test.each(['granted', 'exhausted'])('acceptance adoption respects a %s retention offer', async (status) => {
+    const { invoice } = await prepareAcceptanceInvoice();
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ is_recurring: true });
+    const [offer] = await mockPg('retention_offers').insert({ customer_id: fixture.customerId,
+      family_key: 'pest_control', percent_off: 15, max_charges: 2, cap_amount: 75, status }).returning('*');
+    const result = await saveVisitCompletionPacket(submission());
+    expect(result.body.billing.state).toBe(status === 'granted' ? 'office_required' : 'invoice_ready');
+    expect((await mockPg('retention_offers').where({ id: offer.id }).first()).charges_applied).toBe(0);
+    expect(Number((await mockPg('invoices').where({ id: invoice.id }).first()).total)).toBe(Number(invoice.total));
+  });
+
   test('the charge fence refuses a deposit reversed after invoice adoption', async () => {
     const { invoice, deposit } = await prepareAcceptanceInvoice({ withAdjustments: true });
     const saved = await saveVisitCompletionPacket(submission());

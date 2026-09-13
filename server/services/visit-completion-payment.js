@@ -1,5 +1,6 @@
 'use strict';
 
+const { isDeepStrictEqual } = require('node:util');
 const db = require('../models/db');
 const VisitGroups = require('./visit-groups');
 const { resolveBillingLane } = require('./billing-lane');
@@ -49,6 +50,13 @@ async function assertVisitCompletionCharge(trx, invoice, packetId) {
   if (!Number.isSafeInteger(totalCents) || !Number.isSafeInteger(netSubtotalCents)
       || totalCents > frozen.totalCents || netSubtotalCents > frozen.netSubtotalCents) {
     refuse('invoice_above_saved_amount');
+  }
+  // Adoption freezes the acceptance invoice's exact line contract. Any later
+  // edit, even a same-total replacement or decrease, requires office review.
+  if (Object.hasOwn(frozen, 'acceptedLineItems')) {
+    const currentLines = require('./invoice')._parseInvoiceLineItems(invoice.line_items);
+    if (!Array.isArray(frozen.acceptedLineItems)
+        || !isDeepStrictEqual(currentLines, frozen.acceptedLineItems)) refuse('accepted_invoice_lines_changed');
   }
   if (!await require('./estimate-deposits').invoiceDepositCreditIsBacked(invoice, trx)) refuse('deposit_credit_changed');
   const customer = await trx('customers').where({ id: invoice.customer_id }).first();

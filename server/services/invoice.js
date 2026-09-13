@@ -1174,9 +1174,11 @@ const InvoiceService = {
     // A stamped writer may have waited behind acceptance adoption. Its
     // missing visit link must not bypass the saved packet's billing owner.
     if (!linkedScheduledServiceId && stampedEstimateIdInNotes) {
-      const packetOwner = await database('invoices').where({ customer_id: customerId })
-        .where('notes', 'like', `%accepted estimate #${stampedEstimateIdInNotes}%`)
-        .whereNotNull('visit_completion_packet_id').first('visit_completion_packet_id');
+      const packetOwner = await database('invoices as i')
+        .join('visit_completion_packet_items as p', 'p.invoice_id', 'i.id')
+        .join('scheduled_services as s', 's.id', 'p.scheduled_service_id')
+        .where({ 'i.customer_id': customerId, 's.source_estimate_id': stampedEstimateIdInNotes })
+        .whereNotNull('i.visit_completion_packet_id').first('i.visit_completion_packet_id');
       if (packetOwner?.visit_completion_packet_id) {
         throw Object.assign(new Error('This estimate is billed by its saved visit closeout. Resume that closeout.'),
           { status: 409, code: 'VISIT_PACKET_OWNS_BILLING' });
