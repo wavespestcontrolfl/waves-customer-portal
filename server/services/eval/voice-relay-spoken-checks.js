@@ -31,7 +31,7 @@ const escapeRegexLiteral = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').repla
 const wordAlt = (words) => words.map((w) => (w.startsWith('be ') ? `(?:be )?${escapeRegexLiteral(w.slice(3))}` : escapeRegexLiteral(w))).join('|');
 const vocabAlt = (words) => `(?:${wordAlt(words)})`;
 
-const SAFETY_STRONG_ADJECTIVES = Object.freeze(['safe', 'harmless', 'non-toxic', 'nontoxic', 'pet-friendly', 'pet friendly', 'pet-safe', 'pet safe']);
+const SAFETY_STRONG_ADJECTIVES = Object.freeze(['safe', 'harmless', 'non-toxic', 'nontoxic', 'pet-friendly', 'pet friendly', 'pet-safe', 'pet safe', 'family-safe', 'family safe']);
 
 const SAFETY_FILLER_ADJECTIVES = Object.freeze(['fine', 'ok', 'okay', 'alright']);
 
@@ -1292,10 +1292,12 @@ const SAFETY_QUESTION_PRODUCT_SUBJECT_RE = `(?:(?:this|that|the|our|your|these|t
 
 const SAFETY_QUESTION_PRONOUN_RE = '(?:it|that|they|this|these|those)\\b';
 
+const SAFETY_QUESTION_AUXILIARY = `(?:is|are|does|do|would|will|can|could|isn[\\x27\\u2019]t|aren[\\x27\\u2019]t|doesn[\\x27\\u2019]t|don[\\x27\\u2019]t|wouldn[\\x27\\u2019]t|won[\\x27\\u2019]t|can[\\x27\\u2019]t|couldn[\\x27\\u2019]t)`;
+
 function questionAboutProduct(text, keywordAlt) {
-  const productSubject = new RegExp(`\\b(?:is|are|does|do|would|will|can|could)\\b[^?]{0,20}?\\b${SAFETY_QUESTION_PRODUCT_SUBJECT_RE}[^?]{0,80}?\\b(?:${keywordAlt})\\b[^?]{0,60}?\\?`, 'i');
+  const productSubject = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\b[^?]{0,20}?\\b${SAFETY_QUESTION_PRODUCT_SUBJECT_RE}[^?]{0,80}?\\b(?:${keywordAlt})\\b[^?]{0,60}?\\?`, 'i');
   if (productSubject.test(text)) return true;
-  const pronounSubject = new RegExp(`\\b(?:is|are|does|do|would|will|can|could)\\b\\s+${SAFETY_QUESTION_PRONOUN_RE}[^?]{0,80}?\\b(?:${keywordAlt})\\b[^?]{0,60}?\\?`, 'i');
+  const pronounSubject = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\b\\s+${SAFETY_QUESTION_PRONOUN_RE}[^?]{0,80}?\\b(?:${keywordAlt})\\b[^?]{0,60}?\\?`, 'i');
   const match = pronounSubject.exec(text);
   if (!match) return false;
   // A pronoun subject needs an earlier product mention in the SAME turn to
@@ -1310,8 +1312,7 @@ const SAFETY_KEYWORDS_HARM = 'unsafe|harmful|harm|toxic|dangerous|risky|poisonou
 
 function questionNegatesKeyword(text, keywordAlt) {
   const adjacentNegation = new RegExp(`\\bnot\\s+(?:${SAFETY_INTENSIFIER})?(?:${keywordAlt})\\b`, 'i');
-  const contractedNegation = new RegExp(`\\b(?:is|are|was|were|do|does|would|will|can|could)n[\\x27\\u2019]?t\\b[^?]{0,80}?\\b(?:${keywordAlt})\\b`, 'i');
-  return adjacentNegation.test(text) || contractedNegation.test(text);
+  return adjacentNegation.test(text);
 }
 
 function safetyQuestionPolarity(text) {
