@@ -560,7 +560,7 @@ function no_free_visit_promise(value, record, { spoken }) {
         // A negative inside the matched promise ("won't bill you") IS
         // the free-visit claim. Only its preceding refusal can exempt it.
         const claim = claimContext(text, match.index, match.index);
-        const [clauseStart] = clauseBounds(text, match.index);
+        const [clauseStart, clauseEnd] = clauseBounds(text, match.index);
         const clausePrefix = text.slice(clauseStart, match.index);
         const temporalParenthetical = FREE_VISIT_TEMPORAL_PARENTHETICAL_RE.exec(clausePrefix);
         const claimStart = temporalParenthetical
@@ -573,7 +573,9 @@ function no_free_visit_promise(value, record, { spoken }) {
         const prefix = causalBoundary
           ? causalContext.slice(causalBoundary.index + causalBoundary[0].length, match.index - claimStart)
           : text.slice(claimStart, match.index);
-        const governingCondition = /\b(?:if|unless|whether|until|before)\b/i.test(prefix);
+        const suffix = text.slice(match.index + match[0].length, clauseEnd);
+        const governingCondition = /\b(?:if|unless|whether|until|before)\b/i.test(prefix)
+          || /^\s*,?\s*(?:only\s+)?(?:if|unless)\b/i.test(suffix);
         if (!governingCondition && !clauseIsEpistemicallyHedged(prefix)) {
           return ['fail', `free visit promised: "${clip(match[0], 160)}"`];
         }
