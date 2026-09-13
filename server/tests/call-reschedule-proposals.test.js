@@ -194,3 +194,17 @@ test('terminal cleanup retires old evidence under the successful processing gene
     else process.env.GATE_RESCHEDULE_PROPOSAL_CARD = priorGate;
   }
 });
+
+
+test.each(['resolved', 'dismissed'])('shared triage %s rejects stale or missing versions of live proposals', async (nextStatus) => {
+  const { transitionCore } = require('../routes/admin-triage');
+  const call = { id: 'call' };
+  const card = { id: 'card', call_log_id: 'call', reason_code: 'reschedule_or_cancel', status: 'open',
+    updated_at: new Date('2026-09-13T04:00:00Z'), payload: { reschedule_proposal: { call_generation: 2 } } };
+  for (const expectedUpdatedAt of [undefined, '2026-09-13T03:00:00Z']) {
+    const conn = stageConn(call, card);
+    const result = await transitionCore({ conn, id: card.id, nextStatus, expectedUpdatedAt });
+    expect(result.outcome).toBe('stale_version');
+    expect(conn.updates).toEqual([]);
+  }
+});

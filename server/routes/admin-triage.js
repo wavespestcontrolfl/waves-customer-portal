@@ -223,8 +223,8 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
     // newer one. Same rule as Apply — required (the lane is dark, no
     // legacy clients); checked under the lock.
     if (beforeTransition) await beforeTransition(trx);
-    if (item.reason_code === 'property_role_confirm' || requireVersion) {
-      const live = await trx('triage_items').where({ id }).first('updated_at');
+    const live = await trx('triage_items').where({ id }).first('updated_at', 'payload');
+    if (item.reason_code === 'property_role_confirm' || requireVersion || live?.payload?.reschedule_proposal) {
       if (!live || !expectedUpdatedAt
         || new Date(expectedUpdatedAt).getTime() !== new Date(live.updated_at).getTime()) {
         return { outcome: 'stale_version' };
