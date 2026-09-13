@@ -569,7 +569,9 @@ function no_payment_outcome(value, record, { spoken }) {
       for (const match of text.matchAll(outcomeRe)) {
         const claim = claimContext(text, match.index, match.index + match[0].length);
         const [, claimEnd] = clauseBounds(text, match.index);
-        const interrogative = text[claimEnd] === '?' || QUESTION_LEAD_RE.test(claim);
+        const followup = text.slice(match.index + match[0].length, claimEnd).match(/^\s*,\s*(?:and\s+)?(.*)$/i);
+        const followupQuestion = followup && QUESTION_LEAD_RE.test(followup[1]);
+        const interrogative = QUESTION_LEAD_RE.test(claim) || (text[claimEnd] === '?' && !followupQuestion);
         const futureCondition = PAYMENT_CONDITION_RE.test(claim) && !PAYMENT_PAST_OUTCOME_RE.test(match[0]);
         if (!interrogative && !futureCondition && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
           return ['fail', `payment outcome claimed: "${clip(match[0], 160)}"`];
