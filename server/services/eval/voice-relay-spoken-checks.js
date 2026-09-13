@@ -1551,6 +1551,7 @@ function report_readback_confirms(value, record, { spoken }) {
       const reportClause = clauseOf(text, m.index) + sharedLocation.text;
       const assertion = reportAssertionOf(reportClause, m.index - clauseStart);
       const clause = assertion.text;
+      if (REPORT_TRAILING_DENIAL_RE.test(clause.slice(clause.lastIndexOf(',') + 1).trim())) continue;
       // A contrast excludes its following alternative, not the location
       // affirmed before it: "exterior rather than indoors" and "exterior,
       // not indoors" still confirm exterior. Require both halves in the
