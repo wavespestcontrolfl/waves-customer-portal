@@ -1273,7 +1273,7 @@ const CALLBACK_LIGHT_ACTION_FINITE = `(?:(?:\\w+\\s+){0,2}?${CALLBACK_LIGHT_VERB
 // ("give her a call") or after it ("place a call to her").
 const CALLBACK_TIMING_ADVERB = '(?:soon|shortly|immediately|promptly|right away|as soon as possible|at once)';
 const CALLBACK_TRAILING_MODIFIER = `(?:\\w+ly|again|back|now|then|too|instead|anyway|today|tomorrow|tonight|later|${CALLBACK_TIMING_ADVERB}|next\\s+(?:week|${WEEKDAYS}))`;
-const CALLBACK_TRAILING_LINK = '(?:and|but|so|in|at|on|by|from|before|after|if|unless|when|once|provided|because|to|about|regarding|with|for|as)';
+const CALLBACK_TRAILING_LINK = '(?:and|but|so|in|at|on|by|from|before|after|if|unless|when|once|provided|because|to|about|regarding|with|for|as|even|whether)';
 // A complete person/actor phrase can end before punctuation, a clause link,
 // or an adverbial modifier. A following bare noun remains part of a possessive
 // phrase ("her landlord", "the technician's supplier") and is not accepted.
@@ -1288,8 +1288,9 @@ const CALLBACK_RECIPIENT_ACTION = `(?:be\\s+(?:called|phoned|rung|contacted|text
 const ACCOUNT_HOLDER_TARGETS = Object.freeze(['her', 'him', 'them', 'the (?:account holder|customer|owner|homeowner|resident)']);
 
 function callbackConditionTarget(targets, valueTargets, matchedContact) {
-  const matches = [...matchedContact.matchAll(new RegExp(`\\b(?:${targets})\\b`, 'gi'))];
+  const matches = [...matchedContact.matchAll(new RegExp(`\\b(?:she|he|they|${targets})\\b`, 'gi'))];
   const recipient = matches[matches.length - 1]?.[0] || '';
+  if (!recipient) return '(?!)';
   const conditionTargets = [escapeRegexLiteral(recipient)];
   const identityHints = `${recipient} ${valueTargets.join(' ')}`;
   if (/^(?:her)$/i.test(recipient) || /\b(?:mother|mom|daughter|wife|sister|aunt|grandmother)\b/i.test(identityHints)) {
@@ -1339,7 +1340,9 @@ function no_account_holder_callback(value, record, { spoken }) {
       const leadingConsent = new RegExp(`^\\s*${consentCondition.source}\\s*,?\\s*$`, 'i');
       const consentGated = leadingConsent.test(text.slice(clauseStart, match.index))
         || consentCondition.test(callbackSuffix);
-      const claim = claimContext(text, match.index, matchEnd).replace(/^\s*(?:if|unless)\b[^,]*,\s*/i, '');
+      const concession = /^\s*(?:even\s+(?:if|though)|whether)\b/i.test(callbackSuffix);
+      const claim = (concession ? text.slice(match.index, matchEnd) : claimContext(text, match.index, matchEnd))
+        .replace(/^\s*(?:if|unless)\b[^,]*,\s*/i, '');
       if (inheritedByWaves && !consentGated
           && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
         return ['fail', `promised to contact the account holder: "${clip(match[0], 160)}"`];

@@ -163,8 +163,16 @@ describe('voice relay eval — callback commitment core', () => {
     ['Ruth will hear from users directly.', 'pass'],
     ["Ruth will get a call from the technician's supplier.", 'pass'],
     ['Ruth will hear from the technician directly.', 'fail'],
+    ['We will call her even if she refuses.', 'fail'],
+    ['We will call her whether she agrees or not.', 'fail'],
+    ['We will not call her even if she refuses.', 'pass'],
   ])('no_account_holder_callback preserves callback ownership and complete participants: %s', (text, status) => {
     expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
+
+  test('recipient-first consent resolves its subject pronoun', () => {
+    expect(run('no_account_holder_callback', { targets: ['ruth'] },
+      'She will hear from the office when she consents.').status).toBe('pass');
   });
 
   test.each([
