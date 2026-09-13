@@ -132,6 +132,13 @@ describe('email reply verifier', () => {
       .toEqual(expect.arrayContaining(['date_unsupported:9 AM', 'few_shot_leak']));
   });
 
+  test('and-separated exact appointment times are not a window', () => {
+    for (const clocks of ['9 AM and 11 AM', '9 and 11 AM']) {
+      expect(verdict(`Hi Casey, your appointments are at ${clocks}.`).ok).toBe(false);
+    }
+    expect(verdict('Hi Casey, your pending appointment is between 9 AM and 11 AM.').ok).toBe(true);
+  });
+
   test('between-and appointment windows preserve ordered endpoints', () => {
     expect(verdict('Hi Casey, your pending appointment is September 15 between 9 AM and 11 AM.').ok).toBe(true);
     expect(verdict('Hi Casey, your pending appointment is September 15 between 9 and 11 AM.').ok).toBe(true);
