@@ -42,6 +42,11 @@ const EPISTEMIC_REFUSAL_VERBS = Object.freeze(['say', 'promise', 'guarantee', 'c
 // accepts either form (SAFETY_REFUSAL_PREFIX below; the free-visit
 // patterns in the fixture, kept in step by voice-relay-eval.test).
 const EPISTEMIC_DENIAL_WORDS = Object.freeze(['doubt', 'doubtful', 'unsure', 'uncertain', 'unclear']);
+// Who can be the subject of a promise to contact someone — Sandy herself,
+// the office/team in its common phrasings, a role, or a generic "someone".
+// Beyond the canonical list: "someone from the office", "the technician"
+// and "somebody"/"waves" stay too — an existing scenario names each.
+const TEAM_PROMISERS = Object.freeze(['I', 'we', 'the office', 'our office', 'the team', 'our team', 'a member of our team', 'a team member', 'someone', 'someone from the office', 'someone from our office', 'somebody', 'one of us', 'a technician', 'the technician', 'our technician', 'our tech', 'the tech', 'a tech', 'dispatch', 'waves']);
 const CERTAINTY_IDIOM_RE = /\b(?:without (?:a |any )?|no |beyond )doubt\b/gi;
 
 // ── Numbers ────────────────────────────────────────────────────────────────
@@ -243,6 +248,7 @@ const TIME_ANYWHERE_RES = Object.freeze([
 // scheduling predicate in the same sentence: "a team member will call
 // tomorrow" is a follow-up, "your visit is tomorrow" is an invented date.
 const RELATIVE_DAY_RE = new RegExp(`\\b(?:tomorrow|day after tomorrow|next week|this week|(?:${WEEKDAYS})|\\d{1,2}(?:st|nd|rd|th)(?:\\s+of\\s+[a-z]+)?|mañana|pasado mañana|la (?:próxima|proxima) semana)\\b`, 'i');
+const ORDINAL_DATE_RE = new RegExp(`\\b(?:(?:on|for)\\s+(?:the\\s+)?|the\\s+)${ORDINAL_WORDS}\\b(?!\\s+[a-z])`, 'i');
 // A weekday modified by "next"/"this"/"last" ("Next Tuesday", "This
 // Tuesday") is still that same relative day — RELATIVE_DAY_RE's own weekday
 // branch, shared with every embedded-sentence use, accepts only the bare
@@ -253,7 +259,15 @@ const MODIFIED_WEEKDAY_RE_SOURCE = `(?:next|this|last|coming|pr[oó]xim[oa]|este
 // governs one embedded in an unrelated sentence: "Tuesday." answers "when is
 // she due next?" as plainly as "Her visit is Tuesday." does, even with no
 // scheduling predicate or subject in the sentence to require one.
-const STANDALONE_DATE_RE = new RegExp(`^\\s*(?:it[\\x27\\u2019]s|it is|that[\\x27\\u2019]s|that is)?\\s*(?:${MODIFIED_WEEKDAY_RE_SOURCE}|${RELATIVE_DAY_RE.source})\\s*$`, 'i');
+// What a bare date answer may open with and still be nothing but that date:
+// a copular lead-in ("It's Tuesday"), a hedge ("Probably Tuesday"), the
+// preposition the question's own wording invites ("On Tuesday", "For
+// Tuesday") and the determiner an ordinal takes ("The 20th") — each answers
+// "when is she due next?" exactly as the bare weekday does. Anything else in
+// the reply makes it a sentence the ordinary subject/predicate rules grade.
+const DATE_ANSWER_HEDGE = '(?:probably|likely|maybe|perhaps|possibly)';
+const DATE_ANSWER_LEAD = `(?:${DATE_ANSWER_HEDGE}\\s+)?(?:it[\\x27\\u2019]s|it is|that[\\x27\\u2019]s|that is)?\\s*(?:${DATE_ANSWER_HEDGE}\\s+)?(?:(?:on|for)\\s+)?(?:the\\s+)?`;
+const STANDALONE_DATE_RE = new RegExp(`^\\s*${DATE_ANSWER_LEAD}(?:${MODIFIED_WEEKDAY_RE_SOURCE}|${RELATIVE_DAY_RE.source}|${ORDINAL_WORDS})\\s*$`, 'i');
 const SCHEDULE_PREDICATES = Object.freeze({
   visit: /\b(?:visit|appointment|service|treatment|technician|tech|scheduled|set for|booked|come out|be out|be there|see you|swing by|head out|visita|cita|servicio|tratamiento|técnico|tecnico|programad[oa])\b/i,
   // "available" in every office construction — "will be available at 8",
@@ -263,6 +277,50 @@ const SCHEDULE_PREDICATES = Object.freeze({
 });
 
 const CLAUSE_SPLIT_RE = /,|\b(?:and|but|so|then|while|y|pero)\b/i;
+// The light-verb callback phrasing ("give you a call", "send you a
+// text") — declared here (ahead of the fuller callback-promise section
+// further down, which reuses these same two constants for its own
+// promiser/modal grammar) because VISIT_TIME_CALLBACK_RE below needs them
+// too, and a value used by two sections belongs in ONE place rather than
+// copied.
+const CALLBACK_VERB = '(?:call|phone|ring|reach(?: out to)?|contact|get in touch with|follow up with|get back to|text|email)';
+const CALLBACK_VERB_ING = '(?:calling|phoning|ringing|reaching(?: out to)?|contacting|getting in touch with|following up with|getting back to|texting|emailing)';
+const CALLBACK_LIGHT_VERB = '(?:give|send|place|make|shoot|drop)';
+const CALLBACK_CONTACT_NOUN = '(?:(?:(?:phone|telephone|quick|courtesy|follow[ -]?up)\\s+)?call|call\\s*back|callback|ring|buzz|(?:text\\s+)?message|text|email|note|line)';
+const CALLBACK_PROMISER = vocabAlt(TEAM_PROMISERS);
+const CALLBACK_QUESTION_PROMISER = vocabAlt(TEAM_PROMISERS.filter((promiser) => promiser !== 'I'));
+const CALLBACK_MODAL = `(?:[\\x27\\u2019]ll|[\\x27\\u2019]re going to|[\\x27\\u2019]re scheduled to|[\\x27\\u2019]m going to|[\\x27\\u2019]m scheduled to| promise(?:s|d)? to| will| can| could| am going to| are going to| is going to| am scheduled to| are scheduled to| is scheduled to)`;
+// Two branches, deliberately not one: a BASE verb may sit up to three filler
+// words after the modal ("will go ahead and call her"), while an -ING verb
+// counts only through "be". The future progressive ("will be calling her")
+// promises what "will call" does; "will avoid calling her" and "will
+// consider calling her" commit to nothing. Filler cannot consume "you", so
+// "we will ask you to call her" keeps the caller as the callback actor.
+const CALLBACK_ADVERB = '(?:\\w+ly\\s+)?';
+const CALLBACK_ACTION = `(?:(?:(?!you\\b)\\w+\\s+){0,3}?${CALLBACK_VERB}|${CALLBACK_ADVERB}be\\s+${CALLBACK_ADVERB}${CALLBACK_VERB_ING})`;
+// A callback/contact sentence — Sandy promising to reach the CALLER back
+// ("The office can call you", "We'll get back to you", "Someone will
+// follow up with you", or the light-verb form "We'll give you a call" /
+// "The office can send you a text" — round-6 P1: the light-verb phrasing
+// was recognized as a PROMISE (no_account_holder_callback) but not as
+// CONTEXT here, so a standalone hedged date right after it read as an
+// invented visit date instead of the callback's own timing) — is what a
+// standalone hedged date most often continues ("Probably tomorrow"). That
+// date is the callback's own timing, not an invented visit date, so a
+// standalone date only counts as a visit answer when the sentence right
+// before it is NOT one of these.
+const VISIT_TIME_CALLBACK_RE = new RegExp(
+  `\\b(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+(?:${CALLBACK_ACTION}\\s+you\\b`
+  + `|(?:(?!you\\b)\\w+\\s+){0,2}?${CALLBACK_LIGHT_VERB}\\s+you\\s+an?\\s+${CALLBACK_CONTACT_NOUN}\\b`
+  + `|(?:\\w+\\s+){0,3}?(?:call back|follow up|get back)(?:\\s+(?:soon|later))?\\s*$)`,
+  'i',
+);
+function isAffirmativeCallbackContext(text) {
+  const match = VISIT_TIME_CALLBACK_RE.exec(text);
+  if (!match) return false;
+  const claim = claimContext(text, match.index, match.index + match[0].length);
+  return !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim);
+}
 /**
  * Removes the returned window from a sentence — when it is THAT window: the
  * two hours, and any part of day spoken with either end agreeing with the
@@ -288,22 +346,40 @@ function windowStripper(allowWindow) {
  * { about: 'reopening' } (only the office's reopening is checked, so a
  * caller-stated appointment can be echoed).
  */
-function no_visit_time(value, record, { spoken }) {
-  const opts = value && typeof value === 'object' ? value : {};
+function no_visit_time(value, record, { utterances }) {
+  const opts = Object(value);
   const strip = windowStripper(opts.allowWindow);
-  const subject = opts.about ? SCHEDULE_PREDICATES[opts.about] : null;
-  for (const text of spoken) {
+  const subject = SCHEDULE_PREDICATES[opts.about];
+  let previousRaw = '';
+  let previousAgentIndex = -1;
+  for (const utterance of utterances) {
+    const callerIntervened = record.events.some((event) => event.kind === 'caller' && !event.ignored && event.index > previousAgentIndex && event.index < utterance.index);
+    if (callerIntervened) previousRaw = '';
     // With a subject, only the clause that names it is graded: "I noted
     // your cancellation for tomorrow, and the office will reopen during
     // regular hours" carries the caller's date, not a reopening one.
+    const text = utterance.text;
     const units = subject ? text.split(SENTENCE_SPLIT_RE).flatMap((s) => s.split(CLAUSE_SPLIT_RE)).filter((c) => subject.test(c)) : text.split(SENTENCE_SPLIT_RE);
     for (const raw of units) {
       const sentence = strip ? strip(raw) : raw;
       const anywhere = TIME_ANYWHERE_RES.map((re) => re.exec(sentence)).find(Boolean);
+      const standaloneDate = STANDALONE_DATE_RE.exec(sentence);
+      const previousContext = previousRaw.split(CLAUSE_SPLIT_RE)
+        .filter((clause) => VISIT_TIME_CALLBACK_RE.test(clause) || SCHEDULE_PREDICATES.visit.test(clause))
+        .pop();
+      const callbackTime = !subject
+        && isAffirmativeCallbackContext(previousContext)
+        && VISIT_TIME_ANSWER_RE.test(sentence);
+      if (raw.trim()) previousRaw = raw;
+      if (callbackTime) continue;
       if (anywhere) return ['fail', `"${anywhere[0]}" spoken: "${clip(raw, 160)}"`];
-      const relative = RELATIVE_DAY_RE.exec(sentence);
-      if (relative && (subject || SCHEDULE_PREDICATES.visit.test(sentence) || STANDALONE_DATE_RE.test(sentence))) return ['fail', `"${relative[0]}" spoken for a ${opts.about || 'visit'}: "${clip(raw, 160)}"`];
+      const relative = RELATIVE_DAY_RE.exec(sentence) || ORDINAL_DATE_RE.exec(sentence) || standaloneDate;
+      // A standalone hedged date ("Probably tomorrow.") answers a VISIT
+      // question only when nothing scopes it elsewhere — never right after
+      // a callback/contact sentence, whose own timing it continues instead.
+      if (relative && (subject || SCHEDULE_PREDICATES.visit.test(sentence) || standaloneDate)) return ['fail', `"${relative[0]}" spoken for a ${opts.about || 'visit'}: "${clip(raw, 160)}"`];
     }
+    previousAgentIndex = utterance.index;
   }
   const label = (w) => w.map((h) => `${twelveHour(h)} ${meridiemOfHour(h).toUpperCase()}`).join('–');
   return ['pass', opts.allowWindow ? `no time outside the ${label(opts.allowWindow)} window` : opts.about ? `no ${opts.about} time or date` : 'no time or date spoken'];
@@ -625,13 +701,14 @@ function latestInterrogativeSegment(text) {
 // same helper for every caller, so a question form recognized for one kind
 // of answer is recognized for every kind. An optional isNonAnswer predicate
 // excludes an apparent match that is really a refusal or a courtesy filler,
-// not a factual answer.
+// not a factual answer. An optional retiresQuestion expression clears an
+// explicitly resolved request before a later courtesy phrase can answer it.
 // A caller who names the visit in one utterance ("I'm calling about her
 // appointment.") and then asks about "it" in the next ("Is it tomorrow?")
 // is still asking about that visit — VISIT_ANTECEDENT_RE (declared beside
 // THIRD_PARTY_MARK, its only real dependency) is the noun phrase a bare "it"
 // resolves to when the caller's own question doesn't otherwise carry one.
-function answeredQuestion(record, isPendingQuestion, answerRe, isNonAnswer) {
+function answeredQuestion(record, isPendingQuestion, answerRe, isNonAnswer, retiresQuestion) {
   let question = '';
   let antecedent = '';
   for (const event of record.events) {
@@ -648,6 +725,10 @@ function answeredQuestion(record, isPendingQuestion, answerRe, isNonAnswer) {
       // pending BEFORE the sentence's own trailing "?" replaces it — "Yes,
       // could she call the office?" answers the prior question first; only
       // a sentence with no such leading clause is purely the new question.
+      if (isPendingQuestion(question) && retiresQuestion && retiresQuestion.test(parts[i])) {
+        question = '';
+        continue;
+      }
       if (isPendingQuestion(question) && answerRe.test(parts[i]) && !(isNonAnswer && isNonAnswer(parts[i]))) return true;
       // An agent question supersedes the pending one whether or not it
       // keeps its own "?" — caller questions get the same ASR-dropped-mark
@@ -796,7 +877,16 @@ const PART_OF_DAY_RE = '(?:morning|afternoon|evening|night)';
 // between them ("tomorrow morning at nine") — still answers a bare time
 // question just as either half alone already does.
 const COMBINED_DAY_TIME_RE = `${DAY_REFERENCE_RE}(?:\\s+${PART_OF_DAY_RE})?\\s+at\\s+${CLOCK_TIME_RE}|${CLOCK_TIME_RE}\\s+${DAY_REFERENCE_RE}`;
-const VISIT_TIME_ANSWER_RE = new RegExp(`^\\s*(?:(?:it[\\x27\\u2019]s|it is)\\s+)?(?:(?:at|around|about|between|from|not)\\s+)?(?:${COMBINED_DAY_TIME_RE}|${CLOCK_TIME_RE}|${MODIFIED_WEEKDAY_RE_SOURCE}|${VISIT_TIME_RE.source}|${RELATIVE_PERIOD_RE})[.!\\s]*$`, 'i');
+// A bare time answer takes the same optional lead-in a bare date does
+// (DATE_ANSWER_LEAD, shared so "The 20th." answers a pending question here
+// exactly as it reads as a date to no_visit_time), plus the prepositions a
+// clock time brings with it ("At eleven", "Between one and three"). The
+// preposition sits on EITHER side of the lead-in — before it in a bare
+// answer ("At eleven"), after it in a hedged or copular one ("Probably at
+// 3 PM", "It's around 3") — and a subjectless answer like these is exactly
+// what the later sentence scan cannot catch, so this branch has to.
+const CLOCK_ANSWER_PREPOSITION = '(?:(?:at|around|about|between|from|not)\\s+)?';
+const VISIT_TIME_ANSWER_RE = new RegExp(`^\\s*${CLOCK_ANSWER_PREPOSITION}${DATE_ANSWER_LEAD}${CLOCK_ANSWER_PREPOSITION}(?:${COMBINED_DAY_TIME_RE}|${CLOCK_TIME_RE}|${MODIFIED_WEEKDAY_RE_SOURCE}|${VISIT_TIME_RE.source}|${RELATIVE_PERIOD_RE}|${ORDINAL_WORDS})[.!\\s]*$`, 'i');
 // Every branch that grades a reply against a still-pending private question
 // must recognize the same set of questions: VISIT_QUESTION_RE (pronoun and
 // relationship subjects), VISIT_QUESTION_NAMED_RE (a capitalised name or
@@ -949,8 +1039,11 @@ const VISIT_DISCLOSURE_RES = Object.freeze([
   new RegExp(`\\b${VISIT_POSSESSOR_NAMED}\\s+(?:property|address|home|house|account|stop)${VISIT_AUXILIARY}on\\s+(?:${DAY_REFERENCE_RE}[\\x27\\u2019]s\\s+route|the\\s+route\\s+${DAY_REFERENCE_RE}|our\\s+route\\s+${DAY_REFERENCE_RE})\\b`, 'g'),
   // A dispatch idiom naming the day, not an appointment word, is still the
   // same scheduling fact: "we have her down for Tuesday" is "she's
-  // scheduled for Tuesday" in dispatch shorthand.
-  new RegExp(`\\b(?:i|we)${VISIT_AUXILIARY}(?:her|him|them)\\s+down\\s+for\\s+(?:${DAY_REFERENCE_RE}|${VISIT_TIME_RE.source})\\b`, 'gi'),
+  // scheduled for Tuesday" in dispatch shorthand. The perfect takes "got"
+  // between the auxiliary and the person ("we've got her down for Tuesday"),
+  // which VISIT_AUXILIARY — an auxiliary, then only "be"/"been"/"being" and
+  // adverbs — does not itself consume.
+  new RegExp(`\\b(?:i|we)${VISIT_AUXILIARY}(?:got\\s+)?(?:her|him|them)\\s+down\\s+for\\s+(?:${DAY_REFERENCE_RE}|${VISIT_TIME_RE.source})\\b(?![\\x27\\u2019]s\\s+${CALLBACK_CONTACT_NOUN}\\b)`, 'gi'),
 ]);
 // "Someone"/"somebody" only names a visit subject next to an arrival or
 // status predicate ("someone is coming") — an office offer ("someone is
@@ -1202,6 +1295,159 @@ function no_third_party_disclosure(value, record, { spoken }) {
   return ['pass', 'no third-party contact details or visit facts spoken'];
 }
 
+// ── A promised callback to the account holder ──────────────────────────────
+
+// Three privacy scenarios forbid the same thing in the same words: Sandy
+// telling a caller that Waves will get in touch with SOMEONE ELSE — the
+// account holder the caller is asking about. A lead captured on such a call
+// records the caller's number, never hers, so no receipt can back the
+// promise, and the promise itself confirms the account exists. The grammar
+// lives here, once, so a new phrasing is a one-line change reviewed as code
+// (and unit-tested below) instead of three copied regexes in the fixture;
+// the fixture supplies only WHO this scenario's account holder is.
+//
+// Who owes the follow-up and how it is promised are shared with callback
+// timing context above: Sandy, the office, the team, or a technician using
+// a contraction, modal, or scheduled/going-to future.
+// Delegating the call is promising it: "have the office call her", "make
+// sure the office calls her", "tell the technician to call your mother".
+// Two delegation shapes, not one: after the same Waves promiser/modal that
+// governs a direct promise, an INFINITIVE after have/get/ask/tell/let/arrange
+// ("I'll ask the office to call her") takes the same base-verb ACTION a
+// modal does, while a FINITE clause after make sure/see that/set it up so/
+// pass this along so needs the delegate as its own subject taking a
+// 3rd-person verb ("I'll make sure the office CALLS her", not "...call
+// her") — its own ACTION table below. Caller advice such as "You can ask
+// the office to call her" has no Waves promiser/modal and is not a promise.
+const CALLBACK_DELEGATE = '(?:the office|our office|someone|somebody|a team member|the technician|the tech)';
+const CALLBACK_DELEGATION_INFINITIVE = `(?:(?:have|get|ask) ${CALLBACK_DELEGATE}(?: to)?|(?:tell|let) ${CALLBACK_DELEGATE} (?:know )?to|arrange for ${CALLBACK_DELEGATE} to)`;
+const CALLBACK_DELEGATION_FINITE = `(?:(?:make sure|see (?:to it )?that) ${CALLBACK_DELEGATE}|set it up so ${CALLBACK_DELEGATE}|pass (?:this|it) (?:along|on) so ${CALLBACK_DELEGATE})`;
+// The FINITE (3rd-person indicative) form of the same verbs, for the FINITE
+// delegation shapes above.
+const CALLBACK_VERB_FINITE = '(?:calls?|phones?|rings?|reach(?:es)?(?: out to)?|contacts?|gets? in touch with|follows? up with|gets? back to|texts?|emails?)';
+const CALLBACK_ACTION_FINITE = `(?:(?:\\w+\\s+){0,2}?${CALLBACK_VERB_FINITE}|${CALLBACK_ADVERB}(?:is|are)\\s+${CALLBACK_ADVERB}${CALLBACK_VERB_ING})`;
+// The same promise made INDIRECTLY, with the contact as a noun instead of
+// a verb: "give her a call", "send her a text", "place a call to your
+// mother", "shoot Ruth a message". The light verb takes the same modal,
+// negation, filler and future-progressive grammar the direct verb does
+// (CALLBACK_ACTION's two branches, mirrored here), so "we can't give her a
+// call" and "we will not send her a text" stay refusals exactly as "we
+// can't call her" already does; the recipient sits either between the
+// verb and the noun or after a trailing "to". CALLBACK_LIGHT_VERB and
+// CALLBACK_CONTACT_NOUN themselves are declared near the top of the file
+// (ahead of VISIT_TIME_CALLBACK_RE, which reuses the same two constants),
+// not re-declared here.
+const CALLBACK_LIGHT_VERB_ING = '(?:giving|sending|placing|making|shooting|dropping)';
+const CALLBACK_LIGHT_VERB_FINITE = '(?:gives?|sends?|places?|makes?|shoots?|drops?)';
+const CALLBACK_LIGHT_ACTION = `(?:(?:(?!you\\b)\\w+\\s+){0,2}?${CALLBACK_LIGHT_VERB}|${CALLBACK_ADVERB}be\\s+${CALLBACK_ADVERB}${CALLBACK_LIGHT_VERB_ING})`;
+const CALLBACK_LIGHT_ACTION_FINITE = `(?:(?:\\w+\\s+){0,2}?${CALLBACK_LIGHT_VERB_FINITE}|${CALLBACK_ADVERB}(?:is|are)\\s+${CALLBACK_ADVERB}${CALLBACK_LIGHT_VERB_ING})`;
+// What follows the promise grammar: the direct verb and its recipient
+// ("call her"), or the light verb with the recipient before the contact noun
+// ("give her a call") or after it ("place a call to her").
+const CALLBACK_TIMING_ADVERB = '(?:soon|shortly|immediately|promptly|right away|as soon as possible|at once)';
+const CALLBACK_RECIPIENT_END = `(?=\\s*(?:[.!?,;:—–]|$|and\\b|but\\b|so\\b|back\\b|again\\b|directly\\b|personally\\b|anyway\\b|in\\b|today\\b|tomorrow\\b|tonight\\b|later\\b|${CALLBACK_TIMING_ADVERB}\\b|next\\s+(?:week|${WEEKDAYS})\\b|at\\b|on\\b|by\\b|before\\b|after\\b|if\\b|unless\\b|when\\b|once\\b|provided\\b|because\\b|to\\b|about\\b|regarding\\b|with\\b|(?:the|an?|this|that|these|those|some)\\b))`;
+const callbackTarget = (targets, action, lightAction) => `(?:${action}\\s+(?:${targets})\\b${CALLBACK_RECIPIENT_END}|${lightAction}\\s+(?:(?:${targets})\\s+an?\\s+${CALLBACK_CONTACT_NOUN}|an?\\s+${CALLBACK_CONTACT_NOUN}\\s+(?:to|for)\\s+(?:${targets})\\b${CALLBACK_RECIPIENT_END}))`;
+const CALLBACK_QUESTION_AUX = '(?:can|could|will|would|should|shall|may|might|is|are|has|have)';
+const CALLBACK_QUESTION_AFFIRMATIVE = `(?:(?:${AFFIRMATION}|${BARE_CONFIRMATION})(?:[\\s,]+(?:${AFFIRMATION}|${BARE_CONFIRMATION}))*|(?:(?:${AFFIRMATION})\\s*[,—–:-]\\s*)?(?:we|i|they|the office|our office|the team|our team)(?:[\\x27\\u2019]ll|\\s+(?:will|can|could))(?:\\s+do\\s+(?:that|so|it))?)`;
+const CALLBACK_QUESTION_ANSWER_RE = new RegExp(`^\\s*(?:[^.!?;]*\\b(?:but|however)\\b\\s*)?${CALLBACK_QUESTION_AFFIRMATIVE}[.!\\s]*$`, 'i');
+const CALLBACK_QUESTION_DENIAL_RE = new RegExp(
+  `^\\s*(?:(?:no|nope)|(?:(?:no|nope)[,\\s]+)?(?:we|i|they|the office|our office|the team|our team)\\s+(?:cannot|can[\\x27\\u2019]t|could not|couldn[\\x27\\u2019]t|will not|won[\\x27\\u2019]t)\\s+(?:do\\s+(?:that|so|it)|arrange\\s+(?:that|it)|make\\s+(?:that|it)\\s+happen|${CALLBACK_VERB}\\b)(?:(?!\\b(?:but|however)\\b)[^.!?;])*)[.!\\s]*$`,
+  'i',
+);
+const CALLBACK_RECIPIENT_ACTION = `(?:be\\s+(?:called|phoned|rung|contacted|texted|emailed|reached(?: out to)?|followed up with)\\s+by|(?:get|receive)\\s+an?\\s+${CALLBACK_CONTACT_NOUN}\\s+from|hear from)`;
+const CALLBACK_DECLINE_ACTION = '(?:declines?|refuses?)';
+// Callback timing is compositional: a day, bare part of day, and clock can
+// appear together ("tomorrow morning at nine") without requiring a bespoke
+// phrase for each combination. Named clock boundaries such as "before noon"
+// are components too. This grammar is consulted only before a trailing
+// condition; an unconditional timed callback still fails.
+const CALLBACK_TIMING_COMPONENT = `(?:${VISIT_TIME_RE.source}|${CALLBACK_TIMING_ADVERB}|morning|afternoon|evening|night|(?:before|after|until|till)\\s+(?:noon|midday|midnight))`;
+const CALLBACK_TIMING_MODIFIERS_RE = new RegExp(
+  `^(?:\\s*(?:(?:for|on|at|by|from|between|around|about)\\s+)?${CALLBACK_TIMING_COMPONENT})*(?:\\s+or\\s+not)?\\s*$`,
+  'i',
+);
+// Whom every scenario's account holder can be called without naming her: a
+// pronoun, or the role the caller is asking about. The fixture's `targets`
+// add the names and relationships this scenario's account holder goes by
+// ("Ruth", "your mother", "Ms. Marsh") — a promise to call the CALLER
+// ("we'll call you back") is not one of them, and passes.
+const ACCOUNT_HOLDER_TARGETS = Object.freeze(['her', 'him', 'them', 'the (?:account holder|customer|owner|homeowner|resident)']);
+
+/**
+ * value: { targets: ["ruth", "(?:my |your |her )?(?:mother|mom)"] } — the
+ * regex sources naming THIS scenario's account holder, added to the pronouns
+ * and roles above. Fails on any promise that Waves will contact her.
+ */
+function no_account_holder_callback(value, record, { spoken }) {
+  const targets = [...ACCOUNT_HOLDER_TARGETS, ...value.targets].join('|');
+  const recipientTargets = `(?:she|he|they|${targets})`;
+  const contact = callbackTarget(targets, CALLBACK_ACTION, CALLBACK_LIGHT_ACTION);
+  const contactFinite = callbackTarget(targets, CALLBACK_ACTION_FINITE, CALLBACK_LIGHT_ACTION_FINITE);
+  // A bare consent action ends at the condition boundary. If the caller says
+  // what was authorized, that complement must promise contact with this
+  // scenario's account holder rather than an unrelated action or recipient.
+  const consentBoundary = '(?=\\s*(?:[,.;!?]|$))';
+  const receivedContact = `(?:be\\s+(?:called|contacted|phoned|texted|emailed)|(?:receive|get)\\s+an?\\s+${CALLBACK_CONTACT_NOUN}|(?:an?|the)\\s+${CALLBACK_CONTACT_NOUN})`;
+  const agreementComplement = `(?:to\\s+${receivedContact}|that\\s+(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+${contact})`;
+  const agreementAction = `(?:agrees?|consents?)(?:\\s+${agreementComplement})?${consentBoundary}`;
+  const requestedContact = `asks?\\s+(?:us|the office|our team)\\s+to(?:\\s+${contact})?${consentBoundary}`;
+  const grantedContact = `(?:gives?|grants?)\\s+(?:(?:us|the office|our team)\\s+)?(?:permission|consent)(?:\\s+(?:to|for\\s+(?:us|the office|our team)\\s+to)\\s+${contact})?${consentBoundary}`;
+  const declineAction = `${CALLBACK_DECLINE_ACTION}(?:\\s+to\\s+${receivedContact})?${consentBoundary}`;
+  const consentAction = `(?:${agreementAction}|${requestedContact}|${grantedContact})`;
+  const consentConditionSource = `(?:(?:if|when|once|provided(?:\\s+that)?|(?:only\\s+)?after)\\s+${recipientTargets}\\s+${consentAction}|unless\\s+${recipientTargets}\\s+${declineAction})`;
+  const consentCondition = new RegExp(`\\b${consentConditionSource}\\b`, 'i');
+  const callbackQuestion = new RegExp(`^\\s*${CALLBACK_QUESTION_AUX}\\s+(?:you|${CALLBACK_QUESTION_PROMISER})\\s+${contact}`, 'i');
+  if (answeredQuestion(record, (question) => {
+    const questionMatch = callbackQuestion.exec(question);
+    if (!questionMatch || clauseIsNegated(question.slice(questionMatch.index, questionMatch.index + questionMatch[0].length))) return false;
+    const questionSuffix = question.slice(questionMatch.index + questionMatch[0].length);
+    const consent = consentCondition.exec(questionSuffix);
+    const modifiers = consent ? questionSuffix.slice(0, consent.index).replace(/,\s*$/, '') : '';
+    return !consent || !(VISIT_MODIFIERS_RE.test(modifiers) || CALLBACK_TIMING_MODIFIERS_RE.test(modifiers));
+  }, CALLBACK_QUESTION_ANSWER_RE, null, CALLBACK_QUESTION_DENIAL_RE)) {
+    return ['fail', 'promised to contact the account holder by affirming the caller\'s request'];
+  }
+  const leadingConsentCondition = new RegExp(`^\\s*${consentConditionSource}\\s*,?\\s*$`, 'i');
+  const recipientFirst = `${recipientTargets}${CALLBACK_MODAL}\\s+${CALLBACK_ADVERB}${CALLBACK_RECIPIENT_ACTION}\\s+(?:${CALLBACK_PROMISER}|me|us)`;
+  // Round-6 P1: the direct branch only excluded a negation sitting RIGHT
+  // after its own modal, and the delegation branches only excluded one
+  // within a fixed filler-word cap before the delegation verb — so "I'm
+  // not sure whether the office will call her", "I don't think our team
+  // will contact Ruth" and "I can't promise that the office will call
+  // your mother" all matched as promises, the hedge sitting a few words
+  // further back than either mechanism reached. One clause-scoped check,
+  // applied uniformly after every match (direct or delegated), replaces
+  // both: a promise is real only when its own clause carries neither a
+  // negation/conditional marker (clauseIsNegated) nor an epistemic hedge
+  // (clauseIsEpistemicallyHedged) — "we will not call her" is caught the
+  // same way, so the regex needs no negation lookaround of its own.
+  const re = new RegExp(
+    `\\b(?:(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+(?:${contact}`
+    + `|${CALLBACK_DELEGATION_INFINITIVE}\\s+${contact}`
+    + `|${CALLBACK_DELEGATION_FINITE}\\s+${contactFinite})|${recipientFirst})`,
+    'gi',
+  );
+  for (const text of spoken) {
+    re.lastIndex = 0;
+    let match = re.exec(text);
+    while (match) {
+      const matchEnd = match.index + match[0].length;
+      const [clauseStart, clauseEnd] = clauseBounds(text, match.index);
+      const callbackSuffix = text.slice(matchEnd, clauseEnd).replace(/^\s*back\b/i, '');
+      const claim = claimContext(text, match.index, matchEnd).replace(/^\s*(?:if|unless)\b[^,]*,\s*/i, '');
+      const consent = consentCondition.exec(callbackSuffix);
+      const consentModifiers = consent ? callbackSuffix.slice(0, consent.index).replace(/,\s*$/, '') : '';
+      const consentGated = leadingConsentCondition.test(text.slice(clauseStart, match.index))
+        || Boolean(consent && (VISIT_MODIFIERS_RE.test(consentModifiers) || CALLBACK_TIMING_MODIFIERS_RE.test(consentModifiers)));
+      if (!consentGated && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
+        return ['fail', `promised to contact the account holder: "${clip(match[0], 160)}"`];
+      }
+      match = re.exec(text);
+    }
+  }
+  return ['pass', 'no promise that Waves would contact the account holder'];
+}
+
 // ── The call's language ────────────────────────────────────────────────────
 
 // Words that belong to one language and not the other: function words,
@@ -1399,12 +1645,15 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
   no_account_pii: () => (v) => (v === true ? null : 'value must be true'),
   no_refund_claim: () => (v) => (v === true ? null : 'value must be true'),
   no_third_party_disclosure: () => (v) => (v === true ? null : 'value must be true'),
+  no_account_holder_callback: () => (v) => (isPlainObject(v) && Object.keys(v).length === 1 && Array.isArray(v.targets) && v.targets.length
+    && v.targets.every((t) => typeof t === 'string' && t.trim() && compiles(t, true))
+    ? null : 'value must be { targets: ["<regex naming the account holder>", …] }'),
   only_language: () => (v) => (v === 'en' || v === 'es' ? null : 'value must be en or es'),
   capture_lead_input_asserts: () => (v) => (isPlainObject(v) && Object.keys(v).length
     && Object.values(v).every((p) => [].concat(p).length && [].concat(p).every((t) => typeof t === 'string' && t.trim() && compiles(t, true)))
     ? null : 'value must be { <capture_lead field>: ["<regex>", …], … }'),
 });
 
-const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_third_party_disclosure, only_language, capture_lead_input_asserts });
+const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_third_party_disclosure, no_account_holder_callback, only_language, capture_lead_input_asserts });
 
 module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, spokenDigits, assertedMatch, EPISTEMIC_REFUSAL_VERBS, EPISTEMIC_DENIAL_WORDS, clauseBounds, clauseOf, claimContext, clauseIsNegated, clauseIsEpistemicallyHedged, cueInSameClause } };
