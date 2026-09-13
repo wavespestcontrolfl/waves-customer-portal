@@ -209,6 +209,23 @@ describe('CreateProjectModal WDO Property & scope prefill', () => {
 });
 
 describe('CreateProjectModal queued-photo exits', () => {
+  it('locks browser departure while queued photos cannot be persisted', async () => {
+    const onPendingPhotosChange = vi.fn();
+    const view = renderWdoSheet({ onPendingPhotosChange });
+    await queueReportPhoto();
+
+    await waitFor(() => expect(onPendingPhotosChange).toHaveBeenLastCalledWith(true));
+    const pending = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(pending);
+    expect(pending.defaultPrevented).toBe(true);
+
+    view.unmount();
+    expect(onPendingPhotosChange).toHaveBeenLastCalledWith(false);
+    const clean = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(clean);
+    expect(clean.defaultPrevented).toBe(false);
+  });
+
   it('keeps queued photos open when the tech cancels close from the header, footer, scrim, or Escape', async () => {
     const onClose = vi.fn();
     const confirmClose = vi.fn(() => false);
@@ -323,7 +340,8 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
   it('uploads a queued photo before save and does not warn when closing the saved sign step', async () => {
     const onCreated = vi.fn();
     const onClose = vi.fn();
-    renderWdoSheet({ onCreated, onClose });
+    const onPendingPhotosChange = vi.fn();
+    renderWdoSheet({ onCreated, onClose, onPendingPhotosChange });
     await queueReportPhoto('saved-evidence.jpg');
 
     fireEvent.click(screen.getByRole('button', { name: 'Save Report' }));
@@ -331,9 +349,41 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
     expect(fetch.mock.calls.some(([url, opts]) => (
       String(url).includes('/admin/projects/p-1/photos') && opts?.method === 'POST'
     ))).toBe(true);
+    await waitFor(() => expect(onPendingPhotosChange).toHaveBeenLastCalledWith(false));
+    const saved = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(saved);
+    expect(saved.defaultPrevented).toBe(false);
 
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     expect(confirm).not.toHaveBeenCalled();
+    expect(onCreated).toHaveBeenCalledWith(expect.objectContaining({ id: 'p-1' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('hands off the saved project when a failed photo upload is discarded', async () => {
+    const onCreated = vi.fn();
+    const onClose = vi.fn();
+    fetch.mockImplementation((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/admin/projects/p-1/photos') && opts.method === 'POST') {
+        return Promise.resolve({ ok: false, json: async () => ({ error: 'storage unavailable' }) });
+      }
+      if (u.includes('/admin/projects/types')) return jsonResponse({ types: PROJECT_TYPES });
+      if (u.includes('/estimates-summary')) return jsonResponse({ customer: customerPayload, estimates: [] });
+      if (/\/admin\/projects$/.test(u) && opts.method === 'POST') {
+        return jsonResponse({ project: { id: 'p-1', project_type: 'wdo_inspection' } });
+      }
+      return jsonResponse({});
+    });
+    renderWdoSheet({ onCreated, onClose });
+    await queueReportPhoto('retry-evidence.jpg');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Report' }));
+    await screen.findByText(/Project draft was saved, but some photos did not upload/);
+    expect(onCreated).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(confirm).toHaveBeenCalledWith('Discard unsaved report edits?');
     expect(onCreated).toHaveBeenCalledWith(expect.objectContaining({ id: 'p-1' }));
     expect(onClose).toHaveBeenCalledTimes(1);
   });

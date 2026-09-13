@@ -1562,6 +1562,7 @@ export function ProjectDetail({
   const [editTitle, setEditTitle] = useState("");
   const [editProjectDate, setEditProjectDate] = useState("");
   const [dirty, setDirty] = useState(false);
+  const [dirtyPhotoIds, setDirtyPhotoIds] = useState(() => new Set());
   const [sentLink, setSentLink] = useState("");
   const [aiWriting, setAiWriting] = useState(false);
   const [notice, setNotice] = useState("");
@@ -1631,6 +1632,7 @@ export function ProjectDetail({
     // The drawer instance survives across projects (dispatch overlay) — an
     // unchecked hold must not silently carry over to the next WDO.
     setHoldReportUntilPaid(true);
+    setDirtyPhotoIds(new Set());
   }, [projectId]);
 
   // Host-driven data refresh (Codex r10 P2 on #2717): after an in-editor
@@ -1652,10 +1654,20 @@ export function ProjectDetail({
 
   // Host-visible dirty signal (Codex r14 P2 on #2717): the dispatch
   // overlay's backdrop close needs to know when discarding would lose
-  // unsaved edits — this editor keeps them only in component state.
+  // unsaved edits — both the report fields and each photo caption editor
+  // keep drafts only in component state.
   useEffect(() => {
-    onDirtyChange?.(dirty);
-  }, [dirty, onDirtyChange]);
+    onDirtyChange?.(dirty || dirtyPhotoIds.size > 0);
+  }, [dirty, dirtyPhotoIds, onDirtyChange]);
+  const handlePhotoCaptionDirtyChange = useCallback((photoId, isDirty) => {
+    setDirtyPhotoIds((current) => {
+      if (current.has(photoId) === isDirty) return current;
+      const next = new Set(current);
+      if (isDirty) next.add(photoId);
+      else next.delete(photoId);
+      return next;
+    });
+  }, []);
 
   const project = data?.project;
   const typeCfg =
@@ -2936,6 +2948,7 @@ export function ProjectDetail({
                   projectId={projectId}
                   onDelete={() => handlePhotoDelete(ph.id)}
                   onCaptionSaved={() => load({ preserveEdits: true })}
+                  onDirtyChange={handlePhotoCaptionDirtyChange}
                 />
               ))}
             </div>
@@ -3371,7 +3384,7 @@ function ProjectHistoryPanel({ activity }) {
 
 // Named export so the caption editor can be mounted standalone in tests and
 // UI verification (the drawer needs a full project fixture to render).
-export function PhotoThumb({ photo, projectId, onDelete, onCaptionSaved }) {
+export function PhotoThumb({ photo, projectId, onDelete, onCaptionSaved, onDirtyChange }) {
   const [url, setUrl] = useState(null);
   const [loadFailed, setLoadFailed] = useState(false);
   // Inline caption editing — captions print on the FDACS photo addendum, and
@@ -3380,6 +3393,16 @@ export function PhotoThumb({ photo, projectId, onDelete, onCaptionSaved }) {
   const [editingCaption, setEditingCaption] = useState(false);
   const [captionDraft, setCaptionDraft] = useState(photo.caption || "");
   const [captionSaving, setCaptionSaving] = useState(false);
+  const captionDirty = editingCaption && captionDraft !== (photo.caption || "");
+  const captionDirtyRef = useRef(captionDirty);
+  captionDirtyRef.current = captionDirty;
+
+  useEffect(() => {
+    onDirtyChange?.(photo.id, captionDirty);
+  }, [captionDirty, onDirtyChange, photo.id]);
+  useEffect(() => () => {
+    if (captionDirtyRef.current) onDirtyChange?.(photo.id, false);
+  }, [onDirtyChange, photo.id]);
 
   async function saveCaption() {
     setCaptionSaving(true);

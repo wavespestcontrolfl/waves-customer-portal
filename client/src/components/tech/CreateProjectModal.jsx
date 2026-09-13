@@ -298,7 +298,7 @@ function mergeSuggestionsIntoFindings(current, suggestions, overwrite = false) {
 }
 
 export default function CreateProjectModal({
-  onClose, onCreated,
+  onClose, onCreated, onPendingPhotosChange,
   defaultCustomerId, defaultServiceRecordId, defaultScheduledServiceId,
   defaultCustomerLabel,
   defaultProjectDate,
@@ -477,6 +477,7 @@ export default function CreateProjectModal({
 
   function requestClose() {
     if (photoQueue.length && !confirm('Discard unsaved report edits?')) return;
+    if (createdProject && onCreated) onCreated(createdProject);
     onClose?.();
   }
 
@@ -537,6 +538,20 @@ export default function CreateProjectModal({
   // Photo buffer — queued locally, uploaded after project is created.
   const [photoQueue, setPhotoQueue] = useState([]);
   const [uploadProgress, setUploadProgress] = useState({ done: 0, total: 0 });
+
+  // Files cannot join the localStorage draft, so protect them through both
+  // browser departure and the Tech portal's existing history lock. The host
+  // callback is optional because admin surfaces also mount this component.
+  useEffect(() => {
+    onPendingPhotosChange?.(photoQueue.length > 0);
+  }, [onPendingPhotosChange, photoQueue.length]);
+  useEffect(() => () => onPendingPhotosChange?.(false), [onPendingPhotosChange]);
+  useEffect(() => {
+    if (!photoQueue.length) return undefined;
+    const warn = (event) => { event.preventDefault(); event.returnValue = ''; };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [photoQueue.length]);
 
   // --- Draft auto-save (localStorage) ---
   // Mirrors the completion-form draft pattern: debounced save of the typed
@@ -1498,6 +1513,10 @@ export default function CreateProjectModal({
           setError(`Project draft was saved, but some photos did not upload. Retry Save Draft to upload the remaining photo${failedUploads.length === 1 ? '' : 's'}. ${failedUploads.join('; ')}`);
           return;
         }
+        // Every queued File now has a durable server photo. Release browser
+        // and Tech navigation guards while an official report remains open
+        // on its sign/delivery step.
+        setPhotoQueue([]);
       }
 
       try { localStorage.removeItem(draftKey); } catch { /* ignore */ }

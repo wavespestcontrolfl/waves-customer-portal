@@ -10,7 +10,13 @@ vi.mock('socket.io-client', () => ({ io: () => ({ on: (_event, callback) => { mo
 vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false }));
 vi.mock('../../components/tech/TechIntelligenceBar', () => ({ default: () => <div>Field assistant</div> }));
 vi.mock('../../components/tech/GeofenceArrivalPrompt', () => ({ default: () => null }));
-vi.mock('../../components/tech/CreateProjectModal', () => ({ default: () => null, wdoFeeSeedFromVisit: () => null }));
+vi.mock('../../components/tech/CreateProjectModal', () => ({
+  default: ({ onPendingPhotosChange }) => <div role="dialog" aria-label="Create project fixture">
+    <button onClick={() => onPendingPhotosChange(true)}>Queue report photo</button>
+    <button onClick={() => onPendingPhotosChange(false)}>Clear report photos</button>
+  </div>,
+  wdoFeeSeedFromVisit: () => null,
+}));
 vi.mock('../../components/tech/TechTimeTrackingCard', () => ({ default: () => <div>Shift time</div> }));
 vi.mock('../../components/tech/TechServicePhotosModal', () => ({ default: ({ serviceId }) => <div>Photos for {serviceId}</div> }));
 vi.mock('../../components/tech/TechTreatmentZoneModal', () => ({ default: () => null }));
@@ -176,6 +182,17 @@ describe('Tech field workspace uses the existing route workflow', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Start contact action' }));
     expect(mocks.navigationBusy).toHaveBeenLastCalledWith(true);
     expect(screen.getByRole('button', { name: 'Today' })).toBeDisabled();
+  });
+
+  it('uses the navigation lock while the create report has unpersisted photos', async () => {
+    rows = [row('one')];
+    mount('/tech/tools');
+    fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Queue report photo' }));
+    await waitFor(() => expect(mocks.navigationBusy).toHaveBeenLastCalledWith(true));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear report photos' }));
+    await waitFor(() => expect(mocks.navigationBusy).toHaveBeenLastCalledWith(false));
   });
 
   it('keeps Project Report disabled when the selected visit is missing despite another live service', async () => {

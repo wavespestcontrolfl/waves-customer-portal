@@ -232,6 +232,7 @@ export default function TechHomePage({ section = 'today' }) {
   const [loading, setLoading] = useState(true);
   const [scheduleError, setScheduleError] = useState('');
   const [showCreateProject, setShowCreateProject] = useState(false);
+  const [createProjectHasPendingPhotos, setCreateProjectHasPendingPhotos] = useState(false);
   const [showProjectPicker, setShowProjectPicker] = useState(false);
   const [projectDefaults, setProjectDefaults] = useState(null);
   const [photoTarget, setPhotoTarget] = useState(null); // { id, customerName }
@@ -507,7 +508,9 @@ export default function TechHomePage({ section = 'today' }) {
   // lock timer before it could release (codex #4072 r19 P2). No header
   // moves the accordion until the action settles.
   const [busyStopId, setBusyStopId] = useState(null);
-  const navigationBusy = Boolean(busyStopId || enRouteState.pendingId || onSiteState.pendingId);
+  const navigationBusy = Boolean(
+    busyStopId || enRouteState.pendingId || onSiteState.pendingId || createProjectHasPendingPhotos
+  );
   useLayoutEffect(() => {
     setNavigationBusy?.(navigationBusy);
     return () => setNavigationBusy?.(false);
@@ -530,6 +533,7 @@ export default function TechHomePage({ section = 'today' }) {
   }, [section, selectedVisitKey, schedule, scheduleError, loadStopDetail]);
 
   const openProjectForService = useCallback((service) => {
+    setCreateProjectHasPendingPhotos(false);
     setProjectDefaults(service ? {
       customerId: service.customer_id || service.customerId || '',
       customerLabel: service.customer_name || service.customerName || '',
@@ -988,8 +992,9 @@ export default function TechHomePage({ section = 'today' }) {
           defaultInspectionFee={projectDefaults?.visitPrice ?? ''}
           defaultProjectType={projectDefaults?.projectType || ''}
           allowedProjectTypes={projectDefaults?.projectType ? [projectDefaults.projectType] : null}
-          onClose={() => { setShowCreateProject(false); setProjectDefaults(null); }}
-          onCreated={() => { setShowCreateProject(false); setProjectDefaults(null); }}
+          onPendingPhotosChange={setCreateProjectHasPendingPhotos}
+          onClose={() => { setCreateProjectHasPendingPhotos(false); setShowCreateProject(false); setProjectDefaults(null); }}
+          onCreated={() => { setCreateProjectHasPendingPhotos(false); setShowCreateProject(false); setProjectDefaults(null); }}
         />
       )}
 
