@@ -115,6 +115,9 @@ describe('voice relay eval — capture_lead_input_asserts', () => {
     ['Customer did not book, but asked whether the bait is safe for her dog.', 'pass'],
     ['Customer has a dog and asked if bait is safe; go over it on site', 'pass'],
     ['Customer asked if the bait is not safe for her dog.', 'pass'],
+    ["Customer asked why the bait wasn't safe for her dog.", 'pass'],
+    ["Customer did not ask why the bait wasn't safe for her dog.", 'fail'],
+    ["Customer denied asking why the bait wasn't safe for her dog.", 'fail'],
     ['Customer asked, is the bait not safe for her dog?', 'pass'],
     ['Customer did not ask if the bait is not safe for her dog.', 'fail'],
     ['Customer did not ask, is the bait not safe for her dog?', 'fail'],
@@ -133,6 +136,10 @@ describe('voice relay eval — capture_lead_input_asserts', () => {
     ['Customer failed to mention a safety concern for her dog.', 'fail'],
     ['Customer failed to report a safety concern for her dog.', 'fail'],
     ['Customer failed to book an appointment and raised a safety concern for her dog.', 'pass'],
+    ['Customer was unable to raise a safety concern for her dog.', 'fail'],
+    ['Customer was unable to mention a safety concern for her dog.', 'fail'],
+    ['Customer was unable to report a safety concern for her dog.', 'fail'],
+    ['Customer was unable to book an appointment and raised a safety concern for her dog.', 'pass'],
   ])('capture_lead_input_asserts grades the concern as asserted, not merely mentioned — %s', (summary, status) => {
     const check = runCheck(exp('capture_lead_input_asserts', PET_CONCERN, 'critical'), captured(summary));
     expect(check.status).toBe(status);
@@ -217,6 +224,13 @@ test.each([
 
 test.each([
   ['Safety concerns for her dog were not raised.', false],
+  ['Safety concerns for her dog could not be raised.', false],
+  ['Safety concerns for her dog should not be raised.', false],
+  ['Safety concerns for her dog will not be raised.', false],
+  ['Safety concerns for her dog may not be raised.', false],
+  ['Safety concerns for her dog can not be raised.', false],
+  ['Safety concerns for her dog could be raised.', true],
+  ['Customer could not book and raised a safety concern for her dog.', true],
   ['Safety concerns for her dog were definitely not raised.', false],
   ['Safety concerns for her dog were, according to the caller, not raised.', false],
   ['Customer did not book and then asked about safety for her dog.', true],
@@ -315,6 +329,11 @@ test.each([
   ['Customer mentioned nothing but safety for her dog.', true],
   ['Customer mentioned nothing except safety for her dog.', true],
   ['Customer mentioned nothing other than safety for her dog.', true],
+  ['Customer reported no concerns about safety for her dog.', false],
+  ['Customer reported no concerns except safety for her dog.', true],
+  ['Customer reported no concerns other than safety for her dog.', true],
+  ['Customer reported no safety concerns except scheduling.', false],
+  ['Customer reported no safety concerns other than scheduling.', false],
 ])('zero-report wording differs from exclusive affirmative wording: %s', (text, asserted) => {
   const { assertedMatch } = require('../services/eval/voice-relay-spoken-checks')._internals;
   expect(Boolean(assertedMatch(text, /safety[^.]*dog/i))).toBe(asserted);
