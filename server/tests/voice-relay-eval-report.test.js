@@ -159,6 +159,14 @@ test.each([
   expect(checks.report_readback_confirms(report, {}, { spoken: [spoken] })[0]).toBe('pass');
 });
 
+test.each([
+  'Talstar P was applied to the garage and the exterior perimeter was not treated.',
+  'Talstar P was applied to the garage and the exterior perimeter was scheduled for tomorrow.',
+  'Talstar P was applied to the garage and the exterior perimeter, right?',
+])('a second location retains its own predicate or question scope: %s', (spoken) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken: [spoken] })[0]).toBe('fail');
+});
+
 test('coordinated products do not borrow one another\'s treatment location', () => {
   const spoken = ['Talstar P went around the exterior perimeter and bait along the foundation.'];
   const swappedFindings = [

@@ -1394,6 +1394,26 @@ function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb
   return deniedSpans(affirmed).some(([start, end]) => firstAt < end && lastAt > start);
 }
 
+function reportSharedLocationContinuation(text, clauseEnd, location) {
+  const remainder = text.slice(clauseEnd);
+  const locationTail = new RegExp(
+    `^and\\s+(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+)?`
+      + `(?:(?:the|a|an)\\s+)?(?:${location})`,
+    'i',
+  ).exec(remainder);
+  if (!locationTail) return { text: '', question: false };
+  const end = remainder.search(/[.!?;]/);
+  return {
+    text: remainder.slice(0, end >= 0 ? end : undefined),
+    question: end >= 0 && remainder[end] === '?',
+  };
+}
+
+function reportTrailingEvidenceIsQualified(evidence) {
+  return REPORT_TRAILING_UNCERTAINTY_RE.test(evidence)
+    || REPORT_CONCISE_NONCOMPLETION_RE.test(evidence);
+}
+
 /** value: { subject: "<regex>", location: "<regex>" } */
 function report_readback_confirms(value, record, { spoken }) {
   const subjectRe = new RegExp(value.subject, 'gi');
@@ -1406,13 +1426,9 @@ function report_readback_confirms(value, record, { spoken }) {
       const sentencePrefix = text.slice(0, m.index).split(/[.!?;]/).pop();
       const interrogative = /^\s*(?:(?:and|but|so)\s+)?(?:was|were|is|are|has|have|had|did|do|does|can|could|would|will|should|what|where|when|why|how)\b/i.test(sentencePrefix);
       const alternativeQuestion = /^or\b[^.!?;]*\?/i.test(text.slice(clauseEnd));
-      if (text[clauseEnd] === '?' || interrogative || alternativeQuestion) continue;
-      const sharedLocationTail = new RegExp(
-        `^and\\s+(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+)?`
-          + `(?:(?:the|a|an)\\s+)?(?:${value.location})`,
-        'i',
-      ).exec(text.slice(clauseEnd));
-      const reportClause = clauseOf(text, m.index) + (sharedLocationTail ? sharedLocationTail[0] : '');
+      const sharedLocation = reportSharedLocationContinuation(text, clauseEnd, value.location);
+      if (text[clauseEnd] === '?' || interrogative || alternativeQuestion || sharedLocation.question) continue;
+      const reportClause = clauseOf(text, m.index) + sharedLocation.text;
       const clause = reportAssertionOf(reportClause, m.index - clauseStart);
       // A contrast excludes its following alternative, not the location
       // affirmed before it: "exterior rather than indoors" and "exterior,
@@ -1455,7 +1471,7 @@ function report_readback_confirms(value, record, { spoken }) {
         ? affirmed.slice(0, evidenceEnd) + affirmed.slice(evidenceEnd).replace(/\bbefore\b/gi, 'prior to') : affirmed;
       const claim = claimContext(claimText, Math.min(subjectAt, locationAt), claimText.length);
       if (subjectAt >= 0 && !REPORT_UNCERTAINTY_RE.test(findingEvidence)
-          && !REPORT_TRAILING_UNCERTAINTY_RE.test(trailingEvidence) && !REPORT_INSTRUCTION_RE.test(affirmed)
+          && !reportTrailingEvidenceIsQualified(trailingEvidence) && !REPORT_INSTRUCTION_RE.test(affirmed)
           && !alternativeLocation
           && (completedFinding || conciseFinding)
           && !reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb)) {
