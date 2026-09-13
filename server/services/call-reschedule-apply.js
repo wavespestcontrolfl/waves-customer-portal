@@ -73,6 +73,7 @@ const { phoneMatchDigits } = require('../utils/phone');
 const { KNOWN_CALLER_PHONE_COLS } = require('../utils/known-caller-phone');
 const { stripServiceSuffixes } = require('../utils/service-normalizer');
 const { serviceNameCandidates } = require('./service-completion-profiles');
+const { assertAdminAppointmentWindow } = require('./scheduling/window-rules');
 const { isEnabled } = require('../config/feature-gates');
 const { createHash } = require('crypto');
 const logger = require('./logger');
@@ -129,12 +130,53 @@ function skip(reason, extra = {}) {
   return { action: 'skip', reason, ...extra };
 }
 
+const OFFER_WINDOW_MS = 7 * 86400000;
+
+function offerOptions(row) {
+  try {
+    const notes = typeof row.notes === 'string' ? JSON.parse(row.notes) : (row.notes || {});
+    return !!(notes && (notes.option1 || notes.option2));
+  } catch {
+    // Unparseable notes are not actionable to reschedule-sms either — its
+    // parseOptions helper degrades to {} on the same input.
+    return false;
+  }
+}
+
+async function pendingSmsOffer(conn, customerId, serviceId, now) {
+  const rows = await conn('reschedule_log')
+    .where({ customer_id: customerId, scheduled_service_id: serviceId })
+    .whereNull('customer_response')
+    .where('created_at', '>', new Date(now.getTime() - OFFER_WINDOW_MS))
+    .select('id', 'notes');
+  return (rows || []).find(offerOptions) || null;
+}
+
+function openPortalRequest(conn, customerId, serviceId) {
+  return conn('service_requests')
+    .where({ customer_id: customerId, category: 'schedule_change' })
+    .whereNotIn('status', ['resolved', 'closed', 'cancelled'])
+    .where('description', 'like', `Appointment ${serviceId}:%`)
+    .first('id');
+}
+
+// Excluding the proposal under review lets staff apply a claimed card while
+// another claimed or human-closed card still proves the request was handled.
+function humanHandledRescheduleCard(conn, callLogId, { excludeId = null } = {}) {
+  const query = conn('triage_items').where({ call_log_id: callLogId })
+    .whereIn('reason_code', CARD_REASON_CODES)
+    .where((q) => q.where('status', 'in_progress').orWhere((closed) => closed
+      .where('resolution_source', 'human').whereIn('status', ['resolved', 'dismissed'])));
+  if (excludeId) query.whereNot('id', excludeId);
+  return query.first('id');
+}
+
 /**
  * Pure decision. `candidates` are the customer's live scheduled_services
  * rows (already filtered to LIVE_STATUSES by the loader); `now` is the
  * clock the future-instant check uses.
  */
-function planRescheduleFromCall({ v2, call, customer, properties = [], candidates = [], appointmentCreated = false, now = new Date(), transcriptLabelsTrusted = false } = {}) {
+function planRescheduleFromCall({ v2, call, customer, properties = [], candidates = [], appointmentCreated = false, now = new Date(), transcriptLabelsTrusted = false, humanOverride = null } = {}) {
   if (!v2 || typeof v2 !== 'object') return skip('no_v2_extraction');
   if (appointmentCreated) return skip('pipeline_created_appointment');
   if (v2.meta?.is_spam === true) return skip('spam');
@@ -143,10 +185,13 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
   const scheduling = v2.scheduling || {};
   if (scheduling.status === 'canceled') return skip('cancel_not_automated');
   if (scheduling.status !== 'reschedule_requested') return skip('not_a_reschedule');
-  if (scheduling.agent_committed_booking !== true) return skip('agent_did_not_commit');
-  if (!scheduling.confirmed_start_at) return skip('no_confirmed_start');
+  if (humanOverride && scheduling.agent_committed_booking === true) return skip('agent_committed_booking');
+  if (humanOverride && scheduling.confirmed_start_at) return skip('confirmed_start_supersedes_proposal');
+  if (!humanOverride && scheduling.agent_committed_booking !== true) return skip('agent_did_not_commit');
+  const targetStart = humanOverride ? scheduling.proposed_start_at : scheduling.confirmed_start_at;
+  if (!targetStart) return skip(humanOverride ? 'no_proposed_start' : 'no_confirmed_start');
   const confidence = v2.confidence?.scheduling_window;
-  if (typeof confidence !== 'number' || confidence < MIN_SCHEDULING_CONFIDENCE) return skip('low_scheduling_confidence');
+  if (!humanOverride && (typeof confidence !== 'number' || confidence < MIN_SCHEDULING_CONFIDENCE)) return skip('low_scheduling_confidence');
   if (v2.caller?.decision_maker_present === false) return skip('caller_not_decision_maker');
   if (v2.consent?.do_not_contact_request === true) return skip('do_not_contact_requested');
 
@@ -163,64 +208,69 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
   const onFileKeys = new Set(KNOWN_CALLER_PHONE_COLS.flatMap((col) => phoneMatchDigits(customer[col])));
   if (!phoneKeys.some((key) => onFileKeys.has(key))) return skip('caller_phone_not_on_file');
 
-  const target = new Date(scheduling.confirmed_start_at);
+  const target = new Date(targetStart);
   if (Number.isNaN(target.getTime())) return skip('unparseable_confirmed_start');
   if (target.getTime() <= now.getTime()) return skip('confirmed_start_in_past');
   const parts = etParts(target);
-  if (!confirmedStartOnTheHour(scheduling.confirmed_start_at) || target.getUTCMilliseconds() !== 0) return skip('off_grid_start_time');
-  if (!transcriptLabelsTrusted) return skip('untrusted_speaker_labels');
-  if (!hasAgentCommittedEvidence(v2, call.transcription, call.created_at)) return skip('ungrounded_agent_commitment');
+  const onHour = humanOverride ? parts.minute === 0 && target.getUTCSeconds() === 0 : confirmedStartOnTheHour(scheduling.confirmed_start_at);
+  if (!onHour || target.getUTCMilliseconds() !== 0) return skip('off_grid_start_time');
+  if (!humanOverride && !transcriptLabelsTrusted) return skip('untrusted_speaker_labels');
+  if (!humanOverride && !hasAgentCommittedEvidence(v2, call.transcription, call.created_at)) return skip('ungrounded_agent_commitment');
   const newDate = etDateString(target);
   const newStart = `${pad2(parts.hour)}:${pad2(parts.minute)}`;
-  if (etWallClockOfConfirmedStart(scheduling.confirmed_start_at) !== `${newDate}T${newStart}`) return skip('inconsistent_start_offset');
+  if (etWallClockOfConfirmedStart(targetStart) !== `${newDate}T${newStart}`) return skip('inconsistent_start_offset');
 
-  const saved = properties.filter((p) => p.active !== false);
-  const primaryKey = customer.address_line1 ? addressKey(customer) : null;
-  const knownKeys = new Set([primaryKey, ...saved.map((p) => addressKey(p))].filter(Boolean));
-  const stated = v2.property?.service_address || {};
-  const targetKey = statesNewAddress(v2)
-    ? (stated.street_line_1 ? addressKey({ address_line1: stated.street_line_1, address_line2: stated.street_line_2,
-      city: stated.city, zip: stated.postal_code }) : null)
-    : (knownKeys.size === 1 ? [...knownKeys][0] : null);
-  if (!targetKey || !knownKeys.has(targetKey)) return skip('property_needs_review');
-  const atProperty = candidates.filter((row) => {
-    if (row.property_id) return saved.some((p) => String(p.id) === String(row.property_id) && addressKey(p) === targetKey);
-    const key = row.service_address_line1 ? addressKey({ address_line1: row.service_address_line1,
-      address_line2: row.service_address_line2, city: row.service_address_city, zip: row.service_address_zip }) : primaryKey;
-    return key === targetKey;
-  });
-  if (!atProperty.length) return skip('no_visit_on_books');
-  // Match the named service BEFORE proximity. A different program near the
-  // destination cannot stand in for the requested visit outside the span.
-  // Coarse categories cannot distinguish programs, so absent/ambiguous
-  // catalog identity stays in office review.
-  const namedServices = new Set(serviceNameCandidates(v2.service_request?.specific_service_name)
-    .map((name) => stripServiceSuffixes(name).toLowerCase()));
-  // A row that names a catalog service is matched on THAT catalog name only:
-  // a repoint leaves scheduled_services.service_type stale, so the label alone
-  // can name the requested program while the row now belongs to a different
-  // one (admin-schedule.js:14115-14118 documents the same hazard; GH codex
-  // #4204 r8 P1). A row whose service_id no longer resolves to a catalog row
-  // has no authoritative identity and matches nothing. A row with NO
-  // service_id cannot have been repointed — its free-text label is the only
-  // identity it ever had, so it keeps matching on that.
-  const matchingServices = atProperty.filter((row) => {
-    const authoritative = row.service_id ? row.catalog_service_name : row.service_type;
-    if (!authoritative) return false;
-    return serviceNameCandidates(authoritative).some((name) => namedServices.has(stripServiceSuffixes(name).toLowerCase()));
-  });
-  const programIds = new Set(matchingServices.map((row) => row.service_id || stripServiceSuffixes(row.catalog_service_name || row.service_type).toLowerCase()));
-  if (programIds.size !== 1) return skip('service_needs_review');
-  if (matchingServices.length > 1) return skip('ambiguous_visit', { candidateIds: matchingServices.map((r) => r.id) });
-  const nearby = matchingServices.filter((row) => {
-    const d = dateOnly(row.scheduled_date);
-    return d && Math.abs(calendarDaysBetween(d, newDate)) <= CANDIDATE_SPAN_DAYS;
-  });
+  let targetKey = null;
+  let nearby;
+  if (humanOverride) {
+    nearby = candidates.filter((row) => String(row.id) === String(humanOverride.visitId)
+      && String(row.customer_id) === String(customer.id));
+  } else {
+    const saved = properties.filter((p) => p.active !== false);
+    const primaryKey = customer.address_line1 ? addressKey(customer) : null;
+    const knownKeys = new Set([primaryKey, ...saved.map((p) => addressKey(p))].filter(Boolean));
+    const stated = v2.property?.service_address || {};
+    targetKey = statesNewAddress(v2)
+      ? (stated.street_line_1 ? addressKey({ address_line1: stated.street_line_1, address_line2: stated.street_line_2,
+        city: stated.city, zip: stated.postal_code }) : null)
+      : (knownKeys.size === 1 ? [...knownKeys][0] : null);
+    if (!targetKey || !knownKeys.has(targetKey)) return skip('property_needs_review');
+    const atProperty = candidates.filter((row) => {
+      if (row.property_id) return saved.some((p) => String(p.id) === String(row.property_id) && addressKey(p) === targetKey);
+      const key = row.service_address_line1 ? addressKey({ address_line1: row.service_address_line1,
+        address_line2: row.service_address_line2, city: row.service_address_city, zip: row.service_address_zip }) : primaryKey;
+      return key === targetKey;
+    });
+    if (!atProperty.length) return skip('no_visit_on_books');
+    // Match the named service BEFORE proximity. A different program near the
+    // destination cannot stand in for the requested visit outside the span.
+    // Coarse categories cannot distinguish programs, so absent/ambiguous
+    // catalog identity stays in office review.
+    const namedServices = new Set(serviceNameCandidates(v2.service_request?.specific_service_name)
+      .map((name) => stripServiceSuffixes(name).toLowerCase()));
+    // A row that names a catalog service is matched on THAT catalog name only:
+    // a repoint leaves scheduled_services.service_type stale, so the label alone
+    // can name the requested program while the row now belongs to a different
+    // one. A row whose service_id no longer resolves has no authoritative
+    // identity. A row with no service_id keeps its only identity: its label.
+    const matchingServices = atProperty.filter((row) => {
+      const authoritative = row.service_id ? row.catalog_service_name : row.service_type;
+      if (!authoritative) return false;
+      return serviceNameCandidates(authoritative).some((name) => namedServices.has(stripServiceSuffixes(name).toLowerCase()));
+    });
+    const programIds = new Set(matchingServices.map((row) => row.service_id || stripServiceSuffixes(row.catalog_service_name || row.service_type).toLowerCase()));
+    if (programIds.size !== 1) return skip('service_needs_review');
+    if (matchingServices.length > 1) return skip('ambiguous_visit', { candidateIds: matchingServices.map((r) => r.id) });
+    nearby = matchingServices.filter((row) => {
+      const d = dateOnly(row.scheduled_date);
+      return d && Math.abs(calendarDaysBetween(d, newDate)) <= CANDIDATE_SPAN_DAYS;
+    });
+  }
   if (nearby.length === 0) return skip('no_visit_on_books');
   const visit = nearby[0];
   if (!LIVE_STATUSES.includes(visit.status)) return skip('visit_not_live', { visitId: visit.id });
-  if (!MOVABLE_STATUSES.includes(visit.status)) return skip('visit_parked_for_rebook', { visitId: visit.id });
-  if (visit.visit_id) return skip('grouped_visit', { visitId: visit.id });
+  if (!humanOverride && !MOVABLE_STATUSES.includes(visit.status)) return skip('visit_parked_for_rebook', { visitId: visit.id });
+  if (visit.visit_id && !(humanOverride && visit.follow_through_group_eligible === true)) return skip('grouped_visit', { visitId: visit.id });
   // An AI office-review booking the office has not activated is not an
   // ordinary visit whatever its status: moving it trips the rebooker's lazy
   // activation, which resolves its review card, arms customer reminders and
@@ -230,7 +280,8 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
   // (outbound-review-confirm.js:703 and :866-876, which also treats a
   // 'rescheduled' one as superseded). The status-scoped dispatch-owned check
   // below sees only the pending ones (GH codex #4204 r6 P1).
-  if (visit.source_action && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(visit.source_action) && visit.customer_confirmed !== true) {
+  if (visit.source_action && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(visit.source_action)
+    && (humanOverride || visit.customer_confirmed !== true)) {
     return skip('office_review_unconfirmed', { visitId: visit.id });
   }
   if (visit.source_action && DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(visit.source_action) && visit.status === 'pending') {
@@ -243,12 +294,14 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
     || DEFAULT_DURATION_MINUTES;
   const newEnd = deriveWindowEnd(newStart, duration);
   if (!newEnd) return skip('window_runs_past_midnight', { visitId: visit.id });
+  if (humanOverride) assertAdminAppointmentWindow({ windowStart: newStart, windowEnd: newEnd });
 
   const interiorNote = typeof v2.property?.access_notes === 'string' && v2.property.access_notes.trim()
     ? v2.property.access_notes.trim().slice(0, 300)
     : null;
 
   if (currentDate === newDate && currentStart === newStart) {
+    if (!MOVABLE_STATUSES.includes(visit.status)) return skip('visit_parked_for_rebook', { visitId: visit.id });
     return { action: 'already_at_requested_time', propertyKey: targetKey, visitId: visit.id, newDate, newWindow: { start: newStart, end: newEnd }, interiorNote };
   }
   return {
@@ -263,11 +316,11 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
   };
 }
 
-async function loadCandidates(conn, customerId, now = new Date()) {
+async function loadCandidates(conn, customerId, now = new Date(), { includePast = false } = {}) {
   return conn('scheduled_services')
     .where({ 'scheduled_services.customer_id': customerId })
     .whereIn('scheduled_services.status', LIVE_STATUSES)
-    .where('scheduled_services.scheduled_date', '>=', etDateString(now))
+    .where('scheduled_services.scheduled_date', '>=', includePast ? etDateString(new Date(now.getTime() - 60 * 86400000)) : etDateString(now))
     .orderBy('scheduled_services.scheduled_date', 'asc')
     // The catalog row is joined because a repoint leaves scheduled_services
     // .service_type stale: matching the label alone can move a DIFFERENT
@@ -282,7 +335,7 @@ async function loadCandidates(conn, customerId, now = new Date()) {
       'scheduled_services.customer_confirmed',
       'scheduled_services.internal_notes', 'scheduled_services.is_recurring', 'scheduled_services.self_booking_id',
       'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
-      'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
+      'scheduled_services.service_address_city', 'scheduled_services.service_address_state', 'scheduled_services.service_address_zip',
       'services.name as catalog_service_name');
 }
 
@@ -371,11 +424,6 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
   // a newer customer preference (GH codex #4204 r6 P1); the automation stands
   // down and leaves the whole request to staff. Predicate mirrors the dedup
   // lookup routes/schedule.js runs against its own rows.
-  const openPortalRequest = (trx, serviceId) => trx('service_requests')
-    .where({ customer_id: settled.customer_id, category: 'schedule_change' })
-    .whereNotIn('status', ['resolved', 'closed', 'cancelled'])
-    .where('description', 'like', `Appointment ${serviceId}:%`)
-    .first('id');
   // An unanswered reschedule-OPTIONS text is a live offer: reschedule-sms's
   // reply handler still honors a '1' or '2' for seven days and rebooks that
   // row's own visit onto the offered slot, which would drag the visit this
@@ -392,25 +440,6 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
   // move last Tuesday would stand this path down for a week. Rows with no
   // options are exactly the ones reschedule-sms skips (its modern rain-out
   // rows ask for no reply).
-  const OFFER_WINDOW_MS = 7 * 86400000;
-  const offerOptions = (row) => {
-    try {
-      const notes = typeof row.notes === 'string' ? JSON.parse(row.notes) : (row.notes || {});
-      return !!(notes && (notes.option1 || notes.option2));
-    } catch {
-      // Unparseable notes are not an actionable offer to reschedule-sms
-      // either — its own parseOptions degrades to {} on the same input.
-      return false;
-    }
-  };
-  const pendingSmsOffer = async (trx, serviceId) => {
-    const rows = await trx('reschedule_log')
-      .where({ customer_id: settled.customer_id, scheduled_service_id: serviceId })
-      .whereNull('customer_response')
-      .where('created_at', '>', new Date(now.getTime() - OFFER_WINDOW_MS))
-      .select('id', 'notes');
-    return (rows || []).find(offerOptions) || null;
-  };
   const newerMove = (trx) => trx('reschedule_log')
     .whereIn('scheduled_service_id', trx('scheduled_services').where({ customer_id: settled.customer_id }).select('id'))
     .where('created_at', '>', settled.created_at).first('id');
@@ -424,11 +453,11 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
     return { outcome: 'skipped', reason: plan.reason, visitId: plan.visitId || null };
   }
   const visit = candidates.find((r) => r.id === plan.visitId);
-  if (await openPortalRequest(conn, plan.visitId)) {
+  if (await openPortalRequest(conn, settled.customer_id, plan.visitId)) {
     await stampSkipOnCards(conn, call.id, { reason: 'portal_request_open', visitId: plan.visitId });
     return { outcome: 'skipped', reason: 'portal_request_open', visitId: plan.visitId };
   }
-  if (await pendingSmsOffer(conn, plan.visitId)) {
+  if (await pendingSmsOffer(conn, settled.customer_id, plan.visitId, now)) {
     await stampSkipOnCards(conn, call.id, { reason: 'pending_sms_offer', visitId: plan.visitId });
     return { outcome: 'skipped', reason: 'pending_sms_offer', visitId: plan.visitId };
   }
@@ -449,10 +478,7 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
     const applied = await trx('activity_log').where({ action: ACTIVITY_ACTION })
       .whereRaw("metadata->>'call_log_id' = ?", [String(call.id)]).first('id');
     if (applied) throw Object.assign(new Error('This call was already applied'), { code: 'CALL_RESCHEDULE_ALREADY_APPLIED' });
-    const handled = await trx('triage_items').where({ call_log_id: call.id })
-      .whereIn('reason_code', CARD_REASON_CODES)
-      .where((q) => q.where('status', 'in_progress').orWhere((closed) => closed
-        .where('resolution_source', 'human').whereIn('status', ['resolved', 'dismissed']))).first('id');
+    const handled = await humanHandledRescheduleCard(trx, call.id);
     const moved = await newerMove(trx);
     // Under the visit's OWN row lock: routes/schedule.js holds that lock while
     // it inserts the request, so locking here makes a portal submission either
@@ -460,11 +486,11 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
     // touches only notes/updated_at, neither of which is in this path's CAS,
     // so an unserialized check could be overwritten (GH codex #4204 r7 P2).
     await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('id');
-    const portalRequest = await openPortalRequest(trx, visit.id);
+    const portalRequest = await openPortalRequest(trx, settled.customer_id, visit.id);
     // Under the visit's row lock, taken just above. The rebooker writes its
     // own reschedule_log row AFTER this guard, and that row carries no
     // options, so this never stands down on the move it is guarding.
-    const smsOffer = await pendingSmsOffer(trx, visit.id);
+    const smsOffer = await pendingSmsOffer(trx, settled.customer_id, visit.id, now);
     if (handled || moved || portalRequest || smsOffer) throw Object.assign(new Error('The request was handled after this call'), { code: 'CALL_RESCHEDULE_HANDLED' });
     const latestCustomer = await trx('customers').where({ id: settled.customer_id }).forShare().first();
     const latestProperties = await trx('customer_properties').where({ customer_id: settled.customer_id, active: true }).forShare().select('*');
@@ -577,6 +603,7 @@ module.exports = {
   CARD_REASON_CODES,
   MOVABLE_STATUSES,
   ACTIVITY_ACTION,
+  humanHandledRescheduleCard,
   RESCHEDULE_REASON_CODE,
   INITIATED_BY,
 };
