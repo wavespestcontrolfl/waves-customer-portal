@@ -18,6 +18,7 @@ test.each([
   ['If the report is correct, Talstar P and bait were applied.', 'bait were applied', true],
   ["I can't confirm Talstar P and bait were applied.", 'bait were applied', true],
   ["I can't confirm Talstar P or bait was applied.", 'bait was applied', true],
+  ["I can't confirm your refund was processed or your credit was issued.", 'your credit was issued', true],
   ['Before leaving, Talstar P was applied to the exterior perimeter.', 'Talstar P was applied', false],
 ])('governing conditions survive an introductory comma: %s', (text, claim, negated) => {
   const start = text.indexOf(claim);
