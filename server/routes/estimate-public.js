@@ -8406,6 +8406,18 @@ async function handleEstimateView(req, res, next) {
       return res.status(404).set('Content-Type', 'text/html').send(renderEstimateNotFoundPage());
     }
 
+    // Only React renders property-group navigation. A legacy link whose
+    // offer expired must reach that view to expose its still-valid siblings.
+    if (estimate.estimate_group_id
+      && ['sent', 'viewed', 'expired'].includes(estimate.status)
+      && (estimate.status === 'expired' || new Date(estimate.expires_at) < new Date())
+      && groupLinkStillViewable(estimate)) {
+      if (req.path.startsWith('/estimate/')) return next();
+      const originalUrl = req.originalUrl || '';
+      const qs = originalUrl.includes('?') ? originalUrl.slice(originalUrl.indexOf('?')) : '';
+      return res.redirect(302, `/estimate/${encodeURIComponent(estimate.token)}${qs}`);
+    }
+
     await reconcileFrozenMembershipSnapshot(estimate);
 
     // Parsed once here (post-reconcile) so the V2 gate's one-time check below
@@ -8554,15 +8566,7 @@ async function handleEstimateView(req, res, next) {
       return next();
     }
 
-    // expires_at IS this property's own offer deadline (#4309 round 7), so it
-    // is read directly — no narrowing helper. Like the React data gate below,
-    // this navigation gate honors group-link viewability: the delivered link is this anchor's
-    // token, so when the anchor's own offer has ended but the group is still
-    // reachable, the page renders instead of the expired stub and the customer
-    // can still open a fixed sibling that outlives it. The anchor's own card
-    // resolves to 'expired' through terminalState and stays unacceptable.
-    if (new Date(estimate.expires_at) < new Date() && estimate.status !== 'accepted'
-      && !(estimate.estimate_group_id && groupLinkStillViewable(estimate))) {
+    if (new Date(estimate.expires_at) < new Date() && estimate.status !== 'accepted') {
       return res.set('Content-Type', 'text/html').send(
         renderExpiredPage({ address: estimate.address, customerName: estimate.customer_name })
       );

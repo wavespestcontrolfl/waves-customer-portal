@@ -52,6 +52,7 @@ function makeRes() {
     sent: false,
     status(code) { this.statusCode = code; return this; },
     set() { return this; },
+    redirect(code, url) { this.statusCode = code; this.redirectUrl = url; return this; },
     send(body) { this.body = body; this.sent = true; return this; },
   };
 }
@@ -150,4 +151,22 @@ describe('handleEstimateView — SSR viewability gate', () => {
     expect(res.statusCode).toBe(404);
     expect(res.body).toContain('Estimate not found');
   });
+  test.each(['sent', 'viewed', 'expired'])('an expired %s legacy group anchor opens React navigation on both mounts', async (status) => {
+    const row = { status, token: 'groupanchorvalidtoken', expires_at: PAST, use_v2_view: false,
+      sent_at: PAST, estimate_group_id: 'group-bid', estimate_data: { groupLinkViewableThrough: FUTURE } };
+    const spa = await runView(row, ESTIMATE_MOUNT);
+    expect(spa.next).toHaveBeenCalledTimes(1);
+    expect(spa.res.sent).toBe(false);
+    const api = await runView(row, API_MOUNT);
+    expect(api.res.statusCode).toBe(302);
+    expect(api.res.redirectUrl).toBe('/estimate/groupanchorvalidtoken');
+    expect(api.res.sent).toBe(false);
+  });
+  test('an archived group anchor cannot use its navigation window to escape the legacy withholding gate', async () => {
+    const { res } = await runView({ status: 'expired', archived_at: PAST, expires_at: PAST,
+      estimate_group_id: 'group-bid', estimate_data: { groupLinkViewableThrough: FUTURE } }, API_MOUNT);
+    expect(res.statusCode).toBe(404);
+    expect(res.redirectUrl).toBeUndefined();
+  });
+
 });

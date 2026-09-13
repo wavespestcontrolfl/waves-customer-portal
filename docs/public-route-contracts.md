@@ -1001,7 +1001,9 @@ price hold governs expiry even after resends and cannot be changed by the
 generic extension or auto-renew paths; these additions do not widen draft access.
 A delivered group anchor may remain navigable through its stored
 `estimate_data.groupLinkViewableThrough` after its own offer expires, in both
-the HTML and `/data` views, so valid siblings remain reachable. This window
+the HTML and `/data` views, so valid siblings remain reachable. Expired legacy
+anchors with this navigation window route to the React property-group view
+(the API HTML mount redirects to `/estimate/:token`). This window
 never changes offer deadlines, acceptance, CTA eligibility or reminder copy.
 Archived, unpublished, send-failed and off-surface rows remain withheld, and
 the call-side block still overrides navigation access.
