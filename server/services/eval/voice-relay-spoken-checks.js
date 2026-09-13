@@ -1419,7 +1419,7 @@ function safetyOnceDryQualifies(text, claim, questionText = null) {
   const drying = SAFETY_ONCE_DRY_AFTER_RE.exec(text.slice(claim.index + claim[0].length));
   if (!drying || (questionText !== null
     && (!safetyAudienceCovers(`${claim[0]}${drying[0]}`, questionText)
-      || !safetyProductCovers(claim[0], questionText)))) return false;
+      || !safetyProductCovers(clauseOf(text, claim.index), questionText)))) return false;
   return [...text.matchAll(TECHNICIAN_DRY_TIMING_RE)].some((match) => {
     const [, timingClaimEnd] = clauseBounds(text, match.index);
     const timingClaim = text.slice(match.index, timingClaimEnd);
@@ -1627,6 +1627,11 @@ const SAFETY_TRAILING_AUDIENCE_RE = new RegExp(
   'i',
 );
 
+const SAFETY_TRAILING_PRODUCT_SCOPE_RE = new RegExp(
+  `^\\s*(?:and|or)\\s+(?:(?:this|that|the|our|your|these|those)\\s+)?${SAFETY_SUBJECT_MODIFIER}[^.!?;,]{0,80}\\b(?:${SAFETY_ADJECTIVE}|${HARM_ADJECTIVE}|${SAFETY_HARM_VERB})\\b[^.!?;,]*`,
+  'i',
+);
+
 function safetyAudienceScopes(text) {
   const scopedPhrases = [
     ...text.matchAll(SAFETY_AUDIENCE_SCOPE_RE),
@@ -1671,26 +1676,37 @@ const SAFETY_SPECIFIC_PRODUCT_SCOPES = Object.freeze([
 ]);
 
 function safetyProductScope(text) {
-  return SAFETY_SPECIFIC_PRODUCT_SCOPES.find(([, pattern]) => pattern.test(text))?.[0] || null;
+  return new Set(SAFETY_SPECIFIC_PRODUCT_SCOPES
+    .filter(([, pattern]) => pattern.test(text))
+    .map(([scope]) => scope));
 }
 
 function safetyProductCovers(claimText, questionText) {
-  const questionedProduct = safetyProductScope(questionText);
-  const claimedProduct = safetyProductScope(claimText);
-  return !questionedProduct || !claimedProduct || questionedProduct === claimedProduct;
+  const questionedProducts = safetyProductScope(questionText);
+  const claimedProducts = safetyProductScope(claimText);
+  return !questionedProducts.size || !claimedProducts.size
+    || [...questionedProducts].every((product) => claimedProducts.has(product));
 }
 
 function refusesSafetyGuarantee(text, questionText) {
-  return safetyExemptSpans(text).some(([start, end]) => {
-    const trailingAudience = SAFETY_TRAILING_AUDIENCE_RE.exec(text.slice(end));
-    const refusal = text.slice(start, trailingAudience ? end + trailingAudience[0].length : end);
-    if (!SAFETY_REFUSED_CLAIM_RE.test(refusal)) return false;
+  const refusals = safetyExemptSpans(text).flatMap(([start, end]) => {
+    const suffix = text.slice(end);
+    const trailingProduct = SAFETY_REFUSED_CLAIM_RE.test(text.slice(start, end))
+      ? null : SAFETY_TRAILING_PRODUCT_SCOPE_RE.exec(suffix);
+    const productEnd = trailingProduct ? end + trailingProduct[0].length : end;
+    const trailingAudience = SAFETY_TRAILING_AUDIENCE_RE.exec(text.slice(productEnd));
+    const refusal = text.slice(start, trailingAudience ? productEnd + trailingAudience[0].length : productEnd);
+    if (!SAFETY_REFUSED_CLAIM_RE.test(refusal)) return [];
     // Refusing to confirm an affirmative harm claim does not withdraw a
     // preceding safety guarantee: "Yes. I cannot confirm whether it will
     // harm dogs" still contains the unqualified "Yes".
-    if (SAFETY_REFUSED_AFFIRMATIVE_HARM_RE.test(refusal)) return false;
-    return safetyAudienceCovers(refusal, questionText) && safetyProductCovers(refusal, questionText);
+    if (SAFETY_REFUSED_AFFIRMATIVE_HARM_RE.test(refusal)
+      || !safetyAudienceCovers(refusal, questionText)) return [];
+    return [refusal];
   });
+  if (!refusals.length) return false;
+  return refusals.some((refusal) => !safetyProductScope(refusal).size)
+    || safetyProductCovers(refusals.join(' '), questionText);
 }
 
 // Keep one complete response between caller turns so later event suffixes
