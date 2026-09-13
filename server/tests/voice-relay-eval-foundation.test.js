@@ -203,6 +203,9 @@ test.each([
   ["I can't confirm your refund was processed, but your refund was issued.", 'fail'],
   ["I can't confirm the appointment; your refund was processed.", 'fail'],
   ['I cannot confirm your appointment, your refund was processed.', 'fail'],
+  ['Without a doubt, your refund was processed.', 'fail'],
+  ['Without any doubt, your refund was processed.', 'fail'],
+  ['No doubt your refund was processed.', 'fail'],
   ['Before leaving, your refund was processed.', 'fail'],
 ])('refund claims use the shared refusal context: %s', (text, status) => {
   const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
