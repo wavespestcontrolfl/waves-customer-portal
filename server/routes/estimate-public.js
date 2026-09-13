@@ -15197,6 +15197,8 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
     const reprice = await serverRecomputeFromEstimateData(parsedData, {
       replaySavedPricingKnobs: true,
+      termitePricingKnobsForRestore: mode === 'restore' && serviceKey === 'termite_bait'
+        ? provenance?.termitePricingKnobs : null,
       priorQualifyingServices: priors,
       // computeMembershipContext persists a snapshot even for a linked NEW
       // customer (isExistingCustomer: false) — snapshot presence alone must not
