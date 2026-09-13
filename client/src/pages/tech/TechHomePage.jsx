@@ -582,8 +582,9 @@ export default function TechHomePage({ section = 'today' }) {
   }, [openProjectForService]);
   const projectServices = fieldWorkspace
     ? (selectedVisitKey ? (selectedVisit?.services || []) : myServices).filter((service) => (
-        (!TERMINAL_STATUSES_VISIT.has(service.status) || recordlessVisitNeedsCloseout(service) || !!service.visitCloseoutPacket)
-        && !['sent', 'closed'].includes(service.linkedProject?.status)
+        !!service.visitCloseoutPacket || recordlessVisitNeedsCloseout(service)
+        || (!TERMINAL_STATUSES_VISIT.has(service.status)
+          && !['sent', 'closed'].includes(service.linkedProject?.status))
       ))
     : myServices;
   const handleProjectQuickAction = useCallback(() => {

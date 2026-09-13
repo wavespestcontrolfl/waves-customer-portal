@@ -194,10 +194,19 @@ describe('Tech field workspace uses the existing route workflow', () => {
     else expect(report).toBeEnabled();
   });
 
-  it('Tools keeps a saved processing closeout packet available after its member becomes terminal', async () => {
+  it.each([undefined, 'sent', 'closed'])('Tools keeps a saved processing packet available with linked report status %s', async (status) => {
     rows = [row('one', { status: 'completed', visit: { id: 'group' }, visitId: 'group',
       visitCloseoutEnabled: true, has_service_record: true,
-      visitCloseoutPacket: { id: 'packet-one', status: 'processing' } })];
+      visitCloseoutPacket: { id: 'packet-one', status: 'processing' },
+      linkedProject: status ? { id: 'existing-report', status } : null })];
+    await act(async () => { mount('/tech/tools?visit=visit%3Agroup'); });
+    expect(await screen.findByRole('button', { name: /Project Report/ })).toBeEnabled();
+  });
+
+  it.each(['sent', 'closed'])('Tools keeps recordless combined closeout available with a %s linked report', async (status) => {
+    rows = [row('one', { status: 'completed', visit: { id: 'group' }, visitId: 'group',
+      visitCloseoutEnabled: true, has_service_record: false,
+      linkedProject: { id: 'existing-report', status } })];
     await act(async () => { mount('/tech/tools?visit=visit%3Agroup'); });
     expect(await screen.findByRole('button', { name: /Project Report/ })).toBeEnabled();
   });
