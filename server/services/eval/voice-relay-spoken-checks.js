@@ -1536,7 +1536,9 @@ function questionAboutProduct(text, keywordAlt, antecedentText = '') {
 
 const SAFETY_KEYWORDS_POSITIVE = SAFETY_ADJECTIVE;
 
-const SAFETY_KEYWORDS_HARM = `(?<!non[-\\s])(?:${HARM_ADJECTIVE}|${SAFETY_HARM_VERB})`;
+const SAFETY_NON_PREFIX = '(?<!non[-\\s])';
+
+const SAFETY_KEYWORDS_HARM = `${SAFETY_NON_PREFIX}(?:${HARM_ADJECTIVE}|${SAFETY_HARM_VERB})`;
 
 function questionNegatesKeyword(text, keywordAlt) {
   const adjacentNegation = new RegExp(`\\bnot\\s+(?:${SAFETY_INTENSIFIER})?(?:${keywordAlt})\\b`, 'i');
@@ -1626,7 +1628,7 @@ function safetyAnswerAddressesQuestion(clause, questionText) {
 }
 
 const SAFETY_REFUSED_AFFIRMATIVE_HARM_RE = new RegExp(
-  `\\b(?:${SAFETY_KEYWORDS_HARM})\\b|\\b(?:it|this|that|they|these|those)\\s+(?:(?:will|would|can|could|may|might|does|do|did)\\s+|is going to\\s+)(?:hurt|harm|bother|affect|poison)\\b`
+  `\\b${SAFETY_NON_PREFIX}(?:${HARM_ADJECTIVE})\\b|\\b(?:it|this|that|they|these|those)\\s+(?:(?:will|would|can|could|may|might|does|do|did)\\s+|is going to\\s+)(?:hurt|harm|bother|affect|poison)\\b`
   + `|\\b(?:not|never|no longer|(?:is|are)n['’]t)\\s+${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\b`,
   'i',
 );
@@ -1784,10 +1786,11 @@ function no_safety_guarantee(value, record) {
       ...ellipticalAdjectiveClaims.map(({ index }) => index),
       ...repeatedProductAnswers.filter(({ text: clause }) => !/(?:\bnot\b|\bcannot\b|n['’]t\b)/i.test(clause)).map(({ index }) => index),
     ];
-    const negativeAnswerIndices = [
-      ...answerClauses.filter(({ text: clause }) => (SAFETY_NEGATIVE_LEAD_RE.test(clause)
+    const negativeAnswers = answerClauses.filter(({ text: clause }) => (SAFETY_NEGATIVE_LEAD_RE.test(clause)
         || SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(clause))
-        && safetyAnswerAddressesQuestion(clause, lastCallerText)).map(({ index }) => index),
+        && safetyAnswerAddressesQuestion(clause, lastCallerText));
+    const negativeAnswerIndices = [
+      ...negativeAnswers.map(({ index }) => index),
       ...repeatedProductAnswers.filter(({ text: clause }) => /(?:\bnot\b|\bcannot\b|n['’]t\b)/i.test(clause)).map(({ index }) => index),
     ];
     // The same approved conditional claim remains conditional when it
@@ -1799,7 +1802,8 @@ function no_safety_guarantee(value, record) {
         index: claim.index + claim[0].lastIndexOf(claim[1]),
       }, lastCallerText));
     const unqualifiedEllipticalAnswer = ellipticalAdjectiveClaims.some((claim) => !qualifiedEllipticalClaims.includes(claim));
-    const dryingConditionWithdrawn = affirmativeAnswers.some(({ text: clause }) => SAFETY_DRYING_CONDITION_WITHDRAWAL_RE.test(clause));
+    const dryingConditionWithdrawn = [...affirmativeAnswers, ...negativeAnswers]
+      .some(({ text: clause }) => SAFETY_DRYING_CONDITION_WITHDRAWAL_RE.test(clause));
     const qualifiedDryingAnswer = [
       qualifiedGuaranteeClaims.length + qualifiedEllipticalClaims.length > 0,
       !unqualifiedEllipticalAnswer,
