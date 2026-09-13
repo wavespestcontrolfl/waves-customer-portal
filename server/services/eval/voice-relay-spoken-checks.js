@@ -1383,7 +1383,7 @@ const TECHNICIAN_VISIT_TIMING_RE = /\b(?:appointment|arrival|schedule|scheduling
 
 function trailingWithdrawalAlternative(objectSource) {
   return new RegExp(
-    `^\\s*(?:[^.!?;—–]{0,60}?\\s*,?\\s*(?:or|and|but|though|although)\\s+|[.!?]\\s*(?:(?:actually|however)\\s*,?\\s*)?)(?:(?:maybe|perhaps|possibly|potentially)\\s+)?`
+    `^\\s*(?:[^.!?;—–]{0,60}?\\s*,?\\s*(?:or|and|but|though|although)\\s+|[.!?;—–]\\s*(?:(?:actually|however)\\s*,?\\s*)?)(?:(?:maybe|perhaps|possibly|potentially)\\s+)?`
     + `(?:(?:they|the technician|the team member)\\s+)?(?:`
     + `(?:(?:might|may|could|would|should|will)\\s+)?(?:skip|omit|avoid)\\s+${objectSource}\\b`
     + `|(?:(?:might|may|could|would|should|will|can)\\s+not|(?:might|could|would|should|ca|wo)n[\\x27\\u2019]t)`
@@ -1815,6 +1815,8 @@ const PET_GUIDANCE_RE = new RegExp(
 
 const PET_SPECULATIVE_GUIDANCE_RE = /\b(?:might|may|could|would|should|maybe|perhaps|possibly|potentially|hope[sd]?|refuse[sd]?|decline[sd]?|failed|unable)\b/i;
 
+const PET_CALLER_SHOULD_ASK_RE = /^\s*you\s+should\s+ask\b/i;
+
 const PET_TRAILING_CONDITION_RE = /^(?:(?!\b(?:and|or|but|however|then|so)\b(?!\s+(?:(?:only\s+)?(?:if|unless)|only\s+when)\b))[^.!?;—–])*?\b(?:(?:only\s+)?if|unless|only\s+when|when\s+(?:asked|requested))\b/i;
 
 const PET_INDEPENDENT_CONDITIONAL_ACTION_RE = /^\s*,?\s*(?:and|or|but)\s+(?:(?:only\s+)?if|unless|only\s+when)\b[^,.!?;—–]{0,60},\s*(?:(?:they|you|the technician|the team member)\s+)?(?:can|will|may|could|would|should|review|explain|answer|check|verify|go over|talk)\b/i;
@@ -1834,7 +1836,7 @@ function pet_precautions_confirmed(value, record, { spoken }) {
       // the original suffix so a clause boundary cannot hide a withdrawal.
       const claim = claimContext(text, match.index, matchEnd);
       const suffix = text.slice(matchEnd);
-      if ((!PET_TRAILING_CONDITION_RE.test(suffix) || PET_INDEPENDENT_CONDITIONAL_ACTION_RE.test(suffix)) && !PET_GUIDANCE_ALTERNATIVE_RE.test(suffix) && !PET_SPECULATIVE_GUIDANCE_RE.test(claim) && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
+      if ((!PET_TRAILING_CONDITION_RE.test(suffix) || PET_INDEPENDENT_CONDITIONAL_ACTION_RE.test(suffix)) && !PET_GUIDANCE_ALTERNATIVE_RE.test(suffix) && (!PET_SPECULATIVE_GUIDANCE_RE.test(claim) || PET_CALLER_SHOULD_ASK_RE.test(claim)) && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
         return ['pass', `pet precautions direction: "${clip(clause.trim(), 160)}"`];
       }
     }
