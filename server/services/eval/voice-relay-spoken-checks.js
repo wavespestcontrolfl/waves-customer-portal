@@ -1358,7 +1358,7 @@ function no_account_holder_callback(value, record, { spoken }) {
         && /\beven\s*$/i.test(callbackSuffix.slice(0, trailingConsent.index));
       const consentGated = leadingConsent.test(text.slice(clauseStart, match.index))
         || Boolean(trailingConsent && !concessiveConsent);
-      const claim = claimContext(text, match.index, matchEnd)
+      const claim = (inherited ? text.slice(match.index, matchEnd) : claimContext(text, match.index, matchEnd))
         .replace(/^\s*(?:if|unless)\b[^,]*,\s*/i, '');
       if (inheritedByWaves && !consentGated
           && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
