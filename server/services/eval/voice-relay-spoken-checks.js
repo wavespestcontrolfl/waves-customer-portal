@@ -1293,7 +1293,7 @@ const SAFETY_FILLER_ADJECTIVE = vocabAlt(SAFETY_FILLER_ADJECTIVES);
 
 const HARM_ADJECTIVE = vocabAlt(HARM_WORDS);
 
-const SAFETY_AUDIENCE = '(?:your\\s+)?(?:dog|dogs|puppy|pets?|animals?|children|kids)';
+const SAFETY_AUDIENCE = '(?:your\\s+)?(?:dogs?|puppy|cats?|kittens?|pets?|animals?|children|kids)';
 
 // The drying condition must qualify this exact predicate. Only an optional
 // audience may sit between "safe" and "once dry"; arbitrary text could cross
