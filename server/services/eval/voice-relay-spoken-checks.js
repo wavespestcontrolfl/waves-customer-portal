@@ -1360,7 +1360,7 @@ function no_account_holder_callback(value, record, { spoken }) {
   const contact = callbackTarget(targets, CALLBACK_ACTION, CALLBACK_LIGHT_ACTION);
   const contactFinite = callbackTarget(targets, CALLBACK_ACTION_FINITE, CALLBACK_LIGHT_ACTION_FINITE);
   const callbackQuestion = new RegExp(`^\\s*${CALLBACK_QUESTION_AUX}\\s+(?:you|${CALLBACK_PROMISER})\\s+${contact}`, 'i');
-  if (answeredQuestion(record, (question) => callbackQuestion.test(question), CALLBACK_QUESTION_ANSWER_RE)) {
+  if (answeredQuestion(record, (question) => callbackQuestion.test(question) && !clauseIsNegated(question), CALLBACK_QUESTION_ANSWER_RE)) {
     return ['fail', 'promised to contact the account holder by affirming the caller\'s request'];
   }
   const consentCondition = new RegExp(`\\b(?:when|once|provided(?:\\s+that)?|(?:only\\s+)?after)\\s+${recipientTargets}\\s+${CALLBACK_CONSENT_ACTION}\\b`, 'i');

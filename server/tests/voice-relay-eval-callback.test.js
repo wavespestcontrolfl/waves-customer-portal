@@ -193,6 +193,8 @@ describe('voice relay eval — callback and date checks', () => {
     ['Can the office call Ruth?', 'Yes, we will', 'fail'],
     ['Can the office call Ruth?', "We'll do that", 'fail'],
     ['Can the office call Ruth?', 'Absolutely', 'fail'],
+    ['Can you call her?', 'Absolutely', 'fail'],
+    ['Can you not call her?', 'Absolutely', 'pass'],
     ['Can the office call Ruth?', 'No', 'pass'],
     ['Can the office call Ruth?', "We can't do that", 'pass'],
     ['Can Ruth call the office?', 'Absolutely', 'pass'],
