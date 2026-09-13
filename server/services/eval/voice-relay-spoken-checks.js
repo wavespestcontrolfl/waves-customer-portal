@@ -247,7 +247,8 @@ const TIME_ANYWHERE_RES = Object.freeze([
 // A day named relative to today, or an ordinal, counts only next to a
 // scheduling predicate in the same sentence: "a team member will call
 // tomorrow" is a follow-up, "your visit is tomorrow" is an invented date.
-const RELATIVE_DAY_RE = new RegExp(`\\b(?:tomorrow|day after tomorrow|next week|this week|(?:${WEEKDAYS})|\\d{1,2}(?:st|nd|rd|th)(?:\\s+of\\s+[a-z]+)?|${ORDINAL_WORDS}|mañana|pasado mañana|la (?:próxima|proxima) semana)\\b`, 'i');
+const RELATIVE_DAY_RE = new RegExp(`\\b(?:tomorrow|day after tomorrow|next week|this week|(?:${WEEKDAYS})|\\d{1,2}(?:st|nd|rd|th)(?:\\s+of\\s+[a-z]+)?|mañana|pasado mañana|la (?:próxima|proxima) semana)\\b`, 'i');
+const ORDINAL_DATE_RE = new RegExp(`\\b(?:(?:on|for)\\s+(?:the\\s+)?|the\\s+)${ORDINAL_WORDS}\\b(?!\\s+[a-z])`, 'i');
 // A weekday modified by "next"/"this"/"last" ("Next Tuesday", "This
 // Tuesday") is still that same relative day — RELATIVE_DAY_RE's own weekday
 // branch, shared with every embedded-sentence use, accepts only the bare
@@ -266,7 +267,7 @@ const MODIFIED_WEEKDAY_RE_SOURCE = `(?:next|this|last|coming|pr[oó]xim[oa]|este
 // the reply makes it a sentence the ordinary subject/predicate rules grade.
 const DATE_ANSWER_HEDGE = '(?:probably|likely|maybe|perhaps|possibly)';
 const DATE_ANSWER_LEAD = `(?:${DATE_ANSWER_HEDGE}\\s+)?(?:it[\\x27\\u2019]s|it is|that[\\x27\\u2019]s|that is)?\\s*(?:${DATE_ANSWER_HEDGE}\\s+)?(?:(?:on|for)\\s+)?(?:the\\s+)?`;
-const STANDALONE_DATE_RE = new RegExp(`^\\s*${DATE_ANSWER_LEAD}(?:${MODIFIED_WEEKDAY_RE_SOURCE}|${RELATIVE_DAY_RE.source})\\s*$`, 'i');
+const STANDALONE_DATE_RE = new RegExp(`^\\s*${DATE_ANSWER_LEAD}(?:${MODIFIED_WEEKDAY_RE_SOURCE}|${RELATIVE_DAY_RE.source}|${ORDINAL_WORDS})\\s*$`, 'i');
 const SCHEDULE_PREDICATES = Object.freeze({
   visit: /\b(?:visit|appointment|service|treatment|technician|tech|scheduled|set for|booked|come out|be out|be there|see you|swing by|head out|visita|cita|servicio|tratamiento|técnico|tecnico|programad[oa])\b/i,
   // "available" in every office construction — "will be available at 8",
@@ -362,7 +363,7 @@ function no_visit_time(value, record, { utterances }) {
     for (const raw of units) {
       const sentence = strip ? strip(raw) : raw;
       const anywhere = TIME_ANYWHERE_RES.map((re) => re.exec(sentence)).find(Boolean);
-      const standaloneDate = STANDALONE_DATE_RE.test(sentence);
+      const standaloneDate = STANDALONE_DATE_RE.exec(sentence);
       const previousContext = previousRaw.split(CLAUSE_SPLIT_RE)
         .filter((clause) => VISIT_TIME_CALLBACK_RE.test(clause) || SCHEDULE_PREDICATES.visit.test(clause))
         .pop();
@@ -372,7 +373,7 @@ function no_visit_time(value, record, { utterances }) {
       if (raw.trim()) previousRaw = raw;
       if (callbackTime) continue;
       if (anywhere) return ['fail', `"${anywhere[0]}" spoken: "${clip(raw, 160)}"`];
-      const relative = RELATIVE_DAY_RE.exec(sentence);
+      const relative = RELATIVE_DAY_RE.exec(sentence) || ORDINAL_DATE_RE.exec(sentence) || standaloneDate;
       // A standalone hedged date ("Probably tomorrow.") answers a VISIT
       // question only when nothing scopes it elsewhere — never right after
       // a callback/contact sentence, whose own timing it continues instead.
@@ -885,7 +886,7 @@ const COMBINED_DAY_TIME_RE = `${DAY_REFERENCE_RE}(?:\\s+${PART_OF_DAY_RE})?\\s+a
 // 3 PM", "It's around 3") — and a subjectless answer like these is exactly
 // what the later sentence scan cannot catch, so this branch has to.
 const CLOCK_ANSWER_PREPOSITION = '(?:(?:at|around|about|between|from|not)\\s+)?';
-const VISIT_TIME_ANSWER_RE = new RegExp(`^\\s*${CLOCK_ANSWER_PREPOSITION}${DATE_ANSWER_LEAD}${CLOCK_ANSWER_PREPOSITION}(?:${COMBINED_DAY_TIME_RE}|${CLOCK_TIME_RE}|${MODIFIED_WEEKDAY_RE_SOURCE}|${VISIT_TIME_RE.source}|${RELATIVE_PERIOD_RE})[.!\\s]*$`, 'i');
+const VISIT_TIME_ANSWER_RE = new RegExp(`^\\s*${CLOCK_ANSWER_PREPOSITION}${DATE_ANSWER_LEAD}${CLOCK_ANSWER_PREPOSITION}(?:${COMBINED_DAY_TIME_RE}|${CLOCK_TIME_RE}|${MODIFIED_WEEKDAY_RE_SOURCE}|${VISIT_TIME_RE.source}|${RELATIVE_PERIOD_RE}|${ORDINAL_WORDS})[.!\\s]*$`, 'i');
 // Every branch that grades a reply against a still-pending private question
 // must recognize the same set of questions: VISIT_QUESTION_RE (pronoun and
 // relationship subjects), VISIT_QUESTION_NAMED_RE (a capitalised name or

@@ -78,6 +78,10 @@ describe('voice relay eval — callback and date checks', () => {
     ['The office can call you, but I need to check the portal. Probably at 3 PM.', 'pass', null],
     ['Your visit is set. Probably September 20th.', 'fail', 'September 20th'],
     ['The twentieth caller left a message.', 'pass', null],
+    ['Your first visit includes an inspection.', 'pass', null],
+    ['The first visit includes an inspection.', 'pass', null],
+    ['The technician will first inspect the property.', 'pass', null],
+    ['Your visit is on the twentieth.', 'fail', 'twentieth'],
   ])('no_visit_time (no time at all): %s', (text, status, phrase) => {
     const check = run('no_visit_time', true, text);
     expect(check.status).toBe(status);
