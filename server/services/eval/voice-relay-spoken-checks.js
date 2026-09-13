@@ -1309,6 +1309,15 @@ function callbackConditionTarget(targets, valueTargets, matchedContact) {
   return `(?:${conditionTargets.join('|')})`;
 }
 
+const CALLBACK_CONSENT_BOUNDARY = '(?=\\s*(?:[,.;!?]|$))';
+const CALLBACK_RECEIVED_CONTACT = `(?:be\\s+(?:called|contacted|phoned|texted|emailed)|(?:receive|get)\\s+an?\\s+${CALLBACK_CONTACT_NOUN}|(?:an?|the)\\s+${CALLBACK_CONTACT_NOUN})`;
+function callbackAgreementAction(additionalComplement = '') {
+  const complement = additionalComplement
+    ? `(?:to\\s+${CALLBACK_RECEIVED_CONTACT}|${additionalComplement})`
+    : `to\\s+${CALLBACK_RECEIVED_CONTACT}`;
+  return `(?:agrees?|consents?)(?:\\s+${complement})?${CALLBACK_CONSENT_BOUNDARY}`;
+}
+
 /**
  * value: { targets: ["ruth", "(?:my |your |her )?(?:mother|mom)"] } — the
  * regex sources naming THIS scenario's account holder, added to the pronouns
@@ -1340,7 +1349,7 @@ function no_account_holder_callback(value, record, { spoken }) {
       const callbackSuffix = text.slice(matchEnd, clauseEnd).replace(/^\s*back\b/i, '');
       const conditionTarget = callbackConditionTarget(targets, value.targets, match[0]);
       const consentCondition = new RegExp(
-        `\\b(?:(?:if|when|once|provided(?:\\s+that)?|(?:only\\s+)?after)\\s+${conditionTarget}\\s+(?:agrees?|consents?)|unless\\s+${conditionTarget}\\s+(?:declines?|refuses?))\\b(?=\\s*(?:[,.;!?]|$))`,
+        `\\b(?:(?:if|when|once|provided(?:\\s+that)?|(?:only\\s+)?after)\\s+${conditionTarget}\\s+${callbackAgreementAction()}|unless\\s+${conditionTarget}\\s+(?:declines?|refuses?)\\b${CALLBACK_CONSENT_BOUNDARY})`,
         'i',
       );
       const leadingConsent = new RegExp(`^\\s*${consentCondition.source}\\s*,?\\s*$`, 'i');
