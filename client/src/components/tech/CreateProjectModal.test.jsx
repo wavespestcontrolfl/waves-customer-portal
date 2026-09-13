@@ -388,6 +388,78 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('preserves a photo selected while an earlier upload is in flight', async () => {
+    const onPendingPhotosChange = vi.fn();
+    const originalFetch = fetch.getMockImplementation();
+    let finishFirstUpload;
+    const firstUpload = new Promise((resolve) => { finishFirstUpload = resolve; });
+    let uploadCount = 0;
+    fetch.mockImplementation((url, opts = {}) => {
+      const requestUrl = String(url);
+      if (requestUrl.includes('/admin/projects/p-1/photos') && opts.method === 'POST') {
+        uploadCount += 1;
+        if (uploadCount === 1) return firstUpload;
+      }
+      if (requestUrl.endsWith('/admin/projects/p-1') && opts.method === 'PUT') {
+        return jsonResponse({ project: { id: 'p-1', project_type: 'wdo_inspection' } });
+      }
+      return originalFetch(url, opts);
+    });
+    renderWdoSheet({ onPendingPhotosChange });
+    await queueReportPhoto('first-evidence.jpg');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Report' }));
+    await waitFor(() => expect(uploadCount).toBe(1));
+    const libraryInputs = document.querySelectorAll('input[type="file"]:not([capture])');
+    const libraryInput = libraryInputs[libraryInputs.length - 1];
+    fireEvent.change(libraryInput, {
+      target: { files: [new File(['later'], 'later-evidence.jpg', { type: 'image/jpeg' })] },
+    });
+    await screen.findByText('later-evidence.jpg');
+
+    finishFirstUpload({ ok: true, json: async () => ({}) });
+    await screen.findByText('1 photo was added while this draft was saving. Save again to upload it.');
+    expect(screen.queryByText('first-evidence.jpg')).toBeNull();
+    expect(onPendingPhotosChange).toHaveBeenLastCalledWith(true);
+
+    const retrySave = screen.getByRole('button', { name: 'Save Report' });
+    await waitFor(() => expect(retrySave.disabled).toBe(false));
+    fireEvent.click(retrySave);
+    await waitFor(() => expect(uploadCount).toBe(2));
+    await screen.findByText('✓ Report draft saved');
+    await waitFor(() => expect(onPendingPhotosChange).toHaveBeenLastCalledWith(false));
+  });
+
+  it('hands off a partially saved project before opening appointment details', async () => {
+    const onCreated = vi.fn();
+    const onClose = vi.fn();
+    const onViewDetails = vi.fn();
+    fetch.mockImplementation((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/admin/projects/p-1/photos') && opts.method === 'POST') {
+        return Promise.resolve({ ok: false, json: async () => ({ error: 'storage unavailable' }) });
+      }
+      if (u.includes('/admin/projects/types')) return jsonResponse({ types: PROJECT_TYPES });
+      if (u.includes('/estimates-summary')) return jsonResponse({ customer: customerPayload, estimates: [] });
+      if (/\/admin\/projects$/.test(u) && opts.method === 'POST') {
+        return jsonResponse({ project: { id: 'p-1', project_type: 'wdo_inspection' } });
+      }
+      return jsonResponse({});
+    });
+    renderWdoSheet({ onCreated, onClose, onViewDetails });
+    await queueReportPhoto('details-retry.jpg');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Report' }));
+    await screen.findByText(/Project draft was saved, but some photos did not upload/);
+    fireEvent.click(screen.getByRole('button', { name: 'Details' }));
+
+    expect(confirm).toHaveBeenCalledWith('1 queued photo will be discarded if you open appointment details before saving. Continue?');
+    expect(onCreated).toHaveBeenCalledTimes(1);
+    expect(onCreated).toHaveBeenCalledWith(expect.objectContaining({ id: 'p-1' }));
+    expect(onViewDetails).toHaveBeenCalledTimes(1);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it('"Sign later" leaves the saved draft and reports the project to the parent', async () => {
     const onCreated = vi.fn();
     const onClose = vi.fn();

@@ -1621,7 +1621,7 @@ export function ProjectDetail({
       // mounted editor (Codex r11 P2 + house review): keep the stale data,
       // and only surface the failure when this was a foreground load.
       if (!background) setError(e.message || "Could not load project");
-      if (!preserveEdits) setData(null);
+      if (!background && !preserveEdits) setData(null);
     } finally {
       if (!background) setLoading(false);
     }

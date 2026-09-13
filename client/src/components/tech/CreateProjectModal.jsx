@@ -537,6 +537,8 @@ export default function CreateProjectModal({
 
   // Photo buffer — queued locally, uploaded after project is created.
   const [photoQueue, setPhotoQueue] = useState([]);
+  const photoQueueRef = useRef(photoQueue);
+  photoQueueRef.current = photoQueue;
   const [uploadProgress, setUploadProgress] = useState({ done: 0, total: 0 });
 
   // Files cannot join the localStorage draft, so protect them through both
@@ -1281,7 +1283,15 @@ export default function CreateProjectModal({
   }
 
   function queuePhoto(file, category) {
-    setPhotoQueue(prev => [...prev, { file, category, caption: '', id: `q_${Date.now()}_${prev.length}` }]);
+    const next = [
+      ...photoQueueRef.current,
+      { file, category, caption: '', id: `q_${Date.now()}_${photoQueueRef.current.length}` },
+    ];
+    // A native picker that opened before Save can resolve while uploads are
+    // running. Mirror additions immediately so the in-flight save can leave
+    // that new File queued for a second pass instead of clearing it.
+    photoQueueRef.current = next;
+    setPhotoQueue(next);
   }
 
   // "Extract from photo" on the Previous Treatment observations field: send
@@ -1483,11 +1493,13 @@ export default function CreateProjectModal({
       // Upload queued photos one by one. Kept serial so a mid-upload failure
       // reports accurate progress; volume is typically small (5–30 photos).
       if (photoQueue.length) {
-        setUploadProgress({ done: 0, total: photoQueue.length });
+        const queuedForUpload = photoQueue;
+        const attemptedIds = new Set(queuedForUpload.map((item) => item.id));
+        setUploadProgress({ done: 0, total: queuedForUpload.length });
         const failedUploads = [];
         const failedIds = new Set();
-        for (let i = 0; i < photoQueue.length; i++) {
-          const ph = photoQueue[i];
+        for (let i = 0; i < queuedForUpload.length; i++) {
+          const ph = queuedForUpload[i];
           const fd = new FormData();
           fd.append('photo', ph.file);
           if (ph.category) fd.append('category', ph.category);
@@ -1506,17 +1518,21 @@ export default function CreateProjectModal({
             failedUploads.push(`${ph.file.name}: ${err.message || 'upload failed'}`);
             failedIds.add(ph.id);
           }
-          setUploadProgress({ done: i + 1, total: photoQueue.length });
+          setUploadProgress({ done: i + 1, total: queuedForUpload.length });
         }
+        const remainingQueue = photoQueueRef.current.filter((item) => (
+          !attemptedIds.has(item.id) || failedIds.has(item.id)
+        ));
+        photoQueueRef.current = remainingQueue;
+        setPhotoQueue(remainingQueue);
         if (failedUploads.length) {
-          setPhotoQueue(prev => prev.filter(item => failedIds.has(item.id)));
           setError(`Project draft was saved, but some photos did not upload. Retry Save Draft to upload the remaining photo${failedUploads.length === 1 ? '' : 's'}. ${failedUploads.join('; ')}`);
           return;
         }
-        // Every queued File now has a durable server photo. Release browser
-        // and Tech navigation guards while an official report remains open
-        // on its sign/delivery step.
-        setPhotoQueue([]);
+        if (remainingQueue.length) {
+          setError(`${remainingQueue.length} photo${remainingQueue.length === 1 ? ' was' : 's were'} added while this draft was saving. Save again to upload ${remainingQueue.length === 1 ? 'it' : 'them'}.`);
+          return;
+        }
       }
 
       try { localStorage.removeItem(draftKey); } catch { /* ignore */ }
@@ -1942,6 +1958,7 @@ export default function CreateProjectModal({
                     && !confirm(`${photoQueue.length} queued photo${photoQueue.length === 1 ? '' : 's'} will be discarded if you open appointment details before saving. Continue?`)) {
                     return;
                   }
+                  if (createdProject && onCreated) onCreated(createdProject);
                   onViewDetails();
                 }}
                 style={{
@@ -2679,6 +2696,7 @@ export default function CreateProjectModal({
                   setQueue={setPhotoQueue}
                   categories={typeCfg.photoCategories}
                   onAdd={queuePhoto}
+                  disabled={saving}
                   palette={P}
                   inputStyle={inputStyle}
                   theme={theme}
@@ -2776,7 +2794,7 @@ function LibraryIcon() {
   );
 }
 
-function PhotoQueue({ queue, setQueue, categories, onAdd, palette: P, inputStyle, theme }) {
+function PhotoQueue({ queue, setQueue, categories, onAdd, disabled, palette: P, inputStyle, theme }) {
   const [selectedCategory, setSelectedCategory] = useState(categories?.[0] || '');
 
   function handleFiles(e) {
@@ -2786,10 +2804,12 @@ function PhotoQueue({ queue, setQueue, categories, onAdd, palette: P, inputStyle
   }
 
   function removeItem(id) {
+    if (disabled) return;
     setQueue(q => q.filter(item => item.id !== id));
   }
 
   function updateCaption(id, caption) {
+    if (disabled) return;
     const bounded = String(caption || '').slice(0, PHOTO_CAPTION_MAX);
     setQueue(q => q.map(item => (
       item.id === id ? { ...item, caption: bounded, generatedCaption: undefined } : item
@@ -2813,6 +2833,7 @@ function PhotoQueue({ queue, setQueue, categories, onAdd, palette: P, inputStyle
     <div>
       <select
         value={selectedCategory}
+        disabled={disabled}
         onChange={(e) => setSelectedCategory(e.target.value)}
         style={{ ...inputStyle, width: '100%', padding: '8px 10px', fontSize: 12, marginBottom: 8 }}
       >
@@ -2822,7 +2843,7 @@ function PhotoQueue({ queue, setQueue, categories, onAdd, palette: P, inputStyle
       </select>
       <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
         {/* Take a photo — opens the camera directly on mobile */}
-        <label style={addButtonStyle}>
+        <label style={{ ...addButtonStyle, ...(disabled ? { pointerEvents: 'none', opacity: 0.55 } : {}) }}>
           <PhotoIcon /> Camera
           <input
             type="file"
@@ -2834,7 +2855,7 @@ function PhotoQueue({ queue, setQueue, categories, onAdd, palette: P, inputStyle
           />
         </label>
         {/* Choose from photo library — no capture attribute so the gallery opens */}
-        <label style={libraryButtonStyle}>
+        <label style={{ ...libraryButtonStyle, ...(disabled ? { pointerEvents: 'none', opacity: 0.55 } : {}) }}>
           <LibraryIcon /> Library
           <input
             type="file"
@@ -2865,6 +2886,7 @@ function PhotoQueue({ queue, setQueue, categories, onAdd, palette: P, inputStyle
                   type="text"
                   value={item.caption || ''}
                   maxLength={PHOTO_CAPTION_MAX}
+                  disabled={disabled}
                   onChange={(e) => updateCaption(item.id, e.target.value)}
                   placeholder="Describe what this shows and where"
                   aria-label={`Photo description for ${item.file.name}`}
@@ -2880,6 +2902,7 @@ function PhotoQueue({ queue, setQueue, categories, onAdd, palette: P, inputStyle
               <button
                 type="button"
                 onClick={() => removeItem(item.id)}
+                disabled={disabled}
                 style={{
                   background: 'transparent', border: 'none', color: P.muted,
                   cursor: 'pointer', fontSize: 16, padding: '0 6px',

@@ -188,6 +188,36 @@ describe("Project photo caption dirty signal", () => {
     await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(true));
   });
 
+  it("keeps a caption draft when a successful report save has a failed background refresh", async () => {
+    projectPhotos = [photos[0]];
+    const onDirtyChange = vi.fn();
+    let detailReads = 0;
+    fetch.mockImplementation(async (url, options = {}) => {
+      const path = String(url).replace(/^\/api/, "");
+      if (path === "/admin/projects/project-1" && (!options.method || options.method === "GET")) {
+        detailReads += 1;
+        if (detailReads > 1) return response({ error: "Refresh unavailable" }, 503);
+      }
+      return response(fixtureFor(url, options));
+    });
+    render(<MemoryRouter><ProjectDetail
+      projectId="project-1"
+      typesRegistry={types}
+      onClose={vi.fn()}
+      onDirtyChange={onDirtyChange}
+    /></MemoryRouter>);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit caption" }));
+    fireEvent.change(screen.getByPlaceholderText("Photo caption"), { target: { value: "Pending through refresh" } });
+    fireEvent.change(screen.getByLabelText("Report title"), { target: { value: "Saved report title" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await screen.findByText("Changes saved.");
+    expect(screen.getByDisplayValue("Pending through refresh")).toBeInTheDocument();
+    expect(screen.queryByText("Project unavailable.")).not.toBeInTheDocument();
+    await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(true));
+  });
+
   it("keeps a failed caption save dirty", async () => {
     projectPhotos = [photos[0]];
     const onDirtyChange = vi.fn();
