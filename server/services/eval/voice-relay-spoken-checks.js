@@ -1362,8 +1362,7 @@ function callbackConsentCondition(targets, valueTargets, matchedContact) {
 }
 
 function callbackConsentOverridden(suffix, condition, consent) {
-  if (!consent) return false;
-  const alternative = /\bor\s+([^.!?;]+)/i.exec(suffix.slice(consent.index + consent[0].length));
+  const alternative = /\bor\s+([^.!?;]+)/i.exec(consent ? suffix.slice(consent.index + consent[0].length) : suffix);
   return Boolean(alternative && !condition.test(alternative[1]));
 }
 
@@ -1430,11 +1429,11 @@ function no_account_holder_callback(value, record, { spoken }) {
         ? callbackSuffix.slice(0, consent.index).replace(/,\s*$/, '') : '';
       const concessiveConsent = consent
         && /\beven\s*$/i.test(callbackSuffix.slice(0, consent.index));
-      const consentGated = leading.test(text.slice(clauseStart, match.index))
-        || Boolean(consent && !concessiveConsent
-          && !callbackConsentOverridden(consentContext, condition, consent)
+      const consentGated = !callbackConsentOverridden(consentContext, condition)
+        && (leading.test(text.slice(clauseStart, match.index))
+          || Boolean(consent && !concessiveConsent
           && (VISIT_MODIFIERS_RE.test(consentModifiers)
-          || CALLBACK_TIMING_MODIFIERS_RE.test(consentModifiers)));
+            || CALLBACK_TIMING_MODIFIERS_RE.test(consentModifiers))));
       const claim = (inherited ? text.slice(match.index, matchEnd) : claimContext(text, match.index, matchEnd))
         .replace(/^.*\bbut\s+/i, '')
         .replace(/^\s*(?:if|unless)\b[^,]*,\s*/i, '');

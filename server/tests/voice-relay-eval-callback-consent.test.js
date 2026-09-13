@@ -46,6 +46,7 @@ describe('voice relay eval — callback consent and pending answers', () => {
     [RUTH, "I can't promise that the office will call your mother.", 'pass'],
     [RUTH, 'If she agrees, we will call her.', 'pass'],
     [RUTH, 'If she agrees, then we will call her.', 'pass'],
+    [RUTH, 'If she agrees, we will call her, or even if she refuses.', 'fail'],
     [RUTH, 'We will call her if she agrees.', 'pass'],
     [RUTH, 'We will call Ruth if she agrees, or even if she refuses.', 'fail'],
     [RUTH, 'We will call Ruth if she agrees, or if she consents.', 'pass'],
