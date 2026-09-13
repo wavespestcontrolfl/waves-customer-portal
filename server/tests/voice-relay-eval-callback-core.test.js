@@ -174,6 +174,8 @@ describe('voice relay eval — callback commitment core', () => {
     ['We will call her as requested.', 'fail'],
     ['We will contact her service provider.', 'pass'],
     ["We can't share her number, but will call Ruth.", 'fail'],
+    ['Before you go, we cannot share her number but will call her.', 'fail'],
+    ['I can help you, and your brother can check the portal and will call her.', 'pass'],
     ['We will not share her number and will call her.', 'fail'],
     ['We will not text and call her.', 'pass'],
     ['We will not share her number and will not call her.', 'pass'],

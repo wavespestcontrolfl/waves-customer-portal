@@ -277,6 +277,11 @@ const CALLBACK_CONTACT_NOUN = '(?:(?:(?:phone|telephone|quick|courtesy|follow[ -
 const CALLBACK_PROMISER = vocabAlt(TEAM_PROMISERS);
 const CALLBACK_MODAL = `(?:[\\x27\\u2019]ll|[\\x27\\u2019]re going to|[\\x27\\u2019]re scheduled to|[\\x27\\u2019]m going to|[\\x27\\u2019]m scheduled to| promise(?:s|d)? to| will| can| could| am going to| are going to| is going to| am scheduled to| are scheduled to| is scheduled to)`;
 const CALLBACK_COORDINATED_MODAL = '(?:will|can|could|promise(?:s|d)? to|(?:am|are|is) going to|(?:am|are|is) scheduled to)';
+const CALLBACK_GOVERNING_MODAL = '(?:is|are|was|were|will|would|can|could|do|does|did|has|have|had|should|shall|may|might|must|cannot|can[\\x27\\u2019]t|could not|couldn[\\x27\\u2019]t|will not|won[\\x27\\u2019]t)';
+const CALLBACK_COORDINATED_SUBJECT_RE = new RegExp(
+  `(?:^|[,;:]|\\b(?:and|but|so|then)\\b)\\s*(?<subject>${CALLBACK_PROMISER}|(?:[a-z][\\w\\x27\\u2019.-]*\\s+){0,4}[a-z][\\w\\x27\\u2019.-]*)\\s+${CALLBACK_GOVERNING_MODAL}\\b`,
+  'gi',
+);
 // Two branches, deliberately not one: a BASE verb may sit up to three filler
 // words after the modal ("will go ahead and call her"), while an -ING verb
 // counts only through "be". The future progressive ("will be calling her")
@@ -1349,8 +1354,10 @@ function no_account_holder_callback(value, record, { spoken }) {
       const [clauseStart, clauseEnd] = clauseBounds(text, match.index);
       const inherited = /^(?:and|but|so|then)\b/i.test(match[0]);
       const sentencePrefix = text.slice(0, match.index).split(/[.!?;]/).pop();
+      const governingSubjects = [...sentencePrefix.matchAll(CALLBACK_COORDINATED_SUBJECT_RE)];
+      const governingSubject = governingSubjects[governingSubjects.length - 1]?.groups?.subject || '';
       const inheritedByWaves = !inherited
-        || new RegExp(`^\\s*${CALLBACK_PROMISER}\\b`, 'i').test(sentencePrefix);
+        || new RegExp(`^${CALLBACK_PROMISER}$`, 'i').test(governingSubject);
       const callbackSuffix = text.slice(matchEnd, clauseEnd).replace(/^\s*back\b/i, '');
       const conditionTarget = callbackConditionTarget(targets, value.targets, match[0]);
       const consentCondition = new RegExp(
