@@ -259,19 +259,47 @@ export async function disablePush({ apiBase = '/api', token } = {}) {
   // Record the opt-out before any network/SW work so the self-heal can't
   // race a partially-completed disable back to enabled.
   setPushOptIn(authToken, false);
+
+  let sub;
   try {
     const reg = await navigator.serviceWorker.getRegistration();
-    if (reg) {
-      const sub = await reg.pushManager.getSubscription();
-      if (sub) {
-        await fetch(`${apiBase}/admin/push/unsubscribe`, {
-          method: 'POST', headers,
-          body: JSON.stringify({ endpoint: sub.endpoint }),
-        });
-        await sub.unsubscribe();
-      }
-    }
-  } catch { /* swallow */ }
+    sub = reg ? await reg.pushManager.getSubscription() : null;
+  } catch (e) {
+    throw new Error(`Could not access this browser's push subscription: ${e?.message || 'unknown browser error'}. Please try again.`);
+  }
+
+  // No local subscription means this browser is already unable to receive
+  // push, so there is no endpoint to unregister from the server.
+  if (!sub) return { ok: true };
+
+  // Keep the browser endpoint available for retry until server cleanup is
+  // confirmed. The opt-out above prevents automatic re-enrollment meanwhile.
+  let response;
+  try {
+    response = await fetch(`${apiBase}/admin/push/unsubscribe`, {
+      method: 'POST', headers,
+      body: JSON.stringify({ endpoint: sub.endpoint }),
+    });
+  } catch (e) {
+    throw new Error(`Push could not be fully disabled. The server could not be reached${e?.message ? `: ${e.message}` : ''}. Please try again.`);
+  }
+  if (!response.ok) {
+    throw new Error(`Push could not be fully disabled. The server rejected the request (HTTP ${response.status}). Please try again.`);
+  }
+
+  const [browserResult] = await Promise.allSettled([sub.unsubscribe()]);
+  let browserError = '';
+  if (browserResult.status === 'rejected') {
+    const detail = browserResult.reason?.message;
+    browserError = `The browser could not remove its subscription${detail ? `: ${detail}` : ''}.`;
+  } else if (!browserResult.value) {
+    browserError = 'The browser did not confirm that its subscription was removed.';
+  }
+
+  if (browserError) {
+    throw new Error(`Push could not be fully disabled. ${browserError} Please try again.`);
+  }
+
   return { ok: true };
 }
 

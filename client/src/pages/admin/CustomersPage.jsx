@@ -941,7 +941,19 @@ function CustomerIntelligenceTab() {
   const [retryKey, setRetryKey] = useState(0);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [scanning, setScanning] = useState(false);
+  const pendingRef = useRef(new Set());
+  const refreshSeqRef = useRef(0);
+  const uncertainSeqRef = useRef(0);
+  const [pendingActions, setPendingActions] = useState({});
+  const [uncertainApprovals, setUncertainApprovals] = useState({});
+  const [scanNeedsRefresh, setScanNeedsRefresh] = useState(false);
+  const [actionFeedback, setActionFeedback] = useState(null);
+  let isAdmin;
+  try {
+    isAdmin = JSON.parse(localStorage.getItem("waves_admin_user") || "{}")?.role === "admin";
+  } catch {
+    isAdmin = false;
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -956,58 +968,161 @@ function CustomerIntelligenceTab() {
     return () => { cancelled = true; };
   }, [retryKey]);
 
+  const beginAction = (key, action) => {
+    if (pendingRef.current.has(key)) return false;
+    pendingRef.current.add(key);
+    setPendingActions((current) => ({ ...current, [key]: action }));
+    setActionFeedback(null);
+    return true;
+  };
+
+  const finishAction = (key) => {
+    pendingRef.current.delete(key);
+    setPendingActions((current) => {
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  };
+  const showFeedback = (message, tone = "error", retryRefresh = false) =>
+    setActionFeedback({ message, tone, retryRefresh });
+
+  const refreshResults = async (message, tone = "success") => {
+    const seq = ++refreshSeqRef.current;
+    const uncertaintySnapshot = uncertainSeqRef.current;
+    try {
+      const result = await adminFetch("/admin/customers/intelligence");
+      if (!result || !Number.isFinite(result.totalCustomers)) {
+        throw new Error("Incomplete intelligence summary");
+      }
+      if (seq !== refreshSeqRef.current) return true;
+      setData(result);
+      setUncertainApprovals((current) => Object.fromEntries(
+        Object.entries(current).filter(([, generation]) => generation > uncertaintySnapshot),
+      ));
+      setScanNeedsRefresh(false);
+      setActionFeedback(message ? { message, tone, retryRefresh: false } : null);
+      return true;
+    } catch {
+      if (seq !== refreshSeqRef.current) return true;
+      showFeedback(
+        message
+          ? `${message} Latest results could not be refreshed.`
+          : "Latest results could not be refreshed. Try again.",
+        message ? tone : "warning",
+        true,
+      );
+      return false;
+    }
+  };
+
   const handleScan = async () => {
-    setScanning(true);
+    const key = "scan";
+    if (!beginAction(key, "scan")) return;
     try {
       await adminFetch("/admin/customers/intelligence/scan", {
         method: "POST",
         body: "{}",
       });
-      const d = await adminFetch("/admin/customers/intelligence");
-      setData(d);
-    } catch (e) {
-      console.error("Scan failed:", e);
+      const refreshed = await refreshResults("Customer intelligence scan completed.");
+      if (!refreshed) setScanNeedsRefresh(true);
+    } catch {
+      showFeedback("Customer intelligence scan failed. Try again.");
+    } finally {
+      finishAction(key);
     }
-    setScanning(false);
   };
 
-  const handleApprove = async (outreachId) => {
+  const handleApprove = async (outreach) => {
+    const key = `outreach:${outreach.id}`;
+    if (!isAdmin || uncertainApprovals[outreach.id] || !beginAction(key, "approve")) return;
     try {
-      await adminFetch(
-        `/admin/customers/intelligence/retention/${outreachId}/approve`,
+      const result = await adminFetch(
+        `/admin/customers/intelligence/retention/${outreach.id}/approve`,
         { method: "PUT", body: JSON.stringify({ approvedBy: "admin" }) },
       );
-      const d = await adminFetch("/admin/customers/intelligence");
-      setData(d);
-    } catch (e) {
-      console.error("Approve failed:", e);
-    }
-  };
-
-  const handleSkip = async (outreachId) => {
-    try {
-      await adminFetch(
-        `/admin/customers/intelligence/retention/${outreachId}/skip`,
-        { method: "PUT", body: JSON.stringify({}) },
+      setData((current) => ({
+        ...current,
+        pendingOutreach: (current.pendingOutreach || []).filter(
+          (item) => item.id !== outreach.id,
+        ),
+      }));
+      const saved = result?.outreach || {};
+      let message = "Retention approval recorded.";
+      let tone = "success";
+      if (outreach.outreach_type === "sms") {
+        if (saved.status === "sent") message = "Retention SMS sent.";
+        else if (saved.status === "blocked") {
+          message = "Retention SMS was blocked and was not sent.";
+          tone = "blocked";
+        } else if (saved.status === "approved") {
+          message = "Retention SMS approval is recorded; delivery is not confirmed.";
+          tone = "warning";
+        } else {
+          message = `Retention SMS approval returned status ${saved.status || "unknown"}; delivery is not confirmed.`;
+          tone = "warning";
+        }
+      } else if (saved.status === "approved") {
+        message = "Call outreach approved for manual follow-up.";
+      }
+      await refreshResults(message, tone);
+    } catch {
+      const uncertaintyGeneration = ++uncertainSeqRef.current;
+      setUncertainApprovals((current) => ({
+        ...current,
+        [outreach.id]: uncertaintyGeneration,
+      }));
+      showFeedback(
+        "Approval could not be confirmed. Refresh current status before trying again.",
+        "error",
+        true,
       );
-      const d = await adminFetch("/admin/customers/intelligence");
-      setData(d);
-    } catch (e) {
-      console.error("Skip failed:", e);
+    } finally {
+      finishAction(key);
     }
   };
 
-  const handleUpsellStatus = async (upsellId, status) => {
+  const handleStatusUpdate = async ({ key, action, path, body, collection, id, message, errorMessage }) => {
+    if (!beginAction(key, action)) return;
     try {
-      await adminFetch(`/admin/customers/intelligence/upsells/${upsellId}`, {
-        method: "PUT",
-        body: JSON.stringify({ status }),
-      });
-      const d = await adminFetch("/admin/customers/intelligence");
-      setData(d);
-    } catch (e) {
-      console.error("Upsell update failed:", e);
+      await adminFetch(path, { method: "PUT", body: JSON.stringify(body) });
+      setData((current) => ({
+        ...current,
+        [collection]: (current[collection] || []).filter((item) => item.id !== id),
+      }));
+      await refreshResults(message);
+    } catch {
+      showFeedback(errorMessage);
+    } finally {
+      finishAction(key);
     }
+  };
+
+  const handleSkip = (outreachId) => {
+    if (!isAdmin || uncertainApprovals[outreachId]) return;
+    return handleStatusUpdate({
+      key: `outreach:${outreachId}`,
+      action: "skip",
+      path: `/admin/customers/intelligence/retention/${outreachId}/skip`,
+      body: {},
+      collection: "pendingOutreach",
+      id: outreachId,
+      message: "Retention outreach skipped.",
+      errorMessage: "Retention outreach could not be skipped. Try again.",
+    });
+  };
+
+  const handleUpsellStatus = (upsellId, status) => {
+    return handleStatusUpdate({
+      key: `upsell:${upsellId}`,
+      action: "upsell",
+      path: `/admin/customers/intelligence/upsells/${upsellId}`,
+      body: { status },
+      collection: "upsells",
+      id: upsellId,
+      message: "Upsell marked as pitched.",
+      errorMessage: "Upsell status could not be updated. Try again.",
+    });
   };
 
   if (loading)
@@ -1024,7 +1139,10 @@ function CustomerIntelligenceTab() {
       </div>
     );
 
+  const { pendingOutreach = [], upsells = [] } = data;
   const MONO = "'JetBrains Mono', monospace";
+  const scanPending = Boolean(pendingActions.scan);
+  const feedbackColor = { error: D.red, blocked: D.red, warning: D.amber }[actionFeedback?.tone] || D.green;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -1041,8 +1159,12 @@ function CustomerIntelligenceTab() {
           Review prepared outreach and service opportunities.
         </div>{" "}
         <button
-          onClick={handleScan}
-          disabled={scanning}
+          onClick={
+            scanNeedsRefresh
+              ? () => void refreshResults("Latest results refreshed.")
+              : handleScan
+          }
+          disabled={scanPending}
           style={{
             padding: "6px 14px",
             borderRadius: 6,
@@ -1051,17 +1173,44 @@ function CustomerIntelligenceTab() {
             color: D.teal,
             fontSize: 12,
             cursor: "pointer",
-            opacity: scanning ? 0.5 : 1,
+            opacity: scanPending ? 0.5 : 1,
           }}
         >
-          {scanning ? "Scanning..." : "Run Scan Now"}
+          {scanPending
+            ? "Scanning..."
+            : scanNeedsRefresh
+              ? "Retry scan results"
+              : "Run Scan Now"}
         </button>{" "}
       </div>
-      {!(data.pendingOutreach || []).length && !(data.upsells || []).length && (
+      {actionFeedback && (
+        <div
+          role={actionFeedback.tone === "error" ? "alert" : "status"}
+          style={{
+            padding: "10px 12px",
+            border: `1px solid ${D.border}`,
+            borderRadius: 6,
+            color: feedbackColor,
+            fontSize: 14,
+          }}
+        >
+          {actionFeedback.message}
+          {actionFeedback.retryRefresh && (
+            <button
+              type="button"
+              onClick={() => void refreshResults("Latest results refreshed.")}
+              style={{ marginLeft: 10, color: D.teal, fontSize: 14 }}
+            >
+              Retry results
+            </button>
+          )}
+        </div>
+      )}
+      {pendingOutreach.length + upsells.length === 0 && (
         <p style={{ color: D.muted, fontSize: 14 }}>No pending outreach or upsell opportunities. Use Directory filters to find customers by health or past retention outcomes.</p>
       )}
       {/* Pending Outreach */}
-      {(data.pendingOutreach || []).length > 0 && (
+      {pendingOutreach.length > 0 && (
         <div
           style={{
             background: D.card,
@@ -1079,9 +1228,9 @@ function CustomerIntelligenceTab() {
               marginBottom: 16,
             }}
           >
-            Pending Retention Outreach ({data.pendingOutreach.length})
+            Pending Retention Outreach ({pendingOutreach.length})
           </div>
-          {data.pendingOutreach.map((o) => (
+          {pendingOutreach.map((o) => (
             <div
               key={o.id}
               style={{
@@ -1120,7 +1269,12 @@ function CustomerIntelligenceTab() {
               <div style={{ display: "flex", gap: 6 }}>
                 {" "}
                 <button
-                  onClick={() => handleApprove(o.id)}
+                  onClick={() =>
+                    uncertainApprovals[o.id]
+                      ? void refreshResults("Latest results refreshed.")
+                      : handleApprove(o)
+                  }
+                  disabled={!isAdmin || Boolean(pendingActions[`outreach:${o.id}`])}
                   style={{
                     padding: "5px 12px",
                     borderRadius: 5,
@@ -1130,14 +1284,25 @@ function CustomerIntelligenceTab() {
                     fontSize: 11,
                     fontWeight: 500,
                     cursor: "pointer",
+                    opacity:
+                      !isAdmin || pendingActions[`outreach:${o.id}`] ? 0.5 : 1,
                   }}
                 >
-                  {o.outreach_type === "sms"
-                    ? "Yes Approve & Send"
-                    : "Yes Approve & Call"}
+                  {uncertainApprovals[o.id]
+                    ? "Check status"
+                    : pendingActions[`outreach:${o.id}`] === "approve"
+                      ? "Approving..."
+                      : o.outreach_type === "sms"
+                        ? "Yes Approve & Send"
+                        : "Yes Approve & Call"}
                 </button>{" "}
                 <button
                   onClick={() => handleSkip(o.id)}
+                  disabled={
+                    !isAdmin ||
+                    uncertainApprovals[o.id] ||
+                    Boolean(pendingActions[`outreach:${o.id}`])
+                  }
                   style={{
                     padding: "5px 12px",
                     borderRadius: 5,
@@ -1146,9 +1311,17 @@ function CustomerIntelligenceTab() {
                     color: D.muted,
                     fontSize: 11,
                     cursor: "pointer",
+                    opacity:
+                      !isAdmin ||
+                      uncertainApprovals[o.id] ||
+                      pendingActions[`outreach:${o.id}`]
+                        ? 0.5
+                        : 1,
                   }}
                 >
-                  Skip
+                  {pendingActions[`outreach:${o.id}`] === "skip"
+                    ? "Skipping..."
+                    : "Skip"}
                 </button>{" "}
               </div>{" "}
             </div>
@@ -1157,7 +1330,7 @@ function CustomerIntelligenceTab() {
       )}
 
       {/* Upsell Opportunities */}
-      {(data.upsells || []).length > 0 && (
+      {upsells.length > 0 && (
         <div
           style={{
             background: D.card,
@@ -1177,7 +1350,7 @@ function CustomerIntelligenceTab() {
           >
             {" "}
             <div style={{ fontSize: 16, fontWeight: 500, color: D.green }}>
-              Upsell Opportunities ({data.upsells.length})
+              Upsell Opportunities ({upsells.length})
             </div>{" "}
             <div style={{ fontSize: 13, color: D.muted }}>
               Potential:{" "}
@@ -1274,7 +1447,7 @@ function CustomerIntelligenceTab() {
                 </tr>{" "}
               </thead>{" "}
               <tbody>
-                {data.upsells.slice(0, 15).map((u) => (
+                {upsells.slice(0, 15).map((u) => (
                   <tr key={u.id}>
                     {" "}
                     <td
@@ -1341,6 +1514,7 @@ function CustomerIntelligenceTab() {
                       {" "}
                       <button
                         onClick={() => handleUpsellStatus(u.id, "pitched")}
+                        disabled={Boolean(pendingActions[`upsell:${u.id}`])}
                         style={{
                           padding: "3px 8px",
                           borderRadius: 4,
@@ -1349,9 +1523,12 @@ function CustomerIntelligenceTab() {
                           color: "#fff",
                           fontSize: 10,
                           cursor: "pointer",
+                          opacity: pendingActions[`upsell:${u.id}`] ? 0.5 : 1,
                         }}
                       >
-                        Pitch
+                        {pendingActions[`upsell:${u.id}`]
+                          ? "Saving..."
+                          : "Pitch"}
                       </button>{" "}
                     </td>{" "}
                   </tr>

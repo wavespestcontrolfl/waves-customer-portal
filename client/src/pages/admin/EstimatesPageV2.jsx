@@ -1618,10 +1618,19 @@ function EstimatePipelineViewV2({
   const activeFilterRef = useRef(filter);
   activeFilterRef.current = filter;
   const estimatesRequestRef = useRef(0);
-  const refreshEstimates = useCallback(() => {
+  const foregroundRequestRef = useRef(null);
+  const queuedSilentRefreshRef = useRef(false);
+  const refreshEstimates = useCallback(({ silent = false } = {}) => {
+    if (silent && foregroundRequestRef.current !== null) {
+      queuedSilentRefreshRef.current = true;
+      return;
+    }
     const requestId = ++estimatesRequestRef.current;
-    setLoading(true);
-    setError(null);
+    if (!silent) {
+      foregroundRequestRef.current = requestId;
+      setLoading(true);
+      setError(null);
+    }
     const currentFilter = activeFilterRef.current;
     const fetches = [fetchEstimatePipelineRows(currentFilter)];
     if (currentFilter !== "archived") {
@@ -1642,12 +1651,24 @@ function EstimatePipelineViewV2({
           mergeEstimateRows(pipeline.rows, archived.estimates || []),
         );
         setEstimatesTruncated(!!pipeline.truncated || !!archived.truncated);
+        setError(null);
         setLoading(false);
       })
       .catch((err) => {
         if (requestId !== estimatesRequestRef.current) return;
-        setError(err);
+        if (!silent) setError(err);
         setLoading(false);
+      })
+      .finally(() => {
+        if (!silent && foregroundRequestRef.current === requestId) {
+          foregroundRequestRef.current = null;
+        }
+        if (requestId === estimatesRequestRef.current
+          && foregroundRequestRef.current === null
+          && queuedSilentRefreshRef.current) {
+          queuedSilentRefreshRef.current = false;
+          refreshEstimates({ silent: true });
+        }
       });
   }, []);
   useEffect(() => {
@@ -1969,9 +1990,9 @@ function EstimatePipelineViewV2({
         <CreateAppointmentModal
           open
           onClose={() => setScheduleEstimate(null)}
-          onChange={() => {
-            setScheduleEstimate(null);
-            refreshEstimates();
+          onChange={(appointment, outcome = {}) => {
+            if (!outcome.background) setScheduleEstimate(null);
+            refreshEstimates({ silent: !!outcome.background });
           }}
           defaultCustomer={{
             id: scheduleEstimate.customerId,

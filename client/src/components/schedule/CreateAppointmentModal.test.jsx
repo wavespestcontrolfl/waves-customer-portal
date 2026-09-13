@@ -266,6 +266,23 @@ describe('canSubmitAppointments', () => {
     expect(canSubmitAppointments({ selectedCustomer: { id: 1 }, services: [{}], bookingPropertyState: 'loading', alreadySubmitting: false })).toBe(false);
   });
 
+  it('waits for the selected customer address review lookup to settle', () => {
+    expect(canSubmitAppointments({
+      selectedCustomer: { id: 1 },
+      services: [{}],
+      bookingPropertyState: 'ready',
+      alreadySubmitting: false,
+      addressAskPending: true,
+    })).toBe(false);
+    expect(canSubmitAppointments({
+      selectedCustomer: { id: 1 },
+      services: [{}],
+      bookingPropertyState: 'ready',
+      alreadySubmitting: false,
+      addressAskPending: false,
+    })).toBe(true);
+  });
+
   it('refuses a second concurrent submit regardless of the other conditions', () => {
     expect(canSubmitAppointments({ selectedCustomer: { id: 1 }, services: [{}], bookingPropertyState: 'ready', alreadySubmitting: true })).toBe(false);
   });

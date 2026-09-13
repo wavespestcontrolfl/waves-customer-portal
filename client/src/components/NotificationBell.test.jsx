@@ -67,6 +67,52 @@ afterEach(() => {
 });
 
 describe('NotificationBell panel', () => {
+  it.each([390, 1280])('lets admins read an older refreshed alert on a %ipx screen', async (width) => {
+    const previousWidth = window.innerWidth;
+    window.innerWidth = width;
+    const recent = Array.from({ length: 30 }, (_, i) => ({ ...NOTIFICATIONS[0], id: `recent-${i}`, title: `Recent alert ${i}`, read_at: new Date().toISOString() }));
+    const older = { ...NOTIFICATIONS[0], id: 'older-refreshed', title: 'Updated restock alert', created_at: '2026-09-01T12:00:00Z' };
+    global.fetch = vi.fn(async (url, options) => {
+      if (String(url).includes('/unread-count')) return jsonResponse({ count: 1 });
+      if (options?.method === 'PUT') return jsonResponse({ success: true });
+      if (String(url).includes('page=2')) return jsonResponse({ notifications: [recent[29], older], hasMore: false });
+      return jsonResponse({ notifications: recent, hasMore: true });
+    });
+    try {
+      render(<NotificationBell type="admin" />);
+      fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Load more' }));
+      const alert = await screen.findByText('Updated restock alert');
+      expect(screen.getAllByText('Recent alert 29')).toHaveLength(1);
+      expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull();
+      fireEvent.click(alert);
+      await waitFor(() => expect(global.fetch).toHaveBeenCalledWith('/api/admin/notifications/older-refreshed/read', expect.objectContaining({ method: 'PUT' })));
+    } finally {
+      window.innerWidth = previousWidth;
+    }
+  });
+
+  it('preserves loaded alerts and retries the same older page after a failure', async () => {
+    let attempts = 0;
+    global.fetch = vi.fn(async url => {
+      if (String(url).includes('/unread-count')) return jsonResponse({ count: 2 });
+      if (String(url).includes('page=2')) {
+        if (++attempts === 1) return { ok: false, status: 503 };
+        return jsonResponse({ notifications: [{ ...NOTIFICATIONS[1], id: 3, title: 'Older alert' }], hasMore: false });
+      }
+      return jsonResponse({ notifications: NOTIFICATIONS, hasMore: true });
+    });
+    render(<NotificationBell type="admin" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Load more' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent("Older notifications couldn't be loaded.");
+    expect(screen.getByText('Visit completed')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('Older alert')).toBeInTheDocument();
+    expect(attempts).toBe(2);
+  });
+
+
   it('refetches the authoritative badge after marking one notification read', async () => {
     native.enabled = true;
     let count = 2;

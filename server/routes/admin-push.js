@@ -15,7 +15,6 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const logger = require('../services/logger');
 const { listTriggers } = require('../services/notification-triggers');
 const {
   OVERRIDABLE_CATEGORY_SET, DEFAULT_ON_CATEGORIES,
@@ -194,10 +193,7 @@ router.get('/preferences', async (req, res, next) => {
     const adminUserId = req.technicianId;
     const triggers = listTriggers();
 
-    let rows = [];
-    try {
-      rows = await db('notification_preferences').where({ admin_user_id: adminUserId });
-    } catch (e) { logger.warn(`[admin-push] prefs query failed: ${e.message}`); }
+    const rows = await db('notification_preferences').where({ admin_user_id: adminUserId });
 
     const byKey = new Map(rows.map((r) => [r.trigger_key, r]));
     const merged = triggers.map((t) => {
