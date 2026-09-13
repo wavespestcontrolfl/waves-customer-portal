@@ -1449,6 +1449,7 @@ function reportHasCompletedFinding(affirmed, subjectAt, subjectLength, locationA
     if (locationAt > findingVerb.index || !REPORT_NOUN_LED_PREFIX_RE.test(receiverPrefix)
         || !REPORT_LOCATION_RECIPIENT_PREDICATE_RE.test(receiverPredicate)) return false;
   }
+  if (/\bimagin(?:e[sd]?|ing)\s+(?:that\s+)?$/i.test(affirmed.slice(0, subjectAt))) return false;
   const predicateIntroduction = affirmed.slice(0, findingVerb.index);
   if (REPORT_NONCOMPLETION_GOVERNOR_RE.test(predicateIntroduction)
       || REPORT_NONCOMPLETION_MODIFIER_RE.test(predicateIntroduction)) return false;
