@@ -590,7 +590,10 @@ function paymentOutcomeIsConditional(text, claimStart, claim, match, trailingCla
 function paymentOutcomeIsInterrogative(text, claim, matchEnd, claimEnd) {
   const trailingClaim = text.slice(matchEnd, claimEnd);
   const followup = trailingClaim.match(/^\s*,\s*(?:and\s+)?(.*)$/i);
-  const followupQuestion = followup && QUESTION_LEAD_RE.test(followup[1]);
+  const followupQuestion = followup && new RegExp(
+    `^\\s*(?:${QUESTION_AUX_RE_SOURCE}|(?:what|when|where|which|who|whom|whose|why|how)\\b[^,.!?;]{0,40}\\b${QUESTION_AUX_RE_SOURCE})\\b`,
+    'i',
+  ).test(followup[1]);
   return QUESTION_LEAD_RE.test(claim) || (text[claimEnd] === '?' && !followupQuestion);
 }
 function paymentOutcomeHasTemporalCondition(text, claim, claimStart, match, trailingClaim) {
