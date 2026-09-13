@@ -571,7 +571,7 @@ router.post('/:id/apply-property-roles', async (req, res) => {
 
 // POST /api/admin/triage/:id/verdict  { verdict, wrong_fields?, note? }
 // Records the human verdict on a TRIAGED call. The verdict is CALL-level
-// ("accept = the AI got this call right"), so it resolves EVERY open triage row
+// ("accept = the AI got this call right"), so it resolves open routing rows
 // for the call, not just the clicked one — a call can have several flags
 // (address_review + name_review …) and the reviewer judges the call once. The
 // per-flag detail lives in wrong_fields. Resolving the whole call also avoids
@@ -651,11 +651,16 @@ router.post('/:id/verdict', async (req, res) => {
           .forUpdate()
           .select('id');
       }
+      const live = await trx('triage_items').where({ id }).first('payload');
+      if (live?.payload?.reschedule_proposal) {
+        throw Object.assign(new Error('Review or dismiss the reschedule proposal instead of recording a call verdict.'), { proposalConflict: true });
+      }
       const resolvedRows = await trx('triage_items')
         .where({ call_log_id: item.call_log_id })
-        // Bounce follow-ups AND pending property-role confirmations survive a
-        // call verdict — both carry work of their own (see the guards above).
+        // Bounce follow-ups, property-role confirmations and reschedule
+        // proposals survive a routing verdict: each has its own review action.
         .whereNotIn('reason_code', ['email_bounce_reverify', 'property_role_confirm'])
+        .whereRaw("payload->'reschedule_proposal' IS NULL")
         .whereIn('status', OPEN_STATES)
         .update({
           status: 'resolved',
@@ -791,6 +796,7 @@ router.post('/:id/verdict', async (req, res) => {
 
     return res.json({ ok: true, id, status: 'resolved', verdict, resolved_count: resolved });
   } catch (err) {
+    if (err.proposalConflict) return res.status(409).json({ error: err.message });
     logger.error(`[admin-triage] verdict failed: ${err.message}`);
     if (!res.headersSent) res.status(500).json({ error: 'Failed to record verdict' });
   }
