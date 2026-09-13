@@ -1235,12 +1235,13 @@ function cardSpokenDigits(text) {
 // "$129" elsewhere in the clause from hiding "I heard four".
 const CARD_PHONE_VALUE = '(?:(?:\\(\\d{3}\\)|\\b\\d{3})[\\s.-]\\d{3}[\\s.-]\\d{4}\\b|\\b\\d{10}\\b)';
 const CARD_MENU_OPTION_RE = /\b(?:option|choice|key)\s+(?:number\s+)?\d+\b|\bpress\s+\d+\b/gi;
+const CARD_COUNT_MODIFIERS = '(?:(?:pending|failed|successful|declined|completed|remaining|active|saved)\\s+)*';
 const CARD_COUNT_NOUN = '(?:applications?|treatments?|services?|visits?|appointments?|accounts?|payments?|transactions?|attempts?|options?|cards?|rooms?|bedrooms?|bathrooms?|properties|homes?|lawns?|yards?|dogs?|cats?|pets?|animals?|children|kids?|bab(?:y|ies)|adults?|people|men|women|mice|geese|feet|fish|sheep)';
 const CARD_MEASUREMENT_UNIT = '(?:sq(?:uare)?\\.?\\s*(?:ft|feet|foot)|acres?)';
 // Preserve a comma that introduces a separately explained numeric value or a
 // reverse card-position label before spokenDigits can join the digit words.
 const CARD_COMMA_VALUE_BOUNDARY_RE = new RegExp(
-  `,\\s*(?=(?:\\d+|${DIGIT_TOKEN})\\s+(?:(?:${CARD_COUNT_NOUN}|${CARD_MEASUREMENT_UNIT})\\b|`
+  `,\\s*(?=(?:\\d+|${DIGIT_TOKEN})\\s+(?:(?:${CARD_COUNT_MODIFIERS}${CARD_COUNT_NOUN}|${CARD_MEASUREMENT_UNIT})\\b|`
     + `(?:is|was)\\s+(?:the\\s+)?(?:first|last|next|middle)\\s+(?:digit|number|one)\\s+(?:of|on)\\s+`
     + `(?:(?:your|the|my|this|that)\\s+)?(?:card|pan|cvv|cvc|security code)\\b))`,
   'gi',
@@ -1265,7 +1266,7 @@ const CARD_NON_FRAGMENT_RES = Object.freeze([
   new RegExp(`\\b\\d[\\d,]*(?:\\.\\d+)?\\s*${CARD_MEASUREMENT_UNIT}\\b`, 'gi'),
   /\b(?:[01]?\d|2[0-3]):[0-5]\d(?:\s*(?:a\.?\s*m\.?|p\.?\s*m\.?))?(?![\da-z])/gi,
   /\b\d+(?:\.\d+)?\s*(?:seconds?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?)\b/gi,
-  /\b\d+(?:\.\d+)?\s+(?:(?:pending|failed|successful|declined|completed|remaining|active|saved)\s+)*(?:cards?|applications?|payments?|transactions?|attempts?|options?|visits?|services?|appointments?|accounts?)\b/gi,
+  new RegExp(`\\b\\d+(?:\\.\\d+)?\\s+${CARD_COUNT_MODIFIERS}(?:cards?|applications?|payments?|transactions?|attempts?|options?|visits?|services?|appointments?|accounts?)\\b`, 'gi'),
   new RegExp(`\\b\\d+(?:\\.\\d+)?\\s+(?!(?:card\\s+(?:number|digits?)|pan|cvv|cvc|security\\s+(?:code|digits?)|digits?|numbers?|codes?)\\b)${CARD_COUNT_NOUN}(?=\\s+(?:is|are|was|were)\\b|[.!?,;:]|$)`, 'gi'),
   /\b\d+(?:\.\d+)?[\s-]+(?:rooms?|bedrooms?)\b/gi,
   /\b(?:rooms?|bedrooms?)\s+(?:is|was|are|were)\s+\d+(?:\.\d+)?\b/gi,
