@@ -163,6 +163,19 @@ function openPortalRequest(conn, customerId, serviceId) {
     .first('id');
 }
 
+// One human-handled predicate for both automatic and reviewed application.
+// The reviewed path excludes its own proposal card so a staff member may
+// apply a card they have claimed, while a claimed/resolved/dismissed sibling
+// still proves that the call's appointment request is already being handled.
+function humanHandledRescheduleCard(conn, callLogId, { excludeId = null } = {}) {
+  const query = conn('triage_items').where({ call_log_id: callLogId })
+    .whereIn('reason_code', CARD_REASON_CODES)
+    .where((q) => q.where('status', 'in_progress').orWhere((closed) => closed
+      .where('resolution_source', 'human').whereIn('status', ['resolved', 'dismissed'])));
+  if (excludeId) query.whereNot('id', excludeId);
+  return query.first('id');
+}
+
 /**
  * Pure decision. `candidates` are the customer's live scheduled_services
  * rows (already filtered to LIVE_STATUSES by the loader); `now` is the
@@ -208,7 +221,7 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
   if (!humanOverride && !hasAgentCommittedEvidence(v2, call.transcription, call.created_at)) return skip('ungrounded_agent_commitment');
   const newDate = etDateString(target);
   const newStart = `${pad2(parts.hour)}:${pad2(parts.minute)}`;
-  if (!humanOverride && etWallClockOfConfirmedStart(scheduling.confirmed_start_at) !== `${newDate}T${newStart}`) return skip('inconsistent_start_offset');
+  if (etWallClockOfConfirmedStart(targetStart) !== `${newDate}T${newStart}`) return skip('inconsistent_start_offset');
 
   let targetKey = null;
   let nearby;
@@ -300,6 +313,7 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
     : null;
 
   if (currentDate === newDate && currentStart === newStart) {
+    if (!MOVABLE_STATUSES.includes(visit.status)) return skip('visit_parked_for_rebook', { visitId: visit.id });
     return { action: 'already_at_requested_time', propertyKey: targetKey, visitId: visit.id, newDate, newWindow: { start: newStart, end: newEnd }, interiorNote };
   }
   return {
@@ -341,7 +355,7 @@ async function loadCandidates(conn, customerId, now = new Date(), { includePast 
 // automatic path's planner and SmartRebooker choke point. The proposal guard,
 // note and audit all commit in the move transaction, including a series move.
 async function applyReviewedCallReschedule({ conn, call, v2, customer, candidates, visitId, actorId,
-  operationKey, guard, occurrenceIds = [], occurrences, now = new Date(), rebooker = null } = {}) {
+  operationKey, guard, proposalCardId = null, occurrenceIds = [], occurrences, now = new Date(), rebooker = null } = {}) {
   if (!actorId || !operationKey || typeof guard !== 'function') {
     throw new Error('Reviewed reschedule requires an authenticated, uniquely identified proposal guard');
   }
@@ -380,6 +394,9 @@ async function applyReviewedCallReschedule({ conn, call, v2, customer, candidate
       if (await pendingSmsOffer(trx, customer.id, affectedVisitId, now)) {
         throw Object.assign(new Error('A text-message reschedule offer is still open. Use the schedule editor.'), { status: 409 });
       }
+    }
+    if (await humanHandledRescheduleCard(trx, call.id, { excludeId: proposalCardId })) {
+      throw Object.assign(new Error('Another staff action handled this appointment request. Refresh the proposal.'), { status: 409 });
     }
     await guard(trx);
     if (plan.interiorNote) {
@@ -594,25 +611,6 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
   // move last Tuesday would stand this path down for a week. Rows with no
   // options are exactly the ones reschedule-sms skips (its modern rain-out
   // rows ask for no reply).
-  const OFFER_WINDOW_MS = 7 * 86400000;
-  const offerOptions = (row) => {
-    try {
-      const notes = typeof row.notes === 'string' ? JSON.parse(row.notes) : (row.notes || {});
-      return !!(notes && (notes.option1 || notes.option2));
-    } catch {
-      // Unparseable notes are not an actionable offer to reschedule-sms
-      // either — its own parseOptions degrades to {} on the same input.
-      return false;
-    }
-  };
-  const pendingSmsOffer = async (trx, serviceId) => {
-    const rows = await trx('reschedule_log')
-      .where({ customer_id: settled.customer_id, scheduled_service_id: serviceId })
-      .whereNull('customer_response')
-      .where('created_at', '>', new Date(now.getTime() - OFFER_WINDOW_MS))
-      .select('id', 'notes');
-    return (rows || []).find(offerOptions) || null;
-  };
   const newerMove = (trx) => trx('reschedule_log')
     .whereIn('scheduled_service_id', trx('scheduled_services').where({ customer_id: settled.customer_id }).select('id'))
     .where('created_at', '>', settled.created_at).first('id');
@@ -630,7 +628,7 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
     await stampSkipOnCards(conn, call.id, { reason: 'portal_request_open', visitId: plan.visitId });
     return { outcome: 'skipped', reason: 'portal_request_open', visitId: plan.visitId };
   }
-  if (await pendingSmsOffer(conn, plan.visitId)) {
+  if (await pendingSmsOffer(conn, settled.customer_id, plan.visitId, now)) {
     await stampSkipOnCards(conn, call.id, { reason: 'pending_sms_offer', visitId: plan.visitId });
     return { outcome: 'skipped', reason: 'pending_sms_offer', visitId: plan.visitId };
   }
@@ -651,10 +649,7 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
     const applied = await trx('activity_log').where({ action: ACTIVITY_ACTION })
       .whereRaw("metadata->>'call_log_id' = ?", [String(call.id)]).first('id');
     if (applied) throw Object.assign(new Error('This call was already applied'), { code: 'CALL_RESCHEDULE_ALREADY_APPLIED' });
-    const handled = await trx('triage_items').where({ call_log_id: call.id })
-      .whereIn('reason_code', CARD_REASON_CODES)
-      .where((q) => q.where('status', 'in_progress').orWhere((closed) => closed
-        .where('resolution_source', 'human').whereIn('status', ['resolved', 'dismissed']))).first('id');
+    const handled = await humanHandledRescheduleCard(trx, call.id);
     const moved = await newerMove(trx);
     // Under the visit's OWN row lock: routes/schedule.js holds that lock while
     // it inserts the request, so locking here makes a portal submission either
@@ -666,7 +661,7 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
     // Under the visit's row lock, taken just above. The rebooker writes its
     // own reschedule_log row AFTER this guard, and that row carries no
     // options, so this never stands down on the move it is guarding.
-    const smsOffer = await pendingSmsOffer(trx, visit.id);
+    const smsOffer = await pendingSmsOffer(trx, settled.customer_id, visit.id, now);
     if (handled || moved || portalRequest || smsOffer) throw Object.assign(new Error('The request was handled after this call'), { code: 'CALL_RESCHEDULE_HANDLED' });
     const latestCustomer = await trx('customers').where({ id: settled.customer_id }).forShare().first();
     const latestProperties = await trx('customer_properties').where({ customer_id: settled.customer_id, active: true }).forShare().select('*');

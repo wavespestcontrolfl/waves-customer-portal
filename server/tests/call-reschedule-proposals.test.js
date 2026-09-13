@@ -6,7 +6,7 @@ jest.mock('../services/call-booking-catalog', () => ({
 jest.mock('../services/scheduling/window-rules', () => ({
   ...jest.requireActual('../services/scheduling/window-rules'), probeSlotOverlap: jest.fn().mockResolvedValue([]),
 }));
-const { proposalEvidence, proposalAddress, customerWindow, previewProposal, applyProposal } = require('../services/call-reschedule-proposals');
+const { proposalEvidence, proposalAddress, customerWindow, stageProposal, previewProposal, applyProposal } = require('../services/call-reschedule-proposals');
 const { planRescheduleFromCall } = require('../services/call-reschedule-apply');
 const { classifyTriageItem } = require('../services/triage-auto-resolve');
 const { probeSlotOverlap } = require('../services/scheduling/window-rules');
@@ -34,6 +34,67 @@ describe('reviewed proposed times', () => {
   test('an old proposal stays open instead of aging out as an advisory', () => {
     expect(classifyTriageItem({ status: 'open', severity: 'advisory', reason_code: 'reschedule_or_cancel', created_at: '2001-01-01',
       payload: { reschedule_proposal: { proposed_start_at: v2.scheduling.proposed_start_at } } }, { evidence: new Map() })).toBeNull();
+  });
+});
+
+function stageConn(call, card) {
+  const updates = [];
+  const conn = (table) => {
+    const state = { where: {}, nullColumn: null };
+    const query = {
+      where(arg) { if (arg && typeof arg === 'object') Object.assign(state.where, arg); return query; },
+      whereNull(column) { state.nullColumn = column; return query; },
+      whereRaw() { return query; },
+      forUpdate() { return query; },
+      first() {
+        if (table === 'call_log') return Promise.resolve(call);
+        if (table === 'triage_items') {
+          const matches = card && Object.entries(state.where).every(([key, value]) => card[key] === value)
+            && (!state.nullColumn || card[state.nullColumn] == null)
+            && card.payload?.reschedule_proposal;
+          return Promise.resolve(matches ? card : undefined);
+        }
+        return Promise.resolve(undefined);
+      },
+      update(patch) {
+        updates.push({ table, patch });
+        if (table === 'triage_items') Object.assign(card, patch);
+        return Promise.resolve(1);
+      },
+    };
+    return query;
+  };
+  conn.raw = jest.fn().mockResolvedValue({ rows: [] });
+  conn.transaction = (fn) => fn(conn);
+  conn.updates = updates;
+  return conn;
+}
+
+describe('proposal staging after call reprocessing', () => {
+  test('a nonqualifying reprocess retires an unclaimed proposal but preserves a claimed one', async () => {
+    const priorGate = process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
+    process.env.GATE_RESCHEDULE_PROPOSAL_CARD = 'true';
+    const reprocessed = { id: 'call', customer_id: 'customer', processing_token: null, processing_generation: 2,
+      v2_extraction_status: 'valid', ai_extraction_enriched: { meta: { is_spam: true } } };
+    const payload = { reschedule_proposal: { call_generation: 1 }, other_evidence: { keep: true } };
+    try {
+      const openCard = { id: 'open-card', call_log_id: 'call', reason_code: 'reschedule_or_cancel', status: 'open',
+        assigned_to: null, payload: { ...payload } };
+      const openConn = stageConn(reprocessed, openCard);
+      expect(await stageProposal(openConn, { callId: 'call', procGeneration: 2 })).toEqual({ staged: false });
+      expect(openCard.payload).toEqual({ other_evidence: { keep: true } });
+      expect(openConn.updates).toHaveLength(1);
+
+      const claimedCard = { id: 'claimed-card', call_log_id: 'call', reason_code: 'reschedule_or_cancel', status: 'in_progress',
+        assigned_to: 'staff', payload: { ...payload } };
+      const claimedConn = stageConn(reprocessed, claimedCard);
+      expect(await stageProposal(claimedConn, { callId: 'call', procGeneration: 2 })).toEqual({ staged: false });
+      expect(claimedCard.payload).toEqual(payload);
+      expect(claimedConn.updates).toHaveLength(0);
+    } finally {
+      if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
+      else process.env.GATE_RESCHEDULE_PROPOSAL_CARD = priorGate;
+    }
   });
 });
 
