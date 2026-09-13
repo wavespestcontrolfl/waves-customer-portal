@@ -1380,7 +1380,7 @@ function safetyOnceDryQualifies(text, claim, questionText = null) {
     const [, timingClaimEnd] = clauseBounds(text, match.index);
     const timingClaim = text.slice(match.index, timingClaimEnd);
     const claim = claimContext(text, match.index, match.index + match[0].length);
-    return text[timingClaimEnd] !== '?'
+    return text[timingClaimEnd] !== '?' && !QUESTION_LEAD_RE.test(claim)
       && (TECHNICIAN_EXPLICIT_DRY_TIMING_RE.test(match[0]) || !TECHNICIAN_VISIT_TIMING_RE.test(timingClaim))
       && !PET_TRAILING_CONDITION_RE.test(text.slice(match.index + match[0].length))
       && !TECHNICIAN_DRY_TIMING_ALTERNATIVE_RE.test(text.slice(match.index + match[0].length))
