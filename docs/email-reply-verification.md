@@ -17,9 +17,9 @@ an abbreviation ends a sentence to avoid ambiguous fact grouping.
 Independent fact categories also use separate sentences: the verifier does
 not infer subject relationships across coordinated billing/service clauses. Billing dues, surcharge and collected
 total keep their separate meanings; ambiguous billing-field wording requires
-review. Signed or written-out currency amounts and ordinal dates require review;
+review. Signed, malformed-grouping or written-out currency amounts and ordinal dates require review;
 unsigned numeric dollar figures and calendar dates without ordinal suffixes
-remain the supported forms. Withheld dues quotes do not establish a surcharge
+remain the supported forms. Named clocks (noon/midnight) require review. Withheld dues quotes do not establish a surcharge
 or collected total. Invoice statuses and payment-due dates bind to the invoice. Invoice dates require
 due-date wording in a sentence without lifecycle-event claims; the assembler
 does not expose invoice event timestamps. Estimate dates require sent/emailed wording without other lifecycle claims.

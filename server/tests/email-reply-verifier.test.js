@@ -254,6 +254,23 @@ describe('email reply verifier', () => {
     expect(verdict('Hi Casey, your outstanding balance is $75.').ok).toBe(true);
   });
 
+  test('requires valid currency comma grouping', () => {
+    for (const amount of ['$1,20', '$12,0', '1,20 dollars', '12,0 bucks']) {
+      expect(verdict(`Hi Casey, your invoice amount is ${amount}.`).violations)
+        .toContain(`amount_unsupported:${amount}`);
+    }
+    const facts = contextWith().facts.map((fact) => (fact.key === 'outstanding_balance'
+      ? { ...fact, value: 1234.56 }
+      : fact));
+    expect(verdict('Hi Casey, your outstanding balance is $1,234.56.', { context: { facts } }).ok).toBe(true);
+    expect(verdict('Hi Casey, your outstanding balance is 1,234.56 dollars.', { context: { facts } }).ok).toBe(true);
+    expect(verdict('Hi Casey, your invoice amount is $120, payable by check.').ok).toBe(true);
+  });
+
+  test.each(['noon', 'midnight'])('named clocks require review: %s', (clock) => {
+    expect(verdict(`Hi Casey, your appointment is at ${clock}.`).violations).toContain('clock_format_unsupported');
+  });
+
   test('rejects signed currency instead of grounding its unsigned substring', () => {
     for (const amount of [
       '-$75', '- $75', '−$75', '− $75', '$-75', '$ − 75', '+$75', '+ $75',

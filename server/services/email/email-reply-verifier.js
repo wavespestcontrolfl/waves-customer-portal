@@ -25,7 +25,9 @@ function presentFacts(context) {
 }
 
 function cents(value) {
-  const number = Number(String(value).replace(/[^\d.-]/g, ''));
+  const amount = String(value).replace(/^\$\s*|\s+(?:dollars?|bucks?)$/gi, '').replace(/[,.]$/, '');
+  if (!/^(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d{1,2})?$/.test(amount)) return null;
+  const number = Number(amount.replace(/,/g, ''));
   return Number.isFinite(number) ? Math.round(number * 100) : null;
 }
 
@@ -399,7 +401,7 @@ function structuralViolations(draft, context, wordBudget) {
   if (/<\/?[a-z][^>]*>/i.test(draft)) violations.push('html_not_allowed');
   if (/^\s*(?:[-*•]|\d+[.)])\s+/m.test(draft)) violations.push('bullets_not_allowed');
   const withoutClockTimes = draft.replace(TIME_RANGE_RE, '').replace(TIME_RE, '');
-  if (/\b\d{1,2}:\d{2}\b|\b(?:at|from|between)\s+\d{1,2}\b(?![\d:/])/i.test(withoutClockTimes)) violations.push('clock_format_unsupported');
+  if (/\b(?:noon|midnight)\b|\b\d{1,2}:\d{2}\b|\b(?:at|from|between)\s+\d{1,2}\b(?![\d:/])/i.test(withoutClockTimes)) violations.push('clock_format_unsupported');
   if (BOILERPLATE_RE.test(draft)) violations.push('boilerplate_not_allowed');
   if (!exemplarLooksClean('', draft)) violations.push('untrusted_instruction');
   if (forgedSignature(draft)) violations.push('signature_unsupported');
