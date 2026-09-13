@@ -1355,7 +1355,7 @@ function callbackConsentCondition(targets, valueTargets, matchedContact) {
   const source = `(?:(?:(?:only\\s+)?(?:if|after)|when|once|provided(?:\\s+that)?)\\s+${conditionTarget}\\s+${consentAction}|unless\\s+${conditionTarget}\\s+${declineAction})`;
   return {
     condition: new RegExp(`\\b${source}\\b`, 'i'),
-    leading: new RegExp(`^\\s*${source}\\s*,?\\s*$`, 'i'),
+    leading: new RegExp(`^\\s*${source}\\s*,?\\s*(?:then\\s+)?$`, 'i'),
   };
 }
 
