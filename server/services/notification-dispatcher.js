@@ -187,24 +187,10 @@ const NotificationDispatcher = {
       return { sent: false, channel: null, results: { reason: 'type_disabled' } };
     }
 
-    // Check quiet hours (shared helper — also enforced by the deferred-
-    // replay recheck so a queued notification honors the same window)
-    if (inCustomerQuietHours(prefs)) {
-      logger.info(`[notify] Quiet hours active for customer ${customerId} (${prefs.quiet_hours_start}-${prefs.quiet_hours_end})`);
-      return { sent: false, channel: null, results: { reason: 'quiet_hours' } };
-    }
-
-    // Determine channel
+    // Resolve the existing channel/consent rules before a guarded quiet-hours
+    // return. Only a call that would otherwise have an SMS leg may hand its
+    // recovery owner a durable, retryable obligation.
     const channel = prefs?.[typeConfig.channel] || 'sms';
-    const results = {};
-    let sent = false;
-    let smsDelivery = null;
-    // The SMS leg's canonical outcome ('accepted' | 'uncertain' | 'not_sent'),
-    // kept alongside `sent` for callers holding a durable send-once claim: only
-    // a definite 'not_sent' is safe to retry. An accepted-but-unaudited send
-    // throws with the outcome attached, and a lost outcome must read uncertain.
-    let smsOutcome = null;
-
     // Marketing-purpose SMS is opt-IN (TCPA), not merely not-opted-out:
     // the consentBasis below reads stored prefs as captured consent, so the
     // SMS leg requires an EXPLICIT true on the notification type's OWN
@@ -218,13 +204,54 @@ const NotificationDispatcher = {
     const marketingConsentColumn = purpose === 'marketing_seasonal' ? 'seasonal_tips' : 'marketing_offers';
     const marketingSmsOptIn = !marketingPurpose
       || (prefs && prefs[marketingConsentColumn] === true);
+    const smsEligible = Boolean(
+      ['sms', 'both', 'push'].includes(channel) && smsMessage && customer.phone,
+    );
+
+    // Check quiet hours (shared helper — also enforced by the deferred-
+    // replay recheck so a queued notification honors the same window)
+    if (inCustomerQuietHours(prefs)) {
+      logger.info(`[notify] Quiet hours active for customer ${customerId} (${prefs.quiet_hours_start}-${prefs.quiet_hours_end})`);
+      if (typeof preSendCheck === 'function'
+        && smsEligible && marketingSmsOptIn
+        && !customerQuietHoursCoverSendWindow(prefs)) {
+        const nextAllowedAt = nextCustomerQuietHoursEndET(prefs).toISOString();
+        const smsResult = {
+          sent: false,
+          blocked: true,
+          deliveryOutcome: 'not_sent',
+          code: 'QUIET_HOURS_HOLD',
+          reason: 'customer_quiet_hours',
+          retryable: true,
+          deferred: true,
+          nextAllowedAt,
+        };
+        return {
+          sent: false,
+          channel,
+          results: { sms: 'blocked: QUIET_HOURS_HOLD' },
+          deliveryOutcome: 'not_sent',
+          smsResult,
+        };
+      }
+      return { sent: false, channel: null, results: { reason: 'quiet_hours' } };
+    }
+
+    const results = {};
+    let sent = false;
+    let smsDelivery = null;
+    // The SMS leg's canonical outcome ('accepted' | 'uncertain' | 'not_sent'),
+    // kept alongside `sent` for callers holding a durable send-once claim: only
+    // a definite 'not_sent' is safe to retry. An accepted-but-unaudited send
+    // throws with the outcome attached, and a lost outcome must read uncertain.
+    let smsOutcome = null;
 
     // Send SMS
-    if (['sms', 'both', 'push'].includes(channel) && smsMessage && customer.phone && !marketingSmsOptIn) {
+    if (smsEligible && !marketingSmsOptIn) {
       logger.info(`[notify] ${notificationType} SMS skipped — no stored marketing opt-in for customer ${customerId}`);
       results.sms = 'no_marketing_consent';
     }
-    if (['sms', 'both', 'push'].includes(channel) && smsMessage && customer.phone && marketingSmsOptIn) {
+    if (smsEligible && marketingSmsOptIn) {
       try {
         const smsResult = await sendCustomerMessage({
           to: customer.phone,

@@ -5,6 +5,8 @@ const ownerMigration = require('../models/migrations/20260909000050_lawn_assessm
 
 let mockKnex;
 const mockNotify = jest.fn();
+const mockSendCustomerMessage = jest.fn();
+const mockGateEnvValue = jest.fn(() => false);
 const mockRenderRequiredSmsTemplate = jest.fn(async (_key, vars) => `Score ${vars.overall_score}${vars.tip_line}`);
 
 jest.mock('../models/db', () => {
@@ -16,8 +18,11 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ gateEnvValue: jest.fn(() => false) }));
+jest.mock('../config/feature-gates', () => ({ gateEnvValue: (...args) => mockGateEnvValue(...args) }));
 jest.mock('../config/twilio-numbers', () => ({ getOutboundNumber: jest.fn(() => '+19415550199') }));
+jest.mock('../services/messaging/send-customer-message', () => ({
+  sendCustomerMessage: (...args) => mockSendCustomerMessage(...args),
+}));
 jest.mock('../services/sms-template-renderer', () => ({
   renderRequiredSmsTemplate: (...args) => mockRenderRequiredSmsTemplate(...args),
 }));
@@ -27,6 +32,7 @@ jest.mock('../services/notification-dispatcher', () => ({
 }));
 
 const LawnIntel = require('../services/lawn-intelligence');
+const RealNotificationDispatcher = jest.requireActual('../services/notification-dispatcher');
 const { replayDeferredNotification } = require('../services/lawn-visit-delivery');
 const { recheckDeferredReplay } = require('../services/messaging/deferred-replay-registry');
 
@@ -58,6 +64,9 @@ postgres('deferred standalone lawn assessment notification (real PostgreSQL)', (
 
   beforeEach(async () => {
     jest.clearAllMocks();
+    mockNotify.mockReset();
+    mockSendCustomerMessage.mockReset();
+    mockGateEnvValue.mockImplementation(() => false);
     for (const table of ['sms_log', 'notification_prefs', 'tech_calibration', 'lawn_assessment_runs', 'lawn_assessments', 'technicians', 'customers']) {
       await fixture.knex(table).del();
     }
@@ -119,32 +128,54 @@ postgres('deferred standalone lawn assessment notification (real PostgreSQL)', (
     assessment_id: seeded.assessment.id, run_id: seeded.run.id, ...overrides,
   });
 
-  test('a guarded quiet-hours hold creates one identity-only obligation and atomically releases its send claim', async () => {
+  test('the real dispatcher turns customer quiet hours into one identity-only obligation that replays with recovery gated off', async () => {
     const seeded = await seed();
-    const sms = holdSms();
-    mockNotify.mockImplementation(async (_customerId, _type, options) => {
-      await options.preSendCheck?.();
-      return dispatcherResult(sms);
+    await fixture.knex('notification_prefs').insert({
+      customer_id: seeded.customerId,
+      service_completed: true,
+      service_complete_channel: 'sms',
+      quiet_hours_start: '22:00:00',
+      quiet_hours_end: '09:00:00',
     });
-    const results = await Promise.all([
-      LawnIntel.sendAssessmentNotification(seeded.assessment.id, { beforeSend: jest.fn() }),
-      LawnIntel.sendAssessmentNotification(seeded.assessment.id, { beforeSend: jest.fn() }),
-    ]);
-    expect(results.filter((result) => result?.notificationQueued)).toHaveLength(1);
-    expect(mockNotify).toHaveBeenCalledTimes(1);
-    const rows = await fixture.knex('sms_log').where({ customer_id: seeded.customerId });
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ status: 'scheduled', message_body: '', message_type: 'service_complete' });
-    expect(rows[0].metadata).toMatchObject({
-      entry_point: 'lawn_assessment_notification_deferred', requires_registered_dispatch: true,
-      assessment_id: seeded.assessment.id, run_id: seeded.run.id, customer_id: seeded.customerId,
-    });
-    expect(new Date(rows[0].scheduled_for).toISOString()).toBe(sms.nextAllowedAt);
-    expect(await fixture.knex('lawn_assessments').where({ id: seeded.assessment.id }).first())
-      .toMatchObject({ notification_sent: false, notification_sent_at: null });
+    mockNotify.mockImplementation((...args) => RealNotificationDispatcher.notify(...args));
+    jest.useFakeTimers().setSystemTime(new Date('2026-09-12T12:00:00Z')); // 08:00 ET
+    try {
+      const results = await Promise.all([
+        LawnIntel.sendAssessmentNotification(seeded.assessment.id, { beforeSend: jest.fn() }),
+        LawnIntel.sendAssessmentNotification(seeded.assessment.id, { beforeSend: jest.fn() }),
+      ]);
+      expect(results.filter((result) => result?.notificationQueued)).toHaveLength(1);
+      expect(mockNotify).toHaveBeenCalledTimes(1);
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      const rows = await fixture.knex('sms_log').where({ customer_id: seeded.customerId });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ status: 'scheduled', message_body: '', message_type: 'service_complete' });
+      expect(rows[0].metadata).toMatchObject({
+        entry_point: 'lawn_assessment_notification_deferred', requires_registered_dispatch: true,
+        assessment_id: seeded.assessment.id, run_id: seeded.run.id, customer_id: seeded.customerId,
+      });
+      expect(new Date(rows[0].scheduled_for).toISOString()).toBe('2026-09-12T13:00:00.000Z');
+      expect(await fixture.knex('lawn_assessments').where({ id: seeded.assessment.id }).first())
+        .toMatchObject({ notification_sent: false, notification_sent_at: null });
 
-    await LawnIntel.sendAssessmentNotification(seeded.assessment.id, { beforeSend: jest.fn() });
-    expect(await fixture.knex('sms_log').where({ customer_id: seeded.customerId })).toHaveLength(1);
+      await LawnIntel.sendAssessmentNotification(seeded.assessment.id, { beforeSend: jest.fn() });
+      expect(await fixture.knex('sms_log').where({ customer_id: seeded.customerId })).toHaveLength(1);
+
+      // The scheduled-SMS registry owns this replay independently of the lawn
+      // recovery sweep's dark gate. A second hold remains retryable on the same
+      // row so the scheduler can move it again without frozen copy.
+      jest.setSystemTime(new Date('2026-09-12T13:00:00Z')); // 09:00 ET
+      const replayHold = holdSms('2026-09-12T14:00:00.000Z');
+      mockSendCustomerMessage.mockResolvedValue(replayHold);
+      mockGateEnvValue.mockClear();
+      const replayed = await replayDeferredNotification(replayMeta(seeded, rows[0]), replayDeps());
+      expect(replayed).toMatchObject(replayHold);
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(mockGateEnvValue).not.toHaveBeenCalledWith('GATE_LAWN_DELIVERY_RECOVERY');
+      expect(await fixture.knex('sms_log').where({ customer_id: seeded.customerId })).toHaveLength(1);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('registry replay rechecks service-complete preferences and waits until customer quiet hours end', async () => {

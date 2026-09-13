@@ -3,6 +3,7 @@ jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMe
 jest.mock('../config/twilio-numbers', () => ({ getOutboundNumber: jest.fn(() => '+19415550199') }));
 
 const mockInsert = jest.fn(async () => []);
+let mockPrefs = { service_complete_channel: 'sms' };
 jest.mock('../models/db', () => jest.fn((table) => {
   if (table === 'customers') return {
     where: jest.fn().mockReturnThis(),
@@ -10,7 +11,7 @@ jest.mock('../models/db', () => jest.fn((table) => {
   };
   if (table === 'notification_prefs') return {
     where: jest.fn().mockReturnThis(),
-    first: jest.fn(async () => ({ service_complete_channel: 'sms' })),
+    first: jest.fn(async () => mockPrefs),
   };
   if (table === 'sms_log') return { insert: mockInsert };
   throw new Error(`Unexpected table: ${table}`);
@@ -27,6 +28,7 @@ const MESSAGE = {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockPrefs = { service_complete_channel: 'sms' };
   sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
 });
 
@@ -56,6 +58,110 @@ test('a guarded send-window hold stays unqueued so its recovery owner can prepar
   });
   expect(result).toMatchObject({ sent: false, results: { sms: 'blocked: QUIET_HOURS_HOLD' } });
   expect(mockInsert).not.toHaveBeenCalled();
+});
+
+test('a guarded customer quiet-hours hold exposes a proven-unsent retry at the actual quiet end', async () => {
+  mockPrefs = {
+    service_completed: true,
+    service_complete_channel: 'sms',
+    quiet_hours_start: '22:00:00',
+    quiet_hours_end: '09:00:00',
+  };
+  jest.useFakeTimers().setSystemTime(new Date('2026-09-12T12:00:00Z')); // 08:00 ET
+  try {
+    const result = await NotificationDispatcher.notify('customer-1', 'service_complete', {
+      ...MESSAGE,
+      preSendCheck: async () => ({ ok: true }),
+    });
+    expect(result).toEqual({
+      sent: false,
+      channel: 'sms',
+      results: { sms: 'blocked: QUIET_HOURS_HOLD' },
+      deliveryOutcome: 'not_sent',
+      smsResult: {
+        sent: false,
+        blocked: true,
+        deliveryOutcome: 'not_sent',
+        code: 'QUIET_HOURS_HOLD',
+        reason: 'customer_quiet_hours',
+        retryable: true,
+        deferred: true,
+        nextAllowedAt: '2026-09-12T13:00:00.000Z',
+      },
+    });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockInsert).not.toHaveBeenCalled();
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test.each([
+  ['unguarded SMS', 'sms', undefined],
+  ['guarded email-only', 'email', async () => ({ ok: true })],
+])('%s keeps the existing quiet-hours suppression without an SMS obligation', async (_label, channel, preSendCheck) => {
+  mockPrefs = {
+    service_complete_channel: channel,
+    quiet_hours_start: '22:00:00',
+    quiet_hours_end: '09:00:00',
+  };
+  jest.useFakeTimers().setSystemTime(new Date('2026-09-12T12:00:00Z')); // 08:00 ET
+  try {
+    await expect(NotificationDispatcher.notify('customer-1', 'service_complete', {
+      ...MESSAGE,
+      ...(preSendCheck ? { preSendCheck } : {}),
+    })).resolves.toEqual({ sent: false, channel: null, results: { reason: 'quiet_hours' } });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockInsert).not.toHaveBeenCalled();
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test('a guarded quiet window covering the global send window is suppressed without an impossible retry', async () => {
+  mockPrefs = {
+    service_complete_channel: 'sms',
+    quiet_hours_start: '08:00:00',
+    quiet_hours_end: '21:00:00',
+  };
+  jest.useFakeTimers().setSystemTime(new Date('2026-09-12T16:00:00Z')); // 12:00 ET
+  try {
+    await expect(NotificationDispatcher.notify('customer-1', 'service_complete', {
+      ...MESSAGE,
+      preSendCheck: async () => ({ ok: true }),
+    })).resolves.toEqual({ sent: false, channel: null, results: { reason: 'quiet_hours' } });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockInsert).not.toHaveBeenCalled();
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test.each([
+  ['disabled type', 'service_complete', {
+    service_completed: false,
+    service_complete_channel: 'sms',
+  }, { reason: 'type_disabled' }],
+  ['missing marketing opt-in', 'marketing', {
+    marketing_channel: 'sms',
+  }, { reason: 'quiet_hours' }],
+])('guarded quiet hours preserve %s suppression without an SMS obligation', async (_label, type, prefs, results) => {
+  mockPrefs = {
+    ...prefs,
+    quiet_hours_start: '22:00:00',
+    quiet_hours_end: '09:00:00',
+  };
+  jest.useFakeTimers().setSystemTime(new Date('2026-09-12T12:00:00Z')); // 08:00 ET
+  try {
+    await expect(NotificationDispatcher.notify('customer-1', type, {
+      ...MESSAGE,
+      preSendCheck: async () => ({ ok: true }),
+    })).resolves.toEqual({ sent: false, channel: null, results });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockInsert).not.toHaveBeenCalled();
+  } finally {
+    jest.useRealTimers();
+  }
 });
 
 test('an unguarded send-window hold keeps the existing frozen-body queue behavior', async () => {
