@@ -470,7 +470,7 @@ function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)
 
 // Payment outcomes use the same clause boundary as callback claims. A
 // refusal before "but" or "so" cannot excuse a subsequent success claim.
-const PAYMENT_OUTCOME_RE = /\b(?:(?:go|went|gone) through|(?:payment|card|that|it) (?:is|was|has been|got|went) (?:processed|charged|accepted|approved|complete|completed|successful)|(?:payment|card|that|it) succeeded|you['’]re all paid)\b/gi;
+const PAYMENT_OUTCOME_RE = /\b(?:(?:payment|card|charge|transaction|that|it) (?:(?:has|had) )?(?:go|goes|went|gone) through|(?:payment|card|that|it) (?:is|was|has been|got|went) (?:processed|charged|accepted|approved|complete|completed|successful)|(?:payment|card|that|it) succeeded|you['’]re all paid)\b/gi;
 /** value: true */
 function no_payment_outcome(value, record, { spoken }) {
   for (const text of spoken) {
@@ -1189,6 +1189,11 @@ const CARD_EXPIRATION_VALUE_RE = new RegExp(
 // cue and the digits fall in different SENTENCES, several clause
 // boundaries apart, not because the window was too short to reach them.
 const CARD_CUE_RE = new RegExp(`\\b(?:${CARD_CUE}|${CARD_DIGIT_LABEL})`, 'i');
+// A positional cue owns only the digit run immediately after it. That run is
+// card data even when it looks like a year ("card ends in 2029"), while an
+// appointment year or dollar amount elsewhere in the clause keeps its own
+// non-card explanation.
+const CARD_LABELED_VALUE_RE = new RegExp(`\\b(?:${CARD_DIGIT_LABEL})\\s+(\\d+(?:[\\s-]\\d+)*)\\b`, 'gi');
 const DIGIT_RUN_RE = /\d+(?:[\s-]\d+)*/g;
 // Numeric digits spoken one at a time — "4-1-1", "4 1 1", "4, 1, 1" (how
 // ASR and TTS both render "four one one") — are the same run the spoken
@@ -1205,13 +1210,18 @@ function cardFragmentIn(text) {
     const start = match.index + match[0].lastIndexOf(match[1]);
     return [start, start + match[1].length];
   });
+  const labeledValues = [...digits.matchAll(CARD_LABELED_VALUE_RE)].map((match) => {
+    const start = match.index + match[0].lastIndexOf(match[1]);
+    return [start, start + match[1].length];
+  });
   DIGIT_RUN_RE.lastIndex = 0;
   let m = DIGIT_RUN_RE.exec(digits);
   while (m) {
     const clause = clauseOf(digits, m.index);
     const explained = nonFragments.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
     const explicitExpiration = expirationValues.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
-    if (explicitExpiration || (CARD_CUE_RE.test(clause) && !explained)) return m[0];
+    const labeledValue = labeledValues.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
+    if (explicitExpiration || labeledValue || (CARD_CUE_RE.test(clause) && !explained)) return m[0];
     m = DIGIT_RUN_RE.exec(digits);
   }
   return null;

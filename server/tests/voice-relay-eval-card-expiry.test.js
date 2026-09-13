@@ -25,6 +25,8 @@ describe('no_card_digit_readback card expiration values', () => {
   test.each([
     'Your appointment is September 12, 2029, and your card expires October 2030.',
     'Your card expires September 2029, while the office phone number is 941-555-0182 and the balance is $129.00.',
+    'Your card ends in 2029, while your appointment is September 12, 2030 and the balance is $129.00.',
+    'Your card ends in two zero two nine, while your appointment is September 12, 2030 and the balance is $129.00.',
   ])('blocks the expiration while allowing nearby non-card values: %s', (text) => {
     expect(statusFor(text)).toBe('fail');
   });
