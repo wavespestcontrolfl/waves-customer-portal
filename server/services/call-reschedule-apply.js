@@ -66,6 +66,7 @@
 
 const { etParts, etDateString, addETDays, etCalendarDayOf, deriveWindowEnd, windowDurationMinutes } = require('../utils/datetime-et');
 const { lockTriageCall } = require('../utils/triage-locks');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
 const { hasAgentCommittedEvidence, confirmedStartOnTheHour, etWallClockOfConfirmedStart, statesNewAddress } = require('./call-triage-flags');
 const { addressKey } = require('./customer-properties');
@@ -339,6 +340,127 @@ async function loadCandidates(conn, customerId, now = new Date(), { includePast 
       'services.name as catalog_service_name');
 }
 
+// Human review chooses the source visit and requested time, then shares the
+// automatic path's planner and SmartRebooker choke point. The proposal guard,
+// audit, and move commit in one transaction, including for a series move.
+async function applyReviewedCallReschedule({ conn, call, v2, customer, candidates, visitId, actorId,
+  operationKey, guard, proposalCardId = null, occurrenceIds = [], occurrences, now = new Date(), rebooker = null } = {}) {
+  if (!actorId || !operationKey || typeof guard !== 'function') {
+    throw new Error('Reviewed reschedule requires an authenticated, uniquely identified proposal guard');
+  }
+  const plan = planRescheduleFromCall({ call, v2, customer, candidates, now, humanOverride: { visitId } });
+  if (plan.action === 'skip') return { outcome: 'skipped', reason: plan.reason };
+  const visit = candidates.find((row) => String(row.id) === String(plan.visitId));
+  const seriesIds = plan.dateMove ? occurrenceIds : [];
+  const affectedVisitIds = [...new Set([visit.id, ...seriesIds].map(String))].sort();
+  const beforeMove = async (trx) => {
+    // The call-booking creator takes this canonical fence before reading the
+    // primary and creating a follow-up. Take it before every identity row lock.
+    await lockCustomerComms(trx, customer.id);
+    await trx('customers').where({ id: customer.id }).forShare().first('id');
+    await trx('customer_properties').where({ customer_id: customer.id, active: true }).forShare().select('id');
+    await lockTriageCall(trx, call.id);
+    await trx('call_log').where({ id: call.id }).forUpdate().first('id');
+  };
+  const writeReview = async ({ trx }) => {
+    const snapshotColumns = ['customer_id', 'property_id', 'service_id', 'service_type', 'status', 'visit_id',
+      'is_recurring', 'source_action', 'customer_confirmed', 'self_booking_id', 'window_start', 'window_end',
+      'estimated_duration_minutes', 'service_address_line1', 'service_address_line2', 'service_address_city',
+      'service_address_state', 'service_address_zip'];
+    const lockedServices = await trx('scheduled_services').whereIn('id', affectedVisitIds)
+      .orderBy('id').forUpdate().select();
+    const lockedService = lockedServices.find((row) => String(row.id) === String(visit.id));
+    if (lockedServices.length !== affectedVisitIds.length || !lockedService
+      || dateOnly(lockedService.scheduled_date) !== dateOnly(visit.scheduled_date)
+      || snapshotColumns.some((key) => (lockedService[key] ?? null) !== (visit[key] ?? null))) {
+      throw Object.assign(new Error('The visit changed. Refresh the proposal.'), { status: 409 });
+    }
+    for (const affectedVisitId of affectedVisitIds) {
+      if (await openPortalRequest(trx, customer.id, affectedVisitId)) {
+        throw Object.assign(new Error('A customer portal reschedule request is still open. Use the schedule editor.'), { status: 409 });
+      }
+      if (await pendingSmsOffer(trx, customer.id, affectedVisitId, now)) {
+        throw Object.assign(new Error('A text-message reschedule offer is still open. Use the schedule editor.'), { status: 409 });
+      }
+    }
+    if (await humanHandledRescheduleCard(trx, call.id, { excludeId: proposalCardId })) {
+      throw Object.assign(new Error('Another staff action handled this appointment request. Refresh the proposal.'), { status: 409 });
+    }
+    await guard(trx);
+    await trx('activity_log').insert({
+      customer_id: customer.id,
+      action: ACTIVITY_ACTION,
+      description: 'Requested time applied by staff. No immediate customer message; normal appointment reminders continue.',
+      metadata: { call_log_id: call.id, scheduled_service_id: visit.id, actor_id: actorId,
+        from: plan.from || null, to: { date: plan.newDate, ...plan.newWindow }, human_override: true },
+    });
+  };
+  if (plan.action === 'already_at_requested_time') {
+    await conn.transaction(async (trx) => {
+      await beforeMove(trx);
+      await writeReview({ trx });
+    });
+    return { outcome: 'noop', visitId: visit.id };
+  }
+  const result = await (rebooker || require('./rebooker')).reschedule(
+    visit.id, plan.newDate, plan.newWindow, RESCHEDULE_REASON_CODE, 'admin', {
+      actorId,
+      pendingConfirmation: true,
+      notifyRequested: false,
+      skipCallFollowUpShift: true,
+      sourceSurface: 'call_reschedule',
+      operationKey,
+      adminWindowRules: true,
+      overlapAdvisory: true,
+      memberGuard: async ({ members }) => {
+        if (members.length !== 1 || String(members[0].id) !== String(visit.id)) {
+          throw Object.assign(new Error('The visit group changed. Use the schedule editor.'), { status: 409 });
+        }
+      },
+      beforeMove,
+      ...(plan.dateMove ? { expectOccurrenceIds: occurrenceIds, expectOccurrences: occurrences } : { seriesPolicy: 'single' }),
+      expect: {
+        scheduled_date: dateOnly(visit.scheduled_date), window_start: visit.window_start, window_end: visit.window_end,
+        estimated_duration_minutes: visit.estimated_duration_minutes, customer_id: visit.customer_id,
+        property_id: visit.property_id, service_id: visit.service_id, service_type: visit.service_type,
+        status: visit.status, visit_id: visit.visit_id || null, source_action: visit.source_action,
+        is_recurring: visit.is_recurring,
+      },
+      moveGuard: writeReview,
+    },
+  );
+  if (visit.self_booking_id) {
+    try {
+      await conn('self_booked_appointments').where({ id: visit.self_booking_id }).update({
+        date: plan.newDate, start_time: plan.newWindow.start, end_time: plan.newWindow.end, updated_at: new Date(),
+      });
+    } catch (err) {
+      logger.warn(`[call-reschedule] self-booking snapshot sync failed for ${visit.id}: ${err.message}`);
+    }
+  }
+  if (result?.seriesMoveId) {
+    await require('../routes/admin-dispatch').applySeriesMoveEffects({
+      result, serviceId: visit.id, newDate: plan.newDate, newWindow: plan.newWindow,
+      notify: false, actorId, reasonText: null,
+    });
+  } else {
+    try {
+      await require('./appointment-reminders').handleReschedule(
+        visit.id, `${plan.newDate}T${plan.newWindow.start}`,
+        { sendNotification: false, expectSchedule: { date: plan.newDate, windowStart: plan.newWindow.start } },
+      );
+    } catch (err) {
+      logger.warn(`[call-reschedule] reminder sync failed for ${visit.id}: ${err.message}`);
+    }
+    try {
+      await require('./dispatch-assignment').emitDispatchJobUpdate({ jobId: visit.id, actorId });
+    } catch (err) {
+      logger.warn(`[call-reschedule] board broadcast failed for ${visit.id}: ${err.message}`);
+    }
+  }
+  return { outcome: 'applied', visitId: visit.id, newDate: plan.newDate, newWindow: plan.newWindow, warnings: result?.warnings || [] };
+}
+
 // Resolve the call's open reschedule cards and re-sync review_status —
 // admin-triage transitionCore's rule: open/in_progress cards remaining keep
 // the call 'open', otherwise it takes the applied status.
@@ -594,6 +716,7 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
 }
 
 module.exports = {
+  applyReviewedCallReschedule,
   applyCallReschedule,
   planRescheduleFromCall,
   loadCandidates,

@@ -1671,7 +1671,7 @@ class SmartRebooker {
     // shared with the admin schedule-edit path; best-effort outside the trx.
     const followUpReport = {};
     try {
-      const shifted = await shiftCallFollowUpsForParentMove({
+      const shifted = options.skipCallFollowUpShift ? 0 : await shiftCallFollowUpsForParentMove({
         conn: db,
         parentServiceId: serviceId,
         fromDate: originalDate,
@@ -1987,6 +1987,24 @@ class SmartRebooker {
       // rung-1 site fires it, and the no-projected-dates path falls through to
       // the call below, whichever comes first.
       let beforeMoveRan = false;
+      let reviewedMaintenancePreflightRan = false;
+      const preflightReviewedMaintenance = async () => {
+        if (reviewedMaintenancePreflightRan
+          || (!Array.isArray(options.expectOccurrenceIds) && !Array.isArray(options.expectOccurrences))
+          || typeof options.beforeMove !== 'function') return;
+        const result = await trx.raw(
+          'SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked',
+          ['recurring-series-maintenance', String(parentId)],
+        );
+        if (result.rows[0]?.locked !== true) {
+          throw Object.assign(new Error('This plan is being updated — reload and save again.'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'VISIT_CHANGED_RETRY',
+          });
+        }
+        reviewedMaintenancePreflightRan = true;
+      };
       const runBeforeMove = async () => {
         if (beforeMoveRan) return;
         beforeMoveRan = true;
@@ -2185,10 +2203,14 @@ class SmartRebooker {
           });
           const followUpDays = followUpPlan.map((k) => k.new_day);
           await acquireOccupancyLocks(trx, [...projectedDates, ...followUpDays]);
+          // Reviewed Apply's callback takes customer-comms. Maintenance owns
+          // that lock in the opposite order, so never wait for maintenance
+          // after the callback: try it here while only occupancy is held.
+          await preflightReviewedMaintenance();
           await runBeforeMove();
-          // Visit stop locks for EVERY swept occurrence, right after
-          // rung 1 — the same occupancy-then-stop order the single-row
-          // writers take (codex #3609 r31 P1 + uncapped audit):
+          // Visit stop locks for EVERY swept occurrence, after the reviewed
+          // maintenance/comms preflight — the same occupancy-first order the
+          // single-row writers take (codex #3609 r31 P1 + uncapped audit):
           // createOrJoinVisit serializes on the stop lock, never on the
           // occupancy/maintenance locks, so a grouping racing this sweep
           // either committed (visible in the locked read below) or waits
@@ -2208,9 +2230,9 @@ class SmartRebooker {
               await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit.stop', vgKey]);
             }
           }
-          // Rung 1 → the per-parent recurring-series maintenance lock, the
-          // order update-details already takes (occupancy, then
-          // maintenance, then comms). Byte-identical key to admin-schedule's
+          // Acquire the per-parent recurring-series maintenance lock; reviewed
+          // Apply already owns it from the nonblocking preflight above, so
+          // this is reentrant. Byte-identical key to admin-schedule's
           // acquireRecurringSeriesMaintenanceLock (a service cannot import
           // a route file): it serializes this sweep against the completion
           // auto-extend, the series cancel and the plan-length reconcile,
@@ -2463,6 +2485,7 @@ class SmartRebooker {
           throw Object.assign(new Error('The recurring dates or windows changed. Refresh the proposal.'), { statusCode: 409, code: 'SERIES_CHANGED' });
         }
       }
+      await preflightReviewedMaintenance();
       await runBeforeMove();
       // The call/proposal guard runs on the locked series before its first write.
       if (typeof options.moveGuard === 'function') {
