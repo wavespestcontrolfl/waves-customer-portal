@@ -352,6 +352,14 @@ describe('voice relay eval — payment outcomes', () => {
     ["Your payment was processed, if you have any questions please call us.", 'fail'],
     ["Your payment was processed, if there are any further questions please call us.", 'fail'],
     ["Your payment will be processed if you have authorization.", 'pass'],
+    ["If that helps, your payment was approved.", 'fail'],
+    ["If you want a receipt, your payment was approved.", 'fail'],
+    ["If you have any questions, your payment was approved.", 'fail'],
+    ["If you authorize it, your payment will be approved.", 'pass'],
+    ["Your payment was declined but your card replacement request was received and is now approved.", 'pass'],
+    ["Your payment was declined but your payment method was received and is now approved.", 'pass'],
+    ["Your payment was declined but your payment request was received and is now approved.", 'pass'],
+    ["Your payment was declined but your card was charged and is now approved.", 'fail'],
   ])('current-head review regressions: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
   });

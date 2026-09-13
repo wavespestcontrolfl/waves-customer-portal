@@ -562,7 +562,7 @@ const PAYMENT_INHERITED_OUTCOME_RE = new RegExp(
 );
 const PAYMENT_NON_TARGET_ANTECEDENT = '(?:appointment|estimate|service|visit|invoice|receipt|account|request|office|manager|technician|customer)';
 const PAYMENT_INTERVENING_SUBJECT_RE = new RegExp(
-  `\\b(?:because|while|although|since|as|and|but|yet)\\s+(?:(?:(?:the|your|our|this|that|an?|his|her|their)\\s+)(?!payment\\b|(?:(?:credit|debit|prepaid)\\s+)?card\\b|charge\\b|transaction\\b)[a-z][\\w'-]*(?:\\s+[a-z][\\w'-]*){0,3}|${PAYMENT_NON_TARGET_ANTECEDENT})\\s+(?:is|was|are|were|has|had|will|should|does|did|got|gets?|became|becomes?|seems?|seemed|[a-z]+ed|went|ran|fell)\\b`,
+  `\\b(?:because|while|although|since|as|and|but|yet)\\s+(?:(?:(?:the|your|our|this|that|an?|his|her|their)\\s+)(?!${PAYMENT_TARGET}\\b)[a-z][\\w'-]*(?:\\s+[a-z][\\w'-]*){0,3}|${PAYMENT_NON_TARGET_ANTECEDENT})\\s+(?:is|was|are|were|has|had|will|should|does|did|got|gets?|became|becomes?|seems?|seemed|[a-z]+ed|went|ran|fell)\\b`,
   'i',
 );
 const PAYMENT_TARGET_ES = '(?:(?:su|el|la|este|esta)\\s+)?(?:pago|tarjeta|cargo|transacci[oó]n)';
@@ -602,8 +602,10 @@ function paymentOutcomeIsConditional(text, claimStart, claim, outcome, outcomeSt
   if (matchOffset < 0) return false;
   const prefix = claim.slice(0, matchOffset);
   const clauseIntroduction = text.slice(claimStart, outcomeStart);
-  return /^\s*(?:if|unless|whether(?:\s+or\s+not)?|si|a\s+menos\s+que)\b/i.test(clauseIntroduction)
-    || /^\s*(?:if|unless|whether(?:\s+or\s+not)?|si|a\s+menos\s+que)\b/i.test(claim)
+  return (/^\s*(?:if|unless|whether(?:\s+or\s+not)?|si|a\s+menos\s+que)\b/i.test(clauseIntroduction)
+      && !PAYMENT_CONDITIONAL_ASIDE_RE.test(clauseIntroduction))
+    || (/^\s*(?:if|unless|whether(?:\s+or\s+not)?|si|a\s+menos\s+que)\b/i.test(claim)
+      && !PAYMENT_CONDITIONAL_ASIDE_RE.test(claim))
     || /\b(?:if|unless|whether(?:\s+or\s+not)?|si|a\s+menos\s+que)\s+(?:(?:your|the|that|this|a)\s+)?$/i.test(prefix)
     || (PAYMENT_TRAILING_CONDITION_RE.test(trailingClaim)
       && !PAYMENT_CONDITIONAL_ASIDE_RE.test(trailingClaim));
