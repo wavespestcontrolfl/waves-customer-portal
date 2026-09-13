@@ -1272,6 +1272,9 @@ const REPORT_TRAILING_UNCERTAINTY_RE = new RegExp(
   'i',
 );
 const REPORT_CONCISE_NONCOMPLETION_RE = /^\s*(?:(?:(?:is|are|was|were|has|have|had)(?:\s+(?:been|being))?\s+)?(?:(?:only|just|merely|simply|still)\s+)*(?:(?:the|our|your|their|his|her|my|its)\s+)?(?:(?:recommended|scheduled|planned|intended|proposed|suggested|considered|expected|required|needed|pending)\b|(?:an?\s+)?(?:recommendation|plan|proposal|suggestion|possibility)\b|under\s+consideration\b|(?:for\s+)?(?:tomorrow|tonight|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b)|(?:will|shall|would|should|can|could|may|might|must|is going to|are going to|was going to|were going to)\b)/i;
+// Qualified shorthand must positively state completion or cite the report;
+// unknown qualifiers can describe proposed treatment and are not evidence.
+const REPORT_CONCISE_COMPLETION_RE = /^(?:(?:(?:was|were|is|are|has been|have been|had been)\s+)?(?:(?:already|actually|just)\s+)*completed(?:\s+(?:yesterday|today|earlier|recently|last\s+(?:week|month|year)))?|as\s+(?:noted|documented|recorded|shown)\s+in\s+the\s+report)?\s*$/i;
 const REPORT_ASSERTION_START = `(?:(?:the|a|an)\\s+)?(?:[\\w'\u2019-]+\\s+){1,4}(?:(?:(?:was|were|is|are|has|have|had|got)\\s+(?:\\w+ly\\s+)?)?(?:${REPORT_FINDING_VERB_RE.source}|\\b(?:receiving|getting)\\b))`;
 const REPORT_ASSERTION_BOUNDARY_RE = new RegExp(`(?:,\\s*|\\b(?:with|and)\\s+)(?=${REPORT_ASSERTION_START})`, 'gi');
 const REPORT_UNRELATED_OR_CLAUSE_RE = /^or\s+(?:(?:the|our|your|their)\s+)?(?:technician|tech|crew|team|office|report|i|we|you|he|she|they|it)\s+(?:is|are|was|were|has|have|had|will|would|should|can|could|did|does|do)\b/i;
@@ -1412,7 +1415,7 @@ function reportHasConciseFinding(affirmed, subjectAt, subjectLength, locationAt,
   const qualifier = affirmed.slice(evidenceEnd).replace(/^[\s,:—–-]+/, '');
   return !findingVerb && /^(?:(?:the|a|an|granular)\s*)?$/i.test(affirmed.slice(0, firstAt).trim())
     && /\b(?:around|along|on|to|at|in)\b/i.test(affirmed.slice(firstAt, lastAt))
-    && !REPORT_CONCISE_NONCOMPLETION_RE.test(qualifier);
+    && REPORT_CONCISE_COMPLETION_RE.test(qualifier);
 }
 
 // Reuse the capture evaluator's denial spans for explicit denial predicates
