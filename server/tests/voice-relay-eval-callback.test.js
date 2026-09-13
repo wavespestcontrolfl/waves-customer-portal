@@ -58,6 +58,8 @@ describe('voice relay eval — callback and date checks', () => {
     ["We'll call back. Probably tomorrow.", 'pass', null],
     ['We will follow up. Likely Tuesday.', 'pass', null],
     ['We will follow up on her appointment. Likely Tuesday.', 'fail', 'Tuesday'],
+    ['You can call us if you need anything. Tuesday.', 'fail', 'Tuesday'],
+    ['We can call you if you need anything. Tuesday.', 'pass', null],
   ])('no_visit_time (no time at all): %s', (text, status, phrase) => {
     const check = run('no_visit_time', true, text);
     expect(check.status).toBe(status);

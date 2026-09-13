@@ -298,7 +298,12 @@ const CALLBACK_MODAL = `(?:[\\x27\\u2019]ll|[\\x27\\u2019]re going to|[\\x27\\u2
 // date is the callback's own timing, not an invented visit date, so a
 // standalone date only counts as a visit answer when the sentence right
 // before it is NOT one of these.
-const VISIT_TIME_CALLBACK_RE = new RegExp(`\\b(?:${CALLBACK_VERB}|${CALLBACK_VERB_ING})\\b.*\\byou\\b|\\b${CALLBACK_LIGHT_VERB}\\s+you\\s+an?\\s+${CALLBACK_CONTACT_NOUN}\\b|\\b(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+(?:\\w+\\s+){0,3}?(?:call back|follow up|get back)(?:\\s+(?:soon|later))?\\s*$`, 'i');
+const VISIT_TIME_CALLBACK_RE = new RegExp(
+  `\\b(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+(?:(?:(?!you\\b)\\w+\\s+){0,3}?(?:${CALLBACK_VERB}|${CALLBACK_VERB_ING})\\s+you\\b`
+  + `|(?:(?!you\\b)\\w+\\s+){0,2}?${CALLBACK_LIGHT_VERB}\\s+you\\s+an?\\s+${CALLBACK_CONTACT_NOUN}\\b`
+  + `|(?:\\w+\\s+){0,3}?(?:call back|follow up|get back)(?:\\s+(?:soon|later))?\\s*$)`,
+  'i',
+);
 /**
  * Removes the returned window from a sentence — when it is THAT window: the
  * two hours, and any part of day spoken with either end agreeing with the
