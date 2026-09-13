@@ -330,6 +330,123 @@ async function deferPipeline(assessmentId, ownerToken, knex, { staleAfterMs = PI
   return rows.length === 1;
 }
 
+function notificationJournal(run) {
+  return parseObject(run?.reconciliation)?.notification;
+}
+
+function reconciliationWithoutNotification(run) {
+  const reconciliation = { ...(parseObject(run?.reconciliation) || {}) };
+  delete reconciliation.notification;
+  return reconciliation;
+}
+
+// The run table is optional during a rolling migration. Isolate its locked
+// read in a savepoint so an undefined-table error does not abort the enclosing
+// assessment transaction.
+async function lockedNotificationRun(assessmentId, trx) {
+  try {
+    return await trx.transaction((savepoint) => savepoint('lawn_assessment_runs')
+      .where({ assessment_id: assessmentId }).forUpdate().first());
+  } catch (err) {
+    if (err?.code === '42P01') return undefined;
+    throw err;
+  }
+}
+
+async function writeNotificationReconciliation(run, attemptId, reconciliation, trx) {
+  if (!run) return;
+  const updated = await trx('lawn_assessment_runs').where({ id: run.id })
+    .whereRaw("reconciliation->'notification'->>'attempt_id' = ?", [attemptId])
+    .update({ reconciliation: JSON.stringify(reconciliation), updated_at: trx.raw('clock_timestamp()') });
+  if (updated !== 1) throw Object.assign(new Error('Lawn notification attempt ownership lost'), { code: 'LAWN_NOTIFICATION_ATTEMPT_LOST' });
+}
+
+async function withNotificationAttempt(assessmentId, attemptId, knex, mutate) {
+  return knex.transaction(async (trx) => {
+    const assessment = await trx('lawn_assessments').where({ id: assessmentId }).forUpdate().first();
+    if (!assessment) return false;
+    const run = await lockedNotificationRun(assessmentId, trx);
+    if ((run && (!attemptId || notificationJournal(run)?.attempt_id !== attemptId)) || (!run && attemptId)) return false;
+    return mutate({ assessment, run, trx });
+  });
+}
+
+// The assessment claim and current-attempt UUID commit together under the
+// repository's assessment -> run lock order. Legacy rows without a run retain
+// their assessment-only claim; recovery journals exist only for run-backed work.
+async function claimNotificationAttempt(assessmentId, knex) {
+  return knex.transaction(async (trx) => {
+    const assessment = await trx('lawn_assessments').where({ id: assessmentId }).forUpdate().first();
+    if (!assessment?.confirmed_by_tech || assessment.service_id || assessment.notification_sent) return null;
+    const run = await lockedNotificationRun(assessmentId, trx);
+    const attemptId = run ? randomUUID() : null;
+    if (run) {
+      await trx('lawn_assessment_runs').where({ id: run.id }).update({
+        reconciliation: JSON.stringify({
+          ...(parseObject(run.reconciliation) || {}), notification: { attempt_id: attemptId, outcome: 'pending' },
+        }),
+        updated_at: trx.raw('clock_timestamp()'),
+      });
+    }
+    await trx('lawn_assessments').where({ id: assessmentId })
+      .update({ notification_sent: true, notification_sent_at: null, updated_at: trx.raw('clock_timestamp()') });
+    return { attemptId };
+  });
+}
+
+async function releaseNotificationAttempt(assessmentId, attemptId, knex) {
+  return withNotificationAttempt(assessmentId, attemptId, knex, async ({ assessment, run, trx }) => {
+    if (!assessment.notification_sent || assessment.notification_sent_at) return false;
+    await trx('lawn_assessments').where({ id: assessmentId })
+      .update({ notification_sent: false, notification_sent_at: null, updated_at: trx.raw('clock_timestamp()') });
+    await writeNotificationReconciliation(run, attemptId, reconciliationWithoutNotification(run), trx);
+    return true;
+  });
+}
+
+async function settleNotificationAttempt(assessmentId, attemptId, knex) {
+  return withNotificationAttempt(assessmentId, attemptId, knex, async ({ assessment, run, trx }) => {
+    if (!assessment.notification_sent || assessment.notification_sent_at) return false;
+    await trx('lawn_assessments').where({ id: assessmentId })
+      .update({ notification_sent_at: trx.raw('clock_timestamp()'), updated_at: trx.raw('clock_timestamp()') });
+    await writeNotificationReconciliation(run, attemptId, reconciliationWithoutNotification(run), trx);
+    return true;
+  });
+}
+
+// This transaction is deliberately independent of a failed assessment release.
+// Only the exact current attempt may add explicit provider non-delivery proof.
+async function recordNotificationNotSent(assessmentId, attemptId, knex) {
+  if (!attemptId) return false;
+  return withNotificationAttempt(assessmentId, attemptId, knex, async ({ assessment, run, trx }) => {
+    if (!run || !assessment.notification_sent || assessment.notification_sent_at) return false;
+    const reconciliation = parseObject(run.reconciliation) || {};
+    await writeNotificationReconciliation(run, attemptId, {
+      ...reconciliation,
+      notification: { ...notificationJournal(run), attempt_id: attemptId, outcome: 'not_sent' },
+    }, trx);
+    return true;
+  });
+}
+
+// Recovery treats only the current attempt's explicit not_sent journal as
+// authority. Unknown, accepted, uncertain, queued, and stale attempts remain
+// claimed so an ambiguous provider handoff can never be retried automatically.
+async function recoverNotificationNotSent(assessmentId, knex) {
+  return knex.transaction(async (trx) => {
+    const assessment = await trx('lawn_assessments').where({ id: assessmentId }).forUpdate().first();
+    if (!assessment) return false;
+    const run = await lockedNotificationRun(assessmentId, trx);
+    const journal = notificationJournal(run);
+    if (!run || !journal?.attempt_id || journal.outcome !== 'not_sent'
+      || !assessment.notification_sent || assessment.notification_sent_at) return false;
+    await trx('lawn_assessments').where({ id: assessmentId })
+      .update({ notification_sent: false, notification_sent_at: null, updated_at: trx.raw('clock_timestamp()') });
+    await writeNotificationReconciliation(run, journal.attempt_id, reconciliationWithoutNotification(run), trx);
+    return true;
+  });
+}
+
 function calibrationForRun(assessment, run) {
   const snapshot = parseObject(run?.reconciliation)?.confirmation;
   const technicianId = snapshot?.technician_id || assessment?.technician_id;
@@ -390,8 +507,10 @@ async function completePipeline(assessmentId, ownerToken, knex, { staleAfterMs =
     await trx('lawn_assessments').where({ id: assessmentId }).forUpdate().first('id');
     const owned = await ownedPipelineQuery(assessmentId, ownerToken, trx, staleAfterMs).forUpdate().first('id');
     if (!owned) return { owned: false, gaps: [] };
-    const { gaps } = await deliveryState(assessmentId, trx);
-    if (gaps.length) return { owned: true, gaps };
+    const { gaps, notificationUnsettled } = await deliveryState(assessmentId, trx);
+    if (gaps.length || notificationUnsettled) {
+      return { owned: true, gaps: notificationUnsettled && !gaps.includes('notification') ? [...gaps, 'notification'] : gaps };
+    }
     const rows = await ownedPipelineQuery(assessmentId, ownerToken, trx, staleAfterMs)
       .update({ pipeline_completed_at: trx.raw('clock_timestamp()'), updated_at: trx.raw('clock_timestamp()') }).returning('id');
     return { owned: rows.length === 1, gaps };
@@ -415,5 +534,6 @@ function replayContextForRun(run) {
 module.exports = {
   billedUsage, runRowFor, recordRun, attachRunPhotos, loadRun, priorAssessmentCount, responseForRun,
   reviewRun, confirmRun, replayContextForRun, PIPELINE_STALE_MS, claimPipeline, renewPipeline, ownsPipeline, releasePipeline, deferPipeline,
+  claimNotificationAttempt, releaseNotificationAttempt, settleNotificationAttempt, recordNotificationNotSent, recoverNotificationNotSent,
   calibrationForRun, deliveryState, markPipelineHealthComplete, completePipeline,
 };

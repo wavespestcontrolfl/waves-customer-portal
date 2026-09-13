@@ -2355,13 +2355,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
 
   // Submit
   const submitAppointments = async (separateProgram) => {
-    if (!canSubmitAppointments({
-      selectedCustomer,
-      services,
-      bookingPropertyState,
-      alreadySubmitting: submittingRef.current,
-      addressAskPending,
-    })) return;
     submittingRef.current = true;
     setSaving(true);
     const releaseSubmit = () => {
@@ -2371,65 +2364,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const submitCustomerId = String(selectedCustomer.id);
     const submitIsCurrent = () => modalMountedRef.current
       && selectedCustomerIdRef.current === submitCustomerId;
-    // An auto-priced mosquito line must not be booked until the live server
-    // quote resolved, and a cached quote is re-verified at the moment of
-    // booking (lot data or pricing config may have changed while the modal
-    // sat open) — see mosquitoSubmitGate.
-    const mosquitoHold = await mosquitoSubmitGate({
-      quotePending: services.some((s) => mosquitoQuotePending(s)),
-      needsRevalidation: services.some((s) => isOneTimeMosquitoLine(s) && !lineHasEnteredPrice(s)),
-      mosquitoQuote,
-      customerId: selectedCustomer.id,
-    });
-    // The quote check can await the network; close/customer change invalidates it.
-    if (!submitIsCurrent()) {
-      releaseSubmit();
-      return;
-    }
-    if (mosquitoHold) {
-      if (mosquitoHold.clearQuote) {
-        mosquitoQuoteReqRef.current = null;
-        setMosquitoQuote(null);
-      }
-      if (mosquitoHold.refresh) {
-        setMosquitoQuote({ customerId: selectedCustomer.id, status: 'ready', price: mosquitoHold.price });
-      }
-      setToast(mosquitoHold.message);
-      setTimeout(() => setToast(''), mosquitoHold.holdMs);
-      releaseSubmit();
-      return;
-    }
-    // Keep this as the final await before the first appointment POST.
-    const recheckController = new AbortController();
-    addressSubmitRecheckRef.current?.controller.abort();
-    addressSubmitRecheckRef.current = { customerId: submitCustomerId, controller: recheckController };
-    const freshAddressAsk = await recheckAddressAskAtSubmit({
-      customerId: submitCustomerId,
-      seenNotice: addressAsk,
-      signal: recheckController.signal,
-    });
-    if (addressSubmitRecheckRef.current?.controller === recheckController) {
-      addressSubmitRecheckRef.current = null;
-    }
-    // Never let a stale customer's response update the warning or reach a POST.
-    if (!submitIsCurrent() || freshAddressAsk.status === 'cancelled') {
-      releaseSubmit();
-      return;
-    }
-    // Changed evidence must be shown once; a retry still performs a fresh check.
-    if (freshAddressAsk.changed) {
-      setAddressAsk(freshAddressAsk.notice);
-      setToast('Address review changed — read the latest notice, then submit again.');
-      setAddressAskHoldVersion((version) => version + 1);
-      setTimeout(() => {
-        if (modalMountedRef.current) setToast('');
-      }, 4000);
-      releaseSubmit();
-      return;
-    }
-    const groups = groupServicesForAppointmentSubmit(services);
+    const cancelledSubmit = Symbol('cancelled submit');
+    // Every network boundary shares one cancellation decision and exit path.
+    // Booking responses are recorded before this check so closed drafts can
+    // still refresh their parent with a committed appointment's identity.
+    const assertSubmitCurrent = (stepActive = true) => {
+      if (!stepActive || !submitIsCurrent()) throw cancelledSubmit;
+    };
     const results = [];
-    let firstError = null;
     let bookingPostAttempted = false;
     const reportBackground = () => {
       if (!bookingPostAttempted) return;
@@ -2439,252 +2381,304 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       onCreated?.(appointment, { background: true });
       onChange?.(appointment, { background: true });
     };
-    // Annual-prepay-on-book rides exactly ONE recurring group's POST — if a
-    // one-time group also carried it, whichever request landed first would
-    // accept the estimate (possibly as standard) and strand the prepay.
-    let prepayAttachedThisSubmit = false;
-    // Set when the series the manual prepay choice priced is actually created.
-    let prepaySeriesId = null;
-    // A blank-priced one-time mosquito primary must reach the server as a
-    // null price — see appointmentGroupRequestBody. Named locally so the &&
-    // that decides it lives in its own scope, not submitAppointments's.
-    const isPrimaryBlankAutoMosquito = (s) => isOneTimeMosquitoLine(s) && !lineHasEnteredPrice(s);
-    for (const group of groups) {
-      const key = groupKey(group);
-      // Skip groups already created in a prior attempt of this submit
-      // session — a retry after partial failure shouldn't duplicate them.
-      if (createdGroupKeysRef.current.has(key)) continue;
-      if (!submitIsCurrent()) break;
-      try {
-        const [primary, ...extras] = group.lines;
-        const groupSubtotal = group.lines.reduce((sum, s) => sum + lineEffectiveNetAmount(s), 0);
-        const groupHasPrice = group.lines.some((s) => {
-          const n = parseFloat(s.price);
-          return Number.isFinite(n) && n >= 0 && s.price !== '' && s.price != null;
-        });
-        const groupDuration = group.lines.reduce((sum, s) => sum + (s.duration || s.default_duration_minutes || 30), 0);
-        const addons = extras.map((s) => {
-          const basePrice = lineBaseAmount(s);
-          const p = lineNetAmount(s);
-          // One-time mosquito add-on lines: an ENTERED 0 (deliberate waiver)
-          // must reach the server as 0 — amountOrNull's `> 0 ? : null`
-          // coercion would otherwise turn it into null and the server would
-          // stamp the lot-ladder charge instead. Blank stays null so the
-          // ladder applies.
-          const preserveZero = isOneTimeMosquitoLine(s) && lineHasEnteredPrice(s);
-          const recurringLine = !!s.cadence && s.cadence !== 'one_time';
-          return {
-            serviceId: s.id || null,
-            serviceName: s.name,
-            name: s.name,
-            basePrice: amountOrNull(basePrice, preserveZero),
-            price: amountOrNull(p, preserveZero),
-            ...lineDiscountFields(s.lineDiscount, lineDiscountAmount(s)),
-            ...serviceCadenceConfig(s),
-            skipWeekends: recurringLine ? !!skipWeekends : undefined,
-            weekendShift: recurringLine && skipWeekends ? weekendShift : undefined,
-          };
-        });
-        const isRecurring = group.cadence !== 'one_time';
-        // Guarded so a stale toggle can't leak onto an already-accepted or
-        // ineligible estimate; the server re-validates and downgrades with a
-        // warning regardless. Add-on lines / booster months ride the same POST
-        // and the server downgrades a prepay request that carries them — the
-        // UI disables the choice in that state (prepayBlockReason), this is
-        // the belt-and-suspenders for a stale selection.
-        const groupHasBoosters = group.lines.some((s) => Array.isArray(s.boosterMonths) && s.boosterMonths.length > 0);
-        const { attach: attachAnnualPrepay, billingTerm } = decideAnnualPrepayAttachment({
-          billAsAnnualPrepay,
-          isRecurring,
-          prepayAttachedThisSubmit,
-          noExtras: extras.length === 0,
-          groupHasBoosters,
-          group,
-          linkedEstimate,
-        });
-        const body = {
-          ...appointmentGroupRequestBody({
-            separateProgram, key, separateProgramReason,
-            customerId: selectedCustomer.id,
-            scheduledDate: apptDate,
-            primaryId: primary.id,
-            primaryName: primary.name,
-            primaryIsBlankAutoMosquito: isPrimaryBlankAutoMosquito(primary),
-            groupHasPrice,
-            primaryBasePrice: lineBaseAmount(primary),
-            primaryDiscount: primary.lineDiscount,
-            primaryDiscountDollars: lineDiscountAmount(primary),
-            serviceAddons: addons,
-            windowStart,
-            windowEnd: computeWindowEnd(windowStart, groupDuration),
-            techMode,
-            techId,
-            groupSubtotal,
-            groupDuration,
+    // Failure and prepay outcomes use the same toast/alert feedback routing.
+    const showSubmitFeedback = ({ toastText, alertText }) => {
+      if (toastText) setToast(toastText);
+      else if (alertText) alert(alertText);
+    };
+    const showBookingWarnings = (warnings, prefix = '') => {
+      if (warnings.length) showScheduleSaveNotice(prefix + warnings.join('\n\n'));
+    };
+    try {
+      // An auto-priced mosquito line must not be booked until the live server
+      // quote resolved, and a cached quote is re-verified at the moment of
+      // booking (lot data or pricing config may have changed while the modal
+      // sat open) — see mosquitoSubmitGate.
+      const mosquitoHold = await mosquitoSubmitGate({
+        quotePending: services.some((s) => mosquitoQuotePending(s)),
+        needsRevalidation: services.some((s) => isOneTimeMosquitoLine(s) && !lineHasEnteredPrice(s)),
+        mosquitoQuote,
+        customerId: selectedCustomer.id,
+      });
+      // The quote check can await the network; close/customer change invalidates it.
+      assertSubmitCurrent();
+      if (mosquitoHold) {
+        if (mosquitoHold.clearQuote) {
+          mosquitoQuoteReqRef.current = null;
+          setMosquitoQuote(null);
+        }
+        if (mosquitoHold.refresh) {
+          setMosquitoQuote({ customerId: selectedCustomer.id, status: 'ready', price: mosquitoHold.price });
+        }
+        setToast(mosquitoHold.message);
+        setTimeout(() => setToast(''), mosquitoHold.holdMs);
+        return;
+      }
+      // Keep this as the final await before the first appointment POST.
+      const recheckController = new AbortController();
+      addressSubmitRecheckRef.current?.controller.abort();
+      addressSubmitRecheckRef.current = { customerId: submitCustomerId, controller: recheckController };
+      const freshAddressAsk = await recheckAddressAskAtSubmit({
+        customerId: submitCustomerId,
+        seenNotice: addressAsk,
+        signal: recheckController.signal,
+      });
+      if (addressSubmitRecheckRef.current?.controller === recheckController) {
+        addressSubmitRecheckRef.current = null;
+      }
+      // Never let a stale customer's response update the warning or reach a POST.
+      assertSubmitCurrent(freshAddressAsk.status !== 'cancelled');
+      // Changed evidence must be shown once; a retry still performs a fresh check.
+      if (freshAddressAsk.changed) {
+        setAddressAsk(freshAddressAsk.notice);
+        setToast('Address review changed — read the latest notice, then submit again.');
+        setAddressAskHoldVersion((version) => version + 1);
+        setTimeout(() => {
+          if (modalMountedRef.current) setToast('');
+        }, 4000);
+        return;
+      }
+      const groups = groupServicesForAppointmentSubmit(services);
+      let firstError = null;
+      // Annual-prepay-on-book rides exactly ONE recurring group's POST — if a
+      // one-time group also carried it, whichever request landed first would
+      // accept the estimate (possibly as standard) and strand the prepay.
+      let prepayAttachedThisSubmit = false;
+      // Set when the series the manual prepay choice priced is actually created.
+      let prepaySeriesId = null;
+      // A blank-priced one-time mosquito primary must reach the server as a
+      // null price — see appointmentGroupRequestBody. Named locally so the &&
+      // that decides it lives in its own scope, not submitAppointments's.
+      const isPrimaryBlankAutoMosquito = (s) => isOneTimeMosquitoLine(s) && !lineHasEnteredPrice(s);
+      for (const group of groups) {
+        const key = groupKey(group);
+        // Skip groups already created in a prior attempt of this submit
+        // session — a retry after partial failure shouldn't duplicate them.
+        if (createdGroupKeysRef.current.has(key)) continue;
+        assertSubmitCurrent();
+        try {
+          const [primary, ...extras] = group.lines;
+          const groupSubtotal = group.lines.reduce((sum, s) => sum + lineEffectiveNetAmount(s), 0);
+          const groupHasPrice = group.lines.some(lineHasEnteredPrice);
+          const groupDuration = group.lines.reduce((sum, s) => sum + (s.duration || s.default_duration_minutes || 30), 0);
+          const addons = extras.map((s) => {
+            const basePrice = lineBaseAmount(s);
+            const p = lineNetAmount(s);
+            // One-time mosquito add-on lines: an ENTERED 0 (deliberate waiver)
+            // must reach the server as 0 — amountOrNull's `> 0 ? : null`
+            // coercion would otherwise turn it into null and the server would
+            // stamp the lot-ladder charge instead. Blank stays null so the
+            // ladder applies.
+            const preserveZero = isOneTimeMosquitoLine(s) && lineHasEnteredPrice(s);
+            const recurringLine = !!s.cadence && s.cadence !== 'one_time';
+            return {
+              serviceId: s.id || null,
+              serviceName: s.name,
+              name: s.name,
+              basePrice: amountOrNull(basePrice, preserveZero),
+              price: amountOrNull(p, preserveZero),
+              ...lineDiscountFields(s.lineDiscount, lineDiscountAmount(s)),
+              ...serviceCadenceConfig(s),
+              skipWeekends: recurringLine ? !!skipWeekends : undefined,
+              weekendShift: recurringLine && skipWeekends ? weekendShift : undefined,
+            };
+          });
+          const isRecurring = group.cadence !== 'one_time';
+          // Guarded so a stale toggle can't leak onto an already-accepted or
+          // ineligible estimate; the server re-validates and downgrades with a
+          // warning regardless. Add-on lines / booster months ride the same POST
+          // and the server downgrades a prepay request that carries them — the
+          // UI disables the choice in that state (prepayBlockReason), this is
+          // the belt-and-suspenders for a stale selection.
+          const groupHasBoosters = group.lines.some((s) => Array.isArray(s.boosterMonths) && s.boosterMonths.length > 0);
+          const { attach: attachAnnualPrepay, billingTerm } = decideAnnualPrepayAttachment({
+            billAsAnnualPrepay,
+            isRecurring,
+            prepayAttachedThisSubmit,
+            noExtras: extras.length === 0,
+            groupHasBoosters,
+            group,
             linkedEstimate,
-            propertyPickerActive,
-            selectedPropertyId,
-            customerNotes,
-            internalNotes,
-          }),
-          // Only the FIRST created group of a booking asks for the customer
-          // confirmation text and carries the card-link flag — a split
-          // seasonal/year-round save posts multiple series for the same
-          // picked slot, and each would otherwise send its own confirmation
-          // (codex r20 P2) or text two secure links.
-          ...firstGroupSendFlags({
-            resultsCount: results.length,
-            createdCount: createdGroupKeysRef.current.size,
-            sendSms,
-            cardLinkAvailable,
-            sendCardLink,
-          }),
-          isRecurring,
-          ...recurringGroupRequestFields({
-            isRecurring, group, recurringCount, skipWeekends, weekendShift,
-            collectPrepay, groupSubtotal, prepayMethod, prepayNote,
-          }),
-          billingTerm,
-        };
-        if (attachAnnualPrepay) prepayAttachedThisSubmit = true;
-        bookingPostAttempted = true;
-        const r = await adminFetch('/admin/schedule', { method: 'POST', body: JSON.stringify(body) });
-        createdGroupKeysRef.current.add(key);
-        // The series the prepay covers, matched by group identity — NOT
-        // "the first result" (a booking can post a one-time group first).
-        if (matchesPrepayTarget({ targetKey: manualPrepayPlan.targetKey, key, result: r })) {
-          prepaySeriesId = r.id;
-        }
-        results.push(r);
-      } catch (e) {
-        // A late failure must not update a closed draft.
-        if (!submitIsCurrent()) break;
-        const decision = classifySubmitGroupFailure(e, {
-          group, linkedEstimate, separateProgram, key, groupLabelText: groupLabel(group),
-        });
-        if (decision.recoverable) {
+          });
+          const body = {
+            ...appointmentGroupRequestBody({
+              separateProgram, key, separateProgramReason,
+              customerId: selectedCustomer.id,
+              scheduledDate: apptDate,
+              primaryId: primary.id,
+              primaryName: primary.name,
+              primaryIsBlankAutoMosquito: isPrimaryBlankAutoMosquito(primary),
+              groupHasPrice,
+              primaryBasePrice: lineBaseAmount(primary),
+              primaryDiscount: primary.lineDiscount,
+              primaryDiscountDollars: lineDiscountAmount(primary),
+              serviceAddons: addons,
+              windowStart,
+              windowEnd: computeWindowEnd(windowStart, groupDuration),
+              techMode,
+              techId,
+              groupSubtotal,
+              groupDuration,
+              linkedEstimate,
+              propertyPickerActive,
+              selectedPropertyId,
+              customerNotes,
+              internalNotes,
+            }),
+            // Only the FIRST created group of a booking asks for the customer
+            // confirmation text and carries the card-link flag — a split
+            // seasonal/year-round save posts multiple series for the same
+            // picked slot, and each would otherwise send its own confirmation
+            // (codex r20 P2) or text two secure links.
+            ...firstGroupSendFlags({
+              resultsCount: results.length,
+              createdCount: createdGroupKeysRef.current.size,
+              sendSms,
+              cardLinkAvailable,
+              sendCardLink,
+            }),
+            isRecurring,
+            ...recurringGroupRequestFields({
+              isRecurring, group, recurringCount, skipWeekends, weekendShift,
+              collectPrepay, groupSubtotal, prepayMethod, prepayNote,
+            }),
+            billingTerm,
+          };
+          if (attachAnnualPrepay) prepayAttachedThisSubmit = true;
+          bookingPostAttempted = true;
+          const r = await adminFetch('/admin/schedule', { method: 'POST', body: JSON.stringify(body) });
           createdGroupKeysRef.current.add(key);
-          continue;
+          // The series the prepay covers, matched by group identity — NOT
+          // "the first result" (a booking can post a one-time group first).
+          if (matchesPrepayTarget({ targetKey: manualPrepayPlan.targetKey, key, result: r })) {
+            prepaySeriesId = r.id;
+          }
+          results.push(r);
+        } catch (e) {
+          // A late failure must not update a closed draft.
+          assertSubmitCurrent();
+          const decision = classifySubmitGroupFailure(e, {
+            group, linkedEstimate, separateProgram, key, groupLabelText: groupLabel(group),
+          });
+          if (decision.recoverable) {
+            createdGroupKeysRef.current.add(key);
+            continue;
+          }
+          if (decision.duplicateConflict) {
+            setDuplicateConflict(decision.duplicateConflict);
+            setSeparateProgramReason('');
+          }
+          firstError = decision.firstError;
+          break;
         }
-        if (decision.duplicateConflict) {
-          setDuplicateConflict(decision.duplicateConflict);
-          setSeparateProgramReason('');
-        }
-        firstError = decision.firstError;
-        break;
       }
-    }
-    releaseSubmit();
-    if (!submitIsCurrent()) {
-      // An attempted POST may have committed despite a lost response. Refresh
-      // the parent, while skipping later groups and follow-up billing.
-      reportBackground();
-      return;
-    }
-    if (firstError) {
-      const created = createdGroupKeysRef.current.size;
-      const total = groups.length;
-      // Warnings from groups that DID commit must surface here too: those
-      // groups are recorded in createdGroupKeysRef and skipped on retry, so
-      // their persistent notice must survive the retry (e.g. an
-      // advisory schedule-overlap note on an already-booked group).
+      releaseSubmit();
+      assertSubmitCurrent();
       const committedWarnings = results.flatMap((r) => (Array.isArray(r?.warnings) ? r.warnings : []));
-      if (committedWarnings.length) showScheduleSaveNotice(committedWarnings.join('\n\n'));
-      const notice = submitFailureNotice({ firstError, created, total });
-      if (notice.toastText) setToast(notice.toastText);
-      else alert(notice.alertText);
-      reportBackground();
-      return;
-    }
-    // Annual prepay on a manual booking: mint AFTER the series is committed,
-    // never before — a prepay invoice for a booking that failed to save would
-    // sell a year of visits that don't exist. The preview is re-fetched here
-    // rather than reusing the displayed one so the amount, coverage and
-    // eligibility are re-derived from what was ACTUALLY booked (the operator
-    // can change the rate or date after the last preview), and the server's
-    // own mintPayload is what gets posted.
-    let prepayNotice = '';
-    let prepayWarnings = [];
-    if (shouldMintManualPrepay({ billAsManualPrepay, manualPrepayArmable, prepaySeriesId })) {
-      setSaving(true);
-      try {
-        // Price from the row the server actually persisted, never from the
-        // draft payload (Codex #3161 P2): the booking endpoint re-resolves
-        // discounts and writes its OWN estimated_price, so replaying the
-        // client-derived shape could invoice a per-visit amount this series
-        // never carried. The endpoint re-derives cadence, coverage anchor and
-        // every eligibility guard from that row too.
-        const params = new URLSearchParams({ scheduledServiceId: String(prepaySeriesId) });
-        const fresh = await adminFetch(`/admin/schedule/annual-prepay-preview?${params}`);
-        if (!submitIsCurrent()) {
-          reportBackground();
-          return;
-        }
-        assertManualPrepayMintEligible({ fresh, manualPrepay });
-        const minted = await adminFetch(`/admin/customers/${selectedCustomer.id}/annual-prepay-invoice`, {
-          method: 'POST',
-          body: JSON.stringify(fresh.mintPayload),
-        });
-        if (!submitIsCurrent()) {
-          reportBackground();
-          return;
-        }
-        // Advisory notes from the mint (e.g. the promised first visit overlaps
-        // another job) ride the same warnings[] shape as the booking itself
-        // and join the blocking alert below.
-        const outcome = classifyManualPrepayMintOutcome({ minted, fresh });
-        prepayWarnings = outcome.warnings;
-        prepayNotice = outcome.notice;
-        if (outcome.blockingAlert) alert(outcome.blockingAlert);
-      } catch (e) {
-        if (!submitIsCurrent()) {
-          reportBackground();
-          return;
-        }
-        // Loud, never silent: the appointment IS booked, so the operator must
-        // know the year was not invoiced and where to finish it.
-        // Deliberately NOT "the invoice was not created": the mint commits the
-        // invoice and term, sends, and only then writes its audit row, so a
-        // 500 (or a lost response) can mean the customer already HAS the
-        // invoice. Telling the operator to mint another would double-bill the
-        // year (Codex #3161 r3 P2).
-        alert(`Appointment booked, but the annual prepay step did not complete cleanly: ${e.message}\n\nCheck the customer's invoices BEFORE minting another — the invoice may already exist and have been sent. If none is there, mint it from Customer 360 → Annual prepay.`);
-      } finally {
-        if (submitIsCurrent()) setSaving(false);
-      }
-    }
-    // A prepaid year is NOT billed per service report — say what actually
-    // happens instead of the per-visit copy.
-    setToast(composeAppointmentSuccessToast({
-      resultsCount: results.length,
-      createdCount: createdGroupKeysRef.current.size,
-      estimateAccepted: results.some((r) => r?.estimateAccepted),
-      prepayNotice,
-    }));
-    const apptWarnings = [
-      ...results.flatMap((r) => (Array.isArray(r?.warnings) ? r.warnings : [])),
-      ...prepayWarnings,
-    ];
-    // A guarded estimate (one-time/recurring choice, invoice-mode, expired,
-    // pending manager approval) books fine but couldn't be auto-accepted — tell
-    // the operator so they can record the win from the Estimates page.
-    if (apptWarnings.length) showScheduleSaveNotice(`Appointment saved.\n\n${apptWarnings.join('\n\n')}`);
-    setTimeout(() => {
-      if (!submitIsCurrent()) {
+      if (firstError) {
+        const created = createdGroupKeysRef.current.size;
+        const total = groups.length;
+        // Warnings from groups that DID commit must surface here too: those
+        // groups are recorded in createdGroupKeysRef and skipped on retry, so
+        // their persistent notice must survive the retry (e.g. an
+        // advisory schedule-overlap note on an already-booked group).
+        showBookingWarnings(committedWarnings);
+        const notice = submitFailureNotice({ firstError, created, total });
+        showSubmitFeedback(notice);
         reportBackground();
         return;
       }
-      createdGroupKeysRef.current = new Set();
-      onCreated?.({ id: results[0]?.id, scheduledDate: apptDate });
-      onChange?.({ id: results[0]?.id, scheduledDate: apptDate });
-    }, 1200);
-    return true;
+      // Annual prepay on a manual booking: mint AFTER the series is committed,
+      // never before — a prepay invoice for a booking that failed to save would
+      // sell a year of visits that don't exist. The preview is re-fetched here
+      // rather than reusing the displayed one so the amount, coverage and
+      // eligibility are re-derived from what was ACTUALLY booked (the operator
+      // can change the rate or date after the last preview), and the server's
+      // own mintPayload is what gets posted.
+      let prepayNotice = '';
+      let prepayWarnings = [];
+      if (shouldMintManualPrepay({ billAsManualPrepay, manualPrepayArmable, prepaySeriesId })) {
+        setSaving(true);
+        try {
+          // Price from the row the server actually persisted, never from the
+          // draft payload (Codex #3161 P2): the booking endpoint re-resolves
+          // discounts and writes its OWN estimated_price, so replaying the
+          // client-derived shape could invoice a per-visit amount this series
+          // never carried. The endpoint re-derives cadence, coverage anchor and
+          // every eligibility guard from that row too.
+          const params = new URLSearchParams({ scheduledServiceId: String(prepaySeriesId) });
+          const fresh = await adminFetch(`/admin/schedule/annual-prepay-preview?${params}`);
+          assertSubmitCurrent();
+          assertManualPrepayMintEligible({ fresh, manualPrepay });
+          const minted = await adminFetch(`/admin/customers/${selectedCustomer.id}/annual-prepay-invoice`, {
+            method: 'POST',
+            body: JSON.stringify(fresh.mintPayload),
+          });
+          assertSubmitCurrent();
+          // Advisory notes from the mint (e.g. the promised first visit overlaps
+          // another job) ride the same warnings[] shape as the booking itself
+          // and join the blocking alert below.
+          const outcome = classifyManualPrepayMintOutcome({ minted, fresh });
+          prepayWarnings = outcome.warnings;
+          prepayNotice = outcome.notice;
+          showSubmitFeedback({ alertText: outcome.blockingAlert });
+        } catch (e) {
+          assertSubmitCurrent();
+          // Loud, never silent: the appointment IS booked, so the operator must
+          // know the year was not invoiced and where to finish it.
+          // Deliberately NOT "the invoice was not created": the mint commits the
+          // invoice and term, sends, and only then writes its audit row, so a
+          // 500 (or a lost response) can mean the customer already HAS the
+          // invoice. Telling the operator to mint another would double-bill the
+          // year (Codex #3161 r3 P2).
+          alert(`Appointment booked, but the annual prepay step did not complete cleanly: ${e.message}\n\nCheck the customer's invoices BEFORE minting another — the invoice may already exist and have been sent. If none is there, mint it from Customer 360 → Annual prepay.`);
+        }
+      }
+      // A prepaid year is NOT billed per service report — say what actually
+      // happens instead of the per-visit copy.
+      setToast(composeAppointmentSuccessToast({
+        resultsCount: results.length,
+        createdCount: createdGroupKeysRef.current.size,
+        estimateAccepted: results.some((r) => r?.estimateAccepted),
+        prepayNotice,
+      }));
+      const apptWarnings = [
+        ...committedWarnings,
+        ...prepayWarnings,
+      ];
+      // A guarded estimate (one-time/recurring choice, invoice-mode, expired,
+      // pending manager approval) books fine but couldn't be auto-accepted — tell
+      // the operator so they can record the win from the Estimates page.
+      showBookingWarnings(apptWarnings, 'Appointment saved.\n\n');
+      setTimeout(() => {
+        if (!submitIsCurrent()) {
+          reportBackground();
+          return;
+        }
+        createdGroupKeysRef.current = new Set();
+        onCreated?.({ id: results[0]?.id, scheduledDate: apptDate });
+        onChange?.({ id: results[0]?.id, scheduledDate: apptDate });
+      }, 1200);
+      return true;
+    } catch (error) {
+      if (error !== cancelledSubmit) throw error;
+      // A POST may have committed even when its response was lost.
+      reportBackground();
+    } finally {
+      releaseSubmit();
+    }
   };
 
   // Header, footer and second-program CTA share one synchronous lock. React
   // state alone can admit two taps before the first render marks us saving.
   const handleSubmit = async (separateProgram) => {
-    if (submitLockRef.current) return;
+    if (!canSubmitAppointments({
+      selectedCustomer,
+      services,
+      bookingPropertyState,
+      alreadySubmitting: submitLockRef.current,
+      addressAskPending,
+    })) return;
     submitLockRef.current = true;
     let booked = false;
     try {
