@@ -1409,11 +1409,6 @@ function reportSharedLocationContinuation(text, clauseEnd, location) {
   };
 }
 
-function reportTrailingEvidenceIsQualified(evidence) {
-  return REPORT_TRAILING_UNCERTAINTY_RE.test(evidence)
-    || REPORT_CONCISE_NONCOMPLETION_RE.test(evidence);
-}
-
 /** value: { subject: "<regex>", location: "<regex>" } */
 function report_readback_confirms(value, record, { spoken }) {
   const subjectRe = new RegExp(value.subject, 'gi');
@@ -1471,7 +1466,8 @@ function report_readback_confirms(value, record, { spoken }) {
         ? affirmed.slice(0, evidenceEnd) + affirmed.slice(evidenceEnd).replace(/\bbefore\b/gi, 'prior to') : affirmed;
       const claim = claimContext(claimText, Math.min(subjectAt, locationAt), claimText.length);
       if (subjectAt >= 0 && !REPORT_UNCERTAINTY_RE.test(findingEvidence)
-          && !reportTrailingEvidenceIsQualified(trailingEvidence) && !REPORT_INSTRUCTION_RE.test(affirmed)
+          && !REPORT_TRAILING_UNCERTAINTY_RE.test(trailingEvidence)
+          && !REPORT_CONCISE_NONCOMPLETION_RE.test(trailingEvidence) && !REPORT_INSTRUCTION_RE.test(affirmed)
           && !alternativeLocation
           && (completedFinding || conciseFinding)
           && !reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb)) {
