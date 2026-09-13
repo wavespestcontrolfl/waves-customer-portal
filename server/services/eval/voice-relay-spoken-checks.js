@@ -1222,7 +1222,8 @@ const CARD_DIGIT_LABEL = '(?:begins?|starts?|ends?|ending|starting|beginning) (?
 // only the digit run it contains. Keeping these as global span matchers stops
 // "$129" elsewhere in the clause from hiding "I heard four".
 const CARD_NON_FRAGMENT_RES = Object.freeze([
-  /\$\s*\d+(?:\.\d+)?/gi,
+  new RegExp(`\\b(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})(?:[\\s-]+(?:and\\s+)?(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})){0,6}\\s+(?:dollars?|cents?|bucks)\\b`, 'gi'),
+  new RegExp(`\\$\\s*${DIGITS}`, 'gi'),
   /\b(?:[01]?\d|2[0-3]):[0-5]\d(?:\s*(?:a\.?\s*m\.?|p\.?\s*m\.?))?(?![\da-z])/gi,
   /\b\d+(?:\.\d+)?\s*(?:seconds?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?)\b/gi,
   /\b\d+(?:\.\d+)?\s+(?:cards?|applications?|payments?|transactions?|attempts?|options?|visits?|services?|appointments?|accounts?)\b/gi,
