@@ -506,7 +506,7 @@ const PAYMENT_SUCCESS_ADVERBS = '(?:(?:already|just|now|successfully)\\s+)*';
 const PAYMENT_TARGET = '(?:payment|(?:(?:credit|debit|prepaid)\\s+)?card|charge|transaction)';
 const PAYMENT_AMOUNT = `(?:\\$\\s*${DIGITS}|${DIGITS}\\s+(?:dollars?|bucks))`;
 const PAYMENT_OUTCOME_RE = new RegExp(
-  `\\b(?:${PAYMENT_ACTOR}(?:(?:\\s+(?:have|has|had)(?:n[\\x27\\u2019]t)?|[\\x27\\u2019](?:ve|d))\\s+|\\s+)(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:processed|charged|accepted|approved|completed)\\s+(?:(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET}|${PAYMENT_AMOUNT}\\s+to\\s+(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET})|(?:${PAYMENT_TARGET}|that|it) (?:(?:has|had) )?(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:go|goes|went|gone) through|(?:${PAYMENT_TARGET}|that|it)[\\x27\\u2019]s\\s+(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:been\\s+${PAYMENT_SUCCESS_ADVERBS})?(?:processed|charged|accepted|approved|complete|completed|successful)|(?:${PAYMENT_TARGET}|that|it) (?:(?:(?:is|was|got|went) (?:not )?|(?:has|had) (?:not )?${PAYMENT_SUCCESS_ADVERBS}been ))${PAYMENT_SUCCESS_ADVERBS}(?:processed|charged|accepted|approved|complete|completed|successful)|(?:${PAYMENT_TARGET}|that|it) succeeded|you[\\x27\\u2019]re all paid)\\b`,
+  `\\b(?:${PAYMENT_ACTOR}(?:(?:\\s+(?:have|has|had)(?:n[\\x27\\u2019]t)?|[\\x27\\u2019](?:ve|d))\\s+|\\s+)(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:processed|charged|accepted|approved|completed)\\s+(?:(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET}|${PAYMENT_AMOUNT}\\s+to\\s+(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET})|(?:${PAYMENT_TARGET}|that|it) (?:(?:has|had) )?(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:go|goes|went|gone) through|(?:${PAYMENT_TARGET}|that|it)[\\x27\\u2019]s\\s+(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:been\\s+${PAYMENT_SUCCESS_ADVERBS})?(?:processed|charged|accepted|approved|complete|completed|successful)|(?:${PAYMENT_TARGET}|that|it) (?:(?:(?:is|was|got|went) (?:not )?|(?:has|had) (?:not )?${PAYMENT_SUCCESS_ADVERBS}been ))${PAYMENT_SUCCESS_ADVERBS}(?:processed|charged|accepted|approved|complete|completed|successful)|(?:${PAYMENT_TARGET}|that|it)(?:(?:\\s+(?:has|had)(?:n[\\x27\\u2019]t)?|[\\x27\\u2019]s)\\s+|\\s+)(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}succeeded|you[\\x27\\u2019]re all paid)\\b`,
   'gi',
 );
 const PAYMENT_CONDITION_RE = /^\s*(?:once|when)\b/i;
@@ -1244,6 +1244,7 @@ const CARD_VALUE_CONTEXT_RE = new RegExp(`\\b${CARD_CUE}\\b`, 'i');
 // appointment year or dollar amount elsewhere in the clause keeps its own
 // non-card explanation.
 const CARD_LABELED_VALUE_RE = new RegExp(`\\b(?:${CARD_DIGIT_LABEL})\\s+(\\d+(?:[\\s-]\\d+)*)\\b`, 'gi');
+const CARD_EXPLICIT_VALUE_RE = /\b(?:card\s+(?:number|digits?)|pan|cvv|cvc|security code)\b(?:\s+(?:is|was))?\s*[:#]?\s*((?:\(\d+\)|\d+)(?:[\s.-]\d+)*)\b/gi;
 const DIGIT_RUN_RE = /\d+(?:[\s-]\d+)*/g;
 // Numeric digits spoken one at a time — "4-1-1", "4 1 1", "4, 1, 1" (how
 // ASR and TTS both render "four one one") — are the same run the spoken
@@ -1264,6 +1265,10 @@ function cardFragmentIn(text) {
     const start = match.index + match[0].lastIndexOf(match[1]);
     return [start, start + match[1].length];
   });
+  const explicitCardValues = [...digits.matchAll(CARD_EXPLICIT_VALUE_RE)].map((match) => {
+    const start = match.index + match[0].lastIndexOf(match[1]);
+    return [start, start + match[1].length];
+  });
   DIGIT_RUN_RE.lastIndex = 0;
   let m = DIGIT_RUN_RE.exec(digits);
   while (m) {
@@ -1271,7 +1276,8 @@ function cardFragmentIn(text) {
     const explained = nonFragments.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
     const explicitExpiration = expirationValues.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
     const labeledValue = labeledValues.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
-    if (explicitExpiration || (labeledValue && CARD_VALUE_CONTEXT_RE.test(clause)) || (CARD_CUE_RE.test(clause) && !explained)) return m[0];
+    const explicitCardValue = explicitCardValues.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
+    if (explicitExpiration || explicitCardValue || (labeledValue && CARD_VALUE_CONTEXT_RE.test(clause)) || (CARD_CUE_RE.test(clause) && !explained)) return m[0];
     m = DIGIT_RUN_RE.exec(digits);
   }
   return null;
