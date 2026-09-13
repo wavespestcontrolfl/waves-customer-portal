@@ -1,4 +1,3 @@
-const { exemplarLooksClean } = require('../sms-shadow-drafter');
 const { containsReportAccessCode } = require('../service-report/technician-report-copy');
 const { findBannedCustomerCopy } = require('../service-report/activity-indicators');
 const { reentrySafetyClaimFinding } = require('../content/content-guardrails');
@@ -8,13 +7,15 @@ const PHONE_URI_RE = /\b(?:tel|sms):(?:\/\/)?(?:\+?\d|\(\d)[\d()+.,;*#?=&%-]*/i;
 const MARKDOWN_LINK_RE = /\[[^\]\n]+\]\(\s*(?:<[^>\n]*>|[^)\n]*)\s*\)|\[[^\]\n]+\]\[[^\]\n]*\]/i;
 const MARKDOWN_LINK_DEFINITION_RE = /^\s*\[[^\]\n]+\]:\s*\S+/im;
 const BOILERPLATE_RE = /\bthank you for (?:reaching out|contacting us)\b|\bhope this (?:email )?finds you well\b|\bplease (?:do not|don't) hesitate to (?:reach out|contact us)\b|\blet us know if you have any (?:other |further )?questions\b/i;
+// Outbound corrections can legitimately supersede preparation instructions.
+// Screen prompt-control language rather than using the stricter exemplar gate.
+const OUTPUT_INSTRUCTION_RE = /\b(?:system|developer)\s+(?:prompt|instructions?)\b|\b(?:assistant|system|user)\s*:|\b(?:ignore|disregard|forget|override)\s+(?:(?:all|the|any)\s+)?(?:previous|prior|above|earlier)\s+instructions?\b|\b(?:ignore|disregard|forget|override)\b[^.!?]{0,80}\b(?:prompt|system|developer)\b|```/i;
 // Allow modifiers such as "scheduled pest-control", but do not absorb an
 // approved application unit into a later, unrelated mention of a visit.
-const VISIT_SRC = '(?:(?!applications?\\b)[a-z]+(?:-[a-z]+)*\\s+){0,3}visit\\b';
+const VISIT_SRC = '(?:(?!applications?\\b)[a-z]+(?:-[a-z]+)*\\s+)*visit\\b';
 const VISIT_UNIT_SRC = `(?:each|every|a)\\s+${VISIT_SRC}`;
 const PRICE_UNIT_SRC = `(?:(?:for\\s+)?${VISIT_UNIT_SRC}|per[\\s-]+${VISIT_SRC}|/\\s*${VISIT_SRC})`;
 const VISIT_PRICE_RE = new RegExp([
-  '\\bper[\\s-]+visit\\b',
   `(?:\\$\\s*\\d[\\d,.]*|\\b\\d[\\d,.]*\\s+dollars?)\\s*${PRICE_UNIT_SRC}`,
   `\\b(?:price|amount|cost|charge|rate)\\s+${PRICE_UNIT_SRC}`,
   `\\b${VISIT_UNIT_SRC}\\s+(?:costs?|is|will\\s+(?:cost|be))\\s+\\$\\s*\\d`,
@@ -26,7 +27,7 @@ function normalizeCopy(text) {
 
 function wordCount(text) {
   const trimmed = String(text || '').trim();
-  return trimmed ? trimmed.split(/\s+/).length : 0;
+  return trimmed ? trimmed.split(/[\s\u2012-\u2015]+/).filter(Boolean).length : 0;
 }
 
 function forgedSignature(text) {
@@ -34,9 +35,11 @@ function forgedSignature(text) {
   const tail = lines.slice(-2).join('\n');
   const closing = /^(?:best|best regards|kind regards|warm regards|regards|sincerely|thanks|thank you|cheers|warmly)[,.]?$/i;
   const dashedName = /(?:^|\n)\s*[-–—]\s*\p{Lu}[\p{L}\p{M}'’.-]*(?:\s+\p{Lu}[\p{L}\p{M}'’.-]*){0,2}[,.]?\s*$/u;
+  const signOffAndName = /^[\p{L}\p{M}'’ -]+,\n\p{Lu}[\p{L}\p{M}'’.-]*(?: \p{Lu}[\p{L}\p{M}'’.-]*){0,3}$/u;
   return lines.slice(1).some((line) => closing.test(line))
     || /(?:^|\n)\s*(?:[-–—]\s*)?(?:adam|virginia|the waves pest control team|waves team)\s*$/i.test(tail)
-    || dashedName.test(tail);
+    || dashedName.test(tail)
+    || (lines.length > 2 && signOffAndName.test(tail));
 }
 
 function greetingMatches(draft, customer) {
@@ -49,7 +52,7 @@ function greetingMatches(draft, customer) {
 function customerCopyViolation(draft, normalizedCopy) {
   return findBannedCustomerCopy(normalizedCopy).length > 0
     || VISIT_PRICE_RE.test(normalizedCopy)
-    || /\bWaves\s+Lawn\s*(?:&|and)\s*Pest\b/i.test(normalizedCopy)
+    || /\bWaves\s+(?:Lawn\s*(?:[-+&]|and)?\s*Pest|Pest(?:\s+Control)?\s*(?:[-+&]|and)\s*Lawn)\b/i.test(normalizedCopy)
     || !!reentrySafetyClaimFinding(draft);
 }
 
@@ -68,10 +71,10 @@ function verifyEmailReplyStructure({ text, customer, wordBudget } = {}) {
 
   if (!draft) violations.push('empty_reply');
   if (!Number.isInteger(wordBudget) || wordBudget < 1 || wordCount(draft) > wordBudget) violations.push('word_budget_exceeded');
-  if (/<!--[\s\S]*?-->|<![^>]*>|<\/?[a-z][^>]*>/i.test(draft)) violations.push('html_not_allowed');
+  if (/<!--|<![^>]*>|<\/?[a-z][^>]*>/i.test(draft)) violations.push('html_not_allowed');
   if (/^\s*(?:[-+*•]|\d+[.)])\s+/m.test(normalizedCopy)) violations.push('bullets_not_allowed');
   if (BOILERPLATE_RE.test(normalizedCopy.replace(/\s+/g, ' '))) violations.push('boilerplate_not_allowed');
-  if (!exemplarLooksClean('', draft)) violations.push('untrusted_instruction');
+  if (OUTPUT_INSTRUCTION_RE.test(normalizedCopy)) violations.push('untrusted_instruction');
   if (forgedSignature(draft)) violations.push('signature_unsupported');
   if (LINK_RE.test(draft) || PHONE_URI_RE.test(draft) || MARKDOWN_LINK_RE.test(draft)
     || MARKDOWN_LINK_DEFINITION_RE.test(draft)) violations.push('link_unsupported');

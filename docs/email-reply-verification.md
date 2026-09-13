@@ -17,6 +17,12 @@ HTML comments/declarations, and Markdown links with relative or fragment
 destinations. Paired plain-prose cases protect ordinary mentions of visits,
 names, punctuation, and bracketed placeholders.
 
+Word-separating dashes count toward the budget; hyphenated compounds remain
+one word. Outbound prompt-control screening is intentionally separate from
+`sms-shadow-drafter`'s stricter exemplar-admission screen: legitimate customer
+preparation corrections can refer to previous instructions. Pricing-unit
+checks require a price or pricing noun, so reminders per visit remain valid.
+
 This is a structure check, not fact verification. It does not validate
 amounts, statuses, dates, arrival windows, technician names, placeholders or
 facts copied from examples. A successful result must not authorize draft
