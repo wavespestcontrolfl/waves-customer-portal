@@ -1316,6 +1316,8 @@ const SAFETY_ONCE_DRY_AFTER_RE = new RegExp(`^(?:\\s+(?:for|around|with)\\s+${SA
 const SAFETY_ONCE_DRY_PREDICATE_RE = new RegExp(`(?:^|(?:[\\x27\\u2019](?:s|re)|\\b(?:is|are|was|were|will be|would be|should be))\\s+)${SAFETY_ONCE_DRY_COORDINATED_PREFIX}safe(?:\\s+(?:for|around|with)\\s+${SAFETY_AUDIENCE})?$`, 'i');
 
 const TECHNICIAN_DRY_TIMING_RE = /\b(?:the |your |our |a )?(?:technician|tech|team member|member of (?:our|the) team)\b[^.!?;]{0,30}?\b(?:(?:will|can|is going to)\s+(?:confirm|verify|check)|(?:confirms|verifies|checks))\b[^.!?;]{0,30}?\b(?:timing|drying(?: time)?|re-?entry(?: time| timing)?|when\b[^.!?;]{0,16}\bdry)\b/gi;
+const TECHNICIAN_EXPLICIT_DRY_TIMING_RE = /\b(?:drying(?: time)?|re-?entry(?: time| timing)?|when\b[^.!?;]{0,16}\bdry)\s*$/i;
+const TECHNICIAN_VISIT_TIMING_RE = /\b(?:appointment|arrival|schedule|scheduling)\b/i;
 
 function trailingWithdrawalAlternative(objectSource) {
   return new RegExp(
@@ -1333,9 +1335,11 @@ function safetyOnceDryQualifies(text, claim, questionText = null) {
   const drying = SAFETY_ONCE_DRY_AFTER_RE.exec(text.slice(claim.index + claim[0].length));
   if (!drying || (questionText !== null && !safetyAudienceCovers(`${claim[0]}${drying[0]}`, questionText))) return false;
   return [...text.matchAll(TECHNICIAN_DRY_TIMING_RE)].some((match) => {
+    const [, timingClaimEnd] = clauseBounds(text, match.index);
+    const timingClaim = text.slice(match.index, timingClaimEnd);
     const claim = claimContext(text, match.index, match.index + match[0].length);
-    return text[clauseBounds(text, match.index)[1]] !== '?'
-      && !/\b(?:appointment|arrival|schedule|scheduling)\b/i.test(match[0])
+    return text[timingClaimEnd] !== '?'
+      && (TECHNICIAN_EXPLICIT_DRY_TIMING_RE.test(match[0]) || !TECHNICIAN_VISIT_TIMING_RE.test(timingClaim))
       && !PET_TRAILING_CONDITION_RE.test(text.slice(match.index + match[0].length))
       && !TECHNICIAN_DRY_TIMING_ALTERNATIVE_RE.test(text.slice(match.index + match[0].length))
       && !PET_SPECULATIVE_GUIDANCE_RE.test(claim)
@@ -1391,10 +1395,10 @@ const SAFETY_QUESTION_PRONOUN_RE = '(?:it|that|they|this|these|those)\\b';
 const SAFETY_QUESTION_AUXILIARY = `(?:is|are|does|do|would|will|can|could|isn[\\x27\\u2019]t|aren[\\x27\\u2019]t|doesn[\\x27\\u2019]t|don[\\x27\\u2019]t|wouldn[\\x27\\u2019]t|won[\\x27\\u2019]t|can[\\x27\\u2019]t|couldn[\\x27\\u2019]t)`;
 
 function questionAboutProduct(text, keywordAlt) {
-  const productSubject = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\b[^.!?;]{0,20}?\\b${SAFETY_QUESTION_PRODUCT_SUBJECT_RE}([^.!?;]{0,80}?\\b(?:${keywordAlt})\\b)[^.!?;]{0,60}?\\?`, 'i');
+  const productSubject = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\b[^.!?;]{0,20}?\\b${SAFETY_QUESTION_PRODUCT_SUBJECT_RE}([^.!?;]{0,80}?\\b(?:${keywordAlt})\\b)[^.!?;]{0,60}?(?:[?.]|$)`, 'i');
   const productMatch = productSubject.exec(text);
   if (productMatch) return { predicate: productMatch[1] };
-  const pronounSubject = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\b\\s+${SAFETY_QUESTION_PRONOUN_RE}([^.!?;]{0,80}?\\b(?:${keywordAlt})\\b)[^.!?;]{0,60}?\\?`, 'i');
+  const pronounSubject = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\b\\s+${SAFETY_QUESTION_PRONOUN_RE}([^.!?;]{0,80}?\\b(?:${keywordAlt})\\b)[^.!?;]{0,60}?(?:[?.]|$)`, 'i');
   const match = pronounSubject.exec(text);
   if (!match) return null;
   // A pronoun subject needs an earlier product mention in the SAME turn to
