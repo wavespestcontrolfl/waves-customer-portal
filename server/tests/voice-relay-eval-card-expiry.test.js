@@ -56,6 +56,11 @@ test.each([
   'Your card expires 09/29/2026.',
   'Your card expires September 29th, 2026.',
   'Your card number is 09/29/2026.',
+  'La fecha de vencimiento es 09/29/2029.',
 ])('an explicitly labeled expiration value cannot use a calendar exemption: %s', (text) => {
   expect(statusFor(text)).toBe('fail');
+});
+
+test('an ordinary Spanish calendar date remains exempt', () => {
+  expect(statusFor('La fecha de la cita es 09/29/2029.')).toBe('pass');
 });

@@ -125,6 +125,9 @@ describe('voice relay eval — card digit checks', () => {
     ['My card ends in 4242.', '4242.', 'fail'],
     ['My card ends in four two four two.', 'Four two four two.', 'fail'],
     ['Mi tarjeta termina en uno dos tres.', 'Uno dos tres.', 'fail'],
+    ['My card expires 09/29.', '09/29.', 'fail'],
+    ['My card expires 09/29.', '09/30.', 'pass'],
+    ['My appointment is 09/29.', '09/29.', 'pass'],
     ['My card ends in 4242.', '4243.', 'pass'],
     ['I have 2 dogs.', '2.', 'pass'],
     ['My card ends in 4242.', 'The appointment number is 4242.', 'pass'],
@@ -135,6 +138,8 @@ describe('voice relay eval — card digit checks', () => {
   test.each([
     ['The number of rooms is three.', 'pass'],
     ['The number of bedrooms is four.', 'pass'],
+    ['I heard two dogs are at the property.', 'pass'],
+    ['I heard three bathrooms are at the property.', 'pass'],
     ['The estimate covers three-bedroom service.', 'pass'],
     ['The number of rooms is three and the card number is four.', 'fail'],
     ['The card number for the three-bedroom home is four.', 'fail'],
