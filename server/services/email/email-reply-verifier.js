@@ -253,12 +253,12 @@ function statusViolations(text, context) {
         supports: (fact) => SUCCESS_STATUS_RE.test(String(fact.value?.status || '')),
       },
       {
-        matches: /\b(?:visit|service|appointment)\b[^.!?]{0,60}\b(?:confirmed|booked|all set)\b|\b(?:confirmed|booked)\b[^.!?]{0,60}\b(?:visit|service|appointment)\b/i.test(sentence),
+        matches: /\b(?:visit|service|appointment)\b[\s\S]*\b(?:confirmed|booked|all set)\b|\b(?:confirmed|booked)\b[\s\S]*\b(?:visit|service|appointment)\b/i.test(sentence),
         key: 'upcoming_visit', violation: 'visit_status_unsupported',
         supports: (fact) => String(fact.value?.status).toLowerCase() === 'confirmed',
       },
       {
-        matches: /\bestimate\b[^.!?]{0,40}\b(?:sent|emailed)\b|\b(?:sent|emailed)\b[^.!?]{0,40}\bestimate\b/i.test(sentence),
+        matches: /\bestimate\b[\s\S]*\b(?:sent|emailed)\b|\b(?:sent|emailed)\b[\s\S]*\bestimate\b/i.test(sentence),
         key: 'pending_estimate', violation: 'estimate_status_unsupported',
         supports: (fact) => /^(?:sent|viewed)$/i.test(String(fact.value?.status || '')) && fact.value?.sentAt,
       },

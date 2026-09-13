@@ -93,6 +93,15 @@ describe('email reply verifier', () => {
       .toBe(['succeeded', 'completed'].includes(status));
   });
 
+  test('status checks cover the whole sentence regardless of intervening detail', () => {
+    expect(verdict('Hi Casey, your appointment on September 15 between 9 AM and 11 AM with our technician is confirmed.').violations)
+      .toContain('visit_status_unsupported');
+    expect(verdict('Hi Casey, your estimate for the requested service at your property was sent.').violations)
+      .toContain('estimate_status_unsupported');
+    expect(verdict('Hi Casey, we sent the detailed service proposal you requested in your estimate.').violations)
+      .toContain('estimate_status_unsupported');
+  });
+
   test('requires amounts, dates, and windows in one sentence to come from the same record', () => {
     const facts = contextWith().facts.concat([
       { key: 'recent_payment', status: 'present', value: { amount: 25, paymentDate: '2026-09-11', status: 'succeeded' } },
