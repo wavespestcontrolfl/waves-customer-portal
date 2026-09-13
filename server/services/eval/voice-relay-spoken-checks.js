@@ -1240,6 +1240,8 @@ const REPORT_PARTICIPLE_RE = /^(?:applied|placed|used|treated|sprayed|put|receiv
 const REPORT_LOCATION_RECIPIENT_VERB_RE = /^(?:got|received)$/i;
 const REPORT_NOUN_LED_PREFIX_RE = /^\s*(?:(?:the|a|an)\s*)?$/i;
 const REPORT_LOCATION_RECIPIENT_PREDICATE_RE = /^\s*(?:(?:itself|has|have|had|already|also|just|now|\w+ly)\s+)*$/i;
+const REPORT_DIRECT_OBJECT_GAP_RE = /^\s*(?:(?:the|a|an)\s+)?$/i;
+const REPORT_WENT_LOCATION_RE = /^\s*(?:around|along|on|to|at|in)\b/i;
 const REPORT_COMPLETED_PASSIVE_RE = /\b(?:(?:was|were|got)|(?:has|have|had)(?:\s+(?:\w+ly|already|just|now))*\s+been)\s+(?:(?:\w+ly|already|just|now)\s+)*$/i;
 const REPORT_NONCOMPLETION_GOVERNOR_RE = /(?:\b(?:supposed|expected|required|meant|scheduled|instructed|asked|told|directed|ordered|needed|intended|planned|ought)\s+to(?:\s+(?:\w+ly|already|just|now))*(?:\s+have(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?)?(?:\s+(?:\w+ly|already|just|now))*|\bplan(?:s|ned|ning)?\s+on\s+having(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?(?:\s+(?:\w+ly|already|just|now))*)\s*$/i;
 const REPORT_NONCOMPLETION_MODIFIER_RE = /\b(?:almost|nearly)(?:\s+(?:has|have|had|was|were|got|been)){0,2}\s*$/i;
@@ -1287,8 +1289,9 @@ function reportHasAlternativeLocation(affirmed, locationAt, orTail) {
 // A noncompletion governor or near-miss modifier excludes active-order and
 // passive frames alike: "planned on having applied Talstar", "almost applied
 // Talstar", and "Talstar was nearly applied" do not establish completion.
-// Otherwise, an active past treatment places its predicate before the matched
-// product, while a participle after it needs a completed passive auxiliary.
+// Otherwise, an active past treatment takes the matched product directly;
+// an earlier verb governing some other object does not establish the finding.
+// A participle after the product needs a completed passive auxiliary.
 function reportHasCompletedFinding(affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb) {
   if (subjectAt < 0 || !findingVerb) return false;
   // "The perimeter received Talstar" describes treatment at the location;
@@ -1302,8 +1305,15 @@ function reportHasCompletedFinding(affirmed, subjectAt, subjectLength, locationA
   const predicateIntroduction = affirmed.slice(0, findingVerb.index);
   if (REPORT_NONCOMPLETION_GOVERNOR_RE.test(predicateIntroduction)
       || REPORT_NONCOMPLETION_MODIFIER_RE.test(predicateIntroduction)) return false;
-  if (!REPORT_PARTICIPLE_RE.test(findingVerb[0])) return true;
-  if (findingVerb.index < subjectAt) return true;
+  if (!REPORT_PARTICIPLE_RE.test(findingVerb[0])) {
+    if (!/^went$/i.test(findingVerb[0])) return true;
+    return subjectAt < findingVerb.index && findingVerb.index < locationAt
+      && REPORT_WENT_LOCATION_RE.test(affirmed.slice(findingVerb.index + findingVerb[0].length, locationAt + locationLength));
+  }
+  if (findingVerb.index < subjectAt) {
+    const directObjectGap = affirmed.slice(findingVerb.index + findingVerb[0].length, subjectAt);
+    return REPORT_DIRECT_OBJECT_GAP_RE.test(directObjectGap);
+  }
   const predicatePrefix = affirmed.slice(subjectAt + subjectLength, findingVerb.index);
   const tersePastFinding = REPORT_NOUN_LED_PREFIX_RE.test(affirmed.slice(0, subjectAt)) && !predicatePrefix.trim();
   return tersePastFinding || REPORT_COMPLETED_PASSIVE_RE.test(predicatePrefix);
@@ -1313,9 +1323,11 @@ function reportHasConciseFinding(affirmed, subjectAt, subjectLength, locationAt,
   const firstAt = Math.min(subjectAt, locationAt);
   const lastAt = Math.max(subjectAt, locationAt);
   const evidenceEnd = Math.max(subjectAt + subjectLength, locationAt + locationLength);
+  // Presentation punctuation does not change the trailing qualifier's scope.
+  const qualifier = affirmed.slice(evidenceEnd).replace(/^[\s,:—–-]+/, '');
   return !findingVerb && /^(?:(?:the|a|an|granular)\s*)?$/i.test(affirmed.slice(0, firstAt).trim())
     && /\b(?:around|along|on|to|at|in)\b/i.test(affirmed.slice(firstAt, lastAt))
-    && !REPORT_CONCISE_NONCOMPLETION_RE.test(affirmed.slice(evidenceEnd));
+    && !REPORT_CONCISE_NONCOMPLETION_RE.test(qualifier);
 }
 
 // Reuse the capture evaluator's denial spans for explicit denial predicates
@@ -1359,12 +1371,13 @@ function report_readback_confirms(value, record, { spoken }) {
       // summaries may omit it ("Talstar P around the perimeter"), but must
       // start with a finding term and connect it to its location; a caller
       // question or a list of terms is not such a summary.
-      const findingVerb = REPORT_FINDING_VERB_RE.exec(affirmed);
-      const completedFinding = reportHasCompletedFinding(
-        affirmed, subjectAt, m[0].length, locationAt, locationMatch[0].length, findingVerb,
-      );
+      const findingVerbs = [...affirmed.matchAll(new RegExp(REPORT_FINDING_VERB_RE.source, 'gi'))];
+      const findingVerb = findingVerbs.find((candidate) => reportHasCompletedFinding(
+        affirmed, subjectAt, m[0].length, locationAt, locationMatch[0].length, candidate,
+      ));
+      const completedFinding = Boolean(findingVerb);
       const conciseFinding = reportHasConciseFinding(
-        affirmed, subjectAt, m[0].length, locationAt, locationMatch[0].length, findingVerb,
+        affirmed, subjectAt, m[0].length, locationAt, locationMatch[0].length, findingVerbs[0],
       );
       // Modals and uncertainty govern the treatment only through its matched
       // evidence. A later explanatory clause ("which you can see" or "as the
