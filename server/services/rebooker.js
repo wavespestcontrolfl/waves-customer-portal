@@ -76,6 +76,17 @@ function seriesOccurrenceWindow(win, sib, options = {}) {
   return { start, end };
 }
 
+// A proposal's disclosed recurring dates/windows must match the locked
+// move, including a cadence edit that leaves the same occurrence IDs.
+function reviewedOccurrence(row, date, window = {}, options = {}) {
+  const target = seriesOccurrenceWindow(window, row, options);
+  return { id: String(row.id), from_date: dateOnly(row.scheduled_date), status: row.status,
+    from_start: row.window_start || null, from_end: row.window_end || null,
+    duration: row.estimated_duration_minutes || null, property_id: row.property_id || null,
+    date_exception: row.date_exception === true, cadence_date: dateOnly(row.date_exception_cadence_date) || null,
+    to_date: date, to_start: target.start || null, to_end: target.end || null };
+}
+
 // Seasonal mosquito cadence lives in the seeder — single source of truth for
 // the Feb-Oct walk, so this file's own nextRecurringDate cannot drift from it.
 const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, customerPrefersNoWeekends, preferenceRowBlocksWeekends } = require('./recurring-appointment-seeder');
@@ -1177,12 +1188,14 @@ class SmartRebooker {
     // incidental to grouping, so the row keeps its own status — the unit
     // mover's sibling rule — instead of landing on 'confirmed'; a failed
     // Combine then has nothing to un-confirm. A live row still rewinds.
-    const landedStatus = options.keepStatus === true && !lifecycleRewound ? service.status : 'confirmed';
+    const landedStatus = options.pendingConfirmation === true ? 'pending'
+      : (options.keepStatus === true && !lifecycleRewound ? service.status : 'confirmed');
     const updates = {
       scheduled_date: newDate,
       window_start: win.start || service.window_start,
       window_end: windowEnd,
       status: landedStatus,
+      ...(options.pendingConfirmation === true ? { customer_confirmed: false } : {}),
       ...(initiatedBy !== 'auto_dispatch' ? recurringDispatchDuePatch(service, {
         scheduled_date: newDate, window_start: win.start || service.window_start,
       }) : {}),
@@ -2387,6 +2400,14 @@ class SmartRebooker {
         }
       }
 
+      if (Array.isArray(options.expectOccurrences)) {
+        const actual = siblings.slice(startIdx).map((row, i) => sweptIds.includes(String(row.id))
+          ? reviewedOccurrence(row, projectOccurrenceDate(i, row), String(row.id) === String(serviceId) ? win : {}, options) : null).filter(Boolean)
+          .sort((a, b) => a.id.localeCompare(b.id));
+        if (JSON.stringify(actual) !== JSON.stringify(options.expectOccurrences)) {
+          throw Object.assign(new Error('The recurring dates or windows changed. Refresh the proposal.'), { statusCode: 409, code: 'SERIES_CHANGED' });
+        }
+      }
       await runBeforeMove();
       // The call/proposal guard runs on the locked series before its first write.
       if (typeof options.moveGuard === 'function') {
@@ -2490,7 +2511,8 @@ class SmartRebooker {
           scheduled_date: date,
           window_start: occurrenceWindow.start,
           window_end: occurrenceWindow.end,
-          status: isAnchor && !(options.keepStatus === true && !sibRewound) ? 'confirmed' : sib.status,
+          status: isAnchor ? (options.pendingConfirmation === true ? 'pending' : (options.keepStatus === true && !sibRewound ? sib.status : 'confirmed')) : sib.status,
+          ...(isAnchor && options.pendingConfirmation === true ? { customer_confirmed: false } : {}),
           updated_at: trx.fn.now(),
           ...exceptionUpdate,
           ...(sibRewound ? LIVE_LIFECYCLE_RESET : {}),
@@ -3093,9 +3115,10 @@ class SmartRebooker {
   // contract every surface renders ("Move visit + N future visits", the IB
   // pending-action card). No client computes N. Same sibling selection and
   // projector as the move; conflicts are probed without locks for the
-  // projected SIBLINGS (the anchor's own window is the caller's choice and is
-  // validated by the move itself).
-  async previewSeriesMove(serviceId, newDate) {
+  // projected SIBLINGS. Callers that apply admin window rules pass the same
+  // option here so the disclosed anchor and kept sibling windows are
+  // validated exactly as they will be during the move.
+  async previewSeriesMove(serviceId, newDate, newWindow = {}, options = {}) {
     const service = await db('scheduled_services').where({ id: serviceId }).first();
     if (!service) throw Object.assign(new Error('Service not found'), { statusCode: 404 });
     const seriesDateStr = dateOnly(newDate);
@@ -3116,7 +3139,7 @@ class SmartRebooker {
       .whereRaw('COALESCE(date_exception_cadence_date, scheduled_date) >= ?::date', [seriesPosition(service)])
       .whereNotIn('status', TERMINAL)
       .orderByRaw('COALESCE(date_exception_cadence_date, scheduled_date) asc, scheduled_date asc')
-      .select('id', 'status', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'date_exception', 'date_exception_cadence_date');
+      .select('id', 'status', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'date_exception', 'date_exception_cadence_date', 'property_id');
     const droppedIdx = siblings.findIndex((s) => String(s.id) === String(serviceId));
     if (droppedIdx === -1) return empty;
     const { deltaDays, cadenceSlotDate, projectOccurrenceDate } = await makeSeriesProjector({ service, parent, newDate, seriesDateStr });
@@ -3127,6 +3150,7 @@ class SmartRebooker {
       || (idx === 0 && LIVE_OVERRIDE_STATUSES.has(row.status)));
     const sweptIds = movable.map((row) => String(row.id));
     const dates = [];
+    const occurrences = [];
     let conflictCount = 0;
     for (let i = 0; i < swept.length; i++) {
       const row = swept[i];
@@ -3138,12 +3162,15 @@ class SmartRebooker {
       }
       const date = projectOccurrenceDate(i, row);
       dates.push(date);
-      if (i === 0 || !row.window_start) continue;
+      const occurrenceWindow = String(row.id) === String(serviceId) ? newWindow : {};
+      occurrences.push(reviewedOccurrence(row, date, occurrenceWindow, options));
+      const targetWindow = seriesOccurrenceWindow(occurrenceWindow, row, options);
+      if (i === 0 || !targetWindow.start) continue;
       const clash = await findConflictingVisits({
         db,
         date,
-        windowStart: row.window_start,
-        windowEnd: occupancyProbeEnd(row.window_start, row.window_end, row.estimated_duration_minutes),
+        windowStart: targetWindow.start,
+        windowEnd: occupancyProbeEnd(targetWindow.start, targetWindow.end, row.estimated_duration_minutes),
         excludeServiceIds: sweptIds,
         excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
       });
@@ -3157,6 +3184,7 @@ class SmartRebooker {
       // The exact set a surface acknowledges (seriesAckIds) — bound again at
       // commit against the locked sweep (expectOccurrenceIds).
       occurrenceIds: [...sweptIds].sort(),
+      occurrences: occurrences.sort((a, b) => a.id.localeCompare(b.id)),
       skippedCount: swept.length - movable.length,
       exceptionCount: movable.filter((row, idx) => idx > 0 && row.date_exception === true).length,
       conflictCount,

@@ -396,6 +396,20 @@ describe('single-path date exceptions', () => {
     await SmartRebooker.reschedule('svc-2', BASE, { start: '13:00', end: '15:00' }, 'admin', 'admin', { seriesPolicy: 'single' });
     expect(trxScheduled.update.mock.calls[0][0]).not.toHaveProperty('date_exception');
   });
+
+  test.each([
+    ['default', {}, 'confirmed', false],
+    ['reviewed proposal', { pendingConfirmation: true }, 'pending', true],
+  ])('%s single move preserves its confirmation semantics', async (_label, extra, status, clearsConfirmation) => {
+    const { trxScheduled } = wireSingleMocks(anchorRow({ id: 'svc-2', recurring_parent_id: 'svc-1' }));
+    await SmartRebooker.reschedule('svc-2', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
+      seriesPolicy: 'single', ...extra,
+    });
+    const update = trxScheduled.update.mock.calls[0][0];
+    expect(update.status).toBe(status);
+    if (clearsConfirmation) expect(update.customer_confirmed).toBe(false);
+    else expect(update).not.toHaveProperty('customer_confirmed');
+  });
 });
 
 describe('rescheduleSeries — date-only sweep', () => {
@@ -410,6 +424,28 @@ describe('rescheduleSeries — date-only sweep', () => {
     expect(updates[0].update.mock.calls[0][0].status).toBe(keepStatus ? 'pending' : 'confirmed');
     if (keepStatus) expect(historyInsert.insert).not.toHaveBeenCalled();
     else expect(historyInsert.insert).toHaveBeenCalledWith({ job_id: 'svc-1', from_status: 'pending', to_status: 'confirmed', transitioned_by: null });
+  });
+
+  test('a reviewed move returns only the anchor to pending confirmation and records that transition', async () => {
+    const { updates, historyInsert } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1)]);
+    await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
+      ...ADMIN_OPTS, pendingConfirmation: true,
+    });
+    expect(updates[0].update.mock.calls[0][0]).toMatchObject({ status: 'pending', customer_confirmed: false });
+    expect(updates[1].update.mock.calls[0][0]).toMatchObject({ status: 'confirmed' });
+    expect(updates[1].update.mock.calls[0][0]).not.toHaveProperty('customer_confirmed');
+    expect(historyInsert.insert).toHaveBeenCalledWith({ job_id: 'svc-1', from_status: 'confirmed', to_status: 'pending', transitioned_by: null });
+  });
+
+  test.each(['id', 'from_date', 'status', 'from_start', 'from_end', 'duration', 'property_id', 'date_exception', 'cadence_date', 'to_date', 'to_start', 'to_end'])('a stale disclosed occurrence %s refuses the entire reviewed move', async (field) => {
+    const { updates } = wireSeriesMocks([sib('svc-1', BASE)]);
+    const disclosed = { id: 'svc-1', from_date: BASE, status: 'confirmed', from_start: '09:00:00', from_end: '11:00:00',
+      duration: null, property_id: null, date_exception: false, cadence_date: null,
+      to_date: TARGET, to_start: '09:00', to_end: '11:00', [field]: 'stale' };
+    await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
+      ...ADMIN_OPTS, expectOccurrenceIds: ['svc-1'], expectOccurrences: [disclosed],
+    })).rejects.toMatchObject({ statusCode: 409, code: 'SERIES_CHANGED' });
+    expect(updates[0].update).not.toHaveBeenCalled();
   });
 
   test('anchor takes the new window + confirmed; siblings keep window, status and tech (a pending placeholder stays pending)', async () => {
@@ -887,7 +923,7 @@ describe('previewSeriesMove', () => {
     });
     findConflictingVisits.mockResolvedValueOnce([{ id: 'other' }]);
     const preview = await SmartRebooker.previewSeriesMove('svc-1', TARGET);
-    expect(preview).toEqual({
+    expect(preview).toMatchObject({
       collective: true,
       deltaDays: 2,
       movableCount: 3,
@@ -898,10 +934,44 @@ describe('previewSeriesMove', () => {
       firstAffectedDate: TARGET,
       lastAffectedDate: dayOffset(33),
     });
+    expect(preview.occurrences).toEqual([
+      expect.objectContaining({ id: 'svc-1', from_date: BASE, to_date: TARGET, from_start: '09:00:00', to_start: '09:00:00' }),
+      expect.objectContaining({ id: 'svc-3', from_date: dayOffset(26), to_date: dayOffset(28) }),
+      expect.objectContaining({ id: 'svc-4', from_date: SIB3, to_date: dayOffset(33), to_start: null, to_end: null }),
+    ]);
     // Only the timed sibling (svc-3) was probed: the anchor's window is the
     // caller's choice and the windowless svc-4 occupies nothing.
     expect(findConflictingVisits).toHaveBeenCalledTimes(1);
     expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({ date: dayOffset(28), excludeServiceIds: ['svc-1', 'svc-3', 'svc-4'] }));
+  });
+
+  test('the disclosed anchor window retains its duration and can be applied unchanged', async () => {
+    const anchor = anchorRow({ window_end: '10:30:00', estimated_duration_minutes: 90 });
+    const rows = [{ ...anchor }];
+    const queries = [chain({ first: jest.fn().mockResolvedValue(anchor) }),
+      chain({ first: jest.fn().mockResolvedValue(anchor) }), chain({ select: jest.fn().mockResolvedValue(rows) })];
+    db.mockImplementation((table) => table === 'scheduled_services' ? queries.shift() : chain({ first: jest.fn().mockResolvedValue(null) }));
+    const preview = await SmartRebooker.previewSeriesMove('svc-1', TARGET, { start: '13:00' });
+    expect(preview.occurrences[0]).toMatchObject({ to_start: '13:00', to_end: '14:30', duration: 90 });
+    const { updates } = wireSeriesMocks(rows, { anchor });
+    await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '13:00' }, 'admin', 'admin', {
+      pendingConfirmation: true, expectOccurrenceIds: preview.occurrenceIds, expectOccurrences: preview.occurrences,
+    });
+    expect(updates[0].update.mock.calls[0][0]).toMatchObject({ scheduled_date: TARGET, window_start: '13:00', window_end: '14:30', status: 'pending' });
+  });
+
+  test('admin preview rejects a future occurrence whose stored window cannot pass Apply rules', async () => {
+    const anchor = anchorRow();
+    const rows = [
+      { ...anchor, window_start: '09:00:00', window_end: '10:00:00' },
+      { id: 'svc-2', status: 'pending', scheduled_date: SIB1, window_start: '09:30:00', window_end: '10:30:00' },
+    ];
+    const queries = [chain({ first: jest.fn().mockResolvedValue(anchor) }),
+      chain({ first: jest.fn().mockResolvedValue(anchor) }), chain({ select: jest.fn().mockResolvedValue(rows) })];
+    db.mockImplementation((table) => table === 'scheduled_services' ? queries.shift() : chain({ first: jest.fn().mockResolvedValue(null) }));
+
+    await expect(SmartRebooker.previewSeriesMove('svc-1', TARGET, { start: '13:00', end: '14:00' },
+      { adminWindowRules: true })).rejects.toMatchObject({ code: 'INVALID_APPOINTMENT_WINDOW', status: 422 });
   });
 
   test('same date, one-time row → not collective, zero counts', async () => {
