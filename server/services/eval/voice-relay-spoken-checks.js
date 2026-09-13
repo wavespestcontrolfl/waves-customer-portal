@@ -1280,6 +1280,7 @@ const CARD_NON_FRAGMENT_RES = Object.freeze([
     + `(?:(?:is|was|will be|falls?|fell|occur(?:s|red)?|happen(?:s|ed)?|scheduled|booked)\\s+)?`
     + `(?:(?:on|in|for)\\s+)?${CARD_EXPLAINED_DATE_VALUE}\\b`, 'gi'),
   /\b(?:(?:issued|added|saved|updated)\s+(?:on|in)|on\s+file\s+since)\s+(?:19|20)\d{2}\b/gi,
+  /\b(?:first|last)\s+\d+\s+(?:are|were)\b/gi,
   CARD_MENU_OPTION_RE,
   /\b(?:phone|cell|mobile|office|fax|area)\s+(?:number|code)\s+(?:(?:is|of|as)\s+)?(?:\(\d+\)|\d+)(?:[\s.-]\d+)*/gi,
   new RegExp(`\\b(?:phone|cell|mobile|fax)(?:\\s+number)?\\s+(?:is|was|as)\\s+${CARD_PHONE_VALUE}`, 'gi'),
@@ -1314,7 +1315,7 @@ const CARD_READBACK_CUE_RE = /\b(?:read|repeat|confirm)(?:ing)?\b[^.!?;]{0,50}\b
 // Carry only requests for sensitive card fields, not any question mentioning
 // a card: billing ZIP, promo codes and account phones retain their own meaning.
 const CARD_REQUEST_CUE_RE = new RegExp(`\\b(?:what\\s+(?:are|is)|which|tell|give|read|say|provide|share|repeat|confirm|enter|input|type|(?:can|could|may)\\s+(?:i|we)\\s+(?:have|get)|d[ií]game|dime|ingrese|introduzca|proporcione|lea|confirme|(?:puede|podr[ií]a)\\s+(?:darme|decirme)|cu[aá]l(?:es)?\\s+(?:es|son))\\b[^.!?;]{0,80}\\b(?:${CARD_FIELD_LABEL}|(?:digits?|numbers|(?:the|your|first|last|next|middle)\\s+number)\\s+(?:of|on|from|for)\\s+(?:(?:your|the|this|that)\\s+)?(?:(?:credit|debit|prepaid)\\s+)?card|expir(?:y|ation)|n[uú]mero\\s+de\\s+(?:(?:la|su|tu)\\s+)?tarjeta|d[ií]gitos?\\s+de\\s+(?:(?:la|su|tu)\\s+)?tarjeta|c[oó]digo\\s+de\\s+seguridad|(?:fecha\\s+de\\s+)?vencimiento)\\b`, 'i');
-const CARD_BARE_FRAGMENT_RE = /^\s*(?:(?:yes|yeah|okay|sure)[\s,:-]+)?(?:(?:it (?:is|was)|the (?:number|digits?) (?:is|are|was|were))[\s,:-]+)?\d+(?:[\s/.-]+\d+)*\s*(?:(?:,\s*)?(?:(?:is|that(?:[\x27\u2019]s| is))\s+)?(?:correct|right)|,\s*got it)?\s*$/i;
+const CARD_BARE_FRAGMENT_RE = /^\s*(?:(?:yes|yeah|okay|sure)[\s,:-]+)?(?:(?:it(?:[\x27\u2019]s| (?:is|was))|the (?:number|digits?|(?:first|last) \d+) (?:is|are|was|were))[\s,:-]+)?\d+(?:[\s/.-]+\d+)*\s*(?:(?:,\s*)?(?:(?:is|that(?:[\x27\u2019]s| is))\s+)?(?:correct|right)|,\s*got it)?\s*$/i;
 // A positional cue owns only the digit run immediately after it. That run is
 // card data even when it looks like a year ("card ends in 2029"), while an
 // appointment year or dollar amount elsewhere in the clause keeps its own
