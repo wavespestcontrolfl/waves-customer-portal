@@ -1446,15 +1446,18 @@ function reportHasCompletedFinding(affirmed, subjectAt, subjectLength, locationA
 
 function reportHasConciseFinding(affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb) {
   const firstAt = Math.min(subjectAt, locationAt);
-  const lastAt = Math.max(subjectAt, locationAt);
   const evidenceEnd = Math.max(subjectAt + subjectLength, locationAt + locationLength);
+  // A scenario regex can match a brand stem before its one-character formulation suffix.
+  const locationPrefix = affirmed.slice(subjectAt + subjectLength, locationAt)
+    .replace(/^\s*[a-z0-9]\b(?=\s+(?:is|are|was|were|has|have|had)\b)/i, '')
+    .replace(/^\s*(?:(?:is|are|was|were|has|have|had)\s+(?:been\s+)?)?/i, '');
   // Presentation punctuation does not change the trailing qualifier's scope.
   const qualifier = affirmed.slice(evidenceEnd)
     .split(/,?\s+and\s+(?=(?:(?:the|a|an)\s+)?[\w'\u2019-]+(?:\s+[\w'\u2019-]+){0,2}\s+(?:is|are|was|were|has|have|around|along|on|to|at|in)\b)/i)[0]
     .replace(/^[\s,:—–-]+/, '')
     .replace(/^(?:perimeter|area|wall|walls|zone|edge)\b[\s,]*/i, '');
   return !findingVerb && /^(?:(?:the|a|an|granular)\s*)?$/i.test(affirmed.slice(0, firstAt).trim())
-    && /\b(?:around|along|on|to|at|in)\b/i.test(affirmed.slice(firstAt, lastAt))
+    && REPORT_FRONTED_LOCATION_PREFIX_RE.test(locationPrefix)
     && REPORT_CONCISE_COMPLETION_RE.test(qualifier);
 }
 
