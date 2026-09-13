@@ -1271,7 +1271,7 @@ const SAFETY_ONCE_DRY_AFTER_RE = new RegExp(`^(?:\\s+(?:for|around|with)\\s+${SA
 // by the same drying and technician-timing language.
 const SAFETY_ONCE_DRY_PREDICATE_RE = new RegExp(`(?:^|(?:[\\x27\\u2019](?:s|re)|\\b(?:is|are|was|were|will be|would be|should be))\\s+)safe(?:\\s+(?:for|around|with)\\s+${SAFETY_AUDIENCE})?$`, 'i');
 
-const TECHNICIAN_DRY_TIMING_RE = /\b(?:the |your |our |a )?(?:technician|tech|team member|member of (?:our|the) team)\b[^.!?;]{0,30}?\b(?:(?:will|can|is going to)\s+(?:confirm|verify|check)|(?:confirms|verifies|checks))\b[^.!?;]{0,30}?\b(?:timing|drying(?: time)?|re-?entry(?: time)?|when\b[^.!?;]{0,16}\bdry)\b/gi;
+const TECHNICIAN_DRY_TIMING_RE = /\b(?:the |your |our |a )?(?:technician|tech|team member|member of (?:our|the) team)\b[^.!?;]{0,30}?\b(?:(?:will|can|is going to)\s+(?:confirm|verify|check)|(?:confirms|verifies|checks))\b[^.!?;]{0,30}?\b(?:timing|drying(?: time)?|re-?entry(?: time| timing)?|when\b[^.!?;]{0,16}\bdry)\b/gi;
 
 function safetyOnceDryQualifies(text, claim) {
   if (!SAFETY_ONCE_DRY_PREDICATE_RE.test(claim[0])
@@ -1279,6 +1279,7 @@ function safetyOnceDryQualifies(text, claim) {
   return [...text.matchAll(TECHNICIAN_DRY_TIMING_RE)].some((match) => {
     const claim = claimContext(text, match.index, match.index + match[0].length);
     return !/\b(?:appointment|arrival|schedule|scheduling)\b/i.test(match[0])
+      && !PET_TRAILING_CONDITION_RE.test(text.slice(match.index + match[0].length))
       && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim);
   });
 }
@@ -1526,7 +1527,7 @@ function capture_lead_input_asserts(value, record) {
   return best.length ? ['fail', `no capture_lead input asserted: ${best.join('; ')}`] : ['pass', 'capture_lead input asserts every expected field'];
 }
 
-const PET_GUIDANCE_RE = /\b(?:(?:technician|team member)\b[^,.!?;]{0,100}?\b(?:go(?:es)? over|review(?:s)?|explain(?:s)?|talk(?:s)?(?: you)? through)|ask (?:the |a |your )?(?:technician|team member) about)\b[^,.!?;]{0,80}?\b(?:products?|label|precautions?)\b/gi;
+const PET_GUIDANCE_RE = /\b(?:(?:technician|team member)\b[^,.!?;]{0,100}?\b(?:go(?:es)? over|review(?:s)?|explain(?:s)?|talk(?:s)?(?: you)? through)|ask (?:the |a |your )?(?:technician|team member) about)\b[^,.!?;]{0,80}?\b(?:products?(?:\s+labels?)?|labels?|precautions?)(?:\s+(?:and|or)\s+(?:the\s+)?(?:products?(?:\s+labels?)?|labels?|precautions?))*\b/gi;
 
 const PET_SPECULATIVE_GUIDANCE_RE = /\b(?:might|may|could|would|should|maybe|perhaps|possibly|potentially)\b/i;
 
