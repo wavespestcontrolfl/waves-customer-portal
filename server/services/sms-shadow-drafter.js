@@ -1242,6 +1242,7 @@ module.exports = {
   buildUserPromptFromFacts,
   buildFactsBlock,
   formatExemplarBlock,
+  exemplarLooksClean,
   fetchVoiceExemplars,
   fetchVoiceProfileForDrafter,
   resolveEffectiveVoiceProfile,
