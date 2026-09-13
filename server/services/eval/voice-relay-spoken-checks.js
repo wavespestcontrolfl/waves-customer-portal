@@ -639,6 +639,8 @@ function paymentOutcomePronounHasNonTargetAntecedent(text, match) {
   for (const phrase of phrases.reverse()) {
     const before = sentencePrefix.slice(0, phrase.index);
     if (/\b(?:in|on|at|to|from|for|with|by|about|through|after|before|under)\s*$/i.test(before)) continue;
+    // A reporting actor supplies evidence, not the object being approved.
+    if (/\b(?:says?|said|reports?|reported|confirms?|confirmed|indicates?|indicated|shows?|showed)\s*$/i.test(phrase[0])) continue;
     const candidate = phrase[0].split(/\s+\b(?:and|or|then|but|in|on|at|to|from|for|with|by|was|were|is|are|has|had|will|should|did|does|do)\b/i)[0];
     return !new RegExp(`\\b${PAYMENT_TARGET}\\b`, 'i').test(candidate);
   }
@@ -690,7 +692,13 @@ function no_payment_outcome(value, record, { spoken }) {
         const bridge = subjectSuffix.slice(0, match.index);
         if (PAYMENT_INTERVENING_SUBJECT_RE.test(bridge)) continue;
         const predicateStart = subjectEnd + match.index + match[0].lastIndexOf(predicate);
-        const subjectClaim = claimContext(text, subject.index, predicateStart + predicate.length);
+        // Resolve the payment referent across clauses, but keep a renewed
+        // pronoun assertion outside an earlier refusal's scope.
+        const renewedSubject = [...bridge.matchAll(/\b(?:and|but|yet|so)\s+(?<subject>it|that)\b/gi)].pop();
+        const subjectStart = renewedSubject
+          ? subjectEnd + renewedSubject.index + renewedSubject[0].lastIndexOf(renewedSubject.groups.subject)
+          : subject.index;
+        const subjectClaim = claimContext(text, subjectStart, predicateStart + predicate.length);
         const [claimStart, predicateEnd] = clauseBounds(text, predicateStart);
         const matchEnd = predicateStart + predicate.length;
         const trailingClaim = text.slice(matchEnd, predicateEnd);
