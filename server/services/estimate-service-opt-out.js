@@ -52,6 +52,8 @@ const SERVICE_OPT_OUT_KEYS = {
 //   problem, but the policy stands independently of it.
 const NON_REMOVABLE_BY_POLICY = ['tree_shrub'];
 
+const { selectedTermiteAnnualPlanRows } = require('./estimate-termite-program-rows');
+
 function isPlainObject(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
@@ -63,6 +65,47 @@ function isPlainObject(value) {
 // reduced price while accept locks and bills the full one.
 function inputCarriers(parsedData) {
   return [parsedData?.engineInputs, parsedData?.inputs].filter(isPlainObject);
+}
+
+// The annual termite program's replay stamp lives on the priced RESULT, not
+// in a durable input field. Removing the line deletes that stamp; restoring
+// its captured input would therefore price against today's gate/config and
+// can silently turn the sold annual plan into quarterly service or a new
+// annual price. Treat it like Tree & Shrub's result-derived knobs: never offer
+// the removal, and refuse restores from legacy events written before this
+// guard. Quarterly termite remains removable.
+function termiteAnnualPlanServiceChangeBlocked(parsedData = {}, {
+  serviceKey,
+  included,
+  removedInputs = null,
+} = {}) {
+  if (serviceKey !== 'termite_bait') return false;
+  if (included === false) return selectedTermiteAnnualPlanRows(parsedData).length > 0;
+  if (included !== true) return false;
+
+  let captured = removedInputs;
+  if (!isPlainObject(captured)) {
+    const events = Array.isArray(parsedData?.serviceOptOut?.events)
+      ? parsedData.serviceOptOut.events
+      : [];
+    const removal = events.filter((event) => event?.serviceKey === serviceKey && event.included === false).pop();
+    captured = readRemovedInputs(removal);
+  }
+  if (!isPlainObject(captured)) return false;
+
+  const serviceInputs = ['engineInputs', 'inputs'].flatMap((carrier) => {
+    const services = captured?.[carrier];
+    if (!isPlainObject(services)) return [];
+    return ['termite', 'termiteBait', 'termite_bait'].map((key) => services[key]).filter(isPlainObject);
+  });
+  if (serviceInputs.some((input) => String(input.plan || input.pricingKnobs?.plan || '').toLowerCase() === 'annual_protection')) {
+    return true;
+  }
+
+  const restoresTermiteToken = Array.isArray(captured.selected)
+    && captured.selected.some((token) => String(token).toUpperCase() === 'TERMITE_BAIT');
+  return restoresTermiteToken
+    && String(parsedData?.engineRequest?.options?.termitePlan || '').toLowerCase() === 'annual_protection';
 }
 
 /**
@@ -166,6 +209,7 @@ function serviceOptOutRemovableKeys(estData = {}, sections = [], rowTier = null)
     // Also what excludes the synthetic `bundle` card the server emits when the
     // ladder cannot be split, and every commercial_* and tree_shrub key.
     if (!SERVICE_OPT_OUT_KEYS[key]) continue;
+    if (termiteAnnualPlanServiceChangeBlocked(estData, { serviceKey: key, included: false })) continue;
     // A real key that still fronts several services (memberKeys) is one card
     // for many lines — there is no single service to point the control at.
     if (Array.isArray(section.memberKeys) && section.memberKeys.length > 1) continue;
@@ -257,6 +301,9 @@ function applyServiceOptOutToEstimateData(parsedData = {}, {
   const spec = SERVICE_OPT_OUT_KEYS[serviceKey];
   if (!spec) return { ok: false, reason: 'service_not_removable' };
   if (!isPlainObject(parsedData)) return { ok: false, reason: 'service_not_removable' };
+  if (termiteAnnualPlanServiceChangeBlocked(parsedData, { serviceKey, included, removedInputs })) {
+    return { ok: false, reason: 'service_not_removable' };
+  }
 
   if (included === false) {
     const captured = { engineInputs: null, inputs: null, selected: [] };
@@ -569,4 +616,5 @@ module.exports = {
   latestOptOutEventIsStaff,
   lineReviewOnly,
   memberEvidenceInEstimateData,
+  termiteAnnualPlanServiceChangeBlocked,
 };

@@ -2847,8 +2847,8 @@ export function calculateEstimate(inputs) {
       // bundle-discountable. Rates come from the live DB-synced table
       // (applyServerTermiteBondPricingConfig), never a baked literal.
       const TERMITE_BOND_OPTIONS = termiteBondOptionsTable();
-      R.tmBait.bondOptions = TERMITE_BOND_OPTIONS;
       // The bond rider and station rental are retired on the annual plan (plan §A2).
+      if (!onAnnualPlan) R.tmBait.bondOptions = TERMITE_BOND_OPTIONS;
       const tmBond = onAnnualPlan ? null : (TERMITE_BOND_OPTIONS.find((o) => o.key === termiteBondTerm) || null);
       R.tmBait.selectedBondTerm = tmBond ? tmBond.key : null;
       if (tmBond) {

@@ -223,6 +223,7 @@ describe("annual protection plan mirror (ruling A-1 = P1; server gate word via f
       expect(on.results.tmBait.pricingKnobs).toMatchObject({ plan: "annual_protection", setupPerStation: 30, annualBase: 249 });
       expect(on.results.tmBond).toBeUndefined();
       expect(on.results.tmBait.rented).toBeUndefined();
+      expect(on.results.tmBait.bondOptions).toBeUndefined();
       const row = on.recurring.services.find((s) => s.service === "termite_bait");
       expect(row).toMatchObject({ perTreatment: 249 + brackets * 50, visitsPerYear: 1 });
       expect(on.oneTime.tmInstall).toBe(sta * 30);

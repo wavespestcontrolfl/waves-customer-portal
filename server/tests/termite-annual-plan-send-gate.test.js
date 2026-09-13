@@ -8,7 +8,8 @@
  * on carries it too. Unsetting the gate must therefore stop that draft from
  * being DELIVERED (a delivered estimate is viewable and acceptable; a draft is
  * neither — UNPUBLISHED_ESTIMATE_STATUSES keeps draft/scheduled rows off every
- * public money path). `sent_at` is the durable publication witness.
+ * public money path). deliveryState.firstDeliveredAt is the durable real-
+ * provider-handoff witness; sent_at can also describe a suppressed SMS.
  */
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
@@ -144,7 +145,16 @@ describe('assertEstimateSendable — GATE_TERMITE_ANNUAL_PLAN at delivery', () =
   });
 
   test('gate OFF: a RESEND of an already-delivered plan still goes out — the switch stops new contracts, it does not retract issued ones', () => {
-    expect(caught(planDraft({ status: 'sent', sent_at: new Date('2026-09-12T00:00:00Z') }))).toBeNull();
+    expect(caught(planDraft({
+      status: 'sent',
+      sent_at: new Date('2026-09-12T00:00:00Z'),
+      estimate_data: { result: { lineItems: [PLAN_LINE] }, deliveryState: { firstDeliveredAt: '2026-09-12T00:00:00.000Z' } },
+    }))).toBeNull();
+  });
+
+  test('gate OFF: a suppressed-only SMS sent_at is not publication and cannot bypass the kill switch', () => {
+    const err = caught(planDraft({ status: 'sent', sent_at: new Date('2026-09-12T00:00:00Z') }));
+    expect(err?.code).toBe('TERMITE_ANNUAL_PLAN_DISABLED');
   });
 
   test('gate ON: the same draft sends', () => {
