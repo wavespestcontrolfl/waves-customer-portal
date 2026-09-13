@@ -3,10 +3,12 @@
 const crypto = require('crypto');
 const { gateEnvValue } = require('../config/feature-gates');
 const { parseETDateTime } = require('../utils/datetime-et');
+const { arrivalWindowRange } = require('../utils/sms-time-format');
 const { lockTriageCall } = require('../utils/triage-locks');
 const { recordAuditEvent } = require('./audit-log');
 const { probeSlotOverlap } = require('./scheduling/window-rules');
-const { loadCandidates, planRescheduleFromCall, applyReviewedCallReschedule, ACTIVITY_ACTION } = require('./call-reschedule-apply');
+const { etWallClockOfConfirmedStart } = require('./call-triage-flags');
+const { loadCandidates, planRescheduleFromCall, applyReviewedCallReschedule, humanHandledRescheduleCard, ACTIVITY_ACTION } = require('./call-reschedule-apply');
 
 const enabled = () => gateEnvValue('GATE_RESCHEDULE_PROPOSAL_CARD');
 const fail = (message, status = 409) => Object.assign(new Error(message), { status });
@@ -61,12 +63,21 @@ function proposalEvidence(v2, transcript) {
 function customerWindow(date, start) {
   if (!date || !start) return null;
   const day = date instanceof Date ? date.toISOString().slice(0, 10) : String(date).slice(0, 10);
-  const at = parseETDateTime(`${day}T${String(start).slice(0, 5)}`);
-  if (!at || Number.isNaN(at.getTime())) return null;
-  return { start_at: at.toISOString(), end_at: new Date(at.getTime() + 120 * 60000).toISOString() };
+  const range = arrivalWindowRange(start);
+  const match = range?.match(/^(\d{2}:\d{2})-(\d{2}:\d{2})$/);
+  if (!match) return null;
+  const startMinutes = Number(match[1].slice(0, 2)) * 60 + Number(match[1].slice(3));
+  const endMinutes = Number(match[2].slice(0, 2)) * 60 + Number(match[2].slice(3));
+  const [year, month, dateOfMonth] = day.split('-').map(Number);
+  const endDay = endMinutes <= startMinutes
+    ? new Date(Date.UTC(year, month - 1, dateOfMonth + 1)).toISOString().slice(0, 10) : day;
+  const startAt = parseETDateTime(`${day}T${match[1]}`);
+  const endAt = parseETDateTime(`${endDay}T${match[2]}`);
+  if (!startAt || !endAt || Number.isNaN(startAt.getTime()) || Number.isNaN(endAt.getTime())) return null;
+  return { start_at: startAt.toISOString(), end_at: endAt.toISOString() };
 }
 
-async function stageProposal(conn, { callId, procGeneration = null } = {}) {
+async function stageProposal(conn, { callId, procGeneration = null, now = new Date() } = {}) {
   if (!enabled() || !callId) return { staged: false };
   return conn.transaction(async (trx) => {
     await lockTriageCall(trx, callId);
@@ -88,18 +99,16 @@ async function stageProposal(conn, { callId, procGeneration = null } = {}) {
     if (v2?.meta?.is_spam || v2?.meta?.is_voicemail || v2?.scheduling?.status !== 'reschedule_requested') return retire();
     const proposed = v2.scheduling.proposed_start_at;
     const quote = proposalEvidence(v2, call.transcription);
-    if (!proposed || !Number.isFinite(new Date(proposed).getTime()) || !quote) return retire();
+    const requestedAt = new Date(proposed);
+    if (!proposed || !Number.isFinite(requestedAt.getTime()) || requestedAt.getTime() <= now.getTime() || !quote) return retire();
     const handled = await trx('activity_log').where({ action: ACTIVITY_ACTION })
       .whereRaw("metadata->>'call_log_id' = ?", [callId]).first('id');
     if (handled) return { staged: false };
-    const priorHuman = await trx('triage_items').where({ call_log_id: callId, reason_code: 'reschedule_or_cancel', resolution_source: 'human' })
-      .whereIn('status', ['resolved', 'dismissed']).first('id');
-    if (priorHuman) return { staged: false };
+    if (await humanHandledRescheduleCard(trx, callId)) return retire();
     const proposal = { version: 1, proposed_start_at: proposed, quote,
-      call_generation: call.processing_generation, staged_at: new Date().toISOString() };
+      call_generation: call.processing_generation, staged_at: now.toISOString() };
     let card = await trx('triage_items').where({ call_log_id: callId, reason_code: 'reschedule_or_cancel' })
       .whereIn('status', openStates).forUpdate().first();
-    if (card?.status === 'in_progress') return { staged: false, reason: 'claimed_by_staff' };
     if (card) {
       const previous = card.payload?.reschedule_proposal;
       if (previous?.proposed_start_at === proposed && previous?.quote === quote
@@ -142,9 +151,9 @@ async function listProposals(conn, { limit = 100, offset = 0, now = new Date() }
     row.skip_reason = row.payload.reschedule_apply?.skipped || 'agent_did_not_commit';
     delete row.payload;
     row.candidates = await visitsForCard(conn, row.customer_id, now);
-    const requested = new Date(row.proposal.proposed_start_at);
+    const requested = etWallClockOfConfirmedStart(row.proposal.proposed_start_at);
     row.matched_visit_id = row.candidates.length === 1 ? row.candidates[0].id : null;
-    row.requested_window = { start_at: requested.toISOString(), end_at: new Date(requested.getTime() + 120 * 60000).toISOString() };
+    row.requested_window = requested ? customerWindow(requested.slice(0, 10), requested.slice(11, 16)) : null;
     // Preserve appointment internals on the server; the card needs only the
     // identity and customer-facing window for choosing the discussed visit.
     row.candidates = row.candidates.map((visit) => {
@@ -182,7 +191,7 @@ async function previewProposal(conn, id, { visitId, now = new Date(), rebooker =
   if (plan.action === 'skip') throw fail(`This request needs the schedule editor: ${plan.reason.replace(/_/g, ' ')}`);
   const mover = rebooker || require('./rebooker');
   const series = mover.collectiveMoveGateOn()
-    ? await mover.previewSeriesMove(selection, plan.newDate, plan.newWindow) : { collective: false };
+    ? await mover.previewSeriesMove(selection, plan.newDate, plan.newWindow, { adminWindowRules: true }) : { collective: false };
   const selected = candidates.find((v) => v.id === selection);
   const overlapRows = await conn.transaction((trx) => probeSlotOverlap({
     trx,

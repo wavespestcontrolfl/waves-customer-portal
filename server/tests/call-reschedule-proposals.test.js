@@ -31,24 +31,32 @@ describe('reviewed proposed times', () => {
     expect(planRescheduleFromCall({ ...args, candidates: candidates.map((row) => ({ ...row, customer_id: 'foreign' })), humanOverride: { visitId: 'missed' } }).reason).toBe('no_visit_on_books');
     expect(customerWindow('2099-09-10', '14:00')).toEqual({ start_at: '2099-09-10T18:00:00.000Z', end_at: '2099-09-10T20:00:00.000Z' });
   });
+  test('customer arrival windows preserve two Eastern wall-clock hours across spring forward', () => {
+    expect(customerWindow('2029-03-11', '01:00')).toEqual({
+      start_at: '2029-03-11T06:00:00.000Z',
+      end_at: '2029-03-11T07:00:00.000Z',
+    });
+  });
   test('an old proposal stays open instead of aging out as an advisory', () => {
     expect(classifyTriageItem({ status: 'open', severity: 'advisory', reason_code: 'reschedule_or_cancel', created_at: '2001-01-01',
       payload: { reschedule_proposal: { proposed_start_at: v2.scheduling.proposed_start_at } } }, { evidence: new Map() })).toBeNull();
   });
 });
 
-function stageConn(call, card) {
+function stageConn(call, card, { handledCard = null } = {}) {
   const updates = [];
   const conn = (table) => {
-    const state = { where: {}, nullColumn: null };
+    const state = { where: {}, whereIn: {}, nullColumn: null };
     const query = {
       where(arg) { if (arg && typeof arg === 'object') Object.assign(state.where, arg); return query; },
+      whereIn(column, values) { state.whereIn[column] = values; return query; },
       whereNull(column) { state.nullColumn = column; return query; },
       whereRaw() { return query; },
       forUpdate() { return query; },
       first() {
         if (table === 'call_log') return Promise.resolve(call);
         if (table === 'triage_items') {
+          if (state.whereIn.reason_code) return Promise.resolve(handledCard);
           const matches = card && Object.entries(state.where).every(([key, value]) => card[key] === value)
             && (!state.nullColumn || card[state.nullColumn] == null)
             && card.payload?.reschedule_proposal;
@@ -91,6 +99,46 @@ describe('proposal staging after call reprocessing', () => {
       expect(await stageProposal(claimedConn, { callId: 'call', procGeneration: 2 })).toEqual({ staged: false });
       expect(claimedCard.payload).toEqual(payload);
       expect(claimedConn.updates).toHaveLength(0);
+    } finally {
+      if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
+      else process.env.GATE_RESCHEDULE_PROPOSAL_CARD = priorGate;
+    }
+  });
+
+  test('expired requests and human-handled sibling workflows retire only an unclaimed proposal', async () => {
+    const priorGate = process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
+    process.env.GATE_RESCHEDULE_PROPOSAL_CARD = 'true';
+    const quote = 'Could you come Thursday at two instead?';
+    const call = { id: 'call', customer_id: 'customer', processing_token: null, processing_generation: 2,
+      v2_extraction_status: 'valid', transcription: `Caller: ${quote}`,
+      ai_extraction_enriched: { scheduling: { status: 'reschedule_requested', proposed_start_at: '2099-09-10T14:00:00-04:00' },
+        evidence: [{ field_path: '/scheduling/proposed_start_at', speaker: 'caller', quote }] } };
+    const proposal = () => ({ id: 'proposal-card', call_log_id: 'call', reason_code: 'reschedule_or_cancel', status: 'open',
+      assigned_to: null, payload: { reschedule_proposal: { call_generation: 1 }, keep: true } });
+    try {
+      const expired = proposal();
+      const expiredCall = { ...call, ai_extraction_enriched: { ...call.ai_extraction_enriched,
+        scheduling: { status: 'reschedule_requested', proposed_start_at: '2026-09-10T14:00:00-04:00' } } };
+      await stageProposal(stageConn(expiredCall, expired), { callId: 'call', procGeneration: 2, now: new Date('2026-09-11T00:00:00Z') });
+      expect(expired.payload).toEqual({ keep: true });
+
+      for (const handledCard of [
+        { id: 'coord-claimed', status: 'in_progress' },
+        { id: 'coord-resolved', status: 'resolved', resolution_source: 'human' },
+        { id: 'coord-dismissed', status: 'dismissed', resolution_source: 'human' },
+      ]) {
+        const open = proposal();
+        await stageProposal(stageConn(call, open, { handledCard }), {
+          callId: 'call', procGeneration: 2, now: new Date('2099-09-09T12:00:00Z'),
+        });
+        expect(open.payload).toEqual({ keep: true });
+      }
+
+      const claimed = { ...proposal(), status: 'in_progress', assigned_to: 'staff' };
+      await stageProposal(stageConn(call, claimed, { handledCard: { id: 'coord-claimed', status: 'in_progress' } }), {
+        callId: 'call', procGeneration: 2, now: new Date('2099-09-09T12:00:00Z'),
+      });
+      expect(claimed.payload).toHaveProperty('reschedule_proposal');
     } finally {
       if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
       else process.env.GATE_RESCHEDULE_PROPOSAL_CARD = priorGate;
