@@ -24,7 +24,8 @@ function isServiceReportPath(reqPath = '') {
   return /^\/report\/[a-f0-9]{32}\/?$/i.test(value)
     || /^\/report\/project\/[a-z0-9-]+\/?$/i.test(value)
     // Recap player carries the same bearer report token in the URL.
-    || /^\/recap\/[a-f0-9]{32}\/?$/i.test(value);
+    || /^\/recap\/[a-f0-9]{32}\/?$/i.test(value)
+    || /^\/visit\/[a-f0-9]{64}\/?$/.test(value);
 }
 
 // Public tokenized customer estimate page. The token is a bearer credential in

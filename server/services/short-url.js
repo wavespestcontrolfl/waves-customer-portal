@@ -223,7 +223,11 @@ async function createTrackedShortLink(longUrl, opts = {}) {
 // Optional `purpose` scopes the reuse to codes THIS workflow minted — a
 // retrying sender must never adopt another campaign's code and inherit its
 // click attribution (pre-push codex P1 on #3814).
-async function existingShortUrlFor({ kind, entityType, entityId, purpose = null }) {
+// `rethrow: true` is for callers that must tell "no short code" from "could
+// not read the short codes" — the stranded-send reconciliation searches the
+// provider for this link, so an unreadable code has to read as unknown
+// rather than as an absent one (local audit).
+async function existingShortUrlFor({ kind, entityType, entityId, purpose = null, rethrow = false }) {
   if (!kind || !entityType || !entityId) return null;
   try {
     const lookup = db('short_codes')
@@ -235,6 +239,7 @@ async function existingShortUrlFor({ kind, entityType, entityId, purpose = null 
     return row?.code ? `${baseUrl()}/l/${row.code}` : null;
   } catch (err) {
     logger.warn(`[short-url] existing-code lookup failed for ${kind}/${entityId}: ${err.message}`);
+    if (rethrow) throw err;
     return null;
   }
 }

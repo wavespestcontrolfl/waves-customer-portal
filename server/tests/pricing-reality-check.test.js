@@ -93,6 +93,42 @@ describe('pricing reality check calculations', () => {
     expect(result.summary.avgActualMinutes).toBe(45);
   });
 
+  test.each([
+    ['zero', 0],
+    ['unknown', null],
+  ])('keeps a grouped %s allocation ahead of linked timers and shared spans', (_label, allocatedMinutes) => {
+    expect(resolveActualMinutes({
+      service_time_minutes: allocatedMinutes,
+      actual_duration_minutes: allocatedMinutes,
+      time_entry_minutes: 90,
+      time_entry_clock_in: '2026-05-15T14:00:00.000Z',
+      time_entry_clock_out: '2026-05-15T15:30:00.000Z',
+      arrived_at: '2026-05-15T14:00:00.000Z',
+      completed_at: '2026-05-15T16:00:00.000Z',
+      service_record_started_at: '2026-05-15T14:00:00.000Z',
+      service_record_ended_at: '2026-05-15T16:00:00.000Z',
+      service_record_structured_notes: JSON.stringify({
+        timeOnSite: allocatedMinutes,
+        visitDurationAllocation: { version: 1, allocatedMinutes },
+      }),
+    })).toBe(allocatedMinutes);
+  });
+
+  test('lets a later admin duration correction supersede the grouped allocation', () => {
+    expect(resolveActualMinutes({
+      service_time_minutes: 45,
+      actual_duration_minutes: 45,
+      time_entry_minutes: 90,
+      arrived_at: '2026-05-15T14:00:00.000Z',
+      completed_at: '2026-05-15T16:00:00.000Z',
+      service_record_structured_notes: JSON.stringify({
+        timeOnSite: 45,
+        timeOnSiteAdjusted: true,
+        visitDurationAllocation: { version: 1, allocatedMinutes: 20 },
+      }),
+    })).toBe(45);
+  });
+
   test('groups completed services by Eastern month', () => {
     const result = buildPricingRealityCheckFromRows([
       completedRow({

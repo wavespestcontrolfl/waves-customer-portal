@@ -10,6 +10,16 @@ This contract records the admin UI that is actually shipped and supported. Where
 
 The September 8, 2026 foundation revision promotes the accepted Customer workspace presentation for new and deliberately migrated work. Start those surfaces with `<UiSurface density="comfortable">`. The existing catalog at `/admin/_design-system` demonstrates the controls, behavior, and implementation source. This revision does not globally restyle existing pages. See [the acceptance record](admin-foundation-acceptance-2026-09-08.md) for the original local implementation evidence and its verification limits.
 
+## Explicitly promoted admin scopes
+
+The following scopes use the full shared admin component foundation rather than the older redesign spec's token-only treatment. These entries are additive to previously accepted migrations; they are not an exhaustive route inventory:
+
+- `/admin/service-library`: catalog and service editors, Discounts tools, and the separate mobile service/category screens.
+- `/admin/agents`: Triage & Decisions, Shadow Drafts (including voice profiles, sealed exams and pathology review), and Data Hygiene.
+- `/admin/lawn-assessments?tab=field`: the assessment hub's field panel, photo/scoring review and turf-profile editor.
+
+These promotions cover presentation and component structure only. Existing data, fields, requests, actions, permissions and approval boundaries remain authoritative. They do not promote any customer-facing report or shared tech-app component. Blog, Reports and Referrals retain their existing scope until explicitly decided separately.
+
 ## Safety rules
 
 1. Keep information-architecture, visual, content, and endpoint changes in separate pull requests.

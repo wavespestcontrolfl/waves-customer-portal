@@ -1,59 +1,29 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Bot, CheckCircle2, ClipboardList, Edit3, MessageSquare, PhoneCall, RefreshCw, Save, ShieldAlert, UserRound, XCircle } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
-import useIsMobile from "../../hooks/useIsMobile";
+import {
+  ActionFeedback,
+  Badge,
+  Button,
+  Card,
+  CardBody,
+  CardHeader,
+  CardTitle,
+  Field as FormField,
+  Input,
+  Textarea,
+  UiSurface,
+} from "../../components/ui";
 import { adminFetch } from "../../utils/admin-fetch";
-
-const D = {
-  bg: "#F4F4F5",
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  heading: "#09090B",
-  text: "#27272A",
-  muted: "#71717A",
-  green: "#15803D",
-  amber: "#A16207",
-  red: "#991B1B",
-  blue: "#1D4ED8",
-};
 
 const STATUSES = ["pending_review", "accepted", "corrected", "dismissed", "all"];
 
 function Chip({ children, tone = "neutral" }) {
-  const colors = {
-    green: { bg: "#DCFCE7", fg: D.green },
-    amber: { bg: "#FEF3C7", fg: D.amber },
-    red: { bg: "#FEE2E2", fg: D.red },
-    blue: { bg: "#DBEAFE", fg: D.blue },
-    neutral: { bg: D.bg, fg: D.text },
-  }[tone] || { bg: D.bg, fg: D.text };
-  return (
-    <span style={{
-      display: "inline-flex",
-      alignItems: "center",
-      minHeight: 24,
-      padding: "0 8px",
-      borderRadius: 6,
-      background: colors.bg,
-      color: colors.fg,
-      fontSize: 12,
-      fontWeight: 700,
-      whiteSpace: "nowrap",
-    }}>
-      {children}
-    </span>
-  );
+  return <Badge tone={tone === "red" ? "alert" : "neutral"}>{children}</Badge>;
 }
 
 function statusLabel(value) {
   return String(value || "").replace(/_/g, " ").replace(/\b\w/g, (ch) => ch.toUpperCase());
-}
-
-function statusTone(value) {
-  if (value === "accepted") return "green";
-  if (value === "corrected") return "blue";
-  if (value === "dismissed") return "red";
-  return "amber";
 }
 
 function actionLabel(value) {
@@ -88,38 +58,37 @@ function timeLabel(value) {
 }
 
 function TextList({ items = [], empty = "-" }) {
-  if (!items.length) return <span style={{ color: D.muted }}>{empty}</span>;
+  if (!items.length) return <span className="text-ink-secondary">{empty}</span>;
   return (
-    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+    <div className="flex flex-wrap gap-2">
       {items.map((item) => <Chip key={item}>{actionLabel(item)}</Chip>)}
     </div>
   );
 }
 
-function Field({ label, value }) {
+function DetailField({ label, value }) {
   if (value === null || value === undefined || value === "") return null;
   return (
-    <div>
-      <div style={{ fontSize: 11, color: D.muted, fontWeight: 700 }}>{label}</div>
-      <div style={{ fontSize: 13, color: D.text, lineHeight: 1.35 }}>{String(value)}</div>
+    <div className="min-w-0">
+      <div className="text-14 font-medium text-ink-secondary">{label}</div>
+      <div className="break-words text-ui-body text-zinc-800">{String(value)}</div>
     </div>
   );
 }
 
 function Panel({ icon: Icon, title, children }) {
   return (
-    <section style={{ display: "grid", gap: 10, border: `1px solid ${D.border}`, borderRadius: 8, padding: 12 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: D.muted, fontWeight: 700 }}>
-        {Icon && <Icon size={16} />}
+    <Card className="p-4 space-y-3">
+      <div className="flex items-center gap-2 text-14 font-medium text-zinc-900">
+        {Icon && <Icon size={16} aria-hidden />}
         {title}
       </div>
       {children}
-    </section>
+    </Card>
   );
 }
 
 export default function AgentDecisionsPage({ embedded = false } = {}) {
-  const isMobile = useIsMobile();
   const [status, setStatus] = useState("pending_review");
   const [data, setData] = useState({ decisions: [], metrics: null });
   const [selectedId, setSelectedId] = useState(null);
@@ -197,7 +166,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
 
   const review = useCallback(async (decision, verdict) => {
     if (!decision) return;
-    setBusyId(decision.id);
+    setBusyId(`${decision.id}:${verdict}`);
     setError("");
     setNotice("");
     try {
@@ -226,7 +195,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
 
   const saveReplyTraining = useCallback(async (decision, replyVerdict) => {
     if (!decision) return;
-    setBusyId(`${decision.id}:reply`);
+    setBusyId(`${decision.id}:reply:${replyVerdict}`);
     setError("");
     setNotice("");
     try {
@@ -260,7 +229,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
   const replyRates = replyMetrics.rates || {};
 
   return (
-    <div style={{ minHeight: "100%", background: D.bg, color: D.text }}>
+    <UiSurface density="comfortable" className="min-h-full space-y-5 text-zinc-800">
       {!embedded && (
         <AdminCommandHeader
           title="Agent review"
@@ -269,27 +238,18 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
         />
       )}
 
-      <div style={{ padding: isMobile ? "0 0 32px" : "0 24px 32px", display: "grid", gap: 16, minWidth: 0 }}>
+      <div className="space-y-5 min-w-0">
         {data.missingTable && (
-          <div style={{ background: "#FEF3C7", border: `1px solid ${D.amber}`, color: D.amber, borderRadius: 8, padding: 12, display: "flex", gap: 8, alignItems: "center" }}>
-            <ShieldAlert size={18} />
+          <ActionFeedback error>
+            <ShieldAlert size={18} aria-hidden />
             Run the agent_decisions migration before review data can be recorded.
-          </div>
+          </ActionFeedback>
         )}
 
-        {(notice || error) && (
-          <div style={{
-            background: error ? "#FEE2E2" : "#DCFCE7",
-            border: `1px solid ${error ? D.red : D.green}`,
-            color: error ? D.red : D.green,
-            borderRadius: 8,
-            padding: 12,
-          }}>
-            {error || notice}
-          </div>
-        )}
+        {error && <ActionFeedback error>{error}</ActionFeedback>}
+        {notice && <ActionFeedback>{notice}</ActionFeedback>}
 
-        <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2, minmax(0, 1fr))" : "repeat(5, minmax(0, 1fr))", gap: 10 }}>
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
           {[
             ["Pending", metrics.pending || 0],
             ["Accepted", metrics.accepted || 0],
@@ -297,168 +257,148 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
             ["Dismissed", metrics.dismissed || 0],
             ["Reply Examples", metrics.replyTraining?.reviewed || 0],
           ].map(([label, value]) => (
-            <div key={label} style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 14 }}>
-              <div style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>{label}</div>
-              <div style={{ fontSize: 26, fontWeight: 700, color: D.heading }}>{value}</div>
-            </div>
+            <Card key={label} className="p-4">
+              <div className="text-14 font-medium text-ink-secondary">{label}</div>
+              <div className="text-28 font-medium text-zinc-900 u-nums">{value}</div>
+            </Card>
           ))}
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: isMobile ? "minmax(0, 1fr)" : "1.1fr 1.2fr 1fr", gap: 12, alignItems: "start" }}>
-          <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 14, display: "grid", gap: 10 }}>
-            <div style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>Reply Quality</div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
+        <div className="grid gap-3 xl:grid-cols-3 items-start">
+          <Card><CardHeader><CardTitle>Reply quality</CardTitle></CardHeader><CardBody className="grid grid-cols-2 gap-2">
               {[
-                ["Accept", replyVerdicts.accepted || 0, replyRates.accepted, D.green],
-                ["Edit", replyVerdicts.edited || 0, replyRates.edited, D.blue],
-                ["Reject", replyVerdicts.rejected || 0, replyRates.rejected, D.red],
-                ["No Reply", replyVerdicts.noReplyNeeded || 0, replyRates.noReplyNeeded, D.amber],
-              ].map(([label, count, rate, color]) => (
-                <div key={label} style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: 10 }}>
-                  <div style={{ color: D.muted, fontSize: 11, fontWeight: 700 }}>{label}</div>
-                  <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-                    <strong style={{ color, fontSize: 22 }}>{count}</strong>
-                    <span style={{ color: D.muted, fontSize: 12 }}>{percent(rate)}</span>
+                ["Accept", replyVerdicts.accepted || 0, replyRates.accepted],
+                ["Edit", replyVerdicts.edited || 0, replyRates.edited],
+                ["Reject", replyVerdicts.rejected || 0, replyRates.rejected],
+                ["No reply", replyVerdicts.noReplyNeeded || 0, replyRates.noReplyNeeded],
+              ].map(([label, count, rate]) => (
+                <Card key={label} className="p-3">
+                  <div className="text-14 font-medium text-ink-secondary">{label}</div>
+                  <div className="flex items-baseline gap-2 u-nums">
+                    <strong className="text-22 font-medium text-zinc-900">{count}</strong>
+                    <span className="text-ui-caption text-ink-secondary">{percent(rate)}</span>
                   </div>
-                </div>
+                </Card>
               ))}
-            </div>
-          </div>
+          </CardBody></Card>
 
-          <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 14, display: "grid", gap: 10 }}>
-            <div style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>By Workflow</div>
+          <Card><CardHeader><CardTitle>By workflow</CardTitle></CardHeader><CardBody>
             {replyMetrics.byWorkflow?.length ? (
-              <div style={{ display: "grid", gap: 8 }}>
+              <div className="space-y-2">
                 {replyMetrics.byWorkflow.map((row) => (
-                  <div key={row.workflow} style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto auto", gap: 10, alignItems: "center", fontSize: 13 }}>
-                    <div style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 700 }}>{row.workflow}</div>
-                    <span style={{ color: D.muted }}>{row.reviewed} reviewed</span>
-                    <span style={{ color: row.rejectedRate > 0.15 ? D.red : D.green, fontWeight: 700 }}>{percent(row.acceptanceRate)} accept</span>
+                  <div key={row.workflow} className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2 text-ui-body">
+                    <div className="truncate font-medium text-zinc-900">{row.workflow}</div>
+                    <span className="text-ink-secondary u-nums">{row.reviewed} reviewed</span>
+                    <span className={`${row.rejectedRate > 0.15 ? "text-alert-fg" : "text-zinc-900"} font-medium u-nums`}>
+                      {percent(row.acceptanceRate)} accept
+                    </span>
                   </div>
                 ))}
               </div>
             ) : (
-              <div style={{ color: D.muted, fontSize: 13 }}>No reviewed reply examples yet.</div>
+              <ActionFeedback>No reviewed reply examples yet.</ActionFeedback>
             )}
-          </div>
+          </CardBody></Card>
 
-          <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 14, display: "grid", gap: 10 }}>
-            <div style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>Top Scenarios</div>
+          <Card><CardHeader><CardTitle>Top scenarios</CardTitle></CardHeader><CardBody>
             {replyMetrics.byScenario?.length ? (
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <div className="flex flex-wrap gap-2">
                 {replyMetrics.byScenario.map((row) => (
                   <Chip key={row.scenarioLabel}>{actionLabel(row.scenarioLabel)} · {row.count}</Chip>
                 ))}
               </div>
             ) : (
-              <div style={{ color: D.muted, fontSize: 13 }}>No scenario labels yet.</div>
+              <ActionFeedback>No scenario labels yet.</ActionFeedback>
             )}
-          </div>
+          </CardBody></Card>
         </div>
 
         {replyMetrics.recentRejected?.length ? (
-          <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 14, display: "grid", gap: 10 }}>
-            <div style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>Recent Rejected Drafts</div>
-            <div style={{ display: "grid", gap: 8 }}>
+          <Card><CardHeader><CardTitle>Recent rejected drafts</CardTitle></CardHeader><CardBody className="space-y-2">
               {replyMetrics.recentRejected.map((row) => (
-                <div key={row.id} style={{ display: "grid", gap: 4, borderTop: `1px solid ${D.border}`, paddingTop: 8 }}>
-                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 12, color: D.muted, fontWeight: 700 }}>
+                <div key={row.id} className="space-y-1 border-t border-hairline border-zinc-200 pt-2 first:border-t-0 first:pt-0">
+                  <div className="flex flex-wrap items-center gap-2 text-ui-caption text-ink-secondary">
                     <Chip tone="red">Rejected</Chip>
                     <span>{row.customerName || "Unknown customer"}</span>
                     <span>{row.workflow}</span>
                     {row.scenarioLabel && <span>{actionLabel(row.scenarioLabel)}</span>}
                     <span>{timeLabel(row.reviewedAt)}</span>
                   </div>
-                  <div style={{ fontSize: 13, lineHeight: 1.35 }}>{row.inboundBody || "-"}</div>
-                  {row.reviewNote && <div style={{ color: D.muted, fontSize: 13, lineHeight: 1.35 }}>{row.reviewNote}</div>}
+                  <div className="text-ui-body text-zinc-800">{row.inboundBody || "-"}</div>
+                  {row.reviewNote && <div className="text-ui-caption text-ink-secondary">{row.reviewNote}</div>}
                 </div>
               ))}
-            </div>
-          </div>
+          </CardBody></Card>
         ) : null}
 
-        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Decision status">
           {STATUSES.map((item) => (
-            <button
+            <Button
               key={item}
               type="button"
               onClick={() => setStatus(item)}
-              style={{
-                height: 36,
-                borderRadius: 6,
-                border: `1px solid ${status === item ? D.heading : D.border}`,
-                background: status === item ? D.heading : D.card,
-                color: status === item ? "#fff" : D.text,
-                padding: "0 12px",
-                fontWeight: 700,
-                cursor: "pointer",
-              }}
+              variant={status === item ? "primary" : "secondary"}
+              aria-pressed={status === item}
             >
               {statusLabel(item)}
-            </button>
+            </Button>
           ))}
-          <button
+          <Button
             type="button"
             onClick={load}
-            disabled={loading}
-            style={{ marginLeft: "auto", height: 36, borderRadius: 6, border: `1px solid ${D.border}`, background: D.card, color: D.text, padding: "0 12px", fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer" }}
+            loading={loading}
+            variant="secondary"
+            className="sm:ml-auto"
           >
-            <RefreshCw size={16} />
+            <RefreshCw size={16} aria-hidden />
             Refresh
-          </button>
+          </Button>
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: isMobile ? "minmax(0, 1fr)" : "minmax(280px, 380px) minmax(0, 1fr)", gap: 16, alignItems: "start" }}>
-          <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, overflow: "hidden" }}>
+        <div className="grid gap-4 md:grid-cols-[minmax(280px,380px)_minmax(0,1fr)] items-start">
+          <Card className="overflow-hidden">
             {loading ? (
-              <div style={{ padding: 18, color: D.muted }}>Loading decisions...</div>
+              <ActionFeedback className="m-4">Loading decisions...</ActionFeedback>
             ) : data.decisions?.length ? (
               data.decisions.map((decision) => (
                 <button
                   key={decision.id}
                   type="button"
                   onClick={() => setSelectedId(decision.id)}
-                  style={{
-                    width: "100%",
-                    textAlign: "left",
-                    border: 0,
-                    borderBottom: `1px solid ${D.border}`,
-                    background: selected?.id === decision.id ? "#F8FAFC" : D.card,
-                    padding: 14,
-                    cursor: "pointer",
-                  }}
+                  aria-pressed={selected?.id === decision.id}
+                  className="block min-h-11 w-full border-0 border-b border-hairline border-zinc-200 bg-white p-4 text-left text-ui-body hover:bg-zinc-50 aria-pressed:bg-zinc-100 u-focus-ring"
                 >
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                    <Chip tone={statusTone(decision.status)}>{statusLabel(decision.status)}</Chip>
-                    <span style={{ marginLeft: "auto", color: D.muted, fontSize: 12 }}>{timeLabel(decision.createdAt)}</span>
+                  <div className="mb-2 flex items-center gap-2">
+                    <Badge tone="neutral">{statusLabel(decision.status)}</Badge>
+                    <span className="ml-auto text-ui-caption text-ink-secondary u-nums">{timeLabel(decision.createdAt)}</span>
                   </div>
-                  <div style={{ fontWeight: 700, color: D.heading }}>{decision.customerName || "Unknown customer"}</div>
-                  <div style={{ color: D.muted, fontSize: 13, marginTop: 2 }}>{statusLabel(decision.detectedIntent)} · {confidence(decision.confidence)}</div>
-                  <div style={{ color: D.text, fontSize: 13, marginTop: 8, lineHeight: 1.35 }}>
+                  <div className="font-medium text-zinc-900">{decision.customerName || "Unknown customer"}</div>
+                  <div className="mt-1 text-ui-caption text-ink-secondary">{statusLabel(decision.detectedIntent)} · {confidence(decision.confidence)}</div>
+                  <div className="mt-2 text-ui-body text-zinc-800">
                     {decision.inboundMessage || "No message body"}
                   </div>
                 </button>
               ))
             ) : (
-              <div style={{ padding: 18, color: D.muted }}>No decisions found.</div>
+              <ActionFeedback className="m-4">No decisions found.</ActionFeedback>
             )}
-          </div>
+          </Card>
 
-          <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 18, minHeight: 480 }}>
+          <Card className="min-h-[480px]"><CardBody>
             {!selected ? (
-              <div style={{ color: D.muted }}>Select a decision to review.</div>
+              <ActionFeedback>Select a decision to review.</ActionFeedback>
             ) : (
-              <div style={{ display: "grid", gap: 18 }}>
-                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                  <Chip tone={statusTone(selected.status)}>{statusLabel(selected.status)}</Chip>
-                  <Chip tone="blue">{selected.mode}</Chip>
+              <div className="space-y-5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge tone="neutral">{statusLabel(selected.status)}</Badge>
+                  <Chip>{selected.mode}</Chip>
                   <Chip>{selected.workflow}</Chip>
-                  <span style={{ marginLeft: "auto", color: D.muted, fontSize: 12 }}>Decision {shortId(selected.id)}</span>
+                  <span className="ml-auto text-ui-caption text-ink-secondary u-nums">Decision {shortId(selected.id)}</span>
                 </div>
 
                 <section>
-                  <h2 style={{ margin: 0, fontSize: 20, color: D.heading }}>{selected.customerName || "Unknown customer"}</h2>
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+                  <h2 className="text-18 font-medium text-zinc-900">{selected.customerName || "Unknown customer"}</h2>
+                  <div className="mt-2 flex flex-wrap gap-2">
                     <Chip>Intent: {statusLabel(selected.detectedIntent)}</Chip>
                     <Chip>Confidence: {confidence(selected.confidence)}</Chip>
                     {selected.estimateId && <Chip>Estimate {shortId(selected.estimateId)} · {selected.estimateStatus || "-"}</Chip>}
@@ -466,271 +406,245 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                   </div>
                 </section>
 
-                <section style={{ display: "grid", gap: 8 }}>
-                  <div style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>Inbound Message</div>
-                  <div style={{ background: D.bg, borderRadius: 8, padding: 12, lineHeight: 1.45 }}>{selected.inboundMessage || "-"}</div>
+                <section className="space-y-2">
+                  <h3 className="text-14 font-medium text-zinc-900">Inbound message</h3>
+                  <div className="rounded-md bg-zinc-50 p-3 text-ui-body">{selected.inboundMessage || "-"}</div>
                 </section>
 
                 <Panel icon={MessageSquare} title="Conversation context">
                   {detailLoading ? (
-                    <div style={{ color: D.muted }}>Loading thread...</div>
+                    <ActionFeedback>Loading thread...</ActionFeedback>
                   ) : detail?.context?.smsThread?.length ? (
-                    <div style={{ display: "grid", gap: 8 }}>
+                    <div className="space-y-2">
                       {detail.context.smsThread.map((msg) => (
-                        <div key={msg.id} style={{
-                          display: "grid",
-                          gap: 4,
-                          padding: 10,
-                          borderRadius: 8,
-                          background: msg.isTrigger ? "#FEF3C7" : D.bg,
-                          border: `1px solid ${msg.isTrigger ? "#F59E0B" : D.border}`,
-                        }}>
-                          <div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12, color: D.muted, fontWeight: 700 }}>
+                        <div key={msg.id} className="space-y-1 rounded-md border-hairline border-zinc-200 bg-zinc-50 p-3">
+                          <div className="flex flex-wrap items-center gap-2 text-ui-caption text-ink-secondary">
                             <span>{msg.direction === "inbound" ? "Customer" : "Waves"}</span>
                             <span>{timeLabel(msg.createdAt)}</span>
                             {msg.type && <span>{msg.type}</span>}
                             {msg.isTrigger && <Chip tone="amber">Trigger</Chip>}
                           </div>
-                          <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.4 }}>{msg.body || "-"}</div>
+                          <div className="whitespace-pre-wrap text-ui-body">{msg.body || "-"}</div>
                         </div>
                       ))}
                     </div>
                   ) : (
-                    <div style={{ color: D.muted }}>No recent SMS thread found.</div>
+                    <ActionFeedback>No recent SMS thread found.</ActionFeedback>
                   )}
                 </Panel>
 
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                <div className="grid gap-3 xl:grid-cols-2">
                   <Panel icon={UserRound} title="Customer / Lead / Estimate">
                     {detail?.error ? (
-                      <div style={{ color: D.red }}>{detail.error}</div>
+                      <ActionFeedback error>{detail.error}</ActionFeedback>
                     ) : (
-                      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10 }}>
-                        <Field label="Customer" value={[detail?.context?.customer?.first_name, detail?.context?.customer?.last_name].filter(Boolean).join(" ") || selected.customerName} />
-                        <Field label="Phone" value={detail?.context?.customer?.phone || selected.customerPhone || selected.sourceFromPhone} />
-                        <Field label="Address" value={detail?.context?.customer?.address_line1 || detail?.context?.estimate?.address} />
-                        <Field label="City" value={detail?.context?.customer?.city} />
-                        <Field label="WaveGuard" value={detail?.context?.customer?.waveguard_tier || detail?.context?.estimate?.waveguard_tier} />
-                        <Field label="Lead Status" value={detail?.context?.lead?.status || selected.leadStatus} />
-                        <Field label="Estimate Status" value={detail?.context?.estimate?.status || selected.estimateStatus} />
-                        <Field label="Service Interest" value={detail?.context?.lead?.service_interest || detail?.context?.estimate?.service_interest} />
+                      <div className="grid grid-cols-2 gap-3">
+                        <DetailField label="Customer" value={[detail?.context?.customer?.first_name, detail?.context?.customer?.last_name].filter(Boolean).join(" ") || selected.customerName} />
+                        <DetailField label="Phone" value={detail?.context?.customer?.phone || selected.customerPhone || selected.sourceFromPhone} />
+                        <DetailField label="Address" value={detail?.context?.customer?.address_line1 || detail?.context?.estimate?.address} />
+                        <DetailField label="City" value={detail?.context?.customer?.city} />
+                        <DetailField label="WaveGuard" value={detail?.context?.customer?.waveguard_tier || detail?.context?.estimate?.waveguard_tier} />
+                        <DetailField label="Lead status" value={detail?.context?.lead?.status || selected.leadStatus} />
+                        <DetailField label="Estimate status" value={detail?.context?.estimate?.status || selected.estimateStatus} />
+                        <DetailField label="Service interest" value={detail?.context?.lead?.service_interest || detail?.context?.estimate?.service_interest} />
                       </div>
                     )}
                   </Panel>
 
                   <Panel icon={PhoneCall} title="Recent calls">
                     {detailLoading ? (
-                      <div style={{ color: D.muted }}>Loading calls...</div>
+                      <ActionFeedback>Loading calls...</ActionFeedback>
                     ) : detail?.context?.calls?.length ? (
-                      <div style={{ display: "grid", gap: 8 }}>
+                      <div className="space-y-2">
                         {detail.context.calls.map((call) => (
-                          <div key={call.id} style={{ display: "grid", gap: 4, borderBottom: `1px solid ${D.border}`, paddingBottom: 8 }}>
-                            <div style={{ display: "flex", gap: 8, color: D.muted, fontSize: 12, fontWeight: 700 }}>
+                          <div key={call.id} className="space-y-1 border-b border-hairline border-zinc-200 pb-2 last:border-b-0">
+                            <div className="flex flex-wrap gap-2 text-ui-caption text-ink-secondary">
                               <span>{call.direction || "call"}</span>
                               <span>{timeLabel(call.createdAt)}</span>
                               {call.outcome && <span>{call.outcome}</span>}
                             </div>
-                            <div style={{ fontSize: 13, lineHeight: 1.4 }}>{call.synopsis || call.transcription || call.notes || "-"}</div>
+                            <div className="text-ui-body">{call.synopsis || call.transcription || call.notes || "-"}</div>
                           </div>
                         ))}
                       </div>
                     ) : (
-                      <div style={{ color: D.muted }}>No recent calls found.</div>
+                      <ActionFeedback>No recent calls found.</ActionFeedback>
                     )}
                   </Panel>
                 </div>
 
                 <Panel icon={ClipboardList} title="Recent service context">
                   {detailLoading ? (
-                    <div style={{ color: D.muted }}>Loading services...</div>
+                    <ActionFeedback>Loading services...</ActionFeedback>
                   ) : detail?.context?.services?.length ? (
-                    <div style={{ display: "grid", gap: 8 }}>
+                    <div className="space-y-2">
                       {detail.context.services.map((service) => (
-                        <div key={service.id} style={{ display: "grid", gap: 4, borderBottom: `1px solid ${D.border}`, paddingBottom: 8 }}>
-                          <div style={{ display: "flex", gap: 8, color: D.muted, fontSize: 12, fontWeight: 700 }}>
+                        <div key={service.id} className="space-y-1 border-b border-hairline border-zinc-200 pb-2 last:border-b-0">
+                          <div className="flex flex-wrap gap-2 text-ui-caption text-ink-secondary">
                             <span>{service.serviceType}</span>
                             <span>{service.serviceDate || timeLabel(service.createdAt)}</span>
                             <span>{service.status}</span>
                           </div>
-                          <div style={{ fontSize: 13, lineHeight: 1.4 }}>{service.technicianNotes || "-"}</div>
+                          <div className="text-ui-body">{service.technicianNotes || "-"}</div>
                         </div>
                       ))}
                     </div>
                   ) : (
-                    <div style={{ color: D.muted }}>No recent service records found.</div>
+                    <ActionFeedback>No recent service records found.</ActionFeedback>
                   )}
                 </Panel>
 
-                <section style={{ display: "grid", gap: 8 }}>
-                  <div style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>Suggested Reply</div>
-                  <div style={{ background: D.bg, borderRadius: 8, padding: 12, lineHeight: 1.45 }}>{selected.suggestedMessage || "-"}</div>
+                <section className="space-y-2">
+                  <h3 className="text-14 font-medium text-zinc-900">Suggested reply</h3>
+                  <div className="rounded-md bg-zinc-50 p-3 text-ui-body">{selected.suggestedMessage || "-"}</div>
                 </section>
 
                 <Panel icon={MessageSquare} title="Reply training">
-                  <div style={{ display: "grid", gap: 10 }}>
+                  <div className="space-y-3">
                     {detail?.replyTraining && (
-                      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                        <Chip tone="green">Saved</Chip>
-                        {detail.replyTraining.replyVerdict && <Chip tone={detail.replyTraining.replyVerdict === "rejected" ? "red" : detail.replyTraining.replyVerdict === "accepted" ? "green" : "blue"}>{statusLabel(detail.replyTraining.replyVerdict)}</Chip>}
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Chip>Saved</Chip>
+                        {detail.replyTraining.replyVerdict && <Chip tone={detail.replyTraining.replyVerdict === "rejected" ? "red" : "neutral"}>{statusLabel(detail.replyTraining.replyVerdict)}</Chip>}
                         {detail.replyTraining.scenarioLabel && <Chip>{actionLabel(detail.replyTraining.scenarioLabel)}</Chip>}
-                        <span style={{ color: D.muted, fontSize: 12 }}>
+                        <span className="text-ui-caption text-ink-secondary">
                           {detail.replyTraining.reviewedBy ? `Reviewed by ${detail.replyTraining.reviewedBy}` : "Reviewed"}
                           {detail.replyTraining.reviewedAt ? ` · ${timeLabel(detail.replyTraining.reviewedAt)}` : ""}
                         </span>
                       </div>
                     )}
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                      <section style={{ display: "grid", gap: 6 }}>
-                        <div style={{ fontSize: 11, color: D.muted, fontWeight: 700 }}>Actual Human Reply</div>
-                        <textarea
+                    <div className="grid gap-3 xl:grid-cols-2">
+                      <FormField label="Actual human reply">
+                        <Textarea
                           value={actualReply}
                           onChange={(event) => setActualReply(event.target.value)}
                           rows={5}
                           placeholder="If you replied, paste or adjust the actual reply here."
-                          style={{ width: "100%", resize: "vertical", border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, font: "inherit", boxSizing: "border-box" }}
                         />
-                      </section>
-                      <section style={{ display: "grid", gap: 6 }}>
-                        <div style={{ fontSize: 11, color: D.muted, fontWeight: 700 }}>Final / Rewrite Reply</div>
-                        <textarea
+                      </FormField>
+                      <FormField label="Final / rewrite reply">
+                        <Textarea
                           value={idealReply}
                           onChange={(event) => setIdealReply(event.target.value)}
                           rows={5}
                           placeholder="Accepted draft, edited version, or your replacement reply."
-                          style={{ width: "100%", resize: "vertical", border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, font: "inherit", boxSizing: "border-box" }}
                         />
-                      </section>
+                      </FormField>
                     </div>
-                    <div style={{ display: "grid", gridTemplateColumns: "minmax(180px, 260px) 1fr", gap: 10 }}>
-                      <input
+                    <div className="grid gap-3 xl:grid-cols-[minmax(180px,260px)_1fr]">
+                      <FormField label="Scenario label">
+                      <Input
                         value={replyScenarioLabel}
                         onChange={(event) => setReplyScenarioLabel(event.target.value)}
                         placeholder="scenario, e.g. scheduling"
-                        style={{ width: "100%", border: `1px solid ${D.border}`, borderRadius: 8, padding: "0 10px", font: "inherit", minHeight: 38, boxSizing: "border-box" }}
                       />
-                      <input
+                      </FormField>
+                      <FormField label="Review note">
+                      <Input
                         value={replyReviewNote}
                         onChange={(event) => setReplyReviewNote(event.target.value)}
                         placeholder="What should the agent learn from this reply?"
-                        style={{ width: "100%", border: `1px solid ${D.border}`, borderRadius: 8, padding: "0 10px", font: "inherit", minHeight: 38, boxSizing: "border-box" }}
                       />
+                      </FormField>
                     </div>
-                    <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, flexWrap: "wrap" }}>
-                      <button
+                    <div className="ui-record-actions justify-end">
+                      <Button
                         type="button"
                         disabled={!!busyId || !(idealReply.trim() || selected.suggestedMessage)}
                         onClick={() => saveReplyTraining(selected, "accepted")}
-                        style={actionButton(D.green)}
+                        variant="secondary"
+                        loading={busyId === `${selected.id}:reply:accepted`}
                       >
-                        <CheckCircle2 size={16} />
-                        Accept Draft
-                      </button>
-                      <button
+                        <CheckCircle2 size={16} aria-hidden /> Accept draft
+                      </Button>
+                      <Button
                         type="button"
                         disabled={!!busyId || !idealReply.trim()}
                         onClick={() => saveReplyTraining(selected, "edited")}
-                        style={actionButton(D.blue)}
+                        variant="secondary"
+                        loading={busyId === `${selected.id}:reply:edited`}
                       >
-                        <Edit3 size={16} />
-                        Edit & Save
-                      </button>
-                      <button
+                        <Edit3 size={16} aria-hidden /> Edit & save
+                      </Button>
+                      <Button
                         type="button"
                         disabled={!!busyId || !idealReply.trim()}
                         onClick={() => saveReplyTraining(selected, "rejected")}
-                        style={actionButton(D.red)}
+                        variant="danger"
+                        loading={busyId === `${selected.id}:reply:rejected`}
                       >
-                        <XCircle size={16} />
-                        Reject & Rewrite
-                      </button>
-                      <button
+                        <XCircle size={16} aria-hidden /> Reject & rewrite
+                      </Button>
+                      <Button
                         type="button"
                         disabled={!!busyId}
                         onClick={() => saveReplyTraining(selected, "no_reply_needed")}
-                        style={actionButton(D.amber)}
+                        variant="secondary"
+                        loading={busyId === `${selected.id}:reply:no_reply_needed`}
                       >
-                        <Save size={16} />
-                        No Reply Needed
-                      </button>
+                        <Save size={16} aria-hidden /> No reply needed
+                      </Button>
                     </div>
                   </div>
                 </Panel>
 
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-                  <section style={{ display: "grid", gap: 8 }}>
-                    <div style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>Recommended Actions</div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <section className="space-y-2">
+                    <h3 className="text-14 font-medium text-zinc-900">Recommended actions</h3>
                     <TextList items={selected.recommendedActions} />
                   </section>
-                  <section style={{ display: "grid", gap: 8 }}>
-                    <div style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>Allowed In Future</div>
+                  <section className="space-y-2">
+                    <h3 className="text-14 font-medium text-zinc-900">Allowed in future</h3>
                     <TextList items={selected.autoActionsAllowed} />
                   </section>
-                  <section style={{ display: "grid", gap: 8 }}>
-                    <div style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>Blocked Actions</div>
+                  <section className="space-y-2">
+                    <h3 className="text-14 font-medium text-zinc-900">Blocked actions</h3>
                     <TextList items={selected.blockedActions} />
                   </section>
-                  <section style={{ display: "grid", gap: 8 }}>
-                    <div style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>Safety Flags</div>
+                  <section className="space-y-2">
+                    <h3 className="text-14 font-medium text-zinc-900">Safety flags</h3>
                     <TextList items={selected.safetyFlags} />
                   </section>
                 </div>
 
-                <section style={{ display: "grid", gap: 8 }}>
-                  <div style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>Reasoning</div>
-                  <div style={{ color: D.text, lineHeight: 1.45 }}>{selected.reasoningSummary || "-"}</div>
+                <section className="space-y-2">
+                  <h3 className="text-14 font-medium text-zinc-900">Reasoning</h3>
+                  <div className="text-ui-body text-zinc-800">{selected.reasoningSummary || "-"}</div>
                 </section>
 
-                <section style={{ display: "grid", gap: 10, borderTop: `1px solid ${D.border}`, paddingTop: 16 }}>
-                  <div style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>Correction</div>
-                  <textarea
+                <section className="space-y-3 border-t border-hairline border-zinc-200 pt-4">
+                  <h3 className="text-14 font-medium text-zinc-900">Correction</h3>
+                  <FormField label="Corrected actions">
+                  <Textarea
                     value={correctedActions}
                     onChange={(event) => setCorrectedActions(event.target.value)}
                     rows={4}
-                    style={{ width: "100%", resize: "vertical", border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, font: "inherit", boxSizing: "border-box" }}
                   />
-                  <textarea
+                  </FormField>
+                  <FormField label="Review reason">
+                  <Textarea
                     value={correctionNote}
                     onChange={(event) => setCorrectionNote(event.target.value)}
                     rows={3}
                     placeholder="Why was this accepted, corrected, or dismissed?"
-                    style={{ width: "100%", resize: "vertical", border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, font: "inherit", boxSizing: "border-box" }}
                   />
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                    <button type="button" disabled={!!busyId} onClick={() => review(selected, "accepted")} style={actionButton(D.green)}>
-                      <CheckCircle2 size={16} />
-                      Accept
-                    </button>
-                    <button type="button" disabled={!!busyId} onClick={() => review(selected, "corrected")} style={actionButton(D.blue)}>
-                      <Edit3 size={16} />
-                      Correct
-                    </button>
-                    <button type="button" disabled={!!busyId} onClick={() => review(selected, "dismissed")} style={actionButton(D.red)}>
-                      <XCircle size={16} />
-                      Dismiss
-                    </button>
+                  </FormField>
+                  <div className="ui-record-actions">
+                    <Button type="button" disabled={!!busyId} loading={busyId === `${selected.id}:accepted`} onClick={() => review(selected, "accepted")}>
+                      <CheckCircle2 size={16} aria-hidden /> Accept
+                    </Button>
+                    <Button type="button" disabled={!!busyId} loading={busyId === `${selected.id}:corrected`} onClick={() => review(selected, "corrected")} variant="secondary">
+                      <Edit3 size={16} aria-hidden /> Correct
+                    </Button>
+                    <Button type="button" disabled={!!busyId} loading={busyId === `${selected.id}:dismissed`} onClick={() => review(selected, "dismissed")} variant="danger">
+                      <XCircle size={16} aria-hidden /> Dismiss
+                    </Button>
                   </div>
                 </section>
               </div>
             )}
-          </div>
+          </CardBody></Card>
         </div>
       </div>
-    </div>
+    </UiSurface>
   );
-}
-
-function actionButton(color) {
-  return {
-    height: 38,
-    borderRadius: 6,
-    border: `1px solid ${color}`,
-    background: color,
-    color: "#fff",
-    padding: "0 12px",
-    fontWeight: 700,
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 6,
-    cursor: "pointer",
-  };
 }

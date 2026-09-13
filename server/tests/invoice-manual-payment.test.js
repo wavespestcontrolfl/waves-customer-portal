@@ -134,6 +134,35 @@ describe('recordManualPayment — refusal contract', () => {
     expect(err.currentStatus).toBe('paid');
   });
 
+  test('a Bill-To assignment that commits after the pre-read → 409 under the lock, nothing recorded (audit P0)', async () => {
+    // The unlocked read at the top sees a plain self-pay invoice; the row this
+    // transaction locks carries the withdrawal stamp. Only `status` is
+    // re-checked at the paid flip, and the self-pay resolver reads this
+    // invoice's own representative service — the payer can sit on another
+    // billed member of the same packet.
+    db.mockImplementation(() => recorder({ first: openInvoice() }));
+    let invoiceUpdate = null;
+    let paymentsInsert = null;
+    db.transaction.mockImplementation(async (fn) => {
+      const trx = jest.fn((table) => {
+        if (table === 'invoices') {
+          const r = recorder({ first: openInvoice({ scheduled_send_error: 'payer_billed:5:hold' }), returning: [] });
+          invoiceUpdate = r.update;
+          return r;
+        }
+        if (table === 'payments') { const r = recorder(); paymentsInsert = r.insert; return r; }
+        throw new Error(`unexpected trx table ${table}`);
+      });
+      trx.fn = { now: () => 'NOW()' };
+      return fn(trx);
+    });
+    const err = await refusalOf(recordManualPayment('inv-1', { method: 'zelle' }));
+    expect(err.statusCode).toBe(409);
+    expect(err.message).toMatch(/billed to a third-party payer.*nothing was recorded/);
+    expect(invoiceUpdate).not.toHaveBeenCalled();
+    expect(paymentsInsert).toBeNull();
+  });
+
   test.each(['cancelled', 'no_show', 'skipped'])('invoice whose visit is %s under the lock → 409 visitNeverRan, no paid flip, no ledger row (#3878 r2 fence)', async (visitStatus) => {
     db.mockImplementation(() => recorder({ first: openInvoice({ scheduled_service_id: 'svc-1' }) }));
     let invoiceUpdate = null;

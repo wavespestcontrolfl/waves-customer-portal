@@ -10,12 +10,24 @@ vi.mock('socket.io-client', () => ({ io: () => ({ on: (_event, callback) => { mo
 vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false }));
 vi.mock('../../components/tech/TechIntelligenceBar', () => ({ default: () => <div>Field assistant</div> }));
 vi.mock('../../components/tech/GeofenceArrivalPrompt', () => ({ default: () => null }));
-vi.mock('../../components/tech/CreateProjectModal', () => ({ default: () => null, wdoFeeSeedFromVisit: () => null }));
+vi.mock('../../components/tech/CreateProjectModal', () => ({
+  default: ({ onPendingPhotosChange, onCreated }) => <div role="dialog" aria-label="Create project fixture">
+    <button onClick={() => onPendingPhotosChange(true)}>Queue report photo</button>
+    <button onClick={() => onPendingPhotosChange(false)}>Clear report photos</button>
+    <button onClick={() => onCreated({ id: 'created-report', status: 'draft' })}>Finish partial report</button>
+  </div>,
+  wdoFeeSeedFromVisit: () => null,
+}));
 vi.mock('../../components/tech/TechTimeTrackingCard', () => ({ default: () => <div>Shift time</div> }));
 vi.mock('../../components/tech/TechServicePhotosModal', () => ({ default: ({ serviceId }) => <div>Photos for {serviceId}</div> }));
 vi.mock('../../components/tech/TechTreatmentZoneModal', () => ({ default: () => null }));
 vi.mock('../../components/tech/FieldLeadModal', () => ({ default: () => null }));
 vi.mock('../../components/ServiceRecapModal', () => ({ default: () => <div>Existing recap form</div> }));
+vi.mock('../admin/ProjectsPage', () => ({ ProjectDetail: ({ projectId, onDirtyChange, onClose }) => <div data-testid="project-detail" data-project-id={projectId}>
+  <button onClick={() => onDirtyChange(true)}>Edit report</button>
+  <button onClick={() => onDirtyChange(false)}>Save report</button>
+  <button onClick={onClose}>Close report</button>
+</div> }));
 vi.mock('./VisitBriefPanel', () => ({ default: ({ stop, detail, onRetry, onPhotos, onBusyChange }) => <div>
   <p>Property brief for {stop.primary.id}</p>
   <p>{detail?.byService?.[stop.primary.id]?.brief?.facts?.access?.accessNotes}</p>
@@ -173,6 +185,36 @@ describe('Tech field workspace uses the existing route workflow', () => {
     expect(screen.getByRole('button', { name: 'Today' })).toBeDisabled();
   });
 
+  it('uses the navigation lock while the create report has unpersisted photos', async () => {
+    rows = [row('one')];
+    mount('/tech/tools');
+    fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Queue report photo' }));
+    await waitFor(() => expect(mocks.navigationBusy).toHaveBeenLastCalledWith(true));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear report photos' }));
+    await waitFor(() => expect(mocks.navigationBusy).toHaveBeenLastCalledWith(false));
+  });
+
+  it('retains a partially created report and refreshes the route before it can be reopened', async () => {
+    rows = [row('one')];
+    mount('/tech/tools');
+    const report = await screen.findByRole('button', { name: /Project Report/ });
+    const scheduleReads = () => fetchMock.mock.calls.filter(([path]) => path.includes('/admin/schedule?')).length;
+    const initialReads = scheduleReads();
+    fireEvent.click(report);
+    rows = [row('one', { linkedProject: { id: 'created-report', status: 'draft' } })];
+    fireEvent.click(screen.getByRole('button', { name: 'Finish partial report' }));
+
+    expect(await screen.findByTestId('project-detail')).toHaveAttribute('data-project-id', 'created-report');
+    await waitFor(() => expect(scheduleReads()).toBeGreaterThan(initialReads));
+    fireEvent.click(screen.getByRole('button', { name: 'Close report' }));
+    await waitFor(() => expect(screen.queryByTestId('project-detail')).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /Project Report/ }));
+    expect(await screen.findByTestId('project-detail')).toHaveAttribute('data-project-id', 'created-report');
+    expect(screen.queryByRole('dialog', { name: 'Create project fixture' })).not.toBeInTheDocument();
+  });
+
   it('keeps Project Report disabled when the selected visit is missing despite another live service', async () => {
     rows = [row('one')];
     await act(async () => { mount('/tech/tools?visit=row%3Amissing'); });
@@ -182,12 +224,77 @@ describe('Tech field workspace uses the existing route workflow', () => {
     expect(screen.queryByText('Existing recap form')).not.toBeInTheDocument();
   });
 
+  it.each([
+    [false, false],
+    [true, true],
+  ])('Tools exposes completed combined closeout only when has_service_record is %s (disabled=%s)', async (hasRecord, disabled) => {
+    rows = [row('one', { status: 'completed', visit: { id: 'group' }, visitId: 'group',
+      visitCloseoutEnabled: true, has_service_record: hasRecord })];
+    await act(async () => { mount('/tech/tools?visit=visit%3Agroup'); });
+    const report = await screen.findByRole('button', { name: /Project Report/ });
+    if (disabled) expect(report).toBeDisabled();
+    else expect(report).toBeEnabled();
+  });
+
+  it.each([undefined, 'sent', 'closed'])('Tools keeps a saved processing packet available with linked report status %s', async (status) => {
+    rows = [row('one', { status: 'completed', visit: { id: 'group' }, visitId: 'group',
+      visitCloseoutEnabled: true, has_service_record: true,
+      visitCloseoutPacket: { id: 'packet-one', status: 'processing' },
+      linkedProject: status ? { id: 'existing-report', status } : null })];
+    await act(async () => { mount('/tech/tools?visit=visit%3Agroup'); });
+    expect(await screen.findByRole('button', { name: /Project Report/ })).toBeEnabled();
+  });
+
+  it.each(['sent', 'closed'])('Tools keeps recordless combined closeout available with a %s linked report', async (status) => {
+    rows = [row('one', { status: 'completed', visit: { id: 'group' }, visitId: 'group',
+      visitCloseoutEnabled: true, has_service_record: false,
+      linkedProject: { id: 'existing-report', status } })];
+    await act(async () => { mount('/tech/tools?visit=visit%3Agroup'); });
+    expect(await screen.findByRole('button', { name: /Project Report/ })).toBeEnabled();
+  });
+
   it.each(['sent', 'closed', 'draft'])('Tools only offers editable linked reports (%s)', async status => {
     rows = [row('one', { linkedProject: { id: 'existing-report', status } })];
     await act(async () => { mount('/tech/tools'); });
     const report = await screen.findByRole('button', { name: /Project Report/ });
     if (status === 'draft') expect(report).toBeEnabled();
     else expect(report).toBeDisabled();
+  });
+
+  it('guards dirty report close and backdrop exits, then closes without a prompt after save', async () => {
+    rows = [row('one', { linkedProject: { id: 'existing-report', status: 'draft' } })];
+    const confirmClose = vi.fn(() => false);
+    vi.stubGlobal('confirm', confirmClose);
+    mount('/tech/tools');
+    fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
+    const editor = await screen.findByTestId('project-detail');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit report' }));
+    await waitFor(() => expect(mocks.navigationBusy).toHaveBeenLastCalledWith(true));
+    fireEvent.click(editor.parentElement.parentElement);
+    fireEvent.click(screen.getByRole('button', { name: 'Close report' }));
+    expect(confirmClose).toHaveBeenCalledTimes(2);
+    expect(confirmClose).toHaveBeenCalledWith('Discard unsaved report edits?');
+    expect(screen.getByTestId('project-detail')).toBeInTheDocument();
+
+    confirmClose.mockReturnValue(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Close report' }));
+    await waitFor(() => expect(screen.queryByTestId('project-detail')).not.toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole('button', { name: /Project Report/ }));
+    await screen.findByTestId('project-detail');
+    fireEvent.click(screen.getByRole('button', { name: 'Close report' }));
+    expect(confirmClose).toHaveBeenCalledTimes(3);
+    await waitFor(() => expect(screen.queryByTestId('project-detail')).not.toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole('button', { name: /Project Report/ }));
+    await screen.findByTestId('project-detail');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit report' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save report' }));
+    await waitFor(() => expect(mocks.navigationBusy).toHaveBeenLastCalledWith(false));
+    fireEvent.click(screen.getByRole('button', { name: 'Close report' }));
+    expect(confirmClose).toHaveBeenCalledTimes(3);
+    await waitFor(() => expect(screen.queryByTestId('project-detail')).not.toBeInTheDocument());
   });
 
   it('preserves owner-only estimating and the social feature gate in Tools', async () => {

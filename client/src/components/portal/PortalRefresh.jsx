@@ -3,12 +3,34 @@ import { usePortalRefresh } from '../../hooks/usePortalRead';
 import { COLORS } from '../../theme-brand';
 
 const buttonStyle = { minHeight: 48, padding: '8px 14px', borderRadius: 10, border: `1px solid ${COLORS.glassNavy}`, background: 'transparent', color: COLORS.glassNavy, font: 'inherit', fontSize: 14, cursor: 'pointer' };
+const noticeStyle = { display: 'flex', gap: 12, justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', borderRadius: 12, marginBottom: 16, color: COLORS.glassNavy };
+const statusStyle = { fontSize: 14 };
+
+function refreshMessage(portal, pullRefreshing, pull) {
+  if (!portal.online) return 'You’re offline. Showing saved information.';
+  if (pullRefreshing || portal.refreshing) return 'Refreshing…';
+  if (pull >= 80) return 'Release to refresh';
+  if (pull > 0) return 'Pull down to refresh';
+  return '';
+}
 
 export function PortalRefreshArea({ children, available = true, onlineContent }) {
   const portal = usePortalRefresh();
   const start = useRef(null);
   const [pull, setPull] = useState(0);
+  const [pullRefreshing, setPullRefreshing] = useState(false);
   const active = portal?.enabled && available;
+  const showNotice = !portal?.online || pull > 0 || pullRefreshing;
+  const refreshUnavailable = portal?.refreshing || !portal?.online;
+  const presentation = showNotice ? {
+    container: { 'data-glass': 'soft', style: noticeStyle },
+    status: { style: statusStyle },
+    button: { 'data-glass-accent': '' },
+  } : {
+    container: {},
+    status: { className: 'sr-only' },
+    button: { className: 'sr-only focus:not-sr-only' },
+  };
   const reset = () => { start.current = null; setPull(0); };
   const onTouchStart = (event) => {
     if (!active || portal.refreshing || !portal.online || event.touches.length !== 1) return;
@@ -28,16 +50,28 @@ export function PortalRefreshArea({ children, available = true, onlineContent })
     if (dx > 30 || dy < 0) { reset(); return; }
     setPull(Math.min(110, dy));
   };
+  const refreshManually = async () => {
+    if (refreshUnavailable) return;
+    setPullRefreshing(true);
+    try { await portal.refresh({ preserveVerified: false }); }
+    finally { setPullRefreshing(false); }
+  };
   const onTouchEnd = () => {
-    if (pull >= 80) void portal.refresh();
+    if (pull >= 80) void refreshManually();
     reset();
   };
   return <div onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd} onTouchCancel={reset}>
-    {active && <div data-glass="soft" style={{ display: 'flex', gap: 12, justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', borderRadius: 12, marginBottom: 16, color: COLORS.glassNavy }}>
-      <span role="status" style={{ fontSize: 14 }}>
-        {!portal.online ? 'You’re offline. Showing saved information.' : portal.refreshing ? 'Refreshing…' : pull >= 80 ? 'Release to refresh' : pull > 0 ? 'Pull down to refresh' : 'Refresh your visits and documents'}
+    {active && <div {...presentation.container}>
+      <span role="status" {...presentation.status}>
+        {refreshMessage(portal, pullRefreshing, pull)}
       </span>
-      <button type="button" data-glass-accent="" style={buttonStyle} onClick={() => { void portal.refresh(); }} disabled={portal.refreshing || !portal.online}>
+      <button
+        type="button"
+        {...presentation.button}
+        style={{ ...buttonStyle, ...(refreshUnavailable ? { opacity: 0.55 } : {}) }}
+        onClick={() => { void refreshManually(); }}
+        aria-disabled={refreshUnavailable || undefined}
+      >
         {portal.refreshing ? 'Refreshing…' : 'Refresh'}
       </button>
     </div>}

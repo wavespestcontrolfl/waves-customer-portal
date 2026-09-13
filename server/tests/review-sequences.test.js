@@ -3,6 +3,10 @@ const mockSendCustomerMessage = jest.fn(async () => ({ sent: true, auditLogId: '
 const mockEmailSendTemplate = jest.fn(async () => ({ sent: true, message: { id: 'em-1' } }));
 
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/visit-completion-packets', () => ({
+  enrollVisitCompletionReview: jest.fn(),
+  enrollVisitCompletionReviewForInvoice: jest.fn(),
+}));
 // Mutable gate flags for the 2026-07-30 revamp tests (post-service auto-enroll
 // + direct Google link). Both default OFF = pre-rollout behavior.
 const mockGates = { reviewSequences: false, reviewDirectLink: false };
@@ -624,6 +628,35 @@ describe('review sequences — cadence engine', () => {
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(out.stopped).toBe(1);
     expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('opted_out');
+  });
+
+  test('a step parked by a summary bounce after the provider accepted it is still advanced, so recovery resumes the next step', async () => {
+    const Summary = require('../services/visit-completion-summary');
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'cust-pk', first_name: 'Pia', last_name: 'K', nearest_location_id: 'venice' }],
+      review_sequences: [{
+        id: 'seq-pk', customer_id: 'cust-pk', service_record_id: 'sr-pk', status: 'active', current_step: 0, touches_sent: 0,
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }, { day: 3, channel: 'sms', templateKey: 'soft_reminder' }]),
+        started_at: new Date(Date.now() - 60000), next_run_at: new Date(Date.now() - 60000),
+      }],
+    });
+    db.mockImplementation(mock);
+    mockSendCustomerMessage.mockImplementationOnce(async () => {
+      // The bounce reconciliation parks the sequence between the provider's
+      // return and this step's bookkeeping (the packet handoff ends at return).
+      Object.assign(mock.__state.rows.review_sequences[0], { status: 'stopped', stop_reason: Summary.PARKED_REVIEW_REASON, completed_at: new Date() });
+      return { sent: true, auditLogId: 'audit-pk' };
+    });
+
+    await ReviewService.processReviewSequences();
+
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    const seq = mock.__state.rows.review_sequences[0];
+    // Parked stays parked (never re-activated here), but the delivered step is
+    // recorded so a resume schedules step 1 instead of replaying step 0.
+    expect(seq).toMatchObject({ status: 'stopped', stop_reason: Summary.PARKED_REVIEW_REASON, current_step: 1, touches_sent: 1 });
+    expect(seq.next_run_at).toBeInstanceOf(Date);
   });
 });
 
@@ -3093,6 +3126,17 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(scheduled).toBeLessThanOrEqual(before + 31 * 60000);
   });
 
+  test('paid webhook projections delegate packet ownership before the representative record review policy', async () => {
+    const enroll = require('../services/visit-completion-packets').enrollVisitCompletionReviewForInvoice;
+    enroll.mockResolvedValueOnce({ enrolled: false, reason: 'member_review_suppressed' });
+    const individual = jest.spyOn(ReviewService, 'enrollPostService');
+    const result = await ReviewService.enrollForPaidInvoice({ id: 'packet-invoice', customer_id: 'customer-1', service_record_id: 'representative-record' });
+    expect(enroll).toHaveBeenCalledWith('packet-invoice');
+    expect(individual).not.toHaveBeenCalled();
+    expect(result).toEqual({ enrolled: false, reason: 'member_review_suppressed' });
+    individual.mockRestore();
+  });
+
   test('enrollForPaidInvoice parses a naive ET reviewScheduledFor as Eastern wall-clock', async () => {
     mockGates.reviewSequences = true;
     // The completion panel posts timezone-less ET ('YYYY-MM-DDTHH:mm'). Build
@@ -4408,6 +4452,61 @@ describe('codex #3235 r19 — first-send re-resolution failure defers', () => {
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+// The Twilio adapter catches provider errors and reports them as
+// `sent: false` / PROVIDER_FAILURE instead of raising. On a row the summary
+// handoff left `sending`, the request WAS made and its response was lost, so
+// the deferral bookkeeping would reset the row and send a second ask on top of
+// a delivered one (audit P1).
+describe('legacy sendSMS — ambiguous returned provider failure', () => {
+  const rows = () => ({
+    customers: [{ id: 'unc-1', first_name: 'Lee', last_name: 'P', phone: '+19410000195', nearest_location_id: 'venice' }],
+    review_requests: [{
+      id: 'rr-unc-1', customer_id: 'unc-1', channel: 'sms', status: 'sending', template_key: 'day0_ask',
+      tech_name: null, token: 'tok-unc-1', location_id: 'venice', claimed_at: new Date(),
+    }],
+  });
+
+  test('keeps the claim standing instead of requeuing it', async () => {
+    // The row is `pending` when sendSMS starts (the pre-send fence only
+    // stores against a pending row); the summary handoff inside the
+    // provider call is what marks it `sending` before the request is made.
+    const state = rows();
+    state.review_requests[0].status = 'pending';
+    const mock = makeMock(state);
+    db.mockImplementation(mock);
+    mockSendCustomerMessage.mockImplementationOnce(async () => {
+      mock.__state.rows.review_requests[0].status = 'sending';
+      return {
+        sent: false, blocked: false, code: 'PROVIDER_FAILURE', reason: 'connection reset',
+        retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 300000).toISOString(),
+      };
+    });
+
+    const out = await ReviewService.sendSMS('rr-unc-1');
+
+    expect(out).toMatchObject({ sent: false, uncertain: true, reason: 'provider_uncertain' });
+    expect(mock.__state.rows.review_requests[0].status).toBe('sending');
+    expect(mock.__state.rows.review_requests[0].sms_sent_at).toBeFalsy();
+  });
+
+  test('a released row takes the ordinary deferral', async () => {
+    const state = rows();
+    state.review_requests[0].status = 'pending';
+    state.review_requests[0].claimed_at = null;
+    const mock = makeMock(state);
+    db.mockImplementation(mock);
+    mockSendCustomerMessage.mockResolvedValueOnce({
+      sent: false, blocked: false, code: 'PROVIDER_FAILURE', reason: 'connection reset',
+      retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 300000).toISOString(),
+    });
+
+    // The deferral path returns nothing — the row IS the verdict.
+    expect(await ReviewService.sendSMS('rr-unc-1')).toBeUndefined();
+    expect(mock.__state.rows.review_requests[0].status).toBe('pending');
+    expect(mock.__state.rows.review_requests[0].scheduled_for).toBeTruthy();
   });
 });
 

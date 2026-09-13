@@ -77,6 +77,14 @@ const MAX_CONFIRMATIONS = 3; // AV confirmation calls per recovery
 const houseNumberOf = (street) => (String(street || '').trim().match(/^\d+/) || [null])[0];
 const zip5 = (zip) => (String(zip || '').match(/^\d{5}/) || [null])[0];
 const cityKey = (city) => String(city || '').toLowerCase().replace(/[^a-z]/g, '');
+// Premise identity keeps DIGITS. cityKey drops them — right for comparing city
+// names, catastrophic for a numbered grid: "4th Avenue East" and "40th Avenue
+// East" both reduced to "thavenueeast", so two genuinely different houses
+// counted as ONE confirmed premise and the first was auto-adopted, sending a
+// tech to an address nobody confirmed (codex #4437 r7 P1). The ordinal prompt
+// makes multi-ordinal candidate sets the normal case, so this is live rather
+// than theoretical.
+const premiseKey = (street) => String(street || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
 /** Places Autocomplete → array of prediction descriptions ([] on zero results, null on API failure). */
 async function fetchAutocompletePredictions(input, { deadline = newDeadline() } = {}) {
@@ -98,12 +106,23 @@ async function fetchAutocompletePredictions(input, { deadline = newDeadline() } 
 /**
  * Gemini phonetic re-hearing: street names that sound like the garbled one.
  * Returns [] on any model failure — recovery just proceeds with nothing.
+ *
+ * The prompt names BOTH garble classes on purpose. Asking only for "real words
+ * or proper names" made the model structurally blind to numbered grids: on
+ * 2026-09-10 a caller's spoken ordinal ("<Nth> Avenue East") transcribed as a
+ * similar-sounding word and every re-hearing came back word-shaped, because an
+ * ordinal was never in the hypothesis space. A tech drove to a street that
+ * does not exist (call c3c27b01). Numbered streets are most of the local grid
+ * and callers SPEAK the ordinal, so the transcriber writes whatever word it
+ * sounded like.
  */
 async function fetchPhoneticStreetCandidates({ streetName, city, state, zip, deadline = newDeadline() }) {
   if (!process.env.GEMINI_API_KEY) return [];
   const prompt = `A phone-call transcription mis-heard a street name. The transcriber wrote the street name as "${streetName}" for an address in ${[city, state, zip].filter(Boolean).join(', ')}.
-Street names are usually real words or proper names; transcription errors are PHONETIC (the written words sound like the real street when read aloud — e.g. "C Phone" is how "Seafoam" sounds, "Amber Crick" is "Amber Creek").
-List up to ${MAX_CANDIDATES} plausible real street names (with their suffix, e.g. "Trail", "Drive") that "${streetName}" could be a mis-hearing of. Order by phonetic closeness. Do NOT include house numbers, cities, or the garbled name itself.
+Transcription errors are PHONETIC — the written words sound like the real street when read aloud. Two kinds are common:
+1. A word mis-heard as another word: "C Phone" is how "Seafoam" sounds, "Amber Crick" is "Amber Creek".
+2. A NUMBERED street mis-heard as a word. Many towns are laid out as numbered grids ("4th Avenue East", "72nd Street North"). Callers SPEAK the number ("fourth", "seventy-second"), so the transcriber can write a word that merely sounds like it — "Port"/"Fort"/"Ford" for "Fourth", "Sex" for "Sixth", "Tent" for "Tenth". A suffix carrying a compass direction ("Avenue East", "Street North") is a strong hint the town uses a numbered grid.
+List up to ${MAX_CANDIDATES} plausible real street names (with their suffix, e.g. "Trail", "Drive", "Avenue East") that "${streetName}" could be a mis-hearing of. Include numbered/ordinal streets among the candidates whenever the mis-heard word could plausibly be a spoken number. Order by phonetic closeness. Do NOT include house numbers, cities, or the garbled name itself.
 Return ONLY JSON: {"candidates": ["...", "..."]}`;
   try {
     const res = await fetch(
@@ -254,7 +273,7 @@ async function recoverStreetAddress({ extracted = {}, avStatus, extraStreetCandi
     }
     // Distinct confirmed premises — two different validated streets is genuine
     // ambiguity, which belongs to a human, not an auto-adopt.
-    const premiseKeys = new Set(confirmed.map((c) => `${cityKey(c.street_line_1)}|${zip5(c.postal_code)}`));
+    const premiseKeys = new Set(confirmed.map((c) => `${premiseKey(c.street_line_1)}|${zip5(c.postal_code)}`));
     const recovered = !truncated && premiseKeys.size === 1
       ? {
         address_line1: confirmed[0].street_line_1,
@@ -277,6 +296,7 @@ async function recoverStreetAddress({ extracted = {}, avStatus, extraStreetCandi
 }
 
 module.exports = {
+  premiseKey,
   recoverStreetAddress,
   fetchAutocompletePredictions,
   fetchPhoneticStreetCandidates,

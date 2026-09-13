@@ -35,7 +35,7 @@ import { useParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
 import { DOC_EYEBROW } from '../theme-doc';
 import { estimateCard } from '../components/estimate/cardStyles';
-import { WavesShell, CustomerColumn } from '../components/brand';
+import { WavesShell, CustomerColumn, PublicStateCard } from '../components/brand';
 import Icon from '../components/Icon';
 import { useGlassSurface } from '../glass/glass-engine';
 import SchedulePicker from '../components/booking/SchedulePicker';
@@ -172,29 +172,17 @@ function SkeletonCard() {
 
 function NotFoundCard({ title, body }) {
   return (
-    <Card>
-      <CardTitle>{title}</CardTitle>
-      <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>{body}</div>
-      <ContactRow />
-    </Card>
+    <PublicStateCard state="not-found" title={title}>
+      {body}
+    </PublicStateCard>
   );
 }
 
 function LoadErrorCard({ title, onRetry }) {
   return (
-    <Card>
-      <CardTitle>{title}</CardTitle>
-      <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>
-        This looks temporary. Your link is still valid—try again in a moment.
-      </div>
-      <button
-        type="button"
-        onClick={onRetry}
-        style={{ marginTop: 16, border: 0, borderRadius: 10, padding: '11px 16px', background: COLORS.glassNavy, color: '#fff', font: 'inherit', fontWeight: 700, cursor: 'pointer' }}
-      >
-        Try again
-      </button>
-    </Card>
+    <PublicStateCard state="error" title={title} onRetry={onRetry}>
+      This looks temporary. Your link is still valid&mdash;try again in a moment.
+    </PublicStateCard>
   );
 }
 
