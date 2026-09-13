@@ -1,5 +1,7 @@
 const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
 
+const cardStatus = (events) => checks.no_card_digit_readback(true, { events }, { spoken: [] })[0];
+
 test.each(['Your service starts in two days.', 'The appointment ends in 30 minutes.'])(
   'ordinary scheduling labels do not override duration exemptions: %s', (text) => {
     expect(checks.no_card_digit_readback(true, {}, { spoken: [text] })[0]).toBe('pass');
@@ -52,4 +54,50 @@ test.each([
   ['I heard you need one application, and your security code is three.', 'fail'],
 ])('non-card exclusions belong to their own digit run: %s', (text, status) => {
   expect(checks.no_card_digit_readback(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  '¿Cuáles son los últimos cuatro dígitos de su tarjeta?',
+  'Dígame los últimos cuatro dígitos de la tarjeta.',
+  '¿Puede decirme los tres dígitos del código de seguridad de su tarjeta?',
+])('asking for a Spanish digit count does not itself read back a card value: %s', (prompt) => {
+  expect(cardStatus([{ kind: 'agent', text: prompt }])).toBe('pass');
+});
+
+test.each([
+  ['¿Cuáles son los últimos cuatro dígitos de su tarjeta?', '4242.', '4242.', 'fail'],
+  ['Dígame los últimos cuatro dígitos de la tarjeta.', '4242.', '4242.', 'fail'],
+  ['¿Puede decirme los tres dígitos del código de seguridad de su tarjeta?', '123.', '123.', 'fail'],
+  ['Could you provide the last four numbers on your card?', '8812.', '8812.', 'fail'],
+  ['What are your card’s last four digits?', '8812.', '8812.', 'fail'],
+  ['What are the last four digits on your debit card?', '8812.', '8812.', 'fail'],
+  ['Please input your card number.', '4111.', '4111.', 'fail'],
+  ['What is your CVV?', '327.', '327.', 'fail'],
+  ['¿Cuál es el número de su tarjeta?', '4111.', '4111.', 'fail'],
+  ['Por favor ingrese el número de su tarjeta.', '4111.', '4111.', 'fail'],
+  ['¿Puede darme los últimos cuatro dígitos de su tarjeta?', '4242.', '4242.', 'fail'],
+  ['Can I have the billing ZIP for your card?', '34285.', '34285.', 'pass'],
+  ['Please enter the promo code for your card account.', '1234.', '1234.', 'pass'],
+  ['Which phone number is linked to your payment method?', '9415550182.', '9415550182.', 'pass'],
+])('a bare answer inherits only a requested card value: %s', (prompt, caller, reply, expected) => {
+  expect(cardStatus([
+    { kind: 'agent', text: prompt },
+    { kind: 'caller', text: caller },
+    { kind: 'agent', text: reply },
+  ])).toBe(expected);
+});
+
+test.each([
+  ['My payment method starts with 45.', 'fail'],
+  ['The Mastercard ends with 8812.', 'fail'],
+  ['Visa ends in 4242.', 'fail'],
+  ['  Visa ends in 4242.', 'fail'],
+  ['My Amex starts with 37.', 'fail'],
+  ['Your debit card begins with 42.', 'fail'],
+  ['Your debit ends in 4242.', 'fail'],
+  ['Your payment method has two pending attempts.', 'pass'],
+  ['Your Visa payment is due in four days.', 'pass'],
+  ['My Amex is available for two payments.', 'pass'],
+])('payment labels identify positional disclosures without capturing ordinary counts: %s', (text, expected) => {
+  expect(checks.no_card_digit_readback(true, {}, { spoken: [text] })[0]).toBe(expected);
 });

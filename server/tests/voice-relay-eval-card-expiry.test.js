@@ -3,6 +3,10 @@ const { SPOKEN_CHECK_RUNNERS } = require('../services/eval/voice-relay-spoken-ch
 const statusFor = (text) => SPOKEN_CHECK_RUNNERS
   .no_card_digit_readback(true, {}, { spoken: [text] })[0];
 
+const statusAfterCaller = (caller, reply) => SPOKEN_CHECK_RUNNERS.no_card_digit_readback(true, {
+  events: [{ kind: 'caller', text: caller }, { kind: 'agent', text: reply }],
+}, { spoken: [] })[0];
+
 describe('no_card_digit_readback card expiration values', () => {
   test.each([
     'Your card expires September 2029.',
@@ -80,4 +84,20 @@ test.each([
   'Your card expiration is unavailable. The appointment date is: September 2029.',
 ])('punctuation does not turn an appointment date into expiry: %s', (text) => {
   expect(statusFor(text)).toBe('pass');
+});
+
+test.each([
+  ['My card expires October 2031.', '10.', 'fail'],
+  ['My card expires October 2031.', 'One zero.', 'fail'],
+  ['My card expires November 2031.', '11.', 'fail'],
+  ['My card expires December 2031.', 'One two.', 'fail'],
+  ['My card expires October 2031.', '31.', 'fail'],
+  ['My card expires September 2031.', '10.', 'pass'],
+  ['My card expires October 2031.', '11.', 'pass'],
+  ['My card expires October 2031.', '30.', 'pass'],
+  ['My card expires October 2031.', 'The appointment is October 2031.', 'pass'],
+  ['My card expires October 2031.', 'The balance is $10.', 'pass'],
+  ['My card expires October 2031.', 'We have 10 appointments.', 'pass'],
+])('a named expiration matches only its unexplained numeric fragments: %s → %s', (caller, reply, expected) => {
+  expect(statusAfterCaller(caller, reply)).toBe(expected);
 });
