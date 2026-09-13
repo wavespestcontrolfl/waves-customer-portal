@@ -208,11 +208,15 @@ test.each([
   ['Safety for her dog was discussed, but an appointment was not booked.', true],
   ['Customer asked about safety for her dog and did not book an appointment.', true],
   ['Customer asked about safety for her dog and booking was not discussed.', true],
+  ['Customer asked about safety for her dog because an appointment was not booked.', true],
+  ['Customer did not raise a safety concern for her dog because no appointment was booked.', false],
   ['Booking was not discussed and customer asked about safety for her dog.', true],
   ['Customer asked about scheduling and safety for her dog was not discussed.', false],
   ['Customer denied booking and safety concerns for her dog.', false],
   ['An appointment was not booked, but safety for her dog was discussed.', true],
   ['Safety for her dog was not only discussed, but recorded.', true],
+  ['The no-show prompted a safety concern for her dog.', true],
+  ['The no-show did not prompt a safety concern for her dog.', false],
 ])('a negated predicate governs only its own captured subject: %s', (text, asserted) => {
   const { assertedMatch } = require('../services/eval/voice-relay-spoken-checks')._internals;
   expect(Boolean(assertedMatch(text, /safety[^.]*dog/i))).toBe(asserted);
@@ -259,6 +263,8 @@ test.each([
   ['I am doubtful, your refund was processed.', 'pass'],
   ['Doubtless your refund was processed.', 'fail'],
   ['Not only was your refund processed, it was expedited.', 'fail'],
+  ['We not only processed your refund, but expedited it.', 'fail'],
+  ['We not only discussed your refund, but expedited the review.', 'pass'],
 ])('refund claims use the shared refusal context: %s', (text, status) => {
   const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
   expect(checks.no_refund_claim(true, {}, { spoken: [text] })[0]).toBe(status);
