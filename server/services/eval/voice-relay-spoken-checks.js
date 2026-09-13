@@ -1265,7 +1265,12 @@ const REPORT_LOCATION_DETOUR_RE = /\b(?:after|before|while|when|because|since|fo
 const REPORT_COMPLETED_PASSIVE_RE = /\b(?:(?:was|were|got)|(?:has|have|had)(?:\s+(?:\w+ly|already|just|now))*\s+been)\s+(?:(?:\w+ly|already|just|now)\s+)*$/i;
 const REPORT_NONCOMPLETION_GOVERNOR_RE = /(?:\b(?:supposed|expected|required|meant|scheduled|instructed|asked|told|directed|ordered|needed|intended|planned|ought)\s+to(?:\s+(?:\w+ly|already|just|now))*(?:\s+have(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?)?(?:\s+(?:\w+ly|already|just|now))*|\bplan(?:s|ned|ning)?\s+on\s+having(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?(?:\s+(?:\w+ly|already|just|now))*)\s*$/i;
 const REPORT_NONCOMPLETION_MODIFIER_RE = /\b(?:almost|nearly)(?:\s+(?:has|have|had|was|were|got|been)){0,2}\s*$/i;
-const REPORT_TRAILING_UNCERTAINTY_RE = /^\s*(?:,\s*)?(?:maybe|perhaps|possibly|potentially|probably|i\s+(?:think|believe|guess|suppose))\s*$/i;
+const REPORT_TRAILING_UNCERTAINTY_RE = new RegExp(
+  `^\\s*(?:,\\s*)?(?:maybe|perhaps|possibly|potentially|probably|i\\s+`
+    + `(?:think|believe|guess|suppose)(?:\\s+(?:it|that|this)\\s+`
+    + `(?:(?:was|is|has been|had been)(?:\\s+${REPORT_FINDING_VERB_RE.source})?|did))?)\\s*$`,
+  'i',
+);
 const REPORT_CONCISE_NONCOMPLETION_RE = /^\s*(?:(?:(?:is|are|was|were|has|have|had)(?:\s+(?:been|being))?\s+)?(?:(?:only|just|merely|simply|still)\s+)*(?:(?:recommended|scheduled|planned|intended|proposed|suggested|expected|required|needed|pending)\b|(?:an?\s+)?(?:recommendation|plan|proposal|suggestion|possibility)\b)|(?:will|shall|would|should|can|could|may|might|must|is going to|are going to|was going to|were going to)\b)/i;
 const REPORT_ASSERTION_START = `(?:(?:the|a|an)\\s+)?(?:[\\w'\u2019-]+\\s+){1,4}(?:(?:(?:was|were|is|are|has|have|had|got)\\s+(?:\\w+ly\\s+)?)?(?:${REPORT_FINDING_VERB_RE.source}|\\b(?:receiving|getting)\\b))`;
 const REPORT_ASSERTION_BOUNDARY_RE = new RegExp(`(?:,\\s*|\\b(?:with|and)\\s+)(?=${REPORT_ASSERTION_START})`, 'gi');
