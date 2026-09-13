@@ -8,9 +8,22 @@ import DispatchPageV2 from './DispatchPageV2';
 import { adminFetch } from '../../utils/admin-fetch';
 
 vi.mock('../../utils/admin-fetch', () => ({ adminFetch: vi.fn(), isRateLimitError: () => false }));
-vi.mock('../../components/schedule/TimeGridDay', () => ({ default: () => <div>Schedule visits</div> }));
+const enabledVisit = { id: 'service-one', visitId: 'visit-one', visitCloseoutEnabled: true, visitCloseoutPacket: null };
+const enabledStandalone = { id: 'service-standalone', visitId: null, visitCloseoutEnabled: true, visitCloseoutPacket: null };
+vi.mock('./SchedulePage', () => ({
+  CompletionPanel: () => null,
+  RescheduleModal: () => null,
+  EditServiceModal: ({ service }) => <div>Editing service {service.id}</div>,
+  ProtocolPanel: () => null,
+  completionResumeOwed: () => false,
+}));
+vi.mock('../../components/schedule/TimeGridDay', () => ({ default: ({ onEdit }) => <div>Schedule visits
+  <button onClick={() => onEdit(enabledVisit)}>Open day visit</button>
+  <button onClick={() => onEdit(enabledStandalone)}>Open standalone day</button>
+</div> }));
 vi.mock('../../components/schedule/MobileDispatchList', () => ({ default: () => null }));
 vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false }));
+vi.mock('../../components/admin/VisitCloseoutSheet', () => ({ default: ({ visitId }) => <div>Visit closeout {visitId}</div> }));
 beforeEach(() => {
   vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ alerts: [] }) })));
@@ -18,7 +31,7 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.clearAllMocks(); });
 
 
-vi.mock('../../components/schedule/TimeGridDays', () => ({ default: ({date}) => <div>Grid date: {date}</div> }));
+vi.mock('../../components/schedule/TimeGridDays', () => ({ default: ({ date, dayCount, onEdit }) => <div>Grid date: {date}<button onClick={() => onEdit(enabledVisit)}>Open {dayCount}-day visit</button></div> }));
 vi.mock('../../components/schedule/CalendarViewsV2', async importOriginal => ({
   ...await importOriginal(), MonthViewV2: ({date}) => <div>Month date: {date}</div>,
 }));
@@ -50,6 +63,26 @@ it.each([
   fireEvent.click(screen.getByRole('button', {name:'Next', exact:true}));
   (await screen.findAllByRole('button', {name:mode, exact:true}))[0];
   expect(adminFetch).toHaveBeenCalledWith('/admin/schedule?date='+nextDate);
+});
+
+it.each([
+  ['Day', 'Open day visit'],
+  ['5-Day', 'Open 5-day visit'],
+  ['Week', 'Open 7-day visit'],
+])('opens an enabled unsubmitted combined visit from the desktop %s calendar', async (mode, entryName) => {
+  vi.mocked(adminFetch).mockResolvedValue({ services: [enabledVisit], technicians: [], products: [], types: [] });
+  render(<MemoryRouter initialEntries={['/admin/dispatch?tab=schedule&date=2026-09-12']}><DispatchPageV2 activeTab="board" /></MemoryRouter>);
+  fireEvent.click((await screen.findAllByRole('button', { name: mode, exact: true }))[0]);
+  fireEvent.click(await screen.findByRole('button', { name: entryName }));
+  expect(await screen.findByText('Visit closeout visit-one')).toBeInTheDocument();
+});
+
+it('keeps a standalone row in the normal editor when the legacy gate marks every row enabled', async () => {
+  vi.mocked(adminFetch).mockResolvedValue({ services: [enabledStandalone], technicians: [], products: [], types: [] });
+  render(<MemoryRouter initialEntries={['/admin/dispatch?tab=schedule&date=2026-09-12']}><DispatchPageV2 activeTab="board" /></MemoryRouter>);
+  fireEvent.click(await screen.findByRole('button', { name: 'Open standalone day' }));
+  expect(await screen.findByText('Editing service service-standalone')).toBeInTheDocument();
+  expect(screen.queryByText(/Visit closeout/)).not.toBeInTheDocument();
 });
 
 vi.mock('../../components/schedule/MobileDayStrip', () => ({ default: () => <div>Day strip</div> }));

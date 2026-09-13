@@ -134,6 +134,9 @@ function DiscountsSection() {
   const [previewSub, setPreviewSub] = useState("");
   const [previewResult, setPreviewResult] = useState(null);
   const [stats, setStats] = useState(null);
+  const [statsLoading, setStatsLoading] = useState(false);
+  const [statsError, setStatsError] = useState(false);
+  const [statsAttempt, setStatsAttempt] = useState(0);
   const [customers, setCustomers] = useState([]);
   const [custSearch, setCustSearch] = useState("");
 
@@ -245,13 +248,26 @@ function DiscountsSection() {
     }
   };
 
-  const loadStats = () => {
-    af("/admin/discounts/stats").then(setStats).catch(() => {});
-  };
-
   useEffect(() => {
-    if (tab === "stats") loadStats();
-  }, [tab]);
+    if (tab !== "stats") return;
+    let current = true;
+    setStatsLoading(true);
+    setStatsError(false);
+    setStats(null);
+    af("/admin/discounts/stats")
+      .then((data) => {
+        if (current) setStats(data);
+      })
+      .catch(() => {
+        if (current) setStatsError(true);
+      })
+      .finally(() => {
+        if (current) setStatsLoading(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [tab, statsAttempt]);
 
   const update = (key, value) =>
     setForm((current) => ({ ...current, [key]: value }));
@@ -764,6 +780,17 @@ function DiscountsSection() {
         </TabPanel>
 
         <TabPanel value="stats">
+          {statsLoading && (
+            <ActionFeedback>Loading discount statistics…</ActionFeedback>
+          )}
+          {statsError && (
+            <ActionFeedback
+              error
+              onRetry={() => setStatsAttempt((attempt) => attempt + 1)}
+            >
+              Could not load discount statistics.
+            </ActionFeedback>
+          )}
           {stats && (
             <div className="space-y-4">
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
