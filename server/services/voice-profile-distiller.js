@@ -201,6 +201,7 @@ async function distillVoiceProfile({ dbi = db, anthropicClient } = {}) {
   const pending = await dbi('voice_profiles').where({ status: 'pending' }).first('id', 'created_at');
   if (pending) {
     const newSincePending = await dbi('voice_corpus_examples')
+      .whereIn('source', ['sms_human_reply', 'call_transcript'])
       .where('created_at', '>', pending.created_at)
       .whereRaw(USABLE_CORPUS_SQL)
       .count('* as count')
@@ -227,6 +228,7 @@ async function distillVoiceProfile({ dbi = db, anthropicClient } = {}) {
     .orderByRaw('GREATEST(created_at, COALESCE(reviewed_at, created_at)) DESC')
     .first();
   const newCorpus = await dbi('voice_corpus_examples')
+    .whereIn('source', ['sms_human_reply', 'call_transcript'])
     .modify((q) => { if (lastProfile?.watermark) q.where('created_at', '>', lastProfile.watermark); })
     .whereRaw(USABLE_CORPUS_SQL)
     .count('* as count')
