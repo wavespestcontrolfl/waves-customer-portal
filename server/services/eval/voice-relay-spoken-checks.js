@@ -1231,7 +1231,7 @@ function no_third_party_disclosure(value, record, { spoken }) {
 // fixture lookbehind could.
 const REPORT_UNCERTAINTY_RE = /\b(?:can|must|may|might|could|would|should|will|shall|going to|plan(?:s|ned)? to|maybe|perhaps|possibly|potentially|probably)\b/i;
 const REPORT_INSTRUCTION_RE = /(?:^|,\s*)(?:please\s+)?(?:apply|use|put|treat|spray|place)\b|\b(?:please|make sure|ensure|remember to)\b/i;
-const REPORT_FINDING_VERB_RE = /\b(?:applied|placed|used|treated|sprayed|put|went|got)\b/i;
+const REPORT_FINDING_VERB_RE = /\b(?:applied|placed|used|treated|sprayed|put|went|got|received)\b/i;
 const REPORT_ASSERTION_START = `(?:(?:the|a|an)\\s+)?(?:[\\w'\u2019-]+\\s+){1,4}(?:(?:(?:was|were|is|are|has|have|had|got)\\s+(?:\\w+ly\\s+)?)?${REPORT_FINDING_VERB_RE.source})`;
 const REPORT_ASSERTION_BOUNDARY_RE = new RegExp(`(?:,\\s*|\\bwith\\s+)(?=${REPORT_ASSERTION_START})`, 'gi');
 const REPORT_UNRELATED_OR_CLAUSE_RE = /^or\s+(?:(?:the|our|your|their)\s+)?(?:technician|tech|crew|team|office|report|i|we|you|he|she|they|it)\s+(?:is|are|was|were|has|have|had|will|would|should|can|could|did|does|do)\b/i;
@@ -1286,10 +1286,11 @@ function report_readback_confirms(value, record, { spoken }) {
       if (text[clauseEnd] === '?' || interrogative || alternativeQuestion) continue;
       const clause = reportAssertionOf(clauseOf(text, m.index), m.index - clauseStart);
       // A contrast excludes its following alternative, not the location
-      // affirmed before it: "exterior rather than indoors" still confirms
-      // exterior. Require both halves in the affirmative portion.
+      // affirmed before it: "exterior rather than indoors" and "exterior,
+      // not indoors" still confirm exterior. Require both halves in the
+      // affirmative portion.
       const affirmed = clause.replace(/^\s*(?:rather than|instead of)\b[^,]*,\s*/i, '')
-        .split(/\b(?:rather than|instead of)\b/i)[0];
+        .split(/\b(?:rather than|instead of)\b|,\s*\bnot\b/i)[0];
       const subjectAt = affirmed.search(new RegExp(value.subject, 'i'));
       const locationAt = affirmed.search(locationRe);
       const orTail = text.slice(clauseEnd);
