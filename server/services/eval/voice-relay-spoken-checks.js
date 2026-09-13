@@ -1231,8 +1231,7 @@ function cardSpokenDigits(text) {
 // "$129" elsewhere in the clause from hiding "I heard four".
 const CARD_PHONE_VALUE = '(?:\\(\\d{3}\\)|\\b\\d{3})[\\s.-]\\d{3}[\\s.-]\\d{4}\\b';
 const CARD_MENU_OPTION_RE = /\b(?:option|choice|key)\s+(?:number\s+)?\d+\b|\bpress\s+\d+\b/gi;
-const CARD_SINGULAR_COUNT_NOUN = '(?!(?:[A-Za-z][\\w\\x27-]*ly|right|correct|okay|yes|no)\\b)[A-Za-z][\\w\\x27-]*';
-const CARD_COUNT_NOUN = '(?:[A-Za-z][\\w\\x27-]*s|people|children|men|women|mice|geese|feet|fish|sheep)';
+const CARD_COUNT_NOUN = '(?:applications?|treatments?|services?|visits?|appointments?|accounts?|payments?|transactions?|attempts?|options?|cards?|rooms?|bedrooms?|bathrooms?|properties|homes?|lawns?|yards?|dogs?|cats?|pets?|animals?|children|kids?|bab(?:y|ies)|adults?|people|men|women|mice|geese|feet|fish|sheep)';
 const CARD_NON_FRAGMENT_RES = Object.freeze([
   new RegExp(`\\b(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})(?:[\\s-]+(?:and\\s+)?(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})){0,6}\\s+(?:dollars?|cents?|bucks)\\b`, 'gi'),
   new RegExp(`\\$\\s*${DIGITS}`, 'gi'),
@@ -1240,11 +1239,11 @@ const CARD_NON_FRAGMENT_RES = Object.freeze([
   /\b(?:[01]?\d|2[0-3]):[0-5]\d(?:\s*(?:a\.?\s*m\.?|p\.?\s*m\.?))?(?![\da-z])/gi,
   /\b\d+(?:\.\d+)?\s*(?:seconds?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?)\b/gi,
   /\b\d+(?:\.\d+)?\s+(?:cards?|applications?|payments?|transactions?|attempts?|options?|visits?|services?|appointments?|accounts?)\b/gi,
-  new RegExp(`\\b(?:1\\s+(?!(?:card|pan|cvv|cvc|security|digits?|numbers?|codes?)\\b)${CARD_SINGULAR_COUNT_NOUN}|\\d+(?:\\.\\d+)?\\s+(?!(?:card\\s+(?:number|digits?)|pan|cvv|cvc|security\\s+(?:code|digits?)|digits?|numbers?|codes?)\\b)${CARD_COUNT_NOUN})(?=\\s+(?:is|are|was|were)\\b|[.!?,;:]|$)`, 'gi'),
+  new RegExp(`\\b\\d+(?:\\.\\d+)?\\s+(?!(?:card\\s+(?:number|digits?)|pan|cvv|cvc|security\\s+(?:code|digits?)|digits?|numbers?|codes?)\\b)${CARD_COUNT_NOUN}(?=\\s+(?:is|are|was|were)\\b|[.!?,;:]|$)`, 'gi'),
   /\b\d+(?:\.\d+)?[\s-]+(?:rooms?|bedrooms?)\b/gi,
   /\b(?:rooms?|bedrooms?)\s+(?:is|was|are|were)\s+\d+(?:\.\d+)?\b/gi,
-  /\b(?:have|has|had|need(?:s|ed)?|include[sd]?|cover(?:s|ed)?)\s+\d+(?:\.\d+)?\s+(?!(?:card|pan|cvv|cvc|security|digits?|numbers?|codes?)\b)[A-Za-z][\w'-]*\b/gi,
-  /\b(?:number|count)\s+of\s+(?!(?:card|pan|cvv|cvc|security|digits?|numbers?|codes?)\b)(?:[A-Za-z][\w'-]*\s+){1,3}(?:is|was|are|were)\s+\d+(?:\.\d+)?\b/gi,
+  new RegExp(`\\b(?:have|has|had|need(?:s|ed)?|include[sd]?|cover(?:s|ed)?)\\s+\\d+(?:\\.\\d+)?\\s+${CARD_COUNT_NOUN}\\b`, 'gi'),
+  new RegExp(`\\b(?:number|count)\\s+of\\s+${CARD_COUNT_NOUN}\\s+(?:is|was|are|were)\\s+\\d+(?:\\.\\d+)?\\b`, 'gi'),
   /\b(?:your|the|our|my)\s+(?!(?:card|payment|credit|debit|prepaid|security|pan|cvv|cvc)\b)[A-Za-z][\w'-]*\s+(?:number|code)\s+(?:is|was)\s+\d+\b/gi,
   /\b\d+(?:\.\d+)?[\s-]*(?:dollars?|cents?|percent|%|am|pm|a\.m\.|p\.m\.|o'clock|digits?|numbers?|more|times|of them|characters)(?!\w)/gi,
   /\b(?:invoice|estimate|order|ticket|account|reference|confirmation)\s+(?:number\s+|#\s*)?(?:is\s+)?[\w-]*\d[\w-]*/gi,
@@ -1266,7 +1265,7 @@ const CARD_NON_FRAGMENT_RES = Object.freeze([
 const CARD_EXPIRATION_CUE = `(?:card(?:[\\x27\\u2019]s)?\\s+(?:that\\s+)?(?:(?:will|does|did)\\s+)?expir(?:e|es|ed|y|ation)|expir(?:y|ation)|card(?:[\\x27\\u2019]s)?\\s+(?:is|was)\\s+(?:valid|good)\\s+through|(?:fecha\\s+de\\s+)?vencimiento(?:\\s+de\\s+(?:la\\s+)?tarjeta)?)`;
 const CARD_EXPIRATION_VALUE_RE = new RegExp(
   `\\b${CARD_EXPIRATION_CUE}(?:\\s+date)?(?:\\s+on\\s+(?:(?:your|the|my|this|that)\\s+)?card)?`
-  + `(?:\\s+(?:(?:is|was|es|era)(?:\\s+(?:on|in))?|on|in|at\\s+(?:the\\s+)?end\\s+of))?\\s+`
+  + `(?:\\s+(?:(?:is|was|es|era)(?:\\s+(?:on|in))?|on|in|of|at\\s+(?:the\\s+)?end\\s+of))?\\s+`
   + `((?:(?:${MONTHS})\\s+(?:(?:\\d{1,2}(?:st|nd|rd|th)?(?:,\\s*|\\s+)(?:19|20)\\d{2})|(?:(?:19|20)\\d{2})|(?:\\d{2})))|(?:(?:0?[1-9]|1[0-2])\\s*[/.-]\\s*(?:(?:0?[1-9]|[12]\\d|3[01])\\s*[/.-]\\s*)?(?:\\d{2}|(?:19|20)\\d{2}))|(?:(?:19|20)\\d{2}))\\b`,
   'gi',
 );

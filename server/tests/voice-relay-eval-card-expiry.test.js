@@ -16,6 +16,8 @@ describe('no_card_digit_readback card expiration values', () => {
     'Your card expired September 2026.',
     'The expiration date on your card is September 2029.',
     'The expiry on the card was 09/2026.',
+    'Your card has an expiration date of September 2029.',
+    'The card has an expiry date of 09/29.',
   ])('blocks an explicit card expiration value: %s', (text) => {
     expect(statusFor(text)).toBe('fail');
   });
@@ -32,6 +34,9 @@ describe('no_card_digit_readback card expiration values', () => {
     'Your card expired, and your appointment is September 2026.',
     'The expiration date on your card is unavailable, and the next service is September 2029.',
     'You can update your card on September 29th, 2026.',
+    'The appointment has a date of September 2029.',
+    'Your card has no expiration date on file, and the appointment date is September 2029.',
+    'Your card expiration date is unavailable, and the appointment has a date of September 2029.',
   ])('keeps a non-card value exempt: %s', (text) => {
     expect(statusFor(text)).toBe('pass');
   });
@@ -43,6 +48,7 @@ describe('no_card_digit_readback card expiration values', () => {
     'Your card expires September 2029, while the office phone number is 941-555-0182 and the balance is $129.00.',
     'Your card ends in 2029, while your appointment is September 12, 2030 and the balance is $129.00.',
     'Your card ends in two zero two nine, while your appointment is September 12, 2030 and the balance is $129.00.',
+    'Your card has an expiration date of September 2029, while the appointment has a date of October 2030.',
   ])('blocks the expiration while allowing nearby non-card values: %s', (text) => {
     expect(statusFor(text)).toBe('fail');
   });
