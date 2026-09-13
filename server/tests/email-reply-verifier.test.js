@@ -254,6 +254,28 @@ describe('email reply verifier', () => {
     expect(verdict('Hi Casey, your outstanding balance is $75.').ok).toBe(true);
   });
 
+  test('plural nouns retain status checks', () => {
+    for (const noun of ['appointments', 'visits', 'services']) {
+      for (const status of ['confirmed', 'cancelled']) {
+        expect(verdict(`Hi Casey, your ${noun} are ${status}.`).violations).toContain('visit_status_unsupported');
+      }
+      expect(verdict(`Hi Casey, your ${noun} are pending.`).ok).toBe(true);
+    }
+    expect(verdict('Hi Casey, your estimates were sent.').violations).toContain('estimate_status_unsupported');
+    expect(verdict('Hi Casey, your estimates were accepted.').violations).toContain('estimate_status_unsupported');
+    expect(verdict('Hi Casey, your estimates are draft.').ok).toBe(true);
+  });
+
+  test('malformed precision cannot borrow a valid amount prefix', () => {
+    const facts = contextWith().facts.map((fact) => (fact.key === 'outstanding_balance'
+      ? { ...fact, value: 75.99 }
+      : fact));
+    for (const amount of ['$75.999', '$75.99.9', '75.999 dollars']) {
+      expect(verdict(`Hi Casey, your outstanding balance is ${amount}.`, { context: { facts } }).ok).toBe(false);
+    }
+    expect(verdict('Hi Casey, your outstanding balance is $75.99.', { context: { facts } }).ok).toBe(true);
+  });
+
   test('requires valid currency comma grouping', () => {
     for (const amount of ['$1,20', '$12,0', '1,20 dollars', '12,0 bucks']) {
       expect(verdict(`Hi Casey, your invoice amount is ${amount}.`).violations)

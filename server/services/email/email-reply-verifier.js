@@ -6,7 +6,7 @@ const { etParts, addETDays } = require('../../utils/datetime-et');
 
 const PLACEHOLDER_RE = /\[([a-z][a-z0-9_ -]{0,30})\]|\{\{?([a-z][a-z0-9_ -]{0,30})\}?\}/gi;
 const LINK_RE = /(?:https?:\/\/|www\.)[^\s<>()]+|\b(?:[a-z0-9-]+\.)+[a-z]{2,63}(?:\/[^\s<>()]*)?/gi;
-const MONEY_RE = /\$\s*\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?\s+(?:dollars?|bucks?)\b/gi;
+const MONEY_RE = /\$\s*\d(?:[\d,.]*\d)?|\b\d(?:[\d,.]*\d)?\s+(?:dollars?|bucks?)\b/gi;
 const SIGNED_MONEY_RE = /(?:[+\-\u2212]\s*\$\s*|\$\s*[+\-\u2212]\s*)\d[\d,]*(?:\.\d{1,2})?|[+\-\u2212]\s*\d[\d,]*(?:\.\d{1,2})?\s+(?:dollars?|bucks?)\b/gi;
 const WRITTEN_MONEY_RE = /\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)\s+(?:dollars?|bucks?)\b/gi;
 const DATE_RE = /\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b|\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?\b|\b\d{1,2}(?:st|nd|rd|th)\b|\b(?:sun|mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|sat(?:ur)?)(?:day)?\b|\b(?:today|tomorrow)\b/gi;
@@ -104,9 +104,9 @@ function mentionedFactKeys(sentence) {
   if (language.payment) keys.push('recent_payment');
   if (language.invoice) keys.push('open_invoice');
   if (/\b(?:dues|surcharge|card fee|monthly (?:charge|cost|price|rate))\b/i.test(sentence)) keys.push('billing_lane');
-  if (/\bestimate\b/i.test(sentence)) keys.push('pending_estimate');
+  if (/\bestimates?\b/i.test(sentence)) keys.push('pending_estimate');
   if (/\b(?:visit|service|appointment)\w*\b/i.test(sentence)
-    || (!/\bestimate\b/i.test(sentence) && /\b(?:scheduled|coming|arriv)\w*\b/i.test(sentence))) {
+    || (!/\bestimates?\b/i.test(sentence) && /\b(?:scheduled|coming|arriv)\w*\b/i.test(sentence))) {
     keys.push(/\b(?:last|previous|completed|was serviced|came out)\b/i.test(sentence)
       ? 'last_completed_visit' : 'upcoming_visit');
   }
@@ -214,7 +214,7 @@ function dateSemanticKeys(sentence) {
   const language = factLanguage(sentence);
   if (language.invoice) return ['open_invoice'];
   if (language.payment) return ['recent_payment'];
-  if (/\bestimate\b/i.test(sentence)) return ['pending_estimate'];
+  if (/\bestimates?\b/i.test(sentence)) return ['pending_estimate'];
   if (/\b(?:last|previous|completed|was serviced|came out)\b/i.test(sentence)) return ['last_completed_visit'];
   if (/\b(?:visit|service|appointment|scheduled|coming|arriv)\w*\b/i.test(sentence)) return ['upcoming_visit'];
   return [];
@@ -289,22 +289,22 @@ function statusViolations(text, context) {
   for (const sentence of sentences(text)) {
     const language = factLanguage(sentence);
     if (/\b(?:not|never|no longer|isn['’]t|wasn['’]t|hasn['’]t|haven['’]t|didn['’]t|cannot|can['’]t)\b/i.test(sentence)
-      && /\b(?:payment|paid|invoice|visit|service|appointment|estimate)\b/i.test(sentence)) violations.push('negated_status_unsupported');
+      && /\b(?:payments?|paid|invoices?|visits?|services?|appointments?|estimates?)\b/i.test(sentence)) violations.push('negated_status_unsupported');
 
     const stateRules = [
       { matches: language.payment, key: 'recent_payment', violation: 'payment_status_unsupported',
         pattern: /\b(?:failed|declined|pending|processing|refunded|reversed|cancelled|canceled|voided)\b/gi },
       { matches: language.invoice, key: 'open_invoice', violation: 'invoice_status_unsupported',
         pattern: /\b(?:draft|sent|viewed|paid|prepaid|overdue|unpaid|processing|refunded|voided|void|cancelled|canceled)\b/gi },
-      { matches: /\bestimate\b/i.test(sentence), key: 'pending_estimate', violation: 'estimate_status_unsupported',
+      { matches: /\bestimates?\b/i.test(sentence), key: 'pending_estimate', violation: 'estimate_status_unsupported',
         pattern: /\b(?:draft|scheduled|sending|send failed|viewed|accepted|declined|expired)\b/gi },
-      { matches: /\b(?:visit|service|appointment)\b/i.test(sentence), key: 'upcoming_visit', violation: 'visit_status_unsupported',
+      { matches: /\b(?:visits?|services?|appointments?)\b/i.test(sentence), key: 'upcoming_visit', violation: 'visit_status_unsupported',
         pattern: /\b(?:pending|rescheduled|cancelled|canceled|skipped|en route|on site)\b/gi },
     ];
     for (const rule of stateRules) {
       if (rule.matches && !stateWordsSupported(sentence, rule.key, context, rule.pattern)) violations.push(rule.violation);
     }
-    if (/\b(?:visit|service|appointment)\b/i.test(sentence) && /\bcompleted\b/i.test(sentence)
+    if (/\b(?:visits?|services?|appointments?)\b/i.test(sentence) && /\bcompleted\b/i.test(sentence)
       && (/\b(?:next|upcoming)\b/i.test(sentence) || !statusSupported(sentence, 'last_completed_visit', context, () => true))) violations.push('visit_status_unsupported');
 
     const statusRules = [
@@ -315,12 +315,12 @@ function statusViolations(text, context) {
         supports: (fact) => SUCCESS_STATUS_RE.test(String(fact.value?.status || '')),
       },
       {
-        matches: /\b(?:visit|service|appointment)\b[\s\S]*\b(?:confirmed|booked|all set)\b|\b(?:confirmed|booked)\b[\s\S]*\b(?:visit|service|appointment)\b/i.test(sentence),
+        matches: /\b(?:visits?|services?|appointments?)\b[\s\S]*\b(?:confirmed|booked|all set)\b|\b(?:confirmed|booked)\b[\s\S]*\b(?:visits?|services?|appointments?)\b/i.test(sentence),
         key: 'upcoming_visit', violation: 'visit_status_unsupported',
         supports: (fact) => String(fact.value?.status).toLowerCase() === 'confirmed',
       },
       {
-        matches: /\bestimate\b[\s\S]*\b(?:sent|emailed)\b|\b(?:sent|emailed)\b[\s\S]*\bestimate\b/i.test(sentence),
+        matches: /\bestimates?\b[\s\S]*\b(?:sent|emailed)\b|\b(?:sent|emailed)\b[\s\S]*\bestimates?\b/i.test(sentence),
         key: 'pending_estimate', violation: 'estimate_status_unsupported',
         supports: (fact) => /^(?:sent|viewed)$/i.test(String(fact.value?.status || '')) && fact.value?.sentAt,
       },
