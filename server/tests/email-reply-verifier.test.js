@@ -335,6 +335,18 @@ describe('email reply verifier', () => {
     expect(verdict('Hi Casey, your payment was on September 10.').ok).toBe(true);
   });
 
+  test('original payment dates do not establish other payment event dates', () => {
+    for (const status of ['refunded', 'reversed', 'canceled', 'voided', 'declined', 'failed', 'processing']) {
+      const facts = contextWith().facts.map((fact) => (fact.key === 'recent_payment'
+        ? { ...fact, value: { ...fact.value, status } }
+        : fact));
+      expect(verdict(`Hi Casey, your $50 payment was ${status} on September 10.`, { context: { facts } }).violations)
+        .toContain('date_unsupported:September 10');
+      expect(verdict(`Hi Casey, your $50 payment was ${status}.`, { context: { facts } }).ok).toBe(true);
+      expect(verdict('Hi Casey, your $50 payment was on September 10.', { context: { facts } }).ok).toBe(true);
+    }
+  });
+
   test('invoice due dates cannot support invoice event dates', () => {
     expect(verdict('Hi Casey, your invoice is due September 20.').ok).toBe(true);
     for (const wording of [

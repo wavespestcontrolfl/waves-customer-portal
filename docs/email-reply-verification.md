@@ -23,7 +23,8 @@ remain the supported forms. Named clocks (noon/midnight) require review. Withhel
 or collected total. Invoice statuses and payment-due dates bind to the invoice. Invoice dates require
 due-date wording in a sentence without lifecycle-event claims; the assembler
 does not expose invoice event timestamps. Estimate dates require sent/emailed wording without other lifecycle claims.
-Viewed estimates retain sent evidence.
+Viewed estimates retain sent evidence. Payment dates do not establish refund,
+reversal or other subsequent lifecycle-event dates.
 
 The verifier also checks plain-text structure, greeting, unsupported signatures,
 boilerplate, links, access codes, existing customer-copy compliance, copied

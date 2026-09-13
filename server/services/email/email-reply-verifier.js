@@ -233,6 +233,8 @@ function temporalSupportedByEntry(raw, sentence, entry) {
     || /\b(?:sent|viewed|created|issued|paid|cancelled|canceled|processed|refunded|voided|emailed)\b/i.test(sentence))) return false;
   if (entry.key === 'pending_estimate' && (!/\b(?:sent|emailed)\b/i.test(sentence)
     || /\b(?:expir\w*|accept\w*|declin\w*|view\w*|creat\w*|approv\w*|sign\w*|schedul\w*)\b/i.test(sentence))) return false;
+  if (entry.key === 'recent_payment'
+    && /\b(?:refund\w*|revers\w*|cancel\w*|void\w*|declin\w*|fail\w*|processing)\b/i.test(sentence)) return false;
   const normalized = normalizeTemporal(raw);
   if ([...entry.aliases].some((alias) => normalizeTemporal(alias) === normalized)) return true;
   const standaloneClocks = String(sentence).replace(TIME_RANGE_RE, '').match(TIME_RE) || [];
