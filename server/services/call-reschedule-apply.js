@@ -318,8 +318,10 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
 }
 
 async function loadCandidates(conn, customerId, now = new Date(), { includePast = false } = {}) {
-  return conn('scheduled_services')
-    .where({ 'scheduled_services.customer_id': customerId })
+  const query = conn('scheduled_services');
+  if (Array.isArray(customerId)) query.whereIn('scheduled_services.customer_id', customerId);
+  else query.where({ 'scheduled_services.customer_id': customerId });
+  return query
     .whereIn('scheduled_services.status', LIVE_STATUSES)
     .where('scheduled_services.scheduled_date', '>=', includePast ? etDateString(addETDays(now, -60)) : etDateString(now))
     .orderBy('scheduled_services.scheduled_date', 'asc')

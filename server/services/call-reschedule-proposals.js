@@ -17,7 +17,7 @@ const norm = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g,
 const openStates = ['open', 'in_progress'];
 const ADDRESS_COLUMNS = ['address_line1', 'address_line2', 'city', 'state', 'zip'];
 const CUSTOMER_COLUMNS = ['id', 'first_name', 'last_name', 'deleted_at', 'phone', 'secondary_phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone', ...ADDRESS_COLUMNS];
-const PROPERTY_COLUMNS = ['id', ...ADDRESS_COLUMNS, 'updated_at'];
+const PROPERTY_COLUMNS = ['id', 'customer_id', ...ADDRESS_COLUMNS, 'updated_at'];
 
 // Display only: keep the raw property identity untouched for the Apply guard.
 function proposalAddress(visit, customer) {
@@ -147,10 +147,12 @@ async function visitsForCard(conn, customerId, now) {
   const propertyIds = [...new Set(rows.map((r) => r.property_id).filter(Boolean))];
   const [services, properties] = await Promise.all([
     serviceIds.length ? conn('services').whereIn('id', serviceIds).select('id', 'name') : [],
-    propertyIds.length ? conn('customer_properties').where({ customer_id: customerId, active: true }).whereIn('id', propertyIds).select(PROPERTY_COLUMNS) : [],
+    propertyIds.length ? conn('customer_properties').where({ active: true })
+      .whereIn('customer_id', Array.isArray(customerId) ? customerId : [customerId])
+      .whereIn('id', propertyIds).select(PROPERTY_COLUMNS) : [],
   ]);
   return rows.map((r) => ({ ...r, service_name: services.find((s) => s.id === r.service_id)?.name || 'Service',
-    property: properties.find((p) => p.id === r.property_id) || null, current_window: customerWindow(r.scheduled_date, r.window_start) }));
+    property: properties.find((p) => p.id === r.property_id && p.customer_id === r.customer_id) || null, current_window: customerWindow(r.scheduled_date, r.window_start) }));
 }
 
 async function listProposals(conn, { limit = 100, offset = 0, now = new Date() } = {}) {
@@ -160,12 +162,20 @@ async function listProposals(conn, { limit = 100, offset = 0, now = new Date() }
     .whereRaw("t.payload->'reschedule_proposal' IS NOT NULL").orderBy('t.created_at', 'asc').orderBy('t.id').limit(limit).offset(offset)
     .select('t.id', 't.call_log_id', 't.updated_at', 't.payload', 'cl.customer_id', 'cl.created_at as call_at',
       'c.first_name', 'c.last_name', 'c.phone', ...ADDRESS_COLUMNS.map((field) => `c.${field}`));
+  const visitsByCustomer = new Map();
+  if (rows.length) {
+    const visits = await visitsForCard(conn, [...new Set(rows.map((row) => row.customer_id))], now);
+    for (const visit of visits) {
+      if (!visitsByCustomer.has(visit.customer_id)) visitsByCustomer.set(visit.customer_id, []);
+      visitsByCustomer.get(visit.customer_id).push(visit);
+    }
+  }
   for (const row of rows) {
     row.card_kind = 'reschedule_proposal';
     row.proposal = row.payload.reschedule_proposal;
     row.skip_reason = row.payload.reschedule_apply?.skipped || 'agent_did_not_commit';
     delete row.payload;
-    row.candidates = await visitsForCard(conn, row.customer_id, now);
+    row.candidates = visitsByCustomer.get(row.customer_id) || [];
     const requested = etWallClockOfConfirmedStart(row.proposal.proposed_start_at);
     row.matched_visit_id = row.candidates.length === 1 ? row.candidates[0].id : null;
     row.requested_window = requested ? customerWindow(requested.slice(0, 10), requested.slice(11, 16)) : null;

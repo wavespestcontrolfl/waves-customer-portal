@@ -1,6 +1,6 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-const { proposalEvidence, proposalAddress, customerWindow, stageProposal, dismissProposal } = require('../services/call-reschedule-proposals');
+const { proposalEvidence, proposalAddress, customerWindow, stageProposal, dismissProposal, listProposals } = require('../services/call-reschedule-proposals');
 const { classifyTriageItem } = require('../services/triage-auto-resolve');
 
 describe('reviewed proposed times', () => {
@@ -222,5 +222,62 @@ test('gate rollback still allows a version-bound dismissal of an existing propos
   } finally {
     delete process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
     transition.mockRestore();
+  }
+});
+
+
+test('a full proposal page batches visits and preserves customer/address isolation', async () => {
+  const priorGate = process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
+  process.env.GATE_RESCHEDULE_PROPOSAL_CARD = 'true';
+  const cards = Array.from({ length: 100 }, (_, index) => ({
+    id: `card-${index}`, customer_id: `customer-${index % 50}`,
+    address_line1: 'Fallback address',
+    payload: { reschedule_proposal: { proposed_start_at: '2099-09-10T14:00:00-04:00' } },
+  }));
+  const visits = Array.from({ length: 50 }, (_, index) => ({
+    id: `visit-${index}`, customer_id: `customer-${index}`, property_id: `property-${index}`,
+    service_id: 'pest', scheduled_date: '2099-09-11', window_start: '09:00', status: 'confirmed',
+    internal_notes: 'Private scheduling note',
+  }));
+  const properties = visits.map((visit, index) => ({
+    id: visit.property_id, customer_id: index === 0 ? 'customer-1' : visit.customer_id,
+    active: true, address_line1: `Property ${index}`,
+  }));
+  const tables = { 'triage_items as t': cards, scheduled_services: visits,
+    services: [{ id: 'pest', name: 'Pest Control' }], customer_properties: properties };
+  const queries = [];
+  const conn = (table) => {
+    const filters = [];
+    const query = {
+      join: () => query, leftJoin: () => query, whereNull: () => query,
+      whereRaw: () => query, orderBy: () => query, limit: () => query, offset: () => query,
+      where: () => query, select: () => query,
+      whereIn(column, values) { filters.push({ column: column.split('.').pop(), values }); return query; },
+      then(resolve, reject) {
+        queries.push(table);
+        const rows = tables[table].filter((row) => filters.every(({ column, values }) =>
+          !(column in row) || values.includes(row[column])));
+        return Promise.resolve(rows.map((row) => ({ ...row }))).then(resolve, reject);
+      },
+    };
+    return query;
+  };
+  try {
+    const result = await listProposals(conn, { now: new Date('2099-09-09T12:00:00Z') });
+    expect(result).toHaveLength(100);
+    expect(queries.sort()).toEqual(['customer_properties', 'scheduled_services', 'services', 'triage_items as t']);
+    for (const [index, card] of result.entries()) {
+      expect(card.candidates).toHaveLength(1);
+      expect(card.candidates[0]).toMatchObject({ id: `visit-${index % 50}`, service_name: 'Pest Control' });
+      expect(card.candidates[0]).not.toHaveProperty('internal_notes');
+      expect(card.candidates[0].display_address.address_line1).toBe(index % 50 === 0 ? 'Fallback address' : `Property ${index % 50}`);
+    }
+    tables['triage_items as t'] = [];
+    queries.length = 0;
+    await expect(listProposals(conn)).resolves.toEqual([]);
+    expect(queries).toEqual(['triage_items as t']);
+  } finally {
+    if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
+    else process.env.GATE_RESCHEDULE_PROPOSAL_CARD = priorGate;
   }
 });
