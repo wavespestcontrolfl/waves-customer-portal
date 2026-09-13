@@ -191,3 +191,17 @@ it('does not show an unconfirmed Request updates opt-out during gate rollback', 
   fireEvent.change(select, { target: { value: 'email' } });
   await waitFor(() => expect(select).toHaveValue('push'));
 });
+
+it('blocks invalid billing email before saving and accepts a corrected address', async () => {
+  prefs.billingEmail = 'existing@example.com';
+  render(<BillingTab customer={customer} />);
+  const field = await screen.findByRole('textbox', { name: 'Billing email', exact: true });
+  fireEvent.change(field, { target: { value: 'invalid-email' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save billing preferences' }));
+  expect(field.validity.typeMismatch).toBe(true);
+  expect(api.updateNotificationPrefs).not.toHaveBeenCalled();
+  fireEvent.change(field, { target: { value: 'corrected@example.com' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save billing preferences' }));
+  await screen.findByRole('button', { name: 'Saved', exact: true });
+  expect(api.updateNotificationPrefs).toHaveBeenCalledWith(expect.objectContaining({ billingEmail: 'corrected@example.com' }));
+});

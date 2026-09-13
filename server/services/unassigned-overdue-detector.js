@@ -67,6 +67,7 @@ async function runUnassignedOverdueCheck() {
 }
 
 async function runInner() {
+  if (require('./no-show-detector').enabled()) return { created: 0, skipped: true, reason: 'handled_by_tech_late_check' };
   let rows;
   try {
     const result = await db.raw(`

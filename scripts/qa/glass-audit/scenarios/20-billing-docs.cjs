@@ -306,8 +306,10 @@ const autopayContract = () => contractRow({
   cardBrand: 'visa',
   lastFour: '4242',
   methodType: 'card',
-  renewalDate: '2027-03-01',
-  cancellationDeadline: '2027-02-15',
+  // The AutoPay card renders both of these as live deadlines ("renews on", "cancel by"), so a
+  // literal pair turns into a contract that renewed months ago -- generated from the run instead.
+  renewalDate: etDateString(addETDays(new Date(), 180)),
+  cancellationDeadline: etDateString(addETDays(new Date(), 166)),
   consentTextVersion: 'v3',
   contractTextSnapshot: [
     'AUTOPAY AUTHORIZATION',

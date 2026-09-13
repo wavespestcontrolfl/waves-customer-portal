@@ -150,6 +150,28 @@ export function deleteCompletionDraft(serviceId, scope) {
     .then((result) => result !== false);
 }
 
+// Visit closeout forms are unsubmitted field drafts too. Keep them in the
+// draft database so an older open CompletionPanel tab, whose committed-body
+// pruner knows nothing about visit keys, cannot delete them as unmarked
+// completion retries. Namespace the scope while retaining the signed-in
+// operator id so a shared browser never restores one technician's visit forms
+// for the next technician.
+function visitDraftScope(operatorScope) {
+  return `visit:${operatorScope ? String(operatorScope) : "anonymous"}`;
+}
+
+export function putVisitCompletionDraft(visitId, draft, operatorScope, now = Date.now()) {
+  return putCompletionDraft(visitId, draft, visitDraftScope(operatorScope), now);
+}
+
+export function getVisitCompletionDraft(visitId, operatorScope) {
+  return getCompletionDraft(visitId, visitDraftScope(operatorScope));
+}
+
+export function deleteVisitCompletionDraft(visitId, operatorScope) {
+  return deleteCompletionDraft(visitId, visitDraftScope(operatorScope));
+}
+
 // Deletes every draft row older than `maxAgeMs` across all scopes and
 // resolves the [{ serviceId, scope }] it removed so the caller can drop the
 // matching localStorage metadata. Each row's age check and delete are

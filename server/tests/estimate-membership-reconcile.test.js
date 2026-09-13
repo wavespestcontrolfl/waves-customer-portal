@@ -87,7 +87,7 @@ describe('reconcileFrozenMembershipSnapshot — frozen recurring flags', () => {
     isActivePlanCustomer.mockResolvedValue(false);
     const estimate = estimateRow(frozenEstData());
 
-    await reconcileFrozenMembershipSnapshot(estimate);
+    expect(await reconcileFrozenMembershipSnapshot(estimate)).toEqual({ ok: true }); // a completed reprice reports ok
 
     const estData = JSON.parse(estimate.estimate_data);
     expect(estData.engineInputs.recurringCustomer).toBeUndefined();
@@ -136,7 +136,8 @@ describe('reconcileFrozenMembershipSnapshot — frozen recurring flags', () => {
     serverRecomputeFromEstimateData.mockResolvedValue({ recomputed: false, reason: 'NO_INPUTS' });
     const estimate = estimateRow(frozenEstData());
 
-    await reconcileFrozenMembershipSnapshot(estimate);
+    const result = await reconcileFrozenMembershipSnapshot(estimate, { strictMembership: true });
+    expect(result).toEqual({ ok: false, error: 'NO_INPUTS' });
 
     const estData = JSON.parse(estimate.estimate_data);
     expect(estData.membershipLapsedRequote).toBe(true);
@@ -144,6 +145,39 @@ describe('reconcileFrozenMembershipSnapshot — frozen recurring flags', () => {
     // gates accept/deposit through resolveEstimateQuoteRequirement.
     expect(estData.result.oneTime.total).toBe(127.5);
     expect(estimate.onetime_total).toBe(127.5);
+  });
+
+  // The PUBLIC probe stays non-strict (#4345 r5 regression: strictness there
+  // bought nothing, since every public caller ignores the result and the page
+  // degrades to nonmember pricing on its own). A lookup that throws anyway —
+  // a connection error rather than a soft "no plan" — still reports ok:false.
+  test('a failed membership lookup: the row keeps its frozen snapshot, no reprice, and the result reports { ok: false } (non-strict default probe — codex #4345 re-cut)', async () => {
+    isActivePlanCustomer.mockRejectedValue(new Error('customers lookup timed out'));
+    const estimate = estimateRow(frozenEstData());
+    const before = estimate.estimate_data;
+
+    const result = await reconcileFrozenMembershipSnapshot(estimate);
+
+    expect(isActivePlanCustomer).toHaveBeenCalledWith(expect.anything(), estimate.customer_id, { strict: false });
+    expect(result).toEqual({ ok: false, error: 'customers lookup timed out' });
+    expect(estimate.estimate_data).toBe(before);
+    expect(serverRecomputeFromEstimateData).not.toHaveBeenCalled();
+    expect(clearEstimatePricingCache).not.toHaveBeenCalled();
+  });
+
+  // The opt-in the intelligence bar's get_estimate_detail takes: a reader that
+  // must not report ANY amount off an unverified frozen snapshot turns the
+  // soft "no plan" answer into a throw, and withholds on ok:false.
+  test('strictMembership is opt-in and threads through to the live probe', async () => {
+    isActivePlanCustomer.mockResolvedValue(true);
+    await reconcileFrozenMembershipSnapshot(estimateRow(frozenEstData()), { strictMembership: true });
+    expect(isActivePlanCustomer).toHaveBeenCalledWith(expect.anything(), expect.any(String), { strict: true });
+  });
+
+  test('nothing to reconcile (active member, no customer) resolves undefined — never { ok: false }', async () => {
+    isActivePlanCustomer.mockResolvedValue(true);
+    expect(await reconcileFrozenMembershipSnapshot(estimateRow(frozenEstData()))).toBeUndefined();
+    expect(await reconcileFrozenMembershipSnapshot({ id: 'x', customer_id: null })).toBeUndefined();
   });
 
   test('an active member keeps the stamped flags untouched', async () => {
@@ -338,7 +372,8 @@ describe('reconcileFrozenMembershipSnapshot — the rodent setup waiver is re-va
     isActivePlanCustomer.mockResolvedValue(true);
     loadExistingQualifyingServiceKeys.mockRejectedValue(new Error('db down'));
     const estimate = estimateRow(waivedRodentEstData());
-    await reconcileFrozenMembershipSnapshot(estimate);
+    const result = await reconcileFrozenMembershipSnapshot(estimate, { strictMembership: true });
+    expect(result).toEqual({ ok: false, error: 'setup_waiver_unverified_requote' });
     const estData = JSON.parse(estimate.estimate_data);
     expect(estData.setupWaiverPriorQualifyingServices).toEqual(['pest_control']);
     expect(estData.engineInputs.setupWaiverPriorQualifyingServices).toEqual(['pest_control']);

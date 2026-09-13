@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const SignalDetector = require('../services/customer-intelligence/signal-detector');
 const HealthScorer = require('../services/customer-intelligence/health-scorer');
 const RetentionEngine = require('../services/customer-intelligence/retention-engine');
@@ -153,10 +153,11 @@ router.post('/:id/retention-outreach', async (req, res, next) => {
 });
 
 // PUT /api/admin/customers/intelligence/retention/:id/approve — approve and send
-router.put('/retention/:id/approve', async (req, res, next) => {
+router.put('/retention/:id/approve', requireAdmin, async (req, res, next) => {
   try {
     const outreach = await db('retention_outreach').where('id', req.params.id).first();
     if (!outreach) return res.status(404).json({ error: 'Outreach not found' });
+    if (outreach.status !== 'pending_approval') return res.json({ outreach });
 
     // Never text archived customers — retention outreach for a soft-deleted
     // customer is stale by definition.
@@ -168,67 +169,88 @@ router.put('/retention/:id/approve', async (req, res, next) => {
       return res.status(409).json({ error: 'Customer is archived or missing — outreach cannot be sent' });
     }
 
-    // sent_at / status 'sent' are only stamped AFTER a successful send so a
-    // blocked or failed send leaves the row in a truthful state.
-    const updates = { status: 'approved', approved_by: req.body.approvedBy || 'admin' };
+    // Commit the existing approval state before crossing the provider boundary.
+    // Only one concurrent request may claim a pending draft. A crash or an
+    // uncertain send leaves it approved, never eligible for an automatic resend.
+    const [claimed] = await db('retention_outreach')
+      .where({ id: outreach.id, status: 'pending_approval' })
+      .update({ status: 'approved', approved_by: req.technicianId, updated_at: new Date() })
+      .returning('*');
+    if (!claimed) {
+      const current = await db('retention_outreach').where('id', outreach.id).first();
+      if (!current) return res.status(404).json({ error: 'Outreach not found' });
+      return res.json({ outreach: current });
+    }
+    const updates = { status: 'approved', updated_at: new Date() };
 
-    // If SMS, actually send it
-    if (outreach.outreach_type === 'sms') {
-      if (customer.phone) {
-        try {
-          const smsResult = await sendCustomerMessage({
-            to: customer.phone,
-            body: outreach.message_content,
-            channel: 'sms',
-            audience: 'customer',
-            purpose: 'retention',
-            customerId: customer.id,
-            identityTrustLevel: 'phone_matches_customer',
-            entryPoint: 'admin_customer_intel_retention_approve',
-            consentBasis: {
-              status: 'opted_in',
-              source: 'customer_retention_preferences',
-              capturedAt: customer.updated_at || customer.created_at || new Date().toISOString(),
-            },
-            metadata: {
-              original_message_type: 'retention',
-              outreach_id: outreach.id,
-              adminUserId: req.technicianId,
-            },
-          });
-          if (smsResult.sent) {
-            updates.status = 'sent';
-            updates.sent_at = new Date();
-          } else {
-            updates.status = 'blocked';
-            logger.warn(`Retention SMS blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
-          }
-        } catch (err) {
-          updates.status = 'blocked';
-          logger.error(`Retention SMS failed: ${err.message}`);
-        }
-      } else {
-        updates.status = 'blocked';
-        logger.warn(`Retention SMS for customer ${outreach.customer_id} has no phone on file — marked blocked`);
-      }
+    // Calls remain manual; SMS requires a reachable customer.
+    if (claimed.outreach_type !== 'sms') {
+      updates.status = 'approved';
+    } else if (!customer.phone) {
+      updates.status = 'blocked';
+      logger.warn(`Retention SMS skipped — customer ${customer.id} has no phone`);
     } else {
-      updates.status = 'approved'; // Call — marked as approved, Adam calls manually
+      try {
+        const smsResult = await sendCustomerMessage({
+          to: customer.phone,
+          body: claimed.message_content,
+          channel: 'sms',
+          audience: 'customer',
+          purpose: 'retention',
+          customerId: customer.id,
+          identityTrustLevel: 'phone_matches_customer',
+          entryPoint: 'admin_customer_intel_retention_approve',
+          consentBasis: {
+            status: 'opted_in',
+            source: 'customer_retention_preferences',
+            capturedAt: customer.updated_at || customer.created_at || new Date().toISOString(),
+          },
+          metadata: {
+            original_message_type: 'retention',
+            outreach_id: outreach.id,
+            adminUserId: req.technicianId,
+          },
+        });
+        if (smsResult.sent) {
+          updates.status = 'sent';
+          updates.sent_at = new Date();
+        } else {
+          updates.status = smsResult.deliveryOutcome === 'uncertain' ? 'approved' : 'blocked';
+          logger.warn(`Retention SMS blocked/failed for customer ${customer.id}: ${smsResult.deliveryOutcome} (${smsResult.code})`);
+        }
+      } catch (err) {
+        // The gateway can throw after the provider accepted the message but
+        // its audit failed. Record a known outcome; otherwise preserve the
+        // claim without asserting either delivery or a safe-to-resend failure.
+        if (err.providerOutcome?.sent === true) {
+          updates.status = 'sent';
+          updates.sent_at = new Date();
+        } else if (err.providerOutcome?.sent === false && err.providerOutcome.deliveryOutcome !== 'uncertain') {
+          updates.status = 'blocked';
+        }
+        logger.error(`Retention SMS outcome requires review: ${err.message}`);
+      }
     }
 
-    const [updated] = await db('retention_outreach').where('id', req.params.id).update(updates).returning('*');
-    res.json({ outreach: updated });
+    const [updated] = await db('retention_outreach')
+      .where({ id: outreach.id, status: 'approved' }).update(updates).returning('*');
+    const current = updated || await db('retention_outreach').where('id', outreach.id).first();
+    res.json({ outreach: current });
   } catch (err) { next(err); }
 });
 
 // PUT /api/admin/customers/intelligence/retention/:id/skip — skip outreach
-router.put('/retention/:id/skip', async (req, res, next) => {
+router.put('/retention/:id/skip', requireAdmin, async (req, res, next) => {
   try {
     const [updated] = await db('retention_outreach')
-      .where('id', req.params.id)
+      .where({ id: req.params.id, status: 'pending_approval' })
       .update({ status: 'skipped', updated_at: new Date() })
       .returning('*');
-    if (!updated) return res.status(404).json({ error: 'Outreach not found' });
-    res.json({ outreach: updated });
+    if (updated) return res.json({ outreach: updated });
+    const current = await db('retention_outreach').where('id', req.params.id).first();
+    if (!current) return res.status(404).json({ error: 'Outreach not found' });
+    if (current.status === 'skipped') return res.json({ outreach: current });
+    return res.status(409).json({ error: 'Outreach already acted on. Refresh its status before continuing.' });
   } catch (err) { next(err); }
 });
 

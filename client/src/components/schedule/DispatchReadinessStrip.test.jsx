@@ -6,7 +6,8 @@ afterEach(cleanup);
 
 describe('dispatch readiness', () => {
   it('opens the existing Job Card without invoking the appointment or drag action', () => {
-    const open = vi.fn();
+    let focusedAtOpen = null;
+    const open = vi.fn(() => { focusedAtOpen = document.activeElement; });
     const edit = vi.fn();
     const drag = vi.fn();
     render(<div onClick={edit} onPointerDown={drag}>
@@ -16,6 +17,7 @@ describe('dispatch readiness', () => {
     fireEvent.pointerDown(button);
     fireEvent.click(button);
     expect(open).toHaveBeenCalledOnce();
+    expect(focusedAtOpen).toBe(button);
     expect(edit).not.toHaveBeenCalled();
     expect(drag).not.toHaveBeenCalled();
   });

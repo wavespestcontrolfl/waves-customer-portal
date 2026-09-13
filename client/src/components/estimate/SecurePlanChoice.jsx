@@ -96,10 +96,10 @@ function PlanOption({ selected, disabled, onClick, title, price, priceSuffix, st
         ) : null}
         {price}
         {priceSuffix ? (
-          <span style={{ fontSize: 13, fontWeight: 600, color: W.textCaption }}> {priceSuffix}</span>
+          <span style={{ fontSize: 14, fontWeight: 600, color: W.textCaption }}> {priceSuffix}</span>
         ) : null}
       </div>
-      <div style={{ fontSize: 13, color: W.textBody, lineHeight: 1.5, marginTop: 5 }}>{sub}</div>
+      <div style={{ fontSize: 14, color: W.textBody, lineHeight: 1.5, marginTop: 5 }}>{sub}</div>
       {badge || null}
     </button>
   );

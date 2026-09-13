@@ -145,7 +145,10 @@ export const SHADOWS = {
 export const BUTTON_BASE = {
   borderRadius: RADIUS.full,            // 9999 — pill (legacy portal convention)
   fontFamily: FONTS.ui,
-  fontWeight: 800,
+  // 600, not 800 (G-04): this token feeds portal pages that sit on the glass
+  // sheet, whose weights stop at 700. 800 snapped to a heavier face on iOS and
+  // read as a different font beside the sheet's own 600 controls.
+  fontWeight: 600,
   fontSize: 14,
   border: 'none',
   cursor: 'pointer',
@@ -171,7 +174,11 @@ export const BTN_BASE = {
   border: `2px solid ${COLORS.blueDeeper}`,
   cursor: 'pointer',
   textDecoration: 'none',
-  textTransform: 'uppercase',
+  /* Sentence case (owner ruling C1, DECISIONS 2026-09-11). The design brief
+     called UPPERCASE CTAs brand identity; DECISIONS 2026-09-04 is newer and
+     glass-specific and rules sentence case, and every glass CTA already
+     renders that way except the ones reaching this token. */
+  textTransform: 'none',
   whiteSpace: 'nowrap',
   boxShadow: SHADOWS.btnRest,
   transition: 'background-color 150ms ease-out, color 150ms ease-out, transform 150ms ease-out, box-shadow 150ms ease-out',
@@ -182,7 +189,7 @@ export const BTN_BASE = {
 // Variant styles — spread over BTN_BASE. e.g. `style={{ ...BTN_BASE, ...BUTTON_PRIMARY }}`
 export const BUTTON_PRIMARY = {
   fontSize: 16,
-  fontWeight: 800,
+  fontWeight: 700,   // sheet ceiling (G-04)
   letterSpacing: '0.01em',
   lineHeight: 1,
   padding: '16px 24px',
@@ -193,7 +200,7 @@ export const BUTTON_PRIMARY = {
 
 export const BUTTON_INFO = {
   fontSize: 16,
-  fontWeight: 800,
+  fontWeight: 700,   // sheet ceiling (G-04)
   letterSpacing: '0.01em',
   lineHeight: 1,
   padding: '16px 24px',
@@ -215,8 +222,8 @@ export const BUTTON_SECONDARY = {
 };
 
 export const BUTTON_NAV = {
-  fontSize: 13,
-  fontWeight: 800,
+  fontSize: 14,      // 14px floor — nothing under it on a customer surface
+  fontWeight: 700,   // sheet ceiling (G-04)
   letterSpacing: '0.04em',
   lineHeight: 1,
   padding: '10px 16px',
@@ -251,7 +258,7 @@ export const BUTTON_TERTIARY = {
   borderRadius: 0,
   textUnderlineOffset: 4,
   textDecorationThickness: 2,
-  textTransform: 'uppercase',           // keeps parity with other variants
+  textTransform: 'none',                // keeps parity with other variants (C1)
 };
 
 // Convenience full objects — pass directly as style={GOLD_CTA}, etc.
@@ -292,7 +299,7 @@ export const SECTION_SUBHEAD_ON_BLUE = { ...SECTION_SUBHEAD, color: COLORS.white
 export const CARD_TITLE = {
   fontFamily: FONTS.display,
   fontSize: 27,                          // text-2xl at 18px root
-  fontWeight: 800,
+  fontWeight: 700,                       // sheet ceiling (G-04)
   letterSpacing: '0.02em',
   lineHeight: 1.15,
   color: COLORS.blueDeeper,

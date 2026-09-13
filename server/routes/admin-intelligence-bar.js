@@ -58,6 +58,7 @@ const { MANAGED_AGENTS_OPS_TOOLS, executeManagedAgentsOpsTool } = require('../se
 const { JOB_HEALTH_TOOLS, executeJobHealthTool } = require('../services/intelligence-bar/job-health-tools');
 const { CLOSEOUT_TOOLS, executeCloseoutTool } = require('../services/intelligence-bar/closeout-tools');
 const { CALL_RESEARCH_TOOLS, executeCallResearchTool } = require('../services/intelligence-bar/call-research-tools');
+const { CUSTOMER_LIFECYCLE_TOOLS, executeCustomerLifecycleTool, mergeCustomersEnabled } = require('../services/intelligence-bar/customer-lifecycle-tools');
 const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
 const PendingActions = require('../services/intelligence-bar/pending-actions');
 const { isToolFailure, executionOutcome } = require('../services/intelligence-bar/outcomes');
@@ -132,6 +133,7 @@ const SOCIAL_OPS_TOOL_NAMES = new Set(SOCIAL_OPS_TOOLS.map(t => t.name));
 const MANAGED_AGENTS_OPS_TOOL_NAMES = new Set(MANAGED_AGENTS_OPS_TOOLS.map(t => t.name));
 const JOB_HEALTH_TOOL_NAMES = new Set(JOB_HEALTH_TOOLS.map(t => t.name));
 const CALL_RESEARCH_TOOL_NAMES = new Set(CALL_RESEARCH_TOOLS.map(t => t.name));
+const CUSTOMER_LIFECYCLE_TOOL_NAMES = new Set(CUSTOMER_LIFECYCLE_TOOLS.map(t => t.name));
 // Every infra module loads with EVERY admin context (any admin page can ask
 // about deploys, errors, or webhook health) and shares the admin-only guard
 // that OPS_TOOLS established — technician tokens never see or execute them.
@@ -153,7 +155,7 @@ const SEO_QUERY_TOOLS = SEO_TOOLS.filter(t => !SEO_CONFIRMED_ACTION_TOOL_NAMES.h
 // Communications/Email pages. Call-research rides here too: voice-of-customer
 // questions ("what do callers say about X?") come from any page, and the
 // tool surfaces only redacted text — no names, no customer ids.
-const BASE_TOOLS = [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_SHARED_TOOLS, ...CALL_RESEARCH_TOOLS];
+const BASE_TOOLS = [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_SHARED_TOOLS, ...CALL_RESEARCH_TOOLS, ...CUSTOMER_LIFECYCLE_TOOLS];
 
 const AGENT_ESTIMATE_TOOL_NAMES = require('../services/intelligence-bar/agent-estimate-policy');
 const apiToolDefinition = require('../services/intelligence-bar/tool-definition');
@@ -175,6 +177,9 @@ const ADMIN_ONLY_TOOL_NAMES = new Set([
   // Cancel plan (C3) churns accounts and moves billing — admin only, like the
   // requireAdmin Customer 360 endpoints it mirrors.
   'cancel_plan',
+  // Merge repoints whole customer records — admin only, like the
+  // requireAdmin admin-customer-duplicates.js route it mirrors.
+  'merge_customers',
   ...EMAIL_TOOLS.map(t => t.name),
 ]);
 
@@ -593,6 +598,16 @@ function confirmationDisplayParams(toolName, params, preview) {
       ...(preview.reason_code ? { reason_code: preview.reason_code } : {}),
       ...(preview.note ? { note: preview.note } : {}),
       ...(preview.termite_retrieval ? { termite_stations: 'retrieval task will be raised' } : {}),
+    };
+  }
+  if (toolName === 'merge_customers' && preview?.preview === true) {
+    // Curated card: name both humans, never the raw ids — the full moving
+    // counts and disclosure text still ride the contract's effects (built
+    // from this same preview object, see authorization-contract.js).
+    return {
+      winner: `${preview.winner_name} (…${(preview.winner_phone || '').replace(/\D/g, '').slice(-4) || '????'})`,
+      loser: `${preview.loser_name} (…${(preview.loser_phone || '').replace(/\D/g, '').slice(-4) || '????'})`,
+      moving: preview.moving,
     };
   }
   if ((toolName === 'trigger_review_request' || toolName === 'reply_via_sms') && preview?.pinned_recipient) {
@@ -1802,15 +1817,29 @@ The portal runs on Railway behind Cloudflare; errors report to Sentry; SMS/voice
 - You CANNOT restart, redeploy, purge caches, resolve issues, or change configuration — never claim otherwise. Point the operator to the relevant dashboard for any change.`;
 
 
+// Default-off capability gates applied to EVERY context's list in one place
+// (codex #4348 r14 P1): merge_customers is offered only while
+// GATE_IB_MERGE_CUSTOMERS is on. The executor refuses at execution time
+// too, so a forced call fails closed with the list.
 function getToolsForContext(context, isAdmin = false) {
+  const tools = toolsForContextUngated(context, isAdmin);
+  return mergeCustomersEnabled() ? tools : tools.filter(t => t.name !== 'merge_customers');
+}
+
+function toolsForContextUngated(context, isAdmin = false) {
   // Tech portal stays isolated — no base, no infra, tech-tools only.
   if (context === 'tech') {
     return TECH_TOOLS;
   }
-  // Email tools mirror the requireAdmin /api/admin/email surface — never
-  // offer them to technician tokens. ADMIN_ONLY_TOOL_NAMES blocks execution
-  // regardless; this keeps them out of the model's tool list too.
-  const base = isAdmin ? BASE_TOOLS : BASE_TOOLS.filter(t => !EMAIL_TOOL_NAMES.has(t.name));
+  // Every admin-only tool in BASE_TOOLS (the email surface mirroring
+  // requireAdmin /api/admin/email, create_customer, cancel_plan,
+  // merge_customers) is dropped for technician tokens. The route already
+  // forces context 'tech' for a non-admin, so this branch is not reached
+  // today with isAdmin=false — but the filter belongs to the function, not
+  // to one caller's routing, so a future non-tech non-admin context can
+  // never advertise a write the role guard would then refuse (codex #4348
+  // r8 P2). ADMIN_ONLY_TOOL_NAMES blocks execution regardless.
+  const base = isAdmin ? BASE_TOOLS : BASE_TOOLS.filter(t => !ADMIN_ONLY_TOOL_NAMES.has(t.name));
   if (context === 'agent_estimate') {
     return AGENT_ESTIMATE_TOOLS;
   }
@@ -1845,7 +1874,7 @@ function getToolsForContext(context, isAdmin = false) {
   if (context === 'comms') {
     // Full comms set already includes the read tools — don't double-load.
     // Call-research re-added explicitly: this branch bypasses BASE_TOOLS.
-    return [...TOOLS, ...COMMS_TOOLS, ...(isAdmin ? EMAIL_SHARED_TOOLS : []), ...CALL_RESEARCH_TOOLS, ...infra];
+    return [...TOOLS, ...COMMS_TOOLS, ...(isAdmin ? [...EMAIL_SHARED_TOOLS, ...CUSTOMER_LIFECYCLE_TOOLS] : []), ...CALL_RESEARCH_TOOLS, ...infra];
   }
   if (context === 'tax') {
     return [...base, ...TAX_TOOLS, ...infra];
@@ -1856,7 +1885,7 @@ function getToolsForContext(context, isAdmin = false) {
   if (context === 'email') {
     // Full email set already includes the shared subset — don't double-load.
     // Call-research re-added explicitly: this branch bypasses BASE_TOOLS.
-    return isAdmin ? [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_TOOLS, ...CALL_RESEARCH_TOOLS, ...infra] : base;
+    return isAdmin ? [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_TOOLS, ...CALL_RESEARCH_TOOLS, ...CUSTOMER_LIFECYCLE_TOOLS, ...infra] : base;
   }
   if (context === 'banking') {
     return [...base, ...BANKING_QUERY_TOOLS, ...infra];
@@ -1982,6 +2011,9 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   }
   if (CALL_RESEARCH_TOOL_NAMES.has(toolName)) {
     return executeCallResearchTool(toolName, input);
+  }
+  if (CUSTOMER_LIFECYCLE_TOOL_NAMES.has(toolName)) {
+    return executeCustomerLifecycleTool(toolName, input, actionContext);
   }
   if (SEO_TOOL_NAMES.has(toolName)) {
     return executeSeoTool(toolName, input, actionContext);
@@ -2873,6 +2905,15 @@ router.post('/confirm-action', async (req, res, next) => {
     }
 
     const execParams = { ...action.params };
+    // The merge drift pins are ROUTE-OWNED: they are assigned below from the
+    // live re-run preview and from nowhere else. Stored params originate in
+    // the model's tool input, and the tool schema does not forbid extra
+    // properties, so strip any inbound copy before it can be read as an
+    // approval (pre-push audit P1, defence in depth — the live-preview
+    // fingerprint already has to match for execution to proceed, and
+    // winner_version/loser_version are inside that fingerprint).
+    delete execParams._approved_versions;
+    delete execParams._approved_effects;
     if (execParams._ib_task_context) {
       const targetFailure = await TaskContext.validateRecordTarget(execParams, execParams._ib_task_context, { toolName: action.tool_name });
       if (targetFailure) {
@@ -3036,6 +3077,14 @@ router.post('/confirm-action', async (req, res, next) => {
         if (Array.isArray(livePreview?.stops)
           || (action.tool_name === 'swap_tech_assignments' && livePreview?.stops && typeof livePreview.stops === 'object')) {
           execParams._verified_stops = livePreview.stops;
+        }
+        // merge_customers: the fingerprint-verified preview's pins (both
+        // customer versions + the disclosed effects fingerprint) ride to
+        // the executor so it validates the APPROVED snapshot under its own
+        // locks — never a freshly sampled one.
+        if (action.tool_name === 'merge_customers' && livePreview?.winner_version && livePreview?.loser_version) {
+          execParams._approved_versions = { winner: String(livePreview.winner_version), loser: String(livePreview.loser_version) };
+          if (typeof livePreview.effects_fingerprint === 'string') execParams._approved_effects = livePreview.effects_fingerprint;
         }
         // Route optimizers (GH r14 P1): the verified preview's ordered
         // sequence IS the approved plan — hand the ordered ids to the

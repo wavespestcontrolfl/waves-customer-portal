@@ -1,11 +1,17 @@
 import React, { useMemo } from "react";
 import PropTypes from "prop-types";
-import { Bug, HelpCircle, Leaf, PawPrint, ShieldCheck, Trees } from "lucide-react";
+import {
+  Bug,
+  HelpCircle,
+  Leaf,
+  PawPrint,
+  ShieldCheck,
+  Trees,
+} from "lucide-react";
 import { classifyEstimate } from "./EstimatePage";
-import { Card, cn } from "../../components/ui";
+import { Button, Card } from "../../components/ui";
 import { etParts } from "../../lib/timezone";
 
-const ROBOTO = "'Roboto', Arial, sans-serif";
 const DAY = 86400000;
 const HOUR = 3600000;
 const DATE_RANGES = [
@@ -30,24 +36,54 @@ export function classifyEstimateServiceLine(estimate) {
   if (/rodent|rat|mouse/.test(interest)) return "rodent";
   if (/lawn|turf|fertili[sz]/.test(interest)) return "lawn";
   if (/tree|shrub|palm|ornamental/.test(interest)) return "tree_shrub";
-  if (/pest|roach|cockroach|flea|wasp|bed.?bug|ant|spider|general/.test(interest))
+  if (
+    /pest|roach|cockroach|flea|wasp|bed.?bug|ant|spider|general/.test(interest)
+  )
     return "pest";
   return "unknown";
 }
 
 const SERVICE_META = {
-  commercial_pest: { label: "Commercial pest", icon: Bug, ticketSuffix: "manual quote" },
-  commercial_lawn: { label: "Commercial lawn", icon: Leaf, ticketSuffix: "manual quote" },
-  commercial_mosquito: { label: "Commercial mosquito", icon: Bug, ticketSuffix: "/mo recurring" },
-  commercial_termite_bait: { label: "Commercial termite bait", icon: ShieldCheck, ticketSuffix: "/mo recurring" },
-  commercial_rodent_bait: { label: "Commercial rodent bait", icon: PawPrint, ticketSuffix: "/mo recurring" },
+  commercial_pest: {
+    label: "Commercial pest",
+    icon: Bug,
+    ticketSuffix: "manual quote",
+  },
+  commercial_lawn: {
+    label: "Commercial lawn",
+    icon: Leaf,
+    ticketSuffix: "manual quote",
+  },
+  commercial_mosquito: {
+    label: "Commercial mosquito",
+    icon: Bug,
+    ticketSuffix: "/mo recurring",
+  },
+  commercial_termite_bait: {
+    label: "Commercial termite bait",
+    icon: ShieldCheck,
+    ticketSuffix: "/mo recurring",
+  },
+  commercial_rodent_bait: {
+    label: "Commercial rodent bait",
+    icon: PawPrint,
+    ticketSuffix: "/mo recurring",
+  },
   pest: { label: "Pest control", icon: Bug, ticketSuffix: "/mo recurring" },
   mosquito: { label: "Mosquito", icon: Bug, ticketSuffix: "/mo recurring" },
   lawn: { label: "Lawn care", icon: Leaf, ticketSuffix: "/mo recurring" },
   tree_shrub: { label: "Tree & shrub", icon: Trees, ticketSuffix: "per visit" },
   rodent: { label: "Rodent", icon: PawPrint, ticketSuffix: "/mo recurring" },
-  palm_injection: { label: "Palm injection", icon: Trees, ticketSuffix: "/mo recurring" },
-  termite: { label: "Termite bait", icon: ShieldCheck, ticketSuffix: "one-time" },
+  palm_injection: {
+    label: "Palm injection",
+    icon: Trees,
+    ticketSuffix: "/mo recurring",
+  },
+  termite: {
+    label: "Termite bait",
+    icon: ShieldCheck,
+    ticketSuffix: "one-time",
+  },
   unknown: { label: "Unknown", icon: HelpCircle, ticketSuffix: "unclassified" },
 };
 
@@ -96,11 +132,7 @@ export function resolutionDate(estimate) {
 // isGoingColdEstimate so the two "Needs attention" cards never double-count the
 // same offer — every open offer lands in at most one bucket.
 export function isFollowUpOverdueEstimate(estimate, nowMs = Date.now()) {
-  if (
-    estimate?.status === "sent" &&
-    !estimate.viewedAt &&
-    estimate.sentAt
-  ) {
+  if (estimate?.status === "sent" && !estimate.viewedAt && estimate.sentAt) {
     const sentAt = new Date(estimate.sentAt).getTime();
     return !Number.isNaN(sentAt) && nowMs - sentAt > 72 * HOUR;
   }
@@ -125,12 +157,11 @@ export function isGoingColdEstimate(estimate, nowMs = Date.now()) {
 
 function serviceLineEntriesForEstimate(estimate) {
   if (Array.isArray(estimate.serviceLines) && estimate.serviceLines.length) {
-    return estimate.serviceLines
-      .map((line) => ({
-        key: line && SERVICE_META[line.key] ? line.key : "unknown",
-        amount: Number(line?.amount || 0),
-        basis: line?.amountBasis === "one_time" ? "one_time" : "monthly",
-      }));
+    return estimate.serviceLines.map((line) => ({
+      key: line && SERVICE_META[line.key] ? line.key : "unknown",
+      amount: Number(line?.amount || 0),
+      basis: line?.amountBasis === "one_time" ? "one_time" : "monthly",
+    }));
   }
   const key = classifyEstimateServiceLine(estimate);
   return [
@@ -215,16 +246,33 @@ function pricedOffers(estimates) {
 function avgTicketFor(estimates) {
   const priced = pricedOffers(estimates);
   if (priced.length === 0) return 0;
-  return Math.round(priced.reduce((sum, e) => sum + amount(e), 0) / priced.length);
+  return Math.round(
+    priced.reduce((sum, e) => sum + amount(e), 0) / priced.length,
+  );
 }
 
 // The prior equal-length window immediately before the selected range, so the
 // avg-ticket trend compares like-for-like (90d vs prior 90d, not a fixed 30d).
 // Returns null for "all" — there is no comparable prior period.
 function priorPeriodWindow(range, nowMs) {
-  if (range === "7d") return { start: nowMs - 14 * DAY, end: nowMs - 7 * DAY, label: "vs prior 7d" };
-  if (range === "30d") return { start: nowMs - 60 * DAY, end: nowMs - 30 * DAY, label: "vs prior 30d" };
-  if (range === "90d") return { start: nowMs - 180 * DAY, end: nowMs - 90 * DAY, label: "vs prior 90d" };
+  if (range === "7d")
+    return {
+      start: nowMs - 14 * DAY,
+      end: nowMs - 7 * DAY,
+      label: "vs prior 7d",
+    };
+  if (range === "30d")
+    return {
+      start: nowMs - 60 * DAY,
+      end: nowMs - 30 * DAY,
+      label: "vs prior 30d",
+    };
+  if (range === "90d")
+    return {
+      start: nowMs - 180 * DAY,
+      end: nowMs - 90 * DAY,
+      label: "vs prior 90d",
+    };
   if (range === "ytd") {
     // Anchor Jan 1 at ET midnight (same basis as withinDateRange's ET-year
     // boundary) so the prior window lines up with the current YTD window in any
@@ -248,11 +296,11 @@ function estimatesInWindow(estimates, win) {
 function StatCard({ label, value, sub }) {
   return (
     <Card className="flex-1 min-w-[140px] p-4 min-h-[104px] flex flex-col items-center justify-center text-center">
-      <div className="text-11 uppercase tracking-label text-ink-tertiary mb-1">
+      <div className="text-ui-body uppercase tracking-label text-ink-tertiary mb-1">
         {label}
       </div>
       <div className="text-22 font-medium u-nums text-zinc-900">{value}</div>
-      {sub && <div className="text-11 text-ink-tertiary mt-1">{sub}</div>}
+      {sub && <div className="text-ui-body text-ink-tertiary mt-1">{sub}</div>}
     </Card>
   );
 }
@@ -266,10 +314,10 @@ StatCard.propTypes = {
 function SectionHeader({ title, sub }) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 border-b border-hairline border-zinc-200">
-      <div className="text-11 uppercase tracking-label text-ink-tertiary">
+      <div className="text-ui-body uppercase tracking-label text-ink-tertiary">
         {title}
       </div>
-      {sub && <div className="text-11 text-ink-tertiary">{sub}</div>}
+      {sub && <div className="text-ui-body text-ink-tertiary">{sub}</div>}
     </div>
   );
 }
@@ -279,27 +327,31 @@ SectionHeader.propTypes = {
   sub: PropTypes.string,
 };
 
-function FunnelTile({ label, value, sub, filterKey, activeFilter, onFilterChange }) {
+function FunnelTile({
+  label,
+  value,
+  sub,
+  filterKey,
+  activeFilter,
+  onFilterChange,
+}) {
   const active = activeFilter === filterKey;
   return (
-    <button
+    <Button
       type="button"
+      variant={active ? "primary" : "secondary"}
       onClick={() => onFilterChange(active ? "all" : filterKey)}
       aria-pressed={active}
-      className={cn(
-        "w-full min-h-9 px-3 py-4 rounded-sm text-left",
-        "border-hairline flex items-center justify-between gap-2 u-focus-ring",
-        active
-          ? "bg-zinc-900 text-white border-zinc-900"
-          : "bg-white text-zinc-900 border-zinc-200 hover:bg-zinc-50",
-      )}
+      className="h-auto min-h-11 w-full justify-between gap-2 px-3 py-4 text-left"
     >
       <span>
-        <span className="block text-11 uppercase tracking-label">{label}</span>
-        <span className="block text-11 mt-1 opacity-80">{sub}</span>
+        <span className="block text-ui-body uppercase tracking-label">
+          {label}
+        </span>
+        <span className="block text-ui-body mt-1 opacity-80">{sub}</span>
       </span>
       <span className="text-22 font-medium u-nums">{value}</span>
-    </button>
+    </Button>
   );
 }
 
@@ -312,21 +364,30 @@ FunnelTile.propTypes = {
   onFilterChange: PropTypes.func.isRequired,
 };
 
-function AttentionCard({ label, value, sub, filterKey, alert, onFilterChange }) {
+function AttentionCard({
+  label,
+  value,
+  sub,
+  filterKey,
+  alert,
+  onFilterChange,
+}) {
   return (
     <Card className={alert ? "border-alert-fg" : ""}>
-      <button
+      <Button
         type="button"
+        variant="ghost"
         onClick={() => onFilterChange(filterKey)}
-        className={cn(
-          "w-full p-4 text-left rounded-sm u-focus-ring",
-          alert ? "bg-alert-bg text-alert-fg" : "bg-white text-zinc-900 hover:bg-zinc-50",
-        )}
+        className={
+          alert
+            ? "h-auto w-full flex-col items-start justify-start bg-alert-bg p-4 text-left text-alert-fg"
+            : "h-auto w-full flex-col items-start justify-start p-4 text-left"
+        }
       >
-        <div className="text-11 uppercase tracking-label">{label}</div>
+        <div className="text-ui-body uppercase tracking-label">{label}</div>
         <div className="text-22 font-medium u-nums mt-1">{value}</div>
-        <div className="text-11 mt-1">{sub}</div>
-      </button>
+        <div className="text-ui-body mt-1">{sub}</div>
+      </Button>
     </Card>
   );
 }
@@ -340,41 +401,53 @@ AttentionCard.propTypes = {
   onFilterChange: PropTypes.func.isRequired,
 };
 
-function PricingRiskCard({ value, missingCogs, lowMargin, warnings, onFilterChange }) {
+function PricingRiskCard({
+  value,
+  missingCogs,
+  lowMargin,
+  warnings,
+  onFilterChange,
+}) {
   return (
     <Card>
       <div className="w-full p-4 text-left rounded-sm bg-white text-zinc-900">
-        <button
+        <Button
           type="button"
+          variant="ghost"
           onClick={() => onFilterChange("pricing_risk")}
-          className="w-full text-left rounded-sm u-focus-ring hover:bg-zinc-50"
+          className="h-auto w-full flex-col items-start justify-start px-0 text-left"
         >
-          <div className="text-11 uppercase tracking-label">Pricing risk</div>
+          <div className="text-ui-body uppercase tracking-label">
+            Pricing risk
+          </div>
           <div className="text-22 font-medium u-nums mt-1">{value}</div>
-        </button>
+        </Button>
         <div className="mt-2 flex gap-2 flex-wrap">
-          <button
+          <Button
             type="button"
+            variant="secondary"
+            size="sm"
             onClick={() => onFilterChange("missing_cogs")}
-            className="px-2 py-1 rounded-full text-11 border-hairline border-zinc-200 text-ink-tertiary u-focus-ring hover:bg-zinc-50"
           >
             <span className="u-nums">{missingCogs}</span> missing COGS
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
+            variant="secondary"
+            size="sm"
             onClick={() => onFilterChange("low_margin")}
-            className="px-2 py-1 rounded-full text-11 border-hairline border-zinc-200 text-ink-tertiary u-focus-ring hover:bg-zinc-50"
           >
             <span className="u-nums">{lowMargin}</span> low margin
-          </button>
+          </Button>
           {warnings > 0 && (
-            <button
+            <Button
               type="button"
+              variant="secondary"
+              size="sm"
               onClick={() => onFilterChange("pricing_warning")}
-              className="px-2 py-1 rounded-full text-11 border-hairline border-zinc-200 text-ink-tertiary u-focus-ring hover:bg-zinc-50"
             >
               <span className="u-nums">{warnings}</span> warnings
-            </button>
+            </Button>
           )}
         </div>
       </div>
@@ -423,7 +496,11 @@ export default function PipelineAnalytics({
     // One denominator rule with the win/loss and source cards (GH codex
     // P1): rows classified never-winnable (invalid/duplicate lead,
     // converted through another path) leave the close-rate math.
-    const NEVER_WINNABLE = ["invalid_lead", "converted_other_path", "expired_unsent"];
+    const NEVER_WINNABLE = [
+      "invalid_lead",
+      "converted_other_path",
+      "expired_unsent",
+    ];
     const resolvedInRange = activeRows.filter((e) => {
       if (NEVER_WINNABLE.includes(e.disposition)) return false;
       const resolvedAt = resolutionDate(e);
@@ -443,13 +520,19 @@ export default function PipelineAnalytics({
         e.status === "accepted" &&
         withinDateRange(e.acceptedAt || e.createdAt, selectedRange, nowMs),
     );
-    const totalMRRWon = acceptedEstimates.reduce((sum, e) => sum + amount(e), 0);
+    const totalMRRWon = acceptedEstimates.reduce(
+      (sum, e) => sum + amount(e),
+      0,
+    );
     const wonRecurring = acceptedEstimates.filter((e) => amount(e) > 0).length;
     const wonOneTime = acceptedEstimates.length - wonRecurring;
     const pipelineEstimates = inRange.filter(
       (e) => !["accepted", "declined", "expired"].includes(e.status),
     );
-    const pipelineValue = pipelineEstimates.reduce((sum, e) => sum + amount(e), 0);
+    const pipelineValue = pipelineEstimates.reduce(
+      (sum, e) => sum + amount(e),
+      0,
+    );
     const avgTicket = avgTicketFor(inRange);
     const priorWin = priorPeriodWindow(selectedRange, nowMs);
     const priorAvg = avgTicketFor(estimatesInWindow(activeRows, priorWin));
@@ -462,8 +545,12 @@ export default function PipelineAnalytics({
         ? `→ ${priorWin.label}`
         : `${avgDelta > 0 ? "↑" : avgDelta < 0 ? "↓" : "→"} ${money(Math.abs(avgDelta))} ${priorWin.label}`;
 
-    const needsEstimate = classified.filter((e) => e._class === "needs_estimate").length;
-    const readyToSend = classified.filter((e) => e._class === "ready_to_send").length;
+    const needsEstimate = classified.filter(
+      (e) => e._class === "needs_estimate",
+    ).length;
+    const readyToSend = classified.filter(
+      (e) => e._class === "ready_to_send",
+    ).length;
     const awaiting = classified.filter((e) => e._class === "awaiting").length;
     const followUp = classified.filter((e) => e._class === "follow_up").length;
     const scheduled = classified.filter((e) => e._class === "scheduled").length;
@@ -479,7 +566,9 @@ export default function PipelineAnalytics({
     const declinedCount = activeRows.filter(
       (e) => e.status === "declined",
     ).length;
-    const expiredCount = activeRows.filter((e) => e.status === "expired").length;
+    const expiredCount = activeRows.filter(
+      (e) => e.status === "expired",
+    ).length;
 
     const followUpOverdue = activeRows.filter((e) =>
       isFollowUpOverdueEstimate(e, nowMs),
@@ -549,54 +638,47 @@ export default function PipelineAnalytics({
   }, [estimates, selectedRange]);
 
   return (
-    <div style={{ fontFamily: ROBOTO }}>
+    <div>
       <div className="flex gap-2 mb-5 flex-wrap items-center">
-        <div className="text-11 uppercase tracking-label text-ink-tertiary">
+        <div className="text-ui-body uppercase tracking-label text-ink-tertiary">
           KPI/ROI range
         </div>
         {DATE_RANGES.map((option) => {
           const active = option.key === selectedRange;
           return (
-            <button
+            <Button
               key={option.key}
               type="button"
+              variant={active ? "primary" : "secondary"}
+              size="sm"
               onClick={() => onDateRangeChange?.(option.key)}
               aria-pressed={active}
-              className={cn(
-                "h-8 px-3 rounded-full text-11 font-medium border-hairline u-focus-ring",
-                active
-                  ? "bg-zinc-900 text-white border-zinc-900"
-                  : "bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50",
-              )}
             >
               {option.label}
-            </button>
+            </Button>
           );
         })}
         {activeFilter && activeFilter !== "all" && (
-          <button
+          <Button
             type="button"
+            variant="secondary"
+            size="sm"
             onClick={() => onFilterChange("all")}
-            className="h-8 px-3 rounded-full text-11 font-medium border-hairline u-focus-ring bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50"
           >
             Clear filter
-          </button>
+          </Button>
         )}
-        <button
+        <Button
           type="button"
+          variant={activeFilter === "archived" ? "primary" : "secondary"}
+          size="sm"
           onClick={() =>
             onFilterChange(activeFilter === "archived" ? "all" : "archived")
           }
           aria-pressed={activeFilter === "archived"}
-          className={cn(
-            "h-8 px-3 rounded-full text-11 font-medium border-hairline u-focus-ring",
-            activeFilter === "archived"
-              ? "bg-zinc-900 text-white border-zinc-900"
-              : "bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50",
-          )}
         >
           Archived
-        </button>
+        </Button>
       </div>
 
       <div className="flex gap-2 mb-5 flex-wrap">
@@ -669,14 +751,14 @@ export default function PipelineAnalytics({
           title="ROI by service line"
           sub="Offers · accepted · avg ticket — counted per line, so bundled estimates appear under each service they quote"
         />
-        <div className="hidden md:grid md:grid-cols-4 gap-3 px-3 py-2 bg-zinc-50 text-10 uppercase tracking-label text-ink-tertiary font-medium">
+        <div className="hidden md:grid md:grid-cols-4 gap-3 px-3 py-2 bg-zinc-50 text-ui-body uppercase tracking-label text-ink-tertiary font-medium">
           <div>Service</div>
           <div className="u-nums">Offers</div>
           <div>Accepted / offers</div>
           <div>Avg ticket</div>
         </div>
         {metrics.serviceRows.length === 0 ? (
-          <div className="p-4 text-13 text-ink-secondary">
+          <div className="p-4 text-ui-body text-ink-secondary">
             No non-draft estimates in this date range.
           </div>
         ) : (
@@ -685,7 +767,7 @@ export default function PipelineAnalytics({
             return (
               <div
                 key={row.key}
-                className="grid grid-cols-1 md:grid-cols-4 gap-3 px-3 py-3 border-t border-zinc-100 text-12"
+                className="grid grid-cols-1 md:grid-cols-4 gap-3 px-3 py-3 border-t border-zinc-100 text-ui-body"
               >
                 <div className="flex items-center gap-2 text-zinc-900">
                   <Icon
@@ -698,19 +780,19 @@ export default function PipelineAnalytics({
                 </div>
                 <div className="u-nums text-zinc-900">{row.sent}</div>
                 <div className="flex items-center gap-2">
-                  <div className="w-full h-1 rounded-full bg-zinc-100 overflow-hidden">
-                    <div
-                      className="h-1 rounded-full bg-zinc-900"
-                      style={{ width: `${row.acceptancePct}%` }}
-                    />
-                  </div>
-                  <div className="text-11 text-ink-tertiary u-nums">
+                  <progress
+                    className="h-1 w-full accent-zinc-900"
+                    value={row.acceptancePct}
+                    max="100"
+                    aria-label={`${row.label} acceptance rate`}
+                  />
+                  <div className="text-ui-body text-ink-tertiary u-nums">
                     {row.acceptancePct}% · {row.won}/{row.sent}
                   </div>
                 </div>
                 <div className="u-nums text-zinc-900">
                   {money(row.avgTicket)}{" "}
-                  <span className="text-11 font-normal text-ink-tertiary">
+                  <span className="text-ui-body font-normal text-ink-tertiary">
                     {row.ticketSuffix}
                   </span>
                 </div>
@@ -721,10 +803,10 @@ export default function PipelineAnalytics({
       </Card>
 
       <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-        <div className="text-11 uppercase tracking-label text-ink-tertiary">
+        <div className="text-ui-body uppercase tracking-label text-ink-tertiary">
           Needs attention
         </div>
-        <div className="text-11 text-ink-tertiary">All-time queue</div>
+        <div className="text-ui-body text-ink-tertiary">All-time queue</div>
       </div>
       <div className="grid grid-cols-3 gap-2 mb-5">
         <AttentionCard

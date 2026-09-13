@@ -22,6 +22,7 @@ const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
 const { etDateString } = require('../utils/datetime-et');
 const { renderRequiredSmsTemplate } = require('./sms-template-renderer');
+const visitRuns = require('./lawn-visit-runs');
 
 // Structured-output contract for the photo-quality gate (llm/call.js
 // jsonSchema). The weighted score and the usable flag decide the verdict.
@@ -109,6 +110,135 @@ async function assessPhotoQuality(base64Image, mimeType) {
 // MAIN SERVICE
 // ══════════════════════════════════════════════════════════════
 
+// Only the columns this database actually has; null when none of them match.
+async function reportInsertData(reportData) {
+  const reportCols = await db('service_reports').columnInfo().catch(() => ({}));
+  const insertData = Object.fromEntries(Object.entries(reportData).filter(([key]) => reportCols[key]));
+  return Object.keys(insertData).length > 0 ? insertData : null;
+}
+
+// One customer text per assessment: claimed before the wire, released only when
+// the dispatcher delivered nothing at all. Rows predating the column read null.
+// The claim and the outcome are separate marks, so the row always says which
+// state it is in: notification_sent with a NULL notification_sent_at is a claim
+// still in flight, a timestamp is a settled send (delivered, accepted, or an
+// ambiguous handoff that must never be retried), and false is owed. A release
+// that cannot be written therefore leaves an in-flight claim, not delivery
+// evidence, and callers can tell the difference.
+async function claimNotificationSend(assessmentId) {
+  return visitRuns.claimNotificationAttempt(assessmentId, db);
+}
+
+function notificationResultFromError(err, capturedResult) {
+  if (capturedResult) return capturedResult;
+  const providerOutcome = err?.providerOutcome;
+  if (!providerOutcome || typeof providerOutcome !== 'object') return null;
+  const deliveryOutcome = providerOutcome.deliveryOutcome
+    || (providerOutcome.sent === true ? 'accepted' : null);
+  if (!['accepted', 'uncertain', 'not_sent'].includes(deliveryOutcome)) return null;
+  return {
+    sent: providerOutcome.sent === true,
+    deliveryOutcome,
+    results: { sms: `error: ${providerOutcome.code || err.message}` },
+    smsResult: { ...providerOutcome, deliveryOutcome },
+  };
+}
+
+// Only a result that explicitly proves no handoff and created no durable queue
+// frees the claim. An arbitrary dispatcher throw is unknown and stays fenced.
+async function releaseUnhandedClaim(assessmentId, claim, result) {
+  if (!claim || result?.sent || result?.deliveryOutcome !== 'not_sent') return;
+  await releaseNotificationSend(assessmentId, claim.attemptId, result);
+}
+
+async function settleNotificationSend(assessmentId, attemptId) {
+  await visitRuns.settleNotificationAttempt(assessmentId, attemptId, db);
+}
+
+// Only a definite non-delivery frees the claim.
+async function resolveNotificationClaim(assessmentId, attemptId, result) {
+  const outcome = result.deliveryOutcome;
+  if (result.sent || result.notificationQueued || outcome !== 'not_sent') {
+    if (!result.sent && !result.notificationQueued) {
+      logger.warn(`[lawn-intel] assessment ${assessmentId}: notification outcome ${outcome}; claim settled, never re-sent`);
+    }
+    await settleNotificationSend(assessmentId, attemptId);
+    return;
+  }
+  await releaseNotificationSend(assessmentId, attemptId, result);
+}
+
+async function releaseNotificationSend(assessmentId, attemptId, result) {
+  try {
+    const released = await visitRuns.releaseNotificationAttempt(assessmentId, attemptId, db);
+    if (released) logger.warn(`[lawn-intel] assessment ${assessmentId}: no notification channel delivered (${JSON.stringify(result?.results || {})}); released for re-send`);
+    return released;
+  } catch (err) {
+    // Provider non-delivery is the only authority for retry. Preserve that
+    // evidence independently if the assessment release itself could not commit.
+    if (attemptId && result?.sent !== true && result?.deliveryOutcome === 'not_sent'
+      && !result.notificationQueued) {
+      try {
+        await visitRuns.recordNotificationNotSent(assessmentId, attemptId, db);
+      } catch (evidenceErr) {
+        logger.error(`[lawn-intel] assessment ${assessmentId}: notification non-delivery evidence write failed: ${evidenceErr.message}`);
+      }
+      err.notificationResult = result;
+    }
+    throw err;
+  }
+}
+
+// The normal scheduled-SMS rail owns an after-hours retry even when the lawn
+// recovery sweep is off. Persist identity, never a body that can outlive its
+// copy seal. The registry dispatch reacquires ownership and renders on replay.
+async function deferAssessmentNotification(assessment, customer, nextAllowedAt, attemptId) {
+  return db.transaction(async (trx) => {
+    const current = await trx('lawn_assessments').where({ id: assessment.id }).forUpdate().first();
+    if (!current?.notification_sent || current.notification_sent_at) return false;
+    const run = await trx('lawn_assessment_runs').where({ assessment_id: assessment.id }).forUpdate().first();
+    if (!run) throw new Error('Deferred lawn notification requires its stored run');
+    if (run.reconciliation?.notification?.attempt_id !== attemptId) return false;
+    const existing = await trx('sms_log').where({ customer_id: customer.id })
+      .whereIn('status', ['scheduled', 'sending'])
+      .whereRaw("metadata->>'entry_point' = ? AND metadata->>'assessment_id' = ?",
+        ['lawn_assessment_notification_deferred', String(assessment.id)]).first('id');
+    if (!existing) await trx('sms_log').insert({
+      customer_id: customer.id,
+      direction: 'outbound',
+      from_phone: require('../config/twilio-numbers').getOutboundNumber(),
+      to_phone: customer.phone,
+      message_body: '',
+      status: 'scheduled',
+      scheduled_for: new Date(nextAllowedAt),
+      message_type: 'service_complete',
+      metadata: JSON.stringify({
+        entry_point: 'lawn_assessment_notification_deferred',
+        requires_registered_dispatch: true,
+        assessment_id: assessment.id,
+        run_id: run.id,
+        customer_id: customer.id,
+        replay_purpose: 'appointment',
+        refresh_customer_phone: true,
+      }),
+    });
+    // Obligation creation and exact-attempt claim release commit together.
+    if (!(await visitRuns.releaseNotificationAttempt(assessment.id, attemptId, trx))) {
+      throw Object.assign(new Error('Deferred lawn notification attempt ownership lost'), { code: 'LAWN_NOTIFICATION_ATTEMPT_LOST' });
+    }
+    return true;
+  });
+}
+
+// Delivery recovery's own preconditions — the lease and the copy seal — must
+// reach the caller rather than the send-failure log, and must not release a
+// claim: they say the send should not happen now, not that it failed.
+const DELIVERY_CONTROL_CODES = new Set(['LAWN_DELIVERY_OWNERSHIP_LOST', 'LAWN_COPY_SEAL_LOST']);
+const isOwnershipLoss = (err) => DELIVERY_CONTROL_CODES.has(err?.code);
+async function runBeforeSend(beforeSend) {
+  if (beforeSend) return beforeSend();
+}
+
 const LawnIntelligence = {
 
   fetchFawnWeather,
@@ -134,7 +264,7 @@ const LawnIntelligence = {
   // Shared by the completion-time report SMS (score folded into the single
   // service-report text) and the legacy standalone notification below.
   async computeAssessmentScoreParts(assessment) {
-    if (!assessment) return null;
+    if (!assessment) return { overall: 0, delta: null, deltaStr: '', tip: '' };
     const scoreOf = (a) => a.overall_score || Math.round(
       (a.turf_density + a.weed_suppression + a.fungus_control +
         (a.color_health || 0) + (a.thatch_level || 0)) / 5
@@ -143,10 +273,10 @@ const LawnIntelligence = {
     const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
     const scopedHistory = propertyHistoryEnabled ? await require('./lawn-assessment-history').historyForAssessment(assessment, { knex: db }) : null;
     if (propertyHistoryEnabled) {
-      if (!scopedHistory.current) return null;
+      if (!scopedHistory.current) return { overall: 0, delta: null, deltaStr: '', tip: '' };
       assessment = scopedHistory.current;
     }
-    const overall = propertyHistoryEnabled ? scopedHistory.progress.score : scoreOf(assessment);
+    const overall = (propertyHistoryEnabled ? scopedHistory.progress.score : scoreOf(assessment)) ?? 0;
     const previous = propertyHistoryEnabled ? scopedHistory.previous : await db('lawn_assessments')
       .where({ customer_id: assessment.customer_id, confirmed_by_tech: true })
       .where('service_date', '<', assessment.service_date)
@@ -171,20 +301,27 @@ const LawnIntelligence = {
   // SUPERSEDED, twice over: the lawn score was folded into the single
   // completion service-report SMS, and that fold-in was itself retired
   // 2026-08-01 (owner ruling — the completion text is a short link to the
-  // report; the score lives ON the report). Retained for manual re-send /
-  // backfill; not invoked from the confirm or completion pipelines.
-  async sendAssessmentNotification(assessmentId) {
+  // report; the score lives ON the report). Still sent for STANDALONE
+  // assessments only (service_id null — no completion text ever follows), by
+  // the confirm route and by delivery recovery (lawn-visit-delivery.js); never
+  // for a service-linked assessment. options.beforeSend runs right before the
+  // claim and at the provider handoff; recovery passes its lease/copy check
+  // so provider preparation cannot outlive ownership and still send.
+  async sendAssessmentNotification(assessmentId, { beforeSend, scheduledSmsLogId } = {}) {
+    let claim = null;
+    let dispatchResult = null;
     try {
+      await visitRuns.recoverNotificationNotSent(assessmentId, db);
       const assessment = await db('lawn_assessments').where({ id: assessmentId, confirmed_by_tech: true }).first();
-      if (!assessment || assessment.notification_sent) return null;
+      // service_id set → the visit's completion text carries the report link.
+      if (!assessment || assessment.notification_sent || assessment.service_id) return null;
 
       const customer = await db('customers').where({ id: assessment.customer_id }).first();
       if (!customer) return null;
 
-      const parts = await LawnIntelligence.computeAssessmentScoreParts(assessment);
-      const overall = parts?.overall ?? 0;
-      const deltaStr = parts?.deltaStr || '';
-      const tip = parts?.tip ? `\nTip: ${parts.tip}` : '';
+      const { overall, deltaStr, tip: customerTip } =
+        await LawnIntelligence.computeAssessmentScoreParts(assessment);
+      const tip = customerTip ? `\nTip: ${customerTip}` : '';
 
       const smsMessage = await renderRequiredSmsTemplate('lawn_health_report_ready', {
         first_name: customer.first_name || 'there',
@@ -198,30 +335,64 @@ const LawnIntelligence = {
         entity_id: assessment.id,
       });
 
+      await runBeforeSend(beforeSend);
+      // Claim the send BEFORE it reaches the wire. A process exit between the
+      // dispatcher accepting and the stamp committing used to leave the run
+      // looking unsent, and delivery recovery would text the customer a second
+      // time. At-most-once is the right side to fail on here: the report is in
+      // the portal either way, and a duplicate text is not retractable.
+      claim = await claimNotificationSend(assessmentId);
+      if (!claim) return null;
       const NotificationDispatcher = require('./notification-dispatcher');
       const result = await NotificationDispatcher.notify(customer.id, 'service_complete', {
         smsMessage,
         emailSubject: `Your Lawn Health Report — Score: ${overall}/100`,
         emailBody: smsMessage,
+        ...(beforeSend ? {
+          preSendCheck: async () => {
+            const authority = await runBeforeSend(beforeSend);
+            return { ...authority, ok: true };
+          },
+        } : {}),
+        scheduledSmsLogId,
       });
+      // Past this line the dispatcher has returned a canonical outcome. A
+      // later failed write cannot change that provider evidence.
+      dispatchResult = result;
+      const { smsResult = {} } = result;
 
-      // Stamp only when a channel actually delivered — an unconditional
-      // stamp recorded "notified" even when the dispatcher sent nothing
-      // (email-preferring customers, blocked SMS), permanently hiding the
-      // miss because the notification_sent guard above never retries.
-      if (result?.sent) {
-        await db('lawn_assessments').where({ id: assessmentId }).update({
-          notification_sent: true,
-          notification_sent_at: new Date(),
-        });
-      } else {
-        logger.warn(`[lawn-intel] assessment ${assessmentId}: no notification channel delivered (${JSON.stringify(result?.results || {})}); left unstamped for re-send`);
+      // This owner queues a quiet-hours hold only when it supplied the live
+      // guard, non-delivery is explicit, and the scheduled-SMS rail does not
+      // already own the replay. Unguarded holds are queued by the dispatcher.
+      // Canonical QUIET_HOURS_HOLD results include their retry timestamp.
+      if (beforeSend && !scheduledSmsLogId && result.deliveryOutcome === 'not_sent'
+        && smsResult.code === 'QUIET_HOURS_HOLD') {
+        const queued = await deferAssessmentNotification(
+          assessment, customer, smsResult.nextAllowedAt, claim.attemptId,
+        );
+        if (queued) return { ...result, notificationQueued: true, deferred: true, nextAllowedAt: smsResult.nextAllowedAt };
       }
+
+      // Nothing delivered (email-preferring customer, blocked SMS) is not a
+      // send: release the claim so the miss stays visible and re-sendable
+      // rather than being permanently recorded as "notified". An accepted or
+      // UNCERTAIN handoff keeps its claim — the carrier may already have the
+      // text, and recovery must not send a second one to find out.
+      await resolveNotificationClaim(assessmentId, claim.attemptId, result);
 
       return result;
     } catch (err) {
+      if (isOwnershipLoss(err)) throw err;
       logger.error(`[lawn-intel] sendAssessmentNotification failed: ${err.message}`);
-      return null;
+      if (err.notificationResult) throw err;
+      dispatchResult = notificationResultFromError(err, dispatchResult);
+      // Preserve delivered, durably queued, accepted, or uncertain evidence.
+      // Release only a proven-unsent result that transferred no delivery
+      // ownership; otherwise recovery could either strand work or send twice.
+      await releaseUnhandedClaim(assessmentId, claim, dispatchResult);
+      // A replay must retain provider evidence even when its local settlement
+      // write fails. Its queue row can settle without sending a second copy.
+      return scheduledSmsLogId ? dispatchResult : null;
     }
   },
 
@@ -236,17 +407,18 @@ const LawnIntelligence = {
   },
 
   // ── 10. Lawn health → customer health bridge ────────────────
-  async emitHealthSignal(customerId) {
+  async emitHealthSignal(customerId, { knex = db, strict = false } = {}) {
+    let result = null;
     try {
       const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
       const assessments = propertyHistoryEnabled
-        ? (await require('./lawn-assessment-history').latestForCustomer(customerId, { limit: 4 }, db)).reverse()
-        : await db('lawn_assessments')
+        ? (await require('./lawn-assessment-history').latestForCustomer(customerId, { limit: 4 }, knex)).reverse()
+        : await knex('lawn_assessments')
         .where({ customer_id: customerId, confirmed_by_tech: true })
         .orderBy('service_date', 'desc')
         .limit(4);
 
-      if (assessments.length < 2) return null;
+      if (assessments.length < 2) return strict ? { skipped: 'insufficient_history' } : null;
 
       const calcOverall = (a) => a.overall_score || Math.round(
         (a.turf_density + a.weed_suppression + a.fungus_control + (a.color_health || 0) + (a.thatch_level || 0)) / 5
@@ -258,50 +430,50 @@ const LawnIntelligence = {
       const declining = trend.every((s, i) => i === 0 || s <= trend[i - 1]) && (trend[0] - trend[trend.length - 1]) > 5;
       const improving = trend.every((s, i) => i === 0 || s >= trend[i - 1]) && (trend[0] - trend[trend.length - 1]) > 10;
 
-      // Emit signals to customer_signals if table exists
-      try {
-        if (declining) {
-          const existing = await db('customer_signals')
-            .where({ customer_id: customerId, signal_type: 'LAWN_SCORE_DECLINING', resolved: false })
-            .first();
-          if (!existing) {
-            await db('customer_signals').insert({
-              customer_id: customerId,
-              signal_type: 'LAWN_SCORE_DECLINING',
-              signal_value: JSON.stringify({ scores: trend, delta: trend[0] - trend[trend.length - 1] }),
-              severity: trend[0] - trend[trend.length - 1] > 15 ? 'warning' : 'info',
-              detected_at: new Date(),
-            });
-          }
-        }
+      result = { declining, improving, latest, trend };
 
-        if (improving && latest >= 75) {
-          const existing = await db('customer_signals')
-            .where({ customer_id: customerId, signal_type: 'LAWN_TRANSFORMATION', resolved: false })
-            .first();
-          if (!existing) {
-            await db('customer_signals').insert({
-              customer_id: customerId,
-              signal_type: 'LAWN_TRANSFORMATION',
-              signal_value: JSON.stringify({ scores: trend, latest }),
-              severity: 'info',
-              detected_at: new Date(),
-            });
-          }
+      // Legacy callers retain the computed trend when signal persistence fails.
+      if (declining) {
+        const existing = await knex('customer_signals')
+          .where({ customer_id: customerId, signal_type: 'LAWN_SCORE_DECLINING', resolved: false })
+          .first();
+        if (!existing) {
+          await knex('customer_signals').insert({
+            customer_id: customerId,
+            signal_type: 'LAWN_SCORE_DECLINING',
+            signal_value: JSON.stringify({ scores: trend, delta: trend[0] - trend[trend.length - 1] }),
+            severity: trend[0] - trend[trend.length - 1] > 15 ? 'warning' : 'info',
+            detected_at: new Date(),
+          });
         }
+      }
 
-        // Resolve stale signals
-        if (!declining) {
-          await db('customer_signals')
-            .where({ customer_id: customerId, signal_type: 'LAWN_SCORE_DECLINING', resolved: false })
-            .update({ resolved: true, resolved_at: new Date() });
+      if (improving && latest >= 75) {
+        const existing = await knex('customer_signals')
+          .where({ customer_id: customerId, signal_type: 'LAWN_TRANSFORMATION', resolved: false })
+          .first();
+        if (!existing) {
+          await knex('customer_signals').insert({
+            customer_id: customerId,
+            signal_type: 'LAWN_TRANSFORMATION',
+            signal_value: JSON.stringify({ scores: trend, latest }),
+            severity: 'info',
+            detected_at: new Date(),
+          });
         }
-      } catch { /* customer_signals table may not exist */ }
+      }
 
-      return { declining, improving, latest, trend };
+      // Resolve stale signals
+      if (!declining) {
+        await knex('customer_signals')
+          .where({ customer_id: customerId, signal_type: 'LAWN_SCORE_DECLINING', resolved: false })
+          .update({ resolved: true, resolved_at: new Date() });
+      }
+      return result;
     } catch (err) {
+      if (strict) throw err;
       logger.error(`[lawn-intel] emitHealthSignal failed: ${err.message}`);
-      return null;
+      return result;
     }
   },
 
@@ -317,10 +489,11 @@ const LawnIntelligence = {
   },
 
   // ── 12. Tech calibration scoring ────────────────────────────
-  async recordTechCalibration(assessmentId, aiScores, techScores) {
+  async recordTechCalibration(assessmentId, aiScores, techScores, { knex = db, strict = false, technicianId } = {}) {
     try {
-      const assessment = await db('lawn_assessments').where({ id: assessmentId }).first();
-      if (!assessment || !assessment.technician_id) return null;
+      const assessment = await knex('lawn_assessments').where({ id: assessmentId }).first();
+      const techId = technicianId || assessment?.technician_id;
+      if (!assessment || !techId) return strict ? { skipped: 'no_technician' } : null;
 
       // stress_damage is the consolidated score the tech actually corrects on the
       // completion screen now (fungus/thatch are AI-only and unchanged), so it must
@@ -328,32 +501,26 @@ const LawnIntelligence = {
       // reads as zero delta.
       const fields = ['turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level', 'stress_damage'];
       const deltas = [];
-      const row = { assessment_id: assessmentId, technician_id: assessment.technician_id };
+      const row = { assessment_id: assessmentId, technician_id: techId };
+      let higher = 0, lower = 0;
 
       for (const f of fields) {
-        const aiKey = f;
-        row[`ai_${f}`] = aiScores[aiKey] ?? null;
-        row[`tech_${f}`] = techScores[aiKey] ?? null;
-        if (aiScores[aiKey] != null && techScores[aiKey] != null) {
-          deltas.push(Math.abs(aiScores[aiKey] - techScores[aiKey]));
-        }
+        row[`ai_${f}`] = aiScores[f] ?? null;
+        row[`tech_${f}`] = techScores[f] ?? null;
+        if (aiScores[f] == null || techScores[f] == null) continue;
+        const delta = techScores[f] - aiScores[f];
+        deltas.push(Math.abs(delta));
+        higher += Number(delta > 0);
+        lower += Number(delta < 0);
       }
 
       row.avg_delta = deltas.length ? Math.round(deltas.reduce((a, b) => a + b, 0) / deltas.length * 10) / 10 : 0;
-
-      // Determine bias direction
-      let higher = 0, lower = 0;
-      for (const f of fields) {
-        if (techScores[f] != null && aiScores[f] != null) {
-          if (techScores[f] > aiScores[f]) higher++;
-          else if (techScores[f] < aiScores[f]) lower++;
-        }
-      }
       row.bias_direction = higher > lower ? 'higher' : lower > higher ? 'lower' : 'mixed';
 
-      await db('tech_calibration').insert(row);
+      await knex('tech_calibration').insert(row);
       return row;
     } catch (err) {
+      if (strict) throw err;
       logger.error(`[lawn-intel] recordTechCalibration failed: ${err.message}`);
       return null;
     }
@@ -400,22 +567,40 @@ const LawnIntelligence = {
         generated_at: new Date(),
       };
 
-      let report = null;
-      if (await db.schema.hasTable('service_reports').catch(() => false)) {
-        const reportCols = await db('service_reports').columnInfo().catch(() => ({}));
-        const insertData = Object.fromEntries(
-          Object.entries(reportData).filter(([key]) => reportCols[key])
-        );
-        if (Object.keys(insertData).length > 0) {
-          [report] = await db('service_reports').insert(insertData).returning('*');
-        }
+      // No service_reports table anywhere in this schema (none of the repo's
+      // migrations create one) is the NORMAL case, not a lag: the assessment row
+      // and Lawn Report V2 are the report. Withholding the marker there left the
+      // delivery pipeline's report step owed forever, which blocked the standalone
+      // notification behind it — so "nothing to insert" still completes the step.
+      const reportsTable = await db.schema.hasTable('service_reports').catch(() => false);
+      const insertData = reportsTable ? await reportInsertData(reportData) : null;
+      // A table that exists but accepted no columns is a real migration lag: leave
+      // the step owed so recovery retries once the schema catches up.
+      if (reportsTable && !insertData) {
+        logger.warn(`[lawn-intel] assessment ${assessmentId}: service_reports has no usable columns; report left owed`);
+        return null;
+      }
+      // With no marker column nothing can record that this report exists, so the
+      // recovery sweep would read the step as owed and insert a fresh row on
+      // every pass. Skip the insert rather than pile rows up unrecorded.
+      if (insertData && !assessmentCols.report_auto_generated && !assessmentCols.report_id) {
+        logger.warn(`[lawn-intel] assessment ${assessmentId}: lawn_assessments has no report marker column; report generation skipped`);
+        return null;
       }
 
-      const update = {};
-      if (assessmentCols.report_auto_generated) update.report_auto_generated = true;
-      if (report?.id && assessmentCols.report_id) update.report_id = report.id;
-      if (assessmentCols.updated_at) update.updated_at = new Date();
-      if (Object.keys(update).length > 0) await db('lawn_assessments').where({ id: assessmentId }).update(update);
+      // One transaction. A process exit between the report row and its
+      // assessment marker used to leave an unmarked report that delivery
+      // recovery regenerated as a second row for the same assessment
+      // (service_reports has no uniqueness constraint to catch it).
+      const report = await db.transaction(async (trx) => {
+        const row = insertData ? (await trx('service_reports').insert(insertData).returning('*'))[0] : null;
+        const update = {};
+        if (assessmentCols.report_auto_generated) update.report_auto_generated = true;
+        if (row?.id && assessmentCols.report_id) update.report_id = row.id;
+        if (assessmentCols.updated_at) update.updated_at = new Date();
+        if (Object.keys(update).length > 0) await trx('lawn_assessments').where({ id: assessmentId }).update(update);
+        return row;
+      });
 
       return report || { ...reportData, skippedInsert: true };
     } catch (err) {

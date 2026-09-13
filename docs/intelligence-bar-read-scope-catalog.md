@@ -85,6 +85,20 @@ old list).
   is a pure pricing engine and stays available.
 - `block_sender` is a `record` write with no record id; `validateSenderBlock`
   binds it to the task customer's own address.
+- `merge_customers` is `record`: its two role-named ids (`winner_customer_id`,
+  `loser_customer_id`) are mapped to the customer collection by
+  `validateRecordTarget` (`CUSTOMER_PAIR_SELECTORS`), so both halves are loaded
+  and version-stamped. The task establishes at most one customer target, so
+  only ONE half of the pair needs to already belong to the task — the task
+  customer is either the winner or the loser (the stub page or the real
+  customer's page). The OTHER half is admitted only when it is a live,
+  eligible duplicate-queue candidate under that exact pairing, per
+  `customer-dedupe.js`'s canonical `duplicatePairEligibility` (never
+  re-derived in task-context.js) — a red-tier, out-of-queue, or
+  address-conflicted pairing is refused like any other foreign record, and so
+  is a pairing where neither id is the task's customer. An unreadable
+  dismissals table answers `dismissals_unreadable` (fail-closed) — never an
+  admitted pair.
 - Operations and provider readers whose text can echo customer identifiers
   (`get_twilio_alerts`, `get_scheduled_job_health`, `get_railway_logs`, the
   three Sentry readers, the two GrowthBook readers, `get_managed_agent_runs`,

@@ -34,7 +34,7 @@ const petSchema = Joi.object({
   notes: Joi.string().trim().allow('', null).max(300),
 }).unknown(true);
 
-const prefsSchema = Joi.object({
+const PREFS_FIELD_SCHEMAS = {
   neighborhoodGateCode: shortText,
   propertyGateCode: shortText,
   garageCode: shortText,
@@ -102,7 +102,45 @@ const prefsSchema = Joi.object({
   hoaInspectionPeriod: shortText,
   accessNotes: longText,
   specialInstructions: longText,
-}).unknown(false);
+};
+
+const prefsSchema = Joi.object(PREFS_FIELD_SCHEMAS).unknown(false);
+
+// Validates each field in the body INDEPENDENTLY so one permanently-invalid
+// field (e.g. a badly typed HOA email) can never reject every OTHER valid
+// field in the same autosave batch — the 2026-09-11 prod incident: a
+// half-typed hoaEmail 400'd 8 consecutive saves while everything else the
+// customer typed was silently discarded. Returns the coerced value for every
+// field that validated, plus a `rejected` list of { field, message } for
+// every field present in the body that did not — same message text the
+// combined-schema validator produced (label(key) reproduces the "<key> ..."
+// phrasing), so this is a strict superset of the old error detail.
+// Unknown keys are silently dropped (matches the previous
+// `stripUnknown: true` behavior) — they are not reported as rejected.
+function validatePrefsBody(body) {
+  const source = body && typeof body === 'object' ? body : {};
+  const value = {};
+  const rejected = [];
+  let presentCount = 0;
+  for (const [key, raw] of Object.entries(source)) {
+    // OWN keys only (codex r1 P2): `constructor` / `toString` / `__proto__`
+    // in the JSON body would otherwise resolve to an inherited
+    // Object.prototype member, and calling .label() on it throws a 500
+    // instead of stripping the unknown key.
+    const fieldSchema = Object.prototype.hasOwnProperty.call(PREFS_FIELD_SCHEMAS, key)
+      ? PREFS_FIELD_SCHEMAS[key]
+      : null;
+    if (!fieldSchema) continue; // unknown field — stripped, not reported
+    presentCount += 1;
+    const { value: fieldValue, error: fieldError } = fieldSchema.label(key).validate(raw);
+    if (fieldError) {
+      rejected.push({ field: key, message: fieldError.message });
+    } else {
+      value[key] = fieldValue;
+    }
+  }
+  return { value, rejected, presentCount };
+}
 
 const ALLOWED_FIELDS = [
   'neighborhood_gate_code', 'property_gate_code', 'garage_code', 'lockbox_code',
@@ -285,9 +323,16 @@ router.get('/preferences', async (req, res, next) => {
 // =========================================================================
 router.put('/preferences', async (req, res, next) => {
   try {
-    const { value, error } = prefsSchema.validate(req.body, { stripUnknown: true, abortEarly: false });
-    if (error) {
-      return res.status(400).json({ error: error.details.map(d => d.message).join('; ') });
+    const { value, rejected, presentCount } = validatePrefsBody(req.body);
+    if (presentCount > 0 && rejected.length === presentCount) {
+      // Every field in the request failed validation — nothing to save.
+      // Still 400 (matches the old contract for this case), but with the
+      // same per-field detail the partial-success path below carries, not
+      // only a joined string.
+      return res.status(400).json({
+        error: rejected.map((r) => r.message).join('; '),
+        rejected,
+      });
     }
 
     // Convert camelCase input to snake_case, filter to allowed fields only
@@ -420,7 +465,11 @@ router.put('/preferences', async (req, res, next) => {
       }).catch((emailErr) => logger.warn(`[property] account.updated email failed for ${req.customerId}: ${emailErr.message}`));
     }
 
-    res.json({ preferences: camelFields, saved: true });
+    // A batch that mixed valid and invalid fields still 200s — the valid
+    // fields above are already persisted — but names what it dropped so the
+    // client can surface exactly those fields instead of poisoning retries
+    // for the whole batch (2026-09-11 prod incident).
+    res.json({ preferences: camelFields, saved: true, ...(rejected.length ? { rejected } : {}) });
   } catch (err) {
     next(err);
   }
@@ -586,6 +635,7 @@ module.exports._private = {
   propertyChangeItems,
   displayPrefValue,
   prefsSchema,
+  validatePrefsBody,
   customerHasLawnCare,
   customerQualifiesForLawnInches,
   IRRIGATION_INPUT_FIELDS,

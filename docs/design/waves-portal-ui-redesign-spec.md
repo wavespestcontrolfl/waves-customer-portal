@@ -25,6 +25,8 @@ A prescriptive design spec for rebuilding the Waves Portal (/admin and /tech) in
 6. `/admin/communications` + `/admin/communications/sms`
 7. `/admin/knowledge` — the Wiki (directory, article reader, sources, Health, recent queries, Q&A)
 
+Named promotions in [the active admin UI consistency contract](admin-ui-consistency-contract.md#explicitly-promoted-admin-scopes) supersede the corresponding token-only assignments below. This historical list is not an inventory of currently unmigrated pages; previously accepted migrations remain governed by the active contract.
+
 **Tier 2 — token pass only (apply tokens, strip colors, uppercase CTAs, fix status indicators; no layout restructuring, no archetype enforcement, no component architecture changes):**
 
 - `/admin/revenue`

@@ -122,7 +122,7 @@ export default function InstallPrompt() {
           borderRadius: 999,
           padding: '9px 16px',
           fontSize: 14,
-          fontWeight: 800,
+          fontWeight: 700,
           cursor: 'pointer',
           fontFamily: FONTS.heading,
           letterSpacing: 0,
