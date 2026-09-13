@@ -1,6 +1,13 @@
 /** Planned route measurements. No writes, geocoding, traffic calls or invented
  * stop capacity. Gross calendar gaps are not automatically bookable time. */
 const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration } = require('../route-reorder-window-fit');
+
+// Route-quality measures work still to be performed. stops-ahead keeps
+// completed visits as route stops (position/total on the day of service),
+// but the admin details editor can move a terminal row onto a future date
+// (route-reorder.js handles the same case), and such a row must not create
+// location, duration, grouping or lateness cards (codex #4295 r3 P2).
+const QUALITY_EXCLUDED_STATUSES = [...require('../stops-ahead').NOT_A_ROUTE_STOP_STATUSES, 'completed'];
 const { parseHHMM } = require('./window-rules');
 
 function measureDayQuality(RouteOptimizer, stops, {
@@ -71,7 +78,6 @@ async function getScheduleQualityMeasurements(input = {}, conn = require('../../
   const { etDateDiffDays } = require('../recurring-appointment-seeder');
   const { dayStopsQuery, guardedCoordSelects } = require('./day-stops');
   const { applyAssignable } = require('../technician-eligibility');
-  const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
   const { getBlackoutLayers } = require('./blackout-dates');
   const RouteOptimizer = require('../route-optimizer');
   const today = etDateString(now);
@@ -100,8 +106,18 @@ async function getScheduleQualityMeasurements(input = {}, conn = require('../../
   const days = [];
   for (let index = 0; index <= etDateDiffDays(from, to); index++) {
     const date = etDateString(addETDays(parseETDateTime(`${from}T12:00`), index));
-    const stops = await dayStopsQuery(conn, { dateStr: date, excludeStatuses: NOT_A_ROUTE_STOP_STATUSES,
+    const stops = await dayStopsQuery(conn, { dateStr: date, excludeStatuses: QUALITY_EXCLUDED_STATUSES,
       select: ['scheduled_services.id', 'scheduled_services.technician_id', 'scheduled_services.route_order',
+        'scheduled_services.customer_id',
+        'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
+        'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
+        {
+          customer_address_line1: 'customers.address_line1',
+          customer_address_line2: 'customers.address_line2',
+          customer_city: 'customers.city',
+          customer_state: 'customers.state',
+          customer_zip: 'customers.zip',
+        },
         'scheduled_services.window_start', 'scheduled_services.window_end', 'scheduled_services.time_window',
         'scheduled_services.status', 'scheduled_services.reservation_expires_at',
         'scheduled_services.created_at', 'scheduled_services.visit_id', 'scheduled_services.estimated_duration_minutes',
@@ -140,4 +156,5 @@ async function getScheduleQualityMeasurements(input = {}, conn = require('../../
   return result;
 }
 
-module.exports = { measureDayQuality, getScheduleQualityMeasurements };
+module.exports = {
+  QUALITY_EXCLUDED_STATUSES, measureDayQuality, getScheduleQualityMeasurements };

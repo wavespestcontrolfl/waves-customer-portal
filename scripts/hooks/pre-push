@@ -26,14 +26,41 @@
 #                                         guard's baseline is always origin/main)
 #   CODEX_REVIEW_TIMEOUT=300           — per-ref codex budget in seconds (default 180)
 #   CODEX_REVIEW_MAX_DIFF_BYTES=0      — disable the diff-size cap (default 500000)
+#   SKIP_CLAUDE_FALLBACK=1             — Codex only; no Claude fallback auditor
+#   CLAUDE_REVIEW_TIMEOUT=900          — per-ref claude budget in seconds, BOTH
+#                                         attempts (default 600)
+#   CLAUDE_REVIEW_MODEL=opus           — fallback auditor model (default sonnet)
+#   SPLIT_WARN_FILES=25                — advisory split threshold, files (0 disables)
+#   SPLIT_WARN_BYTES=120000            — advisory split threshold, bytes (0 disables)
+#
+# ── Two LLM auditors ─────────────────────────────────────────────────────
+# Codex is the PRIMARY reviewer. Claude is the FALLBACK, and it runs only
+# when Codex could not produce a verdict: not installed, ChatGPT usage
+# limit, watchdog timeout, empty output, or malformed JSON.
+#
+# Why the fallback exists: when Codex quota runs out, round 0 goes dark and
+# every push ships locally unaudited until the reset. That happened on
+# 2026-08-04 (a full day of unaudited pushes before anyone read the real
+# error) and again on 2026-09-11 (a five-day window, reset Sep 16, during
+# which the GitHub @codex round was the only audit on any push from any
+# lane). A finding caught here costs seconds; the same finding caught on
+# GitHub costs a full review round trip. Round 0 must not have a single
+# point of failure.
+#
+# Both auditors emit the SAME schema (.github/codex-review-schema.json) and
+# feed the SAME P0-blocking gate. Every verdict header names the auditor
+# that produced it, so a scrollback is never ambiguous about which ran.
+# This is the LLM layer only — the deterministic applied-migration guard
+# above is unaffected and still runs unconditionally.
 #
 # Failure policy: this auditor is advisory backup, not a gate — infra
-# flakiness must never block a push. Preflight failures (no codex CLI, no
-# jq, missing schema, unknown base) warn and pass the whole push. Per-ref
-# failures (codex errors, hangs past CODEX_REVIEW_TIMEOUT, bad output) skip
-# just that ref so a multi-ref push keeps its aggregate P0 verdict; a hung
-# `codex exec` (auth prompt in a non-TTY hook, dead network) is killed by a
-# watchdog. If no ref could be audited, the push proceeds.
+# flakiness must never block a push. Preflight failures (no LLM auditor at
+# all, no jq, missing schema, unknown base) warn and pass the whole push.
+# Per-ref failures (both auditors erroring, hanging past their budgets, or
+# returning bad output) skip just that ref so a multi-ref push keeps its
+# aggregate P0 verdict; a hung child (auth prompt in a non-TTY hook, dead
+# network) is killed by a watchdog. If no ref could be audited, the push
+# proceeds.
 
 set -u
 
@@ -299,6 +326,13 @@ SCHEMA=".github/codex-review-schema.json"
 AGENTS_MD="AGENTS.md"
 CODEX_TIMEOUT="${CODEX_REVIEW_TIMEOUT:-180}"
 MAX_DIFF_BYTES="${CODEX_REVIEW_MAX_DIFF_BYTES:-500000}"
+# 300s was not enough once the AGENTS.md rubric joined the prompt: a real
+# push of this branch timed out and went UN-AUDITED, which is the failure
+# this feature exists to prevent. The budget covers BOTH attempts for a ref.
+CLAUDE_TIMEOUT="${CLAUDE_REVIEW_TIMEOUT:-600}"
+CLAUDE_MODEL="${CLAUDE_REVIEW_MODEL:-sonnet}"
+SPLIT_WARN_FILES="${SPLIT_WARN_FILES:-25}"
+SPLIT_WARN_BYTES="${SPLIT_WARN_BYTES:-120000}"
 
 # ── Preflight: required tools / files ────────────────────────────────────
 warn_and_pass() {
@@ -307,7 +341,21 @@ warn_and_pass() {
   exit 0
 }
 
-command -v codex >/dev/null 2>&1 || warn_and_pass "codex CLI not found on PATH — install with: npm i -g @openai/codex"
+# Either auditor alone is enough to keep round 0 alive; only the loss of
+# BOTH is a preflight failure.
+HAVE_CODEX=0
+HAVE_CLAUDE=0
+command -v codex  >/dev/null 2>&1 && HAVE_CODEX=1
+command -v claude >/dev/null 2>&1 && HAVE_CLAUDE=1
+[ "${SKIP_CLAUDE_FALLBACK:-0}" = "1" ] && HAVE_CLAUDE=0
+
+if [ "$HAVE_CODEX" = "0" ] && [ "$HAVE_CLAUDE" = "0" ]; then
+  warn_and_pass "no LLM auditor on PATH — install codex (npm i -g @openai/codex) or claude"
+fi
+if [ "$HAVE_CODEX" = "0" ]; then
+  echo "[codex-review] codex CLI not found — the Claude fallback auditor will run instead." >&2
+fi
+
 command -v jq    >/dev/null 2>&1 || warn_and_pass "jq not found on PATH — install with: brew install jq"
 [ -f "$SCHEMA" ]    || warn_and_pass "missing $SCHEMA"
 [ -f "$AGENTS_MD" ] || warn_and_pass "missing $AGENTS_MD"
@@ -342,15 +390,764 @@ fi
 persist_ref_artifacts() {
   # $1 = ref index. Copies whatever exists; never fails the hook.
   [ -n "$PERSIST_DIR" ] || return 0
-  for artifact in "findings-$1.json" "codex-$1.stdout" "codex-$1.stderr"; do
+  for artifact in "findings-$1.json" \
+                  "codex-$1.stdout"  "codex-$1.stderr" \
+                  "claude-$1.stdout" "claude-$1.stderr"; do
     [ -f "$TMPDIR_RUN/$artifact" ] && cp "$TMPDIR_RUN/$artifact" "$PERSIST_DIR/$artifact" 2>/dev/null
   done
   return 0
 }
 
+# ── JSON salvage ─────────────────────────────────────────────────────────
+# Pulls the first balanced top-level object that actually looks like a
+# review (has a "findings" key) out of a reply that wrapped it in prose or
+# a fence. Scans for a real object rather than regexing, so a brace inside
+# a finding's description string cannot truncate it. No python3 → no
+# salvage, and the caller falls through to its retry: this is a recovery
+# path, never a requirement.
+# ── "Reviewed nothing" guard ─────────────────────────────────────────────
+# A zero-finding verdict is indistinguishable from a clean one by shape
+# alone, so a reviewer that never saw the diff scores as CLEAN and the push
+# sails through. That is not hypothetical — it happened here: a retry that
+# omitted the diff replied "No diff content was available in this session to
+# review" with findings: [], and the hook printed "clean — push allowed".
+# The structural fix is that every attempt now carries the diff; this is the
+# cheap belt to go with those braces. Narrow on purpose: it only rejects a
+# verdict that BOTH found nothing AND says it could not see anything.
+# The matcher is deliberately narrow. An earlier version accepted a bare
+# "no code changes", which also matches the perfectly ordinary clean summary
+# "No code changes introduce correctness issues" — that would have rejected
+# good reviews and reported the ref UN-AUDITED. Every alternative below
+# requires wording that the diff itself was absent or unreachable, not
+# merely that the changes were fine.
+verdict_reviewed_nothing() {
+  # $1 = verdict json. 0 = the reviewer admits it reviewed nothing.
+  #
+  # EVERY alternative must require wording that the diff itself was absent or
+  # unreachable. This matcher has now produced two false positives, both of
+  # which would have thrown away a good review and manufactured a fake
+  # UN-AUDITED — the exact darkness this feature exists to remove:
+  #   "No code changes introduce correctness issues"  (bare "no code changes")
+  #   "No diff issues were found"                     (bare "no diff")
+  # So no alternative may end on a bare noun. scripts/test-verdict-guards.sh
+  # pins both cases; add to it before touching this pattern.
+  [ "$(jq -r '(.findings|length)' "$1" 2>/dev/null)" = "0" ] || return 1
+  jq -r '.summary // ""' "$1" 2>/dev/null | grep -Eqi \
+    "(no|empty|missing) (diff|patch)( content)?( was| is)? (not )?(provided|available|supplied|included|attached|accessible)|(diff|patch|changes) (was|were) not (provided|included|supplied|available|attached)|could not (see|read|access|retrieve|find|locate) (the |any )?(diff|change|changes|patch|content)|no (code )?(changes|content|files) (were |was )?(provided|available|supplied|included|attached|visible)|nothing (was )?(provided|supplied|to review)|(diff|patch) (is|was) (empty|unavailable|missing|inaccessible)"
+}
+
+# ── Full schema validation ───────────────────────────────────────────────
+# Codex is held to .github/codex-review-schema.json by --output-schema.
+# Claude is not, so a reply can be valid JSON with a findings array and
+# still be wrong in a way that scores as clean: the P0 count is an EXACT
+# string match on "P0", so a finding whose priority is "[P0]" or "p0", or
+# one missing file/description, silently counts as zero P0s and the push is
+# allowed. Validate the whole object before trusting the count.
+verdict_matches_schema() {
+  # $1 = verdict json. 0 = conforms well enough for the scoring block.
+  #
+  # EXACTLY ONE top-level value first. `jq empty` happily accepts a STREAM of
+  # two objects, and two schema-valid objects with no prose between them
+  # sailed past the fast path without ever reaching the ambiguity check in
+  # extract_review_json. The counters below then produced "0\n1", which blows
+  # up Bash arithmetic and can block a push on two clean verdicts — the exact
+  # opposite of this hook's fail-open policy.
+  [ "$(jq -s 'length' "$1" 2>/dev/null)" = "1" ] || return 1
+  # `line` is REQUIRED by .github/codex-review-schema.json and, when not null,
+  # must be an integer >= 1. Checking only `.line == null` conflated "absent"
+  # with "explicitly null" and let a finding through with no citation at all;
+  # checking only `type == "number"` admitted 0, -4 and 3.5.
+  # The schema is additionalProperties:false at BOTH levels, and that is not
+  # pedantry: a reply that puts its blocker in a sibling such as `issues`
+  # while leaving `findings: []` is schema-valid to everything below, and
+  # the counter then scores it P0: 0 and the push goes through clean.
+  jq -e '
+    (type == "object") and
+    ((keys - ["summary", "findings"]) | length == 0) and
+    (.summary | type == "string") and (.summary | length > 0) and
+    (.findings | type == "array") and
+    (
+      [ .findings[]
+        | (type == "object")
+          and ((keys - ["priority", "file", "line", "title", "description"]) | length == 0)
+          and (.priority? | type == "string" and (. == "P0" or . == "P1" or . == "P2"))
+          and (.file? | type == "string" and (. | length > 0))
+          and (.title? | type == "string" and (. | length > 0))
+          and (.description? | type == "string" and (. | length > 0))
+          and (has("line"))
+          and (
+                (.line == null)
+                or ((.line | type == "number") and (.line >= 1) and ((.line | floor) == .line))
+              )
+      ] | all
+    )
+  ' "$1" >/dev/null 2>&1
+}
+
+extract_review_json() {
+  # $1 = raw reply text, $2 = out file.
+  # 0 = exactly one review object salvaged, 1 = none usable,
+  # 2 = AMBIGUOUS (more than one candidate — the caller must reject rather
+  #     than guess which one is the verdict).
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 - "$1" "$2" <<'PYEOF' 2>/dev/null
+import json, sys
+try:
+    raw = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+except OSError:
+    sys.exit(1)
+
+# Collect EVERY schema-shaped object, not just the first. Taking the first
+# is unsafe: a reply that shows an illustrative empty verdict and then the
+# real one carrying a P0 would salvage as clean and the push would be
+# allowed. More than one candidate is ambiguous, and ambiguous is not clean.
+candidates = []
+start = raw.find("{")
+while start != -1:
+    depth = 0
+    in_string = False
+    escaped = False
+    end = -1
+    for i in range(start, len(raw)):
+        ch = raw[i]
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    if end == -1:
+        break
+    try:
+        obj = json.loads(raw[start:end + 1])
+    except ValueError:
+        obj = None
+    if isinstance(obj, dict) and isinstance(obj.get("findings"), list):
+        candidates.append(obj)
+        start = raw.find("{", end + 1)   # a review object is top level
+    else:
+        start = raw.find("{", start + 1)
+
+if len(candidates) == 1:
+    with open(sys.argv[2], "w", encoding="utf-8") as fh:
+        json.dump(candidates[0], fh)
+    sys.exit(0)
+sys.exit(2 if len(candidates) > 1 else 1)
+PYEOF
+}
+
+# ── Sandbox drift tripwire ───────────────────────────────────────────────
+# The sandbox is the only thing between an untrusted diff and an
+# authenticated local CLI, and it is enumerated by NAME. A `claude` upgrade
+# that renames a tool, adds one, or changes a flag's meaning weakens it
+# silently — and nothing would say so until someone happened to re-run the
+# verifier. So the verifier stamps what it proved, and the hook checks that
+# stamp against what is installed now.
+#
+# It WARNS rather than blocking, deliberately. Refusing to run the fallback
+# on an unrecognised CLI version would re-create the dark round 0 this whole
+# feature exists to remove, and would do it on the most common day of all
+# (the day after an upgrade). A loud, specific warning with the exact command
+# to run is the right trade; an unverified sandbox is still a sandbox.
+SANDBOX_STAMP="scripts/.fallback-auditor-verified"
+SANDBOX_HOOK_SRC="scripts/hooks/pre-push"
+SANDBOX_FINGERPRINT_TOOL="scripts/hooks/sandbox-fingerprint.sh"
+sandbox_fingerprint() {
+  # Computed by the shared helper, not inline, so this and the verifier's
+  # stamp can never disagree about what the fingerprint covers — see the
+  # header of scripts/hooks/sandbox-fingerprint.sh. It hashes the extracted
+  # `claude -p` INVOCATION as well as the three assignments: dropping
+  # `env -i` or the flags from the actual command while leaving the
+  # assignments alone used to leave this number unchanged, so the stamp
+  # still matched and nothing warned before an untrusted diff went into a
+  # weakened sandbox.
+  bash "$SANDBOX_FINGERPRINT_TOOL" "$SANDBOX_HOOK_SRC" 2>/dev/null
+}
+warn_if_sandbox_unverified() {
+  local now_version now_fp stamped_version stamped_fp
+  now_version="$(claude --version 2>/dev/null | awk '{print $1}')"
+  now_fp="$(sandbox_fingerprint)"
+  if [ ! -f "$SANDBOX_STAMP" ]; then
+    echo "[codex-review] ⚠️  fallback sandbox has NEVER been verified on this checkout." >&2
+    echo "[codex-review]     run: scripts/verify-fallback-auditor-sandbox.sh" >&2
+    return 0
+  fi
+  stamped_version="$(sed -n 's/^claude_version=//p' "$SANDBOX_STAMP" | head -1)"
+  stamped_fp="$(sed -n 's/^sandbox_fingerprint=//p' "$SANDBOX_STAMP" | head -1)"
+  if [ -z "$now_fp" ]; then
+    # Failing to compute it is not "no drift" — say so rather than fall
+    # through to a comparison that would silently pass on an empty string.
+    echo "[codex-review] ⚠️  could not compute the fallback sandbox fingerprint" >&2
+    echo "[codex-review]     ($SANDBOX_FINGERPRINT_TOOL missing, or the hook's sandbox" >&2
+    echo "[codex-review]     definition moved). The drift check is not running." >&2
+    echo "[codex-review]     run: scripts/verify-fallback-auditor-sandbox.sh" >&2
+    return 0
+  fi
+  if [ "$now_version" != "$stamped_version" ]; then
+    echo "[codex-review] ⚠️  claude CLI is $now_version but the fallback sandbox was last" >&2
+    echo "[codex-review]     verified on $stamped_version. An upgrade can rename or add a tool" >&2
+    echo "[codex-review]     that the disallow list does not name." >&2
+    echo "[codex-review]     run: scripts/verify-fallback-auditor-sandbox.sh" >&2
+  elif [ "$now_fp" != "$stamped_fp" ]; then
+    echo "[codex-review] ⚠️  the sandbox definition changed since it was last verified" >&2
+    echo "[codex-review]     (flags, env allowlist, disallow list, or the claude -p" >&2
+    echo "[codex-review]     invocation itself). run: scripts/verify-fallback-auditor-sandbox.sh" >&2
+  fi
+  return 0
+}
+
+# ── Fallback auditor: Claude ─────────────────────────────────────────────
+# Same prompt, same schema, same P0 gate. Codex gets the schema via
+# --output-schema; claude has no such flag, so the contract goes in the
+# prompt and the result is validated here.
+# Returns 0 with schema-shaped JSON in $2, non-zero otherwise.
+#
+# ── Sandbox (this is a security boundary, not a tidiness preference) ──────
+# The prompt contains a diff the hook did not write: a pulled branch, a
+# contributed PR, a compromised dependency commit. That is untrusted text
+# going into an authenticated local CLI on every push, so the auditor runs
+# with NO tools at all and no way to acquire any:
+#   --restricted          removes Bash/REPL/code-running tools and WebFetch,
+#                         skips project+local settings, and confines file
+#                         tools to the working directory
+#   --strict-mcp-config   with no --mcp-config, loads ZERO MCP servers, so
+#                         the railway/stripe/cloudflare tools are absent
+#   --disallowedTools     names the rest explicitly, INCLUDING ToolSearch —
+#                         without it the model can load a deferred tool's
+#                         schema and call it, which makes every other entry
+#                         in this list bypassable
+# Verified empirically, not inferred from --help, by
+# scripts/verify-fallback-auditor-sandbox.sh. What that script actually
+# proves, against ground truth on disk and the network rather than the
+# model's self-report: a sandboxed run cannot READ a nonce file outside the
+# repo, cannot WRITE a file, cannot reach a ToolSearch-loaded tool to do
+# either, and cannot make an HTTP request to a local canary listener. A
+# CONTROL run without the flags must succeed at the read, or the script
+# fails rather than reporting a green sandbox it did not measure. Re-run it
+# after any `claude` CLI upgrade or any change to these flags.
+# The verifier greps all three of these out of this file so it can assert the
+# sandbox the hook ACTUALLY uses. Keep them as plain single-line assignments.
+CLAUDE_SANDBOX_FLAGS="--restricted --strict-mcp-config"
+# The child gets an ALLOWLISTED environment (`env -i`), not the parent's
+# environment minus a denylist. A push shell routinely carries Stripe keys,
+# database URLs and GitHub tokens, and when the hook runs from inside a
+# Claude Code session it also carries that session's messaging socket, bearer
+# token and session ids. A process whose job is to read an untrusted diff
+# has no business holding any of that: the sandbox flags stop the model
+# USING tools, but the process's own environment would still be there for a
+# crash trace or a debug artifact to spill. (CLAUDECODE itself does NOT
+# block a nested run — every fallback verdict on this PR was produced with
+# CLAUDECODE=1 set — it simply is not on the list.)
+#
+# What the CLI needs, measured rather than guessed: HOME for its config and
+# credentials, PATH to be found, USER because the keychain credential lookup
+# keys off it (without USER the child reports "Not logged in" every time),
+# and TMPDIR. The rest are harmless locale/terminal names plus the CLI's own
+# optional auth and config overrides, forwarded only when set.
+CLAUDE_ENV_ALLOW="HOME PATH TMPDIR USER LOGNAME SHELL TERM LANG LC_ALL LC_CTYPE TZ SECURITYSESSIONID CLAUDE_CONFIG_DIR ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_OAUTH_TOKEN"
+claude_env_args() {
+  # Prints NAME=value, one per line, for every allowlisted name that is set.
+  local name
+  for name in $CLAUDE_ENV_ALLOW; do
+    [ -n "${!name+x}" ] && printf '%s=%s\n' "$name" "${!name}"
+  done
+  return 0
+}
+# ── Referenced-file context (the Claude fallback only) ───────────────────
+# Codex reviews with repo access. The Claude fallback has NO tools — that is
+# the sandbox and it is not negotiable — so it sees the diff and nothing
+# else, and it cannot resolve a reference the diff makes to a file the diff
+# does not contain.
+#
+# That blindness has a measured cost. On a real review the fallback flagged
+# a model-registry policy as possibly missing and asked the author to
+# confirm it existed, because it could not open server/config/models.js to
+# see that it did. The policy was there. A hedged finding about a file the
+# model is forbidden to read is noise, and it crowds out a real one.
+#
+# So resolve the relative requires/imports the diff ADDS and inline the few
+# that are not themselves in the diff. Every path here is extracted from an
+# UNTRUSTED diff, so none of them is trusted:
+#   - resolved against the AUDITED COMMIT's tree, never the filesystem, so
+#     uncommitted edits or a different checked-out branch cannot substitute
+#     content while it is labelled authoritative
+#   - required to normalize to a path inside the repo, so a spec like
+#     ../../../../.ssh/id_rsa is dropped, and a symlink entry is refused
+#     outright rather than followed
+#   - required to be IN THAT COMMIT'S TREE, which is what actually keeps an
+#     untracked .env or a dropped credentials file out however it is spelled
+#   - excluded when the diff changes it, with the changed set taken from git
+#     metadata rather than the patch text — a binary-rendered file has no
+#     `+++` header, and reading the text would let a CHANGED file be inlined
+#     as unchanged and skip review
+#   - required to be a source extension, and never under node_modules
+#   - capped in count and bytes, so a diff cannot inflate its own prompt
+# No python3 → no context section, and the audit runs exactly as before.
+CLAUDE_CONTEXT_MAX_FILES="${CLAUDE_CONTEXT_MAX_FILES:-5}"
+CLAUDE_CONTEXT_MAX_BYTES="${CLAUDE_CONTEXT_MAX_BYTES:-50000}"
+write_referenced_context_script() {
+  # Kept in its own file rather than a heredoc inside $( ): bash cannot
+  # parse a heredoc nested in a command substitution.
+  cat > "$1" <<'PYEOF'
+import os, re, sys
+
+# argv: <diff file> <tree listing from `git ls-tree -r <sha>`>
+#       <changed paths, one per line, from `git diff --name-only`>
+# Everything is resolved against that listing — the audited commit — and the
+# filesystem is never touched. That is deliberate: the working tree can hold
+# uncommitted edits, or be on another branch entirely, and inlining THAT
+# content while labelling it authoritative context for this diff would hide
+# the very defect the audit is looking for.
+diff_path, tree_path, changed_path = sys.argv[1], sys.argv[2], sys.argv[3]
+SPEC = re.compile(r"""(?:require\(|import\()\s*['"](\.[^'"]+)['"]|\bfrom\s+['"](\.[^'"]+)['"]""")
+EXT = ('.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx')
+SYMLINK_MODE = '120000'
+
+# `git ls-tree -r` prints: <mode> <type> <object>\t<path>
+tree = {}
+with open(tree_path, encoding='utf-8', errors='replace') as fh:
+    for line in fh:
+        meta, _, path = line.rstrip('\n').partition('\t')
+        if not path:
+            continue
+        tree[path] = meta.split(' ', 1)[0]
+
+# The changed set comes from git's own metadata, NEVER from the `+++`
+# headers. A file git renders as binary — one NUL byte, or a `-diff`
+# attribute — is emitted as "Binary files a/x and b/x differ" with no `+++`
+# header at all. Reading the headers would leave that file out of `changed`,
+# and its NEW contents would then be inlined under a heading that tells the
+# reviewer it is unchanged and not to report on it: a changed file would
+# evade review entirely.
+changed = set()
+with open(changed_path, encoding='utf-8', errors='replace') as fh:
+    for line in fh:
+        line = line.rstrip('\n')
+        if line:
+            changed.add(line)
+
+# A `+++` prefix is only a file header OUTSIDE a hunk. Inside one it is an
+# added line whose source text begins with `++` — `++ counter;` reaches the
+# patch as `+++ counter;`. Treating that as a header repoints `cur` at a
+# garbage path, and every relative import after it then resolves from the
+# repo root: a nested caller's ./helper silently becomes the root helper.js,
+# inlined under the authoritative UNCHANGED heading. So track hunk state and
+# let only a real header move `cur`.
+refs, cur, in_hunk = [], None, False
+with open(diff_path, encoding='utf-8', errors='replace') as fh:
+    for line in fh:
+        if line.startswith('diff --git '):
+            cur, in_hunk = None, False
+            continue
+        if line.startswith('@@'):
+            in_hunk = True
+            continue
+        if not in_hunk:
+            # The file-header region: the only place a `+++` is a header.
+            # Used solely to attribute the added lines below to the file
+            # they came from — never to decide what counts as changed.
+            if line.startswith('+++ '):
+                path = line[4:].strip()
+                if path.startswith('b/'):
+                    path = path[2:]
+                cur = None if path == '/dev/null' else path
+            continue
+        # Inside a hunk, only added lines carry imports worth resolving.
+        if not line.startswith('+') or cur is None:
+            continue
+        for m in SPEC.finditer(line[1:]):
+            spec = m.group(1) or m.group(2)
+            if spec:
+                refs.append((cur, spec))
+
+out, seen = [], set()
+for src, spec in refs:
+    base = os.path.normpath(os.path.join(os.path.dirname(src), spec))
+    # The EXACT path is always the first candidate, whatever it is named.
+    # Node tries it first, so it is the target even when it has no
+    # extension or an unsupported one — and if it is then rejected, the
+    # reference is dropped rather than quietly re-pointed at a sibling.
+    # Generating only EXT candidates would skip a tracked extensionless
+    # `helper` (a symlink, say) and inline `helper.js` in its place.
+    cands = [base]
+    cands += [base + e for e in EXT]
+    cands += [base + '/index' + e for e in EXT]
+    seen_cands = set()
+    cands = [c for c in cands if not (c in seen_cands or seen_cands.add(c))]
+
+    # RESOLUTION FIRST, filtering second, and the two must not be mixed.
+    # Walking the candidate list while filtering lets an excluded target
+    # fall through to the next candidate: if ./helper resolves to helper.js
+    # but that file is changed, the loop would go on to inline
+    # helper/index.js and present it as what the import points at. Pick the
+    # first candidate that exists in the commit — that IS the target — and
+    # then judge it.
+    target = None
+    for rel in cands:
+        # Containment, lexically: normpath has already collapsed the `..`
+        # segments, so anything that escaped the repo now starts with `..`.
+        # Such a path is never in the tree either, so this is belt and
+        # braces rather than the only guard.
+        if os.path.isabs(rel) or rel == '..' or rel.startswith('../'):
+            continue
+        if rel in tree:
+            target = rel
+            break
+    if target is None:
+        continue
+
+    # From here a failed check drops the REFERENCE, never advances to a
+    # different file.
+    if target in seen or target in changed:
+        continue
+    if 'node_modules' in target.split('/'):
+        continue
+    # A symlink entry is refused outright: its blob is a path, and following
+    # it would step outside the commit's own contents.
+    if tree.get(target) == SYMLINK_MODE:
+        continue
+    # The extension is judged on the RESOLVED target, not used to filter the
+    # candidate list. Filtering the list is what let an unsupported exact
+    # match fall through to a same-named .js file.
+    if not target.endswith(EXT):
+        continue
+    seen.add(target)
+    out.append(target)
+
+print('\n'.join(out))
+PYEOF
+}
+collect_referenced_context() {
+  # $1 = file holding the diff, $2 = output file, $3 = the audited commit,
+  # $4 = the base it is diffed against. Writes a prompt section, or leaves
+  # the output empty when there is nothing safe and useful to add.
+  local diff_file="$1" out="$2" audit_sha="$3" base="$4"
+  local candidates rel size bytes=0 count=0
+  local pyfile="$TMPDIR_RUN/referenced-context.py"
+  local treefile="$TMPDIR_RUN/referenced-context-tree.txt"
+  local changedfile="$TMPDIR_RUN/referenced-context-changed.txt"
+  local body="$TMPDIR_RUN/referenced-context-body.txt"
+  : > "$out"
+  # Both are required, and missing either FAILS CLOSED to no context at all.
+  # Without the base there is no authoritative changed-file list, and the
+  # only other source for it is the diff text — which is exactly the thing
+  # that cannot see a binary-rendered file.
+  [ -n "$audit_sha" ] || return 0
+  [ -n "$base" ] || return 0
+  [ "$CLAUDE_CONTEXT_MAX_FILES" -gt 0 ] 2>/dev/null || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+
+  # The audited commit's own file list — not the working tree's.
+  git ls-tree -r "$audit_sha" > "$treefile" 2>/dev/null || return 0
+  [ -s "$treefile" ] || return 0
+  git diff --name-only "$base...$audit_sha" > "$changedfile" 2>/dev/null || return 0
+
+  write_referenced_context_script "$pyfile" || return 0
+  candidates="$(python3 "$pyfile" "$diff_file" "$treefile" "$changedfile" 2>/dev/null)" || return 0
+  [ -n "$candidates" ] || return 0
+
+  : > "$body"
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    [ "$count" -lt "$CLAUDE_CONTEXT_MAX_FILES" ] || break
+    size="$(git cat-file -s "$audit_sha:$rel" 2>/dev/null)" || continue
+    [ -n "$size" ] || continue
+    [ $((bytes + size)) -le "$CLAUDE_CONTEXT_MAX_BYTES" ] || continue
+    {
+      echo ""
+      echo "----- $rel (UNCHANGED, for reference only) -----"
+      git cat-file blob "$audit_sha:$rel" 2>/dev/null
+    } >> "$body"
+    bytes=$((bytes + size))
+    count=$((count + 1))
+  done <<REFEOF
+$candidates
+REFEOF
+
+  [ "$count" -gt 0 ] || return 0
+  {
+    echo ""
+    echo "── Referenced files, NOT part of the diff ($count file(s)) ─────────"
+    echo "The diff above references these files. They are reproduced so you"
+    echo "can resolve those references instead of guessing, because you have"
+    echo "no tools and cannot open them yourself."
+    echo ""
+    echo "They are read from the commit under audit, so they are what this"
+    echo "push would actually ship alongside the diff."
+    echo ""
+    echo "They are NOT changed by this push. Do NOT raise findings about"
+    echo "their contents, and do NOT ask the author to confirm something"
+    echo "that is answered here — read it and decide."
+    cat "$body"
+  } > "$out"
+  return 0
+}
+
+CLAUDE_DISALLOWED_TOOLS="Bash Edit Write NotebookEdit WebFetch WebSearch Task Agent Read Grep Glob ToolSearch Skill Workflow ListAgents SendMessage Monitor TaskOutput TaskStop CronCreate CronDelete CronList EnterWorktree ExitWorktree PushNotification RemoteTrigger DesignSync Artifact SlashCommand KillShell BashOutput TodoWrite ExitPlanMode EnterPlanMode ScheduleWakeup ReportFindings SendUserFile SendFeedback AskUserQuestion EndConversation"
+run_claude_audit() {
+  # $1 = ref index, $2 = out file, $3 = prompt file, $4 = label, $5 = short
+  # sha, $6 = the full audited sha (referenced files are read from it),
+  # $7 = the base it is diffed against
+  local idx="$1" out_file="$2" prompt_file="$3" label="$4" short_sha="$5" audit_sha="${6:-}" audit_base="${7:-}"
+  local envelope="$TMPDIR_RUN/claude-$idx.stdout"
+  local claude_prompt="$TMPDIR_RUN/claude-prompt-$idx.txt"
+  local child_pid watchdog_pid child_status=0
+
+  [ "$HAVE_CLAUDE" = "1" ] || return 1
+
+  # The diff and the rubric are assembled ONCE into $base_prompt, and every
+  # attempt is built from it. They used to be assembled inline per attempt,
+  # and the retry rebuild quietly omitted AGENTS.md — so attempt 2, which
+  # fires precisely when the model already struggled, was the one judged
+  # against the short focus list instead of the full rubric. Keeping the
+  # shared part in one file makes that drift impossible rather than merely
+  # fixed.
+  local base_prompt="$TMPDIR_RUN/claude-base-$idx.txt"
+  local context_file="$TMPDIR_RUN/claude-context-$idx.txt"
+  collect_referenced_context "$prompt_file" "$context_file" "$audit_sha" "$audit_base"
+  {
+    cat "$prompt_file"
+    [ -s "$context_file" ] && cat "$context_file"
+    echo ""
+    echo "── AGENTS.md (the repository review rubric, inlined) ──────────────"
+    echo "You have NO tools, so you cannot open this file yourself. It is"
+    echo "reproduced here in full because it is the authority on what counts"
+    echo "as P0 and P1 in this repo. Review against it, not only against the"
+    echo "short focus list above."
+    echo ""
+    cat "$AGENTS_MD"
+  } > "$base_prompt"
+
+  {
+    cat "$base_prompt"
+    echo ""
+    echo "── Output contract ────────────────────────────────────────────────"
+    echo "Reply with a SINGLE JSON object and NOTHING else: no prose before"
+    echo "or after, no markdown code fence, no explanation. The object must"
+    echo "validate against this JSON Schema:"
+    echo ""
+    cat "$SCHEMA"
+  } > "$claude_prompt"
+
+  # Say how long this can take, every time. The hook has no progress output,
+  # so a silent multi-minute pause reads as a hang — and an engineer who
+  # decides it has hung reaches for SKIP_CODEX_REVIEW, which turns a slow
+  # audit into no audit. Naming the ceiling up front is what stops that.
+  echo "[codex-review] codex unavailable for $label — falling back to claude ($CLAUDE_MODEL)." >&2
+  echo "[codex-review] This reviews the full diff against AGENTS.md and can take several" >&2
+  echo "[codex-review] minutes (budget ${CLAUDE_TIMEOUT}s for this ref). It is not hung — let it finish." >&2
+  if [ "${SANDBOX_CHECKED:-0}" != "1" ]; then
+    SANDBOX_CHECKED=1
+    warn_if_sandbox_unverified
+  fi
+
+  # Two attempts. Codex is pinned to the schema by --output-schema; claude
+  # has no such flag, so a reviewer that finds something interesting will
+  # sometimes answer in prose and ignore the contract entirely (observed:
+  # a full markdown write-up of a real P1 instead of the JSML object). The
+  # salvage pass below recovers an object embedded in prose; attempt 2 is
+  # for a reply that contained no object at all. A rejected reply is NOT
+  # treated as clean — it falls through to UN-AUDITED like any other
+  # failure.
+  local attempt accepted salvage_status remaining reject_reason
+  # ONE budget for the whole fallback, not one per attempt: CLAUDE_REVIEW_TIMEOUT
+  # is documented per-ref, and a per-attempt watchdog let a malformed first
+  # attempt push a routine push to roughly double the stated ceiling.
+  local deadline=$(( $(date +%s) + CLAUDE_TIMEOUT ))
+  for attempt in 1 2; do
+    : > "$envelope"
+    rm -f "$TMPDIR_RUN/timed-out-claude-$idx"
+    child_status=0
+    remaining=$(( deadline - $(date +%s) ))
+    if [ "$remaining" -lt 20 ]; then
+      echo "[codex-review] claude budget exhausted for $label (${CLAUDE_TIMEOUT}s total) — no retry." >&2
+      return 1
+    fi
+
+    # Same process-group watchdog discipline as the codex leg above.
+    local -a claude_env=()
+    while IFS= read -r kv; do claude_env+=("$kv"); done < <(claude_env_args)
+    set -m
+    # shellcheck disable=SC2086  # CLAUDE_SANDBOX_FLAGS is intentionally word-split
+    env -i "${claude_env[@]}" claude -p \
+           --model "$CLAUDE_MODEL" \
+           --output-format json \
+           $CLAUDE_SANDBOX_FLAGS \
+           --disallowedTools "$CLAUDE_DISALLOWED_TOOLS" \
+           --append-system-prompt "You are being called as a machine-readable code reviewer. Your ENTIRE reply must be one JSON object matching the schema you are given. No prose, no markdown, no code fence, no commentary before or after. Findings go in the findings array, never in prose." \
+           < "$claude_prompt" >"$envelope" 2>"$TMPDIR_RUN/claude-$idx.stderr" &
+    child_pid=$!
+    (
+      sleep "$remaining"
+      touch "$TMPDIR_RUN/timed-out-claude-$idx"
+      kill -TERM -"$child_pid" 2>/dev/null
+      sleep 5
+      kill -KILL -"$child_pid" 2>/dev/null
+    ) >/dev/null 2>&1 &
+    watchdog_pid=$!
+    set +m
+    wait "$child_pid" || child_status=$?
+    if [ -f "$TMPDIR_RUN/timed-out-claude-$idx" ]; then
+      kill -KILL -"$child_pid" 2>/dev/null
+    fi
+    kill -TERM -"$watchdog_pid" 2>/dev/null
+    wait "$watchdog_pid" 2>/dev/null
+
+    # A timeout or a dead CLI will not improve on a retry — give up now.
+    if [ -f "$TMPDIR_RUN/timed-out-claude-$idx" ]; then
+      echo "[codex-review] claude timed out after ${CLAUDE_TIMEOUT}s on $label (set CLAUDE_REVIEW_TIMEOUT to adjust)." >&2
+      return 1
+    fi
+    if [ "$child_status" -ne 0 ] || [ ! -s "$envelope" ]; then
+      echo "[codex-review] claude failed for $label; last stderr lines:" >&2
+      tail -n 15 "$TMPDIR_RUN/claude-$idx.stderr" >&2
+      return 1
+    fi
+    if ! jq empty "$envelope" >/dev/null 2>&1; then
+      echo "[codex-review] claude envelope for $label is not valid JSON." >&2
+      return 1
+    fi
+    if [ "$(jq -r '.is_error // false' "$envelope")" = "true" ]; then
+      echo "[codex-review] claude reported an error for $label: $(jq -r '.result // "(none)"' "$envelope" | head -c 300)" >&2
+      return 1
+    fi
+
+    # Unwrap the print-mode envelope, strip a markdown fence, and salvage an
+    # object that arrived wrapped in prose.
+    jq -r '.result // empty' "$envelope" > "$TMPDIR_RUN/claude-raw-$idx.txt"
+    sed -e '/^[[:space:]]*```/d' "$TMPDIR_RUN/claude-raw-$idx.txt" > "$out_file"
+
+    accepted=0
+    reject_reason="contract"
+    if [ -s "$out_file" ] && jq empty "$out_file" >/dev/null 2>&1 \
+       && verdict_matches_schema "$out_file"; then
+      accepted=1
+    else
+      extract_review_json "$TMPDIR_RUN/claude-raw-$idx.txt" "$out_file"
+      salvage_status=$?
+      if [ "$salvage_status" = "2" ]; then
+        echo "[codex-review] claude's reply for $label contains MORE THAN ONE review object —" >&2
+        echo "[codex-review] refusing to guess which is the verdict (the first could be an" >&2
+        echo "[codex-review] illustrative clean example and the second the real P0)." >&2
+        reject_reason="ambiguous"
+      elif [ "$salvage_status" = "0" ]; then
+        if verdict_matches_schema "$out_file"; then
+          echo "[codex-review] claude wrapped its verdict in prose for $label — salvaged the JSON object." >&2
+          accepted=1
+        else
+          echo "[codex-review] claude's salvaged verdict for $label does not match the schema" >&2
+          echo "[codex-review] (bad priority value, a finding missing file/title/description, or a" >&2
+          echo "[codex-review] key outside the schema — findings must live in the findings array)." >&2
+          reject_reason="schema"
+        fi
+      fi
+    fi
+
+    if [ "$accepted" = "1" ]; then
+      if verdict_reviewed_nothing "$out_file"; then
+        echo "[codex-review] claude returned an EMPTY verdict for $label saying it could not" >&2
+        echo "[codex-review] see the diff — rejecting it. A review of nothing is not a clean" >&2
+        echo "[codex-review] review. Summary was: $(jq -r '.summary // ""' "$out_file" | head -c 200)" >&2
+        accepted=0
+        reject_reason="reviewed_nothing"
+      else
+        [ "$attempt" = "2" ] && echo "[codex-review] (verdict came from the retry attempt)" >&2
+        return 0
+      fi
+    fi
+
+    if [ "$attempt" = "1" ]; then
+      echo "[codex-review] retrying $label once (reason: $reject_reason)." >&2
+      # Attempt 2 MUST carry the diff again. An earlier version sent only the
+      # contract plus the previous reply, and the retry duly answered "no diff
+      # content was available to review" with an empty findings array — which
+      # scored as P0:0/P1:0 and printed "clean — push allowed". A verdict on
+      # nothing is the single worst failure this hook can have, so the retry
+      # is built from $prompt_file (diff included) and never replaces it.
+      # The retry prompt must name the ACTUAL defect. Telling a model that
+      # returned perfectly good JSON "your reply was not a single JSON object"
+      # sends it to fix something that was never wrong, and the real problem
+      # survives the retry. The reviewed-nothing case matters most: that
+      # model needs to be told the diff IS present, not lectured about JSON.
+      {
+        cat "$base_prompt"
+        echo ""
+        echo "── Output contract (RETRY) ────────────────────────────────────────"
+        case "$reject_reason" in
+          reviewed_nothing)
+            echo "Your previous reply was well-formed JSON, but it said you could not"
+            echo "see the diff. The diff IS included above, in full, under the"
+            echo "'Changed files' and 'Diff' headings. Read it and review it."
+            echo "Return an empty findings array ONLY if you actually reviewed the"
+            echo "diff and found nothing wrong — never because you believe no diff"
+            echo "was provided."
+            ;;
+          ambiguous)
+            echo "Your previous reply contained MORE THAN ONE JSON object, so there"
+            echo "was no way to tell which one was the verdict. Re-issue the SAME"
+            echo "review as EXACTLY ONE JSON object. Do not include an example, a"
+            echo "template, or a second illustrative object of any kind."
+            ;;
+          schema)
+            echo "Your previous reply was JSON but did not match the schema. Every"
+            echo "finding needs priority (exactly \"P0\", \"P1\" or \"P2\" — no"
+            echo "brackets, no lowercase), a non-empty file, title and description,"
+            echo "and a line key whose value is a whole number of at least 1, or"
+            echo "null when the finding has no single line. No keys outside the"
+            echo "schema at either level: every issue goes in the findings array,"
+            echo "never in a sibling such as issues or notes. Re-issue the SAME"
+            echo "review correctly."
+            ;;
+          *)
+            echo "Your previous reply to this exact review request did not follow the"
+            echo "output contract: it was not a single JSON object. Re-issue the SAME"
+            echo "review of the diff above as ONE JSON object and nothing else — no"
+            echo "prose, no markdown, no code fence. Findings belong in the findings"
+            echo "array. An empty findings array means you reviewed the diff and found"
+            echo "nothing; never return it because you could not see the diff."
+            ;;
+        esac
+        echo ""
+        echo "── Your previous reply, verbatim ──────────────────────────────────"
+        echo "It is reproduced because it may contain a REAL finding that was"
+        echo "expressed in an invalid form. Re-issuing the review must not lose"
+        echo "it: anything below that is a genuine issue belongs in the findings"
+        echo "array of your new reply. Do not return an empty findings array"
+        echo "simply because this attempt is a retry."
+        echo ""
+        head -c 30000 "$TMPDIR_RUN/claude-raw-$idx.txt"
+        echo ""
+        echo "── Schema ─────────────────────────────────────────────────────────"
+        cat "$SCHEMA"
+      } > "$claude_prompt"
+      continue
+    fi
+
+    echo "[codex-review] claude output for $label is not valid JSON after 2 attempts:" >&2
+    sed -n '1,20p' "$TMPDIR_RUN/claude-raw-$idx.txt" >&2
+    return 1
+  done
+  return 1
+}
+
 P0_TOTAL=0
 P1_TOTAL=0
 AUDITED=0
+FALLBACK_USED=0
+UNAUDITED_REFS=0
+AUDITORS_USED=""
 
 for i in "${!REF_SHAS[@]}"; do
   AUDIT_SHA="${REF_SHAS[$i]}"
@@ -374,10 +1171,34 @@ for i in "${!REF_SHAS[@]}"; do
   DIFF_BYTES="$(printf '%s' "$DIFF" | wc -c | tr -d ' ')"
   FILE_COUNT="$(printf '%s\n' "$CHANGED_FILES" | wc -l | tr -d ' ')"
 
+  # ── Split advisory (never blocks) ──────────────────────────────────────
+  # waves-ship §4's round cap discovers "this PR is too large to converge"
+  # at review round 5+, after those rounds are already spent. Narrow PRs
+  # converge in 1–3 rounds; wide ones have run to 15–18. Saying it at push
+  # time moves the split decision in front of the first @codex tag instead
+  # of behind five rounds of it.
+  SPLIT_HINT=""
+  if [ "$SPLIT_WARN_FILES" -gt 0 ] && [ "$FILE_COUNT" -gt "$SPLIT_WARN_FILES" ]; then
+    SPLIT_HINT="$FILE_COUNT files (threshold $SPLIT_WARN_FILES)"
+  fi
+  if [ "$SPLIT_WARN_BYTES" -gt 0 ] && [ "$DIFF_BYTES" -gt "$SPLIT_WARN_BYTES" ]; then
+    [ -n "$SPLIT_HINT" ] && SPLIT_HINT="$SPLIT_HINT, "
+    SPLIT_HINT="$SPLIT_HINT$DIFF_BYTES bytes (threshold $SPLIT_WARN_BYTES)"
+  fi
+  if [ -n "$SPLIT_HINT" ]; then
+    echo "" >&2
+    echo "[codex-review] ⚠️  SPLIT ADVISORY — $AUDIT_LABEL is large: $SPLIT_HINT" >&2
+    echo "[codex-review] Wide PRs have run 15–18 review rounds here; narrow ones converge in 1–3." >&2
+    echo "[codex-review] Consider cutting siblings off main BEFORE the first @codex tag." >&2
+    echo "[codex-review] Advisory only, the push is not blocked. Tune with SPLIT_WARN_FILES / SPLIT_WARN_BYTES." >&2
+    echo "" >&2
+  fi
+
   # Oversized diffs make codex slow enough to read as a hang. Skip just this
   # ref — the @codex PR review still covers it.
   if [ "$MAX_DIFF_BYTES" -gt 0 ] && [ "$DIFF_BYTES" -gt "$MAX_DIFF_BYTES" ]; then
     echo "[codex-review] $AUDIT_LABEL ($SHORT_SHA): diff is $DIFF_BYTES bytes (cap $MAX_DIFF_BYTES) — skipping audit for this ref. Set CODEX_REVIEW_MAX_DIFF_BYTES=0 to disable the cap." >&2
+    UNAUDITED_REFS=$((UNAUDITED_REFS + 1))
     continue
   fi
 
@@ -421,6 +1242,16 @@ for i in "${!REF_SHAS[@]}"; do
 
   echo "[codex-review] auditing $AUDIT_LABEL ($SHORT_SHA): $FILE_COUNT file(s) vs ${BASE}…" >&2
 
+  # Codex is the primary auditor; Claude is the fallback (see the header).
+  # The single-iteration `while` below is a labelled block: every codex
+  # failure path inside it `break`s out with CODEX_OK still 0, which hands
+  # the ref to the Claude fallback instead of skipping it unaudited. The
+  # failure messages are unchanged — they now describe why the fallback is
+  # running rather than why the ref was abandoned.
+  CODEX_OK=0
+  while : ; do
+  [ "$HAVE_CODEX" = "1" ] || break
+
   # Run codex under a watchdog: a hook has no TTY, so a codex that stalls
   # (auth prompt, dead network) would otherwise hang the push forever.
   # `set -m` gives each background job its own process group, so the kills
@@ -462,13 +1293,14 @@ for i in "${!REF_SHAS[@]}"; do
   # a blocked push's findings must survive the hook (see PERSIST_DIR above).
   persist_ref_artifacts "$i"
 
-  # Timeouts and codex failures skip only THIS ref: a multi-ref push keeps
-  # its aggregate verdict, so a P0 already found on an earlier ref still
-  # blocks even if a later ref's audit dies.
+  # Timeouts and codex failures hand THIS ref to the Claude fallback; if
+  # that also fails the ref is skipped. A multi-ref push keeps its aggregate
+  # verdict either way, so a P0 already found on an earlier ref still blocks
+  # even if a later ref's audit dies.
   if [ "$CODEX_STATUS" -ne 0 ]; then
     if [ -f "$TMPDIR_RUN/timed-out-$i" ]; then
-      echo "[codex-review] $AUDIT_LABEL ($SHORT_SHA): codex timed out after ${CODEX_TIMEOUT}s — skipping this ref (set CODEX_REVIEW_TIMEOUT to adjust)." >&2
-      continue
+      echo "[codex-review] $AUDIT_LABEL ($SHORT_SHA): codex timed out after ${CODEX_TIMEOUT}s (set CODEX_REVIEW_TIMEOUT to adjust)." >&2
+      break
     fi
     # Errors land at the END of stderr (after the banner + prompt echo) —
     # the old head-40 dump hid the real cause behind the prompt echo and
@@ -482,15 +1314,13 @@ for i in "${!REF_SHAS[@]}"; do
       # patch's diff), and real errors land at the end of the stream.
       LIMIT_LINE="$(grep -E "^ERROR:.*hit your usage limit" "$TMPDIR_RUN/codex-$i.stderr" | tail -1)"
       echo "" >&2
-      echo "[codex-review] ⚠️  CODEX USAGE LIMIT — the local audit CANNOT run." >&2
+      echo "[codex-review] ⚠️  CODEX USAGE LIMIT — codex cannot audit this push." >&2
       echo "[codex-review] $LIMIT_LINE" >&2
-      echo "[codex-review] Until the limit resets, the GitHub @codex round is the ONLY audit" >&2
-      echo "[codex-review] on this push — do not treat this pass-through as a clean review." >&2
-      continue
+      break
     fi
-    echo "[codex-review] codex exec failed for $AUDIT_LABEL — skipping this ref; last stderr lines:" >&2
+    echo "[codex-review] codex exec failed for $AUDIT_LABEL; last stderr lines:" >&2
     tail -n 15 "$TMPDIR_RUN/codex-$i.stderr" >&2
-    continue
+    break
   fi
 
   if [ ! -s "$OUT_FILE" ]; then
@@ -500,21 +1330,52 @@ for i in "${!REF_SHAS[@]}"; do
     # usage-limit branch does, because the fail-open pass is otherwise
     # indistinguishable from a real clean review in a scrollback.
     echo "" >&2
-    echo "[codex-review] ⚠️  codex produced NO OUTPUT for $AUDIT_LABEL — this ref is UN-AUDITED." >&2
+    echo "[codex-review] ⚠️  codex produced NO OUTPUT for $AUDIT_LABEL." >&2
     echo "[codex-review] An empty verdict is not a clean review (seen post-quota: a prior" >&2
-    echo "[codex-review] attempt blocked with P0s, the retry emitted nothing). The GitHub" >&2
-    echo "[codex-review] @codex round is the only audit on this push." >&2
+    echo "[codex-review] attempt blocked with P0s, the retry emitted nothing)." >&2
     if [ -n "$PERSIST_DIR" ]; then
       echo "[codex-review] codex stdout/stderr saved in: $PERSIST_DIR" >&2
     fi
-    continue
+    break
   fi
 
   if ! jq empty "$OUT_FILE" >/dev/null 2>&1; then
-    echo "[codex-review] codex output for $AUDIT_LABEL is not valid JSON — skipping this ref:" >&2
+    echo "[codex-review] codex output for $AUDIT_LABEL is not valid JSON:" >&2
     sed -n '1,20p' "$OUT_FILE" >&2
+    break
+  fi
+
+  CODEX_OK=1
+  break
+  done
+
+  # ── Auditor dispatch ───────────────────────────────────────────────────
+  # Codex produced a verdict, or Claude picks the ref up. Only when BOTH
+  # fail is the ref genuinely un-audited, and that is said plainly: a
+  # pass-through must never read like a clean review in a scrollback.
+  if [ "$CODEX_OK" = "1" ]; then
+    AUDITOR="codex"
+  elif run_claude_audit "$i" "$OUT_FILE" "$PROMPT_FILE" "$AUDIT_LABEL" "$SHORT_SHA" "$AUDIT_SHA" "$BASE"; then
+    AUDITOR="claude"
+    FALLBACK_USED=1
+    persist_ref_artifacts "$i"
+  else
+    echo "" >&2
+    echo "[codex-review] ⚠️  $AUDIT_LABEL ($SHORT_SHA) is UN-AUDITED — both auditors failed." >&2
+    echo "[codex-review] The GitHub @codex round is the ONLY audit on this ref — do not" >&2
+    echo "[codex-review] treat this pass-through as a clean review." >&2
+    if [ -n "$PERSIST_DIR" ]; then
+      echo "[codex-review] auditor logs saved in: $PERSIST_DIR" >&2
+    fi
+    UNAUDITED_REFS=$((UNAUDITED_REFS + 1))
+    persist_ref_artifacts "$i"
     continue
   fi
+
+  case " $AUDITORS_USED " in
+    *" $AUDITOR "*) ;;
+    *) AUDITORS_USED="$AUDITORS_USED $AUDITOR" ;;
+  esac
 
   AUDITED=$((AUDITED + 1))
   SUMMARY="$(jq -r '.summary // "(no summary)"' "$OUT_FILE")"
@@ -524,7 +1385,7 @@ for i in "${!REF_SHAS[@]}"; do
   P1_TOTAL=$((P1_TOTAL + P1_COUNT))
 
   echo "" >&2
-  echo "──────── Codex Review · $AUDIT_LABEL ($SHORT_SHA) ──────────────────" >&2
+  echo "──────── Review · $AUDIT_LABEL ($SHORT_SHA) · auditor: $AUDITOR ────" >&2
   echo "$SUMMARY" >&2
   echo "" >&2
   echo "P0: $P0_COUNT  ·  P1: $P1_COUNT" >&2
@@ -550,12 +1411,23 @@ done
 # ── Aggregate verdict ────────────────────────────────────────────────────
 echo "" >&2
 if [ "$AUDITED" -eq 0 ]; then
-  echo "[codex-review] no auditable refs — push allowed." >&2
+  if [ "$UNAUDITED_REFS" -gt 0 ]; then
+    echo "[codex-review] ⚠️  $UNAUDITED_REFS ref(s) went UN-AUDITED and none succeeded — push allowed," >&2
+    echo "[codex-review] but the GitHub @codex round is the only audit on this push." >&2
+  else
+    echo "[codex-review] no auditable refs — push allowed." >&2
+  fi
   exit 0
 fi
 
-echo "──────── Aggregate ($AUDITED ref(s) audited) ──────────────────────" >&2
+echo "──────── Aggregate ($AUDITED ref(s) audited by${AUDITORS_USED}) ─────" >&2
 echo "P0 total: $P0_TOTAL  ·  P1 total: $P1_TOTAL" >&2
+if [ "$UNAUDITED_REFS" -gt 0 ]; then
+  echo "⚠️  $UNAUDITED_REFS ref(s) went UN-AUDITED — see above." >&2
+fi
+if [ "$FALLBACK_USED" = "1" ]; then
+  echo "Note: at least one verdict came from the Claude fallback (codex could not run)." >&2
+fi
 echo "───────────────────────────────────────────────────────────────────" >&2
 
 if [ "$P0_TOTAL" -gt 0 ]; then
@@ -567,7 +1439,19 @@ if [ "$P0_TOTAL" -gt 0 ]; then
   exit 1
 fi
 
-if [ "$P1_TOTAL" -gt 0 ]; then
+# The LAST line is the one that gets read, so it must not say "clean" when
+# part of the push was never looked at. A multi-ref push with one audited
+# clean ref and one that blew the size cap or lost both auditors used to
+# print the un-audited warning and then "clean — push allowed" underneath
+# it, which is the sentence anyone skimming a scrollback would keep.
+if [ "$UNAUDITED_REFS" -gt 0 ]; then
+  if [ "$P1_TOTAL" -gt 0 ]; then
+    echo "[codex-review] PARTIALLY AUDITED — push allowed with P1 warnings, and $UNAUDITED_REFS ref(s) were never reviewed." >&2
+  else
+    echo "[codex-review] PARTIALLY AUDITED — the audited ref(s) were clean, but $UNAUDITED_REFS ref(s) were" >&2
+    echo "[codex-review] never reviewed. This push is NOT pre-push clean; say so in the PR body." >&2
+  fi
+elif [ "$P1_TOTAL" -gt 0 ]; then
   echo "[codex-review] push allowed with P1 warnings." >&2
 else
   echo "[codex-review] clean — push allowed." >&2

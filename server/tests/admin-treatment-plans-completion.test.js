@@ -58,3 +58,14 @@ test.each([false, true])('tech assignment is enforced before and after the plan 
   expect(db.chain.where).toHaveBeenCalledWith('scheduled_services.technician_id', 'tech');
   expect(db.chain.whereNotIn).toHaveBeenCalled();
 });
+
+test.each([true, false])('the plan response never carries propertyGate.billingMode (technician=%s) — office-only, attribution reads the server-built plan (codex #4365 P2)', async (tech) => {
+  buildPlanForService.mockResolvedValue({ serviceId: 'visit', propertyGate: { serviceTier: 'Silver', billingMode: 'one_time', trackKey: 'st_augustine' }, completionDefaults: { enabled: true } });
+  for (const post of [false, true]) {
+    const res = await run({ tech, post, body: post ? { completionDefaults: true } : {}, query: post ? {} : { completionDefaults: '1' } });
+    expect(res.statusCode).toBe(200);
+    expect(res.body.plan.propertyGate).toEqual({ serviceTier: 'Silver', trackKey: 'st_augustine' });
+    expect(res.body.plan.propertyGate).not.toHaveProperty('billingMode');
+    expect(res.body.plan.completionDefaults).toEqual({ enabled: true });
+  }
+});

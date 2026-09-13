@@ -34,6 +34,11 @@ async function recordConsent({
   // charge + future invoices) instead of the base card text — the UI must
   // have rendered the SAME variant at the checkbox (GATE_PREPAY_CARD_AND_CHARGE).
   consentVariant = null,
+  // A caller that must decide something ELSE atomically with this row (the
+  // pay surface re-judges Bill-To ownership in the same transaction, so a
+  // withdrawal committing mid-request cannot leave consent recorded against
+  // payer-owned debt — Codex #4311 r39) passes its transaction here.
+  database = db,
 }) {
   if (!customerId) throw new Error('recordConsent: customerId required');
   if (!stripePaymentMethodId) throw new Error('recordConsent: stripePaymentMethodId required');
@@ -41,7 +46,7 @@ async function recordConsent({
 
   const consentText = getConsentText(methodType, { variant: consentVariant });
 
-  const [row] = await db('payment_method_consents').insert({
+  const [row] = await database('payment_method_consents').insert({
     customer_id: customerId,
     payment_method_id: paymentMethodId,
     stripe_payment_method_id: stripePaymentMethodId,

@@ -135,12 +135,18 @@ const EXPANDED_TOOLS = [
 
 // ── New tool execution ──────────────────────────────────────────
 
-async function executeExpandedTool(toolName, input, contextCustomerId) {
+// `context` is the execution context of the caller driving the tool:
+// `actorTechnicianId` names the authenticated operator behind an
+// operator-confirmed write (null for an autonomous customer-facing turn,
+// which the downstream writers attribute to the system). It never comes
+// from the model's tool input.
+async function executeExpandedTool(toolName, input, contextCustomerId, context = {}) {
   // Try original tools first
   const originalNames = ORIGINAL_TOOLS.map(t => t.name);
   if (originalNames.includes(toolName)) {
     return executeOriginalTool(toolName, input, contextCustomerId);
   }
+  const actorTechnicianId = context?.actorTechnicianId || null;
 
   // Expanded tools
   const customerId = input.customer_id || contextCustomerId;
@@ -246,8 +252,12 @@ async function executeExpandedTool(toolName, input, contextCustomerId) {
         return { sent: false, payer_billed: true, message: 'This invoice is billed to a third-party payer and is not payable by the customer.' };
       }
       // Operator-confirmed IB write (send gated by the confirm-action trust
-      // boundary) — carries the send-window operator marker.
-      const sendResult = await InvoiceService.sendViaSMS(invoiceId, { operatorInitiated: true });
+      // boundary) — carries the send-window operator marker, and the
+      // operator themselves: when this send closes out the open visit the
+      // invoice bills (GATE_INVOICE_ISSUED_CLOSES_VISIT), the transition and
+      // its audit row name the staff member who confirmed the write, not
+      // the system (GitHub r4 P2 #4127).
+      const sendResult = await InvoiceService.sendViaSMS(invoiceId, { operatorInitiated: true, actorTechnicianId });
       const sent = !!(sendResult?.sent || sendResult?.ok);
       const invoice = await db('invoices').where('id', invoiceId).first();
 

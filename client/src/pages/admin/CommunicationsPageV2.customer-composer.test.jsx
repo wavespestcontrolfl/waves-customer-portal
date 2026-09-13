@@ -145,3 +145,21 @@ it("reads older customer conversations through the loaded snapshot even when the
   await waitFor(() => expect(requests("/admin/communications/messages/read")).toHaveLength(1));
   expect(bodyOf("/admin/communications/messages/read")).toEqual({ messageIds: [], conversationIds: readScope.conversationIds, readBefore: readScope.readBefore });
 });
+
+// codex #4213 P2: smsThreadKey keeps the full identity of an international
+// number, so the customer-mode history filter must use the same key or an
+// international customer's rewrite loses every recent message.
+it("keeps an international customer's history in the rewrite request", async () => {
+  responses["/admin/communications/rewrite-sms"] = { body: "Tuesday works for us." };
+  const intl = { id: "customer-uk", phone: "+442079460958" };
+  const intlMessages = [
+    { channel: "sms", contactPhone: intl.phone, ourEndpointId: line, ourEndpointLabel: "Test line", direction: "inbound", body: "Can you come Tuesday?", createdAt: "2024-07-02T12:00:00Z" },
+    { channel: "sms", contactPhone: "+12079460958", ourEndpointId: line, direction: "inbound", body: "US lookalike", createdAt: "2024-07-01T12:00:00Z" },
+  ];
+  render(<SmsTab active customer={intl} customerMessages={intlMessages} onSent={vi.fn()} />, { wrapper: MemoryRouter });
+  const field = screen.getByRole("textbox", { name: "Text message" });
+  fireEvent.change(field, { target: { value: "tuesday works" } });
+  fireEvent.click(screen.getByRole("button", { name: "Rewrite message in Waves tone" }));
+  expect(bodyOf("/admin/communications/rewrite-sms")).toMatchObject({ customerId: intl.id, customerPhone: intl.phone, lastInboundMessage: "Can you come Tuesday?", recentMessages: [{ direction: "inbound", body: "Can you come Tuesday?" }] });
+  await waitFor(() => expect(field).toHaveValue("Tuesday works for us."));
+});

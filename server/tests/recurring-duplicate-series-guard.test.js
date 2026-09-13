@@ -36,6 +36,7 @@ const {
   findActiveRecurringSeries,
   seriesCreateLockKeys,
   serviceKeyFor,
+  separateProgramMatches,
 } = require('../services/recurring-appointment-seeder');
 const { etDateString } = require('../utils/datetime-et');
 
@@ -412,6 +413,31 @@ describe('checkActiveSeriesLocked — race-safe guard (P0: check-then-insert rac
     expect([a.seeded, b.seeded].filter(Boolean)).toHaveLength(1);
     expect([a.kept, b.kept].filter(Boolean)).toHaveLength(1);
     expect(rawCalls).toHaveLength(2);
+  });
+
+  test('two intentional second-program requests share one reviewed set and create only one additional series', async () => {
+    const parent = { id: 10, customer_id: 5, service_type: 'Quarterly Pest Control', is_recurring: true,
+      recurring_ongoing: true, scheduled_date: FUTURE, status: 'pending' };
+    const { db, state } = makeLockEnv({ parents: [parent] });
+    const createSeparateProgram = () => db.transaction(async (trx) => {
+      const { matches, guardError } = await checkActiveSeriesLocked(trx, { customerId: 5, serviceType: parent.service_type });
+      if (guardError || !separateProgramMatches(matches, ['10'])) return false;
+      const { id: _id, ...newProgram } = parent;
+      await trx('scheduled_services').insert(newProgram);
+      return true;
+    });
+    const results = await Promise.all([createSeparateProgram(), createSeparateProgram()]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(state.parents).toHaveLength(2);
+    // A lost response does not turn its retry into a third program.
+    expect(await createSeparateProgram()).toBe(false);
+  });
+
+  test('second-program approval rejects incomplete, changed, or repeated IDs', () => {
+    expect(separateProgramMatches([{ id: 1 }, { id: 2 }], ['2', '1'])).toBe(true);
+    for (const ids of [undefined, [], ['1'], ['1', '1'], ['1', '3']]) {
+      expect(separateProgramMatches([{ id: 1 }, { id: 2 }], ids)).toBe(false);
+    }
   });
 
   // Runs two creators concurrently against the keyed-lock env and reports how

@@ -219,7 +219,7 @@ describe('sendEstimateNow — durable first-delivery witness (#3391 round)', () 
     ['an ordinary', {}],
     // A near-today hold, derived so the case never lapses (AGENTS.md test-date rule).
     ['a shorter-fixed', { estimate_data: JSON.stringify({ proposal: { enabled: true, validThrough: new Date(Date.now() + 14 * 86400000).toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) } }) }],
-  ])('%s group anchor stays viewable through the longest fixed sibling hold (GH codex P1 r2 on #4309)', async (_name, anchorOverrides) => {
+  ])('%s group anchor records the sibling hold as link viewability WITHOUT widening its own expiry (owner ruling on #4309 r7)', async (_name, anchorOverrides) => {
     const anchor = estimateRow({ estimate_group_id: 'synthetic-fixed-group', ...anchorOverrides });
     const sibling = { id: 'synthetic-fixed-sibling', status: 'sent', pricing_authority: 'SERVER',
       estimate_data: { proposal: { enabled: true, validThrough: '2099-12-21' } } };
@@ -238,7 +238,15 @@ describe('sendEstimateNow — durable first-delivery witness (#3391 round)', () 
     const result = await router.sendEstimateNow(anchor, 'both', { callerPreClaimed: true });
     expect(result.sent).toBe(true);
     const published = updates.find((patch) => patch.sent_at && patch.expires_at);
-    expect(new Date(published.expires_at).toISOString()).toBe('2099-12-22T04:59:59.999Z');
+    // The anchor's OWN offer deadline — its seven-day window, or its own
+    // shorter fixed date. Never the sibling's 2099 hold.
+    expect(new Date(published.expires_at).toISOString()).not.toBe('2099-12-22T04:59:59.999Z');
+    expect(new Date(published.expires_at).getFullYear()).toBeLessThan(2030);
+    // The sibling hold is recorded as the delivered link's viewability window,
+    // committed in the same finalization write.
+    const patch = deliveryPatches().find((d) => d.groupLinkViewableThrough);
+    expect(patch).toBeTruthy();
+    expect(new Date(patch.groupLinkViewableThrough).toISOString()).toBe('2099-12-22T04:59:59.999Z');
   });
 
   test('a REAL group handoff appends each already-published sibling\'s frozen scope at the GROUP instant, pricing snapshot untouched (codex #3811 r34 P2)', async () => {

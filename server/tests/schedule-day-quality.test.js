@@ -1,5 +1,5 @@
 jest.mock('../models/db', () => ({}));
-const { measureDayQuality, getScheduleQualityMeasurements } = require('../services/scheduling/day-quality');
+const { measureDayQuality, getScheduleQualityMeasurements, QUALITY_EXCLUDED_STATUSES } = require('../services/scheduling/day-quality');
 const { simulateArrivalRoute, effectiveWindowRange } = require('../services/route-reorder-window-fit');
 const Model = { HQ: { lat: 1, lng: 1 }, haversine: (a, b, c, d) => a === c && b === d ? 0 : 1,
   fallbackLegMetrics: distance => ({ minutes: distance * 10, meters: distance * 1000 }) };
@@ -53,4 +53,10 @@ test('malformed and excessive date ranges reject before database access', async 
   for (const input of [{ date_from: 'bad' }, { date_from: '2026-02-30' }, { date_from: '2026-09-01', date_to: '2026-12-01' }]) {
     expect(await getScheduleQualityMeasurements(input, {})).toEqual({ error: 'Use a valid date range of at most 31 days.' });
   }
+});
+
+test('quality measurement excludes completed rows as well as every non-route-stop status (codex #4295 r3 P2)', () => {
+  const { NOT_A_ROUTE_STOP_STATUSES } = require('../services/stops-ahead');
+  expect(QUALITY_EXCLUDED_STATUSES).toEqual(expect.arrayContaining([...NOT_A_ROUTE_STOP_STATUSES, 'completed']));
+  expect(NOT_A_ROUTE_STOP_STATUSES).not.toContain('completed');
 });

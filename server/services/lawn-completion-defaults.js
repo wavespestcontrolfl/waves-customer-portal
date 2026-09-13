@@ -148,9 +148,14 @@ function archivedLawnRecipeMatches(protocol, items) {
     });
 }
 
-function completionItem(item, protocolProduct, amountsAllowed) {
-  const amountAvailable = amountsAllowed && item.product?.labelVerifiedAt
-    && Number(item.mix?.amount) > 0 && !String(item.mix?.amountUnit || '').includes('/');
+// The planned quantity is the tech's starting point whenever the planner
+// produced one (owner ruling 2026-09-11): an unverified label stamp or a plan
+// block (inventory, blackout, budget, approval) no longer withholds it —
+// those still show in the plan banner, and the amount stays the tech's
+// actual to confirm or edit. Only a missing quantity or a per-basis unit
+// ("fl oz/acre" is a concentration, not an applied amount) leaves it blank.
+function completionItem(item, protocolProduct) {
+  const amountAvailable = Number(item.mix?.amount) > 0 && !String(item.mix?.amountUnit || '').includes('/');
   return {
     ...item,
     applicationMethod: completionMethod(item, protocolProduct),
@@ -161,7 +166,7 @@ function completionItem(item, protocolProduct, amountsAllowed) {
       amount: null, amountUnit: String(item.mix?.amountUnit || '').split('/')[0] || null,
       ratePer1000: null, rateUnit: item.mix?.rateUnit || null,
     },
-    amountReason: amountAvailable ? null : 'Enter the actual amount; a verified suggestion is unavailable.',
+    amountReason: amountAvailable ? null : 'Enter the actual amount; a suggested quantity is unavailable.',
   };
 }
 
@@ -171,10 +176,21 @@ function completionItem(item, protocolProduct, amountsAllowed) {
 // track for anyone; that resolution must not become a one-time or commercial
 // visit's protocol — and a partial assignment (window only) must not let the
 // matcher's wildcards adopt the calendar-resolved protocol either.
+// An EXPLICIT non-membership billing lane defeats the tier fallback: a
+// customer reclassified to per_visit / one_time can legitimately keep a
+// legacy Bronze–Platinum tier on the row, and billing-lane already rules
+// that such a lane is authoritative over lingering tier fields (a per_visit
+// / one_time customer is never dues-covered). Attribution follows the same
+// classifier so a nonmember visit's applied products are not recorded as
+// seasonal protocol actuals. per_application and annual_prepay are
+// membership lanes; null / inferred keeps the tier rule.
+const NON_PROGRAM_BILLING_MODES = new Set(['per_visit', 'one_time']);
+
 function lawnPlanProgramApplies(plan) {
   const assigned = plan?.appointmentAssignment || {};
-  return ['Bronze', 'Silver', 'Gold', 'Platinum'].includes(plan?.propertyGate?.serviceTier)
-    || !!(assigned.protocolKey && assigned.protocolVersion && assigned.windowKey);
+  const tierApplies = ['Bronze', 'Silver', 'Gold', 'Platinum'].includes(plan?.propertyGate?.serviceTier)
+    && !NON_PROGRAM_BILLING_MODES.has(plan?.propertyGate?.billingMode);
+  return tierApplies || !!(assigned.protocolKey && assigned.protocolVersion && assigned.windowKey);
 }
 
 // The ledger stamps a visit's protocol only when a program applies, the
@@ -197,16 +213,14 @@ function buildLawnCompletionDefaults(plan, context) {
   const programApplies = lawnPlanProgramApplies(plan);
   const protocolMatches = matchesLawnCompletionProtocol(protocol, assigned, plan.propertyGate.trackKey);
   const eligible = context.isLawn && context.propertyMatchesProfile && programApplies && protocolMatches;
-  const amountsAllowed = eligible && plan.propertyGate.blocks.length === 0;
   const products = protocol?.products || [];
   const protocolProductFor = (item) => products.find((row) => row.productId === (item.substitution?.originalProductId || item.product?.id));
   const items = eligible ? plan.mixCalculator.items.filter((item) => {
     const product = protocolProductFor(item);
     // defaultInPlan distinguishes defaults from opt-in rows. Gates can also
-    // carry annual counters or safety metadata on a selected base product;
-    // the planner's blocks still withhold any unavailable suggested quantity.
+    // carry annual counters or safety metadata on a selected base product.
     return item.selected === true && item.product?.active !== false && product?.defaultInPlan;
-  }).map((item) => completionItem(item, protocolProductFor(item), amountsAllowed)) : [];
+  }).map((item) => completionItem(item, protocolProductFor(item))) : [];
   // The planner's recipe comes from the field reference (protocols.json);
   // the defaults list is the owner-edited operating layer. When a live
   // window registers none of the recipe's selected products as defaults,

@@ -303,7 +303,10 @@ class ManagedAssistant {
         // Execute the tool against our DB
         let toolResult;
         try {
-          toolResult = await executeToolCall(toolName, toolInput, customerId);
+          // An autonomous customer-facing turn: no authenticated operator
+          // stands behind the write, so the execution context carries none
+          // and downstream writers attribute it to the system.
+          toolResult = await executeToolCall(toolName, toolInput, customerId, { actorTechnicianId: null });
         } catch (err) {
           toolResult = { error: `Tool failed: ${err.message}` };
           logger.error(`[managed-assistant] Tool ${toolName} error: ${err.message}`);

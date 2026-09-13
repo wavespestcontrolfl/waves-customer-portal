@@ -316,17 +316,21 @@ function withAccountPrimaryFallback(row, primaryRow) {
 
 // Loads the account's primary profile (id / first_name / phone / email) for a
 // secondary-profile row; null when the row is primary, unlinked, or the read
-// fails. The db handle is injectable for tests; the default is the shared knex.
-async function loadAccountPrimaryRow(row, { db = null } = {}) {
+// fails by default. Delivery authorization opts into rethrow and holds the
+// source profile FOR SHARE through its dispatch claim; other callers keep
+// the existing best-effort fallback. forShare requires a transaction handle.
+async function loadAccountPrimaryRow(row, { db = null, forShare = false, rethrow = false } = {}) {
   if (!isSecondaryProfile(row)) return null;
   try {
     const knex = db || require('../models/db');
-    const primary = await knex('customers')
-      .where({ account_id: row.account_id, is_primary_profile: true })
+    let query = knex('customers').where({ account_id: row.account_id, is_primary_profile: true });
+    if (forShare) query = query.forShare();
+    const primary = await query
       .whereNull('deleted_at')
       .first('id', 'first_name', 'phone', 'email');
     return primary && String(primary.id) !== String(row.id) ? primary : null;
-  } catch {
+  } catch (err) {
+    if (rethrow) throw err;
     return null;
   }
 }

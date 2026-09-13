@@ -2,7 +2,7 @@
   "version": 2,
   "set": "category-seed-v1",
   "owner": "adam",
-  "notes": "Curated lawn + tree-shrub hub-blog backlog (owner rulings 2026-07-27: 24 lawn + 8 tree-shrub, ~2/week drip, informational + list-shaped + category-comparison shapes). GLOBAL RULES, all briefs: (1) informational lane only — no near-me or transactional phrasing anywhere; (2) every agronomic/pest claim must be verified against the cited UF/IFAS or county source at draft time — if a claim cannot be verified, OMIT it; (3) never state prices or dollar amounts — if cost comes up, direct readers to /contact/ (lawn and tree-shrub have no calculator flow); (4) never describe pesticide applications as 'safe', give re-entry minutes, or say 'EPA-registered' as a safety claim; (5) TREE-SHRUB BRIEFS ONLY: the tree-shrub facts bank is unverified — make NO claims about what our tree & shrub service includes, treats, applies, or costs; describe the horticultural problem from cited sources and hand off generically ('have a local pro take a look'); (6) fertilizer topics must respect the Manatee and Sarasota County June 1 – September 30 nitrogen/phosphorus fertilizer restricted season — never advise applying N or P during the blackout; (7) list-shaped briefs follow the citable-listicle architecture baked into their outlines (count in title, quick answer naming every item, numbered H2 per item, sourced how-we-chose note, visible last-updated line at current month + year). PEST-ID SERIES (v2, owner GO 2026-07-28, Orkin-style identification with more depth): each pest-ID brief is IDENTIFICATION-FIRST (measurements, colors, distinguishing marks, look-alike comparisons) — never a 'get rid of X' treatment post (that family already exists; link into it instead); every ID claim and every item in the mandatory 'Interesting facts' section must trace to the cited UF/IFAS source (Featured Creatures profiles preferred) — no folklore, no unsourced trivia; FAQ-blocked pests (roaches, rodents, bed bugs, spiders, wasps, termites) get NO FAQ section.",
+  "notes": "Curated lawn + tree-shrub hub-blog backlog (owner rulings 2026-07-27: 24 lawn + 8 tree-shrub, ~2/week drip, informational + list-shaped + category-comparison shapes). GLOBAL RULES, all briefs: (1) informational lane only — no near-me or transactional phrasing anywhere; (2) every agronomic/pest claim must be verified against the cited UF/IFAS or county source at draft time — if a claim cannot be verified, OMIT it; (3) never state prices or dollar amounts — if cost comes up, direct readers to /contact/ (lawn and tree-shrub have no calculator flow); (4) never describe pesticide applications as 'safe', give re-entry minutes, or say 'EPA-registered' as a safety claim; (5) TREE-SHRUB BRIEFS ONLY: the tree-shrub facts bank is unverified — make NO claims about what our tree & shrub service includes, treats, applies, or costs; describe the horticultural problem from cited sources and hand off generically ('have a local pro take a look'); (6) fertilizer topics must respect the Manatee and Sarasota County June 1 – September 30 nitrogen/phosphorus fertilizer restricted season — never advise applying N or P during the blackout; (7) list-shaped briefs follow the citable-listicle architecture baked into their outlines (count in title, quick answer naming every item, numbered H2 per item, sourced how-we-chose note, visible last-updated line at current month + year). PEST-ID SERIES (v2, owner GO 2026-07-28, Orkin-style identification with more depth): each pest-ID brief is IDENTIFICATION-FIRST (measurements, colors, distinguishing marks, look-alike comparisons) — never a 'get rid of X' treatment post (that family already exists; link into it instead); every ID claim and every item in the mandatory 'Interesting facts' section must trace to the cited UF/IFAS source (Featured Creatures profiles preferred) — no folklore, no unsourced trivia; FAQ-blocked pests (roaches, rodents, bed bugs, spiders, wasps, termites) get NO FAQ section. CUSTOMER-QUESTION SERIES (Q-ids, owner ask 2026-09-11): each Q brief answers a real question a customer asked us, as a plain how-to — informational lane, exclusion and habitat steps first, and an honest what-Waves-does-and-does-not-do section; never invent a service, product or guarantee we do not offer.",
   "cta_codes": {
     "QUOTE": "quote form /pest-control-quote/ (relative on-site link)",
     "CONTACT": "contact page /contact/ (relative on-site link) — lawn and tree-shrub have no calculator flow"
@@ -34,7 +34,7 @@
         "Webworm vs chinch bug: the two look-alikes and the pull-back-the-turf test that separates them",
         "Life cycle: the moths you see don't feed — the night-feeding caterpillars do (per UF/IFAS)",
         "Why shaded, damp, lush lawns get hit hardest",
-        "What actually works: targeted treatment of the caterpillar stage; why spraying the moths accomplishes nothing",
+        "What actually works: targeted treatment of the caterpillar stage, and why treatment targets the caterpillars rather than the moths (per UF/IFAS)",
         "When a lawn recovers on its own vs when damage compounds into fall",
         "Handoff: what a professional inspection checks before treating"
       ],
@@ -239,14 +239,14 @@
       "schema_types": [
         "Article"
       ],
-      "thesis": "Doveweed hides in plain sight because it looks like St. Augustine until it has taken over — it germinates late, thrives in the summer wet season, and is one of the toughest broadleaf weeds in SWFL turf.",
+      "thesis": "Doveweed hides in plain sight because it looks like St. Augustine until it has taken over — it germinates late, thrives in the summer wet season, and is one of the toughest summer-annual weeds in SWFL turf. Describe its classification only in the terms the cited UF/IFAS page uses, and do not assert a broadleaf-versus-monocot correction of your own.",
       "outline": [
         "Why you didn't notice it until August: late germination and a grass-like look (per UF/IFAS)",
         "ID cues: rubbery shiny leaves, creeping stems that root at the nodes, purple bloom",
         "The moisture connection: doveweed maps your drainage and irrigation problems",
         "Why it's hard to kill: waxy leaves, regrowth from stem fragments",
         "The control calendar: what works now vs what has to wait for next spring's pre-emergent window",
-        "Fixing the conditions so it doesn't return: irrigation runtime, drainage, turf density"
+        "Fixing the conditions that favor it: irrigation runtime, drainage, turf density — describe this as reduced recurrence, never as a guarantee that it will not return"
       ],
       "sources": [
         "https://edis.ifas.ufl.edu/",
@@ -280,7 +280,7 @@
         "Article",
         "FAQPage"
       ],
-      "thesis": "Half the chronic lawn problems we see start at the mower — height, frequency, and blade condition drive St. Augustine health more than any product does.",
+      "thesis": "Mowing height, mowing frequency and blade condition all affect St. Augustine health, and they are the practices a homeowner controls directly — the cited UF/IFAS mowing guidance is the basis for every number in this post. Make no comparison between mowing and any product, no claim about how common a mistake is, and no claim about what we see in the field.",
       "outline": [
         "Title carries the count (7); ~60-word quick answer naming all seven mistakes up front",
         "1. Mowing below the recommended height for St. Augustine (state UF/IFAS's current recommended range, verified)",
@@ -325,11 +325,11 @@
       "schema_types": [
         "Article"
       ],
-      "thesis": "The black film on your gardenias and the sticky mist under your oaks are the same story: sap-feeding insects excreting honeydew that sooty mold grows on — treat the insect, and the mold resolves.",
+      "thesis": "The black film on your gardenias and the sticky mist under your oaks are the same story: sap-feeding insects excreting honeydew that sooty mold grows on — manage the insect and the mold weathers off over time, exactly as the cited UF/IFAS source describes it.",
       "outline": [
         "What homeowners see: black coating on leaves, sticky film on cars and patios under trees",
         "The causal chain per UF/IFAS: scale/whitefly/aphid honeydew → sooty mold fungus",
-        "Why wiping the mold off doesn't work — it isn't attacking the plant directly",
+        "Why wiping the mold off is only temporary — it returns while the honeydew source remains, and it is not attacking the plant directly (per UF/IFAS)",
         "Finding the actual pest: where scale hides and what the crawler stage is",
         "Management principles UF/IFAS describes: horticultural oils, timing to crawler emergence, encouraging beneficials",
         "When an infestation is beyond DIY oil sprays — handoff to a local pro"
@@ -449,7 +449,7 @@
       ],
       "thesis": "Dollarweed is a moisture indicator first and a weed second — UF/IFAS calls it out as a sign of excess water, so lasting control in Venice's flat, poorly-drained lots starts with irrigation, not herbicide.",
       "outline": [
-        "ID: the lily-pad leaf with the stem in the center (vs pennywort look-alikes)",
+        "ID: the round, coin-shaped leaf with the stem attached at its center, versus dichondra, whose stem meets the leaf at a notch. \"Pennywort\" is another name for dollarweed itself, not a look-alike — do not present them as different plants",
         "What UF/IFAS says it indicates: chronic excess moisture",
         "The Venice factor: flat lots, high water tables, reclaimed-water irrigation schedules",
         "Step one is an irrigation audit: runtimes, head coverage, rain shutoff",
@@ -494,7 +494,7 @@
         "Frame the three categories honestly: national chain / local SWFL company / DIY — what each is genuinely good at",
         "ComparisonTable: category-level rows only (program flexibility, local calibration, who does the work, accountability, typical commitment) — NO business names anywhere, no self-declared rankings",
         "What SWFL specifically demands: the June–Sept fertilizer restricted season, St. Augustine pest calendar, alkaline coastal soils",
-        "The DIY reality check: what's achievable with store products and what isn't",
+        "The DIY reality check: what UF/IFAS home-lawn guidance says a homeowner can manage, and where that guidance points to professional help — cite it; make no efficacy claim about a retail product that the citation does not support",
         "Questions to ask ANY provider before signing (category-neutral checklist)",
         "Honest 'who should pick what' close — each category wins a scenario"
       ],
@@ -538,7 +538,7 @@
         "Why the waterfront pattern: shoreline establishment then landward creep",
         "The honest control conversation: suppression vs eradication in an established lawn",
         "Why partial kill often makes it look worse before it gets better",
-        "Prevention on adjacent turf and cleaning equipment"
+        "Limiting spread to adjacent turf and cleaning equipment"
       ],
       "sources": [
         "https://edis.ifas.ufl.edu/",
@@ -578,7 +578,7 @@
         "Magnesium: the yellow-band signature",
         "Manganese ('frizzle top'): why it shows on NEW growth and why it's urgent",
         "Why pruning yellow fronds off a deficient palm makes deficiency worse (UF/IFAS guidance)",
-        "The soil reality on SWFL alkaline soils, and why palm fertilization is its own discipline",
+        "The soil reality on SWFL alkaline soils, and why palm fertilization is its own discipline — describe the UF/IFAS approach only; give no application-timing advice that falls inside the June 1 – September 30 nitrogen/phosphorus restricted season",
         "Handoff: when to bring in a pro for assessment"
       ],
       "sources": [
@@ -620,7 +620,7 @@
         "The square-foot check: how many grubs actually justifies treatment (UF/IFAS threshold, verified)",
         "Timing: why late-summer/fall treatment targets the vulnerable stage",
         "Breaking the animal cycle: fix the food source, not just the digging",
-        "Root recovery and reseeding/plugging expectations"
+        "Root recovery and plugging or sodding expectations (St. Augustine is established vegetatively, not from seed)"
       ],
       "sources": [
         "https://edis.ifas.ufl.edu/",
@@ -632,7 +632,8 @@
       ],
       "verify_notes": [
         "The grubs-per-square-foot threshold must come from the current UF/IFAS figure, not memory.",
-        "Verify the plugging post link resolves on the live sitemap."
+        "Verify the plugging post link resolves on the live sitemap.",
+        "Digging animals are a DIAGNOSTIC CLUE ONLY. No trapping, relocation, exclusion or wildlife-trapper referral content of any kind (owner rule, waves-content skill) — the section covers grub control as the food source and says nothing about handling the animals themselves. The deterministic guardrail exempts third-party subjects such as \"trappers\", so this rule has to hold in the brief."
       ]
     },
     {
@@ -655,7 +656,7 @@
       "schema_types": [
         "Article"
       ],
-      "thesis": "Nutsedge outgrows turf visibly within days of mowing, shrugs off broadleaf weed killers because it isn't a broadleaf, and persists through underground tubers — which is why the usual weed-and-feed approach never touches it.",
+      "thesis": "Nutsedge outgrows turf visibly within days of mowing, shrugs off broadleaf weed killers because it isn’t a broadleaf, and persists through underground tubers — which is why broadleaf-only weed-and-feed products generally do not control it, stated only as the cited UF/IFAS source supports.",
       "outline": [
         "ID in ten seconds: the triangular stem roll test, V-shaped glossy blades, faster vertical growth than turf",
         "Yellow vs purple nutsedge in Florida per UF/IFAS",
@@ -680,7 +681,7 @@
       "id": "L14",
       "action": "new_supporting_blog",
       "slug": "/lawn-care/lawn-burweed-stickers-prevention/",
-      "working_title": "Stop Lawn Burweed Now or Pull Stickers Out of Bare Feet in February",
+      "working_title": "Treat for Lawn Burweed Now or Pull Stickers Out of Bare Feet in February",
       "primary_kw": "lawn burweed florida",
       "secondary_kws": [
         "stickers in grass",
@@ -695,13 +696,13 @@
       "schema_types": [
         "Article"
       ],
-      "thesis": "The painful stickers in spring lawns come from burweed that germinated quietly the previous fall — the only good control window is a fall pre-emergent, before you ever see the plant.",
+      "thesis": "The painful stickers in spring lawns come from burweed that germinated quietly the previous fall — the reliable control window opens with a fall pre-emergent, with an early-winter post-emergent option while the plants are still small and before the burs harden. Follow the timing the cited UF/IFAS source gives; do not reduce it to a single window.",
       "outline": [
         "Working backward from February stickers to fall germination (per UF/IFAS)",
         "Why post-emergent control in spring is too late — the burs have already formed",
         "The fall pre-emergent window: what soil-temperature trigger UF/IFAS ties germination to (verified)",
         "What burweed looks like young, for homeowners who want to scout",
-        "Density as prevention: why thick turf is the best pre-emergent",
+        "Density as the first defense: how thick, healthy turf helps suppress weed establishment — describe this without comparing it to a pre-emergent or claiming it replaces one",
         "Pairing with the rest of the fall weed program (link the pre-emergent and winter-weed posts)"
       ],
       "sources": [
@@ -783,9 +784,9 @@
       "schema_types": [
         "Article"
       ],
-      "thesis": "October and November are when SWFL lawns can actually be rebuilt — summer's pest, fungus, and rain stress is over, the fertilizer window is open, and warm soil keeps St. Augustine growing while the weather stops fighting you.",
+      "thesis": "October and November are when SWFL lawns can actually be rebuilt — the summer pattern of pest, fungus, and rain stress changes as the season turns (it does not simply end; large patch is the fall watch item), the fertilizer window is open, and warm soil keeps St. Augustine growing while the weather stops fighting you.",
       "outline": [
-        "Why fall beats spring in SWFL: warm soil, lower disease pressure, open fertilizer window, gentler sun",
+        "Why fall beats spring in SWFL: warm soil, lower summer-disease pressure (large patch is the fall watch item — do not imply fall is disease-free), open fertilizer window, gentler sun",
         "Week-by-week: assess damage → feed for roots → plug/patch bare areas → pre-emergent for winter weeds",
         "Triaging what summer left behind: chinch damage vs fungus damage vs shade thinning (link the diagnostic posts)",
         "The plugging window: why fall plugs establish before winter dormancy",
@@ -912,7 +913,7 @@
         "The competition strategy: mowing height and density management that favors St. Augustine",
         "The selective option: the Recognition + Fusilade II tank mix under Florida's 2(ee) — capped at 2 applications per growing season (spring), cultivar restrictions, why it's a professional program (link the full protocol post)",
         "Spot-treatment realities and the resod decision for heavy takeover",
-        "Keeping it out of beds and preventing reintroduction"
+        "Keeping it out of beds and reducing reintroduction"
       ],
       "sources": [
         "https://edis.ifas.ufl.edu/",
@@ -1108,7 +1109,7 @@
       "action": "new_supporting_blog",
       "slug": "/lawn-care/winter-ryegrass-overseeding-north-port-fl/",
       "city": "North Port",
-      "working_title": "Please Don't Overseed Your North Port Lawn With Winter Rye — Here's Why",
+      "working_title": "What UF/IFAS Says About Overseeding North Port St. Augustine Lawns With Winter Rye",
       "primary_kw": "overseeding st augustine winter",
       "secondary_kws": [
         "winter rye grass florida",
@@ -1123,7 +1124,7 @@
       "schema_types": [
         "Article"
       ],
-      "thesis": "Winter ryegrass overseeding is a northern transplant habit that UF/IFAS specifically cautions against on St. Augustine — the rye competes with the permanent lawn exactly when it's most vulnerable, and the spring transition costs more than the winter color was worth.",
+      "thesis": "Winter ryegrass overseeding is a northern transplant habit that UF/IFAS does not recommend on St. Augustine — the rye competes with the permanent lawn exactly when it’s most vulnerable, and the spring transition costs more than the winter color was worth. State the UF/IFAS position exactly as the cited page words it; do not harden a caution into a prohibition.",
       "outline": [
         "Where the habit comes from: it genuinely works on northern and even central-Florida bermuda — St. Augustine is different",
         "What UF/IFAS actually says about overseeding St. Augustine lawns (verified, stated fairly)",
@@ -1163,7 +1164,7 @@
       "schema_types": [
         "Article"
       ],
-      "thesis": "Most 'dying shrub' calls start with a watering theory and end with an insect — six checkable signs separate pest pressure from irrigation stress before you drown a bug problem.",
+      "thesis": "A shrub in decline is often read as a watering problem when the visible symptom can point to an insect instead — the symptom is rarely where the problem began. State no frequency: do not say how often either explanation is right, and make no claim about what our service calls find.",
       "outline": [
         "Title carries the count (6); ~60-word quick answer naming all six signs up front",
         "1. Sticky film or black sooty coating on leaves (honeydew producers)",
@@ -1337,7 +1338,7 @@
       ],
       "thesis": "North Port's sandy soils and dry winters punish thirsty ornamentals — the Florida-Friendly Landscaping program's plant guidance points to shrubs that establish once and then largely fend for themselves.",
       "outline": [
-        "The North Port context: sandy soil, dry-season irrigation limits, well-water lots",
+        "The North Port context: sandy soil, well-water lots, and — ONLY if the watering-restriction source named in the sources can be located and cited — the local dry-season irrigation limits; if that page cannot be found, cover the soil and well-water context alone and omit irrigation limits entirely rather than describing them uncited",
         "What 'Florida-Friendly' actually means (the UF/IFAS FFL program, described accurately)",
         "A verified shortlist of drought-tolerant shrubs for SWFL from FFL/UF/IFAS plant guidance (each entry verified against the source)",
         "Right plant, right place: sun, salt, and mature-size mistakes that undo drought tolerance",
@@ -1347,7 +1348,8 @@
       "sources": [
         "https://ffl.ifas.ufl.edu/",
         "https://gardeningsolutions.ifas.ufl.edu/",
-        "Every shrub named must appear in current FFL/UF/IFAS plant guidance for this region — verify each; snapshot at draft."
+        "Every shrub named must appear in current FFL/UF/IFAS plant guidance for this region — verify each; snapshot at draft.",
+        "Any irrigation-limit or watering-restriction statement must cite the Sarasota County or SWFWMD year-round watering restriction page; if no citable page is found, drop the irrigation-limit phrasing entirely rather than describing limits from memory."
       ],
       "internal_links": [
         "/tree-shrub/signs-shrubs-have-pest-problem/"
@@ -1378,14 +1380,14 @@
         "Article",
         "FAQPage"
       ],
-      "thesis": "The tiny ants trailing across SWFL kitchens are usually one of three species with different habits and different fixes — a side-by-side ID (size, color, trail behavior, nesting) tells you which one you have before anyone reaches for a spray.",
+      "thesis": "The tiny ants trailing across SWFL kitchens are usually one of a few species with different habits and different fixes — a side-by-side ID (size, color, trail behavior, nesting) tells you which one you have before anyone reaches for a spray.",
       "outline": [
         "The 10-second triage: where the trail is, what they are eating, time of day",
         "Ghost ant ID: pale translucent abdomen, dark head, erratic trails (per UF/IFAS Featured Creatures)",
         "Sugar ant vs the catch-all name: what people actually mean in Florida",
         "Pharaoh ant ID and why misidentifying THIS one matters (budding colonies)",
         "Side-by-side comparison table: size, color, trail, nest location, difficulty",
-        "Interesting facts: sourced UF/IFAS trivia (colony sizes, multiple queens, why crushing trails backfires)",
+        "Interesting facts: sourced UF/IFAS trivia (colony sizes, multiple queens, the coconut odour of crushed ghost ants) — no claim about what crushing trails or spraying does to a colony unless the cited profile states it",
         "When ID says call a pro; link the get-rid-of guides for treatment"
       ],
       "sources": [
@@ -1422,11 +1424,11 @@
       "schema_types": [
         "Article"
       ],
-      "thesis": "Carpenter ants and termites both leave evidence in wood, but the evidence is opposite: clean excavated galleries and coarse frass versus mud, moisture, and eaten grain — reading it correctly changes everything about urgency and cost.",
+      "thesis": "Carpenter ants and termites both leave evidence in wood, but the evidence differs: smooth, clean galleries with frass dumps for carpenter ants, versus mud and moisture for subterranean termites or dry pellet piles for drywood termites — reading it correctly changes how urgently you need to act.",
       "outline": [
-        "Why the confusion is expensive in both directions",
-        "Carpenter ant evidence per UF/IFAS: smooth galleries ACROSS the grain, frass piles with insect parts",
-        "Termite evidence: mud tubes, blistered paint, galleries WITH the grain, no sawdust",
+        "Why the confusion costs time in both directions",
+        "Carpenter ant evidence per UF/IFAS: smooth, clean galleries and frass dumps containing insect parts — use only the distinguishing marks the cited profile actually gives; do not assert gallery direction relative to the wood grain unless the source states it",
+        "Termite evidence per UF/IFAS, covering BOTH types found in SWFL: subterranean (mud tubes, mud-lined galleries, moisture) and drywood (hard six-sided fecal pellets pushed from kick-out holes, no mud, no moisture) — a drywood reader must not be sent to the wrong answer by a subterranean-only key",
         "The swarmer check: waist, wings, antennae — the three-point ID",
         "Where each shows up in SWFL homes (moisture wood vs slab entry)",
         "Interesting facts: sourced UF/IFAS trivia (carpenter ants do not eat wood; night foraging)",
@@ -1445,7 +1447,8 @@
         "Every identification measurement/mark and every interesting-fact item must be verified against the cited UF/IFAS page at draft; if a claim cannot be verified, OMIT it.",
         "Identification-first post: do NOT drift into a treatment guide — link the existing get-rid-of post for treatment and keep this page the ID reference.",
         "FAQ-blocked pest — do not add an FAQ section or FAQPage schema.",
-        "Do not duplicate the existing drywood-vs-subterranean post — this is ant-vs-termite, stay in that lane."
+        "Do not duplicate the existing drywood-vs-subterranean post — this is ant-vs-termite, stay in that lane.",
+        "SWFL has BOTH subterranean and drywood termites. Any statement of the form \"termites do X\" must say which type, or be true of both — a subterranean-only evidence key published as \"termite evidence\" misdiagnoses the drywood reader. Do not state or imply costs."
       ]
     },
     {
@@ -1470,11 +1473,11 @@
       "thesis": "Which roach you are seeing — and WHERE — is the whole diagnosis: an American wandering in from the rain is a different problem from German roaches breeding behind the fridge, and the ID takes ten seconds once you know the marks.",
       "outline": [
         "The location rule: bathroom floor at night vs kitchen cabinet hinges",
-        "American cockroach (palmetto bug) ID per UF/IFAS: size, the figure-8 pronotum mark, flight",
+        "American cockroach ID per UF/IFAS: size, the figure-8 pronotum mark, flight — note that \"palmetto bug\" is a colloquial name UF/IFAS also applies to other species, not a synonym for this one",
         "German cockroach ID: the two racing stripes, why size means infestation not relief",
         "Smokybrown ID: uniform mahogany, attic and soffit pressure",
         "Comparison table: size, marks, where found, flies?, infestation risk",
-        "Interesting facts: sourced UF/IFAS trivia (why \"palmetto bug\" is a euphemism, survival feats)",
+        "Interesting facts: sourced UF/IFAS trivia (which species Floridians actually call palmetto bugs, flight and habitat behaviour) — no survival folklore such as headless survival or radiation resistance",
         "What each ID means for action; link the get-rid-of guides"
       ],
       "sources": [
@@ -1519,7 +1522,7 @@
         "Norway rat ID: burrows, ground-level entry",
         "House mouse ID and why \"small rat\" is usually wrong",
         "Rub marks, gnawing, and the flashlight checklist",
-        "Interesting facts: sourced UF/IFAS trivia (climbing ability, gnawing force)",
+        "Interesting facts: sourced UF/IFAS trivia (climbing ability, litter size and breeding rate) — no gnawing-force or psi figure, which UF/IFAS does not publish",
         "Species → entry point → next step; link the rodent guides"
       ],
       "sources": [
@@ -1569,7 +1572,8 @@
       ],
       "sources": [
         "https://entnemdept.ufl.edu/creatures/",
-        "Pull UF/IFAS bed bug and flea Featured Creatures/EDIS pages; verify bite-pattern and inspection claims; DO NOT give medical advice — describe patterns, direct medical questions to a physician; snapshot at draft."
+        "Pull UF/IFAS bed bug and flea Featured Creatures/EDIS pages; verify bite-pattern and inspection claims; DO NOT give medical advice — describe patterns, direct medical questions to a physician; snapshot at draft.",
+        "Also pull the UF/IFAS Featured Creatures tropical rat mite / bird mite profile — outline item 3 requires a mite section and no current source covers mites."
       ],
       "internal_links": [
         "/pest-control-services/",
@@ -1602,20 +1606,21 @@
       "schema_types": [
         "Article"
       ],
-      "thesis": "The nest tells you the wasp, and the wasp tells you the risk: open-comb paper wasps, hidden-cavity yellowjackets, and solitary mud daubers sit at completely different aggression levels — knocking down the wrong one is how people get swarmed.",
+      "thesis": "The nest tells you the wasp, and the wasp tells you what you are dealing with: open-comb paper wasps, hidden-cavity yellowjackets, and solitary mud daubers behave very differently around their nests — which is why identifying one before touching it matters. Describe temperament and sting risk only as the cited UF/IFAS profiles state it.",
       "outline": [
         "Read the NEST first: open umbrella comb vs enclosed cavity vs mud tubes (per UF/IFAS)",
         "Paper wasp ID and temperament",
-        "Yellowjacket ID: ground/cavity nests, defensive radius, late-season aggression",
-        "Mud dauber ID: the harmless one that eats spiders",
-        "Cicada killer cameo: terrifying looking, nearly harmless",
-        "Risk table: nest type, aggression, sting risk, DIY-or-pro",
+        "Yellowjacket ID: ground and cavity nests, defensive response near the nest, colony behaviour stated only as the cited UF/IFAS profile describes it for Florida",
+        "Mud dauber ID: solitary mud-tube builder that provisions its nest with spiders — describe temperament ONLY in the words the cited UF/IFAS profile uses; do not call any stinging wasp harmless",
+        "Cicada killer cameo: the very large solitary wasp people mistake for a threat — describe its temperament only as the cited UF/IFAS profile states it, and do not call it harmless",
+        "Comparison table: nest type, where it is built, and temperament as the cited UF/IFAS profiles describe it — no DIY-or-pro column and no recommendation to remove any nest yourself",
         "Interesting facts: sourced UF/IFAS trivia (paper-making, dauber spider hunting)",
-        "Which nests to leave alone and which need professional removal"
+        "What each ID means for what to do next; link the existing paper wasp and mud dauber posts. Do not tell the reader which nests are safe to knock down — this is an identification page, not a removal instruction"
       ],
       "sources": [
         "https://entnemdept.ufl.edu/creatures/",
-        "Pull UF/IFAS Featured Creatures profiles for paper wasps, yellowjackets, and mud daubers; verify nest/behavior claims; snapshot at draft."
+        "Pull UF/IFAS Featured Creatures profiles for paper wasps, yellowjackets, and mud daubers; verify nest/behavior claims; snapshot at draft.",
+        "Also pull the UF/IFAS Featured Creatures cicada killer profile — outline item 4 requires it, and no source currently covers that species."
       ],
       "internal_links": [
         "/pest-control-services/",
@@ -1626,14 +1631,15 @@
         "Every identification measurement/mark and every interesting-fact item must be verified against the cited UF/IFAS page at draft; if a claim cannot be verified, OMIT it.",
         "Identification-first post: do NOT drift into a treatment guide — link the existing get-rid-of post for treatment and keep this page the ID reference.",
         "FAQ-blocked pest — do not add an FAQ section or FAQPage schema.",
-        "Never call any stinging-insect approach \"safe\" — site compliance language rules."
+        "Never call any stinging-insect approach \"safe\" — site compliance language rules.",
+        "Stinging insects: make no harmlessness claim about any wasp, and give no instruction, ranking or table column that tells a reader which nests they may remove themselves. Temperament, aggression and sting risk are stated only in the cited profile’s own terms."
       ]
     },
     {
       "id": "P07",
       "action": "new_supporting_blog",
       "slug": "/mosquito/mosquito-species-southwest-florida/",
-      "working_title": "The Three Mosquitoes That Actually Bite You in Southwest Florida",
+      "working_title": "Three Backyard Mosquitoes Worth Telling Apart in Southwest Florida",
       "primary_kw": "types of mosquitoes in florida",
       "secondary_kws": [
         "mosquito species identification",
@@ -1649,7 +1655,7 @@
         "Article",
         "FAQPage"
       ],
-      "thesis": "Of Florida’s dozens of mosquito species, a homeowner mostly meets three — and they differ in when they bite, where they breed, and what they carry, which is why time-of-day is the most useful ID clue you have.",
+      "thesis": "Of Florida’s dozens of mosquito species, three are the ones SWFL homeowners most often meet around the house — and they differ in when they bite, where they breed, and what they carry, which is why time-of-day is the most useful ID clue you have. Do not claim these are the only mosquitoes that bite here; coastal SWFL has others.",
       "outline": [
         "Day-biter vs dusk-biter: the first ID split",
         "Aedes aegypti and albopictus ID per UF/IFAS: container breeders, the white markings, day biting",
@@ -1669,7 +1675,8 @@
       "verify_notes": [
         "Every identification measurement/mark and every interesting-fact item must be verified against the cited UF/IFAS page at draft; if a claim cannot be verified, OMIT it.",
         "Identification-first post: do NOT drift into a treatment guide — link the existing get-rid-of post for treatment and keep this page the ID reference.",
-        "Verify both internal links resolve on the live sitemap (mosquito posts may live under /mosquito/ or /pest-control/ — check actual URLs)."
+        "Verify both internal links resolve on the live sitemap (mosquito posts may live under /mosquito/ or /pest-control/ — check actual URLs).",
+        "Disease claims: cite a SPECIFIC UF/IFAS or Florida Department of Health page by URL, or omit the claim. floridahealth.gov is not on the trusted-citation host list, so an uncited FDOH reference will either trip the external-link guard or publish ungrounded."
       ]
     },
     {
@@ -1699,8 +1706,8 @@
         "Earwig ID: the pincers that scare people and what they are actually for",
         "Booklice ID: the tiny one on damp paper and walls",
         "What each eats and what damage is real vs imagined",
-        "Comparison table + humidity fixes that outperform sprays",
-        "Interesting facts: sourced UF/IFAS trivia (silverfish antiquity, earwig folklore vs reality)",
+        "Comparison table: size, shape, where found, and what each one indicates about humidity",
+        "Interesting facts: sourced UF/IFAS trivia (silverfish antiquity, what earwig cerci are actually used for) — address the ear myth only if the cited UF/IFAS page addresses it",
         "When numbers mean a moisture problem worth professional eyes"
       ],
       "sources": [
@@ -1742,7 +1749,7 @@
         "No-see-um ID per UF/IFAS: size, the burning bite, dawn/dusk pressure",
         "Coastal geography: why Venice and coastal Bradenton feel it worse",
         "Breeding difference: salt marsh vs container water — why yard dumping does not fix midges",
-        "What actually helps: screen mesh size, fans, timing, per UF/IFAS",
+        "Why the usual mosquito playbook misses biting midges (screen mesh size, fans, timing), per UF/IFAS — link the no-see-um post for control rather than rewriting it here",
         "Interesting facts: sourced UF/IFAS trivia (wing-beat, the name)",
         "Setting honest expectations; link the no-see-um and mosquito posts"
       ],
@@ -1792,7 +1799,8 @@
       ],
       "sources": [
         "https://entnemdept.ufl.edu/creatures/",
-        "Pull the UF/IFAS Featured Creatures red imported fire ant profile and pavement ant/mole cricket references; verify mound-morphology claims; snapshot at draft."
+        "Pull the UF/IFAS Featured Creatures red imported fire ant profile and pavement ant/mole cricket references; verify mound-morphology claims; snapshot at draft.",
+        "Also pull a UF/IFAS reference for earthworm castings in turf — the thesis and outline item 4 both require them and no current source covers them."
       ],
       "internal_links": [
         "/pest-control-services/",
@@ -1825,15 +1833,15 @@
         "Article",
         "FAQPage"
       ],
-      "thesis": "Summer rains push both into lanais and garages, but they could not be more different: slow vegetarian millipedes that curl into coils, and fast predatory centipedes that can pinch — the ID takes one look at legs and speed.",
+      "thesis": "Summer rains push both into lanais and garages, but they could not be more different: slow vegetarian millipedes that curl into coils, and fast predatory centipedes whose bite can be painful — the ID takes one look at legs and speed. Describe the bite only as the cited UF/IFAS page does; do not downgrade it to a \"pinch\".",
       "outline": [
         "The one-look ID: legs per segment, speed, and the curl test (per UF/IFAS)",
         "Millipede ID and the rainy-season migration phenomenon",
-        "Centipede ID: the Florida blue and house centipede, what a pinch is like",
-        "Why neither wants to live indoors (and what that means for control)",
+        "Centipede ID: house centipede and the larger Florida species — describe the bite only as the cited UF/IFAS page states it, with no medical advice and no experiential description",
+        "Why neither wants to live indoors",
         "The moisture and mulch connection at the foundation line",
         "Interesting facts: sourced UF/IFAS trivia (leg counts, millipede defensive chemistry)",
-        "Exclusion beats spraying: door sweeps, mulch pullback; when mass migrations warrant help"
+        "What the ID means in practice: both are outdoor moisture followers that wander in — door sweeps and mulch pullback at the foundation line, and when a mass migration is worth a call. Make no comparative claim about spraying that the cited source does not support"
       ],
       "sources": [
         "https://entnemdept.ufl.edu/creatures/",
@@ -1844,7 +1852,8 @@
       ],
       "verify_notes": [
         "Every identification measurement/mark and every interesting-fact item must be verified against the cited UF/IFAS page at draft; if a claim cannot be verified, OMIT it.",
-        "Identification-first post: do NOT drift into a treatment guide — link the existing get-rid-of post for treatment and keep this page the ID reference."
+        "Identification-first post: do NOT drift into a treatment guide — link the existing get-rid-of post for treatment and keep this page the ID reference.",
+        "Only link a blog URL verified to exist on the live sitemap. If the \"get-rid-of\" post this brief refers to does not exist, link the service page instead — never invent a destination slug."
       ]
     },
     {
@@ -1867,12 +1876,12 @@
         "Article",
         "FAQPage"
       ],
-      "thesis": "The hand-sized yellow grasshopper stripping SWFL ornamentals every summer is the eastern lubber — flightless, toxic to predators, nearly untreatable at adult size, and a textbook case where timing (the black nymph stage) is the whole game.",
+      "thesis": "The large yellow grasshopper stripping SWFL ornamentals every summer is the eastern lubber — flightless, chemically defended against many predators, and far harder to control as an adult than as a nymph, which makes timing (the black nymph stage) the whole game. Give adult size only as a measurement the cited UF/IFAS profile states.",
       "outline": [
         "ID at both life stages per UF/IFAS: the black-with-yellow-stripe nymph vs the giant yellow adult",
-        "Why birds will not solve this: the toxicity defense",
+        "The chemical defence and what it means for predators — state which predators the cited UF/IFAS profile says are and are not deterred, rather than asserting that nothing eats them",
         "What they eat in SWFL landscapes: crinum, amaryllis, citrus leaves",
-        "The control window: hand-picking and treating NYMPHS in spring, why adults shrug everything off",
+        "The control window UF/IFAS points to: the black nymph stage, and why adults are much harder to control — state this as the source states it, without claiming adults are untreatable",
         "Interesting facts: sourced UF/IFAS trivia (hissing/foam display, flightlessness)",
         "Damage triage on ornamentals; link tree-shrub resources",
         "Honest close: what a pro can and cannot do about lubbers"
@@ -1887,7 +1896,61 @@
       ],
       "verify_notes": [
         "Every identification measurement/mark and every interesting-fact item must be verified against the cited UF/IFAS page at draft; if a claim cannot be verified, OMIT it.",
-        "Identification-first post: do NOT drift into a treatment guide — link the existing get-rid-of post for treatment and keep this page the ID reference."
+        "Identification-first post: do NOT drift into a treatment guide — link the existing get-rid-of post for treatment and keep this page the ID reference.",
+        "Only link a blog URL verified to exist on the live sitemap. If the \"get-rid-of\" post this brief refers to does not exist, link the service page instead — never invent a destination slug."
+      ]
+    },
+    {
+      "id": "Q01",
+      "action": "new_supporting_blog",
+      "slug": "/pest-control/how-to-get-lizards-out-of-your-lanai-southwest-florida/",
+      "working_title": "How to Get Lizards Out of Your Lanai (and Keep Them Out) in Southwest Florida",
+      "primary_kw": "how to get rid of lizards on lanai",
+      "secondary_kws": [
+        "lizards in pool cage",
+        "keep lizards off lanai",
+        "lizards in screened porch florida"
+      ],
+      "intent": "informational how-to (customer question, 2026-09-11: lizards living in a screened lanai)",
+      "window": "2026-09-12",
+      "byline": "adam",
+      "cta": [
+        "QUOTE"
+      ],
+      "schema_types": [
+        "Article",
+        "FAQPage"
+      ],
+      "thesis": "Lizards living inside a Southwest Florida lanai are most often anoles or house geckos — occasionally another species such as a curly-tailed lizard — that slipped through a screen or door gap chasing the insects the cage lights attract; the honest response is a gap-and-light audit plus reducing the insects they are hunting, not lizard sprays, mothballs or glue boards, and a lanai with fewer insects is a less attractive place for them to hunt.",
+      "outline": [
+        "Quick answer (5 steps): find and patch the gap they came through, herd out the ones already inside, change the lights that feed them, cut the bug supply, keep the screens tight",
+        "Which lizard is on your lanai: brown anole, green anole, Mediterranean and tropical house geckos, curly-tailed lizard, one line each from UF/IFAS (size, color, day vs night) and which are native vs introduced; none are venomous and none bite unless picked up",
+        "Why they are in there: the cage is a lit, sheltered insect trap, plus water in plant saucers and warm slab edges; lizards follow the bugs, so they are a symptom",
+        "How they got in: the gap under the screen door, torn or popped spline at the base panels, the seam where cage meets slab or pool deck, weep holes and kick plates; a five-minute flashlight audit at dusk",
+        "Getting the ones already inside out: prop the screen door at dusk and dawn, gentle herding toward it, cup-and-card for a cornered one; what NOT to do: glue boards (they catch non-target wildlife and are inhumane — no efficacy claim needed), and the products people reach for instead, covered ONLY on the terms set in the sourcing directive below",
+        "Cut the buffet: warm-spectrum or yellow bug bulbs, fewer lights on late, no pet food or fruit on the lanai, empty plant-saucer water, keep shrubs 12 inches off the cage, a perimeter pest program to bring insect pressure down",
+        "What Waves does and does not do: we treat the insects that draw them (perimeter pest control, Waveguard); we never remove, trap, relocate or poison lizards, and this post does not cover wildlife removal of any kind",
+        "FAQ: do lizards bite; is it a problem if my cat or dog catches one (bite/venom risk is not the same as eating one — cover the cat-liver-fluke point ONLY if the cited veterinary source supports it, and send pet-health questions to a vet); do lizards lay eggs inside a lanai; will a pest control treatment kill the lizards; why are there suddenly more lizards after rain"
+      ],
+      "sources": [
+        "https://gardeningsolutions.ifas.ufl.edu/care/wildlife/anoles.html",
+        "https://edis.ifas.ufl.edu/publication/UW070",
+        "Locate the UF/IFAS or FWC species profiles for the brown anole (Anolis sagrei, introduced), green anole (Anolis carolinensis, native), Mediterranean house gecko and tropical house gecko (both introduced) and the northern curly-tailed lizard (introduced); verify size, coloring, activity time and native/introduced status against those pages; snapshot at draft.",
+        "For the what-not-to-do section, cite an authoritative source for EACH claim you make: the EPA or FDACS position that using a registered pesticide (mothballs/naphthalene) inconsistently with its label is a violation, and, separately, any efficacy or label-status statement about retail lizard repellents. If no citable source is found for a given product, OMIT that product entirely from the section rather than asserting it is unlabeled or ineffective; the section may still cover glue boards on humane/non-target grounds, which needs no efficacy claim.",
+        "https://www.merckvetmanual.com/digestive-system/hepatic-disease-in-small-animals/hepatobiliary-fluke-infection-in-small-animals"
+      ],
+      "internal_links": [
+        "/pest-control-services/",
+        "/pest-control/lizard-faeces-swfl-guide/",
+        "/waveguard-memberships/"
+      ],
+      "verify_notes": [
+        "Every species ID claim (size, color, native vs introduced, day vs night activity) must be verified against the cited UF/IFAS or FWC page at draft; if a claim cannot be verified, OMIT it. Do NOT call brown anoles or house geckos 'protected' or 'native' — the brown anole and both house geckos are introduced species.",
+        "No health claims beyond what the source supports. Nonvenomous and does-not-bite-unless-handled is the ceiling for PEOPLE. Do NOT write that these lizards are harmless to pets as a blanket statement: bite/venom risk and ingestion risk are different questions, and a cat that eats a lizard can pick up liver flukes. State the ingestion point ONLY if the cited veterinary source supports it, keep it to one factual sentence, and refer pet-health questions to a veterinarian. If it cannot be verified, OMIT the whole ingestion point rather than replacing it with a reassurance.",
+        "How-to post, not an identification reference: the existing /pest-control/lizard-faeces-swfl-guide/ already owns droppings ID — link it once and keep this page on exclusion, herding, lighting and bug-supply reduction.",
+        "Waves treats insects, not lizards. Never imply we remove, trap, relocate or poison lizards, and never describe any pesticide as \"safe\" or \"pet-safe\" or give re-entry minutes. Do not name a product for lizard control; no such labeled product is part of our service. NO WILDLIFE-TRAPPING CONTENT of any kind (owner rule, waves-content skill): do not recommend, name or describe a trapper, removal service or relocation, and do not add an iguana-removal aside.",
+        "Southwest Florida framing throughout (Sarasota, Bradenton, Venice, Lakewood Ranch, North Port, Palmetto, Parrish, Port Charlotte); no statewide-only framing in title or H2s.",
+        "Never promise elimination or that the lizards will leave (writer-agent-config PREVENTION_PROMISE). Reduced attractiveness only, always conditional: fewer insects means a lanai that offers them less to hunt. Do not write that they will leave, move on, relocate or stop coming back. The deterministic guardrail does not cover lizards, so this rule has to hold in the brief."
       ]
     }
   ]

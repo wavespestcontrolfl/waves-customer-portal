@@ -433,10 +433,12 @@ button, input, select, textarea, optgroup {
 
 /* Customer-facing portal cleanup. These classes intentionally sit outside
    admin shells and pair with inline React styles on the public pages. */
-.waves-customer-page {
-  width: min(100% - 32px, 1080px);
-  margin: 28px auto 56px;
-}
+/* `.waves-customer-page` / `.waves-receipt-page` / `.waves-estimate-page` /
+   `.waves-rate-page` / `.waves-contract-page` retired (audit G-01, DECISIONS
+   2026-09-11 "R2a: one customer page column") — every consumer now renders
+   <CustomerColumn> (client/src/components/brand/CustomerColumn.jsx), which
+   owns the 16px gutter / 28px top / 56px bottom / 760-or-640 recipe these
+   five one-off classes used to duplicate. */
 
 .waves-billing-grid {
   display: grid;
@@ -457,11 +459,6 @@ button, input, select, textarea, optgroup {
   margin-right: auto;
 }
 
-.waves-receipt-page {
-  width: min(100% - 32px, 760px);
-  margin: 32px auto 56px;
-}
-
 .waves-customer-help {
   margin-top: 22px;
   text-align: center;
@@ -470,18 +467,10 @@ button, input, select, textarea, optgroup {
   line-height: 1.6;
 }
 
-.waves-estimate-page {
-  width: min(100% - 32px, 760px);
-  margin: 28px auto 48px;
-}
-
-.waves-rate-page {
-  width: min(100% - 32px, 520px);
-  margin: 48px auto 48px;
-}
-
-.waves-onboarding-page,
-.waves-contract-page {
+/* Onboarding is a multi-step flow with its own step grid, not a document
+   column — deferred to R4 rather than narrowed blind (DECISIONS 2026-09-11
+   C6 and "R2a"). */
+.waves-onboarding-page {
   width: min(100% - 32px, 1080px);
   margin: 28px auto 56px;
 }
@@ -534,7 +523,7 @@ button, input, select, textarea, optgroup {
   border: 1px solid var(--border);
   border-radius: 8px;
   font-size: 12px;
-  font-weight: 800;
+  font-weight: 700;
   text-transform: uppercase;
   white-space: nowrap;
 }
@@ -554,12 +543,7 @@ button, input, select, textarea, optgroup {
     position: static !important;
   }
 
-  .waves-customer-page,
-  .waves-receipt-page,
-  .waves-estimate-page,
-  .waves-rate-page,
-  .waves-onboarding-page,
-  .waves-contract-page {
+  .waves-onboarding-page {
     width: min(100% - 24px, 100%);
     margin-top: 18px;
     margin-bottom: 40px;

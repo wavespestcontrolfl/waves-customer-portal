@@ -17,23 +17,16 @@
 // server set ever changes — the UI lets users pick one before each
 // upload so photos categorize correctly for the missed_photo
 // detector / customer-track view downstream.
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, useId } from 'react';
 import { createPortal } from 'react-dom';
 import useIsMobile from '../../hooks/useIsMobile';
+import useModalFocus from '../../hooks/useModalFocus';
+import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import { getAdminAuthToken } from '../../lib/adminAuth';
 import { DVH } from '../../lib/viewportUnits';
 import TechPhotoMarksModal from './TechPhotoMarksModal';
-
-const DARK = {
-  bg: '#0f1923',
-  card: '#1e293b',
-  border: '#334155',
-  teal: '#0ea5e9',
-  red: '#ef4444',
-  green: '#22c55e',
-  text: '#e2e8f0',
-  muted: '#94a3b8',
-};
+import { UiSurface, Button, Field, Input, ActionFeedback, cn } from '../ui';
+import '../../styles/tech-workflow.css';
 
 const API = import.meta.env.VITE_API_URL || '';
 const PHOTO_TYPES = ['before', 'after', 'progress', 'issue'];
@@ -168,219 +161,80 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
     void uploadPhoto(photo);
   };
 
+  useLockBodyScroll(true);
+  const dialogRef = useModalFocus(true, close);
+  const titleId = useId();
+  const locked = uploading || !!pendingPhoto;
+  // DVH is 'dvh' where the engine supports it, 'vh' on pre-15.4 WebKit — see
+  // lib/viewportUnits.js. Bridged in as a single CSS custom property so the
+  // desktop height cap stays expressed in tech-workflow.css rather than an
+  // inline layout object.
   return createPortal(
-    <div
-      onClick={close}
-      style={{
-        position: 'fixed', inset: 0, fontFamily: "'DM Sans', sans-serif", background: 'rgba(0,0,0,0.7)',
-        display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
-        zIndex: 1000,
+    <UiSurface
+      density="touch"
+      className={cn('tech-visit-surface tech-visit-overlay', isMobile && 'tech-visit-overlay--fullscreen')}
+      style={{ '--tech-vh': `1${DVH}` }}
+      onClick={(event) => {
+        event.stopPropagation();
+        if (event.target === event.currentTarget) close();
       }}
     >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          background: DARK.bg, width: '100%', maxWidth: isMobile ? 'none' : 480,
-          borderTopLeftRadius: isMobile ? 0 : 16, borderTopRightRadius: isMobile ? 0 : 16,
-          boxSizing: 'border-box', height: isMobile ? '100%' : undefined, maxHeight: isMobile ? '100%' : `90${DVH}`,
-          display: 'flex', flexDirection: 'column', overflow: 'hidden',
-          paddingTop: 'calc(16px + env(safe-area-inset-top, 0px))',
-          paddingBottom: 'calc(16px + env(safe-area-inset-bottom, 0px))',
-          paddingLeft: 'calc(16px + env(safe-area-inset-left, 0px))',
-          paddingRight: 'calc(16px + env(safe-area-inset-right, 0px))',
-          border: `1px solid ${DARK.border}`,
-        }}
+      <section
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className={cn('tech-visit-dialog', isMobile ? 'tech-visit-dialog--fullscreen' : 'tech-visit-dialog--photo-cap')}
+        aria-hidden={markTarget ? true : undefined}
+        inert={markTarget ? '' : undefined}
       >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexShrink: 0 }}>
-          <h2 style={{
-            margin: 0, fontSize: 18, fontWeight: 700, color: DARK.text,
-            fontFamily: "'Montserrat', sans-serif",
-          }}>
-            Service Photos
-          </h2>
-          <button type="button" aria-label="Close service photos" onClick={close} disabled={uploading} style={{
-            background: 'transparent', border: 'none', color: DARK.muted,
-            fontSize: 24, cursor: 'pointer', padding: '0 4px', lineHeight: 1, minWidth: 44, minHeight: 44,
-          }}>×</button>
+        <header className="tech-visit-header">
+          <div><h2 id={titleId} className="tech-visit-title">Service Photos</h2>{customerName && <p className="tech-visit-muted">{customerName}</p>}</div>
+          <Button variant="ghost" className="tech-visit-action tech-visit-close" onClick={close} disabled={uploading} aria-label="Close service photos">×</Button>
+        </header>
+        <div className="tech-visit-body">
+          <div className="tech-visit-card">
+            <h3 className="tech-visit-section-title">Type</h3>
+            <div className="tech-visit-photo-types" role="group" aria-label="Photo type">
+              {PHOTO_TYPES.map((type) => <Button key={type} variant="secondary" className="tech-visit-action" aria-pressed={photoType === type} onClick={() => setPhotoType(type)} disabled={locked}>{type}</Button>)}
+            </div>
+            <Field label="Caption (optional)" className="tech-visit-field">
+              <Input className="tech-visit-control" value={caption} onChange={(event) => setCaption(event.target.value)}
+                placeholder="e.g., Front yard before treatment" disabled={locked} />
+            </Field>
+            <Button className="tech-visit-action tech-visit-primary tech-visit-wide" onClick={handlePickFile} loading={uploading} disabled={!!pendingPhoto}>📷 Add Photo</Button>
+            <input ref={fileInputRef} type="file" accept="image/*" onChange={handleFileSelected} className="tech-visit-file-input" aria-label="Choose service photo" />
+          </div>
+          {pendingPhoto && <div className="tech-visit-card">
+            <ActionFeedback className="tech-visit-feedback">{uploading ? 'Uploading photo…' : 'Photo not uploaded. Keep this visit open to retry.'}</ActionFeedback>
+            <p className="tech-visit-muted">{pendingPhoto.file.name}</p>
+            {!uploading && <div className="tech-visit-actions">
+              <Button className="tech-visit-action tech-visit-primary" onClick={() => uploadPhoto(pendingPhoto)}>Retry upload</Button>
+              <Button variant="secondary" className="tech-visit-action" onClick={() => { setPendingPhoto(null); setErrorMsg(''); }}>Discard selected photo</Button>
+            </div>}
+          </div>}
+          {errorMsg && <ActionFeedback error className="tech-visit-feedback">{errorMsg}</ActionFeedback>}
+          {statusMsg && !errorMsg && <ActionFeedback className="tech-visit-feedback">{statusMsg}</ActionFeedback>}
+          <h3 className="tech-visit-section-title">Attached{!loading && !loadError ? ` (${photos.length})` : ''}</h3>
+          {loading ? <ActionFeedback className="tech-visit-feedback">Loading…</ActionFeedback> : loadError ? <>
+            <ActionFeedback error className="tech-visit-feedback">{loadError}</ActionFeedback>
+            <Button variant="secondary" className="tech-visit-action" onClick={load}>Retry photos</Button>
+          </> : photos.length === 0 ? <p className="tech-visit-muted">No photos yet.</p> : (
+            <div className="tech-visit-photo-grid">
+              {photos.map((photo) => <article key={photo.id} className="tech-visit-photo">
+                <a href={photo.url} target="_blank" rel="noopener noreferrer" className="tech-visit-photo-link">
+                  <img src={photo.url} alt={photo.caption || photo.photo_type} className="tech-visit-photo-image" />
+                  <p className="tech-visit-photo-label">{photo.photo_type}{photo.staged ? ' · staged' : ''}</p>
+                  {photo.caption && <p className="tech-visit-photo-label">{photo.caption}</p>}
+                </a>
+                {/* Existing marking gate and eligible photo types stay authoritative. */}
+                {marksSupported && MARKABLE_PHOTO_TYPES.has(photo.photo_type) && <Button variant="secondary" className="tech-visit-action" onClick={(event) => { event.currentTarget.focus(); setMarkTarget(photo); }}>Mark spots</Button>}
+              </article>)}
+            </div>
+          )}
         </div>
-        <div style={{ minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain' }}>
-        {customerName && (
-          <p style={{ margin: '0 0 14px', fontSize: 13, color: DARK.muted }}>{customerName}</p>
-        )}
-
-        {/* Upload controls */}
-        <div style={{
-          background: DARK.card, border: `1px solid ${DARK.border}`,
-          borderRadius: 10, padding: 12, marginBottom: 14,
-        }}>
-          <label style={{ display: 'block', fontSize: 11, color: DARK.muted, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 1 }}>
-            Type
-          </label>
-          <div style={{ display: 'flex', gap: 6, marginBottom: 10, flexWrap: 'wrap' }}>
-            {PHOTO_TYPES.map((t) => (
-              <button
-                key={t}
-                onClick={() => setPhotoType(t)}
-                disabled={uploading || !!pendingPhoto}
-                style={{
-                  padding: '6px 12px', borderRadius: 6, fontSize: 12, fontWeight: 600,
-                  border: `1px solid ${photoType === t ? DARK.teal : DARK.border}`,
-                  background: photoType === t ? `${DARK.teal}22` : 'transparent',
-                  color: photoType === t ? DARK.teal : DARK.text,
-                  cursor: uploading ? 'wait' : 'pointer', textTransform: 'capitalize',
-                }}
-              >
-                {t}
-              </button>
-            ))}
-          </div>
-          <label style={{ display: 'block', fontSize: 11, color: DARK.muted, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 1 }}>
-            Caption (optional)
-          </label>
-          <input
-            type="text"
-            value={caption}
-            onChange={(e) => setCaption(e.target.value)}
-            placeholder="e.g., Front yard before treatment"
-            disabled={uploading || !!pendingPhoto}
-            style={{
-              width: '100%', padding: '8px 10px', borderRadius: 6,
-              border: `1px solid ${DARK.border}`, background: DARK.bg,
-              color: DARK.text, fontSize: 13, marginBottom: 10, boxSizing: 'border-box',
-            }}
-          />
-          <button
-            onClick={handlePickFile}
-            disabled={uploading || !!pendingPhoto}
-            style={{
-              width: '100%', padding: '10px', borderRadius: 8,
-              border: 'none', background: uploading ? DARK.border : DARK.teal,
-              color: '#fff', fontSize: 14, fontWeight: 700,
-              cursor: uploading ? 'wait' : 'pointer',
-            }}
-          >
-            {uploading ? 'Uploading…' : '📷 Add Photo'}
-          </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            onChange={handleFileSelected}
-            style={{ display: 'none' }}
-          />
-        </div>
-
-        {pendingPhoto && <div role="status" style={{ color: DARK.text, marginBottom: 12 }}>
-          <p>{uploading ? 'Uploading photo…' : 'Photo not uploaded. Keep this visit open to retry.'}</p>
-          <p>{pendingPhoto.file.name}</p>
-          {!uploading && <>
-            <button type="button" onClick={() => uploadPhoto(pendingPhoto)}>Retry upload</button>{' '}
-            <button type="button" onClick={() => { setPendingPhoto(null); setErrorMsg(''); }}>Discard selected photo</button>
-          </>}
-        </div>}
-
-        {errorMsg && (
-          <div style={{
-            background: `${DARK.red}22`, border: `1px solid ${DARK.red}`, color: DARK.red,
-            padding: '8px 10px', borderRadius: 6, fontSize: 13, marginBottom: 12,
-          }}>
-            {errorMsg}
-          </div>
-        )}
-        {statusMsg && !errorMsg && (
-          <div style={{
-            background: `${DARK.green}22`, border: `1px solid ${DARK.green}`, color: DARK.green,
-            padding: '8px 10px', borderRadius: 6, fontSize: 13, marginBottom: 12,
-          }}>
-            {statusMsg}
-          </div>
-        )}
-
-        {/* Existing photos */}
-        <h3 style={{
-          margin: '0 0 8px', fontSize: 12, color: DARK.muted, fontWeight: 700,
-          textTransform: 'uppercase', letterSpacing: 1,
-        }}>
-          Attached{!loading && !loadError ? ` (${photos.length})` : ''}
-        </h3>
-        {loading ? (
-          <p style={{ color: DARK.muted, fontSize: 13, textAlign: 'center', padding: 20 }}>
-            Loading…
-          </p>
-        ) : loadError ? (
-          <div>
-            <p role="alert" style={{ color: DARK.red, fontSize: 14 }}>{loadError}</p>
-            <button type="button" onClick={load} style={{ minHeight: 48, fontSize: 14, color: DARK.text, background: DARK.card, border: `1px solid ${DARK.border}`, borderRadius: 6, padding: '8px 12px' }}>Retry photos</button>
-          </div>
-        ) : photos.length === 0 ? (
-          <p style={{ color: DARK.muted, fontSize: 13, textAlign: 'center', padding: 20 }}>
-            No photos yet.
-          </p>
-        ) : (
-          <div style={{
-            display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8,
-          }}>
-            {photos.map((p) => (
-              <a key={p.id} href={p.url} target="_blank" rel="noopener noreferrer"
-                style={{
-                  position: 'relative', display: 'block',
-                  background: DARK.card, border: `1px solid ${DARK.border}`,
-                  borderRadius: 8, overflow: 'hidden', textDecoration: 'none',
-                }}>
-                <img src={p.url} alt={p.caption || p.photo_type}
-                  style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', display: 'block' }} />
-                <div style={{
-                  position: 'absolute', top: 4, left: 4,
-                  background: 'rgba(0,0,0,0.65)', color: '#fff',
-                  fontSize: 10, fontWeight: 700, padding: '2px 6px',
-                  borderRadius: 4, textTransform: 'capitalize',
-                }}>
-                  {p.photo_type}{p.staged ? ' · staged' : ''}
-                </div>
-                {p.caption && (
-                  <div style={{
-                    padding: '4px 6px', fontSize: 11, color: DARK.muted,
-                    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-                  }}>
-                    {p.caption}
-                  </div>
-                )}
-                {/* Treated-point marking (GATE_PHOTO_MARKS). Only offered on
-                    lanes that support marks — markLanes is empty otherwise, so
-                    this affordance is absent rather than disabled.
-                    'before' photos are excluded: they document the state
-                    BEFORE treatment, so marks on one would publish a
-                    pre-treatment image as the treated area (codex P1). The
-                    PUT route rejects them too — this only saves the tech a
-                    pointless round trip. */}
-                {marksSupported && MARKABLE_PHOTO_TYPES.has(p.photo_type) && (
-                  <button
-                    type="button"
-                    onClick={(e) => { e.preventDefault(); setMarkTarget(p); }}
-                    style={{
-                      position: 'absolute', right: 4, bottom: 4,
-                      background: 'rgba(0,0,0,0.72)', color: '#fff',
-                      border: `1px solid ${DARK.border}`, borderRadius: 6,
-                      fontSize: 10.5, fontWeight: 600, padding: '4px 8px', cursor: 'pointer',
-                    }}
-                  >
-                    Mark spots
-                  </button>
-                )}
-              </a>
-            ))}
-          </div>
-        )}
-        </div>
-      </div>
-      {markTarget && (
-        <TechPhotoMarksModal
-          serviceId={serviceId}
-          photo={markTarget}
-          onClose={() => setMarkTarget(null)}
-        />
-      )}
-    </div>,
-    document.body
+      </section>
+      {markTarget && <TechPhotoMarksModal serviceId={serviceId} photo={markTarget} onClose={() => setMarkTarget(null)} />}
+    </UiSurface>, document.body,
   );
 }

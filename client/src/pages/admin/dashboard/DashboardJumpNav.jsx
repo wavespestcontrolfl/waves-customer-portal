@@ -1,5 +1,14 @@
 import { useEffect, useState } from "react";
-import { cn } from "../../../components/ui";
+import { LayoutDashboard, RefreshCw } from "lucide-react";
+import AdminCommandHeader from "../../../components/admin/AdminCommandHeader";
+import {
+  Button,
+  Card,
+  CardBody,
+  Field,
+  Input,
+  Select,
+} from "../../../components/ui";
 
 // Point-in-time → rolling windows (inclusive of today) → calendar-to-date.
 // Server resolves each id via the shared periodStartDate (admin-dashboard.js).
@@ -24,6 +33,11 @@ const PERIODS = [
 //     scorecard): the pills are real tabs; the parent owns which single
 //     section renders, so the observer is skipped entirely.
 export default function DashboardJumpNav({
+  title,
+  dateLabel,
+  updatedLabel,
+  onRefresh,
+  refreshing,
   sections,
   period,
   customRange,
@@ -83,52 +97,47 @@ export default function DashboardJumpNav({
     setShowRangePicker(false);
   };
 
-  // Mobile sticky offset: .admin-main is the scroll container and its
-  // paddingTop is 52px + safe-area + 16px, and sticky offsets resolve from the
-  // padding edge — so top:-16px parks the bar exactly flush under the fixed
-  // 52px+safe-area AdminLayoutV2 header (a positive 52px offset doubled the
-  // header height and let content scroll through a see-through band above the
-  // pills). isMobile cutoff is 768px, i.e. Tailwind's md:.
   return (
-    <div className="md:sticky md:top-0 z-20 -mx-3 sm:-mx-6 px-3 sm:px-6 pt-1.5 md:pt-2 pb-0 mb-3 md:mb-4 bg-surface-page border-b border-hairline border-zinc-200">
-      {/* Section tabs and the period strip share a row only from xl up —
-          below that the two together are wider than the content column
-          (the strip spilled past the viewport at 768/1024), so they stack. */}
-      <div className="flex flex-col xl:flex-row xl:items-end xl:justify-between gap-1.5 md:gap-2 xl:gap-3">
-        {/* Section tabs — a full-width 5-up segmented row on mobile (every tab
-            always visible, no scroll), inline pills on desktop. */}
-        <nav
-          aria-label="Dashboard sections"
-          className="grid grid-cols-5 md:flex md:items-center md:gap-1 md:min-w-0 md:overflow-x-auto"
-        >
-          {sections.map((s) => (
-            <button
-              key={s.id}
-              type="button"
-              onClick={() => jumpTo(s.id)}
-              aria-current={current === s.id ? "true" : undefined}
-              className={cn(
-                "h-10 md:h-8 px-0 md:px-2.5 text-12 font-medium u-focus-ring border-b-2 -mb-px transition-colors whitespace-nowrap md:shrink-0",
-                current === s.id
-                  ? "border-zinc-900 text-zinc-900"
-                  : "border-transparent text-ink-secondary hover:text-zinc-900",
-              )}
-            >
-              {s.label}
-            </button>
-          ))}
-        </nav>
+    <div data-qa="dashboard-jump-nav" className="z-20 mb-5 md:sticky md:top-0 md:bg-surface-page/95 md:pb-3">
+      <AdminCommandHeader
+        title={title}
+        icon={LayoutDashboard}
+        sections={sections.map((section) => ({ key: section.id, label: section.label }))}
+        activeKey={current}
+        onSectionChange={jumpTo}
+        ariaLabel="Dashboard sections"
+        navGridClassName="grid-cols-5"
+        variant="workspace"
+        sticky={false}
+        actions={[
+          {
+            key: "refresh",
+            label: refreshing ? "Refreshing" : "Refresh",
+            icon: RefreshCw,
+            variant: "secondary",
+            onClick: onRefresh,
+            disabled: refreshing,
+          },
+        ]}
+        className="mb-3 md:mb-3 md:bg-transparent md:pb-0"
+      />
 
-        {/* Period selector — drives the KPI tiles + attribution panels.
-            Mobile: one compact native select (the 9-pill strip overflowed a
-            390px viewport). Desktop: the original pill strip. */}
-        <div className="relative flex items-center gap-2 pb-1.5 min-w-0">
+      <Card>
+        <CardBody className="flex flex-col gap-3 py-3 xl:flex-row xl:items-center xl:justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-ui-caption text-ink-secondary">
+            <span>{dateLabel}</span>
+            <span>{updatedLabel}</span>
+          </div>
+
+          {/* The period controls keep the dashboard's current state and fetch
+              semantics; shared controls provide the comfortable target size. */}
+          <div className="relative flex min-w-0 items-center gap-2">
           {periodLabel && (
-            <span className="hidden lg:inline text-12 text-ink-tertiary whitespace-nowrap">
+            <span className="hidden whitespace-nowrap text-ui-caption text-ink-secondary lg:inline">
               {periodLabel}
             </span>
           )}
-          <select
+          <Select
             aria-label="Period"
             value={period}
             onChange={(e) => {
@@ -143,7 +152,7 @@ export default function DashboardJumpNav({
               onSelectPeriod(v);
               setShowRangePicker(false);
             }}
-            className="md:hidden w-full h-11 text-16 border-hairline border-zinc-200 rounded-sm bg-white px-2 text-zinc-900 u-focus-ring"
+            className="md:hidden"
           >
             {PERIODS.map((p) => (
               <option key={p.id} value={p.id}>
@@ -155,92 +164,91 @@ export default function DashboardJumpNav({
                 ? `Since ${customRange.from}`
                 : "Custom range…"}
             </option>
-          </select>
+          </Select>
           {/* Re-selecting the already-active custom option fires no change
               event, so once a range is applied the select alone can't reopen
               the picker — this button is the way back in on mobile. */}
           {period === "custom" && (
-            <button
+            <Button
               type="button"
               onClick={() => {
                 setDraftFrom(customRange?.from || "");
                 setShowRangePicker((v) => !v);
               }}
-              className="md:hidden shrink-0 h-11 px-2.5 text-11 uppercase tracking-label font-medium border-hairline border-zinc-200 rounded-sm bg-white text-ink-secondary u-focus-ring"
+              variant="secondary"
+              className="shrink-0 md:hidden"
             >
               Edit
-            </button>
+            </Button>
           )}
-          <div className="hidden md:block max-w-full overflow-x-auto">
-            <div className="inline-flex items-center border-hairline border-zinc-200 rounded-sm overflow-hidden">
+          <div className="hidden max-w-full overflow-x-auto md:block">
+            <div className="inline-flex items-center gap-1">
               {PERIODS.map((p) => (
-                <button
+                <Button
                   key={p.id}
+                  type="button"
                   onClick={() => {
                     onSelectPeriod(p.id);
                     setShowRangePicker(false);
                   }}
-                  className={cn(
-                    "h-7 px-3 text-11 uppercase tracking-label font-medium u-focus-ring transition-colors shrink-0",
-                    period === p.id
-                      ? "bg-zinc-900 text-white"
-                      : "bg-white text-ink-secondary hover:bg-zinc-50",
-                  )}
+                  variant={period === p.id ? "primary" : "secondary"}
+                  aria-pressed={period === p.id}
+                  className="shrink-0 px-3"
                 >
                   {p.label}
-                </button>
+                </Button>
               ))}
-              <button
+              <Button
+                type="button"
                 onClick={() => {
                   setDraftFrom(customRange?.from || "");
                   setShowRangePicker((v) => !v);
                 }}
-                className={cn(
-                  "h-7 px-3 text-11 uppercase tracking-label font-medium u-focus-ring transition-colors shrink-0 border-l border-hairline border-zinc-200 whitespace-nowrap",
-                  period === "custom"
-                    ? "bg-zinc-900 text-white"
-                    : "bg-white text-ink-secondary hover:bg-zinc-50",
-                )}
+                variant={period === "custom" ? "primary" : "secondary"}
+                aria-pressed={period === "custom"}
+                className="shrink-0 whitespace-nowrap px-3"
                 title="Custom lookback — pick a start date (through today)"
               >
                 {period === "custom" && customRange
                   ? `Since ${customRange.from}`
                   : "Custom"}
-              </button>
+              </Button>
             </div>
           </div>
           {showRangePicker && (
-            <div className="absolute right-0 top-full mt-1 z-30 bg-white border-hairline border-zinc-200 rounded-sm shadow-lg p-3 flex flex-col gap-2">
-              <label className="text-11 text-ink-tertiary flex items-center justify-between gap-3">
-                Since
-                <input
+            <Card className="absolute right-0 top-full z-30 mt-1 w-[min(320px,calc(100vw-32px))]">
+              <CardBody className="flex flex-col gap-3">
+                <Field label="Since">
+                  <Input
                   type="date"
                   max={todayISO}
                   value={draftFrom}
                   onChange={(e) => setDraftFrom(e.target.value)}
-                  className="h-11 md:h-auto text-16 md:text-12 border-hairline border-zinc-300 rounded-sm px-2 py-1 u-focus-ring"
-                />
-              </label>
-              <div className="text-11 text-ink-tertiary">through today</div>
-              <div className="flex justify-end gap-2 mt-1">
-                <button
+                  />
+                </Field>
+                <div className="text-ui-caption text-ink-secondary">through today</div>
+                <div className="ui-record-actions justify-end">
+                <Button
+                  type="button"
                   onClick={() => setShowRangePicker(false)}
-                  className="text-11 text-ink-tertiary hover:text-ink-secondary u-focus-ring"
+                  variant="ghost"
                 >
                   Cancel
-                </button>
-                <button
+                </Button>
+                <Button
+                  type="button"
                   onClick={applyCustom}
                   disabled={!draftFrom}
-                  className="text-11 font-medium px-3 py-1 rounded-sm bg-zinc-900 text-white disabled:opacity-40 u-focus-ring"
                 >
                   Apply
-                </button>
-              </div>
-            </div>
+                </Button>
+                </div>
+              </CardBody>
+            </Card>
           )}
         </div>
-      </div>
+        </CardBody>
+      </Card>
     </div>
   );
 }

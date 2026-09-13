@@ -26,8 +26,10 @@ import {
   termiteBaitSystemLabel,
 } from "../../lib/estimateEngine";
 import { useNavigate } from "react-router-dom";
+import { useIntelligenceBarActions, usePublishIntelligenceBarPageData } from "../../hooks/useIntelligenceBarPageData";
 import { ActionFeedback, Button, Badge, Card, Checkbox, Field, Input, Select, Textarea, UiSurface, cn } from "../../components/ui";
 import "../../styles/estimate-workflow.css";
+import { addressAskNotice, filterAddressAsks } from "../../lib/addressAsks";
 import PestProductionDiagnosticsPanel from "../../components/admin/PestProductionDiagnosticsPanel";
 import { ExternalLink } from "lucide-react";
 import { useEstimateSend } from "../../components/admin/EstimateSendDialog";
@@ -327,18 +329,6 @@ function buildAiProviderWarnings({ sources, errors = [], providerStatus = {} } =
   }
   return warnings;
 }
-
-// Triage reason codes that mean the lead's address itself is still owed
-// or unverified (call-routing-gates address_review lane, validation half).
-const ADDRESS_ASK_REASONS = new Set([
-  "missing_unit_number",
-  "address_unverified",
-  "missing_service_address",
-  "low_confidence_address",
-  "address_validation_unavailable",
-  "address_unverifiable",
-  "address_not_validated",
-]);
 
 // A dwelling unit designator anywhere in a typed address (the server's
 // unit-scope model reads the same forms; "#" alone counts).
@@ -1722,6 +1712,7 @@ export default function EstimateToolViewV2({
   // contact fields only and the operator rebuilds the quote before saving.
   const [editMode, setEditMode] = useState(null);
   const [editLoadError, setEditLoadError] = useState(null);
+  const [editLoadAttempt, setEditLoadAttempt] = useState(0);
   useEffect(() => {
     if (!editMode || !/^#estimate-(customer|services|pricing|review)$/.test(window.location.hash)) return;
     requestAnimationFrame(() => document.querySelector(window.location.hash)?.scrollIntoView({ block: "start" }));
@@ -1733,6 +1724,19 @@ export default function EstimateToolViewV2({
   const formRef = useRef(form);
   formRef.current = form;
   const dirty = JSON.stringify(form) !== savedFormRef.current;
+  const { lastMutation } = useIntelligenceBarActions();
+  // PostgreSQL returns canonical lowercase UUIDs; the route may carry uppercase.
+  const sameEstimateId = (a, b) => String(a || "").toLowerCase() === String(b || "").toLowerCase();
+  const [latestEstimateMutation, setLatestEstimateMutation] = useState(null);
+  useEffect(() => {
+    if (lastMutation?.domain === "estimate" && sameEstimateId(lastMutation.estimate_id, editEstimateId)) setLatestEstimateMutation(lastMutation);
+  }, [lastMutation, editEstimateId]);
+  const estimateRefresh = sameEstimateId(latestEstimateMutation?.estimate_id, editEstimateId) ? latestEstimateMutation?.id : null;
+  const loadedEstimateRefresh = useRef(null);
+  const viewedEstimateReady = !editEstimateId || sameEstimateId(editMode?.id, editEstimateId);
+  usePublishIntelligenceBarPageData({ customer_id: viewedEstimateReady ? form.customerId || null : null,
+    property_id: viewedEstimateReady ? form.propertyId || null : null,
+    estimate_id: viewedEstimateReady ? savedId || editMode?.id || editEstimateId || null : null });
   const openMessages = useCustomerSms();
   useEffect(() => {
     if (!dirty) return undefined;
@@ -1856,7 +1860,15 @@ export default function EstimateToolViewV2({
   }, [activeLeadId, groupAnchorId]);
 
   useEffect(() => {
-    if (!editEstimateId || editEstimateId === editMode?.id) return undefined;
+    if (!editEstimateId || (sameEstimateId(editEstimateId, editMode?.id) && (!estimateRefresh || loadedEstimateRefresh.current === estimateRefresh))) return undefined;
+    const refreshing = sameEstimateId(editEstimateId, editMode?.id);
+    if (refreshing && dirty) {
+      loadedEstimateRefresh.current = estimateRefresh;
+      setEditLoadError(null);
+      setSaveError("This estimate changed in the Intelligence Bar. Your unsaved edits are still here. Reload this page to review the saved version.");
+      return undefined;
+    }
+    const observedForm = JSON.stringify(formRef.current);
     let cancelled = false;
     (async () => {
       setEditLoadError(null);
@@ -1873,6 +1885,11 @@ export default function EstimateToolViewV2({
         const d = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
         if (cancelled) return;
+        if (refreshing && JSON.stringify(formRef.current) !== observedForm) {
+          loadedEstimateRefresh.current = estimateRefresh;
+          setSaveError("This estimate changed in the Intelligence Bar. Your unsaved edits are still here. Reload this page to review the saved version.");
+          return;
+        }
         if (!d.editable) {
           setEditMode(null);
           setEditLoadError(
@@ -1881,6 +1898,7 @@ export default function EstimateToolViewV2({
           return;
         }
         const seeded = formFromEditSource(d);
+        loadedEstimateRefresh.current = estimateRefresh;
         // Reopening the SAME job must not trip the per-job rodent-guarantee
         // confirmation reset (it fires on identity change vs this ref).
         rgIdentityRef.current = `${seeded.address || ""}|${seeded.customerId || ""}|${seeded.customerName || ""}|${seeded.customerEmail || ""}`;
@@ -1909,7 +1927,7 @@ export default function EstimateToolViewV2({
         setExistingCustomerMatch(d.customer || null);
       } catch (e) {
         if (!cancelled) {
-          setEditMode(null);
+          if (!refreshing) setEditMode(null);
           setEditLoadError(e.message);
         }
       }
@@ -1917,7 +1935,7 @@ export default function EstimateToolViewV2({
     return () => {
       cancelled = true;
     };
-  }, [editEstimateId]);
+  }, [editEstimateId, estimateRefresh, editLoadAttempt]);
 
   function exitEditMode() {
     if (dirty && !window.confirm("Start a new estimate with unsaved changes?")) return;
@@ -2305,6 +2323,7 @@ export default function EstimateToolViewV2({
   // bare complex address quoted as a 358-unit commercial property).
   // Read-only context, same fail-open contract as customerSpend.
   const [openAddressAsks, setOpenAddressAsks] = useState([]);
+  const openAddressNotice = addressAskNotice(openAddressAsks);
   useEffect(() => {
     setOpenAddressAsks([]);
     const customerId = existingCustomerMatch?.id || form.customerId;
@@ -2315,7 +2334,7 @@ export default function EstimateToolViewV2({
         const r = await adminFetch(
           // active = open OR in_progress: a card the office already claimed
           // is still an owed callback (pre-push codex P1).
-          `/admin/triage?status=active&customer_id=${encodeURIComponent(customerId)}`,
+          `/admin/triage?address_confirmation=true&status=active&customer_id=${encodeURIComponent(customerId)}`,
         );
         if (!r.ok) return;
         const d = await r.json();
@@ -2323,9 +2342,7 @@ export default function EstimateToolViewV2({
         // Validation-ask cards only: the address_review lane also files
         // multi-property / second-address / property-role / dropped-call
         // cards, which are not "this address may be wrong" (codex r1 P2).
-        setOpenAddressAsks(
-          (Array.isArray(d.items) ? d.items : []).filter((i) => ADDRESS_ASK_REASONS.has(i.reason_code)),
-        );
+        setOpenAddressAsks(filterAddressAsks(d.items));
       } catch {
         if (!cancelled) setOpenAddressAsks([]);
       }
@@ -4253,17 +4270,18 @@ export default function EstimateToolViewV2({
           <div className="mb-4 flex items-start justify-between gap-4 border-hairline border-zinc-300 rounded-xs bg-zinc-50 px-4 py-3">
             <div className="text-14 text-zinc-700">
               <span className="font-medium text-zinc-900">
-                Couldn&apos;t open the estimate for editing.
+                {editMode ? "Couldn’t refresh the saved estimate. Your current edits are still here." : "Couldn’t open the estimate for editing."}
               </span>{" "}
               {editLoadError}
             </div>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => setEditLoadError(null)}
-            >
-              Dismiss
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="secondary" size="sm" onClick={() => setEditLoadAttempt(attempt => attempt + 1)}>
+                Retry
+              </Button>
+              <Button variant="secondary" size="sm" onClick={() => setEditLoadError(null)}>
+                Dismiss
+              </Button>
+            </div>
           </div>
         )}
         {editMode && (
@@ -4743,23 +4761,20 @@ export default function EstimateToolViewV2({
                     </div>
                   </div>
                 )}
-              {openAddressAsks.length > 0 && (
+              {openAddressNotice && (
                 <div className="mb-2.5 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs text-14 text-zinc-900">
                   <span className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-900 mr-1.5 align-middle" />
                   <strong>Address still being confirmed</strong>
                   {" — "}
-                  {openAddressAsks.some((i) => i.reason_code === "missing_unit_number")
-                    ? "the caller gave the building but no unit number"
-                    : "the address from the call did not validate"}
-                  {(() => {
-                    const b = openAddressAsks.find((i) => i.payload?.unit_ask_building?.street_line_1)?.payload
-                      ?.unit_ask_building;
-                    return b
-                      ? ` (${[b.street_line_1, b.city, b.postal_code].filter(Boolean).join(", ")})`
-                      : "";
-                  })()}
-                  . Callback pending in the Triage Inbox — this lookup may be the whole building, not
-                  the unit.
+                  {openAddressNotice.reason}
+                  {openAddressNotice.heard ? ` (heard as "${openAddressNotice.heard}")` : ""}
+                  {". "}
+                  {openAddressNotice.building ? `Unit needed for: ${openAddressNotice.building}. ` : ""}
+                  {openAddressNotice.candidates.length > 0
+                    ? `The caller more likely said: ${openAddressNotice.candidates.join("; ")}. `
+                    : ""}
+                  Callback pending in the Triage Inbox
+                  {openAddressNotice.unitOnly ? " — this lookup may be the whole building, not the unit." : "."}
                 </div>
               )}
               {/* Gated on the DATA, not on existingCustomerMatch — the

@@ -4,14 +4,13 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { eligibleVendorPricing } = require('../services/vendor-pricing-eligibility');
-const { findLiveRestockRequest } = require('../services/procurement/live-restock-request');
-const { AUTO_REORDER_SOURCE } = require('../services/procurement/auto-reorder');
+const inventoryOperations = require('../services/inventory-operations');
+const { restockMeta } = require('../services/inventory-restock-queue');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { buildWaveGuardInventoryForecast } = require('../services/waveguard-inventory-forecast');
 const { passwordWriteAction, vendorCredentialKey, encryptedPasswordRaw } = require('../services/vendor-credentials');
 const {
-  describeInventoryConversion,
   normalizeInventoryUnit,
   unitDefinition,
 } = require('../services/inventory-units');
@@ -2608,80 +2607,12 @@ router.get('/protocol-health', async (req, res, next) => {
 // =========================================================================
 router.post('/:productId/adjust', async (req, res, next) => {
   try {
-    const { movementType = 'correction', quantity, unit, lotNumber, reason, note } = req.body || {};
-    const allowedTypes = new Set(['restock', 'correction', 'damaged_lost']);
-    if (!allowedTypes.has(movementType)) return res.status(400).json({ error: 'Invalid movementType' });
-
-    const amount = numberOrNull(quantity);
-    if (amount == null || amount === 0) return res.status(400).json({ error: 'quantity is required' });
-    if ((movementType === 'restock' || movementType === 'damaged_lost') && amount <= 0) {
-      return res.status(400).json({ error: 'quantity must be positive' });
-    }
-
-    const result = await db.transaction(async (trx) => {
-      const product = await trx('products_catalog')
-        .where({ id: req.params.productId })
-        .forUpdate()
-        .first();
-      if (!product) {
-        const err = new Error('Product not found');
-        err.statusCode = 404;
-        throw err;
-      }
-
-      const inventoryUnit = unit || product.inventory_unit;
-      if (!inventoryUnit) {
-        const err = new Error('Inventory unit is required');
-        err.statusCode = 400;
-        throw err;
-      }
-      assertSupportedInventoryUnit(inventoryUnit);
-
-      if (
-        product.inventory_unit
-        && normalizeInventoryUnit(inventoryUnit) !== normalizeInventoryUnit(product.inventory_unit)
-      ) {
-        const err = new Error(`Adjustment unit must match current inventory unit (${product.inventory_unit})`);
-        err.statusCode = 400;
-        throw err;
-      }
-
-      const stockBefore = numberOrNull(product.inventory_on_hand) || 0;
-      const delta = movementType === 'damaged_lost' ? -Math.abs(amount) : amount;
-      const stockAfter = Number((stockBefore + delta).toFixed(4));
-
-      await trx('products_catalog').where({ id: product.id }).update({
-        inventory_on_hand: stockAfter,
-        inventory_unit: inventoryUnit,
-        updated_at: new Date(),
-      });
-
-      const [movement] = await trx('product_inventory_movements').insert({
-        product_id: product.id,
-        movement_type: movementType,
-        quantity: amount,
-        unit: inventoryUnit,
-        stock_before: stockBefore,
-        stock_after: stockAfter,
-        lot_number: lotNumber || null,
-        metadata: {
-          source: 'admin_manual_adjustment',
-          reason: reason || null,
-          note: note || null,
-          delta,
-          adjustedBy: req.adminUser?.id || req.adminUser?.email || req.adminUser?.name || null,
-        },
-      }).returning('*');
-
-      const updated = await trx('products_catalog').where({ id: product.id }).first();
-      return { product: updated, movement };
-    });
-
-    res.json({
-      success: true,
-      product: mapProduct(result.product),
-      movement: result.movement,
-    });
+    const body = req.body || {};
+    const result = await inventoryOperations.adjustStock(req.params.productId, {
+      movementType: body.movementType || 'correction', quantity: body.quantity, unit: body.unit,
+      lotNumber: body.lotNumber, reason: body.reason, note: body.note,
+    }, { actorId: req.technicianId, source: 'admin_manual_adjustment', allowConversion: false });
+    res.json({ success: true, product: mapProduct(result.product), movement: result.movement });
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
     next(err);
@@ -2916,74 +2847,19 @@ router.get('/waveguard-forecast', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// The forecast restock row, built from the LOCKED product and the request
-// body (validated by the caller). Pure — no decisions about whether to insert.
-function forecastRestockRow(product, body, { actor, actorName, requestedQuantity, unit }) {
-  const now = new Date();
-  return {
-    product_id: product.id,
-    status: 'open',
-    priority: String(body.priority || 'high').toLowerCase(),
-    requested_quantity: requestedQuantity,
-    unit,
-    current_stock: numberOrNull(product.inventory_on_hand),
-    target_stock: numberOrNull(body.targetStock),
-    vendor: product.best_vendor || null,
-    needed_by: body.neededBy || null,
-    reason: String(body.reason || '').trim() || `Forecasted WaveGuard inventory demand for ${product.name}`,
-    source: 'waveguard_inventory_forecast',
-    created_by: actor,
-    created_by_name: actorName,
-    metadata: {
-      forecastDays: numberOrNull(body.forecastDays),
-      committedDemand: numberOrNull(body.committedDemand),
-      projectedRemaining: numberOrNull(body.projectedRemaining),
-      firstShortDate: body.firstShortDate || null,
-    },
-    created_at: now,
-    updated_at: now,
-  };
-}
-
-// POST /waveguard-forecast/:productId/restock-request — create a restock request from projected demand.
+// POST /waveguard-forecast/:productId/restock-request — save projected demand.
 router.post('/waveguard-forecast/:productId/restock-request', async (req, res, next) => {
   try {
     if (!(await db.schema.hasTable('product_restock_requests'))) return res.status(404).json({ error: 'Restock requests are not available' });
     const body = req.body || {};
-    const actor = req.technicianId || req.technician?.id || null;
-    const actorName = req.technician?.name || req.technician?.email || null;
-    // One transaction, product row LOCKED before the insert, then — under
-    // that lock — the dispatcher's live-order check (409 while an automatic
-    // order is placing/placed: the Restock tab carries the order line,
-    // pre-push P0) and the SHARED any-source live-request check every
-    // restock creator runs (this route, the readiness route, the
-    // Intelligence Bar tool, the auto-reorder sweep), so a writer that
-    // resumes after a concurrent commit hands back the request that already
-    // exists instead of raising its twin (Codex r8 P1, r9 P1).
-    // allowDuplicate lets staff stack a second STAFF request on purpose; it
-    // never stacks one on the sweep's automatic request.
-    const outcome = await db.transaction(async (trx) => {
-      const product = await trx('products_catalog').where({ id: req.params.productId }).forUpdate().first();
-      if (!product) return { status: 404, body: { error: 'Product not found' } };
-      await require('../services/procurement/order-dispatch').assertNoLiveAutoOrder(trx, product.id);
-      const requestedQuantity = numberOrNull(body.requestedQuantity);
-      const unit = String(body.unit || product.inventory_unit || product.rate_unit || '').trim();
-      if (!requestedQuantity || requestedQuantity <= 0 || !unit) {
-        return { status: 400, body: { error: 'Requested quantity and unit are required' } };
-      }
-      assertSupportedInventoryUnit(unit);
-
-      const existing = await findLiveRestockRequest(trx, product.id);
-      if (existing && (body.allowDuplicate !== true || existing.source === AUTO_REORDER_SOURCE)) {
-        return { status: 200, body: { success: true, existing: true, restockRequest: existing } };
-      }
-
-      const [restockRequest] = await trx('product_restock_requests')
-        .insert(forecastRestockRow(product, body, { actor, actorName, requestedQuantity, unit }))
-        .returning('*');
-      return { status: 200, body: { success: true, existing: false, restockRequest } };
-    });
-    res.status(outcome.status).json(outcome.body);
+    const result = await inventoryOperations.createRestockRequest(req.params.productId, {
+      requestedQuantity: body.requestedQuantity, unit: body.unit,
+      priority: String(body.priority || 'high').toLowerCase(), allowDuplicate: body.allowDuplicate,
+      neededBy: body.neededBy, reason: body.reason, targetStock: body.targetStock,
+      forecastDays: body.forecastDays, committedDemand: body.committedDemand,
+      projectedRemaining: body.projectedRemaining, firstShortDate: body.firstShortDate,
+    }, { actorId: req.technicianId, actorName: req.technician?.name || null, source: 'waveguard_inventory_forecast' });
+    res.json({ success: true, existing: result.existing, restockRequest: result.restockRequest });
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
     if (err.code === '23514') return res.status(400).json({ error: 'Invalid priority or request status' });
@@ -3068,12 +2944,6 @@ router.post('/unit-review/:productId/fix', async (req, res, next) => {
   }
 });
 
-function restockMeta(raw) {
-  if (!raw) return {};
-  if (typeof raw !== 'string') return raw;
-  try { return JSON.parse(raw) || {}; } catch { return {}; }
-}
-
 // GET /restock-requests — product restock request queue.
 // GET /restock-requests/:id/order-evidence — presigned URLs for the
 // screenshots an order adapter uploaded (dry run, refusal, confirmation), so
@@ -3097,235 +2967,23 @@ router.get('/restock-requests/:id/order-evidence', async (req, res, next) => {
 
 router.get('/restock-requests', async (req, res, next) => {
   try {
-    if (!(await db.schema.hasTable('product_restock_requests'))) {
-      return res.json({ requests: [] });
-    }
-    const status = String(req.query.status || 'open').toLowerCase();
-    // vendor_orders (PR 2 ledger) is one row per request at most; absent
-    // table (older schema) → no order columns.
-    const hasOrders = await db.schema.hasTable('vendor_orders');
-    let query = db('product_restock_requests as prr')
-      .leftJoin('products_catalog as pc', 'prr.product_id', 'pc.id')
-      .leftJoin('scheduled_services as ss', 'prr.scheduled_service_id', 'ss.id')
-      .leftJoin('customers as c', 'prr.customer_id', 'c.id')
-      .select(
-        'prr.*',
-        'pc.name as product_name',
-        'pc.category as product_category',
-        'pc.inventory_on_hand',
-        'pc.inventory_unit',
-        'pc.best_vendor',
-        'ss.scheduled_date',
-        'ss.service_type',
-        'c.first_name',
-        'c.last_name',
-        'c.address_line1',
-        'c.city',
-        ...(hasOrders ? ['vo.status as order_status', 'vo.external_order_number as order_number', 'vo.amount_cents as order_amount_cents', 'vo.error as order_error', 'vo.placed_at as order_placed_at', 'vo.adapter as order_adapter', db.raw("vo.evidence->>'revokedAt' as order_revoked_at"), db.raw("vo.evidence->>'landedAfterReceive' as order_landed_after_receive"), db.raw("vo.request_payload->>'orderedQuantity' as order_ordered_quantity")] : []),
-      )
-      .modify((q) => { if (hasOrders) q.leftJoin('vendor_orders as vo', 'vo.restock_request_id', 'prr.id'); })
-      .orderByRaw("case prr.priority when 'urgent' then 0 when 'high' then 1 when 'normal' then 2 else 3 end")
-      .orderByRaw('prr.needed_by asc nulls last')
-      .orderBy('prr.created_at', 'desc')
-      .limit(Math.max(1, Math.min(200, Number(req.query.limit || 100))));
-    // Active includes a received request whose automatic order landed after
-    // that receipt (evidence.landedAfterReceive): it still needs the second
-    // Receive or a revoke, and its bell links here (Codex r29 P2).
-    if (status === 'active' && hasOrders) query = query.where((q) => q.whereIn('prr.status', ['open', 'ordered']).orWhereRaw("(prr.status = 'received' AND NULLIF(vo.evidence->>'landedAfterReceive', '') IS NOT NULL)"));
-    else if (status !== 'all') query = query.whereIn('prr.status', status === 'active' ? ['open', 'ordered'] : [status]);
-    const rows = await query;
-    // Technicians see the order outcome (placed / needs review), never the
-    // spend: a single-product order total IS the unit cost — owner-only,
-    // like every other cost field on this router (Codex r1 P2).
-    const showSpend = req.techRole === 'admin';
-    res.json({
-      requests: rows.map((row) => ({
-        id: row.id,
-        productId: row.product_id,
-        productName: row.product_name,
-        productCategory: row.product_category,
-        status: row.status,
-        priority: row.priority,
-        requestedQuantity: row.requested_quantity != null ? Number(row.requested_quantity) : null,
-        unit: row.unit,
-        currentStock: row.current_stock != null ? Number(row.current_stock) : null,
-        liveStock: row.inventory_on_hand != null ? Number(row.inventory_on_hand) : null,
-        inventoryUnit: row.inventory_unit,
-        targetStock: row.target_stock != null ? Number(row.target_stock) : null,
-        vendor: row.vendor || row.best_vendor || null,
-        // Auto-reorder requests carry the vendor SKU + product URL in
-        // metadata; the tab renders them as the order link (Codex r3 P2).
-        vendorSku: restockMeta(row.metadata).vendorSku || null,
-        vendorProductUrl: restockMeta(row.metadata).vendorProductUrl || null,
-        // Automatic order outcome (null = never dispatched): placing | placed
-        // | failed | needs_review, with the vendor number, total and the
-        // parked reason so the tab explains why a request still needs a hand.
-        order: hasOrders ? restockOrderView(row, showSpend) : null,
-        neededBy: row.needed_by,
-        reason: row.reason,
-        source: row.source,
-        scheduledServiceId: row.scheduled_service_id,
-        scheduledDate: row.scheduled_date,
-        serviceType: row.service_type,
-        customerName: `${row.first_name || ''} ${row.last_name || ''}`.trim() || null,
-        address: row.address_line1,
-        city: row.city,
-        createdByName: row.created_by_name,
-        createdAt: row.created_at,
-      })),
-    });
+    res.json(await require('../services/inventory-restock-queue').listRestockRequests({
+      status: req.query.status || 'open', limit: req.query.limit, showSpend: req.techRole === 'admin', requestId: req.query.requestId,
+    }));
   } catch (err) { next(err); }
 });
-
-// The automatic-order outcome on a Restock row (null = never dispatched):
-// placing | placed | failed | needs_review with the vendor number, total
-// and the parked reason so the tab explains why a request still needs a
-// hand. Spend is owner-only: a single-product order total IS the unit
-// cost, so a technician gets the reason code and no amount (Codex r1 P2).
-// Its own stage, separate from the base row mapping (Codex r10 P2).
-function restockOrderView(row, showSpend) {
-  if (!row.order_status) return null;
-  return {
-    status: row.order_status,
-    adapter: row.order_adapter,
-    externalOrderNumber: row.order_number || null,
-    amountCents: showSpend && row.order_amount_cents != null ? Number(row.order_amount_cents) : null,
-    // The parked message can quote the total (cap wording): techs get the
-    // reason code only.
-    error: !row.order_error ? null : showSpend ? row.order_error : String(row.order_error).split(':')[0],
-    placedAt: row.order_placed_at || null,
-    revokedAt: row.order_revoked_at || null,
-    // What the order actually bought, in the request's unit (packages round
-    // up) — the tab's receive default; a revoked order is not what arrives.
-    orderedQuantity: row.order_placed_at && !row.order_revoked_at && row.order_ordered_quantity != null ? Number(row.order_ordered_quantity) : null,
-    // The order landed after the request was received by hand: the tab
-    // offers one more receive (the late order's own) on the received row.
-    landedAfterReceive: !!row.order_landed_after_receive,
-  };
-}
 
 // POST /restock-requests/:id/action — update request status and optionally receive stock.
 router.post('/restock-requests/:id/action', async (req, res, next) => {
   try {
     if (!(await db.schema.hasTable('product_restock_requests'))) return res.status(404).json({ error: 'Restock requests are not available' });
-    const action = String(req.body?.action || '').toLowerCase();
-    if (!['mark_ordered', 'receive', 'cancel'].includes(action)) return res.status(400).json({ error: 'Invalid action' });
-    const actor = req.technicianId || req.technician?.id || null;
-    const result = await db.transaction(async (trx) => {
-      // LOCK ORDER: the request's ledger row first, then the request — the
-      // order the dispatcher's record transaction and the revoke CLI use, so
-      // a receive racing a revoke waits instead of deadlocking (hook r27 P1).
-      await trx('vendor_orders').where({ restock_request_id: req.params.id }).forUpdate().first('id');
-      // Lock the request row so a double-click / stale tab cannot receive the
-      // same request twice (double stock + duplicate restock movement).
-      const request = await trx('product_restock_requests').where({ id: req.params.id }).forUpdate().first();
-      if (!request) {
-        const err = new Error('Restock request not found');
-        err.statusCode = 404;
-        throw err;
-      }
-      // Automatic-order guard (pre-push P0s): 409 for every action while the
-      // order is placing; 409 for cancel while a dispatched order is not yet
-      // received or revoked (the next sweep would order again).
-      const dispatch = require('../services/procurement/order-dispatch');
-      const guard = await dispatch.assertManualActionAllowed(trx, request.id, action);
-      const status = String(request.status || '').toLowerCase();
-      // ONE more receive on a received request whose automatic order landed
-      // after that receipt (ledger evidence.landedAfterReceive — Codex r27
-      // P1): this receipt is the late order's own; the marker that kept the
-      // live-order guards closed comes off in the same transaction.
-      const secondReceive = action === 'receive' && status === 'received' && !!guard.landedAfterReceive;
-      if (action === 'receive' && !['open', 'ordered'].includes(status) && !secondReceive) {
-        const err = new Error(`Restock request is already ${status}; refresh the list`);
-        err.statusCode = 409;
-        throw err;
-      }
-      if (action !== 'receive' && ['received', 'cancelled'].includes(status)) {
-        // Terminal statuses never reopen (r5-push P1): a received request's
-        // stock is already added, and a stale tab's mark_ordered on a
-        // cancelled request would resurrect a closed order.
-        const err = new Error(`Restock request is already ${status} and cannot be reopened`);
-        err.statusCode = 409;
-        throw err;
-      }
-      if (action === 'mark_ordered' && status !== 'open') {
-        const err = new Error(`Only an open request can be marked ordered (this one is ${status}); refresh the list`);
-        err.statusCode = 409;
-        throw err;
-      }
-      // The action resolves the request's ledger bell ("order manually" /
-      // "receive or revoke"): retired here so no one follows it (Codex r28 P2).
-      await dispatch.settleRequestLedgerBells(trx, request.id);
-      if (action === 'mark_ordered') {
-        const [updated] = await trx('product_restock_requests')
-          .where({ id: request.id })
-          .update({ status: 'ordered', updated_at: new Date() })
-          .returning('*');
-        return { request: updated };
-      }
-      if (action === 'cancel') {
-        const [updated] = await trx('product_restock_requests')
-          .where({ id: request.id })
-          .update({ status: 'cancelled', closed_by: actor, closed_at: new Date(), updated_at: new Date() })
-          .returning('*');
-        return { request: updated };
-      }
-      const product = await trx('products_catalog').where({ id: request.product_id }).forUpdate().first();
-      if (!product) {
-        const err = new Error('Product not found');
-        err.statusCode = 404;
-        throw err;
-      }
-      // Default = what the automatic order actually bought (packages round
-      // up), else the requested figure (Codex r2 P1).
-      const orderedQuantity = await dispatch.orderedQuantityFor(trx, request.id);
-      const quantity = numberOrNull(req.body?.quantity) ?? orderedQuantity ?? numberOrNull(request.requested_quantity);
-      const unit = String(req.body?.unit || request.unit || product.inventory_unit || '').trim();
-      if (!quantity || quantity <= 0 || !unit) {
-        const err = new Error('Receive quantity and unit are required');
-        err.statusCode = 400;
-        throw err;
-      }
-      const inventoryUnit = product.inventory_unit || unit;
-      const received = describeInventoryConversion(quantity, unit, inventoryUnit);
-      if (!received.convertible || received.amount == null) {
-        const err = new Error(`Cannot convert receive unit ${unit} to inventory unit ${inventoryUnit}`);
-        err.statusCode = 400;
-        throw err;
-      }
-      const stockBefore = numberOrNull(product.inventory_on_hand) || 0;
-      const stockAfter = Number((stockBefore + received.amount).toFixed(4));
-      await trx('products_catalog').where({ id: product.id }).update({
-        inventory_on_hand: stockAfter,
-        inventory_unit: inventoryUnit,
-        updated_at: new Date(),
-      });
-      const [movement] = await trx('product_inventory_movements').insert({
-        product_id: product.id,
-        movement_type: 'restock',
-        quantity: received.amount,
-        unit: inventoryUnit,
-        stock_before: stockBefore,
-        stock_after: stockAfter,
-        metadata: {
-          source: 'restock_request_receive',
-          restockRequestId: request.id,
-          note: req.body?.note || null,
-          adjustedBy: actor,
-          enteredQuantity: quantity,
-          enteredUnit: unit,
-          conversionConfidence: received.confidence,
-          ...(secondReceive ? { secondReceive: true } : {}),
-        },
-      }).returning('*');
-      if (secondReceive) await dispatch.settleLandedAfterReceive(trx, request.id);
-      const [updated] = await trx('product_restock_requests')
-        .where({ id: request.id })
-        .update({ status: 'received', closed_by: actor, closed_at: new Date(), updated_at: new Date() })
-        .returning('*');
-      return { request: updated, movement };
-    });
-    res.json({ success: true, ...result });
+    const body = req.body || {};
+    const action = String(body.action || '').toLowerCase();
+    const result = await inventoryOperations.updateRestockRequest(req.params.id, {
+      action, note: body.note,
+      ...(action === 'receive' ? { quantity: body.quantity ?? undefined, unit: body.unit ?? undefined } : {}),
+    }, { actorId: req.technicianId, source: 'restock_request_receive' });
+    res.json({ success: true, request: result.request, ...(result.movement ? { movement: result.movement } : {}) });
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
     next(err);

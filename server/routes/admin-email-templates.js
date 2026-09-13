@@ -666,33 +666,41 @@ router.post('/suppressions', async (req, res, next) => {
       created_by: req.technicianId || null,
     };
 
-    const existingQuery = db('email_suppressions')
-      .whereRaw('LOWER(email) = ?', [email])
-      .where({ status: 'active', suppression_type: suppressionType });
-    if (groupKey) existingQuery.where({ group_key: groupKey });
-    else existingQuery.whereNull('group_key');
-    const existing = await existingQuery.first();
+    // Written under the shared per-address lock so a bearer-link email
+    // handoff holding it finishes (or has not yet authorized) before this
+    // suppression is visible.
+    const outcome = await db.transaction(async (trx) => {
+      await require('../utils/customer-comms-lock').lockCustomerEmail(trx, email);
+      const existingQuery = trx('email_suppressions')
+        .whereRaw('LOWER(email) = ?', [email])
+        .where({ status: 'active', suppression_type: suppressionType });
+      if (groupKey) existingQuery.where({ group_key: groupKey });
+      else existingQuery.whereNull('group_key');
+      const existing = await existingQuery.first();
 
-    if (existing) {
-      const [updated] = await db('email_suppressions').where({ id: existing.id }).update({
-        source: cleanString(req.body.source, existing.source || 'admin_manual'),
-        metadata: JSON.stringify({ ...parseJsonObject(existing.metadata), ...metadata }),
-        updated_at: new Date(),
+      if (existing) {
+        const [updated] = await trx('email_suppressions').where({ id: existing.id }).update({
+          source: cleanString(req.body.source, existing.source || 'admin_manual'),
+          metadata: JSON.stringify({ ...parseJsonObject(existing.metadata), ...metadata }),
+          updated_at: new Date(),
+        }).returning('*');
+        return { suppression: updated, existing: true };
+      }
+
+      const [suppression] = await trx('email_suppressions').insert({
+        email,
+        group_key: groupKey,
+        suppression_type: suppressionType,
+        status: 'active',
+        source: cleanString(req.body.source, 'admin_manual'),
+        consent_source: cleanString(req.body.consentSource ?? req.body.consent_source, '') || null,
+        consent_timestamp: req.body.consentTimestamp || req.body.consent_timestamp || null,
+        metadata: JSON.stringify(metadata),
       }).returning('*');
-      return res.json({ suppression: updated, existing: true });
-    }
-
-    const [suppression] = await db('email_suppressions').insert({
-      email,
-      group_key: groupKey,
-      suppression_type: suppressionType,
-      status: 'active',
-      source: cleanString(req.body.source, 'admin_manual'),
-      consent_source: cleanString(req.body.consentSource ?? req.body.consent_source, '') || null,
-      consent_timestamp: req.body.consentTimestamp || req.body.consent_timestamp || null,
-      metadata: JSON.stringify(metadata),
-    }).returning('*');
-    res.status(201).json({ suppression, existing: false });
+      return { suppression, existing: false };
+    });
+    if (outcome.existing) return res.json(outcome);
+    res.status(201).json(outcome);
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
     next(err);

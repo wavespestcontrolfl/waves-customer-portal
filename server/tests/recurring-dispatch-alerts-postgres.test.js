@@ -149,8 +149,16 @@ describeWithDatabase('recurring placement alert retirement on PostgreSQL', () =>
 
   test('seeds separate truthful SMS copy and preserves administrator edits on rerun', async () => {
     const migration = require('../models/migrations/20260906000040_recurring_dispatch_sms');
+    // This suite runs against the FULL migrated chain, and 20260911000010
+    // takes "Reply STOP to opt out." off this template afterwards (it goes to
+    // an existing recurring customer — see docs/sms-stop-line-policy.md). So
+    // the seeded copy is asserted as "what this migration seeds, as the STOP
+    // sweep leaves it", not as the raw seed.
+    const stopSweep = require('../models/migrations/20260911000010_stop_line_off_remaining_transactional');
+    const swept = stopSweep._dropStop(migration.TEMPLATE.body);
     const row = await trx('sms_templates').where({ template_key: migration.TEMPLATE.template_key }).first();
-    expect(row.body).toBe(migration.TEMPLATE.body);
+    expect(row.body).toBe(swept);
+    expect(swept).not.toBe(migration.TEMPLATE.body);
     expect(row.variables).toEqual(['first_name', 'start_date', 'window_text']);
     await trx('sms_templates').where({ id: row.id }).update({ body: 'Administrator test edit' });
     await migration.up(trx);

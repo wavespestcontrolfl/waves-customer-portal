@@ -6,7 +6,11 @@
  * Fetches GET /api/estimates/:token/data on mount. Renders slider +
  * price card + checklist + add-ons + slot picker + payment preference
  * + guarantee strip. Handles the /reserve → confirm → /accept flow
- * with a 15-min countdown between reserve and final commit.
+ * with a countdown between reserve and final commit — the same countdown
+ * also covers a reload that lands on the customer's own uncommitted hold
+ * (acceptance.mode === 'existing_appointment' with isHold / reservationExpiresAt
+ * on the appointment): that case is hydrated into a timed reservation too, not
+ * treated as a committed appointment with no expiry.
  *
  * State shape (kept in this one component — the subcomponents are
  * presentational):
@@ -15,9 +19,22 @@
  *   selectedAddOns       — { [section.key]: Set(addon keys) }
  *   selectedSlotId       — string | null
  *   ctaPhase             — 'configure' | 'review' | 'submitting' | 'success' | 'slot_conflict' | 'reservation_expired'
- *   reservation          — { scheduledServiceId, expiresAt } | null
+ *   reservation          — { scheduledServiceId, expiresAt } | { existingAppointmentId, scheduledServiceId, expiresAt, adoptedHold: true } | { existingAppointmentId } | null
  *   paymentPreference    — 'pay_at_visit' | 'prepay_annual' | null
  *   countdownSeconds     — derived from reservation.expiresAt
+ *   holdLimitReached     — true once POST .../reserve/:id/extend has 409'd HOLD_LIMIT_REACHED
+ *                          (a hold tops out 60 min from creation server-side); the "Keep my
+ *                          time" button hides and the bar's copy switches to the ceiling message
+ *
+ * Extend flow: HoldCountdownBar's "Keep my time" button and three silent
+ * auto-extend triggers (entering review, a card-save success, the
+ * PREPAY_CHARGE_QUOTE round trip) all call extendHold(), which POSTs
+ * /reserve/:scheduledServiceId/extend and is serialized on a ref so
+ * overlapping calls collapse to one in-flight request. When the countdown
+ * reaches 0 the page attempts one silent extendHold() before declaring the
+ * hold gone — the server tolerates a commit up to 10 minutes past expiry
+ * (grace window) as long as the slot is still free, so hitting 0 is not
+ * automatically fatal.
  *
  * Matches PayPage / TrackPage convention: inline styles + W palette,
  * mobile-first stacked layout, two-column desktop via grid.
@@ -88,7 +105,8 @@ import { proposalHasAuthoredTerms } from '../lib/proposal-sections';
 import { formatETDate, formatETDateTime } from '../lib/timezone';
 import ReferralShareCard from '../components/referral/ReferralShareCard';
 import { PRICE_FONT, W, waveGuardChipStyle } from '../components/estimate/tokens';
-import { DOC_COLUMN_MAX, DOC_FONT, docTransition } from '../theme-doc';
+import { DOC_FONT, docTransition } from '../theme-doc';
+import { CustomerColumn } from '../components/brand';
 
 const FONT_BODY = DOC_FONT; // the one customer body stack (theme-doc alias)
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -590,9 +608,7 @@ function Page({ children, website = false, stage = null }) {
       {/* Page-local phone/logo bar removed — the WavesShell top bar (App.jsx
           gateway wrap, owner 2026-07-06) provides the standard chrome. */}
       {/* Bottom padding is the gap above the shell footer's rule. */}
-      <div style={{ flex: 1, padding: '32px 20px 40px', maxWidth: DOC_COLUMN_MAX, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
-        {children}
-      </div>
+      <CustomerColumn>{children}</CustomerColumn>
     </div>
   );
 }
@@ -688,10 +704,13 @@ function NotFoundCard({ token = null, extensionEligible = false, onExtended = nu
 
   return (
     <div style={estimateCard({ padding: 32, textAlign: 'center', marginTop: 40 })}>
-      <div style={{ fontSize: 34 }}></div>
-      <div style={{ fontSize: 18, fontWeight: 600, marginTop: 8 }}>
+      {/* An h1, not a styled div (G-07 measured h1Count === 0 here). This card
+          is deliberately NOT a PublicStateCard: it doubles as the extension
+          request flow and flips to a success headline, so role="alert" would
+          be wrong on it. It needs the right heading element, not the card. */}
+      <h1 style={{ fontSize: 18, fontWeight: 600, marginTop: 8 }}>
         {extendedNow ? "You're all set" : 'Estimate unavailable'}
-      </div>
+      </h1>
       {!extendedNow ? (
         <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
           This link may have expired or isn't valid. Call us at{' '}
@@ -784,7 +803,11 @@ const HEADER_EYEBROW_STYLE = {
   fontWeight: 700,
 };
 
-function Header({ customerFirstName, customerName, customerEmail, customerPhone, address, serviceLabel, headline, eyebrowOverride = null, subline = null, createdAt = null, expiresAt = null, slug = null }) {
+// `headingAs` lets a state that already owns the page's h1 keep this framing
+// without a second one. It is presentation-identical -- only the element
+// changes -- and exists because the load-error state below renders its own h1
+// on the state card.
+function Header({ customerFirstName, customerName, customerEmail, customerPhone, address, serviceLabel, headline, eyebrowOverride = null, subline = null, createdAt = null, expiresAt = null, slug = null, headingAs: HeadingTag = 'h1' }) {
   const firstName = customerFirstName || 'there';
   const headlineText = String(headline || UNIVERSAL_HEADLINE).replace('{first}', firstName);
   const phoneDisplay = formatCustomerPhone(customerPhone);
@@ -819,7 +842,7 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
             "· {service}" suffix instead of stacking both. */}
         {eyebrowOverride || `Your estimate${serviceLabel ? ` · ${serviceLabel}` : ''}`}
       </div>
-      <h1 style={{
+      <HeadingTag style={{
                 fontSize: 'clamp(34px, 5vw, 48px)',
         fontWeight: 500,
         letterSpacing: '-0.01em',
@@ -828,7 +851,7 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
         margin: 0,
       }}>
         {headlineText}
-      </h1>
+      </HeadingTag>
       {subline ? (
         <p style={{ margin: '16px 0 0', fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5, maxWidth: '62ch' }}>
           {subline}
@@ -2370,12 +2393,102 @@ export function PlanTotalSummary({ combined, selectedFrequency = null, preCredit
   );
 }
 
-function CountdownLine({ secondsRemaining }) {
+// Prominent, escalating hold bar — replaces the old 14px muted CountdownLine
+// (the prod incident: a countdown nobody could see and no way to extend it).
+// Sits at the top of the review card, sticky so it stays visible while the
+// Stripe card sheet/fields are open further down the card. Neutral above
+// 3:00, amber (SlotIssueBanner's tones) from 3:00, red-tinted under 1:00 —
+// no animation, no modal. `onExtend` renders a "Keep my time" button from
+// 3:00 down (SlotIssueBanner's retry-button style); `holdLimitReached` hides
+// it and swaps the copy for the hard-ceiling message; `checking` covers the
+// brief window where a 0:00 countdown is trying one silent extend before
+// falling back to the expired flow.
+function HoldCountdownBar({ secondsRemaining, checking = false, holdLimitReached = false, extending = false, onExtend = null, onPickNewTime = null, busy = false, sticky = true }) {
   const m = Math.max(0, Math.floor(secondsRemaining / 60));
   const s = Math.max(0, secondsRemaining % 60);
+  const timeLabel = `${m}:${String(s).padStart(2, '0')}`;
+  const urgent = secondsRemaining < 60;
+  const warm = secondsRemaining < 180;
+  const bg = (urgent || holdLimitReached) ? '#fdecea' : warm ? '#fff4e5' : COLORS.white;
+  const border = (urgent || holdLimitReached) ? '#e57373' : warm ? '#f5bb5c' : ESTIMATE_BORDER;
+  const showButton = warm && !holdLimitReached && !checking && typeof onExtend === 'function';
+  // A hold at its 60-minute ceiling cannot be extended again, and an ADOPTED
+  // hold's review card offers no "Go back" — so without this the customer sat
+  // on a 0:00 screen telling her to pick a new time with no way to do it
+  // (codex r3 P2). Offered as soon as the ceiling is known, not only at 0:00:
+  // finishing is still possible until the server's grace runs out, and she
+  // may prefer to re-pick before then.
+  // Hidden while a confirmation is in flight (codex r3 P1), for the same
+  // reason "Go back" is disabled then: recovery clears the reservation and
+  // unmounts card capture, so a tap during confirmSetup or /accept would
+  // race a DELETE against the acceptance it is trying to complete.
+  const showPickNewTime = holdLimitReached && !checking && !busy && typeof onPickNewTime === 'function';
+
+  // Threshold-only aria-live announcement (3:00 and 1:00) — not every tick.
+  // Reset above 3:00 so an extension that pushes the clock back up can
+  // announce the same thresholds again on the way back down.
+  const announcedRef = useRef({ warm: false, urgent: false });
+  const [announcement, setAnnouncement] = useState('');
+  useEffect(() => {
+    if (secondsRemaining > 180) {
+      announcedRef.current = { warm: false, urgent: false };
+      return;
+    }
+    if (secondsRemaining <= 60 && !announcedRef.current.urgent) {
+      announcedRef.current.urgent = true;
+      setAnnouncement('Less than one minute left to keep your held time.');
+    } else if (secondsRemaining <= 180 && !announcedRef.current.warm) {
+      announcedRef.current.warm = true;
+      setAnnouncement('Three minutes left to keep your held time.');
+    }
+  }, [secondsRemaining]);
+
   return (
-    <div style={{ fontSize: 14, color: ESTIMATE_MUTED, textAlign: 'center' }}>
-      Slot held for {m}:{String(s).padStart(2, '0')}
+    <div
+      // Deliberately NOT role="status" (hold-grace self-audit): an implicit polite live
+      // region wrapping a per-second countdown makes assistive tech announce
+      // the whole bar every tick. The threshold messages live in the hidden
+      // aria-live node below, which is the only thing that should speak.
+      style={{
+        position: sticky ? 'sticky' : 'static', top: 0, zIndex: 5,
+        background: bg, border: `1px solid ${border}`, borderRadius: 10,
+        padding: '10px 14px', marginBottom: 16, width: '100%', boxSizing: 'border-box',
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12,
+      }}
+    >
+      <span style={{ fontSize: 16, color: COLORS.navy, fontWeight: 600 }}>
+        {checking
+          ? 'Checking your time…'
+          : holdLimitReached
+            ? "This time can't be held any longer — finish now or pick a new time."
+            : `Your time is held for ${timeLabel}`}
+      </span>
+      {showPickNewTime ? (
+        <button
+          type="button"
+          onClick={() => onPickNewTime()}
+          style={{
+            padding: '8px 16px', flexShrink: 0,
+            background: COLORS.white, color: COLORS.navy, border: `1px solid ${COLORS.navy}`,
+            borderRadius: 8, cursor: 'pointer', fontSize: 14, fontWeight: 600,
+          }}
+        >Pick a new time</button>
+      ) : null}
+      {showButton ? (
+        <button
+          type="button"
+          onClick={() => onExtend()}
+          disabled={extending}
+          style={{
+            padding: '8px 16px', flexShrink: 0,
+            background: ESTIMATE_BUTTON_BG, color: COLORS.white, border: 'none',
+            borderRadius: 8, cursor: extending ? 'wait' : 'pointer', fontSize: 14, fontWeight: 600,
+          }}
+        >{extending ? 'Extending…' : 'Keep my time'}</button>
+      ) : null}
+      <div aria-live="polite" style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clipPath: 'inset(50%)' }}>
+        {announcement}
+      </div>
     </div>
   );
 }
@@ -2393,11 +2506,24 @@ function formatAppointmentLabel(appointment = {}) {
   return [date, time].filter(Boolean).join(' · ') || 'Your scheduled appointment';
 }
 
-function ExistingAppointmentCard({ appointment }) {
+// `appointment.isHold` marks the estimate's OWN uncommitted reservation
+// (customer_id is still null), offered through this same shape on a reload.
+// Calling that "already on the schedule" is how a customer walked away
+// believing she was booked while the hold quietly lapsed (codex r9 P1) — the
+// incident this branch exists to fix. A held row gets tentative copy and its
+// remaining time, BEFORE payment selection; a committed visit is unchanged.
+export function ExistingAppointmentCard({ appointment, secondsRemaining = null, holdLimitReached = false, onPickNewTime = null, busy = false }) {
+  // The hold is spent when the server refused another extension or the clock
+  // reached zero — either way the configure screen must stop saying it is
+  // held (codex r16 P2).
+  const holdExhausted = !!appointment?.isHold
+    && (holdLimitReached || (Number.isFinite(secondsRemaining) && secondsRemaining <= 0));
   return (
     <div style={estimateCard()}>
       <div style={{ fontSize: 14, fontWeight: 700, color: ESTIMATE_MUTED, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-        Existing appointment
+        {appointment?.isHold
+          ? (holdExhausted ? 'Time no longer held' : 'Time held for you')
+          : 'Existing appointment'}
       </div>
       <div style={{ fontSize: 20, fontWeight: 700, color: ESTIMATE_TEXT, marginTop: 8, lineHeight: 1.35 }}>
         {formatAppointmentLabel(appointment)}
@@ -2406,8 +2532,29 @@ function ExistingAppointmentCard({ appointment }) {
         {appointment?.serviceType || 'Service visit'}
       </div>
       <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
-        Your visit is already on the schedule. Choose how you want to pay to approve this estimate.
+        {appointment?.isHold
+          ? (holdExhausted
+            // At the ceiling, or out of time, on the CONFIGURE screen — where
+            // ReviewPhase's "Pick a new time" is not rendered yet (codex r16
+            // P2). Claiming the time is still held here is the same false
+            // reassurance the committed-appointment copy was.
+            ? 'This time can\'t be held any longer. Pick a new time to finish signing up.'
+            : `This time is held while you finish${Number.isFinite(secondsRemaining) && secondsRemaining > 0
+              ? ` — ${Math.floor(secondsRemaining / 60)}:${String(secondsRemaining % 60).padStart(2, '0')} left`
+              : ''}. It is not booked until you choose how to pay and confirm.`)
+          : 'Your visit is already on the schedule. Choose how you want to pay to approve this estimate.'}
       </div>
+      {appointment?.isHold && holdExhausted && !busy && typeof onPickNewTime === 'function' ? (
+        <button
+          type="button"
+          onClick={() => onPickNewTime()}
+          style={{
+            marginTop: 12, padding: '8px 16px',
+            background: COLORS.white, color: COLORS.navy, border: `1px solid ${COLORS.navy}`,
+            borderRadius: 8, cursor: 'pointer', fontSize: 14, fontWeight: 600,
+          }}
+        >Pick a new time</button>
+      ) : null}
     </div>
   );
 }
@@ -3567,7 +3714,7 @@ function AcceptanceRecordCard({ acceptance }) {
   );
 }
 
-export function ReviewPhase({ website = false, slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false, autoPaySlot = null, acceptanceTermsSlot = null, confirmLabelOverride = null, confirmDisabled = false, submittingLabel = null, prefSwitch = null, prepayInLane = false, prepayCardCapture = false, captureMethodType = 'card' }) {
+export function ReviewPhase({ website = false, slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false, autoPaySlot = null, acceptanceTermsSlot = null, confirmLabelOverride = null, confirmDisabled = false, submittingLabel = null, prefSwitch = null, prepayInLane = false, prepayCardCapture = false, captureMethodType = 'card', holdExpiresAt = null, holdChecking = false, holdLimitReached = false, extendingHold = false, onExtendHold = null, onPickNewTime = null }) {
   const usingExistingAppointment = !!existingAppointment;
   const recurringPayPerApplication = serviceMode !== 'one_time' && paymentPreference === 'pay_at_visit';
   // A held (site-confirmation) recurring accept mints NO invoice whatever the
@@ -3596,15 +3743,20 @@ export function ReviewPhase({ website = false, slotId, slotMeta = null, existing
           ? 'Confirm annual prepay'
           : 'Confirm appointment'
       : 'Confirm booking');
+  // A HELD row is not scheduled yet (codex r9 P1): the confirm step is what
+  // books it, so the lede must not promise it "stays scheduled".
+  const existingApptLede = existingAppointment?.isHold
+    ? 'Your held time is confirmed when you finish here.'
+    : 'Your existing appointment stays scheduled.';
   const confirmSub = invoiceOnly
     ? 'No appointment needed. Next step creates your invoice and makes secure payment available.'
     : heldForSiteConfirmation
       ? (usingExistingAppointment
-        ? 'Your existing appointment stays scheduled. No payment needed now — we confirm your exact price on a quick site visit, then send your first invoice.'
+        ? `${existingApptLede} No payment needed now — we confirm your exact price on a quick site visit, then send your first invoice.`
         : 'No payment needed now. Your account manager confirms the exact price on a quick site visit, then sends your first invoice.')
     : usingExistingAppointment
       ? recurringPayPerApplication
-        ? 'Your existing appointment stays scheduled. Next step creates your invoice and makes secure payment available.'
+        ? `${existingApptLede} Next step creates your invoice and makes secure payment available.`
         : paymentPreference === 'prepay_annual'
           ? (prepayInLane
             // Tender-accurate (Codex #3492 r10): the auto-satisfy lane
@@ -3615,14 +3767,30 @@ export function ReviewPhase({ website = false, slotId, slotMeta = null, existing
               // card — a bank pick (GATE_ACCEPT_ACH_CAPTURE) reads "bank
               // account" (Codex #3723 r4 P2).
               ? (captureMethodType === 'us_bank_account'
-                ? 'Your existing appointment stays scheduled. Your bank account is debited the 12-month total when you confirm.'
-                : 'Your existing appointment stays scheduled. Your saved card is charged the 12-month total when you confirm.')
-              : 'Your existing appointment stays scheduled. Your saved payment method on file is charged the 12-month total when you confirm.')
-            : 'Your existing appointment stays scheduled. Annual prepay invoice is available for optional payment after confirmation.')
-          : 'Your existing appointment stays scheduled. We will collect payment with the tech on-site.'
+                ? `${existingApptLede} Your bank account is debited the 12-month total when you confirm.`
+                : `${existingApptLede} Your saved card is charged the 12-month total when you confirm.`)
+              : `${existingApptLede} Your saved payment method on file is charged the 12-month total when you confirm.`)
+            : `${existingApptLede} Annual prepay invoice is available for optional payment after confirmation.`)
+          : `${existingApptLede} We will collect payment with the tech on-site.`
       : '';
+  // Shows whenever this reservation actually carries a timed hold — a fresh
+  // slot pick OR a reload that adopted the customer's own uncommitted hold
+  // (holdExpiresAt is null for a real committed appointment, invoice-only,
+  // and manual scheduling, so those never render the bar).
+  const showHoldBar = !website && !invoiceOnly && !manualScheduling && !!holdExpiresAt;
   return (
     <div data-website-card="" style={{ ...estimateCard(), borderTop: `4px solid ${ESTIMATE_BUTTON_BG}` }}>
+      {showHoldBar ? (
+        <HoldCountdownBar
+          secondsRemaining={secondsRemaining}
+          checking={holdChecking}
+          holdLimitReached={holdLimitReached}
+          extending={extendingHold}
+          onExtend={onExtendHold}
+          onPickNewTime={onPickNewTime}
+          busy={submitting}
+        />
+      ) : null}
       <div hidden={website} style={{ fontSize: 14, fontWeight: 600, color: ESTIMATE_BUTTON_BG, textTransform: 'uppercase', letterSpacing: 0.5 }}>
         {invoiceOnly
           ? 'Confirm your acceptance'
@@ -3647,7 +3815,6 @@ export function ReviewPhase({ website = false, slotId, slotMeta = null, existing
                 ? `Visit: ${new Date(`${slotMeta.date}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' })}${slotMeta.time ? ` · ${slotMeta.time}` : ''}`
                 : `Slot: ${slotId}`}
       </div>
-      {!website && !usingExistingAppointment && !invoiceOnly && !manualScheduling ? <div style={{ marginTop: 16 }}><CountdownLine secondsRemaining={secondsRemaining} /></div> : null}
       {autoPaySlot}
       {acceptanceTermsSlot}
       <div style={{ display: 'grid', gap: 12, marginTop: 16 }}>
@@ -3987,15 +4154,21 @@ function EstimateErrorBanner({ error }) {
 
 function SlotIssueBanner({ kind = 'conflict', onRetry }) {
   const expired = kind === 'expired';
+  // 'stale_hold': the recovery could not release the old hold, so the server
+  // may still be offering it and the correct options stay hidden (codex r10
+  // P2). Its own copy, because neither "expired" nor "taken" is true.
+  const staleHold = kind === 'stale_hold';
   return (
     <div style={{
       background: '#fff4e5', borderRadius: 12, padding: 16,
       border: `1px solid #f5bb5c`, marginBottom: 16,
     }}>
       <div style={{ fontSize: 14, color: COLORS.navy }}>
-        {expired
-          ? 'Your hold expired. Pick a new time to continue.'
-          : "That slot was just taken. We've refreshed the options below — pick another."}
+        {staleHold
+          ? "We couldn't release your earlier time hold, so your options may be out of date. Tap refresh to try again."
+          : expired
+            ? 'Your time-slot hold expired — pick a time again to finish signing up.'
+            : "That slot was just taken. We've refreshed the options below — pick another."}
       </div>
       {onRetry ? (
         <button
@@ -5298,6 +5471,56 @@ function EstimateViewPageInner({ websiteMode = false }) {
 
   const [countdownSeconds, setCountdownSeconds] = useState(0);
   const countdownRef = useRef(null);
+  // Hold-extend state (fix/reservation-hold-expiry). holdLimitReached mirrors
+  // the server's 60-min-from-creation ceiling (POST .../extend 409
+  // HOLD_LIMIT_REACHED) — once set, the "Keep my time" button hides and the
+  // bar shows the ceiling copy for the rest of this reservation. holdChecking
+  // covers only the brief silent extend attempted when the countdown reaches
+  // 0 (the "Checking your time…" copy) — NOT the manual button tap, which
+  // uses extendingHold alone. reservationRef mirrors `reservation` so
+  // extendHold and the countdown effect always read the live scheduledServiceId/
+  // expiresAt without needing `reservation` in their own dependency arrays.
+  const [holdLimitReached, setHoldLimitReached] = useState(false);
+  const [extendingHold, setExtendingHold] = useState(false);
+  const [holdChecking, setHoldChecking] = useState(false);
+  const reservationRef = useRef(null);
+  // Holds the scheduledServiceId whose 60-min ceiling the server refused —
+  // never a bare boolean, so a verdict cannot leak onto a replaced hold.
+  const holdLimitReachedRef = useRef(null);
+  // The hold a recovery could not finish releasing/refreshing — the banner's
+  // Retry re-runs that recovery instead of only re-fetching slots.
+  const pendingRecoveryHoldRef = useRef(null);
+  // Rendered state for the same fact: a ref cannot drive the banner, and a
+  // no_booking recovery lands on 'configure', which has no slot banner — so
+  // a failed release left the stale contract in place with nothing to tap
+  // (codex r10 P2).
+  const [recoveryStuck, setRecoveryStuck] = useState(false);
+  // Recovery releases the hold and re-reads the contract. Until BOTH land,
+  // `data.estimate.acceptance` still describes the dead hold, so leaving the
+  // payment buttons live let a customer re-adopt the very hold being deleted
+  // — or, when stuck, one that could not be deleted — and walk back into
+  // review with stale scheduling state (codex r11 P2).
+  const [recoveryInFlight, setRecoveryInFlight] = useState(false);
+  // Live mirrors for the synchronous guard in handlePaymentChoice (state
+  // lags a retained callback in the same frame).
+  const recoveryInFlightRef = useRef(false);
+  const recoveryStuckRef = useRef(false);
+  // Blocks a SECOND Confirm while a card capture hands off to the awaited
+  // hold extension and then to /accept (codex r5 P1). Deliberately NOT
+  // inlineConfirmBusyRef: that ref also suppresses the extend's own dead-hold
+  // recovery, so latching it here would trade one race for a stuck page.
+  const confirmHandoffRef = useRef(false);
+  // The in-flight extendHoldAndSettle() — awaited at the single acceptance
+  // boundary (codex r6 P1) so no accept can race an extension, whichever
+  // trigger started it (review entry, the manual button, the 0:00 rescue).
+  const extendSettleRef = useRef(null);
+  // Holds the IN-FLIGHT extend's promise, not a boolean: a second trigger
+  // must be able to AWAIT the running one. A bare busy-flag made the 0:00
+  // fallback return with no verdict while an auto-extend was mid-flight,
+  // leaving the bar stuck on "Checking your time…" with the countdown
+  // interval already cleared — the hold then lapsed silently, which is the
+  // very failure this whole change exists to remove.
+  const extendPromiseRef = useRef(null);
   const selectedRef = useRef({});
   // Only the first /data fetch of a session is a real customer "view"; every
   // later re-fetch (preference/slot/accept refresh) passes ?refresh=1 so the
@@ -5616,6 +5839,337 @@ function EstimateViewPageInner({ websiteMode = false }) {
   // only defaults, not clobbering their selections outright. Simpler v1:
   // reset to the new frequency's defaults. Revisit if Virginia reports
   // "I kept unchecking inside spray and it kept re-checking."
+  // Live-ref mirror (same reasoning as ctaPhaseRef): extendHold and the
+  // countdown effect's zero-tick both need the CURRENT scheduledServiceId/
+  // expiresAt without retriggering on every reservation identity change.
+  useEffect(() => { reservationRef.current = reservation; }, [reservation]);
+  // A new hold (fresh slot pick, or a different adopted appointment) starts
+  // its own 60-min ceiling — the flag from a PRIOR reservation must not
+  // suppress this one's "Keep my time" button.
+  useEffect(() => {
+    holdLimitReachedRef.current = null;
+    setHoldLimitReached(false);
+  }, [reservation?.scheduledServiceId]);
+
+  // Extends the live hold by POSTing .../reserve/:scheduledServiceId/extend.
+  // Serialized on extendingHoldRef so the manual button, the three silent
+  // auto-triggers, and the 0:00 fallback can never overlap. No-ops (returns
+  // false) for the draft preview, a reservation with no scheduledServiceId
+  // (existingAppointmentId without an adopted hold, invoiceOnly,
+  // manualScheduling — none of these are timed holds), and once
+  // holdLimitReached is set for this hold. `onOutcome`, when passed, is
+  // called with 'ok' | 'limit_reached' | 'slot_unavailable' | 'expired' —
+  // the silent auto-triggers omit it (a failure there is simply not
+  // extended; the countdown keeps running toward its own 0:00 handling),
+  // the 0:00 fallback uses it to choose reservation_expired vs slot_conflict.
+  const extendHold = useCallback(async () => {
+    if (readOnlyPreview) return 'skipped';
+    // No new extension once an accept is in flight (codex r6 P1). /accept
+    // may have read the hold but not yet taken its locks; an extension
+    // landing in that gap can delete a conflicting hold first, leaving the
+    // accept to throw RESERVATION_NOT_FOUND while this rescue's own recovery
+    // is suppressed by the 'submitting' phase. The accept is authoritative
+    // from here: its own 409 handling drives recovery.
+    if (acceptInFlightRef.current) return 'skipped';
+    const scheduledServiceId = reservationRef.current?.scheduledServiceId;
+    // No scheduledServiceId = not a timed hold (a committed existing
+    // appointment, invoiceOnly, manualScheduling) — nothing to extend.
+    if (!scheduledServiceId) return 'skipped';
+    // The ceiling belongs to ONE hold (codex r3 P1): a delayed
+    // HOLD_LIMIT_REACHED for a hold the customer has since replaced must not
+    // disable extensions for the new one.
+    if (holdLimitReachedRef.current === scheduledServiceId) return 'limit_reached';
+    // Coalesce per HOLD, never across holds (codex r3 P1). Sharing one
+    // promise let a re-pick adopt the previous hold's in-flight request: its
+    // SLOT_UNAVAILABLE then passed the new hold's staleness check (the
+    // reservation had not changed since THAT call started) and discarded a
+    // perfectly good hold. A request for a superseded hold is simply not
+    // reused.
+    if (extendPromiseRef.current && extendPromiseRef.current.holdId === scheduledServiceId) {
+      return extendPromiseRef.current.promise;
+    }
+    const run = (async () => {
+      try {
+        const r = await fetch(`${API_BASE}/public/estimates/${token}/reserve/${encodeURIComponent(scheduledServiceId)}/extend`, {
+          method: 'POST',
+        });
+        const body = await r.json().catch(() => ({}));
+        if (r.ok) {
+          // ONLY when the expiry actually advances (codex r7 P2). The server's
+          // capped no-op answers 200 with the unchanged expiry, and a new
+          // reservation object re-runs the countdown effect — which, at a
+          // sub-second remainder, immediately fires another zero-tick rescue
+          // and POSTs /extend again. That loop is state-driven, not
+          // interval-driven, and on a fast connection it burns the 10/min
+          // reserve limiter before the ceiling timestamp is even reached,
+          // leaving the real recovery attempts rate-limited.
+          setReservation((prev) => {
+            if (!prev || prev.scheduledServiceId !== scheduledServiceId) return prev;
+            const next = body.expiresAt ? new Date(body.expiresAt).getTime() : NaN;
+            const current = prev.expiresAt ? new Date(prev.expiresAt).getTime() : NaN;
+            if (!Number.isFinite(next) || (Number.isFinite(current) && next <= current)) return prev;
+            return { ...prev, expiresAt: body.expiresAt };
+          });
+          return 'ok';
+        }
+        if (r.status === 409 && body.code === 'HOLD_LIMIT_REACHED') {
+          holdLimitReachedRef.current = scheduledServiceId;
+          // Only the hold still on screen may disable its own button.
+          if ((reservationRef.current?.scheduledServiceId || null) === scheduledServiceId) {
+            setHoldLimitReached(true);
+          }
+          if (body.expiresAt) {
+            setReservation((prev) => (prev && prev.scheduledServiceId === scheduledServiceId
+              ? { ...prev, expiresAt: body.expiresAt } : prev));
+          }
+          return 'limit_reached';
+        }
+        if (r.status === 409 && body.code === 'SLOT_UNAVAILABLE') return 'slot_unavailable';
+        // The route's specialized no-booking bodies (codex r7 P2): staff can
+        // reshape an estimate mid-checkout into a commercial-manual,
+        // guarantee-only or trenching-review contract, and /extend preserves
+        // those bodies deliberately. Reporting them as a hold expiry told the
+        // customer to pick a time again for a contract that needs no
+        // appointment — or cannot be self-booked at all. Reload instead: the
+        // server's own acceptance mode is the truth.
+        if (body.commercialManualScheduling || body.invoiceOnlyAcceptance || body.reviewBeforeBooking
+          || body.code === 'BERMUDA_SUPPRESSION_GATED') {
+          // The suppression gate belongs here too (codex r9 P2): every later
+          // reserve and accept stays gated, so "pick another time" is a
+          // futile loop — reload and let the server's own
+          // temporarily-unavailable / contact-the-office copy speak.
+          return 'no_booking';
+        }
+        // A 5xx says nothing about the hold — the server never reached a
+        // verdict (codex r2 P2). Treating that as an expiry would throw a
+        // customer back to the slot picker during a transient outage even
+        // though the commit grace still accepts her confirm, i.e. it would
+        // recreate the very loss this PR prevents. Only an authoritative
+        // answer — 404 (row gone), or a terminal estimate state — is an
+        // expiry.
+        // A 429 from the shared reserve limiter is not a verdict on the hold
+        // either (codex r3 P1) — the request never reached the extend logic.
+        if (r.status === 429 || r.status >= 500) return 'retryable';
+        return 'expired';
+      } catch {
+        // Network/abort: no verdict either. Same reasoning as the 5xx above.
+        return 'retryable';
+      }
+    })();
+    extendPromiseRef.current = { holdId: scheduledServiceId, promise: run };
+    setExtendingHold(true);
+    try {
+      return await run;
+    } finally {
+      // Clear only OUR entry: a newer hold's request may already own the ref.
+      if (extendPromiseRef.current?.promise === run) extendPromiseRef.current = null;
+      setExtendingHold(false);
+    }
+  }, [readOnlyPreview, token]);
+
+  // Returns the request so a caller that must observe server truth
+  // afterwards (recoverFromDeadHold's refresh) can await it; the
+  // fire-and-forget callers simply ignore it.
+  // Resolves TRUE only when the hold is provably gone (codex r4 P2): fetch
+  // resolves normally for a 429/500, and swallowing a network error looked
+  // identical to success — so recoverFromDeadHold refreshed anyway and could
+  // re-adopt the very hold it was recovering from. A 404 counts as released:
+  // nothing is left to delete.
+  const releaseHeldReservation = useCallback((scheduledServiceId) => {
+    if (readOnlyPreview) return Promise.resolve(true);
+    if (!scheduledServiceId) return Promise.resolve(true);
+    return fetch(`${API_BASE}/public/estimates/${token}/reserve/${encodeURIComponent(scheduledServiceId)}`, {
+      method: 'DELETE',
+    }).then((r) => r.ok || r.status === 404).catch(() => false);
+  }, [token, readOnlyPreview]);
+
+  // The ONE recovery for a hold that is definitively gone (codex r3 P1).
+  // Clearing `reservation` alone was not enough: `data.estimate.acceptance`
+  // still described the adopted hold, and canShowSlotPicker only renders the
+  // picker for `standard_slot_pick` — so the customer was told to pick a new
+  // time with no picker on screen, Retry only re-fetched slots, and choosing
+  // a payment method re-adopted the dead hold. Refreshing the contract is
+  // what actually reopens the picker, so every caller goes through here
+  // rather than repeating the reset.
+  const recoverFromDeadHold = useCallback((phase) => {
+    // Never DURING Stripe's confirmation (codex r16 P1): recovery clears the
+    // reservation, unmounts payment capture and DELETEs the hold, which
+    // mid-confirmSetup would cancel a hold the confirmation is about to use
+    // and overwrite the confirmation UI. Guarded HERE rather than at each
+    // button, so a new caller inherits it.
+    //
+    // Scoped to `inlineConfirmBusyRef` alone, on purpose. The card/deposit
+    // handoffs set `confirmHandoffRef` (and the busy STATE, which hides the
+    // buttons) around their awaited extend — settling a definitive verdict
+    // there is exactly what should happen, and blocking it left a customer on
+    // review with a dead hold and no banner after paying a deposit. Same
+    // reason `acceptInFlightRef` is not here: the accept's own 409 handler
+    // recovers while that latch is still set.
+    if (inlineConfirmBusyRef.current) return;
+    // Captured before the reset: an accept-time SLOT_UNAVAILABLE rolls its
+    // transaction back and leaves the hold row LIVE (codex r3 P1), so a bare
+    // refresh would hand that same row straight back as
+    // `existing_appointment` — picker still hidden, and choosing a payment
+    // method re-adopting the very hold the commit just rejected. Releasing
+    // it first is what returns the contract to standard_slot_pick. A hold
+    // that is already gone (expired, swept) just 404s the release.
+    // On a retry the reservation is already cleared, so fall back to the
+    // hold the previous attempt could not release.
+    const deadHoldId = reservationRef.current?.scheduledServiceId
+      || pendingRecoveryHoldRef.current
+      || null;
+    setCtaPhase(phase);
+    // Remembered until the release AND the refresh both succeed (codex r4
+    // P1): otherwise an adopted hold's acceptance mode stays
+    // `existing_appointment`, the picker stays hidden, and the banner's
+    // Retry — which only re-fetched slots — could never dig the customer out.
+    pendingRecoveryHoldRef.current = deadHoldId;
+    setRecoveryStuck(false);
+    recoveryStuckRef.current = false;
+    setRecoveryInFlight(true);
+    recoveryInFlightRef.current = true;
+    setReservation(null);
+    setSelectedSlotId(null);
+    setSelectedSlotMeta(null);
+    setPaymentPreference(null);
+    setSlotsRefreshSignal((v) => v + 1);
+    // Release, THEN read server truth — the refresh must not race the delete.
+    // Best-effort throughout: a failure leaves the recovery copy up (the
+    // phase is already set) rather than throwing inside a countdown tick.
+    releaseHeldReservation(deadHoldId)
+      .then((released) => {
+        // A failed release means the row may still be live: refreshing would
+        // hand it straight back as `existing_appointment` (codex r4 P2). The
+        // recovery copy stays up instead, and the customer's next action —
+        // Refresh times, or the accept itself — re-enters recovery.
+        if (!released) {
+          // Surfaced, not swallowed: the hold may still be live and the
+          // contract still stale, so the customer needs a way to retry — and
+          // the booking controls stay locked (recoveryStuck), because
+          // choosing one would re-adopt that hold.
+          setRecoveryStuck(true);
+          recoveryStuckRef.current = true;
+          setRecoveryInFlight(false);
+          recoveryInFlightRef.current = false;
+          return null;
+        }
+        return loadEstimate({ preserveSelection: false }).then(() => {
+          // Fully recovered — the contract no longer offers the dead hold.
+          pendingRecoveryHoldRef.current = null;
+          setRecoveryStuck(false);
+          recoveryStuckRef.current = false;
+          setRecoveryInFlight(false);
+          recoveryInFlightRef.current = false;
+        });
+      })
+      .catch(() => {
+        setRecoveryStuck(true);
+        recoveryStuckRef.current = true;
+        setRecoveryInFlight(false);
+        recoveryInFlightRef.current = false;
+      });
+  }, [loadEstimate, releaseHeldReservation]);
+
+  // A RELOADED page must start the clock immediately (codex r9 P1). The
+  // adopted hold used to be hydrated only inside handlePaymentChoice, so a
+  // customer who reopened the estimate and read it for a while saw no
+  // remaining time and got no 0:00 rescue until they picked a payment
+  // option — long enough to lose the hold exactly as the incident did.
+  // Keyed on the hold id + expiry so a later /data refresh that advances the
+  // expiry re-seeds, and a committed appointment (neither field) is ignored.
+  useEffect(() => {
+    // Never while a recovery is pending (codex r12 P1): recoverFromDeadHold
+    // clears `reservation` BEFORE awaiting the DELETE and the refresh, and
+    // `existingAppointment` still describes the hold being released — so
+    // hydrating here restored that hold and restarted its countdown, which
+    // for an already-lapsed recovery meant repeated rescue extensions while
+    // the refresh was still in flight. Terminal phases are likewise not
+    // places to start a clock.
+    if (recoveryInFlightRef.current || recoveryStuckRef.current) return;
+    if (['submitting', 'success', 'slot_conflict', 'reservation_expired'].includes(ctaPhase)) return;
+    const held = existingAppointment?.isHold && existingAppointment?.reservationExpiresAt
+      ? existingAppointment
+      : null;
+    if (!held) {
+      // Refreshed server data no longer offers a hold: drop an adopted one we
+      // seeded earlier rather than leaving a countdown on a row that is gone.
+      // A fresh slot pick (no adoptedHold flag) is never touched.
+      setReservation((prev) => (prev?.adoptedHold ? null : prev));
+      return;
+    }
+    setReservation((prev) => {
+      // Never clobber a live reservation the customer just created, and never
+      // re-seed the same hold+expiry (that would re-run the countdown).
+      if (prev && prev.scheduledServiceId === held.id && prev.expiresAt === held.reservationExpiresAt) return prev;
+      if (prev && prev.scheduledServiceId && prev.scheduledServiceId !== held.id) return prev;
+      return {
+        existingAppointmentId: held.id,
+        scheduledServiceId: held.id,
+        expiresAt: held.reservationExpiresAt,
+        adoptedHold: true,
+      };
+    });
+    // `reservation?.scheduledServiceId` is a dependency (codex r12 P1): "Go
+    // back" and a frequency/service-mode change clear `reservation` WITHOUT
+    // releasing the server hold, and without this the effect never re-ran —
+    // the countdown stopped while the page still said the time was held, and
+    // the hold could lapse or be taken while the customer kept configuring.
+    // Re-seeding is idempotent: the updater returns `prev` unchanged once the
+    // same hold+expiry is in place, so this cannot loop.
+  }, [existingAppointment?.id, existingAppointment?.isHold, existingAppointment?.reservationExpiresAt,
+    reservation?.scheduledServiceId, ctaPhase]);
+
+  // ONE place that turns an extend outcome into page state (codex r7 P1).
+  // The wrapper and the 0:00 rescue both needed identical handling three
+  // rounds running — staleness, dead-hold recovery, and now the no-booking
+  // reshape — so the decision lives here and both callers pass the hold they
+  // started on. Non-definitive outcomes ('ok' / 'limit_reached' /
+  // 'retryable' / 'skipped') are returned untouched.
+  const settleExtendOutcome = useCallback((outcome, holdIdAtStart) => {
+    if (outcome !== 'slot_unavailable' && outcome !== 'expired' && outcome !== 'no_booking') return outcome;
+    // BEFORE any state change, for every verdict: a verdict that lands after
+    // the accept committed, after a re-pick, or mid-confirmSetup must not
+    // overwrite what it finds — inlineConfirmBusyRef included, since
+    // handleConfirm keeps the phase at 'review' across confirmSetup().
+    const stale = inlineConfirmBusyRef.current
+      || ['submitting', 'success', 'slot_conflict', 'reservation_expired'].includes(ctaPhaseRef.current)
+      || (reservationRef.current?.scheduledServiceId || null) !== holdIdAtStart;
+    if (stale) return outcome;
+    if (outcome === 'no_booking') {
+      // Staff reshaped the estimate mid-checkout: not a hold problem, and
+      // "pick a time again" is wrong for a contract that books nothing. The
+      // same release-then-refresh recovery, landing on 'configure' instead of
+      // an expiry banner — the DB hold MUST go first (codex r7 P1):
+      // buildEstimateAcceptanceContract prioritises existingAppointment over
+      // the invoice-only and commercial-manual modes, so a refresh that left
+      // the hold alive would re-offer it, and choosing payment would re-adopt
+      // it into the same refusal. recoverFromDeadHold also keeps the retry
+      // path when the release fails.
+      recoverFromDeadHold('configure');
+      return outcome;
+    }
+    recoverFromDeadHold(outcome === 'slot_unavailable' ? 'slot_conflict' : 'reservation_expired');
+    return outcome;
+  }, [recoverFromDeadHold]);
+
+  // Every silent/manual extend consumes its DEFINITIVE outcome (codex r2 P1).
+  // `slot_unavailable` means extendReservation found a committed visit in the
+  // window and DELETED the hold — the slot is gone for good. Discarding that
+  // left the page claiming the time was still held, so a customer could
+  // finish card entry against a reservation that no longer existed and only
+  // learn at confirm (or at 0:00). Anything non-definitive is left to the
+  // countdown's own 0:00 rescue, which is the single place that decides
+  // between an expiry and a retryable miss.
+  const extendHoldAndSettle = useCallback(() => {
+    const holdIdAtStart = reservationRef.current?.scheduledServiceId || null;
+    const settling = extendHold().then((outcome) => settleExtendOutcome(outcome, holdIdAtStart));
+    // Published for the acceptance boundary; cleared only if still ours.
+    extendSettleRef.current = settling;
+    const clear = () => { if (extendSettleRef.current === settling) extendSettleRef.current = null; };
+    settling.then(clear, clear);
+    return settling;
+  }, [extendHold, settleExtendOutcome]);
+
   // Countdown timer tied to reservation.expiresAt
   useEffect(() => {
     if (!reservation?.expiresAt) {
@@ -5628,18 +6182,73 @@ function EstimateViewPageInner({ websiteMode = false }) {
       setCountdownSeconds(remaining);
       if (remaining === 0) {
         clearInterval(countdownRef.current);
-        setCtaPhase('reservation_expired');
-        setReservation(null);
-        setSelectedSlotId(null);
-        setSelectedSlotMeta(null);
-        setPaymentPreference(null);
-        setSlotsRefreshSignal((v) => v + 1);
+        // The server tolerates a commit up to 10 minutes past expiry (grace
+        // window) as long as the slot is still free, so 0:00 is not
+        // automatically fatal — try one silent extend first.
+        setHoldChecking(true);
+        // Identity of the hold this rescue is for. The accept can commit
+        // WHILE the rescue is in flight (the customer taps Confirm at 0:00):
+        // the extend then 404s on a now-committed row and would, unguarded,
+        // overwrite the rendered success phase with "your hold expired" —
+        // telling a customer who was just booked and charged that nothing
+        // happened (hold-grace self-audit). Anything that moved on — a committed or
+        // in-flight accept, or a different reservation — discards this
+        // stale verdict.
+        const rescuedHoldId = reservationRef.current?.scheduledServiceId || null;
+        // 'ok' restarts the countdown (a new expiresAt re-runs this effect).
+        // 'limit_reached' keeps the customer on the review card with the
+        // ceiling copy — the server's commit grace still accepts a confirm
+        // for several more minutes, so throwing them back to the slot picker
+        // here would discard a hold that is still good.
+        const rescue = extendHold().then((outcome) => {
+          setHoldChecking(false);
+          // Delegated to the shared settle (codex r7 P1) — staleness, dead
+          // hold, and the no-booking reshape are decided in ONE place, so
+          // this path can't drift from the wrapper's again. 'ok' /
+          // 'limit_reached' / 'retryable' come back untouched: the hold may
+          // still be good and the commit grace still accepts a confirm, so
+          // the customer stays on the review card.
+          return settleExtendOutcome(outcome, rescuedHoldId);
+        }).catch(() => { setHoldChecking(false); return 'retryable'; });
+        // Tracked like the wrapper's settlement (codex r6 P1): the rescue
+        // calls extendHold directly, so without publishing it here an accept
+        // could still start mid-rescue and hit the unmapped
+        // RESERVATION_NOT_FOUND while the rescue's own recovery was
+        // suppressed by the 'submitting' phase.
+        extendSettleRef.current = rescue;
+        const clearRescue = () => {
+          if (extendSettleRef.current === rescue) extendSettleRef.current = null;
+        };
+        rescue.then(clearRescue, clearRescue);
       }
+      // Reported so the effect can tell an initial zero from a running
+      // clock (codex r5 P2).
+      return remaining;
     };
-    tick();
+    // The first tick can ALREADY be at zero — an adopted hold that lapsed
+    // between /data loading and the customer choosing a payment option.
+    // Installing an interval on top of that fired the 0:00 rescue every
+    // second (codex r5 P2), and a `retryable`/429 answer leaves the
+    // reservation in place, so it hammered the shared reserve limiter
+    // instead of leaving the manual "Keep my time" / "Pick a new time" path.
+    // The zero branch is one-shot by design: its own outcome either
+    // re-arms this effect with a new expiry or recovers.
+    const startedAtZero = tick() === 0;
+    if (startedAtZero) return undefined;
     countdownRef.current = setInterval(tick, 1000);
     return () => clearInterval(countdownRef.current);
-  }, [reservation]);
+  }, [reservation, extendHold, settleExtendOutcome]);
+
+  // Auto-extend trigger 1/3: entering the review phase with a timed
+  // reservation — silent/best-effort, and the outcome is deliberately
+  // ignored (a failure here just leaves the countdown running toward its own
+  // 0:00 handling). Keyed on ctaPhase alone so it fires once per transition
+  // INTO review, not on every render while it stays there.
+  useEffect(() => {
+    if (ctaPhase === 'review' && reservationRef.current?.expiresAt) {
+      extendHoldAndSettle();
+    }
+  }, [ctaPhase, extendHoldAndSettle]);
 
   const onToggleAddOn = useCallback(async (sectionKey, key) => {
     // Live-ref submit lock (mirror of the SlotPicker onSelect guards): the
@@ -5796,12 +6405,6 @@ function EstimateViewPageInner({ websiteMode = false }) {
     await chained;
   }, [readOnlyPreview, loadEstimate, token, paymentPreference, setCtaPhase, scrollToPriceSection]);
 
-  const releaseHeldReservation = useCallback((scheduledServiceId) => {
-    if (readOnlyPreview || !scheduledServiceId) return;
-    fetch(`${API_BASE}/public/estimates/${token}/reserve/${encodeURIComponent(scheduledServiceId)}`, {
-      method: 'DELETE',
-    }).catch(() => {});
-  }, [token, readOnlyPreview]);
 
   // ── Service opt-out (owner 2026-08-31) ────────────────────────────────
   // Same handler anatomy as onToggleInteriorService above — inert under draft
@@ -5942,9 +6545,29 @@ function EstimateViewPageInner({ websiteMode = false }) {
       setError('Draft preview — this estimate has not been sent yet. Send it to the customer to enable booking.');
       return;
     }
+    // Belt and braces behind the disabled buttons (codex r11 P2): a retained
+    // callback or a keyboard event that skips `disabled` must not re-adopt a
+    // hold that recovery is deleting, or one it failed to delete.
+    if (recoveryInFlightRef.current || recoveryStuckRef.current) return;
     if (existingAppointment) {
       setPaymentPreference(pref);
-      setReservation({ existingAppointmentId: existingAppointment.id });
+      // A reload can land on the customer's OWN uncommitted hold rather than
+      // a genuinely committed appointment (the prod incident this guards
+      // against): the server marks that case isHold + reservationExpiresAt.
+      // Hydrate it as a timed reservation too, so the countdown effect runs
+      // and the hold bar renders — a real committed appointment carries
+      // neither field and falls through to the untimed sentinel below,
+      // unchanged. The accept request body is unaffected either way
+      // (existingAppointmentId is still what's sent; scheduledServiceId here
+      // only drives the client-side timer/extend calls).
+      setReservation(existingAppointment.isHold && existingAppointment.reservationExpiresAt
+        ? {
+          existingAppointmentId: existingAppointment.id,
+          scheduledServiceId: existingAppointment.id,
+          expiresAt: existingAppointment.reservationExpiresAt,
+          adoptedHold: true,
+        }
+        : { existingAppointmentId: existingAppointment.id });
       setCtaPhase('review');
       setError(null);
       return;
@@ -6080,6 +6703,41 @@ function EstimateViewPageInner({ websiteMode = false }) {
     // lags a double-tap in the same frame — the ref flips before any await,
     // so a second entry can never double-PUT /accept.
     if (acceptInFlightRef.current) return;
+    // THE acceptance boundary for outstanding extensions (codex r6 P1).
+    // Per-trigger awaits cover the card paths, but review entry, the manual
+    // "Keep my time" button and the 0:00 rescue can all still be in flight
+    // when a saved-card confirm walks straight in here. If /accept reads the
+    // hold before such an extension deletes it, commitReservation throws an
+    // unmapped RESERVATION_NOT_FOUND — and the extension's own recovery is
+    // suppressed once this function sets the phase to 'submitting'. So:
+    // settle first, recover on a definitive answer, and only then proceed.
+    // Deliberately BEFORE acceptInFlightRef flips: this is not an accept
+    // attempt yet, and a definitive failure must leave the page able to
+    // accept again after the customer re-picks.
+    if (extendSettleRef.current) {
+      const holdBeforeBoundary = reservationRef.current?.scheduledServiceId || null;
+      const pending = await extendSettleRef.current.catch(() => 'retryable');
+      // IDENTITY FIRST (codex r6 P1). Go back is clickable across this wait —
+      // nothing is busy yet — and handleReviewCancel leaves the hold live
+      // server-side, so the customer can be on a DIFFERENT hold by now.
+      // Acting on the old verdict first would release that new reservation
+      // and wipe its selections; continuing would accept the abandoned
+      // review's slot and payment preference from this closure. Either way
+      // the only safe move is to stop: the extension that matters is the one
+      // the new hold will run for itself.
+      const holdChanged = (reservationRef.current?.scheduledServiceId || null) !== holdBeforeBoundary;
+      const phaseMovedOn = ['configure', 'slot_conflict', 'reservation_expired', 'success']
+        .includes(ctaPhaseRef.current);
+      if (holdChanged || phaseMovedOn) return;
+      if (pending === 'slot_unavailable' || pending === 'expired') {
+        // Still the same hold and still in review: this verdict is ours. The
+        // wrapper recovers unless its own staleness guard fired, and calling
+        // it again is idempotent (the reservation is already cleared).
+        recoverFromDeadHold(pending === 'slot_unavailable' ? 'slot_conflict' : 'reservation_expired');
+        return;
+      }
+    }
+    if (acceptInFlightRef.current) return;
     acceptInFlightRef.current = true;
     setCtaPhase('submitting');
     setError(null);
@@ -6174,6 +6832,31 @@ function EstimateViewPageInner({ websiteMode = false }) {
           setPrepayChargeQuote(body.quote);
           setPrepayConsentChecked(false);
           setCtaPhase('review');
+          // Auto-extend trigger 3/3: this round trip (server quote render +
+          // the customer reading it before tapping "Confirm & pay") can burn
+          // real time against a timed hold. AWAITED behind the confirm latch
+          // (codex r6 P1): left fire-and-forget, a customer who taps
+          // "Confirm & pay" immediately could start /accept while this
+          // extension was still running — and if it found a conflict and
+          // deleted the hold, the accept failed with an unmapped
+          // RESERVATION_NOT_FOUND while the extension's own recovery was
+          // suppressed by the 'submitting' phase. The latch disables the CTA
+          // for the moment it takes, and extendHoldAndSettle consumes a
+          // definitive verdict itself.
+          // This accept attempt is OVER — the quote commits nothing — so the
+          // single-flight latch must drop before the extension (codex r7 P1):
+          // extendHold refuses to run while an accept is in flight, so the
+          // promised extension was silently 'skipped'. The confirm handoff
+          // latch stays, so a "Confirm & pay" tap still waits for it.
+          acceptInFlightRef.current = false;
+          confirmHandoffRef.current = true;
+          setInlineConfirmBusy(true);
+          try {
+            await extendHoldAndSettle();
+          } finally {
+            confirmHandoffRef.current = false;
+            setInlineConfirmBusy(false);
+          }
           return;
         }
         if (r.status === 402 && body.code === 'RECURRING_CARD_REQUIRED') {
@@ -6241,13 +6924,28 @@ function EstimateViewPageInner({ websiteMode = false }) {
             await loadEstimate();
             return;
           }
-          const expired = /expired|no active reservation/i.test(body.error || '');
-          setCtaPhase(expired ? 'reservation_expired' : 'slot_conflict');
-          setSlotsRefreshSignal((v) => v + 1);
-          setReservation(null);
-          setSelectedSlotId(null);
-          setSelectedSlotMeta(null);
-          setPaymentPreference(null);
+          // Server-supplied code first (RESERVATION_EXPIRED / SLOT_UNAVAILABLE)
+          // — the regex is a fallback only, for legacy 409 bodies that predate
+          // the code field.
+          const expired = body.code === 'RESERVATION_EXPIRED'
+            || (body.code == null && /expired|no active reservation/i.test(body.error || ''));
+          // The accept path returns the SAME no-booking bodies /reserve and
+          // /extend do, for a reshape that landed after the last successful
+          // extension (codex r17 P2). Routing those through slot_conflict
+          // told the customer their slot was taken and offered slot-retry UX
+          // for a flow that now books nothing — so they take the same
+          // 'configure' + reload recovery the extend verdict does.
+          if (body.commercialManualScheduling || body.invoiceOnlyAcceptance || body.reviewBeforeBooking
+            || body.code === 'BERMUDA_SUPPRESSION_GATED') {
+            recoverFromDeadHold('configure');
+            return;
+          }
+          // Same shared recovery as the countdown paths (codex r3 P1): a
+          // RELOADED page's adopted hold leaves acceptance.mode at
+          // existing_appointment, so clearing the reservation alone left the
+          // customer with recovery copy and no slot picker — and choosing a
+          // payment method re-adopted the dead hold.
+          recoverFromDeadHold(expired ? 'reservation_expired' : 'slot_conflict');
           return;
         }
         throw new Error(body.error || `accept failed: ${r.status}`);
@@ -6273,7 +6971,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
     } finally {
       acceptInFlightRef.current = false;
     }
-  }, [readOnlyPreview, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences]);
+  }, [readOnlyPreview, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences, extendHoldAndSettle, recoverFromDeadHold]);
 
   // Deposit-gated confirm (flat $49/$99, PR #1660). When the resolved policy
   // requires a deposit and none is collected yet, mint the intent and open
@@ -6356,7 +7054,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
       // mounted Payment Element mid-confirmSetup. inlineConfirmBusy drives
       // the CTA's disabled/label state instead; the ref is the synchronous
       // double-tap latch (ctaPhaseRef still reads 'review' during the await).
-      if (inlineConfirmBusyRef.current) return;
+      if (inlineConfirmBusyRef.current || confirmHandoffRef.current) return;
       inlineConfirmBusyRef.current = true;
       setInlineConfirmBusy(true);
       setError(null);
@@ -6373,6 +7071,28 @@ function EstimateViewPageInner({ websiteMode = false }) {
       }
       recurringCardSetupIntentIdRef.current = cardResult.setupIntentId;
       track(FUNNEL_EVENTS.ESTIMATE_CARD_STEP_COMPLETED, { estimate_id: data?.estimate?.id || null });
+      // Auto-extend trigger 2/3: the inline seamless capture just spent real
+      // time confirming the SetupIntent. Awaited, and a definitive answer
+      // stops this accept (codex r4 P1) — see handleCardHoldSuccess.
+      const holdBeforeExtend = reservationRef.current?.scheduledServiceId || null;
+      // Latched across the handoff (codex r5 P1): the capture latch is
+      // already released and the SetupIntent id is populated, so a second
+      // Confirm tap would skip capture and start /accept alongside the
+      // running extension — the very race this await exists to close. The
+      // disabled state comes along; the recovery-suppressing ref does not.
+      confirmHandoffRef.current = true;
+      setInlineConfirmBusy(true);
+      let holdOutcome;
+      try {
+        holdOutcome = await extendHoldAndSettle();
+      } finally {
+        confirmHandoffRef.current = false;
+        setInlineConfirmBusy(false);
+      }
+      if (holdOutcome === 'slot_unavailable' || holdOutcome === 'expired') return;
+      // Same abandoned-review guard as the modal paths (codex r4 P1).
+      if (ctaPhaseRef.current !== 'review'
+        || (reservationRef.current?.scheduledServiceId || null) !== holdBeforeExtend) return;
     }
     // Recurring card-on-file (dark until RECURRING_CARD_ON_FILE). When this
     // recurring accept owes an Auto Pay card and none is captured yet, mint
@@ -6485,21 +7205,72 @@ function EstimateViewPageInner({ websiteMode = false }) {
       }
     }
     await performAccept();
-  }, [data, inlineCardIntent, paymentPreference, serviceMode, token, performAccept, readOnlyPreview]);
+  }, [data, inlineCardIntent, paymentPreference, serviceMode, token, performAccept, readOnlyPreview, extendHoldAndSettle]);
 
   const handleDepositSuccess = useCallback(async (paymentIntentId) => {
     depositPaymentIntentIdRef.current = paymentIntentId;
     setDepositIntent(null);
+    // The deposit is PAID by the time we get here, so this is the one path
+    // where a dead hold costs the customer money (codex r8 P1): the modal can
+    // outlast the hold, and a rescue that already settled on a retryable miss
+    // leaves the acceptance boundary with nothing to await — /accept then
+    // answers RESERVATION_EXPIRED and a paying customer has no visit. Extend
+    // first, exactly like the card-success paths.
+    //
+    // On a definitive failure the shared settle has already put the customer
+    // on the slot picker; depositPaymentIntentIdRef is deliberately NOT
+    // cleared, so the accept after they re-pick replays the SAME payment
+    // intent rather than charging again.
+    const holdBeforeExtend = reservationRef.current?.scheduledServiceId || null;
+    confirmHandoffRef.current = true;
+    setInlineConfirmBusy(true);
+    let holdOutcome;
+    try {
+      holdOutcome = await extendHoldAndSettle();
+    } finally {
+      confirmHandoffRef.current = false;
+      setInlineConfirmBusy(false);
+    }
+    if (holdOutcome === 'slot_unavailable' || holdOutcome === 'expired' || holdOutcome === 'no_booking') return;
+    if (ctaPhaseRef.current !== 'review'
+      || (reservationRef.current?.scheduledServiceId || null) !== holdBeforeExtend) return;
     await performAccept();
-  }, [performAccept]);
+  }, [performAccept, extendHoldAndSettle]);
 
   const handleDepositCancel = useCallback(() => setDepositIntent(null), []);
 
   const handleCardHoldSuccess = useCallback(async (setupIntentId) => {
     cardHoldSetupIntentIdRef.current = setupIntentId;
     setCardHoldIntent(null);
+    // Auto-extend trigger 2/3: the card-hold capture modal just spent real
+    // time confirming the SetupIntent.
+    // AWAITED, and acceptance stops on a definitive answer (codex r4 P1):
+    // launching the extend and starting /accept together let the accept
+    // preflight read a row the extend was about to delete, and once accept
+    // set the phase to 'submitting' the extend's own staleness guard
+    // suppressed its conflict recovery — so the customer got an unmapped
+    // failure instead of "that time is gone, pick another".
+    // Go back is clickable across this await — inlineConfirmBusy is already
+    // cleared and the phase is still 'review' (codex r4 P1) — and
+    // handleReviewCancel leaves the server hold live, so continuing would
+    // accept the ABANDONED review's selections. Re-validate both the phase
+    // and the hold identity after the wait.
+    const holdBeforeExtend = reservationRef.current?.scheduledServiceId || null;
+    // Same handoff latch as the inline path (codex r5 P1).
+    confirmHandoffRef.current = true;
+    setInlineConfirmBusy(true);
+    let holdOutcome;
+    try {
+      holdOutcome = await extendHoldAndSettle();
+    } finally {
+      confirmHandoffRef.current = false;
+      setInlineConfirmBusy(false);
+    }
+    if (holdOutcome === 'slot_unavailable' || holdOutcome === 'expired') return;
+    if (ctaPhaseRef.current !== 'review'
+      || (reservationRef.current?.scheduledServiceId || null) !== holdBeforeExtend) return;
     await performAccept();
-  }, [performAccept]);
+  }, [performAccept, extendHoldAndSettle]);
 
   const handleCardHoldCancel = useCallback(() => setCardHoldIntent(null), []);
 
@@ -6511,8 +7282,35 @@ function EstimateViewPageInner({ websiteMode = false }) {
     recurringCardIntentOpenRef.current = false;
     setRecurringCardIntent(null);
     track(FUNNEL_EVENTS.ESTIMATE_CARD_STEP_COMPLETED, { estimate_id: data?.estimate?.id || null });
+    // Auto-extend trigger 2/3: the recurring-card capture modal just spent
+    // real time confirming the SetupIntent.
+    // AWAITED, and acceptance stops on a definitive answer (codex r4 P1):
+    // launching the extend and starting /accept together let the accept
+    // preflight read a row the extend was about to delete, and once accept
+    // set the phase to 'submitting' the extend's own staleness guard
+    // suppressed its conflict recovery — so the customer got an unmapped
+    // failure instead of "that time is gone, pick another".
+    // Go back is clickable across this await — inlineConfirmBusy is already
+    // cleared and the phase is still 'review' (codex r4 P1) — and
+    // handleReviewCancel leaves the server hold live, so continuing would
+    // accept the ABANDONED review's selections. Re-validate both the phase
+    // and the hold identity after the wait.
+    const holdBeforeExtend = reservationRef.current?.scheduledServiceId || null;
+    // Same handoff latch as the inline path (codex r5 P1).
+    confirmHandoffRef.current = true;
+    setInlineConfirmBusy(true);
+    let holdOutcome;
+    try {
+      holdOutcome = await extendHoldAndSettle();
+    } finally {
+      confirmHandoffRef.current = false;
+      setInlineConfirmBusy(false);
+    }
+    if (holdOutcome === 'slot_unavailable' || holdOutcome === 'expired') return;
+    if (ctaPhaseRef.current !== 'review'
+      || (reservationRef.current?.scheduledServiceId || null) !== holdBeforeExtend) return;
     await handleConfirm();
-  }, [data, handleConfirm]);
+  }, [data, handleConfirm, extendHoldAndSettle]);
 
   const handleRecurringCardCancel = useCallback(() => {
     recurringCardIntentOpenRef.current = false;
@@ -6788,8 +7586,14 @@ function EstimateViewPageInner({ websiteMode = false }) {
   }
   if (loadError) {
     return (
+      // The header stays: it is NOT blank on a failed load — Header falls back
+      // to "there" for the name and to UNIVERSAL_HEADLINE, so removing it
+      // deleted the page's framing from the outage state. What it must not do
+      // is render a second `h1`, since the state card now carries one (the
+      // `r2b` evidence run measured h1:2 here), so it renders the same copy as
+      // a <p>.
       <Page website={websiteMode}>
-        <Header customerFirstName={null} address={null} />
+        <Header customerFirstName={null} address={null} headingAs="p" />
         <PublicLoadError resource="estimate" onRetry={() => loadEstimate().catch(() => {
           setLoadError(true);
           setLoading(false);
@@ -7731,7 +8535,13 @@ function EstimateViewPageInner({ websiteMode = false }) {
     <>
           {existingAppointment ? (
             <>
-              <ExistingAppointmentCard appointment={existingAppointment} />
+              <ExistingAppointmentCard
+                appointment={existingAppointment}
+                secondsRemaining={countdownSeconds}
+                holdLimitReached={holdLimitReached}
+                onPickNewTime={() => recoverFromDeadHold('reservation_expired')}
+                busy={ctaPhase === 'submitting' || inlineConfirmBusy || replacingPaymentMethod}
+              />
               <PaymentPreferenceButtons
                 onSelect={handlePaymentChoice}
                 // Locked while an accept or the inline card confirmation is
@@ -7739,7 +8549,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
                 // unmounts the inline Payment Element mid-confirmSetup and
                 // the in-flight handleConfirm closure would book the OLD
                 // choice the UI no longer shows.
-                disabled={readOnlyPreview || ctaPhase === 'submitting' || inlineConfirmBusy}
+                disabled={readOnlyPreview || ctaPhase === 'submitting' || inlineConfirmBusy || recoveryInFlight || recoveryStuck}
                 serviceMode={serviceMode}
                 oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
                 extraInvoiceRows={rodentSetupInvoiceRows}
@@ -7860,6 +8670,12 @@ function EstimateViewPageInner({ websiteMode = false }) {
             existingAppointment={existingAppointment}
             paymentPreference={paymentPreference}
             secondsRemaining={countdownSeconds}
+            holdExpiresAt={reservation?.expiresAt || null}
+            holdChecking={holdChecking}
+            holdLimitReached={holdLimitReached}
+            extendingHold={extendingHold}
+            onExtendHold={extendHoldAndSettle}
+            onPickNewTime={() => recoverFromDeadHold('reservation_expired')}
             onConfirm={handleConfirm}
             onCancel={handleReviewCancel}
             submitting={ctaPhase === 'submitting' || inlineConfirmBusy || replacingPaymentMethod}
@@ -8047,7 +8863,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
                 // payment options the customer will get. Forcing cta.canAccept
                 // false server-side would fall through to the null-terminal
                 // "expired" card and destroy the preview's purpose.
-                disabled={readOnlyPreview || ctaPhase === 'submitting'}
+                disabled={readOnlyPreview || ctaPhase === 'submitting' || recoveryInFlight || recoveryStuck}
                 serviceMode={serviceMode}
                 oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
                 extraInvoiceRows={rodentSetupInvoiceRows}
@@ -8065,10 +8881,27 @@ function EstimateViewPageInner({ websiteMode = false }) {
           ) : null
   );
 
-  const slotIssueBanner = ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired' ? (
+  // A stuck recovery outranks the phase-specific banners: it is the reason
+  // the options on screen may be wrong (codex r10 P2).
+  const slotIssueBanner = recoveryStuck ? (
+    <SlotIssueBanner
+      kind="stale_hold"
+      onRetry={() => recoverFromDeadHold(ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired'
+        ? ctaPhase
+        : 'configure')}
+    />
+  ) : ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired' ? (
     <SlotIssueBanner
       kind={ctaPhase === 'reservation_expired' ? 'expired' : 'conflict'}
-      onRetry={() => setSlotsRefreshSignal((v) => v + 1)}
+      onRetry={() => {
+        // A recovery that failed its release or refresh is what actually
+        // blocks the picker (codex r4 P1) — retry THAT, not just the slots.
+        if (pendingRecoveryHoldRef.current) {
+          recoverFromDeadHold(ctaPhase === 'slot_conflict' ? 'slot_conflict' : 'reservation_expired');
+          return;
+        }
+        setSlotsRefreshSignal((v) => v + 1);
+      }}
     />
   ) : null;
 
@@ -8081,7 +8914,18 @@ function EstimateViewPageInner({ websiteMode = false }) {
         fees={(pricing.firstVisitFees?.length ? pricing.firstVisitFees : (setupFeeEffective ? [setupFeeEffective] : [])).map(tierAwareFee).filter(fee => Number(fee.amount) > 0)}
         bookingContent={<>{slotIssueBanner}{bookingContent}{paymentContent}</>} reviewContent={reviewContent}
         reviewing={!!reservation && (ctaPhase === 'review' || (ctaPhase === 'submitting' && !!inlineCardIntent))}
-        busy={ctaPhase === 'submitting'} timer={<CountdownLine secondsRemaining={countdownSeconds} />}
+        busy={ctaPhase === 'submitting'} timer={reservation?.expiresAt ? (
+          <HoldCountdownBar
+            secondsRemaining={countdownSeconds}
+            checking={holdChecking}
+            holdLimitReached={holdLimitReached}
+            extending={extendingHold}
+            onExtend={extendHoldAndSettle}
+            onPickNewTime={() => recoverFromDeadHold('reservation_expired')}
+            busy={ctaPhase === 'submitting' || inlineConfirmBusy || replacingPaymentMethod}
+            sticky={false}
+          />
+        ) : null}
         phone={WAVES_PHONE_DISPLAY} phoneHref={`tel:${WAVES_PHONE_TEL}`}
         callbackContent={<WebsiteCallbackButton token={token} />}
         canBook={canShowSlotPicker && cta.canAccept} error={<EstimateErrorBanner error={error} />}
@@ -8211,7 +9055,13 @@ function EstimateViewPageInner({ websiteMode = false }) {
             : null}
 
           {existingAppointment ? (
-            <ExistingAppointmentCard appointment={existingAppointment} />
+            <ExistingAppointmentCard
+                appointment={existingAppointment}
+                secondsRemaining={countdownSeconds}
+                holdLimitReached={holdLimitReached}
+                onPickNewTime={() => recoverFromDeadHold('reservation_expired')}
+                busy={ctaPhase === 'submitting' || inlineConfirmBusy || replacingPaymentMethod}
+              />
           ) : null}
 
           {paymentContent}

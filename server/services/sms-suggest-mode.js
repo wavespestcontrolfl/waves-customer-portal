@@ -114,6 +114,11 @@ const SUGGEST_WORKFLOW = 'sms_house_voice_suggest';
 const SUGGEST_AGENT_NAME = 'House Voice Drafter';
 const SUGGEST_DECISION_VERSION = 'house_voice_suggest_v1';
 const EXPIRY_HOURS = 48;
+// How long recoverSuggestionHoldingStates protects a reservation flagged
+// provider_outcome_uncertain before treating it as an ordinary orphan.
+// Bounded terminal settlement, not a resend: reopening only returns the
+// linked decision(s) to pending_review for operator visibility.
+const UNCERTAIN_RESERVATION_HOLD_HOURS = 24;
 
 // Human-authored/approved outbounds that really left the system — the same
 // ground-truth allowlists the shadow judge pairs against (sms-shadow-judge).
@@ -680,14 +685,86 @@ async function parkThreadSuggestions({ phoneLast10, excludeDecisionId }, dbh = d
 }
 
 /**
+ * Persist the existing sms_log holding marker with the decisions whose
+ * settlement depends on the provider result. Recovery can then tell a real
+ * orphan from a send whose outcome still needs reconciliation, even while the
+ * auto-send gate is off.
+ */
+async function createReplyHoldingReservation(dbh, {
+  to, customerId = null, fromNumber, body, adminUserId = null,
+  agentDecisionId = null, parkedDecisionIds = [], reservationKind = 'manual', uncertain = false,
+}) {
+  const metadata = {
+    [`${reservationKind}_send_reservation`]: true,
+    ...(uncertain ? { provider_outcome_uncertain: true } : {}),
+    ...(agentDecisionId ? { agent_decision_id: agentDecisionId } : {}),
+    ...(parkedDecisionIds.length ? { parked_decision_ids: parkedDecisionIds } : {}),
+  };
+  const [row] = await dbh('sms_log')
+    .insert({
+      customer_id: customerId,
+      direction: 'outbound',
+      from_phone: fromNumber,
+      to_phone: to,
+      message_body: body,
+      status: 'sending',
+      message_type: reservationKind === 'auto' ? 'ai_autosent' : 'manual',
+      admin_user_id: adminUserId,
+      metadata: JSON.stringify(metadata),
+    })
+    .returning('id');
+  return row?.id || null;
+}
+
+async function settleReplyHoldingReservation({ reservationId, uncertain = false, acceptedResult = null }) {
+  if (!reservationId) return true;
+  try {
+    if (acceptedResult) {
+      const updated = await db('sms_log')
+        .where({ id: reservationId, direction: 'outbound', status: 'sending' })
+        .update({
+          status: 'sent',
+          twilio_sid: acceptedResult.providerMessageId || null,
+          metadata: db.raw(
+            "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
+            [JSON.stringify({ provider_outcome: 'accepted' })]
+          ),
+          updated_at: new Date(),
+        });
+      return updated > 0;
+    }
+    if (uncertain) {
+      const updated = await db('sms_log')
+        .where({ id: reservationId, direction: 'outbound', status: 'sending' })
+        .update({
+          metadata: db.raw(
+            "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
+            [JSON.stringify({ provider_outcome_uncertain: true })]
+          ),
+          updated_at: new Date(),
+        });
+      return updated > 0;
+    }
+    await db('sms_log').where({ id: reservationId }).del();
+    return true;
+  } catch (err) {
+    // Recovery keeps a linked reservation while its decisions remain held and
+    // clears it after they settle, so bookkeeping failure stays fail-safe.
+    logger.warn(`[sms-auto-send] reply reservation settlement failed (${reservationId}): ${err.message}`);
+    return false;
+  }
+}
+
+/**
  * A human is about to reply to a thread from an operator surface that holds
  * no suggestion card (the tech portal's own-line text). The lifecycle the
  * admin composer runs inline, as one pair:
  *   reserveHumanReply — under the thread lock: back off when an autonomous
  *     reply (Phase E) is mid-send; leave the 'sending' marker its guard
  *     (threadHasLiveAnswer) sees; park the thread's pending suggestions.
- *   settleHumanReply — delete the marker; sent → parked suggestions are
- *     ignored (the human answered), not sent → they reopen.
+ *   settleHumanReply — settle the marker; sent → parked suggestions are
+ *     ignored (the human answered), not sent → they reopen, and an uncertain
+ *     result retains the linked marker for reconciliation.
  * The parked ids also ride the provider-created sms_log row (metadata
  * parkedDecisionIds) so a crash between Twilio's accept and settle is
  * recovered by the orphan sweep, exactly as the composer's send is.
@@ -698,52 +775,62 @@ async function reserveHumanReply({ to, customerId = null, fromNumber, body, admi
   // arrives AFTER this was never on the operator's screen and keeps its card.
   const startedAt = new Date();
   const base = { phoneLast10: threadLast10, startedAt };
-  if (!threadLast10) return { ...base, parkedDecisionIds: [], reservationId: null, autoSendInFlight: false };
+  if (!threadLast10) return { ...base, parkedDecisionIds: [], heldDecisionIds: [], reservationId: null, autoSendInFlight: false };
   const autoSend = require('./sms-auto-send');
   const { isEnabled } = require('../config/feature-gates');
   return db.transaction(async (trx) => {
     await lockSuggestThread(trx, threadLast10);
-    let reservationId = null;
-    if (isEnabled('smsAutoSend')) {
+    const autoSendEnabled = isEnabled('smsAutoSend');
+    if (autoSendEnabled) {
       if (await autoSend.hasActiveAutoSendClaim(trx, { threadLast10, customerId })) {
-        return { ...base, parkedDecisionIds: [], reservationId: null, autoSendInFlight: true };
+        return { ...base, parkedDecisionIds: [], heldDecisionIds: [], reservationId: null, autoSendInFlight: true };
       }
-      const [resv] = await trx('sms_log')
-        .insert({
-          customer_id: customerId,
-          direction: 'outbound',
-          from_phone: fromNumber,
-          to_phone: to,
-          message_body: body,
-          status: 'sending',
-          message_type: 'manual',
-          admin_user_id: adminUserId,
-          metadata: JSON.stringify({ manual_send_reservation: true }),
-        })
-        .returning('id');
-      reservationId = resv?.id || null;
     }
     const parkedDecisionIds = await parkThreadSuggestions({ phoneLast10: threadLast10 }, trx);
-    return { ...base, parkedDecisionIds, reservationId, autoSendInFlight: false };
+    // The gate controls only the autonomous-send interlock. A manual reply
+    // that actually parks decisions always needs durable recovery linkage.
+    const reservationId = autoSendEnabled || parkedDecisionIds.length
+      ? await createReplyHoldingReservation(trx, {
+        to, customerId, fromNumber, body, adminUserId, parkedDecisionIds,
+        // reserveHumanReply returns directly to the tech-line provider call;
+        // transaction failure aborts first, and any later transport timeout
+        // already has durable uncertainty linkage.
+        uncertain: true,
+      })
+      : null;
+    return { ...base, parkedDecisionIds, heldDecisionIds: parkedDecisionIds, reservationId, autoSendInFlight: false };
   });
 }
 
-async function settleHumanReply({ phoneLast10 = null, startedAt = null, parkedDecisionIds = [], reservationId = null, sent, reviewedBy, reason }) {
-  if (reservationId) {
-    await db('sms_log').where({ id: reservationId }).del().catch((delErr) => {
-      // Bounded: reconcileAutoSendClaims sweeps stale 'sending' reservations.
-      logger.warn(`[sms-auto-send] manual reservation cleanup failed (${reservationId}): ${delErr.message}`);
-    });
-  }
+async function settleHumanReply({ phoneLast10 = null, startedAt = null, parkedDecisionIds = [], heldDecisionIds = parkedDecisionIds, reservationId = null, sent, ambiguous = false, reviewedBy, reason }) {
+  // tech-line deliberately passes [] instead of its reserved parked ids for
+  // an ambiguous provider result, and sets `ambiguous: true` explicitly —
+  // needed because a reservation created solely to fence an in-flight
+  // auto-send (autoSendEnabled with no suggestion yet published) has
+  // heldDecisionIds: [] too, so the two cases can't be told apart from the
+  // decision-id arrays alone. A definite miss passes the real ids and
+  // reopens them below; a no-card, non-ambiguous reservation has no state
+  // to protect and can be removed.
+  const uncertain = !sent && reservationId && parkedDecisionIds.length === 0 && (ambiguous || heldDecisionIds.length > 0);
   if (!sent) {
+    await settleReplyHoldingReservation({ reservationId, uncertain });
     if (parkedDecisionIds.length) await reopenScheduledSuggestions({ decisionIds: parkedDecisionIds, reason: reason || 'The staff reply was not sent — suggestion reopened.' });
     return;
   }
-  if (parkedDecisionIds.length) await ignoreParkedSuggestions({ decisionIds: parkedDecisionIds, reviewedBy });
+  // Promote the reservation to accepted evidence before later bookkeeping.
+  // If the normal provider row or the ignore update failed, recovery can use
+  // this linked row instead of reopening cards on an answered thread.
+  await settleReplyHoldingReservation({ reservationId, acceptedResult: {} });
+  const ignored = parkedDecisionIds.length
+    ? await ignoreParkedSuggestions({ decisionIds: parkedDecisionIds, reviewedBy })
+    : 0;
   // The reserve transaction's lock released at its commit; a publish that
   // started before the reply can land between that commit and Twilio's
   // accept — the same interval the admin composer sweeps (codex #4072 r2 P1).
   await sweepStaleSuggestionsAfterReply({ phoneLast10, sendStartedAt: startedAt, reviewedBy, note: 'A staff reply to this thread was sent.' });
+  if (ignored === parkedDecisionIds.length) {
+    await settleReplyHoldingReservation({ reservationId });
+  }
 }
 
 /**
@@ -912,13 +999,23 @@ async function resolveSuggestionAfterSend({ decisionId, sentBody, reviewedBy }) 
  * suggest-mode gate, and a post-claim crash must never strand those rows
  * invisible.
  */
-async function recoverSuggestionHoldingStates({ orphanMinutes = 30 } = {}) {
-  // Short window on purpose: an immediate-send claim has NO backing sms_log
-  // row, so a crash mid-send leaves the card hidden until this reopens it —
-  // 30 minutes bounds that, and the NOT EXISTS live-row check below keeps
-  // genuinely queued sends untouched however long they wait. Runs from the
-  // 5-min scheduled-SMS cron as well as the nightly sweep.
+async function recoverSuggestionHoldingStates({ orphanMinutes = 30, uncertainReconciliationHours = UNCERTAIN_RESERVATION_HOLD_HOURS } = {}) {
+  // Short window on purpose: legacy immediate-send claims and pre-reservation
+  // failures can have no backing sms_log row. The NOT EXISTS check keeps queued
+  // sends and linked reply reservations untouched while delivery is unresolved.
+  // Runs from the 5-min scheduled-SMS cron as well as the nightly sweep.
   const cutoff = new Date(Date.now() - orphanMinutes * 60 * 1000);
+  // A reservation flagged provider_outcome_uncertain has no durable delivery
+  // evidence to wait on — Twilio never returned a SID, so the sent-linked
+  // sweep above can never resolve it. Protecting it indefinitely would hide
+  // the suggestion (and any auto-send claim) from every operator surface
+  // forever (codex P2). Bounded instead: it still blocks reopening while
+  // recent (the ordinary case — most uncertainty resolves within minutes),
+  // but past this window it is treated like any other orphan and reopened
+  // for operator visibility. Reopening only flips agent_decisions.status —
+  // it never touches sms_log or fires a send, so this cannot duplicate the
+  // text; it just stops silently swallowing a suggestion no one can act on.
+  const uncertainCutoff = new Date(Date.now() - uncertainReconciliationHours * 60 * 60 * 1000);
 
   // Sent-linked first: a 'scheduled' decision whose queued row already went
   // SENT means the cron crashed between its sent-update and resolution. The
@@ -973,7 +1070,13 @@ async function recoverSuggestionHoldingStates({ orphanMinutes = 30 } = {}) {
           sl.metadata->>'agent_decision_id' = ad.id::text
           OR jsonb_exists(COALESCE(sl.metadata->'parked_decision_ids', '[]'::jsonb), ad.id::text)
         )
-    )`)
+        AND (
+          (sl.metadata->>'manual_send_reservation' IS DISTINCT FROM 'true'
+            AND sl.metadata->>'auto_send_reservation' IS DISTINCT FROM 'true')
+          OR sl.created_at >= ?
+          OR (sl.metadata->>'provider_outcome_uncertain' = 'true' AND sl.updated_at >= ?)
+        )
+    )`, [cutoff, uncertainCutoff])
     .update({
       status: 'pending_review',
       correction_note: 'Scheduled send never fired — suggestion reopened by the recovery sweep.',
@@ -1037,6 +1140,8 @@ module.exports = {
   revertDraftsToShadow,
   markSuggestionScheduled,
   parkThreadSuggestions,
+  createReplyHoldingReservation,
+  settleReplyHoldingReservation,
   reserveHumanReply,
   settleHumanReply,
   sweepStaleSuggestionsAfterReply,

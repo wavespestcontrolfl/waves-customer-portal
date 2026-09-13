@@ -1,0 +1,6 @@
+# Written by scripts/verify-fallback-auditor-sandbox.sh. Do not edit by hand.
+# Commit it: the pre-push hook warns when the installed claude CLI or the
+# sandbox definition differs from what was last actually proved here.
+claude_version=2.1.258
+sandbox_fingerprint=d53d4e39ad85886d401772cc7ef46d83ea8979d9e5ed80207aea25d825bc51d5
+verified_at=2026-09-11T05:26:23Z

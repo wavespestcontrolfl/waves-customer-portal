@@ -65,4 +65,24 @@ function phoneMatchDigits(raw) {
   return /^1\d{10}$/.test(full) ? [full, full.slice(1)] : [full];
 }
 
-module.exports = { toE164, normalizePhone: toE164, isLikelyE164, phoneMatchDigits };
+// NANP-vs-international grouping key: same identity rule as smsThreadKey in
+// client/src/pages/admin/CommunicationsPageV2.jsx and the both-NANP
+// predicate in the inbound-sms-read blocked-numbers query — a NANP number
+// (bare 10 digits, 1+10 digits, or +1-prefixed) collapses to its last 10
+// digits so '+19415551234', '9415551234', and '(941) 555-1234' share one
+// bucket; any other country code keeps its full digits so it can never
+// collide with an unrelated NANP number that merely shares the same last
+// ten digits (codex #4213 — attaching the wrong customer to a shared-suffix
+// international number caused a real wrong-customer incident). Returns null
+// only for input with no digits at all.
+function phoneIdentityKey(raw) {
+  const text = typeof raw === 'string' ? raw.trim() : '';
+  const digits = text.replace(/\D/g, '');
+  if (!digits) return null;
+  const isNanp = /^1\d{10}$/.test(digits) || (!text.startsWith('+') && digits.length === 10);
+  return isNanp ? digits.slice(-10) : `+${digits}`;
+}
+
+module.exports = {
+  toE164, normalizePhone: toE164, isLikelyE164, phoneMatchDigits, phoneIdentityKey,
+};

@@ -955,7 +955,9 @@ async function updateReferralStatus(referralId, { status, adminNotes, lostReason
 // reward — the promoter balance / payout columns are tracking only). A one-time
 // service never qualifies. Idempotent: the referral's first_service_completed
 // flag is the single-use guard, re-checked under a row lock.
-async function creditReferralOnFirstService({ customerId, serviceId }) {
+// `notify: false` posts both credits but sends neither the reward SMS nor the
+// reward email — the quiet issued-invoice closeout (GitHub r12 P1 #4127).
+async function creditReferralOnFirstService({ customerId, serviceId, notify = true }) {
   if (!customerId || !serviceId) return null;
 
   const customer = await db('customers').where({ id: customerId }).first('id', 'phone', 'first_name');
@@ -1094,7 +1096,7 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
   if (outcome.skipped) return null;
 
   // Post-commit: notify the referrer their reward landed (non-critical).
-  if (outcome.referral.promoter_id) {
+  if (notify && outcome.referral.promoter_id) {
     try {
       const promoter = await db('referral_promoters').where({ id: outcome.referral.promoter_id }).first();
       if (promoter && promoter.customer_phone) {

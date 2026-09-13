@@ -43,7 +43,7 @@ function CustomerFailureScreen({ title, message, onRetry }) {
         }}>
           <Icon name="warning" size={22} strokeWidth={2} />
         </div>
-        <h1 style={{ margin: 0, fontSize: 20, fontWeight: 850, color: CUSTOMER_SURFACE.text, fontFamily: FONTS.heading }}>
+        <h1 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: CUSTOMER_SURFACE.text, fontFamily: FONTS.heading }}>
           {title}
         </h1>
         <p style={{ margin: '9px 0 21px', fontSize: 14, color: CUSTOMER_SURFACE.body, lineHeight: 1.55 }}>
@@ -61,7 +61,7 @@ function CustomerFailureScreen({ title, message, onRetry }) {
             border: '1px solid rgba(4,57,94,0.16)',
             borderRadius: 10,
             fontSize: 14,
-            fontWeight: 850,
+            fontWeight: 700,
             fontFamily: FONTS.heading,
             cursor: 'pointer',
           }}
@@ -124,7 +124,7 @@ class PageErrorBoundary extends Component {
             }}>
               <Icon name="warning" size={22} strokeWidth={2} />
             </div>
-            <div style={{ fontSize: 18, fontWeight: 850, color: COLORS.glassNavy, marginBottom: 8, fontFamily: FONTS.heading }}>Something went wrong</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: COLORS.glassNavy, marginBottom: 8, fontFamily: FONTS.heading }}>Something went wrong</div>
             <div style={{ fontSize: 13, color: '#64748B', marginBottom: 20, lineHeight: 1.5 }}>
             {this.state.error.message}
             </div>
@@ -136,7 +136,7 @@ class PageErrorBoundary extends Component {
               border: 'none',
               borderRadius: 8,
               fontSize: 14,
-              fontWeight: 850,
+              fontWeight: 700,
               fontFamily: FONTS.heading,
               cursor: 'pointer',
             }}>Reload Page</button>
@@ -294,7 +294,7 @@ function ChunkLoadFallback() {
         width: 'min(420px, 100%)', background: '#fff', border: '1px solid #E7E2D7',
         borderRadius: 8, padding: 24, textAlign: 'center', boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
       }}>
-        <div style={{ fontSize: 18, fontWeight: 850, color: COLORS.glassNavy, marginBottom: 8, fontFamily: FONTS.heading }}>
+        <div style={{ fontSize: 18, fontWeight: 700, color: COLORS.glassNavy, marginBottom: 8, fontFamily: FONTS.heading }}>
           Couldn&rsquo;t load this page
         </div>
         <div style={{ fontSize: 13, color: '#64748B', marginBottom: 20, lineHeight: 1.5 }}>
@@ -304,7 +304,7 @@ function ChunkLoadFallback() {
           onClick={() => { sessionStorage.removeItem('chunk-reload-attempted'); window.location.reload(); }}
           style={{
             minHeight: 42, padding: '0 18px', background: COLORS.glassNavy, color: '#fff',
-            border: 'none', borderRadius: 8, fontSize: 14, fontWeight: 850,
+            border: 'none', borderRadius: 8, fontSize: 14, fontWeight: 700,
             fontFamily: FONTS.heading, cursor: 'pointer',
           }}
         >
@@ -359,6 +359,7 @@ function lazyWithRetry(factory) {
 const StaffDocumentLibrary = lazyWithRetry(() => import('./components/staffDocuments/Library'));
 const PortalPage = lazyWithRetry(() => import('./pages/PortalPage'));
 const ReportViewPage = lazyWithRetry(() => import('./pages/ReportViewPage'));
+const VisitSummaryPage = lazyWithRetry(() => import('./pages/VisitSummaryPage'));
 const ProjectReportViewPage = lazyWithRetry(() => import('./pages/ProjectReportViewPage'));
 const AdminReviewsPage = lazyWithRetry(() => import('./pages/admin/ReviewsPage'));
 const AdminDispatchPage = lazyWithRetry(() => import('./pages/admin/AdminDispatchPage'));
@@ -371,6 +372,7 @@ const AdminPipelinePage = lazyWithRetry(() => import('./pages/admin/EstimatesPag
 const AdminAgentEstimatePage = lazyWithRetry(() => import('./pages/admin/AgentEstimatePage'));
 const AdminCommercialProposalPage = lazyWithRetry(() => import('./pages/admin/CommercialProposalPage'));
 const TechHomePage = lazyWithRetry(() => import('./pages/tech/TechHomePage'));
+const PayGrowth = lazyWithRetry(() => import('./components/payGrowth/PayGrowth'));
 const TechProtocolsPage = lazyWithRetry(() => import('./pages/tech/TechProtocolsPage'));
 const LawnReportViewPage = lazyWithRetry(() => import('./pages/LawnReportViewPage'));
 const PestReportViewPage = lazyWithRetry(() => import('./pages/PestReportViewPage'));
@@ -612,7 +614,7 @@ function ProtectedRoute({ children }) {
               animation: 'portalPulse 1.4s ease infinite',
             }}
           />
-          <div style={{ fontSize: 17, fontWeight: 850, fontFamily: FONTS.heading }}>Loading your portal</div>
+          <div style={{ fontSize: 17, fontWeight: 700, fontFamily: FONTS.heading }}>Loading your portal</div>
           {/* Headline + logo only on a normal (fast) load — but while useAuth
               retries a transient failure, still tell the customer what's
               happening instead of an indefinite generic check. */}
@@ -655,6 +657,7 @@ export default function App() {
           <Route path="/report/project/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><ProjectReportViewPage /></WavesShell></Suspense>} />
           <Route path="/report/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><ReportViewPage /></WavesShell></Suspense>} />
           <Route path="/recap/:token" element={<RecapLinkRedirect />} />
+          <Route path="/visit/:token" element={<Suspense fallback={<div />}><WavesShell><VisitSummaryPage /></WavesShell></Suspense>} />
           <Route path="/pay/statement/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><StatementPayPage /></Suspense>} />
           <Route path="/pay/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><PayPage /></Suspense>} />
           <Route path="/receipt/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ReceiptPage /></Suspense>} />
@@ -699,6 +702,7 @@ export default function App() {
             <Route path="estimate" element={<Navigate to="/admin/pipeline?tab=new" replace />} />
             <Route path="protocols" element={<Suspense fallback={<RouteFallback label="Loading protocols..." />}><TechProtocolsPage /></Suspense>} />
             <Route path="documents" element={<Suspense fallback={<RouteFallback label="Loading documents..." />}><StaffDocumentLibrary /></Suspense>} />
+            <Route path="pay-growth" element={<Suspense fallback={<RouteFallback label="Loading pay and growth…" />}><PayGrowth /></Suspense>} />
             <Route path="lawn-diagnostic" element={<Suspense fallback={<RouteFallback label="Loading lawn diagnostic..." />}><TechLawnDiagnosticPage /></Suspense>} />
             <Route path="social-post" element={<Suspense fallback={<RouteFallback label="Loading social post..." />}><TechSocialPostPage /></Suspense>} />
           </Route>

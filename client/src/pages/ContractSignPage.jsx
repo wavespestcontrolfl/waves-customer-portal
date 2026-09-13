@@ -3,13 +3,15 @@ import { useParams } from 'react-router-dom';
 import DocumentActionBar from '../components/DocumentActionBar';
 import {
   WavesShell,
+  CustomerColumn,
   BrandCard,
   BrandButton,
   SerifHeading,
   HelpPhoneLink,
+  PublicStateCard,
 } from '../components/brand';
 import { useGlassSurface } from '../glass/glass-engine';
-import { DOC, DOC_COLUMN, DOC_EYEBROW, FS, FW, LH, SP, RADIUS, docInput } from '../theme-doc';
+import { DOC, DOC_EYEBROW, FS, FW, LH, SP, RADIUS, docInput } from '../theme-doc';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -25,14 +27,14 @@ function fmtDate(value) {
 function ContractError({ title, message }) {
   return (
     <WavesShell variant="customer" topBar="solid">
-      <div role="alert" className="waves-contract-page waves-contract-single" style={{ width: DOC_COLUMN }}>
-        <BrandCard padding={28}>
-          <SerifHeading style={{ marginTop: 0, marginBottom: SP.sm }}>{title}</SerifHeading>
-          <p style={{ margin: 0, color: DOC.ink, lineHeight: LH.body }}>
-            {message} Give us a call and we can help - <HelpPhoneLink tone="dark" inline />.
-          </p>
-        </BrandCard>
-      </div>
+      <CustomerColumn className="waves-contract-single">
+        {/* role="alert" moves off the column and onto the card, where the
+            message actually is. contact="none": the affordance has always been
+            the phone number inside the sentence, not a button pair. */}
+        <PublicStateCard state="not-found" title={title} contact="none">
+          {message} Give us a call and we can help - <HelpPhoneLink tone="dark" inline />.
+        </PublicStateCard>
+      </CustomerColumn>
     </WavesShell>
   );
 }
@@ -205,11 +207,11 @@ export default function ContractSignPage() {
   if (loading) {
     return (
       <WavesShell variant="customer" topBar="solid">
-        <div className="waves-contract-page waves-contract-single" style={{ width: DOC_COLUMN }}>
+        <CustomerColumn className="waves-contract-single">
           <BrandCard padding={28}>
             <div style={{ padding: '40px 20px', textAlign: 'center', color: DOC.muted }}>Loading contract...</div>
           </BrandCard>
-        </div>
+        </CustomerColumn>
       </WavesShell>
     );
   }
@@ -234,7 +236,7 @@ export default function ContractSignPage() {
 
   return (
     <WavesShell variant="customer" topBar="solid">
-      <div className="waves-contract-page" style={{ width: DOC_COLUMN }}>
+      <CustomerColumn>
         <div className="waves-flow-header">
           <div>
             <div style={{ ...DOC_EYEBROW, marginBottom: SP.xs }}>{documentKindLabel}</div>
@@ -378,7 +380,7 @@ export default function ContractSignPage() {
           </BrandCard>
         </div>
 
-      </div>
+      </CustomerColumn>
     </WavesShell>
   );
 }

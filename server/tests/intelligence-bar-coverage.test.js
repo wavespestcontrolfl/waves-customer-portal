@@ -1,5 +1,19 @@
 const { frontendSourceCensus, checkCoverage, coverageCounts } = require('../../scripts/check-ib-coverage');
 
+test('partial parity requires reviewed tested scopes and concrete remaining gaps', () => {
+  const action = { id: 'partial', fingerprint: 'changed', ui: { file: 'example.jsx', line: 1 } };
+  const record = { ...action, status: 'partially_verified', reviewedFingerprint: 'changed', tools: ['save'],
+    permission: 'admin', approval: 'ui_confirm', inputsAndEffects: 'Validated quantity; saves a request',
+    evidence: ['integration test'], verifiedScopes: ['admin'], remainingScopes: [{ scope: 'technician', reason: 'IB write policy remains read-only' }], review: 'scoped implementation review' };
+  expect(checkCoverage([action], { actions: [record] }, { save: {} })).toEqual([]);
+  for (const change of [{ evidence: [] }, { remainingScopes: [] }, { verifiedScopes: [] }, { review: null },
+    { verifiedScopes: [null] }, { verifiedScopes: [''] }, { verifiedScopes: ['   '] }, { review: ' ' },
+    { remainingScopes: [{ scope: ' ', reason: 'missing' }] }, { remainingScopes: [{ scope: 'technician', reason: '\t' }] }]) {
+    expect(checkCoverage([action], { actions: [{ ...record, ...change }] }, { save: {} })).toHaveLength(1);
+  }
+  expect(['verified', 'reviewed_exception'].includes(record.status)).toBe(false);
+});
+
 const source = `
 const save = async () => {
   await adminPostStrict('/admin/knowledge/sources', body);
@@ -117,6 +131,42 @@ test('shared admin wrappers with variable endpoints stay covered outside admin d
   expect(shared.map(row => row.operation.method).sort()).toEqual(['DELETE', 'GET', 'POST']);
   expect(shared.every(row => row.operation.resolution === 'unresolved')).toBe(true);
   expect(checkCoverage(shared, { actions: [] }, {})).toHaveLength(3);
+});
+
+test('a reviewed relocation retains unsupported coverage only for one unchanged call actually removed from its old site', () => {
+  const file = 'client/src/pages/admin/RelocationFixture.jsx';
+  const baselineSource = `function load() { return adminFetch('/admin/inventory/stats'); }`;
+  const movedSource = `function Page() { const load = useCallback(() => adminFetch('/admin/inventory/stats'), []); }`;
+  const [original] = frontendSourceCensus(baselineSource, file);
+  const [moved] = frontendSourceCensus(movedSource, file);
+  expect(moved.id).not.toBe(original.id);
+  expect(moved.fingerprint).toBe(original.fingerprint);
+  const oldRecord = { ...original, status: 'unmapped', baselineFingerprint: original.fingerprint };
+  const movedRecord = { ...moved, status: 'unmapped', baselineFingerprint: moved.fingerprint,
+    relocatedFrom: original.id, relocationReview: 'Unchanged stats read moved into the refresh callback' };
+  const manifest = { baselineCommit: 'abcdef1', actions: [oldRecord, movedRecord] };
+  const git = jest.spyOn(require('child_process'), 'execFileSync').mockImplementation((command, args) => {
+    if (command !== 'git') throw new Error('Unexpected command');
+    if (args[0] === 'merge-base') return '';
+    if (args[0] === 'show') return baselineSource;
+    throw new Error('Unexpected git read');
+  });
+  try {
+    jest.isolateModules(() => {
+      const { verifiedBaselineProof } = require('../../scripts/check-ib-coverage');
+      const identity = `${moved.id}:${moved.fingerprint}`;
+      expect(verifiedBaselineProof([moved], manifest).has(identity)).toBe(true);
+      expect(checkCoverage([moved], manifest, {}, verifiedBaselineProof([moved], manifest))).toEqual([]);
+      expect(verifiedBaselineProof([original, moved], manifest).has(identity)).toBe(false);
+      for (const change of [{ relocationReview: ' ' }, { relocatedFrom: 'invented' }, { baselineFingerprint: 'changed' }]) {
+        expect(verifiedBaselineProof([moved], { ...manifest, actions: [oldRecord, { ...movedRecord, ...change }] }).has(identity)).toBe(false);
+      }
+      const copied = { ...moved, id: 'copy' };
+      expect(verifiedBaselineProof([moved, copied], { ...manifest,
+        actions: [...manifest.actions, { ...movedRecord, id: copied.id }],
+      }).has(identity)).toBe(false);
+    });
+  } finally { git.mockRestore(); }
 });
 
 test('React state setters and lazy module imports are not requests', () => {

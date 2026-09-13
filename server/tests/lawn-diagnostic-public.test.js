@@ -277,7 +277,7 @@ describe('buildPublicLawnReport whitelisting', () => {
   // customer copy for a low/unknown finding (the v0.4 naming gate). Deliberately omits
   // "disease" (the generic "no specific pest or disease" fallback uses it) and "weed"
   // (specific weeds are genericized to "weed pressure" at any confidence, by design).
-  const GOVERNED_CAUSE = /\b(chinch|caterpillars?|armyworms?|sod\s?webworms?|grubs?|large patch(?:es)?|brown patch(?:es)?|gr[ae]y leaf|dollar spots?|fungus|fungal|leaf spots?|mold|mildew|insects?|drought|water stress)\b/i;
+  const GOVERNED_CAUSE = /\b(chinch(?:[\s‐‑‒–—-]*bugs?)?|caterpillars?|army[\s‐‑‒–—-]*worms?|sod[\s‐‑‒–—-]*webworms?|grubs?|large[\s‐‑‒–—-]*patch(?:es)?|brown[\s‐‑‒–—-]*patch(?:es)?|gr[ae]y[\s‐‑‒–—-]*leaf(?:[\s‐‑‒–—-]*spots?)?|dollar[\s‐‑‒–—-]*spots?|fungus(?:es)?|fungi|fungal|leaf[\s‐‑‒–—-]*spots?|mold(?:s|y)?|mildew(?:s|ed|y)?|rhizoctonial?|take[‐‑‒–—-]all(?:[\s‐‑‒–—-]*root[\s‐‑‒–—-]*rot)?|take[\s‐‑‒–—-]*all[\s‐‑‒–—-]*root[\s‐‑‒–—-]*rot|insects?|infestations?|drought(?:s|y)?|water[\s‐‑‒–—-]*stress|under[\s‐‑‒–—-]*water(?:ed|ing)?|wilt(?:s|ed|ing)?|nutsedges?|sedges?|crabgrass(?:es)?|dollarweeds?|clovers?|spurges?|chlorosis|(?:iron|nitrogen|magnesium)[\s‐‑‒–—-]*deficienc(?:y|ies))\b/i;
 
   // The diagnosis-driven, customer-facing fields — everything a cause name could leak
   // into. Excludes seasonal_context (server-generated SWFL education that legitimately
@@ -309,6 +309,25 @@ describe('buildPublicLawnReport whitelisting', () => {
       'Grubs in the soil',    // plural cause name — singular-only gates missed these
       'Dollar spots forming', // plural multi-word spot disease
       'Possible insect activity', // generic cause word, no named species
+      'Chinchbugs along the driveway',
+      'Army worms in the turf',
+      'Nutsedges along the walk',
+      'Sedges along the curb',
+      'Clovers spreading',
+      'Spurges near the drive',
+      'Crabgrass along the walk',
+      'Dollarweeds in the shade',
+      'Sod-webworm damage',
+      'Sod‑webworm damage',
+      'Large-patch activity',
+      'Leaf-spot activity',
+      'Gray-leaf-spot activity',
+      'Fungi spreading',
+      'Rhizoctonia rings',
+      'Take-all root rot',
+      'Take-all patch',
+      'Take all root rot',
+      'An infestation spreading',
     ])('low-confidence "%s" degrades to symptom-only copy', (name) => {
       const diag = sentDiagnostic({
         report_contract: JSON.stringify({
@@ -330,6 +349,18 @@ describe('buildPublicLawnReport whitelisting', () => {
       });
       expect(causeCopy(buildPublicLawnReport(diag))).not.toMatch(GOVERNED_CAUSE);
     });
+
+    test.each(['Sod-webworm', 'Large-patch', 'Leaf-spot', 'Gray-leaf-spot', 'Grayleaf spot', 'Greyleaf spot', 'Fungi', 'Iron deficiency', 'Rhizoctonia', 'Take-all', 'Fungal activity', 'Chinch bug pressure'])(
+      'moderate %s copy still strips confirmed-language claims', (name) => {
+        const diag = sentDiagnostic({
+          report_contract: JSON.stringify({
+            diagnosis: { primary_finding: name, confidence: 'moderate', findings: [{ name, confidence: 'moderate' }] },
+            customer_summary: `${name} is confirmed along the edge.`, watering: {},
+          }),
+        });
+        expect(buildPublicLawnReport(diag).summary).not.toMatch(/confirmed/i);
+      },
+    );
 
     test('positive control: a MODERATE finding still names its cause (invariant is not vacuous)', () => {
       const diag = sentDiagnostic({

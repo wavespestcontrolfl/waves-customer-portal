@@ -1,5 +1,6 @@
 const { correctEmailDomain, meetsConfidence } = require('../utils/email-typo-correction');
 const { looksGarbledTranscriptEmail } = require('../utils/intake-normalize');
+const { parseRawAddress, splitStreetLineUnit, splitUnitFirstLine, normalizeStreetLine, normalizeState, normalizeUnitLine, unitLineValueKey, unitAnywhereOnLine, STREET_SUFFIX_ALIASES } = require('../utils/address-normalizer');
 
 const SERVICE_AREA_COUNTIES = new Set(['Manatee', 'Sarasota', 'Charlotte', 'DeSoto']);
 
@@ -1071,7 +1072,7 @@ function canAutoRoute(extraction, opts = {}) {
   // would dispatch to the customer's on-file (already Google-verified) address
   // rather than one stated on this call.
   const knownCustomerHasAddress = !!(opts.knownCustomer && opts.knownCustomer.hasAddress);
-  const newAddressGiven = statesNewAddress(extraction);
+  const newAddressGiven = statesNewAddress(extraction, opts.knownCustomer);
   if (opts.failOpen && confirmedWithStart) {
     const aniPresent = String(opts.callerAni || '').replace(/\D/g, '').length >= 10;
     const knownCustomer = !!opts.knownCustomer;
@@ -1287,13 +1288,19 @@ function canAutoRoute(extraction, opts = {}) {
     };
   }
 
-  return { allowed: true, flags: finalFlags, failedOpenFlags: failedOpenFlags.length ? failedOpenFlags : undefined };
+  return {
+    allowed: true,
+    flags: finalFlags,
+    failedOpenFlags: failedOpenFlags.length ? failedOpenFlags : undefined,
+    ...(!avPositivelyValidated && dispatchesToOnFile ? { usesOnFileAddress: true } : {}),
+  };
 }
 
 // Suffix-insensitive street comparison shared by the shadow bridge and the
 // second-address check, so "123 Main St" and "123 Main Street" compare equal
 // (otherwise a benign expansion opens a false second_service_address review).
 const streetHouseNum = (s) => (String(s || '').trim().match(/^\d+/) || [''])[0];
+const STREET_SUFFIX_WORDS = new Set([...Object.keys(STREET_SUFFIX_ALIASES), ...Object.values(STREET_SUFFIX_ALIASES).map(value => value.toLowerCase())]);
 const streetNameOnly = (s) => String(s || '').toLowerCase().replace(/[.,#]/g, ' ')
   .replace(/^\s*\d+\s*/, '')
   .replace(/\b(st|street|ave|avenue|rd|road|dr|drive|ln|lane|ct|court|blvd|boulevard|cir|circle|pl|place|ter|terrace|way|trl|trail|pkwy|parkway|hwy|highway)\b/g, '')
@@ -1535,10 +1542,162 @@ const NEW_ADDRESS_FIELDS = [
   'subdivision_or_community', 'raw_text',
 ];
 
-/** Did the caller state a service address on this call at all? */
-function statesNewAddress(extraction) {
+/**
+ * Did the caller state a NEW service address on this call? A known
+ * customer's on-file address (opts.knownCustomer.addressLine1/addressCity/
+ * addressZip) may be passed so that RESTATING it — "1234 Sample Palm", "I'm
+ * in Parrish", "same zip" — is not mistaken for a second property. Live
+ * misses (2026-09-05): a matched customer who said only "I'm in Parrish"
+ * had the city-only fragment sent to Google, returned missing_component,
+ * and lost the on-file trust that would have booked the confirmed estimate.
+ * A restatement must AGREE with the file on every component it names; any
+ * conflicting street, city or ZIP is a new address and holds for review.
+ */
+function statesNewAddress(extraction, knownCustomer = null) {
   const sa = extraction?.property?.service_address || {};
-  return NEW_ADDRESS_FIELDS.some((k) => String(sa[k] || '').trim());
+  const state = normalizeState(sa.state);
+  const stated = (state && state !== 'FL') || NEW_ADDRESS_FIELDS.some((k) => String(sa[k] || '').trim());
+  if (!stated) return false;
+  return !restatesOnFileAddress(sa, knownCustomer);
+}
+
+const zip5Of = (v) => (String(v || '').match(/\d{5}/) || [''])[0];
+const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z ]/g, ' ').replace(/\s+/g, ' ').trim();
+// Canonical unit structure distinguishes Bldg 4 Apt 5 from Apt 45; a hyphen
+// between a digit and a letter is formatting (4-B = 4B), but a hyphen
+// between two DIGITS is a real separator (Apt 4-5 is not Apt 45 — codex
+// r10 P1), so only the former is dropped.
+const unitKey = value => unitLineValueKey(normalizeUnitLine(value)).replace(/(?<!\d)-|-(?!\d)/g, '');
+const statedValues = values => values.map(value => String(value || '').trim()).filter(Boolean);
+const UNIT_WORD = /^(?:#|apt|apartment|unit|ste|suite|bldg|building|fl|floor|lot|spc|space|rm|room)$/i;
+
+// codex P2: "Parrish FL" / "Parrish, FL 34219" / "34219 Parrish" restate the
+// on-file locality just as plainly as a bare "Parrish" — appending the
+// already-agreed state and/or ZIP must not turn a locality restatement into
+// unrecognized street evidence. True only when EVERY word of the phrase
+// (after stripping the "in / I'm in" lead-in and punctuation) is consumed by
+// the saved city, "FL"/"Florida", or the saved ZIP (zip5 or ZIP+4) — any one
+// unmatched word (e.g. "Heights" in "Parrish Heights FL") still falls
+// through to street-evidence comparison below.
+function rawIsPureLocalityPhrase(raw, savedCity, savedZip) {
+  if (!raw || !savedCity) return false;
+  const stripped = String(raw).trim()
+    .replace(/^(?:i\s*'?m\s+|i\s+am\s+|we\s*'?re\s+|we\s+are\s+)?in\s+/i, '')
+    .trim();
+  // Tokenize on anything that is not a letter, digit or ZIP+4 hyphen so
+  // punctuation never hides a token — and NEVER strip digits: a ZIP that
+  // is not the saved one ("34203 Parrish" against 34219) is a contradiction
+  // the caller voiced, not noise (codex r9 P1).
+  const tokens = stripped.toLowerCase().split(/[^a-z0-9-]+/).filter(Boolean);
+  if (!tokens.length) return false;
+  let consumedLocalityToken = false;
+  const cityWords = [];
+  for (const token of tokens) {
+    if (token === 'fl' || token === 'florida') {
+      consumedLocalityToken = true;
+      continue;
+    }
+    if (/\d/.test(token)) {
+      const zipHead = token.replace(/-\d{4}$/, '');
+      if (!savedZip || zipHead !== savedZip) return false;
+      consumedLocalityToken = true;
+      continue;
+    }
+    cityWords.push(token);
+  }
+  if (!cityWords.length) return consumedLocalityToken;
+  return cityKey(cityWords.join(' ')) === savedCity;
+}
+// Spoken directionals ("North Main Street") and the saved abbreviation
+// ("N Main St") are the same street (codex r9 P2) — canonicalize both sides
+// the way suffixes already are, so an AV-incomplete known-customer booking
+// still recognizes its own saved address.
+const DIRECTIONAL_ALIASES = {
+  north: 'n', south: 's', east: 'e', west: 'w',
+  northeast: 'ne', northwest: 'nw', southeast: 'se', southwest: 'sw',
+};
+function restatementStreetParts(line) {
+  const tokens = normalizeStreetLine(line).toLowerCase().split(/\s+/).filter(Boolean)
+    .map(token => String(STREET_SUFFIX_ALIASES[token] || DIRECTIONAL_ALIASES[token] || token).toLowerCase());
+  const house = /^\d+$/.test(tokens[0]) ? tokens.shift() : '';
+  const name = tokens.join(' ');
+  if (STREET_SUFFIX_WORDS.has(tokens[tokens.length - 1])) tokens.pop();
+  return { house, name, withoutSuffix: tokens.join(' ') };
+}
+
+function restatesOnFileAddress(sa, knownCustomer) {
+  const saved = knownCustomer || {};
+  const onFile = splitStreetLineUnit(saved.addressLine1);
+  if (!onFile.street || sa.subdivision_or_community) return false;
+  const raw = String(sa.raw_text || '').trim()
+    .replace(/,\s*same (?:as (?:before|always)|place|address)\.?$/i, '')
+    .replace(/^(?:over )?(?:on|at)\s+/i, '');
+  const { unit: leadingUnit, rest: rawAddress = raw } = splitUnitFirstLine(raw) || {};
+  const parsed = parseRawAddress(rawAddress);
+  const structured = statedValues([sa.street_line_1, sa.line1, sa.street]).map(splitStreetLineUnit);
+  // EVERY unit the raw phrase names is compared ("Apt 4, 500 Main St Apt 5"
+  // against on-file Apt 4 is a contradiction, not a restatement — codex
+  // r11 P1); a first-match pick let the later unit vanish.
+  // The parsed street's own unit is a FRAGMENT of the whole-line unit when
+  // the parser split a compound unit across line1/city ("Bldg 4 Apt 5" →
+  // line1 "… Bldg 4", city "Apt 5") — only consulted when the whole line
+  // carried no unit at all (codex r12 P2).
+  const rawUnits = [leadingUnit, unitAnywhereOnLine(rawAddress) || unitAnywhereOnLine(parsed.line1)].filter(Boolean);
+  // The comma-free parser reads an alphabetic unit value as a city + state
+  // ("100 Main St Apt CT" → city "Apt", state CT): a unit designator in the
+  // city slot is neither a locality nor geography (codex r12 P2).
+  const parsedCityIsUnitWord = UNIT_WORD.test(parsed.city || '');
+  const parsedCity = parsedCityIsUnitWord ? '' : parsed.city;
+  const parsedState = parsedCityIsUnitWord ? '' : parsed.state;
+  // …and that designator + value pair IS the caller's unit ("Apt CT"), which
+  // no unit detector recognizes on its own because the value is alphabetic.
+  if (parsedCityIsUnitWord && parsed.state && !rawUnits.length) rawUnits.push(`${parsed.city} ${parsed.state}`);
+  const savedUnit = unitKey(saved.addressLine2 || onFile.unit);
+  const units = statedValues([sa.street_line_2, sa.line2, sa.unit, sa.apt, ...rawUnits, ...structured.map(part => part.unit)]);
+  const cities = statedValues([sa.city, sa.locality]).map(cityKey);
+  const zips = statedValues([sa.postal_code, sa.zip, sa.zip_code, parsed.zip]).map(zip5Of);
+  const states = statedValues([sa.state, parsedState]).map(normalizeState);
+  const savedCity = cityKey(saved.addressCity);
+  const savedZip = zip5Of(saved.addressZip);
+  const comparisons = [
+    ...cities.map(value => [value, savedCity]), ...zips.map(value => [value, savedZip]),
+    ...states.map(value => [value, 'FL']), ...units.map(value => [unitKey(value), savedUnit]),
+  ];
+  if (comparisons.some(([value, expected]) => value && value !== expected)) return false;
+
+  // Ignore only positive locality restatements or a short acknowledgment.
+  // Every other raw phrase is compared as street evidence, including names
+  // with no house number or suffix; unknown words cannot disappear behind a city.
+  // Whole-phrase check only (codex r9 P1): cityKey() drops digits, so a
+  // "compare the letters to the city" shortcut let "34203 Parrish" pass as
+  // a plain "Parrish" — the contradictory ZIP vanished.
+  const rawIsLocality = raw === savedZip || rawIsPureLocalityPhrase(raw, savedCity, savedZip);
+  const acknowledgment = /^(?:yes|(?:the )?same (?:place|address|as before|as always))\.?$/i.test(raw);
+  const rawCity = cityKey(parsedCity);
+  // A city slot holding the TAIL of a compound raw unit ("Apt 5" of
+  // "Bldg 4 Apt 5") is that unit, not a locality.
+  const cityUnitLine = String(normalizeUnitLine(parsed.city) || '').toLowerCase();
+  const cityIsUnit = Boolean(cityUnitLine) && rawUnits.some((unit) => {
+    const line = String(normalizeUnitLine(unit) || '').toLowerCase();
+    return line === cityUnitLine || line.endsWith(` ${cityUnitLine}`);
+  });
+  const tailAgrees = [!rawCity, rawCity === savedCity, cityIsUnit].some(Boolean);
+  const streets = structured.map(part => part.street);
+  if (raw && !rawIsLocality && !acknowledgment) streets.push(tailAgrees ? splitStreetLineUnit(parsed.line1).street : rawAddress);
+  // A raw ZIP restatement carrying ordinary punctuation or ZIP+4 ("34219.",
+  // "34219-1234") is not the exact-string match rawIsLocality looks for, so it
+  // falls through to the push above — but a bare ZIP parses to an EMPTY
+  // street (parsed.line1 ''), and that phantom entry vetoed agreement on real,
+  // already-matched ZIP evidence below (codex P2). Only actual street text is
+  // street evidence; nothing the caller actually said disappears here.
+  const streetEvidence = streets.filter(Boolean);
+  // A building street alone cannot identify the saved apartment. City/ZIP
+  // only callers still use the complete on-file address at booking time.
+  if (savedUnit && streetEvidence.length && !units.length) return false;
+  const expected = restatementStreetParts(onFile.street);
+  const agree = streetEvidence.map(restatementStreetParts).every(part => part.name && [expected.name, expected.withoutSuffix].includes(part.name)
+    && (!part.house || part.house === expected.house));
+  return agree && [streetEvidence.length, cities.length, zips.length, acknowledgment, rawIsLocality && raw].some(Boolean);
 }
 
 /**
@@ -1558,7 +1717,7 @@ function statesNewAddress(extraction) {
 function dispatchesToOnFileAddress(extraction, opts = {}) {
   return !!(opts.failOpen
     && opts.knownCustomer && opts.knownCustomer.hasAddress
-    && !statesNewAddress(extraction));
+    && !statesNewAddress(extraction, opts.knownCustomer));
 }
 
 module.exports = {
@@ -1583,6 +1742,8 @@ module.exports = {
   BLOCKING_TRIAGE_FLAGS,
   CANONICAL_WRITE_BLOCKING_FLAGS,
   confirmedStartOnTheHour,
+  hasAgentCommittedEvidence,
+  etWallClockOfConfirmedStart,
   FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS,
   hasCanonicalWriteBlock,
   hasNameEmailMismatch,

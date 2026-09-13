@@ -12,6 +12,12 @@
  *   at 10/min (tighter than GET — actual writes). Subsequent accept call
  *   commits the reservation; abandoned reservations get reclaimed.
  *
+ * POST /api/public/estimates/:token/reserve/:scheduledServiceId/extend
+ *   Pushes a live hold's expiry out by another DEFAULT_HOLD_MINUTES, capped
+ *   at MAX_HOLD_MINUTES total lifetime since the hold's created_at (see
+ *   services/slot-reservation.js's extendReservation). Same 10/min budget as
+ *   /reserve.
+ *
  * POST /api/public/estimates/:token/ask
  *   Body: { question, selectedFrequency?, serviceMode?, askToken? }.
  *   Answers questions for the public estimate ask bar. Token link + askToken
@@ -860,6 +866,143 @@ router.delete('/:token/reserve/:scheduledServiceId', async (req, res) => {
   } catch (err) {
     logger.error(`[estimate-slots-public:release] ${err.message}`, { stack: err.stack });
     return res.status(500).json({ error: 'unable to release reservation' });
+  }
+});
+
+const HOLD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// POST /:token/reserve/:scheduledServiceId/extend — "extend my hold"
+// (2026-09-11 incident: a customer whose 15-min hold ticked over while she
+// was still entering payment believed she'd booked and paid). Pushes the
+// hold's expiry out by another DEFAULT_HOLD_MINUTES, capped at
+// MAX_HOLD_MINUTES total lifetime since the hold was created — same rate
+// budget as /reserve since it's a write. Same token/estimate gates as
+// /reserve; the underlying grace + cap contract lives in
+// slot-reservation.js's extendReservation.
+router.post('/:token/reserve/:scheduledServiceId/extend', reserveLimiter, async (req, res) => {
+  const token = req.params.token;
+  const scheduledServiceId = req.params.scheduledServiceId;
+  if (!token || !TOKEN_RE.test(token)) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  // UUID gate BEFORE any query (hold-grace self-audit): scheduled_services.id is a
+  // uuid column, so a malformed id would raise 22P02 and surface as a 500 —
+  // an error log, and a distinguishable response for what must be the same
+  // generic 404 an unknown hold gets.
+  if (!HOLD_ID_RE.test(String(scheduledServiceId || ''))) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  try {
+    const estimate = await db('estimates')
+      .where({ token })
+      .first('id', 'status', 'expires_at', 'archived_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
+    if (!estimate) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+    const callBlocked = await rejectCallSideBlockedEstimate(res, estimate);
+    if (callBlocked) return callBlocked;
+    const ineligible = rejectIneligibleEstimate(res, estimate);
+    if (ineligible) return ineligible;
+    // The SAME specialized no-booking guards /reserve applies (codex r5 P1),
+    // as ONE predicate used twice: here on the pre-txn read, and again inside
+    // the service under the estimate's row lock (codex r6 P1) — the route's
+    // read can go stale while the txn waits, and these shapes live in
+    // estimate_data, which the locked viewability check does not re-derive.
+    const noBookingRefusal = (row) => {
+      // The suppression gate belongs in the locked recheck too (codex r8 P2):
+      // staff can reshape an estimate into a Bermuda-suppression shape after
+      // the pre-txn rejectIneligibleEstimate passed, and extending then
+      // answers 200 for a quote the customer is refused everywhere else,
+      // holding capacity until the next refusal. Same body the pre-txn path
+      // returns.
+      const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
+      if (estimateDataCarriesBermudaSuppression(row.estimate_data)
+        && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
+        return {
+          status: 409,
+          body: {
+            error: 'This estimate includes an option that is temporarily unavailable. Please contact our office and we will refresh your quote.',
+            code: 'BERMUDA_SUPPRESSION_GATED',
+          },
+        };
+      }
+      if (isCommercialAutoEstimate(row)) {
+        return {
+          status: 409,
+          body: {
+            error: 'Commercial service is scheduled by our team — no self-booking.',
+            commercialManualScheduling: true,
+          },
+        };
+      }
+      if (isRodentGuaranteeOnlyEstimate(row, parseEstimateData(row))) {
+        return {
+          status: 409,
+          body: {
+            error: 'No appointment is needed for this renewal — accept without booking.',
+            invoiceOnlyAcceptance: true,
+          },
+        };
+      }
+      if (estimateTrenchingReviewRequired(parseEstimateData(row))) {
+        return { status: 409, body: TRENCHING_REVIEW_409 };
+      }
+      return null;
+    };
+    const preTxnRefusal = noBookingRefusal(estimate);
+    if (preTxnRefusal) return res.status(preTxnRefusal.status).json(preTxnRefusal.body);
+
+    try {
+      const { scheduledServiceId: extendedId, expiresAt } = await slotReservation.extendReservation({
+        estimateId: estimate.id,
+        scheduledServiceId,
+        // Re-run under the estimate's row lock with the LOCKED row.
+        revalidateEstimate: noBookingRefusal,
+      });
+      return res.json({
+        scheduledServiceId: extendedId,
+        expiresAt: expiresAt instanceof Date ? expiresAt.toISOString() : expiresAt,
+      });
+    } catch (svcErr) {
+      if (svcErr.code === 'RESERVATION_NOT_FOUND' || svcErr.code === 'ESTIMATE_NOT_FOUND' || svcErr.code === 'ESTIMATE_EXPIRED') {
+        return res.status(404).json({ error: 'Not found' });
+      }
+      if (svcErr.code === 'ESTIMATE_NO_BOOKING' && svcErr.response) {
+        // The locked revalidation refused — same body the pre-txn guard
+        // uses, so the client's existing handling applies unchanged.
+        return res.status(svcErr.response.status).json(svcErr.response.body);
+      }
+      if (svcErr.code === 'ESTIMATE_TERMINAL') {
+        return res.status(409).json({ error: 'Estimate is no longer active' });
+      }
+      if (svcErr.code === 'HOLD_LIMIT_REACHED') {
+        return res.status(409).json({
+          error: 'Your time-slot hold has reached its limit — pick a time again',
+          code: 'HOLD_LIMIT_REACHED',
+          expiresAt: svcErr.expiresAt instanceof Date ? svcErr.expiresAt.toISOString() : svcErr.expiresAt,
+        });
+      }
+      if (svcErr.code === 'SLOT_UNAVAILABLE') {
+        return res.status(409).json({
+          error: 'slot no longer available',
+          code: 'SLOT_UNAVAILABLE',
+          slotId: svcErr.slotId,
+        });
+      }
+      if (svcErr.code === 'RESERVATION_EXPIRED') {
+        // The blackout recheck's verdict (codex r10 P1): DEFINITIVE, not
+        // retryable. Unmapped it fell through to the catch-all 500, which the
+        // client treats as "no verdict" and keeps an unusable hold alive.
+        return res.status(409).json({
+          error: 'Your time-slot hold expired — pick a time again to finish signing up',
+          code: 'RESERVATION_EXPIRED',
+        });
+      }
+      throw svcErr;
+    }
+  } catch (err) {
+    logger.error(`[estimate-slots-public:extend] ${err.message}`, { stack: err.stack });
+    return res.status(500).json({ error: 'unable to extend hold', retry: true });
   }
 });
 

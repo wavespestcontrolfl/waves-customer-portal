@@ -72,6 +72,7 @@ import {
   Loader2,
   Mail,
   MessageSquare,
+  Ban,
   Mic,
   MicOff,
   PhoneCall,
@@ -264,7 +265,12 @@ const SMS_LOG_PAGE_SIZE = 500;
 // ── V2 helpers ────────────────────────────────────────────────
 
 function smsThreadKey(phone) {
-  return String(phone || "").replace(/\D/g, "").slice(-10) || "unknown";
+  const value = String(phone || "").trim();
+  const digits = value.replace(/\D/g, "");
+  if (!digits) return "unknown";
+  return /^1\d{10}$/.test(digits) || (!value.startsWith("+") && digits.length === 10)
+    ? digits.slice(-10)
+    : `+${digits}`;
 }
 
 // Canonical presence check for tracked customer bearer links: operators edit
@@ -537,10 +543,18 @@ function ConversationViewV2({
   onReply,
   onBack,
   onOpenProfile,
+  onMarkSpam,
 }) {
   const contactPhone = thread.contactPhone;
   const contactName = thread.customerName || contactPhone;
   const canOpenProfile = !!(thread.customerName && thread.customerId);
+  // Only a thread with no customer behind it can be spam. customerId is
+  // the authoritative link (a linked customer can lack a display name);
+  // a customer's or open lead's number is refused server-side anyway. The
+  // action is about a SENDER, so a thread the office started by texting an
+  // unlinked number (outbound only, nothing ever received) does not offer it.
+  const hasInbound = Array.isArray(thread.messages) && thread.messages.some((m) => m.direction === "inbound");
+  const canMarkSpam = !thread.customerId && !thread.customerName && !!contactPhone && hasInbound && typeof onMarkSpam === "function";
   return (
     <div className="flex flex-col h-full">
       {" "}
@@ -571,6 +585,18 @@ function ConversationViewV2({
           </div>{" "}
         </div>{" "}
         <div className="flex items-center gap-2 md:gap-3 shrink-0">
+          {canMarkSpam ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              className="flex-1 md:flex-none"
+              title="Block this number and mark the thread read"
+              onClick={() => onMarkSpam(thread)}
+            >
+              <Ban size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
+              Mark spam
+            </Button>
+          ) : null}
           <Button
             size="sm"
             variant="secondary"
@@ -844,6 +870,16 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   const [smsView, setSmsView] = useState("threads");
   const [activeThread, setActiveThread] = useState(null);
   const [smsSearch, setSmsSearch] = useState("");
+  // Blocked senders (blocked_numbers). /log does not exclude them, so a
+  // just-blocked thread would otherwise be rebuilt on reload and keep
+  // counting in All / Unknown / Unanswered (codex #4213). A NANP block is
+  // keyed like threads (last 10 digits); any other country code keeps its
+  // full digits so a foreign block can never hide a NANP thread sharing
+  // its suffix (the server enforces the same split).
+  const [blocked, setBlocked] = useState(() => new Set());
+  const blockedFromNumbers = (numbers) => {
+    return new Set(numbers.map(smsThreadKey).filter((key) => key !== "unknown"));
+  };
   // PR 4 — status filter chips, reply-from lock.
   const [statusFilter, setStatusFilter] = useState("all");
   const [threadLock, setThreadLock] = useState(null);
@@ -890,7 +926,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     return Promise.all([
       adminFetch(logUrl).catch(() => ({ messages: [] })),
       adminFetch("/admin/communications/stats").catch(() => null),
-    ]).then(([logData, statsData]) => {
+      adminFetch("/admin/communications/blocked-numbers").catch(() => null),
+    ]).then(([logData, statsData, blockedData]) => {
       if (
         requestSeq !== smsLoadSeqRef.current ||
         normalizedSearch !== smsSearchRef.current
@@ -904,6 +941,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       setSmsPage(logData.page || page);
       setSmsHasMore(!!logData.hasMore);
       setStats(statsData);
+      if (blockedData && Array.isArray(blockedData.numbers)) {
+        setBlocked(blockedFromNumbers(blockedData.numbers.map((b) => b.number)));
+      }
       setLoading(false);
     });
   }, [customer?.id]);
@@ -918,7 +958,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   }, [active, smsSearch, loadData]);
 
   const markMessagesRead = useCallback(
-    async (thread) => {
+    async (thread, { throwOnError = false } = {}) => {
       const threadMessages = Array.isArray(thread?.messages)
         ? thread.messages
         : Array.isArray(thread?.messagesList)
@@ -968,8 +1008,12 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           }),
         });
         notifyUnreadChanged();
-      } catch {
+      } catch (e) {
         loadData(smsSearch.trim());
+        // Callers that must observe a partial mark-spam/read failure (codex
+        // #4213 P2) opt in here; every other caller keeps today's
+        // fire-and-forget resync-and-swallow behavior.
+        if (throwOnError) throw e;
       }
     },
     [loadData, smsSearch],
@@ -1995,7 +2039,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       : "";
     const recentNewestMessages = customer
       ? customerMessages.filter((message) => message.channel === "sms"
-          && phoneKey(message.contactPhone) === requestRecipientKey
+          && smsThreadKey(message.contactPhone) === requestRecipientKey
           && phoneKey(message.ourEndpointId) === requestFromNumberKey).slice(0, 8)
       : activeThreadMatchesRecipient && Array.isArray(activeThread?.messages)
         ? activeThread.messages
@@ -2099,8 +2143,10 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     threadList.sort(
       (a, b) => new Date(b.lastTimestamp) - new Date(a.lastTimestamp),
     );
-    return threadList;
-  }, [messages]);
+    return blocked.size
+      ? threadList.filter((t) => !blocked.has(smsThreadKey(t.contactPhone)))
+      : threadList;
+  }, [messages, blocked]);
 
   useEffect(() => {
     if (!activeThread) return;
@@ -2190,6 +2236,43 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     });
     return { all: threads.length, unread, unanswered, unknown };
   }, [threads]);
+
+  // Mark spam: block the sender (future texts are dropped before they are
+  // logged), mark this thread read (it stops counting toward the badge and
+  // the nightly unanswered-texts digest), and return to the list. Only
+  // offered on threads with no customer behind them; the server refuses a
+  // customer's number (CUSTOMER_NUMBER) regardless.
+  const handleMarkSpam = async (thread) => {
+    const number = thread?.contactPhone;
+    if (!number) return;
+    if (!window.confirm(`Block ${number} as spam? Future texts AND calls from this number are rejected before they reach anyone, and this thread is marked read.`)) return;
+    try {
+      await adminFetch(`/admin/communications/blocked-numbers`, {
+        method: "POST",
+        body: JSON.stringify({ number, reason: "Marked spam from the SMS inbox" }),
+      });
+    } catch (e) {
+      alert(`Could not mark spam: ${e.message}`);
+      return;
+    }
+    // The block itself succeeded — leave and drop the thread from the
+    // operational lists regardless of what the read call below does.
+    setBlocked((prev) => {
+      const add = blockedFromNumbers([number]);
+      return new Set([...prev, ...add]);
+    });
+    setSmsView("threads");
+    setActiveThread(null);
+    loadData(smsSearch);
+    try {
+      // throwOnError: a swallowed read failure would leave the confirmation
+      // claiming "marked read" while the messages stay unread and reappear
+      // in the badge the moment the number is unblocked (codex #4213 P2).
+      await markMessagesRead(thread, { throwOnError: true });
+    } catch (e) {
+      alert(`${number} is blocked, but marking the thread read failed: ${e.message}. Its messages may still show as unread if this number is ever unblocked.`);
+    }
+  };
 
   const handleThreadReply = (contactPhone, ourNumber, customerId = null) => {
     setToNumber(contactPhone);
@@ -2925,6 +3008,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
               setActiveThread(null);
             }}
             onOpenProfile={(id) => setSelected360Id(id)}
+            onMarkSpam={handleMarkSpam}
           />{" "}
           {renderLoadMore("Load older SMS history")}
         </Card>

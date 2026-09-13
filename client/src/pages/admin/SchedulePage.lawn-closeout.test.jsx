@@ -352,6 +352,447 @@ it.each(['calculated', 'manual-amount', 'manual-unit', 'partial-zones', 'measure
   if (mode === 'manual-unit') expect(within(totals()[2].parentElement).getAllByRole('combobox')[1].value).toBe('gal');
 });
 
+// A hand-added product is ungoverned: its catalog per-1k rate and the derived
+// total prefill as on a non-defaults closeout (owner 2026-09-11); the tech
+// confirms rather than retypes, and an edit still re-derives / withdraws as
+// the manual-add case above pins.
+it('a manually added product with a catalog per-1k rate prefills its rate and derived total', async () => {
+  enableDefaults();
+  const added = { id: 'manual-talak', name: 'Fixture bifenthrin', category: 'insecticide', rate_unit: 'fl_oz', default_rate_per_1000: '0.5000', min_label_rate_per_1000: 0.25, max_label_rate_per_1000: 1 };
+  render(<CompletionPanel service={service} products={[...catalog, added]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: added.name } });
+  fireEvent.click(screen.getByText(added.name));
+  await waitFor(() => expect(totals()).toHaveLength(3));
+  expect(screen.getAllByPlaceholderText('Rate')[2].value).toBe('0.5');
+  expect(screen.getAllByPlaceholderText('Sq ft')[2].value).toBe('5000');
+  expect(totals()[2].value).toBe('2.5');
+  expect(screen.getByText('Suggested from the label rate for the visit area. Confirm the actual amount.')).toBeTruthy();
+  expect(screen.getByRole('button', { name: /complete & send recap/i }).disabled).toBe(false);
+  fireEvent.change(screen.getByLabelText('Area for this visit (sq ft)'), { target: { value: '4000' } });
+  await waitFor(() => expect(totals()[2].value).toBe('2'));
+  fireEvent.click(await screen.findByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].products[2]).toMatchObject({ productId: 'manual-talak', rate: 0.5, rateUnit: 'fl_oz', totalAmount: 2, amountUnit: 'fl_oz', areaValue: '4000' });
+});
+
+// A per-gallon rate is a tank concentration; gallons of finished mix turn it
+// into an applied quantity. One tank serves the whole mix, so gallons typed on
+// one row fill the other per-gallon rows that are still blank.
+it('a per-gallon product derives its total from gallons mixed, and shares them across the tank', async () => {
+  enableDefaults();
+  const taurus = { id: 'manual-taurus', name: 'Fixture termiticide', category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: '0.8' };
+  const surfactant = { id: 'manual-surf', name: 'Fixture surfactant', category: 'adjuvant', default_unit: 'fl_oz/gal', default_rate: '0.5' };
+  render(<CompletionPanel service={service} products={[...catalog, taurus, surfactant]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  let count = 2;
+  for (const product of [taurus, surfactant]) {
+    fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: product.name } });
+    fireEvent.click(screen.getByText(product.name));
+    count += 1;
+    await waitFor(() => expect(totals()).toHaveLength(count));
+  }
+  // The label band's low end prefills the rate; the total waits for gallons.
+  expect(screen.getAllByPlaceholderText('Rate')[2].value).toBe('0.8');
+  expect(totals()[2].value).toBe('');
+  expect(totals()[3].value).toBe('');
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '25' } });
+  await waitFor(() => expect(totals()[2].value).toBe('20'));
+  // Typed once: the second per-gallon row took the same tank volume.
+  expect(screen.getAllByPlaceholderText('Gal')[1].value).toBe('25');
+  expect(totals()[3].value).toBe('12.5');
+  // A hand-entered total is the actual and survives a gallons change.
+  fireEvent.change(totals()[3], { target: { value: '14' } });
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '30' } });
+  await waitFor(() => expect(totals()[2].value).toBe('24'));
+  expect(totals()[3].value).toBe('14');
+  fireEvent.click(await screen.findByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].products[2]).toMatchObject({ productId: 'manual-taurus', rate: 0.8, rateUnit: 'fl_oz/gal', totalAmount: 24, amountUnit: 'fl_oz' });
+  expect(submit.mock.calls[0][1].products[2].carrierGallons).toBeUndefined();
+});
+
+// The other order: gallons first, then a second tank product is remembered.
+// Adding it must not ask for the same tank volume again (pre-push audit P1).
+it('a per-gallon product added after the gallons were typed joins the same tank', async () => {
+  enableDefaults();
+  const taurus = { id: 'manual-taurus', name: 'Fixture termiticide', category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: '0.8' };
+  const surfactant = { id: 'manual-surf', name: 'Fixture surfactant', category: 'adjuvant', default_unit: 'fl_oz/gal', default_rate: '0.5' };
+  render(<CompletionPanel service={service} products={[...catalog, taurus, surfactant]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2), { timeout: 5000 });
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: taurus.name } });
+  fireEvent.click(screen.getByText(taurus.name));
+  await waitFor(() => expect(totals()).toHaveLength(3));
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '25' } });
+  await waitFor(() => expect(totals()[2].value).toBe('20'));
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: surfactant.name } });
+  fireEvent.click(screen.getByText(surfactant.name));
+  await waitFor(() => expect(totals()).toHaveLength(4));
+  expect(screen.getAllByPlaceholderText('Gal')[1].value).toBe('25');
+  expect(totals()[3].value).toBe('12.5');
+});
+
+// A correction to the tank must reach the rows that only followed it; a row
+// the tech gave its own gallons stops following (pre-push audit P1).
+it('a corrected tank volume cascades to followers and spares a row with its own gallons', async () => {
+  enableDefaults();
+  const taurus = { id: 'manual-taurus', name: 'Fixture termiticide', category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: '0.8' };
+  const surfactant = { id: 'manual-surf', name: 'Fixture surfactant', category: 'adjuvant', default_unit: 'fl_oz/gal', default_rate: '0.5' };
+  render(<CompletionPanel service={service} products={[...catalog, taurus, surfactant]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2), { timeout: 5000 });
+  let count = 2;
+  for (const product of [taurus, surfactant]) {
+    fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: product.name } });
+    fireEvent.click(screen.getByText(product.name));
+    count += 1;
+    await waitFor(() => expect(totals()).toHaveLength(count));
+  }
+  const gal = () => screen.getAllByPlaceholderText('Gal');
+  fireEvent.change(gal()[0], { target: { value: '25' } });
+  await waitFor(() => expect(totals()[3].value).toBe('12.5'));
+  // The follower tracks the correction rather than freezing at 25.
+  fireEvent.change(gal()[0], { target: { value: '30' } });
+  await waitFor(() => expect(totals()[2].value).toBe('24'));
+  expect(gal()[1].value).toBe('30');
+  expect(totals()[3].value).toBe('15');
+  // Its own gallons make it independent of the next correction.
+  fireEvent.change(gal()[1], { target: { value: '10' } });
+  await waitFor(() => expect(totals()[3].value).toBe('5'));
+  fireEvent.change(gal()[0], { target: { value: '40' } });
+  await waitFor(() => expect(totals()[2].value).toBe('32'));
+  expect(gal()[1].value).toBe('10');
+  expect(totals()[3].value).toBe('5');
+});
+
+// Three rows: a follower given its own gallons detaches alone and leaves the
+// rows still following the tank owner alone (Codex r1 P1).
+it('a follower given its own gallons does not drag the tank\'s other followers', async () => {
+  enableDefaults();
+  const mk = (id, rate) => ({ id, name: `Fixture tank ${id}`, category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: rate });
+  const [a, b, c] = [mk('tank-a', '1'), mk('tank-b', '2'), mk('tank-c', '4')];
+  render(<CompletionPanel service={service} products={[...catalog, a, b, c]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2), { timeout: 5000 });
+  let count = 2;
+  for (const product of [a, b, c]) {
+    fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: product.name } });
+    fireEvent.click(screen.getByText(product.name));
+    count += 1;
+    await waitFor(() => expect(totals()).toHaveLength(count));
+  }
+  const gal = () => screen.getAllByPlaceholderText('Gal');
+  fireEvent.change(gal()[0], { target: { value: '25' } });
+  await waitFor(() => expect(totals().slice(2).map(i => i.value)).toEqual(['25', '50', '100']));
+  // B goes on its own 10-gallon mix; C stays on A's tank.
+  fireEvent.change(gal()[1], { target: { value: '10' } });
+  await waitFor(() => expect(totals()[3].value).toBe('20'));
+  expect(gal()[2].value).toBe('25');
+  expect(totals()[4].value).toBe('100');
+  // Clearing B's override rejoins it to A's tank immediately, rather than
+  // leaving it blank until A is edited again (Codex r4 P2).
+  fireEvent.change(gal()[1], { target: { value: '' } });
+  await waitFor(() => expect(gal()[1].value).toBe('25'));
+  expect(totals()[3].value).toBe('50');
+  fireEvent.change(gal()[1], { target: { value: '10' } });
+  await waitFor(() => expect(totals()[3].value).toBe('20'));
+  // A second edit on detached B still leaves C alone — typing "12" is two
+  // edits, and the first must not make B an owner (pre-push audit P1).
+  fireEvent.change(gal()[1], { target: { value: '12' } });
+  await waitFor(() => expect(totals()[3].value).toBe('24'));
+  expect(gal()[2].value).toBe('25');
+  expect(totals()[4].value).toBe('100');
+  // A's correction still reaches C, and still not independent B.
+  fireEvent.change(gal()[0], { target: { value: '30' } });
+  await waitFor(() => expect(totals()[4].value).toBe('120'));
+  expect(gal()[1].value).toBe('12');
+  expect(totals()[3].value).toBe('24');
+  // A follower's dose is labelled by its own rate, never by a hand-picked
+  // unit — 160 fl oz, never "160 gal" (pre-push audit P1).
+  const cUnit = () => within(totals()[4].parentElement).getAllByRole('combobox')[1];
+  fireEvent.change(cUnit(), { target: { value: 'gal' } });
+  expect(cUnit().value).toBe('fl_oz');
+  fireEvent.change(gal()[0], { target: { value: '40' } });
+  await waitFor(() => expect(totals()[4].value).toBe('160'));
+  expect(cUnit().value).toBe('fl_oz');
+});
+
+// A per-gallon row on a NON-lawn lane (pest perimeter: area unit linear_ft)
+// never reached the lawn rate-unit branch, so the tank total and the hidden
+// gallons survived the unit change (Codex r1 P1).
+it('leaving per-gallon clears the tank on a non-lawn row too', async () => {
+  const shrubs = { ...service, serviceType: 'Tree & Shrub Care', completionProfile: { serviceKey: 'tree_shrub', requiresProducts: true }, waveguardTier: null };
+  const added = { id: 'manual-demand', name: 'Fixture foliar product', category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: '0.8' };
+  render(<CompletionPanel service={shrubs} products={[added]} onClose={() => {}} onSubmit={submit} />);
+  fireEvent.change(await screen.findByPlaceholderText('Search products...'), { target: { value: added.name } });
+  fireEvent.click(screen.getByText(added.name));
+  await waitFor(() => expect(totals()).toHaveLength(1));
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '25' } });
+  await waitFor(() => expect(totals()[0].value).toBe('20'));
+  const unit = () => within(totals()[0].parentElement).getAllByRole('combobox')[0];
+  fireEvent.change(unit(), { target: { value: 'g' } });
+  expect(totals()[0].value).toBe('');
+  expect(screen.queryAllByPlaceholderText('Gal')).toHaveLength(0);
+  // Back to per-gallon: no stale 25 gallons revives a quantity.
+  fireEvent.change(unit(), { target: { value: 'fl_oz/gal' } });
+  expect(screen.getAllByPlaceholderText('Gal')[0].value).toBe('');
+  expect(totals()[0].value).toBe('');
+});
+
+// A hand-picked amount unit must not relabel a derived tank dose: 0.8 fl oz/gal
+// x 30 is not "24 gal" (Codex r1 P1).
+it('changing the amount unit withdraws a derived tank total', async () => {
+  enableDefaults();
+  const added = { id: 'manual-taurus', name: 'Fixture termiticide', category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: '0.8' };
+  render(<CompletionPanel service={service} products={[...catalog, added]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2), { timeout: 5000 });
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: added.name } });
+  fireEvent.click(screen.getByText(added.name));
+  await waitFor(() => expect(totals()).toHaveLength(3));
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '25' } });
+  await waitFor(() => expect(totals()[2].value).toBe('20'));
+  const amountUnit = () => within(totals()[2].parentElement).getAllByRole('combobox')[1];
+  // The unit of a derived tank dose is the rate's: 0.8 fl_oz/gal x 25 is
+  // 20 fl oz and can never be relabelled 20 gal, which would deduct the wrong
+  // inventory quantity. Entering a total is how the tech takes the unit.
+  fireEvent.change(amountUnit(), { target: { value: 'gal' } });
+  expect(totals()[2].value).toBe('20');
+  expect(amountUnit().value).toBe('fl_oz');
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '30' } });
+  expect(totals()[2].value).toBe('24');
+  expect(amountUnit().value).toBe('fl_oz');
+  fireEvent.change(totals()[2], { target: { value: '26' } });
+  fireEvent.change(amountUnit(), { target: { value: 'gal' } });
+  expect(totals()[2].value).toBe('26');
+  expect(amountUnit().value).toBe('gal');
+});
+
+// The governed area and method handlers blank derived totals the plan cannot
+// express; a measured tank dose is not one of them (Codex r1 P1).
+it('a tank dose survives an application-area and a method change', async () => {
+  enableDefaults();
+  const added = { id: 'manual-taurus', name: 'Fixture termiticide', category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: '0.8' };
+  render(<CompletionPanel service={service} products={[...catalog, added]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2), { timeout: 5000 });
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: added.name } });
+  fireEvent.click(screen.getByText(added.name));
+  await waitFor(() => expect(totals()).toHaveLength(3));
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '25' } });
+  await waitFor(() => expect(totals()[2].value).toBe('20'));
+  fireEvent.click(screen.getAllByRole('button', { name: 'Back yard', exact: true }).at(-1));
+  expect(totals()[2].value).toBe('20');
+  fireEvent.change(within(totals()[2].parentElement).getAllByRole('combobox')[2], { target: { value: 'spot_treatment' } });
+  expect(totals()[2].value).toBe('20');
+  expect(screen.getAllByPlaceholderText('Gal')[0].value).toBe('25');
+});
+
+// Small doses keep the precision the record stores (Codex r1 P2).
+it('a fractional tank dose keeps its precision', async () => {
+  enableDefaults();
+  const added = { id: 'manual-micro', name: 'Fixture micro dose', category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: '0.03' };
+  render(<CompletionPanel service={service} products={[...catalog, added]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2), { timeout: 5000 });
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: added.name } });
+  fireEvent.click(screen.getByText(added.name));
+  await waitFor(() => expect(totals()).toHaveLength(3));
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '0.5' } });
+  await waitFor(() => expect(totals()[2].value).toBe('0.015'));
+});
+
+// A product added while one row sits on its own mix takes the TANK's volume,
+// not the detached row's (pre-push audit P1).
+it('a new product seeds from the tank owner, not a detached row', async () => {
+  enableDefaults();
+  const mk = (id, rate) => ({ id, name: `Fixture seed ${id}`, category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: rate });
+  const [a, b, c] = [mk('seed-a', '1'), mk('seed-b', '2'), mk('seed-c', '4')];
+  render(<CompletionPanel service={service} products={[...catalog, a, b, c]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2), { timeout: 5000 });
+  const add = async (product, expected) => {
+    fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: product.name } });
+    fireEvent.click(screen.getByText(product.name));
+    await waitFor(() => expect(totals()).toHaveLength(expected));
+  };
+  await add(a, 3);
+  await add(b, 4);
+  const gal = () => screen.getAllByPlaceholderText('Gal');
+  // B sets the tank; A then goes on its own mix and detaches.
+  fireEvent.change(gal()[1], { target: { value: '25' } });
+  await waitFor(() => expect(totals()[2].value).toBe('25'));
+  fireEvent.change(gal()[0], { target: { value: '10' } });
+  await waitFor(() => expect(totals()[2].value).toBe('10'));
+  await add(c, 5);
+  expect(gal()[2].value).toBe('25');
+  expect(totals()[4].value).toBe('100');
+});
+
+// A tank dose comes from the tank, not the square footage: neither a typed
+// product area nor a visit-area refresh may erase it (audit P1).
+it('a tank total survives product-area and visit-area changes', async () => {
+  enableDefaults();
+  const added = { id: 'manual-taurus', name: 'Fixture termiticide', category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: '0.8' };
+  render(<CompletionPanel service={service} products={[...catalog, added]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2), { timeout: 5000 });
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: added.name } });
+  fireEvent.click(screen.getByText(added.name));
+  await waitFor(() => expect(totals()).toHaveLength(3));
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '25' } });
+  await waitFor(() => expect(totals()[2].value).toBe('20'));
+  const card = () => within(totals()[2].parentElement);
+  fireEvent.change(card().getByPlaceholderText('Sq ft'), { target: { value: '1000' } });
+  expect(totals()[2].value).toBe('20');
+  fireEvent.change(screen.getByLabelText('Area for this visit (sq ft)'), { target: { value: '4000' } });
+  await waitFor(() => expect(totals()[0].value).toBe('12'));
+  expect(totals()[2].value).toBe('20');
+});
+
+// The governed path: a plan row whose suggested amount is unavailable, given
+// an actual rate and gallons, keeps its dose through a plan refresh — the
+// reconciliation used to blank every derived total the plan could not express
+// (Codex r1 P1).
+it('a governed plan row keeps its tank dose through a plan refresh', async () => {
+  enableDefaults();
+  mount();
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  const card = () => within(totals()[0].parentElement);
+  // The tech records what actually went out: a tank concentration.
+  fireEvent.change(card().getAllByRole('combobox')[0], { target: { value: 'fl_oz/gal' } });
+  fireEvent.change(card().getByPlaceholderText('Rate'), { target: { value: '0.8' } });
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '25' } });
+  await waitFor(() => expect(totals()[0].value).toBe('20'));
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh plan' }));
+  await waitFor(() => expect(totals()[1].value).toBe('10'));
+  expect(totals()[0].value).toBe('20');
+  expect(screen.getAllByPlaceholderText('Gal')[0].value).toBe('25');
+  fireEvent.click(await screen.findByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].products[0]).toMatchObject({ rate: '0.8', rateUnit: 'fl_oz/gal', totalAmount: 20, amountUnit: 'fl_oz' });
+});
+
+// Removing the tank's owner leaves its followers holding the same mix: the
+// next product added joins that tank rather than asking again (Codex r2 P2).
+it('the shared tank survives removing the row that owned it', async () => {
+  enableDefaults();
+  const mk = (id, rate) => ({ id, name: `Fixture heir ${id}`, category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: rate });
+  const [a, b, c] = [mk('heir-a', '1'), mk('heir-b', '2'), mk('heir-c', '4')];
+  render(<CompletionPanel service={service} products={[...catalog, a, b, c]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2), { timeout: 5000 });
+  const add = async (product, expected) => {
+    fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: product.name } });
+    fireEvent.click(screen.getByText(product.name));
+    await waitFor(() => expect(totals()).toHaveLength(expected));
+  };
+  await add(a, 3);
+  await add(b, 4);
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '25' } });
+  await waitFor(() => expect(totals()[3].value).toBe('50'));
+  // A owned the tank; remove it and B still holds the same 25-gallon mix.
+  fireEvent.click(screen.getAllByRole('button', { name: 'Remove product' })[2]);
+  await waitFor(() => expect(totals()).toHaveLength(3));
+  expect(screen.getAllByPlaceholderText('Gal')[0].value).toBe('25');
+  await add(c, 4);
+  expect(screen.getAllByPlaceholderText('Gal')[1].value).toBe('25');
+  expect(totals()[3].value).toBe('100');
+});
+
+// An owner that leaves per-gallon frees the slot just like removal does; the
+// rows still on its mix keep the tank, so a detached row's next edit cannot
+// propagate over them (pre-push audit P1).
+it('the tank survives its owner changing rate unit, and a detached row still cannot claim it', async () => {
+  enableDefaults();
+  const mk = (id, rate) => ({ id, name: `Fixture unit ${id}`, category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: rate });
+  const [a, b, c] = [mk('unit-a', '1'), mk('unit-b', '2'), mk('unit-c', '4')];
+  render(<CompletionPanel service={service} products={[...catalog, a, b, c]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2), { timeout: 5000 });
+  let count = 2;
+  for (const product of [a, b, c]) {
+    fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: product.name } });
+    fireEvent.click(screen.getByText(product.name));
+    count += 1;
+    await waitFor(() => expect(totals()).toHaveLength(count));
+  }
+  const gal = () => screen.getAllByPlaceholderText('Gal');
+  fireEvent.change(gal()[0], { target: { value: '25' } });
+  await waitFor(() => expect(totals()[4].value).toBe('100'));
+  fireEvent.change(gal()[1], { target: { value: '10' } });
+  await waitFor(() => expect(totals()[3].value).toBe('20'));
+  // A owned the tank; take it off per-gallon and C keeps the 25-gallon mix.
+  fireEvent.change(within(totals()[2].parentElement).getAllByRole('combobox')[0], { target: { value: 'fl_oz' } });
+  await waitFor(() => expect(screen.getAllByPlaceholderText('Gal')).toHaveLength(2));
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '12' } });
+  await waitFor(() => expect(totals()[3].value).toBe('24'));
+  expect(screen.getAllByPlaceholderText('Gal')[1].value).toBe('25');
+  expect(totals()[4].value).toBe('100');
+});
+
+// Converting a row into a per-gallon rate joins the mix already in the tank,
+// and clearing the tank lets the next entry establish it again (Codex r3 P2).
+it('a row converted to per-gallon joins the tank, and clearing the tank frees it', async () => {
+  enableDefaults();
+  const mk = (id, rate, unit) => ({ id, name: `Fixture join ${id}`, category: 'insecticide', ...(unit === 'gal' ? { default_unit: 'fl_oz/gal', default_rate: rate } : { rate_unit: 'fl_oz', default_rate_per_1000: rate }) });
+  const [a, b] = [mk('join-a', '0.8', 'gal'), mk('join-b', '2')];
+  render(<CompletionPanel service={service} products={[...catalog, a, b]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2), { timeout: 5000 });
+  let count = 2;
+  for (const product of [a, b]) {
+    fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: product.name } });
+    fireEvent.click(screen.getByText(product.name));
+    count += 1;
+    await waitFor(() => expect(totals()).toHaveLength(count));
+  }
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '25' } });
+  await waitFor(() => expect(totals()[2].value).toBe('20'));
+  // B is a per-1k product; switching it to a tank concentration joins the mix.
+  fireEvent.change(within(totals()[3].parentElement).getAllByRole('combobox')[0], { target: { value: 'fl_oz/gal' } });
+  await waitFor(() => expect(screen.getAllByPlaceholderText('Gal')).toHaveLength(2));
+  expect(screen.getAllByPlaceholderText('Gal')[1].value).toBe('25');
+  expect(totals()[3].value).toBe('50');
+  // Clearing the tank clears both doses and frees the owner slot, so an entry
+  // on the other row establishes the tank again rather than detaching.
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '' } });
+  await waitFor(() => expect(totals()[2].value).toBe(''));
+  expect(totals()[3].value).toBe('');
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[1], { target: { value: '10' } });
+  await waitFor(() => expect(totals()[3].value).toBe('20'));
+  expect(screen.getAllByPlaceholderText('Gal')[0].value).toBe('10');
+  expect(totals()[2].value).toBe('8');
+});
+
+// The recurring-pest default mix seeds house totals marked manual so a rate or
+// area edit cannot recompute them. Stating the carrier volume is the tech
+// saying what actually went out, so the seed gives way (Codex r5 P1).
+it('gallons replace a seeded pest-mix total', async () => {
+  const pest = { ...service, serviceType: 'Quarterly Pest Control', completionProfile: { serviceKey: 'pest', requiresProducts: true }, waveguardTier: null };
+  const surfactant = { id: 'mix-surf', name: 'Non-ionic surfactant', category: 'adjuvant', default_unit: 'fl_oz/gal', default_rate: '0.5' };
+  render(<CompletionPanel service={pest} products={[surfactant]} onClose={() => {}} onSubmit={submit} />);
+  // Seeded at the house total of 0.25, with a per-gallon rate.
+  await waitFor(() => expect(totals()).toHaveLength(1));
+  expect(totals()[0].value).toBe('0.25');
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '10' } });
+  await waitFor(() => expect(totals()[0].value).toBe('5'));
+  // Derived from here on: a correction tracks rather than sticking at 5.
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '20' } });
+  await waitFor(() => expect(totals()[0].value).toBe('10'));
+});
+
+it('a rate unit moving off per-gallon does not strand the tank total', async () => {
+  enableDefaults();
+  const added = { id: 'manual-taurus', name: 'Fixture termiticide', category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: '0.8' };
+  render(<CompletionPanel service={service} products={[...catalog, added]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2), { timeout: 5000 });
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: added.name } });
+  fireEvent.click(screen.getByText(added.name));
+  await waitFor(() => expect(totals()).toHaveLength(3));
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '25' } });
+  await waitFor(() => expect(totals()[2].value).toBe('20'));
+  // 20 fl oz of tank mix is not 0.8 fl oz per 1,000 sq ft of anything.
+  fireEvent.change(within(totals()[2].parentElement).getAllByRole('combobox')[0], { target: { value: 'fl_oz' } });
+  expect(totals()[2].value).toBe('4');
+  expect(screen.queryAllByPlaceholderText('Gal')).toHaveLength(0);
+  // Back again: the old tank volume is gone, so nothing re-drives a
+  // quantity from a stale 25 gallons (pre-push audit P1).
+  fireEvent.change(within(totals()[2].parentElement).getAllByRole('combobox')[0], { target: { value: 'fl_oz/gal' } });
+  expect(screen.getAllByPlaceholderText('Gal')[0].value).toBe('');
+  expect(totals()[2].value).toBe('');
+});
+
 it('a withdrawn suggestion requires actual units and method instead of displaying hidden fallbacks', async () => {
   enableDefaults();
   mount();
@@ -440,10 +881,12 @@ it('an "Additional work" protocol option is built from the catalog product, not 
   const selects = within(totals()[2].parentElement).getAllByRole('combobox');
   // Rate unit, amount unit and method come from the catalog row (Codex r6 P1:
   // a bare { id, name } read Hydretain's fl_oz as oz and broke the inventory
-  // conversion). The quantity itself stays an actual for the tech to enter.
+  // conversion). An optional row is added by hand, so its catalog per-1k rate
+  // and the derived total prefill like any other manual add (owner
+  // 2026-09-11); the quantity stays the tech's actual to confirm or edit.
   expect(selects.slice(0, 3).map((select) => select.value)).toEqual(['fl_oz', 'fl_oz', 'broadcast_spray']);
-  expect(totals()[2].value).toBe('');
-  expect(screen.getAllByPlaceholderText('Rate')[2].value).toBe('');
+  expect(screen.getAllByPlaceholderText('Rate')[2].value).toBe('6');
+  expect(totals()[2].value).toBe('30');
 });
 
 it.each([
@@ -463,7 +906,9 @@ it.each([
   // herbicide in its window while the catalog category alone reads it as spot
   // work. Without a mode on the option the catalog default still applies.
   expect(selects[2].value).toBe(expected);
-  expect(totals()[2].value).toBe('');
+  // Broadcast derives the label total over the visit area; spot work has no
+  // area to derive against, so the tech enters the actual.
+  expect(totals()[2].value).toBe(expected === 'broadcast_spray' ? '7.5' : '');
 });
 
 it('changing only the amount unit withdraws a plan-suggested total: blank through a refresh and a rate edit, and a typed total keeps its number under the chosen unit', async () => {
@@ -799,6 +1244,70 @@ it('a governed draft restored under an initial plan outage still submits its sav
   // server must plan and record against — not the full saved lawn.
   expect(submit.mock.calls[0][1].lawnProtocolCompletion).toEqual({ treatedSqft: 1000 });
 });
+
+it('an area-only governed draft (no default rows, nothing removed) restored under a plan outage is not deleted when a typed field is erased again', async () => {
+  withdrawDefaults = true;
+  enableDefaults();
+  const view = mount();
+  await waitFor(() => expect(screen.getByLabelText('Area for this visit (sq ft)')).toBeTruthy());
+  fireEvent.change(screen.getByLabelText('Area for this visit (sq ft)'), { target: { value: '1000' } });
+  const key = `waves_completion_draft_${service.id}`;
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(key)).lawnAreaOverride).toBe('1000'));
+  view.unmount();
+  failPlan = true;
+  mount();
+  await screen.findByText('Lawn plan unavailable.');
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  // Typing mints this mount's snapshot; erasing it again re-evaluates the
+  // draft. With no live defaults and nothing removed, the restored visit
+  // area alone must keep the draft alive — before the fix the form read as
+  // empty and the autosave deleted the draft, so a reload or billing detour
+  // lost the measured area and the ledger recorded it as null.
+  const notes = screen.getByPlaceholderText(/Notes about this service/);
+  fireEvent.change(notes, { target: { value: 'x' } });
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(key)).notes).toBe('x'), { timeout: 3000 });
+  fireEvent.change(notes, { target: { value: '' } });
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  expect(localStorage.getItem(key)).not.toBeNull();
+  expect(JSON.parse(localStorage.getItem(key)).lawnAreaOverride).toBe('1000');
+});
+
+it('an area-only draft restored while the completion flag is still cold keeps its area once the flag resolves under a plan outage', async () => {
+  withdrawDefaults = true;
+  enableDefaults();
+  const view = mount();
+  await waitFor(() => expect(screen.getByLabelText('Area for this visit (sq ft)')).toBeTruthy());
+  fireEvent.change(screen.getByLabelText('Area for this visit (sq ft)'), { target: { value: '1000' } });
+  const key = `waves_completion_draft_${service.id}`;
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(key)).lawnAreaOverride).toBe('1000'));
+  view.unmount();
+  failPlan = true;
+  delayFlags = true;
+  refetchFlags();
+  mount();
+  await waitFor(() => expect(flagResolvers).toHaveLength(1));
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  // While the flag is cold the flag-derived area clause reads false, so
+  // the autosave's verdict on this draft is provisional. Typing and erasing
+  // a field re-evaluates it in that state.
+  const notes = screen.getByPlaceholderText(/Notes about this service/);
+  fireEvent.change(notes, { target: { value: 'x' } });
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(key)).notes).toBe('x'), { timeout: 3000 });
+  fireEvent.change(notes, { target: { value: '' } });
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  // The flag resolves true while the plan request fails. The autosave
+  // re-evaluates on the flag itself (a dependency since Codex #4365 r2):
+  // the measured area is draft content under the resolved flag, so a later
+  // erase cycle, unmount or reload cannot lose it.
+  await act(async () => { flagResolvers[0](); });
+  await screen.findByText('Lawn plan unavailable.');
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(key) || 'null')?.lawnAreaOverride).toBe('1000'), { timeout: 3000 });
+  fireEvent.change(notes, { target: { value: 'y' } });
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(key)).notes).toBe('y'), { timeout: 3000 });
+  fireEvent.change(notes, { target: { value: '' } });
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  expect(JSON.parse(localStorage.getItem(key) || 'null')?.lawnAreaOverride).toBe('1000');
+}, 15000);
 
 it('changing visits after a governed draft was restored under a plan outage drops the first visit\'s area and rows', async () => {
   enableDefaults();

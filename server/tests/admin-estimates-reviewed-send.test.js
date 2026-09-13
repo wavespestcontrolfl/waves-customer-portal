@@ -87,11 +87,14 @@ const sendgrid = require('../services/sendgrid-mail');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { computeProposalTotals, normalizeProposal } = require('../services/estimate-proposal');
-const { gateEnvValue, isEnabled } = require('../config/feature-gates');
-const { GATED_SEND_AUTHORITY_SQL } = require('../services/pricing-authority-gate');
-const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
+const { gateEnvValue } = require('../config/feature-gates');
+jest.mock('../services/pricing-authority-gate', () => {
+  const actual = jest.requireActual('../services/pricing-authority-gate');
+  return { ...actual, gatedSendAuthorityPredicateApplies: jest.fn(() => false) };
+});
 
 let row;
+let groupRows;
 let mutations;
 
 function savedEstimate(overrides = {}) {
@@ -115,7 +118,7 @@ function dataOf(estimate = row) {
 function estimateDatabase(table) {
   const filters = [];
   const builder = {};
-  const matches = () => table === 'estimates' && filters.every((filter) => filter(row));
+  const matches = () => table === 'estimates' ? [row, ...groupRows].filter((candidate) => filters.every((filter) => filter(candidate))) : [];
   builder.where = jest.fn((key, value) => {
     if (typeof key === 'function') { key(builder); return builder; }
     for (const [field, expected] of Object.entries(typeof key === 'object' ? key : { [key]: value })) {
@@ -134,16 +137,18 @@ function estimateDatabase(table) {
   for (const method of ['whereRaw', 'orWhereRaw', 'orWhereNotNull', 'forUpdate', 'orderBy', 'limit', 'transacting']) builder[method] = jest.fn(() => builder);
   builder.orWhere = jest.fn((key) => { if (typeof key === 'function') key(builder); return builder; });
   builder.modify = jest.fn((callback) => { callback(builder); return builder; });
-  builder.first = jest.fn(async () => matches() ? structuredClone(row) : null);
-  builder.select = jest.fn(async () => matches() ? [structuredClone(row)] : []);
+  builder.first = jest.fn(async () => matches().length ? structuredClone(matches()[0]) : null);
+  builder.select = jest.fn(async () => matches().map((candidate) => structuredClone(candidate)));
   builder.update = jest.fn(async (patch) => {
     mutations.push({ table, patch });
-    if (!matches()) return 0;
+    const targets = matches();
+    if (!targets.length) return 0;
+    const target = targets[0];
     for (const [key, value] of Object.entries(patch)) {
       if (key === 'estimate_data' && value?.sql) {
-        if (value.bindings?.[0]) row.estimate_data = { ...dataOf(), ...JSON.parse(value.bindings[0]) };
-      } else if (key === 'status' && value?.sql) row.status = row.viewed_at ? 'viewed' : 'sent';
-      else row[key] = value;
+        if (value.bindings?.[0]) target.estimate_data = { ...dataOf(target), ...JSON.parse(value.bindings[0]) };
+      } else if (key === 'status' && value?.sql) target.status = target.viewed_at ? 'viewed' : 'sent';
+      else target[key] = value;
     }
     return 1;
   });
@@ -175,10 +180,10 @@ function scheduledAttempt({ key = 'synthetic-scheduled-attempt', startedAt, resu
 }
 
 beforeEach(() => {
-  isEnabled.mockImplementation(() => false);
   jest.clearAllMocks();
   gateEnvValue.mockReturnValue(false);
   row = savedEstimate();
+  groupRows = [];
   mutations = [];
   db.mockImplementation(estimateDatabase);
   sendgrid.isConfigured.mockReturnValue(true);
@@ -275,66 +280,91 @@ describe('commercial bid authoring', () => {
       expect(row).toEqual(before);
     }
   });
-  test.each([[false], [true]])('saving a longer fixed hold pushes the group\'s published members forward so the entry link keeps assembling the group (pre-push codex P1 on #4309; send gate on: %s)', async (sendGateOn) => {
+  test('saving a longer anchor hold changes only its own offer deadline (owner ruling on #4309 r7)', async () => {
     Object.assign(row, { status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'), estimate_group_id: 'synthetic-group', estimate_data: { proposal: { ...proposal(), validThrough: '2099-12-21' } } });
-    isEnabled.mockImplementation((flag) => flag === 'sendRequiresServerPricing' && sendGateOn);
-    const whereRawSql = [];
-    db.mockImplementation((table) => { const b = estimateDatabase(table); const raw = b.whereRaw; b.whereRaw = jest.fn((sql) => { whereRawSql.push(String(sql)); return raw(sql); }); return b; });
     const res = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-31' } });
-    expect(whereRawSql.some((sql) => /expired_unsent/.test(sql))).toBe(true);
-    // The revive never reaches a sibling that cannot render, and under the
-    // send gate never one that fails the pricing-authority verdict
-    // (pre-push codex P1 on #4270).
-    expect(whereRawSql.some((sql) => /linkage_invalidated_at/.test(sql))).toBe(true);
-    expect(whereRawSql.some((sql) => /invalidation_pending_at/.test(sql))).toBe(true);
-    expect(whereRawSql).toContain(REPRICE_PENDING_ABSENT_SQL);
-    expect(whereRawSql.includes(GATED_SEND_AUTHORITY_SQL)).toBe(sendGateOn);
     expect(res.statusCode).toBe(200);
-    const siblingExtension = mutations.find(({ patch }) => !patch.estimate_data && patch.expires_at);
-    expect(new Date(siblingExtension.patch.expires_at).toISOString()).toBe('2100-01-01T04:59:59.999Z');
-    // A sweep-expired published anchor is revived by the same write, never an unsent expiry.
-    expect(String(siblingExtension.patch.status?.sql ?? siblingExtension.patch.status)).toMatch(/WHEN status = 'expired' THEN \(CASE WHEN viewed_at IS NOT NULL THEN 'viewed' ELSE 'sent' END\)/);
-    expect(String(siblingExtension.patch.disposition?.sql ?? siblingExtension.patch.disposition)).toMatch(/expired_unviewed/);
+    // The anchor's own authored deadline — and nothing else — is its expiry.
     expect(row.expires_at.toISOString()).toBe('2100-01-01T04:59:59.999Z');
+    // No sibling is widened and none is revived: a sibling's offer is its own,
+    // so nothing about this save can change it. Group reachability is carried
+    // by groupLinkViewableThrough on this row instead.
+    const siblingExtension = mutations.find(({ patch }) => patch.status && patch.expires_at);
+    expect(siblingExtension).toBeUndefined();
+    const anchorData = row.estimate_data || {};
+    expect(Object.prototype.hasOwnProperty.call(anchorData, 'groupWidenFloorExpiresAt')).toBe(false);
   });
-  test('the push-forward revival carries the pricing-authority predicate while the rollout gate is on (GH codex P1 r5 on #4309)', async () => {
-    Object.assign(row, { status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'), estimate_group_id: 'synthetic-group', estimate_data: { proposal: { ...proposal(), validThrough: '2099-12-21' } } });
-    isEnabled.mockImplementation((flag) => flag === 'sendRequiresServerPricing');
-    const whereRawSql = [];
-    db.mockImplementation((table) => { const b = estimateDatabase(table); const raw = b.whereRaw; b.whereRaw = jest.fn((sql) => { whereRawSql.push(String(sql)); return raw(sql); }); return b; });
-    try {
-      const res = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-31' } });
-      expect(res.statusCode).toBe(200);
-      expect(whereRawSql).toContain(GATED_SEND_AUTHORITY_SQL);
-    } finally {
-      isEnabled.mockImplementation(() => false);
-    }
+  test.each([
+    ['newly authored', null],
+    ['lengthened', '2099-12-21'],
+  ])('a %s sibling hold extends the delivered anchor link while offers keep their own deadlines', async (_label, oldDate) => {
+    const anchor = savedEstimate({
+      id: 'published-anchor', status: 'sent', estimate_group_id: 'synthetic-group',
+      sent_at: new Date('2026-01-02T12:00:00.000Z'),
+      expires_at: new Date('2099-01-08T12:00:00.000Z'),
+      estimate_data: { deliveryState: { lastDeliveredAt: '2026-01-02T12:00:00.000Z' } },
+    });
+    groupRows.push(anchor);
+    Object.assign(row, {
+      status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'),
+      estimate_group_id: 'synthetic-group',
+      estimate_data: { groupPublishedByEstimateId: anchor.id, proposal: { ...proposal(), validThrough: oldDate } },
+    });
+    const result = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-31' } });
+    expect(result.statusCode).toBe(200);
+    expect(row.expires_at.toISOString()).toBe('2100-01-01T04:59:59.999Z');
+    expect(anchor.expires_at.toISOString()).toBe('2099-01-08T12:00:00.000Z');
+    expect(dataOf(anchor).groupLinkViewableThrough).toBe('2100-01-01T04:59:59.999Z');
+    expect(dataOf().groupLinkViewableThrough).toBeUndefined();
+
+    // A later shortening closes only this property's offer. The already
+    // delivered group link keeps its promised navigation lifetime.
+    const shorter = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-21' } });
+    expect(shorter.statusCode).toBe(200);
+    expect(row.expires_at.toISOString()).toBe('2099-12-22T04:59:59.999Z');
+    expect(dataOf(anchor).groupLinkViewableThrough).toBe('2100-01-01T04:59:59.999Z');
+    expect(anchor.expires_at.toISOString()).toBe('2099-01-08T12:00:00.000Z');
   });
-  test('shortening a fixed hold pulls members back off the obsolete widened expiry (GH codex P1 r4 on #4309)', async () => {
-    const oldExpiry = new Date('2100-01-01T04:59:59.999Z');
-    Object.assign(row, { status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'), expires_at: oldExpiry, estimate_group_id: 'synthetic-group',
-      estimate_data: { proposal: { ...proposal(), validThrough: '2099-12-31' } } });
-    // An ordinary sibling delivered on Jan 3 whose entry expiry this
-    // anchor's old date had widened; its own standard window ended Jan 10.
-    const sibling = savedEstimate({ id: 'synthetic-sibling', status: 'viewed', sent_at: new Date('2026-01-03T12:00:00.000Z'), viewed_at: new Date('2026-01-04T12:00:00.000Z'),
-      expires_at: oldExpiry, estimate_group_id: 'synthetic-group', estimate_data: {} });
+  test('a stale publication marker never extends an anchor from another group', async () => {
+    const formerAnchor = savedEstimate({
+      id: 'former-anchor', status: 'sent', estimate_group_id: 'former-group',
+      sent_at: new Date('2026-01-02T12:00:00.000Z'),
+      expires_at: new Date('2099-01-08T12:00:00.000Z'),
+    });
+    groupRows.push(formerAnchor);
+    Object.assign(row, {
+      status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'),
+      estimate_group_id: 'current-group',
+      estimate_data: { groupPublishedByEstimateId: formerAnchor.id, proposal: proposal() },
+    });
+    const result = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-31' } });
+    expect(result.statusCode).toBe(200);
+    expect(row.expires_at.toISOString()).toBe('2100-01-01T04:59:59.999Z');
+    expect(dataOf(formerAnchor).groupLinkViewableThrough).toBeUndefined();
+    expect(formerAnchor.expires_at.toISOString()).toBe('2099-01-08T12:00:00.000Z');
+  });
+  test('shortening a fixed hold rewrites only the anchor, because no sibling was ever widened (owner ruling on #4309 r7)', async () => {
+    const sibling = { ...row, id: 'sibling-1', status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'), estimate_group_id: 'synthetic-group' };
+    Object.assign(row, { status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'), estimate_group_id: 'synthetic-group', estimate_data: { proposal: { ...proposal(), validThrough: '2099-12-31' } } });
     const siblingUpdates = [];
     db.mockImplementation((table) => {
       const b = estimateDatabase(table);
-      let groupQuery = false; let targetId = null;
+      let targetId = null;
       const originalWhere = b.where.getMockImplementation();
-      b.where.mockImplementation((key, value) => { if (key?.estimate_group_id && !key.id) groupQuery = true; if (key?.id) targetId = key.id; return originalWhere(key, value); });
-      const originalSelect = b.select.getMockImplementation();
-      b.select.mockImplementation(async (...args) => (groupQuery ? [structuredClone(sibling)] : originalSelect(...args)));
+      b.where.mockImplementation((key, value) => { if (key?.id) targetId = key.id; return originalWhere(key, value); });
       const originalUpdate = b.update.getMockImplementation();
       b.update.mockImplementation(async (patch) => { if (targetId === sibling.id) { siblingUpdates.push(patch); return 1; } return originalUpdate(patch); });
       return b;
     });
     const res = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-21' } });
     expect(res.statusCode).toBe(200);
+    // The anchor follows its own new authored date.
     expect(row.expires_at.toISOString()).toBe('2099-12-22T04:59:59.999Z');
-    expect(siblingUpdates).toHaveLength(1);
-    expect(new Date(siblingUpdates[0].expires_at).toISOString()).toBe('2099-12-22T04:59:59.999Z');
+    // Nothing to pull back: a shrink cannot strand a sibling on an obsolete
+    // widened value when no widening ever happened. This is the whole reason
+    // the reconstruction pass and its saved floor could be deleted instead of
+    // repaired — the round-7 P2 regression lived in that pass.
+    expect(siblingUpdates).toHaveLength(0);
   });
   test('an older editor omitting validity preserves the saved price hold', async () => {
     gateEnvValue.mockReturnValue(false);

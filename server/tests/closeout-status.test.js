@@ -502,6 +502,34 @@ describe('closeout-status: invoice + invoice delivery', () => {
   });
 });
 
+describe('closeout-status: grouped summary evidence', () => {
+  test.each([
+    [[], 'pending'],
+    [['sent', 'suppressed'], 'done'],
+    [['sent', 'sent'], 'done'],
+    [['sent', 'failed'], 'pending'],
+    [['claimed', 'sent'], 'pending'],
+    [['sent', 'unknown_delivery'], 'unknown'],
+    [['sent'], 'pending'],
+    [['unknown_delivery', 'suppressed'], 'unknown'],
+    [['suppressed', 'suppressed'], 'not_required'],
+    [['failed', 'claimed'], 'pending'],
+    [['unknown_delivery', 'failed'], 'pending'],
+    [['claimed', 'unknown_delivery'], 'pending'],
+    [['unknown_delivery'], 'pending'],
+  ])('uses the packet delivery outcomes %j for the member report', (statuses, expected) => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({ delivery: null,
+      visitSummaryEffects: statuses.map((status, index) => ({ effect_type: index ? 'completion_email' : 'completion_sms', status })),
+    }));
+    expect(facts.reportDelivery.state).toBe(expected);
+    expect(facts.comms.state).toBe(expected);
+  });
+  test('an unavailable grouped delivery lookup stays unknown', () => {
+    const { facts } = deriveCloseoutFacts(closedOutInputs({ delivery: null, visitSummaryLookupFailed: true }));
+    expect(facts.reportDelivery).toMatchObject({ state: 'unknown', reason: 'visit_summary_lookup_failed' });
+  });
+});
+
 describe('closeout-status: comms + follow-up', () => {
   test('completionSmsStatus sent → done; deferred → pending; failed → failed', () => {
     const rec = (status) => ({ ...closedOutInputs().record, structured_notes: { completionSmsStatus: status } });

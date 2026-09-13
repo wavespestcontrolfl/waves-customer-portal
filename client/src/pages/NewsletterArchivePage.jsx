@@ -13,7 +13,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import NewsletterSignup from '../components/NewsletterSignup';
 import { COLORS as B, FONTS } from '../theme-brand';
-import { WavesShell } from '../components/brand';
+import { WavesShell, CustomerColumn, PublicStateCard } from '../components/brand';
 import { DOC_COLUMN_MAX } from '../theme-doc';
 import { useGlassSurface } from '../glass/glass-engine';
 import PublicLoadError from '../components/PublicLoadError';
@@ -57,7 +57,11 @@ function ArchiveBody({ html }) {
   const srcDoc = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><base target="_blank"><style>
     html,body{margin:0;padding:0;background:#fff;color:${TEXT};}
     body{font-family:${FONTS.body};font-size:16px;line-height:1.6;padding:20px;}
-    h1,h2,h3,h4{font-family:${FONTS.serif};color:${TEXT};line-height:1.25;letter-spacing:0;}
+    /* The system stack, not FONTS.serif (owner ruling C9, DECISIONS
+       2026-09-11). This iframe is sandboxed, so glass-theme.css cannot reach
+       inside it to enforce the sheet, and the serif it authored here was the
+       only serif on any glass surface. */
+    h1,h2,h3,h4{font-family:${FONTS.body};color:${TEXT};line-height:1.25;letter-spacing:0;}
     a{color:${B.wavesBlue};}
     img{max-width:100%;height:auto;}
     *{box-sizing:border-box;}
@@ -119,42 +123,45 @@ export default function NewsletterArchivePage() {
   if (status === 'error') {
     return (
       <WavesShell variant="customer" topBar="solid">
-        <div data-glass-clear="" style={{ background: PAGE_BG, flex: 1, padding: '48px 20px' }}>
+        {/* The shared column, same as the not-found branch below: the 48/20
+            wrapper gave this state a 20px gutter while its sibling had 16. */}
+        <CustomerColumn data-glass-clear="" style={{ background: PAGE_BG }}>
           <PublicLoadError resource="newsletter issue" onRetry={() => setLoadAttempt(a => a + 1)} />
-        </div>
+        </CustomerColumn>
       </WavesShell>
     );
   }
   if (status === 'notfound') {
     return (
       <WavesShell variant="customer" topBar="solid">
-      <div data-glass-clear="" style={{ background: PAGE_BG, flex: 1, padding: '56px 24px', textAlign: 'center' }}>
-        <h1 style={{ fontFamily: FONTS.serif, fontSize: 32, fontWeight: 500, letterSpacing: 0, color: TEXT, margin: '0 0 8px' }}>
-          We couldn't find that issue.
-        </h1>
-        <p style={{ fontFamily: FONTS.body, color: BODY, marginBottom: 24 }}>
-          It may have been removed or the link is incorrect.
-        </p>
-        <a
-          href="https://www.wavespestcontrol.com/newsletter/"
-          data-glass-accent=""
-          style={{
-            fontFamily: FONTS.ui,
-            fontSize: 14,
-            fontWeight: 700,
-            letterSpacing: 0,
-            color: '#fff',
-            background: B.glassNavy,
-            border: `1px solid ${B.glassNavy}`,
-            borderRadius: 8,
-            padding: '12px 22px',
-            textDecoration: 'none',
-            display: 'inline-block',
-          }}
-        >
-          See the latest issues
-        </a>
-      </div>
+        <CustomerColumn data-glass-clear="" style={{ background: PAGE_BG }}>
+          {/* contact="none": this page's terminal action has never been a phone
+              number — it points back at the newsletter index. */}
+          <PublicStateCard state="not-found" title="We couldn't find that issue." contact="none">
+            <p style={{ margin: '0 0 24px' }}>It may have been removed or the link is incorrect.</p>
+            <a
+              href="https://www.wavespestcontrol.com/newsletter/"
+              data-glass-accent=""
+              data-glass-size="primary"
+              style={{
+                fontFamily: FONTS.ui,
+                fontSize: 16,
+                fontWeight: 700,
+                letterSpacing: 0,
+                color: '#fff',
+                background: B.glassNavy,
+                border: `1px solid ${B.glassNavy}`,
+                borderRadius: 8,
+                minHeight: 48,
+                padding: '12px 22px',
+                textDecoration: 'none',
+                display: 'inline-block',
+              }}
+            >
+              See the latest issues
+            </a>
+          </PublicStateCard>
+        </CustomerColumn>
       </WavesShell>
     );
   }
@@ -191,59 +198,66 @@ export default function NewsletterArchivePage() {
         </div>
       </div>
 
-      {/* Subject + preview */}
-      <div style={{ maxWidth: DOC_COLUMN_MAX, margin: '0 auto', padding: '40px 24px 16px' }}>
-        <h1 style={{
-          fontFamily: FONTS.serif,
-          fontSize: 34,
-          fontWeight: 500,
-          color: TEXT,
-          letterSpacing: 0,
-          lineHeight: 1.15,
-          margin: '0 0 8px',
-        }}>
-          {post.subject}
-        </h1>
-        {post.previewText && (
-          <p style={{
-            fontFamily: FONTS.body,
-            fontSize: 15,
-            color: BODY,
-            lineHeight: 1.55,
-            margin: 0,
-          }}>{post.previewText}</p>
-        )}
-      </div>
-
-      {/* Body — sandboxed render of the email HTML */}
-      <div style={{ maxWidth: DOC_COLUMN_MAX, margin: '0 auto', padding: '0 24px' }}>
-        <div data-glass="card" style={{
-          background: '#fff',
-          border: `1px solid ${BORDER}`,
-          borderRadius: 8,
-          overflow: 'hidden',
-        }}>
-          <ArchiveBody html={post.htmlBody} />
+      {/* One CustomerColumn owns the width/gutter/top/bottom recipe for all
+          three content sections below (audit G-01) — the header strip above
+          is chrome and keeps its own inline maxWidth. Relative gaps between
+          the three sections (16 / 36) are the same values the page always
+          used; only the shared outer recipe moved into the primitive. */}
+      <CustomerColumn>
+        {/* Subject + preview */}
+        <div>
+          <h1 style={{
+            fontFamily: FONTS.serif,
+            fontSize: 34,
+            fontWeight: 500,
+            color: TEXT,
+            letterSpacing: 0,
+            lineHeight: 1.15,
+            margin: '0 0 8px',
+          }}>
+            {post.subject}
+          </h1>
+          {post.previewText && (
+            <p style={{
+              fontFamily: FONTS.body,
+              fontSize: 15,
+              color: BODY,
+              lineHeight: 1.55,
+              margin: 0,
+            }}>{post.previewText}</p>
+          )}
         </div>
-      </div>
 
-      {/* Inline signup CTA */}
-      <div style={{ maxWidth: DOC_COLUMN_MAX, margin: '0 auto', padding: '36px 24px 40px' }}>
-        <div data-glass="card" style={{
-          background: '#fff',
-          border: `1px solid ${BORDER}`,
-          borderRadius: 8,
-          padding: '24px 20px',
-          textAlign: 'center',
-        }}>
-          <NewsletterSignup
-            variant="light"
-            source="newsletter_archive"
-            heading="Want the next one in your inbox?"
-            blurb="Free, no spam, unsubscribe anytime."
-          />
+        {/* Body — sandboxed render of the email HTML */}
+        <div style={{ marginTop: 16 }}>
+          <div data-glass="card" style={{
+            background: '#fff',
+            border: `1px solid ${BORDER}`,
+            borderRadius: 8,
+            overflow: 'hidden',
+          }}>
+            <ArchiveBody html={post.htmlBody} />
+          </div>
         </div>
-      </div>
+
+        {/* Inline signup CTA */}
+        <div style={{ marginTop: 36 }}>
+          <div data-glass="card" style={{
+            background: '#fff',
+            border: `1px solid ${BORDER}`,
+            borderRadius: 8,
+            padding: '24px 20px',
+            textAlign: 'center',
+          }}>
+            <NewsletterSignup
+              variant="light"
+              source="newsletter_archive"
+              heading="Want the next one in your inbox?"
+              blurb="Free, no spam, unsubscribe anytime."
+            />
+          </div>
+        </div>
+      </CustomerColumn>
 
     </div>
     </WavesShell>

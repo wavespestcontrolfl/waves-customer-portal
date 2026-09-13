@@ -59,6 +59,11 @@ jest.mock('../services/annual-prepay-renewals', () => ({
 jest.mock('../services/stripe', () => ({
   chargeInvoiceWithSavedCard: jest.fn(),
 }));
+// Invoice issued ⇒ visit completed (GATE_INVOICE_ISSUED_CLOSES_VISIT): a
+// reconciled hand payment closes the visit it bills, after the commit.
+jest.mock('../services/invoice-issued-closeout', () => ({
+  closeOutVisitForIssuedInvoice: jest.fn(async () => ({ closed: false, reason: 'gate_off' })),
+}));
 
 const mockChargesRetrieve = jest.fn();
 const mockChargesList = jest.fn();
@@ -177,6 +182,7 @@ jest.mock('../models/db', () => {
 const express = require('express');
 const db = require('../models/db');
 const StripeService = require('../services/stripe');
+const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
 const reconcileRouter = require('../routes/admin-payments-reconcile');
 const invoicesRouter = require('../routes/admin-invoices');
 
@@ -316,6 +322,42 @@ describe('manual reconcile atomicity', () => {
     expect(db.__state.invoice.status).toBe('sent'); // NOT flipped
     expect(db.__state.invoice.collected_via).toBeUndefined();
     expect(db.__state.payments).toHaveLength(0);
+  });
+
+  // GitHub r4 P1 #4127: /reconcile is a hand-settlement writer like
+  // recordManualPayment — cash / check / off-platform money for a visit-
+  // linked invoice must reach the same invoice-issued closeout, AFTER the
+  // paid flip and ledger row committed, as the reconciling operator.
+  test('a committed cash reconcile runs the invoice-issued closeout as the operator, after the paid flip committed', async () => {
+    let statusAtCloseout = null;
+    closeOutVisitForIssuedInvoice.mockImplementationOnce(async () => {
+      statusAtCloseout = db.__state.invoice.status;
+      return { closed: true, visitId: 'svc-1', resumed: false };
+    });
+    const { status } = await post('/api/admin/payments-reconcile/reconcile', {
+      invoiceId: 'inv-1', collectedVia: 'check', amount: 100,
+    });
+    expect(status).toBe(200);
+    expect(closeOutVisitForIssuedInvoice).toHaveBeenCalledTimes(1);
+    expect(closeOutVisitForIssuedInvoice).toHaveBeenCalledWith({ invoiceId: 'inv-1', trigger: 'paid', actorTechnicianId: 'staff-1' });
+    expect(statusAtCloseout).toBe('paid');
+    expect(db.__state.payments).toHaveLength(1);
+  });
+
+  test('a refused reconcile (uncollectible / rolled back) never reaches the closeout', async () => {
+    db.__state.invoice = freshInvoice({ status: 'void' });
+    const refused = await post('/api/admin/payments-reconcile/reconcile', {
+      invoiceId: 'inv-1', collectedVia: 'cash', amount: 100,
+    });
+    expect(refused.status).toBe(409);
+    db.__state.invoice = freshInvoice();
+    db.__state.failPaymentsInsert = true;
+    const rolledBack = await post('/api/admin/payments-reconcile/reconcile', {
+      invoiceId: 'inv-1', collectedVia: 'cash', amount: 100,
+    });
+    expect(rolledBack.status).toBe(500);
+    expect(db.__state.invoice.status).toBe('sent');
+    expect(closeOutVisitForIssuedInvoice).not.toHaveBeenCalled();
   });
 
   test('an uncollectible invoice is rejected without writes', async () => {

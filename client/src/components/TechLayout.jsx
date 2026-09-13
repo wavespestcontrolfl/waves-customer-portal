@@ -1,10 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import { Outlet, useNavigate, useLocation, Link } from 'react-router-dom';
+import { TrendingUp } from 'lucide-react';
 import { getAdminAuthToken, getAdminDisplayName } from '../lib/adminAuth';
 import { refetchFlags } from '../hooks/useFeatureFlag';
 import AddToHomeScreenHint from './tech/AddToHomeScreenHint';
 import TechFieldShell from './tech/TechFieldShell';
 import useStaffDocumentsAvailable from '../hooks/useStaffDocumentsAvailable';
+import usePayGrowthAvailable from '../hooks/usePayGrowthAvailable';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -28,6 +30,7 @@ const NAV_ITEMS = [
   { path: '/tech/estimate', icon: '📋', label: 'Estimate', adminOnly: true },
   { path: '/tech/protocols', icon: '📖', label: 'Protocols' },
   { path: '/tech/documents', icon: '📄', label: 'Documents', controlledDocuments: true },
+  { path: '/tech/pay-growth', icon: <TrendingUp aria-hidden="true" />, label: 'Growth', payGrowth: true },
 ];
 
 export default function TechLayout() {
@@ -39,6 +42,7 @@ export default function TechLayout() {
     getAdminAuthToken() ? 'checking' : 'unauthenticated'
   ));
   const controlledDocumentsAvailable = useStaffDocumentsAvailable(authStatus === 'ready');
+  const payGrowthAvailable = usePayGrowthAvailable(authStatus === 'ready');
 
   useEffect(() => {
     const token = getAdminAuthToken();
@@ -233,7 +237,7 @@ export default function TechLayout() {
   };
 
   return (
-    <TechFieldShell techName={techName} techRole={techRole} documentsAvailable={controlledDocumentsAvailable}>
+    <TechFieldShell techName={techName} techRole={techRole} documentsAvailable={controlledDocumentsAvailable} payGrowthAvailable={payGrowthAvailable}>
     <div style={{
       minHeight: '100dvh',
       background: DARK.bg,
@@ -296,7 +300,7 @@ export default function TechLayout() {
         padding: '8px 0 env(safe-area-inset-bottom, 8px)',
         zIndex: 50,
       }}>
-        {NAV_ITEMS.filter((item) => (!item.adminOnly || techRole === 'admin') && (!item.controlledDocuments || controlledDocumentsAvailable)).map((item) => {
+        {NAV_ITEMS.filter((item) => (!item.adminOnly || techRole === 'admin') && (!item.controlledDocuments || controlledDocumentsAvailable) && (!item.payGrowth || payGrowthAvailable)).map((item) => {
           const active = isActive(item);
           return (
             <Link

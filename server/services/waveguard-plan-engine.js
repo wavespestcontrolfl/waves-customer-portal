@@ -1284,10 +1284,35 @@ function summarizeTurfProfileCompleteness(profile) {
   };
 }
 
+// customers.billing_mode arrived with migration 20260709000010; a database
+// predating it must still plan (and complete) a visit, so the column is
+// selected only when it exists (Codex #4365 r3 P2). Callers that already
+// probed (completeScheduledService, the inventory forecast batch) pass
+// their result so one probe serves the whole unit of work; otherwise probe
+// here. Only a SUCCESSFUL probe answering false is a legacy schema. A probe
+// that cannot run or fails is unknown and fails the plan closed (Codex
+// #4365 r4 P2): reading it as absent would drop an explicit per_visit /
+// one_time lane and let a lingering tier restore governed defaults.
+async function customerBillingModeColumnExists(knex) {
+  if (typeof knex?.schema?.hasColumn !== 'function') {
+    throw new Error('customers.billing_mode probe unavailable: the database handle has no schema API');
+  }
+  try {
+    return (await knex.schema.hasColumn('customers', 'billing_mode')) === true;
+  } catch (err) {
+    const wrapped = new Error(`customers.billing_mode probe failed: ${err?.message || err}`);
+    wrapped.cause = err;
+    throw wrapped;
+  }
+}
+
 async function buildPlanForService(serviceId, options = {}) {
   const knex = options.db || db;
   const now = options.now || new Date();
   const completionDefaultsEnabled = options.completionDefaultsEnabled ?? lawnCompletionDefaultsEnabled();
+  const billingModeColumnExists = typeof options.billingModeColumnExists === 'boolean'
+    ? options.billingModeColumnExists
+    : await customerBillingModeColumnExists(knex);
 
   const service = await knex('scheduled_services as ss')
     .leftJoin('customers as c', 'ss.customer_id', 'c.id')
@@ -1297,6 +1322,7 @@ async function buildPlanForService(serviceId, options = {}) {
       'ss.*',
       'c.first_name', 'c.last_name', 'c.address_line1', 'c.address_line2', 'c.city', 'c.state', 'c.zip',
       'c.waveguard_tier', 'c.lawn_type',
+      ...(billingModeColumnExists ? ['c.billing_mode'] : []),
       't.name as technician_name',
     )
     .first();
@@ -1628,6 +1654,11 @@ async function buildPlanForService(serviceId, options = {}) {
       customerName: `${service.first_name || ''} ${service.last_name || ''}`.trim(),
       service: service.service_type,
       serviceTier: service.waveguard_tier || null,
+      // The explicit billing lane (customers.billing_mode): an explicit
+      // per_visit / one_time lane defeats a lingering legacy tier for
+      // protocol attribution, mirroring billing-lane's coverage rule
+      // (Codex #4113 batch 12, follow-up). null = unset / inferred.
+      billingMode: service.billing_mode || null,
       trackKey,
       trackName: track?.name || null,
       month,
@@ -1727,6 +1758,7 @@ async function buildPlanForService(serviceId, options = {}) {
 module.exports = {
   buildProductInventorySnapshot,
   buildPlanForService,
+  customerBillingModeColumnExists,
   selectProtocolVisit,
   calculateProductAmount,
   parseVisitNutrientTargets,

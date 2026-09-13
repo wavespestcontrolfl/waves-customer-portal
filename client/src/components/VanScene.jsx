@@ -65,7 +65,7 @@ export default function VanScene({ title, stamp, style }) {
         Look for this van
       </div>
       {title ? (
-        <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 800, fontFamily: FONTS.heading, lineHeight: 1.25, color: INK }}>
+        <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 700, fontFamily: FONTS.heading, lineHeight: 1.25, color: INK }}>
           {title}
         </div>
       ) : null}

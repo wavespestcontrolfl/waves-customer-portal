@@ -2,6 +2,7 @@ import React, { Suspense } from "react";
 import { useSearchParams } from "react-router-dom";
 import { BookOpen, Brain, Library } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import { UiSurface } from "../../components/ui";
 
 const KnowledgePage = React.lazy(() => import("./KnowledgePage"));
 const KnowledgeBasePage = React.lazy(() => import("./KnowledgeBasePage"));
@@ -28,8 +29,12 @@ export default function KnowledgeHubPage() {
   };
 
   return (
-    <div className="mx-auto max-w-[1300px]">
+    // The density context wraps the whole workspace rather than the header
+    // alone: a wrapper no taller than the header would become the sticky
+    // header's containing block and pin it out of view as the content scrolls.
+    <UiSurface density="comfortable" className="mx-auto max-w-[1300px]">
       <AdminCommandHeader
+        variant="workspace"
         title="Knowledge"
         icon={Library}
         sections={AREAS}
@@ -46,12 +51,18 @@ export default function KnowledgeHubPage() {
           </div>
         )}
       >
-        {area === "base" ? (
-          <KnowledgeBasePage embedded />
-        ) : (
-          <KnowledgePage embedded />
-        )}
+        {/* The children are still on legacy presentation -- their own
+            AdminCommandHeader reads the density from context, so the hub's
+            comfortable scope has to stop here. Migrated panels inside them
+            re-establish comfortable on their own surfaces. */}
+        <UiSurface density="legacy">
+          {area === "base" ? (
+            <KnowledgeBasePage embedded />
+          ) : (
+            <KnowledgePage embedded />
+          )}
+        </UiSurface>
       </Suspense>
-    </div>
+    </UiSurface>
   );
 }

@@ -27,6 +27,29 @@ Every saved building line must map to exactly one form row. Programs, corrective
 Both form profiles require an explicit validity date. North Port also enforces December 21, 2026 or later: RFQ page 13 requires a 90-day hold after the bid due date, and Addendum No. 1 moves that date to September 22, 2026. If later addenda change the deadline, enter the corresponding later validity date and review the form profile. For Cove, confirm the submission date and set the required 90-day hold explicitly.
 
 Company/contact text and the Cove OCIP alternate are entered for each export. Signatures, signature dates, discounts, legal attestations, and other packet pages remain for manual completion. Downloading a filled price form does not submit a bid or establish that the full submission package is complete.
+### Offer deadline vs group-link viewability
+
+These are two separate things and they are stored separately. `estimates.expires_at`
+is always a single property's own **offer deadline** — its authored `Valid through`
+date, or the standard seven-day window — and no grouped sibling ever widens it.
+Acceptance, voice quoting, reminder eligibility, reminder copy, the CTA and every
+displayed deadline read it directly.
+
+The window during which the delivered group entry link keeps resolving is
+**group-link viewability**, held in `estimate_data.groupLinkViewableThrough` on the
+anchor whose token was delivered, and read by nothing but the token path. It exists
+because the delivered link is the anchor's token: an ordinary anchor's offer ends
+after seven days, and without a separate window the customer could no longer reach
+a fixed sibling valid for months. It is monotonic — a link already promised a date
+keeps it even if a hold is later shortened, because what closes is the offer, not
+the route to it. A reachable group of expired cards still renders every card as
+expired and refuses acceptance.
+
+Do not fold one into the other. Widening `expires_at` to carry reachability makes
+every reader that means "offer deadline" wrong by default, and it cannot be undone
+downstream: an ordinary row stores no authored date to recover.
+
+
 
 ## Implementation and verification
 

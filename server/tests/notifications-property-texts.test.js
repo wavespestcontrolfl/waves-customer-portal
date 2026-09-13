@@ -11,7 +11,7 @@ jest.mock('../models/db', () => { const fn = jest.fn(); fn.transaction = jest.fn
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../middleware/auth', () => ({ authenticate: (req, _res, next) => { req.customerId = 'c1'; req.customer = { id: 'c1', active: true, account_id: 'a1' }; next(); } }));
 jest.mock('../services/account-membership-email', () => ({ sendAccountUpdated: jest.fn(async () => ({})) }));
-jest.mock('../utils/customer-comms-lock', () => ({ lockCustomerComms: jest.fn(), withCustomerCommsLock: jest.fn(async (_db, _id, fn) => fn(require('../models/db'))) }));
+jest.mock('../utils/customer-comms-lock', () => ({ lockCustomerComms: jest.fn(), lockAssignedCustomerEmails: jest.fn(), withCustomerCommsLock: jest.fn(async (_db, _id, fn) => fn(require('../models/db'))) }));
 jest.mock('../services/service-contact-events', () => ({ recordServiceContactChanges: jest.fn(async () => {}) }));
 jest.mock('../services/account-properties', () => {
   const actual = jest.requireActual('../services/account-properties');

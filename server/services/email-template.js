@@ -87,9 +87,11 @@ const GLASS_THEME = {
   ctaBg: '#F5B520',
   ctaBgImage: 'linear-gradient(135deg,#FFDE78 0%,#F4B014 100%)',
   ctaBorder: '#FFEEB4',
-  // Glass keeps CTA text on the legacy navy deliberately — matches
-  // [data-glass-accent] in glass-theme.css, which pins #1B2C5B.
-  ctaText: '#1B2C5B',
+  // CTA ink on gold is #04395E (owner ruling C2, DECISIONS 2026-09-11). The
+  // comment this replaces claimed to match [data-glass-accent] in
+  // glass-theme.css while shipping a different navy — the sheet has pinned
+  // #04395E all along, so email gold CTAs rendered a token twin of the web's.
+  ctaText: '#04395E',
   // Match the live report action bar ([data-glass-accent]): 10px radius,
   // full-width gold bars. Label weight and size follow the customer sheet
   // (owner 2026-09-03 / batch D 2026-09-05): weights stop at 700, button
@@ -419,7 +421,7 @@ function glassPage(T, { preheader, title, contentHtml, msoWidth = 640 }) {
     .dm-page { background: #071F30 !important; background-image: none !important; }
     .dm-card { background: #0C2B42 !important; border-color: #1E4460 !important; }
     .dm-card a { color: #6CC1F0 !important; }
-    .dm-card a.dm-gold, a.dm-gold { color: #1B2C5B !important; }
+    .dm-card a.dm-gold, a.dm-gold { color: #04395E !important; }
     .dm-card a.dm-onnavy, a.dm-onnavy { color: #FFFFFF !important; }
     .dm-box span.dm-chip-lite { color: #04395E !important; }
     .dm-lightcard { background: #FFFFFF !important; }
@@ -441,7 +443,7 @@ function glassPage(T, { preheader, title, contentHtml, msoWidth = 640 }) {
   [data-ogsc] .dm-page, [data-ogsb] .dm-page { background: #071F30 !important; background-image: none !important; }
   [data-ogsc] .dm-card, [data-ogsb] .dm-card { background: #0C2B42 !important; border-color: #1E4460 !important; }
   [data-ogsc] .dm-card a { color: #6CC1F0 !important; }
-  [data-ogsc] .dm-card a.dm-gold, [data-ogsc] a.dm-gold { color: #1B2C5B !important; }
+  [data-ogsc] .dm-card a.dm-gold, [data-ogsc] a.dm-gold { color: #04395E !important; }
   [data-ogsc] .dm-card a.dm-onnavy, [data-ogsc] a.dm-onnavy { color: #FFFFFF !important; }
   [data-ogsc] .dm-box span.dm-chip-lite { color: #04395E !important; }
   [data-ogsc] .dm-lightcard, [data-ogsb] .dm-lightcard { background: #FFFFFF !important; }
@@ -482,7 +484,7 @@ function glassEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, foote
   const contentHtml = `${glassPillHeader(T)}
       <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:560px;">
         <tr><td align="left" style="padding:30px 4px 0 4px;">
-          <h1 class="dm-ink" style="margin:0 0 14px 0;font-family:${T.headingFont};font-size:34px;line-height:1.08;letter-spacing:-0.03em;color:${T.ink};font-weight:700;">${heading}</h1>
+          <h1 class="dm-ink" style="margin:0 0 14px 0;font-family:${T.headingFont};font-size:32px;line-height:1.08;letter-spacing:-0.03em;color:${T.ink};font-weight:700;">${heading}</h1>
           <div class="dm-page-text" style="font-family:${T.font};font-size:16px;line-height:1.6;color:${T.body};">
             ${intro}
           </div>

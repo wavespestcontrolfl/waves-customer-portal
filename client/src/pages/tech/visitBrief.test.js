@@ -5,6 +5,7 @@ import {
   prepaidLine,
   quotedLineLabel,
   quotedTermsLabel,
+  recordlessVisitNeedsCloseout,
   shortAddress,
   smsHref,
   stopAccessIndicator,
@@ -12,6 +13,18 @@ import {
   telHref,
   visitMoneySummary,
 } from './visitBrief';
+
+describe('recordlessVisitNeedsCloseout', () => {
+  const closeout = { status: 'completed', has_service_record: false, visitId: 'visit-1', visitCloseoutEnabled: true };
+
+  it('allows only an explicitly recordless completed combined visit', () => {
+    expect(recordlessVisitNeedsCloseout(closeout)).toBe(true);
+    expect(recordlessVisitNeedsCloseout({ ...closeout, has_service_record: true })).toBe(false);
+    expect(recordlessVisitNeedsCloseout({ ...closeout, has_service_record: undefined })).toBe(false);
+    expect(recordlessVisitNeedsCloseout({ ...closeout, status: 'cancelled' })).toBe(false);
+    expect(recordlessVisitNeedsCloseout({ ...closeout, visitId: null })).toBe(false);
+  });
+});
 
 describe('fmtMoney', () => {
   it('formats and trims .00; refuses non-numbers', () => {

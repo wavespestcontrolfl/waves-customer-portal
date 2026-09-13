@@ -65,6 +65,7 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     expect(mockTwilioCreate).toHaveBeenCalledTimes(1);
     expect(result.success).toBe(true);
     expect(result.sid).toBe('SM_ok');
+    expect(result.deliveryOutcome).toBe('accepted');
   });
 
   test('direct SMS callers strip external links without changing provider callback URLs', async () => {
@@ -187,13 +188,72 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     expect(require('../services/twilio-failure-alerts').alertTwilioFailure).not.toHaveBeenCalled();
   });
 
-  test('an actual SDK failure still follows provider failure handling', async () => {
-    mockTwilioCreate.mockRejectedValueOnce(Object.assign(new Error('provider unavailable'), { status: 503 }));
+  test.each([
+    ['timeout', Object.assign(new Error('request timed out'), { code: 'ETIMEDOUT' })],
+    ['reset', Object.assign(new Error('socket reset'), { code: 'ECONNRESET' })],
+    ['HTTP 408', Object.assign(new Error('request timeout'), { status: 408 })],
+    ['timeout with an incidental 4xx status', Object.assign(new Error('request timed out'), { code: 'ETIMEDOUT', status: 400 })],
+    ['HTTP 503', Object.assign(new Error('provider unavailable'), { status: 503 })],
+    ['unknown handoff error', new Error('unexpected transport failure')],
+  ])('an SDK %s stays uncertain and follows provider failure handling', async (_label, failure) => {
+    mockTwilioCreate.mockRejectedValueOnce(failure);
     await expect(TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM,
       withSmsHandoff: async dispatch => { await dispatch(); return { ok: true }; },
-    })).rejects.toMatchObject({ status: 503 });
+    })).rejects.toMatchObject({
+      providerOutcome: { sent: false, deliveryOutcome: 'uncertain' },
+    });
     expect(mockTwilioCreate).toHaveBeenCalledTimes(1);
     expect(require('../services/twilio-failure-alerts').alertTwilioFailure).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([false, true])('a missing SID remains uncertain (guarded: %s)', async guarded => {
+    mockTwilioCreate.mockResolvedValueOnce({});
+    await expect(TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM,
+      ...(guarded ? { withSmsHandoff: async dispatch => { await dispatch(); return { ok: true }; } } : {}),
+    })).rejects.toMatchObject({ providerOutcome: { sent: false, deliveryOutcome: 'uncertain' } });
+  });
+
+  test('a provider 4xx is a definitive retryable/non-retryable rejection', async () => {
+    mockTwilioCreate.mockRejectedValueOnce(Object.assign(new Error('too many requests'), { code: 20429, status: 429 }));
+
+    await expect(TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM,
+    })).rejects.toMatchObject({
+      status: 429,
+      providerOutcome: { sent: false, deliveryOutcome: 'not_sent' },
+    });
+  });
+
+  test('a pre-provider 5xx-shaped exception is still definitive non-delivery', async () => {
+    jest.spyOn(TwilioService, 'deriveOutboundNumber').mockRejectedValueOnce(
+      Object.assign(new Error('location lookup unavailable'), { status: 503 }),
+    );
+
+    await expect(TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual',
+    })).rejects.toMatchObject({
+      status: 503,
+      providerOutcome: { sent: false, deliveryOutcome: 'not_sent' },
+    });
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
+  });
+
+  test('an exception after an accepted SDK response preserves acceptance provenance', async () => {
+    require('../services/conversations').recordTouchpoint.mockImplementationOnce(() => {
+      throw Object.assign(new Error('touchpoint module failed'), { status: 503 });
+    });
+
+    await expect(TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM,
+    })).rejects.toMatchObject({
+      providerOutcome: {
+        sent: true,
+        deliveryOutcome: 'accepted',
+        providerMessageId: 'SM_ok',
+      },
+    });
+    expect(mockTwilioCreate).toHaveBeenCalledTimes(1);
   });
 
   test('a guarded send cannot escape through explicit push routing', async () => {
