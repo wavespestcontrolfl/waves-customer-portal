@@ -28,10 +28,22 @@ vi.mock('../../components/schedule/CreateAppointmentModal', () => ({
     return <div role="dialog">New booking for {props.defaultDate}</div>;
   },
 }));
-vi.mock('../../components/schedule/MobileDispatchList', () => ({ default: () => null }));
+vi.mock('../../components/schedule/MobileDispatchList', () => ({ default: ({ services = [], onEdit }) => <div>
+  {services.map((service) => <button key={service.id} aria-label={`Open mobile ${service.customerName}`} onClick={() => onEdit(service)}>Mobile visit</button>)}
+</div> }));
+const projectModalState = vi.hoisted(() => ({ props: null }));
+vi.mock('../../components/tech/CreateProjectModal', () => ({
+  default: (props) => { projectModalState.props = props; return <div role="dialog" aria-label="Project report fixture" />; },
+  wdoFeeSeedFromVisit: () => 175,
+}));
+vi.mock('./ProjectsPage', () => ({ ProjectDetail: ({ projectId }) => <div>Existing report {projectId}</div> }));
+vi.mock('../../components/schedule/MobileAppointmentDetailSheet', () => ({ default: ({ service, onCompleteService }) => <button
+  onClick={() => onCompleteService(service)}
+>Complete details {service.linkedProject?.id || 'unlinked'}</button> }));
 vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false }));
 vi.mock('../../components/admin/VisitCloseoutSheet', () => ({ default: ({ visitId }) => <div>Visit closeout {visitId}</div> }));
 beforeEach(() => {
+  projectModalState.props = null;
   vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ alerts: [] }) })));
 });
@@ -208,6 +220,21 @@ it('keeps the mobile board Day and Week switches available', async () => {
   render(<MemoryRouter><DispatchPageV2 activeTab="board" /></MemoryRouter>);
   expect(await screen.findByRole('button', { name: 'Week', exact: true })).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Day', exact: true })).toBeInTheDocument();
+});
+
+it('carries a newly saved project through Details before completion is reopened', async () => {
+  vi.stubGlobal('innerWidth', 390);
+  const service = { id: 'wdo-service', customerName: 'WDO customer', status: 'confirmed', scheduledDate: '2026-09-12', completionProfile: { projectBacked: true, projectType: 'wdo_inspection' } };
+  vi.mocked(adminFetch).mockResolvedValue({ services: [service], technicians: [], products: [], types: [] });
+  render(<MemoryRouter initialEntries={['/admin/dispatch?date=2026-09-12']}><DispatchPageV2 activeTab="board" /></MemoryRouter>);
+
+  fireEvent.click(await screen.findByRole('button', { name: 'Open mobile WDO customer' }));
+  await screen.findByRole('dialog', { name: 'Project report fixture' });
+  const created = { id: 'created-project', status: 'draft' };
+  act(() => { projectModalState.props.onCreated(created); projectModalState.props.onViewDetails(created); });
+
+  fireEvent.click(await screen.findByRole('button', { name: 'Complete details created-project' }));
+  expect(await screen.findByText('Existing report created-project')).toBeInTheDocument();
 });
 
 

@@ -232,6 +232,9 @@ export default function TechHomePage({ section = 'today' }) {
   const [loading, setLoading] = useState(true);
   const [scheduleError, setScheduleError] = useState('');
   const [showCreateProject, setShowCreateProject] = useState(false);
+  const [createProjectHasPendingPhotos, setCreateProjectHasPendingPhotos] = useState(false);
+  const [continueProjectId, setContinueProjectId] = useState(null);
+  const [projectEditorDirty, setProjectEditorDirty] = useState(false);
   const [showProjectPicker, setShowProjectPicker] = useState(false);
   const [projectDefaults, setProjectDefaults] = useState(null);
   const [photoTarget, setPhotoTarget] = useState(null); // { id, customerName }
@@ -507,7 +510,10 @@ export default function TechHomePage({ section = 'today' }) {
   // lock timer before it could release (codex #4072 r19 P2). No header
   // moves the accordion until the action settles.
   const [busyStopId, setBusyStopId] = useState(null);
-  const navigationBusy = Boolean(busyStopId || enRouteState.pendingId || onSiteState.pendingId);
+  const navigationBusy = Boolean(
+    busyStopId || enRouteState.pendingId || onSiteState.pendingId
+      || createProjectHasPendingPhotos || projectEditorDirty
+  );
   useLayoutEffect(() => {
     setNavigationBusy?.(navigationBusy);
     return () => setNavigationBusy?.(false);
@@ -530,6 +536,7 @@ export default function TechHomePage({ section = 'today' }) {
   }, [section, selectedVisitKey, schedule, scheduleError, loadStopDetail]);
 
   const openProjectForService = useCallback((service) => {
+    setCreateProjectHasPendingPhotos(false);
     setProjectDefaults(service ? {
       customerId: service.customer_id || service.customerId || '',
       customerLabel: service.customer_name || service.customerName || '',
@@ -555,7 +562,14 @@ export default function TechHomePage({ section = 'today' }) {
   // A visit whose report already exists (linkedProject rides the schedule
   // payload) CONTINUES that report in place — re-opening the create form
   // would mint a duplicate project for the same visit.
-  const [continueProjectId, setContinueProjectId] = useState(null);
+  // Mirrors ProjectDetail's dirty state so editor and browser navigation
+  // cannot silently discard report edits.
+  const closeProjectEditor = useCallback(() => {
+    if (projectEditorDirty && !confirm('Discard unsaved report edits?')) return;
+    setProjectEditorDirty(false);
+    setContinueProjectId(null);
+    fetchSchedule();
+  }, [fetchSchedule, projectEditorDirty]);
   const [projectTypesRegistry, setProjectTypesRegistry] = useState(null);
   useEffect(() => {
     if (!continueProjectId || projectTypesRegistry) return;
@@ -575,6 +589,7 @@ export default function TechHomePage({ section = 'today' }) {
     const linkedStatus = service?.linkedProject?.status;
     if (linkedStatus === 'closed' || linkedStatus === 'sent' || service?.status === 'completed') return;
     if (service?.linkedProject?.id) {
+      setProjectEditorDirty(false);
       setContinueProjectId(service.linkedProject.id);
       return;
     }
@@ -978,8 +993,16 @@ export default function TechHomePage({ section = 'today' }) {
           defaultInspectionFee={projectDefaults?.visitPrice ?? ''}
           defaultProjectType={projectDefaults?.projectType || ''}
           allowedProjectTypes={projectDefaults?.projectType ? [projectDefaults.projectType] : null}
-          onClose={() => { setShowCreateProject(false); setProjectDefaults(null); }}
-          onCreated={() => { setShowCreateProject(false); setProjectDefaults(null); }}
+          onPendingPhotosChange={setCreateProjectHasPendingPhotos}
+          onClose={() => { setCreateProjectHasPendingPhotos(false); setShowCreateProject(false); setProjectDefaults(null); }}
+          onCreated={(project, outcome) => {
+            setCreateProjectHasPendingPhotos(false);
+            setShowCreateProject(false);
+            setProjectDefaults(null);
+            setProjectEditorDirty(false);
+            if (project?.id && !outcome?.completed) setContinueProjectId(project.id);
+            fetchSchedule();
+          }}
         />
       )}
 
@@ -992,7 +1015,7 @@ export default function TechHomePage({ section = 'today' }) {
              (z-50), which mounts LATER at body-end and therefore paints
              above this scrim. A higher z here would bury the dialogs. */
           style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(0,0,0,0.6)', overflowY: 'auto' }}
-          onClick={() => { setContinueProjectId(null); fetchSchedule(); }}
+          onClick={closeProjectEditor}
         >
           {/* The report editor is a customer-document surface — it renders
               light (V2) over the dark portal, same as the report preview. */}
@@ -1008,7 +1031,8 @@ export default function TechHomePage({ section = 'today' }) {
               <ProjectDetail
                 projectId={continueProjectId}
                 typesRegistry={projectTypesRegistry}
-                onClose={() => { setContinueProjectId(null); fetchSchedule(); }}
+                onDirtyChange={setProjectEditorDirty}
+                onClose={closeProjectEditor}
                 onChanged={() => fetchSchedule()}
                 canAdminActions={getAdminUser()?.role === 'admin'}
               />
