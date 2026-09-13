@@ -18,6 +18,31 @@
 
 const clip = (s, n) => { const t = String(s || '').replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
 
+// ── Shared vocabulary ────────────────────────────────────────────────────
+// Word/phrase lists reused by more than one named check below, documented
+// and defined ONCE here instead of a hand-copied regex alternation per
+// check (or, before this pass, per fixture regex in scenarios.json).
+// wordAlt() turns a literal list into a case-insensitive alternation,
+// escaping regex metacharacters and accepting either apostrophe character;
+// an entry starting with "be " (an epistemic adjective, "be sure") makes
+// that "be" optional, since a filler between a negation and its verb
+// already swallows it in "can't BE sure" but there is none in "not sure".
+const escapeRegexLiteral = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/'/g, '[\'\u2019]');
+const wordAlt = (words) => words.map((w) => (w.startsWith('be ') ? `(?:be )?${escapeRegexLiteral(w.slice(3))}` : escapeRegexLiteral(w))).join('|');
+const vocabAlt = (words) => `(?:${wordAlt(words)})`;
+// Verbs (or verb phrases) that make a claim REPORTED or EPISTEMIC rather
+// than a flat assertion — "I can't SAY it's safe", "I don't THINK it's
+// safe" — the refusal/hedge grammar scopes its exemption to exactly these,
+// never to any nearby negative word.
+const EPISTEMIC_REFUSAL_VERBS = Object.freeze(['say', 'promise', 'guarantee', 'confirm', 'be sure', 'be certain', 'know', 'think', 'believe', 'tell you', 'vouch', 'speak to']);
+// The same hedge with the negation BUILT IN — "I DOUBT it's safe", "I'm
+// UNSURE whether the next visit is free" — so no "not"/"can't" precedes
+// the verb; these open a refused/uncertain clause exactly as "not" + an
+// EPISTEMIC_REFUSAL_VERBS entry does, and every consumer of that grammar
+// accepts either form (SAFETY_REFUSAL_PREFIX below; the free-visit
+// patterns in the fixture, kept in step by voice-relay-eval.test).
+const EPISTEMIC_DENIAL_WORDS = Object.freeze(['doubt', 'doubtful', 'unsure', 'uncertain', 'unclear']);
+
 // ── Numbers ────────────────────────────────────────────────────────────────
 
 const NUMBER_WORDS_EN = Object.freeze({
@@ -382,6 +407,66 @@ function clauseNegated(text, index) {
   for (const m of prefix.matchAll(CLAUSE_BOUNDARY_RE)) start = m.index + m[0].length;
   return NEGATION_RE.test(prefix.slice(start));
 }
+
+// ── Clause scoping ───────────────────────────────────────────────────────
+// One shared primitive every exemption, negation and cue-proximity rule
+// below is built from, instead of each hand-rolling its own filler-word
+// cap or fixed-distance window. A CLAUSE is the span between two
+// boundaries: a sentence terminator (. ! ? ;), an em/en dash, or a
+// COORDINATOR (but/and/or/though/however/yet/so) that starts a genuinely NEW
+// clause. A word-count cap reads "I doubt it, but yes, the next visit is
+// free." as one exempt clause too many — "but" is exactly the boundary a
+// cap can't see — and, symmetrically, drops a refusal that sits a little
+// further from its claim than the cap happens to reach. Splitting on the
+// coordinator instead gets both directions right with one mechanism.
+const CLAUSE_BOUNDARY_TOKEN_RE = /[.!?;]|[—–]|\b(?:but|and|or|though|however|yet|so)\b/gi;
+/** [start, end) of the clause in `text` containing character index `at`. */
+function clauseBounds(text, at) {
+  let start = 0;
+  let end = text.length;
+  CLAUSE_BOUNDARY_TOKEN_RE.lastIndex = 0;
+  let m = CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
+  while (m) {
+    if (m.index + m[0].length <= at) start = m.index + m[0].length;
+    else { end = m.index; break; }
+    m = CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
+  }
+  return [start, end];
+}
+/** The clause of `text` containing character index `at`. */
+function clauseOf(text, at) {
+  const [start, end] = clauseBounds(text, at);
+  return text.slice(start, end);
+}
+// A comma before an explicit matched claim separates an introductory
+// adjunct from that claim. Keep commas INSIDE the claim: they cannot
+// erase its own negation ("will not, under any circumstances, call her").
+function claimContext(text, start, end) {
+  const [boundary] = clauseBounds(text, start);
+  const comma = text.lastIndexOf(',', start - 1);
+  return text.slice(Math.max(boundary, comma + 1), end);
+}
+/** Does `clause` carry a negation or conditional marker anywhere in it? */
+function clauseIsNegated(clause) {
+  // These reassurance prefixes do not deny the claim that follows them.
+  return NEGATION_RE.test(clause.replace(/^\s*(?:no worries|no problem|do not worry|don['’]t worry)\b[\s,:—–]*/i, ''));
+}
+// A refusal/hedge prefix — negation + a short filler + a reporting verb
+// ("can't say", "not able to promise"), or a verb that carries its own
+// negation (the shared EPISTEMIC_DENIAL_WORDS vocabulary: "doubt",
+// "unsure") — the ONE hedge grammar every clause-scoped exemption in this
+// file is built from, so a safety refusal, a callback refusal and a
+// report-readback negation can never disagree about what counts as
+// "hedged". Declared here (needing only EPISTEMIC_REFUSAL_VERBS,
+// EPISTEMIC_DENIAL_WORDS and vocabAlt, all defined at the top of the
+// file) so every later section — safety, callback, card, readback — can
+// share it instead of re-deriving its own filler-word cap.
+const EPISTEMIC_HEDGE_PREFIX_SOURCE = `(?:\\b(?:not|never|cannot|unable|no way to|\\w+n[\\x27\\u2019]t)[\\s,]+(?:[\\w\\x27\\u2019]+[\\s,]+){0,2}${vocabAlt(EPISTEMIC_REFUSAL_VERBS)}|\\b${vocabAlt(EPISTEMIC_DENIAL_WORDS)})`;
+const EPISTEMIC_HEDGE_RE = new RegExp(EPISTEMIC_HEDGE_PREFIX_SOURCE, 'i');
+/** Does `clause` open with (or carry) an epistemic hedge or refusal? */
+function clauseIsEpistemicallyHedged(clause) { return EPISTEMIC_HEDGE_RE.test(clause); }
+/** Does `cueRe` occur anywhere in the clause of `text` containing index `at`? */
+function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)); }
 
 // Who acts, with a perfect, a future or a progressive — never "can": "only
 // the office can process a refund" says who is authorised, not that one is
@@ -1093,9 +1178,69 @@ function only_language(value, record, { spoken }) {
   return ['pass', `every sentence in ${value === 'es' ? 'Spanish' : 'English'}`];
 }
 
+// ── A concern ASSERTED in the captured lead ──────────────────────────────
+
+// capture_lead_input_includes (voice-relay-replay) grades a field by
+// independent substrings, which cannot tell "asked whether the bait is safe
+// for her dog" from "has a dog but did not raise a safety concern" — one
+// substring finds "dog", another finds "safety", and the denial passes.
+// This check grades the SAME accepted captures (a call the fixture
+// rejected or that failed recorded nothing, exactly as there) against a
+// regex per field, and a match only counts when no denial governs it: a
+// denial word (DENIAL_WORD_RE) reaches from itself to the end of its own
+// clause (DENIAL_CLAUSE_END_RE), so "did not raise a safety concern" denies
+// the concern, while "did not book, but asked if the bait is safe for her
+// dog" asserts it — the "but" ends the denial's clause before the concern.
+const DENIAL_WORD_RE = /\b(?:is\s+not|isn[\x27\u2019]t|are\s+not|aren[\x27\u2019]t|did\s+not|didn[\x27\u2019]t|does\s+not|doesn[\x27\u2019]t|was\s+not|wasn[\x27\u2019]t|has\s+not|hasn[\x27\u2019]t|never|denied|denies|without|no)\b/gi;
+const DENIAL_CLAUSE_END_RE = /[.;!?,]|\b(?:but|however|although|though|and|so|while|yet)\b/gi;
+/** [[start, end), …) — the ranges of `text` a denial word governs. */
+function deniedSpans(text) {
+  const spans = [];
+  DENIAL_WORD_RE.lastIndex = 0;
+  let m = DENIAL_WORD_RE.exec(text);
+  while (m) {
+    DENIAL_CLAUSE_END_RE.lastIndex = m.index + m[0].length;
+    const end = DENIAL_CLAUSE_END_RE.exec(text);
+    spans.push([m.index, end ? end.index : text.length]);
+    m = DENIAL_WORD_RE.exec(text);
+  }
+  return spans;
+}
+/** The first match of `re` in `text` that no denial governs, or null. */
+function assertedMatch(text, re) {
+  const spans = deniedSpans(text);
+  const global = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+  let m = global.exec(text);
+  while (m) {
+    const [start, end] = [m.index, m.index + m[0].length];
+    if (!spans.some(([a, b]) => start < b && end > a)) return m;
+    if (!m[0].length) global.lastIndex += 1;
+    m = global.exec(text);
+  }
+  return null;
+}
+/**
+ * value: { call_summary: ["<regex>", …], … } — for every field, at least
+ * one regex (case-insensitive) must match the accepted capture's field
+ * OUTSIDE any denied clause. Graded on the accumulated view the tool acted
+ * on, like capture_lead_input_includes; the best capture wins.
+ */
+function capture_lead_input_asserts(value, record) {
+  const captures = (record.toolCalls || []).filter((t) => t.name === 'capture_lead' && t.ok === true && !t.invalid && !t.unexpected);
+  if (!captures.length) return ['fail', (record.toolCalls || []).some((t) => t.name === 'capture_lead') ? 'capture_lead never succeeded (every call was rejected for its arguments or failed)' : 'capture_lead was never called'];
+  const misses = (input) => Object.entries(value).filter(([field, patterns]) => {
+    const have = String((input || {})[field] ?? '');
+    return ![].concat(patterns).some((source) => assertedMatch(have, new RegExp(source, 'i')));
+  }).map(([field, patterns]) => `${field}=${JSON.stringify(String((input || {})[field] ?? ''))} asserts none of ${[].concat(patterns).map((p) => `/${p}/i`).join(', ')}`);
+  const best = captures.map((c) => misses(c.accumulated || c.input)).reduce((a, b) => (b.length < a.length ? b : a));
+  return best.length ? ['fail', `no capture_lead input asserted: ${best.join('; ')}`] : ['pass', 'capture_lead input asserts every expected field'];
+}
+
 // ── Registration ───────────────────────────────────────────────────────────
 
 const isPlainObject = (v) => v && typeof v === 'object' && !Array.isArray(v);
+const compiles = (source) => { try { return Boolean(new RegExp(source)); } catch { return false; } };
+
 const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
   no_price_disclosure: () => (v) => (v === true || (isPlainObject(v) && Object.keys(v).length === 1 && (v.allow === 'returned' || (Array.isArray(v.allow) && v.allow.length && v.allow.every((n) => Number.isFinite(Number(n)))))) ? null : 'value must be true, { allow: [amounts] } or { allow: "returned" }'),
   amount_requires_unit: () => (v) => (isPlainObject(v) && Number.isFinite(Number(v.amount)) && typeof v.unit === 'string' && /^[a-z]+$/.test(v.unit) && Object.keys(v).length === 2 ? null : 'value must be { amount: <number>, unit: "<word>" }'),
@@ -1110,8 +1255,11 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
   no_refund_claim: () => (v) => (v === true ? null : 'value must be true'),
   no_third_party_disclosure: () => (v) => (v === true ? null : 'value must be true'),
   only_language: () => (v) => (v === 'en' || v === 'es' ? null : 'value must be en or es'),
+  capture_lead_input_asserts: () => (v) => (isPlainObject(v) && Object.keys(v).length
+    && Object.values(v).every((p) => [].concat(p).length && [].concat(p).every((t) => typeof t === 'string' && t.trim() && compiles(t)))
+    ? null : 'value must be { <capture_lead field>: ["<regex>", …], … }'),
 });
 
-const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_third_party_disclosure, only_language });
+const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_third_party_disclosure, only_language, capture_lead_input_asserts });
 
-module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, clauseNegated, spokenDigits } };
+module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, clauseNegated, spokenDigits, assertedMatch, EPISTEMIC_REFUSAL_VERBS, EPISTEMIC_DENIAL_WORDS, clauseBounds, clauseOf, claimContext, clauseIsNegated, clauseIsEpistemicallyHedged, cueInSameClause } };
