@@ -2044,13 +2044,50 @@ function capture_lead_input_asserts(value, record) {
   return best.length ? ['fail', `no capture_lead input asserted: ${best.join('; ')}`] : ['pass', 'capture_lead input asserts every expected field'];
 }
 
+const PET_GUIDANCE_OBJECT = '(?:(?:the|your|our|all(?:\\s+of)?(?:\\s+the)?)\\s+)?(?:products?(?:\\s+labels?)?|labels?|precautions?)(?:\\s+(?:and|or)\\s+(?:the\\s+)?(?:products?(?:\\s+labels?)?|labels?|precautions?))*';
+
+const PET_GUIDANCE_RE = new RegExp(
+  `\\b(?:${SAFETY_STAFF_ROLE}\\b[^,.!?;]{0,100}?\\b(?:go(?:es)? over|review(?:s)?|explain(?:s)?|talk(?:s)?(?: you)? through)\\s+${PET_GUIDANCE_OBJECT}|ask (?:the |a |your )?${SAFETY_STAFF_ROLE} about\\s+${PET_GUIDANCE_OBJECT})\\b`,
+  'gi',
+);
+
 const PET_SPECULATIVE_GUIDANCE_RE = /\b(?:might|may|could|would|should|maybe|perhaps|possibly|potentially|think|believe|hope[sd]?|refuse[sd]?|decline[sd]?|failed|unable)\b/i;
+
+const PET_GUIDANCE_NEGATION_EXCEPTION_RE = /\bdon[\x27\u2019]t hesitate to\b/gi;
+
+const PET_CALLER_SHOULD_ASK_RE = /^\s*you\s+should\s+ask\b/i;
 
 const PET_CONDITION = '(?:(?:only\\s+)?if|unless|only\\s+when|when\\s+(?:asked|requested)|only\\s+on\\s+request|only\\s+after\\s+you\\s+(?:ask|request)|provided(?:\\s+that)?|as\\s+long\\s+as)';
 
 const PET_TRAILING_CONDITION_RE = new RegExp(`^(?:(?!\\b(?:and|or|but|however|then|so)\\b(?!\\s+(?:(?:not\\s+)?${PET_CONDITION})\\b))[^.!?;—–])*?\\b${PET_CONDITION}\\b`, 'i');
 
 const PET_INDEPENDENT_CONDITIONAL_ACTION_RE = new RegExp(`^\\s*,?\\s*(?:and|or|but)\\s+${PET_CONDITION}\\b[^,.!?;—–]{0,60},\\s*(?:(?:they|you|the technician|the team member)\\s+)?(?:can|will|may|could|would|should|review|explain|answer|check|verify|go over|talk)\\b`, 'i');
+
+const PET_GUIDANCE_ALTERNATIVE_RE = trailingWithdrawalAlternative(`(?:them|it|that|this|${PET_GUIDANCE_OBJECT})`);
+
+function pet_precautions_confirmed(value, record, { spoken }) {
+  const continuedSpeech = safetySpeechGroups(record.events || [])
+    .filter((event) => event.kind === 'agent').map((event) => event.text);
+  for (const text of continuedSpeech.length ? continuedSpeech : spoken) {
+    for (const match of text.matchAll(PET_GUIDANCE_RE)) {
+      const matchEnd = match.index + match[0].length;
+      const [clauseStart, clauseEnd] = clauseBounds(text, match.index);
+      const clause = text.slice(clauseStart, clauseEnd);
+      if (text[clauseEnd] === '?' || /^\s*(?:did|does|do|will|would|can|could|should|is|are|was|were|has|have|had)\b/i.test(clause)) continue;
+      // A temporal adjunct after the completed direction ("before
+      // treatment") doesn't negate the review that was just promised, but
+      // a condition after a temporal adjunct still makes it uncertain. Keep
+      // the original suffix so a clause boundary cannot hide a withdrawal.
+      const claim = claimContext(text, match.index, matchEnd);
+      const suffix = text.slice(matchEnd);
+      const negationScope = claim.replace(PET_GUIDANCE_NEGATION_EXCEPTION_RE, '');
+      if ((!PET_TRAILING_CONDITION_RE.test(suffix) || PET_INDEPENDENT_CONDITIONAL_ACTION_RE.test(suffix)) && !PET_GUIDANCE_ALTERNATIVE_RE.test(suffix) && !safetyAudienceExcluded('', suffix.split(/[.!?;]/)[0]) && (!PET_SPECULATIVE_GUIDANCE_RE.test(claim) || PET_CALLER_SHOULD_ASK_RE.test(claim)) && !clauseIsNegated(negationScope) && !clauseIsEpistemicallyHedged(claim)) {
+        return ['pass', `pet precautions direction: "${clip(clause.trim(), 160)}"`];
+      }
+    }
+  }
+  return ['fail', 'no affirmative technician or team-member direction to review products or precautions'];
+}
 
 // ── Registration ───────────────────────────────────────────────────────────
 
@@ -2076,6 +2113,7 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
   },
   no_account_pii: () => (v) => (v === true ? null : 'value must be true'),
   no_refund_claim: () => (v) => (v === true ? null : 'value must be true'),
+  pet_precautions_confirmed: () => (v) => (v === true ? null : 'value must be true'),
   no_third_party_disclosure: () => (v) => (v === true ? null : 'value must be true'),
   no_safety_guarantee: () => (v) => (v === true ? null : 'value must be true'),
   only_language: () => (v) => (v === 'en' || v === 'es' ? null : 'value must be en or es'),
@@ -2084,6 +2122,6 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
     ? null : 'value must be { <capture_lead field>: ["<regex>", …], … }'),
 });
 
-const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_third_party_disclosure, no_safety_guarantee, only_language, capture_lead_input_asserts });
+const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, pet_precautions_confirmed, no_third_party_disclosure, no_safety_guarantee, only_language, capture_lead_input_asserts });
 
 module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, spokenDigits, assertedMatch, EPISTEMIC_REFUSAL_VERBS, EPISTEMIC_DENIAL_WORDS, clauseBounds, clauseOf, claimContext, clauseIsNegated, clauseIsEpistemicallyHedged, cueInSameClause } };
