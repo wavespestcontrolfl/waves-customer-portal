@@ -31,6 +31,9 @@ describe('email reply verifier', () => {
     expect(verdict('Hi Casey, your pending appointment is September 15 from 9–11 AM.').ok).toBe(true);
     expect(verdict('Hi Casey, your pending appointment is September 15 from 9:30 AM to 11 AM.').violations)
       .toEqual(expect.arrayContaining(['date_unsupported:9:30 AM', 'fact_binding_unsupported']));
+    for (const window of ['9AM to 11AM', '09:00AM to 11:00AM', '9 a.m. to 11 a.m.']) {
+      expect({ window, verdict: verdict(`Hi Casey, your pending appointment is September 15 from ${window}.`) }).toEqual({ window, verdict: { ok: true, violations: [] } });
+    }
     expect(wordCount('Hi Casey, this is four.')).toBe(5);
   });
 

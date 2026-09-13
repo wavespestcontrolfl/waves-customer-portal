@@ -132,8 +132,10 @@ function dateFacts(context) {
 }
 
 function normalizeTemporal(value) {
-  return String(value).toLowerCase().replace(/\./g, '').replace(/\s+/g, ' ')
-    .replace(/\b(\d{1,2}):00\s*(am|pm)\b/g, '$1 $2').trim();
+  const normalized = String(value).toLowerCase().replace(/\./g, '').replace(/\s+/g, ' ').trim();
+  const clock = /^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$/.exec(normalized);
+  if (!clock) return normalized;
+  return `${Number(clock[1])}${Number(clock[2]) ? `:${clock[2]}` : ''} ${clock[3]}`;
 }
 
 function temporalClaims(value) {
@@ -282,7 +284,8 @@ function forgedSignature(text) {
 }
 
 function sentences(text) {
-  return String(text).split(/(?<=[.!?])\s+|\n+/).map((item) => item.trim()).filter(Boolean);
+  return String(text).replace(/\b([ap])\.m\.(?=\s+(?:to\b|[-–—]))/gi, '$1m')
+    .split(/(?<=[.!?])\s+|\n+/).map((item) => item.trim()).filter(Boolean);
 }
 
 function structuralViolations(draft, context, wordBudget) {
