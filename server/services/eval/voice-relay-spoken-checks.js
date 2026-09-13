@@ -1409,12 +1409,19 @@ function reportLocationIsTreatmentTarget(
   if (!reportCoordinatorSharesLocation(
     affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb,
   )) return false;
-  if (locationAt < subjectAt) {
-    return REPORT_FRONTED_LOCATION_PREFIX_RE.test(affirmed.slice(0, locationAt));
-  }
   const relationshipStart = Math.max(
     subjectAt + subjectLength, findingVerb.index + findingVerb[0].length,
   );
+  if (locationAt < subjectAt) {
+    const treatmentTail = affirmed.slice(relationshipStart);
+    const laterTargetLink = REPORT_TREATMENT_LOCATION_LINK_RE.exec(treatmentTail);
+    const laterTarget = laterTargetLink
+      && treatmentTail.slice(laterTargetLink.index + laterTargetLink[0].length);
+    const laterTargetIsTime = laterTarget
+      && new RegExp(`^\\s*${REPORT_COMPLETION_TIME}\\b`, 'i').test(laterTarget);
+    return REPORT_FRONTED_LOCATION_PREFIX_RE.test(affirmed.slice(0, locationAt))
+      && (!laterTargetLink || laterTargetIsTime);
+  }
   const locationLink = affirmed.slice(relationshipStart, locationAt);
   const targetLinks = [...locationLink.matchAll(new RegExp(REPORT_TREATMENT_LOCATION_LINK_RE.source, 'gi'))];
   const finalTargetLink = targetLinks[targetLinks.length - 1];
@@ -1509,7 +1516,8 @@ function reportHasConciseFinding(affirmed, subjectAt, subjectLength, locationAt,
 function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb, precedingText) {
   if (REPORT_SHARED_LIST_CONDITION_RE.test(precedingText)) return true;
   if (propositionIsExplicitlyDenied(affirmed, Math.min(subjectAt, locationAt), findingVerb)) return true;
-  if (clauseIsNegated(claim) || clauseIsEpistemicallyHedged(claim)) return true;
+  if (/\b(?:(?:only\s+)?if|unless|whether|until)\b/i.test(claim)
+      || clauseIsEpistemicallyHedged(claim)) return true;
   const precedingClause = precedingText.split(/[.!?;]/).pop();
   const sharedFindingVerb = [...precedingClause.matchAll(new RegExp(REPORT_FINDING_VERB_RE.source, 'gi'))].pop();
   if (!findingVerb && sharedFindingVerb && /\band\s*$/i.test(precedingClause)) {
