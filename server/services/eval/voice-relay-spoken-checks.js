@@ -539,7 +539,7 @@ function propositionIsExplicitlyDenied(text, at, findingVerb) {
   const prefix = text.slice(start, at);
   if (EXPLICIT_PROPOSITION_DENIAL_RE.test(prefix)) return true;
   const actorPrefix = text.slice(start, findingVerb && findingVerb.index < at ? findingVerb.index : at);
-  const actor = /\b(?:(?:i|we|you|he|she|they)|(?:(?:the|our|a)\s+)?(?:technician|tech|crew|team))(?:\s+(?:has|have|had|already|just|actually))*\s*$/i.exec(actorPrefix);
+  const actor = /\b(?:(?:i|we|you|he|she|they)|(?:(?:the|our|an?)\s+(?:[\w'\u2019-]+\s+){0,3})?(?:technician|tech|crew|team))(?:\s+(?:has|have|had|already|just|actually))*\s*$/i.exec(actorPrefix);
   return Boolean(actor && EXPLICIT_PROPOSITION_DENIAL_RE.test(actorPrefix.slice(0, actor.index)));
 }
 
