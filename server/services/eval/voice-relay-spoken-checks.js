@@ -1258,10 +1258,13 @@ const REPORT_DIRECT_OBJECT_GAP_RE = /^\s*(?:(?:the|a|an)\s+)?$/i;
 const REPORT_COORDINATED_OBJECT_GAP_RE = /\b(?:around|along|on|to|at|in)\b[^.!?;]*\band\s+(?:[\w'\u2019-]+\s+){0,2}$/i;
 const REPORT_WENT_LOCATION_RE = /^\s*(?:around|along|on|to|at|in)\b/i;
 const REPORT_TREATMENT_LOCATION_LINK_RE = /\b(?:around|along|on|to|at|in)\b/i;
+const REPORT_LOCATION_NOUN_PREFIX = `(?:(?:almost|nearly)\\s+)?(?:(?:the|a|an)\\s+)?(?:(?:full|entire|whole|outer|inner|front|rear|back|side|northern|southern|eastern|western|exterior|interior)\\s+){0,2}`;
+const REPORT_LOCATION_TARGET_PREFIX_RE = new RegExp(`^\\s*${REPORT_LOCATION_NOUN_PREFIX}$`, 'i');
+const REPORT_SHARED_LOCATION_TARGET_PREFIX_RE = new RegExp(`^\\s*(?:(?:the|a|an)\\s+)?(?:[\\w'\\u2019-]+\\s+){1,3}and\\s+${REPORT_LOCATION_NOUN_PREFIX}$`, 'i');
 const REPORT_COORDINATED_LOCATION_PREFIX_RE = new RegExp(
-  `^\\s*(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+)?(?:(?:the|an?)\\s*)?$`, 'i',
+  `^\\s*(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+)?${REPORT_LOCATION_NOUN_PREFIX}$`, 'i',
 );
-const REPORT_FRONTED_LOCATION_PREFIX_RE = /^\s*(?:around|along|on|to|at|in)\s+(?:(?:almost|nearly)\s+)?(?:(?:the|an?)\s+)?(?:[\w'\u2019-]+\s+){0,2}$/i;
+const REPORT_FRONTED_LOCATION_PREFIX_RE = new RegExp(`^\\s*${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+${REPORT_LOCATION_NOUN_PREFIX}$`, 'i');
 const REPORT_LOCATION_DETOUR_RE = /\b(?:after|before|while|when|because|since|following|until|unless)\b/i;
 const REPORT_COMPLETED_PASSIVE_RE = /\b(?:(?:was|were|got)|(?:has|have|had)(?:\s+(?:\w+ly|already|just|now))*\s+been)\s+(?:(?:\w+ly|already|just|now)\s+)*$/i;
 const REPORT_NONCOMPLETION_GOVERNOR_RE = /(?:\b(?:supposed|expected|required|meant|scheduled|instructed|asked|told|directed|ordered|needed|intended|planned|failed|pretend(?:s|ed|ing)?|want(?:s|ed)?|ought)\s+to(?:\s+(?:\w+ly|already|just|now))*(?:\s+have(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?)?(?:\s+(?:\w+ly|already|just|now))*|\bplan(?:s|ned|ning)?\s+on\s+having(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?(?:\s+(?:\w+ly|already|just|now))*)\s*$/i;
@@ -1362,8 +1365,14 @@ function reportLocationIsTreatmentTarget(
   const locationLink = locationAt < subjectAt
     ? affirmed.slice(0, locationAt) : affirmed.slice(subjectAt + subjectLength, locationAt);
   if (locationAt < subjectAt) return REPORT_FRONTED_LOCATION_PREFIX_RE.test(locationLink);
-  return REPORT_TREATMENT_LOCATION_LINK_RE.test(locationLink) && !REPORT_LOCATION_DETOUR_RE.test(locationLink)
-    && !/\b(?:near|beside|next to|adjacent to)\s+(?:(?:the|a|an)\s+)?$/i.test(locationLink);
+  const targetLinks = [...locationLink.matchAll(new RegExp(REPORT_TREATMENT_LOCATION_LINK_RE.source, 'gi'))];
+  const finalTargetLink = targetLinks[targetLinks.length - 1];
+  const targetPrefix = finalTargetLink
+    ? locationLink.slice(finalTargetLink.index + finalTargetLink[0].length) : locationLink;
+  return Boolean(finalTargetLink) && !REPORT_LOCATION_DETOUR_RE.test(locationLink)
+    && !/\b(?:near|beside|next to|adjacent to)\s+(?:(?:the|a|an)\s+)?$/i.test(locationLink)
+    && (REPORT_LOCATION_TARGET_PREFIX_RE.test(targetPrefix)
+      || REPORT_SHARED_LOCATION_TARGET_PREFIX_RE.test(targetPrefix));
 }
 
 function reportVerbGovernsProduct(affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb) {
@@ -1445,8 +1454,8 @@ function reportSharedLocationContinuation(text, clauseEnd, location) {
   const remainder = text.slice(clauseEnd);
   const locationTail = new RegExp(
     `^and\\s+(?:(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+)?`
-      + `(?:(?:the|a|an)\\s+)?(?:${location})|[^.!?;]*?`
-      + `${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+(?:(?:the|a|an)\\s+)?(?:${location}))`,
+      + `${REPORT_LOCATION_NOUN_PREFIX}(?:${location})|[^.!?;]*?`
+      + `${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+${REPORT_LOCATION_NOUN_PREFIX}(?:${location}))`,
     'i',
   ).exec(remainder);
   if (!locationTail) return { text: '', question: false };

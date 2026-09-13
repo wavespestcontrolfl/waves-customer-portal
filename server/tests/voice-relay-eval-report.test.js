@@ -57,7 +57,11 @@ test.each([
   ['Talstar P was applied indoors after inspecting the exterior perimeter.', 'fail'],
   ['Talstar P was applied to the interior, near the exterior perimeter.', 'fail'],
   ['Talstar P was applied to the interior next to the exterior perimeter.', 'fail'],
+  ['Talstar P was applied to the interior of the garage facing the exterior perimeter.', 'fail'],
+  ['Talstar P was applied to the garage facing the exterior perimeter.', 'fail'],
+  ['Talstar P was applied to garage facing exterior perimeter.', 'fail'],
   ['Talstar P was applied to the exterior perimeter near the garage.', 'pass'],
+  ['Talstar P was applied to the full exterior perimeter.', 'pass'],
   ['The technician at the exterior perimeter applied Talstar P indoors.', 'fail'],
   ['The technician at the exterior perimeter received Talstar P.', 'fail'],
   ['At the exterior perimeter, the technician got Talstar P.', 'fail'],
@@ -240,6 +244,7 @@ test.each([
   'Talstar P was applied to the exterior perimeter and the garage.',
   'Talstar P was applied to the garage and to the exterior perimeter.',
   'Talstar P was applied around the garage and around the exterior perimeter.',
+  'Talstar P was applied to the garage and the full exterior perimeter.',
 ])('a location list shares its preceding treatment predicate: %s', (spoken) => {
   expect(checks.report_readback_confirms(report, {}, { spoken: [spoken] })[0]).toBe('pass');
 });
