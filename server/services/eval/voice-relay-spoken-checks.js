@@ -439,7 +439,7 @@ function clauseBounds(text, at) {
     // A refusal also governs the alternatives when "whether" is omitted:
     // "can't confirm X or Y". Keep both complements intact without teaching
     // the general clause splitter more finite predicates.
-    if (/^or$/i.test(m[0]) && new RegExp(`(?:\\bwhether\\b|${EPISTEMIC_HEDGE_PREFIX_SOURCE})`, 'i').test(left)) {
+    if (/^or$/i.test(m[0]) && new RegExp(`(?:\\bwhether\\b|${EPISTEMIC_HEDGE_PREFIX_SOURCE}|^\\s*(?:(?:only\\s+)?if(?!\\s+(?:anything|you ask me)\\b)|unless)\\b[^,]*$)`, 'i').test(left)) {
       m = CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
       continue;
     }
@@ -496,7 +496,9 @@ function claimContext(text, start, end) {
   const introduction = text.slice(boundary, comma + 1);
   const preclaim = text.slice(boundary, start);
   const hedgeContext = EPISTEMIC_HEDGE_RE.test(introduction) ? introduction : preclaim;
-  const hedge = EPISTEMIC_HEDGE_RE.exec(hedgeContext);
+  const concessiveIntroduction = /^\s*despite\b/i.test(introduction)
+    || (comma >= boundary && /\b(?:although|though)\s*$/i.test(text.slice(0, boundary)));
+  const hedge = concessiveIntroduction ? null : EPISTEMIC_HEDGE_RE.exec(hedgeContext);
   const complement = hedge ? hedgeContext.slice(hedge.index + hedge[0].length).replace(/[,\s]+$/g, '').trim() : '';
   // A condition or refusal governs the assertion after its comma. Ordinary
   // temporal introductions ("Before you go,") remain separate adjuncts.
@@ -1263,7 +1265,7 @@ const DENIAL_WORD_RE = /\b(?:(?:not|cannot|(?:is|are|do|did|does|was|were|has|ha
 // Commas may enclose an aside and "and" may coordinate denied objects.
 // End their scope only when the next phrase starts a fresh assertion.
 const CAPTURE_NOUN_ASSERTION_START_SOURCE = `(?:[\\w\\x27\\u2019-]+\\s+){1,5}${CLAUSE_FINITE_PREDICATE_RE.source}`;
-const CAPTURE_ASSERTION_START_SOURCE = `(?:(?:(?:the )?(?:caller|customer)|she|he|they)\\s+\\w+|(?:never\\s+)?(?:asked|asks|raised|raises|expressed|expresses|mentioned|mentions|reported|reports|voiced|voices|denied|denies|noting|noted|adding|added|did|does|do|is|are|was|were|has|have|had)\\b|${CAPTURE_NOUN_ASSERTION_START_SOURCE})`;
+const CAPTURE_ASSERTION_START_SOURCE = `(?:(?:(?:the )?(?:caller|customer)|she|he|they)\\s+\\w+|(?:never\\s+)?(?:asked|asks|raised|raises|expressed|expresses|mentioned|mentions|reported|reports|voiced|voices|denied|denies|noting|noted|adding|added|${QUESTION_AUX_RE_SOURCE})\\b|${CAPTURE_NOUN_ASSERTION_START_SOURCE})`;
 const REPORTED_QUESTION_AUX_SOURCE = `(?:${QUESTION_AUX_RE_SOURCE}|\\w+n[\\x27\\u2019]t)`;
 const DENIAL_CLAUSE_END_RE = new RegExp(`[.;!?—–]|\\s-\\s|\\b(?:but|because|except|other than|however|although|though|so|while|yet)\\b|(?::|,|\\band\\b)\\s*(?:(?:then|also)\\s+)*(?=${CAPTURE_ASSERTION_START_SOURCE})`, 'gi');
 function denialContinuesPastBoundary(text, denial, boundary) {
