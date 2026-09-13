@@ -1144,6 +1144,34 @@ describe('previewSeriesMove', () => {
     }
   });
 
+  test('reviewed staff moves preserve disclosed sibling windows across far placeholder clashes', async () => {
+    const anchor = anchorRow({ recurring_pattern: 'custom', recurring_interval_days: 90 });
+    const rows = [{ ...anchor }, { id: 'svc-2', status: 'pending', scheduled_date: dayOffset(100),
+      window_start: '09:00:00', window_end: '11:00:00', technician_id: null,
+      is_recurring: true, recurring_parent_id: 'svc-1' }];
+    const placeholder = { id: 'other-plan-placeholder', is_recurring: true, recurring_parent_id: 'plan-2',
+      status: 'pending', customer_confirmed: false, reservation_expires_at: null };
+    const queries = [chain({ first: jest.fn().mockResolvedValue(anchor) }),
+      chain({ first: jest.fn().mockResolvedValue(anchor) }), chain({ select: jest.fn().mockResolvedValue(rows) })];
+    db.mockImplementation((table) => table === 'scheduled_services' ? queries.shift() : chain({ first: jest.fn().mockResolvedValue(null) }));
+    findConflictingVisits.mockResolvedValueOnce([placeholder]);
+    const preview = await SmartRebooker.previewSeriesMove('svc-1', TARGET, { start: '09:00', end: '11:00' }, ADMIN_OPTS);
+    expect(preview.occurrences[1]).toMatchObject({ to_start: '09:00:00', to_end: '11:00:00' });
+
+    const { updates } = wireSeriesMocks(rows, { anchor });
+    const AppointmentReminders = require('../services/appointment-reminders');
+    const preclose = jest.spyOn(AppointmentReminders, 'precloseWindowlessReminderInTx').mockResolvedValue(undefined);
+    findConflictingVisits.mockResolvedValueOnce([placeholder]).mockResolvedValueOnce([]).mockResolvedValueOnce([placeholder]);
+    try {
+      await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
+        ...ADMIN_OPTS, expectOccurrenceIds: preview.occurrenceIds, expectOccurrences: preview.occurrences,
+      });
+      expect(updates[1].update.mock.calls[0][0]).toMatchObject({ window_start: '09:00:00', window_end: '11:00:00' });
+    } finally {
+      preclose.mockRestore();
+    }
+  });
+
   test('admin preview rejects a future occurrence whose stored window cannot pass Apply rules', async () => {
     const anchor = anchorRow();
     const rows = [

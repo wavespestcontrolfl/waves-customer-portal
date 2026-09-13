@@ -207,7 +207,7 @@ async function previewProposal(conn, id, { visitId, now = new Date(), rebooker =
   const selected = candidates.find((visit) => visit.id === selection);
   const mover = rebooker || require('./rebooker');
   const series = mover.collectiveMoveGateOn()
-    ? await mover.previewSeriesMove(selection, plan.newDate, plan.newWindow, { adminWindowRules: true }) : { collective: false };
+    ? await mover.previewSeriesMove(selection, plan.newDate, plan.newWindow, { adminWindowRules: true, overlapAdvisory: true }) : { collective: false };
   const overlapRows = await conn.transaction((trx) => probeSlotOverlap({
     trx,
     date: plan.newDate,
