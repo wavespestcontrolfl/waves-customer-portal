@@ -484,6 +484,12 @@ function clauseOf(text, at) {
 function claimContext(text, start, end) {
   const [boundary] = clauseBounds(text, start);
   const comma = text.lastIndexOf(',', start - 1);
+  const introduction = text.slice(boundary, comma + 1);
+  // A condition or refusal governs the assertion after its comma. Ordinary
+  // temporal introductions ("Before you go,") remain separate adjuncts.
+  if (/\b(?:if|unless|whether)\b/i.test(introduction) || clauseIsEpistemicallyHedged(introduction)) {
+    return text.slice(boundary, end);
+  }
   return text.slice(Math.max(boundary, comma + 1), end);
 }
 /** Does `clause` carry a negation or conditional marker anywhere in it? */
@@ -1351,19 +1357,30 @@ function only_language(value, record, { spoken }) {
 // clause (DENIAL_CLAUSE_END_RE), so "did not raise a safety concern" denies
 // the concern, while "did not book, but asked if the bait is safe for her
 // dog" asserts it — the "but" ends the denial's clause before the concern.
-const DENIAL_WORD_RE = /\b(?:(?:not|(?:is|are|did|does|was|has)n[\x27\u2019]t)(?!\s+only\b)|never|denied|denies|without|no)\b/gi;
+const DENIAL_WORD_RE = /\b(?:(?:not|(?:is|are|did|does|was|were|has|have|had)n[\x27\u2019]t)(?!\s+only\b)|never|denied|denies|without|no)\b/gi;
 // Commas may enclose an aside and "and" may coordinate denied objects.
 // End their scope only when the next phrase starts a fresh assertion.
-const DENIAL_CLAUSE_END_RE = /[.;!?]|\b(?:but|however|although|though|so|while|yet)\b|(?:,|\band\b)\s*(?=(?:(?:the )?(?:caller|customer)|she|he|they)\s+\w+|(?:asked|asks|raised|raises|expressed|expresses|mentioned|mentions|reported|reports|voiced|voices)\b)/gi;
+const DENIAL_CLAUSE_END_RE = /[.;!?]|\b(?:but|however|although|though|so|while|yet)\b|(?:,|\band\b)\s*(?=(?:(?:the )?(?:caller|customer)|she|he|they)\s+\w+|(?:asked|asks|raised|raises|expressed|expresses|mentioned|mentions|reported|reports|voiced|voices|did|does|do|is|are|was|were|has|have|had)\b)/gi;
 /** [[start, end), …) — the ranges of `text` a denial word governs. */
 function deniedSpans(text) {
   const spans = [];
   DENIAL_WORD_RE.lastIndex = 0;
   let m = DENIAL_WORD_RE.exec(text);
   while (m) {
+    let start = m.index;
+    const prefix = text.slice(0, m.index);
+    // A negated predicate also governs its preceding subject: "concerns
+    // were not raised". Keep that scope inside the same assertion so a
+    // separate negated booking does not erase an affirmative concern.
+    if (/\b(?:is|are|was|were|be|been|being|has|have|had|did|does|do)\s*$/i.test(prefix)
+      || /^(?:is|are|was|were|has|have|had|did|does)n[\x27\u2019]t$/i.test(m[0])) {
+      start = 0;
+      DENIAL_CLAUSE_END_RE.lastIndex = 0;
+      for (const boundary of prefix.matchAll(DENIAL_CLAUSE_END_RE)) start = boundary.index + boundary[0].length;
+    }
     DENIAL_CLAUSE_END_RE.lastIndex = m.index + m[0].length;
     const end = DENIAL_CLAUSE_END_RE.exec(text);
-    spans.push([m.index, end ? end.index : text.length]);
+    spans.push([start, end ? end.index : text.length]);
     m = DENIAL_WORD_RE.exec(text);
   }
   return spans;
