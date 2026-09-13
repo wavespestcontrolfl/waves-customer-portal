@@ -147,6 +147,10 @@ describe('voice relay eval — callback and date checks', () => {
     [RUTH, "I'm not sure whether the office will call her.", 'pass'],
     [RUTH, "I don't think our team will contact Ruth.", 'pass'],
     [RUTH, "I can't promise that the office will call your mother.", 'pass'],
+    [RUTH, 'If she agrees, we will call her.', 'pass'],
+    [RUTH, 'We will call her if she agrees.', 'pass'],
+    [RUTH, 'We will call her. If she agrees, we will email you.', 'fail'],
+    [RUTH, 'We will call her before noon.', 'fail'],
     [RUTH, 'The office will call her.', 'fail'],
     [RUTH, 'Our team will contact Ruth.', 'fail'],
   ])('no_account_holder_callback: a clause-scoped hedge exempts a direct modal clause too %j / %s', (value, text, status) => {

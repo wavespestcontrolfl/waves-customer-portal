@@ -1257,6 +1257,10 @@ const CALLBACK_LIGHT_ACTION_FINITE = `(?:(?:\\w+\\s+){0,2}?${CALLBACK_LIGHT_VERB
 // ("call her"), or the light verb with the recipient before the contact noun
 // ("give her a call") or after it ("place a call to her").
 const callbackTarget = (targets, action, lightAction) => `(?:${action}\\s+(?:${targets})|${lightAction}\\s+(?:(?:${targets})\\s+an?\\s+${CALLBACK_CONTACT_NOUN}|an?\\s+${CALLBACK_CONTACT_NOUN}\\s+(?:to|for)\\s+(?:${targets})))\\b`;
+// A condition immediately after the recipient governs the callback promise:
+// "we will call her if she agrees". Other trailing modifiers stay outside
+// the negation scan — "we will call her before noon" is still a promise.
+const CALLBACK_TRAILING_CONDITION_RE = /^\s*,?\s*(?:only\s+)?(?:if|unless)\b/i;
 // Whom every scenario's account holder can be called without naming her: a
 // pronoun, or the role the caller is asking about. The fixture's `targets`
 // add the names and relationships this scenario's account holder goes by
@@ -1295,7 +1299,10 @@ function no_account_holder_callback(value, record, { spoken }) {
     re.lastIndex = 0;
     let match = re.exec(text);
     while (match) {
-      const claim = claimContext(text, match.index, match.index + match[0].length);
+      const matchEnd = match.index + match[0].length;
+      const [, clauseEnd] = clauseBounds(text, match.index);
+      const trailingCondition = CALLBACK_TRAILING_CONDITION_RE.test(text.slice(matchEnd, clauseEnd));
+      const claim = claimContext(text, match.index, trailingCondition ? clauseEnd : matchEnd);
       if (!clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
         return ['fail', `promised to contact the account holder: "${clip(match[0], 160)}"`];
       }
