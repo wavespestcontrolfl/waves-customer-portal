@@ -413,6 +413,7 @@ const NEGATION_RE = /\b(?:not|never|cannot|can[\x27\u2019]?t|\w+n[\x27\u2019]t|w
 // further from its claim than the cap happens to reach. Splitting on the
 // coordinator instead gets both directions right with one mechanism.
 const CLAUSE_BOUNDARY_TOKEN_RE = /[.!?;]|[—–]|\b(?:but|and|or|though|although|however|yet|so|then|pero|sin embargo|aunque)\b/gi;
+const COORDINATED_REPORT_VERBS = vocabAlt([...EPISTEMIC_REFUSAL_VERBS, 'deny']);
 /** [start, end) of the clause in `text` containing character index `at`. */
 function clauseBounds(text, at) {
   let start = 0;
@@ -420,6 +421,14 @@ function clauseBounds(text, at) {
   CLAUSE_BOUNDARY_TOKEN_RE.lastIndex = 0;
   let m = CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
   while (m) {
+    // "confirm or deny" shares one governing modal/refusal. Its second
+    // reporting verb does not begin an independent assertion.
+    if (/^(?:and|or)$/i.test(m[0])
+        && new RegExp(`\\b${COORDINATED_REPORT_VERBS}\\s*$`, 'i').test(text.slice(start, m.index))
+        && new RegExp(`^\\s*${COORDINATED_REPORT_VERBS}\\b`, 'i').test(text.slice(m.index + m[0].length))) {
+      m = CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
+      continue;
+    }
     if (m.index + m[0].length <= at) start = m.index + m[0].length;
     else { end = m.index; break; }
     m = CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
