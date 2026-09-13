@@ -97,13 +97,14 @@ const EXCLUDED_DIR_HINTS = [
 //   are gone from this list entirely.
 // - BrandFooter and AppShowcaseCard's 7.5px is App Store / Google Play badge
 //   artwork reproduced as inline SVG — fixed proportions, not page type.
-// - ServiceRecapModal and Icon carry emoji the Icon sweep has not reached.
+// - ServiceRecapModal carries emoji the Icon sweep has not reached. (Icon.jsx
+//   itself is no longer listed: its one "violation" was the word-emoji inside
+//   the comment describing that sweep, which the comment skip above retires.)
 const LEGACY_BASELINE = {
   'client/src/App.jsx': { 'banned-font-size': 2 },
   'client/src/components/ActivityCard.jsx': { 'banned-font-size': 1 },
   'client/src/components/BrandFooter.jsx': { 'banned-font-size': 2 },
   'client/src/components/GlassNewsletterCard.jsx': { 'banned-font-size': 1 },
-  'client/src/components/Icon.jsx': { 'emoji': 1 },
   'client/src/components/NewsletterSignup.jsx': { 'banned-font-size': 2 },
   'client/src/components/NotificationBell.jsx': { 'banned-font-size': 9 },
   'client/src/components/PestPressureCard.jsx': { 'banned-font-size': 6 },
@@ -116,7 +117,7 @@ const LEGACY_BASELINE = {
   'client/src/components/estimate/PriceCard.jsx': { 'banned-font-size': 1 },
   'client/src/components/estimate/ProposalDetailCard.jsx': { 'banned-font-size': 1 },
   'client/src/components/estimate/ReportShowcaseCard.jsx': { 'banned-font-size': 14 },
-  'client/src/components/estimate/glass/GlassEstimateExtras.jsx': { 'emoji': 4 },
+  'client/src/components/estimate/glass/GlassEstimateExtras.jsx': { 'emoji': 3 },
   'client/src/components/estimate/glass/glass-components.css': { 'banned-font-size': 3 },
   'client/src/components/estimate/tokens.js': { 'local-palette': 1 },
   'client/src/index.css': { 'banned-font-size': 2 },
@@ -211,14 +212,205 @@ function relKey(filePath) {
   return path.relative(ROOT, filePath).split(path.sep).join('/');
 }
 
+// Which lines are ENTIRELY comment, so scanning them reports debt that does
+// not exist: Icon.jsx's note about migrating the old portal's emoji keys to
+// <Icon/>, and GlassEstimateExtras' "5-star reviews only" docblock, were both
+// counted as raw-emoji violations -- the gate forbade DESCRIBING the sweep it
+// asks for.
+//
+// This asks the parser rather than the line's prefix. A prefix test cannot
+// tell a comment from rendered JSX text that merely starts with `//` -- inside
+// a <pre>, say -- and skipping such a line would hide a real violation on a
+// visible element, the exact masking this is meant to avoid.
+//
+// Two rules survive from the prefix version, because they are about intent
+// rather than detection:
+//   - only WHOLE-line comments are skipped. A line holding both code and a
+//     comment is scanned in full, in both directions: a trailing `// note`
+//     after code, and code trailing a `*/`.
+//   - on a parse failure nothing is skipped. Scanning a comment costs a false
+//     positive; skipping code costs a miss, and a miss is the worse failure.
+// @babel/parser, not acorn: `walk()` accepts .ts and .tsx, and acorn cannot
+// parse TypeScript. A parser that chokes on an extension the walker advertises
+// means that file takes the failure path forever -- safe, since nothing is
+// skipped, but it also means comment prose in it is reported as debt. One
+// parser with the jsx + typescript plugins covers every extension accepted.
+const { parse: babelParse } = require('@babel/parser');
+const postcss = require('postcss');
+
+// `{/* ... */}` is THE way to write a comment in JSX children, and the parser's
+// range covers only the `/* ... */`. The braces are left over as non-whitespace,
+// so the line reads as code and the comment gets scanned. When braces wrap a
+// comment and nothing else, they are part of it; `{/* note */ x}` is an
+// expression and stays scanned.
+function expandJsxWrapper(text, start, end) {
+  let a = start;
+  let b = end;
+  while (a > 0 && /\s/.test(text[a - 1])) a -= 1;
+  while (b < text.length && /\s/.test(text[b])) b += 1;
+  if (text[a - 1] === '{' && text[b] === '}') return [a - 1, b + 1];
+  return [start, end];
+}
+
+// CSS comment spans, from postcss -- the parser this project's own build uses,
+// so it defines what this repo's CSS means.
+//
+// This replaced a hand-written scanner. That scanner took four review findings
+// in three rounds, every one a variant of "something that looks like a comment
+// delimiter and is not": a quoted `content: "/*"`, an unquoted
+// `url(data:...,/*)`, an escaped `url(foo\)/*)`, an escaped `\/*`. The count
+// was rising, not falling, which is the signal to replace the mechanism rather
+// than patch it again. postcss knows strings, url() tokens and escapes by
+// construction.
+//
+// A file postcss rejects yields no ranges, so nothing is skipped and every
+// line is scanned. That is the safe direction, and it is what happens to the
+// one case postcss itself disagrees about (`\/*`, which it reads as an
+// unclosed comment): conservative, never masking.
+function cssCommentRanges(text, offset = 0) {
+  const out = [];
+  let root;
+  try {
+    root = postcss.parse(text);
+  } catch {
+    return out;
+  }
+  root.walkComments((c) => {
+    const a = c.source && c.source.start && c.source.start.offset;
+    const b = c.source && c.source.end && c.source.end.offset;
+    if (typeof a === 'number' && typeof b === 'number') out.push([a + offset, b + offset]);
+  });
+  return out;
+}
+
+// `<style>{`...`}</style>` is the repo's embedded-CSS pattern, and Babel treats
+// the CSS inside as template-string data -- its `/* ... */` never reaches
+// `ast.comments`, so a whole-line note in there was reported as live debt.
+//
+// Only templates with NO interpolation qualify. A quasi is not independently
+// valid CSS: with `prefix = 'url(foo'`, the template `.a { background:
+// ${prefix}/*); }` has its `/*` inside URL data once combined, but the quasi
+// after the interpolation starts at `/*` and postcss reads a comment running
+// to the next `*/` -- masking every live rule in between. Reconstructing the
+// lexer state across interpolations is not worth it: an interpolated style
+// template simply keeps every line scanned.
+//
+// Scoped to <style> children for a second reason: running CSS comment
+// detection over every template literal would let a line of ordinary template
+// TEXT that happens to read `/* ... */` be skipped, which would also mask.
+function styleTemplateNode(node) {
+  if (node.type !== 'JSXElement') return null;
+  const name = node.openingElement && node.openingElement.name;
+  if (!name || name.type !== 'JSXIdentifier' || name.name !== 'style') return null;
+  // Sibling JSX expressions also interpolate CSS: a prefix can open url()
+  // before this template starts. Only a sole template has known context.
+  const children = (node.children || []).filter((child) => child.type !== 'JSXText' || child.value.trim());
+  if (children.length !== 1) return null;
+  const child = children[0];
+  const expr = child.type === 'JSXExpressionContainer' ? child.expression : null;
+  if (!expr || expr.type !== 'TemplateLiteral' || expr.expressions.length !== 0) return null;
+  // React receives cooked CSS. Escapes can close a comment that remains open
+  // in the source, so raw-source ranges are safe only when the text agrees.
+  return expr.quasis.every((q) => q.value.raw === q.value.cooked) ? expr : null;
+}
+
+function styleTemplateRanges(node, out) {
+  if (!node || typeof node !== 'object') return;
+  if (Array.isArray(node)) {
+    for (const n of node) styleTemplateRanges(n, out);
+    return;
+  }
+  const tpl = node.type ? styleTemplateNode(node) : null;
+  if (tpl) {
+    for (const q of tpl.quasis || []) {
+      if (typeof q.start === 'number' && typeof q.end === 'number') out.push([q.start, q.end]);
+    }
+  }
+  for (const key of Object.keys(node)) {
+    if (key === 'loc' || key === 'leadingComments' || key === 'trailingComments') continue;
+    styleTemplateRanges(node[key], out);
+  }
+}
+
+// Babel's TypeScript and JSX grammars conflict: with both on, a valid `.ts`
+// construct like `const n = <number>1` parses as JSX and the file is rejected,
+// sending it down the scan-everything path forever. Pick by extension.
+function pluginsFor(filePath) {
+  if (/\.tsx$/.test(filePath)) return ['jsx', 'typescript'];
+  if (/\.ts$/.test(filePath)) return ['typescript'];
+  return ['jsx'];
+}
+
+function commentLineSet(text, filePath) {
+  const lines = text.split('\n');
+  const covered = new Set();
+  const ranges = [];
+
+  if (/\.css$/.test(filePath)) {
+    for (const r of cssCommentRanges(text)) ranges.push(r);
+  } else {
+    let ast;
+    try {
+      ast = babelParse(text, {
+        sourceType: 'unambiguous',
+        allowReturnOutsideFunction: true,
+        plugins: pluginsFor(filePath),
+      });
+    } catch {
+      return covered; // unparseable: skip nothing, scan everything
+    }
+    for (const c of ast.comments || []) ranges.push(expandJsxWrapper(text, c.start, c.end));
+    const styleQuasis = [];
+    styleTemplateRanges(ast.program, styleQuasis);
+    for (const [a, b] of styleQuasis) {
+      for (const r of cssCommentRanges(text.slice(a, b), a)) ranges.push(r);
+    }
+  }
+  if (!ranges.length) return covered;
+
+  const lineStart = [];
+  let off = 0;
+  for (const line of lines) { lineStart.push(off); off += line.length + 1; }
+
+  // A line counts as comment only when blanking every comment span on it
+  // leaves nothing but whitespace.
+  const spans = lines.map(() => []);
+  for (const [a, b] of ranges) {
+    for (let i = 0; i < lines.length; i += 1) {
+      const s0 = lineStart[i];
+      const e0 = s0 + lines[i].length;
+      if (b <= s0 || a >= e0) continue;
+      spans[i].push([Math.max(a, s0) - s0, Math.min(b, e0) - s0]);
+    }
+  }
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!spans[i].length) continue;
+    let rest = lines[i];
+    for (const [a, b] of spans[i]) rest = rest.slice(0, a) + ' '.repeat(b - a) + rest.slice(b);
+    if (!rest.trim()) covered.add(i + 1);
+  }
+  return covered;
+}
+
 function checkFile(filePath) {
   const rel = relKey(filePath);
   const text = fs.readFileSync(filePath, 'utf8');
   const lines = text.split('\n');
   const violations = [];
 
+  // A line that is ENTIRELY a comment renders nothing, so scanning it reports
+  // debt that does not exist: Icon.jsx's note about migrating the old portal's
+  // emoji keys to <Icon/>, and GlassEstimateExtras' "5-star reviews only"
+  // docblock, were both counted as raw-emoji violations -- the gate forbade
+  // DESCRIBING the sweep it asks for. Only whole-line comments are skipped.
+  // Anything sharing a line with code is scanned in full, in both directions:
+  // a trailing `// note` after code, and code trailing a `*/` on the closing
+  // line of a block. The rule is never to mask, so where the two overlap the
+  // scanner wins and we accept the odd false positive on comment prose.
+  const commentLines = commentLineSet(text, filePath);
   lines.forEach((line, i) => {
     const n = i + 1;
+    if (commentLines.has(n)) return;
 
     if (EMOJI_RX.test(line)) {
       violations.push({
@@ -423,4 +615,9 @@ function main() {
   process.exit(1);
 }
 
-main();
+// Run as a CLI; importable for tests. The comment-skip and the
+// both-directions baseline are the two behaviours that have silently broken
+// this gate before, so they get a test rather than a comment.
+if (require.main === module) main();
+
+module.exports = { checkFile, commentLineSet, LEGACY_BASELINE };
