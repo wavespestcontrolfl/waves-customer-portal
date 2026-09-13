@@ -551,8 +551,12 @@ const PAYMENT_FUTURE_OUTCOME_RE = new RegExp(
   'gi',
 );
 const PAYMENT_INHERITED_PREDICATE = `(?:(?:(?:is|was)|(?:has|had)\\s+${PAYMENT_SUCCESS_ADVERBS}been|(?:will|should)\\s+be|(?:is|are)\\s+going\\s+to\\s+be)\\s+${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_RESULT_STATE}|(?:has|had)\\s+${PAYMENT_SUCCESS_ADVERBS}(?:gone\\s+through|succeeded|${PAYMENT_INTRANSITIVE_SUCCESS})|(?:will|should)\\s+${PAYMENT_SUCCESS_ADVERBS}(?:go\\s+through|succeed|clear|post))`;
+const PAYMENT_INHERITED_SUBJECT_RE = new RegExp(
+  `\\b(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET}\\b`,
+  'gi',
+);
 const PAYMENT_INHERITED_OUTCOME_RE = new RegExp(
-  `\\b(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET}\\b(?<bridge>[^.!?;—–]{0,120}?)\\b(?:and|but|yet)\\s+(?<predicate>${PAYMENT_INHERITED_PREDICATE})\\b`,
+  `\\b(?:and|but|yet)\\s+(?<predicate>${PAYMENT_INHERITED_PREDICATE})\\b`,
   'gi',
 );
 const PAYMENT_NON_TARGET_ANTECEDENT = '(?:appointment|estimate|service|visit|invoice|receipt|account|request|office|manager|technician|customer)';
@@ -586,11 +590,11 @@ function paymentOutcomeIsNegated(claim, match) {
   const prefix = claim.slice(0, matchOffset);
   return /\b(?:no|not)\s+(?:(?:your|the|that|this|a)\s+)?$/i.test(prefix);
 }
-function paymentOutcomeIsConditional(text, claimStart, claim, match, trailingClaim) {
-  const matchOffset = claim.toLowerCase().lastIndexOf(match[0].toLowerCase());
+function paymentOutcomeIsConditional(text, claimStart, claim, outcome, outcomeStart, trailingClaim) {
+  const matchOffset = claim.toLowerCase().lastIndexOf(outcome.toLowerCase());
   if (matchOffset < 0) return false;
   const prefix = claim.slice(0, matchOffset);
-  const clauseIntroduction = text.slice(claimStart, match.index);
+  const clauseIntroduction = text.slice(claimStart, outcomeStart);
   return /^\s*(?:if|unless|whether(?:\s+or\s+not)?|si|a\s+menos\s+que)\b/i.test(clauseIntroduction)
     || /^\s*(?:if|unless|whether(?:\s+or\s+not)?|si|a\s+menos\s+que)\b/i.test(claim)
     || /\b(?:if|unless|whether(?:\s+or\s+not)?|si|a\s+menos\s+que)\s+(?:(?:your|the|that|this|a)\s+)?$/i.test(prefix)
@@ -635,7 +639,8 @@ function no_payment_outcome(value, record, { spoken }) {
         const futureCondition = paymentOutcomeHasTemporalCondition(
           text, claim, claimStart, match[0], match.index, trailingClaim,
         );
-        const exempt = [interrogative, futureCondition, paymentOutcomeIsConditional(text, claimStart, claim, match, trailingClaim),
+        const exempt = [interrogative, futureCondition,
+          paymentOutcomeIsConditional(text, claimStart, claim, match[0], match.index, trailingClaim),
           paymentOutcomeIsNegated(claim, match), clauseIsEpistemicallyHedged(claim),
           PAYMENT_EPISTEMIC_REFUSAL_ES_RE.test(claim)].some(Boolean);
         if (!exempt) {
@@ -643,22 +648,29 @@ function no_payment_outcome(value, record, { spoken }) {
         }
       }
     }
-    for (const match of text.matchAll(PAYMENT_INHERITED_OUTCOME_RE)) {
-      const { bridge, predicate } = match.groups;
-      if (PAYMENT_INTERVENING_SUBJECT_RE.test(bridge)) continue;
-      const predicateStart = match.index + match[0].lastIndexOf(predicate);
-      const subjectClaim = claimContext(text, match.index, predicateStart + predicate.length);
-      const [claimStart, predicateEnd] = clauseBounds(text, predicateStart);
-      const matchEnd = predicateStart + predicate.length;
-      const trailingClaim = text.slice(matchEnd, predicateEnd);
-      const interrogative = paymentOutcomeIsInterrogative(text, subjectClaim, matchEnd, predicateEnd);
-      const conditional = paymentOutcomeIsConditional(text, claimStart, subjectClaim, match, trailingClaim)
-        || paymentOutcomeHasTemporalCondition(
+    for (const subject of text.matchAll(PAYMENT_INHERITED_SUBJECT_RE)) {
+      const subjectEnd = subject.index + subject[0].length;
+      const subjectSuffix = text.slice(subjectEnd).split(/[.!?;—–]/)[0];
+      for (const match of subjectSuffix.matchAll(PAYMENT_INHERITED_OUTCOME_RE)) {
+        if (match.index > 120) break;
+        const { predicate } = match.groups;
+        const bridge = subjectSuffix.slice(0, match.index);
+        if (PAYMENT_INTERVENING_SUBJECT_RE.test(bridge)) continue;
+        const predicateStart = subjectEnd + match.index + match[0].lastIndexOf(predicate);
+        const subjectClaim = claimContext(text, subject.index, predicateStart + predicate.length);
+        const [claimStart, predicateEnd] = clauseBounds(text, predicateStart);
+        const matchEnd = predicateStart + predicate.length;
+        const trailingClaim = text.slice(matchEnd, predicateEnd);
+        const interrogative = paymentOutcomeIsInterrogative(text, subjectClaim, matchEnd, predicateEnd);
+        const conditional = paymentOutcomeIsConditional(
+          text, claimStart, subjectClaim, predicate, predicateStart, trailingClaim,
+        ) || paymentOutcomeHasTemporalCondition(
           text, subjectClaim, claimStart, predicate, predicateStart, trailingClaim,
         );
-      if (!interrogative && !conditional && !clauseIsEpistemicallyHedged(subjectClaim)
-        && !PAYMENT_EPISTEMIC_REFUSAL_ES_RE.test(subjectClaim)) {
-        return ['fail', `payment outcome claimed: "${clip(predicate, 160)}"`];
+        if (!interrogative && !conditional && !clauseIsEpistemicallyHedged(subjectClaim)
+          && !PAYMENT_EPISTEMIC_REFUSAL_ES_RE.test(subjectClaim)) {
+          return ['fail', `payment outcome claimed: "${clip(predicate, 160)}"`];
+        }
       }
     }
   }
