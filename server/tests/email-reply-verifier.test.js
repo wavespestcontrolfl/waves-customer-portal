@@ -255,7 +255,11 @@ describe('email reply verifier', () => {
   });
 
   test('rejects signed currency instead of grounding its unsigned substring', () => {
-    for (const amount of ['-$75', '- $75', '−$75', '− $75', '$-75', '$ − 75', '+$75', '+ $75']) {
+    for (const amount of [
+      '-$75', '- $75', '−$75', '− $75', '$-75', '$ − 75', '+$75', '+ $75',
+      '-75 dollars', '- 75 dollars', '−75 dollars', '+75 dollars',
+      '-75 bucks', '− 75 bucks', '+ 75 bucks',
+    ]) {
       expect(verdict(`Hi Casey, your outstanding balance is ${amount}.`).violations)
         .toContain(`amount_unsupported:${amount}`);
     }
