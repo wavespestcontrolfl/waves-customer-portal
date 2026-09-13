@@ -438,9 +438,12 @@ function claimContext(text, start, end) {
   const [boundary] = clauseBounds(text, start);
   const comma = text.lastIndexOf(',', start - 1);
   const introduction = text.slice(boundary, comma + 1);
+  const hedge = EPISTEMIC_HEDGE_RE.exec(introduction);
+  const complement = hedge ? introduction.slice(hedge.index + hedge[0].length).replace(/[,\s]+$/g, '').trim() : '';
   // A condition or refusal governs the assertion after its comma. Ordinary
   // temporal introductions ("Before you go,") remain separate adjuncts.
-  if (/\b(?:if|unless|whether)\b/i.test(introduction) || clauseIsEpistemicallyHedged(introduction)) {
+  if (/\b(?:if|unless|whether)\b/i.test(introduction)
+      || (hedge && /^(?:(?:any of )?(?:this|that|it))?$/i.test(complement))) {
     return text.slice(boundary, end);
   }
   return text.slice(Math.max(boundary, comma + 1), end);
@@ -1209,7 +1212,10 @@ function deniedSpans(text) {
     // Negation inside a reported question is its content, not a denial
     // that the caller asked it. An earlier "did not ask" still supplies
     // its own denied span over the whole question.
-    const assertionPrefix = prefix.split(/[.;!?]|\b(?:but|however|although|though|so|while|yet)\b/i).pop();
+    let assertionStart = 0;
+    DENIAL_CLAUSE_END_RE.lastIndex = 0;
+    for (const boundary of prefix.matchAll(DENIAL_CLAUSE_END_RE)) assertionStart = boundary.index + boundary[0].length;
+    const assertionPrefix = prefix.slice(assertionStart);
     if (/\b(?:asked|asks|asking|wondered|wonders)\b[^.;!?]*\b(?:if|whether)\b/i.test(assertionPrefix)) {
       m = DENIAL_WORD_RE.exec(text);
       continue;
