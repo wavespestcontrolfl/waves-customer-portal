@@ -1394,7 +1394,7 @@ const SAFETY_QUESTION_PRONOUN_RE = '(?:it|that|they|this|these|those)\\b';
 
 const SAFETY_QUESTION_AUXILIARY = `(?:is|are|does|do|would|will|can|could|isn[\\x27\\u2019]t|aren[\\x27\\u2019]t|doesn[\\x27\\u2019]t|don[\\x27\\u2019]t|wouldn[\\x27\\u2019]t|won[\\x27\\u2019]t|can[\\x27\\u2019]t|couldn[\\x27\\u2019]t)`;
 
-function questionAboutProduct(text, keywordAlt) {
+function questionAboutProduct(text, keywordAlt, antecedentText = '') {
   const productSubject = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\b[^.!?;]{0,20}?\\b${SAFETY_QUESTION_PRODUCT_SUBJECT_RE}([^.!?;]{0,80}?\\b(?:${keywordAlt})\\b)[^.!?;]{0,60}?(?:[?.]|$)`, 'i');
   const productMatch = productSubject.exec(text);
   if (productMatch) return { predicate: productMatch[1] };
@@ -1404,7 +1404,7 @@ function questionAboutProduct(text, keywordAlt) {
   // A pronoun subject needs an earlier product mention in the SAME turn to
   // resolve what it refers to — "is it safe to leave the gate open?" names
   // no product anywhere and is not one of these questions.
-  if (!new RegExp(`\\b${SAFETY_SUBJECT_MODIFIER}\\b`, 'i').test(text.slice(0, match.index))) return null;
+  if (!new RegExp(`\\b${SAFETY_SUBJECT_MODIFIER}\\b`, 'i').test(`${antecedentText} ${text.slice(0, match.index)}`)) return null;
   return { predicate: match[1] };
 }
 
@@ -1418,8 +1418,10 @@ function questionNegatesKeyword(text, keywordAlt) {
 }
 
 function safetyQuestionPolarity(text) {
-  const asksPositive = questionAboutProduct(text, SAFETY_KEYWORDS_POSITIVE);
-  const asksHarm = questionAboutProduct(text, SAFETY_KEYWORDS_HARM);
+  const questionText = latestInterrogativeSegment(text) || text;
+  const antecedentText = text.slice(0, text.lastIndexOf(questionText));
+  const asksPositive = questionAboutProduct(questionText, SAFETY_KEYWORDS_POSITIVE, antecedentText);
+  const asksHarm = questionAboutProduct(questionText, SAFETY_KEYWORDS_HARM, antecedentText);
   const negatesPositive = asksPositive && questionNegatesKeyword(asksPositive.predicate, SAFETY_KEYWORDS_POSITIVE);
   const negatesHarm = asksHarm && questionNegatesKeyword(asksHarm.predicate, SAFETY_KEYWORDS_HARM);
   return {
