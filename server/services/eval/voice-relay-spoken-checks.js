@@ -546,7 +546,7 @@ const FREE_VISIT_PROMISE_RES = Object.freeze(
   "\\bno (?:bill|charge|cost|fee)\\b[^.!?]{0,30}?\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b"
 ].map((source) => new RegExp(source, 'gi')));
 const FREE_VISIT_CAUSAL_BOUNDARY_RE = new RegExp(
-  `\\b(?:as(?!\\s+of\\b)|since(?!\\s+(?:today|yesterday|now)\\b))\\b(?=\\s+(?:(?:i|we|you|he|she|they|it)\\s+|`
+  `\\b(?:as(?!\\s+of\\b)|since(?!\\s+(?:today|yesterday|now)\\b)|now\\s+that)\\b(?=\\s+(?:(?:i|we|you|he|she|they|it)\\s+|`
     + `(?:(?:the|your|our|his|her|their|this|that)\\s+)?(?:[\\w\\x27\\u2019-]+\\s+){1,3})`
     + `${CLAUSE_FINITE_PREDICATE_RE.source})`,
   'gi',
@@ -567,7 +567,9 @@ function no_free_visit_promise(value, record, { spoken }) {
           && clauseIsEpistemicallyHedged(clausePrefix.slice(0, temporalParenthetical.index))
           ? clauseStart : match.index - claim.length;
         const causalContext = text.slice(claimStart, match.index + match[0].length);
-        const causalBoundary = [...causalContext.matchAll(FREE_VISIT_CAUSAL_BOUNDARY_RE)].pop();
+        const causalBoundary = [...causalContext.matchAll(FREE_VISIT_CAUSAL_BOUNDARY_RE)].reverse()
+          .find((boundary) => !/^now\s+that$/i.test(boundary[0])
+            || !clauseIsEpistemicallyHedged(causalContext.slice(0, boundary.index)));
         const prefix = causalBoundary
           ? causalContext.slice(causalBoundary.index + causalBoundary[0].length, match.index - claimStart)
           : text.slice(claimStart, match.index);
@@ -1501,9 +1503,12 @@ function report_readback_confirms(value, record, { spoken }) {
       const [clauseStart, clauseEnd] = clauseBounds(text, m.index);
       const sentencePrefix = text.slice(0, m.index).split(/[.!?;]/).pop();
       const interrogative = /^\s*(?:(?:and|but|so)\s+)?(?:was|were|is|are|has|have|had|did|do|does|can|could|would|will|should|what|where|when|why|how)\b/i.test(sentencePrefix);
-      const alternativeQuestion = /^or\b[^.!?;]*\?/i.test(text.slice(clauseEnd));
+      const coordinatedQuestion = new RegExp(
+        `^(?:or\\b|and\\s+(?=(?:${REPORT_ASSERTION_START}|${REPORT_VERBLESS_PRODUCT_LOCATION_START})))[^.!?;]*\\?`,
+        'i',
+      ).test(text.slice(clauseEnd));
       const sharedLocation = reportSharedLocationContinuation(text, clauseEnd, value.location);
-      if (text[clauseEnd] === '?' || interrogative || alternativeQuestion || sharedLocation.question) continue;
+      if (text[clauseEnd] === '?' || interrogative || coordinatedQuestion || sharedLocation.question) continue;
       const reportClause = clauseOf(text, m.index) + sharedLocation.text;
       const assertion = reportAssertionOf(reportClause, m.index - clauseStart);
       const clause = assertion.text;

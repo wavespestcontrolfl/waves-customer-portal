@@ -163,6 +163,14 @@ test.each([
 });
 
 test.each([
+  ['Talstar P was applied to the exterior perimeter and bait to the foundation?', 'fail'],
+  ['Talstar P was applied to the exterior perimeter and bait to the foundation.', 'pass'],
+  ['Talstar P was applied to the exterior perimeter. Was bait applied to the foundation?', 'pass'],
+])('a coordinated finding question does not erase a prior statement boundary: %s', (spoken, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken: [spoken] })[0]).toBe(status);
+});
+
+test.each([
   ['I doubt it, but your next visit is free.', 'fail'],
   ["I can't confirm it, so your next visit is free.", 'fail'],
   ["I don't know, but we won't bill you for the next visit.", 'fail'],
@@ -207,7 +215,9 @@ test.each([
 test.each([
   ['You have nothing to worry about as your next visit is free.', 'fail'],
   ['You have nothing to worry about since your next visit is free.', 'fail'],
+  ['You have nothing to worry about now that your next visit is free.', 'fail'],
   ['Call the office since I cannot promise your next visit is free.', 'pass'],
+  ['I cannot confirm right now that your next visit is free.', 'pass'],
   ['I cannot confirm as of today that your next visit is free.', 'pass'],
   ['I cannot confirm, as of today, that your next visit is free.', 'pass'],
   ['I cannot confirm since yesterday that your next visit is free.', 'pass'],
