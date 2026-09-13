@@ -283,3 +283,16 @@ test('an interpolated <style> template keeps every line scanned', () => {
   ].join('\n'));
   assert.ok(hits.includes('banned-font-size:6'), `expected the live 12px rule, got ${JSON.stringify(hits)}`);
 });
+
+test('sibling style expressions cannot hide live CSS as a template comment', () => {
+  const hits = scan('Sample.jsx', [
+    'const prefix = ".a { background: url(foo";',
+    'export default function S() {',
+    '  return <style>{prefix}{`/*); }',
+    '    .b { font-size: 12px; }',
+    '    /* real comment */',
+    '  `}</style>;',
+    '}',
+  ].join('\n'));
+  assert.ok(hits.includes('banned-font-size:4'), `expected the live 12px rule, got ${JSON.stringify(hits)}`);
+});

@@ -302,11 +302,13 @@ function styleTemplateNode(node) {
   if (node.type !== 'JSXElement') return null;
   const name = node.openingElement && node.openingElement.name;
   if (!name || name.type !== 'JSXIdentifier' || name.name !== 'style') return null;
-  for (const child of node.children || []) {
-    const expr = child && child.type === 'JSXExpressionContainer' ? child.expression : null;
-    if (expr && expr.type === 'TemplateLiteral' && (expr.expressions || []).length === 0) return expr;
-  }
-  return null;
+  // Sibling JSX expressions also interpolate CSS: a prefix can open url()
+  // before this template starts. Only a sole template has known context.
+  const children = (node.children || []).filter((child) => child.type !== 'JSXText' || child.value.trim());
+  if (children.length !== 1) return null;
+  const child = children[0];
+  const expr = child.type === 'JSXExpressionContainer' ? child.expression : null;
+  return expr && expr.type === 'TemplateLiteral' && expr.expressions.length === 0 ? expr : null;
 }
 
 function styleTemplateRanges(node, out) {
