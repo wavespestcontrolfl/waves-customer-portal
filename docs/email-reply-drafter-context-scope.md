@@ -182,7 +182,12 @@ allow duplicate retries. Manual failures return a usable error to the UI.
   write-confirmation boundary, and the successful response fields (`draft`,
   `email_id`, `thread_id`, `replying_to`, `subject`, `reply_draft`, `note`).
   Manual generation returns text for the operator; it must not create a
-  Gmail draft as an added side effect.
+  Gmail draft as an added side effect. Verify task scope through the real
+  IB route: at the reviewed main revision, its email execution branch calls
+  `executeEmailTool(toolName, input)` without forwarding `actionContext`.
+  Service tests that supply `readCustomerIds` directly do not establish
+  route-level isolation. The rewiring slice must carry the task customer
+  scope end-to-end and test rejection before model egress.
 
 ### 6. Later decision: widen the trigger
 
