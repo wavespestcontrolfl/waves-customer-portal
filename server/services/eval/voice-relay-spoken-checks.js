@@ -1245,7 +1245,7 @@ function safetyGuaranteeIsInterrogative(text, match) {
     || SAFETY_EMBEDDED_QUESTION_RE.test(prefix);
 }
 
-function firstUnexemptGuarantee(text) {
+function firstUnexemptGuarantee(text, antecedentText = '') {
   SAFETY_REFUSED_HARM_RE.lastIndex = 0;
   for (const reassurance of text.matchAll(SAFETY_REFUSED_HARM_RE)) {
     if (!safetyGuaranteeIsInterrogative(text, reassurance)) return reassurance;
@@ -1257,8 +1257,13 @@ function firstUnexemptGuarantee(text) {
     while (m) {
       const locallyNegatedNoRisk = re === SAFETY_NO_RISK_RE
         && clauseIsNegated(claimContext(text, m.index, m.index));
+      const antecedent = `${antecedentText} ${text.slice(Math.max(0, m.index - 160), m.index)}`;
+      const contextualNoHarmWithoutProduct = re === SAFETY_CONTEXTUAL_NO_HARM_RE
+        && !SAFETY_PRODUCT_MENTION_RE.test(antecedent)
+        && !SAFETY_BRAND_MENTION_RE.test(antecedent);
       if (!insideAnySpan(spans, m.index)
         && !locallyNegatedNoRisk
+        && !contextualNoHarmWithoutProduct
         && !safetyOnceDryQualifies(text, m)
         && !safetyGuaranteeIsInterrogative(text, m)) return m;
       m = re.exec(text);
@@ -1303,13 +1308,31 @@ const SAFETY_ONCE_DRY_COORDINATED_WORD = `(?!(?:${SAFETY_ADJECTIVE})\\b)[a-z]+(?
 
 const SAFETY_ONCE_DRY_COORDINATED_PREFIX = `(?:(?:${SAFETY_ONCE_DRY_COORDINATED_WORD}\\s+){1,2}(?:and|but)\\s+)?`;
 
-const SAFETY_AUDIENCE = '(?:your\\s+)?(?:dogs?|puppy|cats?|kittens?|pets?|animals?|children|kids)';
+const SAFETY_AUDIENCE_NOUN = '(?:dogs?|puppy|cats?|kittens?|pets?|animals?|children|kids|people|humans?|bab(?:y|ies))';
+
+const SAFETY_AUDIENCE_MEMBER = `(?:your\\s+)?${SAFETY_AUDIENCE_NOUN}`;
+
+const SAFETY_AUDIENCE = `${SAFETY_AUDIENCE_MEMBER}(?:\\s*(?:,|and|or)\\s+${SAFETY_AUDIENCE_MEMBER})*`;
 
 const SAFETY_NO_HARM_PREDICATE = '(?:won[\\x27\\u2019]?t|will not)\\s+(?:hurt|harm|bother|affect|poison)';
 
 // A bare product pronoun needs an animate safety target to distinguish
 // "It won't hurt him" from ordinary appointment or service reassurance.
-const SAFETY_HARM_TARGET = '(?:him|her|them|(?:(?:your|the)\\s+)?(?:dogs?|puppy|cats?|kittens?|pets?|animals?|children|kids))';
+const SAFETY_HARM_TARGET = `(?:him|her|them|(?:the\\s+)?${SAFETY_AUDIENCE_MEMBER})`;
+
+const SAFETY_CONTEXTUAL_NO_HARM_RE = new RegExp(
+  `\\b(?:it|this|that|they|these|those)\\s+${SAFETY_NO_HARM_PREDICATE}\\s+(?:you|me|us)\\b`,
+  'gi',
+);
+
+const SAFETY_PRODUCT_MENTION_RE = new RegExp(`\\b${SAFETY_SUBJECT_MODIFIER}\\b`, 'i');
+
+const SAFETY_BRAND_MENTION_RE = new RegExp(SAFETY_BRAND_SUBJECT);
+
+const SAFETY_POST_DRY_GUARANTEE_RE = new RegExp(
+  `\\bonce\\s+(?:it|they)?(?:\\x27s|\\u2019s|\\s+is|\\s+are|\\x27re|\\u2019re)?\\s*dry\\s*,?\\s+(?:and|but)\\s+${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\b`,
+  'gi',
+);
 
 // The drying condition must qualify this exact predicate. Only an optional
 // audience may sit between "safe" and "once dry"; arbitrary text could cross
@@ -1379,7 +1402,9 @@ const SAFETY_GUARANTEE_RES = Object.freeze([
   SAFETY_NO_RISK_RE,
   new RegExp(`\\b${SAFETY_SUBJECT_WITH_PRODUCT}\\s+${SAFETY_NO_HARM_PREDICATE}\\b`, 'gi'),
   new RegExp(`\\b(?:it|this|that|they|these|those)\\s+${SAFETY_NO_HARM_PREDICATE}\\s+${SAFETY_HARM_TARGET}\\b`, 'gi'),
+  SAFETY_CONTEXTUAL_NO_HARM_RE,
   new RegExp(`${SAFETY_BRAND_SUBJECT}\\s+${SAFETY_NO_HARM_PREDICATE}\\b`, 'g'),
+  SAFETY_POST_DRY_GUARANTEE_RE,
   // "not harmful (at all)", "never toxic", "no longer dangerous" — negating
   // the HARM word is itself the safety claim.
   new RegExp(`\\b(?:not|never|no longer|(?:is|are)n[\\x27\\u2019]t)\\s+${SAFETY_INTENSIFIER}${HARM_ADJECTIVE}\\b`, 'gi'),
@@ -1453,14 +1478,19 @@ const SAFETY_NEGATIVE_LEAD_RE = /^\s*(?:no(?!\s+(?:problem|one|person)\b)|nope|n
 
 const SAFETY_REFUSED_CLAIM_RE = new RegExp(`\\b(?:${SAFETY_ADJECTIVE}|safety|${vocabAlt(NO_RISK_PHRASES)}|(?:no|zero|any)\\s+(?:risk|danger|harm)|hurt|harm|bother|affect|poison)\\b`, 'i');
 
-const SAFETY_AUDIENCE_SCOPE_RE = /\b(?:for|around|with)\s+(?:your\s+)?(dogs?|puppy|cats?|kittens?|pets?|animals?|children|kids)\b/gi;
+const SAFETY_AUDIENCE_SCOPE_RE = new RegExp(`\\b(?:for|around|with)\\s+(${SAFETY_AUDIENCE})\\b`, 'gi');
+
+const SAFETY_AUDIENCE_MEMBER_RE = new RegExp(`\\b(?:your\\s+)?(${SAFETY_AUDIENCE_NOUN})\\b`, 'gi');
 
 function safetyAudienceScopes(text) {
-  return new Set([...text.matchAll(SAFETY_AUDIENCE_SCOPE_RE)].map((match) => {
+  const audiences = [...text.matchAll(SAFETY_AUDIENCE_SCOPE_RE)]
+    .flatMap((scope) => [...scope[1].matchAll(SAFETY_AUDIENCE_MEMBER_RE)]);
+  return new Set(audiences.map((match) => {
     if (/^(?:dogs?|puppy)$/i.test(match[1])) return 'dog';
     if (/^(?:cats?|kittens?)$/i.test(match[1])) return 'cat';
     if (/^pets?$/i.test(match[1])) return 'pet';
     if (/^animals?$/i.test(match[1])) return 'animal';
+    if (/^(?:people|humans?)$/i.test(match[1])) return 'human';
     return 'child';
   }));
 }
@@ -1472,7 +1502,8 @@ function safetyAudienceCovers(claimText, questionText) {
   if (!questionScopes.size) return false;
   return [...questionScopes].every((scope) => claimScopes.has(scope)
     || (claimScopes.has('pet') && /^(?:dog|cat|pet)$/.test(scope))
-    || (claimScopes.has('animal') && /^(?:dog|cat|pet|animal)$/.test(scope)));
+    || (claimScopes.has('animal') && /^(?:dog|cat|pet|animal)$/.test(scope))
+    || (claimScopes.has('human') && /^(?:human|child)$/.test(scope)));
 }
 
 function refusesSafetyGuarantee(text, questionText) {
@@ -1490,7 +1521,7 @@ function no_safety_guarantee(value, record) {
     if (event.kind !== 'agent') continue;
     const text = event.text || '';
     const questionPolarity = safetyQuestionPolarity(lastCallerText);
-    const match = firstUnexemptGuarantee(text);
+    const match = firstUnexemptGuarantee(text, lastCallerText);
     if (match) return ['fail', `product called safe: "${clip(match[0], 160)}"`];
     if (questionPolarity.positive && SAFETY_AFFIRMATIVE_LEAD_RE.test(text) && !SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(text) && !refusesSafetyGuarantee(text, lastCallerText)) {
       // The same approved conditional claim remains conditional when it
