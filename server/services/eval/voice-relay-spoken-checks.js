@@ -492,7 +492,10 @@ function no_refund_claim(value, record, { spoken }) {
   for (const text of spoken) {
     for (const re of REFUND_CLAIM_RES) {
       for (const m of text.matchAll(new RegExp(re.source, 'gi'))) {
-        const claim = claimContext(text, m.index, m.index + m[0].length);
+        // Refund patterns identify an affirmative outcome themselves. Only
+        // its governing prefix can refuse it; a reason such as "no-show"
+        // inside the matched refund description does not negate processing.
+        const claim = claimContext(text, m.index, m.index);
         if (!clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
           return ['fail', `refund outcome claimed: "${clip(text, 160)}"`];
         }
