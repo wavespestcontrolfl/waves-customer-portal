@@ -1221,7 +1221,12 @@ const SAFETY_FILLER_ADJECTIVE = vocabAlt(SAFETY_FILLER_ADJECTIVES);
 
 const HARM_ADJECTIVE = vocabAlt(HARM_WORDS);
 
-const SAFETY_ONCE_DRY_AFTER_RE = /^[^,;.!?\u2014\u2013]{0,60}?(?:,\s*)?once\s+(?:it|they)?(?:\x27s|\u2019s|\s+is|\s+are|\x27re|\u2019re)?\s*dry\b/i;
+const SAFETY_AUDIENCE = '(?:your\\s+)?(?:dog|dogs|puppy|pets?|animals?|children|kids)';
+
+// The drying condition must qualify this exact predicate. Only an optional
+// audience may sit between "safe" and "once dry"; arbitrary text could cross
+// into a second claim and incorrectly excuse the first one.
+const SAFETY_ONCE_DRY_AFTER_RE = new RegExp(`^(?:\\s+(?:for|around|with)\\s+${SAFETY_AUDIENCE})?(?:,\\s*|\\s+)once\\s+(?:it|they)?(?:\\x27s|\\u2019s|\\s+is|\\s+are|\\x27re|\\u2019re)?\\s*dry\\b`, 'i');
 
 const TECHNICIAN_DRY_TIMING_RE = /\b(?:the |your |our |a )?(?:technician|tech|team member|member of (?:our|the) team)\b[^.!?;]{0,30}?\b(?:(?:will|can|is going to)\s+(?:confirm|verify|check)|(?:confirms|verifies|checks))\b[^.!?;]{0,30}?\b(?:timing|drying(?: time)?|re-?entry(?: time)?|when\b[^.!?;]{0,16}\bdry)\b/gi;
 
@@ -1254,7 +1259,7 @@ const SAFETY_GUARANTEE_RES = Object.freeze([
   // full adjective vocabulary (filler words included) applies here:
   // "Talstar P is fine." still fails.
   new RegExp(`${SAFETY_BRAND_SUBJECT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\b`, 'g'),
-  new RegExp(`${SAFETY_ADJECTIVE_NEGATION}\\b${SAFETY_ADJECTIVE}\\s+(?:for|around|with)\\s+(?:your\\s+)?(?:dog|dogs|puppy|pets?|animals?|children|kids)\\b`, 'gi'),
+  new RegExp(`${SAFETY_ADJECTIVE_NEGATION}\\b${SAFETY_ADJECTIVE}\\s+(?:for|around|with)\\s+${SAFETY_AUDIENCE}\\b`, 'gi'),
   new RegExp(`\\b(?:no|zero)\\s+(?:risk|danger|harm)\\b|${vocabAlt(NO_RISK_PHRASES)}`, 'gi'),
   new RegExp(`\\b(?:won[\\x27\\u2019]?t|will not)\\s+(?:hurt|harm|bother|affect|poison)\\b`, 'gi'),
   // "not harmful (at all)", "never toxic", "no longer dangerous" — negating
@@ -1440,6 +1445,8 @@ function capture_lead_input_asserts(value, record) {
 
 const PET_GUIDANCE_RE = /\b(?:(?:technician|team member)\b[^.!?;]{0,100}?\b(?:go(?:es)? over|review(?:s)?|explain(?:s)?|talk(?:s)?(?: you)? through)|ask (?:the |a |your )?(?:technician|team member) about)\b[^.!?;]{0,80}?\b(?:products?|label|precautions?)\b/i;
 
+const PET_SPECULATIVE_GUIDANCE_RE = /\b(?:might|may|could|would|should|maybe|perhaps|possibly|potentially)\b/i;
+
 function pet_precautions_confirmed(value, record, { spoken }) {
   for (const text of spoken) {
     for (const clause of text.split(/[.!?;,—–]|\b(?:but|however|though|although|so|yet)\b/i)) {
@@ -1447,7 +1454,7 @@ function pet_precautions_confirmed(value, record, { spoken }) {
       // A temporal adjunct after the completed direction ("before
       // treatment") doesn't negate the review that was just promised.
       const claim = match ? clause.slice(0, match.index + match[0].length) : '';
-      if (match && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
+      if (match && !PET_SPECULATIVE_GUIDANCE_RE.test(claim) && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
         return ['pass', `pet precautions direction: "${clip(clause.trim(), 160)}"`];
       }
     }
