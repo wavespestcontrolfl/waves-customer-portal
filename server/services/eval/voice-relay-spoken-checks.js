@@ -1394,7 +1394,9 @@ function trailingWithdrawalAlternative(objectSource) {
 
 const TECHNICIAN_DRY_TIMING_ALTERNATIVE_RE = trailingWithdrawalAlternative('(?:it|that|this|(?:the\\s+)?(?:timing|confirmation|drying time|re-?entry time))');
 
-const TECHNICIAN_DRY_TIMING_OBJECT_NEGATION_RE = /^\s*[^.!?;—–]{0,60}?\s*,?\s*(?:and|but|though|although)\s+not\s+(?:the\s+)?(?:timing|confirmation|drying time|re-?entry time)\b/i;
+const TECHNICIAN_DRY_TIMING_OBJECT_NEGATION_RE = /^\s*[^.!?;—–]{0,60}?\s*(?:,\s*|,?\s*(?:and|but|though|although)\s+)not\s+(?:the\s+)?(?:timing|confirmation|drying time|re-?entry time)\b/i;
+
+const TECHNICIAN_VISIT_TIMING_OBJECT_NEGATION_RE = /^\s*,\s*not\s+(?:the\s+)?(?:appointment|arrival|schedule|scheduling)(?:\s+(?:time|timing))?\b/i;
 
 function safetyOnceDryQualifies(text, claim, questionText = null) {
   if (!SAFETY_ONCE_DRY_PREDICATE_RE.test(claim[0])) return false;
@@ -1406,7 +1408,9 @@ function safetyOnceDryQualifies(text, claim, questionText = null) {
     const claim = claimContext(text, match.index, match.index + match[0].length);
     const suffix = text.slice(match.index + match[0].length);
     return text[timingClaimEnd] !== '?' && !QUESTION_LEAD_RE.test(claim)
-      && (TECHNICIAN_EXPLICIT_DRY_TIMING_RE.test(match[0]) || !TECHNICIAN_VISIT_TIMING_RE.test(timingClaim))
+      && (TECHNICIAN_EXPLICIT_DRY_TIMING_RE.test(match[0])
+        || !TECHNICIAN_VISIT_TIMING_RE.test(timingClaim)
+        || (!TECHNICIAN_VISIT_TIMING_RE.test(match[0]) && TECHNICIAN_VISIT_TIMING_OBJECT_NEGATION_RE.test(suffix)))
       && (!PET_TRAILING_CONDITION_RE.test(suffix) || PET_INDEPENDENT_CONDITIONAL_ACTION_RE.test(suffix))
       && !TECHNICIAN_DRY_TIMING_ALTERNATIVE_RE.test(suffix)
       && !TECHNICIAN_DRY_TIMING_OBJECT_NEGATION_RE.test(suffix)
@@ -1532,13 +1536,13 @@ const SAFETY_LEAD_COMPLETION = '(?:safe|fine|ok(?:ay)?|harmless|no problem|total
 const SAFETY_AFFIRMATIVE_LEAD_RE = new RegExp(
   '^\\s*(?:(?:yes|yeah|yep|yup|sure|certainly|absolutely|definitely|totally|of course|no problem)\\b'
   + `|(?:it is|it['’]s)\\s+${SAFETY_LEAD_COMPLETION}\\b`
-  + `|(?:it is|it['’]s)\\s*,?\\s*(?:yes)?[.!\\s]*$)`,
+  + `|(?:it is|it['’]s|they are|they['’]re)\\s*,?\\s*(?:yes)?[.!\\s]*$)`,
   'i',
 );
 
 const SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE = /^\s*(?:absolutely|certainly|definitely|totally|of course)\s+not\b/i;
 
-const SAFETY_NEGATIVE_LEAD_RE = /^\s*(?:no(?!\s+(?:problem|one|person)\b)|nope|nah|not at all|not really|never|it is not|it['’]s not|it is n['’]t|it isn['’]t)\b/i;
+const SAFETY_NEGATIVE_LEAD_RE = /^\s*(?:no(?!\s+(?:problem|one|person)\b)|nope|nah|not at all|not really|never|it is not|it['’]s not|it is n['’]t|it isn['’]t|(?:it|they)\s+(?:cannot|can not|can['’]t))\b/i;
 
 const SAFETY_REFUSED_CLAIM_RE = new RegExp(`\\b(?:${SAFETY_ADJECTIVE}|safety|${vocabAlt(NO_RISK_PHRASES)}|(?:no|zero|any)\\s+(?:risk|danger|harm)|hurt|harm|bother|affect|poison)\\b`, 'i');
 
