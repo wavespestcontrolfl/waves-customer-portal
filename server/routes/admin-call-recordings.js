@@ -285,7 +285,12 @@ router.post('/proposals/:id/preview', async (req, res, next) => {
   try {
     if (!UUID_RE.test(req.params.id) || (req.body?.visit_id && !UUID_RE.test(req.body.visit_id))) return res.status(400).json({ error: 'Invalid proposal or visit id' });
     const p = await require('../services/call-reschedule-proposals').previewProposal(db, req.params.id, { visitId: req.body?.visit_id });
+    // Render the identity covered by this hash, not a potentially older list row.
+    const { id, status, scheduled_date, current_window, service_name, property } = p.selected;
     res.json({ preview_hash: p.preview_hash, visit_id: p.selected.id, series: p.series,
+      selected: { id, status, scheduled_date, current_window, service_name, property },
+      customer: { id: p.customer.id, first_name: p.customer.first_name, last_name: p.customer.last_name },
+      quote: p.card.payload.reschedule_proposal.quote,
       from: p.plan.from || null, new_date: p.plan.newDate, new_window: p.plan.newWindow });
   } catch (err) {
     if (err.status || err.statusCode) return res.status(err.status || err.statusCode).json({ error: err.message });

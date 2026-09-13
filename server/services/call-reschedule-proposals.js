@@ -12,7 +12,7 @@ const fail = (message, status = 409) => Object.assign(new Error(message), { stat
 const digest = (value) => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const norm = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 const openStates = ['open', 'in_progress'];
-const CUSTOMER_COLUMNS = ['id', 'phone', 'secondary_phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone', 'address_line1', 'address_line2', 'city', 'state', 'zip'];
+const CUSTOMER_COLUMNS = ['id', 'first_name', 'last_name', 'phone', 'secondary_phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone', 'address_line1', 'address_line2', 'city', 'state', 'zip'];
 const PROPERTY_COLUMNS = ['id', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'updated_at'];
 
 function proposalEvidence(v2, transcript) {

@@ -11,6 +11,7 @@ jest.mock('../services/sms-operational-actions', () => ({
   smsCommitmentsEnabled: jest.fn(() => false), listSmsCommitments: jest.fn(async () => []), applySmsCommitmentUpdate: jest.fn(),
 }));
 jest.mock('../services/call-intelligence', () => ({ loadCallIntelligence: jest.fn() }));
+jest.mock('../services/call-reschedule-proposals', () => ({ previewProposal: jest.fn() }));
 jest.mock('../services/callback-cards', () => ({
   enabled: jest.fn(() => false), prepareCallbackCards: jest.fn(), decorateCallbackRows: jest.fn(async (_db, rows) => rows), actOnCallback: jest.fn(),
 }));
@@ -55,6 +56,29 @@ const CALL_ID = '11111111-2222-4333-8444-555555555555';
 const CUSTOMER_ID = '66666666-7777-4888-9999-aaaaaaaaaaaa';
 const COMMIT_ID = 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff';
 const SID = 'CA' + '4'.repeat(32);
+
+test('proposal preview returns only the reviewed identity with its authorization hash', async () => {
+  const selected = { id: COMMIT_ID, status: 'confirmed', scheduled_date: '2027-03-15',
+    current_window: { start_at: '2027-03-15T13:00:00Z', end_at: '2027-03-15T15:00:00Z' },
+    service_name: 'Reviewed service', property: { id: 'reviewed-property', address_line1: '200 Example Court' } };
+  require('../services/call-reschedule-proposals').previewProposal.mockResolvedValue({
+    preview_hash: 'a'.repeat(64), selected: { ...selected, internal_notes: 'must stay private' },
+    customer: { id: CUSTOMER_ID, first_name: 'Synthetic', last_name: 'Caller', secondary_phone: 'private' },
+    card: { payload: { reschedule_proposal: { quote: 'Move the pest appointment to Tuesday.' } } },
+    series: { collective: false }, plan: { newDate: '2027-03-16', newWindow: { start: '14:00', end: '15:30' } },
+  });
+  await withServer(async (base) => {
+    const res = await fetch(`${base}/admin/call-recordings/proposals/${CALL_ID}/preview`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ visit_id: COMMIT_ID }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({ preview_hash: 'a'.repeat(64), selected,
+      customer: { id: CUSTOMER_ID, first_name: 'Synthetic', last_name: 'Caller' }, quote: 'Move the pest appointment to Tuesday.' });
+    expect(body.selected).not.toHaveProperty('internal_notes');
+    expect(body.customer).not.toHaveProperty('secondary_phone');
+  });
+});
 
 // Minimal query recorder: `first()` answers from a queue, `update()` records
 // its patch, `where` chains accumulate.
