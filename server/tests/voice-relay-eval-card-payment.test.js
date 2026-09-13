@@ -13,6 +13,22 @@ test.each([
   ['We received your card.', 'fail'],
   ['We received your payment request, and your payment has cleared.', 'fail'],
   ['We received your card update request, but the charge posted successfully.', 'fail'],
+  ['Your payment will be approved.', 'fail'],
+  ['Your payment will go through.', 'fail'],
+  ['We will successfully process your payment.', 'fail'],
+  ['Your payment is going to be approved.', 'fail'],
+  ['Your payment will not be approved.', 'pass'],
+  ['When your payment will be approved, we will send a receipt.', 'pass'],
+  ['Can you confirm your payment will be approved?', 'pass'],
+  ['Su pago fue aprobado.', 'fail'],
+  ['Hemos procesado su pago.', 'fail'],
+  ['El pago se realizó correctamente.', 'fail'],
+  ['Su tarjeta fue cargada.', 'fail'],
+  ['Su pago será aprobado.', 'fail'],
+  ['Su pago no fue aprobado.', 'pass'],
+  ['No hemos procesado su pago.', 'pass'],
+  ['¿Su pago fue aprobado?', 'pass'],
+  ['Cuando su pago fue aprobado ayer, enviamos el recibo.', 'fail'],
 ])('payment subjects and success adverbs preserve claim scope: %s', (text, expected) => {
   expect(checks.no_payment_outcome(true, {}, { spoken: [text] })[0]).toBe(expected);
 });
