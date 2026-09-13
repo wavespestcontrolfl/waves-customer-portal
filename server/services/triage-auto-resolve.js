@@ -1880,11 +1880,11 @@ async function sweep({ now = new Date() } = {}) {
 // remaining keep the call 'open', otherwise it takes the applied status.
 //
 // visitId binds the transition to the appointment that actually moved. A call
-// can discuss two existing appointments, and closing every matching reason
-// code would hide the office work the other visit still owes (codex #4293 r1
-// P2). A card that names no appointment is ambiguous: it closes with the move
-// only when no OTHER open card on the call names a different visit.
+// can discuss two existing appointments, and an unbound card can represent
+// another visit even when no sibling card names it. Leave unbound cards for
+// review until they carry positive evidence for this appointment.
 async function resolveRescheduleCards(conn, callLogId, note, visitId = null) {
+  if (!visitId) return 0;
   const now = new Date();
   return conn.transaction(async (trx) => {
     await lockTriageCall(trx, callLogId);
@@ -1892,12 +1892,8 @@ async function resolveRescheduleCards(conn, callLogId, note, visitId = null) {
       .where({ call_log_id: callLogId, status: 'open' })
       .whereIn('reason_code', ['reschedule_or_cancel', 'existing_appointment_coordination'])
       .select('id', 'related_scheduled_service_id');
-    const namesAnotherVisit = visitId
-      && candidates.some((item) => item.related_scheduled_service_id && item.related_scheduled_service_id !== visitId);
     const targets = candidates
-      .filter((item) => !visitId
-        || item.related_scheduled_service_id === visitId
-        || (!item.related_scheduled_service_id && !namesAnotherVisit))
+      .filter((item) => item.related_scheduled_service_id === visitId)
       .map((item) => item.id);
     if (!targets.length) return 0;
     const resolved = await trx('triage_items')

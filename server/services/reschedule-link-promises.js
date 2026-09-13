@@ -1409,7 +1409,7 @@ async function claimForDispatch(conn, row, context, { now, planned, link }) {
   }
 }
 
-async function dispatch(conn, row, context, { now, send, buildLink, render, planned, evidenceSince }) {
+async function dispatch(conn, row, context, { now, clock, send, buildLink, render, planned, evidenceSince }) {
   const { commitment, customer, visit } = context;
   const link = await (buildLink || require('./reschedule-link').buildRescheduleLink)(visit.id, { customerId: customer.id });
   if (!link?.url) return parkReview(conn, row, 'link_unavailable');
@@ -1435,21 +1435,10 @@ async function dispatch(conn, row, context, { now, send, buildLink, render, plan
   const { classifyDeliveryCertainty } = require('./messaging/send-customer-message');
   const check = async () => {
     if (mode() !== 'true') return { ok: false, code: 'LINK_GATE_OFF', reason: 'Reschedule link automation is off' };
-    // `now` — not a fresh `new Date()` — is the same provider-boundary clock
-    // every OTHER decision in this file's dispatch path already uses
-    // (holdBeforeSend's own isWithinSendWindowET(now)/nextSendWindowOpenET(now)
-    // just above, in sweep()). A bare `new Date()` here reads the REAL clock
-    // regardless of what instant a caller (a test, or a reprocessed sweep)
-    // says "now" is — between 20:00 and 08:00 ET that silently turns every
-    // other outcome this check can reach into LINK_QUIET_HOURS, which is
-    // exactly why the provider-boundary due_at race test above only passed
-    // during office hours (codex #4293 P1). The rendering/provider round-trip
-    // this check straddles is milliseconds to low seconds, not enough to cross
-    // a quiet-hours boundary or matter for a due_at floor — `now` is fresh
-    // enough for both, and now the two are provably consistent instead of
-    // silently disagreeing.
-    if (!isWithinSendWindowET(now)) return { ok: false, code: 'LINK_QUIET_HOURS', reason: 'Waiting for the next send window' };
-    const checkedAt = now;
+    // Rendering and lock acquisition can cross the send-window boundary.
+    // Read the handoff clock afresh; tests may inject their own clock.
+    const checkedAt = clock();
+    if (!isWithinSendWindowET(checkedAt)) return { ok: false, code: 'LINK_QUIET_HOURS', reason: 'Waiting for the next send window' };
     const live = await contextFor(conn, commitment.id, checkedAt);
     if (live.reason || !sameVisitSnapshot(snapshot(live.visit), planned)) return { ok: false, code: 'LINK_SOURCE_CHANGED', reason: 'The discussed visit changed' };
     // holdBeforeSend rechecks the floor immediately before THIS call into
@@ -1475,6 +1464,7 @@ async function dispatch(conn, row, context, { now, send, buildLink, render, plan
       commitment_id: commitment.id, commitment_generation: live.commitment.processing_generation ?? 0 }).first('id');
     if (!activeAttempt) return { ok: false, code: 'LINK_SOURCE_CHANGED', reason: 'The promised-link attempt was superseded' };
 
+    if (!isWithinSendWindowET(clock())) return { ok: false, code: 'LINK_QUIET_HOURS', reason: 'Waiting for the next send window' };
     return manual ? { ok: false, code: 'LINK_ALREADY_SENT', reason: 'The link was already sent' } : { ok: true };
   };
   try {
@@ -1496,7 +1486,7 @@ async function dispatch(conn, row, context, { now, send, buildLink, render, plan
       .update({ status: 'pending', available_at: new Date(now.getTime() + LOCK_RETRY_MINUTES * 60000), last_error: result.code, updated_at: new Date(),
         payload: deliveryUncertainPatch(conn, false) });
     if (result.blocked && ['LINK_QUIET_HOURS', 'QUIET_HOURS_HOLD', 'LINK_GATE_OFF'].includes(result.code)) return conn('outbox_messages').where({ id: row.id, status: 'sending' })
-      .update({ status: 'pending', available_at: nextSendWindowOpenET(new Date()), last_error: result.code, updated_at: new Date(),
+      .update({ status: 'pending', available_at: nextSendWindowOpenET(clock()), last_error: result.code, updated_at: new Date(),
         payload: deliveryUncertainPatch(conn, false) });
     // A moved-out due_at is not an unknown outcome or an office-review
     // matter — nothing reached the provider, and the fix is exactly the same
@@ -1620,7 +1610,7 @@ async function cancelPreActivation(conn, row) {
     .update({ status: 'cancelled', last_error: 'pre_activation', updated_at: new Date() });
 }
 
-async function runOne(conn, row, { now = new Date(), send = null, buildLink = null, render = null } = {}) {
+async function runOne(conn, row, { now = new Date(), clock = () => new Date(), send = null, buildLink = null, render = null } = {}) {
   if (mode() === 'off') return;
   // Another sweep may have completed this item since it was listed.
   row = await conn('outbox_messages').where({ id: row.id }).first();
@@ -1675,7 +1665,7 @@ async function runOne(conn, row, { now = new Date(), send = null, buildLink = nu
   if (prior) return settleDelivery(conn, row, prior, context);
   const planned = snapshot(visit);
   if (await holdBeforeSend(conn, row, context, planned, now)) return;
-  return dispatch(conn, row, context, { now, send, buildLink, render, planned, evidenceSince });
+  return dispatch(conn, row, context, { now, clock, send, buildLink, render, planned, evidenceSince });
 }
 
 // Oldest-SCANNED-first, falling back to oldest-updated-first for a row that

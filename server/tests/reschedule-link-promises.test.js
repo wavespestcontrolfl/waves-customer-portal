@@ -6,7 +6,12 @@ jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () =
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { resolveRescheduleCards } = require('../services/triage-auto-resolve');
-const links = require('../services/reschedule-link-promises');
+const realLinks = require('../services/reschedule-link-promises');
+// Pin fixture clocks explicitly; production uses the fresh wall clock.
+const links = { ...realLinks,
+  runOne: (conn, row, options = {}) => realLinks.runOne(conn, row, { clock: () => options.now || new Date(), ...options }),
+  sweep: (conn, options = {}) => realLinks.sweep(conn, { clock: () => options.now || new Date(), ...options }),
+};
 const { parseETDateTime } = require('../utils/datetime-et');
 const { gates } = require('../config/feature-gates');
 const { portalUrl } = require('../utils/portal-url');

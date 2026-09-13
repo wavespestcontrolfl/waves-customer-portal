@@ -25,7 +25,12 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
 
 const knex = require('knex');
 const { randomUUID } = require('node:crypto');
-const links = require('../services/reschedule-link-promises');
+const realLinks = require('../services/reschedule-link-promises');
+// Pin fixture clocks explicitly; production uses the fresh wall clock.
+const links = { ...realLinks,
+  runOne: (conn, row, options = {}) => realLinks.runOne(conn, row, { clock: () => options.now || new Date(), ...options }),
+  sweep: (conn, options = {}) => realLinks.sweep(conn, { clock: () => options.now || new Date(), ...options }),
+};
 const { parseETDateTime } = require('../utils/datetime-et');
 const { applyHumanUpdate, upsertCommitments } = require('../services/call-commitments');
 const { lockTriageCall } = require('../utils/triage-locks');
@@ -1937,6 +1942,25 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       expect(await links.stagePromises(mockPg)).toBe(1);
     });
 
+    test('a send waiting past 20:00 ET is deferred by the fresh provider clock', async () => {
+      const now = parseETDateTime('2030-01-07T19:59:00');
+      let handoffNow = now;
+      const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link.' });
+      await links.stagePromises(mockPg);
+      const row = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
+      const send = async ({ preProviderCheck }) => {
+        handoffNow = parseETDateTime('2030-01-07T20:01:00');
+        const verdict = await preProviderCheck();
+        expect(verdict).toMatchObject({ ok: false, code: 'LINK_QUIET_HOURS' });
+        return { sent: false, blocked: true, code: verdict.code };
+      };
+      await realLinks.runOne(mockPg, row, { now, clock: () => handoffNow, send, buildLink: stubBuildLink, render: stubRender });
+      const held = await mockPg('outbox_messages').where({ id: row.id }).first();
+      expect(held.status).toBe('pending');
+      expect(held.available_at).toEqual(parseETDateTime('2030-01-08T08:00:00'));
+      expect(held.provider_message_id).toBeNull();
+    });
+
     test('a persisted deadline permits delivery before the deadline', async () => {
       const now = new Date('2030-01-07T14:00:00Z');
       const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link by Friday.',
@@ -2067,16 +2091,7 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
     // LINK_QUIET_HOURS instead of LINK_FLOOR_NOT_REACHED, so this whole suite
     // only passed during office hours.
     //
-    // `now` here is deliberately left in the send window — exactly like the
-    // test above — because holdBeforeSend (runOne's OWN earlier gate) already
-    // honours `now` correctly today and would legitimately hold before
-    // dispatch() is ever reached if `now` itself were nighttime; that is a
-    // different, correct code path, not the bug. The bug lived in what
-    // check() reads AT the provider boundary once dispatch() is already
-    // running, so this test freezes the REAL wall clock to a quiet-hours
-    // instant for exactly that window and proves the verdict still comes
-    // from `now`, not from the frozen clock.
-    test('the same race still resolves to LINK_FLOOR_NOT_REACHED — never LINK_QUIET_HOURS — even when the real wall clock reads quiet hours (codex #4293 P1)', async () => {
+    test('an injected daytime clock keeps the floor check deterministic when the wall clock is quiet', async () => {
       const now = new Date('2030-01-07T14:00:00Z'); // 9:00 AM ET — inside the send window
       const newFloor = new Date('2030-01-09T14:00:00Z'); // moved two days out
       const commitmentId = await seedPromise({ quote: 'I will text you a reschedule link for that appointment.' });
