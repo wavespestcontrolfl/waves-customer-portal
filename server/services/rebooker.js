@@ -1519,6 +1519,12 @@ class SmartRebooker {
           // onto the new date. Any tracker change makes the write miss and
           // surface the concurrent-change 409 below instead.
           .where({ id: serviceId, status: service.status })
+          // A pending landing clears the confirmation receipt. Pin the
+          // observed flag so a customer confirmation arriving after the
+          // pre-read wins instead of being overwritten by this move.
+          .where(options.pendingConfirmation === true
+            ? { customer_confirmed: service.customer_confirmed ?? null }
+            : {})
           .whereIn('status', Array.from(allowedStatuses)),
         service,
       )

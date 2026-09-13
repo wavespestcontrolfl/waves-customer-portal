@@ -405,7 +405,9 @@ describe('single-path date exceptions', () => {
     ['default', {}, 'confirmed', false],
     ['reviewed proposal', { pendingConfirmation: true }, 'pending', true],
   ])('%s single move preserves its confirmation semantics', async (_label, extra, status, clearsConfirmation) => {
-    const { trxScheduled } = wireSingleMocks(anchorRow({ id: 'svc-2', recurring_parent_id: 'svc-1' }));
+    const { trxScheduled } = wireSingleMocks(anchorRow({
+      id: 'svc-2', recurring_parent_id: 'svc-1', customer_confirmed: true,
+    }));
     await SmartRebooker.reschedule('svc-2', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
       seriesPolicy: 'single', ...extra,
     });
@@ -417,6 +419,10 @@ describe('single-path date exceptions', () => {
       expect(update).not.toHaveProperty('customer_confirmed');
       expect(update).not.toHaveProperty('confirmed_at');
     }
+    const confirmationPins = trxScheduled.where.mock.calls
+      .map(([predicate]) => predicate)
+      .filter((predicate) => predicate?.customer_confirmed === true);
+    expect(confirmationPins).toHaveLength(clearsConfirmation ? 1 : 0);
     expect(activateLegacyOutboundReviewRowIfNeeded).toHaveBeenCalledTimes(clearsConfirmation ? 0 : 1);
   });
 
