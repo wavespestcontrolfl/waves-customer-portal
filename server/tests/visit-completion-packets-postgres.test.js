@@ -2344,6 +2344,41 @@ postgres('visit completion packet records on PostgreSQL', () => {
     } finally { await writer.rollback(); }
   });
 
+  test('a waiting stamped creator rechecks packet ownership after adoption commits', async () => {
+    const { invoice, estimateId } = await prepareAcceptanceInvoice();
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing.state).toBe('invoice_ready');
+    // Re-stage the real adoption's ownership write behind its shared lock.
+    await mockPg('invoices').where({ id: invoice.id }).update({ visit_completion_packet_id: null });
+    const adoption = await mockPg.transaction();
+    const writer = await mockPg.transaction();
+    let creation;
+    try {
+      await adoption.raw('SELECT pg_advisory_xact_lock(hashtext(?))',
+        [`unminted_setup_fee_manual_billing:${estimateId}`]);
+      await adoption('invoices').where({ id: invoice.id }).update({ visit_completion_packet_id: saved.body.packetId });
+      const { rows: [{ pid }] } = await writer.raw('SELECT pg_backend_pid() AS pid');
+      creation = InvoiceService.create({ database: writer, customerId: fixture.customerId,
+        notes: `Manual billing for accepted estimate #${estimateId}.`,
+        lineItems: [{ description: 'First service application', quantity: 1, unit_price: 220 }] })
+        .then((value) => value, (error) => error);
+      let waiting = false;
+      for (let i = 0; i < 50 && !waiting; i += 1) {
+        const { rows: [{ blocked }] } = await mockPg.raw('SELECT cardinality(pg_blocking_pids(?)) > 0 AS blocked', [pid]);
+        waiting = blocked;
+        if (!waiting) await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(waiting).toBe(true);
+      await adoption.commit();
+      expect(await creation).toMatchObject({ status: 409, code: 'VISIT_PACKET_OWNS_BILLING' });
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+    } finally {
+      if (!adoption.isCompleted()) await adoption.rollback();
+      if (creation) await creation;
+      await writer.rollback();
+    }
+  });
+
   test('parks an unminted accepted setup fee before suppressing a free recurring application', async () => {
     const estimateId = randomUUID();
     fixture.estimateIds.push(estimateId);
