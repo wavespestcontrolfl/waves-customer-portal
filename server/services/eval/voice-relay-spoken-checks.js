@@ -1411,7 +1411,11 @@ const TECHNICIAN_DRY_TIMING_OBJECT_NEGATION_RE = /^\s*[^.!?;—–]{0,60}?\s*(?:
 const TECHNICIAN_VISIT_TIMING_OBJECT_NEGATION_RE = /^\s*,\s*not\s+(?:the\s+)?(?:appointment|arrival|schedule|scheduling)(?:\s+(?:time|timing))?\b/i;
 
 function safetyOnceDryQualifies(text, claim, questionText = null) {
-  if (!SAFETY_ONCE_DRY_PREDICATE_RE.test(claim[0])) return false;
+  const claimClause = claimContext(text, claim.index, claim.index + claim[0].length);
+  if (!SAFETY_ONCE_DRY_PREDICATE_RE.test(claim[0])
+    || safetyGuaranteeIsInterrogative(text, claim)
+    || PET_SPECULATIVE_GUIDANCE_RE.test(claimClause)
+    || clauseIsEpistemicallyHedged(claimClause)) return false;
   const drying = SAFETY_ONCE_DRY_AFTER_RE.exec(text.slice(claim.index + claim[0].length));
   if (!drying || (questionText !== null
     && (!safetyAudienceCovers(`${claim[0]}${drying[0]}`, questionText)
@@ -1744,9 +1748,11 @@ function no_safety_guarantee(value, record) {
         0: claim[1],
         index: claim.index + claim[0].lastIndexOf(claim[1]),
       }, lastCallerText));
-    const prohibitedAffirmativeAnswer = (propositionConfirmation && questionPolarity.confirmedPositive)
-      || (questionPolarity.positive
-        ? affirmativeAnswer : questionPolarity.harm && ellipticalAdjectiveAnswer);
+    const prohibitedAffirmativeAnswer = [
+      [propositionConfirmation, questionPolarity.confirmedPositive],
+      [affirmativeAnswer, questionPolarity.positive],
+      [ellipticalAdjectiveAnswer, questionPolarity.harm],
+    ].some(([answer, prohibited]) => answer && prohibited);
     if (prohibitedAffirmativeAnswer
       && !qualifiedDryingAnswer
       && !refusesSafetyGuarantee(text, lastCallerText)) {
