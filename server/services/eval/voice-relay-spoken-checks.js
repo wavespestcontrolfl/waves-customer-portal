@@ -569,6 +569,10 @@ const PAYMENT_PAST_OUTCOME_RE = new RegExp(
   `\\b(?:was|were|had|did|went|got|fue|he|hemos|han|realiz[oó]|proces[oó]|complet[oó])\\b|\\b${PAYMENT_ACTOR}\\s+(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_TRANSITIVE_SUCCESS}\\b|\\b(?:${PAYMENT_TARGET}|that|it)\\s+(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_INTRANSITIVE_SUCCESS}\\b`,
   'i',
 );
+const PAYMENT_PRESENT_PERFECT_OUTCOME_RE = new RegExp(
+  `\\b(?:has|have)\\s+${PAYMENT_SUCCESS_ADVERBS}been\\s+${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_RESULT_STATE}\\b`,
+  'i',
+);
 function paymentOutcomeIsNegated(claim, match) {
   const matchedClaim = match[0].replace(/\bnot only\b/gi, '');
   if (/\b(?:not|never)\b|\b\w+n[\x27\u2019]t\b/i.test(matchedClaim)) return true;
@@ -597,10 +601,13 @@ function paymentOutcomeIsInterrogative(text, claim, matchEnd, claimEnd) {
   return QUESTION_LEAD_RE.test(claim) || (text[claimEnd] === '?' && !followupQuestion);
 }
 function paymentOutcomeHasTemporalCondition(text, claim, claimStart, outcome, outcomeStart, trailingClaim) {
-  return (PAYMENT_CONDITION_RE.test(claim)
-    || PAYMENT_PREREQUISITE_RE.test(text.slice(claimStart, outcomeStart))
-    || PAYMENT_CONDITION_RE.test(trailingClaim.replace(/^\s*,\s*/, '')))
-    && !PAYMENT_PAST_OUTCOME_RE.test(outcome);
+  const outcomeCondition = PAYMENT_CONDITION_RE.test(claim);
+  const attachedPrerequisite = PAYMENT_PREREQUISITE_RE.test(text.slice(claimStart, outcomeStart))
+    || PAYMENT_CONDITION_RE.test(trailingClaim.replace(/^\s*,\s*/, ''));
+  const pastOutcome = PAYMENT_PAST_OUTCOME_RE.test(outcome);
+  const completedPresentPerfect = PAYMENT_PRESENT_PERFECT_OUTCOME_RE.test(outcome);
+  return (outcomeCondition && (!pastOutcome || completedPresentPerfect))
+    || (attachedPrerequisite && !pastOutcome && !completedPresentPerfect);
 }
 /** value: true */
 function no_payment_outcome(value, record, { spoken }) {
