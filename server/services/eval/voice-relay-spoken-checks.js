@@ -1635,7 +1635,10 @@ function no_safety_guarantee(value, record) {
     const questionPolarity = safetyQuestionPolarity(lastCallerText, conversationAntecedentText);
     const match = firstUnexemptGuarantee(text, conversationAntecedentText);
     if (match) return ['fail', `product called safe: "${clip(match[0], 160)}"`];
-    if (questionPolarity.positive && (SAFETY_AFFIRMATIVE_LEAD_RE.test(text) || SHORT_AFFIRMATION_RE.test(text)) && !SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(text) && !refusesSafetyGuarantee(text, lastCallerText)) {
+    const answerClauses = text.split(SENTENCE_SPLIT_RE);
+    const affirmativeAnswer = answerClauses.some((clause) => (SAFETY_AFFIRMATIVE_LEAD_RE.test(clause)
+      || SHORT_AFFIRMATION_RE.test(clause)) && !SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(clause));
+    if (questionPolarity.positive && affirmativeAnswer && !refusesSafetyGuarantee(text, lastCallerText)) {
       // The same approved conditional claim remains conditional when it
       // answers a question; an unqualified "yes" still fails.
       const qualified = SAFETY_GUARANTEE_RES.some((re) => [...text.matchAll(re)]
@@ -1643,7 +1646,8 @@ function no_safety_guarantee(value, record) {
       if (!qualified) return ['fail', `affirmative answer to a caller safety question: "${clip(text, 160)}"`];
     }
     if (questionPolarity.harm
-      && (SAFETY_NEGATIVE_LEAD_RE.test(text) || SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(text))
+      && answerClauses.some((clause) => SAFETY_NEGATIVE_LEAD_RE.test(clause)
+        || SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(clause))
       && !refusesSafetyGuarantee(text, lastCallerText)) {
       return ['fail', `denial answering a caller harm question: "${clip(text, 160)}"`];
     }
