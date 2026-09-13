@@ -1239,6 +1239,12 @@ const CARD_CALENDAR_VALUE_RES = Object.freeze([
   new RegExp(`\\b${CARD_NUMERIC_DATE_VALUE}\\b`, 'g'),
 ]);
 const CARD_EXPLAINED_DATE_VALUE = `(?:${CARD_MONTH_DATE_VALUE}|(?:0?[1-9]|1[0-2])\\s*[/.-]\\s*(?:(?:0?[1-9]|[12]\\d|3[01])\\s*[/.-]\\s*)?(?:\\d{2}|(?:19|20)\\d{2})|(?:19|20)\\d{2})`;
+const CARD_MONTH_NUMBER = Object.freeze(Object.fromEntries(MONTHS.split('|')
+  .map((month, index) => [month, String((index % 12) + 1).padStart(2, '0')])));
+const CARD_NAMED_EXPIRATION_VALUE_RE = new RegExp(
+  `^(${MONTHS})\\s+(?:(\\d{1,2})(?:st|nd|rd|th)?(?:,\\s*|\\s+))?((?:19|20)\\d{2}|\\d{2})$`, 'i',
+);
+const CARD_NUMERIC_EXPIRATION_VALUE_RE = /^(\d{1,2})\s*[/.-]\s*(?:(\d{1,2})\s*[/.-]\s*)?((?:19|20)\d{2}|\d{2})$/;
 const CARD_NON_FRAGMENT_RES = Object.freeze([
   new RegExp(`\\b(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})(?:[\\s-]+(?:and\\s+)?(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})){0,6}\\s+(?:dollars?|cents?|bucks)\\b`, 'gi'),
   new RegExp(`\\$\\s*${DIGITS}`, 'gi'),
@@ -1305,6 +1311,22 @@ const DIGIT_RUN_RE = /\d+(?:[\s-]\d+)*/g;
 // groups and the amount/identifier/date exclusions below still see them.
 const SEPARATED_DIGIT_RUN_RE = /\b\d(?:[\s,-]+\d)+\b/g;
 const joinSeparatedDigits = (text) => text.replace(SEPARATED_DIGIT_RUN_RE, (run) => run.replace(/[\s,-]+/g, ''));
+function normalizedCardExpiration(value) {
+  const text = String(value || '').trim().toLowerCase();
+  const named = CARD_NAMED_EXPIRATION_VALUE_RE.exec(text);
+  const numeric = CARD_NUMERIC_EXPIRATION_VALUE_RE.exec(text);
+  const match = named || numeric;
+  if (!match) return null;
+  const month = named ? CARD_MONTH_NUMBER[match[1]] : match[1].padStart(2, '0');
+  const day = match[2] ? match[2].padStart(2, '0') : '';
+  return `${month}${day}${match[3].slice(-2)}`;
+}
+function cardValuesMatch(supplied, candidate) {
+  const suppliedExpiration = normalizedCardExpiration(supplied);
+  const candidateExpiration = normalizedCardExpiration(candidate);
+  if (suppliedExpiration && candidateExpiration) return suppliedExpiration.includes(candidateExpiration);
+  return String(supplied).replace(/\D/g, '').includes(String(candidate).replace(/\D/g, ''));
+}
 function cardValueHasNonCardExplanation(nonFragments, calendarSpan, start, end, inherited) {
   const contextual = nonFragments.some(([spanStart, spanEnd]) => start >= spanStart && end <= spanEnd);
   return contextual || (Boolean(calendarSpan) && !inherited);
@@ -1346,7 +1368,7 @@ function cardFragmentsIn(text, precedingReadback = false) {
     const valueSpan = [expirationSpan, slashedSpan, calendarSpan].find(Boolean);
     const candidateValue = valueSpan ? digits.slice(...valueSpan) : m[0];
     const precedingValueMatches = Array.isArray(precedingReadback)
-      && precedingReadback.some((value) => value.replace(/\D/g, '').includes(candidateValue.replace(/\D/g, '')));
+      && precedingReadback.some((value) => cardValuesMatch(value, candidateValue));
     // A bare calendar-shaped value is still a card echo when it matches the
     // caller's expiration. Explicit appointment/date labels and
     // the other scoped explanations above continue to own their digit runs.
