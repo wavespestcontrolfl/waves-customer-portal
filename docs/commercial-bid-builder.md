@@ -7,7 +7,7 @@ New unit and validity controls are behind `GATE_COMMERCIAL_BID_BUILDER`, off by 
 ## Author a bid
 
 1. Add building or area line items using reviewed treatment quantities. Quantities and unit prices support four decimal places; each extended charge rounds to cents. Choose square feet, linear feet, acres, pounds, gallons, each, lump sum, hours, days, or trips. Record scope, drawing references, phases, and contractual requirements in the existing scope, building-note, and terms fields.
-2. Set **Valid through (Eastern time)** to the required end date. A fixed date lasts through 11:59:59.999 p.m. Eastern and survives resends. Sending or scheduling after it is refused, including when a sent or viewed sibling carries the hold; a schedule must also land on a five-minute scheduler tick inside the day, so 11:55 p.m. Eastern is the last accepted time. Shortening any editable group member’s hold must still cover pending group sends. Automatic renewal and generic extensions do not change it. A grouped extension refuses before changing any property if any live sibling — including one whose send is in flight — has a fixed date; proposal edits and the extension share the group lock. Ordinary siblings keep their own seven-day send window, except that the delivered group link (the anchor's token) stays viewable through the group's longest fixed date so the fixed property never drops out early. An expired fixed-date bid can be explicitly revised in this editor. A blank date retains the standard seven-day send window.
+2. Set **Valid through (Eastern time)** to the required end date. A fixed date lasts through 11:59:59.999 p.m. Eastern and survives resends. Sending or scheduling after it is refused, including when a sent or viewed sibling carries the hold; a schedule must also land on a five-minute scheduler tick inside the day, so 11:55 p.m. Eastern is the last accepted time. Shortening any editable group member’s hold must still cover pending group sends. Automatic renewal and generic extensions do not change it. A grouped extension refuses before changing any property if any live sibling — including one whose send is in flight — has a fixed date; proposal edits and the extension share the group lock. Ordinary siblings keep their own seven-day send window, except that the delivered group link (the anchor's token) stays viewable through the group's longest published offer deadline, whether fixed or ordinary, so no valid property drops out early. An expired fixed-date bid can be explicitly revised in this editor. A blank date retains the standard seven-day send window.
 3. Save, review the quoted quantities, prices and terms, then download the branded proposal.
 
 ### Offer deadline vs group-link viewability
@@ -23,7 +23,10 @@ The window during which the delivered group entry link keeps resolving is
 anchor whose token was delivered, and read by nothing but the token path. It exists
 because the delivered link is the anchor's token: an ordinary anchor's offer ends
 after seven days, and without a separate window the customer could no longer reach
-a fixed sibling valid for months. It is monotonic — a link already promised a date
+a fixed sibling valid for months. Conversely, an ordinary sibling keeps its full
+seven-day window even when the fixed anchor ends sooner. Whole-quote revisions
+preserve the server-owned navigation window and publication-anchor metadata.
+It is monotonic — a link already promised a date
 keeps it even if a hold is later shortened, because what closes is the offer, not
 the route to it. A reachable group of expired cards still renders every card as
 expired and refuses acceptance.

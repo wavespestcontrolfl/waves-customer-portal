@@ -635,6 +635,37 @@ describe('reviseAdminEstimate', () => {
     expect(data.sendSnapshot).toBeUndefined();
   });
 
+  test('preserves the locked publication window and anchor routing across wholesale revisions', async () => {
+    const originalData = JSON.parse(sentEstimate.estimate_data);
+    const prior = { ...sentEstimate, estimate_data: JSON.stringify({ ...originalData,
+      groupLinkViewableThrough: '2099-01-01T00:00:00Z', groupPublishedByEstimateId: 'delivered-anchor' }) };
+    const locked = { ...prior, estimate_data: JSON.stringify({ ...originalData,
+      groupLinkViewableThrough: '2099-02-01T00:00:00Z', groupPublishedByEstimateId: 'latest-anchor' }) };
+    const { database, updates } = makeReviseDatabase({ estimate: prior, lockedEstimate: locked });
+    await reviseAdminEstimate({ database, estimateId: 'est-1', body: {
+      ...reviseBody, estimateData: { ...reviseBody.estimateData,
+        groupLinkViewableThrough: '2100-01-01T00:00:00Z', groupPublishedByEstimateId: 'client-forged' },
+    }, recompute: noRecompute, now: fixedNow });
+    expect(JSON.parse(updates[0].estimate_data)).toMatchObject({
+      groupLinkViewableThrough: '2099-02-01T00:00:00Z', groupPublishedByEstimateId: 'latest-anchor',
+    });
+    expect(updates[0].expires_at).toBeUndefined();
+  });
+
+  test('cannot invent publication metadata or resurrect it when the locked row no longer carries it', async () => {
+    for (const priorData of [{}, { groupLinkViewableThrough: '2099-01-01T00:00:00Z', groupPublishedByEstimateId: 'old-anchor' }]) {
+      const prior = { ...sentEstimate, estimate_data: JSON.stringify({ ...JSON.parse(sentEstimate.estimate_data), ...priorData }) };
+      const { database, updates } = makeReviseDatabase({ estimate: prior, lockedEstimate: sentEstimate });
+      await reviseAdminEstimate({ database, estimateId: 'est-1', body: {
+        ...reviseBody, estimateData: { ...reviseBody.estimateData,
+          groupLinkViewableThrough: '2100-01-01T00:00:00Z', groupPublishedByEstimateId: 'client-forged' },
+      }, recompute: noRecompute, now: fixedNow });
+      const data = JSON.parse(updates[0].estimate_data);
+      expect(data.groupLinkViewableThrough).toBeUndefined();
+      expect(data.groupPublishedByEstimateId).toBeUndefined();
+    }
+  });
+
   test('guards the atomic update against a concurrent commercial-proposal conversion', async () => {
     const { database, rawGuards } = makeReviseDatabase({ estimate: sentEstimate });
     await reviseAdminEstimate({

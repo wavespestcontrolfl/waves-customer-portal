@@ -418,6 +418,25 @@ async function longestGroupFixedValidity(database, estimate) {
     .reduce((latest, at) => (!latest || at > latest ? at : latest), null);
 }
 
+// Ordinary siblings already published on the group link keep their own
+// offer expiry, including an operator extension beyond the next send's
+// seven-day window. On a resend, the live ordinary rows also receive a fresh
+// seven-day window below; callers include that upcoming window separately.
+async function publishedOrdinarySiblingExpiries(database, estimate) {
+  const rows = await database('estimates')
+    .where({ estimate_group_id: estimate.estimate_group_id })
+    .whereNot({ id: estimate.id })
+    .whereNull('archived_at')
+    .whereNull('price_locked_at')
+    .whereIn('status', ['sent', 'viewed'])
+    .whereRaw(FIXED_BID_VALIDITY_ABSENT_SQL)
+    .select('expires_at');
+  return (Array.isArray(rows) ? rows : []).map((row) => {
+    const expiry = row.expires_at ? new Date(row.expires_at) : null;
+    return expiry && !Number.isNaN(expiry.getTime()) ? expiry : null;
+  });
+}
+
 async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend = false, forUpdate = false, sendAt = null } = {}) {
   if (!estimate?.estimate_group_id) return null;
   // Two sets are judged (never re-claimed): the PUBLISHABLE siblings this
@@ -2508,18 +2527,21 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   const nextExpiresAt = estimateExpiresAt(now, estimate);
   // Group ENTRY access is independent of the anchor's own price eligibility:
   // whether the anchor is ordinary or carries a shorter fixed hold, its token
-  // must outlive the group's longest fixed date so the link keeps assembling
-  // the property group and the fixed property never drops out early. That
+  // must outlive every published sibling's offer, whether a fixed date or
+  // an ordinary seven-day send window. That
   // window is written to estimate_data.groupLinkViewableThrough instead of
   // being folded into expires_at, so nothing that means "offer deadline" —
   // acceptance, voice quoting, reminder eligibility and copy, the CTA — can
   // read a navigation date by accident. Monotonic per delivered link: a link
   // already promised a date is never shortened by a later send.
   let nextGroupLinkViewableThrough = null;
+  let hasOrdinarySibling = false;
   if (estimate.estimate_group_id) {
     const groupHold = await longestGroupFixedValidity(db, estimate);
+    const ordinaryPublished = await publishedOrdinarySiblingExpiries(db, estimate);
+    hasOrdinarySibling = ordinaryPublished.length > 0 || claimedGroupSiblings.some((sibling) => !hasFixedBidValidity(sibling));
     const promised = groupLinkViewableThrough(estimate);
-    const widest = [groupHold, promised].filter(Boolean)
+    const widest = [groupHold, ...ordinaryPublished, promised].filter(Boolean)
       .reduce((latest, at) => (!latest || at > latest ? at : latest), null);
     if (widest && widest > nextExpiresAt) nextGroupLinkViewableThrough = widest;
   }
@@ -2819,6 +2841,17 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   const lastDeliveredAt = stampChannels.length
     ? now().toISOString()
     : (priorDeliveryState?.lastDeliveredAt || null);
+  // Use one handoff-anchored ordinary expiry for the navigation promise and
+  // every ordinary sibling publication/reconciliation below. Recomputing
+  // seven days later in the publication loop could leave the sibling's offer
+  // a few milliseconds longer than the delivered link that reaches it.
+  const ordinaryGroupExpiry = estimate.estimate_group_id
+    ? estimateExpiresAt(() => new Date(lastDeliveredAt || now()))
+    : null;
+  if (hasOrdinarySibling && ordinaryGroupExpiry > nextExpiresAt
+    && (!nextGroupLinkViewableThrough || ordinaryGroupExpiry > nextGroupLinkViewableThrough)) {
+    nextGroupLinkViewableThrough = ordinaryGroupExpiry;
+  }
   // deliveredAt: EVERY real handoff, oldest first, capped — the durable
   // send history. first/last alone lose the middle: an estimate delivered
   // before a call, resent inside its fulfillment window and resent again
@@ -3072,7 +3105,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // final attempt the sibling is released for an operator re-send.
           // A sibling is delivered by the anchor's handoff — the same
           // real-channel test decides whether its scope stamp moves.
-          const siblingExpiry = estimateExpiresAt(now, sibling);
+          const siblingExpiry = proposalExpiry(sibling) || ordinaryGroupExpiry;
           const snapshot = await buildEstimateSendSnapshot({ ...sibling, expires_at: siblingExpiry }, now, { delivered: stampChannels.length > 0, deliveredAt: lastDeliveredAt });
           if (!snapshot?.sendSnapshot || snapshot.sendSnapshot.pricingBundleError) {
             throw new Error(`sibling send snapshot did not freeze pricing${snapshot?.sendSnapshot?.pricingBundleError ? `: ${snapshot.sendSnapshot.pricingBundleError}` : ''}`);
@@ -3163,7 +3196,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // Forward-only expiry inside the SET (not the WHERE): a sibling
           // already extended past this send still needs its reminder flags
           // burned — the anchor owns all group comms (codex #3244 r5).
-          expires_at: db.raw(`CASE WHEN ${FIXED_BID_VALIDITY_ABSENT_SQL} THEN GREATEST(COALESCE(expires_at, ?::timestamptz), ?::timestamptz) ELSE expires_at END`, [estimateExpiresAt(now), estimateExpiresAt(now)]),
+          expires_at: db.raw(`CASE WHEN ${FIXED_BID_VALIDITY_ABSENT_SQL} THEN GREATEST(COALESCE(expires_at, ?::timestamptz), ?::timestamptz) ELSE expires_at END`, [ordinaryGroupExpiry, ordinaryGroupExpiry]),
           followup_unviewed_sent: true,
           followup_viewed_sent: true,
           followup_final_sent: true,
@@ -4278,10 +4311,11 @@ router.put('/:id/proposal', async (req, res, next) => {
         : locked;
       if (groupAnchor?.sent_at && !groupAnchor.archived_at) {
         const groupHold = await longestGroupFixedValidity(trx, locked);
+        const ordinaryPublished = await publishedOrdinarySiblingExpiries(trx, locked);
         const promised = groupLinkViewableThrough(groupAnchor);
         // The current row is excluded from longestGroupFixedValidity. Its
         // newly authored date must participate before the save commits.
-        const widest = [groupHold, authoredExpiry, promised].filter(Boolean)
+        const widest = [groupHold, ...ordinaryPublished, authoredExpiry, promised].filter(Boolean)
           .reduce((latest, at) => (!latest || at > latest ? at : latest), null);
         const anchorOfferExpiry = groupAnchor.id === locked.id ? expiryUpdate || locked.expires_at : groupAnchor.expires_at;
         if (widest && (!anchorOfferExpiry || widest > new Date(anchorOfferExpiry))) {
