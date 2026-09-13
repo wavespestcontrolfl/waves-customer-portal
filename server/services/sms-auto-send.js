@@ -37,6 +37,7 @@ const db = require('../models/db');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
+const { ASK_SPACING_MS } = require('./review-ask-history');
 
 const AUTOSEND_WORKFLOW = 'sms_house_voice_auto_send';
 const AUTOSEND_AGENT_NAME = 'House Voice Auto-Send';
@@ -52,6 +53,18 @@ const AUTOSEND_MESSAGE_TYPE = 'ai_autosent';
 const CLAIM_STATUS = 'sending';
 const SENT_STATUS = 'auto_sent';
 const FAILED_STATUS = 'auto_send_failed';
+
+// How long reconcileAutoSendClaims protects a claim armed
+// provider_outcome_uncertain before treating it as an ordinary orphan (codex
+// #4338 P1). With no Twilio SID, the sent-linked sweep above can never
+// resolve it — protecting it indefinitely left the claim in CLAIM_STATUS
+// forever, which also kept its reservation row alive (reservationsCleared
+// below only clears once every linked decision reaches a terminal status)
+// and the draft out of the normal shadow/judge flow. Bounded instead: the
+// claim still holds while recent, but past this window fails like any other
+// orphan — failClaim leaves the draft 'shadow', so it re-enters ordinary
+// drafting rather than staying invisibly stuck.
+const UNCERTAIN_CLAIM_HOLD_HOURS = 24;
 // message_drafts.status once the send is confirmed (out of the judge pool).
 const DRAFT_SENT_STATUS = 'auto_sent';
 
@@ -84,9 +97,23 @@ const SUPPRESSION_SENTINELS = new Set([
  */
 function isRealProviderSend(result) {
   if (!result || result.sent !== true) return false;
+  if (result.deliveryOutcome && result.deliveryOutcome !== 'accepted') return false;
   const id = result.providerMessageId;
   if (!id) return false;
   return !SUPPRESSION_SENTINELS.has(id);
+}
+
+/**
+ * Does a send-once owner need to retain its claim because delivery is
+ * unresolved? Canonical outcomes are authoritative. The retryable/deferred
+ * fallback remains only for callers that have not reached that contract yet.
+ */
+function isAmbiguousProviderOutcome(result) {
+  if (!result) return false;
+  if (result.deliveryOutcome === 'uncertain') return true;
+  if (result.deliveryOutcome === 'accepted' || result.deliveryOutcome === 'not_sent') return false;
+  if (result.deliveryOutcome != null) return true;
+  return result.sent !== true && !result.blocked && Boolean(result.retryable || result.deferred);
 }
 
 /**
@@ -210,14 +237,29 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
       ? await suggest.parkThreadSuggestions({ phoneLast10: threadLast10 }, trx)
       : [];
 
-    return { decisionId: row.id, toPhone, fromNumber, threadLast10, parkedIds };
+    // Persist the linkage in the SAME transaction as the claim and parks. If
+    // this insert fails, the transaction rolls back and no provider handoff is
+    // allowed. It starts as an ordinary in-flight marker; the executor arms it
+    // as uncertain immediately before entering the provider pipeline.
+    const reservationId = await suggest.createReplyHoldingReservation(trx, {
+      to: toPhone,
+      customerId,
+      fromNumber: fromNumber || TWILIO_NUMBERS.getOutboundNumber(),
+      body: reply,
+      agentDecisionId: row.id,
+      parkedDecisionIds: parkedIds,
+      reservationKind: 'auto',
+    });
+    if (!reservationId) throw new Error('Auto-send holding reservation was not created');
+
+    return { decisionId: row.id, toPhone, fromNumber, threadLast10, parkedIds, reservationId };
   });
 }
 
 /** Mark a confirmed send: resolve the claim and take the draft out of the judge pool. */
 async function resolveSent({ decisionId, draftId, providerMessageId }) {
-  await db.transaction(async (trx) => {
-    await trx('agent_decisions')
+  return db.transaction(async (trx) => {
+    const resolved = await trx('agent_decisions')
       .where({ id: decisionId, status: CLAIM_STATUS })
       .update({
         status: SENT_STATUS,
@@ -229,9 +271,11 @@ async function resolveSent({ decisionId, draftId, providerMessageId }) {
           : 'Auto-sent by the house-voice executor (Phase E).',
         updated_at: new Date(),
       });
+    if (!resolved) return false;
     // Guarded on 'shadow' so a racing path can't double-flip; the outbound IS
     // the draft text now, so it must leave the shadow judge pool.
     await trx('message_drafts').where({ id: draftId, status: 'shadow' }).update({ status: DRAFT_SENT_STATUS });
+    return true;
   });
 }
 
@@ -386,6 +430,14 @@ async function maybeAutoSend(params = {}) {
     // (7) Send via the policy-checked provider path (consent,
     //     suppression, identity trust all enforced upstream).
     const { sendCustomerMessage } = require('./messaging/send-customer-message');
+    // Arm before provider entry. A timeout followed by a DB outage still has
+    // durable uncertainty evidence; if this write misses, fail closed before
+    // any customer communication.
+    if (!await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId, uncertain: true })) {
+      await failClaim(claim.decisionId, 'could not arm provider-outcome reservation');
+      await reopenParked('Auto-send reservation failed before delivery — suggestion reopened.');
+      return { sent: false, reason: 'reservation_failed' };
+    }
     let result;
     try {
       result = await sendCustomerMessage({
@@ -410,10 +462,15 @@ async function maybeAutoSend(params = {}) {
         },
       });
     } catch (err) {
-      await failClaim(claim.decisionId, `send threw: ${err.message}`);
-      await reopenParked('Auto-send errored before delivery — suggestion reopened.');
-      logger.warn(`[sms-auto-send] send threw (decision ${claim.decisionId}): ${err.message}`);
-      return { sent: false, reason: 'send_error' };
+      if (isRealProviderSend(err?.providerOutcome) || isAmbiguousProviderOutcome(err?.providerOutcome)) {
+        result = err.providerOutcome;
+      } else {
+        await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId });
+        await failClaim(claim.decisionId, `send threw: ${err.message}`);
+        await reopenParked('Auto-send errored before delivery — suggestion reopened.');
+        logger.warn(`[sms-auto-send] send threw (decision ${claim.decisionId}): ${err.message}`);
+        return { sent: false, reason: 'send_error' };
+      }
     }
 
     // sent:true is not enough — an upstream suppression (gate off, template
@@ -426,8 +483,18 @@ async function maybeAutoSend(params = {}) {
       // bookkeeping update throws, the claim stays 'sending' with a sent
       // sms_log row and reconcileAutoSendClaims settles it (resolve + flip).
       try {
-        await resolveSent({ decisionId: claim.decisionId, draftId, providerMessageId: result.providerMessageId });
-        if (parkedIds.length) await suggest.ignoreParkedSuggestions({ decisionIds: parkedIds, reviewedBy: 'auto' });
+        // The reservation itself becomes accepted evidence before any later
+        // bookkeeping. If Twilio's sms_log insert and these writes both fail,
+        // recovery still has one durable sent row linking used + parked ids.
+        await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId, acceptedResult: result });
+        if (!await resolveSent({ decisionId: claim.decisionId, draftId, providerMessageId: result.providerMessageId })) {
+          throw new Error('auto-send claim was not resolved');
+        }
+        if (parkedIds.length) {
+          const ignored = await suggest.ignoreParkedSuggestions({ decisionIds: parkedIds, reviewedBy: 'auto' });
+          if (ignored !== parkedIds.length) throw new Error('parked suggestions were not fully resolved');
+        }
+        await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId });
       } catch (bookErr) {
         logger.warn(`[sms-auto-send] post-send bookkeeping failed (decision ${claim.decisionId}); reconcile sweep will settle: ${bookErr.message}`);
       }
@@ -435,7 +502,13 @@ async function maybeAutoSend(params = {}) {
       return { sent: true, decisionId: claim.decisionId, providerMessageId: result.providerMessageId || null };
     }
 
+    if (isAmbiguousProviderOutcome(result)) {
+      logger.warn(`[sms-auto-send] provider outcome uncertain (decision ${claim.decisionId}) — claim retained for reconciliation`);
+      return { sent: false, reason: 'provider_uncertain', ambiguous: true, decisionId: claim.decisionId };
+    }
+
     const notSentReason = result?.sent ? `suppressed:${result.providerMessageId || 'unknown'}` : (result?.code || 'not_sent');
+    await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId });
     await failClaim(claim.decisionId, result?.reason || notSentReason);
     await reopenParked('Auto-send did not go out — suggestion reopened.');
     logger.info(`[sms-auto-send] NOT sent customer=${customerId || 'unknown'} intent=${intent} reason=${notSentReason}`);
@@ -451,11 +524,13 @@ async function maybeAutoSend(params = {}) {
  * and guarded, so racing a live attempt double-resolves to the same verdict.
  *   (a) a claim whose outbound already went out (crash between send and
  *       resolve) → resolve it and flip the draft (the customer WAS texted);
- *   (b) a claim older than orphanMinutes with no live/sent outbound → fail it
- *       (the provider send never confirmed; the draft is still 'shadow').
+ *   (b) a claim older than orphanMinutes with no live/sent outbound and no
+ *       explicit uncertainty reservation younger than uncertainReconciliationHours
+ *       → fail it (the draft stays shadow, re-entering ordinary drafting).
  */
-async function reconcileAutoSendClaims({ orphanMinutes = 30 } = {}) {
+async function reconcileAutoSendClaims({ orphanMinutes = 30, uncertainReconciliationHours = UNCERTAIN_CLAIM_HOLD_HOURS } = {}) {
   const cutoff = new Date(Date.now() - orphanMinutes * 60 * 1000);
+  const uncertainCutoff = new Date(Date.now() - uncertainReconciliationHours * 60 * 60 * 1000);
   let resolved = 0;
   let failed = 0;
 
@@ -480,7 +555,13 @@ async function reconcileAutoSendClaims({ orphanMinutes = 30 } = {}) {
         SELECT 1 FROM sms_log sl
         WHERE sl.status IN ('queued','sent','delivered','scheduled','sending')
           AND sl.metadata->>'agent_decision_id' = agent_decisions.id::text
-      )`)
+          AND (
+            sl.metadata->>'auto_send_reservation' IS DISTINCT FROM 'true'
+            OR sl.created_at >= ?
+            OR (sl.metadata->>'provider_outcome_uncertain' = 'true' AND sl.updated_at >= ?)
+            OR sl.status IN ('queued','sent','delivered')
+          )
+      )`, [cutoff, uncertainCutoff])
       .update({
         status: FAILED_STATUS,
         correction_note: 'Auto-send claim never confirmed a provider send — reconciled by the recovery sweep.',
@@ -490,24 +571,63 @@ async function reconcileAutoSendClaims({ orphanMinutes = 30 } = {}) {
     logger.warn(`[sms-auto-send] orphan reconcile failed: ${err.message}`);
   }
 
-  // Sweep orphaned manual-send reservations: a 'sending' marker the manual
-  // /sms path persists under the lock and normally deletes after its send, but
-  // a crash mid-send could strand one and block auto-sends to that thread.
+  // Sweep settled reply reservations. Linked decisions in a holding state make
+  // the marker live: they may represent a provider outcome that still needs
+  // reconciliation, so age alone can never release them. Once sent evidence or
+  // an operator verdict settles every linked decision, the marker is removable.
   let reservationsCleared = 0;
   try {
     reservationsCleared = await db('sms_log')
-      .where({ direction: 'outbound', status: 'sending' })
-      .whereRaw("metadata->>'manual_send_reservation' = 'true'")
+      .where({ direction: 'outbound' })
+      .whereIn('status', ['sending', 'sent', 'delivered'])
+      .where(function replyReservation() {
+        this.whereRaw("metadata->>'manual_send_reservation' = 'true'")
+          .orWhereRaw("metadata->>'auto_send_reservation' = 'true'");
+      })
+      .whereRaw("COALESCE(metadata->>'review_ask_reservation', 'false') != 'true'")
       .where('created_at', '<', cutoff)
+      .where(function settledOrOrdinaryReservation() {
+        this.whereRaw("metadata->>'provider_outcome_uncertain' IS DISTINCT FROM 'true'")
+          .orWhereNotExists(function liveLinkedDecision() {
+            this.select(db.raw('1'))
+              .from('agent_decisions as held')
+              .whereIn('held.status', ['scheduled', CLAIM_STATUS])
+              .whereRaw(`(
+                held.id::text = sms_log.metadata->>'agent_decision_id'
+                OR jsonb_exists(COALESCE(sms_log.metadata->'parked_decision_ids', '[]'::jsonb), held.id::text)
+              )`);
+          });
+      })
       .del();
   } catch (err) {
     logger.warn(`[sms-auto-send] reservation sweep failed: ${err.message}`);
   }
 
-  if (resolved || failed || reservationsCleared) {
-    logger.info(`[sms-auto-send] reconcile: resolved ${resolved} sent-but-unresolved, failed ${failed} orphaned claims, cleared ${reservationsCleared} stale reservations`);
+  // Sweep stale review-ask reservations. review-ask-history's lastManualAskAt
+  // only reads sms_log back to the 72-hour ask-spacing window, so a row still
+  // stuck at 'sending' past that window (an uncertain provider attempt, a
+  // process crash, or a failed delivery-stamp cleanup in settleReviewReservation)
+  // can no longer serve as spacing evidence either way — it is now orphaned.
+  // A row already resolved to 'sent'/'delivered' is real: settleReviewReservation
+  // either deletes it as a confirmed duplicate or promotes it to the durable
+  // sent record when no separate provider log exists, so it must stay out of
+  // this sweep regardless of age.
+  let reviewReservationsExpired = 0;
+  try {
+    const reviewCutoff = new Date(Date.now() - ASK_SPACING_MS);
+    reviewReservationsExpired = await db('sms_log')
+      .where({ direction: 'outbound', status: 'sending' })
+      .whereRaw("metadata->>'review_ask_reservation' = 'true'")
+      .where('created_at', '<', reviewCutoff)
+      .del();
+  } catch (err) {
+    logger.warn(`[sms-auto-send] review reservation sweep failed: ${err.message}`);
   }
-  return { resolved, failed, reservationsCleared };
+
+  if (resolved || failed || reservationsCleared || reviewReservationsExpired) {
+    logger.info(`[sms-auto-send] reconcile: resolved ${resolved} sent-but-unresolved, failed ${failed} orphaned claims, cleared ${reservationsCleared} stale reservations, expired ${reviewReservationsExpired} stale review reservations`);
+  }
+  return { resolved, failed, reservationsCleared, reviewReservationsExpired };
 }
 
 module.exports = {
@@ -523,6 +643,7 @@ module.exports = {
   SAFE_AUTO_SEND_ACTION,
   SUPPRESSION_SENTINELS,
   isRealProviderSend,
+  isAmbiguousProviderOutcome,
   autoSendActionsSafe,
   autoSendPreflight,
   hasActiveAutoSendClaim,

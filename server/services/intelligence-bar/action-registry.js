@@ -8,6 +8,7 @@ const addFormats = require('ajv-formats');
 const policy = require('./action-policy.json');
 const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES } = require('./write-gates');
 const { threadsEnabled } = require('./threads');
+const { mergeCustomersEnabled } = require('./customer-lifecycle-tools');
 const AGENT_ESTIMATE_TOOL_NAMES = require('./agent-estimate-policy');
 const apiToolDefinition = require('./tool-definition');
 const { validScope } = require('./scope-policy');
@@ -30,6 +31,7 @@ const MODULES = [
   ['email-tools', 'EMAIL_TOOLS', 'executeEmailTool'],
   ['banking-tools', 'BANKING_TOOLS', 'executeBankingTool'],
   ['estimate-tools', 'ESTIMATE_TOOLS', 'executeEstimateTool'],
+  ['customer-lifecycle-tools', 'CUSTOMER_LIFECYCLE_TOOLS', 'executeCustomerLifecycleTool'],
   ['history-tools', 'HISTORY_TOOLS', 'executeHistoryTool'],
   ['ops-tools', 'OPS_TOOLS', 'executeOpsTool'],
   ['sentry-ops-tools', 'SENTRY_OPS_TOOLS', 'executeSentryOpsTool'],
@@ -110,6 +112,7 @@ function allowed(action, { role, context } = {}) {
   if (role !== 'admin') return role === 'technician' && action.role === 'technician_or_admin';
   if (context === 'tech') return action.role === 'technician_or_admin';
   if (action.id === 'search_ib_history' && !threadsEnabled()) return false;
+  if (action.id === 'merge_customers' && !mergeCustomersEnabled()) return false;
   // The dedicated lead-drafting rail has its own per-user gate and narrower
   // business contract. The global assistant uses the ordinary estimate path.
   if (action.id === 'create_agent_estimate_draft' && context !== 'agent_estimate') return false;

@@ -51,9 +51,10 @@ describe("MobileEstimateRow accessibility", () => {
     expect(row).not.toHaveAttribute("role");
     expect(row).not.toHaveAttribute("tabindex");
     expect(summary.querySelector("button, a")).toBeNull();
-    expect(screen.getByRole("button", { name: "Call via Waves" })).toBeInTheDocument();
+    const call = screen.getByRole("button", { name: "Call via Waves" });
+    expect(call).toHaveClass("ui-icon-action");
     const message = screen.getByRole("button", { name: "SMS" });
-    expect(message).toBeInTheDocument();
+    expect(message).toHaveClass("ui-icon-action");
     fireEvent.click(message);
     await waitFor(() => expect(openMessages).toHaveBeenCalledWith({ id: "customer-1", firstName: "QA", lastName: "Current", phone: "+19415550199" }));
     expect(fetch).toHaveBeenCalledWith("/api/admin/customers/customer-1/estimates-summary", expect.any(Object));
@@ -67,9 +68,9 @@ describe("MobileEstimateRow accessibility", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Actions for Ada Lovelace" }));
 
-    // z-[120] is the modal stacking contract (see ui/Dialog.jsx) — above all
-    // shell chrome (90–100) and the C360 estimates panel (110).
-    expect(screen.getByRole("dialog")).toHaveClass("z-[120]");
+    // The shared Dialog owns the layer as an inline value so callers cannot
+    // accidentally let shell chrome (90–110) cover the action surface.
+    expect(screen.getByRole("dialog")).toHaveStyle({ zIndex: "120" });
   });
   it("does not open the stale snapshot when live contact lookup fails", async () => {
     const alert = vi.spyOn(window, "alert").mockImplementation(() => {});

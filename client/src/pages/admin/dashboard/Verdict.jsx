@@ -1,10 +1,9 @@
 import { cn } from "../../../components/ui";
 
-// Traffic-light dots reuse the documented Customers-surface triage palette —
-// the dashboard's color exception (same constants as charts.jsx CAP_TONE_COLOR).
+// Red remains reserved for a failing verdict; other verdicts use neutral ink.
 const TONE_DOT = {
-  good: "#10B981",
-  warn: "#F59E0B",
+  good: "#52525B",
+  warn: "#71717A",
   bad: "#C8312F",
   neutral: "#9CA3AF",
 };
@@ -23,7 +22,7 @@ export default function Verdict({ verdict, className }) {
           style={{ background: TONE_DOT[verdict.tone] || TONE_DOT.neutral }}
           aria-hidden="true"
         />
-        <div className="min-w-0 text-12 leading-snug">
+        <div className="min-w-0 text-ui-caption">
           <p className="text-ink-secondary">{verdict.happened}</p>
           <p className="mt-1 text-zinc-900 font-medium">Do next: {verdict.action}</p>
           {verdict.caveat && <p className="mt-1 text-ink-tertiary">{verdict.caveat}</p>}

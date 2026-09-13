@@ -107,19 +107,19 @@ test('invoice App choice retains operator Text and consent-checked fallback', as
 
 test('an unavailable invoice guard keeps a retry without falling back around the payer check', async () => {
   prefs.invoice_channel = 'push';
-  Twilio.sendSMS.mockResolvedValue({ success: false, appRetryable: true, error: 'invoice_lookup_failed' });
+  Twilio.sendSMS.mockResolvedValue({ success: false, appRetryable: true, deliveryOutcome: 'not_sent', error: 'invoice_lookup_failed' });
   expect(await sendCustomerMessage({ ...input, purpose: 'payment_link', metadata: { original_message_type: 'invoice' } }))
-    .toMatchObject({ sent: false, code: 'APP_DELIVERY_HOLD', retryable: true, deferred: true, nextAllowedAt: expect.any(String) });
+    .toMatchObject({ sent: false, deliveryOutcome: 'not_sent', code: 'APP_DELIVERY_HOLD', retryable: true, deferred: true, nextAllowedAt: expect.any(String) });
   expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
 });
 
 test('temporary native failures retain their delay and never invoke a Text fallback', async () => {
   prefs.invoice_channel = 'push';
-  Twilio.sendSMS.mockResolvedValue({ success: false, appRetryable: true, error: 'native_provider_retryable', retryAfterMs: 900000 });
+  Twilio.sendSMS.mockResolvedValue({ success: false, appRetryable: true, deliveryOutcome: 'uncertain', error: 'native_provider_retryable', retryAfterMs: 900000 });
   const startedAt = Date.now();
   const result = await sendCustomerMessage({ ...input, purpose: 'payment_link', metadata: { original_message_type: 'invoice' } });
   expect(result).toMatchObject({ sent: false, blocked: false, code: 'APP_PROVIDER_RETRY',
-    retryable: true, deferred: true, retryAfterMs: 900000 });
+    deliveryOutcome: 'uncertain', retryable: true, deferred: true, retryAfterMs: 900000 });
   expect(new Date(result.nextAllowedAt).getTime()).toBeGreaterThanOrEqual(startedAt + 900000);
   expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
   expect(Twilio.sendSMS.mock.calls[0][2].explicitPushOnly).toBe(true);

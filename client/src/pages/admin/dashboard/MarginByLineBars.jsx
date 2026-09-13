@@ -1,5 +1,6 @@
-import { cn } from "../../../components/ui";
+import { cn, UiSurface } from "../../../components/ui";
 import { EmptyState, fmtMoney } from "../../../components/dashboard/charts";
+import SampleBadge from "./SampleBadge";
 
 // Gross margin by service line (/admin/revenue/overview byServiceLine —
 // job-costed revenue vs cost per line, zero new SQL). Horizontal bars with a
@@ -15,7 +16,7 @@ export default function MarginByLineBars({ byServiceLine, targetPct = 55 }) {
   const scale = (v) => `${Math.min(100, (Math.max(v, 0) / max) * 100)}%`;
 
   return (
-    <div>
+    <UiSurface>
       <div className="space-y-2.5">
         {lines.map((l) => {
           const lowN = (l.services || 0) < 5;
@@ -29,20 +30,18 @@ export default function MarginByLineBars({ byServiceLine, targetPct = 55 }) {
                 : TONE.bad;
           return (
             <div key={l.serviceLine} className={cn(lowN && "opacity-75")}>
-              <div className="flex items-baseline justify-between gap-3 text-12 mb-0.5">
+              <div className="mb-0.5 flex items-baseline justify-between gap-3 text-ui-caption">
                 <span className="min-w-0 truncate text-ink-primary">
                   {l.serviceLine}
                   {lowN && (
-                    <span className="ml-1.5 inline-block text-11 px-1.5 py-0.5 rounded-sm border border-amber-300 bg-amber-50 text-amber-700 whitespace-nowrap">
-                      Low sample · n={l.services}
-                    </span>
+                    <SampleBadge n={l.services} className="ml-1.5" />
                   )}
                 </span>
                 <span className="u-nums whitespace-nowrap">
                   <span className="font-medium" style={{ color: lowN ? undefined : color }}>
                     {l.margin}%
                   </span>
-                  <span className="text-ink-tertiary text-11 ml-2">
+                  <span className="ml-2 text-ui-caption text-ink-secondary">
                     {fmtMoney(l.revenue)} · {l.services} job{l.services === 1 ? "" : "s"}
                   </span>
                 </span>
@@ -60,10 +59,10 @@ export default function MarginByLineBars({ byServiceLine, targetPct = 55 }) {
           );
         })}
       </div>
-      <div className="mt-3 pt-2 border-t border-hairline border-zinc-100 text-11 text-ink-tertiary">
+      <div className="mt-3 border-t border-hairline border-zinc-100 pt-2 text-ui-caption text-ink-secondary">
         Fully-burdened margin per line (labor · materials · drive from job
         costing). Tick = {targetPct}% company target; under 45% is the floor.
       </div>
-    </div>
+    </UiSurface>
   );
 }

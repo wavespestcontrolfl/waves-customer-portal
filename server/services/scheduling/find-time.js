@@ -139,6 +139,13 @@ async function findCapacitySlots(opts) {
       if (inactiveTechs.has(tech.id)) continue;
       const context = await loadArrivalRouteContext({ date, technicianId: tech.id, now, travel,
         excludeServiceIds: opts.excludeServiceIds,
+        // The requesting estimate's OWN uncommitted hold must not occupy the
+        // route it is asking about (codex r16 P1) — the legacy/SSR page no
+        // longer adopts that hold, so a tight route could otherwise omit the
+        // customer's still-valid held window and leave nothing confirmable.
+        // loadArrivalRouteContext has always taken this option; capacity
+        // generation simply never passed it.
+        excludeEstimateId: opts.excludeEstimateId,
         ...(opts.arrivalWindow?.serviceId ? {
           serviceId: opts.arrivalWindow.serviceId, changes: opts.arrivalWindow.changes,
         } : { prospective: { lat: opts.lat, lng: opts.lng, estimated_duration_minutes: durationMinutes,
@@ -243,6 +250,22 @@ async function findAvailableSlots(opts) {
   } = opts;
   const stopBuffer = Math.max(0, Number(bufferMinutes) || 0);
   const excludeSet = new Set((excludeServiceIds || []).map(String));
+  // The requesting estimate's OWN uncommitted holds are not route stops for
+  // itself (codex r17 P1). The collision filter downstream already excludes
+  // them, but ROUTE GENERATION treated them as occupied anchors — so a held
+  // 08:00 or 12:00 window (neither is a PREFERRED_WINDOWS slot) dropped out
+  // of both the classified and ASAP pools, and the V1 page, which no longer
+  // adopts that hold, could be left with no way to confirm the time the
+  // customer already holds. Resolved to ids here so every downstream
+  // exclusion — dayStops included — honours it through one set.
+  if (opts.excludeEstimateId) {
+    const ownHolds = await db('scheduled_services')
+      .where({ source_estimate_id: opts.excludeEstimateId })
+      .whereNull('customer_id')
+      .whereNotNull('reservation_expires_at')
+      .select('id');
+    for (const row of ownHolds) excludeSet.add(String(row.id));
+  }
 
   if (lat == null || lng == null) {
     return { error: 'lat/lng required', slots: [] };

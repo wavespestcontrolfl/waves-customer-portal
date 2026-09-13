@@ -2,48 +2,30 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { CheckCircle2, DatabaseZap, Eye, EyeOff, Play, RefreshCw, RotateCcw, ShieldAlert, XCircle } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import {
+  ActionFeedback,
+  Badge,
+  Button,
+  Card,
+  CardBody,
+  CardHeader,
+  CardTitle,
+  Dialog,
+  DialogBody,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  Table,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TR,
+  UiSurface,
+} from "../../components/ui";
 import { adminFetch } from "../../utils/admin-fetch";
 
-const D = {
-  bg: "#F4F4F5",
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  heading: "#09090B",
-  text: "#27272A",
-  muted: "#71717A",
-  green: "#15803D",
-  amber: "#A16207",
-  red: "#991B1B",
-  blue: "#1D4ED8",
-};
-
 const STATUSES = ["pending", "auto_applied", "approved", "reverted", "rejected", "stale", "all"];
-
-function Chip({ children, tone = "neutral" }) {
-  const colors = {
-    green: { bg: "#DCFCE7", fg: D.green },
-    amber: { bg: "#FEF3C7", fg: D.amber },
-    red: { bg: "#FEE2E2", fg: D.red },
-    blue: { bg: "#DBEAFE", fg: D.blue },
-    neutral: { bg: D.bg, fg: D.text },
-  }[tone] || { bg: D.bg, fg: D.text };
-  return (
-    <span style={{
-      display: "inline-flex",
-      alignItems: "center",
-      minHeight: 24,
-      padding: "0 8px",
-      borderRadius: 6,
-      background: colors.bg,
-      color: colors.fg,
-      fontSize: 12,
-      fontWeight: 700,
-      whiteSpace: "nowrap",
-    }}>
-      {children}
-    </span>
-  );
-}
 
 function fieldLabel(value) {
   return String(value || "").replace(/_/g, " ").replace(/\b\w/g, (ch) => ch.toUpperCase());
@@ -54,13 +36,6 @@ function valueText(value) {
   if (typeof value === "object" && value.masked) return `${value.masked} (${value.length} chars)`;
   if (typeof value === "object") return JSON.stringify(value);
   return String(value);
-}
-
-function statusTone(status) {
-  if (status === "approved" || status === "auto_applied") return "green";
-  if (status === "reverted") return "blue";
-  if (status === "rejected" || status === "stale") return "red";
-  return "amber";
 }
 
 function confidence(value) {
@@ -97,6 +72,8 @@ export default function DataHygienePage({ embedded = false } = {}) {
   const [scanning, setScanning] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const [revertTarget, setRevertTarget] = useState(null);
+  const [revertError, setRevertError] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -190,7 +167,7 @@ export default function DataHygienePage({ embedded = false } = {}) {
 
   const revert = useCallback(async (proposal) => {
     if (!proposal) return;
-    if (!window.confirm("Revert this approved change and restore the previous value?")) return;
+    setRevertError("");
     setBusyId(proposal.id);
     setError("");
     try {
@@ -199,9 +176,10 @@ export default function DataHygienePage({ embedded = false } = {}) {
         body: "{}",
       });
       setNotice("Proposal reverted.");
+      setRevertTarget(null);
       await load();
     } catch (err) {
-      setError(err.status === 409 ? "Cannot revert because the live value changed after approval." : err.message);
+      setRevertError(err.status === 409 ? "Cannot revert because the live value changed after approval." : err.message);
     } finally {
       setBusyId("");
     }
@@ -232,7 +210,7 @@ export default function DataHygienePage({ embedded = false } = {}) {
   const pendingCount = data.proposals?.filter((p) => p.status === "pending").length || 0;
 
   return (
-    <div style={{ minHeight: "100%", background: D.bg, color: D.text }}>
+    <UiSurface density="comfortable" className="min-h-full space-y-5 text-zinc-800">
       {!embedded && (
         <AdminCommandHeader
           eyebrow="System"
@@ -242,105 +220,89 @@ export default function DataHygienePage({ embedded = false } = {}) {
         />
       )}
 
-      <div style={{ padding: 20, display: "grid", gap: 14 }}>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", justifyContent: "space-between" }}>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+      <div className="space-y-5 min-w-0">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap gap-2" role="group" aria-label="Proposal status">
             {STATUSES.map((s) => (
-              <button
+              <Button
                 key={s}
                 type="button"
                 onClick={() => setStatus(s)}
-                style={{
-                  minHeight: 34,
-                  padding: "0 12px",
-                  borderRadius: 6,
-                  border: `1px solid ${status === s ? D.heading : D.border}`,
-                  background: status === s ? D.heading : D.card,
-                  color: status === s ? "#fff" : D.text,
-                  fontSize: 13,
-                  fontWeight: 700,
-                  cursor: "pointer",
-                }}
+                variant={status === s ? "primary" : "secondary"}
+                aria-pressed={status === s}
               >
                 {fieldLabel(s)}
-              </button>
+              </Button>
             ))}
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button className="inline-flex items-center gap-2 h-9 px-3 rounded-sm border-hairline border-zinc-300 bg-white text-13 font-medium text-zinc-900" onClick={() => runScan("dry_run")} disabled={scanning}>
-              <Play size={14} /> Dry Run
-            </button>
-            <button className="inline-flex items-center gap-2 h-9 px-3 rounded-sm border-hairline border-zinc-900 bg-zinc-900 text-13 font-medium text-white" onClick={() => runScan("manual")} disabled={scanning}>
-              <RefreshCw size={14} /> Create Proposals
-            </button>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="secondary" onClick={() => runScan("dry_run")} loading={scanning}>
+              <Play size={16} aria-hidden /> Dry run
+            </Button>
+            <Button onClick={() => runScan("manual")} loading={scanning}>
+              <RefreshCw size={16} aria-hidden /> Create proposals
+            </Button>
           </div>
         </div>
 
-        {error && <div style={{ border: `1px solid #FCA5A5`, background: "#FEF2F2", color: D.red, padding: 12, borderRadius: 8, fontSize: 13 }}>{error}</div>}
-        {notice && <div style={{ border: `1px solid #BBF7D0`, background: "#F0FDF4", color: D.green, padding: 12, borderRadius: 8, fontSize: 13 }}>{notice}</div>}
+        {error && <ActionFeedback error>{error}</ActionFeedback>}
+        {notice && <ActionFeedback>{notice}</ActionFeedback>}
 
         <MetricsPanel metrics={metrics} />
 
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 420px), 1fr))", gap: 14 }}>
-          <section style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, overflow: "hidden" }}>
-            <div style={{ padding: 14, borderBottom: `1px solid ${D.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div className="grid gap-3 lg:grid-cols-2 items-start">
+          <Card className="overflow-hidden">
+            <CardHeader className="flex items-center justify-between gap-3">
               <div>
-                <div style={{ fontSize: 15, fontWeight: 700, color: D.heading }}>Proposals</div>
-                <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>{pendingCount} pending in current view</div>
+                <CardTitle>Proposals</CardTitle>
+                <p className="text-ui-caption text-ink-secondary mt-1">{pendingCount} pending in current view</p>
               </div>
-              <button type="button" onClick={load} disabled={loading} style={{ border: `1px solid ${D.border}`, background: D.card, borderRadius: 6, width: 34, height: 34, cursor: "pointer" }} aria-label="Refresh">
-                <RefreshCw size={15} />
-              </button>
-            </div>
-            <div style={{ maxHeight: "calc(100vh - 260px)", overflow: "auto" }}>
+              <Button type="button" onClick={load} loading={loading} variant="secondary" aria-label="Refresh proposals">
+                <RefreshCw size={16} aria-hidden />
+              </Button>
+            </CardHeader>
+            <div className="max-h-[calc(100dvh-260px)] overflow-auto">
               {loading ? (
-                <div style={{ padding: 18, color: D.muted, fontSize: 13 }}>Loading...</div>
+                <ActionFeedback className="m-4">Loading proposals...</ActionFeedback>
               ) : data.proposals?.length ? data.proposals.map((proposal) => (
                 <button
                   key={proposal.id}
                   type="button"
                   onClick={() => setSelectedId(proposal.id)}
-                  style={{
-                    display: "block",
-                    width: "100%",
-                    textAlign: "left",
-                    background: proposal.id === selected?.id ? "#FAFAFA" : D.card,
-                    border: "none",
-                    borderBottom: `1px solid ${D.border}`,
-                    padding: 14,
-                    cursor: "pointer",
-                  }}
+                  aria-pressed={proposal.id === selected?.id}
+                  className="block min-h-11 w-full border-0 border-b border-hairline border-zinc-200 bg-white p-4 text-left text-ui-body text-zinc-800 hover:bg-zinc-50 aria-pressed:bg-zinc-100 u-focus-ring"
                 >
-                  <div style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "space-between" }}>
-                    <div style={{ fontSize: 13, fontWeight: 700, color: D.heading, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="truncate font-medium text-zinc-900">
                       {proposal.customer?.name || proposal.customer?.phone || "Unknown customer"}
                     </div>
-                    <Chip tone={statusTone(proposal.status)}>{proposal.status}</Chip>
+                    <Badge tone="neutral">{fieldLabel(proposal.status)}</Badge>
                   </div>
-                  <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>{fieldLabel(proposal.field)} · {confidence(proposal.confidence)}</div>
-                  <div style={{ fontSize: 12, color: D.text, marginTop: 6, overflowWrap: "anywhere" }}>{valueText(proposal.proposedValue)}</div>
+                  <div className="mt-1 text-ui-caption text-ink-secondary">{fieldLabel(proposal.field)} · {confidence(proposal.confidence)}</div>
+                  <div className="mt-2 break-words text-ui-body">{valueText(proposal.proposedValue)}</div>
                 </button>
               )) : (
-                <div style={{ padding: 18, color: D.muted, fontSize: 13 }}>No proposals found.</div>
+                <ActionFeedback className="m-4">No proposals found.</ActionFeedback>
               )}
             </div>
-          </section>
+          </Card>
 
-          <section style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 16, minHeight: 360 }}>
+          <Card className="min-h-[360px]">
+            <CardBody>
             {selected ? (
-              <div style={{ display: "grid", gap: 14 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "start" }}>
+              <div className="space-y-4">
+                <div className="flex items-start justify-between gap-3">
                   <div>
-                    <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>{fieldLabel(selected.field)}</div>
-                    <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>{selected.customer?.name || selected.scopeId}</div>
+                    <h2 className="text-18 font-medium text-zinc-900">{fieldLabel(selected.field)}</h2>
+                    <p className="text-ui-caption text-ink-secondary mt-1">{selected.customer?.name || selected.scopeId}</p>
                   </div>
-                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                    {selected.isSensitive && <Chip tone="amber"><ShieldAlert size={13} style={{ marginRight: 4 }} /> Sensitive</Chip>}
-                    <Chip tone={statusTone(selected.status)}>{selected.status}</Chip>
+                  <div className="flex flex-wrap items-center justify-end gap-2">
+                    {selected.isSensitive && <Badge tone="alert"><ShieldAlert size={14} aria-hidden /> Sensitive</Badge>}
+                    <Badge tone="neutral">{fieldLabel(selected.status)}</Badge>
                   </div>
                 </div>
 
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <div className="grid gap-3 sm:grid-cols-2">
                   <Info label="Current" value={valueText(selected.currentValue)} />
                   <Info label="Proposed" value={valueText(selected.proposedValue)} />
                   <Info label="Source" value={selected.source} />
@@ -348,67 +310,83 @@ export default function DataHygienePage({ embedded = false } = {}) {
                 </div>
 
                 {selected.isSensitive && (
-                  <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: 12, background: "#FFFBEB" }}>
-                    <div style={{ display: "flex", gap: 10, justifyContent: "space-between", alignItems: "center" }}>
+                  <Card>
+                    <CardBody className="space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
                       <div>
-                        <div style={{ fontSize: 12, fontWeight: 700, color: D.amber }}>Sensitive value</div>
-                        <div style={{ fontSize: 12, color: D.muted, marginTop: 3 }}>
+                        <div className="text-14 font-medium text-alert-fg">Sensitive value</div>
+                        <div className="text-ui-caption text-ink-secondary mt-1">
                           Reveal decrypts the vault value and writes an audit event.
                         </div>
                       </div>
-                      <button
-                        className="inline-flex items-center gap-2 h-9 px-3 rounded-sm border-hairline border-amber-700 bg-white text-13 font-medium text-amber-800"
+                      <Button
+                        variant="secondary"
                         onClick={() => reveal(selected)}
-                        disabled={revealingId === selected.id}
+                        loading={revealingId === selected.id}
                       >
-                        {revealed?.proposalId === selected.id ? <EyeOff size={14} /> : <Eye size={14} />}
+                        {revealed?.proposalId === selected.id ? <EyeOff size={16} aria-hidden /> : <Eye size={16} aria-hidden />}
                         {revealed?.proposalId === selected.id ? "Hide" : "Reveal"}
-                      </button>
+                      </Button>
                     </div>
                     {revealed?.proposalId === selected.id && (
-                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 12 }}>
+                      <div className="grid gap-3 sm:grid-cols-2">
                         <Info label="Raw Current" value={valueText(revealed.currentValue)} />
                         <Info label="Raw Proposed" value={valueText(revealed.proposedValue)} />
                       </div>
                     )}
-                  </div>
+                    </CardBody>
+                  </Card>
                 )}
 
-                <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: 12, background: "#FAFAFA" }}>
-                  <div style={{ fontSize: 11, color: D.muted, fontWeight: 700, textTransform: "uppercase" }}>Evidence</div>
-                  <div style={{ fontSize: 13, color: D.text, lineHeight: 1.5, marginTop: 8 }}>
+                <Card>
+                  <CardBody>
+                  <div className="text-14 font-medium text-zinc-900">Evidence</div>
+                  <div className="text-ui-body text-zinc-800 mt-2">
                     {selected.evidence?.source_excerpt || "No excerpt available."}
                   </div>
-                  <div style={{ fontSize: 12, color: D.muted, marginTop: 8 }}>
+                  <div className="text-ui-caption text-ink-secondary mt-2">
                     {selected.evidence?.channel || "-"} · {selected.evidence?.matched_label || "-"}
                   </div>
-                </div>
+                  </CardBody>
+                </Card>
 
                 {selected.status === "pending" && (
-                  <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-                    <button className="inline-flex items-center gap-2 h-9 px-3 rounded-sm border-hairline border-zinc-300 bg-white text-13 font-medium text-zinc-900" onClick={() => reject(selected, "bad_parse")} disabled={busyId === selected.id}>
-                      <XCircle size={14} /> Reject
-                    </button>
-                    <button className="inline-flex items-center gap-2 h-9 px-3 rounded-sm border-hairline border-zinc-900 bg-zinc-900 text-13 font-medium text-white" onClick={() => approve(selected)} disabled={busyId === selected.id}>
-                      <CheckCircle2 size={14} /> Approve
-                    </button>
+                  <div className="ui-record-actions justify-end">
+                    <Button variant="secondary" onClick={() => reject(selected, "bad_parse")} loading={busyId === selected.id}>
+                      <XCircle size={16} aria-hidden /> Reject
+                    </Button>
+                    <Button onClick={() => approve(selected)} loading={busyId === selected.id}>
+                      <CheckCircle2 size={16} aria-hidden /> Approve
+                    </Button>
                   </div>
                 )}
                 {(selected.status === "approved" || selected.status === "auto_applied") && (
-                  <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-                    <button className="inline-flex items-center gap-2 h-9 px-3 rounded-sm border-hairline border-zinc-300 bg-white text-13 font-medium text-zinc-900" onClick={() => revert(selected)} disabled={busyId === selected.id}>
-                      <RotateCcw size={14} /> Revert
-                    </button>
+                  <div className="ui-record-actions justify-end">
+                    <Button variant="secondary" onClick={() => { setRevertError(""); setRevertTarget(selected); }} disabled={busyId === selected.id}>
+                      <RotateCcw size={16} aria-hidden /> Revert
+                    </Button>
                   </div>
                 )}
               </div>
             ) : (
-              <div style={{ color: D.muted, fontSize: 13 }}>Select a proposal.</div>
+              <ActionFeedback>Select a proposal.</ActionFeedback>
             )}
-          </section>
+            </CardBody>
+          </Card>
         </div>
+        <Dialog open={Boolean(revertTarget)} onClose={() => !busyId && setRevertTarget(null)} size="sm">
+          <DialogHeader><DialogTitle>Revert approved change?</DialogTitle></DialogHeader>
+          <DialogBody className="space-y-3">
+            <p className="text-ui-body text-zinc-800">Restore the previous value for this proposal?</p>
+            {revertError && <ActionFeedback error>{revertError}</ActionFeedback>}
+          </DialogBody>
+          <DialogFooter>
+            <Button variant="secondary" onClick={() => setRevertTarget(null)} disabled={Boolean(busyId)}>Cancel</Button>
+            <Button variant="danger" onClick={() => revert(revertTarget)} loading={busyId === revertTarget?.id}>Revert change</Button>
+          </DialogFooter>
+        </Dialog>
       </div>
-    </div>
+    </UiSurface>
   );
 }
 
@@ -420,101 +398,93 @@ function MetricsPanel({ metrics }) {
   const approved = metrics?.statusCounts?.approved || 0;
 
   return (
-    <section style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, overflow: "hidden" }}>
-      <div style={{ padding: 14, borderBottom: `1px solid ${D.border}`, display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+    <Card className="overflow-hidden">
+      <CardHeader className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <div style={{ fontSize: 15, fontWeight: 700, color: D.heading }}>Quality Signals</div>
-          <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>Last {metrics?.days || 30} days</div>
+          <CardTitle>Quality signals</CardTitle>
+          <p className="text-ui-caption text-ink-secondary mt-1">Last {metrics?.days || 30} days</p>
         </div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
-          <Chip tone="green">{approved} approved</Chip>
-          <Chip tone={rejected ? "red" : "neutral"}>{rejected} rejected</Chip>
+        <div className="flex flex-wrap justify-end gap-2">
+          <Badge tone="neutral">{approved} approved</Badge>
+          <Badge tone={rejected ? "alert" : "neutral"}>{rejected} rejected</Badge>
         </div>
-      </div>
-      <div style={{ padding: 14, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 220px), 1fr))", gap: 12 }}>
+      </CardHeader>
+      <CardBody className="grid gap-3 sm:grid-cols-3">
         <MetricCard title="Noisiest field" bucket={topField} />
         <MetricCard title="Noisiest label" bucket={topLabel} />
         <MetricCard title="Extractor" bucket={topVersion} />
-      </div>
-      <div style={{ padding: "0 14px 14px", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 320px), 1fr))", gap: 12 }}>
+      </CardBody>
+      <div className="grid gap-3 px-4 pb-4 lg:grid-cols-2">
         <MetricTable title="By field" rows={metrics?.byField || []} keyLabel="Field" />
         <MetricTable title="By label" rows={metrics?.byMatchedLabel || []} keyLabel="Label" />
       </div>
-      <div style={{ padding: "0 14px 14px" }}>
-        <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, overflow: "hidden" }}>
-          <div style={{ padding: 12, borderBottom: `1px solid ${D.border}`, fontSize: 13, fontWeight: 700, color: D.heading }}>Rejected excerpts</div>
+      <div className="px-4 pb-4">
+        <Card className="overflow-hidden">
+          <CardHeader><CardTitle>Rejected excerpts</CardTitle></CardHeader>
           {metrics?.topRejected?.length ? metrics.topRejected.map((row) => (
-            <div key={row.id} style={{ padding: 12, borderBottom: `1px solid ${D.border}`, display: "grid", gap: 6 }}>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                <Chip tone="red">{fieldLabel(row.field)}</Chip>
-                <span style={{ fontSize: 12, color: D.muted }}>{row.matchedLabel || "unknown"} · {row.extractorVersion || "unknown"} · {row.rejectReason || "rejected"}</span>
+            <div key={row.id} className="space-y-2 border-b border-hairline border-zinc-200 p-3 last:border-b-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge tone="alert">{fieldLabel(row.field)}</Badge>
+                <span className="text-ui-caption text-ink-secondary">{row.matchedLabel || "unknown"} · {row.extractorVersion || "unknown"} · {row.rejectReason || "rejected"}</span>
               </div>
-              <div style={{ fontSize: 13, color: D.text, lineHeight: 1.45, overflowWrap: "anywhere" }}>
+              <div className="break-words text-ui-body text-zinc-800">
                 {row.sourceExcerpt || "No excerpt available."}
               </div>
             </div>
           )) : (
-            <div style={{ padding: 12, color: D.muted, fontSize: 13 }}>No rejected excerpts in this window.</div>
+            <ActionFeedback className="m-3">No rejected excerpts in this window.</ActionFeedback>
           )}
-        </div>
+        </Card>
       </div>
-    </section>
+    </Card>
   );
 }
 
 function MetricCard({ title, bucket }) {
   return (
-    <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: 12, minHeight: 92 }}>
-      <div style={{ fontSize: 11, color: D.muted, fontWeight: 700, textTransform: "uppercase" }}>{title}</div>
-      <div style={{ fontSize: 16, fontWeight: 700, color: D.heading, marginTop: 8, overflowWrap: "anywhere" }}>{bucket?.key ? fieldLabel(bucket.key) : "-"}</div>
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8, fontSize: 12, color: D.muted }}>
+    <Card className="min-h-[92px] p-3">
+      <div className="text-14 font-medium text-ink-secondary">{title}</div>
+      <div className="mt-2 break-words text-16 font-medium text-zinc-900">{bucket?.key ? fieldLabel(bucket.key) : "-"}</div>
+      <div className="mt-2 flex flex-wrap gap-2 text-ui-caption text-ink-secondary u-nums">
         <span>{bucket?.total || 0} total</span>
         <span>{percent(bucket?.rejectionRate)} rejected</span>
       </div>
-    </div>
+    </Card>
   );
 }
 
 function MetricTable({ title, rows, keyLabel }) {
   return (
-    <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, overflow: "hidden" }}>
-      <div style={{ padding: 12, borderBottom: `1px solid ${D.border}`, fontSize: 13, fontWeight: 700, color: D.heading }}>{title}</div>
-      <div style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-          <thead>
-            <tr style={{ color: D.muted, textAlign: "left" }}>
-              <th style={{ padding: 10, fontWeight: 700 }}>{keyLabel}</th>
-              <th style={{ padding: 10, fontWeight: 700 }}>Total</th>
-              <th style={{ padding: 10, fontWeight: 700 }}>Approved</th>
-              <th style={{ padding: 10, fontWeight: 700 }}>Rejected</th>
-              <th style={{ padding: 10, fontWeight: 700 }}>Reject %</th>
-            </tr>
-          </thead>
-          <tbody>
+    <Card className="overflow-hidden">
+      <CardHeader><CardTitle>{title}</CardTitle></CardHeader>
+        <Table aria-label={title} className="min-w-[520px]">
+          <THead>
+            <TR>
+              <TH>{keyLabel}</TH><TH>Total</TH><TH>Approved</TH><TH>Rejected</TH><TH>Reject %</TH>
+            </TR>
+          </THead>
+          <TBody>
             {rows.slice(0, 6).map((row) => (
-              <tr key={row.key} style={{ borderTop: `1px solid ${D.border}` }}>
-                <td style={{ padding: 10, color: D.heading, fontWeight: 700, overflowWrap: "anywhere" }}>{fieldLabel(row.key)}</td>
-                <td style={{ padding: 10 }}>{row.total}</td>
-                <td style={{ padding: 10 }}>{row.approved}</td>
-                <td style={{ padding: 10 }}>{row.rejected}</td>
-                <td style={{ padding: 10 }}>{percent(row.rejectionRate)}</td>
-              </tr>
+              <TR key={row.key}>
+                <TD className="break-words font-medium">{fieldLabel(row.key)}</TD>
+                <TD className="u-nums">{row.total}</TD><TD className="u-nums">{row.approved}</TD>
+                <TD className="u-nums">{row.rejected}</TD><TD className="u-nums">{percent(row.rejectionRate)}</TD>
+              </TR>
             ))}
             {!rows.length && (
-              <tr><td colSpan={5} style={{ padding: 12, color: D.muted }}>No metrics yet.</td></tr>
+              <TR><TD colSpan={5} className="text-ink-secondary">No metrics yet.</TD></TR>
             )}
-          </tbody>
-        </table>
-      </div>
-    </div>
+          </TBody>
+        </Table>
+    </Card>
   );
 }
 
 function Info({ label, value }) {
   return (
-    <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: 12 }}>
-      <div style={{ fontSize: 11, color: D.muted, fontWeight: 700, textTransform: "uppercase" }}>{label}</div>
-      <div style={{ fontSize: 13, color: D.text, marginTop: 6, overflowWrap: "anywhere" }}>{value || "-"}</div>
-    </div>
+    <Card className="p-3">
+      <div className="text-14 font-medium text-ink-secondary">{label}</div>
+      <div className="mt-2 break-words text-ui-body text-zinc-800">{value || "-"}</div>
+    </Card>
   );
 }

@@ -1,7 +1,17 @@
-import { useState, useEffect, useMemo } from "react";
-
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import {
+  ActionFeedback,
+  Button,
+  Card as UiCard,
+  Table,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TR,
+  UiSurface,
+} from "../../components/ui";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
-
 function adminFetch(path, options = {}) {
   const body =
     options.body && typeof options.body !== "string"
@@ -30,243 +40,99 @@ function adminFetch(path, options = {}) {
     return r.json();
   });
 }
-
 function isAdminUser() {
   try {
-    return JSON.parse(localStorage.getItem("waves_admin_user") || "{}")?.role === "admin";
+    return (
+      JSON.parse(localStorage.getItem("waves_admin_user") || "{}")?.role ===
+      "admin"
+    );
   } catch {
     return false;
   }
 }
 
-// Tier 2 monochrome palette — WAVES_COLORS keys preserved so the 90+
-// call sites keep their semantic roles. Dark-mode glows neutralized to
-// light pastel tints; accents fold into zinc-900 per V2 admin spec.
-const WAVES_COLORS = {
-  bg: "#FFFFFF",
-  cardBg: "#FFFFFF",
-  cardBorder: "#E4E4E7", // zinc-200
-  accent: "#18181B", // zinc-900
-  accentGlow: "#F4F4F5", // zinc-100
-  green: "#15803D", // emerald-700 (semantic gain)
-  greenGlow: "#DCFCE7", // emerald-100
-  red: "#991B1B", // alert-fg (semantic loss/alert)
-  redGlow: "#FEE2E2", // red-100
-  yellow: "#A16207", // amber-700
-  yellowGlow: "#FEF3C7", // amber-100
-  purple: "#18181B", // fold to accent
-  orange: "#18181B",
-  cyan: "#18181B",
-  textPrimary: "#09090B", // ink-primary
-  textSecondary: "#52525B", // ink-secondary
-  textMuted: "#A1A1AA", // ink-tertiary
-  gold: "#18181B", // fold to accent
-};
-
 // --- COMPONENTS ---
 
-function MetricCard({
-  value,
-  label,
-  sublabel,
-  color = WAVES_COLORS.accent,
-  large,
-}) {
+function MetricCard({ value, label, sublabel, color = "#18181B" }) {
   return (
-    <div
-      style={{
-        background: WAVES_COLORS.cardBg,
-        border: `1px solid ${WAVES_COLORS.cardBorder}`,
-        borderRadius: 12,
-        padding: large ? "24px 20px" : "18px 16px",
-        textAlign: "center",
-        position: "relative",
-        overflow: "hidden",
-      }}
+    <UiCard
+      className="relative overflow-hidden rounded-md border-hairline border-zinc-200 bg-white px-4 py-[18px] text-center"
     >
       {" "}
       <div
         style={{
-          position: "absolute",
-          top: 0,
-          left: "50%",
-          transform: "translateX(-50%)",
-          width: 80,
-          height: 3,
           background: color,
-          borderRadius: "0 0 4px 4px",
         }}
+        className="absolute [top:0px] [left:50%] [transform:translateX(-50%)] [width:80px] [height:3px] rounded-xs"
       />{" "}
       <div
-        style={{
-          fontSize: large ? 32 : 26,
-          fontWeight: 700,
-          color,
-          letterSpacing: "-0.02em",
-          lineHeight: 1.1,
-          fontFamily: "'Roboto', Arial, sans-serif",
-        }}
+        style={{ color }}
+        className="text-24 font-medium leading-tight"
       >
         {value}
       </div>{" "}
-      <div
-        style={{
-          fontSize: 11,
-          fontWeight: 500,
-          color: WAVES_COLORS.textSecondary,
-          textTransform: "uppercase",
-          letterSpacing: "0.08em",
-          marginTop: 6,
-        }}
-      >
+      <div className="text-ui-body font-medium text-ink-secondary [margin-top:6px]">
         {label}
       </div>
       {sublabel && (
-        <div
-          style={{
-            fontSize: 11,
-            color: WAVES_COLORS.textMuted,
-            marginTop: 2,
-          }}
-        >
+        <div className="text-ui-body text-ink-secondary [margin-top:2px]">
           {sublabel}
         </div>
       )}
-    </div>
+    </UiCard>
   );
 }
-
-function HBar({ label, value, maxValue, color, suffix = "%", width = "100%" }) {
+function HBar({ label, value, maxValue, color, suffix = "%" }) {
   const pct = Math.min((value / maxValue) * 100, 100);
   return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 12,
-        marginBottom: 10,
-        width,
-      }}
-    >
+    <div className="mb-2.5 flex w-full items-center gap-3">
       {" "}
-      <div
-        style={{
-          width: 100,
-          fontSize: 13,
-          color: WAVES_COLORS.textSecondary,
-          fontWeight: 500,
-          flexShrink: 0,
-          textAlign: "right",
-        }}
-      >
+      <div className="[width:100px] text-ui-body text-ink-secondary font-medium shrink-0 text-right">
         {label}
       </div>{" "}
-      <div
-        style={{
-          flex: 1,
-          height: 22,
-          background: "#F4F4F5",
-          borderRadius: 6,
-          overflow: "hidden",
-          position: "relative",
-        }}
-      >
+      <div className="[flex:1] [height:22px] bg-zinc-100 rounded-sm overflow-hidden relative">
         {" "}
         <div
           style={{
             width: `${pct}%`,
-            height: "100%",
             background: color,
-            borderRadius: 6,
-            transition: "width 0.8s cubic-bezier(.4,0,.2,1)",
           }}
+          className="[height:100%] rounded-sm transition-all"
         />{" "}
       </div>{" "}
-      <div
-        style={{
-          width: 52,
-          fontSize: 13,
-          fontWeight: 700,
-          color: WAVES_COLORS.textPrimary,
-          textAlign: "right",
-          flexShrink: 0,
-        }}
-      >
+      <div className="[width:52px] text-ui-body font-medium text-zinc-900 text-right shrink-0">
         {value}
         {suffix}
       </div>{" "}
     </div>
   );
 }
-
 function CompBar({ name, count, maxCount }) {
   const pct = (count / maxCount) * 100;
   return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 12,
-        marginBottom: 8,
-      }}
-    >
+    <div className="flex items-center [gap:12px] [margin-bottom:8px]">
       {" "}
-      <div
-        style={{
-          width: 90,
-          fontSize: 12,
-          color: WAVES_COLORS.textSecondary,
-          fontWeight: 500,
-          textAlign: "right",
-          flexShrink: 0,
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-        }}
-      >
+      <div className="[width:90px] text-ui-body text-ink-secondary font-medium text-right shrink-0 overflow-hidden text-ellipsis whitespace-nowrap">
         {name}
       </div>{" "}
-      <div
-        style={{
-          flex: 1,
-          height: 18,
-          background: "#F4F4F5",
-          borderRadius: 4,
-          overflow: "hidden",
-        }}
-      >
+      <div className="[flex:1] [height:18px] bg-zinc-100 rounded-sm overflow-hidden">
         {" "}
         <div
           style={{
             width: `${pct}%`,
-            height: "100%",
-            background: WAVES_COLORS.red,
-            borderRadius: 4,
-            minWidth: 8,
           }}
+          className="[height:100%] bg-alert-bg rounded-sm [min-width:8px]"
         />{" "}
       </div>{" "}
-      <div
-        style={{
-          width: 28,
-          fontSize: 13,
-          fontWeight: 700,
-          color: WAVES_COLORS.textPrimary,
-          textAlign: "right",
-          flexShrink: 0,
-        }}
-      >
+      <div className="[width:28px] text-ui-body font-medium text-zinc-900 text-right shrink-0">
         {count}
       </div>{" "}
     </div>
   );
 }
-
 function Sparkline({ data, width = 90, height = 28 }) {
   if (!data || data.length < 2)
-    return (
-      <span style={{ color: WAVES_COLORS.textMuted, fontSize: 11 }}>--</span>
-    );
+    return <span className="text-ink-secondary text-ui-body">--</span>;
   const max = Math.max(...data);
   const min = Math.min(...data);
   const range = max - min || 1;
@@ -279,12 +145,12 @@ function Sparkline({ data, width = 90, height = 28 }) {
     .join(" ");
   const trending = data[data.length - 1] < data[0]; // lower position = better for rankings
   const lineColor = trending
-    ? WAVES_COLORS.green
+    ? "#15803D"
     : data[data.length - 1] > data[0]
-      ? WAVES_COLORS.red
-      : WAVES_COLORS.textMuted;
+      ? "#991B1B"
+      : "#A1A1AA";
   return (
-    <svg width={width} height={height} style={{ display: "block" }}>
+    <svg width={width} height={height} className="block">
       {" "}
       <polyline
         points={points}
@@ -303,12 +169,11 @@ function Sparkline({ data, width = 90, height = 28 }) {
     </svg>
   );
 }
-
 function StatusDot({ status }) {
   const colors = {
-    cited: WAVES_COLORS.green,
-    competitor: WAVES_COLORS.red,
-    no_aio: WAVES_COLORS.textMuted,
+    cited: "#15803D",
+    competitor: "#991B1B",
+    no_aio: "#A1A1AA",
   };
   const labels = {
     cited: "Waves Cited",
@@ -318,158 +183,88 @@ function StatusDot({ status }) {
   return (
     <span
       style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 6,
-        fontSize: 12,
         color: colors[status],
-        fontWeight: 500,
       }}
+      className="inline-flex items-center [gap:6px] text-ui-body font-medium"
     >
       {" "}
       <span
         style={{
-          width: 8,
-          height: 8,
-          borderRadius: "50%",
           background: colors[status],
-          display: "inline-block",
         }}
+        className="[width:8px] [height:8px] rounded-xs inline-block"
       />
       {labels[status]}
     </span>
   );
 }
-
 function DeltaArrow({ current, previous }) {
   if (current == null || previous == null)
-    return (
-      <span style={{ color: WAVES_COLORS.textMuted, fontSize: 12 }}>--</span>
-    );
+    return <span className="text-ink-secondary text-ui-body">--</span>;
   const diff = previous - current; // positive = improved (lower position is better)
   if (diff === 0)
     return (
-      <span
-        style={{ color: WAVES_COLORS.textMuted, fontSize: 13, fontWeight: 500 }}
-      >
-        --
-      </span>
+      <span className="text-ink-secondary text-ui-body font-medium">--</span>
     );
-  const color = diff > 0 ? WAVES_COLORS.green : WAVES_COLORS.red;
+  const color = diff > 0 ? "#15803D" : "#991B1B";
   return (
-    <span style={{ color, fontSize: 13, fontWeight: 700 }}>
+    <span
+      style={{
+        color,
+      }}
+      className="text-ui-body font-medium"
+    >
       {diff > 0 ? "+" : "-"}
       {Math.abs(diff)}
     </span>
   );
 }
-
 function PositionBadge({ pos }) {
   if (pos == null)
-    return (
-      <span style={{ color: WAVES_COLORS.textMuted, fontSize: 13 }}>--</span>
-    );
+    return <span className="text-ink-secondary text-ui-body">--</span>;
   let bg = "#F4F4F5";
-  let color = WAVES_COLORS.textSecondary;
+  let color = "#52525B";
   if (pos <= 3) {
-    bg = WAVES_COLORS.greenGlow;
-    color = WAVES_COLORS.green;
+    bg = "#DCFCE7";
+    color = "#15803D";
   } else if (pos <= 10) {
-    bg = WAVES_COLORS.accentGlow;
-    color = WAVES_COLORS.accent;
+    bg = "#F4F4F5";
+    color = "#18181B";
   } else if (pos <= 20) {
-    bg = WAVES_COLORS.yellowGlow;
-    color = WAVES_COLORS.yellow;
+    bg = "#FEF3C7";
+    color = "#A16207";
   } else {
-    bg = WAVES_COLORS.redGlow;
-    color = WAVES_COLORS.red;
+    bg = "#FEE2E2";
+    color = "#991B1B";
   }
   return (
     <span
       style={{
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        minWidth: 32,
-        padding: "2px 8px",
-        borderRadius: 6,
         background: bg,
         color,
-        fontSize: 14,
-        fontWeight: 700,
-        fontFamily: "'Roboto', Arial, sans-serif",
       }}
+      className="inline-flex items-center justify-center [min-width:32px] [padding:2px_8px] rounded-sm text-ui-body font-medium"
     >
       #{pos}
     </span>
   );
 }
-
 function SectionTitle({ children, right }) {
   return (
-    <div
-      style={{
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "center",
-        marginBottom: 16,
-      }}
-    >
+    <div className="flex justify-between items-center [margin-bottom:16px]">
       {" "}
-      <h3
-        style={{
-          fontSize: 14,
-          fontWeight: 700,
-          color: WAVES_COLORS.textPrimary,
-          textTransform: "uppercase",
-          letterSpacing: "0.06em",
-          margin: 0,
-          fontFamily: "'Roboto', Arial, sans-serif",
-        }}
-      >
+      <h3 className="text-ui-body font-medium text-zinc-900 [margin:0px]">
         {children}
       </h3>
       {right}
     </div>
   );
 }
-
-function Card({ children, style = {} }) {
-  return (
-    <div
-      style={{
-        background: WAVES_COLORS.cardBg,
-        border: `1px solid ${WAVES_COLORS.cardBorder}`,
-        borderRadius: 12,
-        padding: 20,
-        ...style,
-      }}
-    >
-      {children}
-    </div>
-  );
-}
-
 function FilterPill({ label, active, onClick }) {
   return (
-    <button
-      onClick={onClick}
-      style={{
-        padding: "5px 14px",
-        borderRadius: 20,
-        border: "1px solid",
-        borderColor: active ? WAVES_COLORS.accent : WAVES_COLORS.cardBorder,
-        background: active ? WAVES_COLORS.accentGlow : "transparent",
-        color: active ? WAVES_COLORS.accent : WAVES_COLORS.textMuted,
-        fontSize: 12,
-        fontWeight: 500,
-        cursor: "pointer",
-        transition: "all 0.2s",
-        fontFamily: "'Roboto', Arial, sans-serif",
-      }}
-    >
+    <Button onClick={onClick} variant={active ? "primary" : "secondary"}>
       {label}
-    </button>
+    </Button>
   );
 }
 
@@ -479,7 +274,8 @@ export default function WavesSEODashboard() {
   const [cityFilter, setCityFilter] = useState("All");
   const [catFilter, setCatFilter] = useState("All");
   const [loading, setLoading] = useState(true);
-  const isMobile = typeof window !== "undefined" && window.innerWidth < 640;
+  const [loadError, setLoadError] = useState("");
+  const loadSequence = useRef(0);
 
   // Real data from API
   const [aiData, setAiData] = useState(null);
@@ -488,21 +284,35 @@ export default function WavesSEODashboard() {
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState("");
   const canRunSeoActions = isAdminUser();
-
-  useEffect(() => {
+  const loadDashboard = useCallback(() => {
+    const sequence = ++loadSequence.current;
     setLoading(true);
+    setLoadError("");
     Promise.all([
-      adminFetch("/admin/seo/ai-overview").catch(() => null),
-      adminFetch("/admin/seo/rankings?days=7").catch(() => null),
-      adminFetch("/admin/seo/backlinks").catch(() => null),
-    ]).then(([ai, rank, bl]) => {
-      setAiData(ai);
-      setRankData(rank);
-      setBacklinkData(bl);
-      setLoading(false);
-    });
+      adminFetch("/admin/seo/ai-overview"),
+      adminFetch("/admin/seo/rankings?days=7"),
+      adminFetch("/admin/seo/backlinks"),
+    ])
+      .then(([ai, rank, bl]) => {
+        if (sequence !== loadSequence.current) return;
+        setAiData(ai);
+        setRankData(rank);
+        setBacklinkData(bl);
+      })
+      .catch((error) => {
+        if (sequence !== loadSequence.current) return;
+        setLoadError(error?.message || "Failed to load SEO dashboard data");
+      })
+      .finally(() => {
+        if (sequence === loadSequence.current) setLoading(false);
+      });
   }, []);
-
+  useEffect(() => {
+    loadDashboard();
+    return () => {
+      loadSequence.current += 1;
+    };
+  }, [loadDashboard]);
   const cities = [
     "All",
     "Bradenton",
@@ -532,13 +342,13 @@ export default function WavesSEODashboard() {
           ? r.currentPosition - r.delta
           : null,
       mapPack: r.mapPackPosition || null,
-      mapPrev: null, // API doesn't track map pack history separately
+      mapPrev: null,
+      // API doesn't track map pack history separately
       trend: (r.history || []).map((h) => h.position).filter((p) => p != null),
       category: r.service_category || "Pest Control",
       city: r.primary_city || "All",
     }));
   }, [rankData]);
-
   const filteredKeywords = useMemo(() => {
     return keywords.filter((k) => {
       if (cityFilter !== "All" && k.city !== cityFilter) return false;
@@ -567,7 +377,10 @@ export default function WavesSEODashboard() {
     // Build competitor mentions from citation counts
     const competitorMentions = Object.entries(aiData.citationCounts || {})
       .filter(([domain]) => !domain.includes("waves"))
-      .map(([name, count]) => ({ name, count }))
+      .map(([name, count]) => ({
+        name,
+        count,
+      }))
       .sort((a, b) => b.count - a.count)
       .slice(0, 8);
 
@@ -580,8 +393,8 @@ export default function WavesSEODashboard() {
 
     // LLM provider visibility from backlink data
     const llmStats = backlinkData?.llmStats || {};
-    const sourceCoverage = total > 0 ? ((wavesCited / total) * 100).toFixed(1) : 0;
-
+    const sourceCoverage =
+      total > 0 ? ((wavesCited / total) * 100).toFixed(1) : 0;
     return {
       sourceCoverage,
       recommendRate: aiData.geoScore || 0,
@@ -594,17 +407,17 @@ export default function WavesSEODashboard() {
         {
           name: "Google AIO presence",
           pct: total > 0 ? ((withAIO / total) * 100).toFixed(1) : 0,
-          color: WAVES_COLORS.green,
+          color: "#15803D",
         },
         {
           name: "LLM linked citations",
           pct: llmStats.citationRate ?? null,
-          color: WAVES_COLORS.accent,
+          color: "#18181B",
         },
         {
           name: "LLM brand mentions",
           pct: llmStats.mentionRate ?? null,
-          color: WAVES_COLORS.green,
+          color: "#15803D",
         },
       ],
       competitorMentions,
@@ -633,22 +446,27 @@ export default function WavesSEODashboard() {
       total: keywords.length,
     };
   }, [rankData, keywords]);
-
   if (loading) {
     return (
-      <div
-        style={{
-          color: WAVES_COLORS.textMuted,
-          padding: 60,
-          textAlign: "center",
-          fontSize: 14,
-        }}
+      <UiSurface
+        density="comfortable"
+        className="text-ink-secondary [padding:60px] text-center text-ui-body"
       >
         Loading SEO Command Center...
-      </div>
+      </UiSurface>
     );
   }
-
+  if (loadError) {
+    return (
+      <ActionFeedback
+        error
+        onRetry={loadDashboard}
+        className="justify-center [padding:40px] text-center"
+      >
+        SEO dashboard unavailable: {loadError}
+      </ActionFeedback>
+    );
+  }
   const runSync = async () => {
     if (!canRunSeoActions) return;
     setSyncing(true);
@@ -675,73 +493,36 @@ export default function WavesSEODashboard() {
     }
     setSyncing(false);
   };
-
   const noData = !aiData && !rankData;
   if (noData) {
     return (
-      <Card style={{ padding: 60, textAlign: "center" }}>
+      <UiCard className="[padding:60px] text-center">
         {" "}
-        <div style={{ fontSize: 48, marginBottom: 16 }}></div>{" "}
-        <div
-          style={{
-            fontSize: 18,
-            fontWeight: 500,
-            color: WAVES_COLORS.textPrimary,
-            marginBottom: 8,
-          }}
-        >
+        <div className="text-[48px] [margin-bottom:16px]"></div>{" "}
+        <div className="text-[18px] font-medium text-zinc-900 [margin-bottom:8px]">
           No SEO Data Yet
         </div>{" "}
-        <div
-          style={{
-            fontSize: 13,
-            color: WAVES_COLORS.textMuted,
-            marginBottom: 20,
-          }}
-        >
+        <div className="text-ui-body text-ink-secondary [margin-bottom:20px]">
           Sync Google Search Console data and run the SEO analyzer to populate
           this dashboard.
         </div>{" "}
         {canRunSeoActions && (
-          <button
-            onClick={runSync}
-            disabled={syncing}
-            style={{
-              padding: "12px 24px",
-              borderRadius: 10,
-              border: "none",
-              cursor: syncing ? "default" : "pointer",
-              background: WAVES_COLORS.accent || "#0ea5e9",
-              color: "#fff",
-              fontSize: 14,
-              fontWeight: 700,
-              opacity: syncing ? 0.7 : 1,
-            }}
-          >
+          <Button onClick={runSync} disabled={syncing}>
             {syncing ? syncMsg : "Sync & Generate SEO Report"}
-          </button>
+          </Button>
         )}
         {syncMsg && !syncing && (
-          <div
-            style={{
-              fontSize: 12,
-              color: WAVES_COLORS.textMuted,
-              marginTop: 10,
-            }}
-          >
+          <div className="text-ui-body text-ink-secondary [margin-top:10px]">
             {syncMsg}
           </div>
         )}
-        <div
-          style={{ fontSize: 11, color: WAVES_COLORS.textMuted, marginTop: 16 }}
-        >
+        <div className="text-ui-body text-ink-secondary [margin-top:16px]">
           Requires: GOOGLE_SERVICE_ACCOUNT_JSON + GSC_SITE_URL env vars on
           Railway
         </div>{" "}
-      </Card>
+      </UiCard>
     );
   }
-
   const maxCompMentions = Math.max(
     1,
     ...(aiOverview?.competitorMentions || []).map((c) => c.count),
@@ -750,145 +531,102 @@ export default function WavesSEODashboard() {
     1,
     ...(aiOverview?.providerVisibility || []).map((p) => Number(p.pct)),
   );
-
   return (
-    <div
-      style={{
-        color: WAVES_COLORS.textPrimary,
-        fontFamily: "'Roboto', Arial, sans-serif",
-      }}
-    >
+    <UiSurface density="comfortable" className="text-zinc-900">
       {" "}
-      <link
-        href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800;900&display=swap"
-        rel="stylesheet"
-      />
       {/* Tab Switcher */}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "center",
-          gap: 4,
-          background: "#F4F4F5",
-          borderRadius: 10,
-          padding: 4,
-          width: isMobile ? "100%" : "fit-content",
-          margin: "0 auto 24px",
-          border: `1px solid ${WAVES_COLORS.cardBorder}`,
-        }}
-      >
+      <div className="mx-auto mb-6 flex w-full justify-center gap-1 rounded-md border-hairline border-zinc-200 bg-zinc-100 p-1 sm:w-fit">
         {[
-          { id: "ai", label: "AI Visibility" },
-          { id: "organic", label: "Organic Rankings" },
+          {
+            id: "ai",
+            label: "AI Visibility",
+          },
+          {
+            id: "organic",
+            label: "Organic Rankings",
+          },
         ].map((tab) => (
-          <button
+          <Button
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
-            style={{
-              padding: "10px 24px",
-              borderRadius: 8,
-              border: "none",
-              background:
-                activeTab === tab.id ? WAVES_COLORS.accent : "transparent",
-              color: activeTab === tab.id ? "#fff" : WAVES_COLORS.textMuted,
-              fontSize: 14,
-              fontWeight: 700,
-              cursor: "pointer",
-              transition: "all 0.2s",
-              fontFamily: "'Roboto', Arial, sans-serif",
-            }}
+            variant={activeTab === tab.id ? "primary" : "secondary"}
           >
             {tab.label}
-          </button>
+          </Button>
         ))}
       </div>
       {/* ============= AI VISIBILITY TAB ============= */}
       {activeTab === "ai" && aiOverview && (
         <div>
           {/* KPI Row */}
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: isMobile
-                ? "repeat(2, 1fr)"
-                : "repeat(5, 1fr)",
-              gap: 12,
-              marginBottom: 20,
-            }}
-          >
+          <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-5">
             {" "}
             <MetricCard
               value={`${aiOverview.sourceCoverage}%`}
               label="Source Coverage"
               sublabel="across tracked keywords"
-              color={WAVES_COLORS.accent}
+              color={"#18181B"}
             />{" "}
             <MetricCard
               value={`${aiOverview.recommendRate}%`}
               label="Legacy GEO Score"
               sublabel="SERP source signal"
-              color={WAVES_COLORS.green}
+              color={"#15803D"}
             />{" "}
             <MetricCard
               value={`${aiOverview.sourceRate}%`}
               label="AIO Source Rate"
               sublabel="of AIO results"
-              color={WAVES_COLORS.purple}
+              color={"#18181B"}
             />{" "}
             <MetricCard
               value={aiOverview.citations}
               label="Source Appearances"
               sublabel="legacy SERP source flags"
-              color={WAVES_COLORS.cyan}
+              color={"#18181B"}
             />{" "}
             <MetricCard
               value={aiOverview.gaps}
               label="Gaps"
               sublabel="missing opportunities"
-              color={WAVES_COLORS.red}
+              color={"#991B1B"}
             />{" "}
           </div>
           {/* Provider Visibility + Competitor Mentions */}
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr",
-              gap: 16,
-              marginBottom: 20,
-            }}
-          >
+          <div className="mb-5 grid grid-cols-1 gap-4 sm:grid-cols-2">
             {" "}
-            <Card>
+            <UiCard className="p-5">
               {" "}
               <SectionTitle>Provider Visibility</SectionTitle>
-              {aiOverview.providerVisibility.map((p) => p.pct === null ? (
-                <div key={p.name} style={{ fontSize: 14, color: WAVES_COLORS.textMuted, marginBottom: 12 }}>
-                  {p.name}: not measured
-                </div>
-              ) : (
-                <HBar
-                  key={p.name}
-                  label={p.name}
-                  value={parseFloat(p.pct)}
-                  maxValue={maxProviderPct * 1.1}
-                  color={p.color}
-                />
-              ))}
-              <p style={{ fontSize: 14, color: WAVES_COLORS.textMuted }}>{aiOverview.llmSample}. Engine and question breakdowns are in SEO → Authority → LLM Mentions.</p>
+              {aiOverview.providerVisibility.map((p) =>
+                p.pct === null ? (
+                  <div
+                    key={p.name}
+                    className="text-ui-body text-ink-secondary [margin-bottom:12px]"
+                  >
+                    {p.name}: not measured
+                  </div>
+                ) : (
+                  <HBar
+                    key={p.name}
+                    label={p.name}
+                    value={parseFloat(p.pct)}
+                    maxValue={maxProviderPct * 1.1}
+                    color={p.color}
+                  />
+                ),
+              )}
+              <p className="text-ui-body text-ink-secondary">
+                {aiOverview.llmSample}. Engine and question breakdowns are in
+                SEO → Authority → LLM Mentions.
+              </p>
               {aiOverview.providerVisibility.length === 0 && (
-                <div
-                  style={{
-                    fontSize: 13,
-                    color: WAVES_COLORS.textMuted,
-                    padding: 20,
-                    textAlign: "center",
-                  }}
-                >
+                <div className="text-ui-body text-ink-secondary [padding:20px] text-center">
                   No provider data yet
                 </div>
               )}
-            </Card>{" "}
-            <Card>
+            </UiCard>{" "}
+            <UiCard className="p-5">
               {" "}
               <SectionTitle>Competitor Mentions in AI</SectionTitle>
               {aiOverview.competitorMentions.length > 0 ? (
@@ -901,37 +639,20 @@ export default function WavesSEODashboard() {
                   />
                 ))
               ) : (
-                <div
-                  style={{
-                    fontSize: 13,
-                    color: WAVES_COLORS.textMuted,
-                    padding: 20,
-                    textAlign: "center",
-                  }}
-                >
+                <div className="text-ui-body text-ink-secondary [padding:20px] text-center">
                   No competitor mention data yet
                 </div>
               )}
-            </Card>{" "}
+            </UiCard>{" "}
           </div>
           {/* Keyword Tracking Table */}
           {aiOverview.keywordTracking.length > 0 && (
-            <Card style={{ marginBottom: 20 }}>
+            <UiCard className="p-5 [margin-bottom:20px]">
               <SectionTitle>Keyword AI Tracking</SectionTitle>
-              <div style={{ overflowX: "auto" }}>
-                <table
-                  style={{
-                    width: "100%",
-                    borderCollapse: "collapse",
-                    fontSize: 13,
-                  }}
-                >
-                  <thead>
-                    <tr
-                      style={{
-                        borderBottom: `1px solid ${WAVES_COLORS.cardBorder}`,
-                      }}
-                    >
+              <div className="overflow-x-auto">
+                <Table className="[width:100%] [border-collapse:collapse] text-ui-body">
+                  <THead>
+                    <TR className="border-b border-hairline border-zinc-200">
                       {[
                         "Keyword",
                         "AI Overview",
@@ -939,335 +660,204 @@ export default function WavesSEODashboard() {
                         "Cited Instead",
                         "Provider",
                       ].map((h) => (
-                        <th
+                        <TH
                           key={h}
-                          style={{
-                            padding: "10px 12px",
-                            textAlign: "left",
-                            fontSize: 11,
-                            fontWeight: 700,
-                            color: WAVES_COLORS.textMuted,
-                            textTransform: "uppercase",
-                            letterSpacing: "0.06em",
-                          }}
+                          className="[padding:10px_12px] text-left text-ui-body font-medium text-ink-secondary"
                         >
                           {h}
-                        </th>
+                        </TH>
                       ))}
-                    </tr>
-                  </thead>
-                  <tbody>
+                    </TR>
+                  </THead>
+                  <TBody>
                     {aiOverview.keywordTracking.map((kw, i) => (
-                      <tr
+                      <TR
                         key={i}
-                        style={{
-                          borderBottom: `1px solid ${WAVES_COLORS.cardBorder}22`,
-                        }}
+                        className="border-b border-hairline border-zinc-200"
                       >
-                        <td
-                          style={{
-                            padding: "10px 12px",
-                            fontWeight: 500,
-                            color: WAVES_COLORS.textPrimary,
-                          }}
-                        >
+                        <TD className="[padding:10px_12px] font-medium text-zinc-900">
                           {kw.keyword}
-                        </td>
-                        <td style={{ padding: "10px 12px" }}>
+                        </TD>
+                        <TD className="[padding:10px_12px]">
                           {kw.aio ? (
-                            <span
-                              style={{
-                                color: WAVES_COLORS.green,
-                                fontWeight: 700,
-                              }}
-                            >
+                            <span className="text-zinc-900 font-medium">
                               Yes
                             </span>
                           ) : (
-                            <span style={{ color: WAVES_COLORS.textMuted }}>
-                              No
-                            </span>
+                            <span className="text-ink-secondary">No</span>
                           )}
-                        </td>
-                        <td style={{ padding: "10px 12px" }}>
+                        </TD>
+                        <TD className="[padding:10px_12px]">
                           <StatusDot status={kw.status} />
-                        </td>
-                        <td
-                          style={{
-                            padding: "10px 12px",
-                            color:
-                              kw.citedBy === "--"
-                                ? WAVES_COLORS.textMuted
-                                : WAVES_COLORS.red,
-                            fontWeight: kw.citedBy === "--" ? 400 : 600,
-                          }}
+                        </TD>
+                        <TD
+                          className={`px-3 py-2.5 ${
+                            kw.citedBy === "--"
+                              ? "font-normal text-ink-tertiary"
+                              : "font-medium text-alert-fg"
+                          }`}
                         >
                           {kw.citedBy}
-                        </td>
-                        <td
-                          style={{
-                            padding: "10px 12px",
-                            color: WAVES_COLORS.textMuted,
-                          }}
-                        >
+                        </TD>
+                        <TD className="[padding:10px_12px] text-ink-secondary">
                           {kw.provider}
-                        </td>
-                      </tr>
+                        </TD>
+                      </TR>
                     ))}
-                  </tbody>
-                </table>
+                  </TBody>
+                </Table>
               </div>
-            </Card>
+            </UiCard>
           )}
 
           {/* Quick Wins */}
           {aiOverview.quickWins.length > 0 && (
-            <Card>
+            <UiCard className="p-5">
               {" "}
               <SectionTitle
                 right={
-                  <span
-                    style={{
-                      fontSize: 12,
-                      color: WAVES_COLORS.yellow,
-                      fontWeight: 500,
-                    }}
-                  >
+                  <span className="text-ui-body text-zinc-700 font-medium">
                     {aiOverview.quickWins.length} opportunities
                   </span>
                 }
               >
                 Quick Wins -- Get Cited
               </SectionTitle>{" "}
-              <div style={{ display: "grid", gap: 10 }}>
+              <div className="grid [gap:10px]">
                 {aiOverview.quickWins.map((qw, i) => (
                   <div
                     key={i}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 16,
-                      padding: "12px 16px",
-                      background: "#FAFAFA",
-                      borderRadius: 8,
-                      border: `1px solid ${WAVES_COLORS.cardBorder}`,
-                    }}
+                    className="flex items-center [gap:16px] [padding:12px_16px] bg-zinc-100 rounded-md border-hairline border-zinc-200"
                   >
                     {" "}
-                    <div style={{ flex: 1 }}>
+                    <div className="[flex:1]">
                       {" "}
-                      <div
-                        style={{
-                          fontSize: 13,
-                          fontWeight: 700,
-                          color: WAVES_COLORS.textPrimary,
-                          marginBottom: 3,
-                        }}
-                      >
+                      <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:3px]">
                         {qw.keyword}
                       </div>{" "}
-                      <div
-                        style={{
-                          fontSize: 12,
-                          color: WAVES_COLORS.textSecondary,
-                        }}
-                      >
+                      <div className="text-ui-body text-ink-secondary">
                         {qw.action}
                       </div>{" "}
                     </div>{" "}
                     <span
                       style={{
-                        padding: "3px 10px",
-                        borderRadius: 12,
-                        fontSize: 11,
-                        fontWeight: 700,
                         background:
                           qw.effort === "Low"
-                            ? WAVES_COLORS.greenGlow
+                            ? "#DCFCE7"
                             : qw.effort === "Medium"
-                              ? WAVES_COLORS.yellowGlow
-                              : WAVES_COLORS.redGlow,
+                              ? "#FEF3C7"
+                              : "#FEE2E2",
                         color:
                           qw.effort === "Low"
-                            ? WAVES_COLORS.green
+                            ? "#15803D"
                             : qw.effort === "Medium"
-                              ? WAVES_COLORS.yellow
-                              : WAVES_COLORS.red,
+                              ? "#A16207"
+                              : "#991B1B",
                       }}
+                      className="[padding:3px_10px] rounded-md text-ui-body font-medium"
                     >
                       {qw.effort}
                     </span>{" "}
                   </div>
                 ))}
               </div>{" "}
-            </Card>
+            </UiCard>
           )}
 
           {!aiOverview.keywordTracking.length &&
             !aiOverview.quickWins.length && (
-              <Card style={{ padding: 40, textAlign: "center" }}>
+              <UiCard className="[padding:40px] text-center">
                 {" "}
-                <div style={{ fontSize: 13, color: WAVES_COLORS.textMuted }}>
+                <div className="text-ui-body text-ink-secondary">
                   No AI Overview tracking data yet. Enable GATE_SEO_INTELLIGENCE
                   and run an AI Overview scan.
                 </div>{" "}
-              </Card>
+              </UiCard>
             )}
         </div>
       )}
       {activeTab === "ai" && !aiOverview && (
-        <Card style={{ padding: 40, textAlign: "center" }}>
+        <UiCard className="[padding:40px] text-center">
           {" "}
-          <div style={{ fontSize: 13, color: WAVES_COLORS.textMuted }}>
+          <div className="text-ui-body text-ink-secondary">
             No AI visibility data yet. Enable GATE_SEO_INTELLIGENCE to start
             tracking.
           </div>{" "}
-        </Card>
+        </UiCard>
       )}
       {/* ============= ORGANIC RANKINGS TAB ============= */}
       {activeTab === "organic" && rankSummary && (
         <div>
           {/* KPI Row */}
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: isMobile
-                ? "repeat(2, 1fr)"
-                : "repeat(5, 1fr)",
-              gap: 12,
-              marginBottom: 20,
-            }}
-          >
+          <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-5">
             {" "}
             <MetricCard
               value={rankSummary.avgPosition}
               label="Avg Position"
-              color={WAVES_COLORS.accent}
+              color={"#18181B"}
             />{" "}
             <MetricCard
               value={rankSummary.top3Count}
               label="Top 3"
               sublabel="keywords in top 3"
-              color={WAVES_COLORS.gold}
+              color={"#18181B"}
             />{" "}
             <MetricCard
               value={rankSummary.top10Count}
               label="Top 10"
               sublabel="page 1 rankings"
-              color={WAVES_COLORS.green}
+              color={"#15803D"}
             />{" "}
             <MetricCard
               value={rankSummary.mapPackCount}
               label="Map Pack"
               sublabel="in local 3-pack"
-              color={WAVES_COLORS.purple}
+              color={"#18181B"}
             />{" "}
             <MetricCard
               value={`${rankSummary.improvingCount}/${rankSummary.total}`}
               label="Improving"
               sublabel={`${rankSummary.decliningCount} declining`}
-              color={WAVES_COLORS.cyan}
+              color={"#18181B"}
             />{" "}
           </div>
           {/* Movement Summary + Filters */}
-          <Card style={{ marginBottom: 20 }}>
+          <UiCard className="p-5 [margin-bottom:20px]">
             {" "}
-            <div
-              style={{
-                display: "flex",
-                gap: isMobile ? 16 : 32,
-                alignItems: "center",
-                flexWrap: "wrap",
-              }}
-            >
+            <div className="flex flex-wrap items-center gap-4 sm:gap-8">
               {" "}
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div className="flex items-center [gap:8px]">
                 {" "}
-                <span
-                  style={{
-                    width: 12,
-                    height: 12,
-                    borderRadius: "50%",
-                    background: WAVES_COLORS.green,
-                    display: "inline-block",
-                  }}
-                />{" "}
-                <span
-                  style={{
-                    fontSize: 14,
-                    fontWeight: 700,
-                    color: WAVES_COLORS.green,
-                  }}
-                >
+                <span className="[width:12px] [height:12px] rounded-xs bg-zinc-900 inline-block" />{" "}
+                <span className="text-ui-body font-medium text-zinc-900">
                   {rankSummary.improvingCount}
                 </span>{" "}
-                <span
-                  style={{ fontSize: 13, color: WAVES_COLORS.textSecondary }}
-                >
+                <span className="text-ui-body text-ink-secondary">
                   Improving
                 </span>{" "}
               </div>{" "}
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div className="flex items-center [gap:8px]">
                 {" "}
-                <span
-                  style={{
-                    width: 12,
-                    height: 12,
-                    borderRadius: "50%",
-                    background: WAVES_COLORS.red,
-                    display: "inline-block",
-                  }}
-                />{" "}
-                <span
-                  style={{
-                    fontSize: 14,
-                    fontWeight: 700,
-                    color: WAVES_COLORS.red,
-                  }}
-                >
+                <span className="[width:12px] [height:12px] rounded-xs bg-alert-bg inline-block" />{" "}
+                <span className="text-ui-body font-medium text-alert-fg">
                   {rankSummary.decliningCount}
                 </span>{" "}
-                <span
-                  style={{ fontSize: 13, color: WAVES_COLORS.textSecondary }}
-                >
+                <span className="text-ui-body text-ink-secondary">
                   Declining
                 </span>{" "}
               </div>{" "}
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div className="flex items-center [gap:8px]">
                 {" "}
-                <span
-                  style={{
-                    width: 12,
-                    height: 12,
-                    borderRadius: "50%",
-                    background: WAVES_COLORS.textMuted,
-                    display: "inline-block",
-                  }}
-                />{" "}
-                <span
-                  style={{
-                    fontSize: 14,
-                    fontWeight: 700,
-                    color: WAVES_COLORS.textMuted,
-                  }}
-                >
+                <span className="[width:12px] [height:12px] rounded-xs bg-zinc-900 inline-block" />{" "}
+                <span className="text-ui-body font-medium text-ink-secondary">
                   {rankSummary.stableCount}
                 </span>{" "}
-                <span
-                  style={{ fontSize: 13, color: WAVES_COLORS.textSecondary }}
-                >
+                <span className="text-ui-body text-ink-secondary">
                   Stable
                 </span>{" "}
               </div>
-              {!isMobile && <div style={{ flex: 1 }} />}
-              <div
-                style={{
-                  display: "flex",
-                  gap: 6,
-                  flexWrap: "wrap",
-                  width: isMobile ? "100%" : "auto",
-                }}
-              >
+              <div className="hidden flex-1 sm:block" />
+              <div className="flex w-full flex-wrap gap-1.5 sm:w-auto">
                 {cities.map((c) => (
                   <FilterPill
                     key={c}
@@ -1278,14 +868,7 @@ export default function WavesSEODashboard() {
                 ))}
               </div>{" "}
             </div>{" "}
-            <div
-              style={{
-                display: "flex",
-                gap: 6,
-                marginTop: 10,
-                flexWrap: "wrap",
-              }}
-            >
+            <div className="flex [gap:6px] [margin-top:10px] flex-wrap">
               {categories.map((c) => (
                 <FilterPill
                   key={c}
@@ -1295,33 +878,23 @@ export default function WavesSEODashboard() {
                 />
               ))}
             </div>{" "}
-          </Card>
+          </UiCard>
           {/* Rankings Table */}
-          <Card>
+          <UiCard className="p-5">
             {" "}
             <SectionTitle
               right={
-                <span style={{ fontSize: 12, color: WAVES_COLORS.textMuted }}>
+                <span className="text-ui-body text-ink-secondary">
                   {filteredKeywords.length} keywords
                 </span>
               }
             >
               Keyword Rankings
             </SectionTitle>
-            <div style={{ overflowX: "auto" }}>
-              <table
-                style={{
-                  width: "100%",
-                  borderCollapse: "collapse",
-                  fontSize: 13,
-                }}
-              >
-                <thead>
-                  <tr
-                    style={{
-                      borderBottom: `1px solid ${WAVES_COLORS.cardBorder}`,
-                    }}
-                  >
+            <div className="overflow-x-auto">
+              <Table className="[width:100%] [border-collapse:collapse] text-ui-body">
+                <THead>
+                  <TR className="border-b border-hairline border-zinc-200">
                     {[
                       "Keyword",
                       "Organic",
@@ -1330,116 +903,73 @@ export default function WavesSEODashboard() {
                       "City",
                       "Trend",
                     ].map((h, i) => (
-                      <th
+                      <TH
                         key={i}
-                        style={{
-                          padding: "10px 12px",
-                          textAlign: i >= 1 && i <= 2 ? "center" : "left",
-                          fontSize: 11,
-                          fontWeight: 700,
-                          color: WAVES_COLORS.textMuted,
-                          textTransform: "uppercase",
-                          letterSpacing: "0.06em",
-                          whiteSpace: "nowrap",
-                        }}
+                        className={`whitespace-nowrap px-3 py-2.5 text-ui-body font-medium text-ink-secondary ${
+                          i >= 1 && i <= 2 ? "text-center" : "text-left"
+                        }`}
                       >
                         {h}
-                      </th>
+                      </TH>
                     ))}
-                  </tr>
-                </thead>
-                <tbody>
+                  </TR>
+                </THead>
+                <TBody>
                   {filteredKeywords.map((kw, i) => (
-                    <tr
+                    <TR
                       key={i}
-                      style={{
-                        borderBottom: `1px solid ${WAVES_COLORS.cardBorder}`,
-                        background: i % 2 === 0 ? "transparent" : "#FAFAFA",
-                      }}
+                      className="border-b border-hairline border-zinc-200 odd:bg-zinc-50"
                     >
-                      <td
-                        style={{
-                          padding: "10px 12px",
-                          fontWeight: 500,
-                          color: WAVES_COLORS.textPrimary,
-                          whiteSpace: "nowrap",
-                        }}
-                      >
+                      <TD className="[padding:10px_12px] font-medium text-zinc-900 whitespace-nowrap">
                         {kw.keyword}
-                      </td>
-                      <td style={{ padding: "10px 12px", textAlign: "center" }}>
+                      </TD>
+                      <TD className="[padding:10px_12px] text-center">
                         <PositionBadge pos={kw.organic} />
                         {kw.prev != null &&
                           kw.organic != null &&
                           kw.prev !== kw.organic && (
-                            <span style={{ marginLeft: 6 }}>
+                            <span className="[margin-left:6px]">
                               <DeltaArrow
                                 current={kw.organic}
                                 previous={kw.prev}
                               />
                             </span>
                           )}
-                      </td>
-                      <td style={{ padding: "10px 12px", textAlign: "center" }}>
+                      </TD>
+                      <TD className="[padding:10px_12px] text-center">
                         <PositionBadge pos={kw.mapPack} />
-                      </td>
-                      <td style={{ padding: "10px 12px" }}>
-                        <span
-                          style={{
-                            padding: "2px 8px",
-                            borderRadius: 6,
-                            fontSize: 11,
-                            fontWeight: 500,
-                            background: "#F4F4F5",
-                            color: WAVES_COLORS.textSecondary,
-                          }}
-                        >
+                      </TD>
+                      <TD className="[padding:10px_12px]">
+                        <span className="[padding:2px_8px] rounded-sm text-ui-body font-medium bg-zinc-100 text-ink-secondary">
                           {kw.category}
                         </span>
-                      </td>
-                      <td
-                        style={{
-                          padding: "10px 12px",
-                          color: WAVES_COLORS.textMuted,
-                          fontSize: 12,
-                        }}
-                      >
+                      </TD>
+                      <TD className="[padding:10px_12px] text-ink-secondary text-ui-body">
                         {kw.city}
-                      </td>
-                      <td style={{ padding: "10px 12px" }}>
+                      </TD>
+                      <TD className="[padding:10px_12px]">
                         <Sparkline data={kw.trend} />
-                      </td>
-                    </tr>
+                      </TD>
+                    </TR>
                   ))}
                   {filteredKeywords.length === 0 && (
-                    <tr>
-                      <td
+                    <TR>
+                      <TD
                         colSpan={6}
-                        style={{
-                          padding: 30,
-                          textAlign: "center",
-                          color: WAVES_COLORS.textMuted,
-                        }}
+                        className="[padding:30px] text-center text-ink-secondary"
                       >
                         No keywords match filters
-                      </td>
-                    </tr>
+                      </TD>
+                    </TR>
                   )}
-                </tbody>
-              </table>
+                </TBody>
+              </Table>
             </div>
-          </Card>
+          </UiCard>
           {/* Top Movers */}
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr",
-              gap: 16,
-              marginTop: 20,
-            }}
-          >
+          <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2">
             {" "}
-            <Card>
+            <UiCard className="p-5">
               {" "}
               <SectionTitle>Biggest Gains (7 days)</SectionTitle>
               {[...filteredKeywords]
@@ -1452,38 +982,20 @@ export default function WavesSEODashboard() {
                   return (
                     <div
                       key={i}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        padding: "8px 0",
-                        borderBottom: `1px solid ${WAVES_COLORS.cardBorder}22`,
-                      }}
+                      className="flex items-center justify-between [padding:8px_0] border-b border-hairline border-zinc-200"
                     >
                       {" "}
-                      <span
-                        style={{
-                          fontSize: 13,
-                          fontWeight: 500,
-                          color: WAVES_COLORS.textPrimary,
-                        }}
-                      >
+                      <span className="text-ui-body font-medium text-zinc-900">
                         {kw.keyword}
                       </span>{" "}
-                      <span
-                        style={{
-                          fontSize: 13,
-                          fontWeight: 700,
-                          color: WAVES_COLORS.green,
-                        }}
-                      >
+                      <span className="text-ui-body font-medium text-zinc-900">
                         #{kw.prev} &rarr; #{kw.organic} +{gain}
                       </span>{" "}
                     </div>
                   );
                 })}
-            </Card>{" "}
-            <Card>
+            </UiCard>{" "}
+            <UiCard className="p-5">
               {" "}
               <SectionTitle>Biggest Drops (7 days)</SectionTitle>
               {[...filteredKeywords]
@@ -1496,49 +1008,31 @@ export default function WavesSEODashboard() {
                   return (
                     <div
                       key={i}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        padding: "8px 0",
-                        borderBottom: `1px solid ${WAVES_COLORS.cardBorder}22`,
-                      }}
+                      className="flex items-center justify-between [padding:8px_0] border-b border-hairline border-zinc-200"
                     >
                       {" "}
-                      <span
-                        style={{
-                          fontSize: 13,
-                          fontWeight: 500,
-                          color: WAVES_COLORS.textPrimary,
-                        }}
-                      >
+                      <span className="text-ui-body font-medium text-zinc-900">
                         {kw.keyword}
                       </span>{" "}
-                      <span
-                        style={{
-                          fontSize: 13,
-                          fontWeight: 700,
-                          color: WAVES_COLORS.red,
-                        }}
-                      >
+                      <span className="text-ui-body font-medium text-alert-fg">
                         #{kw.prev} &rarr; #{kw.organic} {drop}
                       </span>{" "}
                     </div>
                   );
                 })}
-            </Card>{" "}
+            </UiCard>{" "}
           </div>{" "}
         </div>
       )}
       {activeTab === "organic" && !rankSummary && (
-        <Card style={{ padding: 40, textAlign: "center" }}>
+        <UiCard className="[padding:40px] text-center">
           {" "}
-          <div style={{ fontSize: 13, color: WAVES_COLORS.textMuted }}>
+          <div className="text-ui-body text-ink-secondary">
             No ranking data yet. Enable GATE_SEO_INTELLIGENCE and configure
             DataForSEO to start tracking.
           </div>{" "}
-        </Card>
+        </UiCard>
       )}
-    </div>
+    </UiSurface>
   );
 }

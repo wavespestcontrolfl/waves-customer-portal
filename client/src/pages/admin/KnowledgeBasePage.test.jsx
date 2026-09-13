@@ -31,15 +31,15 @@ function LocationProbe() {
 
 // The real page reads the shell's Outlet context for the server-verified
 // role (audit/tokens tabs are owner-only) — mirror it with an admin stub.
-function AdminShellStub() {
-  return <Outlet context={{ user: { role: "admin" } }} />;
+function AdminShellStub({ role = "admin" }) {
+  return <Outlet context={{ user: { role } }} />;
 }
 
-function renderKnowledgeBase(entry) {
+function renderKnowledgeBase(entry, role = "admin") {
   render(
     <MemoryRouter initialEntries={[entry]}>
       <Routes>
-        <Route element={<AdminShellStub />}>
+        <Route element={<AdminShellStub role={role} />}>
           <Route
             path="/admin/knowledge"
             element={(
@@ -78,13 +78,24 @@ describe("KnowledgeBasePage embedded navigation", () => {
       "/admin/knowledge?area=base&source=digest&kbTab=audit",
     );
 
-    expect(screen.getByRole("button", { name: "AI Audit" }))
+    expect(screen.getByRole("button", { name: "AI audit" }))
       .toHaveAttribute("aria-current", "page");
-    fireEvent.click(screen.getByRole("button", { name: "Token Health" }));
+    fireEvent.click(screen.getByRole("button", { name: "Token health" }));
 
     expect(screen.getByTestId("location-search")).toHaveTextContent(
       "?area=base&source=digest&kbTab=tokens",
     );
+  });
+
+  it("keeps owner-only sections hidden and resolves their deep links to Browse", () => {
+    renderKnowledgeBase("/admin/knowledge?area=base&kbTab=tokens", "technician");
+
+    expect(screen.queryByRole("button", { name: "Token health" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "AI audit" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Browse & search" }))
+      .toHaveAttribute("aria-current", "page");
+    expect(screen.getByTestId("location-search"))
+      .toHaveTextContent("?area=base&kbTab=tokens");
   });
 });
 

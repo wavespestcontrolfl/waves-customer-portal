@@ -34,15 +34,29 @@ import lawnScores from '@lawn-scores';
 //   chosen slot is taken between modal open and submit?
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import useIsMobile from "../../hooks/useIsMobile";
+import useLockBodyScroll from "../../hooks/useLockBodyScroll";
+import useModalFocus from "../../hooks/useModalFocus";
 import CompletionPricingCard from "../../components/schedule/CompletionPricingCard";
 import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
+import RescheduleDialogView from "../../components/schedule/RescheduleDialogView";
 
 import { addETDays, etDateString, etDatetimeLocalToISO, etParts, formatETDateOnly, formatETDateTime } from "../../lib/timezone";
 import { completionDraftKey } from "../../lib/completion-drafts";
 import {
   defaultApplicationMethodForLine,
   isPerBasisUnit,
+  isPerGallonUnit,
+  isTankCalculation,
+  derivedTankTotal,
+  tankOwnerRow,
+  promoteTankOwner,
+  applyTankDose,
+  markTankEntry,
+  tankPropagates,
+  followTank,
+  clearTankOnUnitChange,
+  joinTankOnUnitChange,
   normalizeApplicationMethod,
   resolveRatePrefill,
 } from "../../lib/product-rate-prefill";
@@ -850,7 +864,7 @@ function lawnDerivedTotal(product, areaSqft) {
   return derivedTotalAmount(product.rate, areaSqft);
 }
 
-function createCompletionIdempotencyKey(serviceId) {
+export function createCompletionIdempotencyKey(serviceId) {
   const randomPart =
     window.crypto?.randomUUID?.() ||
     `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -990,8 +1004,11 @@ export function completionPreferencesNeedDraft({
 // is an admin-typed override of the running timer (validated 1..720 —
 // out-of-range falls back to the elapsed string so a stray value never
 // ships as operator input; handleSubmit blocks it with an alert first), a
-// string is the auto-elapsed timer, recorded exactly as before.
-export function completionTimeOnSiteBody({ backfill, typedMinutes, elapsed, adjustedMinutes = "" }) {
+// string is the auto-elapsed timer, recorded exactly as before. A prepared
+// combined-visit form omits only that automatic string so packet save can
+// allocate the shared canonical duration across members; explicit numeric
+// operator input remains attached to its member.
+export function completionTimeOnSiteBody({ backfill, typedMinutes, elapsed, adjustedMinutes = "", preparing = false }) {
   if (!backfill) {
     const trimmed = String(adjustedMinutes ?? "").trim();
     if (trimmed !== "") {
@@ -1000,7 +1017,7 @@ export function completionTimeOnSiteBody({ backfill, typedMinutes, elapsed, adju
         return { timeOnSite: minutes };
       }
     }
-    return { timeOnSite: elapsed };
+    return preparing ? {} : { timeOnSite: elapsed };
   }
   const minutes = Math.round(Number(typedMinutes));
   return Number.isFinite(minutes) && minutes > 0 ? { timeOnSite: minutes } : {};
@@ -5586,6 +5603,8 @@ function JobCardTab({ card, loading, error, D }) {
 export function ProtocolPanel({ service, onClose }) {
   // Reactive (rotation-safe) — the module-level snapshot never recomputes.
   const isMobile = useIsMobile(640);
+  const panelRef = useModalFocus(true, onClose);
+  useLockBodyScroll();
   // Monochrome admin V2 palette — shadows the module-level D inside this panel
   // so the Service Protocol flyout matches the zinc admin shell instead of the
   // warmer legacy slate/teal/amber accents.
@@ -5878,31 +5897,46 @@ export function ProtocolPanel({ service, onClose }) {
 
   return createPortal(
     <div
+      onClick={(event) => {
+        event.stopPropagation();
+        if (event.target === event.currentTarget) onClose();
+      }}
       style={{
         position: "fixed",
-        top: 0,
-        right: 0,
-        width: isMobile ? "100%" : "60%",
-        maxWidth: isMobile ? "100%" : 600,
-        minWidth: isMobile ? 0 : 380,
-        height: "100vh",
-        background: D.card,
-        borderLeft: isMobile ? "none" : `1px solid ${D.border}`,
+        inset: 0,
         zIndex: 1000,
         display: "flex",
-        flexDirection: "column",
-        boxShadow: "-8px 0 32px rgba(0,0,0,0.3)",
-        ...(isMobile
-          ? {
-              height: "100dvh",
-              boxSizing: "border-box",
-              paddingBottom: "env(safe-area-inset-bottom, 0px)",
-              paddingLeft: "env(safe-area-inset-left, 0px)",
-              paddingRight: "env(safe-area-inset-right, 0px)",
-            }
-          : {}),
+        justifyContent: "flex-end",
+        background: "rgba(24, 24, 27, 0.35)",
       }}
     >
+      <section
+        ref={panelRef}
+        tabIndex={-1}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="service-protocol-title"
+        style={{
+          width: isMobile ? "100%" : "60%",
+          maxWidth: isMobile ? "100%" : 600,
+          minWidth: isMobile ? 0 : 380,
+          height: "100%",
+          background: D.card,
+          borderLeft: isMobile ? "none" : `1px solid ${D.border}`,
+          display: "flex",
+          flexDirection: "column",
+          boxShadow: "-8px 0 32px rgba(0,0,0,0.3)",
+          outline: "none",
+          ...(isMobile
+            ? {
+                boxSizing: "border-box",
+                paddingBottom: "env(safe-area-inset-bottom, 0px)",
+                paddingLeft: "env(safe-area-inset-left, 0px)",
+                paddingRight: "env(safe-area-inset-right, 0px)",
+              }
+            : {}),
+        }}
+      >
       {/* Header */}
       <div
         style={{
@@ -5919,9 +5953,9 @@ export function ProtocolPanel({ service, onClose }) {
         {" "}
         <div>
           {" "}
-          <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
+          <h2 id="service-protocol-title" style={{ fontSize: 16, fontWeight: 500, color: D.heading, margin: 0 }}>
             Service Protocol
-          </div>{" "}
+          </h2>{" "}
           {!jobCardEnabled && service && (
             <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
               {service.serviceType} — {service.customerName}
@@ -5934,16 +5968,20 @@ export function ProtocolPanel({ service, onClose }) {
           )}
         </div>{" "}
         <button
+          type="button"
           onClick={onClose}
+          aria-label="Close service protocol"
           style={{
             background: "none",
             border: "none",
             color: D.muted,
             fontSize: 20,
             cursor: "pointer",
+            width: 44,
+            height: 44,
           }}
         >
-          ×
+          <span aria-hidden="true">×</span>
         </button>{" "}
       </div>
       {/* Ask bar — the dispatch IB context, scoped to this stop */}
@@ -7286,14 +7324,13 @@ export function ProtocolPanel({ service, onClose }) {
           </>
         )}
       </div>{" "}
+      </section>
     </div>,
     document.body,
   );
 }
 
 export function RescheduleModal({ service, onClose, onRescheduled }) {
-  // Reactive (rotation-safe) — the module-level snapshot never recomputes.
-  const isMobile = useIsMobile(640);
   const [options, setOptions] = useState([]);
   const [reason, setReason] = useState("customer_request");
   const [notes, setNotes] = useState("");
@@ -7541,416 +7578,39 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
     { value: "route_overload", label: "Route Overload" },
   ];
 
-  const inputSt = {
-    width: "100%",
-    padding: "10px 14px",
-    borderRadius: 10,
-    border: `1px solid ${D.border}`,
-    background: D.input,
-    color: D.heading,
-    fontSize: 16,
-    outline: "none",
-    boxSizing: "border-box",
-  };
-
-  return createPortal(
-    <div
-      onClick={onClose}
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.6)",
-        zIndex: 1000,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: isMobile ? 0 : 20,
-      }}
-    >
-      {" "}
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          background: D.card,
-          borderRadius: 16,
-          padding: 24,
-          maxWidth: 480,
-          width: "100%",
-          border: `1px solid ${D.border}`,
-          maxHeight: "80vh",
-          overflowY: "auto",
-          ...(isMobile
-            ? {
-                width: "100%",
-                maxWidth: "none",
-                height: "100%",
-                maxHeight: "none",
-                borderRadius: 0,
-                boxSizing: "border-box",
-                overflowY: "auto",
-                paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
-                paddingBottom: "calc(24px + env(safe-area-inset-bottom, 0px))",
-                paddingLeft: "calc(24px + env(safe-area-inset-left, 0px))",
-                paddingRight: "calc(24px + env(safe-area-inset-right, 0px))",
-              }
-            : {}),
-        }}
-      >
-        {" "}
-        <div
-          style={{
-            fontSize: 18,
-            fontWeight: 500,
-            color: D.heading,
-            marginBottom: 4,
-          }}
-        >
-          Reschedule Service
-        </div>{" "}
-        <div style={{ fontSize: 13, color: D.muted, marginBottom: 16 }}>
-          {service.customerName} — {service.serviceType}
-        </div>{" "}
-        <div style={{ marginBottom: 14 }}>
-          {" "}
-          <div
-            style={{
-              fontSize: 12,
-              fontWeight: 500,
-              color: D.muted,
-              marginBottom: 6,
-            }}
-          >
-            Reason
-          </div>{" "}
-          <select
-            value={reason}
-            onChange={(e) => setReason(e.target.value)}
-            style={inputSt}
-          >
-            {REASONS.map((r) => (
-              <option key={r.value} value={r.value}>
-                {r.label}
-              </option>
-            ))}
-          </select>{" "}
-        </div>{" "}
-        <div style={{ marginBottom: 14 }}>
-          {" "}
-          <div
-            style={{
-              fontSize: 12,
-              fontWeight: 500,
-              color: D.muted,
-              marginBottom: 6,
-            }}
-          >
-            Notes (optional)
-          </div>{" "}
-          <input
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-            placeholder="Additional context..."
-            style={inputSt}
-          />{" "}
-        </div>{" "}
-        <div style={{ marginBottom: 14 }}>
-          {" "}
-          <div
-            style={{
-              fontSize: 12,
-              fontWeight: 500,
-              color: D.muted,
-              marginBottom: 6,
-            }}
-          >
-            Client booking notifications
-          </div>{" "}
-          <select
-            value={notificationType}
-            onChange={(e) => setNotificationType(e.target.value)}
-            disabled={sending}
-            style={inputSt}
-          >
-            <option value="none">Don&rsquo;t send a notification</option>
-            <option value="sms">Text message</option>
-          </select>{" "}
-          <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>
-            This controls the immediate reschedule text. Automated reminders
-            will follow the new appointment time.
-          </div>{" "}
-        </div>{" "}
-        {seriesConfirm && (
-          <div
-            data-testid="series-move-confirm"
-            style={{
-              marginBottom: 14,
-              padding: 12,
-              borderRadius: 10,
-              border: `1px solid ${D.border}`,
-              background: D.bg,
-            }}
-          >
-            <div style={{ fontSize: 13, fontWeight: 500, color: D.heading, marginBottom: 8 }}>
-              Move to {seriesConfirmDate || seriesConfirm.body.newDate}?
-            </div>
-            <SeriesMoveNotice
-              tone="inline"
-              preview={seriesConfirm.preview}
-              stale={seriesConfirm.stale}
-              style={{ background: D.card }}
-            />
-            <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
-              <button
-                onClick={confirmSeriesMove}
-                disabled={sending}
-                style={{
-                  padding: "10px 16px",
-                  borderRadius: 10,
-                  border: "none",
-                  cursor: "pointer",
-                  background: D.teal,
-                  color: "#fff",
-                  fontSize: 13,
-                  fontWeight: 500,
-                  opacity: sending ? 0.6 : 1,
-                }}
-              >
-                {sending ? "Moving…" : "Move visit + later visits"}
-              </button>
-              <button
-                onClick={() => setSeriesConfirm(null)}
-                disabled={sending}
-                style={{
-                  padding: "10px 16px",
-                  borderRadius: 10,
-                  border: `1px solid ${D.border}`,
-                  background: "transparent",
-                  color: D.muted,
-                  fontSize: 13,
-                  cursor: "pointer",
-                }}
-              >
-                Back
-              </button>
-            </div>
-          </div>
-        )}
-        <div
-          style={{
-            fontSize: 13,
-            fontWeight: 500,
-            color: D.teal,
-            marginBottom: 10,
-          }}
-        >
-          Suggested Dates (on route)
-        </div>
-        {loading ? (
-          <div
-            style={{
-              color: D.muted,
-              fontSize: 13,
-              padding: 20,
-              textAlign: "center",
-            }}
-          >
-            Finding best dates...
-          </div>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {options.map((opt, i) => (
-              <div
-                key={i}
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  padding: "12px 14px",
-                  borderRadius: 10,
-                  background: D.bg,
-                  border: `1px solid ${D.border}`,
-                  cursor: "pointer",
-                  transition: "border-color 0.15s",
-                }}
-                onMouseEnter={(e) =>
-                  (e.currentTarget.style.borderColor = D.teal)
-                }
-                onMouseLeave={(e) =>
-                  (e.currentTarget.style.borderColor = D.border)
-                }
-              >
-                {" "}
-                <div>
-                  {" "}
-                  <div
-                    style={{ fontSize: 14, fontWeight: 500, color: D.heading }}
-                  >
-                    {opt.displayDate}
-                  </div>{" "}
-                  <div style={{ fontSize: 12, color: D.muted }}>
-                    {/* Show the block Select actually books (duration-derived),
-                        not the server's wider 2-3h span. */}
-                    {windowFor(opt.suggestedWindow?.start)?.display ||
-                      opt.suggestedWindow?.display}{" "}
-                    · {opt.currentLoad} jobs ·{" "}
-                    {opt.sameAreaServices} same area
-                  </div>{" "}
-                </div>{" "}
-                <button
-                  onClick={() => handleReschedule(opt)}
-                  disabled={sending}
-                  style={{
-                    padding: "8px 14px",
-                    borderRadius: 8,
-                    border: "none",
-                    cursor: "pointer",
-                    background: D.teal,
-                    color: "#fff",
-                    fontSize: 12,
-                    fontWeight: 500,
-                    opacity: sending ? 0.6 : 1,
-                  }}
-                >
-                  Select
-                </button>{" "}
-              </div>
-            ))}
-          </div>
-        )}
-        {/* Manual date/time picker */}
-        <div
-          style={{
-            marginTop: 16,
-            borderTop: `1px solid ${D.border}`,
-            paddingTop: 14,
-          }}
-        >
-          {" "}
-          <button
-            onClick={() => setShowManual(!showManual)}
-            style={{
-              background: "transparent",
-              border: "none",
-              color: D.teal,
-              fontSize: 13,
-              fontWeight: 500,
-              cursor: "pointer",
-              padding: 0,
-              display: "flex",
-              alignItems: "center",
-              gap: 6,
-            }}
-          >
-            {showManual ? "\u25BC" : "\u25B6"} Pick Custom Date & Time
-          </button>
-          {showManual && (
-            <div style={{ marginTop: 12, display: "flex", gap: 10 }}>
-              {" "}
-              <div style={{ flex: 1 }}>
-                {" "}
-                <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
-                  Date
-                </div>{" "}
-                <input
-                  type="date"
-                  value={manualDate}
-                  onChange={(e) => setManualDate(e.target.value)}
-                  style={inputSt}
-                />{" "}
-              </div>{" "}
-              <div style={{ flex: 1 }}>
-                {" "}
-                <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
-                  Start Time
-                </div>{" "}
-                {/* Appointment windows ALWAYS start on the hour (owner
-                    directive) — an hour select instead of a free time input
-                    so an off-hour start can't be submitted. From 06:00 up to
-                    the last hour whose window still ends by 20:00, the admin
-                    day end (window-rules) — the save rejects a later end, and
-                    the arrival-window hints never recommend one, so every
-                    option is savable and every recommendation is an option
-                    (Codex #4120 r6 P1). */}
-                <select
-                  value={manualTime}
-                  onChange={(e) => setManualTime(e.target.value)}
-                  style={inputSt}
-                >
-                  {Array.from({ length: 14 }, (_, i) => i + 6)
-                    .filter((h) => h * 60 + durationMinutes <= 20 * 60)
-                    .map((h) => {
-                    const value = `${String(h).padStart(2, "0")}:00`;
-                    const label = `${h % 12 || 12}:00 ${h >= 12 ? "PM" : "AM"}`;
-                    return (
-                      <option key={value} value={value}>
-                        {label}
-                      </option>
-                    );
-                  })}
-                </select>{" "}
-              </div>{" "}
-              <div style={{ display: "flex", alignItems: "flex-end" }}>
-                {" "}
-                <button
-                  onClick={handleManualReschedule}
-                  disabled={sending || !manualDate}
-                  style={{
-                    padding: "10px 16px",
-                    borderRadius: 10,
-                    border: "none",
-                    cursor: "pointer",
-                    background: manualDate ? D.teal : D.border,
-                    color: D.heading,
-                    fontSize: 13,
-                    fontWeight: 500,
-                    opacity: sending ? 0.6 : 1,
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  Reschedule
-                </button>{" "}
-              </div>{" "}
-            </div>
-          )}
-          {showManual && (
-            <SlotConflictNotice
-              conflicts={manualConflicts}
-              style={{ marginTop: 10 }}
-            />
-          )}
-          {showManual && (
-            <BestTimeHint
-              bestTimes={manualBestTimes}
-              picked={manualPicked}
-              bestInRange={manualBestInRange}
-              currentStart={manualTime}
-              currentDate={manualDate}
-              currentTechnicianId={service.technicianId || service.technician_id}
-              onPick={(slot) => setManualTime(slot.start)}
-              onPickDate={(slot) => { setManualDate(slot.date); setManualTime(slot.start); }}
-              style={{ marginTop: 10 }}
-            />
-          )}
-        </div>{" "}
-        <button
-          onClick={onClose}
-          style={{
-            width: "100%",
-            marginTop: 14,
-            padding: "10px 14px",
-            borderRadius: 10,
-            background: "transparent",
-            border: `1px solid ${D.border}`,
-            color: D.muted,
-            fontSize: 13,
-            cursor: "pointer",
-          }}
-        >
-          Cancel
-        </button>{" "}
-      </div>{" "}
-    </div>,
-    document.body,
+  return (
+    <RescheduleDialogView
+      service={service}
+      reason={reason}
+      setReason={setReason}
+      notes={notes}
+      setNotes={setNotes}
+      notificationType={notificationType}
+      setNotificationType={setNotificationType}
+      sending={sending}
+      seriesConfirm={seriesConfirm}
+      seriesConfirmDate={seriesConfirmDate}
+      confirmSeriesMove={confirmSeriesMove}
+      clearSeriesConfirm={() => setSeriesConfirm(null)}
+      reasons={REASONS}
+      loading={loading}
+      options={options}
+      windowFor={windowFor}
+      handleReschedule={handleReschedule}
+      showManual={showManual}
+      setShowManual={setShowManual}
+      manualDate={manualDate}
+      setManualDate={setManualDate}
+      manualTime={manualTime}
+      setManualTime={setManualTime}
+      durationMinutes={durationMinutes}
+      handleManualReschedule={handleManualReschedule}
+      manualConflicts={manualConflicts}
+      manualBestTimes={manualBestTimes}
+      manualPicked={manualPicked}
+      manualBestInRange={manualBestInRange}
+      onClose={onClose}
+    />
   );
 }
 
@@ -10848,6 +10508,9 @@ export function CompletionPanel({
   products,
   onClose,
   onSubmit,
+  // The stop sheet prepares every canonical form before one visit submit.
+  onPrepared,
+  preparedDraft,
   onViewDetails,
   // Typed specialty completion (PR 4): parent-owned success-screen
   // follow-up CTA (the button only renders when provided).
@@ -12232,6 +11895,10 @@ export function CompletionPanel({
       ...buildSelectedProduct(product),
       totalAmount,
       totalAmountManual: true,
+      // Marked manual so a rate or area edit cannot recompute the house
+      // default — but it is a seed, not the tech's own number, so stating a
+      // carrier volume replaces it (Codex r5 P1).
+      totalAmountSeeded: true,
     }));
     if (!rows.length) return;
     pestDefaultMixSnapshotRef.current = JSON.stringify(rows);
@@ -12313,7 +11980,11 @@ export function CompletionPanel({
     invalidateGeneratedReportOnTypedEdit();
     setSelectedProducts(current => current.map(product => follows(product)
       ? { ...product, areaValue: lawnVisitArea,
-        totalAmount: product.totalAmountManual ? product.totalAmount : lawnDerivedTotal(product, lawnVisitArea) } : product));
+        // A per-gallon row's quantity comes from the tank, not the visit
+        // area: the area still follows, the dose stays (audit P1).
+        totalAmount: product.totalAmountManual || isPerGallonUnit(product.rateUnit)
+          ? product.totalAmount
+          : lawnDerivedTotal(product, lawnVisitArea) } : product));
   }, [lawnDefaultsEnabled, lawnVisitArea, selectedProducts]);
   useEffect(() => {
     if (!completionImprovements || !isLawn) return;
@@ -12837,9 +12508,11 @@ export function CompletionPanel({
     "Complete & Send Invoice": "Apply discounts & send invoice",
     "Complete & Send Recap": "Apply discounts & send recap",
   };
-  const completionCtaLabel = applyingCompletionDiscounts
-    ? discountCompletionLabels[baseCompletionCtaLabel] || baseCompletionCtaLabel
-    : baseCompletionCtaLabel;
+  const completionCtaLabel = onPrepared
+    ? (submitting ? "Saving form…" : "Save service form")
+    : applyingCompletionDiscounts
+      ? discountCompletionLabels[baseCompletionCtaLabel] || baseCompletionCtaLabel
+      : baseCompletionCtaLabel;
 
   useEffect(() => {
     const iv = setInterval(() => setElapsed(elapsedSince(onSiteTime)), 1000);
@@ -13200,19 +12873,33 @@ export function CompletionPanel({
         ? { ...metadata, servicePhotos: metadata.draftId && metadata.draftId === stored?.draftId
           ? stored.servicePhotos : undefined }
         : stored || metadata;
-      if (draft?.serviceId === service.id) {
-        if (draft.pendingPhotoCompletion && (draft.servicePhotos?.length || draft.reconcileOwed)) {
+      const prepared = preparedDraft?.serviceId === service.id ? preparedDraft : null;
+      const deviceIsNewer = draft?.serviceId === service.id
+        && (!prepared || (Date.parse(draft.savedAt) || 0) > (Date.parse(prepared.savedAt) || 0));
+      const selectedDraft = deviceIsNewer
+        ? {
+            ...draft,
+            ...(!Array.isArray(draft.servicePhotos)
+              && draft.draftId
+              && draft.draftId === prepared?.draftId
+              && Array.isArray(prepared.servicePhotos)
+              ? { servicePhotos: prepared.servicePhotos }
+              : {}),
+          }
+        : prepared || draft;
+      if (selectedDraft?.serviceId === service.id) {
+        if (selectedDraft.pendingPhotoCompletion && (selectedDraft.servicePhotos?.length || selectedDraft.reconcileOwed)) {
           // Closeout already succeeded. Reopen only the outstanding photo
           // uploads (or the report reconciliation the uploads still owe);
           // never submit completion or collect payment again.
-          draftSnapshotRef.current = draft;
-          setCompletionResult(draft.pendingPhotoCompletion);
+          draftSnapshotRef.current = selectedDraft;
+          setCompletionResult(selectedDraft.pendingPhotoCompletion);
           setSuccess(true);
         } else {
-          setSavedDraft(draft);
+          setSavedDraft(selectedDraft);
           setShowDraftPrompt(true);
         }
-        if (draft.generationPhotoCount > 0 && !draft.servicePhotos?.length && !draft.reconcileOwed) {
+        if (selectedDraft.generationPhotoCount > 0 && !selectedDraft.servicePhotos?.length && !selectedDraft.reconcileOwed) {
           setDraftStorageNotice("The saved photos could not be restored. Reattach them before completing this visit.");
         }
       }
@@ -14607,9 +14294,18 @@ export function CompletionPanel({
     if (lawnDefaultsEnabled) {
       const item = lawnCompletionDefaults.items.find(item => String(item.product.id) === String(product.id));
       const planned = item && lawnPlanSelections([item], buildSelectedProduct, products, { areas: areasServiced, governed: true })[0];
-      row = planned || { ...row, rate: "", totalAmount: "", applicationArea: areasServiced.join(", "), applicationAreaDefault: true,
+      // A product the tech adds by hand is not governed by the plan, so it
+      // keeps the catalog label prefill (rate + rate × visit area / 1,000)
+      // exactly as an ungoverned closeout does — a per-1k rate on file is
+      // the tech's starting point, never a withheld blank (owner 2026-09-11:
+      // techs were retyping every rate and total after the gate went live).
+      // The suggestion stays editable and is still the tech's actual to
+      // confirm; a label with no per-1k rate prefills nothing, as before.
+      row = planned || { ...row, applicationArea: areasServiced.join(", "), applicationAreaDefault: true,
         lawnAreaDefault: row.areaUnit === "sqft",
-        lawnAmountReason: "Enter the actual amount for this application." };
+        lawnAmountReason: row.totalAmount !== ""
+          ? "Suggested from the label rate for the visit area. Confirm the actual amount."
+          : "Enter the actual amount for this application." };
     }
     // A re-added product is no longer a removed default whatever the plan
     // state — a draft restored under an outage carries removed ids too, and
@@ -14659,10 +14355,23 @@ export function CompletionPanel({
     // blank for the tech to enter. A linear-ft prefill derives nothing
     // either: the derived Total is a per-1,000-sqft calculation and has no
     // meaning against perimeter footage.
+    // One tank, one carrier volume (updateProduct shares it across rows):
+    // a per-gallon product added AFTER the tech typed gallons starts from
+    // the same tank rather than waiting to be told again.
+    // Strictly from the tank's OWNER, never the first row that happens to
+    // carry a number: a row that detached onto its own mix would otherwise
+    // seed the new product with a volume it never shared, and the next owner
+    // correction would move it anyway (pre-push audit P1). A blank owner
+    // value seeds blank.
+    const sharedGallons = isPerGallonUnit(prefillRateUnit)
+      ? selectedProducts.find((p) => isPerGallonUnit(p.rateUnit) && p.tankOwner)?.carrierGallons ?? ""
+      : "";
     const prefillTotal =
-      perBasisUnit || areaRequirement?.unit === "linear_ft"
-        ? ""
-        : derivedTotalAmount(prefillRate, prefillArea);
+      isPerGallonUnit(prefillRateUnit)
+        ? derivedTankTotal(prefillRate, sharedGallons)
+        : perBasisUnit || areaRequirement?.unit === "linear_ft"
+          ? ""
+          : derivedTotalAmount(prefillRate, prefillArea);
     return {
         productId: product.id,
         name: product.name,
@@ -14704,6 +14413,10 @@ export function CompletionPanel({
           labelMaxRate ??
           null,
         totalAmount: prefillTotal,
+        // Gallons of finished mix for a per-gallon rate; blank for every
+        // other unit and never submitted (a derivation input, like the
+        // treated area is for a per-1,000 rate).
+        carrierGallons: sharedGallons,
         totalAmountManual: false,
         applicationMethod,
         applicationArea: "",
@@ -14777,17 +14490,33 @@ export function CompletionPanel({
     }
     invalidateGeneratedReportOnTypedEdit();
     setSelectedProducts((prev) =>
-      prev.filter((p) => p.productId !== productId),
+      promoteTankOwner(prev.filter((p) => p.productId !== productId)),
     );
   }
   function updateProduct(productId, field, value) {
     if (generating) return;
     lawnDefaultMixSeededRef.current = true;
     invalidateGeneratedReportOnTypedEdit();
-    setSelectedProducts((prev) =>
-      prev.map((p) => {
-        if (p.productId !== productId) return p;
+    setSelectedProducts((prev) => {
+      // One tank, one carrier volume, one owner — the rules and their reasons
+      // live in lib/product-rate-prefill. Only the owner's corrections travel,
+      // so a row given its own gallons detaches alone.
+      const tankOwner = tankOwnerRow(prev);
+      const propagateTank = tankPropagates(prev, productId, field);
+      // An owner that leaves per-gallon frees the slot the same way removing
+      // it does, and the rows still on its mix keep the tank: without an heir
+      // the next gallons edit — a detached row's included — would propagate
+      // over them (pre-push audit P1). Idempotent while an owner remains.
+      return promoteTankOwner(prev.map((p) => {
+        if (p.productId !== productId) return propagateTank ? followTank(p, value) : p;
         const next = { ...p, [field]: value };
+        // Leaving a per-gallon rate retires the tank with it, on every lane —
+        // a pest perimeter or tree/shrub row never reaches the rate-unit
+        // branch below, so a hidden volume would survive the round-trip back.
+        Object.assign(next, clearTankOnUnitChange(next, p.rateUnit));
+        // And its mirror: a row converted into a per-gallon rate joins the
+        // mix already in the tank rather than asking for it again.
+        Object.assign(next, joinTankOnUnitChange(next, p.rateUnit, tankOwner));
         // Provenance is per row: a governed row restored while the initial
         // plan request failed (`lawnDefaultsEnabled` false, no defaults
         // loaded) still records which fields the tech edited, or a successful
@@ -14798,6 +14527,9 @@ export function CompletionPanel({
           next.lawnPlanManualFields = [...new Set([...(p.lawnPlanManualFields || []), field])];
         }
         if (field === "applicationArea") next.applicationAreaDefault = false;
+        // The row the tech typed into owns its gallons from here on, and the
+        // first such row owns the tank.
+        if (field === "carrierGallons") Object.assign(next, markTankEntry(next, tankOwner));
         if (field === "applicationMethod") {
           const areaRequirement = requiredApplicationArea(
             value,
@@ -14841,15 +14573,28 @@ export function CompletionPanel({
         // in the rate's unit, so a rate-unit change moves the total unit too.
         if (field === "totalAmount") {
           next.totalAmountManual = true;
+          next.totalAmountSeeded = false;
         } else if (governed && field === "amountUnit") {
           // A still-derived total is the plan's quantity in the plan's unit:
           // a unit change alone withdraws it (never keeps the number under
           // the new unit, never converts) until the tech enters the actual.
           // An entered total keeps its number under the chosen unit as
-          // before (Codex r8 P1).
+          // before (Codex r8 P1). A derived TANK dose follows the same rule
+          // on any lane: without it, 0.8 fl_oz/gal x 30 recomputes as "24
+          // gal" under a hand-picked unit and deducts the wrong inventory
+          // quantity (Codex r1 P1).
           if (!p.totalAmountManual) next.totalAmount = "";
         } else if (!next.totalAmountManual) {
-          if (next.areaUnit !== "sqft") {
+          if (field === "rateUnit" && isPerGallonUnit(p.rateUnit)) {
+            // A tank dose is meaningless under the new unit: re-derive from
+            // the treated area where that is what the unit means, else blank
+            // — never relabel 20 fl oz of tank mix as 20 of something else.
+            const perBasis = isPerBasisUnit(value);
+            next.amountUnit = perBasis ? String(value).split("/")[0] : value;
+            next.totalAmount = !perBasis && next.areaUnit === "sqft"
+              ? lawnDerivedTotal(next, next.areaValue)
+              : "";
+          } else if (next.areaUnit !== "sqft") {
             if (field === "applicationMethod" && p.areaUnit === "sqft") {
               next.totalAmount = "";
             }
@@ -14892,9 +14637,13 @@ export function CompletionPanel({
             next.lawnPlanManualFields = [...new Set([...(next.lawnPlanManualFields || []), "amountUnit"])];
           }
         }
-        return next;
-      }),
-    );
+        // One closing step: a tank row shows its dose, whatever cleared it
+        // earlier. The governed area and method handlers above blank derived
+        // totals the plan cannot express; none of them has to know about
+        // tanks (Codex r1 P1).
+        return applyTankDose(next);
+      }));
+    });
   }
   function toggleArea(area) {
     if (generating) return;
@@ -15858,6 +15607,7 @@ export function CompletionPanel({
           typedMinutes: backfillTimeOnSite,
           elapsed,
           adjustedMinutes: liveAdjustEligible ? adjustedTimeOnSite : "",
+          preparing: !!onPrepared,
         }),
         // Re-entry steppers: only sides the tech moved off their seed post.
         // An untouched panel sends nothing and the server's computed
@@ -16048,6 +15798,13 @@ export function CompletionPanel({
       // byte-for-byte through replayCommittedCompletion above; a fresh build
       // reaching here becomes the candidate snapshot.
       lastSubmitBodyRef.current = body;
+      if (onPrepared) {
+        await onPrepared(service.id, body, {
+          ...draftSnapshotRef.current, serviceId: service.id, servicePhotos,
+        });
+        setSubmitting(false);
+        return;
+      }
       const result = await onSubmit(service.id, body);
       if (await finishCompletionSuccess(result) === "closed") return;
     } catch (e) {
@@ -17041,7 +16798,7 @@ export function CompletionPanel({
                   textOverflow: "ellipsis",
                 }}
               >
-                Complete service
+                {onPrepared ? "Service form" : "Complete service"}
               </div>{" "}
             </div>
             {onViewDetails ? (
@@ -18214,6 +17971,22 @@ export function CompletionPanel({
                           ? catalogUnitOption(sp.rateUnit, STANDARD_RATE_UNIT_OPTIONS)
                           : null}{" "}
                       </select>{" "}
+                      {isPerGallonUnit(sp.rateUnit) ? (
+                        <>
+                          <span style={{ fontSize: 12, fontWeight: 500, color: M.ink3 }}>
+                            Gallons mixed
+                          </span>{" "}
+                          <input
+                            type="number"
+                            placeholder="Gal"
+                            value={sp.carrierGallons ?? ""}
+                            onChange={(e) =>
+                              updateProduct(sp.productId, "carrierGallons", e.target.value)
+                            }
+                            style={{ ...mInput, width: 84, height: 40, padding: "0 12px" }}
+                          />{" "}
+                        </>
+                      ) : null}
                       <span style={{ fontSize: 12, fontWeight: 500, color: M.ink3 }}>
                         Total used
                       </span>{" "}
@@ -19397,7 +19170,7 @@ export function CompletionPanel({
               id={`completion-panel-title-${service.id}`}
               style={{ fontSize: 18, fontWeight: 500, color: D.heading }}
             >
-              Complete Service
+              {onPrepared ? "Service form" : "Complete Service"}
             </div>{" "}
             <button
               type="button"
@@ -20586,6 +20359,22 @@ export function CompletionPanel({
                           ? catalogUnitOption(sp.rateUnit, STANDARD_RATE_UNIT_OPTIONS)
                           : null}{" "}
                   </select>{" "}
+                  {isPerGallonUnit(sp.rateUnit) ? (
+                    <>
+                      <span style={{ fontSize: 12, fontWeight: 500, color: D.muted }}>
+                        Gallons mixed
+                      </span>{" "}
+                      <input
+                        type="number"
+                        placeholder="Gal"
+                        value={sp.carrierGallons ?? ""}
+                        onChange={(e) =>
+                          updateProduct(sp.productId, "carrierGallons", e.target.value)
+                        }
+                        style={{ ...inputStyle, width: 70, marginBottom: 0 }}
+                      />{" "}
+                    </>
+                  ) : null}
                   <span style={{ fontSize: 12, fontWeight: 500, color: D.muted }}>
                     Total used
                   </span>{" "}
@@ -21355,8 +21144,8 @@ export function CompletionPanel({
                 <span style={{ fontSize: 15, fontWeight: 500 }}>
                   {completionCtaLabel}
                 </span>{" "}
-                <span style={{ fontSize: 11, fontWeight: 400, opacity: 0.85 }}>
-                  {isIncompleteVisit
+                <span style={{ fontSize: 14, fontWeight: 400, opacity: 0.85 }}>
+                  {onPrepared ? "Saved with the other services in this visit" : isIncompleteVisit
                     ? "Office follow-up alert will be created"
                     : effectiveSendSms
                       ? `SMS + Report sent to ${service.customerName}`

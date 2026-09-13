@@ -17,6 +17,22 @@ describe('Badge tones', () => {
     expect(screen.getByText('Overdue')).toHaveClass('bg-alert-bg', 'text-alert-fg');
   });
 
+  it('renders the warn tone distinctly from alert and neutral', () => {
+    render(
+      <>
+        <Badge tone="warn" dot>Degraded</Badge>
+        <Badge tone="alert">Expired</Badge>
+        <Badge tone="neutral">Unknown</Badge>
+      </>,
+    );
+    const degraded = screen.getByText('Degraded');
+    expect(degraded).toHaveClass('bg-warn-bg', 'text-warn-fg');
+    expect(degraded.firstChild).toHaveClass('bg-warn-fg');
+    // The point of the tone: a warning must not read as an alert, and must not
+    // collapse into the neutral chip a missing tone would have produced.
+    expect(degraded).not.toHaveClass('bg-alert-bg', 'bg-zinc-100');
+  });
+
   it('falls back to neutral for an unknown tone and warns in dev (F0227)', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     render(<Badge tone="nope" dot>Chip</Badge>);
@@ -30,6 +46,12 @@ describe('Badge tones', () => {
   it('does not warn for a known tone', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     render(<Badge tone="strong">Paid</Badge>);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('treats warn as a known tone', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    render(<Badge tone="warn">Low sample</Badge>);
     expect(warn).not.toHaveBeenCalled();
   });
 });

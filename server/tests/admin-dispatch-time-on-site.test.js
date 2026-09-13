@@ -372,7 +372,7 @@ describe('route wiring contracts', () => {
     expect(source).toMatch(/if \(livePlan\.error\) \{\s*\n\s*return \(\{ status: livePlan\.status, body: livePlan\.error \}\);/);
     const backfillPlanAt = source.indexOf('backfillCompletionPlan({ backfill, scheduledDate: svc.scheduled_date');
     const livePlanAt = source.indexOf('const livePlan = liveTimeOnSitePlan(');
-    const completionTrxAt = source.indexOf('const completionEndedAt = new Date();');
+    const completionTrxAt = source.indexOf('const completionEndedAt = packetRecords');
     expect(backfillPlanAt).toBeGreaterThan(-1);
     expect(livePlanAt).toBeGreaterThan(backfillPlanAt);
     expect(completionTrxAt).toBeGreaterThan(livePlanAt);
@@ -1059,7 +1059,7 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     // The live-override completion reuses the SAME fenced sync (audit
     // round 20c) — gated off backfills, on for numeric corrected minutes,
     // idempotent on crash-resumed retries.
-    expect(source).toMatch(/if \(!isBackfillCompletion && typeof effectiveTimeOnSite === 'number'\) \{\s*\n\s*completionTimerSync = await syncLinkedJobTimer\(\{/);
+    expect(source).toMatch(/if \(!packetDurationAllocation && !isBackfillCompletion && typeof effectiveTimeOnSite === 'number'\) \{\s*\n\s*completionTimerSync = await syncLinkedJobTimer\(\{/);
     expect((source.match(/\.\.\.\(completionTimerSync\.corrected != null \? \{ timeEntryCorrected: completionTimerSync\.corrected \} : \{\}\),/g) || []).length).toBe(2);
     const timerLockAt = source.indexOf("await timerTrx('scheduled_services').where({ id: serviceId }).forUpdate().first();");
     const timerEditAt = source.indexOf("await require('../services/time-tracking').adminEditEntry(");
@@ -1180,7 +1180,7 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     // fields), and its stamped minutes outrank a plain stale-timer elapsed
     // in this request — explicit adjusted/backfill values keep authority.
     expect(source).toMatch(/for \(const field of \[\s*\n\s*'actual_end_time', 'check_out_time', 'completed_at',\s*\n\s*'service_time_minutes', 'actual_duration_minutes',\s*\n\s*'time_on_site_adjusted_minutes', 'time_on_site_correction_seq',\s*\n\s*\]\) \{\s*\n\s*if \(field in lockedSvcRow\) svc\[field\] = lockedSvcRow\[field\];/);
-    expect(source).toMatch(/if \(Number\.isFinite\(stampedMinutes\) && stampedMinutes > 0\s*\n\s*&& \(stampMovedMidFlight\s*\n\s*\|\| \(!isBackfillCompletion && !liveAdjustedTimeOnSite\s*\n\s*&& typeof effectiveTimeOnSite !== 'number'\)\)\) \{\s*\n\s*effectiveTimeOnSite = stampedMinutes;\s*\n\s*correctionPreservedMidFlight = true;/);
+    expect(source).toMatch(/if \(Number\.isFinite\(stampedMinutes\) && stampedMinutes > 0\s*\n\s*&& \(stampMovedMidFlight\s*\n\s*\|\| \(!isBackfillCompletion && !liveAdjustedTimeOnSite\s*\n\s*&& \(packetRecords \|\| typeof effectiveTimeOnSite !== 'number'\)\)\)\) \{\s*\n\s*effectiveTimeOnSite = stampedMinutes;\s*packetDurationAllocation = null;\s*correctionPreservedMidFlight = true;/);
     // The reconcile block sits between the lock and the wall-clock capture.
     const lockAt = source.indexOf("const lockedSvcRow = await trx('scheduled_services')");
     const preserveAt = source.indexOf('correctionPreservedMidFlight = true;');
@@ -1583,7 +1583,7 @@ describe('job costing durable re-derivation from the timeOnSiteAdjusted marker',
   // entry span. Same durable-policy shape as the backfill marker above it.
   test('calculateJobCost re-derives overrideLaborMinutes from the persisted marker + corrected column', () => {
     expect(costingSource).toMatch(/if \(recordNotes\.timeOnSiteAdjusted === true && overrideLaborMinutes == null\) \{\s*\n\s*const correctedMinutes = Number\(svc\.service_time_minutes\);\s*\n\s*if \(Number\.isFinite\(correctedMinutes\) && correctedMinutes > 0\) \{\s*\n\s*overrideLaborMinutes = correctedMinutes;/);
-    expect(costingSource).toMatch(/\{ untrustedLifecycleSpan, explicitLaborMinutes, overrideLaborMinutes \},/);
+    expect(costingSource).toMatch(/\{ untrustedLifecycleSpan, explicitLaborMinutes, overrideLaborMinutes, allocatedLaborMinutes \},/);
     // The override is checked BEFORE the direct job-entries lookup.
     const overrideAt = costingSource.indexOf('const override = Number(overrideLaborMinutes);');
     const entriesAt = costingSource.indexOf("await db('time_entries')");

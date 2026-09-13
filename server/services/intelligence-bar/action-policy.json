@@ -1303,6 +1303,14 @@
     "approval": null,
     "scope": "scoped"
   },
+  "merge_customers": {
+    "module": "customer-lifecycle-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "move_stops_to_day": {
     "module": "schedule-tools.js",
     "domain": "schedule",

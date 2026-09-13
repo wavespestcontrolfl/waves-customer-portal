@@ -447,6 +447,7 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
           onPointerDown={(e) => e.stopPropagation()}
           onClick={(e) => {
             e.stopPropagation();
+            e.currentTarget.focus({ preventScroll: true });
             onProtocol(service);
           }}
           className={cn(
@@ -804,7 +805,10 @@ function AllDayStrip({ services, onEdit, onProtocol, onTreatmentPlan, onViewAudi
           {onProtocol && (
             <button
               type="button"
-              onClick={() => onProtocol(svc)}
+              onClick={(event) => {
+                event.currentTarget.focus({ preventScroll: true });
+                onProtocol(svc);
+              }}
               className="h-6 w-6 inline-flex items-center justify-center rounded-sm bg-white text-zinc-800 u-focus-ring"
               style={{ border: '1px solid #D4D4D8' }}
               title="Protocol"
@@ -906,6 +910,7 @@ function RailItem({ service, onEdit, onProtocol, onTreatmentPlan, onViewAudit, o
           onPointerDown={(e) => e.stopPropagation()}
           onClick={(e) => {
             e.stopPropagation();
+            e.currentTarget.focus({ preventScroll: true });
             onProtocol(service);
           }}
           className="mt-1 h-7 w-full inline-flex items-center justify-center gap-1 rounded-xs bg-white border-hairline border-zinc-300 text-zinc-900 text-10 uppercase tracking-label u-focus-ring"

@@ -1,5 +1,28 @@
 # Public route contracts
 
+## Combined visit summary
+
+`GET /api/visit-summary/:token` (`server/routes/visit-summary-public.js`) and
+the `/visit/:token` React shell use a 64-character lowercase hex bearer token.
+The API format-gates before any database read, hashes the token for lookup,
+and returns the same 404 for malformed, unknown, revoked, or ineligible links.
+Only issued, non-revoked links on closing/closed visits with a complete,
+identity-matched saved packet resolve. Backfilled and withheld service reports
+are excluded. The payload contains the service date and each visible service's
+record id, type, outcome, and existing report link; no technician notes,
+access codes, customer contact details, prices, invoice tokens, or payments.
+
+The API and shell share the existing public report limiter (20 requests/minute
+per IP). Privacy headers (`no-store`, `noindex`, and `no-referrer`) precede the
+limiter; the API also stamps them before the global API limiter. Tokens are
+redacted by the shared URL logger. `GATE_VISIT_CLOSEOUT` controls new packet
+creation, not issued links: disabling it does not revoke customer summaries.
+The admin-only `POST /api/admin/visit-closeouts/:visitId/revoke-summary`
+sets `service_visits.summary_token_revoked_at`; reads immediately refuse the
+link and future dispatch checks refuse it. Revocation does not block packet
+recovery or alter individual report/receipt tokens. The page
+only opens each service's existing report; it adds no write or ask endpoint.
+
 Security contract for every route the portal serves with NO session auth
 at all: token-gated customer surfaces, machine-to-machine webhooks, and
 the anonymous public API. Routes behind the customer JWT (`authenticate`,
@@ -64,7 +87,27 @@ payment URL from the payload. FAQ flag (2026-09-03): with
 GATE_PAY_PAGE_FAQ=true the GET payload carries `payFaq: true` — a display
 flag for the copy-only "Common questions" accordion under the Pay button;
 no other field changes, no customer or invoice data rides it, and gate off
-⇒ key absent, payload byte-identical — unset the gate to kill it),
+⇒ key absent, payload byte-identical — unset the gate to kill it. THIRD-PARTY
+BILL-TO WITHDRAWAL (2026-09-12): a combined-visit invoice whose Bill-To moved
+to a payer AFTER the homeowner already held this link keeps a collectible
+status and a NULL `payer_id` — the move is recorded only in its withdrawal
+stamp — so every money seam on this surface reads the invoice ROW, not its
+status. `/setup`, `/quote`, `/finalize`, `/confirm` and `/update-amount`
+refuse such an invoice through the shared collectibility gate, and `/consent`,
+`/capture-setup` and `/setup-complete` refuse it with
+`409 { error, code: 'invoice_withdrawn_from_customer' }`. What that refusal
+guarantees, precisely: no consent is recorded and no Auto Pay enrollment
+happens for a withdrawn invoice — the authorization row and the ownership
+judgement commit in ONE transaction, and the enrollment re-judges ownership
+inside its own. A Bill-To change that lands mid-request, after the Stripe
+`attach` but before that fence, can leave the method attached to the
+customer's Stripe record; it is inert (no consent, not enrolled, not
+default) and the request still answers 409. The attach cannot join a database
+transaction, and the customer did ask to save the card. A
+withdrawn invoice is also absent from the authenticated portal's balance and
+Pay Now list, and carries no `manualPayOptions`. Nothing else in the payload
+changes; an invoice that returns to self-pay is released by the Bill-To
+reconciliation and collects normally again),
 `/api/pay/statement/:token` (+ `/setup`, `/quote`, `/finalize`) — payer NET
 statement self-serve pay, **gated behind GATE_PAYER_STATEMENTS** (404 when off),
 64-hex `payer_statements.token` format gate + public-route rate limit; resolves
@@ -78,7 +121,8 @@ by packet and customer identity. Unrelated visits and payer-billed invoices
 never expose homeowner credit terms), `/api/contracts/:token`, `/api/booking/*`,
 `/api/public/estimates/:token/ask`,
 `/api/public/estimates/:token/find-slots`,
-`/api/public/estimates/:token/available-slots` and `/reserve` (the recurring
+`/api/public/estimates/:token/available-slots`, `/reserve` and
+`/reserve/:scheduledServiceId/extend` (the recurring
 service profile uses the converter's canonical stored/engine service rows.
 Generated or saved tier selections replace the listed service cadences and
 retain omitted companion programs; choosing a tier is not a service removal.
@@ -103,8 +147,15 @@ Combined catalog allowances still require `GATE_VISIT_COMBINED_CAPACITY` and
 identity; version-1 members keep their 60-minute contract. Public offer/cache
 responses omit catalog identifiers, route internals and allocation stamps.
 Reservation and acceptance re-resolve catalog policies. Transactional catalog
-reads hold matched rows with FOR SHARE until the outer transaction ends, so
-catalog edits cannot overtake a validated allowance. Existing version-2 holds
+reads under capacity hold a `services` table SHARE lock (taken inside the
+lookup savepoint, before any catalog read) until the outer transaction ends
+and take no catalog row locks: every catalog insert, update or delete — admin
+edits and pre-deploy migrations alike — conflicts with that lock at the
+database, so neither a matched row's allowance nor an absent match can be
+overtaken by a row edited, activated or mapped after the lookup, and SHARE
+readers never block each other. Commit and conversion take that lock before
+any `scheduled_services` row lock, matching catalog migrations that lock
+`services` first and then update visits. Existing version-2 holds
 reject changed allowances with 409 `SLOT_UNAVAILABLE`, even after gate shutdown.
 Reservation creation prepares bounded route traffic outside the transaction,
 then takes the date occupancy lock and the selected-technician/unassigned day
@@ -205,22 +256,43 @@ only an approved recap, consumes `/api/reports/:token/recap` + `/recap/video`,
 same noindex/no-referrer/no-store headers as `/report/:token`),
 `/api/stripe/webhook`, `/api/webhooks/twilio` (all Twilio inbound;
 `GATE_SMS_SPAM_CLASSIFIER=shadow` enables a bounded solicitation screen for
-unknown-sender SMS. Other values, including `true`, leave this stage off.
+unknown-sender SMS; `true` enables enforcement at confidence >= 0.85.
+Unset or any other value disables screening.
 Known primary/secondary/service-contact numbers, reactions, empty bodies,
 standalone carrier commands, and the AI assistant line bypass the classifier.
-Natural-language consent requests never wait on the model; only deterministic
-pitch evidence, such as a vendor footer, may be recorded for those messages.
-The unified inbox message is durably saved before screening. A failed unified
-save or relationship lookup bypasses screening and preserves ordinary handling;
-model failures record a failed non-solicitation verdict. The 3.5-second model
+The unified inbox message is durably saved before screening. Failed unified
+saves or relationship lookups bypass screening. Model failures record a failed
+non-solicitation verdict. Sender relationship (compliance eligibility) is
+resolved once, up front, before any consent handling or screening — a
+compliance-eligible sender's consent (keyword or natural-language, on the
+full untouched text) is honored before the classifier and never waits on the
+model; a non-eligible sender's opt-out-shaped phrasing is not treated as
+consent at all and reaches the classifier like any other message (only a
+standalone carrier command such as a bare STOP bypasses the model for them
+too — natural-language phrasing and a footer never do). Shadow can still
+record deterministic pitch evidence via the regex fast path for any
+solicitation-shaped text, consent-related or not. The 3.5-second model
 budget uses the shared dispatcher.
-Shadow verdicts (`solicitation`, `confidence`, `method`, `version`, `mode`)
+Verdicts (`solicitation`, `confidence`, `method`, `version`, `mode`, `enforced`)
 are stored under `metadata.spam_verdict` on unified messages and ordinary or
-natural-language opt-out `sms_log` rows. Verdict attachment merges metadata on
-the saved unified row. Read state, opt-out suppression,
-TwiML replies, notifications, estimator routing, and provider request/auth
-contracts retain their existing behavior. No enforcement is available in
-this stage. The SMS operational extension runs after acknowledgment under
+natural-language opt-out `sms_log` rows. Read state, opt-out suppression,
+TwiML replies, notifications and estimator routing retain their existing
+behavior in shadow mode. Enforced pitches remain in both message stores,
+are marked read when the verdict is attached, and return empty TwiML before
+lead creation, quoting, alerts or
+auto-replies. A compliance-eligible sender's genuine consent command
+(including a natural-language opt-out or a wrong-number report) bypasses
+enforcement — decided before the classifier ever runs — and retains
+suppression and its existing responses. A non-eligible sender's opt-out-
+shaped phrasing, including a vendor's own reply-instruction footer such as
+`Reply NO if you need me to stop texting`, is never treated as the sender's
+own opt-out: only the classifier's model verdict governs enforcement for
+them, and an enforced verdict never creates a suppression row. The
+unanswered digest omits a thread only when its latest eligible inbound has
+an enforced verdict, so a later genuine message resurfaces.
+Verdict attachment merges metadata without replacing unrelated fields. Failed
+verdict attachment bypasses enforcement. Provider request/auth contracts are unchanged. The SMS operational extension
+runs after acknowledgment under
 `GATE_SMS_OPERATIONAL_ACTIONS` plus an explicit activation timestamp;
 it reuses persisted SMS evidence for private profile updates and admin
 notifications, with no additional response fields or customer sends;
@@ -991,6 +1063,35 @@ customer's last selection once the route writes it back (validation audit
 SEC-001, 2026-09-02; before it the ceiling applied only to opted-out
 estimates). A membership reconcile that reprices the mix refreshes the
 opt-out stamp with the row tier.
+Slot-hold lifetime (owner case 2026-09-11 — a customer confirmed 34 seconds
+after her 15-minute hold lapsed, was refused, and believed she had paid).
+`POST /reserve/:scheduledServiceId/extend` pushes an EXISTING hold's expiry
+out by the standard hold window: same `reserveLimiter` budget and token-format
+gate as `/reserve`, same call-side-blocked and ineligible-estimate refusals,
+and the same generic 404 for an unknown token, an unknown hold, a hold
+belonging to ANOTHER estimate, an already-committed row, or a hold past the
+grace — the route is not an enumeration oracle for hold ids. It never creates
+a hold, never changes the slot, and never touches price, customer or estimate
+state. A hold may not live past `MAX_HOLD_MINUTES` (60) from its own
+`created_at` however many times it is extended (409 `HOLD_LIMIT_REACHED` with
+the unchanged `expiresAt`); the same ceiling binds `/reserve`'s same-slot
+refresh, so re-POSTing `/reserve` is not a way around it. An extension whose
+window a COMMITTED visit has since taken supersedes the hold and answers 409
+`SLOT_UNAVAILABLE` rather than keeping a hold the accept is guaranteed to
+refuse — and the supersede is committed, never rolled back with the refusal.
+Reviving a hold that has ALREADY LAPSED (inside the grace) arbitrates against
+live HOLDS as well as committed visits — a lapsed row stopped occupying its
+window, so another customer may hold it — and is refused outright under
+`GATE_SCHEDULING_CAPACITY`, where arrival allocation has no equivalent probe. Commit-time grace:
+`/accept` graduates a hold expired by less than `RESERVATION_COMMIT_GRACE_MINUTES`
+(default 10, clamped 0-30, 0 disables) — every conflict re-check still runs
+under the date lock, so an in-grace commit cannot double-book, and the expiry
+sweep holds the same row for the same window. The grace widens adoption ONLY
+for the estimate's own unclaimed hold, never another customer's row, and the
+VIEW path never OFFERS a lapsed hold. Every hold-expiry refusal on `/accept`
+carries `code: RESERVATION_EXPIRED` so the client names the real cause instead
+of reporting a taken slot.
+
 Appointment reminders registered by `/accept` derive their date and arrival
 from the committed service row. A server-owned `reservation_service_mix`
 allocation can preserve one booked arrival across sequential member work
@@ -1002,8 +1103,18 @@ is internal and adds no request field or public payload field.
 `/accept` existing-appointment adoption (`existingAppointmentId` in the
 body, offered by the view contract instead of the slot picker): the row
 must belong to this customer, be unclaimed or claimed by THIS estimate,
-never a reservation hold or a callback visit, dated today or later, and
-in an adoptable status. Adoptable statuses are `pending`/`confirmed`;
+never a callback visit, dated today or later, and in an adoptable status.
+The estimate's OWN uncommitted reservation hold IS offered through this
+shape (a customer who picked a slot and then reloaded), and the payload
+says so: `isHold` is true and `reservationExpiresAt` carries the hold's
+expiry as an ISO instant. Both fields are ABSENT for a genuinely
+committed visit — not `false`/`null`, so a client that distinguishes an
+absent property keeps the exact pre-2026-09 payload — including one carrying a stray
+`reservation_expires_at`, which `releaseExpiredReservations` exists to
+rescue — so a countdown never starts on a real appointment. Another
+estimate's hold is still never offered. The page uses the two fields to
+run the hold timer and the extend action described below; a client that
+ignores them sees the previous committed-appointment shape. Adoptable statuses are `pending`/`confirmed`;
 behind `GATE_ESTIMATE_ADOPT_IN_PROGRESS_VISIT` (fail-closed in every
 environment — off unless the var is a `gateEnvValue` true: `true`, `1`
 or `on`, case-insensitive; re-read per accept request, so a flip is a
@@ -1053,7 +1164,17 @@ gate, 24h expiry with 410, access-count audit, 30/15min limiter,
 `no-store`).
 `POST /api/stripe/terminal/validate-handoff` (machine-to-machine burn of
 the 60s single-use handoff JWT — the token IS the auth; see the atomic
-terminal-handoff burn rule in AGENTS.md).
+terminal-handoff burn rule in AGENTS.md. THIRD-PARTY BILL-TO WITHDRAWAL
+(2026-09-12): a combined-visit invoice whose Bill-To moved to a payer after
+the handoff was minted keeps a collectible status and a NULL `payer_id` —
+the move is recorded only in its withdrawal stamp — so this route treats a
+withdrawn invoice exactly like a terminal status change and refuses with the
+existing `invoice_changed` outcome after the burn, rather than handing the
+technician a card-present session for debt now owed by AP. `/handoff` refuses
+to mint one for the same reason, and `/payment-intent` refuses with
+`409 { code: 'invoice_withdrawn_from_customer' }` — including a re-read under
+the invoice row lock at the final bind, so a Bill-To change committing during
+the mint is caught).
 `/api/admin/push/vapid-key` (GET; deliberate — the VAPID public key is
 public by protocol).
 `/api/health` (GET; liveness probe, no data).

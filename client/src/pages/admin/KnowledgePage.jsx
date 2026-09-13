@@ -10,63 +10,19 @@ import {
   Search,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import { UiSurface } from "../../components/ui";
+import { adminFetch } from "../../utils/admin-fetch";
+import KnowledgeArticleDirectory from "./knowledge/KnowledgeArticleDirectory";
 import KnowledgeQuestionDialog from "./knowledge/KnowledgeQuestionDialog";
+import KnowledgeRecentQueries from "./knowledge/KnowledgeRecentQueries";
 import { ArticleViewer, HealthCheck } from "./knowledge/KnowledgeReader";
 import KnowledgeSources from "./knowledge/KnowledgeSources";
 
-const API_BASE = import.meta.env.VITE_API_URL || "/api";
-// V2 token pass: teal/purple/orange fold to zinc-900. Semantic green/amber/red preserved.
-const D = {
-  bg: "#F4F4F5",
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  teal: "#18181B",
-  green: "#15803D",
-  amber: "#A16207",
-  red: "#991B1B",
-  orange: "#18181B",
-  text: "#27272A",
-  muted: "#71717A",
-  white: "#FFFFFF",
-  purple: "#18181B",
-  heading: "#09090B",
-  inputBorder: "#D4D4D8",
-};
-const MONO = "'JetBrains Mono', monospace";
-
-function adminFetch(path) {
-  return fetch(`${API_BASE}${path}`, {
-    headers: {
-      Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
-      "Content-Type": "application/json",
-    },
-  }).then((r) => r.json());
-}
-function Card({ children, style }) {
-  return (
-    <div
-      style={{
-        background: D.card,
-        border: `1px solid ${D.border}`,
-        borderRadius: 12,
-        padding: 24,
-        ...style,
-      }}
-    >
-      {children}
-    </div>
-  );
-}
-
-
-// =========================================================================
-// MAIN PAGE
-// =========================================================================
 const TABS = [
   { key: "articles", label: "Articles", Icon: BookOpen },
   { key: "sources", label: "Sources", Icon: Database },
   { key: "health", label: "Health", Icon: Activity },
-  { key: "queries", label: "Recent Queries", Icon: Search },
+  { key: "queries", label: "Recent queries", Icon: Search },
 ];
 
 // The health endpoint is admin-only server-side (requireAdmin); showing the
@@ -104,33 +60,76 @@ export default function KnowledgePage({ embedded = false }) {
   };
   const [articles, setArticles] = useState([]);
   const [categoryCounts, setCategoryCounts] = useState({});
-  const [loading, setLoading] = useState(true);
+  const [articlesLoading, setArticlesLoading] = useState(true);
+  const [articlesError, setArticlesError] = useState("");
+  const [articlesAttempt, setArticlesAttempt] = useState(0);
   const [search, setSearch] = useState("");
-  const [filterCat, setFilterCat] = useState("");
+  const [filterCategory, setFilterCategory] = useState("");
   const [selectedArticle, setSelectedArticle] = useState(null);
   const [showQA, setShowQA] = useState(false);
   const [recentQueries, setRecentQueries] = useState([]);
+  const [queriesLoading, setQueriesLoading] = useState(true);
+  const [queriesError, setQueriesError] = useState("");
+  const [queriesAttempt, setQueriesAttempt] = useState(0);
 
   useEffect(() => {
-    if (tab === "articles") {
-      setLoading(true);
-      let url = "/admin/knowledge?";
-      if (search) url += `search=${encodeURIComponent(search)}&`;
-      if (filterCat) url += `category=${filterCat}&`;
-      adminFetch(url)
-        .then((d) => {
-          setArticles(d.articles || []);
-          setCategoryCounts(d.categoryCounts || {});
-          setLoading(false);
-        })
-        .catch(() => setLoading(false));
+    if (tab !== "articles") return undefined;
+
+    let active = true;
+    let url = "/admin/knowledge?";
+    if (search) url += `search=${encodeURIComponent(search)}&`;
+    if (filterCategory) url += `category=${filterCategory}&`;
+
+    setArticlesLoading(true);
+    setArticlesError("");
+    adminFetch(url)
+      .then((data) => {
+        if (!active) return;
+        setArticles(data.articles || []);
+        setCategoryCounts(data.categoryCounts || {});
+      })
+      .catch((requestError) => {
+        // A swallowed read left the directory showing "No articles yet", which
+        // reads as an empty wiki rather than a failed request.
+        if (active) setArticlesError(requestError?.message || "Could not load articles.");
+      })
+      .finally(() => {
+        if (active) setArticlesLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [tab, search, filterCategory, articlesAttempt]);
+
+  useEffect(() => {
+    if (tab !== "queries") {
+      // Arm the loading state for the next visit so the panel cannot paint the
+      // empty state, or the previous visit's results, before the read starts.
+      setQueriesLoading(true);
+      return undefined;
     }
-    if (tab === "queries") {
-      adminFetch("/admin/knowledge/queries").then((d) =>
-        setRecentQueries(d.queries || []),
-      );
-    }
-  }, [tab, search, filterCat]);
+
+    let active = true;
+    setQueriesLoading(true);
+    setQueriesError("");
+    adminFetch("/admin/knowledge/queries")
+      .then((data) => {
+        if (active) setRecentQueries(data.queries || []);
+      })
+      .catch((requestError) => {
+        if (active) {
+          setQueriesError(requestError?.message || "Could not load recent queries.");
+        }
+      })
+      .finally(() => {
+        if (active) setQueriesLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [tab, queriesAttempt]);
 
   const openQuestion = (event) => {
     event.currentTarget.focus({ preventScroll: true });
@@ -139,27 +138,28 @@ export default function KnowledgePage({ embedded = false }) {
 
   if (selectedArticle) {
     return (
-      <div>
+      <UiSurface density="comfortable">
         {" "}
         <AdminCommandHeader
           title="Wiki"
           icon={BookOpen}
           headingLevel={embedded ? 2 : 1}
           sticky={!embedded}
+          variant="workspace"
           action={{
-            label: "All Articles",
+            label: "All articles",
             icon: ArrowLeft,
             variant: "secondary",
             onClick: () => setSelectedArticle(null),
           }}
         />{" "}
         <ArticleViewer articleId={selectedArticle} />{" "}
-      </div>
+      </UiSurface>
     );
   }
 
   return (
-    <div>
+    <UiSurface density="comfortable">
       {showQA && (
         <KnowledgeQuestionDialog
           open
@@ -175,168 +175,27 @@ export default function KnowledgePage({ embedded = false }) {
         onSectionChange={setTab}
         headingLevel={embedded ? 2 : 1}
         sticky={!embedded}
+        variant="workspace"
         action={{
-          label: "Ask a Question",
+          label: "Ask a question",
           icon: MessageSquare,
           onClick: openQuestion,
         }}
         navGridClassName="grid-cols-2 md:grid-cols-4"
       />
-      {/* ARTICLES TAB */}
       {tab === "articles" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          {/* Category Grid */}
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))",
-              gap: 10,
-            }}
-          >
-            {Object.entries(categoryCounts)
-              .sort((a, b) => b[1] - a[1])
-              .map(([cat, count]) => (
-                <div
-                  key={cat}
-                  onClick={() => setFilterCat(filterCat === cat ? "" : cat)}
-                  style={{
-                    padding: "12px 14px",
-                    background: filterCat === cat ? D.teal + "22" : D.card,
-                    border: `1px solid ${filterCat === cat ? D.teal : D.border}`,
-                    borderRadius: 10,
-                    cursor: "pointer",
-                    textAlign: "center",
-                    transition: "all 0.15s",
-                  }}
-                >
-                  {" "}
-                  <div
-                    style={{
-                      fontSize: 12,
-                      fontWeight: 500,
-                      color: D.heading,
-                      textTransform: "capitalize",
-                    }}
-                  >
-                    {cat}
-                  </div>{" "}
-                  <div
-                    style={{
-                      fontSize: 18,
-                      fontWeight: 700,
-                      color: D.teal,
-                      fontFamily: MONO,
-                    }}
-                  >
-                    {count}
-                  </div>{" "}
-                </div>
-              ))}
-          </div>
-          {/* Search */}
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search articles..."
-            style={{
-              padding: "10px 14px",
-              borderRadius: 8,
-              border: `1px solid ${D.border}`,
-              background: D.bg,
-              color: D.heading,
-              fontSize: 14,
-              width: "100%",
-            }}
-          />
-          {/* Article List */}
-          {loading ? (
-            <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
-              Loading articles...
-            </div>
-          ) : articles.length === 0 ? (
-            <Card style={{ textAlign: "center", padding: 60 }}>
-              {" "}
-              <div
-                style={{
-                  fontSize: 18,
-                  fontWeight: 500,
-                  color: D.heading,
-                  marginBottom: 8,
-                }}
-              >
-                No Articles Yet
-              </div>{" "}
-              <div style={{ fontSize: 14, color: D.muted }}>
-                Add source documents and compile them to build your knowledge
-                base.
-              </div>{" "}
-            </Card>
-          ) : (
-            articles.map((a) => {
-              const tags =
-                typeof a.tags === "string" ? JSON.parse(a.tags) : a.tags || [];
-              return (
-                <div
-                  key={a.id}
-                  onClick={() => setSelectedArticle(a.id)}
-                  style={{
-                    padding: "12px 16px",
-                    background: D.card,
-                    border: `1px solid ${D.border}`,
-                    borderRadius: 8,
-                    cursor: "pointer",
-                    transition: "border-color 0.15s",
-                  }}
-                >
-                  {" "}
-                  <div
-                    style={{ display: "flex", alignItems: "center", gap: 8 }}
-                  >
-                    {" "}
-                    <div style={{ flex: 1 }}>
-                      {" "}
-                      <div
-                        style={{
-                          fontSize: 14,
-                          fontWeight: 500,
-                          color: D.heading,
-                        }}
-                      >
-                        {a.title}
-                      </div>{" "}
-                      <div style={{ fontSize: 12, color: D.muted }}>
-                        {a.summary || a.path}
-                      </div>{" "}
-                    </div>{" "}
-                    <div
-                      style={{ fontSize: 11, color: D.muted, fontFamily: MONO }}
-                    >
-                      {a.word_count}w
-                    </div>{" "}
-                  </div>
-                  {tags.length > 0 && (
-                    <div style={{ display: "flex", gap: 4, marginTop: 6 }}>
-                      {tags.slice(0, 5).map((t, i) => (
-                        <span
-                          key={i}
-                          style={{
-                            padding: "1px 6px",
-                            borderRadius: 3,
-                            background: D.bg,
-                            color: D.muted,
-                            fontSize: 10,
-                          }}
-                        >
-                          {t}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })
-          )}
-        </div>
+        <KnowledgeArticleDirectory
+          articles={articles}
+          categoryCounts={categoryCounts}
+          filterCategory={filterCategory}
+          loading={articlesLoading}
+          error={articlesError}
+          onCategoryChange={setFilterCategory}
+          onArticleOpen={setSelectedArticle}
+          onRetry={() => setArticlesAttempt((value) => value + 1)}
+          search={search}
+          onSearchChange={setSearch}
+        />
       )}
 
       {/* SOURCES TAB */}
@@ -347,60 +206,13 @@ export default function KnowledgePage({ embedded = false }) {
 
       {/* QUERIES TAB */}
       {tab === "queries" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {recentQueries.length === 0 ? (
-            <Card style={{ textAlign: "center", padding: 40 }}>
-              <div style={{ color: D.muted }}>
-                No queries yet. Click "Ask a Question" to start.
-              </div>
-            </Card>
-          ) : (
-            recentQueries.map((q) => (
-              <Card key={q.id} style={{ padding: 16 }}>
-                {" "}
-                <div
-                  style={{
-                    fontSize: 14,
-                    fontWeight: 500,
-                    color: D.teal,
-                    marginBottom: 6,
-                  }}
-                >
-                  Q: {q.query}
-                </div>{" "}
-                <div
-                  style={{
-                    fontSize: 13,
-                    color: D.text,
-                    lineHeight: 1.6,
-                    maxHeight: 120,
-                    overflow: "hidden",
-                  }}
-                >
-                  {q.answer}
-                </div>{" "}
-                <div
-                  style={{
-                    display: "flex",
-                    gap: 12,
-                    marginTop: 8,
-                    fontSize: 11,
-                    color: D.muted,
-                  }}
-                >
-                  {" "}
-                  <span>{q.asked_by}</span>{" "}
-                  <span>{new Date(q.created_at).toLocaleString()}</span>
-                  {q.response_quality && <span>{q.response_quality}/5</span>}
-                  {q.filed_back && (
-                    <span style={{ color: D.green }}>Filed back</span>
-                  )}
-                </div>{" "}
-              </Card>
-            ))
-          )}
-        </div>
+        <KnowledgeRecentQueries
+          queries={recentQueries}
+          loading={queriesLoading}
+          error={queriesError}
+          onRetry={() => setQueriesAttempt((value) => value + 1)}
+        />
       )}
-    </div>
+    </UiSurface>
   );
 }

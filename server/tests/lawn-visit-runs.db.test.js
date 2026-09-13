@@ -4,15 +4,7 @@
 // without DATABASE_URL; CI runs it against the migrated CI database.
 const SKIP = !process.env.DATABASE_URL;
 const { randomUUID } = require('crypto');
-const knexFactory = require('knex');
-// Exercise the published table and score migrations followed by the new
-// prompt-context migration, just as an existing preview database upgrades.
-const promptContextMigration = require('../models/migrations/20260909000040_lawn_assessment_runs_prompt_context');
-const migrations = [
-  require('../models/migrations/20260908000010_lawn_assessment_runs'),
-  require('../models/migrations/20260908000020_lawn_assessment_runs_scores_adjusted'),
-  promptContextMigration,
-];
+const { createLawnVisitDb, migrations, promptContextMigration } = require('./helpers/lawn-visit-db');
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
@@ -21,16 +13,6 @@ const { PROMPT_VERSION } = require('../services/lawn-visit-input');
 const { UNAVAILABLE_OBSERVATIONS } = require('../services/lawn-visit-result');
 const { NO_OBSERVATIONS } = require('../services/lawn-visit-customer-copy');
 
-async function createRunsDb(migrate = true) {
-  const schema = `lawn_visit_${randomUUID().replace(/-/g, '')}`;
-  const knex = knexFactory({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema], pool: { min: 0, max: 4 } });
-  await knex.raw('CREATE SCHEMA ??', [schema]);
-  for (const table of ['customers', 'technicians', 'scheduled_services', 'lawn_assessments', 'lawn_assessment_photos']) {
-    await knex.raw('CREATE TABLE ??.?? (LIKE public.?? INCLUDING ALL)', [schema, table, table]);
-  }
-  if (migrate) for (const step of migrations) await step.up(knex);
-  return { knex, schema, async dispose() { await knex.raw('DROP SCHEMA ?? CASCADE', [schema]); await knex.destroy(); } };
-}
 
 const analysis = (overrides = {}) => ({
   status: 'complete', reason: null, provider: 'gemini', model: 'gemini-3.8-flash', fallbackUsed: false, failures: [],
@@ -45,7 +27,7 @@ const analysis = (overrides = {}) => ({
 
 (SKIP ? describe.skip : describe)('lawn_assessment_runs (real PostgreSQL)', () => {
   let db;
-  beforeAll(async () => { db = await createRunsDb(); }, 60000);
+  beforeAll(async () => { db = await createLawnVisitDb(); }, 60000);
   afterAll(async () => { if (db) await db.dispose(); });
 
   async function seed() {
@@ -57,7 +39,7 @@ const analysis = (overrides = {}) => ({
   }
 
   test('published migrations run up/down/up inside a transaction and leave no schema after rollback', async () => {
-    const isolated = await createRunsDb(false);
+    const isolated = await createLawnVisitDb(false);
     const rollback = new Error('intentional migration dry-run rollback');
     try {
       await expect(isolated.knex.transaction(async (trx) => {

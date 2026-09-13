@@ -45,7 +45,7 @@ const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { openBalanceInvoices } = require('./open-balance');
 const { dunningStoppedInvoiceIds } = require('./completion-balance-sweep');
-const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('./invoice-helpers');
+const { invoiceAmountDue, isInvoiceCollectibleStatus, invoiceWithdrawnFromCustomer } = require('./invoice-helpers');
 
 // Stripe metadata values cap at 500 chars. The compact `${id}:${cents}`
 // encoding spends ~44 chars per sibling, so 8 siblings stay comfortably
@@ -364,6 +364,13 @@ async function verifyAllocationLocked(trx, allocation, { anchorInvoiceId, expect
     if (stoppedNow.has(String(entry.invoiceId))) throw staleErr(`dunning stopped on invoice ${row.invoice_number}`);
     if (!isInvoiceCollectibleStatus(row.status)) throw staleErr(`invoice ${row.invoice_number} is ${row.status}`);
     if (row.payer_id || row.payer_statement_id) throw staleErr(`invoice ${row.invoice_number} became payer-billed`);
+    // The WITHDRAWAL stamp under the same lock (pre-push P0): a combined-visit
+    // packet invoice whose Bill-To moved after the homeowner held its link
+    // keeps a collectible status and a NULL payer_id, so neither check above
+    // sees it, and the live resolve below reads only this invoice's own
+    // representative service — the payer may sit on another billed member of
+    // the same packet. This is the allocation's last fence before money moves.
+    if (invoiceWithdrawnFromCustomer(row)) throw staleErr(`invoice ${row.invoice_number} was withdrawn to a third-party payer`);
     // LIVE payer re-resolution for EVERY row, anchor included (codex r4 P1;
     // anchor exemption removed per codex r5 P1): a payer assigned after
     // invoice creation lives on scheduled_services (or as the customer's
@@ -504,30 +511,192 @@ async function releaseUnconfirmedCombinedSessionsForScheduledServices(database, 
     .pluck('customer_id')).filter(Boolean).map(String).sort();
   await lockCombinedCustomers(database, customerIds);
   const rows = await database('invoices')
-    .whereIn('scheduled_service_id', ids)
+    // A combined-visit invoice is anchored to ONE billed member's
+    // scheduled_service_id; a Bill-To edit on any OTHER member of that
+    // packet moves the same debt, so every invoice whose packet contains an
+    // edited member is in the scan too (Codex #4311 r27 P1).
+    .where((q) => q.whereIn('scheduled_service_id', ids)
+      .orWhereIn('visit_completion_packet_id', database('visit_completion_packet_items')
+        .whereIn('scheduled_service_id', ids).select('packet_id')))
     .whereNotNull('stripe_payment_intent_id')
     // 'processing' rows stay IN the scan (codex r26 P1): they are exactly
     // the in-flight signal the PI-status check must see and report.
     .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
     .select('id', 'invoice_number', 'stripe_payment_intent_id');
-  return releaseUnconfirmedCombinedSessions(database, rows);
+  return releaseWholeOrNothing(database, [rows]);
+}
+
+/** Plan every side, then cancel only if NOTHING is in flight (Codex #4311
+ * r27 P2, the same rule the merge applies to its two sides): a payer change
+ * that is about to be refused for in-flight money must not already have
+ * cancelled a sibling session — a Stripe cancel is an external effect the
+ * caller's transaction cannot roll back. */
+async function releaseWholeOrNothing(database, rowSets) {
+  const plans = [];
+  let inFlight = 0;
+  for (const rows of rowSets) {
+    const plan = await planStampedSessionRelease(database, rows);
+    inFlight += plan.inFlight;
+    plans.push(plan);
+  }
+  if (inFlight > 0) return { released: 0, inFlight };
+  let released = 0;
+  for (const plan of plans) released += (await applyStampedSessionRelease(database, plan)).released;
+  return { released, inFlight: 0 };
+}
+
+/** The customer-default-payer fence over SEVERAL customers at once — one
+ * verdict for all of them (Codex #4311 r27 P2): a payer reactivation moves
+ * every referencing customer's debt together, and a per-customer loop
+ * cancelled the first customer's confirmable session before a later
+ * customer's in-flight payment refused the change. */
+async function releaseUnconfirmedCombinedSessionsForCustomers(database, customerIds) {
+  const ids = [...new Set((customerIds || []).filter(Boolean).map(String))].sort();
+  if (!ids.length) return { released: 0, inFlight: 0 };
+  const rowSets = [];
+  for (const id of ids) rowSets.push(await lockAndPinStampedSessionsForCustomer(database, id));
+  return releaseWholeOrNothing(database, rowSets);
 }
 
 /** Customer-default-payer variant of the same fence (the customers.payer_id
  * writer creates the identical late-assignment gap). */
-async function releaseUnconfirmedCombinedSessionsForCustomer(database, customerId) {
-  if (!customerId) return { released: 0, inFlight: 0 };
-  // Same setup-serialization lock as the scheduled-service variant.
-  await lockCombinedCustomers(database, [String(customerId)]);
-  const rows = await database('invoices')
+// The stamped combined sessions a customer currently holds — the rows the
+// release below acts on. Read-only, no lock: a merge PREVIEW discloses
+// these (the PaymentIntents the merge would cancel, or defer on when money
+// is in flight) and pins them; the release re-reads under its lock and
+// refuses if the set moved (expectedPaymentIntentIds).
+function stampedCombinedSessionRows(database, customerId) {
+  return database('invoices')
     .where({ customer_id: customerId })
     .whereNotNull('stripe_payment_intent_id')
     // 'processing' rows stay IN the scan (codex r26 P1): filtering them
     // out hid the exact in-flight sessions the merge's defer check exists
     // to detect.
     .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
+    // Ordered by the invoice id, which is unique: one combined PaymentIntent
+    // is stamped onto EVERY invoice in its allocation, so without a
+    // tie-breaker two reads of the same unchanged rows can come back in
+    // different orders — and the merge fingerprints this list (codex #4348
+    // r9 P2: a spurious `preview_changed` on a merge nothing had touched).
+    .orderBy('id')
     .select('id', 'invoice_number', 'stripe_payment_intent_id');
-  return releaseUnconfirmedCombinedSessions(database, rows);
+}
+
+// The ONE per-intent decision the release makes, stated as an outcome so a
+// preview can disclose it verbatim (codex #4348 r5 P1: an invoice stamp
+// carries no combined discriminator — an ordinary single-invoice
+// PaymentIntent sits in stampedCombinedSessionRows too, and the release
+// leaves it untouched; a card that promised to cancel it lied):
+//   'cancel'              combined + unconfirmed → canceled in Stripe, stamps cleared
+//   'stamps_cleared'      already canceled → only the stamp cleanup
+//   'in_flight'           money moving → left alone, reported (the merge defers)
+//   'kept_single_invoice' not a combined intent, and this move leaves it
+//                         valid → the invoice's own checkout, untouched
+//   'cancel_single_invoice' not a combined intent, but the CALLER says this
+//                         move invalidates it → canceled in Stripe, stamps
+//                         cleared (codex #4348 r7 P1: a merge retires the
+//                         loser, and that record's own checkout PI still
+//                         carries metadata.waves_customer_id for it — a
+//                         later save-card success would mirror consent and
+//                         autopay onto the archived customer via
+//                         mirrorSavedMethodForSucceededIntent. A merge that
+//                         transfers a third-party payer invalidates the
+//                         SURVIVOR's self-pay checkouts the same way: the
+//                         homeowner would pay a debt that now belongs to
+//                         the AP payer.)
+//   null                  unverifiable (Stripe unavailable) → the caller fails closed
+//
+// `invalidatedSingleInvoice` defaults to false, so every non-merge caller
+// (the payer-change route, the scheduled-service release, the collection
+// rails) keeps its existing single-PI contract untouched.
+function stampedSessionOutcome(pi, { invalidatedSingleInvoice = false } = {}) {
+  if (!pi) return null;
+  if (!isCombinedPiMetadata(pi.metadata)) {
+    if (!invalidatedSingleInvoice) return 'kept_single_invoice';
+    // An invalidated single-invoice session follows the SAME status rules
+    // as a combined one: never cancel money that is already moving — report
+    // it and let the caller defer.
+    if (pi.status === 'canceled') return 'stamps_cleared';
+    return UNCONFIRMED_PI_STATUSES.includes(pi.status) ? 'cancel_single_invoice' : 'in_flight';
+  }
+  if (pi.status === 'canceled') return 'stamps_cleared';
+  return UNCONFIRMED_PI_STATUSES.includes(pi.status) ? 'cancel' : 'in_flight';
+}
+
+// Preview of what releaseUnconfirmedCombinedSessionsForCustomer would do:
+// every stamped session with its per-intent outcome, decided by the same
+// Stripe read the release makes. Fails closed on an unverifiable intent
+// (no card is better than a card that promises an outcome nobody checked).
+async function listUnconfirmedCombinedSessionsForCustomer(database, customerId, { invalidatedSingleInvoice = false } = {}) {
+  if (!customerId) return [];
+  const rows = await stampedCombinedSessionRows(database, customerId);
+  const StripeService = require('./stripe');
+  // ONE read per distinct intent, fanned out to its invoice rows — the same
+  // shape planStampedSessionRelease uses (codex #4348 r12 P2). A combined PI
+  // is stamped onto every invoice in its allocation, so the per-row loop
+  // both cost nine Stripe reads for one intent and could observe DIFFERENT
+  // statuses across them, stamping conflicting outcomes onto rows of the
+  // same session — and that disagreement would then be fingerprinted.
+  const outcomeByIntent = new Map();
+  for (const piId of new Set(rows.map((r) => String(r.stripe_payment_intent_id)))) {
+    let pi;
+    try {
+      pi = await StripeService.retrievePaymentIntent(piId);
+    } catch (err) {
+      throw new Error(`Could not verify payment session ${piId} for the merge preview (${err.message}) — try again`);
+    }
+    const outcome = stampedSessionOutcome(pi, { invalidatedSingleInvoice });
+    if (!outcome) throw new Error(`Could not verify payment session ${piId} for the merge preview (payment service unavailable) — try again`);
+    outcomeByIntent.set(piId, outcome);
+  }
+  const sessions = rows.map((r) => {
+    const piId = String(r.stripe_payment_intent_id);
+    return { invoice_id: r.id, invoice_number: r.invoice_number || null, payment_intent_id: piId, outcome: outcomeByIntent.get(piId) };
+  });
+  // Sorted by PaymentIntent id, then by the unique invoice id: the same PI
+  // appears once per stamped invoice, so the second key is what makes the
+  // order — and therefore the merge's effects fingerprint — deterministic.
+  return sessions.sort((a, b) => (
+    a.payment_intent_id < b.payment_intent_id ? -1
+      : a.payment_intent_id > b.payment_intent_id ? 1
+        : String(a.invoice_id) < String(b.invoice_id) ? -1
+          : String(a.invoice_id) > String(b.invoice_id) ? 1 : 0));
+}
+
+/**
+ * Take the customer's setup-serialization lock, read its stamped sessions,
+ * and check them against the approved pin — everything the release does
+ * BEFORE it touches Stripe. Split out (codex #4348 r8 P1) for a caller that
+ * must resolve each side while the rows still belong to it: the merge's FK
+ * sweep repoints the loser's invoices onto the winner, and after that the
+ * loser reads as having no sessions while the winner reads the union of
+ * both — so the loser's would never be released and the winner's pin would
+ * refuse a set it should have matched. Such a caller snapshots both sides
+ * here, before the sweep, and releases the returned rows afterwards.
+ */
+async function lockAndPinStampedSessionsForCustomer(database, customerId, { expectedPaymentIntentIds = null } = {}) {
+  if (!customerId) return [];
+  // Same setup-serialization lock as the scheduled-service variant. It is an
+  // xact lock, so it is still held when the caller releases later in the
+  // same transaction.
+  await lockCombinedCustomers(database, [String(customerId)]);
+  const rows = await stampedCombinedSessionRows(database, customerId);
+  if (Array.isArray(expectedPaymentIntentIds)) {
+    const live = [...new Set(rows.map((r) => String(r.stripe_payment_intent_id)))].sort();
+    const expected = [...new Set(expectedPaymentIntentIds.map(String))].sort();
+    if (live.length !== expected.length || live.some((id, i) => id !== expected[i])) {
+      const err = new Error('The customer\'s combined payment sessions changed since this merge was approved — review a fresh proposal');
+      err.previewChanged = true;
+      throw err;
+    }
+  }
+  return rows;
+}
+
+async function releaseUnconfirmedCombinedSessionsForCustomer(database, customerId, { expectedPaymentIntentIds = null, invalidatedSingleInvoice = false } = {}) {
+  if (!customerId) return { released: 0, inFlight: 0 };
+  const rows = await lockAndPinStampedSessionsForCustomer(database, customerId, { expectedPaymentIntentIds });
+  return releaseUnconfirmedCombinedSessions(database, rows, { invalidatedSingleInvoice });
 }
 
 // The pay.combined.customer namespace matches createInvoicePaymentIntent /
@@ -568,12 +737,33 @@ async function lockCombinedCustomerStable(database, invoiceId, snapshotCustomerI
   }
 }
 
-async function releaseUnconfirmedCombinedSessions(database, rows) {
+/**
+ * PHASE 1 of the release: retrieve each DISTINCT stamped PaymentIntent once,
+ * decide its outcome, and check it against the card's pin. Performs NO
+ * Stripe writes, so a caller holding several lists can plan them all and
+ * abort before anything is cancelled (codex #4348 r11 P1 — a cancellation
+ * is an external effect the database transaction cannot roll back).
+ *
+ * One retrieval per intent, not per stamped invoice (codex #4348 r11 P2):
+ * a combined PI is stamped onto every invoice in its allocation, so the
+ * per-row loop re-read the same object up to nine times per pass, and the
+ * final pass runs while the merge locks are held.
+ *
+ * `expectedOutcomes`: { [paymentIntentId]: outcome } approved on the card.
+ * The id pin (lockAndPinStampedSessionsForCustomer) only proves the SAME
+ * intents are still stamped; it says nothing about what they will do. A
+ * customer confirming a checkout directly with Stripe between the locked
+ * fingerprint check and this release flips `cancel` → `in_flight`, so the
+ * approval would have promised a cancellation that never happens. Any
+ * intent whose outcome no longer matches its pin refuses with
+ * `previewChanged` (codex #4348 r10 P1).
+ */
+async function planStampedSessionRelease(database, rows, { invalidatedSingleInvoice = false, expectedOutcomes = null } = {}) {
   const piIds = [...new Set(rows.map((r) => String(r.stripe_payment_intent_id)))];
-  let released = 0;
+  const StripeService = require('./stripe');
+  const intents = [];
   let inFlight = 0;
   for (const piId of piIds) {
-    const StripeService = require('./stripe');
     let pi;
     try {
       pi = await StripeService.retrievePaymentIntent(piId);
@@ -587,13 +777,11 @@ async function releaseUnconfirmedCombinedSessions(database, rows) {
     if (!pi) {
       throw new Error(`Could not verify payment session ${piId} before the payer change (payment service unavailable) — try again`);
     }
-    if (!isCombinedPiMetadata(pi.metadata)) continue;
-    // Already canceled (codex r24 P2): a prior release's cancel succeeded
-    // but the stamp cleanup failed — retry the cleanup instead of skipping.
-    if (pi.status === 'canceled') {
-      await clearPaymentIntentStamps(database, piId);
-      released += 1;
-      continue;
+    const outcome = stampedSessionOutcome(pi, { invalidatedSingleInvoice });
+    if (expectedOutcomes && Object.prototype.hasOwnProperty.call(expectedOutcomes, piId) && expectedOutcomes[piId] !== outcome) {
+      const err = new Error(`Payment session ${piId} changed since this was approved (the card said ${expectedOutcomes[piId]}, it is now ${outcome}) — review a fresh proposal`);
+      err.previewChanged = true;
+      throw err;
     }
     // NO microdeposit exemption here (codex r10 P1, unlike stop-dunning):
     // a pending bank verification is still an UNCAPTURED session, and the
@@ -603,12 +791,34 @@ async function releaseUnconfirmedCombinedSessions(database, rows) {
     // actually moving (processing/succeeded) is left to the settle-path
     // ownership guards — reported to the caller (codex r24 P1: a merge
     // must DEFER on a loser-side in-flight session, not proceed past it).
-    const unconfirmed = ['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(pi.status);
-    if (!unconfirmed) {
+    if (outcome === 'in_flight') {
       logger.warn(`[pay-combined] payer change: combined PI ${piId} is ${pi.status} — money may be in flight, not touched`);
       inFlight += 1;
+    }
+    intents.push({ piId, outcome, status: pi.status });
+  }
+  return { intents, inFlight };
+}
+
+/**
+ * PHASE 2: the Stripe writes and stamp cleanup for an already-planned
+ * release. Never re-reads Stripe — the plan decided every outcome.
+ */
+async function applyStampedSessionRelease(database, plan) {
+  const StripeService = require('./stripe');
+  let released = 0;
+  for (const { piId, outcome } of plan.intents) {
+    if (outcome === 'kept_single_invoice' || outcome === 'in_flight') continue;
+    // Already canceled (codex r24 P2): a prior release's cancel succeeded
+    // but the stamp cleanup failed — retry the cleanup instead of skipping.
+    if (outcome === 'stamps_cleared') {
+      await clearPaymentIntentStamps(database, piId);
+      released += 1;
       continue;
     }
+    // Remaining outcomes cancel: 'cancel' (a combined session) and
+    // 'cancel_single_invoice' (a single-invoice checkout this move
+    // invalidates) — same write, same fail-closed error.
     try {
       await StripeService.cancelPaymentIntent(piId);
     } catch (err) {
@@ -616,9 +826,14 @@ async function releaseUnconfirmedCombinedSessions(database, rows) {
     }
     await clearPaymentIntentStamps(database, piId);
     released += 1;
-    logger.info(`[pay-combined] payer change released unconfirmed combined PI ${piId} and cleared its stamps`);
   }
-  return { released, inFlight };
+  return { released, inFlight: plan.inFlight };
+}
+
+/** Plan + apply in one step — the contract every existing caller had. */
+async function releaseUnconfirmedCombinedSessions(database, rows, { invalidatedSingleInvoice = false, expectedOutcomes = null } = {}) {
+  const plan = await planStampedSessionRelease(database, rows, { invalidatedSingleInvoice, expectedOutcomes });
+  return applyStampedSessionRelease(database, plan);
 }
 
 /**
@@ -1156,7 +1371,14 @@ module.exports = {
   lockCombinedCustomers,
   lockCombinedCustomerStable,
   releaseUnconfirmedCombinedSessionsForScheduledServices,
+  releaseUnconfirmedCombinedSessionsForCustomers,
   releaseUnconfirmedCombinedSessionsForCustomer,
+  lockAndPinStampedSessionsForCustomer,
+  releaseUnconfirmedCombinedSessions,
+  planStampedSessionRelease,
+  applyStampedSessionRelease,
+  listUnconfirmedCombinedSessionsForCustomer,
+  stampedSessionOutcome,
   releaseCombinedSessionBeforeCollection,
   revokeOutstandingCombinedSessionsOnGateOff,
   settleCombinedPaymentIntent,

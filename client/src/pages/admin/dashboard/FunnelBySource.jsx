@@ -1,8 +1,9 @@
-import { cn } from "../../../components/ui";
+import { Badge, cn, UiSurface } from "../../../components/ui";
 import { EmptyState, fmtInt } from "../../../components/dashboard/charts";
 import Verdict from "./Verdict";
 import FormulaNote from "./FormulaNote";
 import { leadFunnelVerdict } from "./scorecard-metrics";
+import SampleBadge from "./SampleBadge";
 
 // Lead funnel by source (/admin/dashboard/lead-funnel) — small-multiples for
 // the top sources: how far each channel's leads actually get. Counts and
@@ -35,14 +36,14 @@ function StageBars({ s, stages }) {
         const pct = s.leads > 0 ? Math.round((count / s.leads) * 100) : 0;
         return (
           <div key={st.key} className="flex items-center gap-2">
-            <span className="w-16 shrink-0 text-11 text-ink-tertiary">{st.label}</span>
+            <span className="w-20 shrink-0 text-ui-caption text-ink-secondary">{st.label}</span>
             <div className="flex-1 h-2 bg-surface-sunken rounded-sm overflow-hidden">
               <div
                 className="h-full rounded-sm"
                 style={{ width: `${Math.min(100, pct)}%`, background: st.key === "completed" ? "#10B981" : "#18181B" }}
               />
             </div>
-            <span className="w-16 shrink-0 text-right u-nums text-11 text-ink-secondary">
+            <span className="w-20 shrink-0 text-right u-nums text-ui-caption text-ink-secondary">
               {fmtInt(count)} · {pct}%
             </span>
           </div>
@@ -64,16 +65,16 @@ export default function FunnelBySource({ data, loading, error }) {
   const stages = visibleStages(data.stagesPresent);
 
   return (
-    <div>
+    <UiSurface>
       {/* Topline: everything in-window, with the paid/organic split visible */}
       <div className="flex items-baseline justify-between gap-3 mb-3">
         <div>
           <span className="u-nums text-22 font-medium tracking-tight">{fmtInt(t.leads || 0)}</span>
-          <span className="text-12 text-ink-secondary ml-1.5">
+          <span className="ml-1.5 text-ui-caption text-ink-secondary">
             leads → {fmtInt(t.completed || 0)} won ({t.completeRate ?? 0}%)
           </span>
         </div>
-        <span className="text-11 text-ink-tertiary whitespace-nowrap">
+        <span className="whitespace-nowrap text-ui-caption text-ink-secondary">
           paid {fmtInt(data.paid?.leads || 0)} · organic {fmtInt(data.organic?.leads || 0)}
         </span>
       </div>
@@ -88,20 +89,16 @@ export default function FunnelBySource({ data, loading, error }) {
                     attribution keys, and the Leads page filters by exact
                     lead_sources.name — the labels don't match, so a drill
                     would land on an empty list. */}
-                <span className="text-13 text-ink-primary font-medium truncate">
+                <span className="truncate text-ui-body font-medium text-ink-primary">
                   {s.source}
                 </span>
                 {s.isPaid && (
-                  <span className="inline-block px-1.5 py-0.5 text-[10px] uppercase tracking-label rounded-xs bg-zinc-900 text-white shrink-0">
-                    paid
-                  </span>
+                  <Badge tone="strong">paid</Badge>
                 )}
                 {lowN && (
-                  <span className="inline-block text-11 px-1.5 py-0.5 rounded-sm border border-amber-300 bg-amber-50 text-amber-700 whitespace-nowrap shrink-0">
-                    Low sample · n={fmtInt(s.leads)}
-                  </span>
+                  <SampleBadge n={s.leads} />
                 )}
-                <span className="ml-auto u-nums text-11 text-ink-tertiary whitespace-nowrap">
+                <span className="ml-auto whitespace-nowrap u-nums text-ui-caption text-ink-secondary">
                   {fmtInt(s.leads)} lead{s.leads === 1 ? "" : "s"}
                   {s.lost > 0 && <span className="ml-1.5">· {fmtInt(s.lost)} lost</span>}
                 </span>
@@ -112,7 +109,7 @@ export default function FunnelBySource({ data, loading, error }) {
         })}
       </div>
       {rest > 0 && (
-        <div className="mt-2 text-11 text-ink-tertiary">
+        <div className="mt-2 text-ui-caption text-ink-secondary">
           +{rest} smaller source{rest === 1 ? "" : "s"} not shown — every source still counts in the totals above.
         </div>
       )}
@@ -129,6 +126,6 @@ export default function FunnelBySource({ data, loading, error }) {
         count only as leads + lost. Call↔lead linkage is call-SID based.
         Shaping: server/services/lead-funnel.js.
       </FormulaNote>
-    </div>
+    </UiSurface>
   );
 }

@@ -41,7 +41,12 @@ describe('callback cards', () => {
       const onSummary = vi.fn();
       render(<FollowThroughCards ui={ui} pollMs={600000} onSummary={onSummary} />);
       await screen.findByText('1 snoozed callback');
-      await waitFor(() => expect(onSummary).toHaveBeenLastCalledWith({ enabled: true, open: 1, overdue: 0, hasMore: false }));
+      // vi.waitFor, not RTL's waitFor: with setInterval faked, RTL's poller
+      // never ticks and only DOM mutations re-run the check — the summary
+      // callback mutates nothing, so on a loaded machine the assertion timed
+      // out on the mount-time summary (CI flake). vi.waitFor advances the
+      // fake clock per check instead.
+      await vi.waitFor(() => expect(onSummary).toHaveBeenLastCalledWith({ enabled: true, open: 1, overdue: 0, hasMore: false }));
       expect(screen.getByText(/^Due /)).toBeInTheDocument();
       vi.setSystemTime(Date.now() + 61000);
       act(() => { vi.advanceTimersByTime(60000); });

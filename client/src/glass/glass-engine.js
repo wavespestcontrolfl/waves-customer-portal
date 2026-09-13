@@ -85,8 +85,13 @@ export function applyGlassScene() {
 
 /**
  * Cursor-follow specular + pointer/scroll parallax on the scene orbs.
- * No-ops (and returns a no-op cleanup) when there are no orbs (reduced
- * motion mounts none). The specular vars live on <html> so
+ * No-ops (and returns a no-op cleanup) when there are no orbs. Reduced motion
+ * does NOT mount none — `applyGlassScene` always mounts the five orbs, and
+ * what stops under `reduced` is the movement: no pointer listener at all, so
+ * neither the orb parallax nor the cursor-follow specular runs, and the CSS
+ * drops the transitions alongside. Static orbs are decoration, not motion, and
+ * `prefers-reduced-motion` asks for neither removed (owner ruling C7,
+ * DECISIONS 2026-09-11). The specular vars live on <html> so
  * per-frame pointer motion never feeds a consumer's MutationObserver
  * watching #root; var() resolution inherits from the root, and only the
  * :hover element renders its ::before, so a single global pair positions
@@ -125,7 +130,11 @@ export function attachGlassPointerFx(html, orbs, reduced) {
     });
   };
   const onScroll = () => requestAnimationFrame(parallax);
-  document.addEventListener('pointermove', onMove, { passive: true });
+  // Under reduced motion the pointer listener is never registered. Gating only
+  // `parallax()` left `--mx`/`--my` tracking the cursor, so the specular
+  // highlight went on sliding across every card — motion the user asked not to
+  // see, from the one path that was not checking the flag.
+  if (!reduced) document.addEventListener('pointermove', onMove, { passive: true });
   window.addEventListener('scroll', onScroll, { passive: true });
 
   return () => {

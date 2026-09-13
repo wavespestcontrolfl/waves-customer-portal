@@ -2302,3 +2302,180 @@ Attribution is never invented: a visit's plan stamps the ledger only when a Wave
 ## 2026-09-08 — Record the Tech shared-foundation proof
 
 The accepted Tech migration reuses shared field/action accessibility and explicit touch density with Tech-owned tokens and the Today / Visit / Complete workflow. Recap text and actual rates use explicit, visit-scoped recovery; pending photos remain in memory while their dialog stays open. The Intelligence Bar retains its separate UX scope. Synthetic Chromium/WebKit evidence covers the actual visit, photo and nested marking workflows; physical camera, keyboard and home-screen checks remain required before release. Source and reproduction details are in `docs/design/tech-foundation-acceptance-2026-09-08.md`.
+
+## 2026-09-11 — Nine standards conflicts on the glass surface, ruled
+
+The Liquid Glass consistency audit (#4336, `liquid-glass-consistency-audit-2026-09-09.md` §1.4) found nine places where two written authorities disagreed and the code followed both. The owner ruled all nine on 2026-09-11. Each ruling picks the authority that is newer and glass-specific over the one that is older and general, and the batch below (audit §7 R1) applies them to the sheet and the token modules only — page-level migrations follow in R2–R4.
+
+**C1 — Button case is sentence case on glass.** The design brief says "do not strip UPPERCASE" and calls uppercase CTAs brand identity; DECISIONS 2026-09-04 (batch B) rules sentence case on glass and the customer style guide repeats it. The brief predates both. `BTN_BASE.textTransform` and the `.btn` customer-surface rule in `buttons.css` were the route by which uppercase reached `/book` ("FIND MY BEST TIMES", "CONTINUE") and `TrackPage` ("TEXT ALEX") while every other glass CTA already rendered sentence case. Both now author `none`, and the tertiary variant's opt-out is deleted as dead. Headings that author uppercase (`FORM_HEADER`) are not buttons and are out of scope.
+
+**C2 — CTA ink on gold is #04395E everywhere.** `glass-theme.css` has pinned `#04395E` for `[data-glass-accent]` all along; `email-template.js` shipped `#1B2C5B` under a comment claiming to match the sheet, and the newsletter landing page did the same under a header comment that already called `#04395E` canonical. The glass-scoped navy split (owner 2026-07-12), which kept the marketing navy on the base `.btn` variants and repainted only glass-mounted pages, is retired: it was the mechanism that allowed two navies to live in one token file and an email twin to drift from both.
+
+**C3 — 48 is the document primary, 44 is the floor for everything interactive.** The style guide sets primary 48, gold accent ≥44 and choice chips ≥40; the 09-07 audit and the admin contract treat 44 as the touch floor. The 40px chip minimum is retired, because it was the only interactive surface allowed under the touch floor and it is what forced the `.pill-chip` 44px special case to exist (codex #3983 r3). More importantly the sheet's floors carried `!important`, which beats a page's own inline height: `BrandButton` authored 48 for every variant and rendered 44 on every glass surface (G-03). A floor is not a clamp, so the `!important` is dropped and authored heights win above 44.
+
+**C4 — Metrics take a size role on the existing scale.** The sheet defined a `metric` role with weight and tabular figures but no size, and pages filled the gap with 17, 19, 22, 24, 28, 34, 50 and 64px. The role can now carry the size, in the four steps the type scale already has — 20 (h3), 26 (h2), 32 and 40 (h1's clamp ends) — selected with `data-gt-size="sm|md|lg|xl"`. No new steps are introduced. The base role stays size-neutral on purpose: because every rule in the sheet is `!important`, a default would immediately override callers that have not migrated, and the legacy estimate walker already tags prices `data-gt="metric"` — the fallback one-time price would drop from 34 to 26 and the recurring price would lose its responsive 24–40 clamp. Until a caller opts in, an untagged metric renders exactly as it does today. Migrating the authored sizes is R4.
+
+**C5 — The report CTA-card headline is an h3.** `glass-theme.css` rendered the review-request and cross-sell `h2` at 20px while every other `h2` is 26, and `ReportViewPage` then pulled the same headings to 22px with a second `!important`. The owner ruling of 2026-08-13 that these headlines run one step smaller than section headings still holds; it is now expressed by the element instead of by two stacked size exceptions. The headings become `h3`, which is 20px on the sheet unaided, and both overrides are deleted. Rendered size moves 22 → 20; centering and margins are unchanged.
+
+**C6 — Document column 760, flow column 640.** `theme-doc.js` already exports exactly these as `DOC_COLUMN_MAX` and `FLOW_COLUMN_MAX`. `index.css` carried a 1080 one-off on `.waves-contract-page` and `.waves-customer-page` and a 520 one-off on `.waves-rate-page`. Both are retired. Neither 1080 was reaching a render: `ContractSignPage` already authors the inline 760 `DOC_COLUMN` on the same element, and `.waves-customer-page`'s only consumer also carries `.waves-receipt-page`, which sets 760 later in the file. `.waves-onboarding-page` is a multi-step flow with its own step grid, not a document, and keeps its width for the R2 layout-primitive pass rather than being narrowed blind.
+
+**C7 — Reduced motion keeps the orbs.** `glass-engine.js` claimed reduced motion "mounts none" of the orbs, while `applyGlassScene` always mounts five. Static orbs are decoration, not motion, so nothing in `prefers-reduced-motion` is violated and they stay; the comment is corrected to describe what actually happens. Checking the claim did expose one real gap: only `parallax()` tested the reduced flag, so the pointer listener stayed registered and the cursor-follow specular went on sliding across every card under reduced motion. The listener is no longer registered at all in that mode, which is what the comment always promised.
+
+**C8 — The brand gate scans repo-wide.** The stated policy is repo-wide ("nothing under 14px on a glass surface"), while `scripts/check-portal-brand.js` lists seven directories, so `SecurePlanChoice` ships 13px and the 09-07 audit's `NotificationBell` / `InstallPrompt` / `NewsletterSignup` sizes are invisible to the gate. **This ruling is not applied in this batch.** A repo-wide scan of `client/src` reports 355 violations across 59 files — mostly `components/schedule` and the ~35 legacy `components/estimate` items the current exclusion comment already describes — so extending `SCAN_DIRS` here would turn the gate red on main. It ships as its own PR that replaces the coarse directory allowlist with an enumerated, shrinking file baseline, so new files are covered by default and the remaining debt is countable rather than invisible.
+
+**C9 — No serif inside the newsletter archive iframe.** The sheet forces the system stack on every glass element, but `NewsletterArchivePage` renders operator HTML in a sandboxed iframe the sheet cannot reach, and authored `FONTS.serif` headings inside it — the only serif on any glass surface. The iframe document now uses the body stack. The page's own `FONTS.serif` declarations outside the iframe are already overridden by the sheet and are left for the R3 component pass.
+## 2026-09-11 — C8 applied: the brand gate scans repo-wide behind a shrinking baseline
+
+Ruling C8 above is now in force. `scripts/check-portal-brand.js` scans all of `client/src` instead of seven named directories, so a new customer file is covered the moment it is written rather than when someone remembers to widen a list — which is how `SecurePlanChoice` shipped 13px on `/secure` and how the 09-07 audit's own `NotificationBell`, `InstallPrompt` and `NewsletterSignup` findings stayed invisible to CI.
+
+Widening the scan raw reports 355 violations across 59 files, which would simply have turned the gate red. Three things separate real debt from noise.
+
+**Not customer surfaces, excluded by name.** `components/schedule` (imported only by `pages/admin/*` — the Dispatch calendar, its mobile sheets, the scheduling modals), `components/dashboard`, `components/staffDocuments` and `client/src/dev-preview` are the admin, staff and developer-QA surfaces, which run the D palette and DM Sans under the admin brief and were never subject to the customer rules. `theme-brand.js` is **not** excluded: it exports tokens that reach customer controls, so a wholesale exclusion would hide exactly the regressions the gate exists to catch. Only the `local-palette` rule is waived there, because that file is the palette everything else is told to import.
+
+**Scope, not just directories.** Widening `SCAN_DIRS` alone did not make the gate repo-wide: the walker took only JS and TSX, so `buttons.css` — imported globally by `index.css` — carried `font-weight: 800` and a 13px `.btn-nav` straight past it, and the inline-style rules could not see Tailwind utilities, so the public service-outline page's `text-xs` labels were invisible too. Stylesheets are now scanned with the kebab-case rules that already existed for embedded `<style>` templates, and `text-xs` / `text-[Npx]` are matched as class tokens. That brings the real debt to 90 violations across 27 files — the batch R1 fixes on the same day cleared ten of them on their own, and the ratchet caught that and forced the two allowances down.
+
+**The debt is enumerated, not hidden.** `LEGACY_BASELINE` records what each file may carry, **per rule** rather than as one total. A single total would let a change swap one violation for another of a different kind and stay green — clear an undersized label in `NotificationBell`, add an 800-weight control, count unchanged, nothing fires. Per-rule counts make that a weight regression. A same-rule swap inside an already-dirty file still passes; that file is scheduled for cleanup and its count cannot grow.
+
+The gate fails in both directions. Over the allowance is a regression, so a file with debt cannot accumulate more and a file with none has zero tolerance. Under it fails too: an allowance left above what the file actually carries is headroom for cleaned-up violations to return silently, so the numbers follow the code down and the line goes once the file is clean. That is what makes the list a ratchet rather than a permanent exemption list. Raising a number to go green is explicitly called out in the failure text as the wrong move. The debt is R3 and R4 work in the audit: the legacy `estimate/*` cluster, the 09-07 findings, App Store and Google Play badge artwork reproduced as inline SVG at 7.5px, and emoji the `Icon` sweep has not reached.
+
+`SecurePlanChoice`'s two 13px values — the violation the ruling names — are fixed to 14 rather than baselined. Two emoji the scanner found in doc comments rather than rendered JSX were removed from the prose.
+
+## 2026-09-11 — R2a: one customer page column (CustomerColumn)
+
+The Liquid Glass audit's G-01 (`liquid-glass-consistency-audit-2026-09-09.md` §3) found five different phone gutters (10/12/16/20/24) and several desktop column widths across the customer glass pages, because no page-column primitive existed — every page hand-authored its own wrapper, and `index.css` carried five near-duplicate classes (`.waves-customer-page`, `.waves-receipt-page`, `.waves-estimate-page`, `.waves-rate-page`, `.waves-contract-page`) on top of that. `components/brand/CustomerColumn.jsx` is now the one primitive: `boxSizing: 'border-box'`, `width: '100%'`, `margin: '0 auto'`, `padding: '28px 16px 56px'` (`PAGE_TOP` / `PAGE_GUTTER` / `PAGE_BOTTOM`, new named tokens in `theme-doc.js`), `flex: 1` (page roots use `flex: 1`, DECISIONS 2026-09-04, so the shell footer follows the content), and `maxWidth` from `column`: `"document"` (default) → `DOC_COLUMN_MAX` (760) of CONTENT, `"flow"` → `FLOW_COLUMN_MAX` (640) of content. The named widths are content widths — the audit measured card edges — so the border-box outer cap is content + both gutters (792 / 672); a 760 outer cap would have rendered 728 of content past 792px viewports, a 32px narrowing of every desktop document that the first cut of this primitive actually had. None of this is a new choice — 760/28/56 is `DOC_PAGE_MARGIN` and 640 is `FLOW_COLUMN_MAX`, both already exported by `theme-doc.js` per the PR #2527 ruling ("pay's cap is the standard"); the fix is giving every page ONE way to reach them instead of eleven-plus. `DOC_COLUMN` (theme-doc's `min(100% - 32px, 760px)` width string) stays exported for its one non-`<CustomerColumn>` consumer (the tokens dev-preview) but no longer backs any page wrapper; the parallel `FLOW_COLUMN` string had no consumer and was not kept — flow pages reach 640 only through `<CustomerColumn column="flow">`.
+
+**Migrated** (all now render `<CustomerColumn>`, dropping their own width/margin/padding recipe): document column — `ContractSignPage` (all three states), `LawnReportViewPage`, `PestReportViewPage`, `EstimateViewPage`, `ProjectReportViewPage`, `ReportViewPage` (both the legacy-PDF branch and the live `ServiceReportV1` — `.sr-shell`'s recipe moved to the primitive, its print-only zero-padding override kept as `!important` since it must beat the primitive's inline style), `PrepGuidePage`, `PriceChangeNoticePage`, `ReceiptPage` (kept `waves-print-root`, a print-only class glass-theme.css also targets for card styling; that selector now reads `.waves-print-root` instead of the retired `.waves-receipt-page` — `PayPageV2` carries `waves-print-root` too, because its inactive payment-method icon tile is a `[data-glass-clear]` descendant that matched through `.waves-receipt-page` before; `StatementPayPage` has no such descendant and carries nothing), `StatementPayPage`, `PayPageV2`, `NewsletterArchivePage` (its three stacked content wrappers folded into one `CustomerColumn`; the sticky issue-strip header stays separate — it's chrome, not the content column). Flow column — `AppointmentPage`, `TrackPage`, `ScheduleFlowPage` (both `/reschedule` and `/reservice`), `SecureAppointmentPage`.
+
+**Excluded, both by the audit's own terms**: `PortalPage`'s app-shell 10px gutter (an open owner decision, not this batch's call) and `.waves-onboarding-page` (a multi-step flow with its own grid, not a document — deferred to R4, C6 already ruled this).
+
+**Checked and left alone, not "eleven wrappers":** `RatePage` and `CardPage` render a centered, bounded card widget (their own background/border/logo header), not a full-width content column — forcing the primitive on either would restyle the card, not just consolidate a recipe. `LoginPage` is a vertically-centered two-column marketing hero, not a top-anchored content flow. `ServiceOutlinePage` already renders at 760/16px (Tailwind `max-w-[760px]` + `px-4`) across five independently full-bleed-banded sections — no drift to fix, and collapsing the bands into one column would change its alternating-background design. `ReviewPage` is dead code (unrouted since the RatePage consolidation, per the comment at `App.jsx:178`) — left as found per house rule against deleting files outside the assigned task.
+
+**Deleted from `index.css`**: `.waves-customer-page`, `.waves-receipt-page`, `.waves-estimate-page`, `.waves-rate-page`, `.waves-contract-page`, and their entries in the ≤820px responsive block (which had been giving these pages a *sixth* gutter, 24px, on top of the five G-01 measured — the new primitive needs no viewport override, matching "16px at every width"). `.waves-contract-single` / `.waves-billing-grid` / `.waves-pay-payment-panel` / `.waves-customer-help` and everything else in that block are unrelated and kept.
+
+## 2026-09-11 — R3b: weights above 700 cleared from the baseline
+
+G-04 found weights above 700 surviving on glass through shared tokens the gate
+could not see. C8 widened the gate and enumerated what it exposed; this clears
+the whole `heavy-weight` rule from `LEGACY_BASELINE` — fifteen violations across
+eight files, all snapped to 700 (the customer scale is 400 / 500 / 600 / 700,
+owner sheet 2026-09-03).
+
+`App.jsx` carried seven at **850** — every customer error-boundary heading and
+its retry button, plus "Loading your portal". `NotificationBell` spelled its two
+as `fontWeight: type === 'admin' ? 700 : 800`: the ternary existed only to give
+the customer surface the heavier weight, so with both arms at 700 it is a
+distinction without a difference and the ternary is gone. The rest were single
+literals in `GlassNewsletterCard`, `InstallPrompt`, `NewsletterSignup`,
+`StationMapCard`, `VanScene` and one `font-weight: 800` in `index.css`.
+
+`InstallPrompt` and `VanScene` were weight-only and are **delisted** — the gate
+fails on a stale entry, so a file that reaches zero has to lose its line.
+
+**Debt: 90 → 75 across 25 files.** Everything left is `banned-font-size`, `emoji`,
+`font-family-literal` or `local-palette`. No behaviour changes; 96 tests across
+the seven suites that render these components pass unchanged.
+
+## 2026-09-11 — R2b: one terminal-state card (PublicStateCard)
+
+G-02 measured the not-found / expired / error card as a different component on
+every page family: card padding 20 / 24 / 32 at 390, gutter 20 vs 16, the heading
+an `h1` on two pages, a styled `div` on five and absent on four (G-07's
+`h1Count = 0`), and a CTA set running from nothing at all, through "Try again" at
+three different heights, to a two-button Text+Call row. `PublicLoadError` covered
+the load-error branch on eight of fifteen token pages; every page hand-rolled its
+own not-found, and four flow pages hand-rolled both.
+
+`components/brand/PublicStateCard.jsx` is the one card. `state` is
+`"not-found" | "expired" | "error"`. It fixes three things BY CONSTRUCTION so a
+page cannot drift again: the card grammar comes from `BrandCard` (whose padding
+is already the single responsive `clamp(20px, 4vw, 32px)` — this file authors
+none of its own, and exposes no padding or width knob); the title is always an
+`h1` with no authored font-size, because the sheet's `h1` rule is `!important` on
+glass and an authored size would be dead style; and the contact actions are built
+from `constants/business.js`, never a retyped number.
+
+**One primary per card** (style guide §2). When the state is recoverable the
+retry owns the 48 tier and contact drops to the 44 chip; when it is not, the Call
+action is the primary and "Text Waves" the chip. The two-gold `ContactRow` that
+`/secure` and `/reschedule` each authored is what that resolves. The first cut
+gated that promotion on the two-button mode, so every `contact="call"` page —
+both report pages, the project report's not-found, the service outline's
+expired — rendered its ONLY action as the 44 chip: a regression from the solid
+buttons they had, and a contradiction of the invariant in the same file. The
+promotion depends on there being no retry, not on which contact mode is in play.
+
+**`PublicLoadError` is now a preset, not a ninth recipe** — `state="error"` plus
+the resource noun, with the copy every caller already got. Nine call sites are
+unchanged. A page with a hand-rolled terminal branch uses `PublicStateCard`
+directly; `PublicLoadError` stays for the load-error branch, where the resource
+noun is the only thing that varies.
+
+**Migrated:** `ScheduleFlowPage` (both `/reschedule` and `/reservice`), `TrackPage`,
+`AppointmentPage` (not-found + load-error), `SecureAppointmentPage`, `ReceiptPage`,
+`ContractSignPage`, `StatementPayPage`, `ReportViewPage`, `ProjectReportViewPage`,
+`LawnReportViewPage`, `PestReportViewPage`, `PriceChangeNoticePage`, `PrepGuidePage`,
+`ServiceOutlinePage`, `CardPage`, `NewsletterArchivePage`, `PayPageV2`.
+
+`NewsletterArchivePage` is the one whose terminal action is not a phone number —
+it points back at the newsletter index — so it takes `contact="none"` and keeps
+that link as the card's content. It was missed by the first pass of this PR
+because it reached the card through `PublicLoadError` for its error branch while
+hand-rolling its not-found, which is precisely the split G-02 describes.
+
+### What this did NOT decide
+
+**The wording.** Four live phrasings for the same condition survive verbatim
+("We couldn't find that X" / "This X isn't available" / "X not found" / "This X
+link has expired"). Which one Waves says is a content decision for the owner, not
+a refactor; the card makes them structurally identical without rewriting them.
+
+**The three no-CTA 404s** (estimate, pay, track) keep `contact="none"`. On those
+pages — and on receipt, contract and statement — the phone number lives *inside a
+sentence*, so replacing it with the button pair means rewriting that sentence.
+Same reason. Where the affordance was already a standalone button, unifying it
+was structural and was done: `ReportViewPage`'s lone "Call Waves" became the
+standard pair.
+
+**`EstimateViewPage` keeps its own card on purpose.** It doubles as the
+estimate-extension request flow and flips to a success headline ("You're all
+set"), so `role="alert"` would be wrong on it. It takes the `h1` G-07 asks for
+and nothing else — the heading element was the finding there, not the card.
+
+### Two things that fell out of the migration
+
+`SecureAppointmentPage`'s `unavailable` state — set whenever the payload fetch
+throws, on both the initial load and `refresh()` — **had no render branch at
+all**. It fell through every `if` to the ready render and showed the
+card-capture form for an appointment that never loaded (`data` is null there;
+only the visit summary was guarded). It now renders the error card with a retry.
+
+`ProjectReportViewPage`'s not-found lost its `<Icon name="document">` glyph: no
+other terminal card has one, and a slot for a single caller is exactly the
+speculative config rule 16 forbids. `TrackPage`'s empty 32px decorative `div`
+went the same way.
+
+### The evidence run caught a regression this PR had shipped
+
+`qa:glass` runs `r2b` / `r2b-fix` (six error scenarios x two states x two
+widths, 32 captures, 0 failed) reported `estimate-404 / load-error` at
+**`h1:2`**: that branch renders `<Header/>`, which carries an `h1`, alongside
+the card, which now carries one too. `PublicLoadError` rendered a `div` before
+this PR, so promoting it is what created the duplicate. The header was blank
+there anyway and is gone.
+
+After the fix, every terminal state at both widths: `h1:1`, no text under 14px,
+no weight over 700, no horizontal overflow. Card geometry, measured: at 390 all
+twelve cards are `x:16 w:358` — a 16px gutter on both sides; at 1440 eleven are
+`x:440 w:560`, the twelfth being the EstimateViewPage card in the 760 document
+column. G-02 measured padding 20 / 24 / 32 and gutters 20 vs 16 across these
+same pages.
+
+### Testing
+
+Six suites replace-mock `../components/brand` wholesale, so a new export is
+invisible to them. Rather than hand-stub the card — duplicating its action logic
+in six places — the mocks now spread `importOriginal()`, so `PublicStateCard` and
+`BrandCard` render for real (both are leaf presentational components) and only
+the heavier primitives stay stubbed. `PublicStateCard.test.jsx` asserts the
+invariants, not the pixels: an `h1` on every state, no authored font-size, one
+primary, actions from the shared constants, no width or padding knob.

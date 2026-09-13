@@ -36,7 +36,7 @@ jest.mock('../services/messaging/audit', () => ({
   persistAudit: jest.fn(async () => ({ id: 'audit-1' })),
 }));
 jest.mock('../services/messaging/providers/twilio-sms', () => ({
-  sendViaTwilio: jest.fn(async () => ({ sent: true, providerMessageId: 'SM-real' })),
+  sendViaTwilio: jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-real' })),
 }));
 
 const { randomUUID } = require('node:crypto');
@@ -74,7 +74,7 @@ postgres('receipt SMS delivery evidence on PostgreSQL', () => {
     }
     await migration.up(mockPg);
     loadContactState.mockResolvedValue({ customer: { id: customerId, phone: '+19415550100' }, prefs: {} });
-    sendViaTwilio.mockResolvedValue({ sent: true, provider: 'twilio', providerMessageId: sid, sentAt });
+    sendViaTwilio.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', provider: 'twilio', providerMessageId: sid, sentAt });
   });
   afterEach(async () => { await mockPg?.rollback(); });
   afterAll(async () => { await database?.destroy(); });
@@ -146,7 +146,7 @@ postgres('receipt SMS delivery evidence on PostgreSQL', () => {
     await sendCustomerMessage(input);
     expect(await receiptStamp(row.id)).toEqual(new Date(sentAt));
     expect((await buildReceiptLink([customerId])).url).toContain(`/receipt/${row.token}`);
-    sendViaTwilio.mockResolvedValueOnce({ sent: true, provider: 'twilio', providerMessageId: sid, sentAt: '2026-08-31T15:00:00Z' });
+    sendViaTwilio.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted', provider: 'twilio', providerMessageId: sid, sentAt: '2026-08-31T15:00:00Z' });
     await sendCustomerMessage(input);
     expect(await receiptStamp(row.id)).toEqual(new Date(sentAt));
   });

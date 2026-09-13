@@ -13,8 +13,8 @@ import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../components/admin/AdminCommandHeader", () => ({
-  default: ({ sections = [], activeKey, onSectionChange, action, headingLevel, sticky }) => (
-    <div data-heading-level={headingLevel} data-sticky={String(sticky)}>
+  default: ({ sections = [], activeKey, onSectionChange, action, headingLevel, sticky, variant }) => (
+    <div data-heading-level={headingLevel} data-sticky={String(sticky)} data-variant={variant}>
       {sections.map(({ key, label }) => (
         <button
           key={key}
@@ -93,11 +93,208 @@ describe("KnowledgePage embedded navigation", () => {
 
     expect(screen.getByRole("button", { name: "Sources" }))
       .toHaveAttribute("aria-current", "page");
-    fireEvent.click(screen.getByRole("button", { name: "Recent Queries" }));
+    fireEvent.click(screen.getByRole("button", { name: "Recent queries" }));
 
     expect(screen.getByTestId("location-search")).toHaveTextContent(
       "?source=bookmark&wikiTab=queries",
     );
+  });
+
+  it("loads the workspace directory, preserves filters, and opens from a native button", async () => {
+    const firstLoad = deferred();
+    fetch.mockImplementation((url) => {
+      if (url.endsWith("/article/a-1")) {
+        return Promise.resolve(response({
+          article: {
+            id: "a-1",
+            title: "Termite protocol",
+            path: "protocols/termite.md",
+            version: 2,
+            word_count: 321,
+            content: "Inspect first.",
+          },
+        }));
+      }
+      return firstLoad.promise;
+    });
+    localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
+    renderWiki("/admin/knowledge");
+
+    expect(screen.getByText("Loading articles\u2026")).toBeInTheDocument();
+    expect(document.querySelector('[data-ui-density="comfortable"]')).toBeInTheDocument();
+    expect(document.querySelector("[data-variant]")).toHaveAttribute(
+      "data-variant",
+      "workspace",
+    );
+
+    firstLoad.resolve(response({
+      articles: [{
+        id: "a-1",
+        title: "Termite protocol",
+        path: "protocols/termite.md",
+        word_count: 321,
+        tags: '["termite"]',
+      }],
+      categoryCounts: { protocols: 1 },
+    }));
+    const category = await screen.findByRole("button", {
+      name: "Filter by protocols category, 1 articles",
+    });
+    fireEvent.click(category);
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search articles" }), {
+      target: { value: "annual rate" },
+    });
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith(
+      "/api/admin/knowledge?search=annual%20rate&category=protocols&",
+      expect.any(Object),
+    ));
+
+    const articleButton = screen.getByRole("button", {
+      name: "Open article: Termite protocol",
+    });
+    // A native button, so the card is reachable and operable from the keyboard.
+    expect(articleButton.tagName).toBe("BUTTON");
+    articleButton.focus();
+    expect(articleButton).toHaveFocus();
+    articleButton.click();
+    expect(await screen.findByText("Inspect first.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "All articles" })).toBeInTheDocument();
+  });
+
+  it("retries an article-directory read error", async () => {
+    fetch
+      .mockResolvedValueOnce(response(
+        { error: "Directory unavailable" },
+        { ok: false, status: 503 },
+      ))
+      .mockResolvedValueOnce(response({ articles: [], categoryCounts: {} }));
+    renderWiki("/admin/knowledge?source=bookmark");
+
+    // A swallowed read used to render as an empty wiki rather than a failure.
+    expect(await screen.findByRole("alert")).toHaveTextContent("Directory unavailable");
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("No articles yet")).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("location-search")).toHaveTextContent("source=bookmark");
+  });
+
+  it("retries recent-query reads while preserving tab and query context", async () => {
+    let queryReads = 0;
+    fetch.mockImplementation(async (url) => {
+      if (!url.endsWith("/admin/knowledge/queries")) return response({ articles: [] });
+      queryReads += 1;
+      if (queryReads === 1) {
+        return response({ error: "Queries unavailable" }, { ok: false, status: 503 });
+      }
+      return response({
+        queries: [{
+          id: "query-1",
+          query: "Fixture prior question",
+          answer: "Prior synthetic answer.",
+          asked_by: "Fixture operator",
+          created_at: "2026-09-10T15:00:00Z",
+          response_quality: 4,
+          filed_back: true,
+        }],
+      });
+    });
+    localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
+    renderWiki("/admin/knowledge?source=bookmark&wikiTab=queries");
+
+    expect(document.querySelector('[data-ui-density="comfortable"]')).toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Queries unavailable");
+    expect(screen.getByTestId("location-search")).toHaveTextContent(
+      "?source=bookmark&wikiTab=queries",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Q: Fixture prior question")).toBeInTheDocument();
+    expect(screen.getByText("Fixture operator")).toBeInTheDocument();
+    expect(screen.getByText("4/5")).toBeInTheDocument();
+    expect(screen.getByText("Filed back")).toBeInTheDocument();
+    expect(queryReads).toBe(2);
+
+    fireEvent.click(screen.getByRole("button", { name: "Articles" }));
+    fireEvent.click(screen.getByRole("button", { name: "Recent queries" }));
+    await waitFor(() => expect(queryReads).toBe(3));
+    expect(await screen.findByText("Q: Fixture prior question")).toBeInTheDocument();
+    expect(screen.getByTestId("location-search")).toHaveTextContent(
+      "?source=bookmark&wikiTab=queries",
+    );
+  });
+
+  it("keeps the loading state armed until each recent-query read starts", async () => {
+    localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
+    const pending = deferred();
+    fetch.mockImplementation(async (url) => (
+      url.endsWith("/admin/knowledge/queries") ? pending.promise : response({ articles: [] })
+    ));
+    renderWiki("/admin/knowledge?wikiTab=queries");
+
+    // A deep link must not paint the empty state before the passive effect runs.
+    expect(screen.getByText("Loading recent queries\u2026")).toBeInTheDocument();
+    expect(screen.queryByText(/No queries yet/)).not.toBeInTheDocument();
+
+    pending.resolve(response({ queries: [] }));
+    expect(await screen.findByText(/No queries yet/)).toBeInTheDocument();
+  });
+
+  it("re-arms the loading state instead of showing the previous visit's queries", async () => {
+    localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
+    const second = deferred();
+    let queryReads = 0;
+    fetch.mockImplementation(async (url) => {
+      if (!url.endsWith("/admin/knowledge/queries")) return response({ articles: [] });
+      queryReads += 1;
+      if (queryReads > 1) return second.promise;
+      return response({
+        queries: [{
+          id: "query-1",
+          query: "Fixture prior question",
+          answer: "Prior synthetic answer.",
+          asked_by: "Fixture operator",
+          created_at: "2026-09-10T15:00:00Z",
+        }],
+      });
+    });
+    renderWiki("/admin/knowledge?wikiTab=queries");
+    expect(await screen.findByText("Q: Fixture prior question")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Articles" }));
+    fireEvent.click(screen.getByRole("button", { name: "Recent queries" }));
+    expect(screen.getByText("Loading recent queries\u2026")).toBeInTheDocument();
+    expect(screen.queryByText("Q: Fixture prior question")).not.toBeInTheDocument();
+
+    second.resolve(response({ queries: [] }));
+    expect(await screen.findByText(/No queries yet/)).toBeInTheDocument();
+  });
+
+  it("collapses a recent-query answer to three lines behind an expand control", async () => {
+    localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
+    fetch.mockImplementation(async (url) => (
+      url.endsWith("/admin/knowledge/queries")
+        ? response({
+          queries: [{
+            id: "query-1",
+            query: "Fixture prior question",
+            answer: "Prior synthetic answer.",
+            asked_by: "Fixture operator",
+            created_at: "2026-09-10T15:00:00Z",
+          }],
+        })
+        : response({ articles: [] })
+    ));
+    renderWiki("/admin/knowledge?wikiTab=queries");
+
+    const answer = await screen.findByText("Prior synthetic answer.");
+    expect(answer).toHaveClass("line-clamp-3");
+    const toggle = screen.getByRole("button", { name: "Show full answer" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle).toHaveAttribute("aria-controls", answer.id);
+
+    fireEvent.click(toggle);
+    expect(answer).not.toHaveClass("line-clamp-3");
+    expect(screen.getByRole("button", { name: "Show less" }))
+      .toHaveAttribute("aria-expanded", "true");
   });
 
   it("does not expose the admin-only Health area to non-admin staff", () => {
@@ -114,6 +311,17 @@ describe("KnowledgePage embedded navigation", () => {
     "guards duplicate source %s requests and retries only a failed refresh",
     async (mutation) => {
       const pending = deferred();
+      // Count only this mutation's POSTs. useRenderedTabBeacon also POSTs to
+      // /admin/usage/track on first render of a page+tab, and it dedupes for
+      // the module's lifetime -- so a bare "any POST" filter counts the beacon
+      // when this test runs first and misses it when an earlier test already
+      // armed the same tab, which made the assertion order-dependent.
+      const mutationPath = mutation === "compile"
+        ? "/admin/knowledge/compile"
+        : "/admin/knowledge/sources";
+      const mutationPosts = () => fetch.mock.calls.filter(
+        ([url, options]) => options?.method === "POST" && url.endsWith(mutationPath),
+      );
       let getCount = 0;
       fetch.mockImplementation((url, options) => {
         if (options?.method === "POST") return pending.promise;
@@ -149,16 +357,14 @@ describe("KnowledgePage embedded navigation", () => {
         fireEvent.submit(filename.closest("form"));
       }
 
-      expect(fetch.mock.calls.filter(([, options]) => options?.method === "POST"))
-        .toHaveLength(1);
+      expect(mutationPosts()).toHaveLength(1);
       pending.resolve(response({}));
       expect(await screen.findByRole("alert")).toHaveTextContent(
         "Changes saved, but the source list could not be refreshed.",
       );
       fireEvent.click(screen.getByRole("button", { name: "Try again" }));
       await waitFor(() => expect(getCount).toBe(3));
-      expect(fetch.mock.calls.filter(([, options]) => options?.method === "POST"))
-        .toHaveLength(1);
+      expect(mutationPosts()).toHaveLength(1);
     },
   );
 

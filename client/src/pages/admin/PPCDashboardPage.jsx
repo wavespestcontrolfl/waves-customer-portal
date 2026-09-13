@@ -1,7 +1,17 @@
 import { useState, useEffect, useMemo } from "react";
-
+import {
+  Badge,
+  Button,
+  Card as UiCard,
+  Table,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TR,
+  UiSurface,
+} from "../../components/ui";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
-
 function adminFetch(path) {
   return fetch(`${API_BASE}${path}`, {
     headers: {
@@ -14,32 +24,9 @@ function adminFetch(path) {
 // V2 token pass: non-semantic accents (blue/purple/orange/cyan/gold) fold to
 // zinc-900; semantic green/red/yellow preserved as V2-legal variants.
 // Glows collapsed to zinc-100 pastels.
-const C = {
-  bg: "#FFFFFF",
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  blue: "#18181B",
-  blueGlow: "#F4F4F5",
-  green: "#15803D",
-  greenGlow: "#DCFCE7",
-  red: "#991B1B",
-  redGlow: "#FEE2E2",
-  yellow: "#A16207",
-  yellowGlow: "#FEF3C7",
-  purple: "#18181B",
-  purpleGlow: "#F4F4F5",
-  orange: "#18181B",
-  orangeGlow: "#F4F4F5",
-  cyan: "#18181B",
-  cyanGlow: "#F4F4F5",
-  gold: "#18181B",
-  text: "#27272A",
-  text2: "#71717A",
-  text3: "#71717A",
-  text4: "#52525B",
-  heading: "#09090B",
-  inputBorder: "#D4D4D8",
-};
+const REVENUE_CHART_COLORS = [
+  "#18181B", "#3F3F46", "#71717A", "#A1A1AA", "#D4D4D8",
+];
 
 // --- HELPERS ---
 const fmt = (n, d = 0) =>
@@ -52,9 +39,11 @@ const fmt = (n, d = 0) =>
 const fmtMoney = (n) =>
   n == null
     ? "--"
-    : `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    : `$${n.toLocaleString(undefined, {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      })}`;
 const fmtPct = (n) => (n == null ? "--" : `${Number(n).toFixed(1)}%`);
-
 function MiniSparkline({ data, width = 80, height = 24 }) {
   if (!data || data.length < 2) return null;
   const max = Math.max(...data);
@@ -67,9 +56,9 @@ function MiniSparkline({ data, width = 80, height = 24 }) {
     )
     .join(" ");
   const up = data[data.length - 1] >= data[0];
-  const c = up ? C.green : C.red;
+  const c = up ? "#18181B" : "#991B1B";
   return (
-    <svg width={width} height={height} style={{ display: "block" }}>
+    <svg width={width} height={height} className="block">
       {" "}
       <polyline
         points={pts}
@@ -88,256 +77,161 @@ function MiniSparkline({ data, width = 80, height = 24 }) {
     </svg>
   );
 }
-
-function KPI({ value, label, sub, color = C.blue }) {
+function KPI({ value, label, sub, color = "#18181B", metric }) {
   return (
-    <div
-      style={{
-        background: C.card,
-        border: `1px solid ${C.border}`,
-        borderRadius: 12,
-        padding: "20px 16px",
-        textAlign: "center",
-        position: "relative",
-        overflow: "hidden",
-      }}
-    >
+    <UiCard className="[padding:20px_16px] text-center relative overflow-hidden">
       {" "}
       <div
         style={{
-          position: "absolute",
-          top: 0,
-          left: "50%",
-          transform: "translateX(-50%)",
-          width: 60,
-          height: 3,
           background: color,
-          borderRadius: "0 0 4px 4px",
         }}
+        className="absolute [top:0px] [left:50%] [transform:translateX(-50%)] [width:60px] [height:3px] rounded-xs"
       />{" "}
       <div
+        data-metric={metric}
         style={{
-          fontSize: 28,
-          fontWeight: 700,
           color,
-          letterSpacing: "-0.02em",
-          lineHeight: 1.1,
-          fontFamily: "'Roboto', Arial, sans-serif",
         }}
+        className="text-[28px] font-medium [line-height:1.1]"
       >
         {value}
       </div>{" "}
-      <div
-        style={{
-          fontSize: 11,
-          fontWeight: 500,
-          color: C.text2,
-          textTransform: "uppercase",
-          letterSpacing: "0.08em",
-          marginTop: 6,
-        }}
-      >
+      <div className="text-ui-body font-medium [margin-top:6px] text-ink-secondary">
         {label}
       </div>
       {sub && (
-        <div style={{ fontSize: 11, color: C.text3, marginTop: 2 }}>{sub}</div>
+        <div className="text-ui-body [margin-top:2px] text-ink-secondary">
+          {sub}
+        </div>
       )}
-    </div>
+    </UiCard>
   );
 }
-
-function Card({ children, style = {} }) {
-  return (
-    <div
-      style={{
-        background: C.card,
-        border: `1px solid ${C.border}`,
-        borderRadius: 12,
-        padding: 20,
-        ...style,
-      }}
-    >
-      {children}
-    </div>
-  );
-}
-
 function SectionTitle({ children, right }) {
   return (
-    <div
-      style={{
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "center",
-        marginBottom: 16,
-      }}
-    >
+    <div className="flex justify-between items-center [margin-bottom:16px]">
       {" "}
-      <h3
-        style={{
-          fontSize: 14,
-          fontWeight: 700,
-          color: C.text,
-          textTransform: "uppercase",
-          letterSpacing: "0.06em",
-          margin: 0,
-          fontFamily: "'Roboto', Arial, sans-serif",
-        }}
-      >
+      <h3 className="text-ui-body font-medium [margin:0px] text-zinc-800">
         {children}
       </h3>
       {right}
     </div>
   );
 }
-
 function Pill({ label, active, onClick }) {
   return (
-    <button
-      onClick={onClick}
-      style={{
-        padding: "5px 14px",
-        borderRadius: 20,
-        border: "1px solid",
-        cursor: "pointer",
-        borderColor: active ? C.blue : C.border,
-        background: active ? C.blueGlow : "transparent",
-        color: active ? C.blue : C.text3,
-        fontSize: 12,
-        fontWeight: 500,
-        fontFamily: "'Roboto', Arial, sans-serif",
-        transition: "all 0.15s",
-      }}
-    >
+    <Button onClick={onClick} variant={active ? "primary" : "secondary"}>
       {label}
-    </button>
+    </Button>
   );
 }
-
 function StatusBadge({ status }) {
   const map = {
-    active: { bg: C.greenGlow, color: C.green, label: "Active" },
-    paused: { bg: C.yellowGlow, color: C.yellow, label: "Paused" },
-    winner: { bg: C.greenGlow, color: C.green, label: "Winner" },
-    testing: { bg: C.blueGlow, color: C.blue, label: "Testing" },
-    losing: { bg: C.redGlow, color: C.red, label: "Losing" },
-    keep: { bg: C.greenGlow, color: C.green, label: "Keep" },
-    watch: { bg: C.yellowGlow, color: C.yellow, label: "Watch" },
-    negative: { bg: C.redGlow, color: C.red, label: "Negative" },
+    active: {
+      className: "!bg-green-100 !text-green-700",
+      label: "Active",
+    },
+    paused: {
+      className: "!bg-amber-100 !text-amber-700",
+      label: "Paused",
+    },
+    winner: {
+      className: "!bg-green-100 !text-green-700",
+      label: "Winner",
+    },
+    testing: {
+      className: "!bg-zinc-100 !text-zinc-900",
+      label: "Testing",
+    },
+    losing: {
+      className: "!bg-red-100 !text-red-800",
+      label: "Losing",
+    },
+    keep: {
+      className: "!bg-green-100 !text-green-700",
+      label: "Keep",
+    },
+    watch: {
+      className: "!bg-amber-100 !text-amber-700",
+      label: "Watch",
+    },
+    negative: {
+      className: "!bg-red-100 !text-red-800",
+      label: "Negative",
+    },
   };
-  const s = map[status] || { bg: "#F1F5F9", color: C.text3, label: status };
-  return (
-    <span
-      style={{
-        padding: "3px 10px",
-        borderRadius: 10,
-        fontSize: 11,
-        fontWeight: 700,
-        background: s.bg,
-        color: s.color,
-        whiteSpace: "nowrap",
-      }}
-    >
-      {s.label}
-    </span>
-  );
+  const s = map[status] || {
+    className: "!bg-zinc-100 !text-zinc-700",
+    label: status,
+  };
+  return <Badge className={s.className}>{s.label}</Badge>;
 }
-
 function QualityDots({ score }) {
   if (score == null)
-    return <span style={{ color: C.text3, fontSize: 12 }}>--</span>;
-  const color = score >= 8 ? C.green : score >= 6 ? C.yellow : C.red;
+    return <span className="text-ui-body text-ink-secondary">--</span>;
+  const color = score >= 8 ? "#15803D" : score >= 6 ? "#A16207" : "#991B1B";
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+    <div className="flex items-center [gap:4px]">
       {" "}
       <span
         style={{
-          fontSize: 14,
-          fontWeight: 700,
           color,
-          fontFamily: "'Roboto', Arial, sans-serif",
         }}
+        className="text-ui-body font-medium"
       >
         {score}
       </span>{" "}
-      <span style={{ fontSize: 11, color: C.text3 }}>/10</span>{" "}
+      <span className="text-ui-body text-ink-secondary">/10</span>{" "}
     </div>
   );
 }
-
-function FunnelBar({ label, value, maxValue, color, prefix = "" }) {
+function FunnelBar({
+  label, value, maxValue, color, prefix = "", metric, alert = false,
+}) {
   const pct = maxValue > 0 ? (value / maxValue) * 100 : 0;
   return (
     <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 12,
-        marginBottom: 8,
-      }}
+      data-qa="metric-bar"
+      className="flex items-center [gap:12px] [margin-bottom:8px]"
     >
       {" "}
-      <div
-        style={{
-          width: 80,
-          fontSize: 12,
-          color: C.text2,
-          fontWeight: 500,
-          textAlign: "right",
-          flexShrink: 0,
-        }}
-      >
+      <div className="[width:80px] text-ui-body font-medium text-right shrink-0 text-ink-secondary">
         {label}
       </div>{" "}
-      <div
-        style={{
-          flex: 1,
-          height: 26,
-          background: "#F1F5F9",
-          borderRadius: 6,
-          overflow: "hidden",
-          position: "relative",
-        }}
-      >
+      <div data-qa="metric-bar-track" className="[flex:1] min-w-0 [height:26px] bg-zinc-100 rounded-sm overflow-hidden relative">
         {" "}
         <div
+          data-qa="metric-bar-fill"
           style={{
             width: `${pct}%`,
-            height: "100%",
             background: color,
-            borderRadius: 6,
-            transition: "width 0.6s ease",
             minWidth: value > 0 ? 4 : 0,
-            boxShadow: `0 0 12px ${color}33`,
           }}
+          className="[height:100%] rounded-sm transition-all"
         />{" "}
-        <span
-          style={{
-            position: "absolute",
-            right: 8,
-            top: "50%",
-            transform: "translateY(-50%)",
-            fontSize: 12,
-            fontWeight: 700,
-            color: C.text,
-          }}
-        >
-          {prefix}
-          {fmt(value)}
-        </span>{" "}
       </div>{" "}
+      <span
+        data-qa="metric-bar-value"
+        data-metric={metric}
+        className={`w-[88px] shrink-0 break-words text-right text-ui-body font-medium ${alert ? "text-alert-fg" : "text-zinc-800"}`}
+      >
+        {prefix}
+        {fmt(value)}
+      </span>{" "}
     </div>
   );
 }
-
 function DonutChart({
   segments,
   size = 140,
   thickness = 18,
   centerLabel,
   centerValue,
+  metric,
 }) {
   const total = segments.reduce((s, seg) => s + seg.value, 0);
+  // Preserve the complete currency amount when it would outgrow the ring.
+  const largeCenterValue = String(centerValue ?? "").length > 10;
   let cumAngle = -90;
   const paths = segments.map((seg, i) => {
     const angle = total > 0 ? (seg.value / total) * 360 : 0;
@@ -364,40 +258,28 @@ function DonutChart({
     );
   });
   return (
-    <div style={{ position: "relative", width: size, height: size }}>
+    <div
+      style={{
+        width: size,
+        height: size,
+      }}
+      className="relative"
+    >
       {" "}
       <svg width={size} height={size}>
         {paths}
       </svg>{" "}
-      <div
-        style={{
-          position: "absolute",
-          top: "50%",
-          left: "50%",
-          transform: "translate(-50%,-50%)",
-          textAlign: "center",
-        }}
-      >
+      <div className="absolute [top:50%] [left:50%] [transform:translate(-50%,-50%)] text-center">
         {" "}
         <div
-          style={{
-            fontSize: 22,
-            fontWeight: 700,
-            color: C.text,
-            fontFamily: "'Roboto', Arial, sans-serif",
-          }}
+          data-qa="donut-center-value"
+          data-metric={metric}
+          style={{ maxWidth: size - 2 * thickness - 12 }}
+          className={`${largeCenterValue ? "text-14" : "text-22"} break-words font-medium text-zinc-800`}
         >
           {centerValue}
         </div>{" "}
-        <div
-          style={{
-            fontSize: 11,
-            fontWeight: 500,
-            color: C.text3,
-            textTransform: "uppercase",
-            letterSpacing: "0.05em",
-          }}
-        >
+        <div className="text-ui-body font-medium text-ink-secondary">
           {centerLabel}
         </div>{" "}
       </div>{" "}
@@ -417,11 +299,12 @@ export default function WavesPPCDashboard() {
   const [campaigns, setCampaigns] = useState([]);
   const [funnelData, setFunnelData] = useState(null);
   const [revenueData, setRevenueData] = useState(null);
-
   useEffect(() => {
     setLoading(true);
     Promise.all([
-      adminFetch("/admin/ads/campaigns").catch(() => ({ campaigns: [] })),
+      adminFetch("/admin/ads/campaigns").catch(() => ({
+        campaigns: [],
+      })),
       adminFetch("/admin/ads/funnel?period=30d").catch(() => null),
       adminFetch("/admin/ads/revenue-attribution?period=month").catch(
         () => null,
@@ -433,24 +316,20 @@ export default function WavesPPCDashboard() {
       setLoading(false);
     });
   }, []);
-
   const services = useMemo(() => {
     const set = new Set(
       campaigns.map((c) => c.service_category).filter(Boolean),
     );
     return ["All", ...Array.from(set).sort()];
   }, [campaigns]);
-
   const cities = useMemo(() => {
     const set = new Set(campaigns.map((c) => c.target_area).filter(Boolean));
     return ["All", ...Array.from(set).sort()];
   }, [campaigns]);
-
   const platforms = useMemo(() => {
     const set = new Set(campaigns.map((c) => c.campaign_type).filter(Boolean));
     return ["All", ...Array.from(set).sort()];
   }, [campaigns]);
-
   const filtered = useMemo(
     () =>
       campaigns.filter((c) => {
@@ -463,7 +342,6 @@ export default function WavesPPCDashboard() {
       }),
     [campaigns, serviceFilter, cityFilter, platformFilter],
   );
-
   const totals = useMemo(() => {
     const active = filtered.filter((c) => c.status === "active");
     return {
@@ -476,7 +354,6 @@ export default function WavesPPCDashboard() {
       impressions: active.reduce((s, c) => s + (c.last7d?.impressions || 0), 0),
     };
   }, [filtered]);
-
   const overallROAS =
     totals.spent > 0 ? (totals.revenue / totals.spent).toFixed(1) : "--";
   const overallCPL =
@@ -494,225 +371,145 @@ export default function WavesPPCDashboard() {
       .forEach((c) => {
         const svc = c.service_category || "Other";
         if (!map[svc])
-          map[svc] = { service: svc, spent: 0, revenue: 0, leads: 0 };
+          map[svc] = {
+            service: svc,
+            spent: 0,
+            revenue: 0,
+            leads: 0,
+          };
         map[svc].spent += c.last30d?.spend || 0;
         map[svc].revenue += c.last30d?.conversionValue || 0;
         map[svc].leads += c.last30d?.conversions || 0;
       });
     return Object.values(map).sort((a, b) => b.revenue - a.revenue);
   }, [campaigns]);
-
   const serviceColors = {
-    "Pest Control": C.blue,
-    "Lawn Care": C.green,
-    Mosquito: C.purple,
-    Termite: C.orange,
+    "Pest Control": "#18181B",
+    "Lawn Care": "#3F3F46",
+    Mosquito: "#71717A",
+    Termite: "#52525B",
   };
   const activeCampaigns = campaigns.filter((c) => c.status === "active").length;
-
   if (loading) {
     return (
-      <div
-        style={{
-          color: C.text3,
-          padding: 60,
-          textAlign: "center",
-          fontSize: 14,
-        }}
-      >
+      <div className="[padding:60px] text-center text-ui-body text-ink-secondary">
         Loading PPC Command Center...
       </div>
     );
   }
-
   if (campaigns.length === 0) {
     return (
-      <Card style={{ padding: 60, textAlign: "center" }}>
+      <UiCard className="[padding:60px] text-center">
         {" "}
-        <div style={{ fontSize: 48, marginBottom: 16 }}></div>{" "}
-        <div
-          style={{
-            fontSize: 18,
-            fontWeight: 500,
-            color: C.heading,
-            marginBottom: 8,
-          }}
-        >
+        <div className="text-ui-body [margin-bottom:16px]"></div>{" "}
+        <div className="text-18 font-medium [margin-bottom:8px] text-zinc-900">
           No Campaigns Yet
         </div>{" "}
-        <div style={{ fontSize: 13, color: C.text3 }}>
+        <div className="text-ui-body text-ink-secondary">
           Connect your Google Ads account and add campaigns to start tracking
           PPC performance.
         </div>{" "}
-      </Card>
+      </UiCard>
     );
   }
-
   return (
-    <div
-      style={{
-        color: C.text,
-        fontFamily: "'Roboto', Arial, sans-serif",
-      }}
-    >
+    // AdsPage and AdminLayoutV2 provide no UiSurface, so without this the
+    // migrated Button, Badge, TH and TD primitives resolve the legacy context
+    // default — 11px badges and headings and legacy control sizing. Wrapped at
+    // this page, the migrated unit, rather than higher.
+    <UiSurface className="text-zinc-800">
       {" "}
-      <link
-        href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800;900&display=swap"
-        rel="stylesheet"
-      />{" "}
-      <style>{`
-        @media (max-width: 640px) {
-          .ppc-tab-bar { overflow-x: auto !important; -webkit-overflow-scrolling: touch !important; width: 100% !important; }
-          .ppc-tab-bar button { flex-shrink: 0 !important; padding: 8px 14px !important; font-size: 12px !important; }
-          .ppc-kpi-grid-6 { grid-template-columns: repeat(2, 1fr) !important; }
-          .ppc-kpi-grid-4 { grid-template-columns: repeat(2, 1fr) !important; }
-          .ppc-two-col { grid-template-columns: 1fr !important; }
-          .ppc-platform-grid { grid-template-columns: 1fr !important; }
-          .ppc-funnel-grid { grid-template-columns: 1fr !important; }
-          .ppc-funnel-stats { grid-template-columns: repeat(3, 1fr) !important; }
-          .ppc-header-badge { display: flex !important; flex-wrap: wrap !important; gap: 8px !important; }
-          .ppc-filter-wrap { flex-direction: column !important; gap: 8px !important; }
-          .ppc-filter-wrap >div { flex-wrap: wrap !important; }
-        }
-      `}</style>
       {/* Header */}
-      <div style={{ marginBottom: 24 }}>
+      <div className="[margin-bottom:24px]">
         {" "}
-        <div
-          className="ppc-header-badge"
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 12,
-            marginBottom: 4,
-          }}
-        >
+        <div className="ppc-header-badge flex max-sm:flex-wrap max-sm:gap-2 items-center [gap:12px] [margin-bottom:4px]">
           {" "}
-          <h1 style={{ fontSize: 28, fontWeight: 400, margin: 0 }}>
+          <h2 className="text-[18px] font-medium [margin:0px]">
             Waves PPC command center
-          </h1>{" "}
-          <span
-            style={{
-              padding: "4px 12px",
-              borderRadius: 8,
-              fontSize: 11,
-              fontWeight: 700,
-              background: C.greenGlow,
-              color: C.green,
-            }}
-          >
+          </h2>{" "}
+          <Badge className="[padding:4px_12px] rounded-md text-ui-body font-medium bg-green-100 text-green-700">
             {activeCampaigns} Active Campaigns
-          </span>{" "}
+          </Badge>{" "}
         </div>{" "}
-        <div style={{ fontSize: 13, color: C.text3 }}>
+        <div className="text-ui-body text-ink-secondary">
           Google Ads + Local Service Ads -- Live data from campaign tracker
         </div>{" "}
       </div>
       {/* Tab Switcher */}
-      <div
-        className="ppc-tab-bar"
-        style={{
-          display: "flex",
-          gap: 4,
-          marginBottom: 24,
-          background: "#F1F5F9",
-          borderRadius: 10,
-          padding: 4,
-          width: "fit-content",
-          overflowX: "auto",
-          WebkitOverflowScrolling: "touch",
-        }}
-      >
+      <div className="ppc-tab-bar flex max-sm:w-full [&_button]:shrink-0 [gap:4px] [margin-bottom:24px] bg-zinc-100 rounded-md [padding:4px] [width:fit-content] overflow-x-auto">
         {[
-          { id: "overview", label: "Overview" },
-          { id: "campaigns", label: "Campaigns" },
-          { id: "funnel", label: "Funnel & Attribution" },
+          {
+            id: "overview",
+            label: "Overview",
+          },
+          {
+            id: "campaigns",
+            label: "Campaigns",
+          },
+          {
+            id: "funnel",
+            label: "Funnel & Attribution",
+          },
         ].map((t) => (
-          <button
+          <Button
             key={t.id}
             onClick={() => setTab(t.id)}
-            style={{
-              padding: "10px 22px",
-              borderRadius: 8,
-              border: "none",
-              background: tab === t.id ? C.blue : "transparent",
-              color: tab === t.id ? "#fff" : C.text3,
-              fontSize: 13,
-              fontWeight: 700,
-              cursor: "pointer",
-              transition: "all 0.15s",
-              fontFamily: "'Roboto', Arial, sans-serif",
-              flexShrink: 0,
-              whiteSpace: "nowrap",
-            }}
+            className="shrink-0 whitespace-nowrap"
+            variant={tab === t.id ? "primary" : "secondary"}
           >
             {t.label}
-          </button>
+          </Button>
         ))}
       </div>
       {/* ======= OVERVIEW ======= */}
       {tab === "overview" && (
         <div>
           {/* KPI Row */}
-          <div
-            className="ppc-kpi-grid-6"
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(6,1fr)",
-              gap: 12,
-              marginBottom: 20,
-            }}
-          >
+          <div className="ppc-kpi-grid-6 grid max-sm:!grid-cols-2 [grid-template-columns:repeat(6,1fr)] [gap:12px] [margin-bottom:20px]">
             {" "}
             <KPI
               value={fmtMoney(totals.spent)}
               label="7-Day Spend"
               sub={`of ${fmtMoney(totals.budget)} budget`}
-              color={C.blue}
+              color={"#18181B"}
             />{" "}
             <KPI
               value={fmtMoney(totals.revenue)}
               label="7-Day Revenue"
               sub="attributed revenue"
-              color={C.green}
+              color={"#18181B"}
+              metric="revenue"
             />{" "}
             <KPI
               value={`${overallROAS}x`}
               label="ROAS"
               sub="return on ad spend"
-              color={parseFloat(overallROAS) >= 2 ? C.green : C.red}
+              color={parseFloat(overallROAS) >= 2 ? "#18181B" : "#991B1B"}
+              metric="roas"
             />{" "}
             <KPI
               value={fmt(totals.leads)}
               label="Conversions"
               sub={`${fmt(totals.clicks)} clicks`}
-              color={C.purple}
+              color={"#18181B"}
             />{" "}
             <KPI
               value={`$${overallCPL}`}
               label="Cost Per Lead"
               sub="all campaigns"
-              color={C.cyan}
+              color={"#18181B"}
             />{" "}
             <KPI
               value={`${overallCTR}%`}
               label="Avg CTR"
               sub="search campaigns"
-              color={C.orange}
+              color={"#18181B"}
             />{" "}
           </div>
           {/* Service Breakdown + Budget Donut */}
-          <div
-            className="ppc-two-col"
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr 300px",
-              gap: 16,
-              marginBottom: 20,
-            }}
-          >
+          <div className="ppc-two-col grid max-sm:!grid-cols-1 [grid-template-columns:1fr_300px] [gap:16px] [margin-bottom:20px]">
             {" "}
-            <Card>
+            <UiCard className="p-5">
               {" "}
               <SectionTitle>Revenue by Service Line (30d)</SectionTitle>
               {serviceBreakdown.length > 0 ? (
@@ -724,30 +521,18 @@ export default function WavesPPCDashboard() {
                     maxValue={
                       Math.max(...serviceBreakdown.map((x) => x.revenue)) * 1.1
                     }
-                    color={serviceColors[s.service] || C.blue}
+                    color={serviceColors[s.service] || "#71717A"}
                     prefix="$"
+                    metric="revenue"
                   />
                 ))
               ) : (
-                <div
-                  style={{
-                    color: C.text3,
-                    fontSize: 13,
-                    padding: 20,
-                    textAlign: "center",
-                  }}
-                >
+                <div className="text-ui-body [padding:20px] text-center text-ink-secondary">
                   No revenue data yet
                 </div>
               )}
               {serviceBreakdown.length > 0 && (
-                <div
-                  style={{
-                    borderTop: `1px solid ${C.border}`,
-                    paddingTop: 12,
-                    marginTop: 8,
-                  }}
-                >
+                <div className="[padding-top:12px] [margin-top:8px] border-t border-hairline border-zinc-200">
                   {" "}
                   <SectionTitle>Spend by Service Line</SectionTitle>
                   {serviceBreakdown.map((s) => (
@@ -758,29 +543,25 @@ export default function WavesPPCDashboard() {
                       maxValue={
                         Math.max(...serviceBreakdown.map((x) => x.spent)) * 1.1
                       }
-                      color={serviceColors[s.service] || C.blue}
+                      color={serviceColors[s.service] || "#71717A"}
                       prefix="$"
                     />
                   ))}
                 </div>
               )}
-            </Card>{" "}
-            <Card
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                justifyContent: "center",
-              }}
-            >
+            </UiCard>{" "}
+            <UiCard className="p-5 flex flex-col items-center justify-center">
               {" "}
               <SectionTitle>Budget Utilization (7d)</SectionTitle>{" "}
               <DonutChart
                 segments={[
-                  { value: totals.spent, color: C.blue },
+                  {
+                    value: totals.spent,
+                    color: "#18181B",
+                  },
                   {
                     value: Math.max(0, totals.budget - totals.spent),
-                    color: C.border,
+                    color: "#E4E4E7",
                   },
                 ]}
                 centerValue={
@@ -790,35 +571,34 @@ export default function WavesPPCDashboard() {
                 }
                 centerLabel="Utilized"
               />{" "}
-              <div style={{ marginTop: 16, textAlign: "center" }}>
+              <div className="[margin-top:16px] text-center">
                 {" "}
-                <div style={{ fontSize: 13, color: C.text2 }}>
+                <div className="text-ui-body text-ink-secondary">
                   {fmtMoney(totals.spent)} of {fmtMoney(totals.budget)}
                 </div>{" "}
-                <div style={{ fontSize: 12, color: C.text3, marginTop: 4 }}>
+                <div className="text-ui-body [margin-top:4px] text-ink-secondary">
                   {fmtMoney(Math.max(0, totals.budget - totals.spent))}{" "}
                   remaining
                 </div>{" "}
               </div>{" "}
-            </Card>{" "}
+            </UiCard>{" "}
           </div>
           {/* Platform Split */}
-          <div
-            className="ppc-platform-grid"
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr 1fr",
-              gap: 16,
-              marginBottom: 20,
-            }}
-          >
+          <div className="ppc-platform-grid grid max-sm:!grid-cols-1 [grid-template-columns:1fr_1fr] [gap:16px] [margin-bottom:20px]">
             {["google_search", "google_lsa"].map((type) => {
               const label =
                 type === "google_lsa"
                   ? "Local Service Ads"
                   : "Google Search Ads";
+              // Sync keeps Google's channel: SEARCH, or enum 2 stored as text.
+              // Retain existing manual types without treating Display/PMax as Search.
               const typeCamps = campaigns.filter(
-                (c) => c.campaign_type === type && c.status === "active",
+                (c) =>
+                  c.status === "active" &&
+                  (c.campaign_type === type ||
+                    (type === "google_search" &&
+                      c.platform === "google_ads" &&
+                      ["SEARCH", "2"].includes(c.campaign_type))),
               );
               const sp = typeCamps.reduce(
                 (s, c) => s + (c.last30d?.spend || 0),
@@ -833,64 +613,48 @@ export default function WavesPPCDashboard() {
                 0,
               );
               return (
-                <Card key={type}>
+                <UiCard key={type} data-qa={`platform-${type}`} className="p-5">
                   {" "}
                   <SectionTitle>{label}</SectionTitle>{" "}
-                  <div
-                    className="ppc-kpi-grid-4"
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: "repeat(4,1fr)",
-                      gap: 12,
-                    }}
-                  >
+                  <div className="ppc-kpi-grid-4 grid max-sm:!grid-cols-2 [grid-template-columns:repeat(4,1fr)] [gap:12px]">
                     {" "}
                     <div>
-                      <div
-                        style={{ fontSize: 20, fontWeight: 700, color: C.blue }}
-                      >
+                      <div className="text-22 font-medium text-zinc-900">
                         {fmtMoney(sp)}
                       </div>
-                      <div style={{ fontSize: 11, color: C.text3 }}>SPEND</div>
+                      <div className="text-ui-body text-ink-secondary">
+                        SPEND
+                      </div>
                     </div>{" "}
                     <div>
                       <div
-                        style={{
-                          fontSize: 20,
-                          fontWeight: 700,
-                          color: C.green,
-                        }}
+                        data-metric="revenue"
+                        className="text-22 font-medium text-zinc-900"
                       >
                         {fmtMoney(rv)}
                       </div>
-                      <div style={{ fontSize: 11, color: C.text3 }}>
+                      <div className="text-ui-body text-ink-secondary">
                         REVENUE
                       </div>
                     </div>{" "}
                     <div>
-                      <div
-                        style={{
-                          fontSize: 20,
-                          fontWeight: 700,
-                          color: C.purple,
-                        }}
-                      >
+                      <div className="text-22 font-medium text-zinc-900">
                         {ld}
                       </div>
-                      <div style={{ fontSize: 11, color: C.text3 }}>
+                      <div className="text-ui-body text-ink-secondary">
                         CONVERSIONS
                       </div>
                     </div>{" "}
                     <div>
-                      <div
-                        style={{ fontSize: 20, fontWeight: 700, color: C.cyan }}
-                      >
+                      <div data-metric="roas" className="text-22 font-medium text-zinc-900">
                         {sp > 0 ? (rv / sp).toFixed(1) + "x" : "--"}
                       </div>
-                      <div style={{ fontSize: 11, color: C.text3 }}>ROAS</div>
+                      <div className="text-ui-body text-ink-secondary">
+                        ROAS
+                      </div>
                     </div>{" "}
                   </div>{" "}
-                </Card>
+                </UiCard>
               );
             })}
           </div>{" "}
@@ -900,16 +664,13 @@ export default function WavesPPCDashboard() {
       {tab === "campaigns" && (
         <div>
           {/* Filters */}
-          <Card style={{ marginBottom: 20 }}>
+          <UiCard className="p-5 [margin-bottom:20px]">
             {" "}
-            <div
-              className="ppc-filter-wrap"
-              style={{ display: "flex", gap: 24, flexWrap: "wrap" }}
-            >
+            <div className="ppc-filter-wrap flex max-sm:flex-col max-sm:gap-2 max-sm:[&>div]:flex-wrap [gap:24px] flex-wrap">
               {" "}
-              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <div className="flex [gap:6px] items-center">
                 {" "}
-                <span style={{ fontSize: 12, color: C.text3, fontWeight: 500 }}>
+                <span className="text-ui-body font-medium text-ink-secondary">
                   Service:
                 </span>
                 {services.map((s) => (
@@ -921,9 +682,9 @@ export default function WavesPPCDashboard() {
                   />
                 ))}
               </div>{" "}
-              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <div className="flex [gap:6px] items-center">
                 {" "}
-                <span style={{ fontSize: 12, color: C.text3, fontWeight: 500 }}>
+                <span className="text-ui-body font-medium text-ink-secondary">
                   City:
                 </span>
                 {cities.map((c) => (
@@ -936,11 +697,9 @@ export default function WavesPPCDashboard() {
                 ))}
               </div>
               {platforms.length > 2 && (
-                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <div className="flex [gap:6px] items-center">
                   {" "}
-                  <span
-                    style={{ fontSize: 12, color: C.text3, fontWeight: 500 }}
-                  >
+                  <span className="text-ui-body font-medium text-ink-secondary">
                     Platform:
                   </span>
                   {platforms.map((p) => (
@@ -954,32 +713,24 @@ export default function WavesPPCDashboard() {
                 </div>
               )}
             </div>{" "}
-          </Card>
+          </UiCard>
           {/* Campaign Table */}
-          <Card>
+          <UiCard className="p-5">
             {" "}
             <SectionTitle
               right={
-                <span style={{ fontSize: 12, color: C.text3 }}>
+                <span className="text-ui-body text-ink-secondary">
                   {filtered.length} campaigns
                 </span>
               }
             >
               Campaign Performance
             </SectionTitle>{" "}
-            <div style={{ overflowX: "auto" }}>
+            <div className="overflow-x-auto">
               {" "}
-              <table
-                style={{
-                  width: "100%",
-                  borderCollapse: "collapse",
-                  fontSize: 13,
-                }}
-              >
-                {" "}
-                <thead>
-                  {" "}
-                  <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+              <Table className="[width:100%] [border-collapse:collapse] text-ui-body">
+                <THead>
+                  <TR className="border-b border-hairline border-zinc-200">
                     {[
                       "Campaign",
                       "Status",
@@ -992,25 +743,19 @@ export default function WavesPPCDashboard() {
                       "Clicks",
                       "CTR",
                     ].map((h, i) => (
-                      <th
+                      <TH
                         key={i}
                         style={{
-                          padding: "10px 8px",
                           textAlign: i >= 2 ? "right" : "left",
-                          fontSize: 11,
-                          fontWeight: 700,
-                          color: C.text3,
-                          textTransform: "uppercase",
-                          letterSpacing: "0.05em",
-                          whiteSpace: "nowrap",
                         }}
+                        className="[padding:10px_8px] text-ui-body font-medium whitespace-nowrap text-ink-secondary"
                       >
                         {h}
-                      </th>
+                      </TH>
                     ))}
-                  </tr>{" "}
-                </thead>{" "}
-                <tbody>
+                  </TR>
+                </THead>
+                <TBody>
                   {filtered.map((c, i) => {
                     const p = c.last7d || {};
                     const roas = p.spend > 0 ? p.conversionValue / p.spend : 0;
@@ -1021,140 +766,78 @@ export default function WavesPPCDashboard() {
                         ? (p.clicks / p.impressions) * 100
                         : null;
                     return (
-                      <tr
+                      <TR
                         key={c.id}
                         style={{
-                          borderBottom: `1px solid ${C.border}22`,
                           background: i % 2 === 0 ? "transparent" : "#F0F7FC",
                         }}
+                        className="border-b border-hairline border-zinc-200"
                       >
-                        {" "}
-                        <td
-                          style={{
-                            padding: "10px 8px",
-                            fontWeight: 500,
-                            color: C.text,
-                            whiteSpace: "nowrap",
-                            maxWidth: 220,
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                          }}
-                        >
+                        <TD className="[padding:10px_8px] font-medium whitespace-nowrap [max-width:220px] overflow-hidden text-ellipsis text-zinc-800">
                           {" "}
                           <div>{c.campaign_name}</div>{" "}
-                          <div style={{ fontSize: 11, color: C.text3 }}>
+                          <div className="text-ui-body text-ink-secondary">
                             {c.target_area}{" "}
                             {c.campaign_type && `- ${c.campaign_type}`}
                           </div>{" "}
-                        </td>{" "}
-                        <td style={{ padding: "10px 8px" }}>
+                        </TD>
+                        <TD className="[padding:10px_8px]">
                           <StatusBadge status={c.status} />
-                        </td>{" "}
-                        <td
-                          style={{
-                            padding: "10px 8px",
-                            textAlign: "right",
-                            color: C.text2,
-                          }}
-                        >
+                        </TD>
+                        <TD className="[padding:10px_8px] text-right text-ink-secondary">
                           {fmtMoney(c.daily_budget_current)}
-                        </td>{" "}
-                        <td
-                          style={{
-                            padding: "10px 8px",
-                            textAlign: "right",
-                            fontWeight: 500,
-                            color: C.text,
-                          }}
-                        >
+                        </TD>
+                        <TD className="[padding:10px_8px] text-right font-medium text-zinc-800">
                           {fmtMoney(p.spend)}
-                        </td>{" "}
-                        <td
-                          style={{
-                            padding: "10px 8px",
-                            textAlign: "right",
-                            fontWeight: 500,
-                            color: C.green,
-                          }}
+                        </TD>
+                        <TD
+                          data-metric="revenue"
+                          className="[padding:10px_8px] text-right font-medium text-zinc-800"
                         >
                           {fmtMoney(p.conversionValue)}
-                        </td>{" "}
-                        <td
+                        </TD>
+                        <TD
                           style={{
-                            padding: "10px 8px",
-                            textAlign: "right",
-                            fontWeight: 700,
                             color:
                               roas >= 2
-                                ? C.green
+                                ? "#18181B"
                                 : roas >= 1
-                                  ? C.yellow
-                                  : C.red,
+                                  ? "#A16207"
+                                  : "#991B1B",
                           }}
+                          data-metric="roas"
+                          className="[padding:10px_8px] text-right font-medium"
                         >
                           {roas > 0 ? roas.toFixed(1) + "x" : "--"}
-                        </td>{" "}
-                        <td
-                          style={{
-                            padding: "10px 8px",
-                            textAlign: "right",
-                            color: C.text2,
-                          }}
-                        >
+                        </TD>
+                        <TD className="[padding:10px_8px] text-right text-ink-secondary">
                           {cpa != null ? fmtMoney(cpa) : "--"}
-                        </td>{" "}
-                        <td
-                          style={{
-                            padding: "10px 8px",
-                            textAlign: "right",
-                            fontWeight: 700,
-                            color: C.purple,
-                          }}
-                        >
+                        </TD>
+                        <TD className="[padding:10px_8px] text-right font-medium text-zinc-900">
                           {p.conversions || 0}
-                        </td>{" "}
-                        <td
-                          style={{
-                            padding: "10px 8px",
-                            textAlign: "right",
-                            color: C.text2,
-                          }}
-                        >
+                        </TD>
+                        <TD className="[padding:10px_8px] text-right text-ink-secondary">
                           {p.clicks != null ? fmt(p.clicks) : "--"}
-                        </td>{" "}
-                        <td
-                          style={{
-                            padding: "10px 8px",
-                            textAlign: "right",
-                            color: C.text2,
-                          }}
-                        >
+                        </TD>
+                        <TD className="[padding:10px_8px] text-right text-ink-secondary">
                           {ctr != null ? fmtPct(ctr) : "--"}
-                        </td>{" "}
-                      </tr>
+                        </TD>
+                      </TR>
                     );
                   })}
-                </tbody>{" "}
-              </table>{" "}
+                </TBody>
+              </Table>{" "}
             </div>{" "}
-          </Card>{" "}
+          </UiCard>{" "}
         </div>
       )}
       {/* ======= FUNNEL & ATTRIBUTION ======= */}
       {tab === "funnel" && (
         <div>
           {" "}
-          <div
-            className="ppc-funnel-grid"
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr 1fr",
-              gap: 16,
-              marginBottom: 20,
-            }}
-          >
+          <div className="ppc-funnel-grid grid max-sm:!grid-cols-1 [grid-template-columns:1fr_1fr] [gap:16px] [margin-bottom:20px]">
             {/* Funnel */}
-            <Card>
+            <UiCard className="p-5">
               {" "}
               <SectionTitle>Acquisition Funnel -- Last 30 Days</SectionTitle>
               {funnelData ? (
@@ -1167,83 +850,55 @@ export default function WavesPPCDashboard() {
                         label={stage.replace(/_/g, " ")}
                         value={count}
                         maxValue={funnelData.totalLeads || 1}
-                        color={
-                          stage === "completed"
-                            ? C.green
-                            : stage === "booked"
-                              ? C.cyan
-                              : stage === "lost"
-                                ? C.red
-                                : C.blue
-                        }
+                        color={stage === "lost" ? "#C8312F" : "#71717A"}
+                        alert={stage === "lost"}
                       />
                     ))}
-                  <div
-                    className="ppc-funnel-stats"
-                    style={{
-                      borderTop: `1px solid ${C.border}`,
-                      paddingTop: 12,
-                      marginTop: 12,
-                      display: "grid",
-                      gridTemplateColumns: "repeat(3,1fr)",
-                      gap: 12,
-                      textAlign: "center",
-                    }}
-                  >
+                  <div className="ppc-funnel-stats max-sm:!grid-cols-3 [padding-top:12px] [margin-top:12px] grid [grid-template-columns:repeat(3,1fr)] [gap:12px] text-center border-t border-hairline border-zinc-200">
                     {" "}
                     <div>
-                      <div
-                        style={{ fontSize: 18, fontWeight: 700, color: C.blue }}
-                      >
+                      <div className="text-18 font-medium text-zinc-900">
                         {fmt(funnelData.totalLeads)}
                       </div>
-                      <div style={{ fontSize: 11, color: C.text3 }}>
+                      <div className="text-ui-body text-ink-secondary">
                         TOTAL LEADS
                       </div>
                     </div>{" "}
                     <div>
                       <div
-                        style={{
-                          fontSize: 18,
-                          fontWeight: 700,
-                          color: C.green,
-                        }}
+                        data-metric="revenue"
+                        className="text-18 font-medium text-zinc-900"
                       >
                         {fmtMoney(funnelData.totalRevenue)}
                       </div>
-                      <div style={{ fontSize: 11, color: C.text3 }}>
+                      <div className="text-ui-body text-ink-secondary">
                         REVENUE
                       </div>
                     </div>{" "}
                     <div>
                       <div
                         style={{
-                          fontSize: 18,
-                          fontWeight: 700,
-                          color: funnelData.roas >= 2 ? C.green : C.yellow,
+                          color: funnelData.roas >= 2 ? "#18181B" : "#A16207",
                         }}
+                        data-metric="roas"
+                        className="text-18 font-medium"
                       >
                         {funnelData.roas}x
                       </div>
-                      <div style={{ fontSize: 11, color: C.text3 }}>ROAS</div>
+                      <div className="text-ui-body text-ink-secondary">
+                        ROAS
+                      </div>
                     </div>{" "}
                   </div>{" "}
                 </>
               ) : (
-                <div
-                  style={{
-                    color: C.text3,
-                    fontSize: 13,
-                    padding: 20,
-                    textAlign: "center",
-                  }}
-                >
+                <div className="text-ui-body [padding:20px] text-center text-ink-secondary">
                   No funnel data yet
                 </div>
               )}
-            </Card>
+            </UiCard>
             {/* Revenue Attribution */}
-            <Card>
+            <UiCard className="p-5">
               {" "}
               <SectionTitle>Revenue Attribution by Source</SectionTitle>
               {revenueData?.sources?.length > 0 ? (
@@ -1253,63 +908,50 @@ export default function WavesPPCDashboard() {
                     size={160}
                     segments={(revenueData.sources || []).map((s, i) => ({
                       value: s.revenue,
-                      color: [C.blue, C.green, C.purple, C.orange, C.cyan][
-                        i % 5
-                      ],
+                      color:
+                        REVENUE_CHART_COLORS[
+                          i % REVENUE_CHART_COLORS.length
+                        ],
                     }))}
                     centerValue={fmtMoney(revenueData.totalRevenue)}
                     centerLabel="Total"
+                    metric="revenue"
                   />{" "}
-                  <div style={{ marginTop: 16, display: "grid", gap: 6 }}>
+                  <div className="[margin-top:16px] grid [gap:6px]">
                     {(revenueData.sources || []).map((s, i) => (
                       <div
                         key={s.source}
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "space-between",
-                        }}
+                        className="flex items-center justify-between"
                       >
                         {" "}
-                        <div
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 8,
-                          }}
-                        >
+                        <div className="flex items-center [gap:8px]">
                           {" "}
                           <span
                             style={{
-                              width: 10,
-                              height: 10,
-                              borderRadius: 3,
-                              background: [
-                                C.blue,
-                                C.green,
-                                C.purple,
-                                C.orange,
-                                C.cyan,
-                              ][i % 5],
+                              background:
+                                REVENUE_CHART_COLORS[
+                                  i % REVENUE_CHART_COLORS.length
+                                ],
                             }}
+                            className="[width:10px] [height:10px] rounded-xs"
                           />{" "}
-                          <span style={{ fontSize: 13, color: C.text2 }}>
+                          <span className="text-ui-body text-ink-secondary">
                             {s.source}
                           </span>{" "}
                         </div>{" "}
-                        <div style={{ display: "flex", gap: 16 }}>
+                        <div className="flex [gap:16px]">
                           {" "}
                           <span
-                            style={{
-                              fontSize: 13,
-                              fontWeight: 700,
-                              color: C.text,
-                            }}
+                            data-metric="revenue"
+                            className="text-ui-body font-medium text-zinc-800"
                           >
                             {fmtMoney(s.revenue)}
                           </span>
                           {s.roas && (
-                            <span style={{ fontSize: 12, color: C.text3 }}>
+                            <span
+                              data-metric="roas"
+                              className="text-ui-body text-ink-secondary"
+                            >
                               {s.roas}x ROAS
                             </span>
                           )}
@@ -1319,37 +961,22 @@ export default function WavesPPCDashboard() {
                   </div>{" "}
                 </>
               ) : (
-                <div
-                  style={{
-                    color: C.text3,
-                    fontSize: 13,
-                    padding: 20,
-                    textAlign: "center",
-                  }}
-                >
+                <div className="text-ui-body [padding:20px] text-center text-ink-secondary">
                   No attribution data yet
                 </div>
               )}
-            </Card>{" "}
+            </UiCard>{" "}
           </div>
           {/* City-Level Attribution */}
           {campaigns.length > 0 && (
-            <Card>
+            <UiCard className="p-5">
               {" "}
               <SectionTitle>City-Level PPC Performance (30d)</SectionTitle>{" "}
-              <div style={{ overflowX: "auto" }}>
+              <div className="overflow-x-auto">
                 {" "}
-                <table
-                  style={{
-                    width: "100%",
-                    borderCollapse: "collapse",
-                    fontSize: 13,
-                  }}
-                >
-                  {" "}
-                  <thead>
-                    {" "}
-                    <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                <Table className="[width:100%] [border-collapse:collapse] text-ui-body">
+                  <THead>
+                    <TR className="border-b border-hairline border-zinc-200">
                       {[
                         "City",
                         "Campaigns",
@@ -1359,24 +986,19 @@ export default function WavesPPCDashboard() {
                         "ROAS",
                         "CPA",
                       ].map((h, i) => (
-                        <th
+                        <TH
                           key={i}
                           style={{
-                            padding: "10px 8px",
                             textAlign: i >= 2 ? "right" : "left",
-                            fontSize: 12, // UI audit F0357: matches AdsPage thStyle
-                            fontWeight: 700,
-                            color: C.text3,
-                            textTransform: "uppercase",
-                            letterSpacing: "0.05em",
                           }}
+                          className="[padding:10px_8px] text-ui-body font-medium text-ink-secondary"
                         >
                           {h}
-                        </th>
+                        </TH>
                       ))}
-                    </tr>{" "}
-                  </thead>{" "}
-                  <tbody>
+                    </TR>
+                  </THead>
+                  <TBody>
                     {(() => {
                       const cityMap = {};
                       campaigns
@@ -1405,86 +1027,56 @@ export default function WavesPPCDashboard() {
                           const cpa =
                             row.conv > 0 ? row.spend / row.conv : null;
                           return (
-                            <tr
+                            <TR
                               key={row.city}
-                              style={{
-                                borderBottom: `1px solid ${C.border}22`,
-                              }}
+                              className="border-b border-hairline border-zinc-200"
                             >
-                              {" "}
-                              <td
-                                style={{ padding: "10px 8px", fontWeight: 500 }}
-                              >
+                              <TD className="[padding:10px_8px] font-medium">
                                 {row.city}
-                              </td>{" "}
-                              <td
-                                style={{ padding: "10px 8px", color: C.text2 }}
-                              >
+                              </TD>
+                              <TD className="[padding:10px_8px] text-ink-secondary">
                                 {row.count}
-                              </td>{" "}
-                              <td
-                                style={{
-                                  padding: "10px 8px",
-                                  textAlign: "right",
-                                }}
-                              >
+                              </TD>
+                              <TD className="[padding:10px_8px] text-right">
                                 {fmtMoney(row.spend)}
-                              </td>{" "}
-                              <td
-                                style={{
-                                  padding: "10px 8px",
-                                  textAlign: "right",
-                                  fontWeight: 700,
-                                  color: C.purple,
-                                }}
-                              >
+                              </TD>
+                              <TD className="[padding:10px_8px] text-right font-medium text-zinc-900">
                                 {row.conv}
-                              </td>{" "}
-                              <td
-                                style={{
-                                  padding: "10px 8px",
-                                  textAlign: "right",
-                                  fontWeight: 700,
-                                  color: C.green,
-                                }}
+                              </TD>
+                              <TD
+                                data-metric="revenue"
+                                className="[padding:10px_8px] text-right font-medium text-zinc-900"
                               >
                                 {fmtMoney(row.revenue)}
-                              </td>{" "}
-                              <td
+                              </TD>
+                              <TD
                                 style={{
-                                  padding: "10px 8px",
-                                  textAlign: "right",
-                                  fontWeight: 700,
                                   color:
                                     roas >= 2
-                                      ? C.green
+                                      ? "#18181B"
                                       : roas >= 1
-                                        ? C.yellow
-                                        : C.red,
+                                        ? "#A16207"
+                                        : "#991B1B",
                                 }}
+                                data-metric="roas"
+                                className="[padding:10px_8px] text-right font-medium"
                               >
                                 {roas > 0 ? roas.toFixed(1) + "x" : "--"}
-                              </td>{" "}
-                              <td
-                                style={{
-                                  padding: "10px 8px",
-                                  textAlign: "right",
-                                  color: C.text2,
-                                }}
-                              >
+                              </TD>
+                              <TD className="[padding:10px_8px] text-right text-ink-secondary">
                                 {cpa != null ? fmtMoney(cpa) : "--"}
-                              </td>{" "}
-                            </tr>
+                              </TD>
+                            </TR>
                           );
                         });
                     })()}
-                  </tbody>{" "}
-                </table>{" "}
+                  </TBody>
+                </Table>{" "}
               </div>{" "}
-            </Card>
+            </UiCard>
           )}
         </div>
       )}
-    </div>
+    </UiSurface>
   );
 }

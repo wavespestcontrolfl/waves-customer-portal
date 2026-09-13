@@ -94,7 +94,7 @@ const NotificationService = {
   // `bell` (admin recipients only) is an explicit site-level policy tag:
   // true always rings, false never rings — see notification-bell-policy.js.
   // It only has effect while GATE_ADMIN_BELL_POLICY is on.
-  async create({ recipientType, recipientId, category, title, body, icon, link, metadata, bell, bellDefault, connection = db }) {
+  async create({ recipientType, recipientId, category, title, body, icon, link, metadata, bell, bellDefault, shouldContinue, connection = db }) {
     try {
       // Demo/internal test accounts (App Store review account) must not ring
       // the admin bell — their bounce alerts and junk service requests are
@@ -149,6 +149,18 @@ const NotificationService = {
       // A title that was ONLY emoji falls back to the original rather than
       // inserting an empty string.
       const isAdmin = recipientType === 'admin';
+      // The bell exposes the same copy as native push. Recheck after any
+      // preference/property lookup and dedupe lock, before persisting it.
+      if (typeof shouldContinue === 'function') {
+        const verdict = await shouldContinue();
+        const allowed = verdict === true || verdict?.ok === true;
+        const hasDeadline = verdict && Object.prototype.hasOwnProperty.call(verdict, 'validUntil');
+        const deadlineValid = !hasDeadline || (Number.isFinite(verdict.validUntil) && Date.now() < verdict.validUntil);
+        const windowValid = typeof shouldContinue.isStillValid !== 'function' || shouldContinue.isStillValid() === true;
+        if (!allowed || !deadlineValid || !windowValid) {
+          return { id: null, suppressed: true, reason: 'pre_send_check_blocked' };
+        }
+      }
       const [notif] = await connection('notifications').insert({
         recipient_type: recipientType,
         recipient_id: recipientId || null,
@@ -353,6 +365,7 @@ const NotificationService = {
       body,
       ...createOpts,
       metadata,
+      shouldContinue: pushOptions.shouldContinue,
     };
 
     let notification;

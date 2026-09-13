@@ -346,14 +346,26 @@ function heartbeatCutoff() {
 // (non-window senders).
 function windowGuardFrom(preSendCheck) {
   if (typeof preSendCheck !== 'function') return undefined;
-  return async () => {
+  const guard = async () => {
     try {
       const verdict = await preSendCheck();
-      return Boolean(verdict && verdict.ok === true);
+      if (verdict === true) return true;
+      return verdict?.ok === true ? verdict : false;
     } catch {
       return false; // unknown window state → stop the fan-out
     }
   };
+  // The structured success carries a caller's copy deadline. This pure
+  // companion lets push re-check the canonical clock after its ownership
+  // query without repeating an opaque caller await.
+  guard.isStillValid = () => {
+    try {
+      return typeof preSendCheck.isStillValid !== 'function' || preSendCheck.isStillValid() === true;
+    } catch {
+      return false;
+    }
+  };
+  return guard;
 }
 
 // Durable in-app record, written only AFTER delivery is proven so retry
@@ -386,6 +398,8 @@ async function recordBell(customerId, messageType, body, dedupeKey, appointmentI
  * proceeds untouched.
  */
 async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck, explicitPushOnly = false, notificationEventKey, appointmentId = null, invoiceId, requestNotification }) {
+  let deliveryOutcome = 'not_sent';
+  let acceptedResult = null;
   try {
     if (explicitPushOnly && !gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) return { delivered: false, reason: 'app_gate_off' };
     if (!(await pushEligibleRuntime(customerId, to, messageType, db, { requireExplicit: explicitPushOnly }))) return { delivered: false, reason: 'preference_changed' };
@@ -404,7 +418,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
           presentation = { title: messageType === 'service_request_received' ? 'Request received' : 'Request update',
             link: `/?tab=dashboard&requestId=${encodeURIComponent(request.id)}&requestEvent=${encodeURIComponent(notificationEventKey)}`, category: 'service' };
         } catch {
-          return { delivered: false, retryable: true, reason: 'request_lookup_failed' };
+          return { delivered: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'request_lookup_failed' };
         }
       }
       if (PREF_CHANNEL_COLUMN[messageType] === 'invoice_channel') {
@@ -421,22 +435,24 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
           });
           if (payer.payerId) return { delivered: false, blocked: true, reason: 'invoice_payer_billed' };
         } catch {
-          return { delivered: false, retryable: true, reason: 'invoice_lookup_failed' };
+          return { delivered: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'invoice_lookup_failed' };
         }
         presentation = { title: messageType === 'invoice_followup' ? 'Invoice reminder' : 'Your invoice is ready',
           link: `/pay/${encodeURIComponent(invoice.token)}`, category: 'billing' };
       }
       const { title, link, category } = presentation;
+      deliveryOutcome = 'uncertain';
       appNotification = await require('../notification-service').notifyCustomer(customerId, category, title, body, {
         link, dedupeKey: notificationEventKey, awaitPush: true, appointmentId,
         pushOptions: { shouldContinue: windowGuardFrom(preSendCheck), minUpdatedAt: heartbeatCutoff(), nativeOnly: true },
       });
-      if (appNotification?.push?.reason === 'push_in_flight') return { delivered: false, pending: true, reason: 'push_in_flight' };
+      if (appNotification?.push?.reason === 'push_in_flight') return { delivered: false, pending: true, deliveryOutcome: 'uncertain', reason: 'push_in_flight' };
     }
-    if (!fresh && !appNotification?.push?.accepted) return { delivered: false, reason: 'no_fresh_device' };
+    if (!fresh && !appNotification?.push?.accepted) return { delivered: false, deliveryOutcome: 'not_sent', reason: 'no_fresh_device' };
     // The fan-out itself is restricted to fresh-heartbeat rows — a stale
     // accepting-but-silent token must not become the "delivery" that
     // suppresses the SMS while a fresh device failed.
+    deliveryOutcome = 'uncertain';
     const { delivered } = explicitPushOnly
       ? { delivered: Number(appNotification?.push?.accepted) > 0 }
       : await sendPush(customerId, messageType, body, {
@@ -449,13 +465,14 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
       // families retain their existing fallback policy.
       if (explicitPushOnly && appNotification?.push?.retryable
         && ['request_channel', 'invoice_channel', 'payment_issue_channel'].includes(PREF_CHANNEL_COLUMN[messageType])) {
-        return { delivered: false, retryable: true, reason: 'native_provider_retryable',
+        return { delivered: false, retryable: true, deliveryOutcome: 'uncertain', reason: 'native_provider_retryable',
           retryAfterMs: appNotification.push.retryAfterMs || 60000 };
       }
       logger.info(`[push-routing] ${messageType}: no device accepted delivery — falling back to SMS`);
-      return { delivered: false };
+      return { delivered: false, deliveryOutcome: 'not_sent' };
     }
-    if (appNotification?.push?.deduped) return { delivered: true, sid: `push:${appNotification.id}`, notificationId: String(appNotification.id) };
+    deliveryOutcome = 'accepted';
+    if (appNotification?.push?.deduped) return { delivered: true, deliveryOutcome, sid: `push:${appNotification.id}`, notificationId: String(appNotification.id) };
     // PROOF FIRST, bell second: this sms_log row is what
     // recoverStaleScheduledSmsClaims reads as durable proof-of-send — a
     // crash inside the bell insert before the proof exists would let the
@@ -531,6 +548,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     }
     const notificationId = appNotification?.id ? String(appNotification.id) : await recordBell(customerId, messageType, body, notificationEventKey, appointmentId);
     const sid = notificationId ? `push:${notificationId}` : 'push:delivered';
+    acceptedResult = { delivered: true, deliveryOutcome: 'accepted', sid, notificationId };
     if (proofRowId && notificationId) {
       await db('sms_log')
         .where({ id: proofRowId })
@@ -547,7 +565,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     }
     // Request lifecycle notices already have their bell history and email
     // copies. They must not create a new SMS conversation.
-    if (PREF_CHANNEL_COLUMN[messageType] === 'request_channel') return { delivered: true, sid, notificationId };
+    if (PREF_CHANNEL_COLUMN[messageType] === 'request_channel') return acceptedResult;
 
     // Same unified-history writer the SMS path uses, threaded into the
     // customer's SMS conversation so staff surfaces show the message inline.
@@ -568,10 +586,13 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
       .catch((err) => {
         logger.warn(`[push-routing] touchpoint record failed: ${err.message}`);
       });
-    return { delivered: true, sid, notificationId };
+    return acceptedResult;
   } catch (err) {
     logger.warn(`[push-routing] push_first attempt failed — falling back to SMS: ${err.message}`);
-    return { delivered: false };
+    if (deliveryOutcome === 'accepted') {
+      return acceptedResult || { delivered: true, deliveryOutcome: 'accepted', sid: 'push:delivered' };
+    }
+    return { delivered: false, retryable: deliveryOutcome === 'uncertain', deliveryOutcome, reason: 'push_attempt_failed' };
   }
 }
 
@@ -613,5 +634,5 @@ module.exports = {
   PUSH_ROUTING_POLICY,
   gatePushRoutingOn: () => gateEnvValue('GATE_PUSH_CHANNEL_ROUTING'),
   // exported for tests
-  _test: { pushPresentation, PRESENTATION, PREF_CHANNEL_COLUMN, normalizeDigits, pushEligibleRuntime },
+  _test: { pushPresentation, PRESENTATION, PREF_CHANNEL_COLUMN, normalizeDigits, pushEligibleRuntime, windowGuardFrom },
 };

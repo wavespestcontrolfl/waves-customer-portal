@@ -101,6 +101,22 @@ function callExtractionV2PrimaryEnabled() {
 }
 const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
+
+// The address_recovered card's pass marker, reconciled to THIS pass. The two
+// branches are mirror images and each must clear the other's keys: a pass that
+// recovered re-stamps its provenance AND drops any recovery_superseded_at a
+// failed pass left behind; a pass that did not recover strips the provenance
+// and records when it was superseded. Leaving the failed pass's marker on a
+// later SUCCESS made success -> failure -> success reject the current recovery
+// forever, so the booking banner kept selecting the stale validation failure
+// (codex #4437 r5 pre-push P1). Exported for the round-trip test — this SQL is
+// the contract, and it has now been wrong in both directions.
+function recoveryMarkerPayload(db, passStamp) {
+  return passStamp
+    ? db.raw('(coalesce(payload, \'{}\'::jsonb) - \'recovery_superseded_at\') || ?::jsonb', [JSON.stringify(passStamp)])
+    : db.raw('(coalesce(payload, \'{}\'::jsonb) - \'extraction_model\' - \'extraction_prompt_version\') || ?::jsonb',
+      [JSON.stringify({ recovery_superseded_at: new Date().toISOString() })]);
+}
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem, V2_DECISION_VERSION } = require('./call-routing-gates');
@@ -4795,6 +4811,130 @@ function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, cal
   return { ok: missing.length === 0, missing, advisory, details: merged };
 }
 
+// Natures where the person on the line is definitively NOT the customer the
+// call is linked to. Narrower than the creation-only
+// V2_NON_CUSTOMER_CALL_NATURES, which also holds the existing-customer
+// natures that an update path exists to serve (GH codex #4432 r1 P1).
+const V2_THIRD_PARTY_CALL_NATURES = new Set(['job_applicant', 'vendor_or_partner']);
+
+// Deliberately NOT gated on callExtractionV2PrimaryEnabled() (GH codex #4432
+// r3 P1). That flag guards ADOPTION — a V2 false positive must not suppress a
+// valid V1 customer create, so the creation hold reverts to legacy behavior
+// when V2 is demoted. This consumer only ever DECLINES to copy contact detail
+// onto a row that already exists, which is the safe direction: a shadow-mode
+// verdict may veto, the capture still rides the call record and the triage
+// cards for the office, and nothing legacy is suppressed. A valid V2
+// extraction is produced in shadow mode too, so the applicant/vendor veto
+// keeps working through a flag flip or rollback.
+function thirdPartyCallNatureFromV2(v2Result) {
+  return v2Result?.status === 'valid'
+    && V2_THIRD_PARTY_CALL_NATURES.has(v2Result.extraction?.call_nature);
+}
+
+// The pre-linked contact-backfill gate, as a pure decision so the identity
+// rules are testable as BEHAVIOR and not as a source-text shape (GH codex
+// #4432 r2 P1): a future edit that preserves the wording while inverting a
+// condition has to fail a test.
+//
+// IDENTITY is the inbound ANI — never resolveCallContactPhone's result, which
+// prefers a DICTATED callback number and says nothing about who is on the
+// line (r1 P2); an outbound call's identity is the number WE dialed.
+// `thirdPartyCallNature` must be the update-path subset (job_applicant /
+// vendor_or_partner), NOT the creation-only aggregate, which also holds the
+// existing-customer natures this backfill exists to serve (r1 P1).
+function prelinkedBackfillIdentityPhone(call = {}) {
+  return isOutboundCall(call)
+    ? firstExternalPhone(call.to_phone)
+    : firstExternalPhone(call.from_phone);
+}
+
+function prelinkedBackfillGate({
+  call, customerId, createdCustomerFromCall, phoneMatchedThisPass, extracted = {}, thirdPartyCallNature,
+  explicitUnlink = false,
+} = {}) {
+  const identityPhone = prelinkedBackfillIdentityPhone(call);
+  const eligible = !!customerId
+    // Belt and braces (GH codex #4432 r4 P1): an operator unlink already
+    // nulls call.customer_id, so customerId is falsy here — but this branch
+    // writes to a customer row, and "this call belongs to no customer" is
+    // stated in the override, not inferred from a variable two hundred lines
+    // up. The sibling phone-match branch carries the same predicate.
+    && !explicitUnlink
+    && !createdCustomerFromCall     // a fresh row already carries this call's capture
+    && !phoneMatchedThisPass        // the phone-match branch already backfilled
+    && !!identityPhone
+    && !extracted.is_voicemail      // one-sided transcription: too lossy to trust contact detail
+    && !thirdPartyCallNature;       // an applicant's / vendor's email is not the customer's
+  return { eligible, identityPhone };
+}
+
+// The customer-level half: the identity number must be the linked customer's
+// own, and the spoken name must not contradict the record. A missing or
+// soft-deleted row accepts nothing.
+function linkedCustomerAcceptsBackfill(linked, identityPhone, extracted = {}) {
+  if (!linked || linked.deleted_at) return false;
+  return customerPhoneMatches(identityPhone, linked) && extractedNameMatchesCustomer(extracted, linked);
+}
+
+// Email + address backfill for a call that resolved to an EXISTING customer.
+// Shared by the phone-match branch and the pre-linked branch of Step 3.
+//
+// Same garbled-stored-email rule as the appointment backfill (codex
+// round-12 P2): an invalid stored value is replaceable by a VALID capture; a
+// valid stored email is never overwritten. A REPLACEMENT of a garbled stored
+// email must fan out (copies of the old address exist) and does so in ONE
+// transaction with the customer write, so a partial fan-out cannot strand
+// snapshots on an address the record no longer holds (codex round-24 P1);
+// an empty→value write only settles the missing-email card; neither settles
+// the read-back cards filed for this unverified capture (round-9 + round-10
+// P2; fan-out gap from the local pre-push audit P1). Both paths ride the
+// email-claim guard (r16): every writer that ASSIGNS an email serializes
+// with a concurrent merge-undo's claim probe via the shared normalized-email
+// advisory lock — proceed-with-fresh-read, so only the email column is ever
+// dropped and the address backfill still lands.
+async function backfillLinkedCustomerFromExtraction({ customerId, existing, extracted = {}, source }) {
+  const updates = {};
+  const existingEmailInvalid = existing.email && !EMAIL_RE.test(String(existing.email).trim().toLowerCase());
+  const capturedEmailValid = extracted.email && EMAIL_RE.test(String(extracted.email).trim().toLowerCase());
+  if ((!existing.email || existingEmailInvalid) && capturedEmailValid) updates.email = extracted.email;
+  if ((!existing.address_line1 || existing.address_line1 === '') && extracted.address_line1) {
+    updates.address_line1 = extracted.address_line1;
+    if (extracted.city) updates.city = extracted.city;
+    if (extracted.zip) updates.zip = extracted.zip;
+  }
+  if (Object.keys(updates).length === 0) return { updates };
+  const fanout = require('./customer-email-fanout');
+  const replacingGarbled = !!(updates.email && existingEmailInvalid);
+  const guarded = await fanout.applyCustomerUpdatesWithEmailClaimGuard({
+    customerId, updates,
+    source,
+    ...(replacingGarbled ? {
+      replaceExpectedEmail: existing.email,
+      applyWithEmailInTrx: async (trx) => {
+        await trx('customers').where({ id: customerId }).update(updates);
+        await fanout.propagateCustomerEmailChange({
+          before: existing,
+          after: { id: customerId, email: updates.email },
+          source: `call-captured email replacing a garbled address (${source})`,
+          reviewReasonCodes: ['customer_email_missing'],
+        }, trx);
+      },
+    } : {}),
+  });
+  if (updates.email && guarded.emailApplied && !replacingGarbled) {
+    try {
+      await fanout.resolveOpenEmailReviewCards({
+        customerId, email: updates.email,
+        source: `call-captured email (${source})`,
+        reasonCodes: ['customer_email_missing'],
+      });
+    } catch (e) {
+      logger.warn(`[call-proc] email review-card resolution failed after ${source} for customer ${customerId}: ${e.message}`);
+    }
+  }
+  return { updates, emailApplied: !!(updates.email && guarded.emailApplied) };
+}
+
 async function backfillCustomerFromAppointmentContact(customerId, customer = {}, extracted = {}, callerPhone = null, { suppressPhone = false } = {}) {
   if (!customerId) return customer;
   const updates = {};
@@ -6406,6 +6546,57 @@ async function recordCommitmentsStep({ call, callSid, transcription, extracted, 
   }
 }
 
+// Reschedule apply — when a matched existing customer's call moved a visit
+// that is already on the books (V2 scheduling.status reschedule_requested +
+// agent_committed_booking + confirmed_start_at), move that visit through
+// the rebooker, note the access request, resolve the reschedule cards
+// (services/call-reschedule-apply.js). Runs after finalization, fenced on
+// this pass's GENERATION. Sends NOTHING to the customer. Dark behind
+// GATE_CALL_RESCHEDULE_APPLY; never blocks the call.
+// The two bookkeeping passes an APPLIED move owes, in one place so the step
+// above states the move and this states what follows from it (codex P2) —
+// both share the same precondition and both are non-blocking by design.
+async function applyRescheduleFollowUps({ call, callSid, result }) {
+  if (result?.outcome !== 'applied') return;
+  // recordCommitmentsStep ran BEFORE this step, so a schedule_visit promise
+  // the move just kept was written open and its proof did not exist yet.
+  // Re-run the fulfillment lookup now that the activity row exists, or the
+  // watchdog reports an overdue promise this pass already kept (GH codex
+  // #4204 r6 P2).
+  if (isEnabled('callCommitments')) {
+    await require('./call-commitments').refreshFulfillment(db, call.id)
+      .catch((err) => logger.warn(`[call-proc] post-reschedule fulfillment refresh failed for ${maskSid(callSid)}: ${err.message}`));
+  }
+  // NOTE: the promised window this move communicated needs no capture step
+  // here. no-show-detector.js derives it from the activity_log row
+  // call-reschedule-apply.js writes in the SAME transaction as the move, so
+  // there is nothing to lose if a best-effort write fails after the call is
+  // finalized — and every move applied before that feature existed reads the
+  // same way (codex P1, PR #4403 rounds 8 and 10).
+}
+
+async function applyCallRescheduleStep({ call, callSid, customerId, extracted, v2Result, appointmentResult, procGeneration }) {
+  if (extracted?.is_spam || !isEnabled('callRescheduleApply')) return;
+  if (v2Result?.status !== 'valid' || !v2Result.extraction) return;
+  if (!(call?.customer_id || customerId)) return;
+  try {
+    const result = await require('./call-reschedule-apply').applyCallReschedule({
+      conn: db,
+      call,
+      procGeneration,
+      appointmentCreated: !!appointmentResult?.scheduledServiceId,
+    });
+    if (result.outcome !== 'skipped' || result.reason !== 'not_a_reschedule') {
+      logger.info(`[call-proc] reschedule-apply for ${maskSid(callSid)}: ${result.outcome}${result.reason ? ` (${result.reason})` : ''}${result.visitId ? ` visit=${result.visitId}` : ''}`);
+    }
+    await applyRescheduleFollowUps({ call, callSid, result });
+    return result;
+  } catch (err) {
+    logger.warn(`[call-proc] reschedule-apply step failed (non-blocking) for ${maskSid(callSid)}: ${err.message}`);
+    return { outcome: 'error', error: err.message };
+  }
+}
+
 // Terminal write for a tech follow-up call: the transcript is already
 // stored; this lands the extraction, summary and sentiment the Calls tab
 // reads, marks the call processed and releases the claim in one
@@ -7681,6 +7872,16 @@ const CallRecordingProcessor = {
       && v2Result?.status === 'valid'
       && V2_NON_CUSTOMER_CALL_NATURES.has(v2Result.extraction?.call_nature);
 
+    // The subset where the person on the line is definitively NOT the linked
+    // customer. The set above is a CREATION hold — it also covers the
+    // existing-customer natures, where the classification asserts the caller
+    // already has a record. Consumers that update an ALREADY-LINKED customer
+    // (the pre-linked contact backfill in Step 3) must use this narrower set
+    // instead, or the calls it exists to serve are exactly the ones it skips
+    // (GH codex #4432 r1 P1). 'other' stays out: indeterminate is not
+    // third-party, and those consumers carry their own identity gates.
+    const v2ThirdPartyCallNature = thirdPartyCallNatureFromV2(v2Result);
+
     // ── V2-primary field adoption (owner promotion 2026-07-23) ──
     // A valid V2 extraction now DRIVES the canonical writes: its identity /
     // address / scheduling fields merge into the legacy-shaped `extracted`
@@ -8243,14 +8444,85 @@ const CallRecordingProcessor = {
     // rather than the only check.
     await db('triage_items')
       .where({ call_log_id: call.id, reason_code: 'address_recovered' })
+      .whereExists(function owningPass() {
+        this.select(db.raw('1')).from('call_log')
+          .whereRaw('call_log.id = ?', [call.id])
+          .where('call_log.processing_token', procToken);
+      })
       .update({
-        payload: addressRecovery?.recovered
-          ? db.raw('coalesce(payload, \'{}\'::jsonb) || ?::jsonb', [JSON.stringify(recoveryPassStamp)])
-          : db.raw('(coalesce(payload, \'{}\'::jsonb) - \'extraction_model\' - \'extraction_prompt_version\') || ?::jsonb',
-            [JSON.stringify({ recovery_superseded_at: new Date().toISOString() })]),
+        payload: recoveryMarkerPayload(db, addressRecovery?.recovered ? recoveryPassStamp : null),
         updated_at: new Date(),
       })
       .catch((e) => logger.warn(`[call-proc] recovery-marker reconcile failed for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`));
+
+    // The near-miss predictions recovery could not PROVE unique are the most
+    // useful thing an address card can carry — they are the street the caller
+    // most likely said, already house-number- and ZIP-matched. The shadow
+    // bridge has always attached them; the ENFORCE sites did not, so on the
+    // live path the reviewer saw only the garble (2026-09-10, call c3c27b01: a
+    // card carrying the mis-heard street while recovery had the ordinal street
+    // in hand and no site wrote it down). Same shape the bridge files, so one card
+    // reads identically whichever site won the onConflict race.
+    const addressRecoveryPayload = (flag) => (
+      (flag === 'address_unverified' || flag === 'address_recovered') && addressRecovery?.attempted
+        ? {
+          address_as_heard: rawStreetBeforeAdopt,
+          address_candidates: addressRecovery.candidates || [],
+          recovery_method: addressRecovery.method || null,
+          ...(flag === 'address_recovered' ? { recovery_superseded_at: new Date().toISOString() } : {}),
+        }
+        : null);
+
+    // Reconcile candidate evidence after every filing
+    // site in both modes. Patching inserts one at a time kept
+    // leaving sites out — the two fail-open demotion loops and the dedicated
+    // address_recovered branch never carried the evidence at all, and a card
+    // that already existed kept a stale payload through the conflict-ignored
+    // insert. This single write owns the invariant instead of six call sites
+    // sharing it: whatever address cards this call has open, they carry THIS
+    // pass's recovery evidence, including sites added later.
+    //
+    // Fenced on the claim. The recovery fan-out above awaits bounded network
+    // calls, so a worker that lost its claim meanwhile must not overwrite the
+    // replacement pass's evidence with its own stale candidates — the same
+    // processing_token predicate every other post-provider write here uses.
+    // New recovered cards start retired. Otherwise a worker that loses its
+    // claim can insert after the replacement's failed pass, making an obsolete
+    // recovery look current even though both UPDATE statements are fenced.
+    // Only this owning-pass update activates a freshly inserted recovery.
+    const reconcileAddressRecoveryEvidence = async () => {
+      if (!addressRecovery?.attempted) return;
+      const evidence = {
+        address_as_heard: rawStreetBeforeAdopt,
+        address_candidates: addressRecovery.candidates || [],
+        recovery_method: addressRecovery.method || null,
+      };
+      const fenceToOwningPass = (qb) => qb.whereExists(function owningPass() {
+        this.select(db.raw('1')).from('call_log')
+          .whereRaw('call_log.id = ?', [call.id])
+          .where('call_log.processing_token', procToken);
+      });
+      const onCards = (reasonCode) => fenceToOwningPass(db('triage_items')
+        .where('call_log_id', call.id)
+        .where('reason_code', reasonCode)
+        .whereIn('status', ['open', 'in_progress']));
+
+      await onCards('address_unverified')
+        .update({
+          payload: db.raw('coalesce(payload, \'{}\'::jsonb) || ?::jsonb', [JSON.stringify(evidence)]),
+          updated_at: new Date(),
+        })
+        .catch((e) => logger.warn(`[call-proc] address-evidence reconcile failed for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`));
+
+      await onCards('address_recovered')
+        .update({
+          payload: addressRecovery?.recovered
+            ? recoveryMarkerPayload(db, { ...evidence, ...recoveryPassStamp, address_recovered: addressRecovery.recovered.address_line1 })
+            : db.raw('coalesce(payload, \'{}\'::jsonb) || ?::jsonb', [JSON.stringify(evidence)]),
+          updated_at: new Date(),
+        })
+        .catch((e) => logger.warn(`[call-proc] address-evidence reconcile failed for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`));
+    };
 
     // Explicit SMS consent is a property of the CALL, not of the routing mode:
     // the secondary-contact fan-out at the send site requires it even when V2
@@ -8375,7 +8647,7 @@ const CallRecordingProcessor = {
                 // writes onto the record (codex r18 P1).
                 ...(flag === 'missing_last_name'
                   ? { extraPayload: { heard_name_v1: { first_name: extracted?.first_name ?? null, last_name: extracted?.last_name ?? null } } }
-                  : {}),
+                  : { extraPayload: addressRecoveryPayload(flag) }),
               }))
               .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
               .ignore();
@@ -8399,7 +8671,7 @@ const CallRecordingProcessor = {
                   address_recovered: addressRecovery.recovered.address_line1,
                   address_candidates: addressRecovery.candidates || [],
                   recovery_method: addressRecovery.method || null,
-                  ...recoveryPassStamp,
+                  recovery_superseded_at: new Date().toISOString(),
                   ...(contactDictation?.addresses?.[0]?.confirmation_question
                     ? { confirmation_question: contactDictation.addresses[0].confirmation_question } : {}),
                 },
@@ -8475,9 +8747,12 @@ const CallRecordingProcessor = {
             // cancellation, two reschedules and a re-treat with no owner).
             if (blockingReasons.some((f) => SCHEDULING_CHANGE_REVIEW_FLAGS.includes(f))) schedulingChangeHeld = true;
             for (const flag of triageReasons.slice(0, 10)) {
-              const triageItem = buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction, addressValidation, onFileAddress });
+              const triageItem = buildTriageItem({
+                callLogId: call.id, flag, extraction: v2Extraction, addressValidation, onFileAddress,
+                extraPayload: addressRecoveryPayload(flag),
+              });
               await db('triage_items').insert(triageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
-            }
+              }
             // Demoted flags survive a block by ANOTHER gate (codex round-4
             // P2): an agent-committed call held on e.g. address_unverified
             // must still surface the "confirm the account holder" advisory —
@@ -8761,21 +9036,18 @@ const CallRecordingProcessor = {
                   extraPayload: flag === 'missing_last_name' ? {
                     heard_name_v1: { first_name: extracted?.first_name ?? null, last_name: extracted?.last_name ?? null },
                   } : (isAddressFlag && addressRecovery?.attempted) ? {
-                    address_as_heard: rawStreetBeforeAdopt,
+                    // The same candidate evidence as the enforce path.
+                    ...addressRecoveryPayload(flag),
                     address_recovered: flag === 'address_recovered' ? extracted.address_line1 : null,
-                    address_candidates: addressRecovery.candidates || [],
-                    recovery_method: addressRecovery.method || null,
-                    // Same pass stamp the enforce site writes — this is the
-                    // site that files the card in SHADOW mode, which is
-                    // exactly the cohort the promotion gate audits.
-                    ...(flag === 'address_recovered' ? recoveryPassStamp : {}),
+                    // Inserts start retired; only the owning reconcile can activate them.
+                    ...(flag === 'address_recovered' ? { recovery_superseded_at: new Date().toISOString() } : {}),
                     ...(contactDictation?.addresses?.[0]?.confirmation_question
                       ? { confirmation_question: contactDictation.addresses[0].confirmation_question } : {}),
                   } : null,
                 }))
                 .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
                 .ignore();
-            } catch (triageErr) {
+              } catch (triageErr) {
               logger.warn(`[call-proc-bridge] triage_items insert failed for ${maskSid(callSid)}: ${triageErr.message}`);
             }
           }
@@ -8888,6 +9160,11 @@ const CallRecordingProcessor = {
         logger.warn(`[call-proc] email review skipped for ${maskSid(callSid)}: ${emailErr.message}`);
       }
     }
+
+    // Every address card for this pass is filed by now (both modes, every
+    // branch) — reconcile the recovery evidence onto all of them in one
+    // fenced write.
+    await reconcileAddressRecoveryEvidence();
 
     // Hard veto → record extraction for audit, skip all canonical writes
     // (no customer, no lead, no appointment, no automation). Mirrors the
@@ -9046,6 +9323,7 @@ const CallRecordingProcessor = {
     }
 
     const sharedPhoneAmbiguity = {};
+    let phoneMatchedThisPass = false;
     if (!customerId && phone && !explicitUnlink) {
       // Try to find an existing customer by the external contact phone.
       // Name match wins; phone-only matching needs a second deterministic
@@ -9068,63 +9346,12 @@ const CallRecordingProcessor = {
       });
       if (existing) {
         customerId = existing.id;
-        // Update with any new info
-        const updates = {};
-        // Same garbled-stored-email rule as the appointment backfill
-        // (codex round-12 P2): invalid stored value is replaceable by a
-        // VALID capture; a valid stored email is never overwritten.
-        const existingEmailInvalid = existing.email && !EMAIL_RE.test(String(existing.email).trim().toLowerCase());
-        const capturedEmailValid = extracted.email && EMAIL_RE.test(String(extracted.email).trim().toLowerCase());
-        if ((!existing.email || existingEmailInvalid) && capturedEmailValid) updates.email = extracted.email;
-        if ((!existing.address_line1 || existing.address_line1 === '') && extracted.address_line1) {
-          updates.address_line1 = extracted.address_line1;
-          if (extracted.city) updates.city = extracted.city;
-          if (extracted.zip) updates.zip = extracted.zip;
-        }
-        if (Object.keys(updates).length > 0) {
-          // Same contract as the appointment backfill above: a REPLACEMENT of
-          // a garbled stored email must fan out (copies of the old address
-          // exist) and does so in ONE transaction with the customer write, so
-          // a partial fan-out cannot strand snapshots on an address the
-          // record no longer holds (codex round-24 P1); an empty→value write
-          // only settles the missing-email card; neither settles the
-          // read-back cards filed for this unverified capture (round-9 +
-          // round-10 P2; fan-out gap from the local pre-push audit P1). Both
-          // paths ride the email-claim guard (r16): every writer that
-          // ASSIGNS an email serializes with a concurrent merge-undo's
-          // claim probe via the shared normalized-email advisory lock —
-          // proceed-with-fresh-read, so only the email column is ever
-          // dropped and the address backfill still lands.
-          const fanout = require('./customer-email-fanout');
-          const replacingGarbled = !!(updates.email && existingEmailInvalid);
-          const guarded = await fanout.applyCustomerUpdatesWithEmailClaimGuard({
-            customerId, updates,
-            source: 'call-extraction-backfill',
-            ...(replacingGarbled ? {
-              replaceExpectedEmail: existing.email,
-              applyWithEmailInTrx: async (trx) => {
-                await trx('customers').where({ id: customerId }).update(updates);
-                await fanout.propagateCustomerEmailChange({
-                  before: existing,
-                  after: { id: customerId, email: updates.email },
-                  source: 'call-captured email replacing a garbled address (phone-match update)',
-                  reviewReasonCodes: ['customer_email_missing'],
-                }, trx);
-              },
-            } : {}),
-          });
-          if (updates.email && guarded.emailApplied && !replacingGarbled) {
-            try {
-              await fanout.resolveOpenEmailReviewCards({
-                customerId, email: updates.email,
-                source: 'call-captured email (phone-match update)',
-                reasonCodes: ['customer_email_missing'],
-              });
-            } catch (e) {
-              logger.warn(`[call-proc] email review-card resolution failed after phone-match update for customer ${customerId}: ${e.message}`);
-            }
-          }
-        }
+        phoneMatchedThisPass = true;
+        // Update with any new info (email + address; shared with the
+        // pre-linked path below).
+        await backfillLinkedCustomerFromExtraction({
+          customerId, existing, extracted, source: 'call-extraction-backfill',
+        });
       } else if (sharedPhoneAmbiguity.candidates) {
         // Shared phone, no deterministic tiebreak: minting ANOTHER customer
         // on this number would make it permanently multi-match (the duplicate
@@ -9312,6 +9539,50 @@ const CallRecordingProcessor = {
         }
       } else if (!extracted.first_name) {
         logger.info(`[call-proc] Skipping new customer creation for ${callSid}: first name not confirmed`);
+      }
+    }
+
+    // Pre-linked calls (call.customer_id set at ring time by the inbound
+    // webhook, an operator link, or the transcript-name reconciliation
+    // above) skipped the phone-match branch entirely, so a capture on a
+    // NON-booking call never reached the customer row: the only other email
+    // backfill sits inside the auto-booking branch. Incident 2026-09-11
+    // (customer 7411b13a-3046-4376-b4c8-2d84f32c2ef7): the email dictated on
+    // the second and third calls stayed on call_log.ai_extraction while
+    // customers.email stayed null, and the manual booking that evening sent
+    // the no-email prep fallback text instead of the guide email.
+    //
+    // Same trust bar as the phone-match branch: the IDENTITY number must be
+    // the customer's own and the spoken name must not contradict the record.
+    // Identity is the inbound ANI, never resolveCallContactPhone's result —
+    // that helper prefers a DICTATED callback number, which says nothing
+    // about who is on the line and would reject a caller whose verified ANI
+    // is exactly what established the link (GH codex #4432 r1 P2); the same
+    // rule the phone-verification lane below uses. An outbound call's
+    // identity is the number WE dialed.
+    //
+    // Never from a voicemail (a one-sided transcription is too lossy to
+    // trust contact detail from) or from a THIRD-PARTY call nature — an
+    // applicant's or a vendor's email is not the customer's. Deliberately
+    // NOT the creation-only v2NonCustomerCallNature aggregate: that set also
+    // holds billing_question / existing_customer_service /
+    // existing_customer_scheduling, which are precisely the linked-customer
+    // calls this backfill exists to repair (GH codex #4432 r1 P1).
+    // Fail-soft.
+    const prelinkedGate = prelinkedBackfillGate({
+      call, customerId, createdCustomerFromCall, phoneMatchedThisPass, extracted, explicitUnlink,
+      thirdPartyCallNature: v2ThirdPartyCallNature,
+    });
+    if (prelinkedGate.eligible) {
+      try {
+        const linked = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
+        if (linkedCustomerAcceptsBackfill(linked, prelinkedGate.identityPhone, extracted)) {
+          await backfillLinkedCustomerFromExtraction({
+            customerId, existing: linked, extracted, source: 'call-extraction-backfill-prelinked',
+          });
+        }
+      } catch (e) {
+        logger.warn(`[call-proc] pre-linked customer backfill skipped for ${maskSid(callSid)}: ${e.message}`);
       }
     }
 
@@ -16381,6 +16652,16 @@ const CallRecordingProcessor = {
 
       // Commitments (recordCommitmentsStep): after finalization, generation-fenced, never blocking.
       await recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration });
+
+      // Reschedule apply (applyCallRescheduleStep): an existing customer's
+      // agent-committed move of an on-the-books visit lands on the visit.
+      // No customer comms. Generation-fenced, never blocking.
+      await applyCallRescheduleStep({ call, callSid, customerId, extracted, v2Result, appointmentResult, procGeneration });
+
+      // The window this booking call committed needs no capture step either:
+      // the visit row carries source_call_log_id, written in the booking
+      // transaction, and no-show-detector.js derives the promise from that
+      // durable link (codex P1, PR #4403 round 10).
     }
 
     // Reconcile-only draft-linkage pass, AFTER the fenced finalization
@@ -17104,9 +17385,14 @@ const LEAD_UNIT_MAX_LENGTH = 100;
 const LEAD_PLACE_TAIL_MAX_LENGTH = 80;
 
 CallRecordingProcessor._test = {
+  backfillLinkedCustomerFromExtraction,
+  prelinkedBackfillGate,
+  thirdPartyCallNatureFromV2,
+  linkedCustomerAcceptsBackfill,
   isTechFollowUpCall,
   finalizeTechFollowUpCall,
   recordCommitmentsStep,
+  applyCallRescheduleStep,
   recordedPartOfComposite,
   summarizeBatch,
   noteSharedPhoneSibling,
@@ -17235,5 +17521,6 @@ CallRecordingProcessor.CALL_EXTRACTION_MAX_ATTEMPTS = CALL_EXTRACTION_MAX_ATTEMP
 // the booking path wrote window_start from — a second implementation of the
 // ET-offset-vs-instant rule would drift from it.
 CallRecordingProcessor.v2IsoToEtWallClock = v2IsoToEtWallClock;
+CallRecordingProcessor.recoveryMarkerPayload = recoveryMarkerPayload;
 
 module.exports = CallRecordingProcessor;

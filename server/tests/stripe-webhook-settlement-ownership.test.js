@@ -48,6 +48,9 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false), g
 jest.mock('../services/invoice-helpers', () => ({
   INVOICE_UNCOLLECTIBLE_STATUSES: ['void'],
   invoiceAmountDue: jest.fn(() => 100),
+  // Pure predicate over the row — the real one, so the withdrawn-invoice
+  // quarantine is exercised rather than stubbed away.
+  invoiceWithdrawnFromCustomer: jest.requireActual('../services/invoice-helpers').invoiceWithdrawnFromCustomer,
 }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn(() => 'https://portal.test') }));
 jest.mock('../services/payment-lifecycle-email', () => ({ sendPaymentFailed: jest.fn(async () => {}) }));
@@ -89,6 +92,13 @@ function resetMockState() {
     // committed while this handler waited on the row lock).
     lockedInvoice: { id: 'inv-1', customer_id: LOSER, invoice_number: 'INV-1', status: 'sent', credit_applied: 0 },
     inserts: [],
+    // >0 = a payments row was already sitting in `processing` (the ACH rail),
+    // which takes the settle path that never reaches the fallback lock.
+    processingPaymentsUpdated: 0,
+    // What the settle-time re-read sees (null = same as the pre-lock read).
+    settleReadInvoice: null,
+    settleReadThrows: false,
+    updates: [],
   });
 }
 
@@ -105,12 +115,24 @@ function mockMakeBuilder(table, { inTrx } = {}) {
   b.forUpdate = () => { b._forUpdate = true; return b; };
   b.count = () => { b._counted = true; return b; };
   b.columnInfo = async () => ({ stripe_event_id: {} });
-  b.first = async () => {
+  b.first = async (...cols) => {
     if (table === 'invoices') {
+      // The settle-time re-read names its columns explicitly; every other
+      // invoice read in this handler takes the whole row. That is how the
+      // harness models a withdrawal that commits DURING the payment.
+      if (cols.includes('scheduled_send_error')) {
+        if (mockState.settleReadThrows) throw new Error('connection reset');
+        return mockState.settleReadInvoice ?? mockState.preLockInvoice;
+      }
       // Inside the transaction WITH forUpdate = the post-wait re-read.
       return (inTrx && b._forUpdate) ? mockState.lockedInvoice : mockState.preLockInvoice;
     }
-    if (table === 'payments') return null; // no existing payment row
+    // Outside the transaction, a `processing` row exists exactly when this
+    // PI's ACH is still in flight; inside it (the fallback's FOR UPDATE read)
+    // there is never a pre-existing row — that is the path under test.
+    if (table === 'payments') {
+      return (!inTrx && mockState.processingPaymentsUpdated > 0) ? { id: 'pay-processing' } : null;
+    }
     return null;
   };
   b.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
@@ -118,11 +140,18 @@ function mockMakeBuilder(table, { inTrx } = {}) {
   // the fallback transaction that LOCKS the invoice and inserts the
   // payment, which is the path under test. The invoice link update must
   // report a row so the handler proceeds to that insert.
-  b.update = async () => (table === 'payments' ? 0 : 1);
+  b.update = async (payload) => {
+    mockState.updates.push({ table, payload, inTrx: !!inTrx });
+    return table === 'payments' ? mockState.processingPaymentsUpdated : 1;
+  };
   b.del = async () => 1;
-  b.insert = async (payload) => {
-    mockState.inserts.push({ table, payload });
-    return [{ id: 'new-row' }];
+  b.insert = (payload) => {
+    mockState.inserts.push({ table, payload, inTrx: !!inTrx });
+    // Thenable so `await insert(...)` still yields the row, with the
+    // upsert chain the orphan-quarantine recorder uses.
+    const result = Promise.resolve([{ id: 'new-row' }]);
+    result.onConflict = () => ({ ignore: async () => 1, merge: async () => 1 });
+    return result;
   };
   b.returning = async () => [{ id: 'new-row' }];
   return b;
@@ -181,5 +210,94 @@ describe('payment settlement takes ownership from the LOCKED invoice row', () =>
     const paymentInsert = mockState.inserts.find((i) => i.table === 'payments');
     expect(paymentInsert).toBeTruthy();
     expect(paymentInsert.payload.customer_id).toBe(WINNER);
+  });
+});
+
+// A PaymentIntent the customer minted BEFORE Bill-To moved is confirmed
+// client-side at Stripe and never re-enters our routes, so the route guards
+// cannot refuse it — this webhook is the first place the money is visible
+// (pre-push P0). Settling it would mark an invoice now owned by third-party
+// AP as paid with the homeowner's funds.
+describe('a withdrawn invoice never settles from a customer-minted intent', () => {
+  test('quarantines the charge instead of recording the payment', async () => {
+    mockState.preLockInvoice = { ...mockState.preLockInvoice, scheduled_send_error: 'payer_billed:5:hold' };
+
+    await handlePaymentIntentSucceeded(succeededPI());
+
+    expect(mockState.inserts.find((i) => i.table === 'payments')).toBeFalsy();
+    expect(mockState.inserts.find((i) => i.table === 'stripe_orphan_charges')).toBeTruthy();
+  });
+
+  test('an ordinary delivery failure still settles normally', async () => {
+    mockState.preLockInvoice = { ...mockState.preLockInvoice, scheduled_send_error: 'smtp 550 mailbox unavailable' };
+
+    await handlePaymentIntentSucceeded(succeededPI());
+
+    expect(mockState.inserts.find((i) => i.table === 'payments')).toBeTruthy();
+    expect(mockState.inserts.find((i) => i.table === 'stripe_orphan_charges')).toBeFalsy();
+  });
+
+  test('a settle-time re-read that fails surfaces to Stripe instead of settling without the alert', async () => {
+    // The flip and its withdrawal check share a transaction: a failed re-read
+    // rolls the flip back and the handler throws, so the redelivery repeats
+    // the check rather than leaving a paid invoice with no alert.
+    mockState.processingPaymentsUpdated = 1;
+    mockState.settleReadThrows = true;
+
+    await expect(handlePaymentIntentSucceeded(succeededPI())).rejects.toThrow('connection reset');
+    expect(mockState.inserts.find((i) => i.table === 'customer_health_alerts')).toBeFalsy();
+  });
+});
+
+// The pre-lock read can be overtaken: a Bill-To transaction commits while this
+// webhook waits on the invoice row, and the fallback branch is the one that
+// CREATES the payment row (audit P0).
+describe('the withdrawal is re-read under the settlement lock', () => {
+  test('a withdrawal that commits during the wait still quarantines', async () => {
+    mockState.lockedInvoice = { ...mockState.lockedInvoice, scheduled_send_error: 'payer_billed:5' };
+
+    await handlePaymentIntentSucceeded(succeededPI());
+
+    expect(mockState.inserts.find((i) => i.table === 'payments')).toBeFalsy();
+    const orphan = mockState.inserts.find((i) => i.table === 'stripe_orphan_charges');
+    expect(orphan).toBeTruthy();
+    // Written through the HELD transaction: a root-connection insert would
+    // wait on this transaction's own FOR UPDATE lock (the FK takes KEY SHARE
+    // on the locked invoice) and the quarantine could never commit.
+    expect(orphan.inTrx).toBe(true);
+    // …and the WHOLE handler stops: the quarantine's `return` leaves only the
+    // transaction callback, so without an explicit outcome the invoice-paid
+    // update below would mark a quarantined invoice paid with no payments row.
+    expect(mockState.updates.find((u) => u.table === 'invoices' && u.payload?.status === 'paid')).toBeFalsy();
+  });
+
+  test('a withdrawal visible on the FIRST read still settles an in-flight ACH', async () => {
+    // The early quarantine must not fire when a payments row for this PI is
+    // already `processing`: those funds are captured and the row would be
+    // stranded (audit P0).
+    mockState.processingPaymentsUpdated = 1;
+    mockState.preLockInvoice = { ...mockState.preLockInvoice, scheduled_send_error: 'payer_billed:5' };
+    mockState.settleReadInvoice = { ...mockState.preLockInvoice };
+
+    await handlePaymentIntentSucceeded(succeededPI());
+
+    expect(mockState.inserts.find((i) => i.table === 'stripe_orphan_charges')).toBeFalsy();
+    const alert = mockState.inserts.find((i) => i.table === 'customer_health_alerts');
+    expect(alert?.payload.alert_type).toBe('wh_payer_billed_settled');
+  });
+
+  test('an ACH row already in `processing` settles but raises an alert', async () => {
+    // The money is captured and the payments row exists — refusing here would
+    // strand a `processing` row forever. The office is told instead.
+    mockState.processingPaymentsUpdated = 1;
+    mockState.settleReadInvoice = { ...mockState.preLockInvoice, scheduled_send_error: 'payer_billed:5' };
+
+    await handlePaymentIntentSucceeded(succeededPI());
+
+    const alert = mockState.inserts.find((i) => i.table === 'customer_health_alerts');
+    expect(alert).toBeTruthy();
+    expect(alert.payload.alert_type).toBe('wh_payer_billed_settled');
+    expect(alert.payload.alert_type.length).toBeLessThanOrEqual(30);
+    expect(mockState.inserts.find((i) => i.table === 'stripe_orphan_charges')).toBeFalsy();
   });
 });

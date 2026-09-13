@@ -1,4 +1,5 @@
-import { Badge, Card, CardBody, CardHeader, CardTitle } from "../../../components/ui";
+import { Badge, Card, CardBody, CardHeader, CardTitle, UiSurface } from "../../../components/ui";
+import { ArrowRight } from "lucide-react";
 import { RowLink } from "./RowLink";
 
 // TODAY-section exception card: past-dated visits still sitting in an open
@@ -14,11 +15,11 @@ export default function StaleVisitsCard({ data }) {
   const total = Number(data?.total || visits.length);
 
   return (
-    <Card className="mb-4 max-md:border-0 max-md:shadow-sm">
+    <UiSurface as={Card} className="mb-4">
       <CardHeader className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2.5 min-w-0">
           <CardTitle>Stale visits</CardTitle>
-          <span className="text-12 text-ink-secondary">
+          <span className="text-ui-caption text-ink-secondary">
             past their date, still open
           </span>
         </div>
@@ -30,7 +31,7 @@ export default function StaleVisitsCard({ data }) {
             <RowLink
               key={item.id}
               href={item.href}
-              className="flex flex-col items-start gap-1 xl:flex-row xl:items-center xl:justify-between xl:gap-3 rounded-sm border-hairline border-zinc-200 bg-surface-sunken px-3 py-2 text-13 text-zinc-900 hover:bg-white"
+              className="flex min-h-11 flex-col items-start gap-1 rounded-sm border-hairline border-zinc-200 bg-surface-sunken px-3 py-2 text-ui-body text-zinc-900 hover:bg-white u-focus-ring xl:flex-row xl:items-center xl:justify-between xl:gap-3"
             >
               <span className="flex items-center gap-2 min-w-0 w-full xl:w-auto">
                 <span className="h-2 w-2 rounded-full flex-shrink-0 bg-amber-500" />
@@ -39,25 +40,23 @@ export default function StaleVisitsCard({ data }) {
                   {item.metadata?.serviceType || "Scheduled service"}
                 </span>
               </span>
-              <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 pl-4 xl:pl-0 xl:flex-shrink-0 text-12 text-ink-secondary">
+              <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 pl-4 text-ui-caption text-ink-secondary xl:flex-shrink-0 xl:pl-0">
                 <span className="u-nums whitespace-nowrap">{item.metadata?.scheduledDate}</span>
                 <span>
                   {String(item.metadata?.status || "").replace("_", " ")} ·{" "}
                   {item.metadata?.daysOverdue}d overdue
                 </span>
-                <span aria-hidden="true" className="text-ink-tertiary">
-                  →
-                </span>
+                <ArrowRight size={16} aria-hidden className="text-ink-tertiary" />
               </span>
             </RowLink>
           ))}
         </div>
         {total > visits.length && (
-          <div className="text-12 text-ink-tertiary mt-2">
+          <div className="mt-2 text-ui-caption text-ink-secondary">
             Showing the oldest {visits.length} of {total}.
           </div>
         )}
       </CardBody>
-    </Card>
+    </UiSurface>
   );
 }

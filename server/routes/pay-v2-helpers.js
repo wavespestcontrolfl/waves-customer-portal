@@ -3,7 +3,7 @@ const { assertInvoiceCollectible } = require('../services/invoice-helpers');
 function shouldSkipClientPaymentErrorAlert(invoice) {
   if (!invoice) return false;
   try {
-    assertInvoiceCollectible(invoice.status);
+    assertInvoiceCollectible(invoice);
     return false;
   } catch {
     return true;

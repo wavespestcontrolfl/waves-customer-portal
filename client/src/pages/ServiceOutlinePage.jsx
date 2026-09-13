@@ -3,7 +3,8 @@ import { Link, useParams } from "react-router-dom";
 import { CalendarDays, ClipboardCheck, FileText, MapPin, ShieldCheck, Sprout } from "lucide-react";
 import DocumentActionBar from "../components/DocumentActionBar";
 import { useGlassSurface } from "../glass/glass-engine";
-import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from "../constants/business";
+import { PublicStateCard } from "../components/brand";
+import { WAVES_SUPPORT_PHONE_DISPLAY } from "../constants/business";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -22,32 +23,18 @@ function LoadingState() {
 // transient failures get a Try again. `gone` (404/410) skips the retry — a
 // dead token can't recover, so the copy points at a resend instead.
 function ErrorState({ kind, message, onRetry }) {
+  const gone = kind === "gone";
   return (
     <div data-glass-clear="" className="flex-1 bg-waves-page px-4 py-10">
-      <div className="mx-auto max-w-3xl rounded-md border border-red-200 bg-white p-6">
-        <h1 className="text-xl font-semibold text-waves-blue-deeper">
-          {kind === "gone" ? "This outline link has expired" : "We couldn't load your program overview"}
-        </h1>
-        <p className="mt-2 text-base leading-7 text-slate-600">{message}</p>
-        <div className="mt-5 flex flex-wrap items-center gap-3">
-          {kind !== "gone" && onRetry && (
-            <button
-              type="button"
-              onClick={onRetry}
-              style={{ minHeight: 44 }}
-              className="rounded-md bg-waves-blue-deeper px-5 text-base font-semibold text-white"
-            >
-              Try again
-            </button>
-          )}
-          <a
-            href={WAVES_SUPPORT_PHONE_TEL}
-            style={{ minHeight: 44 }}
-            className="inline-flex items-center rounded-md border border-zinc-200 px-5 text-base font-semibold text-waves-blue-deeper"
-          >
-            Call {WAVES_SUPPORT_PHONE_DISPLAY}
-          </a>
-        </div>
+      <div className="mx-auto max-w-3xl">
+        <PublicStateCard
+          state={gone ? "expired" : "error"}
+          title={gone ? "This outline link has expired" : "We couldn't load your program overview"}
+          onRetry={gone ? undefined : onRetry}
+          contact="call"
+        >
+          {message}
+        </PublicStateCard>
       </div>
     </div>
   );

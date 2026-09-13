@@ -1,7 +1,9 @@
 const crypto = require('crypto');
 const modelOutputSchema = require('../../schemas/call-extraction.model-output.schema.json');
 
-const PROMPT_VERSION = 'v6';
+// v7: ordinal street recovery changes routing outcomes even when extraction
+// text is unchanged. Keep pre-ordinal calls outside this persisted cohort.
+const PROMPT_VERSION = 'v7';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
 // several calls — a realtor whose first call cut off mid-dictation of the

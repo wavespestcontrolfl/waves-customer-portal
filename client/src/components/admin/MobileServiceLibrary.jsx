@@ -9,8 +9,25 @@
 // use the same URL-addressable workflow.
 
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { Library } from "lucide-react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  Library,
+  Percent,
+  Plus,
+} from "lucide-react";
 import AdminCommandHeader from "./AdminCommandHeader";
+import {
+  ActionFeedback,
+  Button,
+  Card,
+  CardBody,
+  Checkbox,
+  Field,
+  Input,
+  Select,
+  UiSurface,
+} from "../ui";
 import { SERVICE_CATEGORY_LABELS as CATEGORY_LABELS } from "../../constants/serviceCategories";
 import { buildMobileServicePayload } from "../../lib/serviceLibraryPayload";
 
@@ -49,91 +66,60 @@ async function fetchAllServices(params = new URLSearchParams()) {
   return rows;
 }
 
-// Shared row + card styling so the three views look identical.
+// Shared row styling for the drill-in lists.
 const rowChrome =
-  "flex items-center gap-3 bg-white border-hairline border-zinc-200 rounded-sm px-3 no-underline";
-
-// Shared form primitives for the inline edit panels.
-function Field({ label, children }) {
-  return (
-    <label className="flex flex-col gap-1">
-      {" "}
-      <span
-        className="text-ink-tertiary uppercase tracking-label"
-        style={{ fontSize: 11 }}
-      >
-        {label}
-      </span>
-      {children}
-    </label>
-  );
-}
-
-const inputChrome =
-  "block w-full bg-white text-14 text-ink-primary border-hairline border-zinc-300 rounded-sm h-10 px-3 focus:outline-none focus:border-zinc-900";
-const selectChrome = inputChrome;
+  "flex min-h-[64px] items-center gap-3 bg-white border-hairline border-zinc-200 rounded-sm px-3 no-underline";
 const editPanelChrome =
-  "bg-zinc-50 border-hairline border-zinc-200 rounded-sm px-3 py-3 flex flex-col gap-3";
+  "bg-zinc-50 border-hairline border-zinc-200 rounded-md p-4 flex flex-col gap-4 text-ui-body";
+
+function saveButtonLabel(saving, isNew) {
+  if (saving) return "Saving…";
+  return isNew ? "Create" : "Save";
+}
 
 function SearchBar({ value, onChange, placeholder }) {
   return (
-    <div className="relative mb-3">
-      {" "}
-      <span
-        aria-hidden
-        className="absolute left-4 top-1/2 -translate-y-1/2 text-ink-tertiary"
-        style={{ fontSize: 14 }}
-      >
-        ⌕
-      </span>{" "}
-      <input
-        type="search"
-        inputMode="search"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        className="block w-full bg-white text-14 text-ink-primary border-hairline border-zinc-300 rounded-full h-12 pl-10 pr-4 focus:outline-none focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900"
-      />{" "}
-    </div>
+    <Input
+      type="search"
+      inputMode="search"
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      placeholder={placeholder}
+      aria-label={placeholder}
+      className="mb-3"
+    />
   );
 }
 
 function Header({ title, onBack, onAdd, centerTitle = false }) {
   return (
-    <div
-      className="flex items-center justify-between mb-3"
-      style={{ minHeight: 44 }}
-    >
+    <div className="mb-3 flex min-h-11 items-center justify-between">
       {" "}
-      <button
+      <Button
         type="button"
         onClick={onBack}
         aria-label="Back"
-        className="flex items-center justify-center rounded-full bg-zinc-100 u-focus-ring"
-        style={{ width: 40, height: 40, fontSize: 16, lineHeight: 1 }}
+        variant="ghost"
+        className="w-11 px-0"
       >
-        ←
-      </button>
+        <ChevronLeft size={20} aria-hidden />
+      </Button>
       {centerTitle && (
-        <div
-          className="flex-1 text-center font-medium text-zinc-900"
-          style={{ fontSize: 17 }}
-        >
+        <div className="flex-1 text-center text-18 font-medium text-zinc-900">
           {title}
         </div>
       )}
       {onAdd ? (
-        <button
+        <Button
           type="button"
           onClick={onAdd}
           aria-label="Add"
-          className="flex items-center justify-center rounded-full bg-zinc-900 text-white u-focus-ring"
-          style={{ width: 40, height: 40, fontSize: 22, lineHeight: 1 }}
+          className="w-11 px-0"
         >
-          +
-        </button>
+          <Plus size={20} aria-hidden />
+        </Button>
       ) : (
-        <div style={{ width: 40, height: 40 }} />
+        <div className="h-11 w-11" />
       )}
     </div>
   );
@@ -141,10 +127,7 @@ function Header({ title, onBack, onAdd, centerTitle = false }) {
 
 function LargeTitle({ children }) {
   return (
-    <h1
-      className="m-0 text-22 font-medium text-zinc-900 tracking-normal mb-4"
-      style={{ fontFamily: "'Roboto', Arial, sans-serif" }}
-    >
+    <h1 className="m-0 mb-4 text-22 font-medium tracking-normal text-zinc-900">
       {children}
     </h1>
   );
@@ -171,7 +154,7 @@ function MenuView({ onNav, onOpenProtocols }) {
     },
   ];
   return (
-    <div className="pt-0 pb-10 mx-auto" style={{ maxWidth: 640 }}>
+    <div className="mx-auto max-w-[640px] pb-10 pt-0">
       {" "}
       <AdminCommandHeader title="Services" icon={Library} />
       <div className="flex flex-col gap-2">
@@ -184,31 +167,22 @@ function MenuView({ onNav, onOpenProtocols }) {
               else onNav(it.key);
             }}
             className={`${rowChrome} justify-between cursor-pointer hover:bg-zinc-50 text-left`}
-            style={{ height: 64 }}
           >
             {" "}
             <div className="flex-1 min-w-0">
               {" "}
-              <div
-                className="font-medium text-ink-primary"
-                style={{ fontSize: 15 }}
-              >
+              <div className="text-16 font-medium text-ink-primary">
                 {it.label}
               </div>{" "}
-              <div
-                className="text-ink-tertiary truncate"
-                style={{ fontSize: 12, marginTop: 2 }}
-              >
+              <div className="mt-1 truncate text-ui-caption text-ink-tertiary">
                 {it.hint}
               </div>{" "}
             </div>{" "}
-            <span
+            <ChevronRight
+              size={20}
               aria-hidden
               className="text-ink-secondary"
-              style={{ fontSize: 20 }}
-            >
-              ›
-            </span>{" "}
+            />
           </button>
         ))}
       </div>{" "}
@@ -217,11 +191,10 @@ function MenuView({ onNav, onOpenProtocols }) {
 }
 
 // ── Thumbnail (small square with Waves logo or category accent) ─────────
-function Thumb({ color = "#E4E4E7", icon }) {
+function Thumb({ icon }) {
   return (
     <div
-      className="flex items-center justify-center rounded-sm shrink-0"
-      style={{ width: 44, height: 44, background: color, color: "#18181B" }}
+      className="flex h-11 w-11 shrink-0 items-center justify-center rounded-sm bg-zinc-200 text-zinc-900"
       aria-hidden
     >
       {icon || (
@@ -235,17 +208,29 @@ function Thumb({ color = "#E4E4E7", icon }) {
 function CategoriesView({ onBack }) {
   const [services, setServices] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [query, setQuery] = useState("");
   const [expandedKey, setExpandedKey] = useState(null);
 
   useEffect(() => {
+    let current = true;
+    setLoading(true);
+    setLoadError(false);
     fetchAllServices(new URLSearchParams({ is_active: "true" }))
       .then((rows) => {
-        setServices(rows);
-        setLoading(false);
+        if (current) setServices(rows);
       })
-      .catch(() => setLoading(false));
-  }, []);
+      .catch(() => {
+        if (current) setLoadError(true);
+      })
+      .finally(() => {
+        if (current) setLoading(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [loadAttempt]);
 
   const groups = useMemo(() => {
     // Group services by `category`. Count distinct subcategories within each
@@ -273,13 +258,9 @@ function CategoriesView({ onBack }) {
   }, [services, query]);
 
   return (
-    <div className="px-4 pt-4 pb-10 mx-auto" style={{ maxWidth: 640 }}>
+    <div className="mx-auto max-w-[640px] px-4 pb-10 pt-4">
       {" "}
-      <Header
-        title="Categories"
-        onBack={onBack}
-        onAdd={() => alert("Create category — coming soon")}
-      />{" "}
+      <Header title="Categories" onBack={onBack} />{" "}
       <LargeTitle>Categories</LargeTitle>{" "}
       <SearchBar
         value={query}
@@ -287,17 +268,19 @@ function CategoriesView({ onBack }) {
         placeholder="Search Categories"
       />
       {loading ? (
-        <div
-          className="p-10 text-center text-ink-secondary"
-          style={{ fontSize: 13 }}
-        >
+        <div className="p-10 text-center text-ui-body text-ink-secondary">
           Loading…
         </div>
-      ) : groups.length === 0 ? (
-        <div
-          className="p-10 text-center text-ink-secondary"
-          style={{ fontSize: 13 }}
+      ) : loadError ? (
+        <ActionFeedback
+          error
+          onRetry={() => setLoadAttempt((attempt) => attempt + 1)}
+          className="my-4"
         >
+          Could not load categories.
+        </ActionFeedback>
+      ) : groups.length === 0 ? (
+        <div className="p-10 text-center text-ui-body text-ink-secondary">
           No categories
         </div>
       ) : (
@@ -312,44 +295,32 @@ function CategoriesView({ onBack }) {
                   onClick={() => setExpandedKey(isOpen ? null : g.key)}
                   aria-expanded={isOpen}
                   className={`${rowChrome} justify-between text-left u-focus-ring`}
-                  style={{ height: 64 }}
                 >
                   {" "}
                   <Thumb />{" "}
                   <div className="flex-1 min-w-0">
                     {" "}
-                    <div
-                      className="font-medium text-ink-primary truncate"
-                      style={{ fontSize: 15 }}
-                    >
+                    <div className="truncate text-16 font-medium text-ink-primary">
                       {g.label}
                     </div>{" "}
-                    <div
-                      className="text-ink-tertiary truncate"
-                      style={{ fontSize: 12, marginTop: 2 }}
-                    >
+                    <div className="mt-1 truncate text-ui-caption text-ink-tertiary">
                       {g.subCount} subcategor{g.subCount === 1 ? "y" : "ies"}
                     </div>{" "}
                   </div>{" "}
-                  <div
-                    className="flex items-center gap-1 text-ink-secondary"
-                    style={{ fontSize: 14 }}
-                  >
+                  <div className="flex items-center gap-1 text-ui-body text-ink-secondary">
                     {" "}
                     <span className="u-nums">
                       {g.itemCount} item{g.itemCount === 1 ? "" : "s"}
                     </span>{" "}
-                    <span
+                    <ChevronRight
+                      size={18}
                       aria-hidden
-                      style={{
-                        fontSize: 18,
-                        lineHeight: 1,
-                        transform: isOpen ? "rotate(90deg)" : "none",
-                        transition: "transform 120ms",
-                      }}
-                    >
-                      ›
-                    </span>{" "}
+                      className={
+                        isOpen
+                          ? "rotate-90 transition-transform"
+                          : "transition-transform"
+                      }
+                    />
                   </div>{" "}
                 </button>
                 {isOpen && <CategoryDetail group={g} />}
@@ -379,49 +350,42 @@ function CategoryDetail({ group }) {
   }, [group]);
 
   return (
-    <div className={editPanelChrome}>
-      {" "}
-      <div className="text-ink-tertiary" style={{ fontSize: 12 }}>
-        Categories are set per service. Edit a service from{" "}
-        <strong>All Services</strong>to move it.
-      </div>
-      {bySub.map(([sub, svcs]) => (
-        <div key={sub || "__none__"} className="flex flex-col gap-1">
-          {" "}
-          <div
-            className="text-ink-secondary uppercase tracking-label"
-            style={{ fontSize: 11 }}
-          >
-            {sub || "Uncategorized"}
-          </div>
-          {svcs.map((s) => (
-            <div
-              key={s.id}
-              className="flex items-center justify-between bg-white border-hairline border-zinc-200 rounded-sm px-3"
-              style={{ height: 40 }}
-            >
-              {" "}
-              <span
-                className="text-ink-primary truncate"
-                style={{ fontSize: 13 }}
-              >
-                {s.name}
-              </span>{" "}
-              <span
-                className="text-ink-tertiary u-nums"
-                style={{ fontSize: 12 }}
-              >
-                {s.pricing_type === "fixed" && s.base_price
-                  ? `$${Number(s.base_price).toFixed(0)}`
-                  : s.pricing_type === "variable" || s.pricing_type === "quoted"
-                    ? "Variable"
-                    : "—"}
-              </span>{" "}
-            </div>
-          ))}
+    <Card className="bg-zinc-50">
+      <CardBody className="space-y-4">
+        {" "}
+        <div className="text-ui-caption text-ink-tertiary">
+          Categories are set per service. Edit a service from{" "}
+          <span className="font-medium text-zinc-900">All Services</span>to move it.
         </div>
-      ))}
-    </div>
+        {bySub.map(([sub, svcs]) => (
+          <div key={sub || "__none__"} className="flex flex-col gap-1">
+            {" "}
+            <div className="text-ui-caption font-medium text-ink-secondary">
+              {sub || "Uncategorized"}
+            </div>
+            {svcs.map((s) => (
+              <div
+                key={s.id}
+                className="flex min-h-11 items-center justify-between rounded-sm border-hairline border-zinc-200 bg-white px-3"
+              >
+                {" "}
+                <span className="truncate text-ui-body text-ink-primary">
+                  {s.name}
+                </span>{" "}
+                <span className="u-nums text-ui-body text-ink-tertiary">
+                  {s.pricing_type === "fixed" && s.base_price
+                    ? `$${Number(s.base_price).toFixed(0)}`
+                    : s.pricing_type === "variable" ||
+                        s.pricing_type === "quoted"
+                      ? "Variable"
+                      : "—"}
+                </span>{" "}
+              </div>
+            ))}
+          </div>
+        ))}
+      </CardBody>
+    </Card>
   );
 }
 
@@ -477,7 +441,7 @@ function DiscountsView({ onBack }) {
     .filter((d) => !q || (d.name || "").toLowerCase().includes(q));
 
   return (
-    <div className="px-4 pt-4 pb-10 mx-auto" style={{ maxWidth: 640 }}>
+    <div className="mx-auto max-w-[640px] px-4 pb-10 pt-4">
       {" "}
       <Header
         title="Discounts"
@@ -507,24 +471,21 @@ function DiscountsView({ onBack }) {
         </div>
       )}
       {loadError ? (
-        <div role="alert" className="p-6 text-center text-alert-fg" style={{ fontSize: 14 }}>
+        <div
+          role="alert"
+          className="p-6 text-center text-ui-body text-alert-fg"
+        >
           <div>{loadError}</div>
-          <button type="button" onClick={load} className="mt-3 bg-zinc-900 text-white rounded-sm u-focus-ring" style={{ padding: "8px 14px" }}>
+          <Button onClick={load} className="mt-3">
             Retry
-          </button>
+          </Button>
         </div>
       ) : loading ? (
-        <div
-          className="p-10 text-center text-ink-secondary"
-          style={{ fontSize: 13 }}
-        >
+        <div className="p-10 text-center text-ui-body text-ink-secondary">
           Loading…
         </div>
       ) : list.length === 0 ? (
-        <div
-          className="p-10 text-center text-ink-secondary"
-          style={{ fontSize: 13 }}
-        >
+        <div className="p-10 text-center text-ui-body text-ink-secondary">
           No discounts
         </div>
       ) : (
@@ -539,42 +500,29 @@ function DiscountsView({ onBack }) {
                   onClick={() => setExpandedId(isOpen ? null : d.id)}
                   aria-expanded={isOpen}
                   className={`${rowChrome} justify-between text-left u-focus-ring`}
-                  style={{ height: 64 }}
                 >
                   {" "}
-                  <Thumb
-                    color="#F4F4F5"
-                    icon={<span style={{ fontSize: 18 }} aria-hidden></span>}
-                  />{" "}
+                  <Thumb icon={<Percent size={18} aria-hidden />} />{" "}
                   <div className="flex-1 min-w-0">
                     {" "}
-                    <div
-                      className="font-medium text-ink-primary truncate"
-                      style={{ fontSize: 15 }}
-                    >
+                    <div className="truncate text-16 font-medium text-ink-primary">
                       {d.name}
                     </div>{" "}
                   </div>{" "}
-                  <div
-                    className="flex items-center gap-1 text-ink-primary"
-                    style={{ fontSize: 14 }}
-                  >
+                  <div className="flex items-center gap-1 text-ui-body text-ink-primary">
                     {" "}
                     <span className="u-nums font-medium">
                       {formatAmount(d)}
                     </span>{" "}
-                    <span
+                    <ChevronRight
+                      size={18}
                       aria-hidden
-                      className="text-ink-secondary"
-                      style={{
-                        fontSize: 18,
-                        lineHeight: 1,
-                        transform: isOpen ? "rotate(90deg)" : "none",
-                        transition: "transform 120ms",
-                      }}
-                    >
-                      ›
-                    </span>{" "}
+                      className={
+                        isOpen
+                          ? "rotate-90 text-ink-secondary transition-transform"
+                          : "text-ink-secondary transition-transform"
+                      }
+                    />
                   </div>{" "}
                 </button>
                 {isOpen && (
@@ -649,23 +597,15 @@ function DiscountEditPanel({ discount, onCancel, onSaved }) {
   return (
     <form onSubmit={submit} className={editPanelChrome}>
       {isNew && (
-        <div
-          className="text-ink-primary font-medium"
-          style={{ fontSize: 15 }}
-        >
-          New Discount
-        </div>
+        <div className="text-16 font-medium text-ink-primary">New Discount</div>
       )}
       {!isNew && (
         <div className="bg-white border-hairline border-zinc-200 rounded-sm px-3 py-2">
           {" "}
-          <div
-            className="text-ink-tertiary uppercase tracking-label"
-            style={{ fontSize: 10 }}
-          >
+          <div className="text-ui-caption font-medium text-ink-tertiary">
             Quick Edit
           </div>{" "}
-          <div className="text-ink-secondary mt-1" style={{ fontSize: 12 }}>
+          <div className="mt-1 text-ui-caption text-ink-secondary">
             {[
               discount?.discount_key,
               discount?.service_key_filter &&
@@ -678,20 +618,16 @@ function DiscountEditPanel({ discount, onCancel, onSaved }) {
         </div>
       )}
       <Field label="Name">
-        {" "}
-        <input
-          className={inputChrome}
+        <Input
           value={name}
           onChange={(e) => setName(e.target.value)}
           required
-        />{" "}
+        />
       </Field>{" "}
       <div className="grid grid-cols-2 gap-3">
         {" "}
         <Field label="Type">
-          {" "}
-          <select
-            className={selectChrome}
+          <Select
             value={discountType}
             onChange={(e) => setDiscountType(e.target.value)}
           >
@@ -700,12 +636,10 @@ function DiscountEditPanel({ discount, onCancel, onSaved }) {
                 {t.label}
               </option>
             ))}
-          </select>{" "}
+          </Select>
         </Field>{" "}
         <Field label="Amount">
-          {" "}
-          <input
-            className={inputChrome}
+          <Input
             type="number"
             inputMode="decimal"
             step="0.01"
@@ -713,42 +647,28 @@ function DiscountEditPanel({ discount, onCancel, onSaved }) {
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
             disabled={discountType === "free_service"}
-          />{" "}
+          />
         </Field>{" "}
       </div>{" "}
-      <label className="flex items-center gap-2" style={{ fontSize: 13 }}>
-        {" "}
-        <input
-          type="checkbox"
-          checked={isActive}
-          onChange={(e) => setIsActive(e.target.checked)}
-        />{" "}
-        <span className="text-ink-primary">Active</span>{" "}
-      </label>
-      {error && (
-        <div className="text-alert-fg" style={{ fontSize: 12 }}>
-          {error}
-        </div>
-      )}
+      <Checkbox
+        label="Active"
+        checked={isActive}
+        onChange={(e) => setIsActive(e.target.checked)}
+      />
+      {error && <ActionFeedback error>{error}</ActionFeedback>}
       <div className="flex gap-2 justify-end pt-1">
         {" "}
-        <button
+        <Button
           type="button"
           onClick={onCancel}
           disabled={saving}
-          className="bg-white border-hairline border-zinc-300 text-ink-primary rounded-sm u-focus-ring"
-          style={{ padding: "8px 14px", fontSize: 13 }}
+          variant="secondary"
         >
           Cancel
-        </button>{" "}
-        <button
-          type="submit"
-          disabled={saving}
-          className="bg-zinc-900 text-white rounded-sm u-focus-ring"
-          style={{ padding: "8px 14px", fontSize: 13, fontWeight: 500 }}
-        >
-          {saving ? "Saving…" : isNew ? "Create" : "Save"}
-        </button>{" "}
+        </Button>{" "}
+        <Button type="submit" loading={saving}>
+          {saveButtonLabel(saving, isNew)}
+        </Button>{" "}
       </div>{" "}
     </form>
   );
@@ -808,20 +728,20 @@ function AllServicesView({ onBack }) {
     .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
 
   return (
-    <div className="px-4 pt-4 pb-10 mx-auto" style={{ maxWidth: 640 }}>
+    <div className="mx-auto max-w-[640px] px-4 pb-10 pt-4">
       {" "}
       <Header title="All services" centerTitle onBack={onBack} />{" "}
-      <button
+      <Button
         type="button"
         onClick={() => {
           setCreating(true);
           setExpandedId(null);
         }}
-        className="w-full bg-zinc-100 text-zinc-900 font-medium rounded-sm u-focus-ring mt-2"
-        style={{ padding: "18px 20px", fontSize: 16 }}
+        variant="secondary"
+        className="mt-2 w-full"
       >
         Create Service
-      </button>
+      </Button>
       {creating && (
         <div className="mt-3">
           {" "}
@@ -844,49 +764,42 @@ function AllServicesView({ onBack }) {
           placeholder="Search All Services"
         />{" "}
       </div>{" "}
-      <div
-        className="grid gap-2 mb-3"
-        style={{ gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}
-      >
+      <div className="mb-3 grid grid-cols-4 gap-2">
         {[
           ["active", "Active"],
           ["inactive", "Inactive"],
           ["all", "All"],
           ["archived", "Archived"],
         ].map(([key, label]) => (
-          <button
+          <Button
             key={key}
-            type="button"
+            variant={status === key ? "primary" : "secondary"}
             onClick={() => {
               setStatus(key);
               setExpandedId(null);
             }}
-            className={`${status === key ? "bg-zinc-900 text-white" : "bg-white text-ink-secondary border-hairline border-zinc-200"} rounded-sm u-focus-ring`}
-            style={{ height: 36, fontSize: 13, fontWeight: 500 }}
+            className="w-full px-1"
           >
             {label}
-          </button>
+          </Button>
         ))}
       </div>
       {loadError ? (
-        <div role="alert" className="p-6 text-center text-alert-fg" style={{ fontSize: 14 }}>
+        <div
+          role="alert"
+          className="p-6 text-center text-ui-body text-alert-fg"
+        >
           <div>{loadError}</div>
-          <button type="button" onClick={load} className="mt-3 bg-zinc-900 text-white rounded-sm u-focus-ring" style={{ padding: "8px 14px" }}>
+          <Button type="button" onClick={load} className="mt-3">
             Retry
-          </button>
+          </Button>
         </div>
       ) : loading ? (
-        <div
-          className="p-10 text-center text-ink-secondary"
-          style={{ fontSize: 13 }}
-        >
+        <div className="p-10 text-center text-ui-body text-ink-secondary">
           Loading…
         </div>
       ) : list.length === 0 ? (
-        <div
-          className="p-10 text-center text-ink-secondary"
-          style={{ fontSize: 13 }}
-        >
+        <div className="p-10 text-center text-ui-body text-ink-secondary">
           No services
         </div>
       ) : (
@@ -902,24 +815,17 @@ function AllServicesView({ onBack }) {
                   type="button"
                   onClick={() => setExpandedId(isOpen ? null : s.id)}
                   aria-expanded={isOpen}
-                  className={`${rowChrome} justify-between text-left u-focus-ring`}
-                  style={{ height: 68 }}
+                  className={`${rowChrome} justify-between py-2 text-left u-focus-ring`}
                 >
                   {" "}
-                  <Thumb color={s.color || "#E4E4E7"} />{" "}
+                  <Thumb />{" "}
                   <div className="flex-1 min-w-0">
                     {" "}
-                    <div
-                      className="font-medium text-ink-primary truncate"
-                      style={{ fontSize: 15 }}
-                    >
+                    <div className="truncate text-16 font-medium text-ink-primary">
                       {s.name}
                     </div>
                     {(duration || s.is_archived) && (
-                      <div
-                        className="text-ink-tertiary truncate"
-                        style={{ fontSize: 12, marginTop: 2 }}
-                      >
+                      <div className="mt-1 truncate text-ui-caption text-ink-tertiary">
                         {[duration, s.is_archived && "Archived"]
                           .filter(Boolean)
                           .join(" · ")}
@@ -928,24 +834,18 @@ function AllServicesView({ onBack }) {
                   </div>{" "}
                   <div className="flex items-center gap-2">
                     {" "}
-                    <span
-                      className="u-nums font-medium text-ink-primary"
-                      style={{ fontSize: 14 }}
-                    >
+                    <span className="u-nums text-ui-body font-medium text-ink-primary">
                       {price}
                     </span>{" "}
-                    <span
+                    <ChevronRight
+                      size={18}
                       aria-hidden
-                      className="text-ink-secondary"
-                      style={{
-                        fontSize: 18,
-                        lineHeight: 1,
-                        transform: isOpen ? "rotate(90deg)" : "none",
-                        transition: "transform 120ms",
-                      }}
-                    >
-                      ›
-                    </span>{" "}
+                      className={
+                        isOpen
+                          ? "rotate-90 text-ink-secondary transition-transform"
+                          : "text-ink-secondary transition-transform"
+                      }
+                    />
                   </div>{" "}
                 </button>
                 {isOpen && (
@@ -990,11 +890,21 @@ function ServiceEditPanel({ service, onCancel, onSaved }) {
     service?.base_price != null ? String(service.base_price) : "",
   );
   const [isActive, setIsActive] = useState(service?.is_active !== false);
-  const [requiresServiceReport, setRequiresServiceReport] = useState(service?.requires_service_report !== false);
-  const [requiresApplicationLog, setRequiresApplicationLog] = useState(!!service?.requires_application_log);
-  const [requiredPhotoCount, setRequiredPhotoCount] = useState(String(service?.required_photo_count || 0));
-  const [requiresCustomerSignature, setRequiresCustomerSignature] = useState(!!service?.requires_customer_signature);
-  const [requiresCustomerNotice, setRequiresCustomerNotice] = useState(!!service?.requires_customer_notice);
+  const [requiresServiceReport, setRequiresServiceReport] = useState(
+    service?.requires_service_report !== false,
+  );
+  const [requiresApplicationLog, setRequiresApplicationLog] = useState(
+    !!service?.requires_application_log,
+  );
+  const [requiredPhotoCount, setRequiredPhotoCount] = useState(
+    String(service?.required_photo_count || 0),
+  );
+  const [requiresCustomerSignature, setRequiresCustomerSignature] = useState(
+    !!service?.requires_customer_signature,
+  );
+  const [requiresCustomerNotice, setRequiresCustomerNotice] = useState(
+    !!service?.requires_customer_notice,
+  );
   const [closeoutTouched, setCloseoutTouched] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -1011,7 +921,8 @@ function ServiceEditPanel({ service, onCancel, onSaved }) {
       ? {
           requires_service_report: requiresServiceReport,
           requires_application_log: requiresApplicationLog,
-          required_photo_count: requiredPhotoCount === "" ? 0 : Number(requiredPhotoCount),
+          required_photo_count:
+            requiredPhotoCount === "" ? 0 : Number(requiredPhotoCount),
           requires_customer_signature: requiresCustomerSignature,
           requires_customer_notice: requiresCustomerNotice,
           closeout_requirements_source: "manual",
@@ -1021,10 +932,12 @@ function ServiceEditPanel({ service, onCancel, onSaved }) {
         : {
             requires_service_report: requiresServiceReport,
             requires_application_log: requiresApplicationLog,
-            required_photo_count: requiredPhotoCount === "" ? 0 : Number(requiredPhotoCount),
+            required_photo_count:
+              requiredPhotoCount === "" ? 0 : Number(requiredPhotoCount),
             requires_customer_signature: requiresCustomerSignature,
             requires_customer_notice: requiresCustomerNotice,
-            closeout_requirements_source: service?.closeout_requirements_source || "inferred_v1",
+            closeout_requirements_source:
+              service?.closeout_requirements_source || "inferred_v1",
           };
     try {
       await aFetch(
@@ -1069,23 +982,15 @@ function ServiceEditPanel({ service, onCancel, onSaved }) {
   return (
     <form onSubmit={submit} className={editPanelChrome}>
       {isNew && (
-        <div
-          className="text-ink-primary font-medium"
-          style={{ fontSize: 15 }}
-        >
-          New Service
-        </div>
+        <div className="text-16 font-medium text-ink-primary">New Service</div>
       )}
       {!isNew && (
         <div className="bg-white border-hairline border-zinc-200 rounded-sm px-3 py-2">
           {" "}
-          <div
-            className="text-ink-tertiary uppercase tracking-label"
-            style={{ fontSize: 10 }}
-          >
+          <div className="text-ui-caption font-medium text-ink-tertiary">
             Quick Edit
           </div>{" "}
-          <div className="text-ink-secondary mt-1" style={{ fontSize: 12 }}>
+          <div className="mt-1 text-ui-caption text-ink-secondary">
             {[
               service?.service_key,
               CATEGORY_LABELS[service?.category] || service?.category,
@@ -1098,32 +1003,26 @@ function ServiceEditPanel({ service, onCancel, onSaved }) {
         </div>
       )}
       <Field label="Name">
-        {" "}
-        <input
-          className={inputChrome}
+        <Input
           value={name}
           onChange={(e) => setName(e.target.value)}
           required
-        />{" "}
+        />
       </Field>{" "}
       <div className="grid grid-cols-2 gap-3">
         {" "}
         <Field label="Duration (min)">
-          {" "}
-          <input
-            className={inputChrome}
+          <Input
             type="number"
             inputMode="numeric"
             step="5"
             min="0"
             value={duration}
             onChange={(e) => setDuration(e.target.value)}
-          />{" "}
+          />
         </Field>{" "}
         <Field label="Pricing">
-          {" "}
-          <select
-            className={selectChrome}
+          <Select
             value={pricingType}
             onChange={(e) => setPricingType(e.target.value)}
           >
@@ -1132,58 +1031,46 @@ function ServiceEditPanel({ service, onCancel, onSaved }) {
                 {t.label}
               </option>
             ))}
-          </select>{" "}
+          </Select>
         </Field>{" "}
       </div>
       {pricingType === "fixed" && (
         <Field label="Base price ($)">
-          {" "}
-          <input
-            className={inputChrome}
+          <Input
             type="number"
             inputMode="decimal"
             step="0.01"
             min="0"
             value={basePrice}
             onChange={(e) => setBasePrice(e.target.value)}
-          />{" "}
+          />
         </Field>
       )}
-      <label className="flex items-center gap-2" style={{ fontSize: 13 }}>
-        {" "}
-        <input
-          type="checkbox"
-          checked={isActive}
-          onChange={(e) => setIsActive(e.target.checked)}
-        />{" "}
-        <span className="text-ink-primary">Active</span>{" "}
-      </label>
+      <Checkbox
+        label="Active"
+        checked={isActive}
+        onChange={(e) => setIsActive(e.target.checked)}
+      />
       <div className="border-t border-zinc-200 pt-3 flex flex-col gap-3">
-        <div
-          className="text-ink-tertiary uppercase tracking-label"
-          style={{ fontSize: 11 }}
-        >
+        <div className="text-ui-body font-medium text-ink-primary">
           Closeout Requirements
         </div>
-        <label className="flex items-center gap-2" style={{ fontSize: 13 }}>
-          <input
-            type="checkbox"
-            checked={requiresServiceReport}
-            onChange={(e) => toggleCloseout(setRequiresServiceReport, e.target.checked)}
-          />
-          <span className="text-ink-primary">Service report</span>
-        </label>
-        <label className="flex items-center gap-2" style={{ fontSize: 13 }}>
-          <input
-            type="checkbox"
-            checked={requiresApplicationLog}
-            onChange={(e) => toggleCloseout(setRequiresApplicationLog, e.target.checked)}
-          />
-          <span className="text-ink-primary">Application/material log</span>
-        </label>
+        <Checkbox
+          label="Service report"
+          checked={requiresServiceReport}
+          onChange={(e) =>
+            toggleCloseout(setRequiresServiceReport, e.target.checked)
+          }
+        />
+        <Checkbox
+          label="Application/material log"
+          checked={requiresApplicationLog}
+          onChange={(e) =>
+            toggleCloseout(setRequiresApplicationLog, e.target.checked)
+          }
+        />
         <Field label="Required photos">
-          <input
-            className={inputChrome}
+          <Input
             type="number"
             inputMode="numeric"
             step="1"
@@ -1195,57 +1082,44 @@ function ServiceEditPanel({ service, onCancel, onSaved }) {
             }}
           />
         </Field>
-        <label className="flex items-center gap-2" style={{ fontSize: 13 }}>
-          <input
-            type="checkbox"
-            checked={requiresCustomerSignature}
-            onChange={(e) => toggleCloseout(setRequiresCustomerSignature, e.target.checked)}
-          />
-          <span className="text-ink-primary">Customer signature</span>
-        </label>
-        <label className="flex items-center gap-2" style={{ fontSize: 13 }}>
-          <input
-            type="checkbox"
-            checked={requiresCustomerNotice}
-            onChange={(e) => toggleCloseout(setRequiresCustomerNotice, e.target.checked)}
-          />
-          <span className="text-ink-primary">Customer notice</span>
-        </label>
+        <Checkbox
+          label="Customer signature"
+          checked={requiresCustomerSignature}
+          onChange={(e) =>
+            toggleCloseout(setRequiresCustomerSignature, e.target.checked)
+          }
+        />
+        <Checkbox
+          label="Customer notice"
+          checked={requiresCustomerNotice}
+          onChange={(e) =>
+            toggleCloseout(setRequiresCustomerNotice, e.target.checked)
+          }
+        />
       </div>
-      {error && (
-        <div className="text-alert-fg" style={{ fontSize: 12 }}>
-          {error}
-        </div>
-      )}
+      {error && <ActionFeedback error>{error}</ActionFeedback>}
       <div className="flex gap-2 justify-end pt-1">
         {isArchived && (
-          <button
+          <Button
             type="button"
             onClick={restore}
             disabled={saving}
-            className="bg-white border-hairline border-zinc-300 text-ink-primary rounded-sm u-focus-ring"
-            style={{ padding: "8px 14px", fontSize: 13 }}
+            variant="secondary"
           >
             Restore
-          </button>
+          </Button>
         )}
-        <button
+        <Button
           type="button"
           onClick={onCancel}
           disabled={saving}
-          className="bg-white border-hairline border-zinc-300 text-ink-primary rounded-sm u-focus-ring"
-          style={{ padding: "8px 14px", fontSize: 13 }}
+          variant="secondary"
         >
           Cancel
-        </button>{" "}
-        <button
-          type="submit"
-          disabled={saving}
-          className="bg-zinc-900 text-white rounded-sm u-focus-ring"
-          style={{ padding: "8px 14px", fontSize: 13, fontWeight: 500 }}
-        >
-          {saving ? "Saving…" : isNew ? "Create" : "Save"}
-        </button>{" "}
+        </Button>{" "}
+        <Button type="submit" loading={saving}>
+          {saveButtonLabel(saving, isNew)}
+        </Button>{" "}
       </div>{" "}
     </form>
   );
@@ -1263,8 +1137,16 @@ export default function MobileServiceLibrary({
     setView(initialView || "menu");
   }, [initialView]);
 
-  if (view === "categories") return <CategoriesView onBack={onBack} />;
-  if (view === "discounts") return <DiscountsView onBack={onBack} />;
-  if (view === "services") return <AllServicesView onBack={onBack} />;
-  return <MenuView onNav={setView} onOpenProtocols={onOpenProtocols} />;
+  let content = <MenuView onNav={setView} onOpenProtocols={onOpenProtocols} />;
+  if (view === "categories") content = <CategoriesView onBack={onBack} />;
+  if (view === "discounts") content = <DiscountsView onBack={onBack} />;
+  if (view === "services") content = <AllServicesView onBack={onBack} />;
+  return (
+    <UiSurface
+      density="comfortable"
+      className="min-w-0 text-ui-body text-zinc-900"
+    >
+      {content}
+    </UiSurface>
+  );
 }

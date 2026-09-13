@@ -133,7 +133,7 @@ export default function GrowthSection({
               : "vs same days last month"
           }
           action={
-            <span className="text-12 text-ink-secondary">
+            <span className="text-ui-caption text-ink-secondary">
               MRR{" "}
               <span className="u-nums font-medium text-zinc-900 ml-1">
                 {fmtMoney(data.mrr)}

@@ -222,6 +222,11 @@ export class ApiClient {
         // branch on this, never on the human-facing message string.
         if (errorBody?.code) requestErr.code = errorBody.code;
         if (errorBody?.method_type) requestErr.methodType = errorBody.method_type;
+        // Per-field validation detail (e.g. PUT /property/preferences when
+        // every field in the batch was rejected) — callers that can save
+        // partial batches use this to know which fields must never be
+        // retried, same way `code` is a machine-readable discriminator.
+        if (Array.isArray(errorBody?.rejected)) requestErr.rejected = errorBody.rejected;
         throw requestErr;
       }
 

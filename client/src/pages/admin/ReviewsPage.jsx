@@ -1,52 +1,80 @@
-import { useState, useEffect, useCallback, useRef } from "react";
-import { Award, Building2, CheckCircle2, Download, RefreshCw, Search, Send, Star, UserCheck } from "lucide-react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
+import {
+  Award,
+  Building2,
+  CheckCircle2,
+  Download,
+  RefreshCw,
+  Search,
+  Send,
+  Star,
+  UserCheck,
+} from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import {
+  Badge,
+  Button,
+  buttonStyles,
+  Card,
+  Input,
+  Select as UiSelect,
+  Textarea,
+  UiSurface,
+} from "../../components/ui";
 import ReviewVelocityEngine from "./ReviewVelocityEngine";
 import GBPManagementPanel from "./GBPManagement";
-
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
-// V2 token pass: `teal` folded to zinc-900. Semantic green/amber/red preserved.
-const D = {
-  bg: "#F4F4F5",
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  teal: "#18181B",
-  green: "#15803D",
-  amber: "#A16207",
-  red: "#991B1B",
-  text: "#27272A",
-  muted: "#71717A",
-  white: "#FFFFFF",
-  heading: "#09090B",
-  inputBorder: "#D4D4D8",
-};
-const isMobile = typeof window !== "undefined" && window.innerWidth < 640;
 
 // Flat leaf sections (one per content tab). `activeTab` holds a LEAF key, so
 // every {activeTab === "..."} render block below is unchanged.
 const REVIEWS_LEAF_SECTIONS = [
-  { key: "reviews", label: "Reviews", Icon: Star },
-  { key: "gbp", label: "GBP Management", Icon: Building2 },
-  { key: "outreach", label: "Review Outreach", Icon: Send },
-  { key: "incentives", label: "Incentives", Icon: Award },
+  {
+    key: "reviews",
+    label: "Reviews",
+    Icon: Star,
+  },
+  {
+    key: "gbp",
+    label: "GBP Management",
+    Icon: Building2,
+  },
+  {
+    key: "outreach",
+    label: "Review Outreach",
+    Icon: Send,
+  },
+  {
+    key: "incentives",
+    label: "Incentives",
+    Icon: Award,
+  },
 ];
 
 // The flat leaf bar is grouped into parent sections, each revealing its leaf
 // tabs in a sub-row. The primary "reviews" group stays first.
 const REVIEWS_TAB_GROUPS = [
-  { key: "reviews", label: "Reviews", Icon: Star, tabs: ["reviews"] },
+  {
+    key: "reviews",
+    label: "Reviews",
+    Icon: Star,
+    tabs: ["reviews"],
+  },
   {
     key: "outreach",
     label: "Outreach",
     Icon: Send,
     tabs: ["outreach", "incentives"],
   },
-  { key: "gbp", label: "GBP", Icon: Building2, tabs: ["gbp"] },
+  {
+    key: "gbp",
+    label: "GBP",
+    Icon: Building2,
+    tabs: ["gbp"],
+  },
 ];
 const REVIEWS_LEAF_BY_KEY = Object.fromEntries(
   REVIEWS_LEAF_SECTIONS.map((s) => [s.key, s]),
 );
-
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     headers: {
@@ -64,7 +92,9 @@ function adminFetch(path, options = {}) {
         // Non-JSON body (proxy/gateway error page, stale cached bundle, timeout).
         // Surface the HTTP status instead of a raw "Unexpected token" parse error.
         throw new Error(
-          r.ok ? "Unexpected non-JSON response from server" : `HTTP ${r.status}`,
+          r.ok
+            ? "Unexpected non-JSON response from server"
+            : `HTTP ${r.status}`,
         );
       }
     }
@@ -72,7 +102,6 @@ function adminFetch(path, options = {}) {
     return data;
   });
 }
-
 function timeAgo(dateStr) {
   if (!dateStr) return "";
   const d = new Date(dateStr);
@@ -88,69 +117,43 @@ function timeAgo(dateStr) {
   if (months === 1) return "1 month ago";
   return `${months} months ago`;
 }
-
 function Stars({ count, size = 16 }) {
   return (
-    <span
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 2,
-      }}
-    >
-      {Array.from({ length: 5 }, (_, i) => (
-        <Star
-          key={i}
-          size={size}
-          fill={i < count ? D.amber : "none"}
-          color={i < count ? D.amber : D.border}
-          strokeWidth={1.8}
-        />
-      ))}
+    <span className="inline-flex items-center gap-[2px]">
+      {Array.from(
+        {
+          length: 5,
+        },
+        (_, i) => (
+          <Star
+            key={i}
+            size={size}
+            className={
+              i < count ? "fill-current text-warn-fg" : "text-zinc-300"
+            }
+            strokeWidth={1.8}
+          />
+        ),
+      )}
     </span>
   );
 }
 
 // --- Stat Card ---
-function StatCard({ label, value, sub, color, highlight }) {
+function StatCard({ label, value, sub, color }) {
   return (
-    <div
-      style={{
-        background: D.card,
-        border: `1px solid ${highlight ? color : D.border}`,
-        borderRadius: 12,
-        padding: isMobile ? "14px 12px" : "20px 24px",
-        flex: isMobile ? "1 1 calc(50% - 6px)" : "1 1 0",
-        minWidth: isMobile ? 0 : 180,
-      }}
-    >
+    <Card className="min-w-[150px] flex-1 p-5">
       {" "}
-      <div
-        style={{
-          color: D.muted,
-          fontSize: 12,
-          fontFamily: "Roboto, Arial, sans-serif",
-          textTransform: "uppercase",
-          letterSpacing: 1,
-          marginBottom: 8,
-        }}
-      >
+      <div className="text-ink-secondary text-ui-body mb-[8px]">
         {label}
       </div>{" "}
-      <div
-        style={{
-          fontFamily: "JetBrains Mono, monospace",
-          fontSize: 28,
-          fontWeight: 700,
-          color: color || D.heading,
-        }}
-      >
+      <div className={`text-[28px] font-medium${color ? ` ${color}` : ""}`}>
         {value}
       </div>
       {sub && (
-        <div style={{ color: D.muted, fontSize: 13, marginTop: 4 }}>{sub}</div>
+        <div className="text-ink-secondary text-ui-body mt-[4px]">{sub}</div>
       )}
-    </div>
+    </Card>
   );
 }
 
@@ -158,51 +161,19 @@ function StatCard({ label, value, sub, color, highlight }) {
 function BreakdownBar({ star, count, max }) {
   const pct = max > 0 ? (count / max) * 100 : 0;
   return (
-    <div
-      style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}
-    >
+    <div className="flex items-center gap-[8px] mb-[4px]">
       {" "}
-      <span
-        style={{
-          fontFamily: "JetBrains Mono, monospace",
-          fontSize: 12,
-          color: D.muted,
-          width: 16,
-          textAlign: "right",
-        }}
-      >
+      <span className="text-ui-body text-ink-secondary w-[16px] text-right">
         {star}
       </span>{" "}
-      <Star size={11} color={D.amber} fill={D.amber} style={{ flexShrink: 0 }} />{" "}
-      <div
-        style={{
-          flex: 1,
-          height: 8,
-          background: "#FFFFFF",
-          borderRadius: 4,
-          overflow: "hidden",
-        }}
-      >
-        {" "}
-        <div
-          style={{
-            height: "100%",
-            width: `${pct}%`,
-            background: D.amber,
-            borderRadius: 4,
-            transition: "width 0.3s ease",
-          }}
-        />{" "}
-      </div>{" "}
-      <span
-        style={{
-          fontFamily: "JetBrains Mono, monospace",
-          fontSize: 12,
-          color: D.muted,
-          width: 24,
-          textAlign: "right",
-        }}
-      >
+      <Star size={14} className="fill-current text-warn-fg" />{" "}
+      <progress
+        className="h-2 flex-1 accent-zinc-900"
+        value={pct}
+        max="100"
+        aria-label={`${star} star reviews`}
+      />{" "}
+      <span className="text-ui-body text-ink-secondary w-[24px] text-right">
         {count}
       </span>{" "}
     </div>
@@ -213,59 +184,22 @@ function BreakdownBar({ star, count, max }) {
 function LocationCard({ loc, breakdown, onRequestReview }) {
   const maxCount = breakdown ? Math.max(...Object.values(breakdown), 1) : 1;
   return (
-    <div
-      style={{
-        background: D.card,
-        border: `1px solid ${D.border}`,
-        borderRadius: 12,
-        padding: isMobile ? 14 : 20,
-        flex: isMobile ? "1 1 100%" : "1 1 220px",
-        minWidth: isMobile ? 0 : 220,
-      }}
-    >
+    <Card className="w-full p-5 sm:max-w-[300px]">
       {" "}
-      <div
-        style={{
-          fontFamily: "Roboto, Arial, sans-serif",
-          fontSize: 16,
-          fontWeight: 500,
-          color: D.heading,
-          marginBottom: 4,
-        }}
-      >
+      <div className="text-ui-body font-medium text-zinc-900 mb-[4px]">
         {loc.name}
       </div>{" "}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          marginBottom: 12,
-        }}
-      >
+      <div className="flex items-center gap-[8px] mb-[12px]">
         {" "}
-        <span
-          style={{
-            fontFamily: "JetBrains Mono, monospace",
-            fontSize: 20,
-            fontWeight: 700,
-            color: D.heading,
-          }}
-        >
+        <span className="text-[20px] font-medium text-zinc-900">
           {loc.avgRating}
         </span>{" "}
         <Stars count={Math.round(Number(loc.avgRating))} size={14} />{" "}
-        <span
-          style={{
-            fontFamily: "JetBrains Mono, monospace",
-            fontSize: 13,
-            color: D.muted,
-          }}
-        >
+        <span className="text-ui-body text-ink-secondary">
           ({loc.count})
         </span>{" "}
       </div>{" "}
-      <div style={{ marginBottom: 16 }}>
+      <div className="mb-[16px]">
         {[5, 4, 3, 2, 1].map((s) => (
           <BreakdownBar
             key={s}
@@ -275,80 +209,94 @@ function LocationCard({ loc, breakdown, onRequestReview }) {
           />
         ))}
       </div>{" "}
-      <div style={{ display: "flex", gap: 8 }}>
+      <div className="flex gap-[8px]">
         {" "}
-        <button
+        <Button
           onClick={() => onRequestReview(loc)}
-          style={{
-            flex: 1,
-            padding: "8px 12px",
-            background: D.teal,
-            color: "#fff",
-            border: "none",
-            borderRadius: 8,
-            fontSize: 13,
-            fontFamily: "Roboto, Arial, sans-serif",
-            fontWeight: 500,
-            cursor: "pointer",
-          }}
+          variant="primary"
+          className="flex-[1]"
         >
           Request Review
-        </button>
+        </Button>
         {loc.reviewUrl && (
           <a
             href={loc.reviewUrl}
             target="_blank"
             rel="noopener noreferrer"
-            style={{
-              padding: "8px 12px",
-              border: `1px solid ${D.border}`,
-              color: D.muted,
-              borderRadius: 8,
-              fontSize: 13,
-              fontFamily: "Roboto, Arial, sans-serif",
-              textDecoration: "none",
-              display: "flex",
-              alignItems: "center",
-            }}
+            className={buttonStyles({
+              variant: "secondary",
+              density: "comfortable",
+            })}
           >
             Google
           </a>
         )}
       </div>{" "}
-    </div>
+    </Card>
   );
 }
 
 // --- Auto-reply pipeline chip (review.autoReply from the list API) ---
-const AUTO_REPLY_COLORS = {
-  queued: "#475569",
-  drafted: "#0F766E",
-  posted: "#15803D",
-  parked: "#A16207",
-  failed: "#A16207",
-  skipped: "#71717A",
-  retracted: "#71717A",
-};
-
 function autoReplyLabel(a) {
   switch (a.status) {
-    case "queued": return "Auto-reply queued";
-    case "drafted": return "Shadow draft";
-    case "posted": return "Auto-replied";
-    case "parked": return a.reason === "low_rating" ? "Needs you (low rating)" : a.reason === "unrated" ? "Needs you (unrated)" : a.reason === "low_rating_requested" ? "Needs you (low rating — draft you asked for)" : a.reason === "unrated_requested" ? "Needs you (unrated — draft you asked for)" : a.reason === "below_threshold" ? "Needs you (below auto-post threshold)" : a.reason === "agent_ops_draft" ? "Needs you (Agent Ops draft — Post now re-checks it)" : "Needs you";
-    case "failed": return "Auto-reply retrying";
-    case "skipped": return "Auto-reply skipped";
-    case "retracted": return "Reply retracted";
-    default: return `Auto-reply: ${a.status}`;
+    case "queued":
+      return "Auto-reply queued";
+    case "drafted":
+      return "Shadow draft";
+    case "posted":
+      return "Auto-replied";
+    case "parked":
+      return a.reason === "low_rating"
+        ? "Needs you (low rating)"
+        : a.reason === "unrated"
+          ? "Needs you (unrated)"
+          : a.reason === "low_rating_requested"
+            ? "Needs you (low rating — draft you asked for)"
+            : a.reason === "unrated_requested"
+              ? "Needs you (unrated — draft you asked for)"
+              : a.reason === "below_threshold"
+                ? "Needs you (below auto-post threshold)"
+                : a.reason === "agent_ops_draft"
+                  ? "Needs you (Agent Ops draft — Post now re-checks it)"
+                  : "Needs you";
+    case "failed":
+      return "Auto-reply retrying";
+    case "skipped":
+      return "Auto-reply skipped";
+    case "retracted":
+      return "Reply retracted";
+    default:
+      return `Auto-reply: ${a.status}`;
   }
 }
-
+// Mapping onto the kit's 4 Badge tones (neutral | strong | warn | alert).
+// Main distinguished 7 statuses by color; "posted" (done) gets strong,
+// "parked" (routine — needs staff review, not an error: low rating,
+// unrated, below threshold, or an Agent Ops draft) gets warn, "failed" (a
+// genuine send failure, currently retrying) gets alert, everything else
+// stays neutral.
+function autoReplyTone(a) {
+  if (a.status === "posted") return "strong";
+  if (a.status === "parked") return "warn";
+  if (a.status === "failed") return "alert";
+  return "neutral";
+}
 function autoReplyTitle(a) {
   const bits = [];
   if (a.reason) bits.push(`reason: ${a.reason.replace(/_/g, " ")}`);
   if (a.mode) bits.push(`mode: ${a.mode.replace(/_/g, " ")}`);
-  if (a.dueAt && a.status === "queued") bits.push(`due ${new Date(a.dueAt).toLocaleString("en-US", { timeZone: "America/New_York" })} ET`);
-  if (a.publishedAt) bits.push(`posted ${new Date(a.publishedAt).toLocaleString("en-US", { timeZone: "America/New_York" })} ET`);
+  if (a.dueAt && a.status === "queued")
+    bits.push(
+      `due ${new Date(a.dueAt).toLocaleString("en-US", {
+        timeZone: "America/New_York",
+      })} ET`,
+    );
+  if (a.publishedAt)
+    bits.push(
+      `posted ${new Date(a.publishedAt).toLocaleString("en-US", {
+        timeZone: "America/New_York",
+      })} ET`,
+    );
   return bits.join(" · ") || "Automatic reply pipeline";
 }
 
@@ -358,17 +306,30 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
   const autoReply = review.autoReply || null;
   const runAuto = async (action) => {
     if (!onAutoReplyAction) return;
-    if (action === "retract" && !window.confirm("Delete this reply on Google?")) return;
+    if (action === "retract" && !window.confirm("Delete this reply on Google?"))
+      return;
     setAutoBusy(true);
     try {
       // Post now is bound to the draft this card displayed (null = none):
       // the server refuses if a different draft is on the row by then.
-      await onAutoReplyAction(review.id, action, action === "post-now"
-        ? { expectedDraft: review.draftReply || (autoReply && autoReply.draft) || null }
-        : undefined);
-      if (action === "retract") { setReplyText(""); setEditing(false); }
+      await onAutoReplyAction(
+        review.id,
+        action,
+        action === "post-now"
+          ? {
+              expectedDraft:
+                review.draftReply || (autoReply && autoReply.draft) || null,
+            }
+          : undefined,
+      );
+      if (action === "retract") {
+        setReplyText("");
+        setEditing(false);
+      }
     } catch (e) {
-      alert(`${action === "retract" ? "Retract" : action === "post-now" ? "Post now" : "Skip"} failed: ${e.message}`);
+      alert(
+        `${action === "retract" ? "Retract" : action === "post-now" ? "Post now" : "Skip"} failed: ${e.message}`,
+      );
     } finally {
       setAutoBusy(false);
     }
@@ -389,18 +350,26 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
   // observed value can never drift from what the editor was seeded with.
   const [observedDraft, setObservedDraft] = useState(review.draftReply || null);
   useEffect(() => {
-    setReplyText(review.reply || ""); setEditing(false); setDraftToken(null); setGroundingToken(null);
+    setReplyText(review.reply || "");
+    setEditing(false);
+    setDraftToken(null);
+    setGroundingToken(null);
     setObservedDraft(review.draftReply || null);
   }, [review.reply, review.draftReply, review.reviewToken]);
   const [submitting, setSubmitting] = useState(false);
   const [success, setSuccess] = useState(false);
   const [aiLoading, setAiLoading] = useState(false);
-
   const handleSubmit = async () => {
     if (!replyText.trim()) return;
     setSubmitting(true);
     try {
-      await onReplySubmit(review.id, replyText.trim(), { draftToken, groundingToken, expectedReply: review.reply || null, expectedDraft: observedDraft, expectedReview: review.reviewToken || null });
+      await onReplySubmit(review.id, replyText.trim(), {
+        draftToken,
+        groundingToken,
+        expectedReply: review.reply || null,
+        expectedDraft: observedDraft,
+        expectedReview: review.reviewToken || null,
+      });
       setEditing(false);
       setSuccess(true);
       setTimeout(() => setSuccess(false), 3000);
@@ -410,7 +379,6 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
       setSubmitting(false);
     }
   };
-
   const handleAiReply = async () => {
     setAiLoading(true);
     try {
@@ -429,354 +397,216 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
       setAiLoading(false);
     }
   };
-
   const LOCATION_LABELS = {
-    "bradenton": "Lakewood Ranch",
+    bradenton: "Lakewood Ranch",
     parrish: "Parrish",
     sarasota: "Sarasota",
     venice: "Venice",
   };
-
   return (
-    <div
-      id={`review-${review.id}`}
-      style={{
-        background: D.card,
-        border: `1px solid ${D.border}`,
-        borderRadius: 12,
-        padding: 20,
-        marginBottom: 12,
-      }}
-    >
+    <Card id={`review-${review.id}`} className="p-[20px] mb-[12px]">
       {/* Header */}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "flex-start",
-          marginBottom: 8,
-          flexWrap: "wrap",
-          gap: 8,
-        }}
-      >
+      <div className="flex justify-between items-start mb-[8px] flex-wrap gap-[8px]">
         {" "}
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div className="flex items-center gap-[10px]">
           {review.reviewerPhoto ? (
             <img
               src={review.reviewerPhoto}
               alt=""
-              style={{ width: 36, height: 36, borderRadius: "50%" }}
+              className="w-[36px] h-[36px] rounded-sm"
             />
           ) : (
-            <div
-              style={{
-                width: 36,
-                height: 36,
-                borderRadius: "50%",
-                background: "#334155",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                fontSize: 15,
-                fontWeight: 500,
-                color: D.muted,
-              }}
-            >
+            <div className="w-[36px] h-[36px] rounded-sm flex items-center justify-center text-ui-body font-medium text-ink-secondary">
               {(review.reviewerName || "?")[0]}
             </div>
           )}
           <div>
             {" "}
-            <div
-              style={{
-                fontFamily: "Roboto, Arial, sans-serif",
-                fontSize: 15,
-                fontWeight: 500,
-                color: D.heading,
-              }}
-            >
+            <div className="text-ui-body font-medium text-zinc-900">
               {review.reviewerName}
             </div>{" "}
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                marginTop: 2,
-              }}
-            >
+            <div className="flex items-center gap-[8px] mt-[2px]">
               {" "}
               <Stars count={review.starRating} size={14} />{" "}
-              <span
-                style={{
-                  fontSize: 11,
-                  fontFamily: "Roboto, Arial, sans-serif",
-                  background: "#334155",
-                  color: "#FFFFFF",
-                  padding: "2px 8px",
-                  borderRadius: 99,
-                }}
-              >
+              <Badge tone="neutral">
                 {LOCATION_LABELS[review.locationId] || review.locationId}
-              </span>{" "}
+              </Badge>{" "}
               {review.missingSince && (
-                <span
-                  title={`No longer returned by Google as of ${new Date(review.missingSince).toLocaleDateString("en-US", { timeZone: "America/New_York" })}. The full text is retained here as evidence for a missing-reviews support case.`}
-                  style={{
-                    fontSize: 11,
-                    fontFamily: "Roboto, Arial, sans-serif",
-                    fontWeight: 500,
-                    color: D.white,
-                    background: D.amber,
-                    padding: "2px 8px",
-                    borderRadius: 99,
-                  }}
+                <Badge
+                  tone="warn"
+                  title={`No longer returned by Google as of ${new Date(
+                    review.missingSince,
+                  ).toLocaleDateString("en-US", {
+                    timeZone: "America/New_York",
+                  })}. The full text is retained here as evidence for a missing-reviews support case.`}
                 >
                   Removed from Google
-                </span>
+                </Badge>
               )}{" "}
               {autoReply && !review.missingSince && (
-                <span
+                <Badge
                   title={autoReplyTitle(autoReply)}
-                  style={{
-                    fontSize: 14,
-                    fontFamily: "Roboto, Arial, sans-serif",
-                    fontWeight: 500,
-                    color: D.white,
-                    background: AUTO_REPLY_COLORS[autoReply.status] || D.muted,
-                    padding: "2px 8px",
-                    borderRadius: 99,
-                  }}
+                  tone={autoReplyTone(autoReply)}
                 >
                   {autoReplyLabel(autoReply)}
-                </span>
+                </Badge>
               )}{" "}
             </div>{" "}
           </div>{" "}
         </div>{" "}
-        <div
-          style={{
-            fontFamily: "JetBrains Mono, monospace",
-            fontSize: 12,
-            color: D.muted,
-          }}
-        >
+        <div className="text-ui-body text-ink-secondary">
           {timeAgo(review.reviewCreatedAt)}
         </div>{" "}
       </div>
       {/* Review text */}
       {review.reviewText && (
-        <div
-          style={{
-            fontFamily: "Roboto, Arial, sans-serif",
-            fontSize: 14,
-            color: D.text,
-            lineHeight: 1.6,
-            margin: "12px 0",
-          }}
-        >
-          {review.reviewText}
-        </div>
+        <div className="text-ui-body text-zinc-900">{review.reviewText}</div>
       )}
 
       {/* Matched customer */}
       {review.matchedCustomer && (
-        <div
-          style={{
-            fontSize: 13,
-            fontFamily: "Roboto, Arial, sans-serif",
-            color: D.teal,
-            marginBottom: 12,
-          }}
-        >
+        <div className="text-ui-body text-zinc-900 mb-[12px]">
           Matched: {review.matchedCustomer.name} — {review.matchedCustomer.tier}
         </div>
       )}
 
       {/* Reply section */}
-      <div
-        style={{
-          borderTop: `1px solid ${D.border}`,
-          paddingTop: 12,
-          marginTop: 8,
-        }}
-      >
+      <div className="border-t border-hairline border-zinc-200 pt-[12px] mt-[8px]">
         {review.missingSince && (
-          <div
-            style={{
-              fontSize: 13,
-              fontFamily: "Roboto, Arial, sans-serif",
-              color: D.muted,
-              marginBottom: 8,
-            }}
-          >
+          <div className="text-ui-body text-ink-secondary mb-[8px]">
             Removed from Google — replying is disabled. The review is retained
             here as evidence for a missing-reviews support case.
           </div>
         )}
-        {!review.missingSince && review.draftReply && !review.reply && !editing && (
-          <div
-            style={{
-              padding: 10,
-              border: `1px solid ${D.border}`,
-              borderRadius: 8,
-              background: D.bg,
-              marginBottom: 10,
-            }}
-          >
-            {" "}
-            <div
-              style={{
-                fontSize: 12,
-                color: D.muted,
-                fontFamily: "Roboto, Arial, sans-serif",
-                marginBottom: 4,
-              }}
-            >
-              Saved draft
-            </div>{" "}
-            <div
-              style={{
-                fontSize: 13,
-                color: D.text,
-                fontFamily: "Roboto, Arial, sans-serif",
-                lineHeight: 1.5,
-                whiteSpace: "pre-wrap",
-              }}
-            >
-              {review.draftReply}
-            </div>{" "}
-            {review.draftStale && (
-              <div style={{ marginTop: 6, fontSize: 12, color: D.warn || "#b45309" }}>
-                This draft was written before the reviewer changed the review — read the current review and edit it before posting.
-              </div>
-            )}
-            <button
-              onClick={() => {
-                setReplyText(review.draftReply);
-                setDraftToken(review.draftToken || null);
-                setGroundingToken(null);
-                setEditing(true);
-              }}
-              style={{
-                marginTop: 8,
-                padding: "6px 12px",
-                background: "transparent",
-                border: `1px solid ${D.teal}`,
-                color: D.teal,
-                borderRadius: 6,
-                fontSize: 12,
-                fontFamily: "Roboto, Arial, sans-serif",
-                cursor: "pointer",
-              }}
-            >
-              Use Draft
-            </button>{" "}
-            {autoReply && ["drafted", "parked", "failed", "queued"].includes(autoReply.status) && (
-              <>
-                <button
-                  onClick={() => runAuto("post-now")}
-                  disabled={autoBusy}
-                  title="Post this draft to Google now (skips the delay and shadow mode)"
-                  style={{
-                    marginTop: 8,
-                    marginLeft: 8,
-                    padding: "6px 12px",
-                    background: D.teal,
-                    border: `1px solid ${D.teal}`,
-                    color: "#fff",
-                    borderRadius: 6,
-                    fontSize: 14,
-                    fontFamily: "Roboto, Arial, sans-serif",
-                    cursor: "pointer",
-                    opacity: autoBusy ? 0.5 : 1,
-                  }}
-                >
-                  {autoBusy ? "Working..." : "Post now"}
-                </button>{" "}
-                <button
-                  onClick={() => runAuto("skip")}
-                  disabled={autoBusy}
-                  title="Take this review out of the automatic reply pipeline"
-                  style={{
-                    marginTop: 8,
-                    marginLeft: 4,
-                    padding: "6px 12px",
-                    background: "transparent",
-                    border: `1px solid ${D.border}`,
-                    color: D.muted,
-                    borderRadius: 6,
-                    fontSize: 14,
-                    fontFamily: "Roboto, Arial, sans-serif",
-                    cursor: "pointer",
-                  }}
-                >
-                  Skip auto
-                </button>
-              </>
-            )}
-          </div>
-        )}
-        {!review.missingSince && autoReply && (["queued", "failed"].includes(autoReply.status) || (autoReply.status === "parked" && ["google_uncertain", "persist_failed"].includes(autoReply.reason))) && !review.draftReply && !review.reply && (
-          <div
-            style={{
-              fontSize: 14,
-              color: D.muted,
-              fontFamily: "Roboto, Arial, sans-serif",
-              marginBottom: 8,
-            }}
-          >
-            {autoReply.draft && (
-              <div
-                style={{
-                  padding: 10,
-                  border: `1px solid ${D.border}`,
-                  borderRadius: 8,
-                  background: D.bg,
-                  marginBottom: 8,
-                  color: D.text,
-                  whiteSpace: "pre-wrap",
-                  lineHeight: 1.5,
+        {!review.missingSince &&
+          review.draftReply &&
+          !review.reply &&
+          !editing && (
+            <Card className="p-[10px] mb-[10px]">
+              {" "}
+              <div className="text-ui-body text-ink-secondary mb-[4px]">
+                Saved draft
+              </div>{" "}
+              <div className="text-ui-body text-zinc-900 whitespace-pre-wrap">
+                {review.draftReply}
+              </div>{" "}
+              {review.draftStale && (
+                <div className="mt-[6px] text-ui-body">
+                  This draft was written before the reviewer changed the review
+                  — read the current review and edit it before posting.
+                </div>
+              )}
+              <Button
+                onClick={() => {
+                  setReplyText(review.draftReply);
+                  setDraftToken(review.draftToken || null);
+                  setGroundingToken(null);
+                  setEditing(true);
                 }}
+                variant="secondary"
+                className="mt-[8px]"
               >
-                <div style={{ color: D.muted, marginBottom: 4 }}>{autoReply.status === "parked" ? "Auto-reply text attempted (needs reconciling)" : "Auto-reply draft (publish retrying)"}</div>
-                {autoReply.draft}
-              </div>
-            )}
-            {autoReply.status === "parked"
-              ? (autoReply.reason === "persist_failed"
-                ? "This reply is LIVE on Google but was not recorded here — confirm it after the next sync, or post / rewrite it."
-                : "Google did not answer in time — this reply MAY be live. Check the review after the next sync, or post / rewrite it.")
-              : autoReply.status === "failed"
-                ? `Auto-reply retrying${autoReply.reason ? ` (${autoReply.reason.replace(/_/g, " ")})` : ""}${autoReply.dueAt ? `, next attempt ${new Date(autoReply.dueAt).toLocaleString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit", month: "short", day: "numeric" })} ET` : ""}.`
-                : `Auto-reply scheduled${autoReply.dueAt ? ` for ${new Date(autoReply.dueAt).toLocaleString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit", month: "short", day: "numeric" })} ET` : ""}.`}{" "}
-            <button
-              onClick={() => runAuto("post-now")}
-              disabled={autoBusy}
-              title="Post to Google now (skips the delay and shadow mode)"
-              style={{ background: "none", border: "none", color: D.teal, cursor: "pointer", fontSize: 14, padding: 0, fontFamily: "Roboto, Arial, sans-serif", fontWeight: 500 }}
-            >
-              {autoBusy ? "Working..." : "Post now"}
-            </button>{" "}
-            ·{" "}
-            <button
-              onClick={() => runAuto("skip")}
-              disabled={autoBusy}
-              style={{ background: "none", border: "none", color: D.teal, cursor: "pointer", fontSize: 14, padding: 0, fontFamily: "Roboto, Arial, sans-serif" }}
-            >
-              Skip auto
-            </button>
-          </div>
-        )}
+                Use Draft
+              </Button>{" "}
+              {autoReply &&
+                ["drafted", "parked", "failed", "queued"].includes(
+                  autoReply.status,
+                ) && (
+                  <>
+                    <Button
+                      onClick={() => runAuto("post-now")}
+                      disabled={autoBusy}
+                      title="Post this draft to Google now (skips the delay and shadow mode)"
+                      variant="primary"
+                      className="mt-[8px] ml-[8px]"
+                    >
+                      {autoBusy ? "Working..." : "Post now"}
+                    </Button>{" "}
+                    <Button
+                      onClick={() => runAuto("skip")}
+                      disabled={autoBusy}
+                      title="Take this review out of the automatic reply pipeline"
+                      variant="secondary"
+                      className="mt-[8px] ml-[4px]"
+                    >
+                      Skip auto
+                    </Button>
+                  </>
+                )}
+            </Card>
+          )}
+        {!review.missingSince &&
+          autoReply &&
+          (["queued", "failed"].includes(autoReply.status) ||
+            (autoReply.status === "parked" &&
+              ["google_uncertain", "persist_failed"].includes(
+                autoReply.reason,
+              ))) &&
+          !review.draftReply &&
+          !review.reply && (
+            <div className="text-ui-body text-ink-secondary mb-[8px]">
+              {autoReply.draft && (
+                <Card className="p-[10px] mb-[8px] text-zinc-900 whitespace-pre-wrap">
+                  <div className="text-ink-secondary mb-[4px]">
+                    {autoReply.status === "parked"
+                      ? "Auto-reply text attempted (needs reconciling)"
+                      : "Auto-reply draft (publish retrying)"}
+                  </div>
+                  {autoReply.draft}
+                </Card>
+              )}
+              {autoReply.status === "parked"
+                ? autoReply.reason === "persist_failed"
+                  ? "This reply is LIVE on Google but was not recorded here — confirm it after the next sync, or post / rewrite it."
+                  : "Google did not answer in time — this reply MAY be live. Check the review after the next sync, or post / rewrite it."
+                : autoReply.status === "failed"
+                  ? `Auto-reply retrying${autoReply.reason ? ` (${autoReply.reason.replace(/_/g, " ")})` : ""}${
+                      autoReply.dueAt
+                        ? `, next attempt ${new Date(
+                            autoReply.dueAt,
+                          ).toLocaleString("en-US", {
+                            timeZone: "America/New_York",
+                            hour: "numeric",
+                            minute: "2-digit",
+                            month: "short",
+                            day: "numeric",
+                          })} ET`
+                        : ""
+                    }.`
+                  : `Auto-reply scheduled${
+                      autoReply.dueAt
+                        ? ` for ${new Date(autoReply.dueAt).toLocaleString(
+                            "en-US",
+                            {
+                              timeZone: "America/New_York",
+                              hour: "numeric",
+                              minute: "2-digit",
+                              month: "short",
+                              day: "numeric",
+                            },
+                          )} ET`
+                        : ""
+                    }.`}{" "}
+              <Button
+                onClick={() => runAuto("post-now")}
+                disabled={autoBusy}
+                title="Post to Google now (skips the delay and shadow mode)"
+                variant="primary"
+              >
+                {autoBusy ? "Working..." : "Post now"}
+              </Button>{" "}
+              ·{" "}
+              <Button
+                onClick={() => runAuto("skip")}
+                disabled={autoBusy}
+                variant="secondary"
+              >
+                Skip auto
+              </Button>
+            </div>
+          )}
         {success && (
-          <div
-            style={{
-              color: D.green,
-              fontSize: 13,
-              fontFamily: "Roboto, Arial, sans-serif",
-              marginBottom: 8,
-            }}
-          >
+          <div className="text-zinc-900 text-ui-body mb-[8px]">
             Reply posted successfully
           </div>
         )}
@@ -784,181 +614,96 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
         {review.reply && !editing ? (
           <div>
             {" "}
-            <div
-              style={{
-                fontSize: 12,
-                color: D.muted,
-                fontFamily: "Roboto, Arial, sans-serif",
-                marginBottom: 4,
-              }}
-            >
+            <div className="text-ui-body text-ink-secondary mb-[4px]">
               Your reply{" "}
               {review.replyUpdatedAt && (
                 <span>· {timeAgo(review.replyUpdatedAt)}</span>
               )}
             </div>{" "}
-            <div
-              style={{
-                fontSize: 14,
-                color: D.text,
-                fontFamily: "Roboto, Arial, sans-serif",
-                lineHeight: 1.5,
-                marginBottom: 8,
-              }}
-            >
+            <div className="text-ui-body text-zinc-900 mb-[8px]">
               {review.reply}
             </div>{" "}
             {!review.missingSince && (
-            <div style={{ display: "flex", gap: 8 }}>
-              {" "}
-              <button
-                onClick={() => {
-                  // An ordinary manual edit carries no draft identity (codex r55).
-                  setDraftToken(null);
-                  setGroundingToken(null);
-                  setEditing(true);
-                  setReplyText(review.reply);
-                }}
-                style={{
-                  padding: "6px 14px",
-                  background: "transparent",
-                  border: `1px solid ${D.border}`,
-                  color: D.muted,
-                  borderRadius: 6,
-                  fontSize: 13,
-                  fontFamily: "Roboto, Arial, sans-serif",
-                  cursor: "pointer",
-                  minHeight: 44,
-                }}
-              >
-                Edit
-              </button>{" "}
-              <button
-                onClick={handleAiReply}
-                disabled={aiLoading}
-                style={{
-                  padding: "6px 14px",
-                  background: "transparent",
-                  border: `1px solid ${D.teal}`,
-                  color: D.teal,
-                  borderRadius: 6,
-                  fontSize: 13,
-                  fontFamily: "Roboto, Arial, sans-serif",
-                  cursor: "pointer",
-                  opacity: aiLoading ? 0.5 : 1,
-                }}
-              >
-                {aiLoading ? "Generating..." : "AI Reply"}
-              </button>{" "}
-              {autoReply && (autoReply.status === "posted" || (autoReply.status === "parked" && autoReply.reason === "review_edited_after_post")) && (
-                <button
-                  onClick={() => runAuto("retract")}
-                  disabled={autoBusy}
-                  title="Delete this automatically posted reply on Google"
-                  style={{
-                    padding: "6px 14px",
-                    background: "transparent",
-                    border: `1px solid ${D.red}`,
-                    color: D.red,
-                    borderRadius: 6,
-                    fontSize: 14,
-                    fontFamily: "Roboto, Arial, sans-serif",
-                    cursor: "pointer",
-                    opacity: autoBusy ? 0.5 : 1,
+              <div className="flex gap-[8px]">
+                {" "}
+                <Button
+                  onClick={() => {
+                    // An ordinary manual edit carries no draft identity (codex r55).
+                    setDraftToken(null);
+                    setGroundingToken(null);
+                    setEditing(true);
+                    setReplyText(review.reply);
                   }}
+                  variant="secondary"
+                  className="min-h-[44px]"
                 >
-                  {autoBusy ? "Working..." : "Retract"}
-                </button>
-              )}
-            </div>
+                  Edit
+                </Button>{" "}
+                <Button
+                  onClick={handleAiReply}
+                  disabled={aiLoading}
+                  variant="secondary"
+                >
+                  {aiLoading ? "Generating..." : "AI Reply"}
+                </Button>{" "}
+                {autoReply &&
+                  (autoReply.status === "posted" ||
+                    (autoReply.status === "parked" &&
+                      autoReply.reason === "review_edited_after_post")) && (
+                    <Button
+                      onClick={() => runAuto("retract")}
+                      disabled={autoBusy}
+                      title="Delete this automatically posted reply on Google"
+                      variant="danger"
+                    >
+                      {autoBusy ? "Working..." : "Retract"}
+                    </Button>
+                  )}
+              </div>
             )}{" "}
           </div>
         ) : !review.missingSince && (editing || !review.reply) ? (
           <div>
             {" "}
-            <textarea
+            <Textarea
               value={replyText}
               onChange={(e) => setReplyText(e.target.value)}
               placeholder="Write your reply..."
               rows={3}
-              style={{
-                width: "100%",
-                padding: 12,
-                background: D.bg,
-                border: `1px solid ${D.border}`,
-                borderRadius: 8,
-                color: D.text,
-                fontSize: 14,
-                fontFamily: "Roboto, Arial, sans-serif",
-                resize: "vertical",
-                outline: "none",
-                boxSizing: "border-box",
-              }}
+              className="w-full resize-y box-border"
             />{" "}
-            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            <div className="flex gap-[8px] mt-[8px]">
               {" "}
-              <button
+              <Button
                 onClick={handleSubmit}
                 disabled={submitting || !replyText.trim()}
-                style={{
-                  padding: "8px 18px",
-                  background: D.teal,
-                  color: "#fff",
-                  border: "none",
-                  borderRadius: 8,
-                  fontSize: 13,
-                  fontFamily: "Roboto, Arial, sans-serif",
-                  fontWeight: 500,
-                  cursor: submitting ? "not-allowed" : "pointer",
-                  opacity: submitting || !replyText.trim() ? 0.5 : 1,
-                }}
+                variant="primary"
               >
                 {submitting
                   ? "Posting..."
                   : review.reply
                     ? "Update Reply"
                     : "Reply"}
-              </button>{" "}
-              <button
+              </Button>{" "}
+              <Button
                 onClick={handleAiReply}
                 disabled={aiLoading}
-                style={{
-                  padding: "8px 18px",
-                  background: "transparent",
-                  border: `1px solid ${D.teal}`,
-                  color: D.teal,
-                  borderRadius: 8,
-                  fontSize: 13,
-                  fontFamily: "Roboto, Arial, sans-serif",
-                  fontWeight: 500,
-                  cursor: "pointer",
-                  opacity: aiLoading ? 0.5 : 1,
-                }}
+                variant="secondary"
               >
                 {aiLoading ? "Generating..." : "AI Reply"}
-              </button>
+              </Button>
               {replyText.trim() && (
-                <button
+                <Button
                   onClick={() => {
                     navigator.clipboard.writeText(replyText);
                   }}
-                  style={{
-                    padding: "8px 18px",
-                    background: "transparent",
-                    border: `1px solid ${D.border}`,
-                    color: D.muted,
-                    borderRadius: 8,
-                    fontSize: 13,
-                    fontFamily: "Roboto, Arial, sans-serif",
-                    fontWeight: 500,
-                    cursor: "pointer",
-                  }}
+                  variant="secondary"
                 >
                   Copy
-                </button>
+                </Button>
               )}
               {editing && (
-                <button
+                <Button
                   onClick={() => {
                     // Cancel discards the draft AND its identity: a later
                     // manual reply on this card must not carry the tokens of
@@ -968,19 +713,10 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
                     setDraftToken(null);
                     setGroundingToken(null);
                   }}
-                  style={{
-                    padding: "8px 14px",
-                    background: "transparent",
-                    border: `1px solid ${D.border}`,
-                    color: D.muted,
-                    borderRadius: 8,
-                    fontSize: 13,
-                    fontFamily: "Roboto, Arial, sans-serif",
-                    cursor: "pointer",
-                  }}
+                  variant="secondary"
                 >
                   Cancel
-                </button>
+                </Button>
               )}
             </div>{" "}
           </div>
@@ -991,58 +727,47 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
           would vanish from every live view (server 409s stale pages).
           Also hidden on a pipeline-posted reply: it must stay reachable for
           the edited-after-post bell and Retract (server 409s too). */}
-      {onDismiss && !review.missingSince && !(review.autoReply?.status === "posted" && !["human", "agent_ops"].includes(review.autoReply?.version)) && !(review.autoReply?.status === "parked" && review.autoReply?.reason === "review_edited_after_post") && (
-        <div style={{ textAlign: "right", marginTop: 8 }}>
-          {" "}
-          <button
-            onClick={() => onDismiss(review.id)}
-            style={{
-              padding: "4px 10px",
-              background: "transparent",
-              border: "none",
-              color: D.muted,
-              fontSize: 11,
-              fontFamily: "Roboto, Arial, sans-serif",
-              cursor: "pointer",
-              opacity: 0.6,
-            }}
-          >
-            Dismiss
-          </button>{" "}
-        </div>
-      )}
-    </div>
+      {onDismiss &&
+        !review.missingSince &&
+        !(
+          review.autoReply?.status === "posted" &&
+          !["human", "agent_ops"].includes(review.autoReply?.version)
+        ) &&
+        !(
+          review.autoReply?.status === "parked" &&
+          review.autoReply?.reason === "review_edited_after_post"
+        ) && (
+          <div className="text-right mt-[8px]">
+            {" "}
+            <Button
+              onClick={() => onDismiss(review.id)}
+              variant="secondary"
+              className="opacity-[0.6]"
+            >
+              Dismiss
+            </Button>{" "}
+          </div>
+        )}
+    </Card>
   );
 }
 
 // --- Select input ---
-function Select({ value, onChange, options, style: extraStyle }) {
+function ReviewSelect({ value, onChange, options }) {
   return (
-    <select
+    <UiSelect
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      style={{
-        padding: "8px 12px",
-        background: D.card,
-        border: `1px solid ${D.border}`,
-        borderRadius: 8,
-        color: D.text,
-        fontSize: 13,
-        fontFamily: "Roboto, Arial, sans-serif",
-        outline: "none",
-        cursor: "pointer",
-        ...extraStyle,
-      }}
+      className="w-full sm:!w-auto sm:min-w-[170px] bg-white border-hairline border-zinc-200 rounded-md text-zinc-900 text-ui-body cursor-pointer"
     >
       {options.map((o) => (
         <option key={o.value} value={o.value}>
           {o.label}
         </option>
       ))}
-    </select>
+    </UiSelect>
   );
 }
-
 function money(cents) {
   const value = (Number(cents) || 0) / 100;
   return value.toLocaleString("en-US", {
@@ -1052,7 +777,6 @@ function money(cents) {
     maximumFractionDigits: 2,
   });
 }
-
 function fmtShortDate(value) {
   if (!value) return "";
   try {
@@ -1064,7 +788,6 @@ function fmtShortDate(value) {
     return "";
   }
 }
-
 function fmtDateTime(value) {
   if (!value) return "";
   try {
@@ -1083,98 +806,66 @@ function fmtDateTime(value) {
     return "";
   }
 }
-
-function PolicyInfoCard({ Icon, label, value, sub, color = D.teal }) {
+function PolicyInfoCard({ Icon, label, value, sub, color }) {
   return (
-    <div
-      style={{
-        background: D.card,
-        border: `1px solid ${D.border}`,
-        borderRadius: 8,
-        padding: 14,
-        display: "grid",
-        gridTemplateColumns: "20px minmax(0, 1fr)",
-        gap: 10,
-        alignItems: "start",
-      }}
-    >
-      <Icon size={18} color={color} style={{ marginTop: 1 }} />
-      <div style={{ minWidth: 0 }}>
-        <div style={{ fontSize: 12, fontWeight: 700, color: D.muted, marginBottom: 4 }}>
+    <Card className="p-[14px] grid grid-cols-[20px_minmax(0,1fr)] items-start gap-[10px]">
+      <Icon size={18} className={`mt-[1px]${color ? ` ${color}` : ""}`} />
+      <div className="min-w-[0px]">
+        <div className="text-ui-body font-medium text-ink-secondary mb-[4px]">
           {label}
         </div>
-        <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, lineHeight: 1.25 }}>
-          {value}
-        </div>
+        <div className="text-ui-body font-medium text-zinc-900">{value}</div>
         {sub && (
-          <div style={{ fontSize: 12, color: D.muted, marginTop: 5, lineHeight: 1.4 }}>
-            {sub}
-          </div>
+          <div className="text-ui-body text-ink-secondary mt-[5px]">{sub}</div>
         )}
       </div>
-    </div>
+    </Card>
   );
 }
 
 // One customer row in the attribution repair panel — used by both the
 // click-correlated "likely reviewers" list (with a badge) and the plain
 // name/phone/address search results.
-function RepairCandidateCard({ review, candidate, matching, onAttribute, badge }) {
+function RepairCandidateCard({
+  review,
+  candidate,
+  matching,
+  onAttribute,
+  badge,
+}) {
   return (
-    <div
-      style={{
-        border: `1px solid ${D.border}`,
-        borderRadius: 8,
-        background: D.card,
-        padding: 10,
-      }}
-    >
-      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 13, fontWeight: 700, color: D.heading }}>
+    <Card className="p-[10px]">
+      <div className="flex items-center gap-[8px] flex-wrap">
+        <span className="text-ui-body font-medium text-zinc-900">
           {candidate.name}
         </span>
         {badge}
       </div>
-      <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
-        {[candidate.address, candidate.city, candidate.phone].filter(Boolean).join(" | ")}
+      <div className="text-ui-body text-ink-secondary mt-[2px]">
+        {[candidate.address, candidate.city, candidate.phone]
+          .filter(Boolean)
+          .join(" | ")}
       </div>
-      <div
-        style={{
-          display: "flex",
-          gap: 8,
-          flexWrap: "wrap",
-          marginTop: 10,
-        }}
-      >
+      <div className="flex gap-[8px] flex-wrap mt-[10px]">
         {(candidate.services || []).length === 0 ? (
           review.reason === "click_auto_confirm" ? (
             // Click-auto rows must stay correctable even with no recent
             // technician visit: the payout stays unminted server-side, so a
             // technician-less confirm is allowed for exactly these rows
             // (GH codex #3483 r2 P1).
-            <button
+            <Button
               onClick={() => onAttribute(review, candidate, null)}
               disabled={Boolean(matching[`${review.id}:${candidate.id}:none`])}
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 6,
-                padding: "8px 10px",
-                borderRadius: 8,
-                border: `1px solid ${D.border}`,
-                background: D.bg,
-                color: D.text,
-                fontSize: 12,
-                fontWeight: 700,
-                cursor: "pointer",
-                opacity: matching[`${review.id}:${candidate.id}:none`] ? 0.55 : 1,
-              }}
+              variant="primary"
+              className="inline-flex items-center gap-[6px]"
             >
               <UserCheck size={14} />
-              {matching[`${review.id}:${candidate.id}:none`] ? "Matching..." : "Confirm match (no visit on file)"}
-            </button>
+              {matching[`${review.id}:${candidate.id}:none`]
+                ? "Matching..."
+                : "Confirm match (no visit on file)"}
+            </Button>
           ) : (
-            <span style={{ color: D.muted, fontSize: 12 }}>
+            <span className="text-ink-secondary text-ui-body">
               No recent technician visits.
             </span>
           )
@@ -1182,36 +873,25 @@ function RepairCandidateCard({ review, candidate, matching, onAttribute, badge }
           candidate.services.map((service) => {
             const matchKey = `${review.id}:${candidate.id}:${service.id}`;
             return (
-              <button
+              <Button
                 key={service.id}
                 onClick={() => onAttribute(review, candidate, service)}
                 disabled={Boolean(matching[matchKey]) || !service.technicianId}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 6,
-                  padding: "8px 10px",
-                  borderRadius: 8,
-                  border: `1px solid ${D.border}`,
-                  background: D.bg,
-                  color: service.technicianId ? D.text : D.muted,
-                  fontSize: 12,
-                  fontWeight: 700,
-                  cursor: service.technicianId ? "pointer" : "not-allowed",
-                  opacity: matching[matchKey] ? 0.55 : 1,
-                }}
+                variant="primary"
+                className="inline-flex items-center gap-[6px]"
               >
                 <UserCheck size={14} />
-                {matching[matchKey] ? "Matching..." : `${service.technicianName} | ${fmtShortDate(service.serviceDate)}`}
-              </button>
+                {matching[matchKey]
+                  ? "Matching..."
+                  : `${service.technicianName} | ${fmtShortDate(service.serviceDate)}`}
+              </Button>
             );
           })
         )}
       </div>
-    </div>
+    </Card>
   );
 }
-
 function ReviewIncentivesPanel() {
   const [days, setDays] = useState("30");
   const [data, setData] = useState(null);
@@ -1232,7 +912,6 @@ function ReviewIncentivesPanel() {
   // — the rendered candidates would belong to A while the attribute POST
   // carries B's review id (pre-push codex P1).
   const candidateReqRef = useRef(0);
-
   const load = useCallback(() => {
     setLoading(true);
     setQueueLoading(true);
@@ -1253,11 +932,9 @@ function ReviewIncentivesPanel() {
         setQueueLoading(false);
       });
   }, [days]);
-
   useEffect(() => {
     load();
   }, [load]);
-
   const runSync = async () => {
     setRunning(true);
     setError(null);
@@ -1275,7 +952,6 @@ function ReviewIncentivesPanel() {
       setRunning(false);
     }
   };
-
   const markPendingPaid = async () => {
     const ids = (data?.payouts || [])
       .filter((p) => p.status !== "paid")
@@ -1295,7 +971,6 @@ function ReviewIncentivesPanel() {
       setMarkingPaid(false);
     }
   };
-
   const downloadCsv = async () => {
     try {
       const res = await fetch(
@@ -1320,7 +995,6 @@ function ReviewIncentivesPanel() {
       setError(e.message);
     }
   };
-
   const openRepair = (review) => {
     const isOpen = activeRepairId === review.id;
     // Invalidate any in-flight candidate request — its response belongs to a
@@ -1337,7 +1011,6 @@ function ReviewIncentivesPanel() {
     // explicit q is plain field matching (GH codex r6 P2).
     if (!isOpen) searchCandidates(review, "");
   };
-
   const searchCandidates = async (review, qOverride) => {
     const reqId = ++candidateReqRef.current;
     setCandidateLoading(true);
@@ -1348,7 +1021,11 @@ function ReviewIncentivesPanel() {
       // changed is a query.
       const params = new URLSearchParams({
         reviewId: review.id,
-        q: qOverride ?? (candidateSearch === (review.reviewerName || "") ? "" : candidateSearch),
+        q:
+          qOverride ??
+          (candidateSearch === (review.reviewerName || "")
+            ? ""
+            : candidateSearch),
       });
       const result = await adminFetch(`/admin/reviews/incentives/attribution-candidates?${params.toString()}`);
       if (candidateReqRef.current !== reqId) return; // superseded — drop stale response
@@ -1360,12 +1037,14 @@ function ReviewIncentivesPanel() {
       if (candidateReqRef.current === reqId) setCandidateLoading(false);
     }
   };
-
   const attributeCandidate = async (review, candidate, service) => {
     // service = null → technician-less click_auto confirm (payout stays
     // unminted server-side; only allowed for click_auto rows there).
     const matchKey = `${review.id}:${candidate.id}:${service ? service.id : "none"}`;
-    setMatching((prev) => ({ ...prev, [matchKey]: true }));
+    setMatching((prev) => ({
+      ...prev,
+      [matchKey]: true,
+    }));
     setError(null);
     try {
       await adminFetch("/admin/reviews/incentives/attribute", {
@@ -1387,129 +1066,97 @@ function ReviewIncentivesPanel() {
     } catch (e) {
       setError(e.message);
     } finally {
-      setMatching((prev) => ({ ...prev, [matchKey]: false }));
+      setMatching((prev) => ({
+        ...prev,
+        [matchKey]: false,
+      }));
     }
   };
-
   const summary = data?.summary || {};
   const payouts = data?.payouts || [];
-  const pendingIds = payouts.filter((p) => p.status !== "paid").map((p) => p.id);
+  const pendingIds = payouts
+    .filter((p) => p.status !== "paid")
+    .map((p) => p.id);
   const policy = data?.policy || {};
   const needsAttributionCount = queueLoading
     ? "..."
-    : queue.length || ((summary.unattributedGoogleReviews || 0) + (summary.unattributedReviewRequests || 0));
+    : queue.length ||
+      (summary.unattributedGoogleReviews || 0) +
+        (summary.unattributedReviewRequests || 0);
   const confirmedGoogleReviews = Number(summary.confirmedGoogleReviews || 0);
-  const programStartsAt = policy.programStartsAt || data?.period?.programStartsAt || null;
+  const programStartsAt =
+    policy.programStartsAt || data?.period?.programStartsAt || null;
   const programStartLabel = fmtDateTime(programStartsAt) || "Not configured";
   const policyEnabled = policy.enabled !== false;
-  const noEligiblePostLaunchReviews = policyEnabled
-    && confirmedGoogleReviews === 0
-    && payouts.length === 0
-    && queue.length === 0;
-
+  const noEligiblePostLaunchReviews =
+    policyEnabled &&
+    confirmedGoogleReviews === 0 &&
+    payouts.length === 0 &&
+    queue.length === 0;
   return (
-    <div style={{ fontFamily: "Roboto, Arial, sans-serif" }}>
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          gap: 12,
-          marginBottom: 16,
-          flexWrap: "wrap",
-        }}
-      >
+    <div>
+      <div className="flex justify-between items-center gap-[12px] mb-[16px] flex-wrap">
         <div>
-          <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>
+          <div className="text-[18px] font-medium text-zinc-900">
             Technician Review Incentives
           </div>
-          <div style={{ fontSize: 13, color: D.muted, marginTop: 2 }}>
-            Flat {money(policy.amountCents || 500)} bonus per confirmed Google review.
+          <div className="text-ui-body text-ink-secondary mt-[2px]">
+            Flat {money(policy.amountCents || 500)} bonus per confirmed Google
+            review.
           </div>
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <Select
+        <div className="flex gap-[8px] items-center flex-wrap">
+          <ReviewSelect
             value={days}
             onChange={setDays}
             options={[
-              { value: "7", label: "7 Days" },
-              { value: "30", label: "30 Days" },
-              { value: "90", label: "90 Days" },
+              {
+                value: "7",
+                label: "7 Days",
+              },
+              {
+                value: "30",
+                label: "30 Days",
+              },
+              {
+                value: "90",
+                label: "90 Days",
+              },
             ]}
           />
-          <button
+          <Button
             onClick={runSync}
             disabled={running}
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 6,
-              padding: "9px 14px",
-              borderRadius: 8,
-              border: "none",
-              background: D.teal,
-              color: "#fff",
-              fontSize: 13,
-              fontWeight: 700,
-              cursor: running ? "not-allowed" : "pointer",
-              opacity: running ? 0.55 : 1,
-            }}
+            variant="primary"
+            className="inline-flex items-center gap-[6px]"
           >
             <RefreshCw size={15} />
             {running ? "Running..." : "Run Attribution"}
-          </button>
-          <button
+          </Button>
+          <Button
             onClick={downloadCsv}
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 6,
-              padding: "9px 14px",
-              borderRadius: 8,
-              border: `1px solid ${D.border}`,
-              background: D.card,
-              color: D.text,
-              fontSize: 13,
-              fontWeight: 700,
-              cursor: "pointer",
-            }}
+            variant="secondary"
+            className="inline-flex items-center gap-[6px]"
           >
             <Download size={15} />
             Export
-          </button>
+          </Button>
         </div>
       </div>
 
       {error && (
-        <div
-          style={{
-            border: `1px solid ${D.red}`,
-            color: D.red,
-            background: "#FEF2F2",
-            borderRadius: 8,
-            padding: 12,
-            marginBottom: 14,
-            fontSize: 13,
-          }}
-        >
+        <Card className="text-alert-fg p-[12px] mb-[14px] text-ui-body">
           {error}
-        </div>
+        </Card>
       )}
 
       {loading ? (
-        <div style={{ color: D.muted, padding: 48, textAlign: "center" }}>
+        <div className="text-ink-secondary p-[48px] text-center">
           Loading review incentives...
         </div>
       ) : (
         <>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: isMobile ? "1fr" : "repeat(3, minmax(0, 1fr))",
-              gap: 10,
-              marginBottom: 14,
-            }}
-          >
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-[10px] mb-[14px]">
             <PolicyInfoCard
               Icon={Award}
               label="Program active since"
@@ -1521,138 +1168,99 @@ function ReviewIncentivesPanel() {
               label="Payout trigger"
               value="Confirmed public Google reviews after activation"
               sub="A bonus row is created only after the review is synced from Google and matched to a technician."
-              color={D.green}
+              color="text-green-700"
             />
             <PolicyInfoCard
               Icon={Search}
               label="Attribution context"
               value="Rate page and review requests are not payout triggers"
               sub="They only help connect a confirmed Google review to the right customer and technician."
-              color={D.amber}
+              color="text-warn-fg"
             />
           </div>
 
           {noEligiblePostLaunchReviews && (
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "22px minmax(0, 1fr)",
-                gap: 10,
-                alignItems: "start",
-                background: "#F0FDF4",
-                border: `1px solid ${D.green}`,
-                borderRadius: 8,
-                padding: 14,
-                marginBottom: 14,
-              }}
-            >
-              <CheckCircle2 size={18} color={D.green} style={{ marginTop: 1 }} />
+            <Card className="grid grid-cols-[22px_minmax(0,1fr)] items-start gap-[10px] p-[14px] mb-[14px]">
+              <CheckCircle2 size={18} className="mt-[1px]" />
               <div>
-                <div style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>
+                <div className="text-ui-body font-medium text-zinc-900">
                   No eligible post-launch Google reviews yet.
                 </div>
-                <div style={{ fontSize: 12, color: D.text, marginTop: 4, lineHeight: 1.45 }}>
-                  Old reviews are intentionally ignored. The first public Google review after activation will either create an earned payout or appear in the attribution queue.
+                <div className="text-ui-body text-zinc-900 mt-[4px]">
+                  Old reviews are intentionally ignored. The first public Google
+                  review after activation will either create an earned payout or
+                  appear in the attribution queue.
                 </div>
               </div>
-            </div>
+            </Card>
           )}
 
-          <div style={{ display: "flex", gap: 12, marginBottom: 18, flexWrap: "wrap" }}>
+          <div className="flex gap-[12px] mb-[18px] flex-wrap">
             <StatCard
               label="Post-Launch Reviews"
               value={confirmedGoogleReviews}
               sub="public Google reviews since activation"
-              color={D.heading}
             />
             <StatCard
               label="Earned"
               value={money(summary.earnedCents)}
               sub={`${summary.payoutCount || 0} technician bonuses`}
-              color={D.teal}
             />
             <StatCard
               label="Pending Payroll"
               value={money(summary.pendingCents)}
               sub={`${summary.pendingCount || 0} unpaid bonuses`}
-              color={summary.pendingCents > 0 ? D.amber : D.green}
+              color={
+                summary.pendingCents > 0 ? "text-warn-fg" : "text-green-700"
+              }
             />
             <StatCard
               label="Paid"
               value={money(summary.paidCents)}
               sub={`${summary.paidCount || 0} closed bonuses`}
-              color={D.green}
+              color="text-green-700"
             />
             <StatCard
               label="Needs Attribution"
               value={needsAttributionCount}
               sub="post-launch reviews missing a customer or technician match"
-              color={D.red}
+              color="text-alert-fg"
             />
           </div>
 
-          <div
-            style={{
-              background: D.card,
-              border: `1px solid ${D.border}`,
-              borderRadius: 10,
-              padding: 16,
-              marginBottom: 14,
-            }}
-          >
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                gap: 10,
-                marginBottom: 12,
-                flexWrap: "wrap",
-              }}
-            >
+          <Card className="p-[16px] mb-[14px]">
+            <div className="flex justify-between items-center gap-[10px] mb-[12px] flex-wrap">
               <div>
-                <div style={{ fontSize: 15, fontWeight: 700, color: D.heading }}>
+                <div className="text-ui-body font-medium text-zinc-900">
                   Attribution Queue
                 </div>
-                <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
+                <div className="text-ui-body text-ink-secondary mt-[2px]">
                   Confirmed Google reviews without a technician bonus row.
                 </div>
               </div>
-              <button
+              <Button
                 onClick={load}
                 disabled={queueLoading}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 6,
-                  padding: "8px 12px",
-                  borderRadius: 8,
-                  border: `1px solid ${D.border}`,
-                  background: D.card,
-                  color: D.text,
-                  fontSize: 12,
-                  fontWeight: 700,
-                  cursor: queueLoading ? "not-allowed" : "pointer",
-                  opacity: queueLoading ? 0.55 : 1,
-                }}
+                variant="secondary"
+                className="inline-flex items-center gap-[6px]"
               >
                 <RefreshCw size={14} />
                 Refresh
-              </button>
+              </Button>
             </div>
 
             {queueLoading && !queue.length ? (
-              <div style={{ color: D.muted, fontSize: 13, padding: "16px 0" }}>
+              <div className="text-ink-secondary text-ui-body">
                 Loading attribution queue...
               </div>
             ) : queue.length === 0 ? (
-              <div style={{ color: D.muted, fontSize: 13, padding: "16px 0" }}>
+              <div className="text-ink-secondary text-ui-body">
                 {confirmedGoogleReviews === 0
                   ? "No eligible post-launch Google reviews in this period."
                   : "No unmatched post-launch Google reviews in this period."}
               </div>
             ) : (
-              <div style={{ display: "grid", gap: 10 }}>
+              <div className="grid gap-[10px]">
                 {/* Every click_auto_confirm row must render — the render cap
                     must never hide a probabilistic link from its only
                     correction surface (GH codex #3483 r4) — and auto rows
@@ -1662,358 +1270,238 @@ function ReviewIncentivesPanel() {
                     backend returned (GH codex #3483 r10). */}
                 {queue
                   .filter((r) => r.reason === "click_auto_confirm")
-                  .concat(queue.filter((r) => r.reason !== "click_auto_confirm").slice(0, 25))
+                  .concat(
+                    queue
+                      .filter((r) => r.reason !== "click_auto_confirm")
+                      .slice(0, 25),
+                  )
                   .map((review) => {
-                  const isOpen = activeRepairId === review.id;
-                  return (
-                    <div
-                      key={review.id}
-                      style={{
-                        border: `1px solid ${D.border}`,
-                        borderRadius: 8,
-                        background: D.bg,
-                        padding: 12,
-                      }}
-                    >
-                      <div
-                        style={{
-                          display: "grid",
-                          gridTemplateColumns: isMobile ? "1fr" : "minmax(0, 1fr) auto",
-                          gap: 10,
-                          alignItems: "center",
-                        }}
-                      >
-                        <div>
-                          <div
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              gap: 8,
-                              flexWrap: "wrap",
-                            }}
-                          >
-                            <span style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>
-                              {review.reviewerName}
-                            </span>
-                            <Stars count={Number(review.starRating) || 0} size={13} />
-                            <span style={{ fontSize: 12, color: D.muted }}>
-                              {[fmtShortDate(review.reviewCreatedAt), review.locationId].filter(Boolean).join(" | ")}
-                            </span>
-                          </div>
-                          <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>
-                            {review.customerName || review.reason?.replace("_", " ")}
-                          </div>
-                          {review.reviewText && (
-                            <div
-                              style={{
-                                color: D.text,
-                                fontSize: 13,
-                                marginTop: 6,
-                                lineHeight: 1.45,
-                                maxWidth: 760,
-                              }}
-                            >
-                              {review.reviewText.length > 220
-                                ? `${review.reviewText.slice(0, 220)}...`
-                                : review.reviewText}
+                    const isOpen = activeRepairId === review.id;
+                    return (
+                      <Card key={review.id} className="p-[12px]">
+                        <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_auto] gap-[10px] items-center">
+                          <div>
+                            <div className="flex items-center gap-[8px] flex-wrap">
+                              <span className="text-ui-body font-medium text-zinc-900">
+                                {review.reviewerName}
+                              </span>
+                              <Stars
+                                count={Number(review.starRating) || 0}
+                                size={13}
+                              />
+                              <span className="text-ui-body text-ink-secondary">
+                                {[
+                                  fmtShortDate(review.reviewCreatedAt),
+                                  review.locationId,
+                                ]
+                                  .filter(Boolean)
+                                  .join(" | ")}
+                              </span>
                             </div>
-                          )}
-                        </div>
-                        <button
-                          onClick={() => openRepair(review)}
-                          style={{
-                            display: "inline-flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            gap: 6,
-                            padding: "8px 12px",
-                            borderRadius: 8,
-                            border: `1px solid ${D.border}`,
-                            background: isOpen ? D.teal : D.card,
-                            color: isOpen ? "#fff" : D.text,
-                            fontSize: 12,
-                            fontWeight: 700,
-                            cursor: "pointer",
-                            whiteSpace: "nowrap",
-                          }}
-                        >
-                          <Search size={14} />
-                          Match
-                        </button>
-                      </div>
-
-                      {isOpen && (
-                        <div
-                          style={{
-                            marginTop: 12,
-                            borderTop: `1px solid ${D.border}`,
-                            paddingTop: 12,
-                          }}
-                        >
-                          <div
-                            style={{
-                              display: "flex",
-                              gap: 8,
-                              alignItems: "center",
-                              flexWrap: "wrap",
-                              marginBottom: 10,
-                            }}
-                          >
-                            <input
-                              value={candidateSearch}
-                              onChange={(e) => setCandidateSearch(e.target.value)}
-                              placeholder="Customer name, phone, address, or city"
-                              style={{
-                                flex: "1 1 280px",
-                                minWidth: 0,
-                                padding: "9px 11px",
-                                borderRadius: 8,
-                                border: `1px solid ${D.inputBorder}`,
-                                fontSize: 13,
-                                color: D.text,
-                                background: D.card,
-                              }}
-                            />
-                            <button
-                              onClick={() => searchCandidates(review)}
-                              disabled={candidateLoading}
-                              style={{
-                                display: "inline-flex",
-                                alignItems: "center",
-                                gap: 6,
-                                padding: "9px 12px",
-                                borderRadius: 8,
-                                border: "none",
-                                background: D.teal,
-                                color: "#fff",
-                                fontSize: 12,
-                                fontWeight: 700,
-                                cursor: candidateLoading ? "not-allowed" : "pointer",
-                                opacity: candidateLoading ? 0.55 : 1,
-                              }}
-                            >
-                              <Search size={14} />
-                              Search
-                            </button>
+                            <div className="text-ui-body text-ink-secondary mt-[4px]">
+                              {review.customerName ||
+                                review.reason?.replace("_", " ")}
+                            </div>
+                            {review.reviewText && (
+                              <div className="text-zinc-900 text-ui-body mt-[6px] max-w-[760px]">
+                                {review.reviewText.length > 220
+                                  ? `${review.reviewText.slice(0, 220)}...`
+                                  : review.reviewText}
+                              </div>
+                            )}
                           </div>
+                          <Button
+                            onClick={() => openRepair(review)}
+                            variant="secondary"
+                            className="inline-flex items-center justify-center gap-[6px] whitespace-nowrap"
+                          >
+                            <Search size={14} />
+                            Match
+                          </Button>
+                        </div>
 
-                          {candidateLoading ? (
-                            <div style={{ color: D.muted, fontSize: 13 }}>Searching...</div>
-                          ) : (
-                            <div style={{ display: "grid", gap: 8 }}>
-                              {likelyReviewers.length > 0 && (
-                                <>
-                                  <div style={{ fontSize: 12, fontWeight: 700, color: D.heading }}>
-                                    Likely reviewers
-                                    <span style={{ fontWeight: 400, color: D.muted }}>
-                                      {" — tapped their review link near this review's timestamp"}
-                                    </span>
+                        {isOpen && (
+                          <div className="mt-[12px] border-t border-hairline border-zinc-200 pt-[12px]">
+                            <div className="flex gap-[8px] items-center flex-wrap mb-[10px]">
+                              <Input
+                                value={candidateSearch}
+                                onChange={(e) =>
+                                  setCandidateSearch(e.target.value)
+                                }
+                                placeholder="Customer name, phone, address, or city"
+                                className="flex-[1_1_280px] min-w-[0px]"
+                              />
+                              <Button
+                                onClick={() => searchCandidates(review)}
+                                disabled={candidateLoading}
+                                variant="primary"
+                                className="inline-flex items-center gap-[6px]"
+                              >
+                                <Search size={14} />
+                                Search
+                              </Button>
+                            </div>
+
+                            {candidateLoading ? (
+                              <div className="text-ink-secondary text-ui-body">
+                                Searching...
+                              </div>
+                            ) : (
+                              <div className="grid gap-[8px]">
+                                {likelyReviewers.length > 0 && (
+                                  <>
+                                    <div className="text-ui-body font-medium text-zinc-900">
+                                      Likely reviewers
+                                      <span className="text-ink-secondary">
+                                        {
+                                          " — tapped their review link near this review's timestamp"
+                                        }
+                                      </span>
+                                    </div>
+                                    {likelyReviewers.map((candidate) => (
+                                      <RepairCandidateCard
+                                        key={`likely-${candidate.id}`}
+                                        review={review}
+                                        candidate={candidate}
+                                        matching={matching}
+                                        onAttribute={attributeCandidate}
+                                        badge={
+                                          <span className="text-ui-body font-medium text-zinc-900 border-hairline border-zinc-200 rounded-md">
+                                            Tapped link{" "}
+                                            {candidate.clickOffsetLabel}
+                                            {candidate.locationMatch
+                                              ? " | same location"
+                                              : ""}
+                                            {candidate.nameMatch
+                                              ? " | last name matches"
+                                              : ""}
+                                          </span>
+                                        }
+                                      />
+                                    ))}
+                                    {candidateResults.length > 0 && (
+                                      <div className="text-ui-body font-medium text-zinc-900 mt-[4px]">
+                                        Name search
+                                      </div>
+                                    )}
+                                  </>
+                                )}
+                                {candidateResults.length === 0 &&
+                                likelyReviewers.length === 0 ? (
+                                  <div className="text-ink-secondary text-ui-body">
+                                    No candidate results.
                                   </div>
-                                  {likelyReviewers.map((candidate) => (
+                                ) : (
+                                  candidateResults.map((candidate) => (
                                     <RepairCandidateCard
-                                      key={`likely-${candidate.id}`}
+                                      key={candidate.id}
                                       review={review}
                                       candidate={candidate}
                                       matching={matching}
                                       onAttribute={attributeCandidate}
-                                      badge={
-                                        <span
-                                          style={{
-                                            fontSize: 12,
-                                            fontWeight: 700,
-                                            color: D.green,
-                                            border: `1px solid ${D.border}`,
-                                            borderRadius: 999,
-                                            padding: "2px 8px",
-                                          }}
-                                        >
-                                          Tapped link {candidate.clickOffsetLabel}
-                                          {candidate.locationMatch ? " | same location" : ""}
-                                          {candidate.nameMatch ? " | last name matches" : ""}
-                                        </span>
-                                      }
                                     />
-                                  ))}
-                                  {candidateResults.length > 0 && (
-                                    <div style={{ fontSize: 12, fontWeight: 700, color: D.heading, marginTop: 4 }}>
-                                      Name search
-                                    </div>
-                                  )}
-                                </>
-                              )}
-                              {candidateResults.length === 0 && likelyReviewers.length === 0 ? (
-                                <div style={{ color: D.muted, fontSize: 13 }}>
-                                  No candidate results.
-                                </div>
-                              ) : (
-                                candidateResults.map((candidate) => (
-                                  <RepairCandidateCard
-                                    key={candidate.id}
-                                    review={review}
-                                    candidate={candidate}
-                                    matching={matching}
-                                    onAttribute={attributeCandidate}
-                                  />
-                                ))
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
+                                  ))
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </Card>
+                    );
+                  })}
               </div>
             )}
-          </div>
+          </Card>
 
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: isMobile ? "1fr" : "minmax(260px, 0.8fr) minmax(0, 1.4fr)",
-              gap: 14,
-              alignItems: "start",
-            }}
-          >
-            <div
-              style={{
-                background: D.card,
-                border: `1px solid ${D.border}`,
-                borderRadius: 10,
-                padding: 16,
-              }}
-            >
-              <div style={{ fontSize: 15, fontWeight: 700, color: D.heading, marginBottom: 12 }}>
+          <div className="grid grid-cols-1 md:grid-cols-[minmax(260px,0.8fr)_minmax(0,1.4fr)] items-start gap-[14px]">
+            <Card className="p-[16px]">
+              <div className="text-ui-body font-medium text-zinc-900 mb-[12px]">
                 Leaderboard
               </div>
               {(data?.leaderboard || []).length === 0 ? (
-                <div style={{ color: D.muted, fontSize: 13 }}>No attributed review bonuses yet.</div>
+                <div className="text-ink-secondary text-ui-body">
+                  No attributed review bonuses yet.
+                </div>
               ) : (
-                <div style={{ display: "grid", gap: 8 }}>
+                <div className="grid gap-[8px]">
                   {data.leaderboard.map((row, index) => (
                     <div
                       key={row.technicianId || index}
-                      style={{
-                        display: "grid",
-                        gridTemplateColumns: "24px 1fr auto",
-                        gap: 10,
-                        alignItems: "center",
-                        padding: "10px 0",
-                        borderBottom: index === data.leaderboard.length - 1 ? "none" : `1px solid ${D.border}`,
-                      }}
+                      className="grid grid-cols-[24px_1fr_auto] gap-[10px] items-center py-[10px] border-b border-hairline border-zinc-200"
                     >
-                      <div style={{ fontWeight: 700, color: D.muted }}>{index + 1}</div>
+                      <div className="font-medium text-ink-secondary">
+                        {index + 1}
+                      </div>
                       <div>
-                        <div style={{ fontSize: 14, fontWeight: 700, color: D.text }}>
+                        <div className="text-ui-body font-medium text-zinc-900">
                           {row.technicianName}
                         </div>
-                        <div style={{ fontSize: 12, color: D.muted }}>
-                          {row.reviewCount} review{row.reviewCount === 1 ? "" : "s"}
+                        <div className="text-ui-body text-ink-secondary">
+                          {row.reviewCount} review
+                          {row.reviewCount === 1 ? "" : "s"}
                         </div>
                       </div>
-                      <div style={{ fontFamily: "JetBrains Mono, monospace", fontWeight: 700 }}>
+                      <div className="font-medium">
                         {money(row.earnedCents)}
                       </div>
                     </div>
                   ))}
                 </div>
               )}
-            </div>
+            </Card>
 
-            <div
-              style={{
-                background: D.card,
-                border: `1px solid ${D.border}`,
-                borderRadius: 10,
-                padding: 16,
-              }}
-            >
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  gap: 10,
-                  marginBottom: 12,
-                  flexWrap: "wrap",
-                }}
-              >
-                <div style={{ fontSize: 15, fontWeight: 700, color: D.heading }}>
+            <Card className="p-[16px]">
+              <div className="flex justify-between items-center gap-[10px] mb-[12px] flex-wrap">
+                <div className="text-ui-body font-medium text-zinc-900">
                   Payout Ledger
                 </div>
-                <button
+                <Button
                   onClick={markPendingPaid}
                   disabled={markingPaid || pendingIds.length === 0}
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: 6,
-                    padding: "8px 12px",
-                    borderRadius: 8,
-                    border: `1px solid ${D.border}`,
-                    background: pendingIds.length ? D.card : D.bg,
-                    color: pendingIds.length ? D.text : D.muted,
-                    fontSize: 12,
-                    fontWeight: 700,
-                    cursor: pendingIds.length ? "pointer" : "not-allowed",
-                    opacity: markingPaid ? 0.55 : 1,
-                  }}
+                  variant="secondary"
+                  className="inline-flex items-center gap-[6px]"
                 >
                   <CheckCircle2 size={15} />
                   {markingPaid ? "Updating..." : "Mark Pending Paid"}
-                </button>
+                </Button>
               </div>
 
               {payouts.length === 0 ? (
-                <div style={{ color: D.muted, fontSize: 13, padding: "20px 0" }}>
+                <div className="text-ink-secondary text-ui-body">
                   No payout rows in this period.
                 </div>
               ) : (
-                <div style={{ display: "grid", gap: 8 }}>
+                <div className="grid gap-[8px]">
                   {payouts.slice(0, 50).map((p) => (
-                    <div
+                    <Card
                       key={p.id}
-                      style={{
-                        display: "grid",
-                        gridTemplateColumns: isMobile ? "1fr" : "1fr auto auto",
-                        gap: isMobile ? 6 : 12,
-                        alignItems: "center",
-                        border: `1px solid ${D.border}`,
-                        borderRadius: 8,
-                        padding: "10px 12px",
-                        background: D.bg,
-                      }}
+                      className="grid grid-cols-1 md:grid-cols-[1fr_auto_auto] gap-1.5 md:gap-3 items-center px-3 py-2.5"
                     >
                       <div>
-                        <div style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>
+                        <div className="text-ui-body font-medium text-zinc-900">
                           {p.technicianName}
                         </div>
-                        <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
-                          {[p.customerName, p.source?.replace("_", " "), fmtShortDate(p.earnedAt)]
+                        <div className="text-ui-body text-ink-secondary mt-[2px]">
+                          {[
+                            p.customerName,
+                            p.source?.replace("_", " "),
+                            fmtShortDate(p.earnedAt),
+                          ]
                             .filter(Boolean)
                             .join(" | ")}
                         </div>
                       </div>
-                      <div
-                        style={{
-                          fontSize: 12,
-                          fontWeight: 700,
-                          color: p.status === "paid" ? D.green : D.amber,
-                          textTransform: "uppercase",
-                        }}
-                      >
+                      <div className="text-ui-body font-medium">
                         {/* The summary calls unpaid bonuses "Pending Payroll";
                             keep the ledger vocab aligned (status is 'earned'). */}
                         {p.status === "paid" ? "Paid" : "Pending"}
                       </div>
-                      <div style={{ fontFamily: "JetBrains Mono, monospace", fontWeight: 700 }}>
-                        {money(p.amountCents)}
-                      </div>
-                    </div>
+                      <div className="font-medium">{money(p.amountCents)}</div>
+                    </Card>
                   ))}
                 </div>
               )}
-            </div>
+            </Card>
           </div>
         </>
       )}
@@ -2048,18 +1536,35 @@ export default function ReviewsPage() {
       const q = new URLSearchParams(window.location.search);
       const responded = q.get("responded");
       return {
-        responded: ["responded", "needs-reply", "all", "removed"].includes(responded) ? responded : null,
+        responded: ["responded", "needs-reply", "all", "removed"].includes(
+          responded,
+        )
+          ? responded
+          : null,
         review: q.get("review") || null,
       };
-    } catch { return { responded: null, review: null }; }
+    } catch {
+      return {
+        responded: null,
+        review: null,
+      };
+    }
   })();
-  const [filterResponded, setFilterResponded] = useState(deepLink.responded || "needs-reply");
+  const [filterResponded, setFilterResponded] = useState(
+    deepLink.responded || "needs-reply",
+  );
   const [search, setSearch] = useState("");
   const scrolledToRef = useRef(false);
   useEffect(() => {
-    if (!deepLink.review || scrolledToRef.current || !data?.reviews?.length) return;
+    if (!deepLink.review || scrolledToRef.current || !data?.reviews?.length)
+      return;
     const el = document.getElementById(`review-${deepLink.review}`);
-    if (el) { scrolledToRef.current = true; el.scrollIntoView({ block: "center" }); }
+    if (el) {
+      scrolledToRef.current = true;
+      el.scrollIntoView({
+        block: "center",
+      });
+    }
   }, [data]);
   const loadSeqRef = useRef(0);
   // Server pages at 200 rows; without a pager a large profile wipe would
@@ -2074,22 +1579,26 @@ export default function ReviewsPage() {
   // page with the failed state would discard the evidence already loaded and
   // restart pagination from page 1 on retry.
   const [loadMoreError, setLoadMoreError] = useState(null);
-
-  const buildParams = useCallback((pageNum) => {
-    const params = new URLSearchParams({ limit: String(PAGE_SIZE) });
-    if (pageNum > 1) params.set("page", String(pageNum));
-    if (filterLocation !== "all") params.set("location", filterLocation);
-    if (filterRating !== "all") params.set("rating", filterRating);
-    if (filterResponded === "responded") params.set("responded", "true");
-    if (filterResponded === "needs-reply") params.set("responded", "false");
-    if (filterResponded === "removed") params.set("missing", "true");
-    if (search.trim()) params.set("search", search.trim());
-    // A notification deep link names one review; the server pins it into the
-    // first page so an old row (beyond the page size) is still reached.
-    if (pageNum === 1 && deepLink.review) params.set("review", deepLink.review);
-    return params;
-  }, [filterLocation, filterRating, filterResponded, search, deepLink.review]);
-
+  const buildParams = useCallback(
+    (pageNum) => {
+      const params = new URLSearchParams({
+        limit: String(PAGE_SIZE),
+      });
+      if (pageNum > 1) params.set("page", String(pageNum));
+      if (filterLocation !== "all") params.set("location", filterLocation);
+      if (filterRating !== "all") params.set("rating", filterRating);
+      if (filterResponded === "responded") params.set("responded", "true");
+      if (filterResponded === "needs-reply") params.set("responded", "false");
+      if (filterResponded === "removed") params.set("missing", "true");
+      if (search.trim()) params.set("search", search.trim());
+      // A notification deep link names one review; the server pins it into the
+      // first page so an old row (beyond the page size) is still reached.
+      if (pageNum === 1 && deepLink.review)
+        params.set("review", deepLink.review);
+      return params;
+    },
+    [filterLocation, filterRating, filterResponded, search, deepLink.review],
+  );
   const loadData = useCallback(() => {
     const loadSeq = loadSeqRef.current + 1;
     loadSeqRef.current = loadSeq;
@@ -2109,7 +1618,11 @@ export default function ReviewsPage() {
       .then((d) => {
         if (loadSeq !== loadSeqRef.current) return;
         setData(d);
-        setHasMore(d.hasMore != null ? !!d.hasMore : (d.reviews || []).length === PAGE_SIZE);
+        setHasMore(
+          d.hasMore != null
+            ? !!d.hasMore
+            : (d.reviews || []).length === PAGE_SIZE,
+        );
         setLoading(false);
       })
       .catch((e) => {
@@ -2118,7 +1631,6 @@ export default function ReviewsPage() {
         setLoading(false);
       });
   }, [buildParams]);
-
   const loadMore = useCallback(() => {
     // Capture the sequence so a filter change mid-flight discards this append.
     const loadSeq = loadSeqRef.current;
@@ -2129,7 +1641,11 @@ export default function ReviewsPage() {
       .then((d) => {
         if (loadSeq !== loadSeqRef.current) return;
         pageRef.current = nextPage;
-        setHasMore(d.hasMore != null ? !!d.hasMore : (d.reviews || []).length === PAGE_SIZE);
+        setHasMore(
+          d.hasMore != null
+            ? !!d.hasMore
+            : (d.reviews || []).length === PAGE_SIZE,
+        );
         setLoadingMore(false);
         setData((prev) => {
           if (!prev) return d;
@@ -2138,7 +1654,10 @@ export default function ReviewsPage() {
           const seen = new Set(prev.reviews.map((r) => r.id));
           return {
             ...prev,
-            reviews: [...prev.reviews, ...(d.reviews || []).filter((r) => !seen.has(r.id))],
+            reviews: [
+              ...prev.reviews,
+              ...(d.reviews || []).filter((r) => !seen.has(r.id)),
+            ],
           };
         });
       })
@@ -2148,7 +1667,6 @@ export default function ReviewsPage() {
         setLoadMoreError(e.message);
       });
   }, [buildParams]);
-
   useEffect(() => {
     const t = setTimeout(loadData, search.trim() ? 250 : 0);
     return () => clearTimeout(t);
@@ -2158,17 +1676,27 @@ export default function ReviewsPage() {
   // (publish the pending draft immediately), skip (leave the pipeline). The
   // row's reply / autoReply state changes server-side, so reload the list.
   const handleAutoReplyAction = async (reviewId, action, body) => {
-    const path = action === "retract"
-      ? `/admin/reviews/${reviewId}/retract-reply`
-      : `/admin/reviews/${reviewId}/auto-reply/${action}`;
+    const path =
+      action === "retract"
+        ? `/admin/reviews/${reviewId}/retract-reply`
+        : `/admin/reviews/${reviewId}/auto-reply/${action}`;
     const result = await adminFetch(path, body ? { method: "POST", body: JSON.stringify(body) } : { method: "POST" });
     // Post now on a 1-3★ / unrated review with no surfaced draft: the server
     // drafted + parked instead of posting; reload so the draft is rendered.
     if (result && result.message) alert(result.message);
     await loadData();
   };
-
-  const handleReply = async (reviewId, replyText, { draftToken = null, groundingToken = null, expectedReply = null, expectedDraft = null, expectedReview = null } = {}) => {
+  const handleReply = async (
+    reviewId,
+    replyText,
+    {
+      draftToken = null,
+      groundingToken = null,
+      expectedReply = null,
+      expectedDraft = null,
+      expectedReview = null,
+    } = {},
+  ) => {
     await adminFetch(`/admin/reviews/${reviewId}/reply`, {
       method: "POST",
       body: JSON.stringify({
@@ -2195,25 +1723,30 @@ export default function ReviewsPage() {
       reviews: prev.reviews.map((r) =>
         r.id === reviewId
           ? {
-            ...r,
-            reply: replyText,
-            replyUpdatedAt: new Date().toISOString(),
-            // The saved draft slot is consumed by the post (server-side the
-            // "[DRAFT]" became the reply): clear it and its identity so a
-            // follow-up edit does not report the obsolete draft as observed.
-            draftReply: null,
-            draftToken: null,
-            draftStale: false,
-            // A manual post closes out the auto-reply state server-side
-            // (skipped/manual_reply); mirror it so Retract — which deletes
-            // whatever reply is live — is not offered on a human's reply.
-            autoReply: r.autoReply ? { ...r.autoReply, status: "skipped", reason: "manual_reply" } : null,
-          }
+              ...r,
+              reply: replyText,
+              replyUpdatedAt: new Date().toISOString(),
+              // The saved draft slot is consumed by the post (server-side the
+              // "[DRAFT]" became the reply): clear it and its identity so a
+              // follow-up edit does not report the obsolete draft as observed.
+              draftReply: null,
+              draftToken: null,
+              draftStale: false,
+              // A manual post closes out the auto-reply state server-side
+              // (skipped/manual_reply); mirror it so Retract — which deletes
+              // whatever reply is live — is not offered on a human's reply.
+              autoReply: r.autoReply
+                ? {
+                    ...r.autoReply,
+                    status: "skipped",
+                    reason: "manual_reply",
+                  }
+                : null,
+            }
           : r,
       ),
     }));
   };
-
   const handleDismiss = async (reviewId) => {
     await adminFetch(`/admin/reviews/${reviewId}/dismiss`, { method: "POST" });
     // Dismissed rows are excluded from every view except Removed, so the same
@@ -2227,7 +1760,6 @@ export default function ReviewsPage() {
       reviews: prev.reviews.filter((r) => r.id !== reviewId),
     }));
   };
-
   const handleRequestReview = (loc) => {
     if (loc.reviewUrl) {
       navigator.clipboard
@@ -2251,7 +1783,6 @@ export default function ReviewsPage() {
     unresponded = 0,
     responded = 0,
     newThisMonth = 0,
-    breakdown = {},
     locationBreakdown = {},
     perLocation = [],
   } = stats;
@@ -2276,7 +1807,8 @@ export default function ReviewsPage() {
     if (filterResponded === "responded" && !r.reply) return false;
     // Needs Reply keeps stamped (removed-from-Google) rows visible even when
     // replied — mirrors the server-side inclusion; the removal alert links here.
-    if (filterResponded === "needs-reply" && r.reply && !r.missingSince) return false;
+    if (filterResponded === "needs-reply" && r.reply && !r.missingSince)
+      return false;
     if (filterResponded === "removed" && !r.missingSince) return false;
     if (search.trim()) {
       const q = search.toLowerCase();
@@ -2292,7 +1824,11 @@ export default function ReviewsPage() {
   // Build per-location lookup merging API locations with stats
   const locLookup = {};
   locations.forEach((l) => {
-    locLookup[l.id] = { ...l, count: 0, avgRating: "0.0" };
+    locLookup[l.id] = {
+      ...l,
+      count: 0,
+      avgRating: "0.0",
+    };
   });
   perLocation.forEach((p) => {
     if (locLookup[p.locationId]) {
@@ -2300,29 +1836,71 @@ export default function ReviewsPage() {
       locLookup[p.locationId].avgRating = p.avgRating;
     }
   });
-
   const locationOptions = [
-    { value: "all", label: "All Locations" },
-    { value: "bradenton", label: "Lakewood Ranch" },
-    { value: "parrish", label: "Parrish" },
-    { value: "sarasota", label: "Sarasota" },
-    { value: "venice", label: "Venice" },
+    {
+      value: "all",
+      label: "All Locations",
+    },
+    {
+      value: "bradenton",
+      label: "Lakewood Ranch",
+    },
+    {
+      value: "parrish",
+      label: "Parrish",
+    },
+    {
+      value: "sarasota",
+      label: "Sarasota",
+    },
+    {
+      value: "venice",
+      label: "Venice",
+    },
   ];
-
   const ratingOptions = [
-    { value: "all", label: "All Ratings" },
-    { value: "5", label: "5 Stars" },
-    { value: "4", label: "4 Stars" },
-    { value: "3", label: "3 Stars" },
-    { value: "2", label: "2 Stars" },
-    { value: "1", label: "1 Star" },
+    {
+      value: "all",
+      label: "All Ratings",
+    },
+    {
+      value: "5",
+      label: "5 Stars",
+    },
+    {
+      value: "4",
+      label: "4 Stars",
+    },
+    {
+      value: "3",
+      label: "3 Stars",
+    },
+    {
+      value: "2",
+      label: "2 Stars",
+    },
+    {
+      value: "1",
+      label: "1 Star",
+    },
   ];
-
   const respondedOptions = [
-    { value: "all", label: "All Reviews" },
-    { value: "responded", label: "Responded" },
-    { value: "needs-reply", label: "Needs Reply" },
-    { value: "removed", label: "Removed from Google" },
+    {
+      value: "all",
+      label: "All Reviews",
+    },
+    {
+      value: "responded",
+      label: "Responded",
+    },
+    {
+      value: "needs-reply",
+      label: "Needs Reply",
+    },
+    {
+      value: "removed",
+      label: "Removed from Google",
+    },
   ];
   const activeGroup =
     REVIEWS_TAB_GROUPS.find((g) => g.tabs.includes(activeTab)) ||
@@ -2332,14 +1910,12 @@ export default function ReviewsPage() {
   );
   // 'none' = no GBP access AND no Places key — review tracking is fully
   // offline for these locations; saying "fallback" would overstate it.
-  const offlineLocations = locations.filter(
-    (l) => l.reviewsSource === "none",
-  );
-
+  const offlineLocations = locations.filter((l) => l.reviewsSource === "none");
   return (
-    <div>
+    <UiSurface density="comfortable">
       {" "}
       <AdminCommandHeader
+        variant="workspace"
         title="Reviews"
         icon={Star}
         sections={REVIEWS_TAB_GROUPS.map((g) => ({
@@ -2356,43 +1932,21 @@ export default function ReviewsPage() {
         navGridClassName="grid-cols-1 md:grid-cols-3"
       />
       {activeGroup.tabs.length > 1 && (
-        <div
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            gap: 8,
-            marginBottom: 16,
-          }}
-        >
+        <div className="flex flex-wrap gap-[8px] mb-[16px]">
           {activeGroup.tabs.map((key) => {
             const leaf = REVIEWS_LEAF_BY_KEY[key];
             const active = activeTab === key;
             const LeafIcon = leaf.Icon;
             return (
-              <button
+              <Button
                 key={key}
                 type="button"
                 onClick={() => setActiveTab(key)}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 6,
-                  height: 36,
-                  padding: "0 14px",
-                  borderRadius: 6,
-                  fontSize: 12,
-                  fontWeight: 700,
-                  textTransform: "uppercase",
-                  letterSpacing: "0.04em",
-                  cursor: "pointer",
-                  border: `1px solid ${active ? "#18181B" : "#E4E4E7"}`,
-                  background: active ? "#18181B" : "#FFFFFF",
-                  color: active ? "#fff" : "#27272A",
-                }}
+                variant={active ? "primary" : "secondary"}
               >
                 <LeafIcon size={14} strokeWidth={1.9} />
                 {leaf.label}
-              </button>
+              </Button>
             );
           })}
         </div>
@@ -2402,51 +1956,24 @@ export default function ReviewsPage() {
         <div>
           {/* Loading state */}
           {loading && (
-            <div
-              style={{
-                color: D.muted,
-                padding: 60,
-                textAlign: "center",
-                fontFamily: "Roboto, Arial, sans-serif",
-                fontSize: 15,
-              }}
-            >
+            <div className="text-ink-secondary p-[60px] text-center text-ui-body">
               Loading reviews...
             </div>
           )}
 
           {/* Error state */}
           {!loading && error && (
-            <div
-              style={{
-                color: D.red,
-                padding: 60,
-                textAlign: "center",
-                fontFamily: "Roboto, Arial, sans-serif",
-              }}
-            >
+            <div className="text-alert-fg p-[60px] text-center">
               {" "}
-              <div style={{ fontSize: 16, marginBottom: 12 }}>
+              <div className="text-ui-body mb-[12px]">
                 Failed to load reviews
               </div>{" "}
-              <div style={{ fontSize: 13, color: D.muted, marginBottom: 16 }}>
+              <div className="text-ui-body text-ink-secondary mb-[16px]">
                 {error}
               </div>{" "}
-              <button
-                onClick={loadData}
-                style={{
-                  padding: "8px 20px",
-                  background: D.teal,
-                  color: "#fff",
-                  border: "none",
-                  borderRadius: 8,
-                  fontSize: 14,
-                  fontFamily: "Roboto, Arial, sans-serif",
-                  cursor: "pointer",
-                }}
-              >
+              <Button onClick={loadData} variant="primary">
                 Retry
-              </button>{" "}
+              </Button>{" "}
             </div>
           )}
 
@@ -2454,34 +1981,14 @@ export default function ReviewsPage() {
           {!loading && !error && data && (
             <>
               {fallbackLocations.length > 0 && (
-                <div
-                  style={{
-                    border: `1px solid ${D.amber}`,
-                    background: "#FFFBEB",
-                    color: D.amber,
-                    borderRadius: 8,
-                    padding: "10px 12px",
-                    marginBottom: 14,
-                    fontSize: 13,
-                  }}
-                >
+                <div className="border-hairline border-zinc-200 text-zinc-900 rounded-md mb-[14px] text-ui-body">
                   {fallbackLocations.map((l) => l.name).join(", ")} currently
                   use Places review fallback until GBP Reviews API access is
                   available.
                 </div>
               )}
               {offlineLocations.length > 0 && (
-                <div
-                  style={{
-                    border: `1px solid ${D.red}`,
-                    background: "#FEF2F2",
-                    color: D.red,
-                    borderRadius: 8,
-                    padding: "10px 12px",
-                    marginBottom: 14,
-                    fontSize: 13,
-                  }}
-                >
+                <div className="border-hairline border-zinc-200 text-alert-fg rounded-md mb-[14px] text-ui-body">
                   Review tracking is offline for{" "}
                   {offlineLocations.map((l) => l.name).join(", ")} — no GBP
                   Reviews API access and no Places API key, so new reviews and
@@ -2494,23 +2001,14 @@ export default function ReviewsPage() {
                   google_reviews fresh without anyone clicking sync. */}
 
               {/* Stats bar */}
-              <div
-                style={{
-                  display: "flex",
-                  gap: 12,
-                  marginBottom: 24,
-                  flexWrap: "wrap",
-                }}
-              >
+              <div className="flex gap-[12px] mb-[24px] flex-wrap">
                 {" "}
                 <StatCard
                   label="Total Reviews"
                   value={totalReviews}
                   sub={
                     <span>
-                      <span style={{ fontFamily: "JetBrains Mono, monospace" }}>
-                        {Number(avgRating).toFixed(1)}
-                      </span>{" "}
+                      <span>{Number(avgRating).toFixed(1)}</span>{" "}
                       <Stars count={Math.round(avgRating)} size={13} />
                     </span>
                   }
@@ -2518,38 +2016,27 @@ export default function ReviewsPage() {
                 <StatCard
                   label="No Portal Reply"
                   value={unresponded}
-                  color={unresponded > 0 ? D.amber : D.green}
+                  color={unresponded > 0 ? "text-warn-fg" : "text-green-700"}
                   sub={
                     unresponded > 0 ? "reply via AI Reply below" : "all replied"
                   }
                 />{" "}
-                <StatCard
-                  label="New This Month"
-                  value={newThisMonth}
-                  color={D.teal}
-                />{" "}
+                <StatCard label="New This Month" value={newThisMonth} />{" "}
                 <StatCard
                   label="Response Rate"
                   value={`${responseRate}%`}
                   color={
                     responseRate >= 90
-                      ? D.green
+                      ? "text-green-700"
                       : responseRate >= 70
-                        ? D.amber
-                        : D.red
+                        ? "text-warn-fg"
+                        : "text-alert-fg"
                   }
                   sub={`${respondedCount} of ${ratedTotal} replied`}
                 />{" "}
               </div>
               {/* Per-location cards */}
-              <div
-                style={{
-                  display: "flex",
-                  gap: 12,
-                  marginBottom: 24,
-                  flexWrap: "wrap",
-                }}
-              >
+              <div className="flex gap-[12px] mb-[24px] flex-wrap">
                 {Object.values(locLookup).map((loc) => (
                   <LocationCard
                     key={loc.id}
@@ -2572,89 +2059,46 @@ export default function ReviewsPage() {
                 ))}
               </div>
               {/* Filter bar */}
-              <div
-                style={{
-                  display: "flex",
-                  gap: 10,
-                  marginBottom: 20,
-                  flexWrap: "wrap",
-                  alignItems: "center",
-                  padding: "12px 16px",
-                  background: D.card,
-                  border: `1px solid ${D.border}`,
-                  borderRadius: 10,
-                }}
-              >
+              <Card className="mb-5 flex flex-wrap items-center gap-3 rounded-md border border-hairline border-zinc-200 bg-white p-3">
                 {" "}
-                <Select
+                <ReviewSelect
                   value={filterLocation}
                   onChange={setFilterLocation}
                   options={locationOptions}
                 />{" "}
-                <Select
+                <ReviewSelect
                   value={filterRating}
                   onChange={setFilterRating}
                   options={ratingOptions}
                 />{" "}
-                <Select
+                <ReviewSelect
                   value={filterResponded}
                   onChange={setFilterResponded}
                   options={respondedOptions}
                 />{" "}
-                <input
+                <Input
                   type="text"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   placeholder="Search reviews..."
-                  style={{
-                    padding: "8px 12px",
-                    background: D.bg,
-                    border: `1px solid ${D.border}`,
-                    borderRadius: 8,
-                    color: D.text,
-                    fontSize: 13,
-                    fontFamily: "Roboto, Arial, sans-serif",
-                    outline: "none",
-                    flex: "1 1 180px",
-                    minWidth: 160,
-                  }}
+                  className="flex-[1_1_180px] min-w-[160px]"
                 />{" "}
-                <span
-                  style={{
-                    fontFamily: "JetBrains Mono, monospace",
-                    fontSize: 12,
-                    color: D.muted,
-                  }}
-                >
+                <span className="text-ui-body text-ink-secondary">
                   {filtered.length} review{filtered.length !== 1 ? "s" : ""}
                 </span>{" "}
-              </div>
+              </Card>
               {/* Reviews feed */}
               {filtered.length === 0 ? (
-                <div
-                  style={{
-                    padding: 48,
-                    textAlign: "center",
-                    color: D.muted,
-                    fontFamily: "Roboto, Arial, sans-serif",
-                    background: D.card,
-                    borderRadius: 12,
-                    border: `1px solid ${D.border}`,
-                  }}
-                >
+                <Card className="p-[48px] text-center text-ink-secondary">
                   {" "}
-                  <Star
-                    size={32}
-                    color={D.muted}
-                    style={{ marginBottom: 12 }}
-                  />{" "}
-                  <div style={{ fontSize: 15 }}>
+                  <Star size={32} className="mb-[12px]" />{" "}
+                  <div className="text-ui-body">
                     No reviews match your filters
                   </div>{" "}
-                  <div style={{ fontSize: 13, marginTop: 4 }}>
+                  <div className="text-ui-body mt-[4px]">
                     Try adjusting your search or filter criteria
                   </div>{" "}
-                </div>
+                </Card>
               ) : (
                 filtered.map((r) => (
                   <ReviewCard
@@ -2667,38 +2111,21 @@ export default function ReviewsPage() {
                 ))
               )}
               {hasMore && (
-                <div style={{ textAlign: "center", marginTop: 12 }}>
+                <div className="text-center mt-[12px]">
                   {loadMoreError && (
-                    <div
-                      style={{
-                        color: D.red,
-                        fontSize: 13,
-                        fontFamily: "Roboto, Arial, sans-serif",
-                        marginBottom: 8,
-                      }}
-                    >
+                    <div className="text-alert-fg text-ui-body mb-[8px]">
                       Couldn&apos;t load more reviews ({loadMoreError}) — the
                       reviews above are still loaded; retry below.
                     </div>
                   )}
-                  <button
+                  <Button
                     onClick={loadMore}
                     disabled={loadingMore}
-                    style={{
-                      padding: "10px 24px",
-                      background: "transparent",
-                      border: `1px solid ${D.border}`,
-                      color: D.text,
-                      borderRadius: 8,
-                      fontSize: 13,
-                      fontFamily: "Roboto, Arial, sans-serif",
-                      cursor: loadingMore ? "default" : "pointer",
-                      opacity: loadingMore ? 0.5 : 1,
-                      minHeight: 44,
-                    }}
+                    variant="secondary"
+                    className="min-h-[44px]"
                   >
                     {loadingMore ? "Loading..." : "Load more reviews"}
-                  </button>
+                  </Button>
                 </div>
               )}
             </>
@@ -2709,6 +2136,6 @@ export default function ReviewsPage() {
       {activeTab === "gbp" && <GBPManagementPanel />}
       {activeTab === "outreach" && <ReviewVelocityEngine />}
       {activeTab === "incentives" && <ReviewIncentivesPanel />}
-    </div>
+    </UiSurface>
   );
 }

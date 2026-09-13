@@ -1279,6 +1279,25 @@ async function resolveFulfillment(conn, commitment, call) {
         .orderBy("created_at", "asc")
         .first("id", "created_at", "scheduled_date", "status");
       if (direct) return { kind: "appointment_booked", record_type: "scheduled_service", record_id: direct.id, matched_at: direct.created_at, strength: "direct", basis: "visit_booked_from_this_call" };
+      // An agent who MOVED an on-the-books visit kept a schedule_visit promise
+      // without creating a row, so neither lookup above can witness it and the
+      // watchdog reported the promise overdue (GH codex #4204 r6 P2). The
+      // applier's own activity row names this call and the visit it moved —
+      // direct proof, same standard as a booking from this call.
+      // schedule_visit ONLY. A moved visit proves an existing appointment
+      // changed time; it says nothing about a promised technician follow-up,
+      // and closing that owed work on this evidence would drop it silently
+      // (GH codex #4204 r7 P2).
+      const { ACTIVITY_ACTION: RESCHEDULE_APPLIED } = require("./call-reschedule-apply");
+      const movedRow = commitment.kind !== "schedule_visit" ? null : await conn("activity_log")
+        .where({ action: RESCHEDULE_APPLIED })
+        .whereRaw("metadata->>'call_log_id' = ?", [String(call.id)])
+        .orderBy("created_at", "asc")
+        .first("created_at", "metadata");
+      const movedMeta = typeof movedRow?.metadata === "string" ? JSON.parse(movedRow.metadata) : movedRow?.metadata;
+      if (movedMeta?.scheduled_service_id) {
+        return { kind: "appointment_rescheduled", record_type: "scheduled_service", record_id: movedMeta.scheduled_service_id, matched_at: movedRow.created_at, strength: "direct", basis: "visit_rescheduled_from_this_call" };
+      }
       if (!customerId) return null;
       const visit = await conn("scheduled_services")
         .where("customer_id", customerId)

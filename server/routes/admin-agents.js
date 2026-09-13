@@ -807,6 +807,14 @@ async function loadPlannerRunTasks() {
   if (!(await tableExists('route_optimization_planner_runs'))) return { missing: true, tasks: [] };
   const rows = await db('route_optimization_planner_runs')
     .where('created_at', '>=', addETDays(new Date(), -7))
+    // Planner RUNS only. Every ordinary schedule mutation also writes a
+    // zero-apply `schedule_quality_change` measurement snapshot to this
+    // ledger (scheduling/quality-after-change.js, dark behind
+    // GATE_SCHEDULE_QUALITY_MEASUREMENTS); three daytime edits would
+    // otherwise push last night's failed or lock-skipped route_tiers_nightly
+    // row — the exception this card exists to surface — out of the
+    // newest-three read (codex #4295 r6 P2).
+    .whereNot('run_type', 'schedule_quality_change')
     .select('id', 'run_type', 'status', 'start_date', 'end_date', 'applied_count', 'skipped_count', 'failed_count', 'result', 'created_at')
     .orderBy('created_at', 'desc')
     .limit(3);

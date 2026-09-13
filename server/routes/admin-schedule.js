@@ -14,6 +14,9 @@ const { completeScheduledServiceInsert } = require('../services/booking/create-s
 const { collectiveMoveGateOn, dateExceptionStamp } = require('../services/rebooker');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { dayStopsQuery, guardedCoordSelects } = require('../services/scheduling/day-stops');
+const { chooseWindowSafeOrder, inProgressStartMin, loadTechDayOrigins, assertTechDayOriginsFresh, driveableStop,
+  resolveWindowSafeOrderByTechDay, windowSafeFigures,
+  ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES, routeWriteGuardSignature } = require('../services/route-reorder');
 const {
   assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning, ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
 } = require('../services/scheduling/window-rules');
@@ -1125,7 +1128,34 @@ async function resetAppointmentReminderForScheduleRewrite(trx, scheduledServiceI
 // (no enforcement); a string = the card-approved number; null = the card
 // showed NO SMS recipient — a phone that appears afterwards must refuse,
 // never receive a text the operator did not approve.
-async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, { expectedPhone = undefined } = {}) {
+// Stop-wide identity for a notice that speaks for a whole grouped stop, in
+// the shape no-show-detector.js reads (the notification event key). Its own
+// function so the already-oversized sender gains no decisions from it.
+function stopWideMeta(stopWideFor, dateStr, startHHMM) {
+  // DISTINCT per notice, not per stop: two successive stop-wide moves would
+  // otherwise share a key, and the detector's "same send" identity — which
+  // decides what supersedes what, and which recovery stands in for which
+  // send — would conflate them (codex P1, PR #4403 round 26). The landed
+  // slot is what makes each move its own event.
+  return stopWideFor ? { notificationEventKey: `visit:${stopWideFor}:${dateStr}:${startHHMM || ''}` } : {};
+}
+
+// The caller's optional pins, read in one place: destructuring them in the
+// signature with defaults added decision points to a function already far
+// over the complexity budget (codex QUALITY_WARN discipline).
+function noticeOptions(options = {}, dateStr, startHHMM) {
+  return { expectedPhone: options.expectedPhone, stopWide: stopWideMeta(options.stopWideFor, dateStr, startHHMM) };
+}
+
+// `stopWideFor`: the service_visits id when this ONE notice speaks for a
+// whole grouped stop (admin-dispatch moves a stop as a unit and quotes the
+// stop's landed start). It rides into the message metadata as the
+// notification event key, which is how no-show-detector.js tells copy that
+// supersedes every member's own promise from copy about one service — without
+// it, each sibling kept its pre-move window and could raise a false alert
+// against it (codex P1, PR #4403 round 26).
+async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, options = {}) {
+  const { expectedPhone, stopWide } = noticeOptions(options, dateStr, startHHMM);
   // Shared belt for every notice path (update-details, bulk reschedule, IB
   // schedule tools): a LEGACY outbound-review row (pending before the
   // 2026-08-11 review-hold removal) must be activated — reminders armed,
@@ -1204,6 +1234,7 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, { exp
         });
       }, 'appointment_rescheduled', 'appointment_confirmation', {
         scheduled_service_id: serviceId,
+        ...stopWide,
         // ABA guard input (codex #3609 r48): the slot this notice quotes —
         // the shared guard accepts either the row's own start or the
         // grouped stop's canonical start, so visitMove.visitStart works.
@@ -2473,6 +2504,118 @@ async function loadStoredDiscountScope(_database, parent, addonRows = []) {
 // visits, not the year-old series parent); the parent template is the
 // fallback when no sibling carries a value. Returns undefined when nothing
 // carries a value so the insert keeps the column default.
+// Re-apply the parent term's coverage after a series row is inserted, so the
+// new visit is stamped if — and only if — the term still has a slot for it.
+// Failing soft leaves the visit uncovered, which is a billing question
+// someone can correct; blocking the extension is a service failure the
+// customer feels.
+// Every annual-prepay term id carried by a live visit anywhere in this
+// series, plus the ones the caller already has in hand. The link can sit on
+// any visit, not the root: prepay activated partway through an ongoing series
+// links only visits inside the term window (coverageRowsForTerm /
+// attachScheduledServices), so a root predating term_start is never linked.
+async function seriesTermIds(conn, parentId, ...known) {
+  const ids = new Set(known.filter(Boolean).map(String));
+  if (parentId) {
+    const rows = await conn('scheduled_services')
+      .where(function inSeries() {
+        this.where({ id: parentId }).orWhere({ recurring_parent_id: parentId });
+      })
+      .whereNotNull('annual_prepay_term_id')
+      // NO status filter, deliberately. This is term DISCOVERY, not slot
+      // counting: any linked visit — live, NULL-status, or terminal — is
+      // valid evidence that this series belongs to that term. Filtering
+      // terminal rows out destroyed the only link when the historical parent
+      // was unlinked and the one linked sibling was later cancelled, leaving
+      // a replacement extension unable to resolve a still-paid term and
+      // billable again — precisely when the cancellation had FREED a slot for
+      // it. Whether the term is real is coveredTermsAsOf's job (it rejects
+      // unpaid and revoked), and whether a slot is free is
+      // coverageRowsForTerm's (it still excludes terminal rows from the
+      // covered set). Discovery only has to find candidates.
+      .distinct('annual_prepay_term_id')
+      .pluck('annual_prepay_term_id');
+    for (const id of rows || []) if (id) ids.add(String(id));
+  }
+  return [...ids];
+}
+
+// The term that covers a specific DATE, chosen from the ids a series carries.
+//
+// Not "the first link found": at a renewal boundary the just-completed visit
+// still points at the OLD term, whose window excludes the new visit, while a
+// sibling already carries the renewed one. Stopping at the historical link
+// left the extension unstamped exactly when coverage was available. Passing
+// the date to coveredTermsAsOf picks the term that is live, paid AND whose
+// window contains the visit — the same authority annualPrepayCoversVisit
+// consults, so the two cannot disagree about which term is real.
+async function coveringTermForDate(conn, termIds, coverageDate) {
+  if (!termIds.length) return null;
+  const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+  return AnnualPrepayRenewals.coveredTermsAsOf(conn, coverageDate || null)
+    .whereIn('t.id', termIds)
+    .orderBy('t.term_start', 'desc')
+    .first('t.*');
+}
+
+// Re-apply the series' annual-prepay coverage after an extension row is
+// inserted, so the new visit is stamped if — and only if — a live paid term
+// covers its date and still has a slot for it.
+//
+// EVERY query, the series scan included, runs inside the savepoint. A failed
+// statement leaves a PostgreSQL transaction aborted (25P02) even when
+// JavaScript catches it, so a lookup outside the savepoint would poison the
+// caller and roll back the visit that was just inserted.
+async function applyExtensionPrepayCoverage(conn, parent, svc = null, coverageDate = null) {
+  const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+  let resolvedTerm = null;
+  const run = async (c) => {
+    const termIds = await seriesTermIds(
+      c, parent?.id, svc?.annual_prepay_term_id, parent?.annual_prepay_term_id,
+    );
+    const term = await coveringTermForDate(c, termIds, coverageDate);
+    if (!term) return;
+    resolvedTerm = term;
+    // A callback stamped by the older text-matching behavior is excluded from
+    // coverageRowsForTerm but keeps its annual-prepay amount, so allocating a
+    // replacement slot without clearing it leaves the term with MORE positive
+    // allocations than coverage_visit_count — inflating prepaid-series totals
+    // and making the callback look like held money to the cancellation
+    // guards. The other direct-stamping paths detach first; so does this one.
+    await AnnualPrepayRenewals._private.detachCallbacksFromTerm(term, c);
+    await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(term, c, {
+      quietTransientExceptions: true,
+      // Queries on the savepoint; alerts wait on the OUTER transaction. A
+      // savepoint's executionPromise resolves on RELEASE, so filing against
+      // it would let a later rollback leave a false cancellation alert that
+      // dedupes the real retry for seven days.
+      notifyConn: conn,
+    });
+  };
+  try {
+    if (conn && conn.isTransaction) await conn.transaction(run);
+    else await run(conn);
+  } catch (e) {
+    // Fail to TODAY's behavior (uncovered) rather than blocking the
+    // extension: an unstamped visit is a billing question someone can
+    // correct, a missing visit is a service failure the customer feels.
+    //
+    // But NOT silently. The savepoint rolls back and the visit commits
+    // uncovered, and no sweep re-runs ordinary coverage allocation
+    // (reconcileCoveredTermsSweep handles COMPLETED visits), so without a
+    // durable trail that row stays billable until it completes and charges
+    // the customer for prepaid work. File the operator exception on the
+    // OUTER transaction, so it is not minted if the caller later rolls back.
+    logger.warn(`[recurring] prepay coverage re-apply failed for parent=${parent?.id}: ${e.message}`);
+    if (resolvedTerm) {
+      await AnnualPrepayRenewals._private.fileCoverageExceptionAfterCommit(
+        conn, resolvedTerm, 'generator_coverage_failed',
+        'A newly scheduled visit on this annual prepay could not be marked as covered, so completing it will invoice the customer for prepaid work. Re-apply the prepay coverage to that visit, or void the invoice if it has already been issued.',
+      ).catch(() => {});
+    }
+  }
+}
+
 async function resolveSeriesCreateInvoiceOnComplete(conn, parentId, parent) {
   try {
     const sibling = await conn('scheduled_services')
@@ -3990,6 +4133,20 @@ router.get('/', async (req, res, next) => {
       };
     }));
     require('../services/visit-groups').visitSummariesForRows(enriched);
+    const visitIds = [...new Set(enriched.map((service) => service.visitId).filter(Boolean))];
+    const closeouts = visitIds.length
+      ? await db('visit_completion_packets').whereIn('visit_id', visitIds).select('id', 'visit_id', 'status')
+      : [];
+    const closeoutByVisit = new Map(closeouts.map((packet) => [packet.visit_id, { id: packet.id, status: packet.status }]));
+    const closeoutVisits = visitIds.length
+      ? await db('service_visits').whereIn('id', visitIds).where('behavior_version', '>=', 2).select('id')
+      : [];
+    const closeoutVisitIds = new Set(closeoutVisits.map((visit) => visit.id));
+    const legacyCloseoutEnabled = isEnabled('visitCloseout') && Boolean(process.env.DATA_HYGIENE_VAULT_KEY);
+    for (const service of enriched) {
+      service.visitCloseoutPacket = closeoutByVisit.get(service.visitId) || null;
+      service.visitCloseoutEnabled = Boolean(service.visitCloseoutPacket) || closeoutVisitIds.has(service.visitId) || legacyCloseoutEnabled;
+    }
 
     // Group by technician
     const byTech = {};
@@ -4071,6 +4228,7 @@ router.get('/', async (req, res, next) => {
       // kill switch is off instead of offering an action the group route
       // 404s (GH codex #3843 r1 P1). Split/Separate stay ungated.
       visitGroups: isEnabled('visitGroups'),
+      visitCloseout: legacyCloseoutEnabled,
       techSummary: Object.values(byTech),
       unassigned,
       technicians,
@@ -4085,6 +4243,7 @@ router.get('/', async (req, res, next) => {
 // GET /api/admin/schedule/week
 router.get('/week', async (req, res, next) => {
   try {
+    const visitCloseoutEnabled = isEnabled('visitCloseout') && Boolean(process.env.DATA_HYGIENE_VAULT_KEY);
     const startDate = req.query.start || etDateString();
     const start = new Date(startDate + 'T12:00:00');
     const days = [];
@@ -4111,14 +4270,18 @@ router.get('/week', async (req, res, next) => {
       const dateStr = d.toISOString().split('T')[0];
 
       const services = await db('scheduled_services')
-        .where({ scheduled_date: dateStr })
+        .where('scheduled_services.scheduled_date', dateStr)
         .modify((q) => scopeToAssignedTech(req, q))
         // See day endpoint for why 'rescheduled' is excluded.
-        .whereNotIn('status', ['cancelled', 'rescheduled'])
+        .whereNotIn('scheduled_services.status', ['cancelled', 'rescheduled'])
         .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
         .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
+        .leftJoin('visit_completion_packets as closeout_packet', 'closeout_packet.visit_id', 'scheduled_services.visit_id')
+        .leftJoin('service_visits as closeout_visit', 'closeout_visit.id', 'scheduled_services.visit_id')
         .joinRaw(`LEFT JOIN payers AS bill_to_payer ON bill_to_payer.id = ${effectiveBillToSql} AND bill_to_payer.active = true`)
         .select('scheduled_services.id', 'scheduled_services.customer_id',
+          'scheduled_services.visit_id', 'closeout_packet.id as closeout_packet_id', 'closeout_packet.status as closeout_packet_status',
+          'closeout_visit.behavior_version as visit_behavior_version',
           'bill_to_payer.id as billed_to_payer_id',
           'bill_to_payer.display_name as billed_to_payer_name',
           'bill_to_payer.company_name as billed_to_payer_company',
@@ -4454,6 +4617,9 @@ router.get('/week', async (req, res, next) => {
           // onto the service too so the mobile detail sheet (date display +
           // rain-out gating) behaves identically in week view.
           scheduledDate: dateStr,
+          visitId: s.visit_id || null,
+          visitCloseoutEnabled: Boolean(s.closeout_packet_id) || visitCloseoutEnabled || Number(s.visit_behavior_version) >= 2,
+          visitCloseoutPacket: s.closeout_packet_id ? { id: s.closeout_packet_id, status: s.closeout_packet_status } : null,
         };
       }));
 
@@ -4479,7 +4645,7 @@ router.get('/week', async (req, res, next) => {
       for (const day of days) day.rainChance = null;
     }
 
-    res.json({ startDate, days });
+    res.json({ startDate, days, visitCloseout: visitCloseoutEnabled });
   } catch (err) { next(err); }
 });
 
@@ -8858,8 +9024,13 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // Payer activation shares comms → combined → customer/appointment rows
       // with customer editors and combined-payment setup. Take this before
       // address locking too; the later release reacquires it re-entrantly.
-      if (detailsChanged && ((Object.prototype.hasOwnProperty.call(updates, 'payer_id') && updates.payer_id)
-        || (Object.prototype.hasOwnProperty.call(updates, 'self_pay_override') && !updates.self_pay_override))) {
+      // EVERY Bill-To edit, in BOTH directions (local audit): clearing a payer
+      // or setting self_pay_override reconciles withdrawn invoices, which
+      // takes the same combined lock later — and taking the customer row
+      // first and that advisory lock afterwards is the inversion a concurrent
+      // customer-payer assignment deadlocks against.
+      if (detailsChanged && (Object.prototype.hasOwnProperty.call(updates, 'payer_id')
+        || Object.prototype.hasOwnProperty.call(updates, 'self_pay_override'))) {
         const provCust = await trx('scheduled_services').where({ id: req.params.id }).first('customer_id');
         if (provCust?.customer_id) {
           await require('../services/pay-combined').lockCombinedCustomers(trx, [String(provCust.customer_id)]);
@@ -9151,6 +9322,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             provFence = { techId: prov.technician_id || null, day: prov.day };
           }
         }
+        // OWNERSHIP ROWS FIRST for a Bill-To edit (Codex #4311 r28 P2): the
+        // reconciliation this save runs (resolvePacketOwnershipLocked) takes
+        // the customer row and then every billed member, and the customer
+        // Bill-To writer holds its customer row while doing the same. Taking
+        // this job's customer row FOR SHARE before any scheduled_services
+        // lock below puts this route on that one order; the reverse
+        // (member row held, customer row awaited) deadlock-aborts one side.
+        if (updates.payer_id !== undefined || updates.self_pay_override !== undefined) {
+          const owner = await trx('scheduled_services').where({ id: req.params.id }).first('customer_id');
+          if (owner?.customer_id) await trx('customers').where({ id: owner.customer_id }).forShare().first('id');
+        }
         let preTupleRow = null;
         if (updates.scheduled_date !== undefined || updates.service_type !== undefined) {
           // FOR UPDATE first (codex P2 #3152 round 20): the correction and
@@ -9269,6 +9451,22 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // customer's default payer even though updates.payer_id is absent.
         // Over-triggering is safe (the release no-ops on non-combined /
         // confirmed sessions).
+        // EVERY refusal is decided BEFORE the first Stripe cancel (local
+        // audit, the same ordering the customer Bill-To route now uses): the
+        // session release below cancels a confirmable combined PaymentIntent,
+        // and a Stripe cancel does not roll back with this transaction — so an
+        // edit rejected for an in-flight send must not already have destroyed
+        // the customer's live pay-page session.
+        if (updates.payer_id !== undefined || updates.self_pay_override !== undefined) {
+          // The combined advisory lock for this customer was taken above,
+          // before any ownership row — both Bill-To writers share that order.
+          await trx('scheduled_services').where({ id: req.params.id }).forNoKeyUpdate().first('id');
+          if (await require('../services/visit-completion-packets').packetInvoiceSendInFlight({ scheduledServiceId: req.params.id }, trx)) {
+            throw Object.assign(new Error('The combined-visit invoice for this service is being delivered. Retry the Bill-To change in a moment.'), {
+              statusCode: 409, isOperational: true, code: 'invoice_send_in_flight',
+            });
+          }
+        }
         const activatesPayer = (Object.prototype.hasOwnProperty.call(updates, 'payer_id') && updates.payer_id)
           || (Object.prototype.hasOwnProperty.call(updates, 'self_pay_override') && !updates.self_pay_override);
         if (activatesPayer) {
@@ -9312,7 +9510,24 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         const makeRecurringPreRow = updates.is_recurring === true
           ? await trx('scheduled_services').where({ id: req.params.id }).first('id', 'customer_id', 'is_recurring', 'recurring_parent_id')
           : null;
+        // (The Bill-To send-in-flight refusal ran above, under this
+        // transaction's row lock and before any Stripe cancellation: the
+        // combined-visit send claim holds the billed member rows FOR SHARE
+        // while it resolves ownership, so that lock waits for the claim to
+        // commit and then sees the invoice in 'sending'. A payer can never
+        // land between the claim and the provider request. Recurring children
+        // keep inheriting the parent's Bill-To through this update.)
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
+        // A job Bill-To edit (payer cleared, self-pay override set) that makes a
+        // withdrawn combined-visit invoice self-pay again requeues it here.
+        if (updates.payer_id !== undefined || updates.self_pay_override !== undefined) {
+          const Packets = require('../services/visit-completion-packets');
+          await Packets.reconcileWithdrawnPacketInvoices(trx, { scheduledServiceId: req.params.id });
+          // The opposite transition (a job payer assigned, an override
+          // cleared) withdraws the self-pay combined-visit invoice this job
+          // now owes to AP, including one already with the homeowner.
+          if (activatesPayer) await Packets.withdrawPacketInvoicesForOwner(trx, { scheduledServiceId: req.params.id });
+        }
         // A row ACTIVATED to recurring becomes a series root NOW (codex
         // #3591 r88 P1): a phone-booked catalog bait visit (the call
         // pipeline inserts single visits only) or any other one-off being
@@ -12620,6 +12835,26 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
             if (seriesCioc !== undefined) nextData.create_invoice_on_complete = seriesCioc;
           }
           const [autoExtRow] = await conn('scheduled_services').insert(nextData).returning('*');
+          // Annual-prepay coverage for the row we just inserted.
+          //
+          // The auto-extend used to build its next visit with no prepay
+          // field at all, so a prepay customer's extension read as UNCOVERED
+          // and billed again for service the prepay had already bought.
+          // Deliberately delegated rather than computed here: the coverage
+          // budget has ONE authority. applyPrepaidCoverageForTerm selects
+          // through coverageRowsForTerm, which caps the set at
+          // coverage_visit_count (committed rows first, date-ordered), skips
+          // completed rows for reconcilePendingWindowCompletions to settle,
+          // skips rows a different term or an out-of-band cash/check/Zelle
+          // payment already covers, and slices by position so the remainder
+          // cents land on the final visit. A second allocator here could
+          // only disagree with it.
+          //
+          // Runs on `conn`, so it commits or rolls back with the extension.
+          // The transient completion-race bell is quiet (this fires per
+          // generated visit and reconciliation settles that case); the
+          // cancelled-paid-slot bell still rings — nothing re-seeds it.
+          await applyExtensionPrepayCoverage(conn, parent, svc, nextStr);
           // Post-insert re-check closes the remaining race: a
           // cancellation can stop the series between the pre-insert
           // read above and this insert. The row hasn't been mirrored,
@@ -13249,6 +13484,78 @@ router.put('/:id/status', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+/**
+ * Today's decision, re-run at the CURRENT ET minute under the write locks.
+ * A no-op for any other date (nothing about a future day goes stale as the
+ * clock moves) and when the original decision was not clock-dependent.
+ */
+function assertStillFeasibleNow({ dateStr, RouteOptimizer, result, services, startMin, techDayOrigins, expected }) {
+  if (startMin == null) return;
+  const recheckStart = inProgressStartMin(dateStr, new Date());
+  if (recheckStart == null || recheckStart === startMin) return;
+  const again = resolveWindowSafeOrderByTechDay({
+    RouteOptimizer, orderedStops: result.orderedStops, sourceStops: services,
+    googleSource: result.source, legs: result.legs, startMin: recheckStart,
+    // The clock moves; the cutoff that decided which promises were already
+    // elapsed does not, or a promise lost while waiting for locks would
+    // simply become unconstrained and pass (codex round 5 P1).
+    elapsedCutoffMin: startMin, techDayOrigins,
+  });
+  if (again.refusal) {
+    throw Object.assign(new Error('schedule changed while optimizing'), { code: 'STALE_OPTIMIZE' });
+  }
+  // Compare the DRIVEN subsequence on both sides: /optimize-route's expected
+  // ids are already terminal-filtered while the resolver keeps those ids in
+  // place, so an unfiltered comparison would differ on every minute boundary
+  // (codex round 5 P1).
+  const driveable = new Set(services.filter(driveableStop).map((svc) => svc.id));
+  const seen = (ids) => ids.filter((id) => driveable.has(id)).join(',');
+  if (seen(again.orderedIds) !== seen(expected)) {
+    throw Object.assign(new Error('schedule changed while optimizing'), { code: 'STALE_OPTIMIZE' });
+  }
+}
+
+/** Operator-facing copy for each refusal the shared decision can return. */
+function optimizeRefusalMessage(reason) {
+  if (reason === 'WINDOW_FIT_GATE_OFF') return 'Google\'s route breaks a promised arrival window and the window-fit repair is off — nothing was changed.';
+  if (reason === 'LIVE_STOP_IN_PROGRESS') return 'A stop on this route is already in progress — reorder it once that visit is complete.';
+  if (reason === 'COORDLESS_STOPS') return 'A stop on this route has no map location, so its arrival window cannot be verified — nothing was changed.';
+  if (reason === 'MODEL_UNCALIBRATED') return 'Drive-time calibration is off, so this route\'s arrival windows cannot be verified without live traffic data — nothing was changed.';
+  if (reason === 'PROGRESS_ORIGIN_UNKNOWN') return 'This route is already under way and the last completed stop has no map location, so the remaining drive cannot be verified — nothing was changed.';
+  return 'No legal stop order keeps every promised arrival window — nothing was changed.';
+}
+
+/**
+ * Post-lock staleness fence (codex round 1 P2, round 3 P1). The per-row
+ * update below already refuses a stop that changed tech-day, but the ORDER
+ * was computed against inputs read before the lock: an appointment
+ * re-promised, dragged, started or re-geocoded in that gap — or a booking
+ * ADDED to the day — invalidates it. Throws STALE_OPTIMIZE, the caller's 409,
+ * leaving the transaction untouched.
+ */
+async function assertGuardInputsFresh(trx, dateStr, technicianId, snapshot) {
+  // The whole eligible tech-day, not just the ids we optimized: a booking
+  // ADDED to (or moved onto) the day in the lock gap is invisible to an
+  // id-filtered re-read, and the order we are about to write has no position
+  // for it — the nightly fence compares membership for the same reason
+  // (codex round 3 P1).
+  // FOR UPDATE, not just a read: the advisory tech-day lock does not stop a
+  // status transition (transitionJobStatus takes no such lock), so without
+  // row locks a visit could go en_route AFTER this check and still receive
+  // the sequence the live-stop guard approved for its old status (codex
+  // round 5 P2). The rows stay locked for the route_order writes below.
+  const fresh = await dayStopsQuery(trx, {
+    dateStr,
+    technicianId: technicianId || null,
+    excludeStatuses: ['cancelled', 'completed'],
+    select: ['scheduled_services.id', ...ROUTE_WRITE_GUARD_COLUMNS.map((c) => `scheduled_services.${c}`),
+      ...CUSTOMER_PREMISE_ALIASES, ...guardedCoordSelects(trx)],
+  }).forUpdate('scheduled_services');
+  const changed = fresh.length !== snapshot.size
+    || fresh.some((row) => routeWriteGuardSignature(row) !== snapshot.get(row.id));
+  if (changed) throw Object.assign(new Error('schedule changed while optimizing'), { code: 'STALE_OPTIMIZE' });
+}
+
 // POST /api/admin/schedule/optimize — route optimization v3 (Google Routes API)
 // Uses Google Routes API with traffic-aware optimization, falls back to nearest-neighbor.
 // requireAdmin: reads the whole board and rewrites route_order across every
@@ -13257,7 +13564,10 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
   try {
     const RouteOptimizer = require('../services/route-optimizer');
     const { date, technicianId } = req.body;
-    const dateStr = date || etDateString();
+    const now = new Date();
+    const dateStr = date || etDateString(now);
+    // Today's route is already partly driven — see inProgressStartMin.
+    const startMin = inProgressStartMin(dateStr, now);
 
     // Shared day-stops scaffold (services/scheduling/day-stops) — same rows as
     // the inline query it replaced: same status exclusions, same select list,
@@ -13270,6 +13580,17 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
         'scheduled_services.id', 'scheduled_services.time_window',
         'scheduled_services.zone', 'scheduled_services.service_type',
         'scheduled_services.technician_id',
+        // Window-guard inputs (route-reorder.js's own day-load select) — the
+        // 2026-09-12/13/14 preview showed this endpoint writing Google's
+        // shortest loop even when it put a 16:00-promised stop first and a
+        // 10:00 stop sixth. These four plus route_order/created_at are what
+        // the chronology/feasibility guards and the window-fit fallback read.
+        'scheduled_services.created_at',
+        // EVERY guard/fence input from one list — the co-visit identity and
+        // premise included — so the day load and the post-lock re-read can
+        // never disagree (codex round 5 P1).
+        ...ROUTE_WRITE_GUARD_COLUMNS.map((c) => `scheduled_services.${c}`),
+        ...CUSTOMER_PREMISE_ALIASES,
         ...guardedCoordSelects(db),
         db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
@@ -13280,6 +13601,7 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
     if (!services.length) {
       return res.json({ success: true, order: [], totalDistanceMeters: 0, totalDurationMinutes: 0, legs: [], source: 'empty' });
     }
+    const guardSnapshot = new Map(services.map((s) => [s.id, routeWriteGuardSignature(s)]));
 
     // Assign zone from customer city/zip if not already set
     for (const svc of services) {
@@ -13296,6 +13618,36 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
       techId: technicianId || null,
     });
 
+    // Window-safety guard chain, PER TECH-DAY — the shared resolver every
+    // board-wide route_order writer uses (route-reorder.js). Stops with no
+    // technician_id have no tech-day to validate against and pass through
+    // untouched, same as the nightly pass's treatment of unassigned stops.
+    // Where each truck actually is, for a day already under way.
+    const techDayOrigins = await loadTechDayOrigins(db, dateStr, { technicianId: technicianId || null, now });
+    const guarded = resolveWindowSafeOrderByTechDay({
+      RouteOptimizer, orderedStops: result.orderedStops, sourceStops: services,
+      googleSource: result.source, legs: result.legs, startMin, techDayOrigins,
+    });
+    const rejection = guarded.refusal;
+    const resolvedByTech = guarded.resolvedByTech || new Map();
+    if (rejection) {
+      return res.status(409).json({
+        success: false,
+        reason: rejection.reason,
+        conflict: rejection.conflict,
+        technicianId: rejection.technicianId,
+        error: optimizeRefusalMessage(rejection.reason),
+        unoptimizedDistanceMeters: rejection.beforeMeters,
+      });
+    }
+    const byId = new Map(services.map((s) => [s.id, s]));
+    const anyWindowConstrained = guarded.anyWindowConstrained;
+    // Google's totals and legs describe the route it scored; ours describe
+    // the one being written. They diverge on a repair AND whenever a stop
+    // was dropped or the origin moved (codex round 5 P1).
+    const ownFigures = anyWindowConstrained || guarded.scoredRouteChanged;
+    const finalOrdered = guarded.orderedIds.map((id) => byId.get(id));
+
     // Update route_order on each service — fenced + transactional: an
     // unfenced per-row loop racing the nightly reorder could interleave and
     // leave a mixed sequence. Same 'slot-reserve' tech-day lock as every
@@ -13305,6 +13657,18 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
       const { lockTechDays } = require('../services/scheduling/tech-day-lock');
       await db.transaction(async (trx) => {
         await lockTechDays(trx, services.map((s) => ({ techId: s.technician_id, date: dateStr })));
+        await assertGuardInputsFresh(trx, dateStr, technicianId || null, guardSnapshot);
+        // The completed rows the origin came from are outside that fence.
+        const freshOrigins = await assertTechDayOriginsFresh(trx, dateStr, techDayOrigins, { technicianId: technicianId || null, now });
+        // And TIME has passed: the Routes API call and a contended tech-day
+        // lock both cost minutes, so an order that barely made a remaining
+        // promise when the request started can be past it by the time we
+        // write (codex round 5 P1). Re-run today's decision at the current
+        // minute and refuse if it no longer produces this order.
+        assertStillFeasibleNow({
+          dateStr, RouteOptimizer, result, services, startMin,
+          techDayOrigins: freshOrigins, expected: guarded.orderedIds,
+        });
         // Stale-snapshot guard (uncapped audit r21 P1): the optimizer ran
         // BEFORE this fence was acquired — a reassignment/date move that
         // committed while we waited for the lock must not receive the stale
@@ -13312,8 +13676,8 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
         // the tech-day the stop was optimized FOR; any miss aborts the whole
         // rewrite untouched (operator reloads and retries).
         const techById = new Map(services.map((s) => [s.id, s.technician_id || null]));
-        for (let i = 0; i < result.orderedStops.length; i++) {
-          const stopId = result.orderedStops[i].id;
+        for (let i = 0; i < finalOrdered.length; i++) {
+          const stopId = finalOrdered[i].id;
           const expectTech = techById.get(stopId) || null;
           const updated = await trx('scheduled_services')
             .where({ id: stopId })
@@ -13335,15 +13699,23 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
       logger.error(`[schedule/optimize] route quality refresh failed: ${e.message}`);
     }
 
-    const totalDurationMinutes = Math.round(result.totalDurationSeconds / 60);
-    const savedDistanceMeters = Math.max(0, result.unoptimizedDistanceMeters - result.totalDistanceMeters);
-    const savedPercent = result.unoptimizedDistanceMeters > 0
-      ? Math.round((savedDistanceMeters / result.unoptimizedDistanceMeters) * 100)
-      : 0;
+    // When every tech-day passed the guards unchanged, the response stays
+    // byte-identical to before (Google's own reported numbers). Only when a
+    // tech-day was window-fit-repaired do the distance/duration figures need
+    // recomputing — under the SAME shared model the repair itself scored
+    // against (route-reorder.js's modelDistanceMeters), since Google's own
+    // numbers describe an order that was never written. Summed PER TECH-DAY
+    // from chooseWindowSafeOrder's own before/after figures: scoring the
+    // flat multi-tech list as one route would chain truck A's last stop to
+    // truck B's first and report a fictitious leg nobody drives (pre-push
+    // audit P1). Unassigned stops have no tech-day and are left out of the
+    // sum, same as they are left out of the guards.
+    const { totalDurationMinutes, totalDistanceMeters, unoptimizedDistanceMeters,
+      savedDistanceMeters, savedPercent, addedDistanceMeters } = windowSafeFigures(result, resolvedByTech, ownFigures, guarded.unassigned);
 
     const response = {
       success: true,
-      order: result.orderedStops.map((s, i) => ({
+      order: finalOrdered.map((s, i) => ({
         id: s.id,
         routeOrder: i + 1,
         zone: s.zone,
@@ -13351,13 +13723,20 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
         city: s.city,
         customerName: (s.customer_name || '').trim(),
       })),
-      totalDistanceMeters: result.totalDistanceMeters,
+      totalDistanceMeters,
       totalDurationMinutes,
-      unoptimizedDistanceMeters: result.unoptimizedDistanceMeters,
+      unoptimizedDistanceMeters,
       savedDistanceMeters,
+      // Non-zero only when a legal repair is LONGER than the infeasible order
+      // it replaces — the operator is told, not shown a flat "saved 0".
+      addedDistanceMeters,
       savedPercent,
-      legs: result.legs,
-      source: result.source,
+      // Model-path legs are a same-truck-consecutive-stop breakdown Google
+      // never computed for a repaired order (computeWindowFitOrder scores
+      // candidates, it doesn't fetch turn-by-turn legs — see its own "legs =
+      // null is DELIBERATE" note) — empty rather than Google's now-stale list.
+      legs: ownFigures ? [] : result.legs,
+      source: anyWindowConstrained ? 'window_constrained' : result.source,
       // Backwards-compat field
       estimatedDriveMinutes: totalDurationMinutes,
     };
@@ -13389,9 +13768,15 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: 'technicianId is required' });
     }
 
-    const dateStr = date || etDateString();
+    const now = new Date();
+    const dateStr = date || etDateString(now);
+    // Today's route is already partly driven — see inProgressStartMin.
+    const startMin = inProgressStartMin(dateStr, now);
 
     // Shared day-stops scaffold — same rows as the inline query it replaced.
+    // Plus route-reorder.js's own window-guard select (window_start/end,
+    // estimated_duration_minutes, route_order, created_at) — see /optimize
+    // above for the motivating 2026-09-12/13/14 preview defect.
     const services = await dayStopsQuery(db, {
       dateStr,
       technicianId,
@@ -13400,6 +13785,11 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
         'scheduled_services.id', 'scheduled_services.time_window',
         'scheduled_services.zone', 'scheduled_services.service_type',
         'scheduled_services.technician_id',
+        'scheduled_services.window_start', 'scheduled_services.window_end',
+        'scheduled_services.created_at',
+        // Same complete guard/fence input set as /optimize above.
+        ...ROUTE_WRITE_GUARD_COLUMNS.map((c) => `scheduled_services.${c}`),
+        ...CUSTOMER_PREMISE_ALIASES,
         ...guardedCoordSelects(db),
         db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
@@ -13410,6 +13800,7 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
     if (!services.length) {
       return res.json({ success: true, order: [], totalDistanceMeters: 0, totalDurationMinutes: 0, legs: [], source: 'empty' });
     }
+    const guardSnapshot = new Map(services.map((s) => [s.id, routeWriteGuardSignature(s)]));
 
     // Assign zone
     for (const svc of services) {
@@ -13425,17 +13816,67 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
       techId: technicianId,
     });
 
+    // Window-safety guard chain (single tech-day — no slicing needed here;
+    // Google's legs align 1:1 with `services`, unlike the multi-tech
+    // /optimize call, so they ride straight into the feasibility guard).
+    const techDayOrigins = await loadTechDayOrigins(db, dateStr, { technicianId, now });
+    // Key the lookups off the id the ROWS carry: Postgres matches an
+    // uppercase UUID but returns the canonical lowercase one, so the raw
+    // request value can miss both a known and an unknown origin and silently
+    // simulate from HQ (codex round 5 P2).
+    const techKey = services[0].technician_id ?? technicianId;
+    if (techDayOrigins.unknown.has(techKey)) {
+      return res.status(409).json({
+        success: false, reason: 'PROGRESS_ORIGIN_UNKNOWN',
+        error: optimizeRefusalMessage('PROGRESS_ORIGIN_UNKNOWN'),
+      });
+    }
+    const outcome = chooseWindowSafeOrder({
+      RouteOptimizer, googleOrder: result.orderedStops, sourceStops: services, googleSource: result.source, legs: result.legs, startMin,
+      origin: techDayOrigins.origins.get(techKey) || null,
+      // This button WRITES; it may not certify a promise on the uncalibrated
+      // model when Google's legs were discarded.
+      requireCalibratedModel: true,
+    });
+    if (!outcome.orderedStops) {
+      return res.status(409).json({
+        success: false,
+        reason: outcome.reason,
+        conflict: outcome.conflict,
+        error: optimizeRefusalMessage(outcome.reason),
+        unoptimizedDistanceMeters: outcome.beforeMeters,
+      });
+    }
+    const finalOrdered = outcome.orderedStops;
+    const windowConstrained = outcome.source === 'window_constrained';
+
     // Update route_order — fenced + transactional, same contract as
     // /optimize above (single tech-day here).
     {
       const { lockTechDays } = require('../services/scheduling/tech-day-lock');
       await db.transaction(async (trx) => {
-        await lockTechDays(trx, [{ techId: technicianId, date: dateStr }]);
+        // techKey, not the raw request value: Postgres canonicalizes an
+        // uppercase UUID for row matching, so hashing the raw one takes a
+        // DIFFERENT advisory lock than concurrent writers hold (codex round
+        // 5 P2).
+        await lockTechDays(trx, [{ techId: techKey, date: dateStr }]);
+        await assertGuardInputsFresh(trx, dateStr, technicianId || null, guardSnapshot);
+        // The completed rows the origin came from are outside that fence.
+        const freshOrigins = await assertTechDayOriginsFresh(trx, dateStr, techDayOrigins, { technicianId: technicianId || null, now });
+        // And TIME has passed: the Routes API call and a contended tech-day
+        // lock both cost minutes, so an order that barely made a remaining
+        // promise when the request started can be past it by the time we
+        // write (codex round 5 P1). Re-run today's decision at the current
+        // minute and refuse if it no longer produces this order.
+        assertStillFeasibleNow({
+          dateStr, RouteOptimizer, result, services, startMin,
+          techDayOrigins: freshOrigins, expected: finalOrdered.map((st) => st.id),
+        });
         // Stale-snapshot guard — same contract as /optimize above: the stop
         // must still be on THIS tech-day or the whole rewrite aborts.
-        for (let i = 0; i < result.orderedStops.length; i++) {
+        for (let i = 0; i < finalOrdered.length; i++) {
           const updated = await trx('scheduled_services')
-            .where({ id: result.orderedStops[i].id })
+            .where({ id: finalOrdered[i].id })
             .where('scheduled_date', dateStr)
             .where('technician_id', technicianId)
             .update({ route_order: i + 1 });
@@ -13452,15 +13893,38 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
       logger.error(`[schedule/optimize-route] route quality refresh failed: ${e.message}`);
     }
 
-    const totalDurationMinutes = Math.round(result.totalDurationSeconds / 60);
-    const savedDistanceMeters = Math.max(0, result.unoptimizedDistanceMeters - result.totalDistanceMeters);
-    const savedPercent = result.unoptimizedDistanceMeters > 0
-      ? Math.round((savedDistanceMeters / result.unoptimizedDistanceMeters) * 100)
+    // See /optimize above: an unrepaired order keeps Google's own reported
+    // numbers byte-identical; a window-fit repair reports the SAME-MODEL
+    // before/after the fallback itself scored against.
+    let totalDurationMinutes;
+    // Google's totals describe the route IT scored — all stops, starting at
+    // HQ. Ours describe the one being written. They diverge on a repair AND
+    // whenever a terminal stop dropped out or the truck's position replaced
+    // HQ (codex round 5 P1).
+    const scoredRouteChanged = services.some((svc) => !driveableStop(svc))
+      || Boolean(techDayOrigins.origins.get(techKey));
+    const ownFigures = windowConstrained || scoredRouteChanged;
+    let totalDistanceMeters;
+    let unoptimizedDistanceMeters;
+    if (ownFigures) {
+      totalDistanceMeters = outcome.afterMeters;
+      unoptimizedDistanceMeters = outcome.beforeMeters;
+      totalDurationMinutes = Math.round((outcome.afterSeconds || 0) / 60);
+    } else {
+      totalDurationMinutes = Math.round(result.totalDurationSeconds / 60);
+      totalDistanceMeters = result.totalDistanceMeters;
+      unoptimizedDistanceMeters = result.unoptimizedDistanceMeters;
+    }
+    const distanceChangeMeters = totalDistanceMeters - unoptimizedDistanceMeters;
+    const savedDistanceMeters = Math.max(0, -distanceChangeMeters);
+    const addedDistanceMeters = Math.max(0, distanceChangeMeters);
+    const savedPercent = unoptimizedDistanceMeters > 0
+      ? Math.round((savedDistanceMeters / unoptimizedDistanceMeters) * 100)
       : 0;
 
     const response = {
       success: true,
-      order: result.orderedStops.map((s, i) => ({
+      order: finalOrdered.map((s, i) => ({
         id: s.id,
         routeOrder: i + 1,
         zone: s.zone,
@@ -13468,13 +13932,17 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
         city: s.city,
         customerName: (s.customer_name || '').trim(),
       })),
-      totalDistanceMeters: result.totalDistanceMeters,
+      totalDistanceMeters,
       totalDurationMinutes,
-      unoptimizedDistanceMeters: result.unoptimizedDistanceMeters,
+      unoptimizedDistanceMeters,
       savedDistanceMeters,
+      addedDistanceMeters,
       savedPercent,
-      legs: result.legs,
-      source: result.source,
+      // computeWindowFitOrder scores candidates, it doesn't fetch turn-by-turn
+      // legs (see its own "legs = null is DELIBERATE" note) — and Google's leg
+      // list describes a route that was never written whenever ours differs.
+      legs: ownFigures ? [] : result.legs,
+      source: windowConstrained ? 'window_constrained' : result.source,
     };
 
     if (result.apiWarning) {
@@ -18036,6 +18504,9 @@ router._test = {
   runRecurringSeriesMaintenance,
   runRecurringAlertAction,
   resolveSeriesCreateInvoiceOnComplete,
+  applyExtensionPrepayCoverage,
+  seriesTermIds,
+  coveringTermForDate,
   normalizePriceServiceScope,
   computePriceServiceGroupChanges,
   pickUnpinnedGroupFields,

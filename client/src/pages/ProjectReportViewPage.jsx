@@ -5,9 +5,9 @@ import {
   FONTS,
 } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
-import { DOC_COLUMN_MAX, DOC_EYEBROW, DOC_FONT, FS } from '../theme-doc';
+import { DOC_EYEBROW, DOC_FONT, FS } from '../theme-doc';
+import { CustomerColumn, PublicStateCard } from '../components/brand';
 import Icon from '../components/Icon';
-import PublicLoadError from '../components/PublicLoadError';
 import DocumentActionBar from '../components/DocumentActionBar';
 import { ProjectAskWaves, ProjectReviewAsk } from '../components/report/ProjectReportEngage';
 import { useGlassSurface } from '../glass/glass-engine';
@@ -427,10 +427,16 @@ export default function ProjectReportViewPage() {
     </div>
   );
 
+  // App.jsx wraps this page in WavesShell, so the terminal states belong in the
+  // shared column like every other one. The full-viewport centred wrapper they
+  // had kept a 20px gutter instead of 16 and pushed the trust footer below the
+  // fold — the drift this migration exists to remove.
   if (loadError) return (
-    <div style={{ minHeight: '100vh', background: ESTIMATE_BG, display: 'grid', placeItems: 'center', padding: 20, fontFamily: FONT_BODY }}>
-      <div style={{ ...cardStyle, maxWidth: 480 }}><PublicLoadError resource="project report" onRetry={() => setLoadAttempt(a => a + 1)} /></div>
-    </div>
+    <CustomerColumn style={{ fontFamily: FONT_BODY }}>
+      <PublicStateCard state="error" title="We couldn&rsquo;t load that project report" onRetry={() => setLoadAttempt(a => a + 1)}>
+        This looks temporary. Your link is still valid&mdash;check your connection and try again.
+      </PublicStateCard>
+    </CustomerColumn>
   );
 
   // Payment-held report (402 report_payment_required): the inspection is
@@ -467,18 +473,11 @@ export default function ProjectReportViewPage() {
   );
 
   if (!data || data.error) return (
-    <div style={{ minHeight: '100vh', background: ESTIMATE_BG, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, fontFamily: FONT_BODY }}>
-      <div style={{ ...cardStyle, maxWidth: 420, textAlign: 'center' }}>
-        <div style={{ color: ESTIMATE_MUTED }}><Icon name="document" size={32} strokeWidth={1.75} /></div>
-        <h1 style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, color: ESTIMATE_TEXT, margin: '8px 0 0' }}>Report unavailable</h1>
-        <div style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 8 }}>
-          This link may have expired or is not valid.
-        </div>
-        <a href={`tel:${WAVES_PHONE_TEL}`} style={{
-          ...primaryButtonStyle, marginTop: 16,
-        }}>Call Waves</a>
-      </div>
-    </div>
+    <CustomerColumn style={{ fontFamily: FONT_BODY }}>
+      <PublicStateCard state="not-found" title="Report unavailable" contact="call">
+        This link may have expired or is not valid.
+      </PublicStateCard>
+    </CustomerColumn>
   );
 
   const typeLabel = TYPE_LABELS[data.projectType] || 'Project';
@@ -586,7 +585,7 @@ export default function ProjectReportViewPage() {
       {/* Page-local top bar removed — the WavesShell top bar (App.jsx route
           wrap, owner 2026-07-06) provides the standard chrome. */}
       {/* div, not <main> — WavesShell supplies the main landmark. */}
-      <div style={{ flex: 1, padding: '32px 20px 64px', maxWidth: DOC_COLUMN_MAX, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
+      <CustomerColumn>
         {/* Owner rules 2026-07-16: the four-box bar (Download PDF / Share /
             Print / Portal Login) sits at the TOP of every report, above the
             header. A filed WDO report downloads the real FDACS PDF;
@@ -795,7 +794,7 @@ export default function ProjectReportViewPage() {
           {' '}This report is provided for your records.
         </footer>
 
-      </div>
+      </CustomerColumn>
     </div>
   );
 }

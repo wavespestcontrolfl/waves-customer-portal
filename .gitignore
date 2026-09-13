@@ -28,3 +28,6 @@ client/public/__stub/
 # Local synthetic UI verification fixtures and screenshots
 /client/.qa/
 /.qa/
+
+# Liquid Glass audit: rendered server HTML (regenerate with scripts/qa/glass-audit/render-server-html.cjs)
+client/glass-audit-html/

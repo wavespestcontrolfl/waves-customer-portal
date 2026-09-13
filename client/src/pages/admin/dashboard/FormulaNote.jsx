@@ -4,10 +4,10 @@
 export default function FormulaNote({ summary = "How this is calculated", children }) {
   return (
     <details className="mt-3">
-      <summary className="list-none cursor-pointer select-none text-11 text-ink-tertiary underline decoration-dotted underline-offset-2 hover:text-ink-secondary">
+      <summary className="min-h-11 cursor-pointer list-none select-none py-2.5 text-ui-caption text-ink-secondary underline decoration-dotted underline-offset-2 hover:text-zinc-900 u-focus-ring">
         {summary}
       </summary>
-      <div className="mt-1.5 text-11 text-ink-tertiary leading-relaxed">{children}</div>
+      <div className="mt-1.5 text-ui-caption text-ink-secondary">{children}</div>
     </details>
   );
 }

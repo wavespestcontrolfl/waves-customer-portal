@@ -23,6 +23,7 @@
  */
 import React, { useState } from 'react';
 import { Card, Button, cn } from '../ui';
+import { formatETTime, formatETDate } from '../../lib/timezone';
 
 const SEVERITY_TONE = {
   info: 'neutral',
@@ -199,6 +200,70 @@ function RouteQualityBody({ alert }) {
   );
 }
 
+// Missing-departure/arrival tracking cards reuse the existing tech_late /
+// unassigned_overdue alert types (same Action Queue lifecycle — resolve,
+// auto-clear on status change) and are distinguished only by
+// payload.source. They still need their own body: the generic
+// TechLateBody/UnassignedOverdueBody read payload.delay_minutes, which
+// this generator never sets, so without this renderer a tracking card
+// would show "Unknown tech running late" with no way to tell which visit
+// needs attention (codex P1 — af4925f71).
+// "9:00–11:00 AM" (shared meridiem compressed onto the end time only) /
+// "11:00 AM–1:00 PM" (both kept when they differ) — same compression style
+// tech-visit-notifications.js's formatPromisedWindow uses server-side.
+function formatWindowRange(startAt, endAt) {
+  if (!startAt) return null;
+  const start = formatETTime(startAt);
+  if (!endAt) return start;
+  const end = formatETTime(endAt);
+  const meridiem = (s) => s.slice(-2);
+  const clock = (s) => s.slice(0, -3);
+  return meridiem(start) === meridiem(end) ? `${clock(start)}–${end}` : `${start}–${end}`;
+}
+
+function TrackingBody({ alert }) {
+  const payload = alert.payload || {};
+  const window = payload.promised_window;
+  // Read the PROMISED window, not alert.scheduled_date/window_* — those
+  // are the visit's current, mutable fields, and stage 2 is enforced
+  // against the promise. A shorter service block or an uncommunicated
+  // internal move must not repaint the card with a different date/time
+  // than the one the message is judging (codex P1). Both ends of the
+  // window render — a bare start time doesn't tell the dispatcher how
+  // long the promised arrival slot actually runs (codex P2).
+  const windowLabel = formatWindowRange(window?.start_at, window?.end_at);
+  const dateLabel = window?.start_at ? formatETDate(window.start_at) : null;
+  const when = [dateLabel, windowLabel].filter(Boolean).join(' · ');
+  // The dispatch:alert socket broadcast carries the bare inserted row (no
+  // tech_name/customer join) until the board's next /alerts hydration — an
+  // admin with the board already open would otherwise see "Unassigned" on
+  // an assigned stage-2 card and a blank customer name (codex P1). The
+  // generator puts these in the payload too; prefer the row-level (joined)
+  // field when present, same pattern as RouteQualityBody's techName.
+  const techName = alert.tech_name || payload.tech_name;
+  const customer = customerLine(alert) || customerLine({
+    customer_first_name: payload.customer_first_name, customer_last_name: payload.customer_last_name,
+  });
+  return (
+    <div className="text-14 text-ink-primary space-y-1">
+      <div>
+        {techName ? (
+          <span className="font-medium">{techName}</span>
+        ) : (
+          <span className="text-ink-tertiary italic">Unassigned</span>
+        )}
+        {customer && (
+          <>
+            {' '}— <span className="font-medium">{customer}</span>
+          </>
+        )}
+        {when && <span className="text-ink-secondary"> ({when})</span>}
+      </div>
+      <p className="text-ink-secondary">{payload.message}</p>
+    </div>
+  );
+}
+
 const TYPE_RENDERERS = {
   tech_late: TechLateBody,
   unassigned_overdue: UnassignedOverdueBody,
@@ -208,7 +273,8 @@ const TYPE_RENDERERS = {
 };
 
 export default function AlertCard({ alert, onResolve }) {
-  const Body = TYPE_RENDERERS[alert.type] || GenericBody;
+  const tracking = alert.payload?.source === 'no_show_detector';
+  const Body = tracking ? TrackingBody : (TYPE_RENDERERS[alert.type] || GenericBody);
   const [resolving, setResolving] = useState(false);
   const [resolveError, setResolveError] = useState(null);
 
@@ -245,7 +311,7 @@ export default function AlertCard({ alert, onResolve }) {
             {alert.severity}
           </span>
           <span className={cn('font-medium text-ink-tertiary truncate', alert.type === 'schedule_route_quality' ? 'text-14' : 'text-11 uppercase tracking-label')}>
-            {alert.type === 'schedule_route_quality' ? 'Route needs review' : alert.type}
+            {alert.type === 'schedule_route_quality' ? 'Route needs review' : tracking ? 'Missing tracking' : alert.type}
           </span>
         </div>
         <span className="text-11 text-ink-tertiary flex-shrink-0">

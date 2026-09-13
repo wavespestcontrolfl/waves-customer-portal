@@ -37,14 +37,25 @@ test('verified plan math is projected unchanged with an editable method', () => 
   expect(result.history).toBe(context.history);
 });
 
-test.each(['unverified', 'blocked', 'unknown-unit'])('%s keeps the area and withholds the derived quantity', (reason) => {
+test.each(['unknown-unit', 'missing-amount'])('%s keeps the area and withholds the derived quantity', (reason) => {
   const { plan, context } = fixture();
-  if (reason === 'unverified') plan.mixCalculator.items[0].product.labelVerifiedAt = null;
-  if (reason === 'blocked') plan.propertyGate.blocks.push({ code: 'current_restriction' });
   if (reason === 'unknown-unit') plan.mixCalculator.items[0].mix.amountUnit = 'fl oz/acre';
+  if (reason === 'missing-amount') plan.mixCalculator.items[0].mix.amount = null;
   const [item] = buildLawnCompletionDefaults(plan, context).items;
   expect(item.mix).toMatchObject({ amount: null, ratePer1000: null, treatedSqft: 4000 });
   expect(item.amountReason).toBeTruthy();
+});
+
+// Owner ruling 2026-09-11: the planned quantity is the tech's starting point
+// even when the label stamp is missing or the plan carries a block — the
+// block still surfaces in the plan banner; the amount is confirmed, not retyped.
+test.each(['unverified', 'blocked'])('%s no longer withholds the planned quantity', (reason) => {
+  const { plan, context } = fixture();
+  if (reason === 'unverified') plan.mixCalculator.items[0].product.labelVerifiedAt = null;
+  if (reason === 'blocked') plan.propertyGate.blocks.push({ code: 'inventory_depleted' });
+  const [item] = buildLawnCompletionDefaults(plan, context).items;
+  expect(item.mix).toEqual(plan.mixCalculator.items[0].mix);
+  expect(item.amountReason).toBeNull();
 });
 
 test.each(['optional', 'conditional', 'inactive', 'unselected'])('%s products do not prefill applied work', (reason) => {
@@ -176,12 +187,12 @@ test('an exact assigned archived version remains eligible, but drafts and partia
   expect(buildLawnCompletionDefaults(plan, context).items).toHaveLength(0);
 });
 
-test('selected defaults with counter or safety metadata remain defaults; plan blocks still withhold amounts', () => {
+test('selected defaults with counter or safety metadata remain defaults, with their amounts', () => {
   const { plan, context } = fixture();
   plan.protocol.structured.products[0].gates = { annualCounter: 'prodiamine_oz_per_1000', requiresZeroNP: true };
   expect(buildLawnCompletionDefaults(plan, context).items[0].mix.amount).toBe(12);
   plan.propertyGate.blocks.push({ code: 'nitrogen_restriction' });
-  expect(buildLawnCompletionDefaults(plan, context).items[0].mix.amount).toBeNull();
+  expect(buildLawnCompletionDefaults(plan, context).items[0].mix.amount).toBe(12);
   plan.protocol.structured.products[0].defaultInPlan = false;
   expect(buildLawnCompletionDefaults(plan, context).items).toHaveLength(0);
 });

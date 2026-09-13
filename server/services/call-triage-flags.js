@@ -1742,6 +1742,8 @@ module.exports = {
   BLOCKING_TRIAGE_FLAGS,
   CANONICAL_WRITE_BLOCKING_FLAGS,
   confirmedStartOnTheHour,
+  hasAgentCommittedEvidence,
+  etWallClockOfConfirmedStart,
   FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS,
   hasCanonicalWriteBlock,
   hasNameEmailMismatch,

@@ -91,6 +91,7 @@ describe('runRedPairAutoDismissSweep', () => {
     db.transaction.mockImplementation(async (fn) => {
       const trx = jest.fn((table) => makeChain(table, (q) => router(table, q)));
       trx.fn = { now: () => 'NOW' };
+      trx.raw = jest.fn(async () => ({ rows: [] }));
       return fn(trx);
     });
     return inserted;

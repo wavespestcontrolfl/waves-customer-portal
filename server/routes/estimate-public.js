@@ -654,6 +654,26 @@ function shapeLinkedAppointment(row) {
     windowDisplay: customerArrivalWindowDisplay(row.window_start) || row.window_display || null,
     serviceType: row.service_type || 'Service visit',
     status: row.status || null,
+    // The estimate's OWN uncommitted hold is offered through this same shape
+    // on a reload (customer picked a slot, then refreshed) — without the
+    // expiry the client rendered it as a committed appointment with no
+    // countdown and let the 15-minute hold lapse under a card entry (owner
+    // case 2026-09-11). isHold lets the client run the hold timer + extend.
+    // ONLY for an actual hold (codex r14 P0): the public contract promises
+    // both fields are ABSENT for a committed visit, so a client that
+    // distinguishes an absent property from `false` keeps the exact pre-PR
+    // payload. A COMMITTED visit can carry a stray reservation_expires_at —
+    // releaseExpiredReservations exists partly to rescue that — and while
+    // such a stray is still in the future, flagging it would start a
+    // countdown on a real appointment, 404 its extend, and offer an
+    // expired-hold recovery for a booked visit; UNCLAIMED is half the
+    // definition for exactly that reason.
+    ...((!row.customer_id && row.reservation_expires_at)
+      ? {
+        isHold: true,
+        reservationExpiresAt: new Date(row.reservation_expires_at).toISOString(),
+      }
+      : {}),
   };
 }
 
@@ -1123,6 +1143,11 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
   const linkedId = data?.scheduled_service_id ? String(data.scheduled_service_id) : '';
   const today = etDateString();
   if (!linkedId && !estimate.id) return null;
+  // Commit-time grace (accept path only): the estimate's OWN hold that
+  // lapsed moments ago is still adoptable — commitReservation re-runs every
+  // conflict check under the date lock, so nothing double-books. The view
+  // path passes no grace: an expired hold is never OFFERED, only honoured.
+  const holdGraceMinutes = Math.max(0, Math.min(30, Math.floor(Number(opts.holdGraceMinutes) || 0)));
 
   // Column refs are table-qualified: the customer-wide fallback left-joins
   // `services` for catalog identity (codex #3228 r5), and unqualified `id`
@@ -1141,6 +1166,13 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
     .andWhere((builder) => {
       builder.whereNull('scheduled_services.reservation_expires_at')
         .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
+      if (holdGraceMinutes > 0 && estimate.id) {
+        builder.orWhere((own) => {
+          own.where('scheduled_services.source_estimate_id', estimate.id)
+            .whereNull('scheduled_services.customer_id')
+            .whereRaw('scheduled_services.reservation_expires_at > NOW() - make_interval(mins => ?)', [holdGraceMinutes]);
+        });
+      }
     })
     // Callback visits are NEVER adoption candidates (codex #3228 r21):
     // is_callback=true intentionally makes completion treat the visit as
@@ -5405,7 +5437,18 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       const tax = Math.round(base * taxRate * 100) / 100;
       return Math.round((base + tax) * 100) / 100;
     })();
-  const existingAppointment = est.existingAppointment || null;
+  // The legacy SSR page has no hold timer and no extend action, and its
+  // adoption UI states "Appointment already scheduled" (codex r7 P1). Handing
+  // it the estimate's OWN live hold through that shape told a V1/control
+  // customer their visit was booked while the clock silently ran out — the
+  // exact signup loss this change exists to stop. The hold is theirs, and
+  // re-reserving the same slot is idempotent for its owner, so this renderer
+  // simply doesn't adopt it: the customer sees the normal slot picker (with
+  // its own "Slot held for you" countdown) and confirms from there. A
+  // genuinely committed appointment still adopts as before.
+  const existingAppointment = (est.existingAppointment && !est.existingAppointment.isHold)
+    ? est.existingAppointment
+    : null;
   const prepayMembershipSummaryHtml = annualPrepayWaivesMembership
     ? `<div class="payment-summary-row discount"><span>WaveGuard Membership Setup</span><strong><s>${fmtMoney(membershipFee)}</s> $0.00</strong></div>`
     : (prepayDiscountAmount > 0
@@ -9013,6 +9056,21 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       return res.status(400).json({ error: 'invoice-mode estimates require a linked customer or customer phone before online acceptance' });
     }
 
+    // Hold grace (owner case 2026-09-11): a customer who spent the whole
+    // 15-minute hold on card entry + the prepay quote round-trip confirmed 34 s
+    // after expiry and was 409'd into believing she had paid. Holds that
+    // lapsed within the grace still commit — commitReservation re-runs every
+    // conflict check under the date lock, so a slot another customer
+    // committed meanwhile still 409s as SLOT_UNAVAILABLE. Read per request
+    // (env-tunable, 0 disables); tests that mock the service see 0.
+    const holdGraceMinutes = typeof slotReservation.commitGraceMinutes === 'function'
+      ? (Number(slotReservation.commitGraceMinutes()) || 0)
+      : 0;
+    const HOLD_EXPIRED_409 = {
+      error: 'Your time-slot hold expired — pick a time again to finish signing up',
+      code: 'RESERVATION_EXPIRED',
+    };
+
     let reservationRow = null;
     if (slotId) {
       const parsed = slotReservation._internals.parseSlotId(slotId);
@@ -9029,13 +9087,32 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         })
         .modify((q) => { if (parsed.techId) q.where('technician_id', parsed.techId); })
         .whereNotNull('reservation_expires_at')
+        // Grace measured by POSTGRES, not this process's clock (pre-push
+        // audit P1): commitReservation's authoritative check compares against
+        // NOW(), so a JS-side Date.now() comparison here could refuse — under
+        // app/DB clock skew — a hold the commit would have graduated. That is
+        // this very bug in miniature.
+        .select('*', db.raw('(reservation_expires_at < NOW() - make_interval(mins => ?)) AS _beyond_grace', [holdGraceMinutes]))
+        // NEWEST hold for the slot, explicitly (codex r3 P1). A customer
+        // whose hold lapsed can reserve the same slot again before the
+        // grace-delayed sweep removes the old row — reserveSlot ignores the
+        // expired one and mints a fresh live row, so two rows match here.
+        // Unordered, `.first()` could hand back the stale one: the grace
+        // would admit it, and commitReservation would then see the
+        // customer's OWN new live hold as a rival and refuse a perfectly
+        // good signup with SLOT_UNAVAILABLE (or a beyond-grace old row would
+        // 409 the preflight before the live row was ever considered).
+        .orderBy('reservation_expires_at', 'desc')
         .first();
 
+      // Row gone = swept past the grace (or never reserved): same recovery
+      // either way, the customer re-picks. Both 409s carry the code the
+      // client keys its "hold expired" banner on.
       if (!reservationRow) {
-        return res.status(409).json({ error: 'no active reservation for this slot — re-pick and try again' });
+        return res.status(409).json(HOLD_EXPIRED_409);
       }
-      if (new Date(reservationRow.reservation_expires_at) < new Date()) {
-        return res.status(409).json({ error: 'reservation expired — re-pick a slot' });
+      if (reservationRow._beyond_grace) {
+        return res.status(409).json(HOLD_EXPIRED_409);
       }
     }
 
@@ -9050,6 +9127,51 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // contract yields to it), so existingAppointmentId stays accepted.
     if (slotId && isRodentGuaranteeOnlyEstimate(estimate, estData)) {
       return res.status(409).json({ error: 'No appointment is needed for this renewal — accept without selecting a slot.' });
+    }
+    // …and the SAME refusal for an adopted UNCOMMITTED hold (codex r14 P1).
+    // The comment above says a linked appointment keeps precedence, and that
+    // is right for a COMMITTED visit — it exists whatever this estimate
+    // becomes. A hold is different: it is this estimate's own pending
+    // booking, /reserve and /extend both refuse the reshaped estimate, and
+    // graduating it would mint the very phantom appointment those refusals
+    // exist to prevent. Read before the adoption lookup so a guarantee-only
+    // or trenching-review reshape cannot ride in on a stale hold id; a
+    // committed row (customer_id set) is untouched and still adopts.
+    // isCommercialAutoAcceptEstimate is the third shape (codex r15 P1): staff
+    // can set commercialEstimatedPricing on an existing quote without
+    // touching its service rows, so family matching keeps passing and the
+    // hold would graduate the very appointment commercial scheduling is
+    // supposed to place by hand. /reserve and /extend both answer
+    // commercialManualScheduling for that same estimate.
+    if (existingAppointmentId
+      && (isRodentGuaranteeOnlyEstimate(estimate, estData)
+        || estimateTrenchingReviewRequired(estData)
+        || isCommercialAutoAcceptEstimate(estimate))) {
+      const adoptedIsHold = await db('scheduled_services')
+        .where({ id: String(existingAppointmentId) })
+        .whereNull('customer_id')
+        .whereNotNull('reservation_expires_at')
+        .first('id');
+      if (adoptedIsHold) {
+        if (isRodentGuaranteeOnlyEstimate(estimate, estData)) {
+          return res.status(409).json({
+            error: 'No appointment is needed for this renewal — accept without booking.',
+            invoiceOnlyAcceptance: true,
+          });
+        }
+        if (estimateTrenchingReviewRequired(estData)) {
+          return res.status(409).json({
+            error: 'A Waves specialist will confirm your termite trenching treatment path and schedule your visit — this quote can’t be booked online.',
+            reviewBeforeBooking: true,
+            reason: 'termite_trenching_review',
+          });
+        }
+        // Same body /reserve and /extend return for this shape.
+        return res.status(409).json({
+          error: 'Commercial service is scheduled by our team — no self-booking.',
+          commercialManualScheduling: true,
+        });
+      }
     }
     // Adoption eligibility runs under the CONTRACT's service modes, exactly
     // as the offer sites do (GET /data and the SSR contract) — owner ruling
@@ -9070,9 +9192,43 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         appointmentId: existingAppointmentId,
         serviceModes: adoptionServiceModesForContract(estimate, estData),
         adoptableStatuses: acceptAdoptableStatuses,
+        holdGraceMinutes,
       })
       : null;
     if (existingAppointmentId && !existingAppointmentRow) {
+      // The estimate's OWN hold, offered as an "existing appointment" on a
+      // reload, drops out of the adoptable set the moment it lapses past the
+      // grace — that is a hold expiry, not a linkage problem, and the client
+      // must say so (the generic copy read as "slot taken" in the owner case).
+      // Narrowed to a row whose hold has ACTUALLY lapsed (pre-push audit
+      // P1): a LIVE hold that failed adoption did so for some other reason —
+      // status, callback, service family, property scope — and calling that
+      // "your hold expired" would send the customer to re-pick while hiding
+      // the real defect. Those keep the linkage message.
+      const ownLapsedHold = await db('scheduled_services')
+        .where({ id: String(existingAppointmentId), source_estimate_id: estimate.id })
+        .whereNull('customer_id')
+        .whereNotNull('reservation_expires_at')
+        .whereRaw('reservation_expires_at < NOW()')
+        .first('id');
+      if (ownLapsedHold) {
+        return res.status(409).json(HOLD_EXPIRED_409);
+      }
+      // The row can be GONE rather than lapsed: releaseExpiredReservations
+      // deletes an uncommitted hold once it is past the grace, so a page that
+      // still carries the adopted hold id finds nothing here and would fall
+      // through to the uncoded linkage 409 — the client's "That slot was just
+      // taken" banner, the exact misdirection this PR exists to remove
+      // (codex r2 P2). A DELETED row is provably not a committed visit (those
+      // are never swept), so when the estimate's own data names this id as
+      // the hold it was holding, the refusal is an expiry and says so.
+      const rowStillExists = await db('scheduled_services')
+        .where({ id: String(existingAppointmentId) })
+        .first('id');
+      const estimateOwnedThatHold = String(estData?.scheduled_service_id || '') === String(existingAppointmentId);
+      if (!rowStillExists && estimateOwnedThatHold) {
+        return res.status(409).json(HOLD_EXPIRED_409);
+      }
       return res.status(409).json({ error: 'existing appointment is not linked to this active estimate' });
     }
     if (
@@ -10791,13 +10947,25 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           }
         } catch (commitErr) {
           if (commitErr.code === 'RESERVATION_EXPIRED') {
-            const err = new Error('reservation expired — re-pick a slot');
+            const err = new Error(HOLD_EXPIRED_409.error);
             err.status = 409;
+            err.code = 'RESERVATION_EXPIRED';
+            throw err;
+          }
+          if (commitErr.code === 'RESERVATION_NOT_FOUND') {
+            // The hold row is GONE — swept, or superseded by a concurrent
+            // extension that found a conflict (codex r6 P1). Unmapped this
+            // surfaced as a generic failure; it is a hold expiry and must
+            // carry the code the client keys its recovery on.
+            const err = new Error(HOLD_EXPIRED_409.error);
+            err.status = 409;
+            err.code = 'RESERVATION_EXPIRED';
             throw err;
           }
           if (commitErr.code === 'SLOT_UNAVAILABLE') {
             const err = new Error('slot no longer available — re-pick a slot');
             err.status = 409;
+            err.code = 'SLOT_UNAVAILABLE';
             throw err;
           }
           throw commitErr;
@@ -10850,13 +11018,25 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             }
           } catch (commitErr) {
             if (commitErr.code === 'RESERVATION_EXPIRED') {
-              const err = new Error('reservation expired — re-pick a slot');
+              const err = new Error(HOLD_EXPIRED_409.error);
               err.status = 409;
+              err.code = 'RESERVATION_EXPIRED';
+              throw err;
+            }
+            if (commitErr.code === 'RESERVATION_NOT_FOUND') {
+              // The hold row is GONE — swept, or superseded by a concurrent
+              // extension that found a conflict (codex r6 P1). Unmapped this
+              // surfaced as a generic failure; it is a hold expiry and must
+              // carry the code the client keys its recovery on.
+              const err = new Error(HOLD_EXPIRED_409.error);
+              err.status = 409;
+              err.code = 'RESERVATION_EXPIRED';
               throw err;
             }
             if (commitErr.code === 'SLOT_UNAVAILABLE') {
               const err = new Error('slot no longer available — re-pick a slot');
               err.status = 409;
+              err.code = 'SLOT_UNAVAILABLE';
               throw err;
             }
             throw commitErr;
@@ -10876,6 +11056,28 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // and every scheduled-invoice writer locks advisory-then-row;
           // taking the row first here would ABBA-deadlock against them.
           // Re-acquisition at create() is a same-transaction no-op.
+          // Catalog SHARE lock BEFORE this row's FOR UPDATE, same order as
+          // commitReservation and convertEstimate (pre-push codex P1 on
+          // #4369): adoptedAppointmentCatalogStamp below resolves the catalog
+          // under capacity, and migration 20260902000010 locks `services`
+          // first and then updates scheduled_services rows — reaching the
+          // catalog lock only after this row lock would ABBA-deadlock against
+          // one that targets this very visit. A lock_timeout maps to the same
+          // recoverable catalog_unavailable the resolver raises.
+          {
+            // Whole row: naming reservation_policy_version breaks the
+            // golden-master schemas that predate the capacity columns.
+            const adoptPolicy = await trx('scheduled_services')
+              .where({ id: existingAppointmentRow.id })
+              .first();
+            if (require('../services/scheduling/policy').capacityEnabled() || adoptPolicy?.reservation_policy_version === 2) {
+              try {
+                await require('../services/scheduling/catalog-lock').lockCatalogIdentity(trx);
+              } catch (lockErr) {
+                throw Object.assign(require('../services/scheduling/arrival-route').capacityError('catalog_unavailable'), { cause: lockErr });
+              }
+            }
+          }
           {
             const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
             await acquireScheduledInvoiceMintLock(trx, existingAppointmentRow.id);

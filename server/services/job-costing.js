@@ -166,8 +166,10 @@ async function calcLaborCost(db, scheduledServiceId, technicianId, startTime, en
   untrustedLifecycleSpan = false,
   explicitLaborMinutes = null,
   overrideLaborMinutes = null,
+  allocatedLaborMinutes,
 } = {}) {
   let minutes = 0;
+  const hasAllocatedLabor = allocatedLaborMinutes !== undefined;
   // Authoritative operator correction (admin time-on-site edit): wins over
   // EVERY derived source, including the direct job time entries below — a
   // visit whose closeout was forgotten usually has a forgotten clock-out
@@ -179,13 +181,22 @@ async function calcLaborCost(db, scheduledServiceId, technicianId, startTime, en
     const override = Number(overrideLaborMinutes);
     if (Number.isFinite(override) && override > 0) minutes = Math.round(override);
   }
+  // A grouped packet allocation is authoritative over per-job clocks and
+  // lifecycle spans: those clocks/stamps describe the shared physical stop.
+  // Null means the packet had no trustworthy start and therefore contributes
+  // zero cost without claiming a measured duration; integer zero is the real
+  // rounded allocation. A later admin correction above still wins.
+  if (!minutes && hasAllocatedLabor) {
+    const allocated = Number(allocatedLaborMinutes);
+    minutes = Number.isInteger(allocated) && allocated >= 0 ? allocated : 0;
+  }
   try {
     // Prefer the JOB time entries tied directly to this visit. time_entries.job_id
     // IS the scheduled_services id (see time-tracking.js), so this attributes
     // exactly. entry_type='job' excludes the shift/break/drive/admin_time clocks
     // (a shift row spans the whole workday) and voided rows are dropped — the
     // same scoping every other time-tracking consumer uses.
-    if (!minutes && scheduledServiceId) {
+    if (!minutes && !hasAllocatedLabor && scheduledServiceId) {
       const jobEntries = await db('time_entries')
         .where({ job_id: scheduledServiceId, entry_type: 'job' })
         .whereNot('status', 'voided')
@@ -196,7 +207,7 @@ async function calcLaborCost(db, scheduledServiceId, technicianId, startTime, en
     // when both real bounds exist AND the bounds are trusted. Never a Date.now()
     // window: during the one-time backfill that would scoop up whatever a tech
     // is clocked into at deploy time and mis-attribute it to an old visit.
-    if (!minutes && !untrustedLifecycleSpan && technicianId && startTime && endTime) {
+    if (!minutes && !hasAllocatedLabor && !untrustedLifecycleSpan && technicianId && startTime && endTime) {
       const entries = await db('time_entries')
         .where({ technician_id: technicianId, entry_type: 'job' })
         .whereNot('status', 'voided')
@@ -215,12 +226,12 @@ async function calcLaborCost(db, scheduledServiceId, technicianId, startTime, en
   // labor, so only the caller's explicit operator-entered minutes count.
   // Absent them, labor stays 0 — the same "no data" posture a visit with no
   // recorded bounds gets.
-  if (!minutes && untrustedLifecycleSpan) {
+  if (!minutes && !hasAllocatedLabor && untrustedLifecycleSpan) {
     const explicit = Number(explicitLaborMinutes);
     if (Number.isFinite(explicit) && explicit > 0) minutes = Math.round(explicit);
   }
   // Final fallback: the actual_start/end span on the scheduled_service.
-  if (!minutes && !untrustedLifecycleSpan && startTime && endTime) {
+  if (!minutes && !hasAllocatedLabor && !untrustedLifecycleSpan && startTime && endTime) {
     minutes = Math.max(0, Math.round((new Date(endTime) - new Date(startTime)) / 60000));
   }
 
@@ -375,6 +386,7 @@ async function calculateJobCost(scheduledServiceId, db, {
   untrustedLifecycleSpan = false,
   explicitLaborMinutes = null,
   overrideLaborMinutes = null,
+  allocatedLaborMinutes,
 } = {}) {
   db = resolveDb(db);
   if (!scheduledServiceId) throw new Error('scheduledServiceId required');
@@ -453,6 +465,15 @@ async function calculateJobCost(scheduledServiceId, db, {
       overrideLaborMinutes = stampedMinutes;
     }
   }
+  // New combined-closeout records freeze their share of the visit duration
+  // beside the record. Re-derive it on every no-options recalculation so a
+  // linked shared-stop timer or the truthful shared timestamp span cannot
+  // replace the allocation. A later authorized correction wins through the
+  // durable correction stamp resolved above.
+  if (allocatedLaborMinutes === undefined && recordNotes.visitDurationAllocation?.version === 1) {
+    const frozen = recordNotes.visitDurationAllocation.allocatedMinutes;
+    allocatedLaborMinutes = Number.isInteger(frozen) && frozen >= 0 ? frozen : null;
+  }
 
   // An operator can dispose a completed visit as intentionally_free in the
   // Billing Recovery workbench (visit_billing_dispositions). That decision is
@@ -473,7 +494,7 @@ async function calculateJobCost(scheduledServiceId, db, {
   });
   const { laborCost, laborHours } = await calcLaborCost(
     db, scheduledServiceId, svc.technician_id, svc.actual_start_time, svc.actual_end_time, laborRate,
-    { untrustedLifecycleSpan, explicitLaborMinutes, overrideLaborMinutes },
+    { untrustedLifecycleSpan, explicitLaborMinutes, overrideLaborMinutes, allocatedLaborMinutes },
   );
   const { productsCost, breakdown } = record?.id
     ? await calcProductsCost(db, record.id)

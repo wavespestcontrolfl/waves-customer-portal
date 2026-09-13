@@ -120,6 +120,17 @@ async function queryToolNames(baseUrl, token, context) {
 describe('email tools are admin-only in the intelligence bar', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    process.env.GATE_IB_MERGE_CUSTOMERS = 'true';
+  });
+  afterAll(() => { delete process.env.GATE_IB_MERGE_CUSTOMERS; });
+
+  test('GATE_IB_MERGE_CUSTOMERS off: merge_customers is offered in NO admin context — including the comms/email branches that rebuild their lists (Codex r14 P1)', async () => {
+    delete process.env.GATE_IB_MERGE_CUSTOMERS;
+    await withServer(async (baseUrl) => {
+      for (const context of ['dispatch', 'customers', 'comms', 'email']) {
+        expect(await queryToolNames(baseUrl, 'admin', context)).not.toContain('merge_customers');
+      }
+    });
   });
 
   test('admin tool lists include the shared email subset (but not email-page-only tools outside the email context)', async () => {
@@ -130,6 +141,12 @@ describe('email tools are admin-only in the intelligence bar', () => {
 
       const email = await queryToolNames(baseUrl, 'admin', 'email');
       expect(email).toEqual(expect.arrayContaining(EMAIL_TOOL_NAMES));
+      // The comms and email branches rebuild their lists instead of using
+      // BASE_TOOLS — the admin-only merge tool must still reach them (Codex #4348 r4 P2).
+      expect(email).toContain('merge_customers');
+      const comms = await queryToolNames(baseUrl, 'admin', 'comms');
+      expect(comms).toContain('merge_customers');
+      expect(await queryToolNames(baseUrl, 'tech', 'comms')).not.toContain('merge_customers');
     });
   });
 

@@ -173,6 +173,59 @@ describe('customer notification native push dispatch', () => {
     expect(result.push).not.toHaveProperty('accepted');
   });
 
+  test.each(['refused', 'throws'])('a guard %s after waiting for the dedupe lock prevents bell and push', async (mode) => {
+    const { notifQ, trx } = setupDb();
+    let releaseLock;
+    let lockEntered;
+    const entered = new Promise((resolve) => { lockEntered = resolve; });
+    trx.raw.mockImplementationOnce(() => new Promise((resolve) => {
+      releaseLock = resolve;
+      lockEntered();
+    }));
+    let valid = true;
+    const shouldContinue = jest.fn(async () => {
+      if (!valid && mode === 'throws') throw new Error('ownership lost');
+      return valid;
+    });
+    const pending = NotificationService.notifyCustomer('customer-1', 'lawn_health', 'Report ready', 'Current tip', {
+      dedupeKey: 'assessment-1', awaitPush: true, pushOptions: { shouldContinue },
+    });
+    await entered;
+    valid = false;
+    releaseLock();
+    const result = await pending;
+    if (mode === 'throws') expect(result).toBeNull();
+    else expect(result).toMatchObject({ suppressed: true, reason: 'pre_send_check_blocked' });
+    expect(shouldContinue).toHaveBeenCalledTimes(1);
+    expect(notifQ.insert).not.toHaveBeenCalled();
+    expect(PushService.sendToCustomer).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['legacy true', true, true, true],
+    ['structured success', { ok: true, validUntil: Date.now() + 60000 }, true, true],
+    ['structured refusal', { ok: false }, true, false],
+    ['expired authority', { ok: true, validUntil: 0 }, true, false],
+    ['invalid authority', { ok: true, validUntil: NaN }, true, false],
+    ['closed window', { ok: true }, false, false],
+  ])('bell and push enforce %s at the structured guard boundary', async (_label, verdict, windowOpen, allowed) => {
+    const { notifQ } = setupDb();
+    const preSendCheck = Object.assign(jest.fn(async () => verdict), { isStillValid: () => windowOpen });
+    const shouldContinue = require('../services/messaging/push-channel-routing')._test.windowGuardFrom(preSendCheck);
+    const result = await NotificationService.notifyCustomer('customer-1', 'lawn_health', 'Report ready', 'Current tip', {
+      dedupeKey: 'assessment-1', awaitPush: true, pushOptions: { shouldContinue },
+    });
+    if (allowed) {
+      expect(notifQ.insert).toHaveBeenCalledTimes(1);
+      expect(PushService.sendToCustomer).toHaveBeenCalledTimes(1);
+      expect(result.id).toBe('notification-1');
+    } else {
+      expect(result).toMatchObject({ suppressed: true });
+      expect(notifQ.insert).not.toHaveBeenCalled();
+      expect(PushService.sendToCustomer).not.toHaveBeenCalled();
+    }
+  });
+
   test('fails closed when an unknown preference key is supplied', async () => {
     const { notifQ } = setupDb();
 
@@ -326,4 +379,3 @@ describe('saved-property destination on customer bells (GATE_APP_PROPERTY_SCOPE)
     expect(PushService.sendToCustomer.mock.calls[0][1]).not.toHaveProperty('appointmentId');
   });
 });
-
