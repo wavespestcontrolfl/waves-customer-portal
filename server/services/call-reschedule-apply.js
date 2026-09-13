@@ -775,6 +775,7 @@ module.exports = {
   CARD_REASON_CODES,
   MOVABLE_STATUSES,
   ACTIVITY_ACTION,
+  humanHandledRescheduleCard,
   RESCHEDULE_REASON_CODE,
   INITIATED_BY,
 };

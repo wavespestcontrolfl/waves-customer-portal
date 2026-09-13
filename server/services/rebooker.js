@@ -78,8 +78,8 @@ function seriesOccurrenceWindow(win, sib, options = {}) {
 
 // A proposal's disclosed recurring dates/windows must match the locked
 // move, including a cadence edit that leaves the same occurrence IDs.
-function reviewedOccurrence(row, date, window = {}) {
-  const target = seriesOccurrenceWindow(window, row);
+function reviewedOccurrence(row, date, window = {}, options = {}) {
+  const target = seriesOccurrenceWindow(window, row, options);
   return { id: String(row.id), from_date: dateOnly(row.scheduled_date), status: row.status,
     from_start: row.window_start || null, from_end: row.window_end || null,
     duration: row.estimated_duration_minutes || null, property_id: row.property_id || null,
@@ -2402,7 +2402,7 @@ class SmartRebooker {
 
       if (Array.isArray(options.expectOccurrences)) {
         const actual = siblings.slice(startIdx).map((row, i) => sweptIds.includes(String(row.id))
-          ? reviewedOccurrence(row, projectOccurrenceDate(i, row), String(row.id) === String(serviceId) ? win : {}) : null).filter(Boolean)
+          ? reviewedOccurrence(row, projectOccurrenceDate(i, row), String(row.id) === String(serviceId) ? win : {}, options) : null).filter(Boolean)
           .sort((a, b) => a.id.localeCompare(b.id));
         if (JSON.stringify(actual) !== JSON.stringify(options.expectOccurrences)) {
           throw Object.assign(new Error('The recurring dates or windows changed. Refresh the proposal.'), { statusCode: 409, code: 'SERIES_CHANGED' });
@@ -3115,9 +3115,10 @@ class SmartRebooker {
   // contract every surface renders ("Move visit + N future visits", the IB
   // pending-action card). No client computes N. Same sibling selection and
   // projector as the move; conflicts are probed without locks for the
-  // projected SIBLINGS (the anchor's own window is the caller's choice and is
-  // validated by the move itself).
-  async previewSeriesMove(serviceId, newDate, newWindow = {}) {
+  // projected SIBLINGS. Callers that apply admin window rules pass the same
+  // option here so the disclosed anchor and kept sibling windows are
+  // validated exactly as they will be during the move.
+  async previewSeriesMove(serviceId, newDate, newWindow = {}, options = {}) {
     const service = await db('scheduled_services').where({ id: serviceId }).first();
     if (!service) throw Object.assign(new Error('Service not found'), { statusCode: 404 });
     const seriesDateStr = dateOnly(newDate);
@@ -3162,8 +3163,8 @@ class SmartRebooker {
       const date = projectOccurrenceDate(i, row);
       dates.push(date);
       const occurrenceWindow = String(row.id) === String(serviceId) ? newWindow : {};
-      occurrences.push(reviewedOccurrence(row, date, occurrenceWindow));
-      const targetWindow = seriesOccurrenceWindow(occurrenceWindow, row);
+      occurrences.push(reviewedOccurrence(row, date, occurrenceWindow, options));
+      const targetWindow = seriesOccurrenceWindow(occurrenceWindow, row, options);
       if (i === 0 || !targetWindow.start) continue;
       const clash = await findConflictingVisits({
         db,

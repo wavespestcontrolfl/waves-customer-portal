@@ -946,6 +946,20 @@ describe('previewSeriesMove', () => {
     expect(updates[0].update.mock.calls[0][0]).toMatchObject({ scheduled_date: TARGET, window_start: '13:00', window_end: '14:30', status: 'pending' });
   });
 
+  test('admin preview rejects a future occurrence whose stored window cannot pass Apply rules', async () => {
+    const anchor = anchorRow();
+    const rows = [
+      { ...anchor, window_start: '09:00:00', window_end: '10:00:00' },
+      { id: 'svc-2', status: 'pending', scheduled_date: SIB1, window_start: '09:30:00', window_end: '10:30:00' },
+    ];
+    const queries = [chain({ first: jest.fn().mockResolvedValue(anchor) }),
+      chain({ first: jest.fn().mockResolvedValue(anchor) }), chain({ select: jest.fn().mockResolvedValue(rows) })];
+    db.mockImplementation((table) => table === 'scheduled_services' ? queries.shift() : chain({ first: jest.fn().mockResolvedValue(null) }));
+
+    await expect(SmartRebooker.previewSeriesMove('svc-1', TARGET, { start: '13:00', end: '14:00' },
+      { adminWindowRules: true })).rejects.toMatchObject({ code: 'INVALID_APPOINTMENT_WINDOW', status: 422 });
+  });
+
   test('same date, one-time row → not collective, zero counts', async () => {
     db.mockImplementation(() => chain({ first: jest.fn().mockResolvedValue(anchorRow({ is_recurring: false })) }));
     expect(await SmartRebooker.previewSeriesMove('svc-1', TARGET)).toMatchObject({ collective: false, movableCount: 0 });
