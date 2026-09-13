@@ -78,8 +78,8 @@ function seriesOccurrenceWindow(win, sib, options = {}) {
 
 // A proposal's disclosed recurring dates/windows must match the locked
 // move, including a cadence edit that leaves the same occurrence IDs.
-function reviewedOccurrence(row, date, window = {}, options = {}) {
-  const target = seriesOccurrenceWindow(window, row, options);
+function reviewedOccurrence(row, date, window = {}, options = {}, clearWindow = false) {
+  const target = clearWindow ? { start: null, end: null } : seriesOccurrenceWindow(window, row, options);
   return { id: String(row.id), from_date: dateOnly(row.scheduled_date), status: row.status,
     from_start: row.window_start || null, from_end: row.window_end || null,
     duration: row.estimated_duration_minutes || null, property_id: row.property_id || null,
@@ -281,7 +281,8 @@ function seriesOperationKey(serviceId, newDate, newWindow, options = {}) {
   // request of its own, distinct from an omitted technician (codex r16 P2).
   const techRequested = Object.prototype.hasOwnProperty.call(options, 'technicianId');
   const techKey = techRequested ? `:tech=${options.technicianId ? String(options.technicianId) : '-'}` : '';
-  const requestKey = `${serviceId}:${dateOnly(newDate)}:${hm(win.start)}:${hm(win.end)}${options.clearAnchorWindow === true ? ':clear' : ''}${techKey}`;
+  const confirmationKey = options.pendingConfirmation === true ? ':pending-confirmation' : '';
+  const requestKey = `${serviceId}:${dateOnly(newDate)}:${hm(win.start)}:${hm(win.end)}${options.clearAnchorWindow === true ? ':clear' : ''}${confirmationKey}${techKey}`;
   const technician = techRequested ? { id: options.technicianId ? String(options.technicianId) : null } : null;
   if (typeof options.operationKey === 'string' && options.operationKey) {
     return { key: options.operationKey, derived: false, requestKey, technician };
@@ -1705,11 +1706,13 @@ class SmartRebooker {
     // and message the customer while still unactivated: reminders unarmed,
     // lead unconverted, review card open (Codex #3361 r2 P0). Best-effort
     // post-commit, at-most-once via the helper's guarded stamp.
-    try {
-      const { activateLegacyOutboundReviewRowIfNeeded } = require('./outbound-review-confirm');
-      await activateLegacyOutboundReviewRowIfNeeded(db, serviceId, 'rebooker-reschedule');
-    } catch (activateErr) {
-      logger.warn(`[rebooker] legacy outbound activation failed for ${serviceId}: ${activateErr.message}`);
+    if (options.pendingConfirmation !== true) {
+      try {
+        const { activateLegacyOutboundReviewRowIfNeeded } = require('./outbound-review-confirm');
+        await activateLegacyOutboundReviewRowIfNeeded(db, serviceId, 'rebooker-reschedule');
+      } catch (activateErr) {
+        logger.warn(`[rebooker] legacy outbound activation failed for ${serviceId}: ${activateErr.message}`);
+      }
     }
 
     // Visit-group seam (visit-group-scope.md §2): a moved child whose stop
@@ -2416,9 +2419,36 @@ class SmartRebooker {
       }
 
       if (Array.isArray(options.expectOccurrences)) {
-        const actual = siblings.slice(startIdx).map((row, i) => sweptIds.includes(String(row.id))
-          ? reviewedOccurrence(row, projectOccurrenceDate(i, row), String(row.id) === String(serviceId) ? win : {}, options) : null).filter(Boolean)
-          .sort((a, b) => a.id.localeCompare(b.id));
+        const actual = [];
+        for (let i = startIdx; i < siblings.length; i++) {
+          const row = siblings[i];
+          if (!sweptIds.includes(String(row.id))) continue;
+          const occurrenceIndex = i - startIdx;
+          const isAnchor = String(row.id) === String(serviceId);
+          const date = projectOccurrenceDate(occurrenceIndex, row);
+          const occurrenceWindow = isAnchor ? win : {};
+          const disclosed = reviewedOccurrence(
+            row, date, occurrenceWindow, options,
+            isAnchor && options.clearAnchorWindow === true,
+          );
+          if (!isAnchor && disclosed.to_start && options.overlapAdvisory !== true) {
+            const clash = await findConflictingVisits({
+              db: trx,
+              date,
+              windowStart: disclosed.to_start,
+              windowEnd: occupancyProbeEnd(disclosed.to_start, disclosed.to_end, row.estimated_duration_minutes),
+              excludeServiceIds: sweptIds,
+              excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
+              travel: seriesTravel,
+            });
+            if (clash.length && !siblingClashWithinHorizon(date) && clash.every(isSeededPlaceholderRow)) {
+              disclosed.to_start = null;
+              disclosed.to_end = null;
+            }
+          }
+          actual.push(disclosed);
+        }
+        actual.sort((a, b) => a.id.localeCompare(b.id));
         if (!reviewedOccurrencesMatch(actual, options.expectOccurrences)) {
           throw Object.assign(new Error('The recurring dates or windows changed. Refresh the proposal.'), { statusCode: 409, code: 'SERIES_CHANGED' });
         }
@@ -3082,11 +3112,13 @@ class SmartRebooker {
     // outbound-review anchor moved (and possibly texted) here would stay
     // customer_confirmed=false with its reminders, lead, and review card
     // stranded. Best-effort post-commit, at-most-once via the helper.
-    try {
-      const { activateLegacyOutboundReviewRowIfNeeded } = require('./outbound-review-confirm');
-      await activateLegacyOutboundReviewRowIfNeeded(db, serviceId, 'rebooker-reschedule-series');
-    } catch (activateErr) {
-      logger.warn(`[rebooker] legacy outbound activation failed for series anchor ${serviceId}: ${activateErr.message}`);
+    if (options.pendingConfirmation !== true) {
+      try {
+        const { activateLegacyOutboundReviewRowIfNeeded } = require('./outbound-review-confirm');
+        await activateLegacyOutboundReviewRowIfNeeded(db, serviceId, 'rebooker-reschedule-series');
+      } catch (activateErr) {
+        logger.warn(`[rebooker] legacy outbound activation failed for series anchor ${serviceId}: ${activateErr.message}`);
+      }
     }
 
     // Same payload the row stores (originalDate as the raw column value,
@@ -3177,19 +3209,28 @@ class SmartRebooker {
       }
       const date = projectOccurrenceDate(i, row);
       dates.push(date);
-      const occurrenceWindow = String(row.id) === String(serviceId) ? newWindow : {};
-      occurrences.push(reviewedOccurrence(row, date, occurrenceWindow, options));
-      const targetWindow = seriesOccurrenceWindow(occurrenceWindow, row, options);
-      if (i === 0 || !targetWindow.start) continue;
-      const clash = await findConflictingVisits({
-        db,
-        date,
-        windowStart: targetWindow.start,
-        windowEnd: occupancyProbeEnd(targetWindow.start, targetWindow.end, row.estimated_duration_minutes),
-        excludeServiceIds: sweptIds,
-        excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
-      });
-      if (clash.length) conflictCount += 1;
+      const isAnchor = String(row.id) === String(serviceId);
+      const occurrenceWindow = isAnchor ? newWindow : {};
+      const anchorCleared = isAnchor && options.clearAnchorWindow === true;
+      const disclosed = reviewedOccurrence(row, date, occurrenceWindow, options, anchorCleared);
+      if (!isAnchor && disclosed.to_start) {
+        const clash = await findConflictingVisits({
+          db,
+          date,
+          windowStart: disclosed.to_start,
+          windowEnd: occupancyProbeEnd(disclosed.to_start, disclosed.to_end, row.estimated_duration_minutes),
+          excludeServiceIds: sweptIds,
+          excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
+        });
+        if (clash.length) {
+          conflictCount += 1;
+          if (options.overlapAdvisory !== true && !siblingClashWithinHorizon(date) && clash.every(isSeededPlaceholderRow)) {
+            disclosed.to_start = null;
+            disclosed.to_end = null;
+          }
+        }
+      }
+      occurrences.push(disclosed);
     }
     dates.sort();
     return {
