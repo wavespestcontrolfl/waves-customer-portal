@@ -44,7 +44,10 @@ export function PortalReadProvider({ enabled, children }) {
   useEffect(() => {
     if (!enabled) return undefined;
     const resume = () => {
-      if (document.visibilityState === 'visible' && Date.now() - lastRefresh.current >= RESUME_REFRESH_MS) void refresh();
+      if (document.visibilityState === 'visible' && Date.now() - lastRefresh.current >= RESUME_REFRESH_MS) {
+        refreshQueued.current = refreshingRef.current;
+        void refresh();
+      }
     };
     const reconnect = () => {
       setOnline(true);

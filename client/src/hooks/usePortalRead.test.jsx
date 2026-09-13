@@ -34,10 +34,15 @@ function RefreshFixture() {
   const portal = usePortalRefresh();
   return <button onClick={portal.refresh}>Refresh fixture</button>;
 }
-function App({ load, account = 'a', show = true, enabled = true }) {
+function SilentRead({ load }) {
+  usePortalRead('documents', load);
+  return null;
+}
+function App({ load, extraLoad, account = 'a', show = true, enabled = true }) {
   return <PortalReadProvider key={account} enabled={enabled}><PortalRefreshArea>
     <RefreshFixture /><div data-testid="pull-target">Visits</div>
     {show && <Read load={load} />}
+    {extraLoad && <SilentRead load={extraLoad} />}
   </PortalRefreshArea></PortalReadProvider>;
 }
 
@@ -253,6 +258,42 @@ describe('customer portal reads', () => {
     expect(load).toHaveBeenCalledTimes(3);
     await act(async () => fireEvent(window, new Event('online')));
     expect(load).toHaveBeenCalledTimes(4);
+  });
+
+  it('queues one resume cycle while a slower reader keeps the current refresh active', async () => {
+    vi.useFakeTimers();
+    const slowRefresh = deferred();
+    const fastLoad = vi.fn()
+      .mockResolvedValueOnce({ title: 'Fast initial' })
+      .mockResolvedValueOnce({ title: 'Fast stale' })
+      .mockResolvedValue({ title: 'Fast current' });
+    const slowLoad = vi.fn()
+      .mockResolvedValueOnce({ title: 'Slow initial' })
+      .mockReturnValueOnce(slowRefresh.promise)
+      .mockResolvedValue({ title: 'Slow current' });
+    render(<App load={fastLoad} extraLoad={slowLoad} />);
+    await act(async () => {});
+    expect(screen.getByTestId('data')).toHaveTextContent('Fast initial');
+    expect(slowLoad).toHaveBeenCalledTimes(1);
+
+    await act(async () => vi.advanceTimersByTimeAsync(2000));
+    await act(async () => fireEvent(window, new Event('focus')));
+    expect(screen.getByTestId('data')).toHaveTextContent('Fast stale');
+    expect(fastLoad).toHaveBeenCalledTimes(2);
+    expect(slowLoad).toHaveBeenCalledTimes(2);
+
+    await act(async () => vi.advanceTimersByTimeAsync(2000));
+    await act(async () => {
+      fireEvent(window, new Event('focus'));
+      fireEvent(window, new Event('focus'));
+    });
+    expect(fastLoad).toHaveBeenCalledTimes(2);
+    expect(slowLoad).toHaveBeenCalledTimes(2);
+
+    await act(async () => slowRefresh.resolve({ title: 'Slow stale' }));
+    expect(fastLoad).toHaveBeenCalledTimes(3);
+    expect(slowLoad).toHaveBeenCalledTimes(3);
+    expect(screen.getByTestId('data')).toHaveTextContent('Fast current');
   });
 
   it('refreshes on native resume, coalesces browser focus, and removes its listener', async () => {
