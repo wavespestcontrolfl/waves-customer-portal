@@ -604,7 +604,7 @@ function paymentOutcomeIsInterrogative(text, claim, matchEnd, claimEnd) {
   const trailingClaim = text.slice(matchEnd, claimEnd);
   const followup = trailingClaim.match(/^\s*,\s*(?:(?:and|y)\s+)?(.*)$/i);
   const followupQuestion = followup && new RegExp(
-    `^\\s*¿?\\s*(?:${QUESTION_AUX_RE_SOURCE}|(?:what|when|where|which|who|whom|whose|why|how)\\b[^,.!?;]{0,40}\\b${QUESTION_AUX_RE_SOURCE}|(?:quiere|quieres|desea|deseas|puedo|podemos|puede|puedes|podr[ií]a(?:mos)?))\\b`,
+    `^\\s*¿?\\s*(?:${QUESTION_AUX_RE_SOURCE}|(?:what|when|where|which|who|whom|whose|why|how)\\b[^,.!?;]{0,40}\\b${QUESTION_AUX_RE_SOURCE}|(?:need\\s+)?(?:anything|something)\\s+else|(?:quiere|quieres|desea|deseas|puedo|podemos|puede|puedes|podr[ií]a(?:mos)?))\\b`,
     'i',
   ).test(followup[1]);
   return QUESTION_LEAD_RE.test(claim) || (text[claimEnd] === '?' && !followupQuestion);
