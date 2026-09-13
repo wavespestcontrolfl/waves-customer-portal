@@ -1363,7 +1363,7 @@ function callbackConsentCondition(targets, valueTargets, matchedContact) {
 
 function callbackConsentOverridden(suffix, condition, consent) {
   const afterConsent = consent ? suffix.slice(consent.index + consent[0].length) : suffix;
-  return [...afterConsent.matchAll(/\bor\s+([^.!?;,]+)/gi)]
+  return [...afterConsent.matchAll(/\b(?:or|and|but)\s+([^.!?;,]+)/gi)]
     .some((alternative) => !callbackConsentIsAffirmative(condition.exec(alternative[1])));
 }
 
