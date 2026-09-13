@@ -128,7 +128,9 @@ router.post('/tech-trigger', async (req, res, next) => {
     // A block or suppression (opt-out, no consented recipient) will not clear
     // by retrying; only the unqueued provider failure is worth another try.
     const unsentFields = !unsent ? {}
-      : unsent.failed === 'send_failed_unqueued'
+      : unsent.uncertain
+        ? { uncertain: true, message: 'The review text may have been delivered. Check the SMS delivery log before sending another request.' }
+        : unsent.failed === 'send_failed_unqueued'
         ? { failed: unsent.failed, message: 'The review text could not be sent. Try again in a few minutes.' }
         : unsent.failed
           ? { failed: unsent.failed, message: 'The review text was not sent: this customer cannot receive review texts right now.' }

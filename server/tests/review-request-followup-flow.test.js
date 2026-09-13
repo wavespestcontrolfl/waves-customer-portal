@@ -32,6 +32,7 @@ jest.mock('../services/twilio', () => ({
 // just runs the body.
 jest.mock('../utils/cron-lock', () => ({
   runExclusive: async (_key, fn) => fn(),
+  wasLockSkipped: result => result?.skipped === true,
 }));
 
 const db = require('../models/db');
@@ -70,6 +71,12 @@ function collection(rows) {
   });
 }
 
+// A query that is awaited directly rather than through .limit() — the review-ask
+// spacing lookups (deliveredAskRows, lastManualAskAt) await the builder itself.
+function resolvesTo(rows) {
+  return chain({ then: (resolve) => resolve(rows) });
+}
+
 function insertReturning(inserted) {
   const holder = {
     payload: null,
@@ -96,9 +103,13 @@ describe('review request follow-up flow', () => {
 
   afterEach(() => {
     jest.useRealTimers();
+    jest.restoreAllMocks();
   });
 
   test('renders customer follow-up template with the current request id', async () => {
+    const history = require('../services/review-ask-history');
+    jest.spyOn(history, 'lastDeliveredAskAt').mockResolvedValue(null);
+    jest.spyOn(history, 'lastManualAskAt').mockResolvedValue(null);
     const updateQuery = chain();
     const reviewRequestQueries = [
       chain(), // deleted-customer follow-up close-out pre-pass
@@ -112,7 +123,9 @@ describe('review request follow-up flow', () => {
           score: null,
         },
       ]),
+      chain({ first: jest.fn().mockResolvedValue({ id: 'rr-1', customer_id: 'cust-1', status: 'sent', score: null }) }),
       chain({ first: jest.fn().mockResolvedValue(null) }),
+      chain(), // durable pre-provider reservation
       updateQuery,
     ];
     const customerQuery = chain({
@@ -136,7 +149,7 @@ describe('review request follow-up flow', () => {
     getServiceContact.mockReturnValue({ phone: '+19415550123', name: 'Jamie Rios' });
     getServiceContactSmsRecipient.mockReturnValue({ phone: '+19415550123', name: 'Jamie Rios' });
     renderSmsTemplate.mockResolvedValue('Please review us');
-    sendCustomerMessage.mockResolvedValue({ sent: true, auditLogId: 'audit-1' });
+    sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-followup', auditLogId: 'audit-1' });
 
     const result = await ReviewService.processFollowups();
 
@@ -161,6 +174,9 @@ describe('review request follow-up flow', () => {
   });
 
   test('marks terminal follow-up policy blocks as handled', async () => {
+    const history = require('../services/review-ask-history');
+    jest.spyOn(history, 'lastDeliveredAskAt').mockResolvedValue(null);
+    jest.spyOn(history, 'lastManualAskAt').mockResolvedValue(null);
     const updateQuery = chain();
     const reviewRequestQueries = [
       chain(), // deleted-customer follow-up close-out pre-pass
@@ -174,7 +190,9 @@ describe('review request follow-up flow', () => {
           score: null,
         },
       ]),
+      chain({ first: jest.fn().mockResolvedValue({ id: 'rr-optout', customer_id: 'cust-1', status: 'sent', score: null }) }),
       chain({ first: jest.fn().mockResolvedValue(null) }),
+      chain(), // durable pre-provider reservation
       updateQuery,
     ];
     const customerQuery = chain({
@@ -198,6 +216,7 @@ describe('review request follow-up flow', () => {
     renderSmsTemplate.mockResolvedValue('Please review us');
     sendCustomerMessage.mockResolvedValue({
       sent: false,
+      deliveryOutcome: 'not_sent',
       blocked: true,
       code: 'PURPOSE_OPTED_OUT',
       retryable: false,
@@ -214,6 +233,9 @@ describe('review request follow-up flow', () => {
   });
 
   test('leaves transient follow-up consent lookup failures retryable', async () => {
+    const history = require('../services/review-ask-history');
+    jest.spyOn(history, 'lastDeliveredAskAt').mockResolvedValue(null);
+    jest.spyOn(history, 'lastManualAskAt').mockResolvedValue(null);
     const updateQuery = chain();
     const reviewRequestQueries = [
       chain(), // deleted-customer follow-up close-out pre-pass
@@ -227,7 +249,9 @@ describe('review request follow-up flow', () => {
           score: null,
         },
       ]),
+      chain({ first: jest.fn().mockResolvedValue({ id: 'rr-consent-retry', customer_id: 'cust-1', status: 'sent', score: null }) }),
       chain({ first: jest.fn().mockResolvedValue(null) }),
+      chain(), // durable pre-provider reservation
       updateQuery,
       updateQuery, // the reopen after the definite not-sent
     ];
@@ -252,6 +276,7 @@ describe('review request follow-up flow', () => {
     renderSmsTemplate.mockResolvedValue('Please review us');
     sendCustomerMessage.mockResolvedValue({
       sent: false,
+      deliveryOutcome: 'not_sent',
       blocked: true,
       code: 'CONSENT_LOOKUP_FAILED',
       retryable: false,
@@ -262,10 +287,7 @@ describe('review request follow-up flow', () => {
     const result = await ReviewService.processFollowups();
 
     expect(result).toEqual({ sent: 0, suppressed: 0, internalFollowups: 0 });
-    // Pre-send marker, then handed back on the definite not-sent (codex
-    // #4338 P1, round 4) — the row is eligible again for a later run.
-    expect(updateQuery.update).toHaveBeenNthCalledWith(1, expect.objectContaining({ followup_sent: true }));
-    expect(updateQuery.update).toHaveBeenLastCalledWith(expect.objectContaining({ followup_sent: false, followup_sent_at: null }));
+    expect(updateQuery.update).toHaveBeenCalledWith({ followup_sent: false, followup_sent_at: null, followup_reserved_at: null });
   });
 
   test('an uncertain follow-up handoff is held, not left retryable (codex #4338 P1)', async () => {
@@ -282,6 +304,16 @@ describe('review request follow-up flow', () => {
           score: null,
         },
       ]),
+      resolvesTo([]), // dispatchReviewAsk: deliveredAskRows spacing lookup
+      // The callback re-reads the row it is about to send, then checks the
+      // sibling-followup dedup, then writes the pre-handoff reservation.
+      chain({ first: jest.fn().mockResolvedValue({
+        id: 'rr-uncertain',
+        customer_id: 'cust-1',
+        sms_sent_at: '2026-05-30T15:00:00.000Z',
+        status: 'sent',
+        score: null,
+      }) }),
       chain({ first: jest.fn().mockResolvedValue(null) }),
       updateQuery,
     ];
@@ -299,6 +331,9 @@ describe('review request follow-up flow', () => {
     db.mockImplementation((table) => {
       if (table === 'review_requests') return reviewRequestQueries.shift();
       if (table === 'customers') return customerQuery;
+      // dispatchReviewAsk's manual-ask lookup. An empty history lets the
+      // spacing gate through; a throw here would (correctly) hold instead.
+      if (table === 'sms_log') return resolvesTo([]);
       throw new Error(`Unexpected table query: ${table}`);
     });
     getServiceContact.mockReturnValue({ phone: '+19415550123', name: 'Jamie' });
@@ -316,10 +351,18 @@ describe('review request follow-up flow', () => {
 
     const result = await ReviewService.processFollowups();
 
-    // Held, not left retryable for the next run to duplicate-send.
-    expect(result).toEqual({ sent: 0, suppressed: 1, internalFollowups: 0 });
+    // Held, not left retryable for the next run to duplicate-send. This slice
+    // reserves followup_sent BEFORE the handoff and reopens it only on a
+    // definite unsent outcome, so an uncertain handoff keeps the reservation
+    // and is counted as neither sent nor suppressed — it is the third state.
+    expect(result).toEqual({ sent: 0, suppressed: 0, internalFollowups: 0 });
     expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({
       followup_sent: true,
+    }));
+    // The reservation must never be reopened here — that is what would let the
+    // next run send a second copy of a follow-up the customer may already hold.
+    expect(updateQuery.update).not.toHaveBeenCalledWith(expect.objectContaining({
+      followup_sent: false,
     }));
   });
 
@@ -340,6 +383,16 @@ describe('review request follow-up flow', () => {
           score: null,
         },
       ]),
+      resolvesTo([]), // dispatchReviewAsk: deliveredAskRows spacing lookup
+      // The callback re-reads the row it is about to send, then checks the
+      // sibling-followup dedup, then writes the pre-handoff reservation.
+      chain({ first: jest.fn().mockResolvedValue({
+        id: 'rr-uncertain-throw',
+        customer_id: 'cust-1',
+        sms_sent_at: '2026-05-30T15:00:00.000Z',
+        status: 'sent',
+        score: null,
+      }) }),
       chain({ first: jest.fn().mockResolvedValue(null) }),
       updateQuery,
     ];
@@ -357,6 +410,9 @@ describe('review request follow-up flow', () => {
     db.mockImplementation((table) => {
       if (table === 'review_requests') return reviewRequestQueries.shift();
       if (table === 'customers') return customerQuery;
+      // dispatchReviewAsk's manual-ask lookup — an empty history lets the
+      // spacing gate through (a throw here would correctly HOLD instead).
+      if (table === 'sms_log') return resolvesTo([]);
       throw new Error(`Unexpected table query: ${table}`);
     });
     getServiceContact.mockReturnValue({ phone: '+19415550123', name: 'Jamie' });
@@ -370,9 +426,16 @@ describe('review request follow-up flow', () => {
 
     const result = await ReviewService.processFollowups();
 
-    expect(result).toEqual({ sent: 0, suppressed: 1, internalFollowups: 0 });
+    // Same third state as the returned-uncertain case above: this slice
+    // reserved followup_sent BEFORE the handoff, the thrown outcome is
+    // converted inside the send callback, and the reservation is kept —
+    // neither sent nor suppressed, never reopened.
+    expect(result).toEqual({ sent: 0, suppressed: 0, internalFollowups: 0 });
     expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({
       followup_sent: true,
+    }));
+    expect(updateQuery.update).not.toHaveBeenCalledWith(expect.objectContaining({
+      followup_sent: false,
     }));
   });
 
