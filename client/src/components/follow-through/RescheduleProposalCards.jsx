@@ -160,8 +160,9 @@ function ProposalCard({ row, ui, busy, selection, onSelection, preview, onPrevie
 
   return <Card>
     <Text tone="title">Reschedule request · {who}</Text>
-    <Text>Caller requested: {requested}</Text>
-    {quote && <Text>Caller said: “{quote}”</Text>}
+    <Text>Requested time identified from transcript: {requested}</Text>
+    {quote && <Text>Transcript excerpt attributed to the caller (speaker attribution may be inferred): “{quote}”</Text>}
+    <Text tone="muted">Verify the speaker attribution and call context before applying this change.</Text>
     <Text tone="muted">Call {callTime(row.call_at)}{row.phone ? ` · ${row.phone}` : ''}</Text>
 
     <CandidateReview {...{ candidates, selected, selection, busy, who, ui, onSelection, row }} />

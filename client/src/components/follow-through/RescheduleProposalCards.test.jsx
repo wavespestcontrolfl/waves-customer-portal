@@ -101,7 +101,8 @@ describe('reschedule proposal review', () => {
     const select = await screen.findByLabelText('Appointment discussed for Synthetic Caller');
     expect(select).toHaveValue('');
     expect(screen.getByRole('button', { name: 'Preview change' })).toBeDisabled();
-    expect(screen.getByText('Caller said: “Please move it to one Thursday afternoon.”')).toBeInTheDocument();
+    expect(screen.getByText(/speaker attribution may be inferred.*Please move it to one Thursday afternoon/i)).toBeInTheDocument();
+    expect(screen.getByText(/verify the speaker attribution and call context before applying/i)).toBeInTheDocument();
 
     selectSecond();
     fireEvent.click(screen.getByRole('button', { name: 'Preview change' }));
@@ -229,7 +230,7 @@ describe('reschedule proposal review', () => {
 
     await screen.findByRole('button', { name: 'Apply change' });
     expect(screen.getByText('Reschedule request · Reviewed Customer')).toBeInTheDocument();
-    expect(screen.getByText('Caller said: “Thursday at one works for me.”')).toBeInTheDocument();
+    expect(screen.getByText(/speaker attribution may be inferred.*Thursday at one works for me/i)).toBeInTheDocument();
     expect(screen.getByText(/Current appointment: Termite inspection .*999 Reviewed Avenue/)).toBeInTheDocument();
     expect(screen.getByRole('option', { name: /Termite inspection .*999 Reviewed Avenue/ })).toBeInTheDocument();
   });
