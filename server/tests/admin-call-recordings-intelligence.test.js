@@ -65,7 +65,8 @@ test('proposal preview returns only the reviewed identity with its authorization
     displayAddress: selected.property, preview_hash: 'a'.repeat(64), selected: { ...selected, internal_notes: 'must stay private' },
     customer: { id: CUSTOMER_ID, first_name: 'Synthetic', last_name: 'Caller', secondary_phone: 'private' },
     card: { payload: { reschedule_proposal: { quote: 'Move the pest appointment to Tuesday.' } } },
-    series: { collective: false }, plan: { newDate: '2027-03-16', newWindow: { start: '14:00', end: '15:30' } },
+    series: { collective: false }, overlap: { count: 1, appointments: [{ id: 'overlap-1' }] },
+    plan: { newDate: '2027-03-16', newWindow: { start: '14:00', end: '15:30' } },
   });
   await withServer(async (base) => {
     const res = await fetch(`${base}/admin/call-recordings/proposals/${CALL_ID}/preview`, {
@@ -74,6 +75,7 @@ test('proposal preview returns only the reviewed identity with its authorization
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toMatchObject({ preview_hash: 'a'.repeat(64), selected,
+      overlap: { count: 1, appointments: [{ id: 'overlap-1' }] },
       customer: { id: CUSTOMER_ID, first_name: 'Synthetic', last_name: 'Caller' }, quote: 'Move the pest appointment to Tuesday.' });
     expect(body.selected.display_address).toEqual(selected.property);
     expect(body.selected).not.toHaveProperty('internal_notes');

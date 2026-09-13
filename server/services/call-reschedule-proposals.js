@@ -5,6 +5,7 @@ const { gateEnvValue } = require('../config/feature-gates');
 const { parseETDateTime } = require('../utils/datetime-et');
 const { lockTriageCall } = require('../utils/triage-locks');
 const { recordAuditEvent } = require('./audit-log');
+const { probeSlotOverlap } = require('./scheduling/window-rules');
 const { loadCandidates, planRescheduleFromCall, applyReviewedCallReschedule, ACTIVITY_ACTION } = require('./call-reschedule-apply');
 
 const enabled = () => gateEnvValue('GATE_RESCHEDULE_PROPOSAL_CARD');
@@ -20,10 +21,32 @@ const PROPERTY_COLUMNS = ['id', ...ADDRESS_COLUMNS, 'updated_at'];
 function proposalAddress(visit, customer) {
   const source = visit.property || (visit.service_address_line1 ? {
     address_line1: visit.service_address_line1, address_line2: visit.service_address_line2,
-    city: visit.service_address_city, zip: visit.service_address_zip,
+    city: visit.service_address_city, state: visit.service_address_state, zip: visit.service_address_zip,
   } : customer);
   if (!String(source?.address_line1 || '').trim()) return null;
   return Object.fromEntries(ADDRESS_COLUMNS.map((field) => [field, source[field] || null]));
+}
+
+function exactAppointmentWindow(date, start, end) {
+  const day = date instanceof Date ? date.toISOString().slice(0, 10) : String(date || '').slice(0, 10);
+  const instant = (time) => {
+    const value = time ? parseETDateTime(`${day}T${String(time).slice(0, 5)}`) : null;
+    return value && !Number.isNaN(value.getTime()) ? value.toISOString() : null;
+  };
+  return { start_at: instant(start), end_at: instant(end) };
+}
+
+function overlapSummary(rows) {
+  const appointments = (rows || []).map((row) => ({
+    id: row.id,
+    scheduled_date: row.scheduled_date instanceof Date ? row.scheduled_date.toISOString().slice(0, 10) : String(row.scheduled_date).slice(0, 10),
+    current_window: exactAppointmentWindow(row.scheduled_date, row.window_start, row.window_end),
+    status: row.status,
+    service_name: row.service_type || 'Service',
+  })).sort((a, b) => a.scheduled_date.localeCompare(b.scheduled_date)
+    || String(a.current_window.start_at || '').localeCompare(String(b.current_window.start_at || ''))
+    || String(a.id).localeCompare(String(b.id)));
+  return { count: appointments.length, appointments };
 }
 
 function proposalEvidence(v2, transcript) {
@@ -148,8 +171,16 @@ async function previewProposal(conn, id, { visitId, now = new Date(), rebooker =
   if (plan.action === 'skip') throw fail(`This request needs the schedule editor: ${plan.reason.replace(/_/g, ' ')}`);
   const mover = rebooker || require('./rebooker');
   const series = mover.collectiveMoveGateOn()
-    ? await mover.previewSeriesMove(selection, plan.newDate, { start: plan.newWindow.start }) : { collective: false };
+    ? await mover.previewSeriesMove(selection, plan.newDate, plan.newWindow) : { collective: false };
   const selected = candidates.find((v) => v.id === selection);
+  const overlapRows = await conn.transaction((trx) => probeSlotOverlap({
+    trx,
+    date: plan.newDate,
+    windowStart: plan.newWindow.start,
+    windowEnd: plan.newWindow.end,
+    excludeServiceIds: series.occurrenceIds?.length ? series.occurrenceIds : [selection],
+  }));
+  const overlap = overlapSummary(overlapRows);
   const followUps = await require('./call-booking-catalog').planCallFollowUpShift({ conn, parentServiceId: selection,
     fromDate: selected.scheduled_date, toDate: plan.newDate });
   if (followUps.length) throw fail('This visit has a linked follow-up. Use Pick another time to review both appointments together.');
@@ -160,10 +191,11 @@ async function previewProposal(conn, id, { visitId, now = new Date(), rebooker =
       visit_id: selected.visit_id, is_recurring: selected.is_recurring, source_action: selected.source_action,
       customer_confirmed: selected.customer_confirmed, self_booking_id: selected.self_booking_id,
       service_address_line1: selected.service_address_line1, service_address_line2: selected.service_address_line2,
-      service_address_city: selected.service_address_city, service_address_zip: selected.service_address_zip },
-    target: v2.scheduling.proposed_start_at, series };
+      service_address_city: selected.service_address_city, service_address_state: selected.service_address_state,
+      service_address_zip: selected.service_address_zip },
+    target: v2.scheduling.proposed_start_at, series, overlap };
   return { preview_hash: digest(snapshot), card, call, customer, candidates, v2, plan, selected, series,
-    displayAddress: proposalAddress(selected, customer) };
+    overlap, displayAddress: proposalAddress(selected, customer) };
 }
 
 async function applyProposal(conn, id, { actorId, visitId, previewHash, now = new Date(), rebooker = null } = {}) {
