@@ -48,6 +48,7 @@ test.each([
   ['The exterior perimeter received Talstar P.', 'pass'],
   ['The exterior perimeter itself received Talstar P.', 'pass'],
   ['The exterior perimeter recently got Talstar P.', 'pass'],
+  ['The exterior perimeter got bait after the technician ordered Talstar P.', 'fail'],
   ['The technician used Talstar P around the exterior perimeter.', 'pass'],
   ['Talstar P was used around the exterior perimeter.', 'pass'],
   ['Talstar P went around the exterior perimeter.', 'pass'],
@@ -59,6 +60,8 @@ test.each([
   ['Talstar P around the exterior perimeter is only a recommendation.', 'fail'],
   ['Talstar P around the exterior perimeter is merely a plan.', 'fail'],
   ['Talstar P around the exterior perimeter is a possibility.', 'fail'],
+  ['Talstar P around the exterior perimeter is being considered.', 'fail'],
+  ['Talstar P around the exterior perimeter is under consideration.', 'fail'],
   ['Talstar P around the exterior perimeter is scheduled for tomorrow.', 'fail'],
   ['Talstar P around the exterior perimeter, scheduled for tomorrow.', 'fail'],
   ['Talstar P around the exterior perimeter was completed yesterday.', 'pass'],
@@ -134,6 +137,12 @@ test.each([
 ])('coordinated location recipients preserve each report finding: %j', (finding, status) => {
   const spoken = ['The perimeter got Talstar P and the foundation got bait.'];
   expect(checks.report_readback_confirms(finding, {}, { spoken })[0]).toBe(status);
+});
+
+test('a location recipient confirms the product it got before a later product mention', () => {
+  const spoken = ['The exterior perimeter got bait after the technician ordered Talstar P.'];
+  const bait = { subject: '\\bbait\\b', location: '\\bexterior perimeter\\b' };
+  expect(checks.report_readback_confirms(bait, {}, { spoken })[0]).toBe('pass');
 });
 
 test.each([
