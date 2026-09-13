@@ -148,3 +148,13 @@ test.each([
   const { assertedMatch } = require('../services/eval/voice-relay-spoken-checks')._internals;
   expect(Boolean(assertedMatch(text, /safety for her dog/i))).toBe(asserted);
 });
+
+test.each([
+  ['Customer did not, at any point, raise a safety concern for her dog.', false],
+  ['Customer denied scheduling and safety concerns for her dog.', false],
+  ['Customer did not book and asked about safety for her dog.', true],
+  ['Customer did not book, she asked about safety for her dog.', true],
+])('capture denial keeps parenthetical and object continuations: %s', (text, asserted) => {
+  const { assertedMatch } = require('../services/eval/voice-relay-spoken-checks')._internals;
+  expect(Boolean(assertedMatch(text, /safety[^.]*dog/i))).toBe(asserted);
+});

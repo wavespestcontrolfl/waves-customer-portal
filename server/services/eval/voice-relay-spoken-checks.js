@@ -1192,7 +1192,9 @@ function only_language(value, record, { spoken }) {
 // the concern, while "did not book, but asked if the bait is safe for her
 // dog" asserts it — the "but" ends the denial's clause before the concern.
 const DENIAL_WORD_RE = /\b(?:not(?!\s+only\b)|is\s+not|isn[\x27\u2019]t|are\s+not|aren[\x27\u2019]t|did\s+not|didn[\x27\u2019]t|does\s+not|doesn[\x27\u2019]t|was\s+not|wasn[\x27\u2019]t|has\s+not|hasn[\x27\u2019]t|never|denied|denies|without|no)\b/gi;
-const DENIAL_CLAUSE_END_RE = /[.;!?,]|\b(?:but|however|although|though|and|so|while|yet)\b/gi;
+// Commas may enclose an aside and "and" may coordinate denied objects.
+// End their scope only when the next phrase starts a fresh assertion.
+const DENIAL_CLAUSE_END_RE = /[.;!?]|\b(?:but|however|although|though|so|while|yet)\b|(?:,|\band\b)\s*(?=(?:(?:the )?(?:caller|customer)|she|he|they)\s+\w+|(?:asked|asks|raised|raises|expressed|expresses|mentioned|mentions|reported|reports|voiced|voices)\b)/gi;
 /** [[start, end), …) — the ranges of `text` a denial word governs. */
 function deniedSpans(text) {
   const spans = [];
