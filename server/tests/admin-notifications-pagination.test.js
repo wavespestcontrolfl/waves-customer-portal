@@ -2,10 +2,11 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info
 jest.mock('../services/internal-test-customers', () => ({ isInternalTestCustomerId: () => false }));
 jest.mock('../services/push-notifications', () => ({}));
 jest.mock('../services/dashboard-alerts', () => ({}));
+jest.mock('../services/dashboard-alerts-cron', () => ({ COUNT_ESCALATION_COOLDOWN_MS: {} }));
 jest.mock('../services/notification-bell-policy', () => ({ isBellPolicyEnabled: () => false }));
 jest.mock('../services/admin-unread', () => ({
   liveAlertNotifications: jest.fn(async () => ({ live: [], liveKeys: new Set() })),
-  isLiveDuplicate: (row, keys) => keys.has(row.id),
+  isLiveDuplicate: jest.requireActual('../services/admin-unread').isLiveDuplicate,
 }));
 jest.mock('../middleware/admin-auth', () => ({ adminAuthenticate: jest.fn(), requireAdmin: jest.fn() }));
 
@@ -64,11 +65,21 @@ test('an older refreshed unread alert is reachable after the 30 newest read rows
 });
 
 test('overlay deduplication does not hide the next persisted page', async () => {
-  liveAlertNotifications.mockResolvedValue({ live: [], liveKeys: new Set(mockRows.slice(0, 30).map(n => n.id)) });
+  mockRows.slice(0, 30).forEach(n => { n.metadata = { triggerKey: 'dashboard_alert', payload: { alertId: n.id, alertCount: 1 } }; });
+  liveAlertNotifications.mockResolvedValue({ live: [], liveKeys: new Set(mockRows.slice(0, 30).map(n => `${n.id}:1`)) });
   const first = await list({ limit: '30' });
   expect(first.notifications).toEqual([]);
   expect(first.hasMore).toBe(true);
   expect((await list({ limit: '30', page: '2' })).notifications[0].id).toBe('older-refreshed');
+});
+
+test('later pages suppress live duplicates but preserve escalation history without repeating the overlay', async () => {
+  const metadata = { triggerKey: 'dashboard_alert', payload: { alertId: 'audit-alert', alertCount: 2 } };
+  mockRows.push({ id: 'persisted-current', recipient_type: 'admin', created_at: '2026-09-02T12:00:00Z', metadata });
+  mockRows.push({ id: 'persisted-history', recipient_type: 'admin', created_at: '2026-09-02T11:00:00Z', metadata: { ...metadata, payload: { ...metadata.payload, alertCount: 1 } } });
+  liveAlertNotifications.mockResolvedValue({ live: [{ id: 'live:audit-alert' }], liveKeys: new Set(['audit-alert:2']) });
+  expect((await list({ limit: '30' })).notifications[0].id).toBe('live:audit-alert');
+  expect((await list({ limit: '30', page: '2' })).notifications.map(n => n.id)).toEqual(['persisted-history', 'older-refreshed']);
 });
 
 test('pagination clamps negative inputs before querying', async () => {

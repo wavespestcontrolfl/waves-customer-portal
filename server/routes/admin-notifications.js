@@ -112,13 +112,13 @@ router.get('/', async (req, res, next) => {
     // Live overlay is ADMIN-ONLY regardless of policy: dashboard alerts
     // carry finance totals and owner-only links, matching the fail-closed
     // persisted-feed scope (codex P1).
-    const liveCtx = page === 1 && !isBellPolicyEnabled() && req.techRole === 'admin'
+    const liveCtx = !isBellPolicyEnabled() && req.techRole === 'admin'
       ? await liveAlertNotifications(req.technicianId)
       : { live: [], liveKeys: new Set() };
     // Page availability follows persisted rows before overlay deduplication:
     // a page containing only live-alert duplicates must still allow paging.
     const dedupedPersisted = persisted.slice(0, limit).filter((n) => !isLiveDuplicate(n, liveCtx.liveKeys));
-    res.json({ notifications: [...liveCtx.live, ...dedupedPersisted], page, limit, hasMore: persisted.length > limit });
+    res.json({ notifications: [...(page === 1 ? liveCtx.live : []), ...dedupedPersisted], page, limit, hasMore: persisted.length > limit });
   } catch (err) { next(err); }
 });
 
