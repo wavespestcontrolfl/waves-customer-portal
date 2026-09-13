@@ -1249,6 +1249,7 @@ const CARD_NON_FRAGMENT_RES = Object.freeze([
   new RegExp(`\\b(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})(?:[\\s-]+(?:and\\s+)?(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})){0,6}\\s+(?:dollars?|cents?|bucks)\\b`, 'gi'),
   new RegExp(`\\$\\s*${DIGITS}`, 'gi'),
   new RegExp(`\\b${PRICE_NUMBER}\\s*(?:per|an?|each|every|for each|for every)\\s+(?:applications?|treatments?|services?|visits?)\\b`, 'gi'),
+  /\b\d[\d,]*(?:\.\d+)?\s*(?:sq(?:uare)?\.?\s*(?:ft|feet|foot)|acres?)\b/gi,
   /\b(?:[01]?\d|2[0-3]):[0-5]\d(?:\s*(?:a\.?\s*m\.?|p\.?\s*m\.?))?(?![\da-z])/gi,
   /\b\d+(?:\.\d+)?\s*(?:seconds?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?)\b/gi,
   /\b\d+(?:\.\d+)?\s+(?:cards?|applications?|payments?|transactions?|attempts?|options?|visits?|services?|appointments?|accounts?)\b/gi,
@@ -1327,6 +1328,9 @@ function cardValuesMatch(supplied, candidate) {
   if (suppliedExpiration && candidateExpiration) return suppliedExpiration.includes(candidateExpiration);
   return String(supplied).replace(/\D/g, '').includes(String(candidate).replace(/\D/g, ''));
 }
+function cardValueInheritsReadback(precedingReadback, calendarSpan, precedingValueMatches) {
+  return precedingValueMatches || (precedingReadback === true && Boolean(calendarSpan));
+}
 function cardValueHasNonCardExplanation(nonFragments, calendarSpan, start, end, inherited) {
   const contextual = nonFragments.some(([spanStart, spanEnd]) => start >= spanStart && end <= spanEnd);
   return contextual || (Boolean(calendarSpan) && !inherited);
@@ -1369,13 +1373,15 @@ function cardFragmentsIn(text, precedingReadback = false) {
     const candidateValue = valueSpan ? digits.slice(...valueSpan) : m[0];
     const precedingValueMatches = Array.isArray(precedingReadback)
       && precedingReadback.some((value) => cardValuesMatch(value, candidateValue));
+    const carriedValue = cardValueInheritsReadback(precedingReadback, calendarSpan, precedingValueMatches);
     // A bare calendar-shaped value is still a card echo when it matches the
-    // caller's expiration. Explicit appointment/date labels and
-    // the other scoped explanations above continue to own their digit runs.
+    // caller's expiration or answers an explicit card request. Explicit
+    // appointment/date labels and the other scoped explanations above
+    // continue to own their digit runs.
     const explained = cardValueHasNonCardExplanation(
-      nonFragments, calendarSpan, m.index, m.index + m[0].length, precedingValueMatches,
+      nonFragments, calendarSpan, m.index, m.index + m[0].length, carriedValue,
     );
-    const inheritedReadback = precedingValueMatches
+    const inheritedReadback = carriedValue
       || (CARD_BARE_FRAGMENT_RE.test(clause)
         && ((clauseStart === 0 && precedingReadback === true) || CARD_READBACK_CUE_RE.test(priorClause)));
     const explicitExpiration = Boolean(expirationSpan);
