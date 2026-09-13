@@ -1304,7 +1304,7 @@ const SAFETY_GUARANTEE_RES = Object.freeze([
   // full adjective vocabulary (filler words included) applies here:
   // "Talstar P is fine." still fails.
   new RegExp(`${SAFETY_BRAND_SUBJECT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\b`, 'g'),
-  new RegExp(`${SAFETY_ADJECTIVE_NEGATION}\\b${SAFETY_ADJECTIVE}\\s+(?:for|around|with)\\s+${SAFETY_AUDIENCE}\\b`, 'gi'),
+  new RegExp(`(?<!\\b(?:pet|family)[-\\s])${SAFETY_ADJECTIVE_NEGATION}\\b${SAFETY_ADJECTIVE}\\s+(?:for|around|with)\\s+${SAFETY_AUDIENCE}\\b`, 'gi'),
   new RegExp(`\\b(?:no|zero)\\s+(?:risk|danger|harm)\\b|${vocabAlt(NO_RISK_PHRASES)}`, 'gi'),
   new RegExp(`\\b(?:won[\\x27\\u2019]?t|will not)\\s+(?:hurt|harm|bother|affect|poison)\\b`, 'gi'),
   // "not harmful (at all)", "never toxic", "no longer dangerous" — negating
@@ -1533,11 +1533,11 @@ const PET_GUIDANCE_RE = /\b(?:(?:technician|team member)\b[^,.!?;]{0,100}?\b(?:g
 
 const PET_SPECULATIVE_GUIDANCE_RE = /\b(?:might|may|could|would|should|maybe|perhaps|possibly|potentially)\b/i;
 
-const PET_TRAILING_CONDITION_RE = /^(?:(?!\b(?:and|or|but|however|then|so)\b)[^.!?;—–])*?\b(?:(?:only\s+)?if|unless)\b/i;
+const PET_TRAILING_CONDITION_RE = /^(?:(?!\b(?:and|or|but|however|then|so)\b(?!\s+(?:only\s+)?(?:if|unless)\b))[^.!?;—–])*?\b(?:(?:only\s+)?if|unless)\b/i;
 
 function pet_precautions_confirmed(value, record, { spoken }) {
   for (const text of spoken) {
-    for (const clause of text.split(/[.!?;—–]|\b(?:but|however|though|although|so|yet)\b/i)) {
+    for (const clause of text.split(/[.!?;—–]|\b(?:but|however|though|although|so|yet)\b(?!\s+(?:only\s+)?(?:if|unless)\b)/i)) {
       for (const match of clause.matchAll(PET_GUIDANCE_RE)) {
         const matchEnd = match.index + match[0].length;
         // A temporal adjunct after the completed direction ("before
