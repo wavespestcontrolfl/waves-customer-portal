@@ -2443,7 +2443,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const groups = groupServicesForAppointmentSubmit(services);
     const results = [];
     let firstError = null;
-    let submitCancelled = false;
     // Annual-prepay-on-book rides exactly ONE recurring group's POST — if a
     // one-time group also carried it, whichever request landed first would
     // accept the estimate (possibly as standard) and strand the prepay.
@@ -2460,7 +2459,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       // session — a retry after partial failure shouldn't duplicate them.
       if (createdGroupKeysRef.current.has(key)) continue;
       if (!modalMountedRef.current || selectedCustomerIdRef.current !== submitCustomerId) {
-        submitCancelled = true;
         break;
       }
       try {
@@ -2563,14 +2561,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           prepaySeriesId = r.id;
         }
         results.push(r);
-        // A request already accepted by the server stays recorded, but a
-        // customer switch/close during that await must stop every later group
-        // and any follow-up invoice POST from the stale closure.
-        if (!modalMountedRef.current || selectedCustomerIdRef.current !== submitCustomerId) {
-          submitCancelled = true;
-          break;
-        }
       } catch (e) {
+        // A late failure must not show dialogs or update a closed draft.
+        // Committed earlier groups are still reported after the loop.
+        if (!modalMountedRef.current || selectedCustomerIdRef.current !== submitCustomerId) break;
         const decision = classifySubmitGroupFailure(e, {
           group, linkedEstimate, separateProgram, key, groupLabelText: groupLabel(group),
         });
@@ -2587,9 +2581,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       }
     }
     releaseSubmit();
-    if (submitCancelled) {
-      if (modalMountedRef.current && results.length > 0) {
-        setToast(`${results.length} of ${groups.length} appointment series saved before the customer changed. Review the customer and submit the remaining work again.`);
+    if (!modalMountedRef.current || selectedCustomerIdRef.current !== submitCustomerId) {
+      // Closing cannot undo a POST already accepted by the server. Refresh
+      // the owning schedule even after unmount, while still skipping every
+      // later booking group and the follow-up billing work below.
+      if (results.length > 0) {
+        onCreated?.({ id: results[0].id, scheduledDate: apptDate }, { background: true });
+        onChange?.({ id: results[0].id, scheduledDate: apptDate }, { background: true });
       }
       return;
     }

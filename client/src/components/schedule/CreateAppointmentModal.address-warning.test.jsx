@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
+import CreateAppointmentModal, {
   ADDRESS_ASK_LOOKUP_TIMEOUT_MS,
   addressAskNoticesMatch,
   recheckAddressAskAtSubmit,
@@ -11,6 +11,8 @@ import {
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 function deferred() {
@@ -21,6 +23,90 @@ function deferred() {
     reject = onReject;
   });
   return { promise, resolve, reject };
+}
+
+function jsonResponse(body, { ok = true, status = 200 } = {}) {
+  return {
+    ok,
+    status,
+    json: vi.fn(async () => body),
+  };
+}
+
+function futureDate(days = 30) {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, '0'),
+    String(date.getDate()).padStart(2, '0'),
+  ].join('-');
+}
+
+function installModalFetch({ firstScheduleRequest, secondScheduleRequest, submitAddressRequest } = {}) {
+  let addressRequests = 0;
+  const fetcher = vi.fn((input, options = {}) => {
+    const url = String(input);
+    if (url.includes('/admin/triage?')) {
+      addressRequests += 1;
+      if (addressRequests === 2 && submitAddressRequest) return submitAddressRequest.promise;
+      return Promise.resolve(jsonResponse({ items: [] }));
+    }
+    if (url.includes('/admin/services?')) {
+      const name = url.includes('Second') ? 'Second seasonal service' : 'First seasonal service';
+      return Promise.resolve(jsonResponse({
+        services: [{
+          id: name.startsWith('First') ? 'service-first' : 'service-second',
+          name,
+          billing_type: 'recurring',
+          frequency: 'seasonal_feb_oct',
+          visits_per_year: 9,
+          base_price: 100,
+          default_duration_minutes: 30,
+        }],
+      }));
+    }
+    if (url.endsWith('/admin/schedule') && options.method === 'POST') {
+      const scheduleRequestCount = fetcher.mock.calls.filter(
+        ([calledUrl, calledOptions]) => String(calledUrl).endsWith('/admin/schedule') && calledOptions?.method === 'POST',
+      ).length;
+      if (scheduleRequestCount === 1) {
+        return firstScheduleRequest?.promise || Promise.resolve(jsonResponse({ id: 'appointment-committed' }));
+      }
+      if (scheduleRequestCount === 2 && secondScheduleRequest) return secondScheduleRequest.promise;
+      return Promise.resolve(jsonResponse({ id: 'unexpected-later-appointment' }));
+    }
+    if (url.includes('/properties?context=appointment_address')) {
+      return Promise.resolve(jsonResponse({ properties: [], canChangeAppointmentAddress: false }));
+    }
+    if (url.includes('/schedule-estimates')) return Promise.resolve(jsonResponse({ estimates: [] }));
+    if (url.endsWith('/admin/technicians')) return Promise.resolve(jsonResponse({ technicians: [] }));
+    if (url.endsWith('/admin/discounts')) return Promise.resolve(jsonResponse([]));
+    if (url.endsWith('/annual-prepay-availability')) return Promise.resolve(jsonResponse({ enabled: false }));
+    if (url.endsWith('/card-request-availability')) return Promise.resolve(jsonResponse({ enabled: false }));
+    if (url.endsWith('/admin/dispatch/slot-check')) {
+      return Promise.resolve(jsonResponse({ ok: true, results: [{ conflicts: [] }] }));
+    }
+    if (url.includes('/admin/schedule/find-time')) return Promise.resolve(jsonResponse({ gated: true }));
+    throw new Error(`Unhandled fetch in CreateAppointmentModal test: ${url}`);
+  });
+  vi.stubGlobal('fetch', fetcher);
+  return { fetcher, getAddressRequestCount: () => addressRequests };
+}
+
+async function addTwoSeasonalServices() {
+  const firstSearch = screen.getByPlaceholderText('Search services');
+  fireEvent.change(firstSearch, { target: { value: 'First' } });
+  fireEvent.click(await screen.findByRole('button', { name: /First seasonal service/ }));
+
+  fireEvent.click(screen.getByRole('button', { name: /Add service/ }));
+  const secondSearch = screen.getByPlaceholderText('Search to add service');
+  fireEvent.change(secondSearch, { target: { value: 'Second' } });
+  fireEvent.click(await screen.findByRole('button', { name: /Second seasonal service/ }));
+
+  const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+  await waitFor(() => expect(submit.disabled).toBe(false));
+  return submit;
 }
 
 describe('useAddressAskLookup', () => {
@@ -228,5 +314,152 @@ describe('submission-time address review', () => {
     await expect(check).resolves.toMatchObject({ status: 'cancelled', changed: false, notice: null });
     request.resolve({ items: [{ reason_code: 'address_unverified' }] });
     await request.promise;
+  });
+});
+
+describe('CreateAppointmentModal submit cancellation', () => {
+  const customer = { id: 'customer-a', firstName: 'Ada', lastName: 'Lovelace' };
+
+  it('reports a committed first group once after unmount and skips later booking posts', async () => {
+    const firstScheduleRequest = deferred();
+    const { fetcher } = installModalFetch({ firstScheduleRequest });
+    const onCreated = vi.fn();
+    const onChange = vi.fn();
+    const scheduledDate = futureDate();
+    const view = render(
+      <CreateAppointmentModal
+        defaultCustomer={customer}
+        defaultDate={scheduledDate}
+        defaultWindowStart="09:00"
+        onClose={vi.fn()}
+        onCreated={onCreated}
+        onChange={onChange}
+      />,
+    );
+    const submit = await addTwoSeasonalServices();
+
+    fireEvent.click(submit);
+    await waitFor(() => expect(fetcher.mock.calls.filter(
+      ([url, options]) => String(url).endsWith('/admin/schedule') && options?.method === 'POST',
+    )).toHaveLength(1));
+    const firstScheduleBody = JSON.parse(fetcher.mock.calls.find(
+      ([url, options]) => String(url).endsWith('/admin/schedule') && options?.method === 'POST',
+    )[1].body);
+    expect(firstScheduleBody).toMatchObject({
+      serviceId: 'service-first',
+      serviceAddons: [],
+      recurringPattern: 'seasonal_feb_oct',
+    });
+    view.unmount();
+
+    await act(async () => {
+      firstScheduleRequest.resolve(jsonResponse({ id: 'appointment-committed' }));
+      await firstScheduleRequest.promise;
+    });
+
+    await waitFor(() => {
+      expect(onCreated).toHaveBeenCalledTimes(1);
+      expect(onChange).toHaveBeenCalledTimes(1);
+    });
+    expect(onCreated).toHaveBeenCalledWith(
+      { id: 'appointment-committed', scheduledDate },
+      { background: true },
+    );
+    expect(onChange).toHaveBeenCalledWith(
+      { id: 'appointment-committed', scheduledDate },
+      { background: true },
+    );
+    expect(fetcher.mock.calls.filter(
+      ([url, options]) => String(url).endsWith('/admin/schedule') && options?.method === 'POST',
+    )).toHaveLength(1);
+    expect(fetcher.mock.calls.some(
+      ([url, options]) => String(url).includes('/annual-prepay-invoice') && options?.method === 'POST',
+    )).toBe(false);
+  });
+
+  it('reports the first committed group without a late error alert when the second post fails after unmount', async () => {
+    const secondScheduleRequest = deferred();
+    const { fetcher } = installModalFetch({ secondScheduleRequest });
+    const alertMock = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const onCreated = vi.fn();
+    const onChange = vi.fn();
+    const scheduledDate = futureDate();
+    const view = render(
+      <CreateAppointmentModal
+        defaultCustomer={customer}
+        defaultDate={scheduledDate}
+        defaultWindowStart="09:00"
+        onClose={vi.fn()}
+        onCreated={onCreated}
+        onChange={onChange}
+      />,
+    );
+    const submit = await addTwoSeasonalServices();
+
+    fireEvent.click(submit);
+    await waitFor(() => expect(fetcher.mock.calls.filter(
+      ([url, options]) => String(url).endsWith('/admin/schedule') && options?.method === 'POST',
+    )).toHaveLength(2));
+    view.unmount();
+
+    await act(async () => {
+      secondScheduleRequest.resolve(jsonResponse(
+        { error: 'late server failure' },
+        { ok: false, status: 500 },
+      ));
+      await secondScheduleRequest.promise;
+    });
+
+    await waitFor(() => {
+      expect(onCreated).toHaveBeenCalledTimes(1);
+      expect(onChange).toHaveBeenCalledTimes(1);
+    });
+    expect(onCreated).toHaveBeenCalledWith(
+      { id: 'appointment-committed', scheduledDate },
+      { background: true },
+    );
+    expect(onChange).toHaveBeenCalledWith(
+      { id: 'appointment-committed', scheduledDate },
+      { background: true },
+    );
+    expect(alertMock).not.toHaveBeenCalled();
+  });
+
+  it('does not report creation when unmounted before the first booking post', async () => {
+    const submitAddressRequest = deferred();
+    const { fetcher, getAddressRequestCount } = installModalFetch({ submitAddressRequest });
+    const onCreated = vi.fn();
+    const onChange = vi.fn();
+    const view = render(
+      <CreateAppointmentModal
+        defaultCustomer={customer}
+        defaultDate={futureDate()}
+        defaultWindowStart="09:00"
+        onClose={vi.fn()}
+        onCreated={onCreated}
+        onChange={onChange}
+      />,
+    );
+    const submit = await addTwoSeasonalServices();
+
+    fireEvent.click(submit);
+    await waitFor(() => expect(getAddressRequestCount()).toBe(2));
+    const submitAddressSignal = fetcher.mock.calls.filter(
+      ([url]) => String(url).includes('/admin/triage?'),
+    )[1][1].signal;
+    view.unmount();
+
+    expect(submitAddressSignal.aborted).toBe(true);
+    await act(async () => {
+      submitAddressRequest.resolve(jsonResponse({ items: [] }));
+      await submitAddressRequest.promise;
+    });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(onCreated).not.toHaveBeenCalled();
+    expect(onChange).not.toHaveBeenCalled();
+    expect(fetcher.mock.calls.some(
+      ([url, options]) => String(url).endsWith('/admin/schedule') && options?.method === 'POST',
+    )).toBe(false);
   });
 });
