@@ -1296,6 +1296,7 @@ const REPORT_TRAILING_UNCERTAINTY_RE = new RegExp(
     + `(?:(?:was|is|has been|had been)(?:\\s+${REPORT_FINDING_VERB_RE.source})?|did))?)\\s*(?=$|,)`,
   'i',
 );
+const REPORT_TRAILING_DENIAL_RE = /^(?:actually\s+)?(?:not(?:\s+(?:really|actually))?|no|(?:it|that|this)\s+(?:was|is|has|had)(?:n['’]t|\s+not)(?:\s+been)?)\s*$/i;
 const REPORT_CONCISE_NONCOMPLETION_RE = /^\s*(?:(?:(?:is|are|was|were|has|have|had)(?:\s+(?:been|being))?\s+)?(?:(?:only|just|merely|simply|still)\s+)*(?:(?:the|our|your|their|his|her|my|its)\s+)?(?:(?:recommended|scheduled|planned|intended|proposed|suggested|considered|expected|required|needed|pending)\b|(?:an?\s+)?(?:recommendation|plan|proposal|suggestion|possibility)\b|under\s+consideration\b|(?:for\s+)?(?:tomorrow|tonight|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b)|(?:will|shall|would|should|can|could|may|might|must|is going to|are going to|was going to|were going to)\b)/i;
 // Qualified shorthand must positively state completion or cite the report;
 // unknown qualifiers can describe proposed treatment and are not evidence.
@@ -1498,8 +1499,9 @@ function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb
 function reportSharedLocationContinuation(text, clauseEnd, location) {
   const remainder = text.slice(clauseEnd);
   const dashQualifier = remainder.replace(/^[—–]\s*/, '').split(/[.!?;]/)[0];
-  if (/^[—–]/.test(remainder) && REPORT_TRAILING_UNCERTAINTY_RE.test(dashQualifier)) {
-    return { text: `, ${dashQualifier}`, question: false };
+  if (/^[—–]/.test(remainder) && (REPORT_TRAILING_UNCERTAINTY_RE.test(dashQualifier)
+      || REPORT_TRAILING_DENIAL_RE.test(dashQualifier))) {
+    return { text: `, ${dashQualifier}`, unconfirmed: true };
   }
   const locationTail = new RegExp(
     `^and\\s+(?:(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+)?`
@@ -1511,19 +1513,21 @@ function reportSharedLocationContinuation(text, clauseEnd, location) {
       + `${REPORT_LOCATION_NOUN_PREFIX}[\\w'-]+\\b`,
     'i',
   ).exec(remainder);
-  if (!locationTail) return { text: '', question: false };
+  if (!locationTail) return { text: '', unconfirmed: false };
   const qualifier = remainder.slice(locationTail[0].length).trim()
     .replace(/^(?:perimeter|area|wall|walls|zone|edge)\b\s*/i, '');
   // A shared list ends the location noun or adds an adjunct, not a new predicate.
   if (!/^(?:$|[.!?;]|(?:,\s*)?(?:and|or|before|after|with|as|according|which|(?:only\s+)?if|unless)\b)/i.test(qualifier)
-      && !REPORT_TRAILING_UNCERTAINTY_RE.test(qualifier.replace(/[.!?;].*$/, ''))) {
-    return { text: '', question: false };
+      && !REPORT_TRAILING_UNCERTAINTY_RE.test(qualifier.replace(/[.!?;].*$/, ''))
+      && !REPORT_TRAILING_DENIAL_RE.test(qualifier.replace(/^[,—–]\s*|[.!?;].*$/g, ''))) {
+    return { text: '', unconfirmed: false };
   }
   const end = remainder.search(/[.!?;]/);
   return {
     text: remainder.slice(0, end >= 0 ? end : undefined),
-    question: end >= 0 && remainder[end] === '?',
-    qualifier: qualifier.replace(/[.!?;].*$/, ''),
+    unconfirmed: (end >= 0 && remainder[end] === '?')
+      || REPORT_TRAILING_UNCERTAINTY_RE.test(qualifier.replace(/[.!?;].*$/, ''))
+      || REPORT_TRAILING_DENIAL_RE.test(qualifier.replace(/^[,—–]\s*|[.!?;].*$/g, '')),
   };
 }
 
@@ -1543,7 +1547,7 @@ function report_readback_confirms(value, record, { spoken }) {
         'i',
       ).test(text.slice(clauseEnd));
       const sharedLocation = reportSharedLocationContinuation(text, clauseEnd, value.location);
-      if (text[clauseEnd] === '?' || interrogative || coordinatedQuestion || sharedLocation.question) continue;
+      if (text[clauseEnd] === '?' || interrogative || coordinatedQuestion || sharedLocation.unconfirmed) continue;
       const reportClause = clauseOf(text, m.index) + sharedLocation.text;
       const assertion = reportAssertionOf(reportClause, m.index - clauseStart);
       const clause = assertion.text;
@@ -1590,7 +1594,7 @@ function report_readback_confirms(value, record, { spoken }) {
         const claim = claimContext(claimText, Math.min(subjectAt, locationAt), claimText.length);
         if (affirmed.slice(subjectAt, subjectAt + m[0].length).toLowerCase() === m[0].toLowerCase()
             && !REPORT_UNCERTAINTY_RE.test(findingEvidence)
-            && !REPORT_TRAILING_UNCERTAINTY_RE.test(sharedLocation.qualifier || trailingEvidence)
+            && !REPORT_TRAILING_UNCERTAINTY_RE.test(trailingEvidence)
             && !REPORT_CONCISE_NONCOMPLETION_RE.test(trailingEvidence) && !REPORT_INSTRUCTION_RE.test(affirmed)
             && !alternativeLocation
             && (completedFinding || conciseFinding)
