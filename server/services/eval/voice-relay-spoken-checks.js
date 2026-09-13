@@ -561,7 +561,7 @@ const PAYMENT_INHERITED_OUTCOME_RE = new RegExp(
 );
 const PAYMENT_NON_TARGET_ANTECEDENT = '(?:appointment|estimate|service|visit|invoice|receipt|account|request|office|manager|technician|customer)';
 const PAYMENT_INTERVENING_SUBJECT_RE = new RegExp(
-  `\\b(?:because|while|although|since|as|and|but|yet)\\s+(?:(?:(?:the|your|our|this|that|an?|his|her|their)\\s+)(?!payment\\b|(?:(?:credit|debit|prepaid)\\s+)?card\\b|charge\\b|transaction\\b)[a-z][\\w'-]*(?:\\s+[a-z][\\w'-]*){0,3}|${PAYMENT_NON_TARGET_ANTECEDENT})\\s+(?:is|was|are|were|has|had|will|should|does|did|got|gets?|became|becomes?|seems?|seemed)\\b`,
+  `\\b(?:because|while|although|since|as|and|but|yet)\\s+(?:(?:(?:the|your|our|this|that|an?|his|her|their)\\s+)(?!payment\\b|(?:(?:credit|debit|prepaid)\\s+)?card\\b|charge\\b|transaction\\b)[a-z][\\w'-]*(?:\\s+[a-z][\\w'-]*){0,3}|${PAYMENT_NON_TARGET_ANTECEDENT})\\s+(?:is|was|are|were|has|had|will|should|does|did|got|gets?|became|becomes?|seems?|seemed|[a-z]+ed|went|ran|fell)\\b`,
   'i',
 );
 const PAYMENT_TARGET_ES = '(?:(?:su|el|la|este|esta)\\s+)?(?:pago|tarjeta|cargo|transacci[oó]n)';
@@ -569,7 +569,7 @@ const PAYMENT_RESULT_ES = '(?:aprobado|aprobada|procesado|procesada|completado|c
 const PAYMENT_ACTIVE_ACTION_ES = '(?:procesar|cobrar|cargar|recibir|aceptar|aprobar|completar)';
 const PAYMENT_ACTIVE_FUTURE_ES = '(?:procesar|cobrar|cargar|recibir|aceptar|aprobar|completar)(?:[eé]|emos|[aá]|[aá]n)';
 const PAYMENT_OUTCOME_ES_RE = new RegExp(
-  `\\b(?:${PAYMENT_TARGET_ES}\\s+(?:fue|ha\\s+sido|ser[aá])\\s+${PAYMENT_RESULT_ES}|(?:he|hemos|han)\\s+${PAYMENT_RESULT_ES}\\s+${PAYMENT_TARGET_ES}|(?:(?:su|el)\\s+)?pago\\s+se\\s+(?:realiz[oó]|proces[oó]|complet[oó])\\s+(?:correctamente|con\\s+[eé]xito)|(?:(?:voy|vamos|iremos)\\s+a\\s+${PAYMENT_ACTIVE_ACTION_ES}|${PAYMENT_ACTIVE_FUTURE_ES})\\s+${PAYMENT_TARGET_ES})\\b`,
+  `\\b(?:${PAYMENT_TARGET_ES}\\s+(?:fue|ha\\s+sido|ser[aá]|est[aá])\\s+${PAYMENT_RESULT_ES}|(?:he|hemos|han)\\s+${PAYMENT_RESULT_ES}\\s+${PAYMENT_TARGET_ES}|(?:(?:su|el)\\s+)?pago\\s+se\\s+(?:realiz[oó]|proces[oó]|complet[oó])\\s+(?:correctamente|con\\s+[eé]xito)|(?:(?:voy|vamos|iremos)\\s+a\\s+${PAYMENT_ACTIVE_ACTION_ES}|${PAYMENT_ACTIVE_FUTURE_ES})\\s+${PAYMENT_TARGET_ES})\\b`,
   'gi',
 );
 const PAYMENT_EPISTEMIC_REFUSAL_ES_RE = /\bno\s+(?:(?:le|te)\s+)?(?:puedo|podemos|podr[ií]a(?:mos)?)\s+(?:confirmar|asegurar|garantizar|decir)\b/i;

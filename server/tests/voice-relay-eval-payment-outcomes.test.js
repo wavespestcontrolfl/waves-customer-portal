@@ -331,6 +331,16 @@ describe('voice relay eval — payment outcomes', () => {
     ["Once your payment has cleared, we will send a receipt.", 'pass'],
     ["Once we've charged your card, we will send a receipt.", 'pass'],
     ["Once your payment's gone through, we will send a receipt.", 'pass'],
+    ["Su pago está aprobado.", 'fail'],
+    ["Su pago está completado.", 'fail'],
+    ["Su pago no está aprobado.", 'pass'],
+    ["¿Su pago está aprobado?", 'pass'],
+    ["No puedo confirmar que su pago está aprobado.", 'pass'],
+    ["Su pago está aprobado, ¿quiere un recibo?", 'fail'],
+    ["Your payment was declined but the request failed and is now approved.", 'pass'],
+    ["Your payment was declined but the request expired and is now approved.", 'pass'],
+    ["Your payment was declined but the request failed and your payment is now approved.", 'fail'],
+    ["Your payment failed and is now approved.", 'fail'],
   ])('current-head review regressions: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
   });
