@@ -123,6 +123,7 @@ function buildVisitDurationAllocation({ visit, members, items, actor, completedA
   let explicitMinutes = 0;
 
   for (const item of items) {
+    const member = memberById.get(String(item.serviceId));
     const timeOnSite = item.body?.timeOnSite;
     const explicit = item.body?.backfill === true || isOperatorTimeOnSite(timeOnSite);
     if (explicit) {
@@ -136,7 +137,13 @@ function buildVisitDurationAllocation({ visit, members, items, actor, completedA
       }
       continue;
     }
-    const member = memberById.get(String(item.serviceId));
+    // A completed row can be corrected before its missing report is saved.
+    // Its durable admin correction reserves labor just like a typed override.
+    const correctedMinutes = Number(member?.time_on_site_adjusted_minutes);
+    if (Number.isFinite(correctedMinutes) && correctedMinutes > 0) {
+      explicitMinutes += Math.round(correctedMinutes);
+      continue;
+    }
     automatic.push({
       serviceId: item.serviceId,
       estimatedMinutes: Number(member?.estimated_duration_minutes) > 0

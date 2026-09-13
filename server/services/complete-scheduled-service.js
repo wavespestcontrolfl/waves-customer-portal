@@ -5329,8 +5329,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             if (Number.isFinite(stampedMinutes) && stampedMinutes > 0
               && (stampMovedMidFlight
                 || (!isBackfillCompletion && !liveAdjustedTimeOnSite
-                  && typeof effectiveTimeOnSite !== 'number'))) {
+                  && (packetRecords || typeof effectiveTimeOnSite !== 'number')))) {
               effectiveTimeOnSite = stampedMinutes;
+              packetDurationAllocation = null;
               correctionPreservedMidFlight = true;
             }
           }
@@ -12444,12 +12445,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
       const result = await trackTransitions.markComplete(svc.id, {
         actorType: 'admin',
         actorId: completionInput.actor.technicianId,
-        // Same backfill contract as the first markComplete above: normally
+        // Same duration contract as the first markComplete above: normally
         // idempotent by now, but when that call failed this one performs the
         // real flip — it must honor the duration policy AND the backdated
         // completed_at stamp too.
-        untrustedLifecycleSpan: isBackfillCompletion,
-        completedAt: backfillTrackerCompletedAt,
+        untrustedLifecycleSpan: isBackfillCompletion || !!packetDurationAllocation,
+        completedAt: packetDurationAllocation?.completedAtSource === 'packet_save'
+          ? packetDurationAllocation.completedAt
+          : backfillTrackerCompletedAt,
         // Same fence as the first markComplete above (codex rounds 13/17).
         expectedCorrectionSeq: svc.time_on_site_correction_seq ?? null,
       });

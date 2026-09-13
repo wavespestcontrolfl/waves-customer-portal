@@ -286,6 +286,66 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(records.every((row) => row.structured_notes.visitDurationAllocation.allocatedMinutes === null)).toBe(true);
   });
 
+  test('preserves a recordless member correction and allocates only the remaining visit minutes', async () => {
+    const start = new Date(Date.now() - 60 * 60000);
+    const end = new Date();
+    await mockPg('service_visits').where({ id: fixture.visitId }).update({ arrived_at: start });
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({
+      status: 'completed', actual_start_time: start, actual_end_time: end, completed_at: end,
+    });
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({
+      time_on_site_adjusted_minutes: 20, time_on_site_correction_seq: 1,
+      actual_duration_minutes: 20, service_time_minutes: 20,
+      actual_end_time: new Date(start.getTime() + 20 * 60000),
+    });
+    const input = submission();
+    input.items.forEach((entry) => { entry.body.timeOnSite = '1:00:00'; });
+    const saved = await saveVisitCompletionPacket(input);
+    expect(saved.status).toBe(202);
+    const packet = await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first('payload');
+    expect(packet.payload.durationAllocation).toMatchObject({
+      totalMinutes: 60, explicitMinutes: 20,
+      items: [{ serviceId: fixture.serviceIds[1], allocatedMinutes: 40 }],
+    });
+    const record = await mockPg('service_records').where({ scheduled_service_id: fixture.serviceIds[0] }).first();
+    expect(record.structured_notes).toMatchObject({ timeOnSite: 20, timeOnSiteAdjusted: true });
+    expect(record.structured_notes.visitDurationAllocation).toBeUndefined();
+    await runVisitCompletionPacketMemberEffects(saved.body.packetId);
+    const services = await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).orderBy('id');
+    expect(services.map((row) => row.actual_duration_minutes)).toEqual([20, 40]);
+  });
+
+  test.each([0, null])('tracker recovery preserves a saved %s allocation after its first transition fails', async (minutes) => {
+    if (minutes === 0) {
+      await mockPg('service_visits').where({ id: fixture.visitId }).update({ arrived_at: new Date() });
+    }
+    const saved = await saveVisitCompletionPacket(submission());
+    // A subsequently repaired shared start must not become per-member labor.
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({
+      actual_start_time: new Date(Date.now() - 59 * 60000),
+    });
+    const transitions = require('../services/track-transitions');
+    const markComplete = transitions.markComplete;
+    const failed = new Set();
+    jest.spyOn(transitions, 'markComplete').mockImplementation((id, options) => {
+      if (!failed.has(id)) {
+        failed.add(id);
+        return Promise.reject(new Error('Synthetic first tracker transition outage'));
+      }
+      return markComplete(id, options);
+    });
+    expect(await runVisitCompletionPacketMemberEffects(saved.body.packetId)).toMatchObject({
+      status: 202, body: { state: 'member_effects_ready' },
+    });
+    const services = await mockPg('scheduled_services').whereIn('id', fixture.serviceIds);
+    expect(services).toHaveLength(2);
+    for (const service of services) {
+      expect(service).toMatchObject({
+        track_state: 'complete', service_time_minutes: minutes, actual_duration_minutes: minutes,
+      });
+    }
+  });
+
   test('an implausibly large item array is refused before any per-item lock is taken', async () => {
     const input = submission();
     const flood = Array.from({ length: 51 }, () => ({ serviceId: randomUUID(), body: { ...input.items[0].body } }));
