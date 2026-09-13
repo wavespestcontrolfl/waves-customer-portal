@@ -16,6 +16,7 @@ const visitInput = require('../services/lawn-visit-input');
 const visitResult = require('../services/lawn-visit-result');
 const visitScores = require('../services/lawn-visit-scores');
 const visitRuns = require('../services/lawn-visit-runs');
+const visitDelivery = require('../services/lawn-visit-delivery');
 const KnowledgeBridge = require('../services/knowledge-bridge');
 const LawnIntel = require('../services/lawn-intelligence');
 const { withConcurrency, mergePhotoComposites } = require('../services/lawn-photo-merge');
@@ -247,6 +248,8 @@ async function resolveAssessmentServiceRecordId(assessment, { propertyHistoryEna
     } else await db('lawn_assessments')
       .where({ id: assessment.id })
       .update({ service_record_id: serviceRecord.id, updated_at: new Date() })
+      .returning('*')
+      .then(([linked]) => Object.assign(assessment, linked))
       .catch((err) => logger.error(`[lawn-assessment] service_record_id back-link failed: ${err.message}`));
   }
   return serviceRecord.id;
@@ -756,14 +759,9 @@ router.post('/assess', async (req, res, next) => {
       season,
       photos: JSON.stringify(photoMeta),
       ...scoreFields,
-      // Gate on: a run-backed row is inserted pending. The baseline it should
-      // take, and the run-aware /confirm that would assign it, are NOT
-      // implemented here — /confirm is still the legacy path, so a gate-on
-      // assessment currently never becomes a baseline and its NULL scores
-      // would be confirmed as zeros by scoreValue(). Both are owned by the
-      // units that wire confirmation (#4284 transaction, #4304 route).
-      // GATE_LAWN_VISIT_ASSESSMENT MUST STAY UNSET until those land; it is
-      // unset in production today, which is why this is latent and not live.
+      // A run-backed assessment stays pending here. The run-aware /confirm
+      // transaction installs its baseline only after all required scores are
+      // complete; unknown scores remain NULL until the technician supplies them.
       is_baseline: propertyHistoryEnabled || visitAssessmentEnabled ? false : isBaseline,
     };
     // Gate on: the run row is the provenance and the review target, so it is
@@ -1050,104 +1048,118 @@ router.post('/confirm', async (req, res, next) => {
       adjustedScores,
       stress_flags: stressFlagsInput,
       protocol_field_checks: protocolFieldChecksInput,
+      observationEdit,
     } = req.body;
-
-    if (!assessmentId) return res.status(400).json({ error: 'assessmentId is required' });
 
     // Validate stress_flags up front so a bad payload doesn't reach
     // the DB write path.
     const { errors: stressErrors, normalized: normalizedStressFlags } = normalizeStressFlags(stressFlagsInput);
-    if (stressErrors.length) {
-      return res.status(400).json({ error: 'Invalid stress_flags', details: stressErrors });
-    }
     const protocolFieldChecksProvided = Object.prototype.hasOwnProperty.call(req.body, 'protocol_field_checks');
-    let protocolFieldChecks = null;
-    if (protocolFieldChecksProvided) {
-      const { errors: protocolCheckErrors, normalized } = normalizeProtocolFieldChecks(protocolFieldChecksInput);
-      if (protocolCheckErrors.length) {
-        return res.status(400).json({ error: 'Invalid protocol_field_checks', details: protocolCheckErrors });
-      }
-      protocolFieldChecks = normalized;
-    }
+    const { errors: protocolCheckErrors, normalized: protocolFieldChecks } = normalizeProtocolFieldChecks(protocolFieldChecksInput);
+    const invalidRequest = [
+      [Boolean(assessmentId), { error: 'assessmentId is required' }],
+      [observationEdit == null || typeof observationEdit === 'string', { error: 'observationEdit must be text or null' }],
+      [stressErrors.length === 0, { error: 'Invalid stress_flags', details: stressErrors }],
+      [protocolCheckErrors.length === 0, { error: 'Invalid protocol_field_checks', details: protocolCheckErrors }],
+    ].find(([valid]) => !valid);
+    if (invalidRequest) return res.status(400).json(invalidRequest[1]);
 
     const assessment = await db('lawn_assessments').where({ id: assessmentId }).first();
     if (!assessment) return res.status(404).json({ error: 'Assessment not found' });
 
-    const finalScores = {
-      turf_density: scoreValue(adjustedScores?.turf_density, assessment.turf_density),
-      weed_suppression: scoreValue(adjustedScores?.weed_suppression, assessment.weed_suppression),
-      color_health: scoreValue(adjustedScores?.color_health, assessment.color_health),
-      fungus_control: scoreValue(adjustedScores?.fungus_control, assessment.fungus_control),
-      thatch_level: scoreValue(adjustedScores?.thatch_level, assessment.thatch_level),
-    };
-    // Stress/Damage. The tech now corrects a single "Stress" score directly on
-    // the completion screen, so honor an explicit adjustedScores.stress_damage
-    // when sent. When it isn't (older clients, or a prefill re-confirm that only
-    // carries the AI values), fall back to the prior derivation: worst of the
-    // fungus + thatch scores and the AI worst-spot floor stored at /assess (which
-    // already folds in insect/drought/mechanical and the worst per-photo
-    // disease/thatch). Pre-stress_damage rows (null floor) fall back to
-    // worst-of(fungus, thatch) — never 0.
-    {
-      const aiFloor = Number.isFinite(Number(assessment.stress_damage))
-        ? Number(assessment.stress_damage)
-        : 95;
-      const derivedStress = Math.min(
-        Number(finalScores.fungus_control),
-        Number(finalScores.thatch_level),
-        aiFloor,
-      );
-      finalScores.stress_damage = scoreValue(adjustedScores?.stress_damage, derivedStress);
-    }
-
-    const updateData = {
-      confirmed_by_tech: true,
-      confirmed_at: new Date(),
-      updated_at: new Date(),
-      ...finalScores,
-      overall_score: calculateOverallScore(finalScores),
-    };
-
-    // If tech provided adjusted scores, apply them
-    if (adjustedScores) {
-      if (adjustedScores.observations != null) updateData.observations = adjustedScores.observations;
-      updateData.adjusted_scores = JSON.stringify({
-        ...parseJsonObject(assessment.adjusted_scores),
-        ...finalScores,
-        ...(adjustedScores.observations != null ? { observations: adjustedScores.observations } : {}),
-      });
-    }
-
-    // Persist stress_flags only if any allowed key was sent. An empty
-    // object {} is treated as "tech confirmed no flags set" and
-    // stored — distinguishable from null (no signal).
-    if (normalizedStressFlags !== null) {
-      updateData.stress_flags = JSON.stringify(normalizedStressFlags);
-    }
-
+    // Persisted provenance selects the workflow, even after the visit gate is
+    // turned off. Legacy rows retain their existing confirmation behavior.
+    const visitRun = await visitRuns.loadRun(assessmentId, db);
     let updated;
-    if (propertyHistoryEnabled) {
-      updated = await lawnAssessment.installConfirmedBaseline({ assessmentId, updateData }, { knex: db });
+    let confirmation;
+    if (visitRun) {
+      confirmation = await visitRuns.confirmRun({
+        assessmentId, adjustedScores, review: req.body, technicianId: req.technicianId,
+        observationEdit, propertyHistoryEnabled, scoreValue, calculateOverallScore,
+        stressFlags: normalizedStressFlags === null ? undefined : normalizedStressFlags,
+        persistChecks: protocolFieldChecksProvided
+          ? (current, trx) => persistProtocolFieldChecks({ assessment: current, checks: protocolFieldChecks, trx })
+          : undefined,
+      }, db);
+      updated = confirmation.assessment;
+      if (!confirmation.confirmed) {
+        return res.json({
+          success: true, confirmed: false, missingScores: confirmation.missingScores,
+          assessment: updated, visitAssessment: visitRuns.responseForRun(confirmation.run),
+        });
+      }
     } else {
-      [updated] = await db('lawn_assessments')
-        .where({ id: assessmentId })
-        .update(updateData)
-        .returning('*');
-    }
-    if (protocolFieldChecksProvided) {
-      await persistProtocolFieldChecks({ assessment: updated, checks: protocolFieldChecks });
-      Object.assign(updated, protocolFieldChecks, { protocol_field_checks: protocolFieldChecks });
+      const finalScores = Object.fromEntries(
+        ['turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level']
+          .map((key) => [key, scoreValue(adjustedScores?.[key], assessment[key])]),
+      );
+      // Stress/Damage. The tech now corrects a single "Stress" score directly on
+      // the completion screen, so honor an explicit adjustedScores.stress_damage
+      // when sent. When it isn't (older clients, or a prefill re-confirm that only
+      // carries the AI values), fall back to the prior derivation: worst of the
+      // fungus + thatch scores and the AI worst-spot floor stored at /assess (which
+      // already folds in insect/drought/mechanical and the worst per-photo
+      // disease/thatch). Pre-stress_damage rows (null floor) fall back to
+      // worst-of(fungus, thatch) — never 0.
+      {
+        const aiFloor = Number.isFinite(Number(assessment.stress_damage))
+          ? Number(assessment.stress_damage)
+          : 95;
+        const derivedStress = Math.min(
+          Number(finalScores.fungus_control),
+          Number(finalScores.thatch_level),
+          aiFloor,
+        );
+        finalScores.stress_damage = scoreValue(adjustedScores?.stress_damage, derivedStress);
+      }
+
+      const updateData = {
+        confirmed_by_tech: true,
+        confirmed_at: new Date(),
+        updated_at: new Date(),
+        ...finalScores,
+        overall_score: calculateOverallScore(finalScores),
+      };
+
+      // If tech provided adjusted scores, apply them
+      if (adjustedScores) {
+        const textUpdate = adjustedScores.observations != null ? { observations: adjustedScores.observations } : {};
+        Object.assign(updateData, textUpdate);
+        updateData.adjusted_scores = JSON.stringify({
+          ...parseJsonObject(assessment.adjusted_scores),
+          ...finalScores,
+          ...textUpdate,
+        });
+      }
+
+      // Persist stress_flags only if any allowed key was sent. An empty
+      // object {} is treated as "tech confirmed no flags set" and
+      // stored — distinguishable from null (no signal).
+      if (normalizedStressFlags !== null) {
+        updateData.stress_flags = JSON.stringify(normalizedStressFlags);
+      }
+
+      if (propertyHistoryEnabled) {
+        updated = await lawnAssessment.installConfirmedBaseline({ assessmentId, updateData }, { knex: db });
+      } else {
+        [updated] = await db('lawn_assessments')
+          .where({ id: assessmentId })
+          .update(updateData)
+          .returning('*');
+      }
+      if (protocolFieldChecksProvided) {
+        await persistProtocolFieldChecks({ assessment: updated, checks: protocolFieldChecks });
+        Object.assign(updated, protocolFieldChecks, { protocol_field_checks: protocolFieldChecks });
+      }
     }
 
     // Agronomic Wiki: link only when a durable service_record exists.
     // Assessments captured inside Complete Service are back-linked after
     // completion creates that record.
-    let resolvedServiceRecordId = updated.service_record_id || null;
     try {
       const wiki = require('../services/agronomic-wiki');
       const serviceRecordId = await resolveAssessmentServiceRecordId(updated, { propertyHistoryEnabled });
       if (serviceRecordId) {
-        resolvedServiceRecordId = serviceRecordId;
         updated.service_record_id = serviceRecordId;
         const outcome = await wiki.linkTreatmentOutcome(serviceRecordId);
         await attachOutcomePhotoRefs(outcome, assessmentId);
@@ -1163,6 +1175,12 @@ router.post('/confirm', async (req, res, next) => {
     // Knowledge Bridge + Lawn Intelligence: fire all async intelligence (non-blocking)
     setImmediate(async () => {
       try {
+        if (visitRun) {
+          // The runner claims inside the task. Confirmation retries and cron
+          // recovery compete through the same renewable database ownership.
+          await visitDelivery.deliverConfirmedAssessment({ assessmentId });
+          return;
+        }
         // 1. FAWN weather context
         await LawnIntel.attachWeather(assessmentId);
 
@@ -1217,8 +1235,16 @@ router.post('/confirm', async (req, res, next) => {
     res.json({
       success: true,
       assessment: updated,
+      ...(confirmation ? {
+        confirmed: true, missingScores: [], visitAssessment: visitRuns.responseForRun(confirmation.run),
+      } : {}),
     });
   } catch (err) {
+    // The run store uses HTTP status values; the shared error handler only
+    // recognizes isOperational/statusCode. Preserve expected review failures.
+    if ([400, 404, 409].includes(err.status)) {
+      return res.status(err.status).json({ error: err.message, details: err.details });
+    }
     next(err);
   }
 });

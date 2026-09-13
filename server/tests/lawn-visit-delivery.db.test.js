@@ -139,6 +139,25 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     },
   );
 
+  test('a persistent notification opt-out leaves notification owed without blocking or repeating the report', async () => {
+    const assessment = await seed();
+    const deps = dependencies();
+    const send = deps.LawnIntel.sendAssessmentNotification.getMockImplementation();
+    deps.LawnIntel.sendAssessmentNotification.mockResolvedValue({ sent: false, results: { reason: 'type_disabled' } });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await expect(deliver(assessment.id, deps)).rejects.toMatchObject({ code: 'LAWN_DELIVERY_STEP_INCOMPLETE' });
+      expect((await runs.deliveryState(assessment.id, db.knex)).gaps).toEqual(['notification']);
+      expect((await stored(assessment.id)).pipeline_completed_at).toBeNull();
+      await expire(assessment.id);
+    }
+    expect(deps.LawnIntel.generateServiceReport).toHaveBeenCalledTimes(1);
+    expect(deps.LawnIntel.sendAssessmentNotification).toHaveBeenCalledTimes(2);
+    deps.LawnIntel.sendAssessmentNotification.mockImplementation(send);
+    expect(await deliver(assessment.id, deps)).toMatchObject({ done: ['notification'], gaps: [] });
+    expect(deps.LawnIntel.generateServiceReport).toHaveBeenCalledTimes(1);
+    expect((await stored(assessment.id)).pipeline_completed_at).toBeInstanceOf(Date);
+  });
+
   test('empty recommendations cannot complete delivery, while a service-linked run skips standalone notification', async () => {
     const assessment = await seed({ service: true, calibration: false });
     const deps = dependencies();
