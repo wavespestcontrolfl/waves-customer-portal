@@ -1270,7 +1270,7 @@ const CAPTURE_ASSERTION_START_SOURCE = `(?:(?:(?:the )?(?:caller|customer)|she|h
 const DENIAL_CLAUSE_END_RE = new RegExp(`[.;!?—–]|\\s-\\s|\\b(?:but|because|except|other than|however|although|though|so|while|yet)\\b|(?::|,|\\band\\b)\\s*(?:(?:then|also)\\s+)*(?=${CAPTURE_ASSERTION_START_SOURCE})`, 'gi');
 function denialContinuesPastBoundary(text, denial, boundary) {
   const complement = text.slice(denial.index + denial[0].length, boundary.index);
-  const directQuestion = /^,/.test(boundary[0])
+  const directQuestion = /^[,:]/.test(boundary[0])
     && new RegExp(`^\\s*${REPORTED_QUESTION_AUX_SOURCE}\\b`, 'i').test(text.slice(boundary.index + boundary[0].length))
     && /\b(?:ask|asked|asks|asking|wonder|wondered|wonders|wondering)\s*$/i.test(complement);
   const namedComplement = /^:/.test(boundary[0]) && /^deni/i.test(denial[0])
@@ -1302,7 +1302,7 @@ function deniedSpans(text) {
     }
     const assertionPrefix = prefix.slice(assertionStart);
     const indirectQuestion = /\b(?:asked|asks|asking|wondered|wonders)\b[^.;!?]*\b(?:if|whether|what|when|where|which|who|whom|whose|why|how)\b/i.test(assertionPrefix);
-    const directQuestion = text.slice(0, m.index + m[0].length).match(new RegExp(`\\b(?:asked|asks|asking|wondered|wonders)\\b\\s*,\\s*${REPORTED_QUESTION_AUX_SOURCE}\\b[^.;!?]*$`, 'i'));
+    const directQuestion = text.slice(0, m.index + m[0].length).match(new RegExp(`\\b(?:asked|asks|asking|wondered|wonders)\\b\\s*[,:]\\s*${REPORTED_QUESTION_AUX_SOURCE}\\b[^.;!?]*$`, 'i'));
     let directQuestionExempt = false;
     if (directQuestion) {
       let reporterStart = 0;
@@ -1310,9 +1310,9 @@ function deniedSpans(text) {
       for (const boundary of prefix.slice(0, directQuestion.index).matchAll(DENIAL_CLAUSE_END_RE)) {
         reporterStart = boundary.index + boundary[0].length;
       }
-      const questionComma = directQuestion.index + directQuestion[0].indexOf(',');
-      directQuestionExempt = !clauseIsNegated(prefix.slice(reporterStart, questionComma))
-        && !prefix.slice(questionComma + 1, assertionStart).trim();
+      const questionBoundary = directQuestion.index + directQuestion[0].search(/[,:]/);
+      directQuestionExempt = !clauseIsNegated(prefix.slice(reporterStart, questionBoundary))
+        && !prefix.slice(questionBoundary + 1, assertionStart).trim();
     }
     if (indirectQuestion || directQuestionExempt) {
       m = DENIAL_WORD_RE.exec(text);

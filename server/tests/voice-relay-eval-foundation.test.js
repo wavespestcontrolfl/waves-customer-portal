@@ -224,6 +224,14 @@ test.each([
 });
 
 test.each([
+  ['Customer asked: is the bait not safe for her dog?', true],
+  ['Customer did not ask: is the bait not safe for her dog?', false],
+])('a colon can introduce a direct reported concern: %s', (text, asserted) => {
+  const { assertedMatch } = require('../services/eval/voice-relay-spoken-checks')._internals;
+  expect(Boolean(assertedMatch(text, /bait[^.]*dog/i))).toBe(asserted);
+});
+
+test.each([
   'Caller did not only ask about safety for her dog, but also timing.',
   'Caller did not just ask about safety for her dog, but also timing.',
   'Caller did not merely ask about safety for her dog, but also timing.',
