@@ -1250,13 +1250,13 @@ function only_language(value, record, { spoken }) {
 // clause (DENIAL_CLAUSE_END_RE), so "did not raise a safety concern" denies
 // the concern, while "did not book, but asked if the bait is safe for her
 // dog" asserts it — the "but" ends the denial's clause before the concern.
-const DENIAL_WORD_RE = /\b(?:(?:not|cannot|(?:is|are|do|did|does|was|were|has|have|had|ca|could|would|wo)n[\x27\u2019]t)(?!\s+(?:only|just|merely|simply)\b)|failed\s+to(?=\s+(?:raise|mention|report)\b)|never|denied|denies|without|nothing(?!\s+(?:but|except|other than)\b)|no(?![-\u2010-\u2015])|neither|none|zero)\b/gi;
+const DENIAL_WORD_RE = /\b(?:(?:not|cannot|(?:is|are|do|did|does|was|were|has|have|had|ca|could|would|wo)n[\x27\u2019]t)(?!\s+(?:only|just|merely|simply)\b)|(?:failed|unable)\s+to(?=\s+(?:raise|mention|report)\b)|never|denied|denies|without|nothing(?!\s+(?:but|except|other than)\b)|no(?![-\u2010-\u2015])|neither|none|zero)\b/gi;
 // Commas may enclose an aside and "and" may coordinate denied objects.
 // End their scope only when the next phrase starts a fresh assertion.
 const CAPTURE_NOUN_ASSERTION_START_SOURCE = `(?:[\\w\\x27\\u2019-]+\\s+){1,5}${CLAUSE_FINITE_PREDICATE_RE.source}`;
 const CAPTURE_ASSERTION_START_SOURCE = `(?:(?:(?:the )?(?:caller|customer)|she|he|they)\\s+\\w+|(?:never\\s+)?(?:asked|asks|raised|raises|expressed|expresses|mentioned|mentions|reported|reports|voiced|voices|denied|denies|noting|noted|adding|added|did|does|do|is|are|was|were|has|have|had)\\b|${CAPTURE_NOUN_ASSERTION_START_SOURCE})`;
 const REPORTED_QUESTION_AUX_SOURCE = `(?:${QUESTION_AUX_RE_SOURCE}|\\w+n[\\x27\\u2019]t)`;
-const DENIAL_CLAUSE_END_RE = new RegExp(`[.;!?—–]|\\s-\\s|\\b(?:but|because|however|although|though|so|while|yet)\\b|(?::|,|\\band\\b)\\s*(?:(?:then|also)\\s+)*(?=${CAPTURE_ASSERTION_START_SOURCE})`, 'gi');
+const DENIAL_CLAUSE_END_RE = new RegExp(`[.;!?—–]|\\s-\\s|\\b(?:but|because|except|other than|however|although|though|so|while|yet)\\b|(?::|,|\\band\\b)\\s*(?:(?:then|also)\\s+)*(?=${CAPTURE_ASSERTION_START_SOURCE})`, 'gi');
 function denialContinuesPastBoundary(text, denial, boundary) {
   const complement = text.slice(denial.index + denial[0].length, boundary.index);
   const directQuestion = /^,/.test(boundary[0])
@@ -1290,7 +1290,7 @@ function deniedSpans(text) {
       assertionStart = boundary.index + boundary[0].length;
     }
     const assertionPrefix = prefix.slice(assertionStart);
-    const indirectQuestion = /\b(?:asked|asks|asking|wondered|wonders)\b[^.;!?]*\b(?:if|whether)\b/i.test(assertionPrefix);
+    const indirectQuestion = /\b(?:asked|asks|asking|wondered|wonders)\b[^.;!?]*\b(?:if|whether|what|when|where|which|who|whom|whose|why|how)\b/i.test(assertionPrefix);
     const directQuestion = text.slice(0, m.index + m[0].length).match(new RegExp(`\\b(?:asked|asks|asking|wondered|wonders)\\b\\s*,\\s*${REPORTED_QUESTION_AUX_SOURCE}\\b[^.;!?]*$`, 'i'));
     let directQuestionExempt = false;
     if (directQuestion) {
@@ -1310,7 +1310,7 @@ function deniedSpans(text) {
     // A negated predicate also governs its preceding subject: "concerns
     // were not raised". Keep that scope inside the same assertion so a
     // separate negated booking does not erase an affirmative concern.
-    if (/\b(?:is|are|was|were|be|been|being|has|have|had|did|does|do)\s*(?:\w+ly\s+|,[^,.;!?]*,\s*)*$/i.test(prefix)
+    if (new RegExp(`\\b(?:${QUESTION_AUX_RE_SOURCE}|be|been|being)\\s*(?:\\w+ly\\s+|,[^,.;!?]*,\\s*)*$`, 'i').test(prefix)
       || /^(?:is|are|was|were|has|have|had|did|does|ca|could|would|wo)n[\x27\u2019]t$/i.test(m[0])) {
       start = 0;
       DENIAL_CLAUSE_END_RE.lastIndex = 0;
