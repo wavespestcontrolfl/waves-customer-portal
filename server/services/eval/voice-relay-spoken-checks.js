@@ -1276,7 +1276,7 @@ function deniedSpans(text) {
     for (const boundary of prefix.matchAll(DENIAL_CLAUSE_END_RE)) assertionStart = boundary.index + boundary[0].length;
     const assertionPrefix = prefix.slice(assertionStart);
     const indirectQuestion = /\b(?:asked|asks|asking|wondered|wonders)\b[^.;!?]*\b(?:if|whether)\b/i.test(assertionPrefix);
-    const directQuestion = prefix.match(/\b(?:asked|asks|asking|wondered|wonders)\b\s*,\s*(?:is|are|was|were|do|does|did|can|could|would|will|has|have|had)\b[^.;!?]*$/i);
+    const directQuestion = prefix.match(new RegExp(`\\b(?:asked|asks|asking|wondered|wonders)\\b\\s*,\\s*${QUESTION_AUX_RE_SOURCE}\\b[^.;!?]*$`, 'i'));
     let directQuestionDenied = false;
     if (directQuestion) {
       let reporterStart = 0;
