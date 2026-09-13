@@ -1232,6 +1232,8 @@ function no_third_party_disclosure(value, record, { spoken }) {
 const REPORT_UNCERTAINTY_RE = /\b(?:can|must|may|might|could|would|should|will|shall|going to|plan(?:s|ned)? to|maybe|perhaps|possibly|potentially|probably)\b/i;
 const REPORT_INSTRUCTION_RE = /(?:^|,\s*)(?:please\s+)?(?:apply|use|put|treat|spray|place)\b|\b(?:please|make sure|ensure|remember to)\b/i;
 const REPORT_FINDING_VERB_RE = /\b(?:applied|placed|used|treated|sprayed|put|went|got|received)\b/i;
+const REPORT_PARTICIPLE_RE = /^(?:applied|placed|used|treated|sprayed|put|received)$/i;
+const REPORT_COMPLETED_PASSIVE_RE = /\b(?:(?:was|were|got)|(?:has|have|had)(?:\s+(?:\w+ly|already|just|now))*\s+been)\s+(?:(?:\w+ly|already|just|now)\s+)*$/i;
 const REPORT_ASSERTION_START = `(?:(?:the|a|an)\\s+)?(?:[\\w'\u2019-]+\\s+){1,4}(?:(?:(?:was|were|is|are|has|have|had|got)\\s+(?:\\w+ly\\s+)?)?${REPORT_FINDING_VERB_RE.source})`;
 const REPORT_ASSERTION_BOUNDARY_RE = new RegExp(`(?:,\\s*|\\bwith\\s+)(?=${REPORT_ASSERTION_START})`, 'gi');
 const REPORT_UNRELATED_OR_CLAUSE_RE = /^or\s+(?:(?:the|our|your|their)\s+)?(?:technician|tech|crew|team|office|report|i|we|you|he|she|they|it)\s+(?:is|are|was|were|has|have|had|will|would|should|can|could|did|does|do)\b/i;
@@ -1271,6 +1273,25 @@ function reportHasAlternativeLocation(affirmed, locationAt, orTail) {
   return /\beither\b/i.test(affirmed) || !REPORT_UNRELATED_OR_CLAUSE_RE.test(alternativeTail);
 }
 
+// An active past treatment places its predicate before the matched product;
+// a participle after the product needs a completed passive auxiliary. This
+// excludes recommendation and command frames such as "be applied" and
+// "get Talstar applied" while retaining actual past treatment assertions.
+function reportHasCompletedFinding(affirmed, subjectAt, subjectLength, findingVerb) {
+  if (subjectAt < 0 || !findingVerb) return false;
+  if (!REPORT_PARTICIPLE_RE.test(findingVerb[0]) || findingVerb.index < subjectAt) return true;
+  const predicatePrefix = affirmed.slice(subjectAt + subjectLength, findingVerb.index);
+  const tersePastFinding = /^\s*(?:(?:the|a|an)\s*)?$/i.test(affirmed.slice(0, subjectAt)) && !predicatePrefix.trim();
+  return tersePastFinding || REPORT_COMPLETED_PASSIVE_RE.test(predicatePrefix);
+}
+
+function reportHasConciseFinding(affirmed, subjectAt, locationAt, findingVerb) {
+  const firstAt = Math.min(subjectAt, locationAt);
+  const lastAt = Math.max(subjectAt, locationAt);
+  return !findingVerb && /^(?:(?:the|a|an|granular)\s*)?$/i.test(affirmed.slice(0, firstAt).trim())
+    && /\b(?:around|along|on|to|at|in)\b/i.test(affirmed.slice(firstAt, lastAt));
+}
+
 /** value: { subject: "<regex>", location: "<regex>" } */
 function report_readback_confirms(value, record, { spoken }) {
   const subjectRe = new RegExp(value.subject, 'gi');
@@ -1300,18 +1321,17 @@ function report_readback_confirms(value, record, { spoken }) {
       // start with a finding term and connect it to its location; a caller
       // question or a list of terms is not such a summary.
       const findingVerb = REPORT_FINDING_VERB_RE.exec(affirmed);
-      const lead = affirmed.slice(0, Math.min(subjectAt, locationAt)).trim();
-      const conciseFinding = /^(?:(?:the|a|an|granular)\s*)?$/i.test(lead)
-        && /\b(?:around|along|on|to|at|in)\b/i.test(affirmed.slice(Math.min(subjectAt, locationAt), Math.max(subjectAt, locationAt)));
+      const completedFinding = reportHasCompletedFinding(affirmed, subjectAt, m[0].length, findingVerb);
+      const conciseFinding = reportHasConciseFinding(affirmed, subjectAt, locationAt, findingVerb);
       // A trailing "before" dates completed evidence. Remove only that
       // temporal marker, preserving any actual denial or condition later.
-      const evidenceEnd = Math.max(subjectAt, locationAt, findingVerb ? findingVerb.index : -1);
-      const claimText = evidenceEnd >= 0 && (findingVerb || conciseFinding)
+      const evidenceEnd = Math.max(subjectAt, locationAt, completedFinding ? findingVerb.index : -1);
+      const claimText = evidenceEnd >= 0 && (completedFinding || conciseFinding)
         ? affirmed.slice(0, evidenceEnd) + affirmed.slice(evidenceEnd).replace(/\bbefore\b/gi, 'prior to') : affirmed;
       const claim = claimContext(claimText, Math.min(subjectAt, locationAt), claimText.length);
       if (subjectAt >= 0 && locationAt >= 0 && !REPORT_UNCERTAINTY_RE.test(affirmed) && !REPORT_INSTRUCTION_RE.test(affirmed)
           && !alternativeLocation
-          && (findingVerb || conciseFinding)
+          && (completedFinding || conciseFinding)
           && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
         return ['pass', `readback confirmed: "${clip(clause.trim(), 160)}"`];
       }
