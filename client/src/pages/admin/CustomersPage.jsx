@@ -943,6 +943,7 @@ function CustomerIntelligenceTab() {
   const [loading, setLoading] = useState(true);
   const pendingRef = useRef(new Set());
   const refreshSeqRef = useRef(0);
+  const uncertainSeqRef = useRef(0);
   const [pendingActions, setPendingActions] = useState({});
   const [uncertainApprovals, setUncertainApprovals] = useState({});
   const [scanNeedsRefresh, setScanNeedsRefresh] = useState(false);
@@ -988,6 +989,7 @@ function CustomerIntelligenceTab() {
 
   const refreshResults = async (message, tone = "success") => {
     const seq = ++refreshSeqRef.current;
+    const uncertaintySnapshot = uncertainSeqRef.current;
     try {
       const result = await adminFetch("/admin/customers/intelligence");
       if (!result || !Number.isFinite(result.totalCustomers)) {
@@ -995,7 +997,9 @@ function CustomerIntelligenceTab() {
       }
       if (seq !== refreshSeqRef.current) return true;
       setData(result);
-      setUncertainApprovals({});
+      setUncertainApprovals((current) => Object.fromEntries(
+        Object.entries(current).filter(([, generation]) => generation > uncertaintySnapshot),
+      ));
       setScanNeedsRefresh(false);
       setActionFeedback(message ? { message, tone, retryRefresh: false } : null);
       return true;
@@ -1063,9 +1067,10 @@ function CustomerIntelligenceTab() {
       }
       await refreshResults(message, tone);
     } catch {
+      const uncertaintyGeneration = ++uncertainSeqRef.current;
       setUncertainApprovals((current) => ({
         ...current,
-        [outreach.id]: true,
+        [outreach.id]: uncertaintyGeneration,
       }));
       showFeedback(
         "Approval could not be confirmed. Refresh current status before trying again.",

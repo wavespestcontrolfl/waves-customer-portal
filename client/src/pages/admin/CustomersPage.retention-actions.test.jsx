@@ -196,6 +196,45 @@ describe("CustomerIntelligenceTab retention actions", () => {
     expect(writesFor("/sms-outreach/approve")).toHaveLength(1);
   });
 
+  it("keeps an ambiguous approval locked when an older summary request finishes", async () => {
+    const olderSummary = deferred();
+    let summaryReads = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url, options = {}) => {
+        const path = String(url);
+        if (path.endsWith("/scan") && options.method === "POST") {
+          return response({ scanned: true });
+        }
+        if (path.endsWith("/sms-outreach/approve") && options.method === "PUT") {
+          return response({ error: "Approval response unavailable" }, 503);
+        }
+        if (!options.method) {
+          summaryReads += 1;
+          return summaryReads === 1 ? response(summary()) : olderSummary.promise;
+        }
+        return response({});
+      }),
+    );
+    await openTab();
+    fireEvent.click(screen.getByRole("button", { name: "Run Scan Now" }));
+    await waitFor(() => expect(summaryReads).toBe(2));
+    fireEvent.click(screen.getByRole("button", { name: "Yes Approve & Send" }));
+    await screen.findByText(/refresh current status before trying again/i);
+
+    olderSummary.resolve(new Response(JSON.stringify(summary()), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+
+    const smsRow = screen.getByText(/Synthetic SMS draft/).parentElement;
+    await waitFor(() =>
+      expect(within(smsRow).getByRole("button", { name: "Check status" })).toBeEnabled(),
+    );
+    expect(within(smsRow).getByRole("button", { name: "Skip" })).toBeDisabled();
+    expect(writesFor("/sms-outreach/approve")).toHaveLength(1);
+  });
+
   it.each([
     ["scan", "/scan", "Customer intelligence scan failed. Try again."],
     ["skip", "/sms-outreach/skip", "Retention outreach could not be skipped. Try again."],
