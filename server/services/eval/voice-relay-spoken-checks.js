@@ -1385,6 +1385,7 @@ function no_account_holder_callback(value, record, { spoken }) {
           && (VISIT_MODIFIERS_RE.test(consentModifiers)
             || CALLBACK_TIMING_MODIFIERS_RE.test(consentModifiers)));
       const claim = (inherited ? text.slice(match.index, matchEnd) : claimContext(text, match.index, matchEnd))
+        .replace(/^.*\bbut\s+/i, '')
         .replace(/^\s*(?:if|unless)\b[^,]*,\s*/i, '');
       if (inheritedByWaves && !consentGated
           && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
