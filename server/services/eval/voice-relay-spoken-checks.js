@@ -1172,6 +1172,8 @@ const CARD_DIGIT_LABEL = '(?:begins?|starts?|ends?|ending|starting|beginning) (?
 // "$129" elsewhere in the clause from hiding "I heard four".
 const CARD_NON_FRAGMENT_RES = Object.freeze([
   /\$\s*\d+(?:\.\d+)?/gi,
+  /\b(?:[01]?\d|2[0-3]):[0-5]\d(?:\s*(?:a\.?\s*m\.?|p\.?\s*m\.?))?(?![\da-z])/gi,
+  /\b\d+(?:\.\d+)?\s*(?:seconds?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?)\b/gi,
   /\b\d+(?:\.\d+)?\s*(?:dollars?|cents?|percent|%|am|pm|a\.m\.|p\.m\.|o'clock|digits?|numbers?|more|times|of them|characters)\b/gi,
   /\b(?:invoice|estimate|order|ticket|account|reference|confirmation)\s+(?:number\s+|#\s*)?(?:is\s+)?[\w-]*\d[\w-]*/gi,
   /\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+(?:(?:19|20)\d{2}|\d{1,2}(?:,?\s+(?:19|20)\d{2})?)\b/gi,

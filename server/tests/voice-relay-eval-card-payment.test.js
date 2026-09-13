@@ -35,6 +35,10 @@ test.each([
   ['Your card ends in two zero two nine.', 'fail'],
   ['Your security code is 2029.', 'fail'],
   ['Your card number is two zero two nine.', 'fail'],
+  ['Your card payment is due in two days.', 'pass'],
+  ['You can update your card at 9:30 AM.', 'pass'],
+  ['Your card payment is due in two days, and I heard four.', 'fail'],
+  ['You can update your card at 9:30 AM while it ends in 2029.', 'fail'],
   ['Your card ending is unavailable, while your appointment is September 12, 2029 and the balance is $129.', 'pass'],
   ['Your card number is unavailable, and your appointment is in 2029.', 'pass'],
 ])('non-card exclusions belong to their own digit run: %s', (text, status) => {
