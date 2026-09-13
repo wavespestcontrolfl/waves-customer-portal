@@ -1313,7 +1313,11 @@ const REPORT_TRAILING_UNCERTAINTY_RE = new RegExp(
     + `(?:(?:was|is|has been|had been)(?:\\s+${REPORT_FINDING_VERB_RE.source})?|did))?)\\s*(?=$|,)`,
   'i',
 );
-const REPORT_TRAILING_DENIAL_RE = /^(?:actually\s+)?(?:not(?:\s+(?:really|actually))?|no|(?:it|that|this)\s+(?:was|is|has|had)(?:n['’]t|\s+not)(?:\s+been)?(?:\s+(?:true|correct|accurate))?)\s*$/i;
+const REPORT_TRAILING_DENIAL_RE = new RegExp(
+  `^(?:actually\\s+)?(?:not(?:\\s+(?:really|actually))?(?:\\s+${REPORT_FINDING_VERB_RE.source})?|no|`
+    + `(?:it|that|this)\\s+(?:was|is|has|had)(?:n[\x27\u2019]t|\\s+not)(?:\\s+been)?(?:\\s+(?:true|correct|accurate))?)\\s*$`,
+  'i',
+);
 const REPORT_CONCISE_NONCOMPLETION_RE = /^\s*(?:(?:(?:is|are|was|were|has|have|had)(?:\s+(?:been|being))?\s+)?(?:(?:only|just|merely|simply|still)\s+)*(?:(?:the|our|your|their|his|her|my|its)\s+)?(?:(?:recommended|scheduled|planned|intended|proposed|suggested|considered|expected|required|needed|pending)\b|(?:an?\s+)?(?:recommendation|plan|proposal|suggestion|possibility)\b|under\s+consideration\b|(?:for\s+)?(?:tomorrow|tonight|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b)|(?:will|shall|would|should|can|could|may|might|must|is going to|are going to|was going to|were going to)\b)/i;
 // Qualified shorthand must positively state completion or cite the report;
 // unknown qualifiers can describe proposed treatment and are not evidence.
@@ -1575,9 +1579,9 @@ function report_readback_confirms(value, record, { spoken }) {
       const sharedLocation = reportSharedLocationContinuation(text, clauseEnd, value.location);
       if (text[clauseEnd] === '?' || interrogative || coordinatedQuestion || sharedLocation.unconfirmed) continue;
       const reportClause = clauseOf(text, m.index) + sharedLocation.text;
+      if (REPORT_TRAILING_DENIAL_RE.test(reportClause.slice(reportClause.lastIndexOf(',') + 1).trim())) continue;
       const assertion = reportAssertionOf(reportClause, m.index - clauseStart);
       const clause = assertion.text;
-      if (REPORT_TRAILING_DENIAL_RE.test(clause.slice(clause.lastIndexOf(',') + 1).trim())) continue;
       // A contrast excludes its following alternative, not the location
       // affirmed before it: "exterior rather than indoors" and "exterior,
       // not indoors" still confirm exterior. Require both halves in the
