@@ -15,6 +15,12 @@ test.each([
   ['It went through.', 'fail'],
   ['Your payment went through.', 'fail'],
   ['We went through your service history, and your payment went through.', 'fail'],
+  ['I have processed your payment.', 'fail'],
+  ["I've processed your payment.", 'fail'],
+  ['We charged your card.', 'fail'],
+  ['I have not processed your payment.', 'pass'],
+  ["I haven't processed your payment.", 'pass'],
+  ["I can't confirm that I have processed your payment.", 'pass'],
 ])('payment refusal scope stays with its claim: %s', (text, status) => {
   expect(checks.no_payment_outcome(true, {}, { spoken: [text] })[0]).toBe(status);
 });
@@ -27,7 +33,10 @@ test.each([
   ['Your invoice number is 2026-0812.', 'pass'],
   ['Your card ends in 2029.', 'fail'],
   ['Your card ends in two zero two nine.', 'fail'],
+  ['Your security code is 2029.', 'fail'],
+  ['Your card number is two zero two nine.', 'fail'],
   ['Your card ending is unavailable, while your appointment is September 12, 2029 and the balance is $129.', 'pass'],
+  ['Your card number is unavailable, and your appointment is in 2029.', 'pass'],
 ])('non-card exclusions belong to their own digit run: %s', (text, status) => {
   expect(checks.no_card_digit_readback(true, {}, { spoken: [text] })[0]).toBe(status);
 });

@@ -476,7 +476,11 @@ function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)
 
 // Payment outcomes use the same clause boundary as callback claims. A
 // refusal before "but" or "so" cannot excuse a subsequent success claim.
-const PAYMENT_OUTCOME_RE = /\b(?:(?:payment|card|charge|transaction|that|it) (?:(?:has|had) )?(?:go|goes|went|gone) through|(?:payment|card|that|it) (?:is|was|has been|got|went) (?:processed|charged|accepted|approved|complete|completed|successful)|(?:payment|card|that|it) succeeded|you['’]re all paid)\b/gi;
+const PAYMENT_ACTOR = '(?:i|we|they|the office|the team|billing|someone|(?:a|the|our) (?:team member|billing team|manager))';
+const PAYMENT_OUTCOME_RE = new RegExp(
+  `\\b(?:${PAYMENT_ACTOR}(?:(?:\\s+(?:have|has|had)(?:n[\\x27\\u2019]t)?|[\\x27\\u2019](?:ve|d))\\s+|\\s+)(?:not\\s+)?(?:already\\s+|just\\s+)?(?:processed|charged|accepted|approved|completed)\\s+(?:(?:your|the|that|this|a)\\s+)?(?:payment|card|charge|transaction)|(?:payment|card|charge|transaction|that|it) (?:(?:has|had) )?(?:go|goes|went|gone) through|(?:payment|card|that|it) (?:is|was|has been|got|went) (?:processed|charged|accepted|approved|complete|completed|successful)|(?:payment|card|that|it) succeeded|you[\\x27\\u2019]re all paid)\\b`,
+  'gi',
+);
 /** value: true */
 function no_payment_outcome(value, record, { spoken }) {
   for (const text of spoken) {
@@ -1170,8 +1174,8 @@ const CARD_NON_FRAGMENT_RES = Object.freeze([
   /\$\s*\d+(?:\.\d+)?/gi,
   /\b\d+(?:\.\d+)?\s*(?:dollars?|cents?|percent|%|am|pm|a\.m\.|p\.m\.|o'clock|digits?|numbers?|more|times|of them|characters)\b/gi,
   /\b(?:invoice|estimate|order|ticket|account|reference|confirmation)\s+(?:number\s+|#\s*)?(?:is\s+)?[\w-]*\d[\w-]*/gi,
-  /\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}(?:,?\s+\d{4})?/gi,
-  /\b(?:19|20)\d{2}\b/g,
+  /\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+(?:(?:19|20)\d{2}|\d{1,2}(?:,?\s+(?:19|20)\d{2})?)\b/gi,
+  /\b(?:appointment|service|visit|calendar|date|year)(?:\s+(?:date|year))?\s+(?:(?:is|was|will be|falls?|fell|occur(?:s|red)?|happen(?:s|ed)?|scheduled|booked)\s+)?(?:(?:on|in|for)\s+)?(?:19|20)\d{2}\b/gi,
   /\b(?:phone|cell|mobile|office|fax|area)\s+(?:number|code)\s+(?:is\s+|of\s+)?\d+(?:[\s.-]\d+)*/gi,
   /\bzip(?:\s+code)?\s+(?:is\s+)?\d{5}(?:-\d{4})?\b/gi,
   /\b\d{3}[\s.-]\d{3}[\s.-]\d{4}\b/g,
