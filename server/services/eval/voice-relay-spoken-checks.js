@@ -1269,7 +1269,7 @@ function no_third_party_disclosure(value, record, { spoken }) {
 const REPORT_UNCERTAINTY_RE = /\b(?:can|must|may|might|could|would|should|will|shall|going to|i\s+(?:think|believe|guess|suppose)|my\s+(?:guess|belief|assumption)\s+is|plan(?:s|ned)? to|intend(?:s|ed|ing)?(?:\s+to)?|wish(?:es|ed|ing)?|maybe|perhaps|possibly|potentially|probably)\b/i;
 const REPORT_INSTRUCTION_RE = /(?:^|,\s*)(?:please\s+)?(?:apply|use|put|treat|spray|place)\b|\b(?:please|make sure|ensure|remember to)\b/i;
 const REPORT_FINDING_VERB_RE = /\b(?:applied|placed|used|treated|sprayed|put|went|got|received)\b/i;
-const REPORT_COMPLETION_TIME = '(?:yesterday|today|earlier|recently|last\\s+(?:week|month|year))';
+const REPORT_COMPLETION_TIME = `(?:(?:on\\s+)?(?:${VISIT_TIME_RE.source})|yesterday|earlier|recently|last\\s+(?:week|month|year))`;
 const REPORT_PARTICIPLE_RE = /^(?:applied|placed|used|treated|sprayed|put|received)$/i;
 const REPORT_LOCATION_RECIPIENT_VERB_RE = /^(?:got|received)$/i;
 const REPORT_NOUN_LED_PREFIX_RE = /^\s*(?:(?:the|a|an)\s*)?$/i;
