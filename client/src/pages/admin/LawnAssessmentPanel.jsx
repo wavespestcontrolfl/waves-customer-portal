@@ -15,6 +15,7 @@ import {
   cn,
 } from "../../components/ui";
 import lawnScores from "@lawn-scores";
+import LawnVisitReview, { createVisitReview, visitReviewPayload } from "../../components/lawn/LawnVisitReview";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -107,6 +108,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
   const [photos, setPhotos] = useState([]); // { data, preview, file }
   const [, setAnalyzing] = useState(false);
   const [result, setResult] = useState(null);
+  const [visitReview, setVisitReview] = useState(null);
   const [turfProfile, setTurfProfile] = useState(EMPTY_TURF_PROFILE);
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileSaving, setProfileSaving] = useState(false);
@@ -213,6 +215,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
         }),
       });
       setResult(r);
+      setVisitReview(createVisitReview(r.visitAssessment, r.assessment?.observations !== undefined ? r.assessment.observations : r.observations));
       // Pre-fill grass type from the AI read when the turf profile has none yet,
       // so the tech sees + can confirm/override. The server already COALESCE-
       // persisted it; this just surfaces it in the profile form.
@@ -263,12 +266,18 @@ export default function LawnAssessmentPanel({ embedded = false }) {
           assessmentId: result.assessment.id,
           adjustedScores,
           protocol_field_checks,
+          ...visitReviewPayload(visitReview),
         }),
       });
       setResult((prev) => ({
         ...prev,
         assessment: response.assessment || prev.assessment,
+        observations: response.assessment?.observations ?? prev.observations,
+        visitAssessment: response.visitAssessment ?? prev.visitAssessment,
       }));
+      if (response.visitAssessment) {
+        setVisitReview(createVisitReview(response.visitAssessment, response.assessment?.observations));
+      }
       if (response.confirmed === false) {
         setAssessmentConfirmed(false);
         alert("Scores saved. Complete the missing scores before confirming.");
@@ -816,8 +825,14 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                 />
               </Field>
             </Card>
+            <LawnVisitReview
+              visitAssessment={result.visitAssessment}
+              value={visitReview}
+              onChange={setVisitReview}
+              disabled={confirming || assessmentConfirmed}
+            />
             {/* Observations */}
-            {result.observations && (
+            {!result.visitAssessment && result.observations && (
               <Card className="mt-3 p-3 text-ui-body text-ink-secondary">
                 {" "}
                 <div className="mb-1 text-ui-body font-medium text-zinc-900">
@@ -851,7 +866,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
             )}{" "}
             <Button
               onClick={() => setStep("capture")}
-              disabled={assessmentConfirmed}
+              disabled={assessmentConfirmed || confirming}
               variant="secondary"
             >
               Retake

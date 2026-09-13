@@ -153,6 +153,17 @@ function outcomeOfThrow(err) {
   return 'uncertain';
 }
 
+function preparationFailure(err) {
+  err.providerOutcome = {
+    sent: false,
+    deliveryOutcome: 'not_sent',
+    code: 'NOTIFICATION_PREPARATION_FAILED',
+    retryable: true,
+    deferred: true,
+  };
+  return err;
+}
+
 const NotificationDispatcher = {
 
   /**
@@ -166,25 +177,27 @@ const NotificationDispatcher = {
   async notify(customerId, notificationType, {
     smsMessage, emailSubject, emailBody, preSendCheck, scheduledSmsLogId,
   } = {}) {
-    const customer = await db('customers').where({ id: customerId }).first();
+    const customer = await db('customers').where({ id: customerId }).first()
+      .catch((err) => { throw preparationFailure(err); });
     if (!customer) {
       logger.warn(`[notify] Customer ${customerId} not found`);
-      return { sent: false, channel: null, results: { error: 'customer_not_found' } };
+      return { sent: false, channel: null, results: { error: 'customer_not_found' }, deliveryOutcome: 'not_sent' };
     }
 
     const typeConfig = TYPE_MAP[notificationType];
     if (!typeConfig) {
       logger.warn(`[notify] Unknown notification type: ${notificationType}`);
-      return { sent: false, channel: null, results: { error: 'unknown_type' } };
+      return { sent: false, channel: null, results: { error: 'unknown_type' }, deliveryOutcome: 'not_sent' };
     }
 
     // Get preferences (or defaults)
-    const prefs = await db('notification_prefs').where({ customer_id: customerId }).first();
+    const prefs = await db('notification_prefs').where({ customer_id: customerId }).first()
+      .catch((err) => { throw preparationFailure(err); });
 
     // Check if type is enabled
     if (prefs && prefs[typeConfig.toggle] === false) {
       logger.info(`[notify] ${notificationType} disabled for customer ${customerId}`);
-      return { sent: false, channel: null, results: { reason: 'type_disabled' } };
+      return { sent: false, channel: null, results: { reason: 'type_disabled' }, deliveryOutcome: 'not_sent' };
     }
 
     // Resolve the existing channel/consent rules before a guarded quiet-hours
@@ -234,7 +247,7 @@ const NotificationDispatcher = {
           smsResult,
         };
       }
-      return { sent: false, channel: null, results: { reason: 'quiet_hours' } };
+      return { sent: false, channel: null, results: { reason: 'quiet_hours' }, deliveryOutcome: 'not_sent' };
     }
 
     const results = {};
@@ -352,7 +365,10 @@ const NotificationDispatcher = {
       results.email = 'unavailable: email channel not implemented';
     }
 
-    return { sent, channel, results, deliveryOutcome: smsOutcome, ...(smsDelivery ? { smsResult: smsDelivery } : {}) };
+    // A null SMS outcome means no provider call was eligible (email-only,
+    // missing phone/body, or missing marketing consent), which is definite
+    // non-delivery. Only a thrown provider call can produce uncertainty.
+    return { sent, channel, results, deliveryOutcome: smsOutcome || 'not_sent', ...(smsDelivery ? { smsResult: smsDelivery } : {}) };
   },
 };
 

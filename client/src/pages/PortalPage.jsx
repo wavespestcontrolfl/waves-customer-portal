@@ -3073,119 +3073,6 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
         </div>
       </section>
 
-      {dashboardSecondarySelection ? (
-        <section data-glass="card" style={{ ...card, padding: compact ? 18 : 22 }} data-testid="home-primary-facts-notice">
-          <div style={{ fontSize: 14, color: muted, lineHeight: 1.5 }}>
-            {lawnScopedToShownHouse
-              ? 'Your protection score and local alerts are shown for your primary address. Switch to that property to see them.'
-              : 'Your protection score, lawn health and local alerts are shown for your primary address. Switch to that property to see them.'}
-          </div>
-        </section>
-      ) : (
-        <PropertyScoreCard data={propertyScore} compact={compact} />
-      )}
-
-      <RecommendationsCard data={propertyRecommendations} customer={customer} />
-
-      {!dashboardSecondarySelection && <PropertyAlertsCard data={propertyAlerts} />}
-
-      {pendingSatisfactionStatus === 'ready' && pendingSatisfaction && !satDismissed && (
-        <section data-glass="card" style={{ ...card, padding: 20, borderColor: satPhase === 'rate' ? '#FED7AA' : '#BFDBFE' }}>
-          {satPhase === 'rate' && (
-            <>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
-                <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', minWidth: 0 }}>
-                  <ShellIconTile icon="star" tone="success" size={38} />
-                  <div style={{ minWidth: 0 }}>
-                    <div style={dashboardLabel}><Icon name="star" size={14} strokeWidth={2} />Visit Feedback</div>
-                    <div style={{ marginTop: 4, fontSize: 17, fontWeight: 700, color: B.glassNavy }}>How was your visit?</div>
-                    <div style={{ marginTop: 2, fontSize: 14, color: muted, lineHeight: 1.45 }}>
-                      {pendingSatisfaction.service_type || pendingSatisfaction.serviceType}
-                      {pendingSatisfaction.technician_name || pendingSatisfaction.technicianName ? ` · ${pendingSatisfaction.technician_name || pendingSatisfaction.technicianName}` : ''}
-                    </div>
-                  </div>
-                </div>
-                <ShellCloseButton onClick={() => setSatDismissed(true)} label="Dismiss feedback prompt" />
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: compact ? 'repeat(5, minmax(0, 1fr))' : 'repeat(10, minmax(0, 1fr))', gap: 4, marginTop: 14 }}>
-                {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => {
-                  const active = n <= (satHover || satRating);
-                  const color = n <= 3 ? B.red : n <= 7 ? B.orange : B.green;
-                  return (
-                    <button key={n} type="button" onMouseEnter={() => setSatHover(n)} onMouseLeave={() => setSatHover(0)} onClick={() => handleSatRating(n)} disabled={satSubmitting} style={{
-                      minWidth: 0, height: 38, borderRadius: 8, border: 'none',
-                      background: active ? color : GLASS_SUBTLE,
-                      color: active ? '#fff' : B.grayMid,
-                      fontWeight: 700, cursor: satSubmitting ? 'wait' : 'pointer',
-                    }}>{n}</button>
-                  );
-                })}
-              </div>
-              {satError && (
-                <div style={{ padding: 10, background: `${B.red}10`, border: `1px solid ${B.red}33`, borderRadius: 8, fontSize: 14, color: B.red, marginTop: 12 }}>
-                  {satError}
-                </div>
-              )}
-            </>
-          )}
-          {satPhase === 'review' && (
-            <div style={{ textAlign: 'center' }}>
-              <div style={{ fontSize: 18, fontWeight: 700, color: B.glassNavy }}>Thanks for the {satRating}/10.</div>
-              <div style={{ marginTop: 6, fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>
-                {satReviewLink
-                  ? <>A quick Google review helps neighbors find the {satOfficeName || 'Waves'} team.</>
-                  // No link means the review ask is queued to text later — a
-                  // bare Google link here couldn't be attributed and the
-                  // queued text would still send afterward.
-                  : <>A quick Google review helps neighbors find the {satOfficeName || 'Waves'} team — keep an eye on your texts for our review link.</>}
-              </div>
-              <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginTop: 14, flexWrap: 'wrap' }}>
-                {satReviewLink ? (
-                  <a data-glass-accent="" href={satReviewLink} target="_blank" rel="noopener noreferrer" style={{
-                    ...PORTAL_BUTTON_BASE, textDecoration: 'none', background: B.glassNavy, color: '#fff', padding: '10px 18px',
-                    boxShadow: 'none', borderRadius: 8,
-                  }}>Open Google</a>
-                ) : null}
-                <button data-glass-accent="" type="button" onClick={() => setSatDismissed(true)} style={{
-                  ...PORTAL_BUTTON_BASE, background: '#fff', color: B.glassNavy, padding: '10px 18px',
-                  boxShadow: 'none', border: '1px solid #E7E2D7', borderRadius: 8,
-                }}>Done</button>
-              </div>
-            </div>
-          )}
-          {satPhase === 'feedback' && (
-            <div>
-              <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>Thanks for the feedback.</div>
-              <textarea
-                value={satFeedback}
-                onChange={e => setSatFeedback(e.target.value)}
-                placeholder="Anything we could do better?"
-                rows={3}
-                style={{
-                  width: '100%', marginTop: 10, padding: 12, borderRadius: 8,
-                  border: '1px solid #D8D0C0', fontSize: 14, fontFamily: FONTS.body,
-                  resize: 'vertical',
-                }}
-              />
-              {satError && (
-                <div role="alert" style={{ padding: 10, background: `${B.red}10`, border: `1px solid ${B.red}33`, borderRadius: 8, fontSize: 14, color: B.red, marginTop: 10 }}>
-                  {satError}
-                </div>
-              )}
-              <button data-glass-accent="" type="button" onClick={handleSatFeedback} disabled={satSubmitting} style={{
-                ...PORTAL_BUTTON_BASE, marginTop: 10, width: '100%', background: B.glassNavy,
-                color: '#fff', boxShadow: 'none', borderRadius: 8,
-              }}>{satSubmitting ? 'Sending...' : 'Send feedback'}</button>
-            </div>
-          )}
-          {satPhase === 'thanks' && (
-            <div style={{ textAlign: 'center', color: B.glassNavy, fontWeight: 700 }}>
-              Thank you. We appreciate the note.
-            </div>
-          )}
-        </section>
-      )}
-
       <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'minmax(0, 1.35fr) minmax(280px, .65fr)', gap: 16, alignItems: 'start' }}>
         {nextRead.saved ? (
           <SavedPortalRead title="Saved next visit" read={nextRead}>
@@ -3330,6 +3217,119 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
           </div>
         </section>
       </div>
+
+      {dashboardSecondarySelection ? (
+        <section data-glass="card" style={{ ...card, padding: compact ? 18 : 22 }} data-testid="home-primary-facts-notice">
+          <div style={{ fontSize: 14, color: muted, lineHeight: 1.5 }}>
+            {lawnScopedToShownHouse
+              ? 'Your protection score and local alerts are shown for your primary address. Switch to that property to see them.'
+              : 'Your protection score, lawn health and local alerts are shown for your primary address. Switch to that property to see them.'}
+          </div>
+        </section>
+      ) : (
+        <PropertyScoreCard data={propertyScore} compact={compact} />
+      )}
+
+      <RecommendationsCard data={propertyRecommendations} customer={customer} />
+
+      {!dashboardSecondarySelection && <PropertyAlertsCard data={propertyAlerts} />}
+
+      {pendingSatisfactionStatus === 'ready' && pendingSatisfaction && !satDismissed && (
+        <section data-glass="card" style={{ ...card, padding: 20, borderColor: satPhase === 'rate' ? '#FED7AA' : '#BFDBFE' }}>
+          {satPhase === 'rate' && (
+            <>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
+                <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', minWidth: 0 }}>
+                  <ShellIconTile icon="star" tone="success" size={38} />
+                  <div style={{ minWidth: 0 }}>
+                    <div style={dashboardLabel}><Icon name="star" size={14} strokeWidth={2} />Visit Feedback</div>
+                    <div style={{ marginTop: 4, fontSize: 17, fontWeight: 700, color: B.glassNavy }}>How was your visit?</div>
+                    <div style={{ marginTop: 2, fontSize: 14, color: muted, lineHeight: 1.45 }}>
+                      {pendingSatisfaction.service_type || pendingSatisfaction.serviceType}
+                      {pendingSatisfaction.technician_name || pendingSatisfaction.technicianName ? ` · ${pendingSatisfaction.technician_name || pendingSatisfaction.technicianName}` : ''}
+                    </div>
+                  </div>
+                </div>
+                <ShellCloseButton onClick={() => setSatDismissed(true)} label="Dismiss feedback prompt" />
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: compact ? 'repeat(5, minmax(0, 1fr))' : 'repeat(10, minmax(0, 1fr))', gap: 4, marginTop: 14 }}>
+                {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => {
+                  const active = n <= (satHover || satRating);
+                  const color = n <= 3 ? B.red : n <= 7 ? B.orange : B.green;
+                  return (
+                    <button key={n} type="button" onMouseEnter={() => setSatHover(n)} onMouseLeave={() => setSatHover(0)} onClick={() => handleSatRating(n)} disabled={satSubmitting} style={{
+                      minWidth: 0, height: 38, borderRadius: 8, border: 'none',
+                      background: active ? color : GLASS_SUBTLE,
+                      color: active ? '#fff' : B.grayMid,
+                      fontWeight: 700, cursor: satSubmitting ? 'wait' : 'pointer',
+                    }}>{n}</button>
+                  );
+                })}
+              </div>
+              {satError && (
+                <div style={{ padding: 10, background: `${B.red}10`, border: `1px solid ${B.red}33`, borderRadius: 8, fontSize: 14, color: B.red, marginTop: 12 }}>
+                  {satError}
+                </div>
+              )}
+            </>
+          )}
+          {satPhase === 'review' && (
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ fontSize: 18, fontWeight: 700, color: B.glassNavy }}>Thanks for the {satRating}/10.</div>
+              <div style={{ marginTop: 6, fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>
+                {satReviewLink
+                  ? <>A quick Google review helps neighbors find the {satOfficeName || 'Waves'} team.</>
+                  // No link means the review ask is queued to text later — a
+                  // bare Google link here couldn't be attributed and the
+                  // queued text would still send afterward.
+                  : <>A quick Google review helps neighbors find the {satOfficeName || 'Waves'} team — keep an eye on your texts for our review link.</>}
+              </div>
+              <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginTop: 14, flexWrap: 'wrap' }}>
+                {satReviewLink ? (
+                  <a data-glass-accent="" href={satReviewLink} target="_blank" rel="noopener noreferrer" style={{
+                    ...PORTAL_BUTTON_BASE, textDecoration: 'none', background: B.glassNavy, color: '#fff', padding: '10px 18px',
+                    boxShadow: 'none', borderRadius: 8,
+                  }}>Open Google</a>
+                ) : null}
+                <button data-glass-accent="" type="button" onClick={() => setSatDismissed(true)} style={{
+                  ...PORTAL_BUTTON_BASE, background: '#fff', color: B.glassNavy, padding: '10px 18px',
+                  boxShadow: 'none', border: '1px solid #E7E2D7', borderRadius: 8,
+                }}>Done</button>
+              </div>
+            </div>
+          )}
+          {satPhase === 'feedback' && (
+            <div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>Thanks for the feedback.</div>
+              <textarea
+                value={satFeedback}
+                onChange={e => setSatFeedback(e.target.value)}
+                placeholder="Anything we could do better?"
+                rows={3}
+                style={{
+                  width: '100%', marginTop: 10, padding: 12, borderRadius: 8,
+                  border: '1px solid #D8D0C0', fontSize: 14, fontFamily: FONTS.body,
+                  resize: 'vertical',
+                }}
+              />
+              {satError && (
+                <div role="alert" style={{ padding: 10, background: `${B.red}10`, border: `1px solid ${B.red}33`, borderRadius: 8, fontSize: 14, color: B.red, marginTop: 10 }}>
+                  {satError}
+                </div>
+              )}
+              <button data-glass-accent="" type="button" onClick={handleSatFeedback} disabled={satSubmitting} style={{
+                ...PORTAL_BUTTON_BASE, marginTop: 10, width: '100%', background: B.glassNavy,
+                color: '#fff', boxShadow: 'none', borderRadius: 8,
+              }}>{satSubmitting ? 'Sending...' : 'Send feedback'}</button>
+            </div>
+          )}
+          {satPhase === 'thanks' && (
+            <div style={{ textAlign: 'center', color: B.glassNavy, fontWeight: 700 }}>
+              Thank you. We appreciate the note.
+            </div>
+          )}
+        </section>
+      )}
 
       {lastRead.saved ? (
         <SavedPortalRead title="Saved completed visit" read={lastRead}>
@@ -6566,6 +6566,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
   const hasBillingEmail = !!(String(billingEmail || '').trim() || customer?.email) && emailPrefEnabled;
 
   const saveBillingPrefs = () => {
+    if (billingPrefsSaving) return;
     setBillingPrefsSaving(true);
     setBillingPrefsStatus(null);
     api.updateNotificationPrefs({
@@ -7294,7 +7295,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
       </div>
 
       {!cancelledAccount && (
-      <div data-glass="card" style={{ ...card, padding: 20 }}>
+      <form onSubmit={event => { event.preventDefault(); saveBillingPrefs(); }} data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={sectionTitle}><Icon name="mail" size={14} strokeWidth={2} />Billing Preferences</div>
         <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Recipients</div>
         <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45, marginBottom: 14 }}>Where invoices, receipts, and reminders go.</div>
@@ -7514,7 +7515,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
             Couldn&rsquo;t save your billing preferences. Please try again.
           </div>
         )}
-        <button type="button" onClick={saveBillingPrefs} disabled={billingPrefsSaving} data-glass-accent="" style={{
+        <button type="submit" disabled={billingPrefsSaving} data-glass-accent="" style={{
           ...primaryButton,
           opacity: billingPrefsSaving ? 0.6 : 1,
           width: '100%',
@@ -7523,7 +7524,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
           {billingPrefsSaving ? 'Saving...' : billingPrefsStatus === 'saved' ? 'Saved' : 'Save billing preferences'}
         </button>
         </>}
-      </div>
+      </form>
       )}
     </div>
   );
@@ -13727,6 +13728,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
             { label: 'Latest', value: latestDoc ? formatDate(latestDoc) : 'None', sub: latestDoc?.title || 'No paperwork yet' },
           ].map((item) => (
             <div key={item.label} style={{
+              minWidth: 0,
               border: '1px solid #E7E2D7',
               borderRadius: 8,
               background: subtle,
