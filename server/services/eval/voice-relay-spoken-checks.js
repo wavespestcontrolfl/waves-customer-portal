@@ -247,7 +247,7 @@ const TIME_ANYWHERE_RES = Object.freeze([
 // A day named relative to today, or an ordinal, counts only next to a
 // scheduling predicate in the same sentence: "a team member will call
 // tomorrow" is a follow-up, "your visit is tomorrow" is an invented date.
-const RELATIVE_DAY_RE = new RegExp(`\\b(?:tomorrow|day after tomorrow|next week|this week|(?:${WEEKDAYS})|\\d{1,2}(?:st|nd|rd|th)(?:\\s+of\\s+[a-z]+)?|mañana|pasado mañana|la (?:próxima|proxima) semana)\\b`, 'i');
+const RELATIVE_DAY_RE = new RegExp(`\\b(?:tomorrow|day after tomorrow|next week|this week|(?:${WEEKDAYS})|\\d{1,2}(?:st|nd|rd|th)(?:\\s+of\\s+[a-z]+)?|${ORDINAL_WORDS}|mañana|pasado mañana|la (?:próxima|proxima) semana)\\b`, 'i');
 // A weekday modified by "next"/"this"/"last" ("Next Tuesday", "This
 // Tuesday") is still that same relative day — RELATIVE_DAY_RE's own weekday
 // branch, shared with every embedded-sentence use, accepts only the bare
@@ -1346,12 +1346,10 @@ const CALLBACK_LIGHT_ACTION_FINITE = `(?:(?:\\w+\\s+){0,2}?${CALLBACK_LIGHT_VERB
 const CALLBACK_RECIPIENT_END = `(?=\\s*(?:[.!?,;:—–]|$|and\\b|but\\b|so\\b|back\\b|again\\b|directly\\b|personally\\b|today\\b|tomorrow\\b|tonight\\b|later\\b|soon\\b|next\\s+(?:week|${WEEKDAYS})\\b|at\\b|on\\b|by\\b|before\\b|after\\b|if\\b|unless\\b|when\\b|once\\b|provided\\b|because\\b|to\\b|about\\b|regarding\\b|with\\b|(?:the|an?|this|that|these|those|some)\\b))`;
 const callbackTarget = (targets, action, lightAction) => `(?:${action}\\s+(?:${targets})\\b${CALLBACK_RECIPIENT_END}|${lightAction}\\s+(?:(?:${targets})\\s+an?\\s+${CALLBACK_CONTACT_NOUN}|an?\\s+${CALLBACK_CONTACT_NOUN}\\s+(?:to|for)\\s+(?:${targets})\\b${CALLBACK_RECIPIENT_END}))`;
 const CALLBACK_QUESTION_AUX = '(?:can|could|will|would|should|shall|may|might|is|are|has|have)';
-const CALLBACK_QUESTION_ANSWER_RE = new RegExp(
-  `${SHORT_AFFIRMATION_RE.source}|^\\s*(?:(?:${AFFIRMATION})\\s*[,—–:-]\\s*)?(?:we|i|they|the office|our office|the team|our team)(?:[\\x27\\u2019]ll|\\s+(?:will|can|could))(?:\\s+do\\s+(?:that|so|it))?[.!\\s]*$`,
-  'i',
-);
+const CALLBACK_QUESTION_AFFIRMATIVE = `(?:(?:${AFFIRMATION}|${BARE_CONFIRMATION})(?:[\\s,]+(?:${AFFIRMATION}|${BARE_CONFIRMATION}))*|(?:(?:${AFFIRMATION})\\s*[,—–:-]\\s*)?(?:we|i|they|the office|our office|the team|our team)(?:[\\x27\\u2019]ll|\\s+(?:will|can|could))(?:\\s+do\\s+(?:that|so|it))?)`;
+const CALLBACK_QUESTION_ANSWER_RE = new RegExp(`^\\s*(?:[^.!?;]*\\b(?:but|however)\\b\\s*)?${CALLBACK_QUESTION_AFFIRMATIVE}[.!\\s]*$`, 'i');
 const CALLBACK_QUESTION_DENIAL_RE = new RegExp(
-  `^\\s*(?:(?:no|nope)[.!]?\\s*$|(?:(?:no|nope)[,\\s]+)?(?:we|i|they|the office|our office|the team|our team)\\s+(?:cannot|can[\\x27\\u2019]t|could not|couldn[\\x27\\u2019]t|will not|won[\\x27\\u2019]t)\\s+(?:do\\s+(?:that|so|it)|arrange\\s+(?:that|it)|make\\s+(?:that|it)\\s+happen|${CALLBACK_VERB}\\b))`,
+  `^\\s*(?:(?:no|nope)|(?:(?:no|nope)[,\\s]+)?(?:we|i|they|the office|our office|the team|our team)\\s+(?:cannot|can[\\x27\\u2019]t|could not|couldn[\\x27\\u2019]t|will not|won[\\x27\\u2019]t)\\s+(?:do\\s+(?:that|so|it)|arrange\\s+(?:that|it)|make\\s+(?:that|it)\\s+happen|${CALLBACK_VERB}\\b)(?:(?!\\b(?:but|however)\\b)[^.!?;])*)[.!\\s]*$`,
   'i',
 );
 const CALLBACK_RECIPIENT_ACTION = `(?:be\\s+(?:called|phoned|rung|contacted|texted|emailed|reached(?: out to)?|followed up with)\\s+by|(?:get|receive)\\s+an?\\s+${CALLBACK_CONTACT_NOUN}\\s+from|hear from)`;

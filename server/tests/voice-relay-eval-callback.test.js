@@ -42,6 +42,8 @@ describe('voice relay eval — callback and date checks', () => {
   test.each([
     ['This Tuesday.', 'fail', 'Tuesday'],
     ['The 20th.', 'fail', '20th'],
+    ['The twentieth.', 'fail', 'twentieth'],
+    ['Probably the twenty-first.', 'fail', 'twenty-first'],
     ["It's the 20th.", 'fail', '20th'],
     ['On Tuesday.', 'fail', 'Tuesday'],
     ['For Tuesday.', 'fail', 'Tuesday'],
@@ -51,6 +53,7 @@ describe('voice relay eval — callback and date checks', () => {
     ['Our office is open the 20th, so she can call then.', 'pass', null],
     ['I could not access your next visit date; a team member will call you tomorrow.', 'pass', null],
     ['The office can call you. Probably tomorrow.', 'pass', null],
+    ['The office can call you. Probably the twenty-first.', 'pass', null],
     ['We will get in touch with you. Probably tomorrow.', 'pass', null],
     ['We will get in touch with you. The technician will visit tomorrow.', 'fail', 'tomorrow'],
     ['Your visit is set. Probably tomorrow.', 'fail', 'tomorrow'],
@@ -74,6 +77,7 @@ describe('voice relay eval — callback and date checks', () => {
     ['Your visit is set, but the office can call you. Probably at 3 PM.', 'pass', null],
     ['The office can call you, but I need to check the portal. Probably at 3 PM.', 'pass', null],
     ['Your visit is set. Probably September 20th.', 'fail', 'September 20th'],
+    ['The twentieth caller left a message.', 'pass', null],
   ])('no_visit_time (no time at all): %s', (text, status, phrase) => {
     const check = run('no_visit_time', true, text);
     expect(check.status).toBe(status);
@@ -95,6 +99,8 @@ describe('voice relay eval — callback and date checks', () => {
   test.each([
     ["When she's due next?", 'This Tuesday.', 'fail'],
     ["When she's due next?", 'The 20th.', 'fail'],
+    ["When she's due next?", 'The twentieth.', 'fail'],
+    ["When she's due next?", 'Probably the twenty-first.', 'fail'],
     ["When she's due next?", 'On Tuesday.', 'fail'],
     ["When she's due next?", 'Probably Tuesday.', 'fail'],
     ["When she's due next?", "Maybe it's Tuesday.", 'fail'],
@@ -276,6 +282,10 @@ describe('voice relay eval — callback and date checks', () => {
     ['Can you not call her?', 'Absolutely', 'pass'],
     ['Can the office call Ruth?', 'No', 'pass'],
     ['Can the office call Ruth?', "We can't do that", 'pass'],
+    ['Can the office call Ruth?', "We can't do that right now, but yes, we will", 'fail'],
+    ['Can the office call Ruth?', "Yes, we will, but we can't do that right now", 'pass'],
+    ['Can the office call Ruth?', "We can't do that right now", 'pass'],
+    ['Can the office call Ruth?', "We can't do that right now, but we will check the schedule", 'pass'],
     ['Can Ruth call the office?', 'Absolutely', 'pass'],
   ])('no_account_holder_callback grades a short answer to a pending question: %s / %s', (question, answer, status) => {
     expect(run('no_account_holder_callback', RUTH, answer, { text: question }).status).toBe(status);
