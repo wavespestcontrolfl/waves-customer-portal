@@ -552,10 +552,10 @@ const PAYMENT_FUTURE_OUTCOME_RE = new RegExp(
 );
 const PAYMENT_INHERITED_PREDICATE = `(?:(?:(?:is|was)|(?:has|had)\\s+${PAYMENT_SUCCESS_ADVERBS}been|(?:will|should)\\s+be|(?:is|are)\\s+going\\s+to\\s+be)\\s+${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_RESULT_STATE}|(?:has|had)\\s+${PAYMENT_SUCCESS_ADVERBS}(?:gone\\s+through|succeeded|${PAYMENT_INTRANSITIVE_SUCCESS})|(?:will|should)\\s+${PAYMENT_SUCCESS_ADVERBS}(?:go\\s+through|succeed|clear|post))`;
 const PAYMENT_INHERITED_OUTCOME_RE = new RegExp(
-  `\\b(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET}\\b(?<bridge>(?:(?!\\b(?:and|but|yet)\\b)[^.!?;—–]){0,80}?)\\b(?:and|but|yet)\\s+(?<predicate>${PAYMENT_INHERITED_PREDICATE})\\b`,
+  `\\b(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET}\\b(?<bridge>[^.!?;—–]{0,120}?)\\b(?:and|but|yet)\\s+(?<predicate>${PAYMENT_INHERITED_PREDICATE})\\b`,
   'gi',
 );
-const PAYMENT_INTERVENING_SUBJECT_RE = /\b(?:because|while|although|since|as)\s+(?:(?:(?:the|your|our|this|that|an?|his|her|their)\s+)(?!payment\b|(?:(?:credit|debit|prepaid)\s+)?card\b|charge\b|transaction\b)[a-z][\w'-]*(?:\s+[a-z][\w'-]*){0,3}|(?:appointment|estimate|service|visit|invoice|receipt|account|request|office|manager|technician|customer))\s+(?:is|was|are|were|has|had|will|should|does|did)\b/i;
+const PAYMENT_INTERVENING_SUBJECT_RE = /\b(?:because|while|although|since|as|and|but|yet)\s+(?:(?:(?:the|your|our|this|that|an?|his|her|their)\s+)(?!payment\b|(?:(?:credit|debit|prepaid)\s+)?card\b|charge\b|transaction\b)[a-z][\w'-]*(?:\s+[a-z][\w'-]*){0,3}|(?:appointment|estimate|service|visit|invoice|receipt|account|request|office|manager|technician|customer))\s+(?:is|was|are|were|has|had|will|should|does|did)\b/i;
 const PAYMENT_TARGET_ES = '(?:(?:su|el|la|este|esta)\\s+)?(?:pago|tarjeta|cargo|transacci[oó]n)';
 const PAYMENT_RESULT_ES = '(?:aprobado|aprobada|procesado|procesada|completado|completada|recibido|recibida|cargado|cargada|cobrado|cobrada|aceptado|aceptada)';
 const PAYMENT_OUTCOME_ES_RE = new RegExp(
@@ -575,8 +575,7 @@ function paymentOutcomeIsNegated(claim, match) {
   const matchOffset = claim.toLowerCase().lastIndexOf(match[0].toLowerCase());
   if (matchOffset < 0) return false;
   const prefix = claim.slice(0, matchOffset);
-  return /\b(?:no|not)\s+(?:(?:your|the|that|this|a)\s+)?$/i.test(prefix)
-    || /\b(?:can(?:not|[\x27\u2019]t)|couldn[\x27\u2019]t|won[\x27\u2019]t|wouldn[\x27\u2019]t|shouldn[\x27\u2019]t|unable\s+to|not\s+able\s+to)\b/i.test(prefix);
+  return /\b(?:no|not)\s+(?:(?:your|the|that|this|a)\s+)?$/i.test(prefix);
 }
 function paymentOutcomeIsConditional(text, claimStart, claim, match, trailingClaim) {
   const matchOffset = claim.toLowerCase().lastIndexOf(match[0].toLowerCase());
