@@ -644,6 +644,7 @@ function validateTreeShrubTypedCompliance({
 }
 
 module.exports = {
+  TREE_SHRUB_SERVICE_LINES,
   TREE_SHRUB_CLOSEOUT_VERSION,
   inferTreeShrubOrdinanceZone,
   isSummerBlackoutForZone,

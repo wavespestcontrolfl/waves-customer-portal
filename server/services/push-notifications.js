@@ -61,7 +61,7 @@ try {
 // for immediate delivery; low-priority pushes stay deferrable on purpose.
 const URGENCY_BY_PRIORITY = { urgent: 'high', high: 'high', normal: 'normal', low: 'low' };
 
-async function sendSubscription(sub, notification) {
+async function sendSubscription(sub, notification, options) {
   // iOS (Capacitor) subscriptions deliver via APNs, not web-push. Routing here
   // keeps every caller (sendToCustomer / sendToAdmins / sendToAdminUsers)
   // platform-agnostic — they just iterate active rows.
@@ -82,7 +82,7 @@ async function sendSubscription(sub, notification) {
 
   // Android (Capacitor) subscriptions deliver via FCM, same routing shape as iOS.
   if (sub.platform === 'android') {
-    const result = await fcm.send(sub.device_token, notification);
+    const result = await fcm.send(sub.device_token, notification, { shouldContinue: options?.shouldContinue });
     if (result.skipped) return { sent: false, skipped: true, reason: result.reason };
     if (result.expired) {
       await db('push_subscriptions').where({ id: sub.id }).update({ active: false }).catch(() => {});
@@ -176,10 +176,23 @@ class PushNotificationService {
       const notifiedPropertyId = await resolveNotificationPropertyId(customerId, notification);
       notification = { ...notification, url: qualifyNotificationLink(notification.url, customerId, notifiedPropertyId) };
     }
-    const query = db('push_subscriptions').whereIn('customer_id', context.ids).where({ active: true, role: 'customer' });
-    if (opts.minUpdatedAt) query.where('updated_at', '>=', opts.minUpdatedAt);
-    if (opts.nativeOnly) query.whereIn('platform', ['ios', 'android']);
-    const subs = await query;
+    // This lookup is still preparation — no provider request has gone out
+    // yet — so a DB failure here must resolve as a normal no-delivery
+    // result, not an uncaught throw. A caller (push-channel-routing.js)
+    // marks its outcome 'uncertain' the moment it calls in here, on the
+    // premise that anything this function throws crossed the provider
+    // boundary; letting this query's own exception escape would report a
+    // never-attempted send as ambiguous instead of not_sent (codex P2).
+    let subs;
+    try {
+      const query = db('push_subscriptions').whereIn('customer_id', context.ids).where({ active: true, role: 'customer' });
+      if (opts.minUpdatedAt) query.where('updated_at', '>=', opts.minUpdatedAt);
+      if (opts.nativeOnly) query.whereIn('platform', ['ios', 'android']);
+      subs = await query;
+    } catch (err) {
+      logger.warn(`[push] Subscription lookup failed for ${customerId}: ${err.code || err.message}`);
+      return { ...summarize([], 0), reason: 'subscription_lookup_failed' };
+    }
     const attemptToken = randomUUID();
     if (opts.notificationId) {
       // Reuse this bell/event claim with a bounded lease. Its native collapse
@@ -206,23 +219,49 @@ class PushNotificationService {
     const results = [];
     let claimLost = false;
     for (const sub of subs) {
-      if (typeof opts.shouldContinue === 'function') {
-        let go = false;
-        try { go = await opts.shouldContinue(); } catch { go = false; }
-        if (!go) {
-          results.push({ sent: false, skipped: true, reason: 'send_window_closed' });
-          continue;
+      let earliestValidUntil = null;
+      const compositeShouldContinue = (typeof opts.shouldContinue === 'function' || opts.notificationId)
+        ? async () => {
+          if (typeof opts.shouldContinue === 'function') {
+            let verdict;
+            try { verdict = await opts.shouldContinue(); } catch { return false; }
+            if (verdict !== true && verdict?.ok !== true) return false;
+            if (verdict && typeof verdict === 'object'
+              && Object.prototype.hasOwnProperty.call(verdict, 'validUntil')) {
+              if (typeof verdict.validUntil !== 'number' || !Number.isFinite(verdict.validUntil)) return false;
+              earliestValidUntil = earliestValidUntil == null
+                ? verdict.validUntil : Math.min(earliestValidUntil, verdict.validUntil);
+            }
+          }
+          if (opts.notificationId) {
+            // The opaque caller check can wait while a newer worker reclaims
+            // the lease. Verify ownership only after it returns; never hold a
+            // notification row lock across caller code.
+            const owned = await db('notifications').where({ id: opts.notificationId })
+              .whereRaw("metadata->>'pushAttemptToken' = ? AND (metadata->>'pushLeaseUntil')::timestamptz > now()", [attemptToken])
+              .first('id', 'metadata').catch(() => null);
+            const ownedLeaseUntil = Date.parse(owned?.metadata?.pushLeaseUntil);
+            if (!owned || !Number.isFinite(ownedLeaseUntil) || ownedLeaseUntil <= Date.now()) {
+              claimLost = true;
+              return false;
+            }
+          }
+          if (earliestValidUntil != null && Date.now() >= earliestValidUntil) return false;
+          if (typeof opts.shouldContinue?.isStillValid === 'function') {
+            try { if (opts.shouldContinue.isStillValid() !== true) return false; } catch { return false; }
+          }
+          return true;
         }
+        : undefined;
+      if (compositeShouldContinue && !(await compositeShouldContinue())) {
+        if (claimLost) break;
+        results.push({ sent: false, skipped: true, reason: 'send_window_closed' });
+        continue;
       }
-      if (opts.notificationId) {
-        // A paused old worker cannot hand off another device after a newer
-        // worker reclaimed its expired lease.
-        const owned = await db('notifications').where({ id: opts.notificationId })
-          .whereRaw("metadata->>'pushAttemptToken' = ? AND (metadata->>'pushLeaseUntil')::timestamptz > now()", [attemptToken]).first('id').catch(() => null);
-        if (!owned) { claimLost = true; break; }
-      }
-      const result = await sendSubscription(sub, notification).catch(() => ({ sent: false, failed: true, reason: 'provider_failure' }));
+      const result = await sendSubscription(sub, notification, { shouldContinue: compositeShouldContinue })
+        .catch(() => ({ sent: false, failed: true, reason: 'provider_failure' }));
       results.push(result);
+      if (claimLost) break;
       if (result.sent && opts.notificationId) {
         // Persist the first acceptance before walking another device, so a
         // later provider crash does not erase an already accepted event.

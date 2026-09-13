@@ -1,4 +1,5 @@
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/customer-email-fanout', () => ({ propagateCustomerEmailChange: jest.fn(async () => ({})) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/sendgrid-mail', () => ({
   sendOne: jest.fn(),
@@ -10,6 +11,10 @@ jest.mock('../services/email-template-library', () => ({
   activeSuppressionFor: jest.fn(),
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+jest.mock('../services/visit-completion-summary', () => ({
+  retrySummaryThroughHandoff: jest.fn(async (message, dispatch) => { const verdict = await dispatch(); return verdict && verdict.ok === false ? verdict : { ok: true }; }),
+  reconcileSummaryEmailRecovery: jest.fn(async () => ({ reconciled: true })),
+}));
 
 const db = require('../models/db');
 const sendgrid = require('../services/sendgrid-mail');
@@ -184,9 +189,10 @@ function orderedDb(resolvers = {}) {
   const calls = [];
   const fn = jest.fn((table) => {
     const chain = {};
-    for (const m of ['where', 'whereRaw', 'whereNot', 'whereIn', 'andWhere', 'orWhereRaw', 'onConflict', 'ignore', 'modify', 'insert', 'select']) {
+    for (const m of ['where', 'whereRaw', 'whereNot', 'whereIn', 'andWhere', 'orWhereRaw', 'onConflict', 'ignore', 'modify', 'select']) {
       chain[m] = jest.fn(() => chain);
     }
+    chain.insert = jest.fn((data) => { calls.push({ table, op: 'insert', data }); return chain; });
     chain.first = jest.fn(() => Promise.resolve(resolvers.first ? resolvers.first(table) : null));
     chain.returning = jest.fn(() => Promise.resolve(resolvers.returning ? resolvers.returning(table) : []));
     chain.update = jest.fn((data) => { calls.push({ table, data }); return Promise.resolve(resolvers.update ? resolvers.update(table, data) : 1); });
@@ -214,6 +220,43 @@ describe('attemptRecovery codex-fix behaviors', () => {
   });
   afterEach(() => { process.env = { ...orig }; });
 
+  test.each([
+    ['sends a visit summary recovery through the locked handoff', { ok: true }, 1, 'resent'],
+    ['suppresses a visit summary recovery whose original recipient is no longer authorized', { ok: false, reason: 'visit_summary_recipient_changed' }, 0, 'recipient_unauthorized'],
+  ])('%s', async (_label, fence, sends, finalStatus) => {
+    const summary = require('../services/visit-completion-summary');
+    summary.retrySummaryThroughHandoff.mockImplementationOnce(async (message, dispatch) => {
+      expect(message.id).toBe('orig1');
+      if (fence.ok) return (await dispatch()) || fence;
+      return fence;
+    });
+    emailLib.loadTemplateByKey.mockResolvedValue(undefined);
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'pm_1' });
+    const mockDb = orderedDb({
+      // The bounced address is the customer's own email, so the still-on-file gate passes.
+      first: (table) => (table === 'customers' ? { id: 'c1', email: 'jane@gmial.com' } : null),
+      returning: (table) => {
+        if (table === 'email_bounce_recoveries') return [{ id: 'rec1' }];
+        if (table === 'email_messages') return [{ id: 'msg1', status: 'queued', from_email_snapshot: 'contact@wavespestcontrol.com', from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com', subject_snapshot: 'S' }];
+        return [];
+      },
+    });
+    db.mockImplementation(mockDb);
+    const res = await recovery.attemptRecovery(
+      { id: 'orig1', recipient_type: 'customer', recipient_id: 'c1', recipient_email_snapshot: 'jane@gmial.com', template_key: 'service.visit_summary', suppression_group_key_snapshot: 'service_operational', categories: ['email_template'], trigger_event_id: 'visit_summary:00000000-0000-4000-8000-000000000001' },
+      { event: 'bounce', type: 'bounce' },
+    );
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(sends);
+    expect(mockDb._calls.filter((c) => c.table === 'email_bounce_recoveries').pop().data).toMatchObject({ status: finalStatus });
+    if (fence.ok) {
+      expect(res).toMatchObject({ resent: true });
+    } else {
+      expect(res).toEqual({ skipped: 'visit_summary_recipient_changed' });
+      expect(mockDb._calls.some((c) => c.table === 'email_messages' && c.data.status === 'blocked')).toBe(true);
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    }
+  });
+
   test('links the ledger BEFORE publishing the provider id (delivery-race fix)', async () => {
     emailLib.loadTemplateByKey.mockResolvedValue(undefined);
     sendgrid.sendOne.mockResolvedValue({ messageId: 'pm_1' });
@@ -240,6 +283,10 @@ describe('attemptRecovery codex-fix behaviors', () => {
     expect(pubIdx).toBeGreaterThanOrEqual(0);
     expect(linkIdx).toBeLessThan(pubIdx);
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    // The recovery row keeps the original trigger identity so trigger-keyed
+    // aggregates (the visit summary effect) settle from its delivery.
+    expect(mockDb._calls.find((c) => c.op === 'insert' && c.table === 'email_messages').data)
+      .toMatchObject({ idempotency_key: 'bounce_recovery:orig1', trigger_event_id: 'estimate_delivery:est-1' });
     // P2: the send carries a custom arg so a fast webhook can resolve the row
     // before provider_message_id is committed.
     expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ customArgs: expect.objectContaining({ email_message_id: 'msg1' }) }));
@@ -417,6 +464,29 @@ function ownerDb(byTable = {}) {
   });
 }
 
+describe('resolveCustomerEmailField (account-primary fallback)', () => {
+  beforeEach(() => db.mockReset());
+
+  test('a secondary profile addressed at its account primary resolves to the primary row\'s email field', async () => {
+    const secondary = { id: 'sec-1', account_id: 'acct-1', is_primary_profile: false, email: null, service_contact_email: null, service_contact2_email: null, service_contact3_email: null };
+    const primary = { id: 'pri-1', first_name: 'Pat', phone: null, email: 'primary@example.com' };
+    db.mockImplementation((table) => {
+      const chain = {};
+      let byId = false;
+      for (const m of ['where', 'whereNull', 'orWhereRaw', 'forShare']) {
+        chain[m] = jest.fn((arg) => { if (arg && typeof arg === 'object' && 'id' in arg) byId = true; if (typeof arg === 'function') arg(chain); return chain; });
+      }
+      chain.first = jest.fn(async () => {
+        if (table === 'customers') return byId ? secondary : primary;
+        return null;
+      });
+      return chain;
+    });
+    await expect(recovery.resolveCustomerEmailField({ recipient_type: 'customer', recipient_id: 'sec-1' }, 'primary@example.com'))
+      .resolves.toEqual({ customerId: 'pri-1', field: 'email' });
+  });
+});
+
 describe('correctedAddressOwnedByOther (codex P1 privacy guard)', () => {
   beforeEach(() => db.mockReset());
 
@@ -431,6 +501,23 @@ describe('correctedAddressOwnedByOther (codex P1 privacy guard)', () => {
   test('false when no customer has it', async () => {
     db.mockImplementation(ownerDb({}));
     await expect(recovery.correctedAddressOwnedByOther('jane@gmail.com', 'c1')).resolves.toBe(false);
+  });
+  test('true when another customer holds a Gmail dot/tag variant of the corrected address', async () => {
+    // Rows only answer the inbox-identity (SPLIT_PART/REPLACE) query, never the exact one.
+    db.mockImplementation((table) => {
+      const chain = {};
+      let canonical = false;
+      for (const m of ['where', 'whereRaw', 'orWhereRaw', 'select', 'modify']) {
+        chain[m] = jest.fn((arg) => { if (typeof arg === 'string' && arg.includes('SPLIT_PART')) canonical = true; if (typeof arg === 'function') arg(chain); return chain; });
+      }
+      const rows = () => (table === 'customers' && canonical ? [{ id: 'c2' }] : []);
+      chain.then = (res, rej) => Promise.resolve(rows()).then(res, rej);
+      chain.catch = (rej) => Promise.resolve(rows()).catch(rej);
+      chain.first = jest.fn(() => Promise.resolve(rows()[0] || null));
+      return chain;
+    });
+    await expect(recovery.correctedAddressOwnedByOther('john.doe@gmail.com', 'c1')).resolves.toBe(true);
+    await expect(recovery.correctedAddressOwnedByOther('john.doe@example.com', 'c1')).resolves.toBe(false);
   });
   test('lead (no own customer): a matching customer blocks', async () => {
     db.mockImplementation(ownerDb({ customers: [{ id: 'c9' }] }));
@@ -515,7 +602,7 @@ function commitDb({
 } = {}) {
   const fn = jest.fn((table) => {
     const chain = {};
-    for (const m of ['where', 'whereRaw', 'whereNot', 'whereIn', 'andWhere', 'orWhereRaw', 'onConflict', 'ignore', 'modify', 'insert']) chain[m] = jest.fn(() => chain);
+    for (const m of ['where', 'whereRaw', 'whereNot', 'whereIn', 'andWhere', 'orWhereRaw', 'onConflict', 'ignore', 'modify', 'insert', 'forUpdate']) chain[m] = jest.fn(() => chain);
     chain.select = jest.fn((col) => { chain._sel = col; return chain; });
     const rowsFor = () => {
       if (table === 'customers') return customerOwnerRows;
@@ -536,6 +623,17 @@ function commitDb({
     return chain;
   });
   fn.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
+  // The billing_email commit runs row → address key → update in a transaction.
+  fn.transaction = jest.fn(async (cb) => cb(fn));
+  return fn;
+}
+// The commit runs destination key → ownership recheck → customer write in one
+// transaction on the module db: the mock must carry transaction/raw too.
+function useCommitDb(opts) {
+  const fn = commitDb(opts);
+  db.mockImplementation(fn);
+  db.transaction = fn.transaction;
+  db.raw = fn.raw;
   return fn;
 }
 
@@ -551,7 +649,7 @@ describe('commitRecoveryOnDelivery persists lead/estimate source address (codex 
       corrected_email: 'jane@gmail.com', bounced_email: 'jane@gmial.com',
       correction_rule: 'domain_typo', status: 'resent', record_updated: false, metadata: {},
     };
-    db.mockImplementation(commitDb({ rec, estUpdate: 1, leadUpdate: 0, origTriggerEvent: 'estimate_delivery:e1' }));
+    useCommitDb({ rec, estUpdate: 1, leadUpdate: 0, origTriggerEvent: 'estimate_delivery:e1' });
     await recovery.commitRecoveryOnDelivery({ id: 'msg9', recipient_email_snapshot: 'jane@gmail.com' });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('estimates.customer_email');
@@ -565,7 +663,7 @@ describe('commitRecoveryOnDelivery persists lead/estimate source address (codex 
     };
     // No origTriggerEvent → no source estimate id → must NOT touch any row that
     // merely shares the typo (no unscoped fallback). Rows present but untouched.
-    db.mockImplementation(commitDb({ rec, estRows: [{ id: 'e1' }], leadRows: [{ id: 'l1' }] }));
+    useCommitDb({ rec, estRows: [{ id: 'e1' }], leadRows: [{ id: 'l1' }] });
     await recovery.commitRecoveryOnDelivery({ id: 'msg11', recipient_email_snapshot: 'jane@gmail.com' });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     const body = NotificationService.notifyAdmin.mock.calls[0][2];
@@ -579,7 +677,7 @@ describe('commitRecoveryOnDelivery persists lead/estimate source address (codex 
       corrected_email: 'jane@gmail.com', bounced_email: 'jane@gmial.com',
       correction_rule: 'domain_typo', status: 'resent', record_updated: false, metadata: {},
     };
-    db.mockImplementation(commitDb({ rec, estUpdate: 1, leadUpdate: 0 }));
+    useCommitDb({ rec, estUpdate: 1, leadUpdate: 0 });
     await recovery.commitRecoveryOnDelivery({ id: 'msg10', recipient_email_snapshot: 'jane@gmail.com' });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     const body = NotificationService.notifyAdmin.mock.calls[0][2];
@@ -594,7 +692,7 @@ describe('commitRecoveryOnDelivery persists lead/estimate source address (codex 
       correction_rule: 'domain_typo', status: 'resent', record_updated: false, metadata: {},
     };
     // A DIFFERENT customer now owns the corrected address → commit must not overwrite.
-    db.mockImplementation(commitDb({ rec, customerOwnerRows: [{ id: 'other-customer' }] }));
+    useCommitDb({ rec, customerOwnerRows: [{ id: 'other-customer' }] });
     await recovery.commitRecoveryOnDelivery({ id: 'msg13', recipient_email_snapshot: 'jane@gmail.com' });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     const body = NotificationService.notifyAdmin.mock.calls[0][2];
@@ -608,7 +706,8 @@ describe('commitRecoveryOnDelivery persists lead/estimate source address (codex 
       corrected_email: 'jane@gmail.com', bounced_email: 'jane@gmial.com',
       correction_rule: 'domain_typo', status: 'resent', record_updated: false, metadata: {},
     };
-    db.mockImplementation(commitDb({ rec }));
+    useCommitDb({ rec });
+    db.transaction = jest.fn(async (cb) => cb(db));
     await recovery.commitRecoveryOnDelivery({ id: 'msg14', recipient_email_snapshot: 'jane@gmail.com' });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('notification_prefs.billing_email');
@@ -622,7 +721,7 @@ describe('commitRecoveryOnDelivery persists lead/estimate source address (codex 
     };
     // Source estimate id comes from the original send's trigger_event_id. Two
     // estimates share the typo, but only the SOURCE row (est-9) must be updated.
-    db.mockImplementation(commitDb({ rec, origTriggerEvent: 'estimate_delivery:est-9', estRows: [{ id: 'est-9' }, { id: 'est-other' }], estUpdate: 1 }));
+    useCommitDb({ rec, origTriggerEvent: 'estimate_delivery:est-9', estRows: [{ id: 'est-9' }, { id: 'est-other' }], estUpdate: 1 });
     await recovery.commitRecoveryOnDelivery({ id: 'msg15', recipient_email_snapshot: 'jane@gmail.com' });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     // Updated via the source-id path (not the ambiguity fallback, which would skip).
@@ -638,7 +737,7 @@ describe('commitRecoveryOnDelivery persists lead/estimate source address (codex 
     // Lead-sourced send (recipient_type 'lead' + recipient_id) → scope the rewrite to
     // that lead row, not any prospect sharing the typo. No source estimate → only the
     // lead path runs.
-    db.mockImplementation(commitDb({ rec, origRecipientType: 'lead', origRecipientId: 'lead-7', leadUpdate: 1, estUpdate: 0 }));
+    useCommitDb({ rec, origRecipientType: 'lead', origRecipientId: 'lead-7', leadUpdate: 1, estUpdate: 0 });
     await recovery.commitRecoveryOnDelivery({ id: 'msgL', recipient_email_snapshot: 'jane@gmail.com' });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     const body = NotificationService.notifyAdmin.mock.calls[0][2];

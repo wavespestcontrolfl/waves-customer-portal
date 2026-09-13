@@ -706,6 +706,25 @@ router.put('/preferences', async (req, res, next) => {
 
     await db.transaction(async (trx) => {
       for (const id of [...new Set([req.customerId, primaryId])].sort()) await lockCustomerComms(trx, id);
+      // Row before key, like every other notification_prefs writer in this
+      // file: lock the preference row(s) this save is about to update
+      // BEFORE requesting the address key. retrySummaryThroughHandoff and
+      // commitRecoveryOnDelivery both lock a preference row first and take
+      // the address key second — taking the key first here would let this
+      // transaction wait on a preference row while one of those waits on
+      // this transaction's key, a deadlock either side can lose.
+      const prefRowIds = [
+        ...(Object.keys(propertyDbUpdates).length ? [req.customerId] : []),
+        ...(Object.keys(channelDbUpdates).length ? [primaryId] : []),
+      ];
+      for (const id of [...new Set(prefRowIds)].sort()) {
+        await trx('notification_prefs').where({ customer_id: id }).forUpdate().first('customer_id');
+      }
+      // A billing address assigned here takes the address key after the row
+      // locks, like every customer address writer: a bearer-link handoff
+      // that read the address as unowned commits before this claim or
+      // re-judges ownership after it.
+      await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, { ...propertyDbUpdates, ...channelDbUpdates });
       if (Object.keys(propertyDbUpdates).length) {
         await trx('notification_prefs').where({ customer_id: req.customerId })
           .update({ ...propertyDbUpdates, updated_at: new Date() });
@@ -836,6 +855,10 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
         // orders the events even if a later save's insert lands first.
         lockedBefore = await trx('customers').where({ id: req.params.customerId }).forUpdate().first() || beforeRow;
         lockedAt = new Date();
+        // The assigned addresses take the shared email key after the row
+        // lock, so a bounce recovery's ownership check cannot be overtaken
+        // by this save (utils/customer-comms-lock.js lockAssignedCustomerEmails).
+        await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, slotUpdates);
         if (optinArgs) {
           const { claimRecipientOptins } = require('../services/recipient-optin');
           optinClaims = await claimRecipientOptins({ ...optinArgs, trx });
@@ -914,6 +937,7 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
         // describe the actual DB transition, not a possibly-stale snapshot.
         legacyLockedBefore = await trx('customers').where({ id: req.params.customerId }).forUpdate().first() || beforeRow;
         legacyLockedAt = new Date();
+        await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, legacySlot1Updates);
         if (legacyOptinArgs) {
           const { claimRecipientOptins } = require('../services/recipient-optin');
           legacyClaims = await claimRecipientOptins({ ...legacyOptinArgs, trx });
@@ -942,8 +966,13 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
     // (marketing flags NULL), so this is always an update — a bare insert
     // here would take the legacy true defaults and mint marketing consent.
     const existing = await ensurePrefs(req.params.customerId);
-    await withCustomerCommsLock(db, req.params.customerId, trx =>
-      trx('notification_prefs').where({ customer_id: req.params.customerId }).update(dbUpdates));
+    await withCustomerCommsLock(db, req.params.customerId, async (trx) => {
+      // Row first, then the address key for an assigned billing_email (the
+      // bounce recovery reads billing_email as an ownership source).
+      await trx('notification_prefs').where({ customer_id: req.params.customerId }).forUpdate().first('customer_id');
+      await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, dbUpdates);
+      await trx('notification_prefs').where({ customer_id: req.params.customerId }).update(dbUpdates);
+    });
     if (pendingOptinDispatch) {
       const { dispatchRecipientOptins } = require('../services/recipient-optin');
       void dispatchRecipientOptins(pendingOptinDispatch.claims, pendingOptinDispatch.customer)

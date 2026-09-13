@@ -18,6 +18,13 @@
  * Run: railway run -s Postgres node server/scripts/v2-promotion-readiness.js
  */
 
+// Recovery attribution is being split from the address-safety change in #4437.
+// Mutable triage cards cannot establish which recovery contract produced the
+// current routing result. Refuse to issue a promotion verdict until that
+// evidence is persisted per processing pass by the metrics follow-up.
+console.error('Promotion readiness unavailable: recovery cohort attribution is pending repair (PR #4437 follow-up). Do not use historical readiness reports to promote routing.');
+process.exit(1);
+
 require('dotenv').config({ path: require('path').join(__dirname, '..', '..', '.env') });
 const {
   canAutoRoute, computeDeterministicTriageFlags, mergeTriageFlags, isInServiceAreaCounty,

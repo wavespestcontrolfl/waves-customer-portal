@@ -2,9 +2,11 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { MemoryRouter } from 'react-router-dom';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import EstimateToolViewV2 from './EstimateToolViewV2';
+import { IntelligenceBarPageDataProvider, useIntelligenceBarActions, useIntelligenceBarPageData } from '../../hooks/useIntelligenceBarPageData';
+function AssistantOutcome() { const { notifyMutation } = useIntelligenceBarActions(); const pageData = useIntelligenceBarPageData(); return <><button onClick={() => notifyMutation({ id: 'operation-a', domain: 'estimate', estimate_id: source.id })}>Assistant saved estimate</button><button onClick={() => notifyMutation({ id: 'unrelated', domain: 'inventory' })}>Assistant saved inventory</button><output aria-label="Current assistant targets">{JSON.stringify(pageData)}</output></>; }
 const { openSend }=vi.hoisted(()=>({openSend:vi.fn()}));
 vi.mock('../../components/admin/EstimateSendDialog',()=>({useEstimateSend:()=>openSend}));
 const result={recurring:{tier:'Bronze',grandTotal:50,annualAfterDiscount:600,services:[{service:'pest_control',name:'Pest Control',mo:50,annual:600}]},oneTime:{total:99,items:[]},results:{},totals:{year2mo:50,year1:699}};
@@ -78,5 +80,110 @@ describe('draft identity and reviewed version',()=>{
   await waitFor(()=>expect(committed()).toHaveLength(1));
   expect(creates).toBe(2);
   expect(fetcher.mock.calls.some(([url,o])=>url==='/api/admin/estimates/persisted-qa-draft'&&o?.method==='PUT')).toBe(true);
+ });
+});
+
+describe('assistant estimate refresh', () => {
+ const mount = () => render(<MemoryRouter><IntelligenceBarPageDataProvider><AssistantOutcome /><EstimateToolViewV2 editEstimateId={source.id} /></IntelligenceBarPageDataProvider></MemoryRouter>);
+ it('refreshes the matching saved editor and publishes only its current record identifiers', async () => {
+  mount();await screen.findByDisplayValue('QA Contact');
+  await waitFor(() => {
+   expect(screen.getByRole('status', { name: 'Current assistant targets' })).toHaveTextContent('qa-property');
+   expect(screen.getByRole('status', { name: 'Current assistant targets' })).toHaveTextContent('qa-draft');
+   expect(screen.getByRole('status', { name: 'Current assistant targets' })).not.toHaveTextContent('QA Contact');
+  });
+  currentSource={...structuredClone(source),editVersion:'assistant-version',customerName:'QA Assistant Saved'};
+  fireEvent.click(screen.getByRole('button',{name:'Assistant saved estimate'}));
+  await screen.findByDisplayValue('QA Assistant Saved');
+  fireEvent.change(screen.getByLabelText('Customer name'),{target:{value:'QA Operator Edit'}});
+  fireEvent.click(screen.getByRole('button',{name:'Save draft',exact:true}));
+  await waitFor(()=>expect(committed()).toHaveLength(1));
+  expect(committed()[0].expectedEditVersion).toBe('assistant-version');
+ });
+ it('keeps the editor usable after a failed refresh and retries the saved version', async () => {
+  mount();await screen.findByDisplayValue('QA Contact');
+  const original=fetcher.getMockImplementation();
+  let refreshCalls=0;
+  fetcher.mockImplementation((url,opts)=>{
+   if(!String(url).endsWith('/edit-source')) return original(url,opts);
+   refreshCalls++;
+   return refreshCalls===1 ? response({error:'Temporary refresh failure'},503)
+    : response({...source,customerName:'QA Recovered',editVersion:'recovered-version'});
+  });
+  fireEvent.click(screen.getByRole('button',{name:'Assistant saved estimate'}));
+  await screen.findByText('Temporary refresh failure',{exact:false});
+  expect(screen.getByLabelText('Customer name')).toHaveValue('QA Contact');
+  expect(screen.getByRole('button',{name:'Save draft',exact:true})).toBeEnabled();
+  expect(refreshCalls).toBe(1);
+  fireEvent.click(screen.getByRole('button',{name:'Retry',exact:true}));
+  await screen.findByDisplayValue('QA Recovered');
+  expect(refreshCalls).toBe(2);
+  expect(screen.queryByText('Temporary refresh failure',{exact:false})).not.toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText('Customer name'),{target:{value:'QA After Retry'}});
+  fireEvent.click(screen.getByRole('button',{name:'Save draft',exact:true}));
+  await waitFor(()=>expect(committed()).toHaveLength(1));
+  expect(committed()[0].expectedEditVersion).toBe('recovered-version');
+ });
+ it('preserves edits made after a failed refresh when Retry is clicked', async () => {
+  mount();await screen.findByDisplayValue('QA Contact');
+  const original=fetcher.getMockImplementation();
+  fetcher.mockImplementation((url,opts)=>String(url).endsWith('/edit-source')
+   ? response({error:'Temporary refresh failure'},503) : original(url,opts));
+  fireEvent.click(screen.getByRole('button',{name:'Assistant saved estimate'}));
+  await screen.findByText('Temporary refresh failure',{exact:false});
+  fireEvent.change(screen.getByLabelText('Customer name'),{target:{value:'QA Unsaved After Failure'}});
+  fireEvent.click(screen.getByRole('button',{name:'Retry',exact:true}));
+  await screen.findByText(/Your unsaved edits are still here/);
+  expect(screen.getByLabelText('Customer name')).toHaveValue('QA Unsaved After Failure');
+  expect(committed()).toHaveLength(0);
+ });
+ it.each(['before','during'])('preserves unsaved fields entered %s the assistant refresh', async timing => {
+  mount();await screen.findByDisplayValue('QA Contact');
+  let finish;
+  if(timing==='during'){
+   const original=fetcher.getMockImplementation();
+   fetcher.mockImplementation((url,opts)=>String(url).endsWith('/edit-source')?new Promise(resolve=>{finish=resolve;}):original(url,opts));
+   fireEvent.click(screen.getByRole('button',{name:'Assistant saved estimate'}));
+   await waitFor(()=>expect(finish).toBeTypeOf('function'));
+  }
+  fireEvent.change(screen.getByLabelText('Customer name'),{target:{value:'QA Unsaved'}});
+  if(timing==='before')fireEvent.click(screen.getByRole('button',{name:'Assistant saved estimate'}));
+  else await act(async()=>finish(await response({...source,customerName:'QA Server Newer',editVersion:'newer'})));
+  expect(await screen.findByText(/Your unsaved edits are still here/)).toBeInTheDocument();
+  expect(screen.getByLabelText('Customer name')).toHaveValue('QA Unsaved');
+  expect(committed()).toHaveLength(0);
+ });
+ it('keeps a matching refresh in flight when an unrelated receipt arrives', async () => {
+  mount();await screen.findByDisplayValue('QA Contact');
+  let finish;
+  const original=fetcher.getMockImplementation();
+  fetcher.mockImplementation((url,opts)=>String(url).endsWith('/edit-source')?new Promise(resolve=>{finish=resolve;}):original(url,opts));
+  fireEvent.click(screen.getByRole('button',{name:'Assistant saved estimate'}));
+  await waitFor(()=>expect(finish).toBeTypeOf('function'));
+  fireEvent.click(screen.getByRole('button',{name:'Assistant saved inventory'}));
+  await act(async()=>finish(await response({...source,customerName:'QA Refreshed',editVersion:'refreshed'})));
+  await screen.findByDisplayValue('QA Refreshed');
+ });
+ it('removes the prior estimate context while another saved estimate is loading', async () => {
+  currentSource={...currentSource,customerId:'qa-customer-a'};
+  const tree=id=><MemoryRouter><IntelligenceBarPageDataProvider><AssistantOutcome /><EstimateToolViewV2 editEstimateId={id} /></IntelligenceBarPageDataProvider></MemoryRouter>;
+  const view=render(tree(source.id));await screen.findByDisplayValue('QA Contact');
+  await waitFor(()=>expect(screen.getByRole('status',{name:'Current assistant targets'})).toHaveTextContent('qa-draft'));
+  let finish;
+  const original=fetcher.getMockImplementation();
+  fetcher.mockImplementation((url,opts)=>String(url).endsWith('/edit-source')?new Promise(resolve=>{finish=resolve;}):original(url,opts));
+  view.rerender(tree('qa-next-draft'));
+  await waitFor(()=>expect(finish).toBeTypeOf('function'));
+  const targets=screen.getByRole('status',{name:'Current assistant targets'});
+  expect(targets).not.toHaveTextContent('qa-draft');
+  expect(targets).not.toHaveTextContent('qa-property');
+  expect(targets).not.toHaveTextContent('qa-customer-a');
+  await act(async()=>finish(await response({...source,id:'qa-next-draft',customerId:'qa-customer-b',propertyId:'qa-property-b',customerName:'QA Next'})));
+  await screen.findByDisplayValue('QA Next');
+  await waitFor(()=>{
+   expect(targets).toHaveTextContent('qa-next-draft');
+   expect(targets).toHaveTextContent('qa-property-b');
+   expect(targets).toHaveTextContent('qa-customer-b');
+  });
  });
 });

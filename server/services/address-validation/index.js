@@ -26,6 +26,7 @@
 
 const logger = require('../logger');
 const { isInServiceAreaCounty } = require('../call-triage-flags');
+const { normalizeState, normalizeStreetLine, parseRawAddress } = require('../../utils/address-normalizer');
 
 // Google address calls are fail-open by design — a HUNG call must fail the
 // same way a failed one does (validation skipped, raw address kept) instead
@@ -140,8 +141,29 @@ function deriveStatus(result, county) {
   return { status: STATUSES.VALIDATED_ACCEPT, ...base };
 }
 
-async function validateAddress({ addressLines, regionCode = 'US' } = {}) {
+// Service-call fragments may use this hint. A stated state takes precedence;
+// other consumers, including moving-address validation, supply no default hint.
+const SERVICE_STATE = 'FL';
+
+async function validateAddress({ addressLines, regionCode = 'US', administrativeArea = null } = {}) {
   const lines = (addressLines || []).filter(Boolean);
+  // Geography comes from locality/state tails only. A line that starts
+  // with a house number ("100 Main St Apt CT") carries a state only when the
+  // parse also found a locality or ZIP — otherwise the state-shaped token
+  // is a unit value or a street suffix, not Connecticut (codex r11 P1).
+  const UNIT_WORD = /^(?:#|apt|apartment|unit|ste|suite|bldg|building|fl|floor|lot|spc|space|rm|room)$/i;
+  const geographyState = (line) => {
+    const parsed = parseRawAddress(line);
+    if (!parsed.state) return '';
+    // The comma-free parser reads "100 Main St Apt CT" as city "Apt" +
+    // state CT — a unit designator is not a locality either.
+    const locality = parsed.city && !UNIT_WORD.test(parsed.city) ? parsed.city : '';
+    if (/^\d/.test(String(line).trim()) && !locality && !parsed.zip) return '';
+    return parsed.state;
+  };
+  const statedState = [lines.join(' ').replace(/,/g, ' '), ...lines]
+    .map(geographyState).filter(Boolean).pop();
+  const regionHint = statedState || administrativeArea;
   if (!ENABLED() || lines.length === 0) {
     return { status: STATUSES.NOT_ATTEMPTED, inServiceArea: null, county: null, granularity: null, normalized: null, hasInferred: false, hasReplaced: false, hasUnconfirmed: false, missingComponents: [] };
   }
@@ -156,7 +178,7 @@ async function validateAddress({ addressLines, regionCode = 'US' } = {}) {
       method: 'POST',
       signal: AbortSignal.timeout(GOOGLE_ADDRESS_TIMEOUT_MS),
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ address: { regionCode, addressLines: lines } }),
+      body: JSON.stringify({ address: { regionCode, ...(regionHint ? { administrativeArea: regionHint } : {}), addressLines: lines } }),
     });
     if (!res.ok) {
       const body = await res.text().catch(() => '');
@@ -166,6 +188,14 @@ async function validateAddress({ addressLines, regionCode = 'US' } = {}) {
     const data = await res.json();
     const county = await reverseGeocodeCounty(data.result?.geocode?.location, key);
     const out = deriveStatus(data.result, county);
+    // Explicit non-Florida geography stays outside the service area even
+    // when AV is incomplete. Recovery may receive a flat extraction that
+    // lost the state, so no recoverable verdict may authorize that retry.
+    const providerState = normalizeState(out.normalized?.state);
+    if (statedState && (statedState !== SERVICE_STATE || (providerState && providerState !== statedState))) {
+      out.status = STATUSES.OUT_OF_SERVICE_AREA;
+      out.inServiceArea = false;
+    }
     out.providerResponseId = data.responseId || null;
     return out;
   } catch (err) {
@@ -177,12 +207,32 @@ async function validateAddress({ addressLines, regionCode = 'US' } = {}) {
 // Build Google AV `addressLines` from the extraction's nested service_address.
 // Two lines (street, then "city ST zip") so AV parses locality/postal cleanly.
 // Returns [] when there's no street AND no city — nothing worth validating.
+// A street line that is only a house number names no street: Google matched
+// one to a random premise in another state (2026-09-06 audit), so it is
+// dropped and the call validates on the locality alone, if any. The test is
+// on street_line_1 ITSELF (codex r2 P2): a unit designator in line 2 ("Apt
+// 4") carries letters but still names no street.
 function buildAddressLines(serviceAddress) {
   const sa = serviceAddress || {};
-  const line1 = [sa.street_line_1, sa.street_line_2].filter(Boolean).join(' ').trim();
-  const line2 = [sa.city, sa.state, sa.postal_code].filter(Boolean).join(' ').trim();
+  const street1 = String(sa.street_line_1 || '').trim();
+  // The extraction schema stores non-Florida states as null; raw_text still
+  // carries the stated geography. A structured street boundary distinguishes
+  // a state-only tail ("Main Street CT") from a street suffix ("Main Ct").
+  const rawTokens = String(sa.raw_text || '').replace(/,/g, ' ').trim().split(/\s+/);
+  const streetKey = normalizeStreetLine(street1).toLowerCase();
+  const boundary = rawTokens.findIndex((_, i) => normalizeStreetLine(rawTokens.slice(0, i + 1).join(' ')).toLowerCase() === streetKey);
+  // Terminal punctuation ("CT 06001.") is transcript/dictation noise, not
+  // part of the ZIP — strip it before matching or the regex below rejects an
+  // otherwise-clean state+ZIP tail and falls through to the ad-hoc parser,
+  // which loses the state entirely on a comma-free string (codex P1).
+  const tail = (boundary >= 0 ? rawTokens.slice(boundary + 1).join(' ') : '').replace(/[.,;]+$/, '');
+  const stateOnlyTail = tail.match(/^([a-z]{2})(?:\s+\d{5}(?:-\d{4})?)?$/i);
+  const rawState = (stateOnlyTail && normalizeState(stateOnlyTail[1])) || parseRawAddress(sa.raw_text).state;
+  const state = rawState && rawState !== SERVICE_STATE ? rawState : (sa.state || rawState);
+  const line1 = /[a-z]/i.test(street1) ? [street1, sa.street_line_2].filter(Boolean).join(' ').trim() : '';
+  const line2 = [sa.city, state, sa.postal_code].filter(Boolean).join(' ').trim();
   if (!line1 && !sa.city) return [];
   return [line1, line2].filter(Boolean);
 }
 
-module.exports = { validateAddress, deriveStatus, buildAddressLines, STATUSES, VERSION };
+module.exports = { validateAddress, deriveStatus, buildAddressLines, STATUSES, VERSION, SERVICE_STATE };

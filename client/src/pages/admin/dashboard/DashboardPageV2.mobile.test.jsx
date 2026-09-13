@@ -111,7 +111,7 @@ describe("DashboardPageV2 mobile scorecard tabs", () => {
     for (const id of ["growth", "profit", "retention", "cash"]) {
       expect(document.getElementById(id)).not.toBeInTheDocument();
     }
-    expect(navButton("Today").getAttribute("aria-current")).toBe("true");
+    expect(navButton("Today").getAttribute("aria-current")).toBe("page");
   });
 
   it("switches sections on pill tap and marks the pill current", async () => {
@@ -125,7 +125,7 @@ describe("DashboardPageV2 mobile scorecard tabs", () => {
     fireEvent.click(navButton("Profit"));
     expect(document.getElementById("profit")).toBeInTheDocument();
     expect(document.getElementById("today")).not.toBeInTheDocument();
-    expect(navButton("Profit").getAttribute("aria-current")).toBe("true");
+    expect(navButton("Profit").getAttribute("aria-current")).toBe("page");
     expect(navButton("Today").getAttribute("aria-current")).toBeNull();
 
     fireEvent.click(navButton("Cash"));
@@ -144,7 +144,7 @@ describe("DashboardPageV2 mobile scorecard tabs", () => {
     fireEvent.click(navButton("Retention"));
     const select = screen.getByLabelText("Period");
     expect(select.tagName).toBe("SELECT");
-    expect(select).toHaveClass("h-11", "text-16");
+    expect(select).toHaveClass("ui-select", "ui-control-comfortable");
     const labels = Array.from(select.querySelectorAll("option")).map((o) => o.textContent);
     expect(labels).toContain("Month to date");
     expect(labels).toContain("Quarter to date");

@@ -179,10 +179,15 @@ const CAP_EXEMPT_TEMPLATE_KEYS = [
 const CAP_TOUCH_SQL = `(template_key IS NULL OR template_key NOT IN (${CAP_EXEMPT_TEMPLATE_KEYS.map((k) => `'${k}'`).join(",")}))`;
 
 /**
- * Cadence plans (owner spec 2026-08-05, revising 2026-07-30):
+ * Cadence plans (owner spec 2026-08-05, revising 2026-07-30; Day-6 email →
+ * Day 7 under the 3-day rule of 2026-09-07 — 72 h after the Day-4 SMS on
+ * an unshifted week). The 3-day rule is the ONLY spacing rule and it wins
+ * over the spec's day windows: when the weekdays-only Day-4 SMS shifts
+ * across a weekend (a Tue/Wed treatment → Monday), the email follows 72 h
+ * after THAT send — Day 9 at the latest — rather than crowding the SMS.
  *   - ONE-TIME services (DEFAULT_SEQUENCE_PLAN): Day 0 SMS right after
  *     service → SMS 3-5 days after treatment (Day 4, weekdays only) → email
- *     5-7 days after treatment (Day 6).
+ *     ≥72 h after the SMS (Day 7 unshifted).
  *   - RECURRING plan customers: ONE ask per eligible visit (Day 0 SMS only) —
  *     the ongoing relationship spreads asks across visits instead of a
  *     3-touch burst that burns the 180d cap in one week.
@@ -211,7 +216,7 @@ function isDay0ControlledAsk({ sequenceStep, channel, templateId }) {
 const DEFAULT_SEQUENCE_PLAN = [
   { day: 0, channel: 'sms', templateKey: DAY0_ASK_TEMPLATE_KEY },
   { day: 4, channel: 'sms', templateKey: 'soft_reminder', weekdaysOnly: true },
-  { day: 6, channel: 'email', templateKey: 'final_nudge' },
+  { day: 7, channel: 'email', templateKey: 'final_nudge' },
 ];
 const RECURRING_SEQUENCE_PLAN = [
   { day: 0, channel: 'sms', templateKey: DAY0_ASK_TEMPLATE_KEY },

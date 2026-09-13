@@ -7,11 +7,12 @@ import './tech-field.css';
 
 // Mounted only after TechLayout verifies the staff profile. One flag read
 // owns the entire workspace; child routes consume the outlet context.
-export default function TechFieldShell({ children, techName, techRole, documentsAvailable }) {
+export default function TechFieldShell({ children, techName, techRole, documentsAvailable, payGrowthAvailable }) {
   const { enabled, ready } = useFeatureFlagReady('tech-field-workspace', false);
   const { pathname, search } = useLocation();
   const { navigationBusy, setNavigationBusy } = useTechNavigationLock();
   const documentsRoute = Boolean(matchPath('/tech/documents', pathname));
+  const payGrowthRoute = Boolean(matchPath('/tech/pay-growth', pathname));
   const todayRoute = Boolean(matchPath('/tech', pathname));
   const moreRoute = Boolean(matchPath('/tech/more', pathname));
   const visit = new URLSearchParams(search).get('visit');
@@ -19,7 +20,7 @@ export default function TechFieldShell({ children, techName, techRole, documents
   const legacyTool = ['/tech/protocols', '/tech/lawn-diagnostic', '/tech/social-post'].some(path => matchPath(path, pathname));
   if (!ready) return <div className="tech-field" role="status">Loading field workspace…</div>;
   if (!enabled) return children;
-  const section = moreRoute || documentsRoute ? 'more'
+  const section = moreRoute || documentsRoute || payGrowthRoute ? 'more'
     : todayRoute ? 'today' : 'tools';
   return (
     <div className="tech-field">
@@ -33,7 +34,7 @@ export default function TechFieldShell({ children, techName, techRole, documents
         <div className={legacyTool ? 'tf-existing' : undefined}>
           {documentsRoute && !documentsAvailable
             ? <p>Staff documents are unavailable.</p>
-            : <Outlet context={{ fieldWorkspace: true, techRole, documentsAvailable, setNavigationBusy }} />}
+            : <Outlet context={{ fieldWorkspace: true, techRole, documentsAvailable, payGrowthAvailable, setNavigationBusy }} />}
         </div>
       </main>
       <nav className="tf-nav" aria-label="Field navigation">

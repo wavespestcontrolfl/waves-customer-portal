@@ -46,7 +46,8 @@
  *   Switching filter should clear stale rows / not mix categories.
  */
 
-import { useState, useEffect, useRef, useId, lazy, Suspense } from "react";
+import { useState, useEffect, useRef, useId, useCallback, lazy, Suspense } from "react";
+import { useIntelligenceBarActions, usePublishIntelligenceBarPageData } from "../../hooks/useIntelligenceBarPageData";
 import { createPortal } from "react-dom";
 import "./customer360-workspace.css";
 import AddressAutocomplete, { sameAutocompleteAddress } from "../AddressAutocomplete";
@@ -69,6 +70,7 @@ import {
   PenLine,
   RotateCcw,
   ShieldCheck,
+  Sparkles,
   Trash2,
   XCircle,
 } from "lucide-react";
@@ -5552,6 +5554,7 @@ function CustomerCallMessage({ message: m }) {
 function CustomerOverlayHeader({
   c,
   isAdmin,
+  openIntelligenceBar,
   openEditModal,
   score,
   onClose,
@@ -5654,6 +5657,9 @@ function CustomerOverlayHeader({
             {c.memberSince && <span>Since {fmtDate(c.memberSince)}</span>}
           </div>{" "}
           <div className="flex gap-2 flex-wrap">
+            {isAdmin && openIntelligenceBar && (
+              <Button variant="secondary" className="text-14" onClick={openIntelligenceBar}>Intelligence Bar</Button>
+            )}
             {c.phone && (
               <>
                 {" "}
@@ -7018,6 +7024,7 @@ function CustomerProfileMobileActions({
   onClose,
   c,
   isAdmin,
+  openIntelligenceBar,
   openEditModal,
   menuRef,
   menuButtonRef,
@@ -7063,6 +7070,12 @@ function CustomerProfileMobileActions({
           <ChevronLeft size={18} strokeWidth={1.75} />{" "}
         </button>{" "}
         <div className="flex items-center gap-2">
+          {isAdmin && openIntelligenceBar && (
+            <button type="button" aria-label="Open Intelligence Bar for this customer" onClick={openIntelligenceBar}
+              className="inline-flex items-center justify-center h-11 w-11 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring">
+              <Sparkles size={18} strokeWidth={1.75} />
+            </button>
+          )}
           {c.phone && (
             <a
               href={`/admin/communications?phone=${encodeURIComponent(c.phone)}&action=sms`}
@@ -8195,10 +8208,9 @@ function CustomerConversation({
             customerReadScope={commsReadScope}
             onSent={async () => {
               setCommsLoaded(false);
-              await Promise.allSettled([
-                reloadCustomer(),
-                ...(isAdmin ? [retryTimeline()] : []),
-              ]);
+              // reloadCustomer refreshes the timeline with the record; a failed
+              // refresh must not read as a failed send.
+              try { await reloadCustomer(); } catch { /* the message was already sent */ }
             }}
           />
         </Suspense>
@@ -8487,7 +8499,7 @@ function CustomerOverlayPresentation({
   );
 }
 
-function useCustomerProfileRecord({ customerId, customerIdRef, isAdmin }) {
+function useCustomerProfileRecord({ customerId, customerIdRef, isAdmin, lastMutation }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [profileLoadError, setProfileLoadError] = useState("");
@@ -8505,51 +8517,64 @@ function useCustomerProfileRecord({ customerId, customerIdRef, isAdmin }) {
   // unchanged resave still self-heals a stale mirror), so a tuple-based
   // signal would leave the panel stale exactly when the server fixed it.
   const [profileVersion, setProfileVersion] = useState(0);
-  const reloadCustomer = () =>
-    adminFetch(`/admin/customers/${customerId}`).then((detail) => {
-      if (String(customerIdRef.current) === String(customerId)) {
-        setData(detail);
-        setProfileVersion((v) => v + 1);
-      }
-      return detail;
-    });
-  useEffect(() => {
-    const seq = profileSeqRef.current + 1;
-    profileSeqRef.current = seq;
-    if (profileAbortRef.current) profileAbortRef.current.abort();
+  // One abortable load shared by the mount/customer-change effect and every
+  // in-place refresh: profile and timeline move together, so an Intelligence
+  // Bar write cannot leave the history showing the pre-write record.
+  const reloadCustomer = useCallback(async () => {
+    if (customerIdRef.current !== customerId) return null;
+    const seq = ++profileSeqRef.current;
+    profileAbortRef.current?.abort();
     const ctrl = new AbortController();
     profileAbortRef.current = ctrl;
+    setTimelineRetrying(false);
+    try {
+      const [detail, tl] = await Promise.all([
+        adminFetch(`/admin/customers/${customerId}`, { signal: ctrl.signal }),
+        isAdmin
+          ? adminFetch(`/admin/customers/${customerId}/timeline`, {
+              signal: ctrl.signal,
+            }).catch((err) => {
+              if (err.name === "AbortError") throw err;
+              return null;
+            })
+          : Promise.resolve({ timeline: [] }),
+      ]);
+      if (ctrl.signal.aborted || seq !== profileSeqRef.current || customerIdRef.current !== customerId) return null;
+      setData(detail);
+      setProfileVersion((v) => v + 1);
+      setProfileLoadError("");
+      setTimeline(tl?.timeline || []);
+      setTimelineMissingSources(tl?.missingSources || []);
+      setTimelineError(tl === null);
+      return detail;
+    } catch (err) {
+      if (ctrl.signal.aborted || seq !== profileSeqRef.current || customerIdRef.current !== customerId) return null;
+      throw err;
+    } finally {
+      if (!ctrl.signal.aborted && seq === profileSeqRef.current && customerIdRef.current === customerId) setLoading(false);
+    }
+  }, [customerId, customerIdRef, isAdmin]);
+
+  useEffect(() => {
     setLoading(true);
     setData(null);
     setProfileLoadError("");
     setTimelineRetrying(false);
     setProfileActionErr("");
-    Promise.all([
-      adminFetch(`/admin/customers/${customerId}`, { signal: ctrl.signal }),
-      isAdmin
-        ? adminFetch(`/admin/customers/${customerId}/timeline`, {
-            signal: ctrl.signal,
-          }).catch((err) => {
-            if (err.name === "AbortError") throw err;
-            return null;
-          })
-        : Promise.resolve({ timeline: [] }),
-    ])
-      .then(([detail, tl]) => {
-        if (seq !== profileSeqRef.current) return;
-        setData(detail);
-        setTimeline(tl?.timeline || []);
-        setTimelineMissingSources(tl?.missingSources || []);
-        setTimelineError(tl === null);
-        setLoading(false);
-      })
-      .catch((err) => {
-        if (err.name === "AbortError" || seq !== profileSeqRef.current) return;
-        setProfileLoadError(err.message || "Failed to load customer");
-        setLoading(false);
-      });
-    return () => ctrl.abort();
-  }, [customerId, profileReloadKey, isAdmin]);
+    void reloadCustomer().catch((err) => {
+      setProfileLoadError(err.message || "Failed to load customer");
+    });
+    return () => profileAbortRef.current?.abort();
+  }, [profileReloadKey, reloadCustomer]);
+
+  // An Intelligence Bar write against this customer refreshes the open record.
+  useEffect(() => {
+    if (lastMutation?.customer_id !== customerId) return;
+    void reloadCustomer().catch(() => {
+      if (customerIdRef.current === customerId) setProfileActionErr("The change was saved. Refresh this record to see it.");
+    });
+  }, [lastMutation, customerId, customerIdRef, reloadCustomer]);
+
   const retryTimeline = async () => {
     const seq = profileSeqRef.current;
     const signal = profileAbortRef.current.signal;
@@ -9567,6 +9592,8 @@ export default function Customer360ProfileV2({
   const customerIdRef = useRef(customerId);
   customerIdRef.current = customerId;
   const isAdmin = getAdminRole() === "admin";
+  const { open: openIntelligenceBar, lastMutation } = useIntelligenceBarActions();
+  usePublishIntelligenceBarPageData({ customer_id: customerId, overlay: true });
   const {
     profileReloadKey,
     reloadCustomer,
@@ -9583,7 +9610,7 @@ export default function Customer360ProfileV2({
     timelineError,
     timelineRetrying,
     profileActionErr,
-  } = useCustomerProfileRecord({ customerId, customerIdRef, isAdmin });
+  } = useCustomerProfileRecord({ customerId, customerIdRef, isAdmin, lastMutation });
   const {
     resumeBilling,
     resumingBilling,
@@ -9956,6 +9983,7 @@ export default function Customer360ProfileV2({
       headerProps={{
         c,
         isAdmin,
+        openIntelligenceBar,
         unreadConversations,
         openEditModal,
         changeWorkspaceTab,
@@ -9987,6 +10015,7 @@ export default function Customer360ProfileV2({
           onClose={onClose}
           c={c}
           isAdmin={isAdmin}
+          openIntelligenceBar={openIntelligenceBar}
           openEditModal={openEditModal}
           menuRef={menuRef}
           menuButtonRef={menuButtonRef}

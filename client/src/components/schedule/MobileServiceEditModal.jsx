@@ -1,3 +1,4 @@
+import { showScheduleSaveNotice } from './ScheduleSaveNotice';
 // Service-line edit sheet opened from MobileCheckoutSheet per IMG_3730.
 // Lets the tech adjust the scheduled service mid-visit: tier (billing
 // cadence label), price override, staff assignment, duration, notes.
@@ -129,7 +130,7 @@ export default function MobileServiceEditModal({
       // Advisory schedule-overlap notes — the save committed (conflicts no
       // longer block admin edits); say what now stacks before closing.
       if (Array.isArray(result?.warnings) && result.warnings.length) {
-        alert(`Saved.\n\n${result.warnings.join('\n\n')}`);
+        showScheduleSaveNotice(`Saved.\n\n${result.warnings.join('\n\n')}`);
       }
       onSaved?.();
     } catch (e) {

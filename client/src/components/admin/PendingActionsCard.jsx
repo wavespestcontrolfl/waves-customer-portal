@@ -137,6 +137,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
   // status per action id: undefined | 'confirming' | 'confirmed' | 'cancelling' | 'cancelled' | 'failed'
   const [statusById, setStatusById] = useState({});
   const [errorById, setErrorById] = useState({});
+  const [receiptById, setReceiptById] = useState({});
   const inFlightRef = useRef(new Set());
 
   // Preserve existing card outcomes and expiry across clarification turns. Countdown
@@ -189,6 +190,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
 
   const showReceipt = (action, body) => {
     const state = receiptState(body);
+    setReceiptById(previous => ({ ...previous, [action.id]: body }));
     const message = body.warning || body.result?.warning || body.result?.error || body.result?.message
       || (state === "unknown" ? "The outcome is not established. Check status before taking further action."
         : state === "failed" ? "The action could not be completed" : null);
@@ -263,7 +265,8 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
     >
       {actions.map((action) => {
         const status = statusById[action.id] || action.resolvedStatus || (action.receipt ? receiptState(action.receipt) : undefined);
-        const receiptResult = action.receipt?.result;
+        const receiptResult = (receiptById[action.id] || action.receipt)?.result;
+        const savedReceipt = status === 'confirmed' && receiptResult?.verification?.persisted === true ? receiptResult.receipt : null;
         const detail = errorById[action.id] || action.resolvedWarning || receiptResult?.warning || receiptResult?.error || receiptResult?.message
           || (status === 'unknown' ? 'The outcome is not established. Check status before taking further action.' : null);
         const settled = ["confirmed", "cancelled", "failed", "accepted", "partial", "unknown"].includes(status);
@@ -329,6 +332,16 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
               </div>
             )}
 
+            {savedReceipt?.summary && <div className={dark ? undefined : 'text-[14px] text-zinc-700 mb-2'}
+              style={dark ? { fontSize: 14, color: D.text, marginBottom: 8 } : undefined}>
+              {savedReceipt.summary}
+            </div>}
+            {savedReceipt?.href?.startsWith('/admin/') && <a href={savedReceipt.href}
+              className={dark ? undefined : 'inline-flex items-center min-h-11 text-[14px] underline text-zinc-900'}
+              style={dark ? { display: 'inline-flex', alignItems: 'center', minHeight: 44, color: D.text, textDecoration: 'underline' } : undefined}>
+              Open saved record
+            </a>}
+
             {status === "unknown" && (
               <button type="button" onClick={() => checkStatus(action)}
                 style={dark ? { minHeight: 44, padding: "8px 12px", color: D.text, background: D.card, border: `1px solid ${D.border}`, borderRadius: 8 } : undefined}
@@ -393,7 +406,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
                   status === "confirmed" ? "text-zinc-900" : status === "failed" ? "text-alert-fg" : "text-zinc-500"
                 }`}
               >
-                {status === "failed" ? "Failed" : statusLabel[status]}
+                {status === "failed" ? "Failed" : savedReceipt?.label || statusLabel[status]}
               </div>
             )}
           </div>

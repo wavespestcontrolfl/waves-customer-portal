@@ -23,6 +23,10 @@ test('global counts retain their scope and separate units', async () => {
   expect(mockQueries[0].sql).toContain('"messages"."is_read" is null');
   expect(mockQueries[0].bindings).toEqual(['sms', 'inbound', false, 1]);
 });
+test('a blocked (marked-spam) sender never counts toward the badge', async () => {
+  await countUnreadInboundSms();
+  expect(mockQueries[0].sql).toContain('not exists (select 1 from "blocked_numbers"');
+});
 test('customer counts bind the account id and retain unread exclusions', async () => {
   const customerId = '00000000-0000-4000-8000-000000000001';
   const internalPhone = '+19415550199';

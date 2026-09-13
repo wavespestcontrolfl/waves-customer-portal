@@ -1,10 +1,30 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
-import useIsMobile from "../../hooks/useIsMobile";
-import { createPortal } from "react-dom";
-import { Phone, MessageSquare } from "lucide-react";
-
+import React, { useState, useEffect, useCallback, useMemo } from "react";
+import { Phone, MessageSquare, X } from "lucide-react";
+import {
+  Badge,
+  Button,
+  buttonStyles,
+  Checkbox,
+  Card,
+  Dialog,
+  DialogBody,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  Input,
+  Select,
+  Sheet,
+  SheetBody,
+  SheetHeader,
+  Table,
+  THead,
+  TBody,
+  TR,
+  TH,
+  TD,
+  Textarea,
+} from "../../components/ui";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
-
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     headers: {
@@ -19,38 +39,6 @@ function adminFetch(path, options = {}) {
     return data;
   });
 }
-
-// V2 token pass: chrome folds to zinc ramp; non-semantic accents
-// (acc/blu/pur) collapse to zinc-900 with zinc-100 pastel glows.
-// Semantic green/amber/red preserved as V2-legal variants.
-const C = {
-  bg: "#F4F4F5",
-  raised: "#FFFFFF",
-  surface: "#FFFFFF",
-  hover: "#FAFAFA",
-  input: "#FFFFFF",
-  bdr: "rgba(24,24,27,0.06)",
-  bdrA: "rgba(24,24,27,0.15)",
-  acc: "#18181B",
-  accG: "#F4F4F5",
-  accD: "#09090B",
-  grn: "#15803D",
-  grnG: "#DCFCE7",
-  org: "#A16207",
-  orgG: "#FEF3C7",
-  red: "#991B1B",
-  redG: "#FEE2E2",
-  blu: "#18181B",
-  bluG: "#F4F4F5",
-  pur: "#18181B",
-  purG: "#F4F4F5",
-  t1: "#27272A",
-  t2: "#71717A",
-  t3: "#71717A",
-  heading: "#09090B",
-  inputBorder: "#D4D4D8",
-  sans: "'Roboto', Arial, sans-serif",
-};
 
 // ── GBP Locations ──
 //
@@ -169,15 +157,31 @@ const GBP_LOCATIONS = [
     outboundNumber: "+19412973337",
   },
 ];
-
-
 const STAGES = {
-  not_contacted: { label: "Not Contacted", color: C.t3, tag: "acc" },
-  sms_sent: { label: "SMS Sent", color: C.org, tag: "org" },
-  reminded: { label: "Reminded", color: C.blu, tag: "blu" },
-  reviewed: { label: "Reviewed", color: C.grn, tag: "grn" },
-  declined: { label: "Declined", color: C.t3, tag: "pur" },
-  issue: { label: "Issue", color: C.red, tag: "red" },
+  not_contacted: {
+    label: "Not Contacted",
+    tag: "acc",
+  },
+  sms_sent: {
+    label: "SMS Sent",
+    tag: "org",
+  },
+  reminded: {
+    label: "Reminded",
+    tag: "blu",
+  },
+  reviewed: {
+    label: "Reviewed",
+    tag: "grn",
+  },
+  declined: {
+    label: "Declined",
+    tag: "pur",
+  },
+  issue: {
+    label: "Issue",
+    tag: "red",
+  },
 };
 
 // Mirror of server/services/review-outreach-templates.js (presentation-only —
@@ -283,7 +287,6 @@ function routeToGBP(addr) {
   }
   return GBP_LOCATIONS[0];
 }
-
 function calcScore(sentiment, daysAgo, revenue, stage, askCount, svcType) {
   let score = 0;
   if (sentiment === "happy") score += 35;
@@ -304,12 +307,117 @@ function calcScore(sentiment, daysAgo, revenue, stage, askCount, svcType) {
   return Math.max(0, Math.min(100, score));
 }
 
+// The cadence's stored decision (review_sequences.decision, written by
+// enrollment and every step-runner deferral) rendered the same way the
+// completion panel explains it: reason, planned/next time, owner action.
+const DECISION_LABELS = {
+  smart_window: "Day-0 ask at the smart send window",
+  operator_timing: "Day-0 ask at the time chosen on the completion panel",
+  customer_requested: "Customer asked for the link — next cadence tick",
+  immediate: "First touch sending now",
+  opener_in_flight: "Series final parked until the opener's send settles",
+  follow_up_scheduled: "Follow-up scheduled",
+  // The runner's 3-day-rule hold and its fail-closed re-check (owner ruling
+  // 2026-09-07); a private check-in that kept its day never carries these.
+  spacing: "Held for the 3-day rule — next ask at last ask + 72 h",
+  spacing_lookup_unavailable: "Re-checking the last ask (3-day rule)",
+  send_window: "Held for the 8 AM–8 PM send window",
+  provider_retry: "Provider retry",
+  customer_lock_held: "Waiting for another review send to finish",
+  send_error_retry: "Send error — retrying",
+  plan_reresolution_unavailable: "Re-checking the visit's cadence plan",
+  cap_stats_unavailable: "Re-checking the ask cap",
+};
+const fmtETWhen = (d) =>
+  new Date(d).toLocaleString("en-US", {
+    timeZone: "America/New_York",
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+function decisionLine(seq, sequencesEnabled) {
+  if (!seq) return null;
+  // A stranded claim (null schedule the worker never re-selects) needs a hand
+  // whether or not the gate is on — say so first (codex #4140 r6 P2).
+  if (seq.stranded)
+    return "Send claim never settled · Owner action: check this cadence";
+  // The worker skips every run while GATE_REVIEW_SEQUENCES is off — the
+  // redemption sweep included — so neither an active row's next tick nor a
+  // parked row's re-check is a plan: both are frozen (codex #4140 r5, r13 P2).
+  // An UNKNOWN gate state is not a plan either (codex #4140 r15 P2): only a
+  // confirmed-on worker earns a "Next" time. Both gates are needed — the
+  // cadence cron registers only under the master GATE_CRON_JOBS.
+  // The only action this page offers is the gates: with them on the worker
+  // resumes an active row at its next tick and the sweep redeems (or, after
+  // 24h, clears) a parked one — so say that, not a Stop this page does not
+  // have (codex #4140 r18 P2).
+  if (sequencesEnabled !== true)
+    return `Paused — cadences are off (GATE_REVIEW_SEQUENCES / GATE_CRON_JOBS)${sequencesEnabled == null ? " or the gate state is unavailable" : ""} · Owner action: turn the gates on${seq.parked ? " — the parked final is redeemed by the next sweep" : ""}`;
+  if (seq.sending) return "Sending now · Owner action: none";
+  // Overdue by more than 7 days: the worker retires the row as stale at its
+  // next pickup instead of sending (codex #4140 r24 P2) — no send time exists.
+  if (seq.staleRetire)
+    return "Overdue over 7 days — retired as stale at the next tick, nothing sends · Owner action: re-enroll from a completion if a review ask is still wanted";
+  // A parked series final (deferred until the opener's send settles) is a
+  // durable enrollment the redemption sweep redeems — not "no cadence"
+  // (codex #4140 r12 P2). It needs no branch of its own: its stored
+  // decision is opener_in_flight with no plannedAt, so it renders below as
+  // "Re-check <tick> · Series final parked… · Owner action: none" — the
+  // tick because the sweep runs on the cadence ticks (nextSendTickAt),
+  // not at the raw park time (codex #4140 r13 P2).
+  const d = seq.decision || {};
+  const label =
+    DECISION_LABELS[d.reason] ||
+    (d.reason ? String(d.reason).replace(/_/g, " ") : "Scheduled");
+  // nextRunAt is when the row becomes ELIGIBLE; the worker runs at :14/:44,
+  // so the planned send is the next tick the server computes
+  // (nextSendTickAt) — a 4:30 PM row cannot text before 4:44 (codex #4140 r4).
+  const when =
+    seq.nextSendTickAt || seq.nextRunAt || d.plannedAt || d.nextEvalAt;
+  // An ask step that swaps channel at send time lands on the other channel's
+  // tick — say both when they differ (codex #4140 r14, r16 P2).
+  const fallback = seq.fallbackTickAt
+    ? ` by ${seq.plannedChannel}, or ${fmtETWhen(seq.fallbackTickAt)} if it falls back to ${seq.fallbackChannel}`
+    : "";
+  const whenText = when ? `${fmtETWhen(when)}${fallback}` : null;
+  const owner =
+    d.ownerAction && d.ownerAction !== "none"
+      ? `Owner action: ${d.ownerAction}`
+      : "Owner action: none";
+  // A cadence enrolled before the decision column existed has no decision
+  // until its next runner update; its next_run_at is a planned send.
+  const planned = !!d.plannedAt || !d.reason;
+  return [
+    whenText ? `${planned ? "Next" : "Re-check"} ${whenText}` : null,
+    label,
+    capturedRequestText(seq, d),
+    owner,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+// A "Customer asked for the link" captured against a cadence that was already
+// running keeps that cadence's own decision (its schedule is unchanged), so
+// the capture is shown beside it — who and when (codex #4140 r8).
+function capturedRequestText(seq, decision) {
+  const c = seq.customerRequested;
+  if (!c || decision.reason === "customer_requested") return null;
+  const at = c.at ? fmtETWhen(c.at) : null;
+  return [
+    "Customer asked for the link",
+    c.byName ? `captured by ${c.byName}` : null,
+    at,
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
 function fmtDate(d) {
   if (!d) return "—";
   if (typeof d === "string") return d;
   return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
 }
-
 function fmtPh(p) {
   if (!p) return "";
   p = p.replace(/\D/g, "");
@@ -318,22 +426,28 @@ function fmtPh(p) {
     ? `(${p.substring(0, 3)}) ${p.substring(3, 6)}-${p.substring(6)}`
     : p;
 }
-
 function hydrate(body, c) {
-  return body
-    .replace(/\{first\}/g, c.first)
-    .replace(/\{name\}/g, c.name)
-    // Tech FIRST name only — the hydrated body submits as custom copy, so the
-    // server's own first-name substitution never runs on it, and a full name
-    // would tip the one-segment ask templates into a second segment.
-    .replace(/\{tech\}/g, String(c.lastTech || "Adam").trim().split(/\s+/)[0] || "Adam")
-    // {sender} is deliberately NOT hydrated here (codex #4139 r1): the
-    // candidates feed carries no technician, so the server renders it from
-    // the record ("<tech> with Waves", else "Waves Pest Control") — the same
-    // way it swaps {review_url} for the tokenized link.
-    .replace(/\{service_type\}/g, c.lastSvc || "pest control")
-    .replace(/\{review_url\}/g, c.reviewUrl)
-    .replace(/\{date\}/g, c.lastDate);
+  return (
+    body
+      .replace(/\{first\}/g, c.first)
+      .replace(/\{name\}/g, c.name)
+      // Tech FIRST name only — the hydrated body submits as custom copy, so the
+      // server's own first-name substitution never runs on it, and a full name
+      // would tip the one-segment ask templates into a second segment.
+      .replace(
+        /\{tech\}/g,
+        String(c.lastTech || "Adam")
+          .trim()
+          .split(/\s+/)[0] || "Adam",
+      )
+      // {sender} is deliberately NOT hydrated here (codex #4139 r1): the
+      // candidates feed carries no technician, so the server renders it from
+      // the record ("<tech> with Waves", else "Waves Pest Control") — the same
+      // way it swaps {review_url} for the tokenized link.
+      .replace(/\{service_type\}/g, c.lastSvc || "pest control")
+      .replace(/\{review_url\}/g, c.reviewUrl)
+      .replace(/\{date\}/g, c.lastDate)
+  );
 }
 
 // Map a row from /admin/reviews/outreach-candidates to the UI customer shape.
@@ -364,7 +478,6 @@ function apiToCustomer(row) {
   const score = calcScore(sentiment, daysAgo, revenue, stage, askCount, svc);
   const first = row.firstName || (row.name || "").split(" ")[0] || row.name;
   const addr = [row.addressLine1, row.city, row.zip].filter(Boolean).join(", ");
-
   return {
     id: row.id,
     name:
@@ -396,7 +509,13 @@ function apiToCustomer(row) {
     askCount,
     hasEmail: !!row.hasEmail,
     lastAsked: row.lastAsked ? fmtDate(new Date(row.lastAsked)) : null,
-    seqStep: seq ? seq.currentStep : stage === "reminded" ? 2 : stage === "sms_sent" ? 1 : 0,
+    seqStep: seq
+      ? seq.currentStep
+      : stage === "reminded"
+        ? 2
+        : stage === "sms_sent"
+          ? 1
+          : 0,
     seqTotal: seq ? seq.totalSteps : 3,
     seqId: seq ? seq.id : null,
     sequence: seq,
@@ -406,7 +525,8 @@ function apiToCustomer(row) {
     cadenceable: row.cadenceable !== false,
     eligibilityReasons: row.eligibilityReasons || [],
     suppressed: Array.isArray(row.eligibilityReasons)
-      ? row.eligibilityReasons.includes("suppressed") || row.eligibilityReasons.includes("opted_out")
+      ? row.eligibilityReasons.includes("suppressed") ||
+        row.eligibilityReasons.includes("opted_out")
       : false,
     suppressReason: (row.eligibilityReasons || [])[0] || null,
   };
@@ -436,91 +556,46 @@ function eligibilityLabel(reasons = []) {
 }
 
 // ── Shared styles ──
-const tagColors = {
-  acc: { bg: C.accG, color: C.acc },
-  grn: { bg: C.grnG, color: C.grn },
-  org: { bg: C.orgG, color: C.org },
-  red: { bg: C.redG, color: C.red },
-  blu: { bg: C.bluG, color: C.blu },
-  pur: { bg: C.purG, color: C.pur },
-};
-
+// Main gave each of the 6 stage/sentiment tags (acc/org/blu/grn/pur/red) its
+// own color; acc/blu/pur are all folded to the same near-black neutral
+// already (the V2 token pass), so only "grn" (Reviewed — done/success),
+// "org" (amber — sms_sent, a routine in-progress state) and "red" (Issue —
+// the genuine failure) map onto the kit's non-neutral tones.
 function Tag({ type, children }) {
-  const tc = tagColors[type] || tagColors.acc;
+  const tone =
+    type === "red"
+      ? "alert"
+      : type === "grn"
+        ? "strong"
+        : type === "org"
+          ? "warn"
+          : "neutral";
+  return <Badge tone={tone}>{children}</Badge>;
+}
+function Btn({ variant = "ghost", onClick, disabled, children }) {
+  const sharedVariant =
+    variant === "success"
+      ? "primary"
+      : variant === "danger"
+        ? "danger"
+        : variant === "warn"
+          ? "secondary"
+          : variant === "primary"
+            ? "primary"
+            : "secondary";
   return (
-    <span
-      style={{
-        fontSize: 12, // UI audit F0517
-        fontWeight: 500,
-        padding: "3px 8px",
-        borderRadius: 20,
-        whiteSpace: "nowrap",
-        background: tc.bg,
-        color: tc.color,
-      }}
-    >
+    <Button onClick={onClick} disabled={disabled} variant={sharedVariant}>
       {children}
-    </span>
+    </Button>
   );
 }
-
-function Btn({ variant = "ghost", onClick, disabled, children, style: extra }) {
-  // UI audit F0517: ~28px touch height before; 36px on desktop, 44px below
-  // the 640px mobile breakpoint (live, not a module-load snapshot).
-  const mobile = useIsMobile(640);
-  const base = {
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 6,
-    padding: "7px 14px",
-    minHeight: mobile ? 44 : 36,
-    borderRadius: 8,
-    fontFamily: C.sans,
-    fontSize: 13,
-    fontWeight: 500,
-    cursor: disabled ? "not-allowed" : "pointer",
-    border: "none",
-    transition: "all .15s",
-    whiteSpace: "nowrap",
-    opacity: disabled ? 0.5 : 1,
-  };
-  const variants = {
-    primary: { background: C.acc, color: "#fff" },
-    success: { background: C.grn, color: "#fff" },
-    ghost: {
-      background: "transparent",
-      border: `1px solid ${C.bdr}`,
-      color: C.t2,
-    },
-    danger: {
-      background: C.redG,
-      color: C.red,
-      border: "1px solid transparent",
-    },
-    warn: { background: C.orgG, color: C.org, border: "1px solid transparent" },
-  };
-  return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      style={{ ...base, ...variants[variant], ...extra }}
-    >
-      {children}
-    </button>
-  );
-}
-
 function SectionLabel({ children }) {
   return (
-    <div
-      style={{ fontSize: 11, fontWeight: 500, color: C.t2, marginBottom: 6 }}
-    >
+    <div className="text-ui-body font-medium text-zinc-900 mb-[6px]">
       {children}
     </div>
   );
 }
-
-const isMobile = typeof window !== "undefined" && window.innerWidth < 640;
 
 // ══════════════════════════════════════════════════════════════
 // MAIN COMPONENT
@@ -538,10 +613,12 @@ export default function ReviewVelocityEngine() {
   // sends from other sessions; it's replaced by /outreach-activity.
   const [activityLog, setActivityLog] = useState([]);
   const [analytics, setAnalytics] = useState(null);
+  // GATE_REVIEW_SEQUENCES && GATE_CRON_JOBS as the candidates response reports
+  // them; null until known.
+  const [sequencesEnabled, setSequencesEnabled] = useState(null);
   const [drawerCust, setDrawerCust] = useState(null);
   const [toast, setToast] = useState("");
   const [batchModal, setBatchModal] = useState(false);
-
   const loadActivity = useCallback(() => {
     adminFetch("/admin/reviews/outreach-activity?limit=100")
       .then((d) => {
@@ -563,7 +640,6 @@ export default function ReviewVelocityEngine() {
       })
       .catch(() => {});
   }, []);
-
   const loadAnalytics = useCallback(() => {
     adminFetch("/admin/reviews/outreach-analytics?days=90")
       .then((d) => setAnalytics(d))
@@ -577,16 +653,27 @@ export default function ReviewVelocityEngine() {
     adminFetch("/admin/reviews/outreach-candidates")
       .then((d) => {
         setCustomers((d.customers || []).map(apiToCustomer));
+        // The gate rides with the rows (codex #4140 r15 P2); an absent value
+        // stays unknown, which decisionLine treats as paused.
+        setSequencesEnabled(
+          typeof d.reviewSequencesEnabled === "boolean"
+            ? d.reviewSequencesEnabled
+            : null,
+        );
         setLoading(false);
       })
       .catch((err) => {
+        // A failed reload must not keep an earlier success's gate verdict —
+        // the gate could have flipped while the request failed, and decisionLine
+        // /Start Cadence would keep advertising sends (codex #4140 r23 P1).
+        // Unknown reads as paused.
+        setSequencesEnabled(null);
         setLoadError(err?.message || "Failed to load outreach candidates");
         setLoading(false);
       });
     loadAnalytics();
     loadActivity();
   }, [loadAnalytics, loadActivity]);
-
   useEffect(() => {
     loadCandidates();
   }, [loadCandidates]);
@@ -612,15 +699,20 @@ export default function ReviewVelocityEngine() {
     };
     setActivityLog((prev) => [entry, ...prev].slice(0, 200));
   }, []);
-
   const showToast = useCallback((text) => {
     setToast(text);
     setTimeout(() => setToast(""), 3500);
   }, []);
-
   const updateCustomer = useCallback((id, updates) => {
     setCustomers((prev) =>
-      prev.map((c) => (c.id === id ? { ...c, ...updates } : c)),
+      prev.map((c) =>
+        c.id === id
+          ? {
+              ...c,
+              ...updates,
+            }
+          : c,
+      ),
     );
   }, []);
 
@@ -664,12 +756,30 @@ export default function ReviewVelocityEngine() {
         // Re-pull the authoritative funnel + feed.
         loadAnalytics();
         loadActivity();
-        if (res?.success) return { ok: true };
-        if (res?.deferred) return { ok: true, deferred: true, message: res.message };
-        if (res?.queued) return { ok: true, queued: true, message: res.message };
-        return { ok: true };
+        if (res?.success)
+          return {
+            ok: true,
+          };
+        if (res?.deferred)
+          return {
+            ok: true,
+            deferred: true,
+            message: res.message,
+          };
+        if (res?.queued)
+          return {
+            ok: true,
+            queued: true,
+            message: res.message,
+          };
+        return {
+          ok: true,
+        };
       } catch (err) {
-        return { ok: false, error: err?.message || "Send failed" };
+        return {
+          ok: false,
+          error: err?.message || "Send failed",
+        };
       }
     },
     [updateCustomer, loadAnalytics, loadActivity],
@@ -685,10 +795,22 @@ export default function ReviewVelocityEngine() {
         });
         const r = (res?.results || [])[0] || {};
         loadCandidates();
-        if (res?.started > 0 || r.started) return { ok: true };
-        return { ok: false, error: ELIGIBILITY_LABELS[r.reason] || r.reason || "Could not start cadence" };
+        if (res?.started > 0 || r.started)
+          return {
+            ok: true,
+          };
+        return {
+          ok: false,
+          error:
+            ELIGIBILITY_LABELS[r.reason] ||
+            r.reason ||
+            "Could not start cadence",
+        };
       } catch (err) {
-        return { ok: false, error: err?.message || "Could not start cadence" };
+        return {
+          ok: false,
+          error: err?.message || "Could not start cadence",
+        };
       }
     },
     [loadCandidates],
@@ -738,11 +860,20 @@ export default function ReviewVelocityEngine() {
     }
     return list.sort((a, b) => b.score - a.score);
   }, [customers, currentFilter, pipeSearch]);
-
   const tabs = [
-    { key: "dashboard", label: "Dashboard" },
-    { key: "pipeline", label: "Pipeline", count: pipelineList.length },
-    { key: "log", label: "Activity Log" },
+    {
+      key: "dashboard",
+      label: "Dashboard",
+    },
+    {
+      key: "pipeline",
+      label: "Pipeline",
+      count: pipelineList.length,
+    },
+    {
+      key: "log",
+      label: "Activity Log",
+    },
   ];
 
   // ── Actions ──
@@ -750,7 +881,9 @@ export default function ReviewVelocityEngine() {
     const c = customers.find((x) => x.id === id);
     if (!c) return;
     if (!c.sendable) {
-      showToast(`Can't send to ${c.name}: ${eligibilityLabel(c.eligibilityReasons) || "not eligible"}`);
+      showToast(
+        `Can't send to ${c.name}: ${eligibilityLabel(c.eligibilityReasons) || "not eligible"}`,
+      );
       return;
     }
     showToast(`Sending to ${c.name}...`);
@@ -758,7 +891,10 @@ export default function ReviewVelocityEngine() {
     if (result.ok) {
       if (result.deferred) {
         addLog("stage", `Queued for ${c.name} → ${c.gbpName}`);
-        showToast(result.message || `Queued for ${c.name} — sends automatically on retry`);
+        showToast(
+          result.message ||
+            `Queued for ${c.name} — sends automatically on retry`,
+        );
       } else if (result.queued) {
         addLog("stage", `Queued for retry: ${c.name}`);
         showToast(result.message || `Queued for retry: ${c.name}`);
@@ -771,7 +907,6 @@ export default function ReviewVelocityEngine() {
       showToast(`Failed: ${result.error}`);
     }
   };
-
   const quickStartSequence = async (id) => {
     const c = customers.find((x) => x.id === id);
     if (!c) return;
@@ -784,104 +919,40 @@ export default function ReviewVelocityEngine() {
       showToast(`Couldn't start: ${result.error}`);
     }
   };
-
   return (
-    <div style={{ fontFamily: C.sans, color: C.t1 }}>
+    <div className="text-zinc-900">
       {/* Nav tabs */}
-      <div
-        style={{ display: "flex", justifyContent: "center", marginBottom: 20 }}
-      >
+      <div className="flex justify-center mb-[20px]">
         {" "}
-        <div
-          style={{
-            display: "inline-flex",
-            flexWrap: "wrap",
-            alignItems: "center",
-            gap: 4,
-            background: "#F4F4F5",
-            borderRadius: 10,
-            padding: 4,
-            border: "1px solid #E4E4E7",
-          }}
-        >
+        <Card className="inline-flex flex-wrap items-center gap-[4px] p-[4px]">
           {tabs.map((t) => (
-            <button
+            <Button
               key={t.key}
               onClick={() => setPage(t.key)}
-              style={{
-                padding: "10px 24px",
-                borderRadius: 8,
-                border: "none",
-                cursor: "pointer",
-                background: page === t.key ? "#18181B" : "transparent",
-                color: page === t.key ? "#FFFFFF" : "#A1A1AA",
-                fontSize: 14,
-                fontWeight: 700,
-                transition: "all 0.2s",
-                fontFamily: "'Roboto', Arial, sans-serif",
-              }}
+              variant={page === t.key ? "primary" : "secondary"}
             >
               {t.label}
               {t.count !== undefined && (
-                <span
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    minWidth: 18,
-                    height: 18,
-                    borderRadius: 9,
-                    fontSize: 11,
-                    fontWeight: 700,
-                    padding: "0 5px",
-                    marginLeft: 6,
-                    background:
-                      page === t.key ? "rgba(255,255,255,0.2)" : "#E4E4E7",
-                    color: page === t.key ? "#FFFFFF" : "#A1A1AA",
-                  }}
-                >
+                <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] rounded-md text-ui-body font-medium ml-[6px]">
                   {t.count}
                 </span>
               )}
-            </button>
+            </Button>
           ))}
-        </div>{" "}
+        </Card>{" "}
       </div>
       {/* Load banner */}
       {loading && (
-        <div
-          style={{
-            padding: 14,
-            border: `1px solid ${C.bdr}`,
-            background: C.surface,
-            borderRadius: 10,
-            fontSize: 12,
-            color: C.t2,
-            marginBottom: 14,
-          }}
-        >
+        <Card className="p-[14px] text-ui-body text-zinc-900 mb-[14px]">
           Loading outreach candidates…
-        </div>
+        </Card>
       )}
       {loadError && (
-        <div
-          style={{
-            padding: 14,
-            border: `1px solid ${C.red}`,
-            background: C.redG,
-            borderRadius: 10,
-            fontSize: 12,
-            color: C.red,
-            marginBottom: 14,
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-          }}
-        >
+        <Card className="p-[14px] text-ui-body text-alert-fg mb-[14px] flex justify-between items-center">
           {" "}
           <span>Couldn't load candidates: {loadError}</span>{" "}
           <Btn onClick={loadCandidates}>Retry</Btn>{" "}
-        </div>
+        </Card>
       )}
       {/* Pages */}
       {page === "dashboard" && (
@@ -906,7 +977,7 @@ export default function ReviewVelocityEngine() {
           setPipeSearch={setPipeSearch}
           quickSend={quickSend}
           quickStartSequence={quickStartSequence}
-          sequencesEnabled={analytics?.reviewSequencesEnabled}
+          sequencesEnabled={sequencesEnabled}
           setDrawerCust={setDrawerCust}
           setBatchModal={setBatchModal}
           addLog={addLog}
@@ -929,7 +1000,7 @@ export default function ReviewVelocityEngine() {
           showToast={showToast}
           sendReviewRequest={sendReviewRequest}
           startSequence={startSequence}
-          sequencesEnabled={analytics?.reviewSequencesEnabled}
+          sequencesEnabled={sequencesEnabled}
         />
       )}
       {/* Batch Modal */}
@@ -945,40 +1016,15 @@ export default function ReviewVelocityEngine() {
         />
       )}
       {/* Toast */}
-      <div
-        style={{
-          position: "fixed",
-          bottom: 20,
-          right: 20,
-          background: C.surface,
-          border: `1px solid ${C.grn}`,
-          borderRadius: 8,
-          padding: "10px 16px",
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          boxShadow: "0 8px 32px rgba(0,0,0,.12)",
-          zIndex: 300,
-          fontSize: 12,
-          fontWeight: 500,
-          transform: toast ? "translateY(0)" : "translateY(80px)",
-          opacity: toast ? 1 : 0,
-          transition: "all .3s",
-          pointerEvents: "none",
-        }}
-      >
-        {" "}
-        <span
-          style={{
-            width: 7,
-            height: 7,
-            borderRadius: "50%",
-            background: C.grn,
-            flexShrink: 0,
-          }}
-        />{" "}
-        <span>{toast}</span>{" "}
-      </div>{" "}
+      {toast && (
+        <Card
+          role="status"
+          className="fixed bottom-5 right-5 z-[130] flex items-center gap-2 p-3 text-ui-body font-medium shadow-lg pointer-events-none"
+        >
+          <span className="h-2 w-2 rounded-full bg-positive-fg" />
+          <span>{toast}</span>
+        </Card>
+      )}
     </div>
   );
 }
@@ -1007,25 +1053,21 @@ function Dashboard({
       label: "In Pipeline",
       value: customers.length,
       desc: "Active customers without a review",
-      accent: C.acc,
     },
     {
       label: "Requests Sent",
       value: f.sent ?? "—",
       desc: "review asks sent (90d)",
-      accent: C.grn,
     },
     {
       label: "Reviews Landed",
       value: reviewsLanded,
       desc: "Google reviews in last 90d",
-      accent: C.blu,
     },
     {
       label: "Click→Google",
       value: f.conversionRate != null ? `${f.conversionRate}%` : "—",
       desc: `${f.reviewed ?? 0} of ${f.sent ?? 0} asks converted`,
-      accent: C.org,
     },
   ];
   // Digital business cards carry a passive review QR (/l kind='card');
@@ -1036,169 +1078,127 @@ function Dashboard({
       label: "Card QR Scans",
       value: cardScans.windowScans ?? 0,
       desc: `from ${cardScans.cards} digital cards (${cardScans.days ?? 90}d) · ${cardScans.scans} all-time`,
-      accent: C.acc,
     });
   }
 
   // Conversion funnel stages + channel split for the reporting strip.
   const funnelStages = [
-    { label: "Sent", value: f.sent ?? 0 },
-    { label: "Opened", value: f.opened ?? 0, rate: f.openRate },
-    { label: "Rated", value: f.rated ?? 0 },
-    { label: "Click→Google", value: f.reviewed ?? 0, rate: f.conversionRate },
+    {
+      label: "Sent",
+      value: f.sent ?? 0,
+    },
+    {
+      label: "Opened",
+      value: f.opened ?? 0,
+      rate: f.openRate,
+    },
+    {
+      label: "Rated",
+      value: f.rated ?? 0,
+    },
+    {
+      label: "Click→Google",
+      value: f.reviewed ?? 0,
+      rate: f.conversionRate,
+    },
   ];
   const byChannel = analytics?.byChannel || [];
   const byTemplate = (analytics?.byTemplate || [])
     .slice()
     .sort((a, b) => b.sent - a.sent)
     .slice(0, 5);
-
   return (
     <div>
       {/* KPIs */}
-      <div style={{ marginBottom: 20 }}>
+      <div className="mb-[20px]">
         {" "}
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            marginBottom: 10,
-          }}
-        >
+        <div className="flex justify-between items-center mb-[10px]">
           {" "}
-          <div style={{ fontSize: 15, fontWeight: 700 }}>
-            Review Pipeline
-          </div>{" "}
+          <div className="text-ui-body font-medium">Review Pipeline</div>{" "}
           <SectionLabel>Last 90 Days</SectionLabel>{" "}
         </div>{" "}
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: isMobile ? "repeat(2, 1fr)" : "repeat(4, 1fr)",
-            gap: isMobile ? 8 : 12,
-          }}
-        >
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 sm:gap-3">
           {kpis.map((k) => (
-            <div
+            <Card
               key={k.label}
-              style={{
-                background: C.surface,
-                border: `1px solid ${C.bdr}`,
-                borderRadius: 12,
-                padding: isMobile ? "12px 10px" : "16px 18px",
-                position: "relative",
-                overflow: "hidden",
-              }}
+              className="relative overflow-hidden px-[10px] py-3 sm:px-[18px] sm:py-4"
             >
               {" "}
-              <div
-                style={{
-                  position: "absolute",
-                  top: 0,
-                  left: 0,
-                  right: 0,
-                  height: 2,
-                  background: k.accent,
-                }}
-              />{" "}
-              <div style={{ fontSize: 28, fontWeight: 700, marginBottom: 2 }}>
-                {k.value}
-              </div>{" "}
-              <div
-                style={{
-                  fontSize: 11,
-                  fontWeight: 500,
-                  color: C.t2,
-                  marginBottom: 4,
-                }}
-              >
+              <div className="absolute inset-x-0 top-0 h-[2px] bg-zinc-900" />{" "}
+              <div className="text-[28px] font-medium mb-[2px]">{k.value}</div>{" "}
+              <div className="text-ui-body font-medium text-zinc-900 mb-[4px]">
                 {k.label}
               </div>{" "}
-              <div style={{ fontSize: 11, color: C.t3 }}>{k.desc}</div>{" "}
-            </div>
+              <div className="text-ui-body text-zinc-900">{k.desc}</div>{" "}
+            </Card>
           ))}
         </div>{" "}
       </div>
       {/* Conversion Funnel + channel/template performance */}
-      <div style={{ marginBottom: 20 }}>
-        <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 10 }}>
+      <div className="mb-[20px]">
+        <div className="text-ui-body font-medium mb-[10px]">
           Conversion Funnel
         </div>
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: isMobile ? "1fr" : "1.4fr 1fr",
-            gap: 12,
-          }}
-        >
+        <div className="grid grid-cols-1 gap-3 sm:[grid-template-columns:1.4fr_1fr]">
           {/* Funnel bars */}
-          <div
-            style={{
-              background: C.surface,
-              border: `1px solid ${C.bdr}`,
-              borderRadius: 12,
-              padding: 16,
-            }}
-          >
+          <Card className="p-[16px]">
             {funnelStages.map((s, i) => {
               const top = funnelStages[0].value || 0;
               const pct = top > 0 ? Math.round((s.value / top) * 100) : 0;
               return (
-                <div key={s.label} style={{ marginBottom: i === funnelStages.length - 1 ? 0 : 10 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                    <span style={{ fontSize: 12, fontWeight: 500, color: C.t2 }}>{s.label}</span>
-                    <span style={{ fontSize: 12, fontWeight: 700 }}>
+                <div
+                  key={s.label}
+                  className={
+                    i < funnelStages.length - 1 ? "mb-[10px]" : undefined
+                  }
+                >
+                  <div className="flex justify-between mb-[4px]">
+                    <span className="text-ui-body font-medium text-zinc-900">
+                      {s.label}
+                    </span>
+                    <span className="text-ui-body font-medium">
                       {s.value}
                       {s.rate != null && (
-                        <span style={{ color: C.t3, fontWeight: 500 }}> · {s.rate}%</span>
+                        <span className="text-zinc-900 font-medium">
+                          {" "}
+                          · {s.rate}%
+                        </span>
                       )}
                     </span>
                   </div>
-                  <div style={{ height: 8, background: C.input, borderRadius: 4, overflow: "hidden" }}>
-                    <div
-                      style={{
-                        width: `${pct}%`,
-                        height: "100%",
-                        background: i === funnelStages.length - 1 ? C.grn : C.acc,
-                        borderRadius: 4,
-                        transition: "width .3s",
-                      }}
-                    />
-                  </div>
+                  <progress
+                    className="h-2 w-full accent-zinc-900"
+                    value={pct}
+                    max="100"
+                    aria-label={`${s.label} conversion`}
+                  />
                 </div>
               );
             })}
-          </div>
+          </Card>
           {/* Channel + top templates */}
-          <div
-            style={{
-              background: C.surface,
-              border: `1px solid ${C.bdr}`,
-              borderRadius: 12,
-              padding: 16,
-            }}
-          >
+          <Card className="p-[16px]">
             <SectionLabel>By Channel</SectionLabel>
             {byChannel.length === 0 ? (
-              <div style={{ fontSize: 11, color: C.t3, marginBottom: 10 }}>No sends yet</div>
+              <div className="text-ui-body text-zinc-900 mb-[10px]">
+                No sends yet
+              </div>
             ) : (
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+              <div className="flex gap-[8px] flex-wrap mb-[12px]">
                 {byChannel.map((ch) => (
                   <div
                     key={ch.channel}
-                    style={{
-                      flex: 1,
-                      minWidth: 90,
-                      padding: "8px 10px",
-                      background: C.input,
-                      borderRadius: 8,
-                    }}
+                    className="flex-[1] min-w-[90px] bg-white rounded-md px-[10px] py-2"
                   >
-                    <div style={{ fontSize: 11, color: C.t3, textTransform: "uppercase" }}>{ch.channel}</div>
-                    <div style={{ fontSize: 15, fontWeight: 700 }}>{ch.sent}</div>
-                    <div style={{ fontSize: 11, color: C.t3 }}>
-                      {ch.sent > 0 ? Math.round((ch.reviewed / ch.sent) * 100) : 0}% converted
+                    <div className="text-ui-body text-zinc-900">
+                      {ch.channel}
+                    </div>
+                    <div className="text-ui-body font-medium">{ch.sent}</div>
+                    <div className="text-ui-body text-zinc-900">
+                      {ch.sent > 0
+                        ? Math.round((ch.reviewed / ch.sent) * 100)
+                        : 0}
+                      % converted
                     </div>
                   </div>
                 ))}
@@ -1206,71 +1206,63 @@ function Dashboard({
             )}
             <SectionLabel>Top Templates</SectionLabel>
             {byTemplate.length === 0 ? (
-              <div style={{ fontSize: 11, color: C.t3 }}>No sends yet</div>
+              <div className="text-ui-body text-zinc-900">No sends yet</div>
             ) : (
               byTemplate.map((t) => (
                 <div
                   key={t.templateKey}
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    fontSize: 11,
-                    padding: "3px 0",
-                    borderBottom: `1px solid ${C.bdr}`,
-                  }}
+                  className="flex justify-between border-b border-hairline border-zinc-200 py-[3px] text-ui-body"
                 >
-                  <span style={{ color: C.t2 }}>{t.templateKey}</span>
-                  <span style={{ color: C.t3 }}>
-                    {t.sent} sent · {t.sent > 0 ? Math.round((t.reviewed / t.sent) * 100) : 0}%
+                  <span className="text-zinc-900">{t.templateKey}</span>
+                  <span className="text-zinc-900">
+                    {t.sent} sent ·{" "}
+                    {t.sent > 0 ? Math.round((t.reviewed / t.sent) * 100) : 0}%
                   </span>
                 </div>
               ))
             )}
-            <div style={{ display: "flex", gap: 12, marginTop: 10 }}>
-              <div style={{ fontSize: 11, color: C.t3 }}>
+            <div className="mt-[10px] flex flex-wrap gap-3">
+              <div className="text-ui-body text-zinc-900">
                 Active cadences:{" "}
-                <span style={{ fontWeight: 700, color: C.acc }}>{analytics?.activeSequences ?? 0}</span>
+                <span className="font-medium text-zinc-900">
+                  {analytics?.activeSequences ?? 0}
+                </span>
               </div>
-              <div style={{ fontSize: 11, color: C.t3 }}>
-                Win-back pool: <span style={{ fontWeight: 700, color: C.acc }}>{winback.length}</span>
+              <div className="text-ui-body text-zinc-900">
+                Win-back pool:{" "}
+                <span className="font-medium text-zinc-900">
+                  {winback.length}
+                </span>
               </div>
-              <div style={{ fontSize: 11, color: C.t3 }}>
-                In queue: <span style={{ fontWeight: 700, color: C.acc }}>{queue.length}</span>
+              <div className="text-ui-body text-zinc-900">
+                In queue:{" "}
+                <span className="font-medium text-zinc-900">
+                  {queue.length}
+                </span>
               </div>
             </div>
-          </div>
+          </Card>
         </div>
       </div>
       {/* GBP Cards */}
-      <div style={{ marginBottom: 20 }}>
+      <div className="mb-[20px]">
         {" "}
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            marginBottom: 10,
-          }}
-        >
+        <div className="flex justify-between items-center mb-[10px]">
           {" "}
-          <div style={{ fontSize: 15, fontWeight: 700 }}>
-            Review Routing
-          </div>{" "}
+          <div className="text-ui-body font-medium">Review Routing</div>{" "}
         </div>{" "}
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: isMobile ? "repeat(2, 1fr)" : "repeat(4, 1fr)",
-            gap: isMobile ? 8 : 12,
-          }}
-        >
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 sm:gap-3">
           {GBP_LOCATIONS.map((loc) => {
             const locCusts = customers.filter((c) => c.gbpId === loc.id);
             // Reviewed + asked now come from real analytics (audit O1), not the
             // candidate pool. "Reviewed" = actual Google reviews landed for this
             // GBP in 90d; "Asked" = review asks sent; Conv = clicked→Google.
-            const gbpRow = (analytics?.googleByLocation || []).find((r) => r.locationId === loc.id);
-            const locRow = (analytics?.byLocation || []).find((r) => r.locationId === loc.id);
+            const gbpRow = (analytics?.googleByLocation || []).find(
+              (r) => r.locationId === loc.id,
+            );
+            const locRow = (analytics?.byLocation || []).find(
+              (r) => r.locationId === loc.id,
+            );
             const locReviewed = gbpRow?.reviews ?? 0;
             const locSent = locRow?.sent ?? 0;
             const locConverted = locRow?.reviewed ?? 0;
@@ -1278,50 +1270,35 @@ function Dashboard({
               (c) => !c.suppressed && c.stage === "not_contacted",
             ).length;
             return (
-              <div
+              <Card
                 key={loc.id}
                 onClick={() => setPage("pipeline")}
-                style={{
-                  background: C.surface,
-                  border: `1px solid ${C.bdr}`,
-                  borderRadius: 12,
-                  padding: isMobile ? 14 : 18,
-                  cursor: "pointer",
-                  transition: "all .15s",
-                }}
+                className="cursor-pointer p-[14px] sm:p-[18px]"
               >
                 {" "}
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "flex-start",
-                    marginBottom: isMobile ? 10 : 14,
-                  }}
-                >
+                <div className="mb-[10px] flex items-start justify-between sm:mb-[14px]">
                   {" "}
-                  <div
-                    style={{ fontSize: isMobile ? 13 : 14, fontWeight: 700 }}
-                  >
+                  <div className="text-ui-body font-medium">
                     {loc.name}
                   </div>{" "}
                   <Tag type="acc">{locCusts.length} customers</Tag>{" "}
                 </div>
                 {/* Stat strip — 2×2 on phones, 4-col single row on desktop so each
                     number gets more horizontal space and reads cleanly at a glance. */}
-                <div
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: isMobile
-                      ? "1fr 1fr"
-                      : "repeat(4, 1fr)",
-                    gap: 8,
-                  }}
-                >
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                   {[
-                    { v: locReviewed, l: "Reviewed" },
-                    { v: locSent, l: "Asked" },
-                    { v: locQueue, l: "In Queue" },
+                    {
+                      v: locReviewed,
+                      l: "Reviewed",
+                    },
+                    {
+                      v: locSent,
+                      l: "Asked",
+                    },
+                    {
+                      v: locQueue,
+                      l: "In Queue",
+                    },
                     {
                       v: `${locSent > 0 ? Math.round((locConverted / locSent) * 100) : 0}%`,
                       l: "Conv Rate",
@@ -1329,24 +1306,13 @@ function Dashboard({
                   ].map((s) => (
                     <div
                       key={s.l}
-                      style={{
-                        textAlign: "center",
-                        padding: "8px 4px",
-                        background: C.input,
-                        borderRadius: 8,
-                      }}
+                      className="rounded-md bg-white px-1 py-2 text-center"
                     >
                       {" "}
-                      <div
-                        style={{
-                          fontSize: isMobile ? 14 : 16,
-                          fontWeight: 700,
-                          color: C.acc,
-                        }}
-                      >
+                      <div className="text-ui-body font-medium text-zinc-900">
                         {s.v}
                       </div>{" "}
-                      <div style={{ fontSize: 11, color: C.t3, marginTop: 2 }}>
+                      <div className="text-ui-body text-zinc-900 mt-[2px]">
                         {s.l}
                       </div>{" "}
                     </div>
@@ -1357,27 +1323,20 @@ function Dashboard({
                   target="_blank"
                   rel="noopener noreferrer"
                   onClick={(e) => e.stopPropagation()}
-                  style={{
-                    display: "inline-block",
-                    fontSize: 11,
-                    color: C.t3,
-                    marginTop: 10,
-                    textDecoration: "none",
-                    borderBottom: `1px dotted ${C.bdr}`,
-                  }}
                   title={loc.reviewUrl}
+                  className="mt-[10px] inline-block border-b border-dotted border-zinc-200 text-ui-body text-zinc-900"
                 >
                   Open review link
                 </a>{" "}
-              </div>
+              </Card>
             );
           })}
         </div>{" "}
       </div>
       {/* Review Velocity — actual Google reviews landed per week (90d) */}
-      <div style={{ marginBottom: 20 }}>
+      <div className="mb-[20px]">
         {" "}
-        <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 10 }}>
+        <div className="text-ui-body font-medium mb-[10px]">
           Review Velocity
         </div>{" "}
         <VelocityChart velocity={analytics?.velocity || []} />
@@ -1385,7 +1344,7 @@ function Dashboard({
       {/* Recent Activity */}
       <div>
         {" "}
-        <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 10 }}>
+        <div className="text-ui-body font-medium mb-[10px]">
           Recent Activity
         </div>{" "}
         <ActivityList log={activityLog} max={8} />{" "}
@@ -1398,87 +1357,52 @@ function Dashboard({
 function VelocityChart({ velocity }) {
   if (!velocity.length) {
     return (
-      <div
-        style={{
-          background: C.surface,
-          border: `1px solid ${C.bdr}`,
-          borderRadius: 12,
-          padding: 20,
-          fontSize: 12,
-          color: C.t3,
-          textAlign: "center",
-        }}
-      >
+      <Card className="p-[20px] text-ui-body text-zinc-900 text-center">
         No Google reviews in the last 90 days yet.
-      </div>
+      </Card>
     );
   }
   const max = Math.max(...velocity.map((v) => v.reviews), 1);
   return (
-    <div
-      style={{
-        background: C.surface,
-        border: `1px solid ${C.bdr}`,
-        borderRadius: 12,
-        padding: 16,
-        height: 150,
-        // Up to 13 weekly buckets at phone width: keep a floor width per
-        // column so the 11px M/D labels stay inside their columns and let
-        // the row scroll sideways instead of spilling out of the card.
-        overflowX: "auto",
-        WebkitOverflowScrolling: "touch",
-      }}
-    >
-    <div
-      style={{
-        display: "flex",
-        alignItems: "flex-end",
-        gap: 6,
-        height: "100%",
-        minWidth: "max-content",
-      }}
-    >
-      {velocity.map((v, i) => {
-        // Bars scale against 70% of the column so the value above and the
-        // date below (11px each plus margins) fit inside the 150px chart
-        // instead of pushing the tallest column into the heading.
-        const h = Math.round((v.reviews / max) * 70);
-        const wk = v.week ? new Date(v.week) : null;
-        return (
-          <div
-            key={i}
-            style={{
-              flex: 1,
-              minWidth: 32,
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              justifyContent: "flex-end",
-              height: "100%",
-            }}
-          >
-            <div style={{ fontSize: 11, fontWeight: 700, color: C.t2, marginBottom: 2 }}>
-              {v.reviews}
-            </div>
+    <Card className="p-[16px] h-[150px] overflow-x-auto">
+      <div className="flex items-end gap-[6px]">
+        {velocity.map((v, i) => {
+          // Bars scale against 70% of the column so the value above and the
+          // date below (11px each plus margins) fit inside the 150px chart
+          // instead of pushing the tallest column into the heading.
+          const h = Math.round((v.reviews / max) * 70);
+          const wk = v.week ? new Date(v.week) : null;
+          return (
             <div
-              style={{
-                width: "100%",
-                maxWidth: 28,
-                height: `${h}%`,
-                minHeight: 3,
-                background: C.grn,
-                borderRadius: 4,
-                transition: "height .3s",
-              }}
-            />
-            <div style={{ fontSize: 11, color: C.t3, marginTop: 4 }}>
-              {wk ? `${wk.getMonth() + 1}/${wk.getDate()}` : ""}
+              key={i}
+              className="flex-[1] min-w-[32px] flex flex-col items-center justify-end"
+            >
+              <div className="text-ui-body font-medium text-zinc-900 mb-[2px]">
+                {v.reviews}
+              </div>
+              <svg
+                viewBox="0 0 28 72"
+                className="h-[72px] w-7"
+                role="img"
+                aria-label={`${v.reviews} reviews`}
+              >
+                <rect
+                  x="0"
+                  y={72 - Math.max(h, 3)}
+                  width="28"
+                  height={Math.max(h, 3)}
+                  rx="3"
+                  className="fill-zinc-900"
+                />
+              </svg>
+              <div className="text-ui-body text-zinc-900 mt-[4px]">
+                {wk ? `${wk.getMonth() + 1}/${wk.getDate()}` : ""}
+              </div>
             </div>
-          </div>
-        );
-      })}
-    </div>
-    </div>
+          );
+        })}
+      </div>
+    </Card>
   );
 }
 
@@ -1500,16 +1424,39 @@ function Pipeline({
   setBatchModal,
 }) {
   const filters = [
-    { key: "all", label: "All" },
-    { key: "hot", label: "Hot Leads" },
-    { key: "not_contacted", label: "Not Contacted" },
-    { key: "sms_sent", label: "SMS Sent" },
-    { key: "reminded", label: "Reminded" },
-    { key: "reviewed", label: "Reviewed" },
-    { key: "issue", label: "Issues" },
-    { key: "winback", label: "Win-Back" },
+    {
+      key: "all",
+      label: "All",
+    },
+    {
+      key: "hot",
+      label: "Hot Leads",
+    },
+    {
+      key: "not_contacted",
+      label: "Not Contacted",
+    },
+    {
+      key: "sms_sent",
+      label: "SMS Sent",
+    },
+    {
+      key: "reminded",
+      label: "Reminded",
+    },
+    {
+      key: "reviewed",
+      label: "Reviewed",
+    },
+    {
+      key: "issue",
+      label: "Issues",
+    },
+    {
+      key: "winback",
+      label: "Win-Back",
+    },
   ];
-
   const toggleSel = (id) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -1518,7 +1465,6 @@ function Pipeline({
       return next;
     });
   };
-
   const toggleAll = (checked) => {
     if (checked) {
       setSelectedIds(new Set(customers.map((c) => c.id)));
@@ -1526,178 +1472,104 @@ function Pipeline({
       setSelectedIds(new Set());
     }
   };
-
   return (
     <div>
       {" "}
-      <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 0 }}>
-        Review Pipeline
-      </div>
+      <div className="text-ui-body font-medium mb-[0px]">Review Pipeline</div>
       {/* Filter bar */}
-      <div
-        style={{
-          display: "flex",
-          gap: 8,
-          padding: "12px 0",
-          borderBottom: `1px solid ${C.bdr}`,
-          marginBottom: 12,
-          flexWrap: "wrap",
-          alignItems: "center",
-        }}
-      >
+      <div className="mb-[12px] flex flex-wrap items-center gap-2 border-b border-hairline border-zinc-200 py-3">
         {" "}
-        <input
+        <Input
           value={pipeSearch}
           onChange={(e) => setPipeSearch(e.target.value)}
           placeholder="Search customers..."
-          style={{
-            flex: 1,
-            minWidth: 200,
-            padding: "8px 12px",
-            background: C.input,
-            border: `1px solid ${C.bdr}`,
-            borderRadius: 8,
-            color: C.t1,
-            fontFamily: C.sans,
-            fontSize: 12,
-            outline: "none",
-          }}
+          className="flex-[1] min-w-[200px]"
         />{" "}
-        <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+        <div className="flex gap-[4px] flex-wrap">
           {filters.map((f) => (
-            <button
+            <Button
               key={f.key}
               onClick={() => setCurrentFilter(f.key)}
-              style={{
-                padding: "6px 12px",
-                fontSize: 12,
-                fontWeight: 500,
-                borderRadius: 20,
-                border: `1px solid ${currentFilter === f.key ? C.bdrA : C.bdr}`,
-                background: currentFilter === f.key ? C.acc : "transparent",
-                color: currentFilter === f.key ? "#fff" : C.t2,
-                cursor: "pointer",
-                transition: "all .15s",
-              }}
+              variant={currentFilter === f.key ? "primary" : "secondary"}
             >
               {f.label}
-            </button>
+            </Button>
           ))}
         </div>{" "}
       </div>
       {/* Batch bar */}
       {selectedIds.size > 0 && (
-        <div
-          style={{
-            display: "flex",
-            gap: 8,
-            alignItems: "center",
-            padding: "10px 16px",
-            background: C.surface,
-            border: `1px solid ${C.bdrA}`,
-            borderRadius: 12,
-            marginBottom: 12,
-          }}
-        >
+        <Card className="mb-[12px] flex items-center gap-2 px-4 py-[10px]">
           {" "}
-          <span style={{ fontSize: 12, fontWeight: 700, color: C.acc }}>
+          <span className="text-ui-body font-medium text-zinc-900">
             {selectedIds.size} selected
           </span>{" "}
-          <div style={{ width: 1, height: 20, background: C.bdr }} />{" "}
+          <div className="w-[1px] h-[20px] bg-zinc-900" />{" "}
           <Btn variant="primary" onClick={() => setBatchModal(true)}>
             Batch Send
           </Btn>{" "}
           <Btn onClick={() => setSelectedIds(new Set())}>Clear</Btn>{" "}
-        </div>
+        </Card>
       )}
       {/* Table */}
-      <div style={{ overflowX: "auto" }}>
+      <div className="overflow-x-auto">
         {" "}
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          {" "}
-          <thead>
-            {" "}
-            <tr>
-              {" "}
-              <th style={thStyle}>
-                <input
-                  type="checkbox"
+        <Table className="w-full">
+          <THead>
+            <TR>
+              <TH>
+                <Checkbox
                   onChange={(e) => toggleAll(e.target.checked)}
-                  style={{ accentColor: C.acc, cursor: "pointer" }}
+                  className="cursor-pointer"
                 />
-              </th>{" "}
-              <th style={thStyle}>Customer</th>{" "}
-              <th style={thStyle}>Location / GBP</th>{" "}
-              <th style={thStyle}>Score</th> <th style={thStyle}>Sentiment</th>{" "}
-              <th style={thStyle}>Stage</th>{" "}
-              <th style={thStyle}>Last Service</th>{" "}
-              <th style={thStyle}>Seq Step</th>{" "}
-              <th style={thStyle}>Actions</th>{" "}
-            </tr>{" "}
-          </thead>{" "}
-          <tbody>
+              </TH>
+              <TH>Customer</TH>
+              <TH>Location / GBP</TH>
+              <TH>Score</TH>
+              <TH>Sentiment</TH>
+              <TH>Stage</TH>
+              <TH>Last Service</TH>
+              <TH>Seq Step</TH>
+              <TH>Actions</TH>
+            </TR>
+          </THead>
+          <TBody>
             {customers.map((c) => {
-              const scoreColor =
-                c.score >= 70 ? C.grn : c.score >= 40 ? C.org : C.red;
               const isSelected = selectedIds.has(c.id);
               return (
-                <tr
+                <TR
                   key={c.id}
                   onDoubleClick={() => setDrawerCust(c)}
-                  style={{
-                    background: isSelected ? C.accG : "transparent",
-                    transition: "background .1s",
-                    cursor: "pointer",
-                  }}
+                  className={`cursor-pointer${isSelected ? " bg-zinc-100" : ""}`}
                 >
-                  {" "}
-                  <td style={tdStyle}>
-                    <input
-                      type="checkbox"
+                  <TD>
+                    <Checkbox
                       checked={isSelected}
                       onChange={() => toggleSel(c.id)}
-                      style={{ accentColor: C.acc, cursor: "pointer" }}
                     />
-                  </td>{" "}
-                  <td style={tdStyle}>
-                    {" "}
-                    <div style={{ fontWeight: 500, fontSize: 13, color: C.t1 }}>
+                  </TD>
+                  <TD>
+                    <div className="font-medium text-ui-body text-zinc-900">
                       {c.name}
-                    </div>{" "}
-                  </td>{" "}
-                  <td style={tdStyle}>
+                    </div>
+                  </TD>
+                  <TD>
                     <Tag type="acc">{c.gbpName}</Tag>
-                  </td>{" "}
-                  <td style={tdStyle}>
-                    {" "}
-                    <div
-                      style={{ display: "flex", alignItems: "center", gap: 6 }}
-                    >
-                      {" "}
-                      <div
-                        style={{
-                          height: 6,
-                          borderRadius: 3,
-                          minWidth: 4,
-                          width: `${c.score}%`,
-                          maxWidth: 80,
-                          background: scoreColor,
-                          transition: "width .3s",
-                        }}
-                      />{" "}
-                      <span
-                        style={{
-                          fontSize: 11,
-                          fontWeight: 700,
-                          color: scoreColor,
-                        }}
-                      >
+                  </TD>
+                  <TD>
+                    <div className="flex items-center gap-[6px]">
+                      <progress
+                        className="h-2 w-20 accent-zinc-900"
+                        value={c.score}
+                        max="100"
+                        aria-label={`${c.score} review score`}
+                      />
+                      <span className="text-ui-body font-medium">
                         {c.score}
-                      </span>{" "}
-                    </div>{" "}
-                  </td>{" "}
-                  <td style={tdStyle}>
-                    {" "}
+                      </span>
+                    </div>
+                  </TD>
+                  <TD>
                     <Tag
                       type={
                         c.sentiment === "happy"
@@ -1710,46 +1582,41 @@ function Pipeline({
                       }
                     >
                       {c.sentiment}
-                    </Tag>{" "}
-                  </td>{" "}
-                  <td style={tdStyle}>
+                    </Tag>
+                  </TD>
+                  <TD>
                     <Tag type={STAGES[c.stage]?.tag || "acc"}>
                       {STAGES[c.stage]?.label || c.stage}
                     </Tag>
-                  </td>{" "}
-                  <td style={tdStyle}>
-                    {" "}
-                    <div style={{ fontSize: 12, color: C.t2 }}>
+                  </TD>
+                  <TD>
+                    <div className="text-ui-body text-zinc-900">
                       {c.lastSvc}
-                    </div>{" "}
-                    <div style={{ fontSize: 11, color: C.t3 }}>
+                    </div>
+                    <div className="text-ui-body text-zinc-900">
                       {c.lastDate} · {c.daysAgo}d ago
-                    </div>{" "}
-                  </td>{" "}
-                  <td style={tdStyle}>
+                    </div>
+                  </TD>
+                  <TD>
                     {c.sequence ? (
-                      <Tag type="blu">
-                        Cadence {c.seqStep}/{c.seqTotal}
-                      </Tag>
+                      <>
+                        <Tag type="blu">
+                          Cadence {c.seqStep}/{c.seqTotal}
+                        </Tag>
+                        <div className="text-ui-body text-zinc-900 mt-[4px]">
+                          {decisionLine(c.sequence, sequencesEnabled)}
+                        </div>
+                      </>
                     ) : c.seqStep > 0 ? (
-                      <Tag type="acc">
-                        Asked {c.askCount}×
-                      </Tag>
+                      <Tag type="acc">Asked {c.askCount}×</Tag>
                     ) : (
-                      <span style={{ color: C.t3, fontSize: 11 }}>—</span>
+                      <span className="text-zinc-900 text-ui-body">—</span>
                     )}
-                  </td>{" "}
-                  <td style={{ ...tdStyle, whiteSpace: "nowrap" }}>
-                    {" "}
-                    <div
-                      style={{
-                        display: "flex",
-                        gap: 4,
-                        justifyContent: "flex-end",
-                      }}
-                    >
+                  </TD>
+                  <TD className="whitespace-nowrap">
+                    <div className="flex gap-[4px] justify-end">
                       {c.phone && (
-                        <button
+                        <Button
                           type="button"
                           onClick={async (e) => {
                             e.stopPropagation();
@@ -1781,22 +1648,11 @@ function Pipeline({
                           }}
                           aria-label="Call via Waves"
                           title="Call via Waves — rings your phone first, press 1 to connect"
-                          style={{
-                            display: "inline-flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            height: 24,
-                            width: 24,
-                            border: `1px solid ${C.inputBorder}`,
-                            borderRadius: 4,
-                            color: C.t2,
-                            background: "#fff",
-                            cursor: "pointer",
-                          }}
+                          variant="primary"
+                          className="h-11 w-11 px-0 sm:h-9 sm:w-9"
                         >
-                          {" "}
-                          <Phone size={12} strokeWidth={1.75} />{" "}
-                        </button>
+                          <Phone size={12} strokeWidth={1.75} />
+                        </Button>
                       )}
                       {c.phone && (
                         <a
@@ -1804,27 +1660,19 @@ function Pipeline({
                           onClick={(e) => e.stopPropagation()}
                           aria-label="SMS"
                           title={`SMS ${c.phoneF || c.phone}`}
-                          style={{
-                            display: "inline-flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            height: 24,
-                            width: 24,
-                            border: `1px solid ${C.inputBorder}`,
-                            borderRadius: 4,
-                            color: C.t2,
-                            background: "#fff",
-                            textDecoration: "none",
-                          }}
+                          className={buttonStyles({
+                            variant: "secondary",
+                            density: "comfortable",
+                            className: "h-11 w-11 px-0 sm:h-9 sm:w-9",
+                          })}
                         >
-                          {" "}
-                          <MessageSquare size={12} strokeWidth={1.75} />{" "}
+                          <MessageSquare size={12} strokeWidth={1.75} />
                         </a>
                       )}
                       {/* Send review now — disabled with the reason when the
                           customer isn't eligible (opted out, at cap, cooldown,
                           suppressed, already in a cadence). */}
-                      <button
+                      <Button
                         type="button"
                         disabled={!c.sendable}
                         title={
@@ -1836,91 +1684,45 @@ function Pipeline({
                           e.stopPropagation();
                           quickSend(c.id);
                         }}
-                        style={{
-                          height: 24,
-                          padding: "0 8px",
-                          border: `1px solid ${c.sendable ? C.acc : C.inputBorder}`,
-                          borderRadius: 4,
-                          color: c.sendable ? "#fff" : C.t3,
-                          background: c.sendable ? C.acc : "#fff",
-                          cursor: c.sendable ? "pointer" : "not-allowed",
-                          opacity: c.sendable ? 1 : 0.6,
-                          fontSize: 11,
-                          fontWeight: 500,
-                          fontFamily: C.sans,
-                          textTransform: "uppercase",
-                          letterSpacing: "0.04em",
-                          whiteSpace: "nowrap",
-                        }}
+                        variant="primary"
+                        className=" whitespace-nowrap"
                       >
                         Send
-                      </button>
+                      </Button>
                       {sequencesEnabled && c.cadenceable && !c.sequence && (
-                        <button
+                        <Button
                           type="button"
                           title="Start a Day 0/3/4 review cadence"
                           onClick={(e) => {
                             e.stopPropagation();
                             quickStartSequence(c.id);
                           }}
-                          style={{
-                            height: 24,
-                            padding: "0 8px",
-                            border: `1px solid ${C.inputBorder}`,
-                            borderRadius: 4,
-                            color: C.t2,
-                            background: "#fff",
-                            cursor: "pointer",
-                            fontSize: 11,
-                            fontWeight: 500,
-                            fontFamily: C.sans,
-                            textTransform: "uppercase",
-                            letterSpacing: "0.04em",
-                            whiteSpace: "nowrap",
-                          }}
+                          variant="secondary"
+                          className=" whitespace-nowrap"
                         >
                           Cadence
-                        </button>
+                        </Button>
                       )}
-                      <button
+                      <Button
                         type="button"
                         onClick={(e) => {
                           e.stopPropagation();
                           setDrawerCust(c);
                         }}
-                        style={{
-                          height: 24,
-                          padding: "0 8px",
-                          border: `1px solid ${C.inputBorder}`,
-                          borderRadius: 4,
-                          color: C.t2,
-                          background: "#fff",
-                          cursor: "pointer",
-                          fontSize: 11,
-                          fontWeight: 500,
-                          fontFamily: C.sans,
-                          textTransform: "uppercase",
-                          letterSpacing: "0.04em",
-                        }}
+                        variant="secondary"
+                        className=""
                       >
                         Edit
-                      </button>{" "}
-                    </div>{" "}
-                  </td>{" "}
-                </tr>
+                      </Button>
+                    </div>
+                  </TD>
+                </TR>
               );
             })}
-          </tbody>{" "}
-        </table>
+          </TBody>
+        </Table>
         {customers.length === 0 && (
-          <div
-            style={{
-              padding: 40,
-              textAlign: "center",
-              color: C.t3,
-              fontSize: 13,
-            }}
-          >
+          <div className="p-[40px] text-center text-zinc-900 text-ui-body">
             No customers match your filters
           </div>
         )}
@@ -1929,25 +1731,6 @@ function Pipeline({
   );
 }
 
-const thStyle = {
-  fontSize: 11,
-  fontWeight: 700,
-  color: C.acc,
-  textAlign: "left",
-  padding: "10px 16px",
-  borderBottom: `1px solid ${C.bdr}`,
-  textTransform: "uppercase",
-  letterSpacing: "0.04em",
-  fontFamily: C.sans,
-};
-const tdStyle = {
-  padding: "12px 16px",
-  borderBottom: `1px solid ${C.bdr}`,
-  fontSize: 13,
-  verticalAlign: "middle",
-  fontFamily: C.sans,
-};
-
 // ══════════════════════════════════════════════════════════════
 // ACTIVITY LOG
 // ══════════════════════════════════════════════════════════════
@@ -1955,78 +1738,48 @@ function ActivityLogPage({ activityLog, setActivityLog, saveState }) {
   return (
     <div>
       {" "}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          marginBottom: 16,
-        }}
-      >
+      <div className="flex justify-between items-center mb-[16px]">
         {" "}
-        <div style={{ fontSize: 15, fontWeight: 700 }}>Activity Log</div>{" "}
+        <div className="text-ui-body font-medium">Activity Log</div>{" "}
         <Btn onClick={() => saveState()}>Refresh</Btn>{" "}
       </div>{" "}
       <ActivityList log={activityLog} max={100} />{" "}
     </div>
   );
 }
-
 function ActivityList({ log, max }) {
   if (!log.length)
     return (
-      <p
-        style={{ color: C.t3, padding: 20, textAlign: "center", fontSize: 12 }}
-      >
+      <p className="text-zinc-900 p-[20px] text-center text-ui-body">
         No activity yet. Send your first review request!
       </p>
     );
-
   const iconMap = {
-    sent: { bg: C.grnG, color: C.grn, glyph: "→" },
-    sms: { bg: C.grnG, color: C.grn, glyph: "→" },
-    reviewed: { bg: C.grnG, color: C.grn, glyph: "★" },
-    rated: { bg: C.orgG, color: C.org, glyph: "#" },
-    call: { bg: C.bluG, color: C.blu, glyph: "☎" },
-    batch: { bg: C.purG, color: C.pur, glyph: "≡" },
-    stage: { bg: C.orgG, color: C.org, glyph: "!" },
+    sent: "→",
+    sms: "→",
+    reviewed: "★",
+    rated: "#",
+    call: "☎",
+    batch: "≡",
+    stage: "!",
   };
-
   return (
-    <div style={{ maxHeight: 300, overflowY: "auto" }}>
+    <div className="max-h-[300px] overflow-y-auto">
       {log.slice(0, max).map((l, i) => {
-        const ic = iconMap[l.type] || iconMap.stage;
+        const glyph = iconMap[l.type] || iconMap.stage;
         return (
           <div
             key={i}
-            style={{
-              display: "flex",
-              gap: 10,
-              padding: "10px 0",
-              borderBottom: `1px solid ${C.bdr}`,
-            }}
+            className="flex gap-[10px] border-b border-hairline border-zinc-200 py-[10px]"
           >
             {" "}
-            <div
-              style={{
-                width: 28,
-                height: 28,
-                borderRadius: "50%",
-                display: "grid",
-                placeItems: "center",
-                fontSize: 12,
-                flexShrink: 0,
-                background: ic.bg,
-                color: ic.color,
-                fontWeight: 700,
-              }}
-            >
-              {ic.glyph}
+            <div className="grid h-[28px] w-[28px] shrink-0 place-items-center rounded-sm text-ui-body font-medium">
+              {glyph}
             </div>{" "}
-            <div style={{ flex: 1, minWidth: 0 }}>
+            <div className="flex-[1] min-w-[0px]">
               {" "}
-              <div style={{ fontSize: 12, lineHeight: 1.5 }}>{l.msg}</div>{" "}
-              <div style={{ fontSize: 11, color: C.t3, marginTop: 2 }}>
+              <div className="text-ui-body">{l.msg}</div>{" "}
+              <div className="text-ui-body text-zinc-900 mt-[2px]">
                 {l.time}
               </div>{" "}
             </div>{" "}
@@ -2049,21 +1802,24 @@ function CustomerDrawer({
   startSequence: startSequenceFn,
   sequencesEnabled,
 }) {
-  // Reactive (rotation-safe) — the module-level snapshot never recomputes.
-  const isMobile = useIsMobile(640);
   const [msg, setMsg] = useState("");
   const [selectedTpl, setSelectedTpl] = useState("");
   const [sending, setSending] = useState(false);
   const [seqStarting, setSeqStarting] = useState(false);
   const c = customer;
-
   const applyTpl = (tplId) => {
     setSelectedTpl(tplId);
     const tpl = TEMPLATES.find((t) => t.id === tplId);
     // Hydrate name/tech/etc. for preview, but KEEP the {review_url} token so the
     // server swaps in the tokenized /rate link. Hydrating it client-side to the
     // raw GBP URL would bypass the NPS gate (sends issues straight to Google).
-    if (tpl) setMsg(hydrate(tpl.body, { ...c, reviewUrl: "{review_url}" }));
+    if (tpl)
+      setMsg(
+        hydrate(tpl.body, {
+          ...c,
+          reviewUrl: "{review_url}",
+        }),
+      );
   };
 
   // A no-link private check-in (resolution_check / satisfaction_confirm) bypasses
@@ -2071,7 +1827,9 @@ function CustomerDrawer({
   // when c.sendable is false (those are review-ask-only blockers) — it just needs
   // an SMS-reachable phone.
   const selectedTplObj = TEMPLATES.find((t) => t.id === selectedTpl);
-  const selectedIsNoLink = !!(selectedTplObj && !selectedTplObj.body.includes("{review_url}"));
+  const selectedIsNoLink = !!(
+    selectedTplObj && !selectedTplObj.body.includes("{review_url}")
+  );
   const canSendSelected = selectedIsNoLink ? !!c.phone : c.sendable;
 
   // Sends the chosen template / edited body through the server's NPS rate-page
@@ -2104,10 +1862,13 @@ function CustomerDrawer({
       showToast(`Failed: ${result.error}`);
     }
   };
-
   const startSequence = async () => {
     if (c.sequence) {
-      showToast("Already in an active cadence");
+      showToast(
+        c.sequence.parked
+          ? "A cadence is already parked for this customer"
+          : "Already in an active cadence",
+      );
       return;
     }
     setSeqStarting(true);
@@ -2120,137 +1881,64 @@ function CustomerDrawer({
       showToast(`Couldn't start: ${result.error}`);
     }
   };
-
-  const scoreColor = c.score >= 70 ? C.grn : c.score >= 40 ? C.org : C.red;
   const gbp = GBP_LOCATIONS.find((l) => l.id === c.gbpId);
   // With a known sentiment, surface matching + neutral templates; when it's
   // unknown (no NPS rating yet), show the full set.
   const sentimentKnown = c.sentiment === "happy" || c.sentiment === "issue";
   const filteredTpls = sentimentKnown
-    ? TEMPLATES.filter((t) => t.sentiment === c.sentiment || t.sentiment === "neutral")
+    ? TEMPLATES.filter(
+        (t) => t.sentiment === c.sentiment || t.sentiment === "neutral",
+      )
     : TEMPLATES;
-
-  return createPortal(
-    <div
-      style={{
-        position: "fixed",
-        top: 0,
-        right: 0,
-        width: 520,
-        height: "100vh",
-        background: C.surface,
-        borderLeft: `1px solid ${C.bdrA}`,
-        zIndex: 150,
-        overflowY: "auto",
-        boxShadow: "-8px 0 32px rgba(0,0,0,.1)",
-        ...(isMobile
-          ? {
-              width: "100%",
-              maxWidth: "100%",
-              height: "100dvh",
-              borderLeft: "none",
-              boxSizing: "border-box",
-              paddingTop: "env(safe-area-inset-top, 0px)",
-              paddingBottom: "env(safe-area-inset-bottom, 0px)",
-              paddingLeft: "env(safe-area-inset-left, 0px)",
-              paddingRight: "env(safe-area-inset-right, 0px)",
-            }
-          : {}),
+  return (
+    <Sheet
+      open
+      onClose={() => {
+        if (!sending && !seqStarting) onClose();
       }}
+      width="md"
+      ariaLabel={`Review outreach for ${c.name}`}
     >
       {/* Header */}
-      <div
-        style={{
-          padding: "16px 20px",
-          borderBottom: `1px solid ${C.bdr}`,
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "flex-start",
-          position: "sticky",
-          top: 0,
-          background: C.surface,
-          zIndex: 1,
-        }}
-      >
+      <SheetHeader className="items-start">
         {" "}
         <div>
           {" "}
-          <h2
-            style={{
-              fontSize: 18,
-              fontWeight: 700,
-              marginBottom: 4,
-              margin: 0,
-              color: C.heading,
-            }}
-          >
+          <h2 className="text-[18px] font-medium mb-[4px] m-0 text-zinc-900">
             {c.name}
           </h2>{" "}
-          <div style={{ fontSize: 11, color: C.t2 }}>
+          <div className="text-ui-body text-zinc-900">
             {c.addr} · {c.lastSvc} · {c.daysAgo} days ago
           </div>{" "}
-          <div style={{ fontSize: 11, color: C.acc, marginTop: 2 }}>
+          <div className="text-ui-body text-zinc-900 mt-[2px]">
             {c.phoneF || "No phone"}
           </div>{" "}
         </div>{" "}
-        <button
+        <Button
           onClick={onClose}
-          style={{
-            background: "none",
-            border: "none",
-            color: C.t3,
-            fontSize: 18,
-            cursor: "pointer",
-            padding: 4,
-          }}
+          disabled={sending || seqStarting}
+          variant="primary"
+          className="text-[18px]"
+          aria-label="Close outreach details"
         >
-          ×
-        </button>{" "}
-      </div>{" "}
-      <div style={{ padding: "16px 20px" }}>
+          <X size={18} />
+        </Button>{" "}
+      </SheetHeader>{" "}
+      <SheetBody>
         {/* Score */}
         <DrawerSection title="Review score breakdown">
           {" "}
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 10,
-              marginBottom: 8,
-            }}
-          >
+          <div className="flex items-center gap-[10px] mb-[8px]">
             {" "}
-            <div style={{ fontSize: 32, fontWeight: 700, color: scoreColor }}>
-              {c.score}
-            </div>{" "}
-            <div
-              style={{
-                flex: 1,
-                height: 8,
-                background: C.input,
-                borderRadius: 4,
-                overflow: "hidden",
-              }}
-            >
-              {" "}
-              <div
-                style={{
-                  width: `${c.score}%`,
-                  height: "100%",
-                  background: scoreColor,
-                  borderRadius: 4,
-                }}
-              />{" "}
-            </div>{" "}
+            <div className="text-[32px] font-medium">{c.score}</div>{" "}
+            <progress
+              className="h-2 flex-1 accent-zinc-900"
+              value={c.score}
+              max="100"
+              aria-label="Review readiness score"
+            />{" "}
           </div>{" "}
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr 1fr",
-              gap: 4,
-              fontSize: 11,
-            }}
-          >
+          <div className="grid grid-cols-2 gap-1 text-ui-body">
             {[
               {
                 l: "Sentiment",
@@ -2268,23 +1956,31 @@ function CustomerDrawer({
                   </Tag>
                 ),
               },
-              { l: "Recency", v: `${c.daysAgo}d ago` },
-              { l: "Revenue", v: `$${c.revenue}` },
-              { l: "Times Asked", v: c.askCount },
-              { l: "Stage", v: STAGES[c.stage]?.label },
-              { l: "Last Asked", v: c.lastAsked || "Never" },
+              {
+                l: "Recency",
+                v: `${c.daysAgo}d ago`,
+              },
+              {
+                l: "Revenue",
+                v: `$${c.revenue}`,
+              },
+              {
+                l: "Times Asked",
+                v: c.askCount,
+              },
+              {
+                l: "Stage",
+                v: STAGES[c.stage]?.label,
+              },
+              {
+                l: "Last Asked",
+                v: c.lastAsked || "Never",
+              },
             ].map((r) => (
-              <div
-                key={r.l}
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  padding: "4px 0",
-                }}
-              >
+              <div key={r.l} className="flex justify-between py-1">
                 {" "}
-                <span style={{ color: C.t3 }}>{r.l}</span>{" "}
-                <span style={{ fontWeight: 500 }}>{r.v}</span>{" "}
+                <span className="text-zinc-900">{r.l}</span>{" "}
+                <span className="font-medium">{r.v}</span>{" "}
               </div>
             ))}
           </div>{" "}
@@ -2292,31 +1988,13 @@ function CustomerDrawer({
         {/* GBP */}
         <DrawerSection title="GBP Assignment">
           {" "}
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              padding: 8,
-              background: C.input,
-              borderRadius: 8,
-              border: `1px solid ${C.bdr}`,
-            }}
-          >
+          <Card className="flex items-center gap-[8px] p-[8px]">
             {" "}
             <Tag type="acc">{gbp?.name || c.gbpId}</Tag>{" "}
-            <span
-              style={{
-                fontSize: 11,
-                color: C.t3,
-                flex: 1,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-              }}
-            >
+            <span className="text-ui-body text-zinc-900 flex-[1] overflow-hidden">
               {c.reviewUrl}
             </span>{" "}
-          </div>{" "}
+          </Card>{" "}
         </DrawerSection>
         {/* Service History */}
         <DrawerSection title="Service history">
@@ -2324,88 +2002,54 @@ function CustomerDrawer({
             c.jobs.map((j, i) => (
               <div
                 key={i}
-                style={{
-                  padding: "6px 0",
-                  borderBottom: `1px solid ${C.bdr}`,
-                  fontSize: 11,
-                }}
+                className="border-b border-hairline border-zinc-200 py-[6px] text-ui-body"
               >
                 {" "}
-                <div
-                  style={{ display: "flex", justifyContent: "space-between" }}
-                >
+                <div className="flex justify-between">
                   {" "}
-                  <span style={{ fontWeight: 500 }}>{j.svcType}</span>{" "}
-                  <span style={{ fontSize: 11, color: C.t3 }}>
+                  <span className="font-medium">{j.svcType}</span>{" "}
+                  <span className="text-ui-body text-zinc-900">
                     {j.date}
                   </span>{" "}
                 </div>
                 {j.notes && (
-                  <div style={{ color: C.t3, marginTop: 2 }}>{j.notes}</div>
+                  <div className="text-zinc-900 mt-[2px]">{j.notes}</div>
                 )}
-                <div style={{ fontSize: 11, color: C.t3, marginTop: 2 }}>
+                <div className="text-ui-body text-zinc-900 mt-[2px]">
                   {j.tech} · ${j.revenue}
                 </div>{" "}
               </div>
             ))
           ) : (
-            <p style={{ color: C.t3, fontSize: 11 }}>No service records</p>
+            <p className="text-zinc-900 text-ui-body">No service records</p>
           )}
         </DrawerSection>
         {/* Recent SMS */}
         <DrawerSection title="Recent SMS">
           {c.sms.length > 0 ? (
             c.sms.slice(-5).map((m, i) => (
-              <div
-                key={i}
-                style={{
-                  background: C.input,
-                  border: `1px solid ${C.bdr}`,
-                  borderRadius: 8,
-                  padding: "8px 10px",
-                  marginBottom: 4,
-                  fontSize: 11,
-                  lineHeight: 1.5,
-                }}
-              >
+              <Card key={i} className="mb-1 px-[10px] py-2 text-ui-body">
                 {" "}
-                <div style={{ fontSize: 11, color: C.t3, marginBottom: 2 }}>
+                <div className="text-ui-body text-zinc-900 mb-[2px]">
                   {m.date} {m.dir === "out" ? "→ Sent" : "← Received"}
                 </div>
                 {m.text}
-              </div>
+              </Card>
             ))
           ) : (
-            <p style={{ color: C.t3, fontSize: 11 }}>No SMS history</p>
+            <p className="text-zinc-900 text-ui-body">No SMS history</p>
           )}
         </DrawerSection>
         {/* Send Review Request */}
         <DrawerSection title="Send review request">
           {" "}
-          <div
-            style={{
-              background: C.input,
-              border: `1px solid ${C.bdr}`,
-              borderRadius: 12,
-              padding: 12,
-            }}
-          >
+          <Card className="p-[12px]">
             {" "}
             <SectionLabel>Select Template</SectionLabel>{" "}
-            <select
+            <Select
               value={selectedTpl}
               onChange={(e) => applyTpl(e.target.value)}
-              style={{
-                width: "100%",
-                padding: "6px 8px",
-                background: C.bg,
-                border: `1px solid ${C.bdr}`,
-                borderRadius: 8,
-                color: C.t1,
-                fontSize: 11,
-                marginBottom: 8,
-                outline: "none",
-              }}
+              className="w-full mb-[8px]"
             >
               {" "}
               <option value="">Select a template...</option>
@@ -2414,56 +2058,29 @@ function CustomerDrawer({
                   {t.name}
                 </option>
               ))}
-            </select>{" "}
-            <textarea
+            </Select>{" "}
+            <Textarea
               value={msg}
               onChange={(e) => setMsg(e.target.value)}
               placeholder="Compose review request..."
-              style={{
-                width: "100%",
-                padding: 8,
-                background: C.bg,
-                border: `1px solid ${C.bdr}`,
-                borderRadius: 8,
-                color: C.t1,
-                fontFamily: C.sans,
-                fontSize: 12,
-                resize: "none",
-                minHeight: 80,
-                outline: "none",
-                boxSizing: "border-box",
-              }}
+              className="w-full resize-none min-h-[80px] box-border"
             />{" "}
-            <div
-              style={{
-                fontSize: 11,
-                color: C.t3,
-                marginTop: 6,
-                lineHeight: 1.5,
-              }}
-            >
+            <div className="text-ui-body text-zinc-900 mt-[6px]">
               The selected template (with your edits) is what sends. The
               {" {review_url}"} resolves to a rating link that routes happy
               customers to Google and issues to a private recovery inbox.
             </div>{" "}
             {!c.sendable && !selectedIsNoLink && (
-              <div
-                style={{
-                  fontSize: 11,
-                  color: C.org,
-                  marginTop: 6,
-                  fontWeight: 500,
-                }}
-              >
+              <div className="text-ui-body text-zinc-900 mt-[6px] font-medium">
                 Not sendable: {eligibilityLabel(c.eligibilityReasons)}
               </div>
             )}
             {!c.sendable && selectedIsNoLink && (
-              <div style={{ fontSize: 11, color: C.t2, marginTop: 6 }}>
+              <div className="text-ui-body text-zinc-900 mt-[6px]">
                 Private check-in — bypasses the review ask cap/cooldown.
               </div>
             )}
-            <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+            <div className="flex gap-[6px] mt-[8px] flex-wrap">
               {" "}
               <Btn
                 variant="success"
@@ -2494,7 +2111,9 @@ function CustomerDrawer({
                       body: JSON.stringify({ to: c.phone }),
                     });
                     if (!r?.success) {
-                      showToast("Call failed: " + (r?.error || "unknown error"));
+                      showToast(
+                        "Call failed: " + (r?.error || "unknown error"),
+                      );
                     } else {
                       addLog("call", `Calling ${c.name} at ${c.phoneF}`);
                       showToast(`Calling ${c.name}…`);
@@ -2507,35 +2126,34 @@ function CustomerDrawer({
                 Call
               </Btn>{" "}
               {c.sequence ? (
-                <Btn disabled>In cadence ({c.seqStep}/{c.seqTotal})</Btn>
+                <Btn disabled>
+                  In cadence ({c.seqStep}/{c.seqTotal})
+                </Btn>
+              ) : null}{" "}
+              {c.sequence ? (
+                <div className="text-ui-body text-zinc-900 mt-[6px]">
+                  {decisionLine(c.sequence, sequencesEnabled)}
+                </div>
               ) : sequencesEnabled ? (
-                <Btn onClick={startSequence} disabled={seqStarting || !c.cadenceable}>
+                <Btn
+                  onClick={startSequence}
+                  disabled={seqStarting || !c.cadenceable}
+                >
                   {seqStarting ? "Starting…" : "Start Cadence"}
                 </Btn>
               ) : null}{" "}
             </div>{" "}
-          </div>{" "}
+          </Card>{" "}
         </DrawerSection>{" "}
-      </div>{" "}
-    </div>,
-    document.body,
+      </SheetBody>{" "}
+    </Sheet>
   );
 }
-
 function DrawerSection({ title, children }) {
   return (
-    <div style={{ marginBottom: 16 }}>
+    <div className="mb-[16px]">
       {" "}
-      <div
-        style={{
-          fontSize: 12,
-          fontWeight: 500,
-          color: C.t2,
-          marginBottom: 8,
-          paddingBottom: 4,
-          borderBottom: `1px solid ${C.bdr}`,
-        }}
-      >
+      <div className="mb-2 border-b border-hairline border-zinc-200 pb-1 text-ui-body font-medium text-zinc-900">
         {title}
       </div>
       {children}
@@ -2555,11 +2173,11 @@ function BatchModal({
   setSelectedIds,
   sendReviewRequest,
 }) {
-  // Reactive (rotation-safe) — the module-level snapshot never recomputes.
-  const isMobile = useIsMobile(640);
   const [sending, setSending] = useState(false);
-  const [progress, setProgress] = useState({ done: 0, total: 0 });
-
+  const [progress, setProgress] = useState({
+    done: 0,
+    total: 0,
+  });
   const confirm = async () => {
     const targets = [...selectedIds]
       .map((id) => customers.find((x) => x.id === id))
@@ -2569,14 +2187,20 @@ function BatchModal({
       return;
     }
     setSending(true);
-    setProgress({ done: 0, total: targets.length });
+    setProgress({
+      done: 0,
+      total: targets.length,
+    });
     let ok = 0,
       fail = 0;
     for (let i = 0; i < targets.length; i++) {
       const result = await sendReviewRequest(targets[i]);
       if (result.ok) ok++;
       else fail++;
-      setProgress({ done: i + 1, total: targets.length });
+      setProgress({
+        done: i + 1,
+        total: targets.length,
+      });
     }
     setSending(false);
     addLog("batch", `Batch review request — ${ok} sent, ${fail} failed`);
@@ -2586,95 +2210,30 @@ function BatchModal({
     setSelectedIds(new Set());
     onClose();
   };
-
-  return createPortal(
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,.65)",
-        zIndex: 200,
-        display: "grid",
-        placeItems: "center",
-        backdropFilter: "blur(6px)",
+  return (
+    <Dialog
+      open
+      onClose={() => {
+        if (!sending) onClose();
       }}
-      onClick={onClose}
+      size="sm"
+      className="admin-shell-v2 font-sans"
     >
-      {" "}
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          background: C.surface,
-          border: `1px solid ${C.bdrA}`,
-          borderRadius: 16,
-          padding: 24,
-          minWidth: 440,
-          maxWidth: 560,
-          boxShadow: "0 24px 64px rgba(0,0,0,.12)",
-          ...(isMobile
-            ? {
-                width: "100%",
-                minWidth: 0,
-                maxWidth: "none",
-                height: "100%",
-                maxHeight: "none",
-                borderRadius: 0,
-                boxSizing: "border-box",
-                overflowY: "auto",
-                paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
-                paddingBottom: "calc(24px + env(safe-area-inset-bottom, 0px))",
-                paddingLeft: "calc(24px + env(safe-area-inset-left, 0px))",
-                paddingRight: "calc(24px + env(safe-area-inset-right, 0px))",
-              }
-            : {}),
-        }}
-      >
-        {" "}
-        <h3
-          style={{
-            fontSize: 16,
-            fontWeight: 700,
-            marginBottom: 6,
-            margin: 0,
-            color: C.heading,
-          }}
-        >
-          Batch send review requests
-        </h3>{" "}
-        <p
-          style={{
-            fontSize: 12,
-            color: C.t2,
-            lineHeight: 1.6,
-            marginBottom: 14,
-          }}
-        >
+      <DialogHeader>
+        <DialogTitle>Batch send review requests</DialogTitle>
+      </DialogHeader>
+      <DialogBody>
+        <p className="text-ui-body text-zinc-900 mb-[14px]">
           You're about to send the canonical review-request SMS to{" "}
           <strong>{selectedIds.size}</strong>customers. The server enforces the
           already-reviewed flag, 30-day cooldown, and 3-request cap.
         </p>
         {sending && (
-          <div
-            style={{
-              fontSize: 12,
-              color: C.t2,
-              padding: "10px 12px",
-              background: C.input,
-              borderRadius: 8,
-              marginTop: 8,
-            }}
-          >
+          <div className="mt-2 rounded-md bg-white px-3 py-[10px] text-ui-body text-zinc-900">
             Sending… {progress.done}/{progress.total}
           </div>
         )}
-        <div
-          style={{
-            display: "flex",
-            gap: 8,
-            justifyContent: "flex-end",
-            marginTop: 16,
-          }}
-        >
+        <DialogFooter>
           {" "}
           <Btn onClick={onClose} disabled={sending}>
             Cancel
@@ -2682,9 +2241,8 @@ function BatchModal({
           <Btn variant="success" onClick={confirm} disabled={sending}>
             {sending ? "Sending…" : "Confirm & Send"}
           </Btn>{" "}
-        </div>{" "}
-      </div>{" "}
-    </div>,
-    document.body,
+        </DialogFooter>
+      </DialogBody>
+    </Dialog>
   );
 }

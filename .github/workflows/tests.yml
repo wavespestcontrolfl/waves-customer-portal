@@ -111,6 +111,12 @@ jobs:
           VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
           DATA_HYGIENE_VAULT_KEY: ci-only-visit-summary-test-key
         run: npx jest --ci --silent --runInBand tests/visit-summary-identity-postgres.test.js
+      - name: Visit summary authorization and recovery transaction tests
+        working-directory: server
+        env:
+          VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+          DATA_HYGIENE_VAULT_KEY: ci-only-visit-summary-test-key
+        run: npx jest --ci --silent --runInBand tests/visit-completion-summary-postgres.test.js
       - name: Server tests (no DB — golden masters keep in-memory semantics)
         working-directory: server
         run: npx jest --ci --silent --maxWorkers=2
@@ -154,11 +160,12 @@ jobs:
         env:
           SCHEDULING_CAPACITY_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/scheduling-catalog-postgres.test.js tests/scheduling-capacity-holds-postgres.test.js tests/scheduling-capacity-accept-postgres.test.js tests/scheduling-capacity-allocation-postgres.test.js
-      - name: Shared reservation arrival transaction tests
+      - name: Shared reservation arrival and hold-grace transaction tests
         working-directory: server
         env:
           RESERVATION_ARRIVAL_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/reservation-arrival-postgres.test.js
+          RESERVATION_HOLD_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/reservation-arrival-postgres.test.js tests/reservation-hold-grace-postgres.test.js
       - name: Staff arrival-window transaction tests
         working-directory: server
         env:
@@ -195,7 +202,7 @@ jobs:
       - name: Intelligence Bar real-database outcome regressions (scripted model)
         env:
           IB_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --runInBand server/tests/intelligence-bar-platform-db.test.js
+        run: npx jest --ci --runInBand server/tests/intelligence-bar-platform-db.test.js server/tests/invoice-property-history-db.test.js server/tests/customer-properties-db.test.js server/tests/intelligence-bar-properties-db.test.js server/tests/intelligence-bar-inventory-db.test.js server/tests/intelligence-bar-customer-estimates-db.test.js
 
   client:
     runs-on: ubuntu-latest

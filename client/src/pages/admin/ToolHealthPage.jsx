@@ -1,23 +1,34 @@
 import { useState, useEffect, useCallback } from "react";
-import useIsMobile from "../../hooks/useIsMobile";
 import { Link } from "react-router-dom";
-import { Activity, CalendarDays, Clock, RefreshCw, Timer } from "lucide-react";
+import {
+  Activity,
+  CalendarDays,
+  ChevronDown,
+  ChevronRight,
+  Clock,
+  RefreshCw,
+  Timer,
+} from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import {
+  ActionFeedback,
+  Badge,
+  Button,
+  Card,
+  CardBody,
+  CardHeader,
+  CardTitle,
+  Table,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TR,
+  UiSurface,
+  cn,
+} from "../../components/ui";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
-// V2 token pass: teal folded to zinc-900. Semantic green/amber/red preserved.
-const D = {
-  bg: "#F4F4F5",
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  teal: "#18181B",
-  green: "#15803D",
-  amber: "#A16207",
-  red: "#991B1B",
-  text: "#27272A",
-  muted: "#71717A",
-  heading: "#09090B",
-};
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -32,39 +43,23 @@ function adminFetch(path, options = {}) {
   });
 }
 
-const sCard = {
-  background: D.card,
-  border: `1px solid ${D.border}`,
-  borderRadius: 12,
-  padding: 20,
-  marginBottom: 16,
-  boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
-};
-const sLabel = {
-  fontSize: 10,
-  color: D.muted,
-  textTransform: "uppercase",
-  letterSpacing: 1,
-};
-const sMono = { fontFamily: "'JetBrains Mono', monospace" };
 const TOOL_HEALTH_WINDOWS = [
   { key: 1, label: "1h", Icon: Timer },
   { key: 24, label: "24h", Icon: Clock },
   { key: 24 * 7, label: "7d", Icon: CalendarDays },
 ];
 
-function statusColor(status) {
-  if (status === "critical") return D.red;
-  if (status === "warning") return D.amber;
-  if (status === "idle") return D.muted;
-  return D.green;
+function statusLabel(status) {
+  if (status === "critical") return "Critical";
+  if (status === "warning") return "Degraded";
+  if (status === "idle") return "Idle";
+  return "Healthy";
 }
 
-function statusLabel(status) {
-  if (status === "critical") return "CRITICAL";
-  if (status === "warning") return "DEGRADED";
-  if (status === "idle") return "IDLE";
-  return "HEALTHY";
+function statusTone(status) {
+  if (status === "critical") return "alert";
+  if (status === "ok") return "strong";
+  return "neutral";
 }
 
 function pct(n) {
@@ -108,669 +103,359 @@ export default function ToolHealthPage() {
       .catch(() => setAdminUser(null));
   }, []);
 
-  if (err) {
-    return (
-      <div style={{ maxWidth: 1300, margin: "0 auto" }}>
-        {" "}
-        <AdminCommandHeader
-          title="Tool health"
-          icon={Activity}
-          sections={TOOL_HEALTH_WINDOWS}
-          activeKey={hours}
-          onSectionChange={setHours}
-          action={{ label: "Refresh", icon: RefreshCw, onClick: load }}
-          navGridClassName="grid-cols-3"
-        />{" "}
-        <div style={{ padding: 40, color: D.red }}>
-          Failed to load: {err}
-        </div>{" "}
-      </div>
-    );
-  }
-  if (!data) {
-    return (
-      <div style={{ maxWidth: 1300, margin: "0 auto" }}>
-        {" "}
-        <AdminCommandHeader
-          title="Tool health"
-          icon={Activity}
-          sections={TOOL_HEALTH_WINDOWS}
-          activeKey={hours}
-          onSectionChange={setHours}
-          action={{ label: "Refresh", icon: RefreshCw, onClick: load }}
-          navGridClassName="grid-cols-3"
-        />{" "}
-        <div style={{ padding: 40, color: D.muted }}>
-          Loading tool health...
-        </div>{" "}
-      </div>
-    );
-  }
-
-  const { overallStatus, summary, agents, contexts, pdfRenderer, recentErrors, alerts } =
-    data;
-
   return (
-    <div style={{ maxWidth: 1300, margin: "0 auto" }}>
-      {" "}
+    <UiSurface
+      density="comfortable"
+      className="mx-auto max-w-[1300px] text-ui-body text-ink-primary"
+    >
       <AdminCommandHeader
+        variant="workspace"
         title="Tool health"
         icon={Activity}
         sections={TOOL_HEALTH_WINDOWS}
         activeKey={hours}
         onSectionChange={setHours}
-        action={{ label: "Refresh", icon: RefreshCw, onClick: load }}
+        action={{ label: "Refresh", icon: RefreshCw, variant: "ghost", onClick: load }}
         navGridClassName="grid-cols-3"
       />
-      {/* Status bar */}
-      <div
-        style={{
-          ...sCard,
-          background: statusColor(overallStatus),
-          color: "#fff",
-          display: "flex",
-          alignItems: "center",
-          gap: 20,
-          padding: 24,
-        }}
-      >
-        {" "}
-        <div>
-          {" "}
-          <div
-            style={{
-              fontSize: 10,
-              opacity: 0.85,
-              textTransform: "uppercase",
-              letterSpacing: 1,
-            }}
-          >
-            Overall Status
-          </div>{" "}
-          <div style={{ fontSize: 28, fontWeight: 700 }}>
+
+      {err ? (
+        <ActionFeedback error onRetry={load} className="min-h-20">
+          Failed to load: {err}
+        </ActionFeedback>
+      ) : !data ? (
+        <ActionFeedback className="min-h-20">Loading tool health...</ActionFeedback>
+      ) : (
+        <ToolHealthContent
+          data={data}
+          adminUser={adminUser}
+          expanded={expanded}
+          setExpanded={setExpanded}
+        />
+      )}
+    </UiSurface>
+  );
+}
+
+function ToolHealthContent({ data, adminUser, expanded, setExpanded }) {
+  const { overallStatus, summary, agents, contexts, pdfRenderer, recentErrors, alerts } =
+    data;
+
+  return (
+    <div className="space-y-5">
+      <Card className={overallStatus === "critical" ? "border-alert-fg" : undefined}>
+        <CardHeader className="flex flex-wrap items-center justify-between gap-3">
+          <CardTitle>Overall status</CardTitle>
+          <Badge tone={statusTone(overallStatus)} dot>
             {statusLabel(overallStatus)}
-          </div>{" "}
-        </div>{" "}
-        <div
-          style={{
-            display: "flex",
-            gap: 28,
-            marginLeft: "auto",
-            flexWrap: "wrap",
-          }}
-        >
-          {" "}
-          <Metric
-            label="Total calls"
-            value={summary.total.toLocaleString()}
-          />{" "}
-          <Metric label="Success rate" value={pct(1 - summary.errorRate)} />{" "}
-          <Metric label="Failures" value={summary.failed.toLocaleString()} />{" "}
-          <Metric label="Circuit trips" value={summary.circuitOpenCount} />{" "}
-          <Metric
-            label="Avg duration"
-            value={summary.avgDurationMs ? `${summary.avgDurationMs}ms` : "—"}
-          />{" "}
-        </div>{" "}
-      </div>
+          </Badge>
+        </CardHeader>
+        <CardBody>
+          <dl className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
+            <Metric label="Total calls" value={summary.total.toLocaleString()} />
+            <Metric label="Success rate" value={pct(1 - summary.errorRate)} />
+            <Metric label="Failures" value={summary.failed.toLocaleString()} alert={summary.failed > 0} />
+            <Metric label="Circuit trips" value={summary.circuitOpenCount} alert={summary.circuitOpenCount > 0} />
+            <Metric
+              label="Avg duration"
+              value={summary.avgDurationMs ? `${summary.avgDurationMs}ms` : "—"}
+            />
+          </dl>
+        </CardBody>
+      </Card>
+
       {adminUser?.role === "admin" && (
-        <div style={{ marginBottom: 24, fontSize: 14, color: D.muted }}>
+        <p className="text-ui-body text-ink-secondary">
           Credential health and provider configuration are in{" "}
           <Link
             to="/admin/settings?tab=integrations"
-            style={{ color: D.heading, textDecoration: "underline", display: "inline-flex", alignItems: "center", minHeight: 44 }}
+            className="inline-flex min-h-11 items-center rounded-xs font-medium text-zinc-900 underline underline-offset-2 u-focus-ring"
           >
             Settings → Integrations
-          </Link>.
-        </div>
+          </Link>
+          .
+        </p>
       )}
+
       {pdfRenderer && (
-        <div style={sCard}>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              gap: 16,
-              flexWrap: "wrap",
-            }}
-          >
-            <div>
-              <div style={sLabel}>PDF Renderer</div>
-              <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>
-                PDF render success rate
-              </div>
-            </div>
-            <div style={{ display: "flex", gap: 28, flexWrap: "wrap" }}>
+        <Card>
+          <CardHeader>
+            <CardTitle>PDF render success rate</CardTitle>
+          </CardHeader>
+          <CardBody>
+            <dl className="grid grid-cols-2 gap-4 md:grid-cols-4">
               <Metric
                 label="Success rate"
-                value={
-                  pdfRenderer.successRate == null
-                    ? "—"
-                    : pct(pdfRenderer.successRate)
-                }
+                value={pdfRenderer.successRate == null ? "—" : pct(pdfRenderer.successRate)}
               />
               <Metric label="Succeeded" value={pdfRenderer.succeeded || 0} />
               <Metric
                 label="Terminal failures"
                 value={pdfRenderer.terminalFailed || 0}
+                alert={pdfRenderer.terminalFailed > 0}
               />
               <Metric
                 label="P95 latency"
-                value={
-                  pdfRenderer.p95LatencyMs
-                    ? `${pdfRenderer.p95LatencyMs}ms`
-                    : "—"
+                value={pdfRenderer.p95LatencyMs ? `${pdfRenderer.p95LatencyMs}ms` : "—"}
+              />
+            </dl>
+          </CardBody>
+        </Card>
+      )}
+
+      {alerts.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Active alerts</CardTitle>
+          </CardHeader>
+          <CardBody className="space-y-3">
+            {alerts.map((alert, index) => (
+              <div
+                key={index}
+                className={cn(
+                  "rounded-md border-hairline p-4",
+                  alert.severity === "critical"
+                    ? "border-alert-fg bg-alert-bg"
+                    : "border-zinc-300 bg-zinc-50",
+                )}
+              >
+                <div className="mb-1 flex flex-wrap items-center gap-2">
+                  <p className="font-medium text-zinc-900">{alert.title}</p>
+                  <Badge tone={alert.severity === "critical" ? "alert" : "neutral"}>
+                    {alert.severity === "critical" ? "Critical" : "Warning"}
+                  </Badge>
+                </div>
+                <p className="text-ui-body text-ink-secondary">{alert.detail}</p>
+              </div>
+            ))}
+          </CardBody>
+        </Card>
+      )}
+
+      <section aria-labelledby="agent-health-heading">
+        <h2 id="agent-health-heading" className="mb-3 text-18 leading-[1.35] font-medium text-zinc-900">
+          Agent health
+        </h2>
+        {agents.length === 0 ? (
+          <Card>
+            <CardBody className="py-8 text-center text-ink-secondary">
+              No agent activity in the selected window.
+            </CardBody>
+          </Card>
+        ) : (
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {agents.map((agent) => (
+              <Card key={agent.source} className={agent.status === "critical" ? "border-alert-fg" : undefined}>
+                <CardHeader className="flex flex-wrap items-center justify-between gap-2">
+                  <CardTitle>{agent.label}</CardTitle>
+                  <Badge tone={statusTone(agent.status)} dot>
+                    {statusLabel(agent.status)}
+                  </Badge>
+                </CardHeader>
+                <CardBody>
+                  <dl className="grid grid-cols-3 gap-3">
+                    <Metric label="Calls" value={agent.total} />
+                    <Metric label="Errors" value={agent.failed} alert={agent.failed > 0} />
+                    <Metric
+                      label="Avg"
+                      value={agent.avgDurationMs ? `${agent.avgDurationMs}ms` : "—"}
+                    />
+                  </dl>
+                  <p className="mt-3 text-ui-caption text-ink-secondary">
+                    Last call {formatRelative(agent.lastCallAt)}
+                  </p>
+                </CardBody>
+              </Card>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section aria-labelledby="contexts-heading">
+        <h2 id="contexts-heading" className="mb-3 text-18 leading-[1.35] font-medium text-zinc-900">
+          Tools by context
+        </h2>
+        {contexts.length === 0 ? (
+          <Card>
+            <CardBody className="py-8 text-center text-ink-secondary">
+              No tool activity in the selected window.
+            </CardBody>
+          </Card>
+        ) : (
+          <div className="space-y-3">
+            {contexts.map((context, index) => (
+              <ContextCard
+                key={context.context}
+                context={context}
+                panelId={`tool-context-${index}`}
+                isOpen={expanded[context.context] !== undefined ? expanded[context.context] : context.failed > 0}
+                onToggle={() =>
+                  setExpanded((current) => ({
+                    ...current,
+                    [context.context]: !(current[context.context] !== undefined
+                      ? current[context.context]
+                      : context.failed > 0),
+                  }))
                 }
               />
-            </div>
-          </div>
-        </div>
-      )}
-      {/* Alerts */}
-      {alerts.length > 0 && (
-        <div style={sCard}>
-          {" "}
-          <div
-            style={{
-              fontSize: 14,
-              fontWeight: 700,
-              color: D.heading,
-              marginBottom: 12,
-            }}
-          >
-            Active Alerts
-          </div>
-          {alerts.map((a, i) => (
-            <div
-              key={i}
-              style={{
-                padding: "10px 14px",
-                marginBottom: 8,
-                background: a.severity === "critical" ? "#FDECEA" : "#FEF7E0",
-                borderLeft: `4px solid ${a.severity === "critical" ? D.red : D.amber}`,
-                borderRadius: 6,
-              }}
-            >
-              {" "}
-              <div style={{ fontSize: 13, fontWeight: 500, color: D.heading }}>
-                {a.title}
-              </div>{" "}
-              <div style={{ fontSize: 12, color: D.text, marginTop: 2 }}>
-                {a.detail}
-              </div>{" "}
-            </div>
-          ))}
-        </div>
-      )}
-      {/* Agent health cards */}
-      <div
-        style={{
-          fontSize: 14,
-          fontWeight: 700,
-          color: D.heading,
-          marginBottom: 10,
-        }}
-      >
-        Agent Health
-      </div>{" "}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))",
-          gap: 12,
-          marginBottom: 24,
-        }}
-      >
-        {agents.map((a) => (
-          <div
-            key={a.source}
-            style={{
-              ...sCard,
-              marginBottom: 0,
-              borderLeft: `4px solid ${statusColor(a.status)}`,
-            }}
-          >
-            {" "}
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-              }}
-            >
-              {" "}
-              <div style={{ fontSize: 13, fontWeight: 700, color: D.heading }}>
-                {a.label}
-              </div>{" "}
-              <div
-                style={{
-                  ...sLabel,
-                  color: statusColor(a.status),
-                  fontWeight: 700,
-                }}
-              >
-                {statusLabel(a.status)}
-              </div>{" "}
-            </div>{" "}
-            <div style={{ display: "flex", gap: 16, marginTop: 10 }}>
-              {" "}
-              <div>
-                {" "}
-                <div style={sLabel}>Calls</div>{" "}
-                <div
-                  style={{
-                    ...sMono,
-                    fontSize: 18,
-                    fontWeight: 700,
-                    color: D.heading,
-                  }}
-                >
-                  {a.total}
-                </div>{" "}
-              </div>{" "}
-              <div>
-                {" "}
-                <div style={sLabel}>Errors</div>{" "}
-                <div
-                  style={{
-                    ...sMono,
-                    fontSize: 18,
-                    fontWeight: 700,
-                    color: a.failed > 0 ? D.red : D.muted,
-                  }}
-                >
-                  {a.failed}
-                </div>{" "}
-              </div>{" "}
-              <div>
-                {" "}
-                <div style={sLabel}>Avg</div>{" "}
-                <div
-                  style={{
-                    ...sMono,
-                    fontSize: 18,
-                    fontWeight: 700,
-                    color: D.heading,
-                  }}
-                >
-                  {a.avgDurationMs ? `${a.avgDurationMs}ms` : "—"}
-                </div>{" "}
-              </div>{" "}
-            </div>{" "}
-            <div style={{ fontSize: 11, color: D.muted, marginTop: 8 }}>
-              Last call {formatRelative(a.lastCallAt)}
-            </div>{" "}
-          </div>
-        ))}
-      </div>
-      {/* Contexts breakdown */}
-      <div
-        style={{
-          fontSize: 14,
-          fontWeight: 700,
-          color: D.heading,
-          marginBottom: 10,
-        }}
-      >
-        Tools by Context
-      </div>
-      {contexts.length === 0 && (
-        <div style={{ ...sCard, color: D.muted, fontSize: 13 }}>
-          No tool activity in the selected window.
-        </div>
-      )}
-      {contexts.map((ctx) => {
-        const key = ctx.context;
-        // auto-expand contexts with any failures; collapsed by default otherwise
-        const isOpen =
-          expanded[key] !== undefined ? expanded[key] : ctx.failed > 0;
-        const statusFor =
-          ctx.failed > 0
-            ? ctx.errorRate >= 0.2
-              ? "critical"
-              : "warning"
-            : "ok";
-        return (
-          <div key={key} style={sCard}>
-            {" "}
-            <button
-              type="button"
-              aria-expanded={isOpen}
-              className="u-focus-ring"
-              onClick={() => setExpanded((e) => ({ ...e, [key]: !isOpen }))}
-              style={{
-                background: "none",
-                border: 0,
-                padding: 0,
-                margin: 0,
-                font: "inherit",
-                color: "inherit",
-                textAlign: "inherit",
-                width: "100%",
-                display: "flex",
-                alignItems: "center",
-                gap: 12,
-                cursor: "pointer",
-              }}
-            >
-              {" "}
-              <div
-                style={{
-                  width: 10,
-                  height: 10,
-                  borderRadius: 5,
-                  background: statusColor(statusFor),
-                }}
-              />{" "}
-              <div
-                style={{
-                  fontSize: 14,
-                  fontWeight: 700,
-                  color: D.heading,
-                  flex: 1,
-                }}
-              >
-                {key}
-              </div>{" "}
-              <div style={{ ...sMono, fontSize: 12, color: D.muted }}>
-                {ctx.toolsUsed} tools · {ctx.total} calls · {ctx.failed} failed
-                ({pct(ctx.errorRate)})
-              </div>{" "}
-              <div style={{ color: D.muted, fontSize: 12 }} aria-hidden="true">
-                {isOpen ? "▾" : "▸"}
-              </div>{" "}
-            </button>
-            {isOpen && (
-              <div style={{ overflowX: "auto", marginTop: 14 }}>
-              <table
-                style={{
-                  width: "100%",
-                  borderCollapse: "collapse",
-                }}
-              >
-                {" "}
-                <thead>
-                  {" "}
-                  <tr>
-                    {[
-                      "Tool",
-                      "Source",
-                      "Calls",
-                      "Failed",
-                      "Error rate",
-                      "Avg",
-                    ].map((h) => (
-                      <th
-                        key={h}
-                        style={{
-                          fontSize: 10,
-                          color: D.muted,
-                          textAlign: "left",
-                          textTransform: "uppercase",
-                          letterSpacing: 1,
-                          padding: "8px 10px",
-                          borderBottom: `1px solid ${D.border}`,
-                        }}
-                      >
-                        {h}
-                      </th>
-                    ))}
-                  </tr>{" "}
-                </thead>{" "}
-                <tbody>
-                  {ctx.tools
-                    .slice()
-                    .sort((a, b) => b.failed - a.failed || b.total - a.total)
-                    .map((t) => (
-                      <tr key={`${t.toolName}-${t.source}`}>
-                        {" "}
-                        <td
-                          style={{
-                            padding: "8px 10px",
-                            fontSize: 13,
-                            color: D.heading,
-                            fontWeight: 500,
-                          }}
-                        >
-                          {t.toolName}
-                        </td>{" "}
-                        <td
-                          style={{
-                            padding: "8px 10px",
-                            fontSize: 12,
-                            color: D.muted,
-                          }}
-                        >
-                          {t.source}
-                        </td>{" "}
-                        <td
-                          style={{
-                            padding: "8px 10px",
-                            ...sMono,
-                            fontSize: 13,
-                            color: D.text,
-                          }}
-                        >
-                          {t.total}
-                        </td>{" "}
-                        <td
-                          style={{
-                            padding: "8px 10px",
-                            ...sMono,
-                            fontSize: 13,
-                            color: t.failed > 0 ? D.red : D.muted,
-                          }}
-                        >
-                          {t.failed}
-                        </td>{" "}
-                        <td
-                          style={{
-                            padding: "8px 10px",
-                            ...sMono,
-                            fontSize: 13,
-                            color:
-                              t.errorRate >= 0.2
-                                ? D.red
-                                : t.errorRate > 0
-                                  ? D.amber
-                                  : D.muted,
-                          }}
-                        >
-                          {pct(t.errorRate)}
-                        </td>{" "}
-                        <td
-                          style={{
-                            padding: "8px 10px",
-                            ...sMono,
-                            fontSize: 13,
-                            color: D.text,
-                          }}
-                        >
-                          {t.avgDurationMs ? `${t.avgDurationMs}ms` : "—"}
-                        </td>{" "}
-                      </tr>
-                    ))}
-                </tbody>{" "}
-              </table>
-              </div>
-            )}
-          </div>
-        );
-      })}
-      {/* Recent errors */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "baseline",
-          gap: 8,
-          marginBottom: 10,
-          marginTop: 8,
-        }}
-      >
-        {" "}
-        <div style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>
-          Recent Errors
-        </div>
-        {recentErrors.length > 0 && (
-          <div style={{ ...sMono, fontSize: 12, color: D.muted }}>
-            {recentErrors.length}
+            ))}
           </div>
         )}
-      </div>{" "}
-      <div style={{ ...sCard, padding: 0 }}>
-        {recentErrors.length === 0 && (
-          <div style={{ color: D.muted, fontSize: 13, padding: 20 }}>
-            No errors in the selected window.
-          </div>
-        )}
-        {recentErrors.map((e, i) => (
-          <RecentErrorRow
-            key={e.id}
-            err={e}
-            isLast={i === recentErrors.length - 1}
-          />
-        ))}
-      </div>{" "}
-      <div
-        style={{
-          textAlign: "center",
-          fontSize: 11,
-          color: D.muted,
-          padding: 20,
-        }}
-      >
+      </section>
+
+      <section aria-labelledby="recent-errors-heading">
+        <div className="mb-3 flex items-center gap-2">
+          <h2 id="recent-errors-heading" className="text-18 leading-[1.35] font-medium text-zinc-900">
+            Recent errors
+          </h2>
+          {recentErrors.length > 0 && <Badge tone="neutral">{recentErrors.length}</Badge>}
+        </div>
+        <Card>
+          {recentErrors.length === 0 ? (
+            <CardBody className="py-8 text-center text-ink-secondary">
+              No errors in the selected window.
+            </CardBody>
+          ) : (
+            <div className="divide-y divide-zinc-200">
+              {recentErrors.map((error) => (
+                <RecentErrorRow key={error.id} err={error} />
+              ))}
+            </div>
+          )}
+        </Card>
+      </section>
+
+      <p className="pb-5 text-center text-ui-caption text-ink-secondary">
         Updated {formatRelative(data.generatedAt)} · auto-refreshes every 30s
-      </div>{" "}
+      </p>
     </div>
   );
 }
 
-function Metric({ label, value }) {
+function Metric({ label, value, alert = false }) {
   return (
     <div>
-      {" "}
-      <div
-        style={{
-          fontSize: 10,
-          opacity: 0.85,
-          textTransform: "uppercase",
-          letterSpacing: 1,
-        }}
-      >
-        {label}
-      </div>{" "}
-      <div
-        style={{
-          fontFamily: "'JetBrains Mono', monospace",
-          fontSize: 22,
-          fontWeight: 700,
-        }}
-      >
+      <dt className="text-ui-caption text-ink-secondary">{label}</dt>
+      <dd className={cn("mt-1 text-22 leading-[1.3] font-medium u-nums", alert && "text-alert-fg")}>
         {value}
-      </div>{" "}
+      </dd>
     </div>
   );
 }
 
-function RecentErrorRow({ err, isLast }) {
-  const isMobile = useIsMobile(720);
-  // Expandable rows are real buttons (keyboard + aria-expanded); plain rows stay divs.
+function ContextCard({ context, panelId, isOpen, onToggle }) {
+  const status = context.failed > 0
+    ? context.errorRate >= 0.2 ? "critical" : "warning"
+    : "ok";
+  const ExpandIcon = isOpen ? ChevronDown : ChevronRight;
+
+  return (
+    <Card className={status === "critical" ? "border-alert-fg" : undefined}>
+      <CardHeader className="p-0">
+        <Button
+          variant="ghost"
+          aria-expanded={isOpen}
+          aria-controls={panelId}
+          onClick={onToggle}
+          className="h-auto min-h-14 w-full justify-start rounded-none px-4 py-3 text-left"
+        >
+          <ExpandIcon size={18} strokeWidth={1.8} aria-hidden className="shrink-0" />
+          <span className="min-w-0 flex-1">
+            <span className="block break-words text-ui-body font-medium text-zinc-900">
+              {context.context}
+            </span>
+            <span className="mt-1 block text-ui-caption font-normal text-ink-secondary u-nums">
+              {context.toolsUsed} tools · {context.total} calls · {context.failed} failed ({pct(context.errorRate)})
+            </span>
+          </span>
+          <Badge tone={statusTone(status)} dot className="shrink-0">
+            {statusLabel(status)}
+          </Badge>
+        </Button>
+      </CardHeader>
+      {isOpen && (
+        <CardBody id={panelId} className="p-0">
+          <Table layout="records" aria-label={`${context.context} tool health`}>
+            <THead>
+              <TR>
+                <TH>Tool</TH>
+                <TH>Source</TH>
+                <TH>Calls</TH>
+                <TH>Failed</TH>
+                <TH>Error rate</TH>
+                <TH>Avg</TH>
+              </TR>
+            </THead>
+            <TBody>
+              {context.tools
+                .slice()
+                .sort((a, b) => b.failed - a.failed || b.total - a.total)
+                .map((tool) => (
+                  <TR key={`${tool.toolName}-${tool.source}`}>
+                    <TD data-label="Tool" className="font-medium">{tool.toolName}</TD>
+                    <TD data-label="Source" className="text-ink-secondary">{tool.source}</TD>
+                    <TD data-label="Calls" nums>{tool.total}</TD>
+                    <TD data-label="Failed" nums className={tool.failed > 0 ? "text-alert-fg" : "text-ink-secondary"}>
+                      {tool.failed}
+                    </TD>
+                    <TD data-label="Error rate" nums className={tool.errorRate > 0 ? "text-alert-fg" : "text-ink-secondary"}>
+                      {pct(tool.errorRate)}
+                    </TD>
+                    <TD data-label="Avg" nums>{tool.avgDurationMs ? `${tool.avgDurationMs}ms` : "—"}</TD>
+                  </TR>
+                ))}
+            </TBody>
+          </Table>
+        </CardBody>
+      )}
+    </Card>
+  );
+}
+
+function RecentErrorRow({ err }) {
   const [open, setOpen] = useState(false);
   const msg = err.errorMessage || "(no message)";
   const canExpand = msg.length > 120 || msg.includes("\n");
-  const Row = canExpand ? "button" : "div";
-
-  return (
-    <Row
-      type={canExpand ? "button" : undefined}
-      aria-expanded={canExpand ? open : undefined}
-      className={canExpand ? "u-focus-ring" : undefined}
-      onClick={() => canExpand && setOpen((o) => !o)}
-      style={{
-        background: "none",
-        border: 0,
-        margin: 0,
-        font: "inherit",
-        color: "inherit",
-        textAlign: "inherit",
-        width: "100%",
-        boxSizing: "border-box",
-        padding: "7px 14px",
-        borderBottom: isLast ? "none" : `1px solid ${D.border}`,
-        display: "grid",
-        gridTemplateColumns: isMobile ? "1fr" : "80px 170px 1fr",
-        columnGap: 14,
-        rowGap: isMobile ? 4 : 0,
-        alignItems: "start",
-        cursor: canExpand ? "pointer" : "default",
-      }}
-    >
-      {" "}
-      <div style={{ fontSize: 11, color: D.muted, lineHeight: "18px" }}>
+  const content = (
+    <>
+      <span className="text-ui-caption text-ink-secondary u-nums">
         {formatRelative(err.at)}
-      </div>{" "}
-      <div style={{ lineHeight: "18px" }}>
-        {" "}
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          {" "}
-          <span
-            style={{
-              fontSize: 12,
-              fontWeight: 500,
-              color: D.heading,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {err.toolName}
-          </span>
+      </span>
+      <span className="min-w-0">
+        <span className="flex min-w-0 items-center gap-2">
+          <span className="truncate font-medium text-zinc-900">{err.toolName}</span>
           {err.circuitOpen && (
-            <span
-              title="Circuit breaker is open"
-              style={{
-                fontSize: 9,
-                padding: "1px 5px",
-                background: "#FDECEA",
-                color: D.red,
-                borderRadius: 3,
-                fontWeight: 700,
-                letterSpacing: 0.4,
-              }}
-            >
-              OPEN
-            </span>
+            <Badge tone="alert" title="Circuit breaker is open" className="shrink-0">
+              Open
+            </Badge>
           )}
-        </div>{" "}
-        <div
-          style={{
-            fontSize: 10,
-            color: D.muted,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
+        </span>
+        <span className="block truncate text-ui-caption text-ink-secondary">
           {err.context || err.source}
-        </div>{" "}
-      </div>{" "}
-      <div
-        style={{
-          fontSize: 12,
-          color: D.text,
-          fontFamily: "'JetBrains Mono', monospace",
-          lineHeight: "18px",
-          display: "-webkit-box",
-          WebkitBoxOrient: "vertical",
-          WebkitLineClamp: open ? "unset" : 2,
-          overflow: "hidden",
-          whiteSpace: "pre-wrap",
-          wordBreak: "break-word",
-        }}
+        </span>
+      </span>
+      <span
+        className={cn(
+          "whitespace-pre-wrap break-words text-ui-body text-zinc-700",
+          canExpand && !open && "max-h-11 overflow-hidden",
+        )}
       >
         {msg}
-      </div>{" "}
-    </Row>
+      </span>
+    </>
+  );
+  const rowClassName = "grid w-full grid-cols-1 gap-2 px-4 py-3 text-left min-[720px]:grid-cols-[80px_170px_minmax(0,1fr)] min-[720px]:gap-3";
+
+  if (!canExpand) return <div className={rowClassName}>{content}</div>;
+
+  return (
+    <Button
+      variant="ghost"
+      aria-expanded={open}
+      onClick={() => setOpen((current) => !current)}
+      className={cn(rowClassName, "h-auto min-h-11 items-start justify-start rounded-none")}
+    >
+      {content}
+    </Button>
   );
 }

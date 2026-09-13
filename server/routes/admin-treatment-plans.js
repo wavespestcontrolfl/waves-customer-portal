@@ -29,6 +29,19 @@ function plannerOptions(req) {
   };
 }
 
+// The plan is built with office-only inputs the response must not carry:
+// customers.billing_mode rides propertyGate.billingMode for completion
+// attribution (lawnPlanProgramApplies) and is stripped here for EVERY caller
+// — technicians read this router, and the technician Customer 360 projection
+// already withholds billingMode with the other billing fields (Codex #4365
+// P2). Completion attribution builds its own plan server-side, never from
+// this response.
+function projectPlanResponse(plan) {
+  if (!plan || typeof plan !== 'object' || !plan.propertyGate || typeof plan.propertyGate !== 'object') return plan;
+  const { billingMode: _billingMode, ...propertyGate } = plan.propertyGate;
+  return { ...plan, propertyGate };
+}
+
 async function completionScopeAllowed(req) {
   const requested = req.query.completionDefaults === '1' || req.body?.completionDefaults === true;
   if (!requested || !isTechnicianRequest(req)) return true;
@@ -46,7 +59,7 @@ router.get('/:serviceId', async (req, res, next) => {
     const plan = await buildPlanForService(req.params.serviceId, plannerOptions(req));
     if (!(await completionScopeAllowed(req))) return res.status(404).json({ error: 'Visit not found' });
     if (plan.completionDefaults) res.set('Cache-Control', 'private, no-store');
-    res.json({ plan });
+    res.json({ plan: projectPlanResponse(plan) });
   } catch (err) {
     next(err);
   }
@@ -58,7 +71,7 @@ router.post('/:serviceId/build', async (req, res, next) => {
     const plan = await buildPlanForService(req.params.serviceId, plannerOptions(req));
     if (!(await completionScopeAllowed(req))) return res.status(404).json({ error: 'Visit not found' });
     if (plan.completionDefaults) res.set('Cache-Control', 'private, no-store');
-    res.json({ plan });
+    res.json({ plan: projectPlanResponse(plan) });
   } catch (err) {
     next(err);
   }

@@ -1,16 +1,39 @@
 import { useCustomerSms } from "../../components/admin/customer360/CustomerSmsPanel";
-import React, { useState, useEffect, useCallback, useRef, useMemo, useId } from "react";
+import React, {
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+  useMemo,
+} from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Trash2, Search, SlidersHorizontal } from "lucide-react";
-import useModalFocus from "../../hooks/useModalFocus";
 import { callViaBridge } from "../../components/admin/CallBridgeLink";
 import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudio";
 import useIsMobile from "../../hooks/useIsMobile";
-import { createPortal } from "react-dom";
 import { useFeatureFlag } from "../../hooks/useFeatureFlag";
-
+import {
+  ActionFeedback,
+  Badge,
+  Button,
+  Card,
+  Dialog,
+  DialogBody,
+  DialogHeader,
+  DialogTitle,
+  Field,
+  Input,
+  Select,
+  Table,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TR,
+  Textarea,
+  UiSurface,
+} from "../../components/ui";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
-const ROBOTO = "'Roboto', Arial, sans-serif";
 
 // leads.address may hold either a street-only line or a fully composed
 // "street, City, FL zip" string depending on which intake path wrote the row —
@@ -29,7 +52,8 @@ function formatLeadAddress(lead) {
     .filter(Boolean);
   const parts = [address];
   if (city && !segments.includes(city.toLowerCase())) parts.push(city);
-  if (zip && !segments.some((seg) => seg.split(/\s+/).includes(zip))) parts.push(zip);
+  if (zip && !segments.some((seg) => seg.split(/\s+/).includes(zip)))
+    parts.push(zip);
   return parts.join(", ");
 }
 
@@ -76,7 +100,16 @@ function leadAdditionalProperties(lead) {
 // full queue) instead of silently truncating.
 const LEAD_OWED_LIMIT = 10;
 function LeadOwedPromises({ leadId }) {
-  const et = (v) => (v ? new Date(v).toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "");
+  const et = (v) =>
+    v
+      ? new Date(v).toLocaleString("en-US", {
+          timeZone: "America/New_York",
+          month: "short",
+          day: "numeric",
+          hour: "numeric",
+          minute: "2-digit",
+        })
+      : "";
   const [rows, setRows] = useState([]);
   const [enabled, setEnabled] = useState(true);
   const [busyId, setBusyId] = useState(null);
@@ -92,7 +125,11 @@ function LeadOwedPromises({ leadId }) {
       setError(err.message || "Could not load what is owed on this lead.");
     }
   }, [leadId]);
-  useEffect(() => { setRows([]); setError(null); load(); }, [load]);
+  useEffect(() => {
+    setRows([]);
+    setError(null);
+    load();
+  }, [load]);
   const act = async (row, action) => {
     if (busyId) return;
     setBusyId(row.id);
@@ -107,46 +144,79 @@ function LeadOwedPromises({ leadId }) {
   };
   if (!rows.length && !error) return null;
   return (
-    <div style={{ marginTop: 12 }} data-testid="lead-owed">
-      <h4 style={{ margin: "0 0 8px", color: C.heading, fontSize: 14 }}>Owed on this lead</h4>
+    <div data-testid="lead-owed" className="mt-[12px]">
+      <h4 className="m-0 mb-[8px] text-zinc-900 text-ui-body">Owed on this lead</h4>
       {error && (
-        <div role="alert" style={{ color: C.red, fontSize: 14, marginBottom: 8 }}>
+        <div role="alert" className="text-alert-fg text-ui-body mb-[8px]">
           {error}{" "}
-          <button type="button" onClick={load} style={{ minHeight: 32, padding: "4px 10px", border: `1px solid ${C.border}`, borderRadius: 6, background: "transparent", color: C.text, cursor: "pointer", font: "inherit", fontSize: 12 }}>
+          <Button
+            type="button"
+            onClick={load}
+            variant="secondary"
+            className="min-h-[32px]"
+          >
             Retry
-          </button>
+          </Button>
         </div>
       )}
       {rows.slice(0, LEAD_OWED_LIMIT).map((row) => (
-        <div key={row.id} style={{ border: `1px solid ${row.overdue ? C.red : C.border}`, borderRadius: 8, padding: 10, marginBottom: 8, fontSize: 14, color: C.text }}>
-          <div style={{ marginBottom: 4 }}>
-            <strong>{row.party === "waves" ? "Waves promised" : "Customer agreed"}:</strong> {row.description}
+        <Card
+          key={row.id}
+          className={`mb-[8px] p-[10px] text-ui-body text-zinc-900 ${row.overdue ? "border-alert-fg" : ""}`}
+        >
+          <div className="mb-[4px]">
+            <strong>
+              {row.party === "waves" ? "Waves promised" : "Customer agreed"}:
+            </strong>{" "}
+            {row.description}
           </div>
-          <div style={{ color: row.overdue ? C.red : C.muted, marginBottom: 6 }}>
-            {row.overdue ? "Overdue" : (row.effective_due_at || row.due_at) ? `Due ${et((row.effective_due_at || row.due_at))} ET` : "No due time"}
-            {" · call "}{et(row.call_started_at)} ET
+          <div
+            className={`mb-[6px] ${row.overdue ? "text-alert-fg" : "text-ink-secondary"}`}
+          >
+            {row.overdue
+              ? "Overdue"
+              : row.effective_due_at || row.due_at
+                ? `Due ${et(row.effective_due_at || row.due_at)} ET`
+                : "No due time"}
+            {" · call "}
+            {et(row.call_started_at)} ET
           </div>
           {enabled && (
             <>
-              <button type="button" disabled={busyId === row.id} onClick={() => act(row, "fulfill")} style={{ marginRight: 8, minHeight: 32, padding: "4px 10px", border: `1px solid ${C.border}`, borderRadius: 6, background: "transparent", color: C.text, cursor: "pointer", font: "inherit", fontSize: 12 }}>
+              <Button
+                type="button"
+                disabled={busyId === row.id}
+                onClick={() => act(row, "fulfill")}
+                variant="secondary"
+                className="mr-[8px] min-h-[32px]"
+              >
                 Mark done
-              </button>
-              <button type="button" disabled={busyId === row.id} onClick={() => act(row, "dismiss")} style={{ minHeight: 32, padding: "4px 10px", border: "none", background: "transparent", color: C.muted, cursor: "pointer", font: "inherit", fontSize: 12 }}>
+              </Button>
+              <Button
+                type="button"
+                disabled={busyId === row.id}
+                onClick={() => act(row, "dismiss")}
+                variant="secondary"
+                className="min-h-[32px]"
+              >
                 Dismiss
-              </button>
+              </Button>
             </>
           )}
-        </div>
+        </Card>
       ))}
       {rows.length > LEAD_OWED_LIMIT && (
-        <div style={{ color: C.muted, fontSize: 12 }}>
-          More promises are owed on this lead — <a href="/admin/communications#tab=owed" style={{ color: C.text }}>open the Owed tab</a> for the full queue.
+        <div className="text-ink-secondary text-ui-body">
+          More promises are owed on this lead —{" "}
+          <a href="/admin/communications#tab=owed" className="text-zinc-900">
+            open the Owed tab
+          </a>{" "}
+          for the full queue.
         </div>
       )}
     </div>
   );
 }
-
 function adminFetch(path, opts = {}) {
   return fetch(`${API_BASE}${path}`, {
     ...opts,
@@ -180,37 +250,6 @@ function adminFetch(path, opts = {}) {
     return r.json();
   });
 }
-
-const C = {
-  bg: "#F4F4F5",
-  card: "#FFFFFF",
-  cardHover: "#FAFAFA",
-  border: "#E4E4E7",
-  text: "#27272A",
-  muted: "#71717A",
-  teal: "#18181B",
-  green: "#3F3F46",
-  amber: "#52525B",
-  red: "#991B1B",
-  purple: "#18181B",
-  white: "#FFFFFF",
-  heading: "#09090B",
-  input: "#FFFFFF",
-  inputBorder: "#D4D4D8",
-};
-const mono = { fontFamily: ROBOTO };
-
-const STATUS_COLORS = {
-  new: "#18181B",
-  contacted: "#52525B",
-  estimate_sent: "#3F3F46",
-  estimate_viewed: "#52525B",
-  won: "#18181B",
-  lost: "#991B1B",
-  unresponsive: "#A1A1AA",
-  disqualified: "#991B1B",
-  duplicate: "#A1A1AA",
-};
 const STATUSES = [
   "new",
   "contacted",
@@ -232,7 +271,12 @@ const CLOSED_STATUSES = [
 // Mirrors the server's expansion of the virtual `open` filter (admin-leads
 // OPEN_LEAD_STATUSES) — needed to know whether a given lead would survive
 // the table's current status filter.
-const OPEN_FILTER_STATUSES = ["new", "contacted", "estimate_sent", "estimate_viewed"];
+const OPEN_FILTER_STATUSES = [
+  "new",
+  "contacted",
+  "estimate_sent",
+  "estimate_viewed",
+];
 const leadMatchesStatusFilter = (lead, status) =>
   !status ||
   (status === "open"
@@ -252,19 +296,20 @@ const LEAD_TYPES = [
 ];
 const LEADS_REFRESH_MS = 10_000;
 const EXPANDED_LEAD_REFRESH_MS = 15_000;
-
 function isPageVisible() {
-  return typeof document === "undefined" || document.visibilityState !== "hidden";
+  return (
+    typeof document === "undefined" || document.visibilityState !== "hidden"
+  );
 }
-
 function daysSinceContact(lead) {
   if (!lead.first_contact_at) return null;
   const ms = Date.now() - new Date(lead.first_contact_at).getTime();
   return Math.floor(ms / 86400000);
 }
-
 function leadEstimateParams(lead) {
-  const params = new URLSearchParams({ tab: "new" });
+  const params = new URLSearchParams({
+    tab: "new",
+  });
   const customerName = [lead.first_name, lead.last_name]
     .filter(Boolean)
     .join(" ")
@@ -314,316 +359,204 @@ function fmtPreferredDateTime(value) {
   const ampm = hour >= 12 ? "PM" : "AM";
   return `${Number(mo)}/${Number(d)}/${y}, ${h12}:${min} ${ampm} ET`;
 }
-
 function fmtCallDuration(seconds) {
   const s = Math.max(0, Math.round(seconds));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
-
-function Badge({ label, color, style }) {
+// Main's roiColor(): positive/zero ROI stays the default heading color,
+// negative ROI is a genuine alert (red).
+function roiColorClass(roi) {
+  return roi < 0 ? "text-alert-fg" : "text-zinc-900";
+}
+// Main's STATUS_COLORS: only lost/disqualified are a real color (alert
+// red); new/won/estimate_sent are zinc-900/900/700, contacted/
+// estimate_viewed are zinc-600, unresponsive/duplicate are zinc-400 — a
+// weight ladder, not a hue-coded status system. Restored for the stage
+// Select and the Kanban dot so lost/disqualified read as genuine alerts
+// and the other stages keep their relative weight. Full literal class
+// strings per key (not template-interpolated) so Tailwind's static
+// content scan can find and generate them.
+const STATUS_SELECT_CLASS = {
+  new: "!bg-zinc-900/10 !border-zinc-900/25 !text-zinc-900",
+  contacted: "!bg-zinc-600/10 !border-zinc-600/25 !text-zinc-600",
+  estimate_sent: "!bg-zinc-700/10 !border-zinc-700/25 !text-zinc-700",
+  estimate_viewed: "!bg-zinc-600/10 !border-zinc-600/25 !text-zinc-600",
+  won: "!bg-zinc-900/10 !border-zinc-900/25 !text-zinc-900",
+  lost: "!bg-alert-bg !border-alert-fg/40 !text-alert-fg",
+  unresponsive: "!bg-zinc-400/10 !border-zinc-400/25 !text-zinc-400",
+  disqualified: "!bg-alert-bg !border-alert-fg/40 !text-alert-fg",
+  duplicate: "!bg-zinc-400/10 !border-zinc-400/25 !text-zinc-400",
+};
+const STATUS_DOT_CLASS = {
+  new: "bg-zinc-900",
+  contacted: "bg-zinc-600",
+  estimate_sent: "bg-zinc-700",
+  estimate_viewed: "bg-zinc-600",
+  won: "bg-zinc-900",
+  lost: "bg-alert-fg",
+  unresponsive: "bg-zinc-400",
+  disqualified: "bg-alert-fg",
+  duplicate: "bg-zinc-400",
+};
+function statusSelectClass(status) {
+  return STATUS_SELECT_CLASS[status] || "";
+}
+function statusDotClass(status) {
+  return STATUS_DOT_CLASS[status] || "bg-zinc-400";
+}
+function LeadBadge({ label, tone = "neutral", className }) {
+  // The old inline-styled badge had whiteSpace: "nowrap"; the shared Badge
+  // primitive doesn't supply it, so a multiword label (or one squeezed
+  // into a narrow table column) can wrap into a malformed two-line chip.
   return (
-    <span
-      style={{
-        display: "inline-block",
-        padding: "2px 10px",
-        borderRadius: 9999,
-        fontSize: 14,
-        fontWeight: 500,
-        backgroundColor: color + "22",
-        color,
-        border: `1px solid ${color}44`,
-        whiteSpace: "nowrap",
-        ...style,
-      }}
-    >
+    <Badge tone={tone} className={`whitespace-nowrap ${className || ""}`}>
       {label}
-    </span>
+    </Badge>
   );
 }
-
 function AgingBadge({ lead }) {
   if (CLOSED_STATUSES.includes(lead.status)) return null;
   const days = daysSinceContact(lead);
   if (days == null) return null;
-  const color =
-    days < 1 ? C.heading : days < 3 ? C.muted : days < 7 ? C.amber : C.red;
   const label = days < 1 ? "today" : days === 1 ? "1d" : `${days}d`;
-  return <Badge label={label} color={color} />;
-}
-
-function Card({ children, style, onClick }) {
+  // Main's 4-tier: <1d strong(heading)/1-2d muted/3-6d C.amber(zinc-600, a
+  // distinct non-alert step before red)/>=7d C.red(alert). "strong" is
+  // already the <1d tier, so the 3-6d mid-age warning can't reuse it
+  // without collapsing the two together — restored as an explicit
+  // zinc-600 chip, matching main's weight instead.
+  if (days >= 1 && days < 3) return <LeadBadge label={label} tone="neutral" />;
+  if (days >= 3 && days < 7)
+    return (
+      <LeadBadge
+        label={label}
+        tone="neutral"
+        className="!bg-zinc-600/15 !text-zinc-600"
+      />
+    );
   return (
-    <div
-      onClick={onClick}
-      style={{
-        backgroundColor: C.card,
-        borderRadius: 12,
-        border: `1px solid ${C.border}`,
-        padding: 20,
-        cursor: onClick ? "pointer" : undefined,
-        ...style,
-      }}
-    >
-      {children}
-    </div>
+    <LeadBadge label={label} tone={days < 1 ? "strong" : "alert"} />
   );
 }
-
-function MetricCard({ label, value, sub, color }) {
+function MetricCard({ label, value, sub, alert = false, valueClassName }) {
   return (
-    <Card style={{ flex: "1 1 180px", minWidth: 160 }}>
+    <Card
+      className={`flex-[1_1_180px] min-w-[160px] p-5 ${alert ? "border-alert-fg" : ""}`}
+    >
       {" "}
-      <div style={{ fontSize: 14, color: C.muted, marginBottom: 4 }}>
+      <div className="text-ui-body text-ink-secondary mb-[4px]">
         {label}
       </div>{" "}
+      {/* The old "26" class was not a configured fontSize utility
+          (tailwind.config.js only defines 11/12/13/14/16/18/22/28), so it
+          silently rendered at the inherited body size instead of main's
+          explicit 26px. There is no nearby custom token (22 and 28 both
+          drift 2-4px), so this uses the arbitrary-value syntax below for
+          an exact match instead. */}
       <div
-        style={{
-          fontSize: 26,
-          fontWeight: 700,
-          color: color || C.heading,
-          ...mono,
-        }}
+        className={`text-[26px] font-medium ${alert ? "text-alert-fg" : valueClassName || ""}`}
       >
         {value}
       </div>
       {sub && (
-        <div style={{ fontSize: 14, color: C.muted, marginTop: 2 }}>{sub}</div>
+        <div className="text-ui-body text-ink-secondary mt-[2px]">{sub}</div>
       )}
     </Card>
   );
 }
-
 function PipelineStatusCard({ label, value }) {
   return (
-    <div
-      style={{
-        flex: "1 1 140px",
-        minWidth: 140,
-        background: C.card,
-        border: `1px solid ${C.border}`,
-        borderRadius: 6,
-        padding: 14,
-        textAlign: "left",
-        fontFamily: ROBOTO,
-      }}
-    >
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 6,
-          marginBottom: 4,
-        }}
-      >
-        <span
-          style={{
-            fontSize: 14,
-            fontWeight: 500,
-            textTransform: "uppercase",
-            letterSpacing: 0,
-            color: C.muted,
-          }}
-        >
+    <Card className="flex-[1_1_140px] min-w-[140px] p-[14px] text-left">
+      <div className="flex items-center gap-[6px] mb-[4px]">
+        <span className="text-ui-body font-medium text-ink-secondary">
           {label}
         </span>
       </div>
-      <div style={{ fontSize: 22, fontWeight: 500, color: C.heading, ...mono }}>
-        {value}
-      </div>
-    </div>
+      <div className="text-[22px] font-medium text-zinc-900">{value}</div>
+    </Card>
   );
 }
-
 function LeadsWorkspaceNav({ active, onChange }) {
-  return <nav aria-label="Lead tools" style={{ display: "flex", gap: 16, marginBottom: 12 }}>
-    {[{ key: "pipeline", label: "Work queue" }, { key: "sources", label: "Sources" }, { key: "analytics", label: "Analytics" }].map(({ key, label }) => (
-      <button key={key} type="button" onClick={() => onChange(key)} aria-current={active === key ? "page" : undefined}
-        style={{ minHeight: 44, padding: 0, border: "none", background: "transparent", color: active === key ? C.heading : C.muted, fontFamily: ROBOTO, fontSize: 14, fontWeight: 500, cursor: "pointer", textDecoration: active === key ? "underline" : "none", textUnderlineOffset: 7 }}>
-        {label}
-      </button>
-    ))}
-  </nav>;
-}
-
-function Btn({ children, onClick, color, small, style, disabled, ...rest }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      {...rest}
-      style={{
-        padding: small ? "4px 12px" : "8px 16px",
-        borderRadius: 8,
-        border: "none",
-        cursor: disabled ? "not-allowed" : "pointer",
-        backgroundColor: color || C.teal,
-        color: "#fff",
-        fontSize: 14,
-        minHeight: 44,
-        fontWeight: 500,
-        opacity: disabled ? 0.5 : 1,
-        transition: "opacity 0.2s",
-        ...style,
-      }}
-    >
-      {children}
-    </button>
-  );
-}
-
-function Input({ label, value, onChange, type, placeholder, style, options }) {
-  const id = useId();
-  const base = {
-    backgroundColor: C.input,
-    border: `1px solid ${C.inputBorder}`,
-    borderRadius: 8,
-    padding: "8px 12px",
-    color: C.text,
-    fontSize: 16,
-    width: "100%",
-    minHeight: 44,
-    boxSizing: "border-box",
-    ...style,
-  };
-  return (
-    <div style={{ marginBottom: 12 }}>
-      {label && (
-        <label htmlFor={id}
-          style={{
-            fontSize: 14,
-            color: C.muted,
-            display: "block",
-            marginBottom: 4,
-          }}
+    <nav aria-label="Lead tools" className="flex gap-[16px] mb-[12px]">
+      {[
+        {
+          key: "pipeline",
+          label: "Work queue",
+        },
+        {
+          key: "sources",
+          label: "Sources",
+        },
+        {
+          key: "analytics",
+          label: "Analytics",
+        },
+      ].map(({ key, label }) => (
+        <Button
+          key={key}
+          type="button"
+          onClick={() => onChange(key)}
+          aria-current={active === key ? "page" : undefined}
+          variant={active === key ? "primary" : "secondary"}
         >
           {label}
-        </label>
-      )}
-      {options ? (
-        <select id={id}
-          value={value || ""}
-          onChange={(e) => onChange(e.target.value)}
-          style={base}
-        >
-          {" "}
-          <option value="">-- Select --</option>
-          {options.map((o) => (
-            <option key={o.value || o} value={o.value || o}>
-              {o.label || o}
-            </option>
-          ))}
-        </select>
-      ) : (
-        <input id={id}
-          type={type || "text"}
-          value={value || ""}
-          onChange={(e) => onChange(e.target.value)}
-          placeholder={placeholder}
-          style={base}
-        />
-      )}
-    </div>
+        </Button>
+      ))}
+    </nav>
   );
 }
-
-function Modal({ title, onClose, children }) {
-  const isMobile = useIsMobile();
-  const panelRef = useModalFocus(true, onClose);
-  return createPortal(
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label={title}
-      style={{
-        position: "fixed",
-        inset: 0,
-        backgroundColor: "rgba(0,0,0,0.6)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        zIndex: 1000,
-        boxSizing: "border-box",
-        paddingTop: "max(16px, env(safe-area-inset-top, 0px))",
-        paddingRight: "max(16px, env(safe-area-inset-right, 0px))",
-        paddingBottom: "max(16px, env(safe-area-inset-bottom, 0px))",
-        paddingLeft: "max(16px, env(safe-area-inset-left, 0px))",
-        ...(isMobile ? { padding: 0 } : {}),
-      }}
-      onClick={onClose}
+function LeadField({
+  label,
+  value,
+  onChange,
+  type,
+  placeholder,
+  className,
+  options,
+}) {
+  const control = options ? (
+    <Select
+      value={value || ""}
+      onChange={(event) => onChange(event.target.value)}
+      className={className}
     >
-      {" "}
-      <div ref={panelRef} tabIndex={-1}
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          backgroundColor: C.card,
-          borderRadius: 16,
-          border: `1px solid ${C.border}`,
-          padding: "clamp(16px, 4vw, 24px)",
-          maxWidth: 520,
-          width: "100%",
-          maxHeight: "100%",
-          overflowY: "auto",
-          boxSizing: "border-box",
-          overscrollBehavior: "contain",
-          ...(isMobile
-            ? {
-                width: "100%",
-                maxWidth: "none",
-                height: "100%",
-                maxHeight: "none",
-                borderRadius: 0,
-                boxSizing: "border-box",
-                overflowY: "auto",
-                paddingTop: "calc(clamp(16px, 4vw, 24px) + env(safe-area-inset-top, 0px))",
-                paddingBottom: "calc(clamp(16px, 4vw, 24px) + env(safe-area-inset-bottom, 0px))",
-                paddingLeft: "calc(clamp(16px, 4vw, 24px) + env(safe-area-inset-left, 0px))",
-                paddingRight: "calc(clamp(16px, 4vw, 24px) + env(safe-area-inset-right, 0px))",
-              }
-            : {}),
-        }}
-      >
-        {" "}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            marginBottom: 16,
-          }}
-        >
-          {" "}
-          <h3 style={{ margin: 0, color: C.heading, fontSize: 18 }}>
-            {title}
-          </h3>{" "}
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close"
-            style={{
-              background: "none",
-              border: "none",
-              color: C.muted,
-              cursor: "pointer",
-              fontSize: 20,
-              width: 44,
-              height: 44,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              borderRadius: 8,
-            }}
-          >
-            x
-          </button>{" "}
-        </div>
-        {children}
-      </div>{" "}
-    </div>,
-    document.body,
+      <option value="">-- Select --</option>
+      {options.map((option) => (
+        <option key={option.value || option} value={option.value || option}>
+          {option.label || option}
+        </option>
+      ))}
+    </Select>
+  ) : (
+    <Input
+      type={type || "text"}
+      value={value || ""}
+      onChange={(event) => onChange(event.target.value)}
+      placeholder={placeholder}
+      className={className}
+    />
+  );
+  return label ? (
+    <Field label={label} className="mb-3">
+      {control}
+    </Field>
+  ) : (
+    control
   );
 }
-
+function LeadDialog({ title, onClose, children }) {
+  return (
+    <Dialog open onClose={onClose}>
+      <DialogHeader className="flex items-center justify-between gap-3">
+        <DialogTitle className="m-0">{title}</DialogTitle>
+        <Button variant="ghost" onClick={onClose} aria-label="Close">
+          ×
+        </Button>
+      </DialogHeader>
+      <DialogBody>{children}</DialogBody>
+    </Dialog>
+  );
+}
 function fmtMoney(v) {
   return v != null
     ? "$" +
@@ -672,15 +605,11 @@ function fmtShortDate(iso) {
     timeZone: "America/New_York",
   });
 }
-function roiColor(roi) {
-  return roi >= 0 ? C.heading : C.red;
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // SPEED-TO-LEAD TIMER
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Inject pulse keyframe once
+// Inject pulse keyframe once (main's stlPulse, unchanged)
 if (
   typeof document !== "undefined" &&
   !document.getElementById("speed-to-lead-pulse")
@@ -701,7 +630,6 @@ function SpeedToLeadTimer({ firstContactAt }) {
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
   }, [firstContactAt]);
-
   const mins = Math.floor(elapsed / 60);
   const hours = Math.floor(elapsed / 3600);
   const displayMinutes = Math.floor((elapsed % 3600) / 60);
@@ -709,16 +637,21 @@ function SpeedToLeadTimer({ firstContactAt }) {
   const hh = String(hours).padStart(2, "0");
   const mm = String(displayMinutes).padStart(2, "0");
   const ss = String(secs).padStart(2, "0");
-  const color = mins < 5 ? C.green : mins < 15 ? C.amber : C.red;
+  // Main's C.green/C.amber are #3F3F46/#52525B (zinc-700/zinc-600) in this
+  // file's local palette, NOT real hues — this admin surface is monochrome
+  // by design (only C.red is a genuine color, reserved for the >=15min
+  // alert). Restored as the exact matching zinc shades, not invented amber.
+  const colorClass =
+    mins < 5
+      ? "text-zinc-700"
+      : mins < 15
+        ? "text-zinc-600"
+        : "text-alert-fg";
   const shouldPulse = mins >= 5;
-
   return (
     <span
+      className={`text-ui-body font-medium ${colorClass}`}
       style={{
-        ...mono,
-        fontSize: 14,
-        color,
-        fontWeight: 500,
         animation: shouldPulse ? "stlPulse 1.5s ease-in-out infinite" : "none",
       }}
     >
@@ -726,16 +659,39 @@ function SpeedToLeadTimer({ firstContactAt }) {
     </span>
   );
 }
-
 const LOST_REASONS = [
-  { value: "price", label: "Price too high" },
-  { value: "competitor", label: "Chose competitor" },
-  { value: "diy", label: "DIY / self-treating" },
-  { value: "not_ready", label: "Not ready yet" },
-  { value: "no_response", label: "No response" },
-  { value: "out_of_area", label: "Out of service area" },
-  { value: "no_need", label: "No longer needed" },
-  { value: "other", label: "Other" },
+  {
+    value: "price",
+    label: "Price too high",
+  },
+  {
+    value: "competitor",
+    label: "Chose competitor",
+  },
+  {
+    value: "diy",
+    label: "DIY / self-treating",
+  },
+  {
+    value: "not_ready",
+    label: "Not ready yet",
+  },
+  {
+    value: "no_response",
+    label: "No response",
+  },
+  {
+    value: "out_of_area",
+    label: "Out of service area",
+  },
+  {
+    value: "no_need",
+    label: "No longer needed",
+  },
+  {
+    value: "other",
+    label: "Other",
+  },
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -745,7 +701,9 @@ const LOST_REASONS = [
 // filters can be initialized from them on the very first render — the initial
 // pipeline load is then already scoped, avoiding an unfiltered first fetch that
 // (with no stale-response guard) could resolve last and overwrite the results.
-function readSourceDrillParams(sp = new URLSearchParams(window.location.search)) {
+function readSourceDrillParams(
+  sp = new URLSearchParams(window.location.search),
+) {
   const sourceName = sp.get("source_name");
   if (!sourceName) return null;
   return {
@@ -759,21 +717,38 @@ function readSourceDrillParams(sp = new URLSearchParams(window.location.search))
     status: sp.get("status") || "",
   };
 }
-
-const LEAD_FILTER_KEYS = { status: "leadStatus", search: "leadSearch", sort: "leadSort", page: "leadPage", source_name: "source_name", start_date: "start_date", end_date: "end_date", builder_warranty: "builder_warranty" };
+const LEAD_FILTER_KEYS = {
+  status: "leadStatus",
+  search: "leadSearch",
+  sort: "leadSort",
+  page: "leadPage",
+  source_name: "source_name",
+  start_date: "start_date",
+  end_date: "end_date",
+  builder_warranty: "builder_warranty",
+};
 function leadFiltersFromParams(params) {
   const drill = readSourceDrillParams(params);
   const status = params.get("leadStatus");
   return {
-    status: status === "all" ? "" : ["open", ...STATUSES].includes(status) ? status : params.has("lead") ? "" : drill?.status ?? "open",
+    status:
+      status === "all"
+        ? ""
+        : ["open", ...STATUSES].includes(status)
+          ? status
+          : params.has("lead")
+            ? ""
+            : (drill?.status ?? "open"),
     search: params.get("leadSearch") || "",
     sort: params.get("leadSort") || "first_contact_at",
     page: Math.max(1, Number.parseInt(params.get("leadPage"), 10) || 1),
-    source_name: params.get("source_name") || "", start_date: params.get("start_date") || drill?.start_date || "", end_date: params.get("end_date") || drill?.end_date || "",
-    builder_warranty: params.get("builder_warranty") === "expiring" ? "expiring" : "",
+    source_name: params.get("source_name") || "",
+    start_date: params.get("start_date") || drill?.start_date || "",
+    end_date: params.get("end_date") || drill?.end_date || "",
+    builder_warranty:
+      params.get("builder_warranty") === "expiring" ? "expiring" : "",
   };
 }
-
 export function LeadsSection({ newLeadRequest = 0 }) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -782,9 +757,25 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   const compactQueue = useIsMobile(1280);
   const [tab, setTab] = useState("pipeline");
   const openMessages = useCustomerSms();
-  const messageLead = (lead, initialDraft = "") => openMessages?.({
-    id: lead.customer_id, firstName: lead.first_name, lastName: lead.last_name, phone: lead.phone,
-  }, { leadId: lead.id, initialDraft, onSent: () => { loadLeads(); loadLeadActivities(lead.id, { silent: true }); } });
+  const messageLead = (lead, initialDraft = "") =>
+    openMessages?.(
+      {
+        id: lead.customer_id,
+        firstName: lead.first_name,
+        lastName: lead.last_name,
+        phone: lead.phone,
+      },
+      {
+        leadId: lead.id,
+        initialDraft,
+        onSent: () => {
+          loadLeads();
+          loadLeadActivities(lead.id, {
+            silent: true,
+          });
+        },
+      },
+    );
   const [callbackForm, setCallbackForm] = useState(null); // { leadId, date, time, notes }
   const [apptForm, setApptForm] = useState(null); // { leadId, date, time, serviceId, serviceType, technicianId, notes }
   const [apptSaving, setApptSaving] = useState(false);
@@ -815,34 +806,61 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   const [contactMatches, setContactMatches] = useState(null);
   useEffect(() => {
     setContactMatches(null);
-    if (showModal !== "newLead" || (!formData.phone && !formData.email)) return undefined;
+    if (showModal !== "newLead" || (!formData.phone && !formData.email))
+      return undefined;
     let cancelled = false;
     const timer = setTimeout(async () => {
       try {
-        const query = new URLSearchParams({ phone: formData.phone || "", email: formData.email || "" });
+        const query = new URLSearchParams({
+          phone: formData.phone || "",
+          email: formData.email || "",
+        });
         const data = await adminFetch(`/admin/leads/contact-matches?${query}`);
         if (!cancelled) setContactMatches(data);
-      } catch { if (!cancelled) setContactMatches({ error: true }); }
-    }, 300);
-    return () => { cancelled = true; clearTimeout(timer); };
-  }, [showModal, formData.phone, formData.email]);
-  const filters = useMemo(() => leadFiltersFromParams(searchParams), [searchParams]);
-  const linkedLeadId = searchParams.get("lead");
-  const setFilters = useCallback((updater) => {
-    setSearchParams((params) => {
-      const current = leadFiltersFromParams(params);
-      const next = typeof updater === "function" ? updater(current) : updater;
-      const updated = new URLSearchParams(params);
-      ["from", "to", "status", "lead"].forEach((key) => updated.delete(key));
-      if (!next.source_name) updated.delete("period_label");
-      for (const [key, param] of Object.entries(LEAD_FILTER_KEYS)) {
-        if (key === "status") updated.set(param, next[key] || "all");
-        else if (next[key] && !(key === "page" && next[key] === 1)) updated.set(param, String(next[key]));
-        else updated.delete(param);
+      } catch {
+        if (!cancelled)
+          setContactMatches({
+            error: true,
+          });
       }
-      return updated;
-    }, { replace: true });
-  }, [setSearchParams]);
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [showModal, formData.phone, formData.email]);
+  const filters = useMemo(
+    () => leadFiltersFromParams(searchParams),
+    [searchParams],
+  );
+  const linkedLeadId = searchParams.get("lead");
+  const setFilters = useCallback(
+    (updater) => {
+      setSearchParams(
+        (params) => {
+          const current = leadFiltersFromParams(params);
+          const next =
+            typeof updater === "function" ? updater(current) : updater;
+          const updated = new URLSearchParams(params);
+          ["from", "to", "status", "lead"].forEach((key) =>
+            updated.delete(key),
+          );
+          if (!next.source_name) updated.delete("period_label");
+          for (const [key, param] of Object.entries(LEAD_FILTER_KEYS)) {
+            if (key === "status") updated.set(param, next[key] || "all");
+            else if (next[key] && !(key === "page" && next[key] === 1))
+              updated.set(param, String(next[key]));
+            else updated.delete(param);
+          }
+          return updated;
+        },
+        {
+          replace: true,
+        },
+      );
+    },
+    [setSearchParams],
+  );
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [debouncedSearch, setDebouncedSearch] = useState(filters.search);
   useEffect(() => {
@@ -853,64 +871,85 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   const [sourcePeriodLabel, setSourcePeriodLabel] = useState(
     () => readSourceDrillParams()?.period_label || "",
   );
-  const pipelineView = searchParams.get("leadView") === "board" ? "board" : "table";
-  const setPipelineView = useCallback((view) => {
-    setSearchParams((current) => {
-      const next = new URLSearchParams(current);
-      if (view === "board") next.set("leadView", "board"); else next.delete("leadView");
-      return next;
-    }, { replace: true });
-  }, [setSearchParams]);
+  const pipelineView =
+    searchParams.get("leadView") === "board" ? "board" : "table";
+  const setPipelineView = useCallback(
+    (view) => {
+      setSearchParams(
+        (current) => {
+          const next = new URLSearchParams(current);
+          if (view === "board") next.set("leadView", "board");
+          else next.delete("leadView");
+          return next;
+        },
+        {
+          replace: true,
+        },
+      );
+    },
+    [setSearchParams],
+  );
   const [draggingLeadId, setDraggingLeadId] = useState(null);
   const [deletingLeadId, setDeletingLeadId] = useState(null);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState(null);
   const [techs, setTechs] = useState([]);
-
   useEffect(() => {
     if (!newLeadRequest) return;
     setFormData({});
     setShowModal("newLead");
   }, [newLeadRequest]);
-
   const setActiveLead = useCallback((leadId) => {
     expandedLeadRef.current = leadId;
     setExpandedLead(leadId);
   }, []);
-
-  const loadLeads = useCallback(async ({ silent = false } = {}) => {
-    // The requested scope depends on the view + filters, so a slow response
-    // from a superseded request (quick Table↔Board toggle, filter change)
-    // must never overwrite the current view's rows — only the newest
-    // request commits.
-    const requestId = ++leadsRequestRef.current;
-    try {
-      if (!silent) setLoadError(null);
-      const params = new URLSearchParams();
-      if (linkedLeadId) params.set("id", linkedLeadId);
-      // List and board apply the same server-side filters and pagination.
-      const status = filters.status;
-      if (status) params.set("status", status);
-      if (debouncedSearch.trim()) params.set("search", debouncedSearch.trim());
-      if (filters.source_name) params.set("source_name", filters.source_name);
-      if (filters.builder_warranty) params.set("builder_warranty", filters.builder_warranty);
-      if (filters.start_date) params.set("start_date", filters.start_date);
-      if (filters.end_date) params.set("end_date", filters.end_date);
-      params.set("sort", filters.sort);
-      params.set("order", filters.sort === "name" ? "asc" : "desc");
-      params.set("page", filters.page);
-      params.set("limit", "50");
-      const data = await adminFetch(`/admin/leads?${params}`);
-      if (requestId !== leadsRequestRef.current) return; // superseded
-      setLeads(data.leads || []);
-      setLeadsTotal(data.total || 0);
-    } catch (e) {
-      if (requestId !== leadsRequestRef.current) return; // superseded
-      console.error("loadLeads", e);
-      if (!silent) setLoadError(e);
-    }
-  }, [linkedLeadId, filters.status, filters.sort, filters.page, filters.source_name, filters.start_date, filters.end_date, filters.builder_warranty, debouncedSearch]);
-
+  const loadLeads = useCallback(
+    async ({ silent = false } = {}) => {
+      // The requested scope depends on the view + filters, so a slow response
+      // from a superseded request (quick Table↔Board toggle, filter change)
+      // must never overwrite the current view's rows — only the newest
+      // request commits.
+      const requestId = ++leadsRequestRef.current;
+      try {
+        if (!silent) setLoadError(null);
+        const params = new URLSearchParams();
+        if (linkedLeadId) params.set("id", linkedLeadId);
+        // List and board apply the same server-side filters and pagination.
+        const status = filters.status;
+        if (status) params.set("status", status);
+        if (debouncedSearch.trim())
+          params.set("search", debouncedSearch.trim());
+        if (filters.source_name) params.set("source_name", filters.source_name);
+        if (filters.builder_warranty)
+          params.set("builder_warranty", filters.builder_warranty);
+        if (filters.start_date) params.set("start_date", filters.start_date);
+        if (filters.end_date) params.set("end_date", filters.end_date);
+        params.set("sort", filters.sort);
+        params.set("order", filters.sort === "name" ? "asc" : "desc");
+        params.set("page", filters.page);
+        params.set("limit", "50");
+        const data = await adminFetch(`/admin/leads?${params}`);
+        if (requestId !== leadsRequestRef.current) return; // superseded
+        setLeads(data.leads || []);
+        setLeadsTotal(data.total || 0);
+      } catch (e) {
+        if (requestId !== leadsRequestRef.current) return; // superseded
+        console.error("loadLeads", e);
+        if (!silent) setLoadError(e);
+      }
+    },
+    [
+      linkedLeadId,
+      filters.status,
+      filters.sort,
+      filters.page,
+      filters.source_name,
+      filters.start_date,
+      filters.end_date,
+      filters.builder_warranty,
+      debouncedSearch,
+    ],
+  );
   const loadSources = useCallback(async ({ silent = false } = {}) => {
     try {
       if (!silent) setLoadError(null);
@@ -939,7 +978,6 @@ export function LeadsSection({ newLeadRequest = 0 }) {
       console.error("loadSourceROI", e);
     }
   }, []);
-
   const loadAnalytics = useCallback(async ({ silent = false } = {}) => {
     try {
       if (!silent) setLoadError(null);
@@ -962,7 +1000,6 @@ export function LeadsSection({ newLeadRequest = 0 }) {
       if (!silent) setLoadError(e);
     }
   }, []);
-
   const loadTechs = useCallback(async () => {
     try {
       const data = await adminFetch("/admin/customers?limit=1");
@@ -975,24 +1012,25 @@ export function LeadsSection({ newLeadRequest = 0 }) {
       setTechs([]);
     }
   }, []);
-
   const loadServices = useCallback(async () => {
     try {
       const data = await adminFetch(
         "/admin/services?is_active=true&limit=200",
-      ).catch(() => ({ services: [] }));
+      ).catch(() => ({
+        services: [],
+      }));
       setServices(data.services || []);
     } catch (e) {
       setServices([]);
     }
   }, []);
-
   useEffect(() => {
     loadTechs();
     loadServices();
   }, [loadTechs, loadServices]);
-
-  useEffect(() => { if (tab === "pipeline") void loadLeads(); }, [tab, loadLeads]);
+  useEffect(() => {
+    if (tab === "pipeline") void loadLeads();
+  }, [tab, loadLeads]);
   useEffect(() => {
     void loadSources();
     if (tab === "sources") void loadSourceROI();
@@ -1000,10 +1038,17 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   }, [tab, loadSources, loadSourceROI, loadAnalytics]);
   useEffect(() => {
     if (tab !== "pipeline") return undefined;
-    const id = window.setInterval(() => { if (isPageVisible()) void loadLeads({ silent: true }); }, LEADS_REFRESH_MS);
-    return () => { window.clearInterval(id); leadsRequestRef.current += 1; };
+    const id = window.setInterval(() => {
+      if (isPageVisible())
+        void loadLeads({
+          silent: true,
+        });
+    }, LEADS_REFRESH_MS);
+    return () => {
+      window.clearInterval(id);
+      leadsRequestRef.current += 1;
+    };
   }, [tab, loadLeads]);
-
   const loadLeadActivities = useCallback(
     async (leadId, { silent = false } = {}) => {
       if (!leadId) return;
@@ -1039,12 +1084,13 @@ export function LeadsSection({ newLeadRequest = 0 }) {
     },
     [],
   );
-
   useEffect(() => {
     if (tab !== "pipeline" || !expandedLead) return undefined;
     const id = window.setInterval(() => {
       if (!isPageVisible()) return;
-      loadLeadActivities(expandedLead, { silent: true });
+      loadLeadActivities(expandedLead, {
+        silent: true,
+      });
     }, EXPANDED_LEAD_REFRESH_MS);
     return () => window.clearInterval(id);
   }, [tab, expandedLead, loadLeadActivities]);
@@ -1074,7 +1120,6 @@ export function LeadsSection({ newLeadRequest = 0 }) {
     // Keep the scoped filters in the URL so Back and refresh preserve the
     // exact reporting cohort. Ordinary filter changes normalize legacy keys.
   }, [setSearchParams]);
-
   const expandLead = async (lead) => {
     if (expandedLead === lead.id) {
       setActiveLead(null);
@@ -1083,7 +1128,6 @@ export function LeadsSection({ newLeadRequest = 0 }) {
     setActiveLead(lead.id);
     loadLeadActivities(lead.id);
   };
-
   const updateLeadStatus = async (leadId, status) => {
     try {
       await adminFetch(`/admin/leads/${leadId}`, {
@@ -1095,7 +1139,6 @@ export function LeadsSection({ newLeadRequest = 0 }) {
       alert("Status update failed: " + e.message);
     }
   };
-
   const deleteLead = async (lead) => {
     const label =
       [lead.first_name, lead.last_name].filter(Boolean).join(" ").trim() ||
@@ -1109,7 +1152,6 @@ export function LeadsSection({ newLeadRequest = 0 }) {
     ) {
       return;
     }
-
     setDeletingLeadId(lead.id);
     try {
       await adminFetch(`/admin/leads/${lead.id}`, { method: "DELETE" });
@@ -1127,7 +1169,6 @@ export function LeadsSection({ newLeadRequest = 0 }) {
       setDeletingLeadId(null);
     }
   };
-
   const retryCurrentTab = () => {
     setLoadError(null);
     if (tab === "pipeline") {
@@ -1141,7 +1182,6 @@ export function LeadsSection({ newLeadRequest = 0 }) {
     }
     if (tab === "analytics") loadAnalytics();
   };
-
   const submitForm = async () => {
     setLoading(true);
     try {
@@ -1220,50 +1260,202 @@ export function LeadsSection({ newLeadRequest = 0 }) {
       if (lead && lead.status !== stage) updateLeadStatus(lead.id, stage);
       setDraggingLeadId(null);
     };
-
     return (
       <>
-        <div style={{ marginBottom: 16 }}>
-          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            <div style={{ position: "relative", flex: "1 1 180px", minWidth: 0 }}>
-              <Search size={18} aria-hidden style={{ position: "absolute", left: 12, top: 13, color: C.muted }} />
-              <input type="search" aria-label="Search leads" placeholder="Search leads" value={filters.search}
-                onChange={(event) => setFilters((f) => ({ ...f, search: event.target.value, page: 1 }))}
-                style={{ width: "100%", boxSizing: "border-box", height: 44, border: `1px solid ${C.inputBorder}`, borderRadius: 6, padding: "8px 12px 8px 38px", background: C.input, color: C.text, fontSize: 16 }} />
+        <div className="mb-[16px]">
+          <div className="flex gap-[8px] items-center flex-wrap">
+            <div className="relative flex-[1_1_180px] min-w-[0px]">
+              <Search
+                size={18}
+                aria-hidden
+                className="pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2 text-ink-secondary"
+              />
+              <Input
+                type="search"
+                aria-label="Search leads"
+                placeholder="Search leads"
+                value={filters.search}
+                onChange={(event) =>
+                  setFilters((f) => ({
+                    ...f,
+                    search: event.target.value,
+                    page: 1,
+                  }))
+                }
+                className="w-full pl-10"
+              />
             </div>
-            <Btn onClick={() => setFiltersOpen((open) => !open)} aria-expanded={filtersOpen} aria-controls="lead-queue-filters"
-              style={{ display: "inline-flex", gap: 6, alignItems: "center", background: C.white, color: C.text, border: `1px solid ${C.border}` }}>
+            <Button
+              onClick={() => setFiltersOpen((open) => !open)}
+              aria-expanded={filtersOpen}
+              aria-controls="lead-queue-filters"
+              variant="primary"
+              className="inline-flex gap-[6px] items-center"
+            >
               <SlidersHorizontal size={18} aria-hidden /> Filters
-              {(filters.status !== "open" || filters.source_name || filters.builder_warranty || filters.sort !== "first_contact_at") && <span aria-label="Active filters" style={{ width: 6, height: 6, borderRadius: "50%", background: C.heading }} />}
-            </Btn>
-            {!isMobile && <div role="group" aria-label="Lead view" style={{ display: "flex", gap: 4 }}>
-              {["table", "board"].map((view) => <Btn key={view} onClick={() => setPipelineView(view)} aria-pressed={pipelineView === view}
-                style={{ background: pipelineView === view ? C.heading : C.white, color: pipelineView === view ? C.white : C.text, border: `1px solid ${C.border}` }}>{view === "table" ? "List" : "Board"}</Btn>)}
-            </div>}
+              {(filters.status !== "open" ||
+                filters.source_name ||
+                filters.builder_warranty ||
+                filters.sort !== "first_contact_at") && (
+                <span
+                  aria-label="Active filters"
+                  className="h-[6px] w-[6px] rounded-sm bg-white"
+                />
+              )}
+            </Button>
+            {!isMobile && (
+              <div
+                role="group"
+                aria-label="Lead view"
+                className="flex gap-[4px]"
+              >
+                {["table", "board"].map((view) => (
+                  <Button
+                    key={view}
+                    onClick={() => setPipelineView(view)}
+                    aria-pressed={pipelineView === view}
+                    variant={pipelineView === view ? "primary" : "secondary"}
+                  >
+                    {view === "table" ? "List" : "Board"}
+                  </Button>
+                ))}
+              </div>
+            )}
           </div>
-          {(filtersOpen || !isMobile) && <div id="lead-queue-filters" style={{ display: "flex", flexWrap: "wrap", alignItems: "end", gap: 12, marginTop: 12 }}>
-            <Input label="Stage" value={filters.status || "all"} onChange={(value) => setFilters((f) => ({ ...f, status: value === "all" ? "" : value, page: 1 }))}
-              options={[{ value: "open", label: "Open leads" }, { value: "all", label: "All stages" }, ...STATUSES.map((value) => ({ value, label: value.replace(/_/g, " ") }))]} />
-            <Input label="Sort" value={filters.sort} onChange={(sort) => setFilters((f) => ({ ...f, sort, page: 1 }))}
-              options={[{ value: "first_contact_at", label: "Newest first" }, { value: "name", label: "Name A–Z" }, { value: "status", label: "Stage" }, { value: "response_time", label: "Response time" }, { value: "monthly_value", label: "Monthly value" }]} />
-            {isMobile && <Input label="View" value={pipelineView} onChange={setPipelineView} options={[{ value: "table", label: "List" }, { value: "board", label: "Board" }]} />}
-            {(filters.source_name || filters.builder_warranty) && <p style={{ fontSize: 14 }}>{[filters.source_name, sourcePeriodLabel, filters.builder_warranty && "Builder warranty expiring"].filter(Boolean).join(" · ")}</p>}
-            <Btn onClick={() => { setFilters({ status: "open", search: "", sort: "first_contact_at", page: 1 }); setSourcePeriodLabel(""); }} style={{ marginBottom: 12, background: "transparent", color: C.text }}>Reset filters</Btn>
-          </div>}
-          <div role="status" aria-live="polite" style={{ marginTop: 12, color: C.muted, fontSize: 14 }}>
-            {leadsTotal === 0 ? "No matching leads" : `${(filters.page - 1) * 50 + 1}–${Math.min(filters.page * 50, leadsTotal)} of ${leadsTotal} matching leads`}
+          {(filtersOpen || !isMobile) && (
+            <div
+              id="lead-queue-filters"
+              className="flex flex-wrap items-end gap-[12px] mt-[12px]"
+            >
+              <LeadField
+                label="Stage"
+                value={filters.status || "all"}
+                onChange={(value) =>
+                  setFilters((f) => ({
+                    ...f,
+                    status: value === "all" ? "" : value,
+                    page: 1,
+                  }))
+                }
+                options={[
+                  {
+                    value: "open",
+                    label: "Open leads",
+                  },
+                  {
+                    value: "all",
+                    label: "All stages",
+                  },
+                  ...STATUSES.map((value) => ({
+                    value,
+                    label: value.replace(/_/g, " "),
+                  })),
+                ]}
+              />
+              <LeadField
+                label="Sort"
+                value={filters.sort}
+                onChange={(sort) =>
+                  setFilters((f) => ({
+                    ...f,
+                    sort,
+                    page: 1,
+                  }))
+                }
+                options={[
+                  {
+                    value: "first_contact_at",
+                    label: "Newest first",
+                  },
+                  {
+                    value: "name",
+                    label: "Name A–Z",
+                  },
+                  {
+                    value: "status",
+                    label: "Stage",
+                  },
+                  {
+                    value: "response_time",
+                    label: "Response time",
+                  },
+                  {
+                    value: "monthly_value",
+                    label: "Monthly value",
+                  },
+                ]}
+              />
+              {isMobile && (
+                <LeadField
+                  label="View"
+                  value={pipelineView}
+                  onChange={setPipelineView}
+                  options={[
+                    {
+                      value: "table",
+                      label: "List",
+                    },
+                    {
+                      value: "board",
+                      label: "Board",
+                    },
+                  ]}
+                />
+              )}
+              {(filters.source_name || filters.builder_warranty) && (
+                <p className="text-ui-body">
+                  {[
+                    filters.source_name,
+                    sourcePeriodLabel,
+                    filters.builder_warranty && "Builder warranty expiring",
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </p>
+              )}
+              <Button
+                onClick={() => {
+                  setFilters({
+                    status: "open",
+                    search: "",
+                    sort: "first_contact_at",
+                    page: 1,
+                  });
+                  setSourcePeriodLabel("");
+                }}
+                variant="secondary"
+                className="mb-[12px]"
+              >
+                Reset filters
+              </Button>
+            </div>
+          )}
+          <div
+            role="status"
+            aria-live="polite"
+            className="mt-[12px] text-ink-secondary text-ui-body"
+          >
+            {leadsTotal === 0
+              ? "No matching leads"
+              : `${(filters.page - 1) * 50 + 1}–${Math.min(filters.page * 50, leadsTotal)} of ${leadsTotal} matching leads`}
             {pipelineView === "board" ? " · column counts show this page" : ""}
           </div>
         </div>
         {pipelineView === "table" && (
           <>
             {/* Leads Table */}
-            <Card style={{ padding: 0 }}>
+            <Card className="p-[0px]">
               {" "}
-              <table className="lead-queue-table" style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
-                {!compactQueue && <colgroup>{[26, 13, 19, 8, 18, 10, 6].map((width, index) => <col key={index} style={{ width: `${width}%` }} />)}</colgroup>}
-                <thead style={compactQueue ? { display: "none" } : undefined}>
-                  <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+              <Table className="lead-queue-table table-fixed" layout="records">
+                {!compactQueue && (
+                  <colgroup>
+                    {[26, 13, 19, 8, 18, 10, 6].map((width, index) => (
+                      <col key={index} style={{ width: `${width}%` }} />
+                    ))}
+                  </colgroup>
+                )}
+                <THead className={compactQueue ? "hidden" : ""}>
+                  <TR>
                     {(compactQueue
                       ? ["Name / Phone", "Status"]
                       : [
@@ -1276,173 +1468,136 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                           "Actions",
                         ]
                     ).map((h) => (
-                      <th
-                        key={h}
-                        style={{
-                          padding: "12px 16px",
-                          textAlign: "left",
-                          fontSize: 14,
-                          color: C.muted,
-                          fontWeight: 500,
-                          textTransform: "uppercase",
-                        }}
-                      >
+                      <TH key={h} className="text-left text-ink-secondary">
                         {h}
-                      </th>
+                      </TH>
                     ))}
-                  </tr>
-                </thead>
-                <tbody>
+                  </TR>
+                </THead>
+                <TBody>
                   {leads.map((lead) => {
                     const isExpanded = expandedLead === lead.id;
                     return (
                       <React.Fragment key={lead.id}>
-                        <tr className="lead-queue-record"
+                        <TR
+                          className={`lead-queue-record cursor-pointer ${isExpanded ? "bg-zinc-50" : ""}`}
                           onClick={() => expandLead(lead)}
-                          style={{
-                            borderBottom: `1px solid ${C.border}`,
-                            cursor: "pointer",
-                            backgroundColor: isExpanded
-                              ? C.cardHover
-                              : "transparent",
-                            transition: "background 0.15s",
-                          }}
                         >
-                          <td style={{ padding: "12px 16px" }}>
+                          <TD>
                             {" "}
-                            <div
-                              style={{
-                                display: "flex",
-                                flexWrap: "wrap",
-                                alignItems: "center",
-                                gap: 8,
-                              }}
-                            >
+                            <div className="flex flex-wrap items-center gap-[8px]">
                               {" "}
-                              <button type="button" onClick={(event) => { event.stopPropagation(); expandLead(lead); }} aria-expanded={isExpanded}
-                                style={{
-                                  border: "none", background: "transparent", padding: 0, minHeight: 44, textAlign: "left", cursor: "pointer", fontFamily: "inherit",
-                                  color: C.heading,
-                                  fontSize: 14,
-                                  fontWeight: 500,
+                              <Button
+                                type="button"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  expandLead(lead);
                                 }}
+                                aria-expanded={isExpanded}
+                                variant="secondary"
+                                className="min-h-[44px] text-left"
                               >
                                 {[lead.first_name, lead.last_name]
                                   .filter(Boolean)
                                   .join(" ") || "Unknown"}
-                              </button>{" "}
+                              </Button>{" "}
                               <AgingBadge lead={lead} />{" "}
                             </div>{" "}
-                            <div
-                              style={{ color: C.muted, fontSize: 14, ...mono }}
-                            >
+                            <div className="text-ink-secondary text-ui-body">
                               {lead.phone || lead.email || "--"}
                             </div>{" "}
                             {compactQueue && lead.service_interest && (
-                              <div style={{ color: C.text, fontSize: 14 }}>
+                              <div className="text-zinc-900 text-ui-body">
                                 {lead.service_interest}
                               </div>
                             )}{" "}
-                            {lead.estimate_id && <div style={{ fontSize: 14, color: C.muted }}>Estimate: {lead.estimate_status || "linked"}</div>}
-                            <div style={{ fontSize: 14, color: C.muted }}>
-                              {lead.next_follow_up_at ? `Follow up ${fmtShortDate(lead.next_follow_up_at)}` : `Added ${fmtShortDate(lead.first_contact_at)}`}
+                            {lead.estimate_id && (
+                              <div className="text-ui-body text-ink-secondary">
+                                Estimate: {lead.estimate_status || "linked"}
+                              </div>
+                            )}
+                            <div className="text-ui-body text-ink-secondary">
+                              {lead.next_follow_up_at
+                                ? `Follow up ${fmtShortDate(lead.next_follow_up_at)}`
+                                : `Added ${fmtShortDate(lead.first_contact_at)}`}
                             </div>
-                          </td>
+                          </TD>
                           {!compactQueue && (
                             <>
-                              <td style={{ padding: "12px 16px" }}>
+                              <TD>
                                 {lead.source_name ? (
-                                  <Badge
-                                    label={
-                                      lead.source_name
-                                    }
-                                    color={C.teal}
+                                  <LeadBadge
+                                    label={lead.source_name}
+                                    tone={"strong"}
                                   />
                                 ) : (
-                                  <span
-                                    style={{ color: C.muted, fontSize: 14 }}
-                                  >
+                                  <span className="text-ink-secondary text-ui-body">
                                     --
                                   </span>
                                 )}
-                              </td>
-                              <td
-                                style={{
-                                  padding: "12px 16px",
-                                  color: C.text,
-                                  fontSize: 14,
-                                }}
-                              >
+                              </TD>
+                              <TD className="text-zinc-900">
                                 {lead.service_interest || "--"}
                                 {lead.builder_warranty_expires_on && (
-                                  <Badge
-                                    label={`warranty exp ${String(
-                                      lead.builder_warranty_expires_on,
-                                    ).slice(0, 10)}`}
-                                    color={C.amber}
-                                    style={{ marginLeft: 6 }}
+                                  <LeadBadge
+                                    label={`warranty exp ${String(lead.builder_warranty_expires_on).slice(0, 10)}`}
+                                    tone={"neutral"}
+                                    className="ml-[6px]"
                                   />
                                 )}
-                              </td>
-                              <td style={{ padding: "12px 16px" }}>
+                              </TD>
+                              <TD>
                                 {" "}
-                                <Badge
+                                <LeadBadge
                                   label={lead.urgency || "normal"}
-                                  color={
+                                  tone={
                                     lead.urgency === "urgent"
-                                      ? C.red
-                                      : lead.urgency === "high"
-                                        ? C.amber
-                                        : C.muted
+                                      ? "alert"
+                                      : "neutral"
+                                  }
+                                  // Main's C.amber (zinc-600) distinguished
+                                  // "high" from normal (muted); restored as
+                                  // an explicit zinc-600 chip rather than
+                                  // reusing "strong" (a different tier
+                                  // elsewhere) or collapsing into neutral.
+                                  className={
+                                    lead.urgency === "high"
+                                      ? "!bg-zinc-600/15 !text-zinc-600"
+                                      : undefined
                                   }
                                 />{" "}
-                              </td>
+                              </TD>
                             </>
                           )}
-                          <td
-                            style={{ padding: "12px 16px" }}
-                            onClick={(e) => e.stopPropagation()}
-                          >
+                          <TD onClick={(e) => e.stopPropagation()}>
                             {" "}
-                            <select aria-label={`Stage for ${[lead.first_name, lead.last_name].filter(Boolean).join(" ") || "lead"}`}
+                            <Select
+                              aria-label={`Stage for ${[lead.first_name, lead.last_name].filter(Boolean).join(" ") || "lead"}`}
                               value={lead.status}
                               onChange={(e) =>
                                 updateLeadStatus(lead.id, e.target.value)
                               }
-                              style={{
-                                backgroundColor:
-                                  STATUS_COLORS[lead.status] + "22",
-                                border: `1px solid ${STATUS_COLORS[lead.status] || C.border}44`,
-                                borderRadius: 6,
-                                padding: "4px 8px",
-                                color: STATUS_COLORS[lead.status] || C.text,
-                                fontSize: 14,
-                                cursor: "pointer",
-                              }}
+                              className={statusSelectClass(lead.status)}
                             >
                               {STATUSES.map((s) => (
                                 <option key={s} value={s}>
                                   {s.replace(/_/g, " ")}
                                 </option>
                               ))}
-                            </select>{" "}
-                          </td>
+                            </Select>{" "}
+                          </TD>
                           {!compactQueue && (
                             <>
-                              <td
-                                style={{
-                                  padding: "12px 16px",
-                                  ...mono,
-                                  fontSize: 14,
-                                  color:
-                                    lead.response_time_minutes != null
-                                      ? lead.response_time_minutes < 15
-                                        ? C.green
-                                        : lead.response_time_minutes < 60
-                                          ? C.amber
-                                          : C.red
-                                      : C.muted,
-                                }}
+                              <TD
+                                className={
+                                  lead.response_time_minutes != null
+                                    ? lead.response_time_minutes < 15
+                                      ? "text-zinc-700"
+                                      : lead.response_time_minutes < 60
+                                        ? "text-zinc-600"
+                                        : "text-alert-fg"
+                                    : "text-ink-secondary"
+                                }
                               >
                                 {lead.status === "new" &&
                                 lead.response_time_minutes == null &&
@@ -1453,79 +1608,53 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                 ) : (
                                   fmtTime(lead.response_time_minutes)
                                 )}
-                              </td>
-                              <td
-                                style={{ padding: "12px 16px" }}
-                                onClick={(e) => e.stopPropagation()}
-                              >
-                                <Btn small onClick={() => expandLead(lead)} aria-expanded={isExpanded} style={{ background: "transparent", color: C.text, paddingInline: 4, whiteSpace: "nowrap" }}>Open</Btn>
-                              </td>
+                              </TD>
+                              <TD onClick={(e) => e.stopPropagation()}>
+                                <Button
+                                  onClick={() => expandLead(lead)}
+                                  aria-expanded={isExpanded}
+                                  variant="secondary"
+                                  className="whitespace-nowrap"
+                                >
+                                  Open
+                                </Button>
+                              </TD>
                             </>
                           )}
-                        </tr>
+                        </TR>
                         {isExpanded && (
-                          <tr>
-                            <td
+                          <TR>
+                            <TD
                               colSpan={compactQueue ? 2 : 7}
-                              style={{ padding: 0 }}
+                              className="p-[0px]"
                             >
                               {" "}
-                              <div
-                                style={{
-                                  padding: "16px 24px",
-                                  backgroundColor: C.bg,
-                                  borderBottom: `1px solid ${C.border}`,
-                                }}
-                              >
+                              <div className="border-b border-solid border-zinc-200 bg-zinc-50 px-6 py-4">
                                 {" "}
-                                <div
-                                  style={{
-                                    display: "flex",
-                                    gap: 16,
-                                    flexWrap: "wrap",
-                                    marginBottom: 16,
-                                  }}
-                                >
+                                <div className="flex gap-[16px] flex-wrap mb-[16px]">
                                   {" "}
-                                  <div style={{ flex: "1 1 300px" }}>
+                                  <div className="flex-[1_1_300px]">
                                     {" "}
-                                    <h4
-                                      style={{
-                                        margin: "0 0 8px",
-                                        color: C.heading,
-                                        fontSize: 14,
-                                      }}
-                                    >
+                                    <h4 className="m-0 mb-[8px] text-zinc-900 text-ui-body">
                                       Details
                                     </h4>{" "}
-                                    <div
-                                      style={{
-                                        fontSize: 14,
-                                        color: C.muted,
-                                        lineHeight: 1.8,
-                                      }}
-                                    >
+                                    <div className="text-ui-body text-ink-secondary">
                                       {" "}
                                       <div>
                                         Service:{" "}
-                                        <span
-                                          style={{
-                                            color: C.heading,
-                                            fontWeight: 500,
-                                          }}
-                                        >
+                                        <span className="text-zinc-900 font-medium">
                                           {lead.service_interest || "--"}
                                         </span>
                                       </div>{" "}
                                       <div>
                                         Email:{" "}
-                                        <span style={{ color: C.text }}>
+                                        <span className="text-zinc-900">
                                           {lead.email || "--"}
                                         </span>
                                       </div>{" "}
                                       <div>
                                         Address:{" "}
-                                        <span style={{ color: C.text }}>
+                                        <span className="text-zinc-900">
                                           {formatLeadAddress(lead) || "--"}
                                         </span>
                                       </div>{" "}
@@ -1533,7 +1662,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                         0 && (
                                         <div>
                                           Also cover:{" "}
-                                          <span style={{ color: C.text }}>
+                                          <span className="text-zinc-900">
                                             {leadAdditionalProperties(
                                               lead,
                                             ).join(" · ")}
@@ -1542,14 +1671,14 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                       )}{" "}
                                       <div>
                                         Type:{" "}
-                                        <span style={{ color: C.text }}>
+                                        <span className="text-zinc-900">
                                           {lead.lead_type?.replace(/_/g, " ") ||
                                             "--"}
                                         </span>
                                       </div>{" "}
                                       <div>
                                         First Contact:{" "}
-                                        <span style={{ color: C.text }}>
+                                        <span className="text-zinc-900">
                                           {lead.first_contact_at
                                             ? new Date(
                                                 lead.first_contact_at,
@@ -1559,7 +1688,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                       </div>
                                       <div>
                                         Builder Warranty:{" "}
-                                        <span style={{ color: C.text }}>
+                                        <span className="text-zinc-900">
                                           {lead.builder_warranty_provider ||
                                           lead.builder_warranty_expires_on
                                             ? [
@@ -1570,17 +1699,14 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                                     // part instead of new Date()
                                                     // (UTC midnight renders as
                                                     // the previous ET day)
-                                                    `expires ${String(
-                                                      lead.builder_warranty_expires_on,
-                                                    ).slice(0, 10)}`
+                                                    `expires ${String(lead.builder_warranty_expires_on).slice(0, 10)}`
                                                   : null,
                                               ]
                                                 .filter(Boolean)
                                                 .join(" — ")
                                             : "--"}
                                         </span>{" "}
-                                        <Btn
-                                          small
+                                        <Button
                                           onClick={() => {
                                             setFormData({
                                               leadId: lead.id,
@@ -1600,14 +1726,12 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                           lead.builder_warranty_expires_on
                                             ? "Edit"
                                             : "Set"}
-                                        </Btn>
+                                        </Button>
                                       </div>
                                       {lead.monthly_value && (
                                         <div>
                                           Monthly Value:{" "}
-                                          <span
-                                            style={{ color: C.green, ...mono }}
-                                          >
+                                          <span className="text-zinc-700">
                                             {fmtMoneyExact(lead.monthly_value)}
                                           </span>
                                         </div>
@@ -1615,7 +1739,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                       {lead.transcript_summary && (
                                         <div>
                                           Notes:{" "}
-                                          <span style={{ color: C.text }}>
+                                          <span className="text-zinc-900">
                                             {lead.transcript_summary}
                                           </span>
                                         </div>
@@ -1644,9 +1768,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                             {timelineLabel && (
                                               <div>
                                                 Wants service:{" "}
-                                                <span
-                                                  style={{ color: C.text }}
-                                                >
+                                                <span className="text-zinc-900">
                                                   {timelineLabel}
                                                 </span>
                                               </div>
@@ -1654,9 +1776,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                             {ex.pain_points && (
                                               <div>
                                                 Concerns:{" "}
-                                                <span
-                                                  style={{ color: C.text }}
-                                                >
+                                                <span className="text-zinc-900">
                                                   {ex.pain_points}
                                                 </span>
                                               </div>
@@ -1664,9 +1784,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                             {ex.preferred_date_time && (
                                               <div>
                                                 Preferred Time:{" "}
-                                                <span
-                                                  style={{ color: C.text }}
-                                                >
+                                                <span className="text-zinc-900">
                                                   {fmtPreferredDateTime(
                                                     ex.preferred_date_time,
                                                   )}
@@ -1674,15 +1792,13 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                               </div>
                                             )}
                                             {quoteFlags.length > 0 && (
-                                              <div style={{ marginTop: 4 }}>
+                                              <div className="mt-[4px]">
                                                 {quoteFlags.map((f) => (
-                                                  <Badge
+                                                  <LeadBadge
                                                     key={f}
                                                     label={f}
-                                                    color={C.amber}
-                                                    style={{
-                                                      marginRight: 6,
-                                                    }}
+                                                    tone={"neutral"}
+                                                    className="mr-[6px]"
                                                   />
                                                 ))}
                                               </div>
@@ -1693,29 +1809,16 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                     </div>{" "}
                                     <LeadOwedPromises leadId={lead.id} />
                                     {leadCalls.length > 0 && (
-                                      <div style={{ marginTop: 12 }}>
-                                        <h4
-                                          style={{
-                                            margin: "0 0 8px",
-                                            color: C.heading,
-                                            fontSize: 14,
-                                          }}
-                                        >
+                                      <div className="mt-[12px]">
+                                        <h4 className="m-0 mb-[8px] text-zinc-900 text-ui-body">
                                           Calls
                                         </h4>
                                         {leadCalls.map((call) => (
                                           <div
                                             key={call.id}
-                                            style={{
-                                              border: `1px solid ${C.border}`,
-                                              borderRadius: 8,
-                                              padding: 10,
-                                              marginBottom: 8,
-                                              fontSize: 14,
-                                              color: C.muted,
-                                            }}
+                                            className="border-hairline border-zinc-200 rounded-md p-[10px] mb-[8px] text-ui-body text-ink-secondary"
                                           >
-                                            <div style={{ marginBottom: 6 }}>
+                                            <div className="mb-[6px]">
                                               {new Date(
                                                 call.created_at,
                                               ).toLocaleString()}
@@ -1731,34 +1834,15 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                                 recordingId={
                                                   call.recording_sid || call.id
                                                 }
-                                                style={{
-                                                  marginBottom: 6,
-                                                  color: C.text,
-                                                }}
+                                                className="mb-[6px] text-zinc-900"
                                               />
                                             )}
                                             {call.transcription && (
                                               <details>
-                                                <summary
-                                                  style={{
-                                                    cursor: "pointer",
-                                                    color: C.teal,
-                                                    fontSize: 14,
-                                                  }}
-                                                >
+                                                <summary className="cursor-pointer text-zinc-900 text-ui-body">
                                                   View transcript
                                                 </summary>
-                                                <div
-                                                  style={{
-                                                    marginTop: 6,
-                                                    maxHeight: 180,
-                                                    overflowY: "auto",
-                                                    whiteSpace: "pre-wrap",
-                                                    color: C.text,
-                                                    fontSize: 14,
-                                                    lineHeight: 1.5,
-                                                  }}
-                                                >
+                                                <div className="mt-[6px] max-h-[180px] overflow-y-auto whitespace-pre-wrap text-zinc-900 text-ui-body">
                                                   {call.transcription}
                                                 </div>
                                               </details>
@@ -1768,41 +1852,20 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                       </div>
                                     )}
                                   </div>{" "}
-                                  <div style={{ flex: "1 1 300px" }}>
+                                  <div className="flex-[1_1_300px]">
                                     {" "}
-                                    <h4
-                                      style={{
-                                        margin: "0 0 8px",
-                                        color: C.heading,
-                                        fontSize: 14,
-                                      }}
-                                    >
+                                    <h4 className="m-0 mb-[8px] text-zinc-900 text-ui-body">
                                       Activity Timeline
                                     </h4>{" "}
-                                    <div
-                                      style={{
-                                        maxHeight: 200,
-                                        overflowY: "auto",
-                                      }}
-                                    >
+                                    <div className="max-h-[200px] overflow-y-auto">
                                       {leadActivitiesLoading && (
-                                        <div
-                                          style={{
-                                            color: C.muted,
-                                            fontSize: 14,
-                                          }}
-                                        >
+                                        <div className="text-ink-secondary text-ui-body">
                                           Loading activities...
                                         </div>
                                       )}
                                       {!leadActivitiesLoading &&
                                         leadActivitiesError && (
-                                          <div
-                                            style={{
-                                              color: C.red,
-                                              fontSize: 14,
-                                            }}
-                                          >
+                                          <div className="text-alert-fg text-ui-body">
                                             Activity failed to load:{" "}
                                             {leadActivitiesError.message ||
                                               String(leadActivitiesError)}
@@ -1811,35 +1874,28 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                       {!leadActivitiesLoading &&
                                         !leadActivitiesError &&
                                         leadActivities.length === 0 && (
-                                          <div
-                                            style={{
-                                              color: C.muted,
-                                              fontSize: 14,
-                                            }}
-                                          >
+                                          <div className="text-ink-secondary text-ui-body">
                                             No activities logged
                                           </div>
                                         )}
                                       {leadActivities.map((a) => (
                                         <div
                                           key={a.id}
-                                          style={{
-                                            fontSize: 14,
-                                            color: C.muted,
-                                            padding: "4px 0",
-                                            borderLeft: `2px solid ${C.border}`,
-                                            paddingLeft: 12,
-                                            marginLeft: 4,
-                                            marginBottom: 4,
-                                          }}
+                                          // border-left is not a Tailwind
+                                          // utility, and border-hairline
+                                          // sets width+style on all four
+                                          // sides — main's 2px left-side
+                                          // timeline connector needs the
+                                          // side-specific utilities below.
+                                          className="text-ui-body text-ink-secondary border-l-2 border-solid border-zinc-200 pl-[12px] ml-[4px] mb-[4px]"
                                         >
                                           {" "}
-                                          <Badge
+                                          <LeadBadge
                                             label={a.activity_type}
-                                            color={C.teal}
-                                            style={{ marginRight: 8 }}
+                                            tone={"strong"}
+                                            className="mr-[8px]"
                                           />{" "}
-                                          <span style={{ color: C.text }}>
+                                          <span className="text-zinc-900">
                                             {a.description}
                                           </span>{" "}
                                           {(() => {
@@ -1862,22 +1918,12 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                             ].filter(Boolean);
                                             if (!lines.length) return null;
                                             return (
-                                              <div
-                                                style={{
-                                                  marginTop: 2,
-                                                  color: C.text,
-                                                }}
-                                              >
+                                              <div className="mt-[2px] text-zinc-900">
                                                 {lines.join(" — ")}
                                               </div>
                                             );
                                           })()}
-                                          <div
-                                            style={{
-                                              fontSize: 14,
-                                              marginTop: 2,
-                                            }}
-                                          >
+                                          <div className="text-ui-body mt-[2px]">
                                             {a.performed_by} -{" "}
                                             {new Date(
                                               a.created_at,
@@ -1906,111 +1952,101 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                   } catch (e) {}
                                   if (!meta.suggestedReply) return null;
                                   return (
-                                    <div
-                                      style={{
-                                        border: `1px solid ${C.teal}44`,
-                                        borderRadius: 10,
-                                        padding: 14,
-                                        marginBottom: 14,
-                                        backgroundColor: C.teal + "0a",
-                                      }}
-                                    >
+                                    <div className="border-hairline border-zinc-200 rounded-md p-[14px] mb-[14px]">
                                       {" "}
-                                      <div
-                                        style={{
-                                          fontSize: 14,
-                                          color: C.teal,
-                                          fontWeight: 500,
-                                          marginBottom: 6,
-                                        }}
-                                      >
+                                      <div className="text-ui-body text-zinc-900 font-medium mb-[6px]">
                                         AI Suggested Reply
                                       </div>{" "}
-                                      <div
-                                        style={{
-                                          fontSize: 14,
-                                          color: C.text,
-                                          marginBottom: 8,
-                                          lineHeight: 1.5,
-                                        }}
-                                      >
+                                      <div className="text-ui-body text-zinc-900 mb-[8px]">
                                         {meta.suggestedReply}
                                       </div>
                                       {meta.serviceInterest && (
-                                        <Badge
+                                        <LeadBadge
                                           label={meta.serviceInterest}
-                                          color={C.teal}
-                                          style={{ marginRight: 6 }}
+                                          tone={"strong"}
+                                          className="mr-[6px]"
                                         />
                                       )}
                                       {meta.urgency &&
                                         meta.urgency !== "normal" && (
-                                          <Badge
+                                          <LeadBadge
                                             label={meta.urgency}
-                                            color={
+                                            tone={
                                               meta.urgency === "urgent"
-                                                ? C.red
-                                                : C.amber
+                                                ? "alert"
+                                                : "neutral"
                                             }
-                                            style={{ marginRight: 6 }}
+                                            className={
+                                              meta.urgency === "urgent"
+                                                ? "mr-[6px]"
+                                                : "mr-[6px] !bg-zinc-600/15 !text-zinc-600"
+                                            }
                                           />
                                         )}
-                                      <div style={{ marginTop: 10 }}>
+                                      <div className="mt-[10px]">
                                         {" "}
-                                        <Btn
-                                          small
-                                          color={C.teal}
-                                          onClick={() => messageLead(lead, meta.suggestedReply)}
+                                        <Button
+                                          variant={"primary"}
+                                          onClick={() =>
+                                            messageLead(
+                                              lead,
+                                              meta.suggestedReply,
+                                            )
+                                          }
                                         >
                                           Review reply
-                                        </Btn>{" "}
+                                        </Button>{" "}
                                       </div>{" "}
                                     </div>
                                   );
                                 })()}
                                 {/* Quick Actions */}
-                                <div
-                                  style={{
-                                    display: "flex",
-                                    gap: 8,
-                                    flexWrap: "wrap",
-                                    marginBottom: 12,
-                                  }}
-                                >
+                                <div className="flex gap-[8px] flex-wrap mb-[12px]">
                                   {" "}
-                                  <Btn
-                                    small
-                                    color={C.teal}
+                                  <Button
+                                    variant={"primary"}
                                     onClick={() => {
                                       messageLead(lead);
                                     }}
                                   >
                                     Message
-                                  </Btn>{" "}
-                                  <Btn
-                                    small
-                                    color={C.purple}
+                                  </Button>{" "}
+                                  <Button
+                                    variant={"primary"}
                                     onClick={() => {
-                                      const next = new URLSearchParams(searchParams);
-                                      for (const [key, value] of leadEstimateParams(lead)) next.set(key, value);
+                                      const next = new URLSearchParams(
+                                        searchParams,
+                                      );
+                                      for (const [
+                                        key,
+                                        value,
+                                      ] of leadEstimateParams(lead))
+                                        next.set(key, value);
                                       next.set("tab", "new");
                                       navigate(`/admin/pipeline?${next}`);
                                     }}
                                   >
                                     Create Estimate
-                                  </Btn>{" "}
-                                  {agentEstimateEnabled && OPEN_FILTER_STATUSES.includes(lead.status) && (
-                                    <Btn
-                                      small
-                                      color={C.purple}
-                                      onClick={() => navigate(`/admin/agent-estimate?leadId=${encodeURIComponent(lead.id)}`)}
-                                    >
-                                      Agent Estimate
-                                    </Btn>
-                                  )}{" "}
-                                  <Btn
-                                    small
-                                    color={C.amber}
+                                  </Button>{" "}
+                                  {agentEstimateEnabled &&
+                                    OPEN_FILTER_STATUSES.includes(
+                                      lead.status,
+                                    ) && (
+                                      <Button
+                                        variant={"primary"}
+                                        onClick={() =>
+                                          navigate(`/admin/agent-estimate?leadId=${encodeURIComponent(lead.id)}`)
+                                        }
+                                      >
+                                        Agent Estimate
+                                      </Button>
+                                    )}{" "}
+                                  <Button
+                                    variant={"primary"}
+                                    // Main's C.amber is #52525B (zinc-600) in
+                                    // this file's local palette, not a real
+                                    // amber — restored as the exact gray.
+                                    className="!bg-zinc-600 !border-zinc-600 hover:!bg-zinc-700"
                                     onClick={() =>
                                       setCallbackForm({
                                         leadId: lead.id,
@@ -2021,212 +2057,204 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                     }
                                   >
                                     Schedule Callback
-                                  </Btn>{" "}
-                                  <details style={{ flexBasis: "100%" }}>
-                                    <summary style={{ cursor: "pointer", minHeight: 44, padding: "12px 0", fontSize: 14, fontWeight: 500 }}>More actions</summary>
-                                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8, paddingBottom: 8 }}>
-                                  <Btn
-                                    small
-                                    color={C.green}
-                                    onClick={() => {
-                                      // Multi-service call leads persist a
-                                      // composed label ("A + B + C") whose
-                                      // PRIMARY may itself be a catalog row
-                                      // containing " + " ("Lawn + Tree &
-                                      // Shrub"). Try the longest prefix
-                                      // first, shedding one " + " segment at
-                                      // a time, so a plus-named combo row
-                                      // still matches before falling back to
-                                      // the bare first segment.
-                                      const segs = (lead.service_interest || "")
-                                        .split(" + ")
-                                        .map((s) => s.trim())
-                                        .filter(Boolean);
-                                      const candidates = segs.map((_, i) =>
-                                        segs
-                                          .slice(0, segs.length - i)
-                                          .join(" + ")
-                                          .toLowerCase(),
-                                      );
-                                      let match = null;
-                                      for (const cand of candidates) {
-                                        match = services.find((s) =>
-                                          [s.name, s.short_name, s.service_key]
-                                            .filter(Boolean)
-                                            .some((v) => {
-                                              const name = v.toLowerCase();
-                                              // Two-way containment: stored
-                                              // labels can be LONGER than the
-                                              // catalog row ("Bee / Wasp Nest
-                                              // Removal Service" vs seeded
-                                              // "Bee / Wasp Nest Removal") —
-                                              // but reverse containment only
-                                              // on SINGLE-segment candidates,
-                                              // or a composite would match a
-                                              // secondary's row before the
-                                              // loop sheds to the primary.
-                                              return (
-                                                name.includes(cand) ||
-                                                (!cand.includes(" + ") &&
-                                                  name.length >= 8 &&
-                                                  cand.includes(name))
-                                              );
-                                            }),
-                                        );
-                                        if (match) break;
-                                      }
-                                      setApptForm({
-                                        leadId: lead.id,
-                                        date: "",
-                                        time: "",
-                                        serviceId: match ? match.id : "",
-                                        // No catalog match: prefill the
-                                        // primary by stripping only KNOWN
-                                        // composed tails (mirror of
-                                        // primaryServiceInterest in
-                                        // server/utils/lead-service-interest)
-                                        // — a bare " + " split would chop a
-                                        // plus-named primary like "Lawn +
-                                        // Tree & Shrub" down to "Lawn".
-                                        serviceType: match
-                                          ? match.name
-                                          : (() => {
-                                              const tails = new Set([
-                                                "pest control service",
-                                                "lawn care service",
-                                                "tree & shrub care service",
-                                                "mosquito control service",
-                                                "termite service",
-                                                "termite inspection",
-                                                "rodent control service",
-                                                "wildlife control service",
-                                                "wdo inspection service",
-                                                "bed bug treatment",
-                                                "palm injection",
-                                                "bee / wasp nest removal service",
-                                                "rodent exclusion",
-                                                "flea control service",
-                                              ]);
-                                              let label = (
-                                                lead.service_interest || ""
-                                              ).trim();
-                                              for (;;) {
-                                                const at =
-                                                  label.lastIndexOf(" + ");
-                                                if (at === -1) break;
-                                                const tail = label
-                                                  .slice(at + 3)
-                                                  .trim()
-                                                  .toLowerCase();
-                                                if (!tails.has(tail)) break;
-                                                label = label
-                                                  .slice(0, at)
-                                                  .trim();
-                                              }
-                                              return label;
-                                            })(),
-                                        technicianId: "",
-                                        notes: "",
-                                      });
-                                    }}
-                                  >
-                                    Add Appt
-                                  </Btn>
-                                  {lead.phone && (
-                                    <Btn
-                                      small
-                                      color={C.green}
-                                      onClick={() =>
-                                        callViaBridge(
-                                          lead.phone,
-                                          `${lead.first_name || ""} ${lead.last_name || ""}`.trim(),
-                                        )
-                                      }
-                                    >
-                                      Call Now
-                                    </Btn>
-                                  )}
-                                  <Btn
-                                    small
-                                    color={C.green}
-                                    onClick={() => {
-                                      setFormData({ leadId: lead.id });
-                                      setShowModal("convert");
-                                    }}
-                                  >
-                                    Convert to Customer
-                                  </Btn>{" "}
-                                  <Btn
-                                    small
-                                    color={C.red}
-                                    onClick={() => {
-                                      setFormData({ leadId: lead.id });
-                                      setShowModal("lost");
-                                    }}
-                                  >
-                                    Mark Lost
-                                  </Btn>{" "}
-                                  <Btn
-                                    small
-                                    color={C.purple}
-                                    onClick={() => {
-                                      setFormData({ leadId: lead.id });
-                                      setShowModal("assign");
-                                    }}
-                                  >
-                                    Assign
-                                  </Btn>{" "}
-                                  <Btn
-                                    small
-                                    color={C.red}
-                                    disabled={deletingLeadId === lead.id}
-                                    style={{
-                                      display: "inline-flex",
-                                      alignItems: "center",
-                                      gap: 6,
-                                    }}
-                                    onClick={() => deleteLead(lead)}
-                                  >
-                                    <Trash2 size={14} strokeWidth={1.8} />
-                                    {deletingLeadId === lead.id
-                                      ? "Deleting"
-                                      : "Delete Lead"}
-                                  </Btn>{" "}
+                                  </Button>{" "}
+                                  <details>
+                                    <summary className="cursor-pointer min-h-[44px] text-ui-body font-medium">
+                                      More actions
+                                    </summary>
+                                    <div className="flex flex-wrap gap-[8px] pb-[8px]">
+                                      <Button
+                                        variant={"primary"}
+                                        // Main's C.green is #3F3F46 (zinc-700) in this file's local
+                                        // palette, not a real green — restored as the exact gray.
+                                        className="!bg-zinc-700 !border-zinc-700 hover:!bg-zinc-800"
+                                        onClick={() => {
+                                          // Multi-service call leads persist a
+                                          // composed label ("A + B + C") whose
+                                          // PRIMARY may itself be a catalog row
+                                          // containing " + " ("Lawn + Tree &
+                                          // Shrub"). Try the longest prefix
+                                          // first, shedding one " + " segment at
+                                          // a time, so a plus-named combo row
+                                          // still matches before falling back to
+                                          // the bare first segment.
+                                          const segs = (
+                                            lead.service_interest || ""
+                                          )
+                                            .split(" + ")
+                                            .map((s) => s.trim())
+                                            .filter(Boolean);
+                                          const candidates = segs.map((_, i) =>
+                                            segs
+                                              .slice(0, segs.length - i)
+                                              .join(" + ")
+                                              .toLowerCase(),
+                                          );
+                                          let match = null;
+                                          for (const cand of candidates) {
+                                            match = services.find((s) =>
+                                              [
+                                                s.name,
+                                                s.short_name,
+                                                s.service_key,
+                                              ]
+                                                .filter(Boolean)
+                                                .some((v) => {
+                                                  const name = v.toLowerCase();
+                                                  // Two-way containment: stored
+                                                  // labels can be LONGER than the
+                                                  // catalog row ("Bee / Wasp Nest
+                                                  // Removal Service" vs seeded
+                                                  // "Bee / Wasp Nest Removal") —
+                                                  // but reverse containment only
+                                                  // on SINGLE-segment candidates,
+                                                  // or a composite would match a
+                                                  // secondary's row before the
+                                                  // loop sheds to the primary.
+                                                  return (
+                                                    name.includes(cand) ||
+                                                    (!cand.includes(" + ") &&
+                                                      name.length >= 8 &&
+                                                      cand.includes(name))
+                                                  );
+                                                }),
+                                            );
+                                            if (match) break;
+                                          }
+                                          setApptForm({
+                                            leadId: lead.id,
+                                            date: "",
+                                            time: "",
+                                            serviceId: match ? match.id : "",
+                                            // No catalog match: prefill the
+                                            // primary by stripping only KNOWN
+                                            // composed tails (mirror of
+                                            // primaryServiceInterest in
+                                            // server/utils/lead-service-interest)
+                                            // — a bare " + " split would chop a
+                                            // plus-named primary like "Lawn +
+                                            // Tree & Shrub" down to "Lawn".
+                                            serviceType: match
+                                              ? match.name
+                                              : (() => {
+                                                  const tails = new Set([
+                                                    "pest control service",
+                                                    "lawn care service",
+                                                    "tree & shrub care service",
+                                                    "mosquito control service",
+                                                    "termite service",
+                                                    "termite inspection",
+                                                    "rodent control service",
+                                                    "wildlife control service",
+                                                    "wdo inspection service",
+                                                    "bed bug treatment",
+                                                    "palm injection",
+                                                    "bee / wasp nest removal service",
+                                                    "rodent exclusion",
+                                                    "flea control service",
+                                                  ]);
+                                                  let label = (
+                                                    lead.service_interest || ""
+                                                  ).trim();
+                                                  for (;;) {
+                                                    const at =
+                                                      label.lastIndexOf(" + ");
+                                                    if (at === -1) break;
+                                                    const tail = label
+                                                      .slice(at + 3)
+                                                      .trim()
+                                                      .toLowerCase();
+                                                    if (!tails.has(tail)) break;
+                                                    label = label
+                                                      .slice(0, at)
+                                                      .trim();
+                                                  }
+                                                  return label;
+                                                })(),
+                                            technicianId: "",
+                                            notes: "",
+                                          });
+                                        }}
+                                      >
+                                        Add Appt
+                                      </Button>
+                                      {lead.phone && (
+                                        <Button
+                                          variant={"primary"}
+                                          // Main's C.green is #3F3F46 (zinc-700) in this file's local
+                                          // palette, not a real green — restored as the exact gray.
+                                          className="!bg-zinc-700 !border-zinc-700 hover:!bg-zinc-800"
+                                          onClick={() =>
+                                            callViaBridge(
+                                              lead.phone,
+                                              `${lead.first_name || ""} ${lead.last_name || ""}`.trim(),
+                                            )
+                                          }
+                                        >
+                                          Call Now
+                                        </Button>
+                                      )}
+                                      <Button
+                                        variant={"primary"}
+                                        // Main's C.green is #3F3F46 (zinc-700) in this file's local
+                                        // palette, not a real green — restored as the exact gray.
+                                        className="!bg-zinc-700 !border-zinc-700 hover:!bg-zinc-800"
+                                        onClick={() => {
+                                          setFormData({
+                                            leadId: lead.id,
+                                          });
+                                          setShowModal("convert");
+                                        }}
+                                      >
+                                        Convert to Customer
+                                      </Button>{" "}
+                                      <Button
+                                        variant={"danger"}
+                                        onClick={() => {
+                                          setFormData({
+                                            leadId: lead.id,
+                                          });
+                                          setShowModal("lost");
+                                        }}
+                                      >
+                                        Mark Lost
+                                      </Button>{" "}
+                                      <Button
+                                        variant={"primary"}
+                                        onClick={() => {
+                                          setFormData({
+                                            leadId: lead.id,
+                                          });
+                                          setShowModal("assign");
+                                        }}
+                                      >
+                                        Assign
+                                      </Button>{" "}
+                                      <Button
+                                        disabled={deletingLeadId === lead.id}
+                                        onClick={() => deleteLead(lead)}
+                                        variant="danger"
+                                        className="inline-flex items-center gap-[6px]"
+                                      >
+                                        <Trash2 size={14} strokeWidth={1.8} />
+                                        {deletingLeadId === lead.id
+                                          ? "Deleting"
+                                          : "Delete Lead"}
+                                      </Button>{" "}
                                     </div>
                                   </details>
                                 </div>
                                 {/* Inline Schedule Callback */}
                                 {callbackForm &&
                                   callbackForm.leadId === lead.id && (
-                                    <div
-                                      style={{
-                                        border: `1px solid ${C.border}`,
-                                        borderRadius: 10,
-                                        padding: 14,
-                                        marginBottom: 12,
-                                        backgroundColor: C.card,
-                                      }}
-                                    >
+                                    <div className="border-hairline border-zinc-200 rounded-md p-[14px] mb-[12px] bg-white">
                                       {" "}
-                                      <div
-                                        style={{
-                                          fontSize: 14,
-                                          color: C.amber,
-                                          fontWeight: 500,
-                                          marginBottom: 8,
-                                        }}
-                                      >
+                                      <div className="text-ui-body text-zinc-600 font-medium mb-[8px]">
                                         Schedule Callback
                                       </div>{" "}
-                                      <div
-                                        style={{
-                                          display: "flex",
-                                          gap: 8,
-                                          marginBottom: 8,
-                                        }}
-                                      >
+                                      <div className="flex gap-[8px] mb-[8px]">
                                         {" "}
-                                        <input
+                                        <Input
                                           type="date"
                                           value={callbackForm.date}
                                           onChange={(e) =>
@@ -2235,17 +2263,9 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                               date: e.target.value,
                                             }))
                                           }
-                                          style={{
-                                            flex: 1,
-                                            backgroundColor: C.input,
-                                            border: `1px solid ${C.inputBorder}`,
-                                            borderRadius: 8,
-                                            padding: "6px 10px",
-                                            color: C.text,
-                                            fontSize: 14,
-                                          }}
+                                          className="flex-[1]"
                                         />{" "}
-                                        <input
+                                        <Input
                                           type="time"
                                           value={callbackForm.time}
                                           onChange={(e) =>
@@ -2254,18 +2274,10 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                               time: e.target.value,
                                             }))
                                           }
-                                          style={{
-                                            flex: 1,
-                                            backgroundColor: C.input,
-                                            border: `1px solid ${C.inputBorder}`,
-                                            borderRadius: 8,
-                                            padding: "6px 10px",
-                                            color: C.text,
-                                            fontSize: 14,
-                                          }}
+                                          className="flex-[1]"
                                         />{" "}
                                       </div>{" "}
-                                      <textarea
+                                      <Textarea
                                         value={callbackForm.notes || ""}
                                         onChange={(e) =>
                                           setCallbackForm((prev) => ({
@@ -2274,25 +2286,15 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                           }))
                                         }
                                         placeholder="Notes..."
-                                        style={{
-                                          width: "100%",
-                                          minHeight: 40,
-                                          backgroundColor: C.input,
-                                          border: `1px solid ${C.inputBorder}`,
-                                          borderRadius: 8,
-                                          padding: "8px 12px",
-                                          color: C.text,
-                                          fontSize: 14,
-                                          resize: "vertical",
-                                          boxSizing: "border-box",
-                                          marginBottom: 8,
-                                        }}
+                                        className="w-full min-h-[40px] resize-y box-border mb-[8px]"
                                       />{" "}
-                                      <div style={{ display: "flex", gap: 8 }}>
+                                      <div className="flex gap-[8px]">
                                         {" "}
-                                        <Btn
-                                          small
-                                          color={C.amber}
+                                        <Button
+                                          variant={"primary"}
+                                          // Main's C.amber is #52525B (zinc-600)
+                                          // here, not a real amber.
+                                          className="!bg-zinc-600 !border-zinc-600 hover:!bg-zinc-700"
                                           disabled={
                                             !callbackForm.date ||
                                             !callbackForm.time
@@ -2319,46 +2321,24 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                           }}
                                         >
                                           Save
-                                        </Btn>{" "}
-                                        <Btn
-                                          small
-                                          color={C.muted}
+                                        </Button>{" "}
+                                        <Button
+                                          variant={"secondary"}
                                           onClick={() => setCallbackForm(null)}
                                         >
                                           Cancel
-                                        </Btn>{" "}
+                                        </Button>{" "}
                                       </div>{" "}
                                     </div>
                                   )}
                                 {/* Inline Add Appointment */}
                                 {apptForm && apptForm.leadId === lead.id && (
-                                  <div
-                                    style={{
-                                      border: `1px solid ${C.border}`,
-                                      borderRadius: 10,
-                                      padding: 14,
-                                      marginBottom: 12,
-                                      backgroundColor: C.card,
-                                    }}
-                                  >
-                                    <div
-                                      style={{
-                                        fontSize: 14,
-                                        color: C.green,
-                                        fontWeight: 500,
-                                        marginBottom: 8,
-                                      }}
-                                    >
+                                  <div className="border-hairline border-zinc-200 rounded-md p-[14px] mb-[12px] bg-white">
+                                    <div className="text-ui-body text-zinc-700 font-medium mb-[8px]">
                                       Add Appointment
                                     </div>
-                                    <div
-                                      style={{
-                                        display: "flex",
-                                        gap: 8,
-                                        marginBottom: 8,
-                                      }}
-                                    >
-                                      <input
+                                    <div className="flex gap-[8px] mb-[8px]">
+                                      <Input
                                         type="date"
                                         value={apptForm.date}
                                         onChange={(e) =>
@@ -2367,20 +2347,12 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                             date: e.target.value,
                                           }))
                                         }
-                                        style={{
-                                          flex: 1,
-                                          backgroundColor: C.input,
-                                          border: `1px solid ${C.inputBorder}`,
-                                          borderRadius: 8,
-                                          padding: "6px 10px",
-                                          color: C.text,
-                                          fontSize: 14,
-                                        }}
+                                        className="flex-[1]"
                                       />
                                       {/* Windows start on the hour (owner rule) — an
                                           hourly select, not a free time input; the
                                           server rejects non-HH:00 anyway. */}
-                                      <select
+                                      <Select
                                         value={apptForm.time}
                                         onChange={(e) =>
                                           setApptForm((prev) => ({
@@ -2388,40 +2360,31 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                             time: e.target.value,
                                           }))
                                         }
-                                        style={{
-                                          flex: 1,
-                                          backgroundColor: C.input,
-                                          border: `1px solid ${C.inputBorder}`,
-                                          borderRadius: 8,
-                                          padding: "6px 10px",
-                                          color: C.text,
-                                          fontSize: 14,
-                                        }}
+                                        className="flex-[1]"
                                       >
                                         <option value="">Time…</option>
                                         {/* All 24 hours, mirroring the shared
                                             CreateAppointmentModal's HOURLY_TIME_OPTIONS —
                                             the endpoint accepts any HH:00. */}
-                                        {Array.from({ length: 24 }, (_, h) => {
-                                          const value = `${String(h).padStart(2, "0")}:00`;
-                                          const hour12 = h % 12 || 12;
-                                          const label = `${hour12}:00 ${h >= 12 ? "PM" : "AM"}`;
-                                          return (
-                                            <option key={value} value={value}>
-                                              {label}
-                                            </option>
-                                          );
-                                        })}
-                                      </select>
+                                        {Array.from(
+                                          {
+                                            length: 24,
+                                          },
+                                          (_, h) => {
+                                            const value = `${String(h).padStart(2, "0")}:00`;
+                                            const hour12 = h % 12 || 12;
+                                            const label = `${hour12}:00 ${h >= 12 ? "PM" : "AM"}`;
+                                            return (
+                                              <option key={value} value={value}>
+                                                {label}
+                                              </option>
+                                            );
+                                          },
+                                        )}
+                                      </Select>
                                     </div>
-                                    <div
-                                      style={{
-                                        display: "flex",
-                                        gap: 8,
-                                        marginBottom: 8,
-                                      }}
-                                    >
-                                      <select
+                                    <div className="flex gap-[8px] mb-[8px]">
+                                      <Select
                                         value={apptForm.serviceId}
                                         onChange={(e) => {
                                           const sid = e.target.value;
@@ -2436,15 +2399,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                               : lead.service_interest || "",
                                           }));
                                         }}
-                                        style={{
-                                          flex: 2,
-                                          backgroundColor: C.input,
-                                          border: `1px solid ${C.inputBorder}`,
-                                          borderRadius: 8,
-                                          padding: "6px 10px",
-                                          color: C.text,
-                                          fontSize: 14,
-                                        }}
+                                        className="flex-[2]"
                                       >
                                         <option value="">
                                           {lead.service_interest
@@ -2456,8 +2411,8 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                             {s.name}
                                           </option>
                                         ))}
-                                      </select>
-                                      <select
+                                      </Select>
+                                      <Select
                                         value={apptForm.technicianId}
                                         onChange={(e) =>
                                           setApptForm((prev) => ({
@@ -2465,15 +2420,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                             technicianId: e.target.value,
                                           }))
                                         }
-                                        style={{
-                                          flex: 1,
-                                          backgroundColor: C.input,
-                                          border: `1px solid ${C.inputBorder}`,
-                                          borderRadius: 8,
-                                          padding: "6px 10px",
-                                          color: C.text,
-                                          fontSize: 14,
-                                        }}
+                                        className="flex-[1]"
                                       >
                                         <option value="">— Unassigned —</option>
                                         {techs.map((t) => (
@@ -2481,9 +2428,9 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                             {t.first_name} {t.last_name || ""}
                                           </option>
                                         ))}
-                                      </select>
+                                      </Select>
                                     </div>
-                                    <textarea
+                                    <Textarea
                                       value={apptForm.notes || ""}
                                       onChange={(e) =>
                                         setApptForm((prev) => ({
@@ -2492,35 +2439,18 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                         }))
                                       }
                                       placeholder="Notes for this appointment..."
-                                      style={{
-                                        width: "100%",
-                                        minHeight: 40,
-                                        backgroundColor: C.input,
-                                        border: `1px solid ${C.inputBorder}`,
-                                        borderRadius: 8,
-                                        padding: "8px 12px",
-                                        color: C.text,
-                                        fontSize: 14,
-                                        resize: "vertical",
-                                        boxSizing: "border-box",
-                                        marginBottom: 8,
-                                      }}
+                                      className="w-full min-h-[40px] resize-y box-border mb-[8px]"
                                     />
-                                    <div
-                                      style={{
-                                        fontSize: 14,
-                                        color: C.muted,
-                                        marginBottom: 8,
-                                      }}
-                                    >
+                                    <div className="text-ui-body text-ink-secondary mb-[8px]">
                                       Saving creates a customer from this lead
                                       (if not already linked) and marks the lead
                                       won.
                                     </div>
-                                    <div style={{ display: "flex", gap: 8 }}>
-                                      <Btn
-                                        small
-                                        color={C.green}
+                                    <div className="flex gap-[8px]">
+                                      <Button
+                                        variant={"primary"}
+                                        // Main's C.green is #3F3F46 (zinc-700), not a real green.
+                                        className="!bg-zinc-700 !border-zinc-700 hover:!bg-zinc-800"
                                         disabled={
                                           apptSaving ||
                                           !apptForm.date ||
@@ -2581,18 +2511,23 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                                 return;
                                               }
                                               if (
-                                                e?.code !== "EMAIL_MATCH_CONFIRM" &&
-                                                e?.code !== "EMAIL_MATCH_AMBIGUOUS"
+                                                e?.code !==
+                                                  "EMAIL_MATCH_CONFIRM" &&
+                                                e?.code !==
+                                                  "EMAIL_MATCH_AMBIGUOUS"
                                               )
                                                 throw e;
                                               const ambiguous =
-                                                e.code === "EMAIL_MATCH_AMBIGUOUS";
+                                                e.code ===
+                                                "EMAIL_MATCH_AMBIGUOUS";
                                               if (ambiguous) {
                                                 // Several accounts share this
                                                 // email: list them; attaching
                                                 // is done from the customer's
                                                 // own record, not here.
-                                                const list = (e.candidates || [])
+                                                const list = (
+                                                  e.candidates || []
+                                                )
                                                   .map(
                                                     (c) =>
                                                       `${c.name || "(unnamed)"} (${c.emailMasked || "email hidden"})`,
@@ -2610,7 +2545,8 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                                 );
                                               if (attach) {
                                                 booked = await submitAppt({
-                                                  attachToAccountId: m.accountId,
+                                                  attachToAccountId:
+                                                    m.accountId,
                                                 });
                                               } else if (
                                                 // Cancel/Escape on the first prompt
@@ -2686,53 +2622,45 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                         }}
                                       >
                                         {apptSaving ? "Saving..." : "Save"}
-                                      </Btn>
-                                      <Btn
-                                        small
-                                        color={C.muted}
+                                      </Button>
+                                      <Button
+                                        variant={"secondary"}
                                         onClick={() => setApptForm(null)}
                                       >
                                         Cancel
-                                      </Btn>
+                                      </Button>
                                     </div>
                                   </div>
                                 )}
                               </div>{" "}
-                            </td>
-                          </tr>
+                            </TD>
+                          </TR>
                         )}
                       </React.Fragment>
                     );
                   })}
                   {leads.length === 0 && (
-                    <tr>
-                      <td
+                    <TR>
+                      <TD
                         colSpan={compactQueue ? 2 : 7}
-                        style={{
-                          padding: 40,
-                          textAlign: "center",
-                          color: C.muted,
-                        }}
+                        className="p-[40px] text-center text-ink-secondary"
                       >
                         No leads found
-                      </td>
-                    </tr>
+                      </TD>
+                    </TR>
                   )}
-                </tbody>
-              </table>{" "}
+                </TBody>
+              </Table>{" "}
             </Card>
           </>
         )}
 
         {pipelineView === "board" && (
-          <div role="region" aria-label="Lead board" tabIndex={0}
-            style={{
-              maxWidth: "100%",
-              display: "flex",
-              gap: 12,
-              overflowX: "auto",
-              paddingBottom: 8,
-            }}
+          <div
+            role="region"
+            aria-label="Lead board"
+            tabIndex={0}
+            className="flex gap-[12px] overflow-x-auto pb-[8px]"
           >
             {BOARD_STAGES.map((stage) => {
               const stageLeads = leads.filter((lead) => lead.status === stage);
@@ -2743,64 +2671,43 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                   key={stage}
                   onDragOver={(e) => e.preventDefault()}
                   onDrop={(e) => handleBoardDrop(e, stage)}
-                  style={{
-                    flex: "0 0 260px",
-                    minWidth: 240,
-                    backgroundColor: C.bg,
-                    border: `1px solid ${isDropTarget ? STATUS_COLORS[stage] : C.border}`,
-                    borderRadius: 10,
-                    padding: 10,
-                  }}
+                  className={
+                    isDropTarget
+                      ? "flex-[0_0_260px] min-w-[240px] bg-zinc-50 border-hairline border-zinc-200 rounded-md p-[10px] ring-2 ring-zinc-900"
+                      : "flex-[0_0_260px] min-w-[240px] bg-zinc-50 border-hairline border-zinc-200 rounded-md p-[10px]"
+                  }
                 >
                   {" "}
-                  <div
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 8,
-                      marginBottom: 10,
-                    }}
-                  >
+                  <div className="flex items-center gap-[8px] mb-[10px]">
                     {" "}
+                    {/* lost/disqualified are a genuine alert (real red)
+                        in main's STATUS_COLORS, not a zinc weight —
+                        statusDotClass keeps that distinct from the other
+                        stages' grayscale ladder. */}
                     <span
-                      style={{
-                        width: 9,
-                        height: 9,
-                        borderRadius: 9999,
-                        backgroundColor: STATUS_COLORS[stage] || C.muted,
-                        display: "inline-block",
-                      }}
+                      className={`w-2.5 h-2.5 rounded-full inline-block ${statusDotClass(stage)}`}
                     />{" "}
-                    <span
-                      style={{
-                        color: C.heading,
-                        fontSize: 14,
-                        fontWeight: 700,
-                        letterSpacing: "0.08em",
-                        textTransform: "uppercase",
-                        flex: 1,
-                      }}
-                    >
+                    <span className="text-zinc-900 text-ui-body font-medium flex-[1]">
                       {stage.replace(/_/g, " ")}
                     </span>{" "}
-                    <span style={{ color: C.muted, fontSize: 14, ...mono }}>
+                    <span className="text-ink-secondary text-ui-body">
                       {stageLeads.length}
                     </span>{" "}
                   </div>{" "}
-                  <div
-                    style={{
-                      maxHeight: "70vh",
-                      overflowY: "auto",
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: 8,
-                    }}
-                  >
+                  <div className="max-h-[70vh] overflow-y-auto flex flex-col gap-[8px]">
                     {stageLeads.map((lead) => (
                       <div
                         key={lead.id}
-                        draggable role="button" tabIndex={0}
-                        onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setPipelineView("table"); expandLead(lead); } }}
+                        draggable
+                        role="button"
+                        tabIndex={0}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            setPipelineView("table");
+                            expandLead(lead);
+                          }
+                        }}
                         onDragStart={(e) => {
                           e.dataTransfer.setData("text/plain", String(lead.id));
                           setDraggingLeadId(lead.id);
@@ -2813,145 +2720,76 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                           // the filter when this card wouldn't pass it.
                           setPipelineView("table");
                           if (!leadMatchesStatusFilter(lead, filters.status)) {
-                            setFilters((f) => ({ ...f, status: "", page: 1 }));
+                            setFilters((f) => ({
+                              ...f,
+                              status: "",
+                              page: 1,
+                            }));
                           }
                           expandLead(lead);
                         }}
-                        style={{
-                          backgroundColor: C.card,
-                          border: `1px solid ${C.border}`,
-                          borderRadius: 8,
-                          padding: 10,
-                          cursor: "grab",
-                          opacity: draggingLeadId === lead.id ? 0.4 : 1,
-                        }}
+                        className={`bg-white border-hairline border-zinc-200 rounded-md p-[10px] cursor-grab ${draggingLeadId === lead.id ? "opacity-40" : "opacity-100"}`}
                       >
                         {" "}
-                        <div
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 8,
-                            marginBottom: 6,
-                          }}
-                        >
+                        <div className="flex items-center gap-[8px] mb-[6px]">
                           {" "}
-                          <div
-                            style={{
-                              color: C.heading,
-                              fontSize: 14,
-                              fontWeight: 500,
-                              overflow: "hidden",
-                              textOverflow: "ellipsis",
-                              whiteSpace: "nowrap",
-                              flex: 1,
-                            }}
-                          >
+                          <div className="text-zinc-900 text-ui-body font-medium overflow-hidden whitespace-nowrap text-ellipsis flex-[1]">
                             {[lead.first_name, lead.last_name]
                               .filter(Boolean)
                               .join(" ") || "Unknown"}
                           </div>{" "}
                           <AgingBadge lead={lead} />{" "}
                         </div>{" "}
-                        <div
-                          style={{
-                            color: C.muted,
-                            fontSize: 14,
-                            ...mono,
-                            marginBottom: 5,
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                            whiteSpace: "nowrap",
-                          }}
-                        >
+                        <div className="text-ink-secondary text-ui-body mb-[5px] overflow-hidden whitespace-nowrap text-ellipsis">
                           {lead.phone || lead.email || "--"}
                         </div>{" "}
-                        <div
-                          style={{
-                            color: C.text,
-                            fontSize: 14,
-                            marginBottom: 8,
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                            whiteSpace: "nowrap",
-                          }}
-                        >
+                        <div className="text-zinc-900 text-ui-body mb-[8px] overflow-hidden whitespace-nowrap text-ellipsis">
                           {lead.service_interest || "--"}
                         </div>{" "}
-                        <div
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 6,
-                            flexWrap: "wrap",
-                          }}
-                        >
+                        <div className="flex items-center gap-[6px] flex-wrap">
                           {lead.source_name && (
-                            <Badge
+                            <LeadBadge
                               label={
                                 lead.source_name.length > 16
                                   ? lead.source_name.slice(0, 13) + "..."
                                   : lead.source_name
                               }
-                              color={C.teal}
+                              tone={"strong"}
                             />
                           )}
                           {lead.urgency && lead.urgency !== "normal" && (
-                            <Badge
+                            <LeadBadge
                               label={lead.urgency}
-                              color={
-                                lead.urgency === "urgent" ? C.red : C.amber
+                              tone={
+                                lead.urgency === "urgent" ? "alert" : "neutral"
+                              }
+                              className={
+                                lead.urgency === "urgent"
+                                  ? undefined
+                                  : "!bg-zinc-600/15 !text-zinc-600"
                               }
                             />
                           )}
                         </div>{" "}
-                        <button
+                        <Button
                           type="button"
-                          aria-label={`Delete lead for ${
-                            [lead.first_name, lead.last_name]
-                              .filter(Boolean)
-                              .join(" ") || "unknown"
-                          }`}
+                          aria-label={`Delete lead for ${[lead.first_name, lead.last_name].filter(Boolean).join(" ") || "unknown"}`}
                           title="Delete lead"
                           disabled={deletingLeadId === lead.id}
                           onClick={(e) => {
                             e.stopPropagation();
                             deleteLead(lead);
                           }}
-                          style={{
-                            display: "inline-flex",
-                            alignItems: "center",
-                            gap: 5,
-                            marginTop: 10,
-                            border: `1px solid ${C.red}33`,
-                            borderRadius: 6,
-                            padding: "4px 7px",
-                            background: C.white,
-                            color: C.red,
-                            fontSize: 14,
-                            fontWeight: 500,
-                            cursor:
-                              deletingLeadId === lead.id
-                                ? "not-allowed"
-                                : "pointer",
-                            opacity: deletingLeadId === lead.id ? 0.5 : 1,
-                          }}
+                          variant="danger"
+                          className="inline-flex items-center gap-[5px] mt-[10px]"
                         >
                           <Trash2 size={13} strokeWidth={1.8} />
                           {deletingLeadId === lead.id ? "Deleting" : "Delete"}
-                        </button>
+                        </Button>
                       </div>
                     ))}
                     {stageLeads.length === 0 && (
-                      <div
-                        style={{
-                          color: C.muted,
-                          fontSize: 14,
-                          fontStyle: "italic",
-                          padding: "12px 4px",
-                          textAlign: "center",
-                        }}
-                      >
+                      <div className="text-ink-secondary text-ui-body text-center">
                         Drop here
                       </div>
                     )}
@@ -2961,47 +2799,39 @@ export function LeadsSection({ newLeadRequest = 0 }) {
             })}
           </div>
         )}
-            {/* Pagination */}
-            {leadsTotal > 50 && (
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "center",
-                  gap: 8,
-                  marginTop: 16,
-                }}
-              >
-                {" "}
-                <Btn
-                  small
-                  disabled={filters.page <= 1}
-                  onClick={() =>
-                    setFilters((f) => ({ ...f, page: f.page - 1 }))
-                  }
-                >
-                  Prev
-                </Btn>{" "}
-                <span
-                  style={{
-                    color: C.muted,
-                    fontSize: 14,
-                    alignSelf: "center",
-                    ...mono,
-                  }}
-                >
-                  Page {filters.page} of {Math.ceil(leadsTotal / 50)}
-                </span>{" "}
-                <Btn
-                  small
-                  disabled={filters.page >= Math.ceil(leadsTotal / 50)}
-                  onClick={() =>
-                    setFilters((f) => ({ ...f, page: f.page + 1 }))
-                  }
-                >
-                  Next
-                </Btn>{" "}
-              </div>
-            )}
+        {/* Pagination */}
+        {leadsTotal > 50 && (
+          <div className="flex justify-center gap-[8px] mt-[16px]">
+            {" "}
+            <Button
+              variant="secondary"
+              disabled={filters.page <= 1}
+              onClick={() =>
+                setFilters((f) => ({
+                  ...f,
+                  page: f.page - 1,
+                }))
+              }
+            >
+              Prev
+            </Button>{" "}
+            <span className="text-ink-secondary text-ui-body self-center">
+              Page {filters.page} of {Math.ceil(leadsTotal / 50)}
+            </span>{" "}
+            <Button
+              variant="secondary"
+              disabled={filters.page >= Math.ceil(leadsTotal / 50)}
+              onClick={() =>
+                setFilters((f) => ({
+                  ...f,
+                  page: f.page + 1,
+                }))
+              }
+            >
+              Next
+            </Button>{" "}
+          </div>
+        )}
       </>
     );
   };
@@ -3011,7 +2841,6 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   // ═════════════════════════════════════════════════════════════════════════
   const [expandedSource, setExpandedSource] = useState(null);
   const [sourceROI, setSourceROI] = useState(null);
-
   const expandSource = async (source) => {
     if (expandedSource === source.id) {
       setExpandedSource(null);
@@ -3025,7 +2854,6 @@ export function LeadsSection({ newLeadRequest = 0 }) {
       setSourceROI(null);
     }
   };
-
   const renderSources = () => {
     // Real revenue-based ROI per source from /analytics/by-source (same backend
     // as Channel Comparison / ROI Matrix / Phone Number ROI), keyed by id.
@@ -3033,31 +2861,14 @@ export function LeadsSection({ newLeadRequest = 0 }) {
     return (
       <>
         {" "}
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            marginBottom: 16,
-          }}
-        >
+        <div className="flex justify-between items-center mb-[16px]">
           {" "}
-          <h2
-            style={{
-              margin: 0,
-              color: C.heading,
-              fontSize: 14,
-              fontWeight: 500,
-              fontFamily: ROBOTO,
-              letterSpacing: "0.02em",
-            }}
-          >
+          <h2 className="m-0 text-zinc-900 text-ui-body font-medium">
             Lead Sources ({sources.length})
           </h2>{" "}
-          <div style={{ display: "flex", gap: 8 }}>
+          <div className="flex gap-[8px]">
             {" "}
-            <Btn
-              small
+            <Button
               onClick={() => {
                 setFormData({
                   source_type: "phone_tracking",
@@ -3067,16 +2878,14 @@ export function LeadsSection({ newLeadRequest = 0 }) {
               }}
             >
               + Add Source
-            </Btn>{" "}
+            </Button>{" "}
           </div>{" "}
         </div>{" "}
-        <Card style={{ padding: 0, overflow: "auto" }}>
+        <Card className="p-[0px] overflow-auto">
           {" "}
-          <table
-            style={{ width: "100%", borderCollapse: "collapse", minWidth: 900 }}
-          >
-            <thead>
-              <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+          <Table className="w-full min-w-[900px]">
+            <THead>
+              <TR>
                 {[
                   "Source",
                   "Type",
@@ -3089,24 +2898,16 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                   "Cost/Acq",
                   "ROI %",
                 ].map((h) => (
-                  <th
+                  <TH
                     key={h}
-                    style={{
-                      padding: "12px 14px",
-                      textAlign: "left",
-                      fontSize: 14,
-                      color: C.muted,
-                      fontWeight: 500,
-                      textTransform: "uppercase",
-                      whiteSpace: "nowrap",
-                    }}
+                    className="text-left text-ink-secondary whitespace-nowrap"
                   >
                     {h}
-                  </th>
+                  </TH>
                 ))}
-              </tr>
-            </thead>
-            <tbody>
+              </TR>
+            </THead>
+            <TBody>
               {sources.map((src) => {
                 const monthLeads = parseInt(src.month_leads || 0);
                 const monthConv = parseInt(src.month_conversions || 0);
@@ -3137,206 +2938,117 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                 // has no winner map and would show un-attributed revenue.
                 const detail = r || sourceROI;
                 const isExp = expandedSource === src.id;
-
                 return (
                   <React.Fragment key={src.id}>
                     {" "}
-                    <tr
+                    <TR
                       onClick={() => expandSource(src)}
-                      style={{
-                        borderBottom: `1px solid ${C.border}`,
-                        cursor: "pointer",
-                        backgroundColor: isExp ? C.cardHover : "transparent",
-                        opacity: src.is_active ? 1 : 0.5,
-                      }}
+                      className={`cursor-pointer ${isExp ? "bg-zinc-50" : ""} ${src.is_active ? "" : "opacity-50"}`}
                     >
-                      <td style={{ padding: "12px 14px" }}>
+                      <TD>
                         {" "}
-                        <div
-                          style={{
-                            color: C.heading,
-                            fontSize: 14,
-                            fontWeight: 500,
-                          }}
-                        >
+                        <div className="text-zinc-900 text-ui-body font-medium">
                           {src.name}
                         </div>
                         {src.domain && (
-                          <div style={{ color: C.muted, fontSize: 11 }}>
+                          <div className="text-ink-secondary text-ui-body">
                             {src.domain}
                           </div>
                         )}
-                      </td>
-                      <td style={{ padding: "12px 14px" }}>
-                        <Badge
+                      </TD>
+                      <TD>
+                        <LeadBadge
                           label={src.source_type?.replace(/_/g, " ")}
-                          color={C.teal}
+                          tone={"strong"}
                         />
-                      </td>
-                      <td
-                        style={{
-                          padding: "12px 14px",
-                          color: C.text,
-                          fontSize: 14,
-                        }}
-                      >
-                        {src.channel || "--"}
-                      </td>
-                      <td
-                        style={{
-                          padding: "12px 14px",
-                          ...mono,
-                          fontSize: 14,
-                          color: C.text,
-                        }}
-                      >
-                        {fmtMoney(mc)}
-                      </td>
-                      <td
-                        style={{
-                          padding: "12px 14px",
-                          ...mono,
-                          fontSize: 14,
-                          color: C.heading,
-                        }}
-                      >
-                        {monthLeads}
-                      </td>
-                      <td
-                        style={{
-                          padding: "12px 14px",
-                          ...mono,
-                          fontSize: 14,
-                          color: C.green,
-                        }}
-                      >
-                        {monthConv}
-                      </td>
-                      <td
-                        style={{
-                          padding: "12px 14px",
-                          ...mono,
-                          fontSize: 14,
-                          color:
-                            convRate > 20
-                              ? C.green
-                              : convRate > 10
-                                ? C.amber
-                                : C.muted,
-                        }}
+                      </TD>
+                      <TD className="text-zinc-900">{src.channel || "--"}</TD>
+                      <TD className="text-zinc-900">{fmtMoney(mc)}</TD>
+                      <TD className="text-zinc-900">{monthLeads}</TD>
+                      <TD className="text-zinc-700">{monthConv}</TD>
+                      <TD
+                        className={
+                          convRate > 20
+                            ? "text-zinc-700"
+                            : convRate > 10
+                              ? "text-zinc-600"
+                              : "text-ink-secondary"
+                        }
                       >
                         {fmtPct(convRate)}
-                      </td>
-                      <td
-                        style={{
-                          padding: "12px 14px",
-                          ...mono,
-                          fontSize: 14,
-                          color: C.text,
-                        }}
-                      >
+                      </TD>
+                      <TD className="text-zinc-900">
                         {cpl > 0 ? fmtMoney(cpl) : "--"}
-                      </td>
-                      <td
-                        style={{
-                          padding: "12px 14px",
-                          ...mono,
-                          fontSize: 14,
-                          color: C.text,
-                        }}
-                      >
+                      </TD>
+                      <TD className="text-zinc-900">
                         {cpa > 0 ? fmtMoney(cpa) : "--"}
-                      </td>
-                      <td
-                        style={{
-                          padding: "12px 14px",
-                          ...mono,
-                          fontSize: 14,
-                          fontWeight: 500,
-                          color: roiColor(roi || 0),
-                        }}
-                      >
+                      </TD>
+                      <TD className={`font-medium ${hasRoiSignal ? roiColorClass(roi) : "text-ink-secondary"}`}>
                         {hasRoiSignal ? fmtPct(roi) : "--"}
-                      </td>
-                    </tr>
+                      </TD>
+                    </TR>
                     {isExp && detail && (
-                      <tr>
-                        <td colSpan={10} style={{ padding: 0 }}>
+                      <TR>
+                        <TD colSpan={10} className="p-[0px]">
                           {" "}
-                          <div
-                            style={{
-                              padding: "16px 24px",
-                              backgroundColor: C.bg,
-                              borderBottom: `1px solid ${C.border}`,
-                            }}
-                          >
+                          <div className="border-b border-solid border-zinc-200 bg-zinc-50 px-6 py-4">
                             {" "}
-                            <div
-                              style={{
-                                display: "flex",
-                                gap: 24,
-                                flexWrap: "wrap",
-                                marginBottom: 12,
-                              }}
-                            >
+                            <div className="flex gap-[24px] flex-wrap mb-[12px]">
                               {" "}
                               <div>
-                                <span style={{ color: C.muted, fontSize: 12 }}>
+                                <span className="text-ink-secondary text-ui-body">
                                   Total Leads:{" "}
                                 </span>
-                                <span style={{ color: C.heading, ...mono }}>
+                                <span className="text-zinc-900">
                                   {detail.totalLeads}
                                 </span>
                               </div>{" "}
                               <div>
-                                <span style={{ color: C.muted, fontSize: 12 }}>
+                                <span className="text-ink-secondary text-ui-body">
                                   Conversions:{" "}
                                 </span>
-                                <span style={{ color: C.green, ...mono }}>
+                                <span className="text-zinc-700">
                                   {detail.conversions}
                                 </span>
                               </div>{" "}
                               <div>
-                                <span style={{ color: C.muted, fontSize: 12 }}>
+                                <span className="text-ink-secondary text-ui-body">
                                   Total Cost:{" "}
                                 </span>
-                                <span style={{ color: C.text, ...mono }}>
+                                <span className="text-zinc-900">
                                   {fmtMoney(detail.totalCost)}
                                 </span>
                               </div>{" "}
                               <div>
-                                <span style={{ color: C.muted, fontSize: 12 }}>
+                                <span className="text-ink-secondary text-ui-body">
                                   Total Revenue:{" "}
                                 </span>
-                                <span style={{ color: C.green, ...mono }}>
+                                <span className="text-zinc-700">
                                   {fmtMoney(detail.totalRevenue)}
                                 </span>
                               </div>{" "}
                               <div>
-                                <span style={{ color: C.muted, fontSize: 12 }}>
+                                <span className="text-ink-secondary text-ui-body">
                                   ROI:{" "}
                                 </span>
-                                <span
-                                  style={{
-                                    ...mono,
-                                    color: roiColor(detail.roi),
-                                  }}
-                                >
+                                <span className={roiColorClass(detail.roi)}>
                                   {fmtPct(detail.roi)}
                                 </span>
                               </div>{" "}
                               <div>
-                                <span style={{ color: C.muted, fontSize: 12 }}>
+                                <span className="text-ink-secondary text-ui-body">
                                   Avg Response:{" "}
                                 </span>
-                                <span style={{ color: C.text, ...mono }}>
+                                <span className="text-zinc-900">
                                   {fmtTime(detail.avgResponseTime)}
                                 </span>
                               </div>{" "}
                             </div>{" "}
-                            <Btn
-                              small
-                              color={C.amber}
+                            <Button
+                              variant={"primary"}
+                              // Main's C.amber is #52525B (zinc-600), not a
+                              // real amber.
+                              className="!bg-zinc-600 !border-zinc-600 hover:!bg-zinc-700"
                               onClick={() => {
                                 setFormData({
                                   sourceId: src.id,
@@ -3346,16 +3058,16 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                               }}
                             >
                               Log Cost
-                            </Btn>{" "}
+                            </Button>{" "}
                           </div>{" "}
-                        </td>
-                      </tr>
+                        </TD>
+                      </TR>
                     )}
                   </React.Fragment>
                 );
               })}
-            </tbody>
-          </table>{" "}
+            </TBody>
+          </Table>{" "}
         </Card>{" "}
       </>
     );
@@ -3373,7 +3085,11 @@ export function LeadsSection({ newLeadRequest = 0 }) {
         0,
       );
     const pipelineOrder = [
-      { stage: "new", label: "New Leads", count: countStages(["new"]) },
+      {
+        stage: "new",
+        label: "New Leads",
+        count: countStages(["new"]),
+      },
       {
         stage: "contacted",
         label: "Contacted",
@@ -3384,11 +3100,20 @@ export function LeadsSection({ newLeadRequest = 0 }) {
         label: "Estimate Sent",
         count: countStages(["estimate_sent", "estimate_viewed", "negotiating"]),
       },
-      { stage: "won", label: "Won", count: countStages(["won"]) },
+      {
+        stage: "won",
+        label: "Won",
+        count: countStages(["won"]),
+      },
       {
         stage: "lost",
         label: "Lost",
-        count: countStages(["lost", "unresponsive", "disqualified", "duplicate"]),
+        count: countStages([
+          "lost",
+          "unresponsive",
+          "disqualified",
+          "duplicate",
+        ]),
       },
     ];
     const funnelData = pipelineOrder;
@@ -3408,40 +3133,34 @@ export function LeadsSection({ newLeadRequest = 0 }) {
 
     // Lost reasons pie
     const totalLost = lostReasons.reduce((s, r) => s + r.count, 0);
-    const pieColors = [
-      C.red,
-      C.heading,
-      C.text,
-      C.green,
-      C.amber,
-      C.muted,
-      "#A1A1AA",
+    // Main's C.red/C.heading/C.text/C.green/C.amber/C.muted are (in this
+    // file's local palette) #991B1B (real red) / #09090B / #27272A / #3F3F46
+    // / #52525B / #71717A — i.e. zinc-950/800/700/600/500 for all but the
+    // first slot. Main gave the first (most common) lost-reason slice the
+    // real red, but that's whichever reason happens to sort first — neutral
+    // categorical/frequency data, not a genuinely negative condition — so
+    // alert red is NOT reused here; this is a pure zinc gradient instead.
+    const pieClasses = [
+      "text-zinc-900",
+      "text-zinc-800",
+      "text-zinc-700",
+      "text-zinc-600",
+      "text-zinc-500",
+      "text-zinc-400",
+      "text-zinc-300",
     ];
 
     // Phone number ROI
     const phoneROI = bySource.filter((s) => s.source?.twilio_phone_number);
-
     return (
       <>
         {/* Metric Cards */}
-        <div
-          style={{
-            display: "flex",
-            gap: 16,
-            flexWrap: "wrap",
-            marginBottom: 24,
-          }}
-        >
+        <div className="flex gap-[16px] flex-wrap mb-[24px]">
           {" "}
-          <MetricCard
-            label="New Leads (Month)"
-            value={ov.total || 0}
-            color={C.teal}
-          />{" "}
+          <MetricCard label="New Leads (Month)" value={ov.total || 0} />{" "}
           <MetricCard
             label="Conversion Rate"
             value={fmtPct(ov.conversionRate)}
-            color={C.green}
           />{" "}
           <MetricCard
             label="Median Response Time"
@@ -3451,16 +3170,13 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                 ? `7-day: ${fmtTime(ov.recentMedianResponseTime)}`
                 : undefined
             }
-            color={C.amber}
           />{" "}
-          <MetricCard
-            label="Cost per Acquisition"
-            value={fmtMoney(ov.cpa)}
-            color={C.purple}
-          />{" "}
+          <MetricCard label="Cost per Acquisition" value={fmtMoney(ov.cpa)} />{" "}
           <MetricCard
             label="Avg Speed to Lead"
-            value={ov.avgSpeedToLead != null ? fmtTime(ov.avgSpeedToLead) : "--"}
+            value={
+              ov.avgSpeedToLead != null ? fmtTime(ov.avgSpeedToLead) : "--"
+            }
             sub={(() => {
               const since = ov.speedToLeadSince
                 ? ` since ${fmtShortDate(ov.speedToLeadSince)}`
@@ -3474,49 +3190,29 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                     : "Needs work";
               return `${ov.openUnansweredCount} waiting${since} · ${quality}`;
             })()}
-            color={
-              ov.avgSpeedToLead == null
-                ? C.green
-                : ov.avgSpeedToLead < 5
-                  ? C.green
-                  : ov.avgSpeedToLead < 15
-                    ? C.amber
-                    : C.red
+            alert={ov.avgSpeedToLead >= 15}
+            valueClassName={
+              ov.avgSpeedToLead != null && ov.avgSpeedToLead >= 5
+                ? "text-zinc-600"
+                : "text-zinc-700"
             }
           />{" "}
           <MetricCard
             label="Monthly ROI"
             value={ov.roi != null ? fmtPct(ov.roi) : "--"}
-            color={roiColor(ov.roi || 0)}
+            alert={ov.roi < 0}
           />{" "}
         </div>
         {/* Pipeline status */}
-        <div style={{ marginBottom: 10 }}>
-          <h2
-            style={{
-              margin: "0 0 6px",
-              color: C.heading,
-              fontSize: 14,
-              fontWeight: 500,
-              fontFamily: ROBOTO,
-              letterSpacing: "0.02em",
-            }}
-          >
+        <div className="mb-[10px]">
+          <h2 className="m-0 mb-[6px] text-zinc-900 text-ui-body font-medium">
             Pipeline status
           </h2>
-          <div style={{ margin: 0, color: C.muted, fontSize: 12 }}>
+          <div className="m-0 text-ink-secondary text-ui-body">
             Current lead counts by status for the selected month.
           </div>
         </div>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            marginBottom: 16,
-            flexWrap: "wrap",
-          }}
-        >
+        <div className="flex items-center gap-[8px] mb-[16px] flex-wrap">
           {funnelData.map((f) => (
             <PipelineStatusCard
               key={f.stage}
@@ -3526,152 +3222,86 @@ export function LeadsSection({ newLeadRequest = 0 }) {
           ))}
         </div>
         {/* Channel Comparison */}
-        <Card style={{ marginBottom: 24 }}>
+        <Card className="mb-[24px] p-5">
           {" "}
-          <h2
-            style={{
-              margin: "0 0 16px",
-              color: C.heading,
-              fontSize: 14,
-              fontWeight: 500,
-              fontFamily: ROBOTO,
-              letterSpacing: "0.02em",
-            }}
-          >
+          <h2 className="m-0 mb-[16px] text-zinc-900 text-ui-body font-medium">
             Channel comparison
           </h2>
           {byChannel.length === 0 && (
-            <div style={{ color: C.muted, fontSize: 13 }}>
+            <div className="text-ink-secondary text-ui-body">
               No channel data available yet
             </div>
           )}
           {byChannel.map((ch) => (
-            <div key={ch.channel} style={{ marginBottom: 12 }}>
+            <div key={ch.channel} className="mb-[12px]">
               {" "}
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  fontSize: 14,
-                  marginBottom: 4,
-                }}
-              >
+              <div className="flex justify-between text-ui-body mb-[4px]">
                 {" "}
-                <span style={{ color: C.text, fontWeight: 500 }}>
+                <span className="text-zinc-900 font-medium">
                   {ch.channel}
                 </span>{" "}
-                <span style={{ color: C.muted, ...mono }}>
+                <span className="text-ink-secondary">
                   Leads: {ch.totalLeads} | Conv: {ch.conversions} | ROI:{" "}
                   {fmtPct(ch.roi)}
                 </span>{" "}
               </div>{" "}
-              <div style={{ display: "flex", gap: 2, height: 16 }}>
-                {" "}
-                <div
-                  style={{
-                    width: `${(ch.totalCost / maxChannelVal) * 100}%`,
-                    height: "100%",
-                    backgroundColor: C.red + "88",
-                    borderRadius: "3px 0 0 3px",
-                    minWidth: ch.totalCost > 0 ? 2 : 0,
-                  }}
-                />{" "}
-                <div
-                  style={{
-                    width: `${(ch.totalRevenue / maxChannelVal) * 100}%`,
-                    height: "100%",
-                    backgroundColor: C.green + "88",
-                    borderRadius: "0 3px 3px 0",
-                    minWidth: ch.totalRevenue > 0 ? 2 : 0,
-                  }}
-                />{" "}
+              <div className="grid grid-cols-2 gap-2">
+                <progress
+                  aria-label={`${ch.channel} cost`}
+                  value={ch.totalCost}
+                  max={maxChannelVal}
+                  // Main painted this C.red, but alert-fg is reserved for
+                  // genuinely negative conditions (e.g. negative ROI) — cost
+                  // here is routine comparison data, not an alert. Restored
+                  // as a lighter zinc weight, distinct from revenue's zinc-700.
+                  className="h-3 w-full accent-zinc-400"
+                />
+                <progress
+                  aria-label={`${ch.channel} revenue`}
+                  value={ch.totalRevenue}
+                  max={maxChannelVal}
+                  className="h-3 w-full accent-zinc-700"
+                />
               </div>{" "}
-              <div
-                style={{
-                  display: "flex",
-                  gap: 16,
-                  fontSize: 14,
-                  color: C.muted,
-                  marginTop: 2,
-                }}
-              >
+              <div className="flex gap-[16px] text-ui-body text-ink-secondary mt-[2px]">
                 {" "}
                 <span>Cost: {fmtMoney(ch.totalCost)}</span>{" "}
                 <span>Revenue: {fmtMoney(ch.totalRevenue)}</span>{" "}
               </div>{" "}
             </div>
           ))}
-          <div
-            style={{
-              display: "flex",
-              gap: 16,
-              fontSize: 14,
-              color: C.muted,
-              marginTop: 8,
-            }}
-          >
+          <div className="flex gap-[16px] text-ui-body text-ink-secondary mt-[8px]">
             {" "}
             <span>
-              <span
-                style={{
-                  display: "inline-block",
-                  width: 12,
-                  height: 12,
-                  backgroundColor: C.red + "88",
-                  borderRadius: 2,
-                  verticalAlign: "middle",
-                  marginRight: 4,
-                }}
-              />
+              <span className="inline-block w-3 h-3 rounded-sm mr-1 bg-zinc-400" />
               Cost
             </span>{" "}
             <span>
-              <span
-                style={{
-                  display: "inline-block",
-                  width: 12,
-                  height: 12,
-                  backgroundColor: C.green + "88",
-                  borderRadius: 2,
-                  verticalAlign: "middle",
-                  marginRight: 4,
-                }}
-              />
+              <span className="inline-block w-3 h-3 rounded-sm mr-1 bg-zinc-700" />
               Revenue
             </span>{" "}
           </div>{" "}
         </Card>
         {/* Source ROI Matrix */}
-        <Card style={{ marginBottom: 24 }}>
+        <Card className="mb-[24px] p-5">
           {" "}
-          <h2
-            style={{
-              margin: "0 0 16px",
-              color: C.heading,
-              fontSize: 14,
-              fontWeight: 500,
-              fontFamily: ROBOTO,
-              letterSpacing: "0.02em",
-            }}
-          >
+          <h2 className="m-0 mb-[16px] text-zinc-900 text-ui-body font-medium">
             Source ROI matrix
           </h2>
           {scatterSources.length === 0 ? (
-            <div style={{ color: C.muted, fontSize: 13 }}>
+            <div className="text-ink-secondary text-ui-body">
               No source data with leads yet
             </div>
           ) : (
-            <svg
-              viewBox="0 0 400 300"
-              style={{ width: "100%", maxWidth: 600, height: "auto" }}
-            >
+            <svg viewBox="0 0 400 300" className="w-full max-w-[600px]">
               {/* Quadrant lines */}
               <line
                 x1="200"
                 y1="10"
                 x2="200"
                 y2="280"
-                stroke={C.border}
+                stroke="currentColor"
+                className="text-zinc-200"
                 strokeDasharray="4"
               />{" "}
               <line
@@ -3679,15 +3309,17 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                 y1="145"
                 x2="380"
                 y2="145"
-                stroke={C.border}
+                stroke="currentColor"
+                className="text-zinc-200"
                 strokeDasharray="4"
               />
               {/* Quadrant labels */}
               <text
                 x="110"
                 y="80"
-                fill={C.muted}
-                fontSize="9"
+                fill="currentColor"
+                className="text-ink-secondary text-[14px]"
+                fontSize="14"
                 textAnchor="middle"
               >
                 Question Marks
@@ -3695,8 +3327,9 @@ export function LeadsSection({ newLeadRequest = 0 }) {
               <text
                 x="300"
                 y="80"
-                fill={C.heading}
-                fontSize="9"
+                fill="currentColor"
+                className="text-zinc-900 text-[14px]"
+                fontSize="14"
                 textAnchor="middle"
               >
                 Stars
@@ -3704,8 +3337,9 @@ export function LeadsSection({ newLeadRequest = 0 }) {
               <text
                 x="110"
                 y="230"
-                fill={C.muted}
-                fontSize="9"
+                fill="currentColor"
+                className="text-ink-secondary text-[14px]"
+                fontSize="14"
                 textAnchor="middle"
               >
                 Dogs
@@ -3713,8 +3347,9 @@ export function LeadsSection({ newLeadRequest = 0 }) {
               <text
                 x="300"
                 y="230"
-                fill={C.text}
-                fontSize="9"
+                fill="currentColor"
+                className="text-zinc-700 text-[14px]"
+                fontSize="14"
                 textAnchor="middle"
               >
                 Cash Cows
@@ -3723,8 +3358,9 @@ export function LeadsSection({ newLeadRequest = 0 }) {
               <text
                 x="200"
                 y="296"
-                fill={C.muted}
-                fontSize="9"
+                fill="currentColor"
+                className="text-ink-secondary text-[14px]"
+                fontSize="14"
                 textAnchor="middle"
               >
                 Revenue --&gt;
@@ -3732,8 +3368,9 @@ export function LeadsSection({ newLeadRequest = 0 }) {
               <text
                 x="12"
                 y="145"
-                fill={C.muted}
-                fontSize="9"
+                fill="currentColor"
+                className="text-ink-secondary text-[14px]"
+                fontSize="14"
                 textAnchor="middle"
                 transform="rotate(-90 12 145)"
               >
@@ -3747,18 +3384,29 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                   4,
                   Math.min(20, (s.totalLeads / maxLeads) * 18),
                 );
-                const c =
+                // Main's C.heading/C.green/C.amber are zinc-950/zinc-700/
+                // zinc-600 in this file's local palette, NOT real hues —
+                // only C.red is a genuine color (the <=0% tier, a real
+                // alert). Restored as the matching zinc shades.
+                const toneClass =
                   s.roi > 200
-                    ? C.heading
+                    ? "text-zinc-900"
                     : s.roi > 50
-                      ? C.green
+                      ? "text-zinc-700"
                       : s.roi > 0
-                        ? C.amber
-                        : C.red;
+                        ? "text-zinc-600"
+                        : "text-alert-fg";
                 return (
                   <g key={i}>
                     {" "}
-                    <circle cx={x} cy={y} r={r} fill={c} opacity={0.7} />{" "}
+                    <circle
+                      cx={x}
+                      cy={y}
+                      r={r}
+                      fill="currentColor"
+                      className={toneClass}
+                      opacity={0.7}
+                    />{" "}
                     <title>
                       {s.source?.name}: Cost {fmtMoney(s.totalCost)}, Rev{" "}
                       {fmtMoney(s.totalRevenue)}, {s.totalLeads} leads, ROI{" "}
@@ -3770,193 +3418,78 @@ export function LeadsSection({ newLeadRequest = 0 }) {
             </svg>
           )}
         </Card>{" "}
-        <div
-          style={{
-            display: "flex",
-            gap: 16,
-            flexWrap: "wrap",
-            marginBottom: 24,
-          }}
-        >
+        <div className="flex gap-[16px] flex-wrap mb-[24px]">
           {/* Response Time vs Conversion */}
-          <Card style={{ flex: "1 1 400px" }}>
+          <Card className="flex-[1_1_400px] p-5">
             {" "}
-            <h2
-              style={{
-                margin: "0 0 16px",
-                color: C.heading,
-                fontSize: 14,
-                fontWeight: 500,
-                fontFamily: ROBOTO,
-                letterSpacing: "0.02em",
-              }}
-            >
+            <h2 className="m-0 mb-[16px] text-zinc-900 text-ui-body font-medium">
               Response time vs conversion
             </h2>
-            <div
-              style={{
-                margin: "-12px 0 14px",
-                color: C.muted,
-                fontSize: 14,
-                fontFamily: ROBOTO,
-              }}
-            >
-              Year to date
-            </div>
+            <div className="text-ink-secondary text-ui-body">Year to date</div>
             {responseBuckets.length === 0 ? (
-              <div style={{ color: C.muted, fontSize: 13 }}>
+              <div className="text-ink-secondary text-ui-body">
                 No response data yet
               </div>
             ) : (
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "flex-end",
-                  gap: 6,
-                  height: 140,
-                }}
-              >
+              <div className="grid gap-3 mt-3">
                 {responseBuckets.map((b, i) => {
-                  const h = Math.max(8, (b.total / maxResp) * 120);
-                  const wonH = b.total > 0 ? (b.won / b.total) * h : 0;
                   return (
-                    <div key={i} style={{ flex: 1, textAlign: "center" }}>
-                      {" "}
-                      <div
-                        style={{
-                          fontSize: 14,
-                          color: C.heading,
-                          ...mono,
-                          marginBottom: 4,
-                        }}
-                      >
-                        {b.conversionRate}%
-                      </div>{" "}
-                      <div
-                        style={{
-                          position: "relative",
-                          height: h,
-                          margin: "0 auto",
-                          width: "80%",
-                          minWidth: 16,
-                        }}
-                      >
-                        {" "}
-                        <div
-                          style={{
-                            position: "absolute",
-                            bottom: 0,
-                            width: "100%",
-                            height: h,
-                            backgroundColor: C.border,
-                            borderRadius: "4px 4px 0 0",
-                          }}
-                        />{" "}
-                        <div
-                          style={{
-                            position: "absolute",
-                            bottom: 0,
-                            width: "100%",
-                            height: wonH,
-                            backgroundColor: C.green,
-                            borderRadius: wonH >= h ? "4px 4px 0 0" : "0 0 0 0",
-                          }}
-                        />{" "}
-                      </div>{" "}
-                      <div
-                        style={{
-                          fontSize: 9,
-                          color: C.muted,
-                          marginTop: 6,
-                          lineHeight: 1.2,
-                        }}
-                      >
+                    <div
+                      key={i}
+                      className="grid grid-cols-[minmax(90px,1fr)_2fr_auto] items-center gap-3"
+                    >
+                      <span className="text-ui-body text-ink-secondary">
                         {b.label}
-                      </div>{" "}
-                      <div style={{ fontSize: 14, color: C.muted, ...mono }}>
-                        {b.total}
-                      </div>{" "}
+                      </span>
+                      <div className="grid gap-1">
+                        <progress
+                          aria-label={`${b.label} total leads`}
+                          value={b.total}
+                          max={maxResp}
+                          className="h-1.5 w-full accent-zinc-400"
+                        />
+                        <progress
+                          aria-label={`${b.label} won leads`}
+                          value={b.won || 0}
+                          max={maxResp}
+                          className="h-1.5 w-full accent-zinc-700"
+                        />
+                      </div>
+                      <span className="text-ui-body text-ink-secondary">
+                        {b.total} · {b.conversionRate}%
+                      </span>
                     </div>
                   );
                 })}
               </div>
             )}
-            <div
-              style={{
-                display: "flex",
-                gap: 12,
-                fontSize: 14,
-                color: C.muted,
-                marginTop: 12,
-              }}
-            >
+            <div className="flex gap-[12px] text-ui-body text-ink-secondary mt-[12px]">
               {" "}
               <span>
-                <span
-                  style={{
-                    display: "inline-block",
-                    width: 10,
-                    height: 10,
-                    backgroundColor: C.border,
-                    borderRadius: 2,
-                    verticalAlign: "middle",
-                    marginRight: 4,
-                  }}
-                />
+                <span className="inline-block w-[10px] h-[10px] bg-zinc-400 rounded-sm mr-[4px]" />
                 Total
               </span>{" "}
               <span>
-                <span
-                  style={{
-                    display: "inline-block",
-                    width: 10,
-                    height: 10,
-                    backgroundColor: C.green,
-                    borderRadius: 2,
-                    verticalAlign: "middle",
-                    marginRight: 4,
-                  }}
-                />
+                <span className="inline-block w-[10px] h-[10px] bg-zinc-700 rounded-sm mr-[4px]" />
                 Won
               </span>{" "}
             </div>{" "}
           </Card>
           {/* Lost Lead Analysis */}
-          <Card style={{ flex: "1 1 300px" }}>
+          <Card className="flex-[1_1_300px] p-5">
             {" "}
-            <h2
-              style={{
-                margin: "0 0 16px",
-                color: C.heading,
-                fontSize: 14,
-                fontWeight: 500,
-                fontFamily: ROBOTO,
-                letterSpacing: "0.02em",
-              }}
-            >
+            <h2 className="m-0 mb-[16px] text-zinc-900 text-ui-body font-medium">
               Lost lead reasons
             </h2>
-            <div
-              style={{
-                margin: "-12px 0 14px",
-                color: C.muted,
-                fontSize: 14,
-                fontFamily: ROBOTO,
-              }}
-            >
-              Year to date
-            </div>
+            <div className="text-ink-secondary text-ui-body">Year to date</div>
             {totalLost === 0 ? (
-              <div style={{ color: C.muted, fontSize: 13 }}>
+              <div className="text-ink-secondary text-ui-body">
                 No lost leads yet
               </div>
             ) : (
-              <div style={{ display: "flex", gap: 24, alignItems: "center" }}>
+              <div className="flex gap-[24px] items-center">
                 {" "}
-                <svg
-                  viewBox="0 0 100 100"
-                  style={{ width: 120, height: 120, flexShrink: 0 }}
-                >
+                <svg viewBox="0 0 100 100" className="w-[120px] h-[120px]">
                   {(() => {
                     let cumAngle = 0;
                     return lostReasons.slice(0, 7).map((r, i) => {
@@ -3978,7 +3511,8 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                             cx="50"
                             cy="50"
                             r="45"
-                            fill={pieColors[i % pieColors.length]}
+                            fill="currentColor"
+                            className={pieClasses[i % pieClasses.length]}
                           />
                         );
                       }
@@ -3986,7 +3520,8 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                         <path
                           key={i}
                           d={`M50,50 L${x1},${y1} A45,45 0 ${largeArc},1 ${x2},${y2} Z`}
-                          fill={pieColors[i % pieColors.length]}
+                          fill="currentColor"
+                          className={pieClasses[i % pieClasses.length]}
                         />
                       );
                     });
@@ -3996,29 +3531,14 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                   {lostReasons.slice(0, 7).map((r, i) => (
                     <div
                       key={i}
-                      style={{
-                        fontSize: 14,
-                        marginBottom: 4,
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 6,
-                      }}
+                      className="text-ui-body mb-[4px] flex items-center gap-[6px]"
                     >
                       {" "}
                       <span
-                        style={{
-                          display: "inline-block",
-                          width: 10,
-                          height: 10,
-                          borderRadius: 2,
-                          backgroundColor: pieColors[i % pieColors.length],
-                          flexShrink: 0,
-                        }}
+                        className={`inline-block w-2.5 h-2.5 rounded-sm bg-current ${pieClasses[i % pieClasses.length]}`}
                       />{" "}
-                      <span style={{ color: C.text }}>{r.reason}</span>{" "}
-                      <span style={{ color: C.muted, ...mono }}>
-                        {r.count}
-                      </span>{" "}
+                      <span className="text-zinc-900">{r.reason}</span>{" "}
+                      <span className="text-ink-secondary">{r.count}</span>{" "}
                     </div>
                   ))}
                 </div>{" "}
@@ -4027,33 +3547,17 @@ export function LeadsSection({ newLeadRequest = 0 }) {
           </Card>{" "}
         </div>
         {/* Phone Number ROI Table */}
-        <Card style={{ padding: 0, overflow: "auto" }}>
+        <Card className="p-[0px] overflow-auto">
           {" "}
-          <div
-            style={{
-              padding: "16px 20px",
-              borderBottom: `1px solid ${C.border}`,
-            }}
-          >
+          <div className="border-b border-solid border-zinc-200 px-5 py-4">
             {" "}
-            <h2
-              style={{
-                margin: 0,
-                color: C.heading,
-                fontSize: 14,
-                fontWeight: 500,
-                fontFamily: ROBOTO,
-                letterSpacing: "0.02em",
-              }}
-            >
+            <h2 className="m-0 text-zinc-900 text-ui-body font-medium">
               Phone number ROI
             </h2>{" "}
           </div>{" "}
-          <table
-            style={{ width: "100%", borderCollapse: "collapse", minWidth: 700 }}
-          >
-            <thead>
-              <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+          <Table className="w-full min-w-[700px]">
+            <THead>
+              <TR>
                 {[
                   "Number",
                   "Source",
@@ -4063,109 +3567,47 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                   "Revenue",
                   "ROI %",
                 ].map((h) => (
-                  <th
-                    key={h}
-                    style={{
-                      padding: "10px 14px",
-                      textAlign: "left",
-                      fontSize: 14,
-                      color: C.muted,
-                      fontWeight: 500,
-                      textTransform: "uppercase",
-                    }}
-                  >
+                  <TH key={h} className="text-left text-ink-secondary">
                     {h}
-                  </th>
+                  </TH>
                 ))}
-              </tr>
-            </thead>
-            <tbody>
+              </TR>
+            </THead>
+            <TBody>
               {phoneROI.map((s, i) => (
-                <tr key={i} style={{ borderBottom: `1px solid ${C.border}` }}>
-                  <td
-                    style={{
-                      padding: "10px 14px",
-                      color: C.teal,
-                      ...mono,
-                      fontSize: 14,
-                    }}
-                  >
+                <TR key={i}>
+                  <TD className="text-zinc-900">
                     {s.source?.twilio_phone_number}
-                  </td>
-                  <td
-                    style={{
-                      padding: "10px 14px",
-                      color: C.text,
-                      fontSize: 14,
-                    }}
-                  >
+                  </TD>
+                  <TD className="text-zinc-900">
                     {s.source?.name?.slice(0, 30)}
-                  </td>
-                  <td
-                    style={{
-                      padding: "10px 14px",
-                      ...mono,
-                      fontSize: 14,
-                      color: C.text,
-                    }}
-                  >
-                    {fmtMoney(s.totalCost)}
-                  </td>
-                  <td
-                    style={{
-                      padding: "10px 14px",
-                      ...mono,
-                      fontSize: 14,
-                      color: C.heading,
-                    }}
-                  >
-                    {s.totalLeads}
-                  </td>
-                  <td
-                    style={{
-                      padding: "10px 14px",
-                      ...mono,
-                      fontSize: 14,
-                      color: C.green,
-                    }}
-                  >
-                    {s.conversions}
-                  </td>
-                  <td
-                    style={{
-                      padding: "10px 14px",
-                      ...mono,
-                      fontSize: 14,
-                      color: C.green,
-                    }}
-                  >
-                    {fmtMoney(s.totalRevenue)}
-                  </td>
-                  <td
-                    style={{
-                      padding: "10px 14px",
-                      ...mono,
-                      fontSize: 14,
-                      fontWeight: 500,
-                      color: roiColor(s.roi),
-                    }}
-                  >
+                  </TD>
+                  <TD className="text-zinc-900">{fmtMoney(s.totalCost)}</TD>
+                  <TD className="text-zinc-900">{s.totalLeads}</TD>
+                  <TD className="text-zinc-700">{s.conversions}</TD>
+                  <TD className="text-zinc-700">{fmtMoney(s.totalRevenue)}</TD>
+                  {/* Main applied roiColor(s.roi) unconditionally (so a
+                      negative ROI showed red) but only displayed the
+                      percentage text when roi > 0 (otherwise "--") — the
+                      color and the value-guard are independent, not gated
+                      on the same condition. */}
+                  <TD className={`font-medium ${roiColorClass(s.roi)}`}>
                     {s.roi > 0 ? fmtPct(s.roi) : "--"}
-                  </td>
-                </tr>
+                  </TD>
+                </TR>
               ))}
               {phoneROI.length === 0 && (
-                <tr>
-                  <td
+                <TR>
+                  <TD
                     colSpan={7}
-                    style={{ padding: 30, textAlign: "center", color: C.muted }}
+                    className="p-[30px] text-center text-ink-secondary"
                   >
                     No phone source data yet
-                  </td>
-                </tr>
+                  </TD>
+                </TR>
               )}
-            </tbody>
-          </table>{" "}
+            </TBody>
+          </Table>{" "}
         </Card>{" "}
       </>
     );
@@ -4176,280 +3618,401 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   // ═════════════════════════════════════════════════════════════════════════
   const renderModal = () => {
     if (!showModal) return null;
-
     if (showModal === "newLead")
       return (
-        <Modal title="New lead" onClose={() => setShowModal(null)}>
+        <LeadDialog title="New lead" onClose={() => setShowModal(null)}>
           {" "}
-          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+          <div className="flex gap-[12px] flex-wrap">
             {" "}
-            <div style={{ flex: "1 1 45%" }}>
-              <Input
+            <div className="flex-[1_1_45%]">
+              <LeadField
                 label="First Name"
                 value={formData.first_name}
-                onChange={(v) => setFormData((f) => ({ ...f, first_name: v }))}
+                onChange={(v) =>
+                  setFormData((f) => ({
+                    ...f,
+                    first_name: v,
+                  }))
+                }
               />
             </div>{" "}
-            <div style={{ flex: "1 1 45%" }}>
-              <Input
+            <div className="flex-[1_1_45%]">
+              <LeadField
                 label="Last Name"
                 value={formData.last_name}
-                onChange={(v) => setFormData((f) => ({ ...f, last_name: v }))}
+                onChange={(v) =>
+                  setFormData((f) => ({
+                    ...f,
+                    last_name: v,
+                  }))
+                }
               />
             </div>{" "}
           </div>{" "}
-          <Input
+          <LeadField
             label="Phone"
             value={formData.phone}
-            onChange={(v) => setFormData((f) => ({ ...f, phone: v }))}
+            onChange={(v) =>
+              setFormData((f) => ({
+                ...f,
+                phone: v,
+              }))
+            }
           />{" "}
-          <Input
+          <LeadField
             label="Email"
             value={formData.email}
-            onChange={(v) => setFormData((f) => ({ ...f, email: v }))}
+            onChange={(v) =>
+              setFormData((f) => ({
+                ...f,
+                email: v,
+              }))
+            }
           />{" "}
-          {contactMatches?.total > 0 && <div style={{ padding: 12, marginBottom: 12, border: `1px solid ${C.border}`, borderRadius: 8 }}>
-            <p style={{ fontSize: 14, margin: "0 0 8px" }}>Possible existing leads with this contact ({contactMatches.total}). Review before creating another record.</p>
-            {contactMatches.matches.map((match) => <Btn key={match.id} small onClick={() => {
-              setShowModal(null);
-              navigate(`/admin/pipeline?lead=${match.id}`);
-            }}>{[match.first_name, match.last_name].filter(Boolean).join(" ") || "Open lead"} · {match.status}</Btn>)}
-          </div>}
-          {contactMatches?.error && <p role="status" style={{ fontSize: 14 }}>Existing-contact check unavailable. Search the queue before creating another record.</p>}
-          <Input
+          {contactMatches?.total > 0 && (
+            <Card className="mb-[12px] p-[12px]">
+              <p className="m-0 mb-[8px] text-ui-body">
+                Possible existing leads with this contact (
+                {contactMatches.total}). Review before creating another record.
+              </p>
+              {contactMatches.matches.map((match) => (
+                <Button
+                  key={match.id}
+                  onClick={() => {
+                    setShowModal(null);
+                    navigate(`/admin/pipeline?lead=${match.id}`);
+                  }}
+                >
+                  {[match.first_name, match.last_name]
+                    .filter(Boolean)
+                    .join(" ") || "Open lead"}{" "}
+                  · {match.status}
+                </Button>
+              ))}
+            </Card>
+          )}
+          {contactMatches?.error && (
+            <p role="status" className="text-ui-body">
+              Existing-contact check unavailable. Search the queue before
+              creating another record.
+            </p>
+          )}
+          <LeadField
             label="Service Interest"
             value={formData.service_interest}
             onChange={(v) =>
-              setFormData((f) => ({ ...f, service_interest: v }))
+              setFormData((f) => ({
+                ...f,
+                service_interest: v,
+              }))
             }
             placeholder="e.g. General Pest, Lawn Care, Termite"
           />{" "}
-          <Input
+          <LeadField
             label="Lead Source"
             value={formData.lead_source_id}
-            onChange={(v) => setFormData((f) => ({ ...f, lead_source_id: v }))}
-            options={sources.map((s) => ({ value: s.id, label: s.name }))}
-          />{" "}
-          <Input label="Notes" value={formData.notes} onChange={(notes) => setFormData((f) => ({ ...f, notes }))} />
-          <details style={{ marginBottom: 16 }}>
-            <summary style={{ minHeight: 44, cursor: "pointer", fontSize: 14 }}>Property and intake details (optional)</summary>
-          <Input
-            label="Address"
-            value={formData.address}
-            onChange={(v) => setFormData((f) => ({ ...f, address: v }))}
-          />{" "}
-          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-            {" "}
-            <div style={{ flex: "1 1 60%" }}>
-              <Input
-                label="City"
-                value={formData.city}
-                onChange={(v) => setFormData((f) => ({ ...f, city: v }))}
-              />
-            </div>{" "}
-            <div style={{ flex: "1 1 30%" }}>
-              <Input
-                label="ZIP"
-                value={formData.zip}
-                onChange={(v) => setFormData((f) => ({ ...f, zip: v }))}
-              />
-            </div>{" "}
-          </div>{" "}
-          <Input
-            label="Lead Type"
-            value={formData.lead_type}
-            onChange={(v) => setFormData((f) => ({ ...f, lead_type: v }))}
-            options={LEAD_TYPES.map((t) => ({
-              value: t,
-              label: t.replace(/_/g, " "),
+            onChange={(v) =>
+              setFormData((f) => ({
+                ...f,
+                lead_source_id: v,
+              }))
+            }
+            options={sources.map((s) => ({
+              value: s.id,
+              label: s.name,
             }))}
           />{" "}
-          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-            {" "}
-            <div style={{ flex: "1 1 55%" }}>
-              <Input
-                label="Builder Termite Warranty (provider)"
-                value={formData.builder_warranty_provider}
-                onChange={(v) =>
-                  setFormData((f) => ({ ...f, builder_warranty_provider: v }))
-                }
-                placeholder="who covers the home today"
-              />
+          <LeadField
+            label="Notes"
+            value={formData.notes}
+            onChange={(notes) =>
+              setFormData((f) => ({
+                ...f,
+                notes,
+              }))
+            }
+          />
+          <details className="mb-[16px]">
+            <summary className="min-h-[44px] cursor-pointer text-ui-body">
+              Property and intake details (optional)
+            </summary>
+            <LeadField
+              label="Address"
+              value={formData.address}
+              onChange={(v) =>
+                setFormData((f) => ({
+                  ...f,
+                  address: v,
+                }))
+              }
+            />{" "}
+            <div className="flex gap-[12px] flex-wrap">
+              {" "}
+              <div className="flex-[1_1_60%]">
+                <LeadField
+                  label="City"
+                  value={formData.city}
+                  onChange={(v) =>
+                    setFormData((f) => ({
+                      ...f,
+                      city: v,
+                    }))
+                  }
+                />
+              </div>{" "}
+              <div className="flex-[1_1_30%]">
+                <LeadField
+                  label="ZIP"
+                  value={formData.zip}
+                  onChange={(v) =>
+                    setFormData((f) => ({
+                      ...f,
+                      zip: v,
+                    }))
+                  }
+                />
+              </div>{" "}
             </div>{" "}
-            <div style={{ flex: "1 1 35%" }}>
-              <Input
-                label="Warranty Expires"
-                type="date"
-                value={formData.builder_warranty_expires_on}
-                onChange={(v) =>
-                  setFormData((f) => ({ ...f, builder_warranty_expires_on: v }))
-                }
-              />
+            <LeadField
+              label="Lead Type"
+              value={formData.lead_type}
+              onChange={(v) =>
+                setFormData((f) => ({
+                  ...f,
+                  lead_type: v,
+                }))
+              }
+              options={LEAD_TYPES.map((t) => ({
+                value: t,
+                label: t.replace(/_/g, " "),
+              }))}
+            />{" "}
+            <div className="flex gap-[12px] flex-wrap">
+              {" "}
+              <div className="flex-[1_1_55%]">
+                <LeadField
+                  label="Builder Termite Warranty (provider)"
+                  value={formData.builder_warranty_provider}
+                  onChange={(v) =>
+                    setFormData((f) => ({
+                      ...f,
+                      builder_warranty_provider: v,
+                    }))
+                  }
+                  placeholder="who covers the home today"
+                />
+              </div>{" "}
+              <div className="flex-[1_1_35%]">
+                <LeadField
+                  label="Warranty Expires"
+                  type="date"
+                  value={formData.builder_warranty_expires_on}
+                  onChange={(v) =>
+                    setFormData((f) => ({
+                      ...f,
+                      builder_warranty_expires_on: v,
+                    }))
+                  }
+                />
+              </div>{" "}
             </div>{" "}
-          </div>{" "}
           </details>
-          <Btn onClick={submitForm} disabled={loading}>
+          <Button onClick={submitForm} disabled={loading}>
             {loading ? "Saving..." : "Create Lead"}
-          </Btn>{" "}
-        </Modal>
+          </Button>{" "}
+        </LeadDialog>
       );
-
     if (showModal === "builderWarranty")
       return (
-        <Modal
+        <LeadDialog
           title="Builder termite warranty"
           onClose={() => setShowModal(null)}
         >
           {" "}
-          <Input
+          <LeadField
             label="Provider"
             value={formData.builder_warranty_provider}
             onChange={(v) =>
-              setFormData((f) => ({ ...f, builder_warranty_provider: v }))
+              setFormData((f) => ({
+                ...f,
+                builder_warranty_provider: v,
+              }))
             }
             placeholder="who covers the home today"
           />{" "}
-          <Input
+          <LeadField
             label="Expires"
             type="date"
             value={formData.builder_warranty_expires_on}
             onChange={(v) =>
-              setFormData((f) => ({ ...f, builder_warranty_expires_on: v }))
+              setFormData((f) => ({
+                ...f,
+                builder_warranty_expires_on: v,
+              }))
             }
           />{" "}
-          <div style={{ fontSize: 14, color: C.muted, marginBottom: 12 }}>
+          <div className="text-ui-body text-ink-secondary mb-[12px]">
             Clearing both fields removes the warranty from this lead.
           </div>{" "}
-          <Btn onClick={submitForm} disabled={loading}>
+          <Button onClick={submitForm} disabled={loading}>
             {loading ? "Saving..." : "Save"}
-          </Btn>{" "}
-        </Modal>
+          </Button>{" "}
+        </LeadDialog>
       );
-
     if (showModal === "convert")
       return (
-        <Modal title="Convert to customer" onClose={() => setShowModal(null)}>
+        <LeadDialog
+          title="Convert to customer"
+          onClose={() => setShowModal(null)}
+        >
           {" "}
-          <Input
+          <LeadField
             label="Customer ID (required)"
             value={formData.customer_id}
-            onChange={(v) => setFormData((f) => ({ ...f, customer_id: v }))}
+            onChange={(v) =>
+              setFormData((f) => ({
+                ...f,
+                customer_id: v,
+              }))
+            }
             placeholder="Existing customer UUID"
           />{" "}
-          <Input
+          <LeadField
             label="Monthly Value ($)"
             value={formData.monthly_value}
-            onChange={(v) => setFormData((f) => ({ ...f, monthly_value: v }))}
+            onChange={(v) =>
+              setFormData((f) => ({
+                ...f,
+                monthly_value: v,
+              }))
+            }
             type="number"
           />{" "}
-          <Input
+          <LeadField
             label="Initial Service Value ($)"
             value={formData.initial_service_value}
             onChange={(v) =>
-              setFormData((f) => ({ ...f, initial_service_value: v }))
+              setFormData((f) => ({
+                ...f,
+                initial_service_value: v,
+              }))
             }
             type="number"
           />{" "}
-          <Input
+          <LeadField
             label="WaveGuard Tier"
             value={formData.waveguard_tier}
-            onChange={(v) => setFormData((f) => ({ ...f, waveguard_tier: v }))}
+            onChange={(v) =>
+              setFormData((f) => ({
+                ...f,
+                waveguard_tier: v,
+              }))
+            }
             options={["Platinum", "Gold", "Silver", "Bronze", "One-Time"]}
           />{" "}
-          <Btn onClick={submitForm} disabled={loading} color={C.green}>
+          <Button
+            onClick={submitForm}
+            disabled={loading}
+            variant={"primary"}
+            // Main's C.green is #3F3F46 (zinc-700), not a real green.
+            className="!bg-zinc-700 !border-zinc-700 hover:!bg-zinc-800"
+          >
             {loading ? "Converting..." : "Convert"}
-          </Btn>{" "}
-        </Modal>
+          </Button>{" "}
+        </LeadDialog>
       );
-
     if (showModal === "lost")
       return (
-        <Modal title="Mark lead lost" onClose={() => setShowModal(null)}>
+        <LeadDialog title="Mark lead lost" onClose={() => setShowModal(null)}>
           {" "}
-          <Input
+          <LeadField
             label="Reason"
             value={formData.reason}
-            onChange={(v) => setFormData((f) => ({ ...f, reason: v }))}
+            onChange={(v) =>
+              setFormData((f) => ({
+                ...f,
+                reason: v,
+              }))
+            }
             options={LOST_REASONS}
           />
           {formData.reason === "competitor" && (
-            <Input
+            <LeadField
               label="Competitor Name"
               value={formData.competitor}
-              onChange={(v) => setFormData((f) => ({ ...f, competitor: v }))}
+              onChange={(v) =>
+                setFormData((f) => ({
+                  ...f,
+                  competitor: v,
+                }))
+              }
               placeholder="e.g. Terminix, Orkin, HomeTeam"
             />
           )}
-          <div style={{ marginBottom: 12 }}>
-            {" "}
-            <label
-              style={{
-                fontSize: 14,
-                color: C.muted,
-                display: "block",
-                marginBottom: 4,
-              }}
-            >
-              Notes
-            </label>{" "}
-            <textarea
+          <Field label="Notes" className="mb-[12px]">
+            <Textarea
               value={formData.notes || ""}
               onChange={(e) =>
-                setFormData((f) => ({ ...f, notes: e.target.value }))
+                setFormData((f) => ({
+                  ...f,
+                  notes: e.target.value,
+                }))
               }
               placeholder="Additional context about why this lead was lost..."
-              style={{
-                width: "100%",
-                minHeight: 80,
-                backgroundColor: C.input,
-                border: `1px solid ${C.inputBorder}`,
-                borderRadius: 8,
-                padding: "8px 12px",
-                color: C.text,
-                fontSize: 14,
-                resize: "vertical",
-                boxSizing: "border-box",
-              }}
-            />{" "}
-          </div>{" "}
-          <Btn onClick={submitForm} disabled={loading} color={C.red}>
+              className="w-full min-h-[80px] resize-y box-border"
+            />
+          </Field>{" "}
+          <Button onClick={submitForm} disabled={loading} variant={"danger"}>
             {loading ? "Saving..." : "Mark Lost"}
-          </Btn>{" "}
-        </Modal>
+          </Button>{" "}
+        </LeadDialog>
       );
-
     if (showModal === "assign")
       return (
-        <Modal title="Assign lead" onClose={() => setShowModal(null)}>
+        <LeadDialog title="Assign lead" onClose={() => setShowModal(null)}>
           {" "}
-          <Input
+          <LeadField
             label="Technician"
             value={formData.technician_id}
-            onChange={(v) => setFormData((f) => ({ ...f, technician_id: v }))}
+            onChange={(v) =>
+              setFormData((f) => ({
+                ...f,
+                technician_id: v,
+              }))
+            }
             options={techs.map((t) => ({
               value: t.id,
               label: `${t.first_name} ${t.last_name || ""}`,
             }))}
           />{" "}
-          <Btn onClick={submitForm} disabled={loading} color={C.purple}>
+          <Button onClick={submitForm} disabled={loading} variant={"primary"}>
             {loading ? "Assigning..." : "Assign"}
-          </Btn>{" "}
-        </Modal>
+          </Button>{" "}
+        </LeadDialog>
       );
-
     if (showModal === "newSource")
       return (
-        <Modal title="Add lead source" onClose={() => setShowModal(null)}>
+        <LeadDialog title="Add lead source" onClose={() => setShowModal(null)}>
           {" "}
-          <Input
+          <LeadField
             label="Name"
             value={formData.name}
-            onChange={(v) => setFormData((f) => ({ ...f, name: v }))}
+            onChange={(v) =>
+              setFormData((f) => ({
+                ...f,
+                name: v,
+              }))
+            }
           />{" "}
-          <Input
+          <LeadField
             label="Source Type"
             value={formData.source_type}
-            onChange={(v) => setFormData((f) => ({ ...f, source_type: v }))}
+            onChange={(v) =>
+              setFormData((f) => ({
+                ...f,
+                source_type: v,
+              }))
+            }
             options={[
               "phone_tracking",
               "website_organic",
@@ -4461,66 +4024,106 @@ export function LeadsSection({ newLeadRequest = 0 }) {
               "walk_in",
               "marketplace",
               "other",
-            ].map((t) => ({ value: t, label: t.replace(/_/g, " ") }))}
+            ].map((t) => ({
+              value: t,
+              label: t.replace(/_/g, " "),
+            }))}
           />{" "}
-          <Input
+          <LeadField
             label="Channel"
             value={formData.channel}
-            onChange={(v) => setFormData((f) => ({ ...f, channel: v }))}
+            onChange={(v) =>
+              setFormData((f) => ({
+                ...f,
+                channel: v,
+              }))
+            }
             placeholder="e.g. google, facebook, referral"
           />{" "}
-          <Input
+          <LeadField
             label="Twilio Phone Number"
             value={formData.twilio_phone_number}
             onChange={(v) =>
-              setFormData((f) => ({ ...f, twilio_phone_number: v }))
+              setFormData((f) => ({
+                ...f,
+                twilio_phone_number: v,
+              }))
             }
             placeholder="+1XXXXXXXXXX"
           />{" "}
-          <Input
+          <LeadField
             label="Domain"
             value={formData.domain}
-            onChange={(v) => setFormData((f) => ({ ...f, domain: v }))}
+            onChange={(v) =>
+              setFormData((f) => ({
+                ...f,
+                domain: v,
+              }))
+            }
             placeholder="example.com"
           />{" "}
-          <Input
+          <LeadField
             label="Cost Type"
             value={formData.cost_type}
-            onChange={(v) => setFormData((f) => ({ ...f, cost_type: v }))}
+            onChange={(v) =>
+              setFormData((f) => ({
+                ...f,
+                cost_type: v,
+              }))
+            }
             options={["free", "fixed", "per_lead", "per_month", "one_time"]}
           />{" "}
-          <Input
+          <LeadField
             label="Monthly Cost ($)"
             value={formData.monthly_cost}
-            onChange={(v) => setFormData((f) => ({ ...f, monthly_cost: v }))}
+            onChange={(v) =>
+              setFormData((f) => ({
+                ...f,
+                monthly_cost: v,
+              }))
+            }
             type="number"
           />{" "}
-          <Btn onClick={submitForm} disabled={loading}>
+          <Button onClick={submitForm} disabled={loading}>
             {loading ? "Creating..." : "Create Source"}
-          </Btn>{" "}
-        </Modal>
+          </Button>{" "}
+        </LeadDialog>
       );
-
     if (showModal === "logCost")
       return (
-        <Modal title="Log source cost" onClose={() => setShowModal(null)}>
+        <LeadDialog title="Log source cost" onClose={() => setShowModal(null)}>
           {" "}
-          <Input
+          <LeadField
             label="Month"
             value={formData.month}
-            onChange={(v) => setFormData((f) => ({ ...f, month: v }))}
+            onChange={(v) =>
+              setFormData((f) => ({
+                ...f,
+                month: v,
+              }))
+            }
             type="date"
           />{" "}
-          <Input
+          <LeadField
             label="Cost Amount ($)"
             value={formData.cost_amount}
-            onChange={(v) => setFormData((f) => ({ ...f, cost_amount: v }))}
+            onChange={(v) =>
+              setFormData((f) => ({
+                ...f,
+                cost_amount: v,
+              }))
+            }
             type="number"
           />{" "}
-          <Input
+          <LeadField
             label="Category"
             value={formData.cost_category}
-            onChange={(v) => setFormData((f) => ({ ...f, cost_category: v }))}
+            onChange={(v) =>
+              setFormData((f) => ({
+                ...f,
+                cost_category: v,
+              }))
+            }
             options={[
               "monthly_fee",
               "domain_renewal",
@@ -4530,17 +4133,27 @@ export function LeadsSection({ newLeadRequest = 0 }) {
               "other",
             ]}
           />{" "}
-          <Input
+          <LeadField
             label="Notes"
             value={formData.notes}
-            onChange={(v) => setFormData((f) => ({ ...f, notes: v }))}
+            onChange={(v) =>
+              setFormData((f) => ({
+                ...f,
+                notes: v,
+              }))
+            }
           />{" "}
-          <Btn onClick={submitForm} disabled={loading} color={C.amber}>
+          <Button
+            onClick={submitForm}
+            disabled={loading}
+            variant={"primary"}
+            // Main's C.amber is #52525B (zinc-600), not a real amber.
+            className="!bg-zinc-600 !border-zinc-600 hover:!bg-zinc-700"
+          >
             {loading ? "Logging..." : "Log Cost"}
-          </Btn>{" "}
-        </Modal>
+          </Button>{" "}
+        </LeadDialog>
       );
-
     return null;
   };
 
@@ -4548,22 +4161,10 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   // MAIN RENDER
   // ═════════════════════════════════════════════════════════════════════════
   return (
-    <div
-      style={{
-        padding: 0,
-        minWidth: 0,
-        maxWidth: 1400,
-        margin: "0 auto",
-        color: C.text,
-        fontFamily: ROBOTO,
-      }}
-    >
-      {" "}
+    <UiSurface className="min-w-0 max-w-[1400px] mx-auto text-zinc-900">
       <style>{`
         .lead-queue-table td { overflow-wrap: anywhere; }
         .lead-queue-table :is(td, th) { padding-inline: 8px !important; }
-        .lead-queue-table :is(input, textarea) { min-width: 0; min-height: 44px; font-size: 16px !important; }
-        .lead-queue-table select { width: 100%; min-height: 44px; font-size: 16px !important; max-width: 100%; background: white !important; color: #27272a !important; }
         @media (max-width: 1279px) {
           .lead-queue-table, .lead-queue-table > tbody, .lead-queue-table > tbody > tr, .lead-queue-table > tbody > tr > td { display: block; width: 100%; }
           .lead-queue-record { display: grid; grid-template-columns: minmax(0, 1fr); padding: 12px 16px; }
@@ -4584,40 +4185,22 @@ export function LeadsSection({ newLeadRequest = 0 }) {
         }}
       />
       {loadError && (
-        <div
-          style={{
-            border: `1px solid ${C.red}44`,
-            backgroundColor: C.red + "0f",
-            color: C.red,
-            borderRadius: 8,
-            padding: "10px 12px",
-            fontSize: 14,
-            marginBottom: 16,
-          }}
-        >
+        <ActionFeedback error className="mb-4">
           Pipeline data failed to load: {loadError.message || String(loadError)}
-          <button
+          <Button
             type="button"
             onClick={retryCurrentTab}
-            style={{
-              marginLeft: 10,
-              border: `1px solid ${C.red}66`,
-              background: "transparent",
-              color: C.red,
-              borderRadius: 6,
-              padding: "3px 8px",
-              cursor: "pointer",
-              fontSize: 14,
-            }}
+            variant="secondary"
+            className="ml-2"
           >
             Retry
-          </button>{" "}
-        </div>
+          </Button>{" "}
+        </ActionFeedback>
       )}
       {tab === "pipeline" && renderPipeline()}
       {tab === "sources" && renderSources()}
       {tab === "analytics" && renderAnalytics()}
       {renderModal()}
-    </div>
+    </UiSurface>
   );
 }

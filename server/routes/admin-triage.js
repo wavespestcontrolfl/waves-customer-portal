@@ -20,6 +20,15 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 
 const OPEN_STATES = ['open', 'in_progress'];
 const ALL_STATES = ['open', 'in_progress', 'resolved', 'dismissed'];
+// Match the booking/estimate address-confirmation notices before applying the
+// inbox page limit. A busy customer's newer unrelated work must not hide an
+// older, still-active address ask.
+const ADDRESS_CONFIRMATION_REASONS = [
+  'missing_unit_number', 'address_unverified', 'missing_service_address',
+  'low_confidence_address', 'address_validation_unavailable',
+  'address_unverifiable', 'address_not_validated', 'on_file_proof_customer_mismatch',
+  'address_recovered', 'address_readback',
+];
 
 // Decision-support feedback (Phase 1). Captured from the triage inbox and the
 // auto-routed review list; nothing here changes routing automatically.
@@ -97,6 +106,11 @@ router.get('/', async (req, res) => {
       .leftJoin('route_feedback', 'triage_items.call_log_id', 'route_feedback.call_log_id')
       .whereIn('triage_items.status', status)
       .modify((q) => { if (customerId) q.where('customers.id', customerId); })
+      .modify((q) => {
+        if (req.query.address_confirmation === 'true') {
+          q.whereIn('triage_items.reason_code', ADDRESS_CONFIRMATION_REASONS);
+        }
+      })
       .modify((q) => { if (source) q.where('triage_items.resolution_source', source); })
       // property_role_confirm payloads embed the customer's OTHER property
       // addresses — the same data admin-customers gates behind requireAdmin —
@@ -545,6 +559,7 @@ router.post('/:id/apply-property-roles', async (req, res) => {
     });
     return res.json({ ok: true, ...outcome });
   } catch (err) {
+    if (err.code === 'property_busy') return res.status(409).json({ error: err.message, code: err.code });
     if (err.conflict) return res.status(409).json({ error: err.message || 'Item changed concurrently' });
     if (err.noProposals) return res.status(400).json({ error: 'Card carries no applicable proposals' });
     logger.error(`[admin-triage] apply-property-roles failed: ${err.message}`);

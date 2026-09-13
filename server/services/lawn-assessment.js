@@ -643,6 +643,8 @@ module.exports = {
   assessInsertFields,
   installConfirmedBaseline,
   VISION_PROMPT,
+  FUNGUS_DISPLAY,
+  THATCH_DISPLAY,
   buildVisionPrompt,
   analyzePhoto,
   averageScores,

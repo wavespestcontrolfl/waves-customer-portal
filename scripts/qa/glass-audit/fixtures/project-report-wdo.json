@@ -1,0 +1,36 @@
+{
+  "/api/reports/project/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/data": {
+    "status": 200,
+    "body": {
+      "fdacsPdfAvailable": true,
+      "status": "sent",
+      "title": "WDO Inspection Service",
+      "technicianName": "Adam",
+      "projectDate": "2026-06-28",
+      "sentAt": "2026-06-28T18:30:00Z",
+      "recommendations": null,
+      "followupDate": null,
+      "followupFindings": null,
+      "followupCompletedAt": null,
+      "upcomingAppointment": null,
+      "photos": [],
+      "customerName": "William Carter",
+      "customerEmail": "william.carter@example.com",
+      "customerPhone": "9415550123",
+      "cityState": "Parrish, FL",
+      "customerAddress": "10225 Kalamazoo Pl, Parrish, FL 34219",
+      "projectType": "wdo_inspection",
+      "findings": {
+        "property_address": "10225 Kalamazoo Pl, Parrish, FL 34219",
+        "structures_inspected": "Main home and attached garage",
+        "structure_type": "CMU / Concrete Masonry Unit",
+        "inspection_scope": "Interior, attic access, garage, exterior perimeter",
+        "wdo_finding": "No visible signs of WDO observed",
+        "inaccessible_areas": "Attic beyond decked walkway; stored items in garage corners",
+        "previous_treatment_evidence": "No",
+        "notice_location": "Electrical Panel",
+        "treated_at_inspection": "No"
+      }
+    }
+  }
+}

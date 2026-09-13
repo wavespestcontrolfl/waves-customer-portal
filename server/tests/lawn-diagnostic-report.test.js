@@ -8,6 +8,7 @@ const {
   scrubCustomerText,
   safeConditionLabel,
   safeCustomerSummary,
+  residualDefinitiveClaim,
   lowerConfidence,
   MINIMAL_SAFE_SUMMARY,
 } = require('../services/lawn-diagnostic-report');
@@ -504,11 +505,154 @@ describe('lawn diagnostic auto-release ladder', () => {
     expect(scrubCustomerText('We saw active caterpillar damage.')).toMatch(/suspected caterpillar/i);
   });
 
+  test.each([
+    ['Chinch bugs were previously active, but none are present now.', 'Chinch bugs may have been previously active, but none are present now.'],
+    ['Large patch was formerly active in the shade.', 'Large patch may have been formerly active in the shade.'],
+    ['Grubs had historically been active here.', 'Grubs may have been historically active here.'],
+  ])('scrubCustomerText keeps the historical qualifier and tense when downgrading %s', (text, expected) => {
+    expect(scrubCustomerText(text)).toBe(expected);
+  });
+
+  test.each([
+    ['Chinch bugs remain active here.', 'Chinch bugs may be active here.'],
+    ['Large patch stays active.', 'Large patch may be active.'],
+    ['Grubs continue to be active.', 'Grubs may be active.'],
+    ['Chinch bugs remained active last visit.', 'Chinch bugs may have been active last visit.'],
+    ['Chinch bugs were active yesterday, but none are present now.', 'Chinch bugs may have been active yesterday, but none are present now.'],
+    ['Drought was confirmed last month.', 'Drought appeared most consistent with the visible pattern last month.'],
+    ['Chinch bugs continue being active.', 'Chinch bugs may be active.'],
+    ['Grubs keep being active.', 'Grubs may be active.'],
+    ['Grubs kept being active.', 'Grubs may have been active.'],
+  ])('scrubCustomerText downgrades aspectual and past-tense claims in %s without changing tense', (text, expected) => {
+    expect(scrubCustomerText(text)).toBe(expected);
+  });
+
+  test.each([
+    ['Fungal activity is confirmed in the shade.', 'Fungal activity appears most consistent with the visible pattern in the shade.'],
+    ['Chinch bug pressure is confirmed.', 'Chinch bug pressure appears most consistent with the visible pattern.'],
+    ['Chinch bugs are confirmed.', 'Chinch bugs appear most consistent with the visible pattern.'],
+    ['Large patch (Rhizoctonia) is confirmed.', 'Large patch (Rhizoctonia) appears most consistent with the visible pattern.'],
+    ['Chinch bug activity has been confirmed.', 'Chinch bug activity appears most consistent with the visible pattern.'],
+    ['Chinch bug presence is confirmed.', 'Chinch bug presence appears most consistent with the visible pattern.'],
+    ['Chinch bug signs are confirmed along the edge.', 'Chinch bug signs appear most consistent with the visible pattern along the edge.'],
+    ['Grub feeding is confirmed.', 'Grub feeding appears most consistent with the visible pattern.'],
+    ['Chinch bugs have only just recently been confirmed.', 'Chinch bugs appear most consistent with the visible pattern.'],
+    ['Large patch has now also already just again been confirmed.', 'Large patch appears most consistent with the visible pattern.'],
+  ])('scrubCustomerText keeps the subject noun phrase and a copula when downgrading %s', (text, expected) => {
+    expect(scrubCustomerText(text)).toBe(expected);
+  });
+
+  test('safeCustomerSummary never publishes a residual definitive cause claim at any confidence', () => {
+    for (const confidence of ['moderate', 'high']) {
+      const out = safeCustomerSummary('Chinch bug colonies are confirmed along the edge.', confidence);
+      expect(out).not.toMatch(/\bconfirmed\b/i);
+      expect(out).not.toMatch(/chinch/i);
+    }
+    expect(residualDefinitiveClaim('Chinch bug colonies are confirmed along the edge.')).toBe(true);
+    expect(residualDefinitiveClaim('Chinch bugs appear most consistent with the visible pattern.')).toBe(false);
+    // No governed term in the sentence: not a cause claim.
+    expect(residualDefinitiveClaim('The watering schedule is confirmed for Tuesday.')).toBe(false);
+    // A modal clause is a finite clause, so the unrelated "confirmed" stays on its own side.
+    expect(residualDefinitiveClaim('The watering schedule was confirmed and large patch may be present.')).toBe(false);
+    expect(residualDefinitiveClaim('The controller was adjusted and chinch bugs could be active along the edge.')).toBe(false);
+    expect(residualDefinitiveClaim('Large patch and dollar spot are confirmed.')).toBe(true);
+    // Adjectival "active" modifies a recovery noun; it is not an activity claim.
+    expect(residualDefinitiveClaim('Large patch has active recovery in the shade.')).toBe(false);
+    expect(residualDefinitiveClaim('Chinch bug damage has active regrowth.')).toBe(false);
+    expect(residualDefinitiveClaim('Chinch bug colonies are active along the edge.')).toBe(true);
+    // Finite confirmation verbs and adjective-first activity claims.
+    expect(residualDefinitiveClaim('The photos confirm chinch bug activity along the edge.')).toBe(true);
+    expect(residualDefinitiveClaim('The photo confirms chinch bug activity.')).toBe(true);
+    expect(residualDefinitiveClaim('Active colonies of chinch bugs remain along the edge.')).toBe(true);
+    expect(residualDefinitiveClaim('We should confirm chinch bug activity if it spreads.')).toBe(false);
+    expect(residualDefinitiveClaim('A closer look is needed to confirm chinch bug activity.')).toBe(false);
+    expect(residualDefinitiveClaim('Chinch bugs may be active and large patch is a possibility.')).toBe(false);
+    expect(residualDefinitiveClaim('Active recovery of large patch continues.')).toBe(false);
+    expect(residualDefinitiveClaim('Confirm chinch bug activity with a float test.')).toBe(false);
+    expect(residualDefinitiveClaim('The photos confirm possible chinch bug activity.')).toBe(false);
+    // verified / proven are definitive synonyms.
+    expect(residualDefinitiveClaim('Chinch bug activity has been verified along the edge.')).toBe(true);
+    expect(residualDefinitiveClaim('Chinch bug activity was proven by the float test.')).toBe(true);
+    expect(residualDefinitiveClaim('The float test verified chinch bug activity.')).toBe(true);
+    expect(residualDefinitiveClaim('The lawn definitely has chinch bugs.')).toBe(true);
+    // The definitive word must share the cause's clause, not merely its sentence.
+    const unrelated = 'The watering schedule was confirmed with the customer, while large patch remains only a possibility.';
+    expect(residualDefinitiveClaim(unrelated)).toBe(false);
+    expect(safeCustomerSummary(unrelated, 'high')).toMatch(/large patch remains only a possibility/);
+    // A comma pair is a parenthetical, not a clause break.
+    expect(residualDefinitiveClaim('Large patch, in the shaded area, is confirmed.')).toBe(true);
+    expect(safeCustomerSummary('Large patch, in the shaded area, is confirmed.', 'high')).not.toMatch(/confirmed|large patch/i);
+    // An activity claim with a subject noun the grammar does not know is still caught.
+    expect(residualDefinitiveClaim('Chinch bug colonies are active along the edge.')).toBe(true);
+    expect(safeCustomerSummary('Chinch bug colonies are active along the edge.', 'moderate')).not.toMatch(/active|chinch/i);
+    // Downgraded forms and non-cause subjects are not residual claims.
+    expect(residualDefinitiveClaim('Chinch bugs may be active along the edge.')).toBe(false);
+    expect(residualDefinitiveClaim('The sprinkler zone is active on Tuesdays.')).toBe(false);
+  });
+
+  test('scrubCustomerText keeps a historical qualifier when downgrading a confirmed claim', () => {
+    const out = scrubCustomerText('Chinch bugs were previously confirmed, but none are present now.');
+    expect(out).not.toMatch(/\bconfirmed\b/i);
+    expect(out).toBe('Chinch bugs previously appeared most consistent with the visible pattern, but none are present now.');
+  });
+
   test('scrubCustomerText strips emails, phone numbers, and links from egress copy', () => {
     const out = scrubCustomerText('Reach me at tech@waves.com or 941-555-1234, see https://x.co/abc.');
     expect(out).not.toMatch(/@waves\.com/);
     expect(out).not.toMatch(/941.?555.?1234/);
     expect(out).not.toMatch(/https?:\/\//);
+  });
+
+  test.each([
+    ['Call 555-0100 if the patch spreads.', /0100/],
+    ['Call 555 0100 if the patch spreads.', /0100/],
+    ['Call +44 20 7946 0958 if the patch spreads.', /7946|0958/],
+    ['Call +44 (0)20-7946-0958 if the patch spreads.', /7946|0958/],
+    ['Call +1 941 555 0100 if the patch spreads.', /0100/],
+    ['Call 9415550100 if the patch spreads.', /0100/],
+    ['Call 0044 20 7946 0958 if the patch spreads.', /7946|0958/],
+    ['Call 00 44 20 7946 0958 if the patch spreads.', /7946|0958/],
+  ])('scrubCustomerText removes local and international phone forms from %s', (text, digits) => {
+    const out = scrubCustomerText(text);
+    expect(out).not.toMatch(digits);
+    expect(out).toMatch(/if the patch spreads\./);
+  });
+
+  test.each(['Large patch has active recovery in the shade.', 'Chinch bug damage has active regrowth.', 'Dollar spot is showing active fill-in.'])('scrubCustomerText leaves the adjectival active phrase in %s alone', (text) => {
+    expect(scrubCustomerText(text)).toBe(text);
+  });
+
+  test('scrubCustomerText still downgrades a predicative active claim beside a recovery noun', () => {
+    expect(scrubCustomerText('Chinch bugs are active and recovery is slow.')).toMatch(/chinch bugs may be active and recovery is slow/i);
+  });
+
+  test('scrubCustomerText downgrades finite confirmation verbs and adjective-first activity claims', () => {
+    expect(scrubCustomerText('The photos confirm chinch bug activity along the edge.')).toBe('The photos suggest chinch bug activity along the edge.');
+    expect(scrubCustomerText('The photo confirms chinch bug activity.')).toBe('The photo suggests chinch bug activity.');
+    const colonies = scrubCustomerText('Active colonies of chinch bugs remain along the edge.');
+    expect(colonies).not.toMatch(/\bactive\b/i);
+    expect(colonies).toMatch(/^suspected colonies of chinch bugs remain along the edge\.$/i);
+    expect(scrubCustomerText('Float test required to confirm active chinch pressure.')).toBe('Float test required to confirm suspected chinch pressure.');
+    expect(safeCustomerSummary('The photos confirm chinch bug activity.', 'moderate')).not.toMatch(/confirm/i);
+  });
+
+  test('scrubCustomerText downgrades verified / proven like confirmed', () => {
+    expect(scrubCustomerText('Chinch bug activity has been verified along the edge.')).toBe('Chinch bug activity appears most consistent with the visible pattern along the edge.');
+    expect(scrubCustomerText('Chinch bug activity was proven by the float test.')).toBe('Chinch bug activity appeared most consistent with the visible pattern by the float test.');
+    expect(scrubCustomerText('The float test verified chinch bug activity.')).toBe('The float test suggested chinch bug activity.');
+    expect(scrubCustomerText('The photos prove chinch bug activity.')).toBe('The photos suggest chinch bug activity.');
+    expect(safeCustomerSummary('Chinch bug activity has been verified.', 'moderate')).not.toMatch(/verified/i);
+  });
+
+  test('an auxiliary never joins an adjective-first cause rewrite', () => {
+    const out = scrubCustomerText('The lawn definitely has chinch bugs.');
+    expect(out).not.toMatch(/suspected has/);
+    expect(residualDefinitiveClaim(out)).toBe(true);
+    expect(safeCustomerSummary('The lawn definitely has chinch bugs.', 'high')).not.toMatch(/definitely|suspected has/);
+  });
+
+  test('scrubCustomerText keeps ordinary short figures', () => {
+    expect(scrubCustomerText('Reapply in 10-14 days across 2,000 sq ft; mow at 3.5 in.')).toBe('Reapply in 10-14 days across 2,000 sq ft; mow at 3.5 in.');
   });
 
   test('customer_summary reduces a raw/injected finding name to an allowlisted label', () => {
@@ -547,6 +691,164 @@ describe('lawn diagnostic auto-release ladder', () => {
     expect(safeConditionLabel('Chinch bug pressure')).toBe('chinch bug activity');
     // A positive finding with a negated differential is NOT clean.
     expect(safeConditionLabel('Possible fungal disease; no weed pressure')).toBe('fungal activity');
+  });
+
+  test.each([
+    'Rhizoctonia ruled out', 'Take-all was not observed', 'Sod-webworm not present', 'Large patch ruled-out',
+    'Chinch bugs weren\u2019t observed', 'Non-fungal stress', 'Gray leaf spot absent', 'Dollar spot unlikely', 'Disease-free turf',
+    'Chinch bugs never observed', 'Never observed chinch bugs',
+    // One negation keeps its scope across an enumerated list.
+    'No weeds, disease, or pests observed', 'No chinch bugs: drought stress ruled out', 'Not drought, chinch bugs, or grubs',
+    // A subject-describing negation negates the whole clause.
+    'Chinch bugs not a factor', 'Chinch bugs were never seen', 'Large patch with no weed pressure ruled out',
+    'Weed-free, disease-free turf', 'Free of chinch bugs',
+    // The whole governed cause is consumed with "free".
+    'Chinch bug-free turf', 'Gray leaf spot-free turf', 'Iron deficiency-free turf', 'Free of gray leaf spot',
+    // "nothing" must not match the thinning alias inside it.
+    'Healthy overall, nothing concerning', 'Nothing concerning',
+    // A non prefix joined directly to the cause.
+    'Nonfungal stress', 'Nonchinch damage',
+    // "no" + a generic symptom noun negates the cause before it.
+    'Chinch bugs \u2014 no evidence observed', 'Dollar spot with no lesions visible', 'Large patch: no signs present',
+    // A conjunct without its own predicate shares the negated one after it.
+    'Chinch bugs and weeds absent', 'Large patch and dollar spot ruled out',
+    // "free of" keeps its scope across a coordinated list.
+    'Free of chinch bugs and weeds', 'Free of chinch bugs, weeds, or grubs',
+    // The nominal absence form.
+    'Absence of chinch bugs', 'Chinch bug absence', 'Absence of any large patch or dollar spot',
+    // A conjunct sharing the negated predicate; symbolic conjunctions in a free-of list.
+    'No chinch bugs and weeds observed', 'Free of chinch bugs & weeds', 'Free of chinch bugs, weeds & grubs', 'Free of chinch bugs / weeds',
+    'Lack of chinch bugs', 'Lacking any chinch bugs',
+  ])('safeConditionLabel never maps the negated alias %s to a positive cause label', (name) => {
+    expect(safeConditionLabel(name, 'high')).toBe('no major visible stress');
+  });
+
+  test('the "free of" list matcher stays linear when a state word ends the list', () => {
+    const inputs = [
+      'Free of significant discoloration present',
+      `Free of ${'a'.repeat(40)} present`,
+      `Free of ${Array(60).fill('word').join(' ')} present`,
+    ];
+    const started = Date.now();
+    for (const input of inputs) safeConditionLabel(input, 'high');
+    expect(Date.now() - started).toBeLessThan(200);
+  });
+
+  test.each([
+    'Large patch is not getting better', 'Chinch bug damage has not started to recover',
+    'Dollar spot not spreading much', 'Large patch is not getting better; weeds absent',
+    'Large patch cannot be ruled out', 'Chinch bugs have not been ruled out', 'Dollar spot not excluded', 'Chinch bugs aren\u2019t unlikely',
+    'Fungal activity is not confirmed', 'Chinch bugs are unconfirmed', 'Chinch bugs cannot be confirmed',
+    'Not free of chinch bugs', 'Turf is not pest-free', 'Cannot be disease-free',
+    // A conjunct with no predicate of its own shares the uncertain predicate.
+    'Chinch bugs and large patch cannot be ruled out',
+  ])('an unrecognized negation %s never earns the clean label and never maps a cause', (name) => {
+    expect(safeConditionLabel(name, 'high')).toBe('a lawn condition we are monitoring');
+    expect(safeConditionLabel(name, 'low')).toBe('a lawn condition we are monitoring');
+  });
+
+  test.each([
+    ['Chinch bugs not present, but drought stress visible', 'drought stress'],
+    ['Rhizoctonia ruled out; dollar spot lesions', 'dollar spot'],
+    ['Sod-webworm not present. Grub damage at the edge', 'grub activity'],
+    ['No weeds; large patch is visible', 'large patch (fungal) activity'],
+    ['Not drought; chinch bug damage along the edge', 'chinch bug activity'],
+    // A determiner-style negation scopes forward, so the positive head survives.
+    ['Large patch with no weed pressure', 'large patch (fungal) activity'],
+    ['Large patch without dollar spot', 'large patch (fungal) activity'],
+    ['Drought stress, not chinch bugs', 'drought stress'],
+    ['Chinch bugs, no drought', 'chinch bug activity'],
+    // A "-free" differential negates only its own compound.
+    ['Large patch in otherwise weed-free turf', 'large patch (fungal) activity'],
+    ['Chinch bug damage, disease free', 'chinch bug activity'],
+    ['Grub damage free of fungal signs', 'grub activity'],
+    // A negated recovery negates the recovery, not the condition.
+    ['Large patch is not improving', 'large patch (fungal) activity'],
+    ['Chinch bug damage has not recovered', 'chinch bug activity'],
+    ['Chinch bug damage hasn\u2019t responded to treatment', 'chinch bug activity'],
+    ['Dollar spot still not clearing up', 'dollar spot'],
+    // A "free of" list ends at its conjunction item or at a new statement.
+    ['Free of chinch bugs and weeds, large patch present', 'large patch (fungal) activity'],
+    ['Free of chinch bugs, weeds, large patch is spreading', 'large patch (fungal) activity'],
+    // A later segment with its own predicate is a new positive statement.
+    ['No weeds, large patch present', 'large patch (fungal) activity'],
+    ['No weeds: chinch bugs observed', 'chinch bug activity'],
+    // Every sentence terminator splits clauses.
+    ['No weeds! Large patch is visible', 'large patch (fungal) activity'],
+    ['No weeds? Large patch is visible', 'large patch (fungal) activity'],
+    // A postpositive marker negates only its own segment, comma- or and-joined.
+    ['Large patch present and weeds absent', 'large patch (fungal) activity'],
+    ['Chinch bug damage at the edge, weeds absent', 'chinch bug activity'],
+    ['Chinch bug damage at the edge and weeds absent', 'chinch bug activity'],
+    ['Large patch absent and drought stress visible', 'drought stress'],
+    ['Weeds absent and large patch present', 'large patch (fungal) activity'],
+    ['Large patch present, weeds absent', 'large patch (fungal) activity'],
+    ['Chinch bugs not present, drought stress visible', 'drought stress'],
+    ['Chinch bugs not a factor, drought stress visible', 'drought stress'],
+    ['Nonirrigated strip, chinch bug damage', 'chinch bug activity'],
+    ['Healthy overall, some yellowing', 'color and nutrient stress'],
+    // An uncertain differential is scoped to its own predicate segment.
+    ['Large patch present, chinch bugs not confirmed', 'large patch (fungal) activity'],
+    ['Large patch visible and chinch bugs cannot be ruled out', 'large patch (fungal) activity'],
+    ['Chinch bugs not confirmed, large patch present', 'large patch (fungal) activity'],
+    ['Drought stress unconfirmed; chinch bug damage along the edge', 'chinch bug activity'],
+    // The nominal absence form negates its own segment.
+    ['Large patch present, chinch bug absence', 'large patch (fungal) activity'],
+    // "not only" / "not just" intensify rather than negate.
+    ['Large patch is not only visible but spreading', 'large patch (fungal) activity'],
+    ['Chinch bug damage is not just visible, it is spreading', 'chinch bug activity'],
+    ['Dollar spot not merely present but spreading', 'dollar spot'],
+    // An "and"-led segment with its own finite verb is a new positive statement.
+    ['No weeds and large patch is present', 'large patch (fungal) activity'],
+    ['No weeds, and large patch is present', 'large patch (fungal) activity'],
+    ['No chinch bugs and drought stress is visible', 'drought stress'],
+    ['Large patch present, lack of weeds', 'large patch (fungal) activity'],
+  ])('safeConditionLabel maps only the positive clause of %s', (name, label) => {
+    expect(safeConditionLabel(name, 'high')).toBe(label);
+  });
+
+  test('safeConditionLabel aliases are word-bounded so ordinary words never map to a condition', () => {
+    expect(safeConditionLabel('Thin turf', 'high')).toBe('thinning turf');
+    expect(safeConditionLabel('Thinning along the edge', 'high')).toBe('thinning turf');
+    expect(safeConditionLabel('Environmental stress', 'high')).not.toBe('color and nutrient stress');
+    expect(safeConditionLabel('Iron deficiency', 'high')).toBe('color and nutrient stress');
+  });
+
+  test('safeConditionLabel keeps a health-led name clean when no positive clause follows', () => {
+    expect(safeConditionLabel('Healthy, dense turf', 'high')).toBe('no major visible stress');
+    expect(safeConditionLabel('Looks good overall', 'high')).toBe('no major visible stress');
+  });
+
+  test('safeCustomerSummary governs the fully joined gray-leaf-spot spelling', () => {
+    expect(safeCustomerSummary('Grayleafspot lesions are visible.', 'low')).not.toMatch(/leaf/i);
+    expect(safeConditionLabel('Grayleafspot lesions', 'moderate')).toBe('gray leaf spot');
+  });
+
+  test.each(['Wilts are visible', 'Funguses are spreading', 'Crabgrasses are spreading', 'Rhizoctonial damage', 'Droughty turf'])('safeCustomerSummary governs the inflected spelling %s', (cause) => {
+    expect(safeCustomerSummary(`${cause} across the shaded strip.`, 'low')).not.toMatch(/wilt|fungus|crabgrass|rhizoctonia|drought/i);
+  });
+
+  test.each(['Moldy growth', 'Mildewed turf', 'Diseased turf', 'Mildewy patches'])('safeCustomerSummary replaces a low-confidence summary using the adjectival form %s with the generic line', (cause) => {
+    expect(safeCustomerSummary(`${cause} across the shaded strip.`, 'low')).not.toMatch(/moldy|mildew|diseased/i);
+  });
+
+  test.each(['Sod--webworm damage', 'Sod - webworm damage', 'Chinch  bug damage', 'Army--worm feeding'])('safeCustomerSummary replaces a low-confidence summary naming %s with the generic line', (cause) => {
+    expect(safeCustomerSummary(`Most consistent with ${cause}.`, 'low')).not.toMatch(/webworm|chinch|worm/i);
+  });
+
+  test.each([
+    ['Sod-webworm damage', 'caterpillar activity'], ['Sod‑webworm damage', 'caterpillar activity'], ['Armyworm feeding', 'caterpillar activity'],
+    ['Large-patch activity', 'large patch (fungal) activity'], ['Brownpatch rings', 'large patch (fungal) activity'],
+    ['Gray-leaf-spot lesions', 'gray leaf spot'], ['Greyleaf spot', 'gray leaf spot'], ['Dollar-spot lesions', 'dollar spot'],
+    ['Leaf-spot activity', 'fungal activity'], ['Water-stress pattern', 'drought stress'], ['Underwatered turf', 'drought stress'],
+    ['Fungi spreading', 'fungal activity'], ['Molds spreading', 'fungal activity'], ['Rhizoctonia rings', 'large patch (fungal) activity'], ['Take-all root rot', 'fungal activity'],
+    ['Take-all patch', 'fungal activity'], ['Take all root rot', 'fungal activity'],
+  ])('safeConditionLabel maps the separator spelling %s to %s at moderate confidence', (name, label) => {
+    expect(safeConditionLabel(name, 'moderate')).toBe(label);
+  });
+
+  test.each(['Recovery may take all season', 'Thin turf may take all summer to recover', 'This will take all of the fall', 'Preventive fungicide application', 'Fungicide-treated area'])('safeConditionLabel never reads the ordinary phrase in %s as a fungal disease', (name) => {
+    expect(safeConditionLabel(name, 'high')).not.toBe('fungal activity');
   });
 
   test('safeConditionLabel downgrades a named cause to a generic symptom below moderate confidence', () => {

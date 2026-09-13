@@ -78,6 +78,7 @@
  *   GATE_ESTIMATE_RETURN_VISIT=true (estimate page returning-visitor strip: visit number + named changes since the previous visit; read-only projection, no comms; dev-open, prod dark)
  *   GATE_HERMES_WATCHDOG=true (external agent watchdog: GET /api/integrations/watchdog-worker/status serves the PII-free health snapshot to the hermes_watchdog key and the 23-min liveness cron bells when the watchdog stops polling; off = 404 + cron no-op; kill = unset)
  *   GATE_ADMIN_OPS_QUEUE=true (Agents hub "Queue" tab: one read-only view of every long-running lane's pending / parked / failed rows — jobs, call processing, content parks, email approvals, IB confirmations, report delivery, follow-ups, open alerts; off = tab hidden, /api/admin/agents/queue 404)
+ *   GATE_IB_MERGE_CUSTOMERS=true (Intelligence Bar merge_customers: the confirmed duplicate-merge write is offered in admin tool lists and executes; off = the tool is not offered on either the legacy or the platform path and a forced call refuses; the admin duplicates-queue route is unaffected; kill = unset)
  *   GATE_IB_TOOL_ACTIVITY=true (Intelligence Bar answers carry a toolActivity list — one operator-facing line per tool the exchange ran: label, done/error/proposed, duration — rendered above the answer in the ⌘K palette; off = response byte-identical to today)
  *   GATE_CALL_TRANSCRIPT_SYNC=true (admin call log: diarized transcript segments render as a clickable, audio-synced list — click a line to seek the recording; off = today's plain-text transcript)
  *   GATE_TECH_DICTATION_UPLOAD=true (tech completion notes: when the browser has no SpeechRecognition — iOS home-screen PWA, Firefox — the mic records with MediaRecorder and POSTs the clip to /api/tech/services/:id/dictation for server transcription; off = today's behavior, mic hidden without SpeechRecognition)
@@ -97,6 +98,7 @@
  *   GATE_LAWN_PROPERTY_HISTORY=true (property-scoped confirmed lawn history, one installed row per visit, report-date/reset windows and confirm-time baseline; dark in dev AND prod; consumers read at call time)
  *   GATE_LAWN_COMPLETION_DEFAULTS=true (appointment-plan completion defaults; requires GATE_LAWN_PROPERTY_HISTORY; opt-in in every environment)
  *   GATE_LAWN_ACTUALS_LEDGER=true (lawn actuals ledger for EVERY lawn visit — one-time, commercial and incomplete-with-products included, no protocol attribution invented; off = WaveGuard-only writer, byte-identical; read at call time)
+ *   GATE_LAWN_DELIVERY_RECOVERY=true (resume a confirmed lawn visit's interrupted customer delivery; FAILS CLOSED everywhere — off = the sweep shadow-logs candidates and sends nothing)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -134,6 +136,14 @@ const gates = {
   lawnCompletionDefaults: gateEnvValue('GATE_LAWN_COMPLETION_DEFAULTS'),
   // Registered for startup logging; the completion writer reads it at call time (strict 'true').
   lawnActualsLedger: process.env.GATE_LAWN_ACTUALS_LEDGER === 'true',
+  // Lawn delivery recovery sweep. Resuming a confirmed visit's delivery can put
+  // a real customer SMS on the wire, so it FAILS CLOSED in every environment per
+  // the house rule — a dev box or preview pointed at a production-seeded database
+  // must never text a customer on boot. Off → the sweep shadow-logs its candidate
+  // count and delivers nothing. Double-gated: the cron also needs cronJobs.
+  // gateEnvValue here and in the sweep, so startup logging can never report this
+  // safety gate as disabled while it is actually open ('1' / 'on').
+  lawnDeliveryRecovery: gateEnvValue('GATE_LAWN_DELIVERY_RECOVERY'),
   // Complete Service: job-matched estimate evidence and reviewed discounts.
   completionServicePricing: process.env.GATE_COMPLETION_SERVICE_PRICING === 'true',
   // Customer selects one available visit; later cadence dates await auto-dispatch ±3 days.
@@ -384,6 +394,9 @@ const gates = {
   // creation) and issued /visit/:token links keep resolving. Fail-closed
   // ==='true' in EVERY environment; kill switch: unset.
   visitGroups: process.env.GATE_VISIT_GROUPS === 'true',
+  // Creation only. Saved packets and issued summary links survive the kill
+  // switch. Read at call time so grouping and closeout share one decision.
+  get visitCloseout() { return process.env.GATE_VISIT_CLOSEOUT === 'true'; },
 
   // Creation only: stamped reservations retain their full service capacity
   // through acceptance even after this gate is disabled. Strict opt-in.
@@ -518,6 +531,9 @@ const gates = {
   // hides the picker, and a propertyId on create is refused (409), so a
   // stale tab cannot book to a secondary address while the lane is dark.
   editApptAddress: process.env.GATE_EDIT_APPT_ADDRESS === 'true',
+  // Admin-only, reasoned second-program creation; reviewed IDs are checked
+  // under the existing series-create lock. Unset hides and refuses the flow.
+  separateRecurringProgram: process.env.GATE_SEPARATE_RECURRING_PROGRAM === 'true',
   editApptVisitCount: process.env.GATE_EDIT_APPT_VISIT_COUNT === 'true',
 
   // Applying a PRICE or primary-SERVICE change from Edit appointment to "this
@@ -783,6 +799,10 @@ const gates = {
   // voice_corpus_examples (redacted text only, reader-not-ingestor).
   // No sends, no customer-visible effect; prod opt-in per house pattern.
   voiceCorpusMiner: isProd ? process.env.GATE_VOICE_CORPUS_MINER === 'true' : true,
+
+  // Reviewed human-email pairs only; strict opt-in in every environment.
+  // The miner re-reads the gate at call time and requires a reviewed selection.
+  voiceCorpusEmailSource: gateEnvValue('GATE_VOICE_CORPUS_EMAIL_SOURCE'),
 
   // Call-Research Miner (voice-of-customer corpus) — nightly extraction of
   // verbatim double-redacted quote chunks from call transcripts into
@@ -1236,8 +1256,8 @@ const gates = {
   // Layered spam classifier: records verdicts to call_spam_verdicts (100%
   // precision offline; any discard action is a separate consumer decision).
   callSpamClassifier: process.env.GATE_CALL_SPAM_CLASSIFIER === 'true',
-  // SMS shadow classification is active only for `shadow`; enforcement is unavailable.
-  smsSpamClassifier: String(process.env.GATE_SMS_SPAM_CLASSIFIER || '').trim().toLowerCase() === 'shadow',
+  // Shadow records evidence; true also silences confident unknown-sender pitches.
+  smsSpamClassifier: ['shadow', 'true'].includes(String(process.env.GATE_SMS_SPAM_CLASSIFIER || '').trim().toLowerCase()),
   // Profile-enrichment writer: gate codes/pets/notes from extraction into
   // property_preferences + customers.internal_notes (admin-edit-preserving).
   callProfileEnrichment: process.env.GATE_CALL_PROFILE_ENRICHMENT === 'true',
@@ -1321,8 +1341,28 @@ const gates = {
   // Off → nothing is written; the Calls tab still renders rows already
   // recorded. Kill switch: unset. See services/call-commitments.js.
   callCommitments: process.env.GATE_CALL_COMMITMENTS === 'true',
+  // Call reschedule apply: a matched existing customer's agent-committed move
+  // of a visit already on the books (V2 reschedule_requested + confirmed
+  // start) is applied to that visit through the rebooker, the access note
+  // lands on the visit, and the call's reschedule cards resolve as 'auto'.
+  // Fail-closed on identity, confidence, and a single unambiguous visit.
+  // Sends NO customer communication (owner directive 2026-09-08); the
+  // reminder cron simply reads the new time. Off → cards stay open as
+  // before. See services/call-reschedule-apply.js.
+  // Automatic moves also require GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS.
+  callRescheduleApply: process.env.GATE_CALL_RESCHEDULE_APPLY === 'true',
   callbackCard: gateEnvValue('GATE_CALLBACK_CARD'),
   smsAdditionalProperty: gateEnvValue('GATE_SMS_ADDITIONAL_PROPERTY'),
+  // Missing-departure/arrival tracking: flags a scheduled_services row whose
+  // promised window (the last communicated arrival window — SMS/email/call
+  // evidence, never the raw schedule) has passed with no en_route/arrived
+  // evidence. Stage 1 (45 min) notifies the assigned tech; stage 2 (150 min,
+  // or any unassigned visit) also raises an office Action Queue alert
+  // through the existing tech_late/unassigned_overdue dispatch-alert
+  // lifecycle. Off → services/no-show-detector.js#sweep is a no-op; the
+  // READ-ONLY replay CLI (ops/agents/replay-no-show-detector.js) still runs
+  // regardless of this gate. Staff alerts only — no customer comms.
+  noShowDetector: gateEnvValue('GATE_NOSHOW_DETECTOR'),
   // Unrecorded-call alert: the "Twilio has no recording either" step of the
   // existing 5-min missing-recording sweep (call-recording-processor
   // .recoverMissingRecentRecordings). Rings an admin bell for any answered
@@ -2007,6 +2047,11 @@ const gates = {
   // existing Intelligence Bar. Read-only and explicitly opt-in everywhere.
   scheduleQualityMeasurements: gateEnvValue('GATE_SCHEDULE_QUALITY_MEASUREMENTS'),
 
+  // Existing Dispatch queue: unresolved future-route locations, durations,
+  // modeled lateness, closures and unallocated work. Requires measurements;
+  // separate opt-in so collection can stay observational.
+  scheduleQualityAlerts: gateEnvValue('GATE_SCHEDULE_QUALITY_ALERTS'),
+
   // Drive-Time Calibration — swaps the straight-line drive-time approximation
   // (haversine × 1.4 road factor @ 30 mph) for a two-term model fitted against
   // real trips: a fixed per-leg overhead plus a per-mile rate. Purely an
@@ -2454,6 +2499,13 @@ const gates = {
   // Platform-wide IB discovery/execution. Dark until explicitly enabled;
   // existing confirmation and role gates remain mandatory on every request.
   ibPlatform: gateEnvValue('GATE_IB_PLATFORM'),
+
+  // Intelligence Bar merge_customers (#4348): an irreversible admin customer
+  // write, dark by default like every other new IB capability. Read at CALL
+  // time in services/intelligence-bar/customer-lifecycle-tools.js
+  // (mergeCustomersEnabled) — tool lists on both paths and the executor
+  // itself; this entry is the status/log listing.
+  ibMergeCustomers: gateEnvValue('GATE_IB_MERGE_CUSTOMERS'),
 
   // Tips from your tech (scope + owner decisions 2026-09-01): the completion
   // screen's searchable tip picker (replacing the free-text Observations /

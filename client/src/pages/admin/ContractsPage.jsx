@@ -23,6 +23,7 @@
 import React, { Suspense, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { FileClock, FileText } from "lucide-react";
+import { UiSurface } from "../../components/ui";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 
@@ -55,11 +56,12 @@ export default function ContractsPage() {
   const [secondary, setSecondary] = useState(null);
 
   return (
-    <div className="mx-auto max-w-[1500px]">
+    <UiSurface density="comfortable" className="mx-auto min-w-0 max-w-[1500px] text-ui-body">
       {/* One header card: Templates / Requests on the first row; the active
           tab page hands its category/status filters + actions up for the
           second row instead of stacking a second header. */}
       <AdminCommandHeader
+        variant="workspace"
         title="Contracts"
         icon={FileText}
         sections={TABS}
@@ -77,7 +79,7 @@ export default function ContractsPage() {
 
       <Suspense
         fallback={
-          <div className="p-10 text-13 text-ink-secondary">Loading…</div>
+          <div className="p-10 text-ui-body text-ink-secondary">Loading…</div>
         }
       >
         {tab === "requests" ? (
@@ -86,6 +88,6 @@ export default function ContractsPage() {
           <DocumentTemplatesPage embedded onSecondaryNav={setSecondary} />
         )}
       </Suspense>
-    </div>
+    </UiSurface>
   );
 }

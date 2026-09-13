@@ -506,22 +506,24 @@ async function saveBillingRecipientPreference(customerId, { email, name }) {
     billing_contact_name: name || null,
     updated_at: new Date(),
   };
-  const existing = await db('notification_prefs')
-    .where({ customer_id: customerId })
-    .first('id');
-  if (existing) {
-    await db('notification_prefs')
+  await db.transaction(async (trx) => {
+    const existing = await trx('notification_prefs')
+      .where({ customer_id: customerId })
+      .forUpdate()
+      .first('id');
+    if (!existing) {
+      // Canonical helper first (marketing flags NULL) — a bare insert would
+      // take the legacy true defaults and mint marketing consent.
+      const { createDefaultCustomerRows } = require('../services/customer-default-rows');
+      await createDefaultCustomerRows(trx, customerId);
+    }
+    // billing_email is an ownership source for the bounce recovery: the
+    // address key is taken after the row, like every other address writer.
+    await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, updates);
+    await trx('notification_prefs')
       .where({ customer_id: customerId })
       .update(updates);
-  } else {
-    // Canonical helper first (marketing flags NULL) — a bare insert would
-    // take the legacy true defaults and mint marketing consent.
-    const { createDefaultCustomerRows } = require('../services/customer-default-rows');
-    await createDefaultCustomerRows(db, customerId);
-    await db('notification_prefs')
-      .where({ customer_id: customerId })
-      .update(updates);
-  }
+  });
 }
 
 // GET /stats
@@ -1968,6 +1970,7 @@ function scheduleInvoiceSend(conn, id, values) {
     .where({ id })
     .whereIn('status', ['draft', 'scheduled'])
     .whereNull('payer_statement_id')
+    .whereRaw("(scheduled_send_error IS NULL OR scheduled_send_error NOT LIKE 'payer_billed:%')")
     .update(values)
     .returning('*')
     .then((rows) => rows[0] || null);
@@ -2032,9 +2035,19 @@ router.post('/:id/schedule-send', requireAdmin, async (req, res, next) => {
     // Phase 2: never queue an accrued invoice into the individual send scheduler —
     // it is delivered on the consolidated statement (processScheduledSends would
     // churn failed sends against the statement-only send guard).
-    const target = await db('invoices').where({ id: req.params.id }).first('payer_statement_id', 'scheduled_service_id');
+    const target = await db('invoices').where({ id: req.params.id })
+      .first('payer_statement_id', 'scheduled_service_id', 'scheduled_send_error');
     if (target?.payer_statement_id) {
       return res.status(400).json({ error: 'Invoice is billed on the payer’s monthly statement; it cannot be scheduled for individual send.' });
+    }
+    // A combined-visit invoice WITHDRAWN to a third-party payer records that
+    // move only in scheduled_send_error. The Bill-To reconciliation owns the
+    // release; never clear the stamp and queue a homeowner delivery here.
+    if (require('../services/invoice-helpers').invoiceWithdrawnFromCustomer(target)) {
+      return res.status(409).json({
+        error: 'This invoice is billed to a third-party payer and has been withdrawn from the customer — clear the Bill-To first.',
+        code: 'invoice_withdrawn_from_customer',
+      });
     }
     const values = {
       status: 'scheduled',
@@ -2691,7 +2704,7 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: 'Invoice is billed to a third-party payer — account credit cannot be applied to payer invoices' });
     }
     try {
-      assertInvoiceCollectible(invoice.status);
+      assertInvoiceCollectible(invoice);
     } catch (err) {
       return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
     }
@@ -2727,7 +2740,7 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
           const err = new Error('Invoice not found'); err.statusCode = 404; err.isOperational = true; throw err;
         }
         try {
-          assertInvoiceCollectible(locked.status);
+          assertInvoiceCollectible(locked);
         } catch (err) {
           err.statusCode = locked.status === 'processing' ? 409 : 400; err.isOperational = true; throw err;
         }
@@ -3034,7 +3047,7 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: 'Invoice is billed to a third-party payer — payment plans are not supported for payer invoices' });
     }
     try {
-      assertInvoiceCollectible(invoice.status);
+      assertInvoiceCollectible(invoice);
     } catch (err) {
       return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
     }
@@ -3098,7 +3111,7 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
         // just-settled invoice would edit-lock it all over again with
         // nothing left to collect (codex r1 P1).
         try {
-          assertInvoiceCollectible(lockedInvoice.status);
+          assertInvoiceCollectible(lockedInvoice);
         } catch (err) {
           err.statusCode = 409; throw err;
         }

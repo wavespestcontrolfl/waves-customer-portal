@@ -3,13 +3,14 @@ const router = express.Router();
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { resolveLocation } = require('../config/locations');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
-const { normalizePhone, phoneMatchDigits } = require('../utils/phone');
+const { normalizePhone, phoneMatchDigits, phoneIdentityKey } = require('../utils/phone');
 const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { placeBridgeCall } = require('../services/call-bridge');
@@ -25,6 +26,8 @@ const {
   HUMAN_REPLY_TYPES,
   markSuggestionScheduled,
   parkThreadSuggestions,
+  createReplyHoldingReservation,
+  settleReplyHoldingReservation,
   reopenScheduledSuggestions,
   ignoreParkedSuggestions,
   sweepStaleSuggestionsAfterReply,
@@ -171,15 +174,20 @@ async function customerOfSourceCall(callId, to) {
 }
 
 async function findSingleCustomerForPhone(phone) {
-  // Compare on the last 10 digits so stored formats ('+19415551234',
-  // '9415551234', '(941) 555-1234') all match the same dialable number —
-  // full-digit equality misses customers stored without the country code.
-  const last10 = normalizePhoneLast10(normalizePhone(phone) || phone);
-  if (!last10) return null;
+  // Full-digit match on every stored format the number could plausibly be
+  // ('+19415551234', '9415551234', '(941) 555-1234' all match the same
+  // NANP line), via the same NANP-vs-international candidate set the
+  // exact-contact search above uses (phoneMatchDigits, utils/phone.js) —
+  // NOT a last-10-digit suffix match, which let an international sender
+  // resolve to an unrelated US customer that merely shared its last ten
+  // digits (codex #4213 P2; the wrong-customer-attach incident this rule
+  // exists to prevent).
+  const candidates = phoneMatchDigits(phone);
+  if (!candidates.length) return null;
 
   const matches = await db('customers')
     .whereNull('deleted_at')
-    .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+    .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ANY (?::text[])", [candidates])
     .orderBy('updated_at', 'desc')
     .limit(2);
 
@@ -200,7 +208,10 @@ async function resolveSmsLogCustomerFallbacks(rows) {
   for (const row of rows || []) {
     if (row.customer_id || row.first_name) continue;
     const contactPhone = row.contact_phone || row.customer_phone;
-    const key = normalizePhoneLast10(normalizePhone(contactPhone) || contactPhone);
+    // phoneIdentityKey (utils/phone.js) — NOT normalizePhoneLast10 — so an
+    // international contact never buckets under the same key as a US
+    // customer sharing its last ten digits; see findSingleCustomerForPhone.
+    const key = phoneIdentityKey(contactPhone);
     if (key && !phones.has(key)) phones.set(key, contactPhone);
   }
   if (!phones.size) return new Map();
@@ -251,7 +262,7 @@ async function dispatchPrepLinkSend(preps, dispatch, actorId, recheck) {
     try {
       result = await dispatch();
     } catch (err) {
-      if (err?.providerOutcome?.sent === true) await mark('after a throw');
+      if (require('../services/sms-auto-send').isRealProviderSend(err?.providerOutcome)) await mark('after a throw');
       throw err;
     }
     if (result?.sent && require('../services/sms-auto-send').isRealProviderSend(result)) await mark('(text already sent)');
@@ -272,6 +283,8 @@ router.post('/sms', async (req, res, next) => {
   let claimedReviewRequestId = null;
   let claimedReviewClaimToken = null;
   let reviewEmailOutcome = null;
+  let reviewSettlementAttempted = false;
+  let reviewProviderStarted = false;
   // Quick Links "Both": once the text has really sent, the same ask goes out
   // by email too (ReviewService.sendInlineEmailCopy). Hoisted: the catch
   // below emails after an accepted-but-thrown send.
@@ -324,9 +337,9 @@ router.post('/sms', async (req, res, next) => {
     }
   };
   // AMBIGUOUS provider outcome (GH Codex #3851 r4 P1 — the card funnel's own
-  // rule): a provider-phase retryable/deferred result (Twilio timeout, 5xx,
-  // 429) is NOT a definitive no-send — the provider may already hold the
-  // message. blocked:true is a validator stop and stays definitive. Bearer
+  // rule): an explicit uncertain result is not a definitive no-send — the
+  // provider may already hold the message. Legacy providers fall back to
+  // retryable/deferred classification. Bearer
   // state is kept consumed: the card claim finalizes through the service's
   // maybe-sent marker (no email twin — nothing is known to have left, and
   // the marker is what the stale lease reads), and an activated contract
@@ -337,7 +350,7 @@ router.post('/sms', async (req, res, next) => {
     if (contractActivations) {
       const ids = contractActivations.map((a) => a.id).join(', ');
       contractActivations = null;
-      logger.error(`[communications] send outcome RETRYABLE-ambiguous (${code}) — prepared contract links stay activated (${ids})`);
+      logger.error(`[communications] send outcome ambiguous (${code}) — prepared contract links stay activated (${ids})`);
     }
     // The project delivery claim stays too (GH Codex #3893 r12 P1): the
     // provider may still hold the text, and restoring the row's state would
@@ -346,12 +359,12 @@ router.post('/sms', async (req, res, next) => {
     if (projectClaim) {
       const claim = projectClaim;
       projectClaim = null;
-      logger.error(`[communications] send outcome RETRYABLE-ambiguous (${code}) — keeping the project report delivery claim for projects ${claim.projects.map((p) => p.id).join(', ')}`);
+      logger.error(`[communications] send outcome ambiguous (${code}) — keeping the project report delivery claim for projects ${claim.projects.map((p) => p.id).join(', ')}`);
     }
     if (cardClaim) {
       const claim = cardClaim;
       cardClaim = null;
-      logger.error(`[communications] send outcome RETRYABLE-ambiguous (${code}) — keeping the card request claim for visits ${claim.cards.map((c) => c.scheduledServiceId).join(', ')}`);
+      logger.error(`[communications] send outcome ambiguous (${code}) — keeping the card request claim for visits ${claim.cards.map((c) => c.scheduledServiceId).join(', ')}`);
       try {
         await require('../services/composer-customer-links').markCardRequestSends(claim, { emailTwin: false });
       } catch (markErr) {
@@ -363,11 +376,13 @@ router.post('/sms', async (req, res, next) => {
     if (!manualReservationId) return;
     const id = manualReservationId;
     manualReservationId = null;
-    await db('sms_log').where({ id }).del().catch((delErr) => {
-      // A leftover reservation is bounded — reconcileAutoSendClaims sweeps
-      // stale 'sending' reservation rows — so a failed delete is non-fatal.
-      logger.warn(`[sms-auto-send] manual reservation cleanup failed (${id}): ${delErr.message}`);
-    });
+    await settleReplyHoldingReservation({ reservationId: id });
+  };
+  const holdManualReservation = async () => {
+    if (!manualReservationId) return;
+    const id = manualReservationId;
+    manualReservationId = null;
+    await settleReplyHoldingReservation({ reservationId: id, uncertain: true });
   };
   try {
     const {
@@ -419,6 +434,15 @@ router.post('/sms', async (req, res, next) => {
       trustedCustomerId = customer.id;
     }
 
+    const reviewLooking = !!reviewRequestId || require('../services/review-ask-history').looksLikeReviewAsk(cleanBody);
+    if (reviewLooking && !reviewRequestId && !trustedCustomerId) {
+      const customer = await findSingleCustomerForPhone(to);
+      if (!customer || normalizePhone(customer.phone) !== normalizePhone(to)) {
+        return res.status(409).json({ error: 'Select the customer receiving this review request before sending.' });
+      }
+      trustedCustomerId = customer.id;
+    }
+
     let verifiedAgentDecision = null;
     if (agentDecisionId && agentDraft) {
       verifiedAgentDecision = await verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId, outgoingBody: body });
@@ -438,8 +462,9 @@ router.post('/sms', async (req, res, next) => {
       // pass on the same pending card and both text the customer. The
       // guarded single UPDATE is the atomic claim; the loser 409s.
       // 'scheduled' = claimed-for-send: reopened below on blocked/failed/
-      // exception, resolved accepted/corrected on success, and the orphan
-      // sweep reopens it if the process dies in between.
+      // exception and resolved accepted/corrected on success. The linked
+      // reservation below tells recovery whether a crashed attempt is stale
+      // or carries explicit provider uncertainty.
       const claimed = await db('agent_decisions')
         .where({ id: verifiedAgentDecision.id, status: 'pending_review' })
         .update({
@@ -457,13 +482,13 @@ router.post('/sms', async (req, res, next) => {
     // (same as the scheduled path): the post-send sweep can't protect the
     // seconds while Twilio runs, and a parallel admin could still fetch and
     // send the same card. Success resolves them as ignored; blocked/failed/
-    // exception reopens them; a crash mid-send is bounded by the 30-min
-    // orphan recovery.
+    // exception reopens them; recovery reopens an ordinary crashed attempt
+    // after 30 minutes but retains an explicitly uncertain provider outcome.
     let autoSendInFlight = false;
     let staleAtClaim = false;
-    // The auto-send interlock only matters when Phase E auto-send is enabled.
-    // Gated so the manual send path carries ZERO extra work while the feature
-    // is dormant (the usual state): no claim lookup, no reservation row.
+    // The autonomous-claim lookup only matters while Phase E is enabled. The
+    // recovery reservation below is separate: it is also required gate-off
+    // whenever this send claims or parks a suggestion.
     const autoSendInterlock = isEnabled('smsAutoSend');
     try {
       const parkPhoneLast10 = normalizePhoneLast10(to);
@@ -490,35 +515,25 @@ router.post('/sms', async (req, res, next) => {
               autoSendInFlight = true;
               return [];
             }
-            // ...and the symmetric direction: persist a human-typed 'sending'
-            // marker the auto-send's own guard (threadHasLiveAnswer) sees, so an
-            // auto-send claiming AFTER we release the lock won't fire during our
-            // provider window. Deleted once the send resolves (below / in catch).
-            // sms_log.from_phone is NOT NULL, but the route lets callers omit
-            // fromNumber (TwilioService picks the location default at send).
-            // The reservation is a transient marker (deleted after send, never
-            // customer-visible), so its from only needs to be non-null — use
-            // the main-line default. getOutboundNumber() with no location falls
-            // back to the main line.
-            const reservationFrom = fromNumber || TWILIO_NUMBERS.getOutboundNumber();
-            const [resv] = await trx('sms_log')
-              .insert({
-                customer_id: trustedCustomerId || null,
-                direction: 'outbound',
-                from_phone: reservationFrom,
-                to_phone: to,
-                message_body: cleanBody,
-                status: 'sending',
-                message_type: 'manual',
-                admin_user_id: req.technicianId || null,
-                metadata: JSON.stringify({ manual_send_reservation: true }),
-              })
-              .returning('id');
-            manualReservationId = resv?.id || null;
           }
-          return parkThreadSuggestions(
+          const parkedIds = await parkThreadSuggestions(
             { phoneLast10: parkPhoneLast10, excludeDecisionId: verifiedAgentDecision?.id }, trx
           );
+          // The gate controls only the autonomous-send race check. Once this
+          // path claims or parks a suggestion, recovery linkage is required
+          // regardless of the gate's current value.
+          if (autoSendInterlock || claimedDecisionId || parkedIds.length) {
+            manualReservationId = await createReplyHoldingReservation(trx, {
+              to,
+              customerId: trustedCustomerId || null,
+              fromNumber: fromNumber || TWILIO_NUMBERS.getOutboundNumber(),
+              body: cleanBody,
+              adminUserId: req.technicianId || null,
+              agentDecisionId: claimedDecisionId,
+              parkedDecisionIds: parkedIds,
+            });
+          }
+          return parkedIds;
         });
       }
     } catch (parkErr) {
@@ -658,6 +673,9 @@ router.post('/sms', async (req, res, next) => {
         if (!rr || rr.triggered_by !== 'auto_inline') {
           return abortUnsent(409, 'The inserted review link could not be verified — remove it from the message and re-insert.');
         }
+        if (trustedCustomerId && rr.customer_id !== trustedCustomerId) {
+          return abortUnsent(422, 'This review link belongs to a different customer — remove it before sending.');
+        }
         const { existingShortUrlFor } = require('../services/short-url');
         const short = await existingShortUrlFor({ kind: 'review', entityType: 'review_requests', entityId: rr.id });
         // Canonical match: scheme dropped and the HOST compared case-
@@ -684,9 +702,15 @@ router.post('/sms', async (req, res, next) => {
           return abortUnsent(409, 'The review link is no longer in the message — remove the review request and try again.');
         }
         const owner = await db('customers').where({ id: rr.customer_id }).first('id', 'phone');
-        if (!owner || normalizePhoneLast10(owner.phone) !== normalizePhoneLast10(to)) {
+        // Exact E.164 match, not a last-10-digits suffix match: the owner's
+        // identity is trusted downstream (customerId, consent, lock, spacing
+        // history), and an international destination can share its last ten
+        // digits with a US number (Codex #4339 P2).
+        const ownerPhone = owner ? normalizePhone(owner.phone) : null;
+        if (!owner || !ownerPhone || ownerPhone !== normalizePhone(to)) {
           return abortUnsent(422, 'This review link belongs to a different customer — remove it before sending.');
         }
+        trustedCustomerId = rr.customer_id;
         // Live consent + the ask gates + the claim, serialized under the same
         // per-customer review lock the mint runs under: a draft can sit open
         // for hours, so the MINT-time gate is stale — a cadence or one-off
@@ -749,6 +773,12 @@ router.post('/sms', async (req, res, next) => {
     }
 
     const sendStartedAt = new Date();
+    // Everything that can reject without a provider side effect has finished.
+    // Arm the durable marker before entering the provider pipeline; if the DB
+    // cannot record that boundary, fail closed and do not send.
+    if (manualReservationId && !await settleReplyHoldingReservation({ reservationId: manualReservationId, uncertain: true })) {
+      return abortUnsent(503, 'Could not reserve this conversation for provider delivery — try again in a moment.');
+    }
     // Human-authored only when the operator typed the body, not when an
     // unedited AI suggestion is being sent through. The stale-month guard
     // exemption rides on this; an unchanged agent draft stays month-checked
@@ -767,7 +797,7 @@ router.post('/sms', async (req, res, next) => {
     // blocked — and the claim released — where the funnel accepts it (GH
     // Codex #3844 r5 P1). The composer inserts the BASE template copy.
     const cardVisitIds = cardClaim ? cardClaim.cards.map((c) => c.scheduledServiceId) : [];
-    const dispatch = () => sendCustomerMessage({
+    const sendMessage = () => sendCustomerMessage({
       to,
       body: cleanBody,
       channel: 'sms',
@@ -807,6 +837,101 @@ router.post('/sms', async (req, res, next) => {
         humanAuthored: !bodyIsUnchangedAgentDraft,
       },
     });
+    const dispatch = async () => {
+      const sendAndSettle = async () => {
+        let result;
+        let reviewReservationId = null;
+        const settleReviewReservation = async (outcome) => {
+          if (!reviewReservationId) return;
+          // A real provider log replaces the pre-send evidence. Otherwise
+          // keep the reservation: even a failed UPDATE must retain the hold.
+          if (require('../services/sms-auto-send').isRealProviderSend(outcome)) {
+            try {
+              const logged = outcome.providerMessageId && await db('sms_log')
+                .where({ twilio_sid: outcome.providerMessageId, direction: 'outbound' }).first('id');
+              if (logged) await db('sms_log').where({ id: reviewReservationId }).del();
+              else await db('sms_log').where({ id: reviewReservationId }).update({
+                status: 'sent', twilio_sid: outcome.providerMessageId || null, updated_at: new Date(),
+              });
+            } catch (stampErr) {
+              logger.warn(`[communications] accepted review keeps its reservation (${reviewReservationId}): ${stampErr.message}`);
+            }
+          } else if (outcome?.deliveryOutcome === 'not_sent') {
+            await db('sms_log').where({ id: reviewReservationId }).del();
+          }
+        };
+        try {
+          // Recheck the held inline claim at the actual provider boundary.
+          if (claimedReviewRequestId && !(await require('../services/review-request')
+            .inlineClaimStillHeld(claimedReviewRequestId, claimedReviewClaimToken))) {
+            return { sent: false, blocked: true, code: 'REVIEW_CLAIM_LOST', httpStatus: 409,
+              reason: 'This review link was claimed by another send. Remove it and re-insert if still needed.' };
+          }
+          if (reviewLooking) {
+            const metadata = JSON.stringify({ manual_send_reservation: true, review_ask_reservation: true });
+            if (manualReservationId && !claimedDecisionId && parkedThreadIds.length === 0) {
+              const [reserved] = await db('sms_log').where({ id: manualReservationId }).update({ metadata, customer_id: trustedCustomerId }).returning('id');
+              if (!reserved) throw new Error('Manual send reservation was lost before review dispatch');
+              reviewReservationId = manualReservationId;
+            } else {
+              const [reservation] = await db('sms_log').insert({
+                customer_id: trustedCustomerId, direction: 'outbound',
+                from_phone: fromNumber || TWILIO_NUMBERS.getOutboundNumber(), to_phone: to,
+                message_body: cleanBody, status: 'sending', message_type: 'manual',
+                admin_user_id: req.technicianId || null, metadata,
+              }).returning('id');
+              if (!reservation) throw new Error('Could not reserve review ask before sending');
+              reviewReservationId = reservation.id;
+            }
+            // A reservation linked to suggestions keeps its own lifecycle.
+            // Review evidence is separate so either settlement can fail safely.
+            if (reviewReservationId === manualReservationId) manualReservationId = null;
+          }
+          reviewProviderStarted = true;
+          result = await sendMessage();
+          if (!claimedReviewRequestId) await settleReviewReservation(result);
+        } catch (err) {
+          if (result) err.providerOutcome = result;
+          if (!reviewProviderStarted) err.providerOutcome = { sent: false, deliveryOutcome: 'not_sent' };
+          if (!claimedReviewRequestId) await settleReviewReservation(err.providerOutcome);
+          if (claimedReviewRequestId) {
+            reviewSettlementAttempted = true;
+            try {
+              await settleInlineReviewAfterThrow({ err, requestId: claimedReviewRequestId,
+                claimToken: claimedReviewClaimToken, emailRequested: reviewRequestEmail === true });
+              await settleReviewReservation(err.providerOutcome);
+            } catch (claimErr) {
+              logger.warn(`[communications] inline review claim cleanup failed (requestId=${claimedReviewRequestId}): ${claimErr.message}`);
+            }
+          }
+          throw err;
+        }
+        if (claimedReviewRequestId) {
+          reviewSettlementAttempted = true;
+          try {
+            reviewEmailOutcome = await settleInlineReviewAfterSend({
+              result, requestId: claimedReviewRequestId, claimToken: claimedReviewClaimToken, emailRequested: reviewRequestEmail === true,
+            });
+            // A URL-only provider log may not classify as an ask. Preserve
+            // explicit evidence until the tracked delivery stamp succeeds.
+            await settleReviewReservation(result);
+          } catch (markErr) {
+            logger.warn(`[communications] inline review mark-delivered failed (requestId=${claimedReviewRequestId}): ${markErr.message}`);
+            // Both: the text left but its delivery stamp (or the email copy)
+            // threw — say the email leg did not go out rather than reporting a
+            // bare "Message sent." (GH Codex #3856 r3 P2).
+            if (reviewRequestEmail === true && !reviewEmailOutcome) {
+              reviewEmailOutcome = { sent: false, reason: 'email_not_attempted' };
+            }
+          }
+        }
+        return result;
+      };
+      return reviewLooking
+        ? require('../services/review-ask-dispatch').dispatchReviewAsk(trustedCustomerId, sendAndSettle,
+          { excludeRequestId: claimedReviewRequestId })
+        : sendAndSettle();
+    };
     const result = prepLinkSends
       ? await dispatchPrepLinkSend(prepLinkSends, dispatch, req.technicianId || null, () => require('../services/composer-customer-links')
         .recheckPrepLinks(cleanBody, normalizePhoneLast10(to), {
@@ -814,12 +939,16 @@ router.post('/sms', async (req, res, next) => {
           usDestination: /^\+1\d{10}$/.test(String(normalizePhone(to) || '')),
         }))
       : await dispatch();
-    // The reservation has done its job — the real provider row now exists (on
-    // success) or no send happened (on failure). Clear it so it can't linger as
-    // a stuck 'sending' row blocking auto-sends to the thread.
-    await clearManualReservation();
-    if (result.blocked || result.sent === false) {
-      if (!result.blocked && (result.retryable || result.deferred)) {
+    const ambiguousProviderOutcome = autoSendExecutor.isAmbiguousProviderOutcome(result);
+    const realProviderSend = autoSendExecutor.isRealProviderSend(result);
+    // A definitive result settles the marker. Uncertainty keeps its linked
+    // decisions held until a sent row or an operator verdict reconciles them.
+    if (ambiguousProviderOutcome) await holdManualReservation();
+    else if (realProviderSend && manualReservationId) {
+      await settleReplyHoldingReservation({ reservationId: manualReservationId, acceptedResult: result });
+    } else await clearManualReservation();
+    if (result.blocked || result.sent === false || ambiguousProviderOutcome) {
+      if (ambiguousProviderOutcome) {
         await holdBearerStateAmbiguous(result);
       } else {
         // The reply never left — release the claims and the parked cards.
@@ -829,14 +958,16 @@ router.post('/sms', async (req, res, next) => {
       // Definitive no-send: the project delivery claim is handed back (an
       // ambiguous outcome kept it above — this is a no-op then).
       await releaseProjectClaim();
-      if (claimedReviewRequestId) {
+      if (claimedReviewRequestId && !reviewSettlementAttempted && !ambiguousProviderOutcome) {
         await require('../services/review-request').releaseInlineClaim(claimedReviewRequestId, claimedReviewClaimToken);
       }
-      await reopenScheduledSuggestions({
-        decisionIds: [claimedDecisionId, ...parkedThreadIds],
-        reason: 'Send was blocked or failed — suggestion reopened.',
-      });
-      return res.status(422).json({
+      if (!ambiguousProviderOutcome) {
+        await reopenScheduledSuggestions({
+          decisionIds: [claimedDecisionId, ...parkedThreadIds],
+          reason: 'Send was blocked or failed — suggestion reopened.',
+        });
+      }
+      return res.status(result.httpStatus || 422).json({
         ...result,
         error: result.reason || result.code || 'SMS send blocked/failed',
       });
@@ -926,21 +1057,6 @@ router.post('/sms', async (req, res, next) => {
     // The text left — the project delivery claim has covered its window; the
     // row's delivery state is restored (the text is a re-share, not a delivery).
     await releaseProjectClaim();
-    if (claimedReviewRequestId) {
-      try {
-        reviewEmailOutcome = await settleInlineReviewAfterSend({
-          result, requestId: claimedReviewRequestId, claimToken: claimedReviewClaimToken, emailRequested: reviewRequestEmail === true,
-        });
-      } catch (markErr) {
-        logger.warn(`[communications] inline review mark-delivered failed (requestId=${claimedReviewRequestId}): ${markErr.message}`);
-        // Both: the text left but its delivery stamp (or the email copy)
-        // threw — say the email leg did not go out rather than reporting a
-        // bare "Message sent." (GH Codex #3856 r3 P2).
-        if (reviewRequestEmail === true && !reviewEmailOutcome) {
-          reviewEmailOutcome = { sent: false, reason: 'email_not_attempted' };
-        }
-      }
-    }
 
     // A reply from the Comms composer is a first response to any open lead
     // with this phone — stamp the Speed-to-Lead clock (SLA truth only; lead
@@ -962,10 +1078,11 @@ router.post('/sms', async (req, res, next) => {
       logger.warn(`[admin-communications] first-response stamp failed: ${stampErr.message}`);
     }
 
+    let linkedDecisionSettlementComplete = true;
     if (verifiedAgentDecision && verifiedAgentDraft) {
       const draftMatched = normalizeReplyForComparison(cleanBody) === normalizeReplyForComparison(verifiedAgentDraft);
       try {
-        await db('agent_decisions')
+        const settled = await db('agent_decisions')
           .where({ id: verifiedAgentDecision.id })
           .whereIn('status', ['scheduled', 'pending_review'])
           .update({
@@ -978,7 +1095,9 @@ router.post('/sms', async (req, res, next) => {
             reviewed_at: new Date(),
             updated_at: new Date(),
           });
+        if (!settled) linkedDecisionSettlementComplete = false;
       } catch (reviewErr) {
+        linkedDecisionSettlementComplete = false;
         logger.warn(`[agent-review] failed to mark inbox draft decision reviewed: ${reviewErr.message}`);
       }
     }
@@ -987,7 +1106,8 @@ router.post('/sms', async (req, res, next) => {
     // operator saw them and chose their own reply; their drafts return to
     // the judge pool against the reply that just went out.
     if (parkedThreadIds.length) {
-      await ignoreParkedSuggestions({ decisionIds: parkedThreadIds, reviewedBy: req.technicianId || 'Admin' });
+      const ignored = await ignoreParkedSuggestions({ decisionIds: parkedThreadIds, reviewedBy: req.technicianId || 'Admin' });
+      if (ignored !== parkedThreadIds.length) linkedDecisionSettlementComplete = false;
     }
 
     // Cards published BETWEEN the park commit and send completion — the
@@ -1000,18 +1120,30 @@ router.post('/sms', async (req, res, next) => {
       note: 'Staff sent their own reply from the SMS inbox.',
     });
 
+    // Accepted evidence stays linked until every known decision has durably
+    // settled. Recovery can finish any partial bookkeeping from this row.
+    if (realProviderSend && linkedDecisionSettlementComplete) await clearManualReservation();
+
     res.json(reviewEmailOutcome ? { ...result, reviewEmail: reviewEmailOutcome } : result);
   } catch (err) {
-    // Release the in-flight reservation so a throw mid-send can't strand a
-    // 'sending' row that blocks auto-sends to the thread.
-    await clearManualReservation();
+    const catchProviderOutcome = err?.providerOutcome;
+    const ambiguousProviderOutcome = autoSendExecutor.isAmbiguousProviderOutcome(catchProviderOutcome);
+    const realProviderSend = autoSendExecutor.isRealProviderSend(catchProviderOutcome);
+    if (ambiguousProviderOutcome) await holdManualReservation();
+    else if (realProviderSend && manualReservationId) {
+      await settleReplyHoldingReservation({ reservationId: manualReservationId, acceptedResult: catchProviderOutcome });
+    } else await clearManualReservation();
     // Same for the inline review claim: a throw with NO confirmed provider
     // acceptance means the ask never left — hand the claim back so an
     // immediate retry isn't blocked for the 10-minute stale window. A throw
     // AFTER acceptance (err.providerOutcome.sent === true, the scheduler's
     // same convention) means the ask DID text: stamp it delivered instead so
-    // it can never go out twice.
-    if (claimedReviewRequestId) {
+    // it can never go out twice. Between those two, uncertainty retains the
+    // evidence: only a throw raised BEFORE provider entry is definitively a
+    // non-send, so that is the only case normalized to 'not_sent' here, and a
+    // path that already settled the ask is left alone.
+    if (claimedReviewRequestId && !reviewSettlementAttempted) {
+      if (!reviewProviderStarted) err.providerOutcome = { sent: false, deliveryOutcome: 'not_sent' };
       try {
         await settleInlineReviewAfterThrow({
           err, requestId: claimedReviewRequestId, claimToken: claimedReviewClaimToken, emailRequested: reviewRequestEmail === true,
@@ -1020,13 +1152,11 @@ router.post('/sms', async (req, res, next) => {
         logger.warn(`[communications] inline review claim cleanup failed (requestId=${claimedReviewRequestId}): ${claimErr.message}`);
       }
     }
-    // A throw carrying an AMBIGUOUS provider outcome (retryable/deferred,
-    // not accepted, not a validator block — the audit write failed after a
-    // Twilio timeout/5xx/429) holds the bearer state exactly as the
+    // A throw carrying an explicit uncertain provider outcome holds the
+    // bearer state exactly as the
     // resolved-result branch does (GH Codex #3851 r5 P1): the provider may
     // hold the text, so the claim and the activated link stay consumed.
-    if (err?.providerOutcome && err.providerOutcome.sent !== true && !err.providerOutcome.blocked
-      && (err.providerOutcome.retryable || err.providerOutcome.deferred)) {
+    if (ambiguousProviderOutcome) {
       await holdBearerStateAmbiguous({ code: err.providerOutcome.providerErrorCode || 'PROVIDER_FAILURE' });
     }
     // The project delivery claim is handed back on a throw too — accepted,
@@ -1034,7 +1164,7 @@ router.post('/sms', async (req, res, next) => {
     await releaseProjectClaim();
     // Same convention for the card request claim: accepted → mark, else release.
     if (cardClaim) {
-      if (err?.providerOutcome?.sent === true) {
+      if (autoSendExecutor.isRealProviderSend(err?.providerOutcome)) {
         const claim = cardClaim;
         cardClaim = null;
         try {
@@ -1048,7 +1178,7 @@ router.post('/sms', async (req, res, next) => {
     }
     // Same convention for the statement stamp (GH Codex #3844 r3 P1): an
     // accepted-then-thrown send DID deliver the statement.
-    if (statementLinkIds && err?.providerOutcome?.sent === true) {
+    if (statementLinkIds && autoSendExecutor.isRealProviderSend(err?.providerOutcome)) {
       try {
         await require('../services/composer-customer-links').markStatementsSent(statementLinkIds, { actorTechnicianId: req.technicianId || null, actorRole: req.techRole || null });
       } catch (stampErr) {
@@ -1057,7 +1187,7 @@ router.post('/sms', async (req, res, next) => {
     }
     // And for the activated contract links: accepted → record, else hand back.
     if (contractActivations) {
-      if (err?.providerOutcome?.sent === true) {
+      if (autoSendExecutor.isRealProviderSend(err?.providerOutcome)) {
         const activations = contractActivations;
         contractActivations = null;
         try {
@@ -1071,7 +1201,7 @@ router.post('/sms', async (req, res, next) => {
     }
     // Guarded reopen: anything the send actually resolved before the throw
     // is no longer 'scheduled' and no-ops here.
-    if (claimedDecisionId || parkedThreadIds.length) {
+    if (!ambiguousProviderOutcome && !realProviderSend && (claimedDecisionId || parkedThreadIds.length)) {
       await reopenScheduledSuggestions({
         decisionIds: [claimedDecisionId, ...parkedThreadIds],
         reason: 'Send errored — suggestion reopened.',
@@ -1437,7 +1567,7 @@ router.get('/log', async (req, res, next) => {
     const messages = await Promise.all(rows.map(async (m) => {
       const initialContact = m.contact_phone || m.customer_phone;
       const fallbackCustomer = !m.customer_id && initialContact
-        ? fallbackCustomers.get(normalizePhoneLast10(normalizePhone(initialContact) || initialContact))
+        ? fallbackCustomers.get(phoneIdentityKey(initialContact))
         : null;
       const customerName = m.first_name
         ? `${m.first_name} ${m.last_name || ''}`.trim()
@@ -2138,7 +2268,7 @@ async function settleInlineReviewAfterSend({ result, requestId, claimToken, emai
   const { isRealProviderSend } = require('../services/sms-auto-send');
   const ReviewService = require('../services/review-request');
   if (!isRealProviderSend(result)) {
-    await ReviewService.releaseInlineClaim(requestId, claimToken);
+    if (result?.deliveryOutcome === 'not_sent') await ReviewService.releaseInlineClaim(requestId, claimToken);
     return emailRequested ? { sent: false, reason: 'text_not_sent' } : null;
   }
   try {
@@ -2156,11 +2286,13 @@ async function settleInlineReviewAfterSend({ result, requestId, claimToken, emai
 // go out twice and, for Both, email the same row now as the happy path
 // would have (the row is delivered, so no retry can reclaim it; GH Codex
 // #3856 r5 P2), the outcome riding the error message the composer shows.
-// Anything else releases the claim so an immediate retry isn't blocked for
-// the 10-minute stale window.
+// Definitive non-delivery releases the claim. Uncertainty retains it for
+// the existing stale-claim provider reconciliation.
 async function settleInlineReviewAfterThrow({ err, requestId, claimToken, emailRequested }) {
   const ReviewService = require('../services/review-request');
-  if (err?.providerOutcome?.sent !== true) {
+  const { isRealProviderSend, isAmbiguousProviderOutcome } = require('../services/sms-auto-send');
+  if (isAmbiguousProviderOutcome(err?.providerOutcome)) return;
+  if (!isRealProviderSend(err?.providerOutcome)) {
     await ReviewService.releaseInlineClaim(requestId, claimToken);
     return;
   }
@@ -3138,10 +3270,46 @@ router.get('/blocked-numbers', async (req, res, next) => {
 
 // POST /api/admin/communications/blocked-numbers — add a number
 // Body: { number, blockType?, reason? }
+// The inbox "Mark spam" action posts here for an unknown-sender thread.
+// The number is stored as E.164 because the spam-block middleware matches
+// the Twilio From value exactly; a thread's contactPhone may carry local
+// formatting. A number that resolves to a live customer (main phone or a
+// service-contact slot) is refused, mirroring the call-disposition guard —
+// blocking it would silently drop that customer's texts.
 router.post('/blocked-numbers', async (req, res, next) => {
   try {
-    const { number, blockType, reason } = req.body;
-    if (!number) return res.status(400).json({ error: 'number required' });
+    const { blockType, reason } = req.body;
+    const number = normalizePhone(req.body.number);
+    if (!phoneMatchDigits(req.body.number).length) return res.status(400).json({ error: 'valid number required' });
+
+    const owner = await findKnownCallerCustomer(db, number);
+    if (owner) {
+      return res.status(409).json({
+        error: 'This number belongs to an existing customer and cannot be blocked. Archive or edit the customer record instead.',
+        code: 'CUSTOMER_NUMBER',
+        customer_id: owner.id,
+        customer_name: [owner.first_name, owner.last_name].filter(Boolean).join(' ') || null,
+      });
+    }
+    // An OPEN lead (a quote requester who has not converted) has no
+    // customer row yet, so its thread looks unknown in the inbox; blocking
+    // it would silently drop the prospect's next text and call (codex
+    // #4213 P1).
+    const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
+    // No catch: a failing safety check must refuse the block, not allow it.
+    const openLead = await db('leads')
+      .whereIn('status', OPEN_LEAD_STATUSES)
+      .whereNull('converted_at')
+      .whereNull('deleted_at')
+      .whereIn(db.raw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g')"), phoneMatchDigits(number))
+      .first('id', 'first_name', 'last_name');
+    if (openLead) {
+      return res.status(409).json({
+        error: 'This number belongs to an open lead and cannot be blocked. Close or convert the lead first.',
+        code: 'LEAD_NUMBER',
+        lead_id: openLead.id,
+      });
+    }
 
     const existing = await db('blocked_numbers').where({ number }).first();
     if (existing) return res.json({ success: true, alreadyBlocked: true });

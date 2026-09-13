@@ -5,7 +5,7 @@
  * historically broke dashboard JOINs against lead_sources.
  */
 
-const { toE164, normalizePhone } = require('../utils/phone');
+const { toE164, normalizePhone, phoneIdentityKey } = require('../utils/phone');
 
 describe('toE164 — empty/null inputs', () => {
   test('null returns null', () => { expect(toE164(null)).toBeNull(); });
@@ -74,5 +74,37 @@ describe('normalizePhone — alias of toE164', () => {
     expect(normalizePhone('9415551234')).toBe(toE164('9415551234'));
     expect(normalizePhone('+19415551234')).toBe(toE164('+19415551234'));
     expect(normalizePhone(null)).toBe(toE164(null));
+  });
+});
+
+// codex #4213 P2: an unlinked +44 sender that shares its last ten digits
+// with a US customer must key/resolve separately from that customer — a
+// last-10-digit collapse is the exact bug that let admin-communications.js
+// hand the international thread the US customer's name and id.
+describe('phoneIdentityKey — NANP-vs-international grouping (mirrors smsThreadKey)', () => {
+  test('NANP formats all share one key regardless of formatting', () => {
+    const key = phoneIdentityKey('+19415551234');
+    expect(phoneIdentityKey('9415551234')).toBe(key);
+    expect(phoneIdentityKey('(941) 555-1234')).toBe(key);
+    expect(phoneIdentityKey('1-941-555-1234')).toBe(key);
+    expect(key).toBe('9415551234');
+  });
+
+  test('a +44 international number keeps a distinct key from a US number sharing its last 10 digits', () => {
+    const usKey = phoneIdentityKey('+12079460958');
+    const ukKey = phoneIdentityKey('+442079460958');
+    expect(usKey).toBe('2079460958');
+    expect(ukKey).toBe('+442079460958');
+    expect(ukKey).not.toBe(usKey);
+  });
+
+  test('two different countries never collide even at the same length', () => {
+    expect(phoneIdentityKey('+442079460958')).not.toBe(phoneIdentityKey('+552079460958'));
+  });
+
+  test('empty/garbage input returns null', () => {
+    expect(phoneIdentityKey('')).toBeNull();
+    expect(phoneIdentityKey(null)).toBeNull();
+    expect(phoneIdentityKey('anonymous')).toBeNull();
   });
 });

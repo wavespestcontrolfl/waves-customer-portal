@@ -66,25 +66,21 @@ const TAB_LIST = [
     key: TABS.MATCH,
     label: "Tech Match",
     Icon: ClipboardList,
-    className: "hidden md:inline-flex",
   },
   {
     key: TABS.CSR,
     label: "CSR Booking",
     Icon: Headphones,
-    className: "hidden md:inline-flex",
   },
   {
     key: TABS.REVENUE,
     label: "Job Scores",
     Icon: TrendingUp,
-    className: "hidden md:inline-flex",
   },
   {
     key: TABS.INSIGHTS,
     label: "Insights",
     Icon: Lightbulb,
-    className: "hidden md:inline-flex",
   },
 ];
 

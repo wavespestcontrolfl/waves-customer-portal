@@ -433,6 +433,44 @@ async function findDuplicateGroups(database = db, { failClosedOnDismissals = fal
   return groups;
 }
 
+// Canonical duplicate-eligibility recheck — the SINGLE place that answers
+// "is this exact (winnerId, loserId) pair still a live, mergeable duplicate
+// candidate right now?" Originally inlined in admin-customer-duplicates.js
+// handleMerge; every other caller (the IB merge_customers tool, the task
+// context's pair authority) reuses this instead of re-deriving tier/reasons
+// logic of its own. Returns exactly one of four outcomes:
+//   not_in_queue      — the pair isn't a live candidate under this winner
+//   red_pair          — tiered red: looks like two different people
+//   address_conflict  — the loser carries a different/incomparable service
+//                        address (a plain merge would retire its only copy);
+//                        callers that support link-as-property (only the
+//                        admin duplicates route does) may still proceed
+//   eligible           — safe to merge; candidate.tier/reasons carried along
+//   dismissals_unreadable — the operator "not a duplicate" verdicts could
+//                        not be read; a merge decision never falls open
+//                        past them (display does, this does not)
+async function duplicatePairEligibility(winnerId, loserId, database = db) {
+  let groups;
+  try {
+    groups = await findDuplicateGroups(database, { failClosedOnDismissals: true });
+  } catch (e) {
+    logger.warn(`[customer-dedupe] duplicatePairEligibility: dismissals unreadable, refusing: ${e.message}`);
+    return { eligible: false, code: 'dismissals_unreadable', reason: 'Operator dismissal verdicts could not be read — refusing to treat this pair as mergeable right now', candidate: null };
+  }
+  const group = groups.find((g) => g.winner.id === winnerId);
+  const candidate = group?.candidates.find((c) => c.loser.id === loserId);
+  if (!candidate) {
+    return { eligible: false, code: 'not_in_queue', reason: 'Pair is no longer in the duplicate queue', candidate: null };
+  }
+  if (candidate.tier === 'red') {
+    return { eligible: false, code: 'red_pair', reason: 'This pair looks like two different people and cannot be merged from the queue', candidate };
+  }
+  if (candidate.reasons.some((r) => r.startsWith('address_'))) {
+    return { eligible: false, code: 'address_conflict', reason: "This duplicate has a different service address — use 'Merge + keep address' so the address isn't lost", candidate };
+  }
+  return { eligible: true, code: 'eligible', reason: null, candidate };
+}
+
 // ---------------------------------------------------------------------------
 // Merge executor
 // ---------------------------------------------------------------------------
@@ -841,6 +879,414 @@ const POLYMORPHIC_CUSTOMER_POINTERS = [
   { table: 'data_hygiene_proposals', typeColumn: 'resource_type', idColumn: 'resource_id' },
 ];
 
+// The referral_promoters balance/counter columns executeMerge ADDS from the
+// loser's enrollment onto the winner's when both are enrolled (the loser's
+// row is then retired as a code alias). One list, shared by the executor
+// and the effect reader below, so a preview can never disclose a different
+// set than the fold moves.
+const REFERRAL_FOLD_COUNTERS = ['referral_balance_cents', 'total_earned_cents',
+  'total_paid_out_cents', 'total_clicks', 'total_referrals_sent', 'total_referrals_converted',
+  'available_balance_cents', 'pending_earnings_cents'];
+
+// The most-restrictive customer-level autopay/credit settings the winner
+// INHERITS from the loser (applied by executeMerge under its locks; read by
+// the IB merge preview so the approval card shows them). Pure: same inputs,
+// same answer, on any row shape that carries the three columns.
+//   autopay_enabled=false      — a retired row that turned autopay off keeps it off
+//   auto_apply_account_credit  — the account-credit auto-apply opt-in (owner
+//                                ruling 2026-08-28) is consent the same way:
+//                                the loser's ledger and cached balance move
+//                                to the winner, so "don't apply my credit"
+//                                must survive on the surviving row
+//   autopay_paused_until       — a longer, still-future pause wins (+ its reason)
+function inheritedAutopayRestrictions(winner, loser, now = Date.now()) {
+  const restrictions = {};
+  if (loser.autopay_enabled === false && winner.autopay_enabled !== false) {
+    restrictions.autopay_enabled = false;
+  }
+  if (loser.auto_apply_account_credit === false && winner.auto_apply_account_credit === true) {
+    restrictions.auto_apply_account_credit = false;
+  }
+  const pauseTs = (v) => (v ? new Date(v).getTime() : null);
+  const loserPause = pauseTs(loser.autopay_paused_until);
+  const winnerPause = pauseTs(winner.autopay_paused_until);
+  if (loserPause && loserPause > now && (!winnerPause || loserPause > winnerPause)) {
+    restrictions.autopay_paused_until = loser.autopay_paused_until;
+    if (loser.autopay_pause_reason) restrictions.autopay_pause_reason = loser.autopay_pause_reason;
+  }
+  return restrictions;
+}
+
+// ---------------------------------------------------------------------------
+// Winner backfill prediction (pure) — what executeMerge copies onto the
+// surviving row from the retired one. ONE rule, used by the executor under
+// its locks and by the IB merge preview (disclosed + pinned on the card), so
+// a preview can never describe a different backfill than the merge applies.
+// `derivedStripeCustomerId` is the executor's saved-card derivation (needs
+// payment_methods reads); previews pass null and disclose that caveat.
+// ---------------------------------------------------------------------------
+function promoteWinnerAsPrimaryRule(winner, loser) {
+  return Boolean(
+    loser.is_primary_profile
+    && loser.account_id
+    && loser.account_id === winner.account_id
+    && !winner.is_primary_profile,
+  );
+}
+
+function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null } = {}) {
+  const winnerPriorValues = {};
+  const backfills = {};
+  for (const field of BACKFILL_FIELDS) {
+    if (isEmptyValue(winner[field]) && !isEmptyValue(loser[field])) backfills[field] = loser[field];
+  }
+  // An address backfills as a TUPLE: a winner with no street but a stale
+  // city/ZIP absorbing the loser's real service address must not mint a
+  // mixed address (dispatch and report fallbacks read these columns
+  // together). When the street comes from the loser, the whole tuple does.
+  if (backfills.address_line1) {
+    // The tuple REPLACES the winner's partial address wholesale — journal
+    // any non-empty prior value being overwritten (e.g. the winner's
+    // original ZIP) so the undo can put it back. Empty priors need no
+    // record: the generic backfill-clear already vacates those to null.
+    for (const field of ['address_line2', 'city', 'state', 'zip']) {
+      if (!isEmptyValue(winner[field])) winnerPriorValues[field] = winner[field];
+    }
+    backfills.address_line2 = loser.address_line2 || null;
+    backfills.city = loser.city || null;
+    backfills.state = loser.state || null;
+    backfills.zip = loser.zip || null;
+  }
+  // A loser-only Stripe profile must move with its payment methods: the
+  // repointed payment_methods rows live on THAT Stripe customer, and a
+  // later ensureStripeCustomer(winner) would mint a fresh profile and
+  // strand every saved card. (Both-have-Stripe was refused above.)
+  if (!winner.stripe_customer_id && (loser.stripe_customer_id || derivedStripeCustomerId)) {
+    backfills.stripe_customer_id = loser.stripe_customer_id || derivedStripeCustomerId;
+  }
+  // A loser-only third-party payer default transfers the same way —
+  // without it the merged account self-pays and bills the homeowner
+  // instead of the AP payer. (Different-payers was refused above.)
+  if (!winner.payer_id && loser.payer_id) {
+    backfills.payer_id = loser.payer_id;
+  }
+  // A loser-only billing mode transfers the same way; per_application_fee
+  // rides along when the winner has none (the completion biller reads it
+  // with the mode).
+  if (!winner.billing_mode && loser.billing_mode) {
+    backfills.billing_mode = loser.billing_mode;
+    if (isEmptyValue(winner.per_application_fee) && !isEmptyValue(loser.per_application_fee)) {
+      backfills.per_application_fee = loser.per_application_fee;
+    }
+  }
+  // A street-only winner absorbing a unit-bearing loser (same street key,
+  // one-sided unit = a compatible match) must keep the unit — it is the
+  // only piece of the service address that distinguishes the apartment.
+  // The loser's line2 copies as-is; a unit embedded in the loser's line1
+  // is re-extracted with case preserved.
+  const winnerKey = normalizeStreetKey(winner.address_line1);
+  const loserKey = normalizeStreetKey(loser.address_line1);
+  const winnerHasUnit = Boolean((winnerKey && winnerKey.unit) || unitFromLine2(winner.address_line2));
+  const loserUnitText = loser.address_line2
+    || rawUnitText(loser.address_line1)
+    || null;
+  if (!winnerHasUnit && winnerKey && loserKey && winnerKey.key === loserKey.key
+    && ((loserKey && loserKey.unit) || unitFromLine2(loser.address_line2))
+    && isEmptyValue(winner.address_line2) && loserUnitText) {
+    backfills.address_line2 = loserUnitText;
+  }
+  if (promoteWinnerAsPrimaryRule(winner, loser)) {
+    backfills.is_primary_profile = true;
+  }
+  // On-location service contacts route appointment/service-report comms
+  // (customer-contact.js): copy slot-WISE, never field-wise — mixing one
+  // slot's name with another's phone would invent a contact that doesn't
+  // exist. A slot moves only when the winner's whole slot is empty.
+  const CONTACT_SLOTS = [
+    ['service_contact_name', 'service_contact_phone', 'service_contact_email', 'service_contact_role'],
+    ['service_contact2_name', 'service_contact2_phone', 'service_contact2_email', 'service_contact2_role'],
+    ['service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'service_contact3_role'],
+  ];
+  let movedContactSlot = false;
+  let movedContactPhone = false;
+  const winnerHadAnyContact = CONTACT_SLOTS.some((slot) => slot.some((f) => !isEmptyValue(winner[f])));
+  for (const slot of CONTACT_SLOTS) {
+    const winnerSlotEmpty = slot.every((f) => isEmptyValue(winner[f]));
+    if (!winnerSlotEmpty) continue;
+    for (const f of slot) {
+      if (!isEmptyValue(loser[f])) {
+        backfills[f] = loser[f];
+        movedContactSlot = true;
+        // slot[1] is the phone column — only a moved TEXTING target can
+        // invalidate the winner's SMS-consent stamp below.
+        if (f === slot[1]) movedContactPhone = true;
+      }
+    }
+  }
+  // Consent artifact travels WITH the contacts it describes (#2948) — but
+  // ONLY when the resulting contact list is exactly the loser's (winner
+  // had no contacts at all and no stamp). If the winner already held any
+  // contact — including one whose stamp an admin edit cleared — carrying
+  // the loser's stamp would re-authorize texting people it never
+  // described; leave it cleared and require re-attestation instead.
+  if (movedContactSlot
+    && !winnerHadAnyContact
+    && isEmptyValue(winner.service_contacts_consent_at)
+    && !isEmptyValue(loser.service_contacts_consent_at)) {
+    backfills.service_contacts_consent_at = loser.service_contacts_consent_at;
+    backfills.service_contacts_consent_source = loser.service_contacts_consent_source;
+    backfills.service_contacts_consent_text_version = loser.service_contacts_consent_text_version;
+  } else if (movedContactPhone && winnerHadAnyContact
+    && !isEmptyValue(winner.service_contacts_consent_at)) {
+    // Mixed list: the winner's stamp described only the winner's own
+    // contacts; loser slots just joined the row, so the stamp no longer
+    // describes the stored list — clear it and require re-attestation.
+    backfills.service_contacts_consent_at = null;
+    backfills.service_contacts_consent_source = null;
+    backfills.service_contacts_consent_text_version = null;
+    // winner_backfills records the APPLIED value (null) — journal the
+    // winner's PRIOR stamps separately so an undo can restore them once
+    // the appended loser contacts are gone (the stamp describes the
+    // winner's own list again). Pre-upgrade journals lack this key and
+    // keep today's behavior (stamp stays cleared; re-attest by hand).
+    winnerPriorValues.service_contacts_consent_at = winner.service_contacts_consent_at;
+    winnerPriorValues.service_contacts_consent_source = winner.service_contacts_consent_source ?? null;
+    winnerPriorValues.service_contacts_consent_text_version = winner.service_contacts_consent_text_version ?? null;
+  }
+  // Acceptance-terms stamp (GATE_ESTIMATE_ACCEPTANCE_TERMS): the loser's
+  // estimate_acceptances rows repoint to the winner below, so the winner's
+  // customer-level "latest version accepted on any estimate" must absorb a
+  // newer (or only) loser version. Versions are 'vYYYY-MM' — string order is
+  // chronological. The winner's prior value is journaled for the undo.
+  if (!isEmptyValue(loser.accepted_terms_version)
+    && (isEmptyValue(winner.accepted_terms_version)
+      || String(loser.accepted_terms_version) > String(winner.accepted_terms_version))) {
+    if (!isEmptyValue(winner.accepted_terms_version)) winnerPriorValues.accepted_terms_version = winner.accepted_terms_version;
+    backfills.accepted_terms_version = loser.accepted_terms_version;
+  }
+  // Rented termite stations are physical equipment in the ground: whichever
+  // customer record survives, Waves still owns them. When no station rows
+  // were ever pinned this flag is the ONLY evidence — cancellation-processor
+  // `rentedTermiteStationState` falls back to it and otherwise reports
+  // `no_rented_stations`, so the retrieval task is never raised and the
+  // stations are abandoned (codex #4348 r15 P1). It is not a BACKFILL_FIELDS
+  // candidate because `false` is not an empty value, so the generic rule
+  // would never copy it and retiring the loser cleared it silently. OR
+  // semantics, and deliberately fail-safe in that direction: a retrieval task
+  // raised for stations already collected is one an admin closes, whereas the
+  // miss leaves Waves equipment on a former customer's property. The same
+  // flag decides `owned_by` for stations mapped later (termite-stations.js).
+  if (loser.termite_stations_rented === true && winner.termite_stations_rented !== true) {
+    backfills.termite_stations_rented = true;
+    // The column is NOT NULL (migration 20260726000003). Every backfill
+    // without a journaled prior is VACATED TO NULL by revertMerge, which
+    // would throw and roll back the entire undo — so the winner's own
+    // pre-merge `false` is recorded explicitly here (pre-push audit P1 on
+    // the r15 fix). The restore pass keeps a literal `false`; only null and
+    // undefined priors are skipped.
+    winnerPriorValues.termite_stations_rented = false;
+  }
+  return { backfills, winnerPriorValues };
+}
+
+// Saved cards live on a specific STRIPE customer: charge paths attach
+// PaymentIntents to ensureStripeCustomer(winner), so a moved method
+// attached elsewhere would strand and autopay/card-on-file charges fail.
+// When neither customer row names a Stripe profile but the saved cards on
+// either side agree on one, the merge adopts it (derivedStripeCustomerId);
+// cards on a profile other than the survivor's are a conflict the merge
+// refuses. ONE reader, used by the executor under its locks and by the IB
+// preview (disclosed + pinned), so the card shows the profile the winner
+// will actually adopt. `from` says whose cards identified it — journaled so
+// an undo knows where the id belongs.
+/**
+ * Pure, deterministic row-level merge refusals — the checks executeMerge
+ * throws on before it reads a single child row. Exported so the IB preview
+ * runs the SAME rule and refuses the proposal (an actionable "resolve X
+ * first") instead of handing the operator a confirmation card that can
+ * never succeed. Returns { code, message } or null.
+ *
+ * - inactive winner: retiring an active customer into an inactive winner
+ *   would hide them from every live-customer surface.
+ * - two Stripe profiles / two third-party payers / two billing modes: a
+ *   human billing decision, never picked by a merge. (A loser-only value
+ *   transfers with the winner backfills — invoice precedence is
+ *   scheduled_service.payer_id ?? customers.payer_id, and the monthly cron
+ *   treats a NULL mode as legacy monthly membership, so dropping the only
+ *   marker would flip billing.)
+ * - same per_application mode, different fees: completion billing reads the
+ *   surviving row's fee for visits without an explicit price, so the
+ *   loser's moved visits would invoice at the wrong accepted amount.
+ */
+function rowLevelMergeConflict(winner, loser) {
+  if (winner.active === false) {
+    return { code: 'winner_inactive', message: 'winner is inactive — reactivate it first or keep the other row' };
+  }
+  if (winner.stripe_customer_id && loser.stripe_customer_id
+    && winner.stripe_customer_id !== loser.stripe_customer_id) {
+    return { code: 'stripe_profile_conflict', message: 'both customers have Stripe profiles — resolve in Stripe first' };
+  }
+  if (winner.payer_id && loser.payer_id && winner.payer_id !== loser.payer_id) {
+    return { code: 'payer_conflict', message: 'customers have different third-party payers — resolve billing first' };
+  }
+  if (winner.billing_mode && loser.billing_mode && winner.billing_mode !== loser.billing_mode) {
+    return { code: 'billing_mode_conflict', message: 'customers have different billing modes — reconcile billing first' };
+  }
+  if (winner.billing_mode === 'per_application' && loser.billing_mode === 'per_application') {
+    const wFee = Number(winner.per_application_fee);
+    const lFee = Number(loser.per_application_fee);
+    if (Number.isFinite(wFee) && Number.isFinite(lFee) && wFee !== lFee) {
+      return { code: 'per_application_fee_conflict', message: 'customers have different per-application fees — reconcile billing first' };
+    }
+  }
+  return null;
+}
+
+/**
+ * The DB-dependent deterministic refusals — the same class as
+ * rowLevelMergeConflict, but each needs a query, so they live in one
+ * async rule the executor throws on and the IB preview runs before it
+ * builds a card (codex #4348 r7 P2: an operator was still able to approve
+ * a legacy/special billing-mode pair, or a loser belonging to a
+ * multi-property account with other live members, and watch the executor
+ * refuse it). `database` is any knex handle — the preview reads unlocked,
+ * executeMerge re-reads under its row locks. Returns { code, message } or
+ * null.
+ */
+async function dbLevelMergeConflict(database, winner, loser) {
+  // Legacy NULL is a real cadence too — the monthly cron treats NULL as
+  // monthly membership, and completion billing reads the SURVIVOR's mode.
+  // Mixing a special-mode side with a legacy side is only safe when the
+  // side whose cadence would flip has no billing artifacts to flip: a
+  // null-mode winner adopting the loser's special mode flips its own
+  // history; a special-mode winner absorbs the loser's legacy visits into
+  // special billing.
+  const winnerMode = winner.billing_mode || null;
+  const loserMode = loser.billing_mode || null;
+  if (winnerMode !== loserMode && (winnerMode === null || loserMode === null)) {
+    const flippingSideId = winnerMode === null ? winner.id : loser.id;
+    for (const table of ['scheduled_services', 'invoices']) {
+       
+      const row = await database(table).where({ customer_id: flippingSideId }).first('id');
+      if (row) {
+        return {
+          code: 'billing_mode_history_conflict',
+          message: 'merging legacy and special billing modes with live billing history — reconcile billing first',
+        };
+      }
+    }
+  }
+  // Multi-property account groups: retiring a loser whose account still
+  // has OTHER live member profiles would strand them — the portal's
+  // property switcher lists rows by the login's account_id, so the
+  // siblings become invisible after the merge. Reconcile accounts first.
+  if (loser.account_id && loser.account_id !== winner.account_id) {
+    const sibling = await database('customers')
+      .where({ account_id: loser.account_id, active: true })
+      .whereNull('deleted_at')
+      .whereNotIn('id', [loser.id, winner.id])
+      .first('id');
+    if (sibling) {
+      return {
+        code: 'multi_property_account_conflict',
+        message: 'the duplicate belongs to a multi-property account with other live members — reconcile accounts first',
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * Which side's SINGLE-INVOICE checkout sessions a merge invalidates
+ * (pay-combined stampedSessionOutcome `invalidatedSingleInvoice`).
+ *
+ * - loser: always. Its PaymentIntents carry metadata.waves_customer_id for
+ *   the record this merge retires, so a later save-card success would
+ *   mirror consent/autopay onto the archived customer.
+ * - winner: only when the merge transfers the loser's third-party payer
+ *   onto a blank-payer winner — the same condition the in-flight defer
+ *   below uses. An open self-pay checkout would otherwise let the
+ *   homeowner pay a debt that now belongs to the AP payer.
+ *
+ * Pure, so the preview and the executor decide identically.
+ */
+function singleInvoiceSessionsInvalidatedByMerge(winner, loser) {
+  return { winner: !winner.payer_id && !!loser.payer_id, loser: true };
+}
+
+/**
+ * The loser notes a merge APPENDS onto the winner. Operator context (CRM +
+ * technician notes) must survive the retire, so the append is real — and
+ * technician_notes drives technician-facing instructions, which is why the
+ * confirmation card has to state it (codex #4348 r7 P2). ONE pure rule for
+ * the executor's write and the disclosure, so the fingerprint moves when
+ * either side's notes are edited during the pending window. Returns
+ * { crm_notes?, technician_notes? } holding the FULL text that will be
+ * written.
+ */
+function predictNoteAppends(winner, loser) {
+  const appends = {};
+  for (const col of ['crm_notes', 'technician_notes']) {
+    const loserVal = String(loser[col] || '').trim();
+    if (!loserVal) continue;
+    const winnerVal = String(winner[col] || '').trim();
+    if (winnerVal.includes(loserVal)) continue;
+    appends[col] = winnerVal
+      ? `${winnerVal}\n\n[From merged duplicate ${String(loser.id).slice(0, 8)}]: ${loserVal}`
+      : loserVal;
+  }
+  return appends;
+}
+
+/**
+ * The saved cards a merge DEMOTES: when the winner already has a default
+ * card, every loser card arriving with is_default or autopay_enabled is
+ * cleared (autopay picks .first() among default+autopay rows, and two
+ * defaults after the repoint would charge an arbitrary card). ONE reader
+ * for the executor's demotion write and the IB card's disclosure, so the
+ * card names the exact payment-method ids and before/after flags and the
+ * effects fingerprint (recomputed under the executor's locks) changes when
+ * those flags do — a same-count flag flip during the pending window can
+ * no longer slip past the pin. Returns
+ * { winner_has_default, cards: [{ id, is_default, autopay_enabled }] } —
+ * cards ordered by id so the disclosure is stable.
+ */
+async function predictSavedCardDemotions(database, winnerId, loserId) {
+  const winnerDefault = await database('payment_methods')
+    .where({ customer_id: winnerId, is_default: true })
+    .first('id');
+  if (!winnerDefault) return { winner_has_default: false, cards: [] };
+  const cards = await database('payment_methods')
+    .where({ customer_id: loserId })
+    .where((q) => q.where({ is_default: true }).orWhere({ autopay_enabled: true }))
+    .orderBy('id')
+    .select('id', 'is_default', 'autopay_enabled');
+  return {
+    winner_has_default: true,
+    cards: cards.map((c) => ({ id: c.id, is_default: c.is_default === true, autopay_enabled: c.autopay_enabled === true })),
+  };
+}
+
+async function deriveSavedCardStripeCustomer(database, winner, loser) {
+  const pmStripeIdsFor = async (customerId) => [...new Set((await database('payment_methods')
+    .where({ customer_id: customerId })
+    .whereNotNull('stripe_customer_id')
+    .select('stripe_customer_id')).map((r) => r.stripe_customer_id))];
+  const loserPmStripeIds = await pmStripeIdsFor(loser.id);
+  const winnerPmStripeIds = await pmStripeIdsFor(winner.id);
+  const allPmStripeIds = [...new Set([...winnerPmStripeIds, ...loserPmStripeIds])];
+  const effectiveWinnerStripe = winner.stripe_customer_id || loser.stripe_customer_id || null;
+  const foreignPmStripe = allPmStripeIds.filter((id) => id !== effectiveWinnerStripe);
+  if (!foreignPmStripe.length) return { derivedStripeCustomerId: null, stripeDerivedFrom: null, conflict: false };
+  if (!effectiveWinnerStripe && allPmStripeIds.length === 1) {
+    const derivedStripeCustomerId = allPmStripeIds[0];
+    const winnerHasIt = winnerPmStripeIds.includes(derivedStripeCustomerId);
+    const loserHasIt = loserPmStripeIds.includes(derivedStripeCustomerId);
+    return { derivedStripeCustomerId, stripeDerivedFrom: winnerHasIt && loserHasIt ? 'both' : (winnerHasIt ? 'winner' : 'loser'), conflict: false };
+  }
+  return { derivedStripeCustomerId: null, stripeDerivedFrom: null, conflict: true };
+}
+
 let fkColumnsCache = null;
 async function customerFkColumns(database) {
   if (fkColumnsCache) return fkColumnsCache;
@@ -902,7 +1348,7 @@ function isEmptyValue(v) {
  *                 BOTH rows carry a Stripe customer (that must be resolved in
  *                 Stripe first — two payment profiles cannot be repointed).
  */
-async function executeMerge({ winnerId, loserId, performedBy, performedById = null, mode = 'manual', evidence = {} }) {
+async function executeMerge({ winnerId, loserId, performedBy, performedById = null, mode = 'manual', evidence = {}, expectedVersions = null, expectedEffectsFingerprint = null, requireQueueEligibility = false, allowAddressConflict = false }) {
   if (!winnerId || !loserId || winnerId === loserId) {
     throw new Error('executeMerge: winnerId and loserId must be distinct');
   }
@@ -978,129 +1424,101 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     if (dialingCase) {
       throw new Error('executeMerge: deferred — a collection call is in flight for one of these customers; retry after it completes');
     }
-    const locked = await trx('customers').whereIn('id', [winnerId, loserId]).forUpdate().select('*');
+    // updated_at::text rides with the lock: the full-precision version an
+    // approved snapshot (expectedVersions) is validated against below.
+    const locked = await trx('customers').whereIn('id', [winnerId, loserId]).forUpdate().select('*', trx.raw('updated_at::text AS version'));
     const winner = locked.find((r) => r.id === winnerId);
     const loser = locked.find((r) => r.id === loserId);
     winnerBeforeMerge = winner;
     mergeLockedAt = new Date();
     if (!winner || !loser) throw new Error('executeMerge: customer not found');
     if (winner.deleted_at || loser.deleted_at) throw new Error('executeMerge: refusing to merge a deleted customer');
-    // The surviving row must be live: retiring an active customer into an
-    // inactive winner would hide them from every live-customer surface.
-    if (winner.active === false) throw new Error('executeMerge: winner is inactive — reactivate it first or keep the other row');
-
-    if (winner.stripe_customer_id && loser.stripe_customer_id
-      && winner.stripe_customer_id !== loser.stripe_customer_id) {
-      throw new Error('executeMerge: both customers have Stripe profiles — resolve in Stripe first');
+    // Both sides' saved cards, locked for the life of this transaction
+    // (pre-push audit P1). payment_methods is read three times here — the
+    // Stripe-profile derivation inside the fingerprint recheck, the same
+    // derivation again for the actual backfill, and the demotion set — and
+    // an unlocked row could change between them, so the profile the card
+    // disclosed and the profile the winner adopts could disagree. Locked in
+    // one id-ordered statement, like the promoter rows.
+    await trx('payment_methods').whereIn('customer_id', [winnerId, loserId]).orderBy('id').forUpdate().select('id');
+    // An approved snapshot (the Intelligence Bar's confirmation card) is
+    // validated HERE, under the row locks, not in a caller-side preflight:
+    // updated_at::text is the same full-precision version the card pinned,
+    // so any change to either customer between approval and this lock
+    // refuses the merge with previewChanged for a fresh card.
+    if (expectedVersions) {
+      const drifted = ['winner', 'loser'].filter((side) => expectedVersions[side] != null
+        && (side === 'winner' ? winner : loser).version !== expectedVersions[side]);
+      if (drifted.length) {
+        const err = new Error(`executeMerge: the ${drifted.join(' and ')} customer changed since this merge was approved — review a fresh proposal`);
+        err.previewChanged = true;
+        throw err;
+      }
     }
+    // Confirmed-card merges (the Intelligence Bar): the final duplicate-queue
+    // eligibility decision runs INSIDE this transaction, after the row locks
+    // and under the pair's adjudication lock — the same lock the dismissal
+    // writers take — so a "not a duplicate" verdict or a queue regrouping
+    // landing between the card and this point refuses the merge instead of
+    // racing past it.
+    // `allowAddressConflict` is the ONE admitted exception, mirrored from the
+    // admin route's own gate: /link-as-property exists precisely to merge an
+    // address_conflict pair (the loser's street survives as a property row),
+    // so that caller passes it through and this locked re-check honours it;
+    // every other refusal code still refuses (pre-push Claude P1: without
+    // this the route let the pair in and the executor refused it 100%).
+    if (requireQueueEligibility) {
+      await acquirePairAdjudicationLock(trx, winnerId, loserId);
+      const eligibility = await duplicatePairEligibility(winnerId, loserId, trx);
+      const admitted = eligibility.eligible || (allowAddressConflict && eligibility.code === 'address_conflict');
+      if (!admitted) {
+        const err = new Error(`executeMerge: the pair is no longer mergeable (${eligibility.code}) — review a fresh proposal`);
+        err.previewChanged = true;
+        throw err;
+      }
+    }
+    // The approved card's effect fingerprint (describeMergeEffects over the
+    // rows at card time) recomputed HERE over the locked rows: a child row
+    // added or removed, a balance, a backfill, a fold that differs from what
+    // the operator saw refuses with previewChanged, nothing committed.
+    let approvedEffects = null;
+    if (expectedEffectsFingerprint) {
+      const effects = await describeMergeEffects(trx, winner, loser);
+      approvedEffects = effects.financial_effects;
+      if (effects.fingerprint !== expectedEffectsFingerprint) {
+        const err = new Error('executeMerge: the rows that would move changed since this merge was approved — review a fresh proposal');
+        err.previewChanged = true;
+        throw err;
+      }
+    }
+    // Deterministic row-level refusals (inactive winner, two Stripe
+    // profiles, two payers, two billing modes / fees) — ONE rule, shared
+    // with the IB preview so an operator never receives a confirmation
+    // card for a merge this executor would unconditionally refuse.
+    const rowConflict = rowLevelMergeConflict(winner, loser);
+    if (rowConflict) throw new Error(`executeMerge: ${rowConflict.message}`);
     // Saved cards live on a specific STRIPE customer: charge paths attach
     // PaymentIntents to ensureStripeCustomer(winner), so a moved method
     // attached elsewhere would strand and autopay/card-on-file charges fail.
     // Validate before the sweep moves them; when neither customer row names
     // a Stripe profile but the saved cards agree on one, derive it (same
     // spirit as the loser-only-profile transfer below).
-    let derivedStripeCustomerId = null;
-    const pmStripeIdsFor = async (customerId) => [...new Set((await trx('payment_methods')
-      .where({ customer_id: customerId })
-      .whereNotNull('stripe_customer_id')
-      .select('stripe_customer_id')).map((r) => r.stripe_customer_id))];
-    // The survivor ends with ONE Stripe profile (its own, or the loser's via
-    // the transfer below) and EVERY saved card on EITHER side must live on
-    // it — including the winner's own cards when its customer row hasn't
-    // named a profile yet (backfilling the loser's would strand them).
-    const loserPmStripeIds = await pmStripeIdsFor(loserId);
-    const winnerPmStripeIds = await pmStripeIdsFor(winnerId);
-    const allPmStripeIds = [...new Set([...winnerPmStripeIds, ...loserPmStripeIds])];
-    const effectiveWinnerStripe = winner.stripe_customer_id || loser.stripe_customer_id || null;
-    const foreignPmStripe = allPmStripeIds.filter((id) => id !== effectiveWinnerStripe);
-    let stripeDerivedFrom = null;
-    if (foreignPmStripe.length) {
-      if (!effectiveWinnerStripe && allPmStripeIds.length === 1) {
-        derivedStripeCustomerId = allPmStripeIds[0];
-        // WHICH side's cards identified the derived profile — journaled so
-        // an undo knows where the id belongs: 'loser' restores it to the
-        // split-out customer; 'winner'/'both' means the kept customer's
-        // own cards ride it and it stays put (the undo refuses if it would
-        // also return cards onto it).
-        const winnerHasIt = winnerPmStripeIds.includes(derivedStripeCustomerId);
-        const loserHasIt = loserPmStripeIds.includes(derivedStripeCustomerId);
-        stripeDerivedFrom = winnerHasIt && loserHasIt ? 'both' : (winnerHasIt ? 'winner' : 'loser');
-      } else {
-        throw new Error("executeMerge: saved cards belong to a different Stripe profile than the surviving customer's — resolve in Stripe first");
-      }
+    const savedCards = await deriveSavedCardStripeCustomer(trx, winner, loser);
+    if (savedCards.conflict) {
+      throw new Error("executeMerge: saved cards belong to a different Stripe profile than the surviving customer's — resolve in Stripe first");
     }
-    // Two DIFFERENT third-party payer defaults is a human billing decision,
-    // exactly like both-have-Stripe: refuse. (A loser-only payer transfers
-    // with the backfills below — invoice precedence is
-    // scheduled_service.payer_id ?? customers.payer_id, so dropping it would
-    // flip the merged account to self-pay.)
-    if (winner.payer_id && loser.payer_id && winner.payer_id !== loser.payer_id) {
-      throw new Error('executeMerge: customers have different third-party payers — resolve billing first');
-    }
-    // Same contract for billing cadence: two DIFFERENT non-null modes is a
-    // human billing decision. (A loser-only mode transfers with the
-    // backfills below — the monthly cron treats NULL as legacy monthly
-    // membership, so dropping the only per_application/annual_prepay marker
-    // would bill the merged account on the wrong cadence.)
-    if (winner.billing_mode && loser.billing_mode && winner.billing_mode !== loser.billing_mode) {
-      throw new Error('executeMerge: customers have different billing modes — reconcile billing first');
-    }
-    // Same mode but DIFFERENT per-application fees is still a billing
-    // conflict: completion billing reads the surviving row's fee for visits
-    // without an explicit price, so the loser's moved visits would invoice
-    // at the wrong accepted amount.
-    if (winner.billing_mode === 'per_application' && loser.billing_mode === 'per_application') {
-      const wFee = Number(winner.per_application_fee);
-      const lFee = Number(loser.per_application_fee);
-      if (Number.isFinite(wFee) && Number.isFinite(lFee) && wFee !== lFee) {
-        throw new Error('executeMerge: customers have different per-application fees — reconcile billing first');
-      }
-    }
-    // Legacy NULL is a real cadence too — the monthly cron treats NULL as
-    // monthly membership, and completion billing reads the SURVIVOR's mode.
-    // Mixing a special-mode side with a legacy side is only safe when the
-    // side whose cadence would flip has no billing artifacts to flip: a
-    // null-mode winner adopting the loser's special mode flips its own
-    // history; a special-mode winner absorbs the loser's legacy visits into
-    // special billing.
-    const winnerMode = winner.billing_mode || null;
-    const loserMode = loser.billing_mode || null;
-    if (winnerMode !== loserMode && (winnerMode === null || loserMode === null)) {
-      const flippingSideId = winnerMode === null ? winnerId : loserId;
-      let hasArtifacts = false;
-      for (const table of ['scheduled_services', 'invoices']) {
-         
-        const row = await trx(table).where({ customer_id: flippingSideId }).first('id');
-        if (row) { hasArtifacts = true; break; }
-      }
-      if (hasArtifacts) {
-        throw new Error('executeMerge: merging legacy and special billing modes with live billing history — reconcile billing first');
-      }
-    }
-    // Multi-property account groups: retiring a loser whose account still
-    // has OTHER live member profiles would strand them — the portal's
-    // property switcher lists rows by the login's account_id, so the
-    // siblings become invisible after the merge. Reconcile accounts first.
-    if (loser.account_id && loser.account_id !== winner.account_id) {
-      const sibling = await trx('customers')
-        .where({ account_id: loser.account_id, active: true })
-        .whereNull('deleted_at')
-        .whereNotIn('id', [loserId, winnerId])
-        .first('id');
-      if (sibling) {
-        throw new Error('executeMerge: the duplicate belongs to a multi-property account with other live members — reconcile accounts first');
-      }
-    }
-    // Same-account primary handoff: shared notification/channel prefs
-    // resolve via (account_id, is_primary_profile=true) — retiring the
-    // account's primary without promoting the survivor would leave sibling
-    // properties falling back to their own/default prefs.
-    const promoteWinnerAsPrimary = Boolean(
-      loser.is_primary_profile
-      && loser.account_id
-      && loser.account_id === winner.account_id
-      && !winner.is_primary_profile,
-    );
+    const { derivedStripeCustomerId, stripeDerivedFrom } = savedCards;
+    // (Payer / billing-mode / per-application-fee refusals: rowLevelMergeConflict above.)
+    // Deterministic refusals that need a query (legacy/special billing
+    // modes with live billing history, a loser whose multi-property account
+    // still has other live members) — ONE rule, re-read here under the row
+    // locks and run unlocked by the IB preview so the operator never
+    // approves a card this executor would refuse.
+    const dbConflict = await dbLevelMergeConflict(trx, winner, loser);
+    if (dbConflict) throw new Error(`executeMerge: ${dbConflict.message}`);
+    // Same-account primary handoff (shared notification/channel prefs
+    // resolve via (account_id, is_primary_profile=true)) is decided by
+    // promoteWinnerAsPrimaryRule inside predictWinnerBackfills below.
     // The queue was computed OUTSIDE this transaction — re-verify under the
     // row lock that the pair still shares a phone (intake flows and admin
     // edits can change either side between detection and the merge click).
@@ -1168,16 +1586,15 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // is_default+autopay_enabled rows, and two defaults after the repoint
     // would charge an arbitrary card. (Reachable when both rows share a
     // Stripe profile or the loser's stripe_customer_id is stale/null.)
-    const winnerHadDefault = await trx('payment_methods')
-      .where({ customer_id: winnerId, is_default: true })
-      .first('id');
+    // The demotion set is the shared reader's (predictSavedCardDemotions),
+    // the same rule the IB card disclosed and the fingerprint pinned.
+    const savedCardDemotions = await predictSavedCardDemotions(trx, winnerId, loserId);
     // Capture each loser card's ORIGINAL default/autopay flags for the
     // journal: the demotion below clears them, and an undo must restore the
     // loser's cards exactly as they were (billing continuity — autopay picks
     // the default card).
     const loserCards = await trx('payment_methods')
       .where({ customer_id: loserId }).select('id', 'is_default', 'autopay_enabled');
-    const loserCardIds = loserCards.map((r) => r.id);
     // The winner's OWN pre-merge cards, journaled so the undo's
     // new-card-on-transferred-profile guard can tell them apart from cards
     // saved AFTER the merge: in the derived-profile case the derivation
@@ -1213,6 +1630,22 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       };
     }
 
+    // BEFORE the sweep: resolve each side's stamped payment sessions under
+    // the pay.combined lock and check them against the approved pin here.
+    // The sweep below repoints the loser's invoices onto the winner, after
+    // which the loser reads as having NO sessions and the winner reads the
+    // union of both — so a post-sweep release would silently skip every
+    // loser session (the r13/r14 P1 hazard back again) and refuse the
+    // winner's pin for a set that never actually changed (codex #4348 r8
+    // P1). Only the read moves here; the Stripe cancellations still run at
+    // the fence below, after the sweep.
+    const PayCombinedFence = require('./pay-combined');
+    const pinnedSessionIds = (side) => (approvedEffects ? approvedEffects.combined_payment_sessions[side].map((sess) => sess.payment_intent_id) : null);
+    const stampedSessionRows = {
+      winner: await PayCombinedFence.lockAndPinStampedSessionsForCustomer(trx, winnerId, { expectedPaymentIntentIds: pinnedSessionIds('winner') }),
+      loser: await PayCombinedFence.lockAndPinStampedSessionsForCustomer(trx, loser.id, { expectedPaymentIntentIds: pinnedSessionIds('loser') }),
+    };
+
     // BEFORE the sweep: remember the loser's referral enrollment — after the
     // sweep both promoter rows sit on the winner and can no longer be told
     // apart by customer_id. (referral_promoters has no unique on customer_id,
@@ -1220,9 +1653,46 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     const loserPromoter = await trx('referral_promoters')
       .where({ customer_id: loserId }).first('id');
 
+    // BEFORE the sweep, immediately before the write: demote the loser's
+    // default/autopay cards so they ARRIVE demoted — the winner's own
+    // pre-merge default stays the ONE default/autopay card. This must run
+    // while the cards still carry the LOSER's customer_id: the sweep below
+    // repoints payment_methods onto the winner, after which the shared
+    // reader finds no loser cards at all — a pinned merge then refused every
+    // legitimate demotion as drift and an unpinned (admin queue) merge
+    // silently skipped it, leaving two default/autopay cards (pre-push
+    // Codex P0). RE-DERIVED here, not applied from the early snapshot
+    // (pre-push audit P1): the FOR UPDATE above stops an existing card's
+    // flags moving, but a card INSERTED for the loser mid-merge has no row
+    // to lock — a stale id list would leave it default. A set that differs
+    // from the one the card disclosed is drift: refuse (nothing external
+    // has happened yet — the Stripe fence is further down).
+    const demotionsNow = await predictSavedCardDemotions(trx, winnerId, loserId);
+    if (expectedEffectsFingerprint
+      && JSON.stringify(demotionsNow) !== JSON.stringify(savedCardDemotions)) {
+      const err = new Error('executeMerge: the saved cards this merge would change moved since it was approved — review a fresh proposal');
+      err.previewChanged = true;
+      throw err;
+    }
+    if (demotionsNow.winner_has_default && demotionsNow.cards.length) {
+      const demoted = await trx('payment_methods')
+        .whereIn('id', demotionsNow.cards.map((c) => c.id))
+        .update({ is_default: false, autopay_enabled: false, updated_at: trx.fn.now() });
+      if (demoted) repointed['payment_methods.demoted_defaults'] = demoted;
+    }
+
     // Repoint every FK. Each table gets its own savepoint (knex nested
     // transaction) so a unique-collision on a droppable singleton can be
     // handled without poisoning the outer transaction.
+    // A payer-linked winner absorbing a self-pay loser makes the loser's debt
+    // payer-owned: a self-pay combined-visit invoice of the loser whose send
+    // claim already committed (its provider handoff pending) defers the merge.
+    // Judged here, under the customer locks and BEFORE the FK sweep repoints
+    // those invoices to the winner (the send fence keys on customer_id).
+    if (winner.payer_id && !loser.payer_id
+        && await require('./visit-completion-packets').packetInvoiceSendInFlight({ customerId: loser.id }, trx)) {
+      throw new Error('A combined-visit invoice for the merged-away record is being sent and this merge would change its billing owner — retry after it settles');
+    }
     const fks = await customerFkColumns(trx);
     for (const { table_name: table, column_name: column } of fks) {
       // Capture the moving row keys BEFORE the update, in an own savepoint:
@@ -1318,12 +1788,16 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         const liveCases = await sp('collection_cases')
           .where({ customer_id: winnerId })
           .whereIn('current_state', ['approved', 'dialing', 'held'])
+          // EXACTLY the preview's order (previewCollectionCaseReconciliation):
+          // surplusApprovedCollectionCases keeps the FIRST approval and
+          // reverts the rest, so on an approved_at tie an order that differs
+          // from the card's would revoke the approval the card promised to
+          // keep — with a matching fingerprint, since the same set is
+          // disclosed either way. The unique id breaks the tie on both sides.
           .orderBy('approved_at', 'desc')
+          .orderBy('id')
           .select('id', 'current_state', 'case_version');
-        const approved = liveCases.filter((c) => c.current_state === 'approved');
-        const hasClaimedOrHeld = liveCases.length > approved.length;
-        const surplus = hasClaimedOrHeld ? approved : approved.slice(1);
-        for (const c of surplus) {
+        for (const c of surplusApprovedCollectionCases(liveCases)) {
           await sp('collection_cases')
             .where({ id: c.id, current_state: 'approved', case_version: c.case_version })
             .update({
@@ -1372,16 +1846,6 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     } catch (planRateErr) {
       loserPlanRateRows = [];
       logger.warn(`[customer-dedupe] loser plan-rate cleanup failed (merge continues): ${planRateErr.message}`);
-    }
-
-    // Normalize payment-method defaults now that the loser's cards moved:
-    // the winner's own pre-merge default stays the ONE default/autopay card.
-    if (winnerHadDefault && loserCardIds.length) {
-      const demoted = await trx('payment_methods')
-        .whereIn('id', loserCardIds)
-        .where((q) => q.where({ is_default: true }).orWhere({ autopay_enabled: true }))
-        .update({ is_default: false, autopay_enabled: false, updated_at: trx.fn.now() });
-      if (demoted) repointed['payment_methods.demoted_defaults'] = demoted;
     }
 
     // Polymorphic customer pointers (recipient_type/recipient_id) — see
@@ -1489,11 +1953,8 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         // click_balance_cents was DROPPED by 20260401000100_referral_unification
         // — only live columns here (a stale column in the UPDATE below would
         // abort the whole merge).
-        const counters = ['referral_balance_cents', 'total_earned_cents',
-          'total_paid_out_cents', 'total_clicks', 'total_referrals_sent', 'total_referrals_converted',
-          'available_balance_cents', 'pending_earnings_cents'];
         const sums = {};
-        for (const col of counters) {
+        for (const col of REFERRAL_FOLD_COUNTERS) {
           const add = Number(loserRow?.[col] || 0);
           if (add) sums[col] = Number(winnerPromoter[col] || 0) + add;
         }
@@ -1547,16 +2008,9 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // APPEND the loser's notes onto the winner — both sides can hold real
     // context, fill-if-empty would drop one, and the merge journal is not an
     // operator surface.
-    const noteAppends = {};
-    for (const col of ['crm_notes', 'technician_notes']) {
-      const loserVal = String(loser[col] || '').trim();
-      if (!loserVal) continue;
-      const winnerVal = String(winner[col] || '').trim();
-      if (winnerVal.includes(loserVal)) continue;
-      noteAppends[col] = winnerVal
-        ? `${winnerVal}\n\n[From merged duplicate ${String(loserId).slice(0, 8)}]: ${loserVal}`
-        : loserVal;
-    }
+    // ONE reader with the card's disclosure (predictNoteAppends), so the
+    // fingerprint covers the text that actually lands on the winner.
+    const noteAppends = predictNoteAppends(winner, loser);
     // Journal the winner's PRIOR notes alongside the applied concatenation
     // ({ before, applied }, same shape as winner_autopay_before) so the undo
     // can put the winner's own notes back when still the merge-written text
@@ -1579,26 +2033,7 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // monthly cron must never charge a customer whose retired row said stop.
     // autopay_log keeps the provenance; re-enabling is an operator action on
     // the surviving row.
-    const autopayRestrictions = {};
-    if (loser.autopay_enabled === false && winner.autopay_enabled !== false) {
-      autopayRestrictions.autopay_enabled = false;
-    }
-    // The account-credit auto-apply opt-in (owner ruling 2026-08-28) is
-    // consent the same way: the loser's ledger and cached balance move to
-    // the winner, so a retired row that said "don't apply my credit" must
-    // keep that answer on the surviving row — its credit would otherwise
-    // be consumed by the next automatic seam. Journaled + undone with the
-    // other most-restrictive columns.
-    if (loser.auto_apply_account_credit === false && winner.auto_apply_account_credit === true) {
-      autopayRestrictions.auto_apply_account_credit = false;
-    }
-    const pauseTs = (v) => (v ? new Date(v).getTime() : null);
-    const loserPause = pauseTs(loser.autopay_paused_until);
-    const winnerPause = pauseTs(winner.autopay_paused_until);
-    if (loserPause && loserPause > Date.now() && (!winnerPause || loserPause > winnerPause)) {
-      autopayRestrictions.autopay_paused_until = loser.autopay_paused_until;
-      if (loser.autopay_pause_reason) autopayRestrictions.autopay_pause_reason = loser.autopay_pause_reason;
-    }
+    const autopayRestrictions = inheritedAutopayRestrictions(winner, loser);
     // Journal the winner's ORIGINAL customer-level autopay fields for
     // exactly the columns this block overwrites (applied directly, not via
     // winner_backfills), so an undo can put the winner's own autopay state
@@ -1670,134 +2105,9 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       updated_at: trx.fn.now(),
     });
 
-    const backfills = {};
-    for (const field of BACKFILL_FIELDS) {
-      if (isEmptyValue(winner[field]) && !isEmptyValue(loser[field])) backfills[field] = loser[field];
-    }
-    // An address backfills as a TUPLE: a winner with no street but a stale
-    // city/ZIP absorbing the loser's real service address must not mint a
-    // mixed address (dispatch and report fallbacks read these columns
-    // together). When the street comes from the loser, the whole tuple does.
-    if (backfills.address_line1) {
-      // The tuple REPLACES the winner's partial address wholesale — journal
-      // any non-empty prior value being overwritten (e.g. the winner's
-      // original ZIP) so the undo can put it back. Empty priors need no
-      // record: the generic backfill-clear already vacates those to null.
-      for (const field of ['address_line2', 'city', 'state', 'zip']) {
-        if (!isEmptyValue(winner[field])) winnerPriorValues[field] = winner[field];
-      }
-      backfills.address_line2 = loser.address_line2 || null;
-      backfills.city = loser.city || null;
-      backfills.state = loser.state || null;
-      backfills.zip = loser.zip || null;
-    }
-    // A loser-only Stripe profile must move with its payment methods: the
-    // repointed payment_methods rows live on THAT Stripe customer, and a
-    // later ensureStripeCustomer(winner) would mint a fresh profile and
-    // strand every saved card. (Both-have-Stripe was refused above.)
-    if (!winner.stripe_customer_id && (loser.stripe_customer_id || derivedStripeCustomerId)) {
-      backfills.stripe_customer_id = loser.stripe_customer_id || derivedStripeCustomerId;
-    }
-    // A loser-only third-party payer default transfers the same way —
-    // without it the merged account self-pays and bills the homeowner
-    // instead of the AP payer. (Different-payers was refused above.)
-    if (!winner.payer_id && loser.payer_id) {
-      backfills.payer_id = loser.payer_id;
-    }
-    // A loser-only billing mode transfers the same way; per_application_fee
-    // rides along when the winner has none (the completion biller reads it
-    // with the mode).
-    if (!winner.billing_mode && loser.billing_mode) {
-      backfills.billing_mode = loser.billing_mode;
-      if (isEmptyValue(winner.per_application_fee) && !isEmptyValue(loser.per_application_fee)) {
-        backfills.per_application_fee = loser.per_application_fee;
-      }
-    }
-    // A street-only winner absorbing a unit-bearing loser (same street key,
-    // one-sided unit = a compatible match) must keep the unit — it is the
-    // only piece of the service address that distinguishes the apartment.
-    // The loser's line2 copies as-is; a unit embedded in the loser's line1
-    // is re-extracted with case preserved.
-    const winnerKey = normalizeStreetKey(winner.address_line1);
-    const loserKey = normalizeStreetKey(loser.address_line1);
-    const winnerHasUnit = Boolean((winnerKey && winnerKey.unit) || unitFromLine2(winner.address_line2));
-    const loserUnitText = loser.address_line2
-      || rawUnitText(loser.address_line1)
-      || null;
-    if (!winnerHasUnit && winnerKey && loserKey && winnerKey.key === loserKey.key
-      && ((loserKey && loserKey.unit) || unitFromLine2(loser.address_line2))
-      && isEmptyValue(winner.address_line2) && loserUnitText) {
-      backfills.address_line2 = loserUnitText;
-    }
-    if (promoteWinnerAsPrimary) {
-      backfills.is_primary_profile = true;
-    }
-    // On-location service contacts route appointment/service-report comms
-    // (customer-contact.js): copy slot-WISE, never field-wise — mixing one
-    // slot's name with another's phone would invent a contact that doesn't
-    // exist. A slot moves only when the winner's whole slot is empty.
-    const CONTACT_SLOTS = [
-      ['service_contact_name', 'service_contact_phone', 'service_contact_email', 'service_contact_role'],
-      ['service_contact2_name', 'service_contact2_phone', 'service_contact2_email', 'service_contact2_role'],
-      ['service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'service_contact3_role'],
-    ];
-    let movedContactSlot = false;
-    let movedContactPhone = false;
-    const winnerHadAnyContact = CONTACT_SLOTS.some((slot) => slot.some((f) => !isEmptyValue(winner[f])));
-    for (const slot of CONTACT_SLOTS) {
-      const winnerSlotEmpty = slot.every((f) => isEmptyValue(winner[f]));
-      if (!winnerSlotEmpty) continue;
-      for (const f of slot) {
-        if (!isEmptyValue(loser[f])) {
-          backfills[f] = loser[f];
-          movedContactSlot = true;
-          // slot[1] is the phone column — only a moved TEXTING target can
-          // invalidate the winner's SMS-consent stamp below.
-          if (f === slot[1]) movedContactPhone = true;
-        }
-      }
-    }
-    // Consent artifact travels WITH the contacts it describes (#2948) — but
-    // ONLY when the resulting contact list is exactly the loser's (winner
-    // had no contacts at all and no stamp). If the winner already held any
-    // contact — including one whose stamp an admin edit cleared — carrying
-    // the loser's stamp would re-authorize texting people it never
-    // described; leave it cleared and require re-attestation instead.
-    if (movedContactSlot
-      && !winnerHadAnyContact
-      && isEmptyValue(winner.service_contacts_consent_at)
-      && !isEmptyValue(loser.service_contacts_consent_at)) {
-      backfills.service_contacts_consent_at = loser.service_contacts_consent_at;
-      backfills.service_contacts_consent_source = loser.service_contacts_consent_source;
-      backfills.service_contacts_consent_text_version = loser.service_contacts_consent_text_version;
-    } else if (movedContactPhone && winnerHadAnyContact
-      && !isEmptyValue(winner.service_contacts_consent_at)) {
-      // Mixed list: the winner's stamp described only the winner's own
-      // contacts; loser slots just joined the row, so the stamp no longer
-      // describes the stored list — clear it and require re-attestation.
-      backfills.service_contacts_consent_at = null;
-      backfills.service_contacts_consent_source = null;
-      backfills.service_contacts_consent_text_version = null;
-      // winner_backfills records the APPLIED value (null) — journal the
-      // winner's PRIOR stamps separately so an undo can restore them once
-      // the appended loser contacts are gone (the stamp describes the
-      // winner's own list again). Pre-upgrade journals lack this key and
-      // keep today's behavior (stamp stays cleared; re-attest by hand).
-      winnerPriorValues.service_contacts_consent_at = winner.service_contacts_consent_at;
-      winnerPriorValues.service_contacts_consent_source = winner.service_contacts_consent_source ?? null;
-      winnerPriorValues.service_contacts_consent_text_version = winner.service_contacts_consent_text_version ?? null;
-    }
-    // Acceptance-terms stamp (GATE_ESTIMATE_ACCEPTANCE_TERMS): the loser's
-    // estimate_acceptances rows repoint to the winner below, so the winner's
-    // customer-level "latest version accepted on any estimate" must absorb a
-    // newer (or only) loser version. Versions are 'vYYYY-MM' — string order is
-    // chronological. The winner's prior value is journaled for the undo.
-    if (!isEmptyValue(loser.accepted_terms_version)
-      && (isEmptyValue(winner.accepted_terms_version)
-        || String(loser.accepted_terms_version) > String(winner.accepted_terms_version))) {
-      if (!isEmptyValue(winner.accepted_terms_version)) winnerPriorValues.accepted_terms_version = winner.accepted_terms_version;
-      backfills.accepted_terms_version = loser.accepted_terms_version;
-    }
+    const predictedBackfills = predictWinnerBackfills(winner, loser, { derivedStripeCustomerId });
+    const backfills = predictedBackfills.backfills;
+    Object.assign(winnerPriorValues, predictedBackfills.winnerPriorValues);
     // Combined-session fence, UNCONDITIONAL (codex #3427 r13/r14 P1,
     // widened r24 P1): the payer case is the sharpest hazard (every
     // invoice starts resolving to the effective winner payer), but a
@@ -1811,21 +2121,140 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // An unreleasable session aborts the merge; the admin retries.
     {
       const PayCombined = require('./pay-combined');
-      const winnerRelease = await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(trx, winnerId);
-      const loserRelease = await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(trx, loser.id);
-      if (loserRelease.inFlight > 0) {
+      // The rows are the PRE-SWEEP snapshot taken above, already checked
+      // against the confirmed card's pin under the pay.combined lock (that
+      // lock is an xact lock, so it is still held here).
+      // Single-invoice checkouts are NOT combined sessions, so the release
+      // leaves them alone by default — except the ones this merge
+      // invalidates (the loser's, whose PI metadata names the record being
+      // retired; and the winner's when the merge transfers a payer). Same
+      // rule the card disclosed.
+      const invalidatedSingle = singleInvoiceSessionsInvalidatedByMerge(winner, loser);
+      // The card pinned each intent's OUTCOME, not just its id: a checkout
+      // confirmed directly with Stripe since the locked check would flip
+      // cancel → in_flight, and the in-flight guards below only defer on a
+      // loser session or a payer-changing winner one — so an ordinary merge
+      // could commit having promised a cancellation it never performed
+      // (codex #4348 r10 P1). Re-asserted at the release boundary.
+      const pinnedOutcomes = (side) => (approvedEffects
+        ? Object.fromEntries(approvedEffects.combined_payment_sessions[side]
+          .filter((sess) => sess.outcome)
+          .map((sess) => [String(sess.payment_intent_id), sess.outcome]))
+        : null);
+      // PLAN both sides first, CANCEL nothing yet (codex #4348 r11 P1). A
+      // Stripe cancellation is an external effect this transaction cannot
+      // roll back: cancelling the winner's checkout and only then finding
+      // the loser has money in flight would abort the merge having already
+      // killed a live payment link, leaving the invoice pointing at a
+      // cancelled checkout. Every defer decision is made before the first
+      // write, and the same holds within one side's list.
+      const winnerPlan = await PayCombined.planStampedSessionRelease(trx, stampedSessionRows.winner, { invalidatedSingleInvoice: invalidatedSingle.winner, expectedOutcomes: pinnedOutcomes('winner') });
+      const loserPlan = await PayCombined.planStampedSessionRelease(trx, stampedSessionRows.loser, { invalidatedSingleInvoice: invalidatedSingle.loser, expectedOutcomes: pinnedOutcomes('loser') });
+      if (loserPlan.inFlight > 0) {
         throw new Error('A combined payment on the merged-away record is still in flight — retry the merge after it settles');
       }
       // A payer-CHANGING merge defers on WINNER-side in-flight money too
       // (codex r33 P1): a blank-payer winner absorbing the loser's payer
       // would change the billing owner of a debit the homeowner already
       // authorized — settlement never re-resolves ownership.
-      if (winnerRelease.inFlight > 0 && !winner.payer_id && loser.payer_id) {
+      if (winnerPlan.inFlight > 0 && !winner.payer_id && loser.payer_id) {
         throw new Error('A combined payment for the surviving record is still in flight and this merge would change its billing owner — retry after it settles');
       }
+      // The SEND fence belongs with the other defers, ahead of the Stripe
+      // writes (Codex #4311 r40 P1): a cancel is an external effect this
+      // transaction cannot roll back, so a merge that is about to be refused
+      // for an in-flight combined-visit send must not already have cancelled
+      // the customer's checkout session. The post-sweep fence below still
+      // covers the repointed loser invoices; this one covers the winner's own
+      // before anything is cancelled.
+      if (backfills.payer_id && !winner.payer_id
+        && await require('./visit-completion-packets').packetInvoiceSendInFlight({ customerId: winnerId }, trx)) {
+        throw new Error('A combined-visit invoice for the surviving record is being sent and this merge would change its billing owner — retry after it settles');
+      }
+      // Past every defer: now the Stripe writes.
+      await PayCombined.applyStampedSessionRelease(trx, winnerPlan);
+      await PayCombined.applyStampedSessionRelease(trx, loserPlan);
+    }
+    // A payer-changing merge is the same live-ownership writer the customer
+    // and job Bill-To routes are: a self-pay combined-visit invoice whose
+    // send claim already committed (its provider handoff pending) must not
+    // have its debt handed to AP underneath it. After the FK sweep the
+    // winner's ownership covers the repointed loser invoices too, so this
+    // one query fences both records for the loser-payer direction (the
+    // winner-payer direction was fenced before the sweep).
+    if (backfills.payer_id && await require('./visit-completion-packets').packetInvoiceSendInFlight({ customerId: winnerId }, trx)) {
+      throw new Error('A combined-visit invoice for the surviving record is being sent and this merge would change its billing owner — retry after it settles');
     }
     if (Object.keys(backfills).length) {
       await trx('customers').where({ id: winnerId }).update({ ...backfills, updated_at: trx.fn.now() });
+    }
+    // The backfill above is a live Bill-To transition like any other: a
+    // payerless winner that just inherited the loser's payer now owns the
+    // repointed self-pay packet invoices, including ones the homeowner
+    // already holds a link for. The fence above only refuses a send in
+    // flight; a `sent`/`viewed`/`overdue` invoice needs the withdrawal, so
+    // the same ownership-adding path every other Bill-To writer runs takes
+    // the winner here, after the payer is applied and the sweep has
+    // repointed the loser's invoices onto it.
+    // Direction-independent (codex r25 P1): the withdrawal is owed whenever
+    // the SURVIVING record is payer-owned, not only when the loser supplied
+    // the payer. A payer-linked winner absorbing a self-pay loser writes no
+    // backfill at all, yet the sweep just repointed the loser's
+    // `sent`/`viewed`/`overdue` packet invoices onto that payer-owned winner
+    // — gating on `backfills.payer_id` left exactly that direction
+    // collectible through the homeowner's existing link. Two self-pay records
+    // merging still run nothing — Bill-To did not move, and a per-job payer on
+    // a repointed service was already withdrawn by the writer that assigned it.
+    // Both directions are fenced against a send in flight (the loser-side check
+    // before the sweep, the winner-side one just above).
+    if (backfills.payer_id || winner.payer_id) {
+      // Only invoices REPOINTED FROM THE LOSER can carry undo-relevant
+      // reversals (local audit on r42): journaling the winner's own ledger
+      // rows would have the undo hand them to the loser while the invoices
+      // stayed with the winner. A count-only sweep record cannot name them,
+      // so nothing is journaled and the table is marked non-replayable.
+      const sweptInvoiceIds = repointedIds['invoices.customer_id'];
+      const inheritedInvoiceIds = new Set(Array.isArray(sweptInvoiceIds) ? sweptInvoiceIds.map(String) : []);
+      // …and only the reversal rows this withdrawal creates: a snapshot taken
+      // before it runs is what makes the diff precise.
+      const ledgerBefore = inheritedInvoiceIds.size
+        ? new Set((await trx('customer_credit_ledger').where({ customer_id: winnerId })
+          .whereIn('invoice_id', [...inheritedInvoiceIds]).pluck('id')).map(String))
+        : new Set();
+      const withdrawnInvoiceIds = await require('./visit-completion-packets')
+        .withdrawPacketInvoicesForOwner(trx, { customerId: winnerId });
+      // The withdrawal RETURNS the homeowner's applied credit, and it runs
+      // AFTER the FK sweep — so the ledger rows it writes belong to the
+      // winner and are not in the sweep's id record (Codex #4311 r42 P1). An
+      // undo would then return the invoice to the loser while the returned
+      // credit stayed with the winner. Journal them with the rest so the undo
+      // repoints them too.
+      const inheritedWithdrawn = withdrawnInvoiceIds.filter((id) => inheritedInvoiceIds.has(String(id)));
+      if (inheritedWithdrawn.length) {
+        const reversalIds = (await trx('customer_credit_ledger')
+          .where({ customer_id: winnerId })
+          .whereIn('invoice_id', inheritedWithdrawn)
+          .pluck('id')).map(String).filter((id) => !ledgerBefore.has(id));
+        if (reversalIds.length) {
+          const key = 'customer_credit_ledger.customer_id';
+          const existing = repointedIds[key];
+          if (Array.isArray(existing)) {
+            repointedIds[key] = [...new Set([...existing, ...reversalIds])];
+          } else if (!existing) {
+            repointedIds[key] = reversalIds;
+          } else {
+            // The sweep already fell back to count-only for this table, so an
+            // id-precise undo is not available for it either way; keep the
+            // existing record and mark the table as not replayable backwards,
+            // the same signal a unique-collision handler raises.
+            if (!collisionHandlers.includes('customer_credit_ledger')) collisionHandlers.push('customer_credit_ledger');
+          }
+        }
+      } else if (withdrawnInvoiceIds.length && !Array.isArray(sweptInvoiceIds) && sweptInvoiceIds) {
+        // Invoices were repointed but the sweep recorded only a count, so a
+        // reversal among them cannot be named for the undo.
+        if (!collisionHandlers.includes('customer_credit_ledger')) collisionHandlers.push('customer_credit_ledger');
+      }
     }
 
     const [journal] = await trx('customer_merge_journal').insert({
@@ -2046,6 +2475,7 @@ async function runRedPairAutoDismissSweep({ performedBy = 'auto:red-tier' } = {}
           // Idempotent by the ordered-pair unique constraint — a re-run or a
           // race with a manual dismissal is an ignored conflict, never an
           // error.
+          await acquirePairAdjudicationLock(trx, a, b);
           await trx('customer_duplicate_dismissals')
             .insert({
               customer_id_a: a,
@@ -4214,7 +4644,7 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       // proportion to the risk, and a brand-new signup claiming exactly the
       // restored address in that window is vanishingly rare and self-heals
       // (the undo simply refuses on the next attempt).
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`customer-email:${emailKeyNorm}`]);
+      await require('../utils/customer-comms-lock').lockCustomerEmail(trx, emailKeyNorm);
       // Serialization ONLY — no claimant refusal (r29, same product ruling
       // as the operator writers): customers.email is deliberately
       // non-unique (20260417000010 — spouses and shared household/business
@@ -4301,6 +4731,28 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       }
     }
 
+    // Ownership-REMOVING side of the undo (codex r25 P2): the merge withdrew
+    // every packet invoice the inherited payer took over, and an undo that
+    // clears or restores `payer_id` hands that debt back to self-pay. Without
+    // this the rows keep their `payer_billed:` stamps, billing holds and payer
+    // alerts forever — their send and payment rails stay blocked. Run for both
+    // records (the loser's invoices moved back to it during the un-repoint
+    // above) and only here, after the winner patch AND the loser restore have
+    // committed, so the resolver reads the post-undo Bill-To. Reconciliation
+    // resolves ownership per packet and releases nothing that still has a live
+    // payer, so an undo that leaves the payer in place is a no-op.
+    // The LOSER runs unconditionally (audit P1): a payer-linked winner
+    // absorbing a self-pay loser withdraws the loser's invoices while writing
+    // no backfill at all, so gating on the winner's payer left exactly that
+    // direction's restored rows stamped and unpayable. Splitting the loser
+    // back out always changes its Bill-To. The WINNER's own invoices are
+    // reconciled only when the undo actually moved its payer.
+    const Packets = require('./visit-completion-packets');
+    await Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: loserId });
+    if (Object.prototype.hasOwnProperty.call(winnerPatch, 'payer_id')) {
+      await Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: winnerId });
+    }
+
     await trx('customer_merge_journal').where({ id: journalId }).update({
       undone_at: trx.fn.now(),
       undone_by: performedBy || 'unknown',
@@ -4361,13 +4813,441 @@ async function revertMerge({ journalId, performedBy, performedById }) {
   return result;
 }
 
+// ---------------------------------------------------------------------------
+// Merge effect reader (shared preview)
+// ---------------------------------------------------------------------------
+
+// What executeMerge WOULD do to related rows for (winnerId, loserId), read
+// through the same table sets the executor sweeps — the schema-driven FK
+// columns (customerFkColumns), the polymorphic recipient pointers
+// (POLYMORPHIC_CUSTOMER_POINTERS, rows typed 'customer'), and the referral
+// enrollment fold (balances added, promoter-keyed rows repointed). Read-only;
+// runs on any knex handle, so a caller holding the executor's row locks (an
+// approved-card recheck inside the merge transaction) sees the same answer
+// the executor is about to act on. Per-table counts are best-effort: a table
+// that fails to count is reported as 'unknown', never a thrown error — one
+// bad table must not blank the whole disclosure.
+//   moving:   { [table]: n | 'unknown', [table.idColumn]: n | 'unknown', total_rows }
+//             (zero counts are dropped)
+//   referral: { loser_enrolled, folded_into_winner_promoter, loser_promoter_id,
+//               winner_promoter_id, balances_added: { [counter]: n },
+//               promoter_rows: { referrals, referral_invites, referral_clicks, referral_payouts } }
+async function previewMergeEffects(database, winnerId, loserId) {
+  const moving = {};
+  let total = 0;
+  const countInto = async (key, build) => {
+    try {
+      const row = await build().count({ n: '*' }).first();
+      const n = Number(row?.n || 0);
+      if (n > 0) { moving[key] = (Number(moving[key]) || 0) + n; total += n; }
+    } catch (err) {
+      moving[key] = 'unknown';
+      logger.warn(`[customer-dedupe] previewMergeEffects: count failed for ${key}: ${err.message}`);
+    }
+  };
+  let fkColumns = [];
+  try {
+    fkColumns = await customerFkColumns(database);
+  } catch (err) {
+    moving.fk_sweep = 'unknown';
+    logger.warn(`[customer-dedupe] previewMergeEffects: customerFkColumns failed: ${err.message}`);
+  }
+  const byTable = new Map();
+  for (const { table_name: table, column_name: column } of fkColumns) {
+    if (!byTable.has(table)) byTable.set(table, []);
+    byTable.get(table).push(column);
+  }
+  // Sequential per-column, concurrent per-table: two FK columns on one table
+  // are rare, but summing them concurrently would race on one accumulator.
+  await Promise.all([...byTable].map(async ([table, columns]) => {
+    for (const column of columns) await countInto(table, () => database(table).where(column, loserId));
+  }));
+  await Promise.all(POLYMORPHIC_CUSTOMER_POINTERS.map(({ table, typeColumn, idColumn }) =>
+    countInto(`${table}.${idColumn}`, () => database(table).where({ [typeColumn]: 'customer', [idColumn]: loserId }))));
+  moving.total_rows = total;
+  return { moving, referral: await referralFoldEffects(database, winnerId, loserId) };
+}
+
+/**
+ * The merge mutations the FK/polymorphic sweep CANNOT see, because the
+ * customer id they key on is not a column: the loser's unstamped visits
+ * (stamped with the loser's own address before the repoint so the schedule
+ * board cannot dispatch to the winner's house), an operator's
+ * call_log.metadata.customer_link_override, the irrigation weekly delivery
+ * identity embedded in email_messages.trigger_event_id, and the sprinkler
+ * "home changed" stamp. Disclosed on the card and pinned in the effects
+ * fingerprint (codex #4348 r9 P2) — without this, such a row could be
+ * created during the pending window and still be rewritten by an approval
+ * that never mentioned it. Keys are the executor's own `repointed` keys.
+ * Omitted entirely when nothing of the sort exists.
+ */
+async function nonFkMergeRewrites(database, winner, loser) {
+  const out = {};
+  const countInto = async (key, build) => {
+    try {
+      const row = await build().count({ n: '*' }).first();
+      const n = Number(row?.n || 0);
+      if (n > 0) out[key] = n;
+    } catch (err) {
+      out[key] = 'unknown';
+      logger.warn(`[customer-dedupe] nonFkMergeRewrites: count failed for ${key}: ${err.message}`);
+    }
+  };
+  // Only when the loser HAS an address — the executor's own condition.
+  if (loser.address_line1) {
+    await countInto('scheduled_services.service_address_stamp', () => database('scheduled_services')
+      .where({ customer_id: loser.id }).whereNull('service_address_line1'));
+  }
+  await countInto('call_log.customer_link_override', () => database('call_log')
+    .whereRaw("metadata -> 'customer_link_override' ->> 'customer_id' = ?", [String(loser.id)]));
+  await countInto('email_messages.trigger_event_id', () => database('email_messages')
+    .where('trigger_event_id', 'like', `irrigation.weekly:${loser.id}:%`));
+  // A pure predicate, not a count: the same premise test the executor runs.
+  try {
+    const fanout = require('./customer-address-fanout');
+    if (fanout.addressMatchKey(winner?.address_line1) && fanout.addressMatchKey(loser?.address_line1)
+      && fanout.homesDiffer(winner, loser)) {
+      out['property_preferences.irrigation_home_changed_at'] = 'stamped';
+    }
+  } catch (err) {
+    out['property_preferences.irrigation_home_changed_at'] = 'unknown';
+    logger.warn(`[customer-dedupe] nonFkMergeRewrites: sprinkler move premise failed: ${err.message}`);
+  }
+  return out;
+}
+
+async function referralFoldEffects(database, winnerId, loserId) {
+  let loserPromoter = await database('referral_promoters').where({ customer_id: loserId }).first();
+  if (!loserPromoter) return { loser_enrolled: false };
+  let winnerPromoter = await database('referral_promoters')
+    .where({ customer_id: winnerId }).whereNot({ id: loserPromoter.id }).first();
+  // Under the executor's transaction (the locked recheck), LOCK both
+  // promoter rows and re-read them, so the balances this fingerprint states
+  // are the balances the fold will actually add up (codex #4348 r10 P1).
+  // Referral writes do not take the customer or pair locks — a unique click
+  // increments total_clicks straight off the promoter row
+  // (routes/referral-links.js) — so without this a click, reward or payout
+  // landing after the locked check folds counters nobody approved, and one
+  // landing after the executor's own reread is erased when the loser row is
+  // zeroed. pg_advisory locks do not cover rows; FOR UPDATE does, and it is
+  // an xact lock, so it is still held through the fold below. Locked in one
+  // id-ordered statement: two merges sharing a promoter (A+B and A+C) then
+  // queue instead of deadlocking.
+  if (database.isTransaction) {
+    const ids = [loserPromoter.id, winnerPromoter?.id].filter(Boolean);
+    await database('referral_promoters').whereIn('id', ids).orderBy('id').forUpdate().select('id');
+    loserPromoter = await database('referral_promoters').where({ id: loserPromoter.id }).first();
+    if (!loserPromoter) return { loser_enrolled: false };
+    if (winnerPromoter) winnerPromoter = await database('referral_promoters').where({ id: winnerPromoter.id }).first();
+  }
+  const promoter_rows = {};
+  for (const table of ['referrals', 'referral_invites', 'referral_clicks', 'referral_payouts']) {
+    const row = await database(table).where({ promoter_id: loserPromoter.id }).count({ n: '*' }).first();
+    promoter_rows[table] = Number(row?.n || 0);
+  }
+  if (!winnerPromoter) {
+    // No fold: the loser's enrollment row itself repoints onto the winner in
+    // the FK sweep (referral_promoters.customer_id) and keeps its balances.
+    return { loser_enrolled: true, folded_into_winner_promoter: false, loser_promoter_id: loserPromoter.id, winner_promoter_id: null, balances_added: {}, promoter_rows };
+  }
+  const balances_added = {};
+  for (const col of REFERRAL_FOLD_COUNTERS) {
+    const add = Number(loserPromoter[col] || 0);
+    if (add) balances_added[col] = add;
+  }
+  return { loser_enrolled: true, folded_into_winner_promoter: true, loser_promoter_id: loserPromoter.id, winner_promoter_id: winnerPromoter.id, balances_added, promoter_rows };
+}
+
+// One advisory lock per unordered pair, transaction-scoped: taken by the
+// dismissal writers (admin route, red-pair auto-dismiss sweep) and by a
+// confirmed-card merge's final eligibility recheck, so the two verdicts
+// cannot interleave.
+async function acquirePairAdjudicationLock(trx, aId, bId) {
+  // LOWERCASED before sorting and hashing (codex #4348 r10 P1). The
+  // dismissal routes accept case-insensitive UUIDs and Postgres canonicalizes
+  // what it stores, so an operator's uppercase "not a duplicate" and the
+  // Intelligence Bar's lowercase merge would otherwise hash to two DIFFERENT
+  // advisory keys — the two writers would not serialize, and a dismissal
+  // committing after the merge's eligibility read would not stop the merge.
+  // Case-folding is the whole point: these are the same pair.
+  const key = `customer-duplicate-pair:${[String(aId).toLowerCase(), String(bId).toLowerCase()].sort().join(':')}`;
+  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [key]);
+}
+
+// The collection-case reconciliation rule, shared by the executor and the
+// preview (codex #4348 r5 P1): among the live cases that land under the
+// winner (ordered approved_at desc), surplus 'approved' rows revert to
+// 'proposed' — all of them when a dialing/held row exists, otherwise all
+// but the newest approval. dialing/held rows are never touched.
+function surplusApprovedCollectionCases(liveCases) {
+  const approved = liveCases.filter((c) => c.current_state === 'approved');
+  const hasClaimedOrHeld = liveCases.length > approved.length;
+  return hasClaimedOrHeld ? approved : approved.slice(1);
+}
+
+// What the executor's post-repoint reconcile WOULD do to collection cases:
+// every live (approved/dialing/held) case on either side with its state and
+// version, the approvals the merge would revoke, and whether a dialing case
+// defers it. Read over any knex handle so the under-lock recheck sees the
+// same answer; a case moving proposed→approved (or an approval rotating)
+// during the pending window changes the fingerprint and refuses the merge
+// instead of silently revoking an approval the operator never saw. An
+// absent table (pre-collections environment) reads as `available: false`;
+// any other read error fails the preview, as the executor's reconcile does.
+async function previewCollectionCaseReconciliation(database, winnerId, loserId) {
+  let rows;
+  try {
+    rows = await database('collection_cases')
+      .whereIn('customer_id', [winnerId, loserId])
+      .whereIn('current_state', ['approved', 'dialing', 'held'])
+      // approved_at decides which approval survives the reconcile, so it
+      // leads — but it ties, and this list is fingerprinted, so the unique
+      // id breaks the tie (codex #4348 r9 P2).
+      .orderBy('approved_at', 'desc')
+      .orderBy('id')
+      .select('id', 'customer_id', 'current_state', 'case_version');
+  } catch (err) {
+    if (err && err.code === '42P01') return { available: false, live: [], demoted_to_proposed: [], defers_on_dialing: false };
+    throw err;
+  }
+  const liveCases = (Array.isArray(rows) ? rows : []).map((c) => ({
+    id: String(c.id),
+    side: String(c.customer_id) === String(winnerId) ? 'winner' : 'loser',
+    current_state: c.current_state,
+    case_version: c.case_version == null ? null : Number(c.case_version),
+  }));
+  return {
+    available: true,
+    live: liveCases.map(({ id, side, current_state, case_version }) => ({ id, side, state: current_state, case_version })),
+    demoted_to_proposed: surplusApprovedCollectionCases(liveCases).map((c) => c.id),
+    defers_on_dialing: liveCases.some((c) => c.current_state === 'dialing'),
+  };
+}
+
+// Deterministic JSON: object keys sorted at every depth, arrays left in
+// their (meaning-bearing, source-pinned) order. Used for the effects
+// fingerprint the executor re-derives under its locks and compares exactly.
+function stableStringify(value) {
+  // A Date has no own enumerable keys, so the object branch below used to
+  // serialize EVERY timestamp as `{}` (codex #4348 r14 P1). Handled here as
+  // well as in normalizeDisclosedTimestamps so a Date introduced by a future
+  // reader can never silently collapse out of the fingerprint again.
+  if (value instanceof Date) return JSON.stringify(value.toISOString());
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(value === undefined ? null : value);
+}
+
+// Postgres returns every timestamp column as a Date object. A Date has no
+// own enumerable keys, so it serialized as `{}` in the fingerprint AND the
+// authorization contract's object renderer treated it as empty — the loser's
+// service_contacts_consent_at transferred onto the winner without appearing
+// on the card and without being pinned (codex #4348 r14 P1). This is true of
+// EVERY timestamp the effect set discloses, not just the consent stamp, so it
+// is normalized once over the whole set rather than at each reader: the card
+// renders the ISO string the operator approves, and that same string is what
+// the executor's locked recheck compares. Non-plain objects other than Date
+// are left exactly as they are rather than rebuilt into index maps.
+function normalizeDisclosedTimestamps(value) {
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) return value.map(normalizeDisclosedTimestamps);
+  if (value && typeof value === 'object' && (value.constructor === Object || value.constructor === undefined)) {
+    const out = {};
+    for (const k of Object.keys(value)) out[k] = normalizeDisclosedTimestamps(value[k]);
+    return out;
+  }
+  return value;
+}
+
+// EVERYTHING a merge of (winner, loser) would do beyond the row retire,
+// stated as the IB confirmation card discloses it, plus one stable
+// fingerprint of it all (key-sorted JSON). Read over any knex handle: the
+// preview reads it unlocked at card time, executeMerge recomputes it over
+// the locked rows and refuses on any difference (expectedEffectsFingerprint).
+// `winner` / `loser` are full customer rows (select *).
+// The loser-row state the merge DELIBERATELY never copies onto the winner
+// (BACKFILL_FIELDS excludes money/tier/stage; password_hash is never moved):
+// a positive monthly_rate, a membership tier, a live pipeline stage, a
+// portal login. Retiring the loser drops each of these silently — after the
+// merge every moved visit bills at the WINNER's rate — so the card states
+// both sides' values and pins them (codex #4348 r14 P1). null when the
+// loser carries nothing the winner would not keep anyway.
+function predictLoserStateDiscarded(winner, loser) {
+  const num = (v) => (v == null || v === '' || Number.isNaN(Number(v)) ? null : Number(v));
+  const tier = (row) => row.waveguard_tier ?? row.tier ?? null;
+  const out = {};
+  const loserRate = num(loser.monthly_rate);
+  if (loserRate > 0 && loserRate !== num(winner.monthly_rate)) {
+    out.monthly_rate = { loser: loserRate, winner: num(winner.monthly_rate) };
+  }
+  if (tier(loser) && tier(loser) !== tier(winner)) {
+    out.membership_tier = { loser: tier(loser), winner: tier(winner) };
+  }
+  if (loser.pipeline_stage && REAL_CUSTOMER_STAGES.has(loser.pipeline_stage) && loser.pipeline_stage !== winner.pipeline_stage) {
+    out.pipeline_stage = { loser: loser.pipeline_stage, winner: winner.pipeline_stage || null };
+  }
+  if (loser.password_hash) out.portal_login = { loser: true, winner: !!winner.password_hash };
+  return Object.keys(out).length ? out : null;
+}
+
+// The unique-key collisions the sweep will hit that the CURRENT rows make
+// predictable — each one runs its UNIQUE_COLLISION_HANDLERS entry, which
+// merges or deletes rows the journal cannot replay backwards, so the queue
+// undo refuses the merge (codex #4348 r14 P2). Read from the same rows the
+// executor sweeps: singleton pref rows on both sides, tags both records
+// carry, conversation threads on the same (channel, endpoint). Sorted so
+// the fingerprint is stable; a table that does not exist yet (42P01) is
+// simply not predicted.
+async function predictCollisionFolds(database, winnerId, loserId) {
+  const ids = [winnerId, loserId];
+  const details = {};
+  const read = async (table, columns) => {
+    try {
+      return await database(table).whereIn('customer_id', ids).select(...columns);
+    } catch (e) {
+      if (e && e.code === '42P01') return [];
+      throw e;
+    }
+  };
+  for (const table of ['notification_prefs', 'property_preferences']) {
+    const rows = await read(table, ['customer_id']);
+    const owners = new Set(rows.map((r) => String(r.customer_id)));
+    if (owners.has(String(winnerId)) && owners.has(String(loserId))) {
+      details[table] = 'both records have a row: the fields merge into the surviving row and the archived record\'s row is dropped';
+    }
+  }
+  const tagRows = await read('customer_tags', ['customer_id', 'tag']);
+  const winnerTags = new Set(tagRows.filter((r) => String(r.customer_id) === String(winnerId)).map((r) => r.tag));
+  const sharedTags = [...new Set(tagRows.filter((r) => String(r.customer_id) === String(loserId) && winnerTags.has(r.tag)).map((r) => r.tag))].sort();
+  if (sharedTags.length) details.customer_tags = { shared: sharedTags };
+  const convRows = await read('conversations', ['customer_id', 'channel', 'our_endpoint_id']);
+  const key = (r) => `${r.channel}\u0000${r.our_endpoint_id}`;
+  const winnerThreads = new Set(convRows.filter((r) => String(r.customer_id) === String(winnerId) && r.channel != null && r.our_endpoint_id != null).map(key));
+  const sharedThreads = [...new Set(convRows.filter((r) => String(r.customer_id) === String(loserId) && r.channel != null && r.our_endpoint_id != null && winnerThreads.has(key(r))).map((r) => `${r.channel}:${r.our_endpoint_id}`))].sort();
+  if (sharedThreads.length) details.conversations = { shared_threads: sharedThreads };
+  return { tables: Object.keys(details).sort(), details };
+}
+
+async function describeMergeEffects(database, winner, loser) {
+  const { moving, referral } = await previewMergeEffects(database, winner.id, loser.id);
+  // Non-FK rewrites (jsonb-embedded ids, trigger-id identities, address
+  // stamps) alongside the swept counts — same object, so they ride in the
+  // fingerprint the executor recomputes under its locks.
+  const nonFk = await nonFkMergeRewrites(database, winner, loser);
+  if (Object.keys(nonFk).length) moving.non_fk_rewrites = nonFk;
+  const credits = Math.round(Number(loser.account_credits || 0) * 100) / 100;
+  const adoptsBillingMode = !winner.billing_mode && !!loser.billing_mode;
+  const adoptsFee = adoptsBillingMode && (winner.per_application_fee == null || winner.per_application_fee === '')
+    && loser.per_application_fee != null && loser.per_application_fee !== '';
+  let loserPlanRates = 0;
+  try {
+    const row = await database('customer_plan_rates').where({ customer_id: loser.id }).count({ n: '*' }).first();
+    loserPlanRates = Number(row?.n || 0);
+  } catch {
+    loserPlanRates = 'unknown';
+  }
+  // The executor's own saved-card derivation (what the winner will actually
+  // adopt) feeds the backfill prediction; a profile conflict the executor
+  // would refuse is stated so the preview refuses too.
+  const savedCards = await deriveSavedCardStripeCustomer(database, winner, loser);
+  const { backfills } = predictWinnerBackfills(winner, loser, { derivedStripeCustomerId: savedCards.derivedStripeCustomerId });
+  // The loser cards the executor will strip of default/autopay (its own
+  // reader) — ids and before-flags on the card, pinned by the fingerprint.
+  const saved_card_demotions = await predictSavedCardDemotions(database, winner.id, loser.id);
+  // Stamped combined payment sessions on either side: the merge releases
+  // (cancels in Stripe) every unconfirmed one and DEFERS on loser-side
+  // money in flight — disclosed as the PaymentIntents involved and pinned;
+  // the release re-reads them under its own lock (expectedPaymentIntentIds).
+  const PayCombined = require('./pay-combined');
+  const invalidatedSingle = singleInvoiceSessionsInvalidatedByMerge(winner, loser);
+  const combined_payment_sessions = {
+    winner: await PayCombined.listUnconfirmedCombinedSessionsForCustomer(database, winner.id, { invalidatedSingleInvoice: invalidatedSingle.winner }),
+    loser: await PayCombined.listUnconfirmedCombinedSessionsForCustomer(database, loser.id, { invalidatedSingleInvoice: invalidatedSingle.loser }),
+  };
+  // Collection cases landing under the winner: the executor's reconcile
+  // can revoke surplus approvals — stated and pinned (state + version).
+  const collection_cases = await previewCollectionCaseReconciliation(database, winner.id, loser.id);
+  const collisionFolds = await predictCollisionFolds(database, winner.id, loser.id);
+  const predictedCollisionHandlers = [...(referral?.folded_into_winner_promoter ? ['referral_promoters'] : []), ...collisionFolds.tables];
+  const financial_effects = {
+    account_credits_moved_to_winner: credits,
+    billing_mode_adopted_from_loser: adoptsBillingMode ? loser.billing_mode : null,
+    per_application_fee_adopted_from_loser: adoptsFee ? Number(loser.per_application_fee) : null,
+    loser_plan_rate_rows_deleted: loserPlanRates,
+    referral_fold: referral,
+    autopay_restrictions_inherited: inheritedAutopayRestrictions(winner, loser),
+    // Fill-if-empty identity/address/contact/billing values the winner takes
+    // from the loser (predictWinnerBackfills — the executor's own rule).
+    winner_backfills: backfills,
+    stripe_profile_from_saved_cards: savedCards.derivedStripeCustomerId
+      ? { stripe_customer_id: savedCards.derivedStripeCustomerId, from: savedCards.stripeDerivedFrom } : null,
+    saved_card_profile_conflict: savedCards.conflict,
+    saved_card_demotions,
+    // The loser notes appended onto the winner — technician_notes changes
+    // technician-facing instructions, so the full resulting text is
+    // disclosed and pinned rather than left to the journal.
+    note_appends: predictNoteAppends(winner, loser),
+    combined_payment_sessions,
+    collection_cases,
+    // The loser state the merge never copies (rate, tier, live stage,
+    // portal login) — both sides' values, pinned.
+    loser_state_discarded: predictLoserStateDiscarded(winner, loser),
+    predicted_collision_handlers: predictedCollisionHandlers,
+    predicted_collision_folds: collisionFolds.details,
+    // Predicted from what can be read ahead (the referral fold and every
+    // unique-key collision the current rows make deterministic — singleton
+    // prefs, shared tags, shared conversation threads); a collision that
+    // only appears from rows inserted after the card is still discovered by
+    // the sweep itself, journaled as collision_handlers, and makes the
+    // queue undo refuse — stated, never promised away.
+    revertible_from_queue: predictedCollisionHandlers.length ? false : 'unless the sweep has to fold colliding rows (journaled; the undo then refuses)',
+  };
+  // Key-sorted at EVERY depth, not just the two top-level objects (codex
+  // #4348 r9 P2). executeMerge compares this string exactly against the
+  // approved card's, so any ordering the reads do not pin would refuse a
+  // merge nothing had changed. Array ORDER is still meaning-bearing and is
+  // pinned at the source instead: stamped sessions sort by
+  // (payment_intent_id, invoice_id) and live collection cases by
+  // (approved_at desc, id) — both unique — so equal reads serialize equal.
+  // ISO-normalized BEFORE the fingerprint and before the card sees them, so
+  // the operator approves the same string the locked recheck compares.
+  const disclosedMoving = normalizeDisclosedTimestamps(moving);
+  const disclosedEffects = normalizeDisclosedTimestamps(financial_effects);
+  const fingerprint = stableStringify({ moving: disclosedMoving, financial_effects: disclosedEffects });
+  return { moving: disclosedMoving, financial_effects: disclosedEffects, fingerprint };
+}
+
 module.exports = {
   findDuplicateGroups,
+  duplicatePairEligibility,
   executeMerge,
   runAutoMergeSweep,
   runRedPairAutoDismissSweep,
   revertMerge,
   recordLinkedProperty,
+  // The shared effect reader — callers that disclose "what would move" (the
+  // IB merge preview and its under-lock recheck) read the SAME FK,
+  // polymorphic-pointer, and referral-fold sets the executor acts on — never
+  // a hand-picked subset that could omit a table or a fold.
+  previewMergeEffects,
+  describeMergeEffects,
+  dbLevelMergeConflict,
+  singleInvoiceSessionsInvalidatedByMerge,
+  predictNoteAppends,
+  previewCollectionCaseReconciliation,
+  surplusApprovedCollectionCases,
+  predictWinnerBackfills,
+  deriveSavedCardStripeCustomer,
+  predictSavedCardDemotions,
+  predictLoserStateDiscarded,
+  predictCollisionFolds,
+  nonFkMergeRewrites,
+  rowLevelMergeConflict,
+  inheritedAutopayRestrictions,
+  acquirePairAdjudicationLock,
+  REFERRAL_FOLD_COUNTERS,
   // Refuse-policy sets, exported so GET /merges' revertible mirror can never
   // drift from the revert endpoint's own count-only refusals.
   REVERT_FINANCIAL_TABLES,
@@ -4396,6 +5276,8 @@ module.exports = {
   repointFlagsReleaseCollisions,
     mergeConversationRows,
     UNIQUE_COLLISION_HANDLERS,
+    stableStringify,
+    normalizeDisclosedTimestamps,
     resetFkCache: () => { fkColumnsCache = null; },
   },
 };

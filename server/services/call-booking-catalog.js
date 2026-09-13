@@ -742,7 +742,7 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
         });
       if (Number(wrote) === 1) {
         shifted += 1;
-        shiftedRows.push({ id: k.id, date: k.new_day, windowStart: k.window_start || null, windowEnd: k.window_end || null });
+        shiftedRows.push({ id: k.id, previousDate: k.day, date: k.new_day, windowStart: k.window_start || null, windowEnd: k.window_end || null });
         // The CAS pinned technician_id, so k.technician_id IS the committed holder.
         if (k.technician_id) noticeRows.push({ id: k.id, technicianId: k.technician_id, fromDay: k.day, toDay: k.new_day, windowStart: k.window_start || null, windowEnd: k.window_end || null });
       } else {
@@ -750,7 +750,10 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
       }
     }
     // Shifted children (with their kept windows) — the caller's durable
-    // reminder sync must cover them (codex r19 P1).
+    // reminder sync must cover them (codex r19 P1). previousDate/date are the
+    // child's OWN source and destination days: a follow-up spaced out from
+    // its parent sits on days neither parent date names, and a post-change
+    // route refresh has to cover those too (codex #4295 r1 P2).
     if (report && typeof report === 'object' && shiftedRows.length) report.shifted = (report.shifted || []).concat(shiftedRows);
     if (skipped.length) {
       if (report && typeof report === 'object') report.skipped = (report.skipped || []).concat(skipped);

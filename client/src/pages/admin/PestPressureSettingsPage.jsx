@@ -1,10 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { createPortal } from "react-dom";
-import useIsMobile from "../../hooks/useIsMobile";
+import React, { useCallback, useEffect, useId, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import {
-  AlertTriangle,
-  CheckCircle2,
   ClipboardList,
   Eye,
   ListChecks,
@@ -15,25 +12,35 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
+import {
+  ActionFeedback,
+  Badge,
+  Button,
+  Card,
+  CardBody,
+  CardHeader,
+  Checkbox,
+  Dialog,
+  DialogBody,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  Field,
+  Input,
+  Select,
+  Switch,
+  Table,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TR,
+  Textarea,
+  UiSurface,
+  cn,
+} from "../../components/ui";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
-
-// V2 monochrome palette — matches client/src/pages/admin/SettingsPage.jsx.
-const D = {
-  bg: "#F4F4F5",
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  teal: "#18181B",
-  green: "#15803D",
-  amber: "#A16207",
-  red: "#991B1B",
-  text: "#27272A",
-  muted: "#71717A",
-  white: "#FFFFFF",
-  heading: "#09090B",
-  inputBorder: "#D4D4D8",
-  subtle: "#FAFAFA",
-};
 
 function adminFetch(path, init = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -59,31 +66,15 @@ function adminFetch(path, init = {}) {
   });
 }
 
-function Card({ children, style }) {
-  return (
-    <div
-      style={{
-        background: D.card,
-        border: `1px solid ${D.border}`,
-        borderRadius: 12,
-        padding: 24,
-        ...style,
-      }}
-    >
-      {children}
-    </div>
-  );
-}
-
 function SectionHeading({ icon: Icon, label, description }) {
   return (
-    <div style={{ marginBottom: 16 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        {Icon ? <Icon size={16} color={D.heading} /> : null}
-        <h2 style={{ fontSize: 16, fontWeight: 500, color: D.heading, margin: 0 }}>{label}</h2>
+    <div>
+      <div className="flex items-center gap-2">
+        {Icon ? <Icon size={17} aria-hidden className="text-zinc-900" /> : null}
+        <h2 className="text-16 leading-[1.4] font-medium text-zinc-900">{label}</h2>
       </div>
       {description ? (
-        <p style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>{description}</p>
+        <p className="mt-1 text-ui-body text-ink-secondary">{description}</p>
       ) : null}
     </div>
   );
@@ -91,66 +82,30 @@ function SectionHeading({ icon: Icon, label, description }) {
 
 function Toggle({ checked, onChange, label, description }) {
   return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        gap: 16,
-        padding: "14px 0",
-        borderBottom: `1px solid ${D.border}`,
-      }}
-    >
-      <div style={{ minWidth: 0, flex: 1 }}>
-        <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>{label}</div>
+    <div className="flex min-h-14 items-center justify-between gap-4 border-b border-hairline border-zinc-200 py-3 last:border-b-0">
+      <div className="min-w-0 flex-1">
+        <div className="font-medium text-zinc-900">{label}</div>
         {description ? (
-          <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>{description}</div>
+          <div className="mt-1 text-ui-caption text-ink-secondary">{description}</div>
         ) : null}
       </div>
-      <div
-        role="switch"
-        aria-checked={checked}
-        tabIndex={0}
-        onClick={() => onChange(!checked)}
-        onKeyDown={(e) => {
-          if (e.key === " " || e.key === "Enter") {
-            e.preventDefault();
-            onChange(!checked);
-          }
-        }}
-        style={{
-          width: 44,
-          height: 24,
-          flexShrink: 0,
-          borderRadius: 12,
-          padding: 2,
-          cursor: "pointer",
-          background: checked ? D.teal : D.border,
-          transition: "background 0.2s",
-        }}
-      >
-        <div
-          style={{
-            width: 20,
-            height: 20,
-            borderRadius: 10,
-            background: D.white,
-            transform: checked ? "translateX(20px)" : "translateX(0)",
-            transition: "transform 0.2s",
-            boxShadow: "0 1px 3px rgba(0,0,0,0.3)",
-          }}
-        />
-      </div>
+      <Switch checked={checked} onChange={onChange} aria-label={label} />
     </div>
   );
 }
 
 function NumberField({ value, onChange, min, max, step = 0.1, suffix, label }) {
+  // Main rendered the unit beside the input rather than folding it into the
+  // label text, so the visible label string stays 1:1. Field requires its
+  // single child to be the labelable control itself (it clones an id/htmlFor
+  // association onto it), so the suffix renders as a sibling instead of
+  // wrapping the Input in an extra div — but it still needs to reach the
+  // input's accessible name/description, or screen readers drop the unit.
+  const suffixId = useId();
   return (
-    <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 13, color: D.muted }}>
-      {label}
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <input
+    <div className={suffix ? "flex items-end gap-2" : undefined}>
+      <Field label={label} className={suffix ? "flex-1" : undefined}>
+        <Input
           type="number"
           value={value}
           min={min}
@@ -160,115 +115,57 @@ function NumberField({ value, onChange, min, max, step = 0.1, suffix, label }) {
             const next = e.target.value === "" ? "" : Number(e.target.value);
             onChange(next);
           }}
-          style={{
-            flex: 1,
-            padding: "8px 10px",
-            border: `1px solid ${D.inputBorder}`,
-            borderRadius: 6,
-            fontSize: 14,
-            color: D.text,
-            background: D.white,
-          }}
+          className="u-nums"
+          aria-describedby={suffix ? suffixId : undefined}
         />
-        {suffix ? <span style={{ fontSize: 12, color: D.muted }}>{suffix}</span> : null}
-      </div>
-    </label>
+      </Field>
+      {suffix ? <span id={suffixId} className="pb-2 text-ui-caption text-ink-secondary">{suffix}</span> : null}
+    </div>
   );
 }
 
 function TextField({ value, onChange, label }) {
   return (
-    <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 13, color: D.muted }}>
-      {label}
-      <input
+    <Field label={label}>
+      <Input
         type="text"
         value={value || ""}
         onChange={(e) => onChange(e.target.value)}
-        style={{
-          padding: "8px 10px",
-          border: `1px solid ${D.inputBorder}`,
-          borderRadius: 6,
-          fontSize: 14,
-          color: D.text,
-          background: D.white,
-        }}
       />
-    </label>
+    </Field>
   );
 }
 
 function TextArea({ value, onChange, label, rows = 4 }) {
   return (
-    <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 13, color: D.muted }}>
-      {label}
-      <textarea
+    <Field label={label}>
+      <Textarea
         value={value || ""}
         rows={rows}
         onChange={(e) => onChange(e.target.value)}
-        style={{
-          padding: "8px 10px",
-          border: `1px solid ${D.inputBorder}`,
-          borderRadius: 6,
-          fontSize: 14,
-          color: D.text,
-          background: D.white,
-          fontFamily: "inherit",
-          resize: "vertical",
-        }}
       />
-    </label>
+    </Field>
   );
 }
 
-function Select({ value, onChange, label, options }) {
+function SelectField({ value, onChange, label, options }) {
   return (
-    <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 13, color: D.muted }}>
-      {label}
-      <select
+    <Field label={label}>
+      <Select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        style={{
-          padding: "8px 10px",
-          border: `1px solid ${D.inputBorder}`,
-          borderRadius: 6,
-          fontSize: 14,
-          color: D.text,
-          background: D.white,
-        }}
       >
         {options.map((opt) => (
           <option key={opt.value} value={opt.value}>{opt.label}</option>
         ))}
-      </select>
-    </label>
+      </Select>
+    </Field>
   );
 }
 
 function Pill({ tone = "neutral", children }) {
-  const toneColors = {
-    success: { bg: "#DCFCE7", text: "#15803D" },
-    warning: { bg: "#FEF3C7", text: "#92400E" },
-    error: { bg: "#FEE2E2", text: "#991B1B" },
-    neutral: { bg: "#F4F4F5", text: "#52525B" },
-  };
-  const c = toneColors[tone] || toneColors.neutral;
-  return (
-    <span
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 4,
-        padding: "2px 8px",
-        borderRadius: 999,
-        fontSize: 11,
-        fontWeight: 500,
-        background: c.bg,
-        color: c.text,
-      }}
-    >
-      {children}
-    </span>
-  );
+  const badgeTone = tone === "success" ? "strong" : tone === "error" ? "alert" : tone === "warning" ? "warn" : "neutral";
+  return <Badge tone={badgeTone}>{children}</Badge>;
 }
 
 const COMPONENT_LABELS = {
@@ -302,7 +199,6 @@ function labelsCoverageError(labels) {
 }
 
 export default function PestPressureSettingsPage() {
-  const isMobile = useIsMobile();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [config, setConfig] = useState(null);
@@ -524,24 +420,30 @@ export default function PestPressureSettingsPage() {
   }, [previewInputs, config]);
 
   if (loading) {
-    return <div style={{ padding: 40, color: D.muted, textAlign: "center" }}>Loading Pest Pressure settings…</div>;
+    return (
+      <UiSurface density="comfortable" className="mx-auto max-w-[1300px] text-ui-body text-ink-primary">
+        <AdminCommandHeader variant="workspace" title="Pest pressure" icon={ShieldAlert} sticky={false} />
+        <ActionFeedback className="min-h-20">Loading Pest Pressure settings…</ActionFeedback>
+      </UiSurface>
+    );
   }
   if (!config) {
     return (
-      <div style={{ padding: 40, color: D.red, textAlign: "center" }}>
-        Could not load settings. {saveError || ""}
-      </div>
+      <UiSurface density="comfortable" className="mx-auto max-w-[1300px] text-ui-body text-ink-primary">
+        <AdminCommandHeader variant="workspace" title="Pest pressure" icon={ShieldAlert} sticky={false} />
+        <ActionFeedback error className="min-h-20">Could not load settings. {saveError || ""}</ActionFeedback>
+      </UiSurface>
     );
   }
 
   return (
-    <div style={{ background: D.bg, minHeight: "100vh", padding: 24 }}>
-      <div style={{ maxWidth: 1100, margin: "0 auto", display: "flex", flexDirection: "column", gap: 16 }}>
+    <UiSurface density="comfortable" className="mx-auto max-w-[1300px] text-ui-body text-ink-primary">
+      <div className="space-y-5">
         <AdminCommandHeader
+          variant="workspace"
           title="Pest pressure"
           icon={ShieldAlert}
           sticky={false}
-          className="mb-0"
           actions={[
             { key: "restore", label: "Restore defaults", icon: RotateCcw, variant: "secondary", onClick: handleRestoreDefaults },
             {
@@ -553,33 +455,17 @@ export default function PestPressureSettingsPage() {
             },
           ]}
         />
-        <p style={{ fontSize: 13, color: D.muted, margin: "-8px 0 0" }}>
+        <p className="max-w-3xl text-ui-body text-ink-secondary">
           Configure the 0–5 Pest Pressure score that appears on customer service reports.
         </p>
 
-        {saveError ? (
-          <Card style={{ background: "#FEF2F2", borderColor: "#FECACA" }}>
-            <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-              <AlertTriangle size={16} color={D.red} />
-              <div style={{ color: D.red, fontSize: 13 }}>{saveError}</div>
-            </div>
-          </Card>
-        ) : null}
-        {saveMessage ? (
-          <Card style={{ background: "#F0FDF4", borderColor: "#BBF7D0" }}>
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <CheckCircle2 size={16} color={D.green} />
-              <div style={{ color: D.green, fontSize: 13 }}>{saveMessage}</div>
-            </div>
-          </Card>
-        ) : null}
+        {saveError ? <ActionFeedback error>{saveError}</ActionFeedback> : null}
+        {saveMessage ? <ActionFeedback>{saveMessage}</ActionFeedback> : null}
 
         {/* A. General */}
         <Card>
-          <SectionHeading
-            label="General"
-            description="Enable the feature, control customer-facing visibility, and pick how the score behaves when inputs are missing."
-          />
+          <CardHeader><SectionHeading label="General" description="Enable the feature, control customer-facing visibility, and pick how the score behaves when inputs are missing." /></CardHeader>
+          <CardBody>
           <Toggle
             label="Enable Pest Pressure"
             description="Master switch. When off, no scores are calculated and the customer report omits the section."
@@ -604,15 +490,15 @@ export default function PestPressureSettingsPage() {
             checked={config.showComponentBreakdownToCustomer}
             onChange={(v) => setField("showComponentBreakdownToCustomer", v)}
           />
-          <div style={{ marginTop: 16 }}>
-            <Select
+          <div className="mt-4 max-w-xl">
+            <SelectField
               label="Missing data behavior"
               value={config.missingDataBehavior}
               onChange={(v) => setField("missingDataBehavior", v)}
               options={MISSING_DATA_OPTIONS}
             />
           </div>
-          <div style={{ marginTop: 16 }}>
+          <div className="mt-4">
             <Toggle
               label="Allow manual override (admins)"
               checked={config.allowManualOverride}
@@ -624,15 +510,14 @@ export default function PestPressureSettingsPage() {
               onChange={(v) => setField("allowTechnicianClientRatingEntry", v)}
             />
           </div>
+          </CardBody>
         </Card>
 
         {/* A.5 Service Lines */}
         <Card>
-          <SectionHeading
-            label="Service line scope"
-            description="Pest Pressure runs only on the service lines selected here. The multi-visit-trend model is built for recurring pest control; other lines (lawn, tree & shrub) probably shouldn't show a card."
-          />
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
+          <CardHeader><SectionHeading label="Service line scope" description="Pest Pressure runs only on the service lines selected here. The multi-visit-trend model is built for recurring pest control; other lines (lawn, tree & shrub) probably shouldn't show a card." /></CardHeader>
+          <CardBody>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {[
               { key: "pest", label: "Pest control" },
               { key: "mosquito", label: "Mosquito (WaveGuard)" },
@@ -645,9 +530,8 @@ export default function PestPressureSettingsPage() {
               const enabledLines = Array.isArray(config.enabledServiceLines) ? config.enabledServiceLines : [];
               const checked = enabledLines.includes(line.key);
               return (
-                <label key={line.key} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", border: `1px solid ${D.inputBorder}`, borderRadius: 6, cursor: "pointer", background: checked ? D.bg : D.white }}>
-                  <input
-                    type="checkbox"
+                <label key={line.key} className={cn("flex min-h-11 cursor-pointer items-center gap-3 rounded-sm border-hairline px-3 py-2", checked ? "border-zinc-900 bg-zinc-100" : "border-zinc-300 bg-white")}>
+                  <Checkbox
                     checked={checked}
                     onChange={(e) => {
                       const next = e.target.checked
@@ -656,15 +540,15 @@ export default function PestPressureSettingsPage() {
                       setField("enabledServiceLines", next);
                     }}
                   />
-                  <span style={{ fontSize: 13, color: D.text }}>{line.label}</span>
+                  <span className="text-ui-body text-zinc-900">{line.label}</span>
                 </label>
               );
             })}
           </div>
           {(!Array.isArray(config.enabledServiceLines) || config.enabledServiceLines.length === 0) ? (
-            <div style={{ fontSize: 12, color: D.red, marginTop: 8 }}>Select at least one service line.</div>
+            <ActionFeedback error className="mt-3">Select at least one service line.</ActionFeedback>
           ) : null}
-          <div style={{ marginTop: 16 }}>
+          <div className="mt-4">
             <Toggle
               label="Skip one-time services"
               description="When on, services explicitly labelled 'one-time' (or 'single visit', 'one-off', 'spot treatment', 'just once') are skipped — the model needs a recurring plan to compare against. Unknown-frequency labels (e.g. 'General Pest Control') are treated as recurring."
@@ -672,15 +556,14 @@ export default function PestPressureSettingsPage() {
               onChange={(v) => setField("requireRecurringFrequency", v)}
             />
           </div>
+          </CardBody>
         </Card>
 
         {/* B. Score Formula */}
         <Card>
-          <SectionHeading
-            label="Score formula"
-            description="Component weights as percentages. Must total 100."
-          />
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <CardHeader><SectionHeading label="Score formula" description="Component weights as percentages. Must total 100." /></CardHeader>
+          <CardBody>
+          <div className="grid gap-3 sm:grid-cols-2">
             {Object.keys(COMPONENT_LABELS).map((key) => (
               <NumberField
                 key={key}
@@ -694,34 +577,26 @@ export default function PestPressureSettingsPage() {
               />
             ))}
           </div>
-          <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 8 }}>
+          <div className="mt-4 flex flex-wrap items-center gap-2">
             <Pill tone={weightValid ? "success" : "error"}>
               Total: {weightTotal.toFixed(0)}%
             </Pill>
             {!weightValid ? (
-              <span style={{ fontSize: 12, color: D.red }}>Weights must total 100%.</span>
+              <span className="text-ui-body text-alert-fg">Weights must total 100%.</span>
             ) : null}
           </div>
+          </CardBody>
         </Card>
 
         {/* C. Score Labels */}
         <Card>
-          <SectionHeading
-            label="Score labels"
-            description="Editable bands for the 0–5 score. Ranges must cover 0–5 with no gaps or overlaps."
-          />
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <CardHeader><SectionHeading label="Score labels" description="Editable bands for the 0–5 score. Ranges must cover 0–5 with no gaps or overlaps." /></CardHeader>
+          <CardBody>
+          <div className="grid gap-4">
             {config.labels.map((row, idx) => (
               <div
                 key={row.key || idx}
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "1.2fr 0.6fr 0.6fr 2fr",
-                  gap: 12,
-                  alignItems: "end",
-                  paddingBottom: 12,
-                  borderBottom: idx === config.labels.length - 1 ? "none" : `1px solid ${D.border}`,
-                }}
+                className="grid items-end gap-3 border-b border-hairline border-zinc-200 pb-4 last:border-b-0 last:pb-0 sm:grid-cols-2 lg:grid-cols-[1.2fr_0.6fr_0.6fr_2fr]"
               >
                 <TextField
                   label={`Name (${row.key})`}
@@ -735,21 +610,20 @@ export default function PestPressureSettingsPage() {
             ))}
           </div>
           {labelError ? (
-            <div style={{ marginTop: 12, fontSize: 12, color: D.red }}>{labelError}</div>
+            <ActionFeedback error className="mt-4">{labelError}</ActionFeedback>
           ) : (
-            <div style={{ marginTop: 12 }}>
+            <div className="mt-4">
               <Pill tone="success">Coverage 0.0 – 5.0 valid</Pill>
             </div>
           )}
+          </CardBody>
         </Card>
 
-        {/* D. Trend Settings */}
+        {/* Trend settings */}
         <Card>
-          <SectionHeading
-            label="Trend thresholds"
-            description="Defaults: improving ≤ −0.5; stable within ±0.4; increasing from +0.5; significant from +1.0."
-          />
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <CardHeader><SectionHeading label="Trend thresholds" description="Defaults: improving ≤ −0.5; stable within ±0.4; increasing from +0.5; significant from +1.0." /></CardHeader>
+          <CardBody>
+          <div className="grid gap-3 sm:grid-cols-2">
             <NumberField
               label="Improving at or below (negative)"
               value={config.trendThresholds.improvingAtOrBelow}
@@ -776,40 +650,36 @@ export default function PestPressureSettingsPage() {
             />
           </div>
           {trendInvalid ? (
-            <div style={{ marginTop: 12, fontSize: 12, color: D.red }}>
+            <ActionFeedback error className="mt-4">
               Trend thresholds must be: improving &lt; 0; stable ≥ 0; increasing &gt; 0; significant &gt; increasing.
-            </div>
+            </ActionFeedback>
           ) : null}
+          </CardBody>
         </Card>
 
         {/* E. Service Frequency Windows */}
         <Card>
-          <SectionHeading
-            label="Service frequency windows"
-            description="Review window in days for each service frequency."
-          />
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 12 }}>
+          <CardHeader><SectionHeading label="Service frequency windows" description="Review window in days for each service frequency." /></CardHeader>
+          <CardBody className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
             <NumberField label="Monthly" value={config.serviceFrequencyWindows.monthly} onChange={(v) => setField("serviceFrequencyWindows.monthly", v)} min={1} step={1} suffix="days" />
             <NumberField label="Bi-monthly" value={config.serviceFrequencyWindows.bimonthly} onChange={(v) => setField("serviceFrequencyWindows.bimonthly", v)} min={1} step={1} suffix="days" />
             <NumberField label="Quarterly" value={config.serviceFrequencyWindows.quarterly} onChange={(v) => setField("serviceFrequencyWindows.quarterly", v)} min={1} step={1} suffix="days" />
             <NumberField label="Semi-annual" value={config.serviceFrequencyWindows.semiannual} onChange={(v) => setField("serviceFrequencyWindows.semiannual", v)} min={1} step={1} suffix="days" />
             <NumberField label="Fallback (custom)" value={config.serviceFrequencyWindows.fallbackDays} onChange={(v) => setField("serviceFrequencyWindows.fallbackDays", v)} min={1} step={1} suffix="days" />
-          </div>
+          </CardBody>
         </Card>
 
         {/* F. Client Questions */}
         <Card>
-          <SectionHeading
-            label="Client rating prompt text"
-            description="Shown to customers (or to techs entering on behalf) when capturing the client-reported activity rating."
-          />
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <CardHeader><SectionHeading label="Client rating prompt text" description="Shown to customers (or to techs entering on behalf) when capturing the client-reported activity rating." /></CardHeader>
+          <CardBody className="space-y-3">
+          <div className="grid gap-3 sm:grid-cols-2">
             <TextField label="Monthly" value={config.clientQuestionText.monthly} onChange={(v) => setField("clientQuestionText.monthly", v)} />
             <TextField label="Bi-monthly" value={config.clientQuestionText.bimonthly} onChange={(v) => setField("clientQuestionText.bimonthly", v)} />
             <TextField label="Quarterly" value={config.clientQuestionText.quarterly} onChange={(v) => setField("clientQuestionText.quarterly", v)} />
             <TextField label="Custom / unknown" value={config.clientQuestionText.custom} onChange={(v) => setField("clientQuestionText.custom", v)} />
           </div>
-          <div style={{ marginTop: 16 }}>
+          <div>
             <TextArea
               label="Customer-facing explanation"
               rows={6}
@@ -817,16 +687,14 @@ export default function PestPressureSettingsPage() {
               onChange={(v) => setField("customerExplanationText", v)}
             />
           </div>
+          </CardBody>
         </Card>
 
         {/* G. Preview */}
         <Card>
-          <SectionHeading
-            icon={Sparkles}
-            label="Preview"
-            description="Run the engine with sample inputs and your current (unsaved) settings."
-          />
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
+          <CardHeader><SectionHeading icon={Sparkles} label="Preview" description="Run the engine with sample inputs and your current (unsaved) settings." /></CardHeader>
+          <CardBody>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {Object.entries({
               clientRating: "Client rating",
               technicianRating: "Technician rating",
@@ -844,30 +712,26 @@ export default function PestPressureSettingsPage() {
               />
             ))}
           </div>
-          <div style={{ marginTop: 12 }}>
-            <button
-              type="button"
+          <div className="mt-4">
+            <Button
+              variant="secondary"
               onClick={runPreview}
-              disabled={previewLoading}
-              style={{
-                display: "inline-flex", alignItems: "center", gap: 6,
-                padding: "8px 14px", borderRadius: 6, border: `1px solid ${D.inputBorder}`,
-                background: D.white, color: D.text, fontSize: 13, fontWeight: 500, cursor: "pointer",
-              }}
+              loading={previewLoading}
+              className="gap-2"
             >
-              <Eye size={14} /> {previewLoading ? "Running…" : "Run preview"}
-            </button>
+              <Eye size={16} aria-hidden /> {previewLoading ? "Running…" : "Run preview"}
+            </Button>
           </div>
           {previewError ? (
-            <div style={{ marginTop: 12, fontSize: 13, color: D.red }}>{previewError}</div>
+            <ActionFeedback error className="mt-4">{previewError}</ActionFeedback>
           ) : null}
           {previewResult ? (
-            <div style={{ marginTop: 16, padding: 16, background: D.subtle, borderRadius: 8 }}>
-              <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
-                <div style={{ fontSize: 32, fontWeight: 700, color: D.heading, fontFamily: "'JetBrains Mono', monospace" }}>
+            <div className="mt-4 rounded-md border-hairline border-zinc-200 bg-zinc-50 p-4">
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="text-28 leading-none font-medium text-zinc-900 u-nums">
                   {previewResult.score === null ? "—" : previewResult.score.toFixed(1)}
                 </div>
-                <div style={{ fontSize: 14, color: D.muted }}>/ 5</div>
+                <div className="text-ui-body text-ink-secondary">/ 5</div>
                 {previewResult.label ? (
                   <Pill tone="neutral">{previewResult.label.name}</Pill>
                 ) : null}
@@ -880,11 +744,11 @@ export default function PestPressureSettingsPage() {
                 ) : null}
               </div>
               {previewResult.summary ? (
-                <p style={{ fontSize: 13, color: D.text, marginTop: 12 }}>{previewResult.summary}</p>
+                <p className="mt-3 text-ui-body text-zinc-700">{previewResult.summary}</p>
               ) : null}
-              <details style={{ marginTop: 12 }}>
-                <summary style={{ cursor: "pointer", fontSize: 12, color: D.muted }}>Calculation breakdown</summary>
-                <pre style={{ marginTop: 8, fontSize: 11, color: D.text, background: D.white, padding: 12, borderRadius: 6, border: `1px solid ${D.border}`, overflow: "auto" }}>
+              <details className="mt-3 rounded-md border-hairline border-zinc-200 bg-white p-3">
+                <summary className="min-h-11 cursor-pointer py-2 text-ui-body text-ink-secondary u-focus-ring">Calculation breakdown</summary>
+                <pre className="mt-2 overflow-auto whitespace-pre-wrap break-words rounded-md bg-zinc-50 p-3 text-14 leading-relaxed text-zinc-700 u-nums">
                   {JSON.stringify({
                     componentScores: previewResult.componentScores,
                     componentWeights: previewResult.componentWeights,
@@ -895,229 +759,181 @@ export default function PestPressureSettingsPage() {
               </details>
             </div>
           ) : null}
+          </CardBody>
         </Card>
 
         {/* H. Recent Scores */}
         <Card>
-          <SectionHeading
-            icon={ListChecks}
-            label="Recent scores"
-            description="Latest 25 calculated Pest Pressure scores across all customers. Use Recalculate to refresh with current source data; Override to set a specific number with a recorded reason."
-          />
+          <CardHeader><SectionHeading icon={ListChecks} label="Recent scores" description="Latest 25 calculated Pest Pressure scores across all customers. Use Recalculate to refresh with current source data; Override to set a specific number with a recorded reason." /></CardHeader>
+          <CardBody className="p-0">
           {scoresError ? (
-            <div style={{ fontSize: 13, color: D.red, marginBottom: 8 }}>{scoresError}</div>
+            <ActionFeedback error className="m-4">{scoresError}</ActionFeedback>
           ) : null}
           {scoresLoading ? (
-            <div style={{ fontSize: 13, color: D.muted }}>Loading…</div>
+            <ActionFeedback className="m-4 min-h-16">Loading…</ActionFeedback>
           ) : recentScores.length === 0 ? (
-            <div style={{ fontSize: 13, color: D.muted }}>
+            <div className="p-6 text-center text-ink-secondary">
               No Pest Pressure scores yet. They appear after the next service report completes.
             </div>
           ) : (
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-                <thead>
-                  <tr style={{ textAlign: "left", color: D.muted, fontWeight: 500 }}>
-                    <th style={{ padding: "8px 8px", borderBottom: `1px solid ${D.border}` }}>Date</th>
-                    <th style={{ padding: "8px 8px", borderBottom: `1px solid ${D.border}` }}>Customer</th>
-                    <th style={{ padding: "8px 8px", borderBottom: `1px solid ${D.border}` }}>Line</th>
-                    <th style={{ padding: "8px 8px", borderBottom: `1px solid ${D.border}`, textAlign: "right" }}>Calc</th>
-                    <th style={{ padding: "8px 8px", borderBottom: `1px solid ${D.border}`, textAlign: "right" }}>Shown</th>
-                    <th style={{ padding: "8px 8px", borderBottom: `1px solid ${D.border}` }}>Label</th>
-                    <th style={{ padding: "8px 8px", borderBottom: `1px solid ${D.border}` }}>Trend</th>
-                    <th style={{ padding: "8px 8px", borderBottom: `1px solid ${D.border}` }}>State</th>
-                    <th style={{ padding: "8px 8px", borderBottom: `1px solid ${D.border}` }}>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
+            <Table className="min-w-[880px]" aria-label="Recent Pest Pressure scores">
+                <THead>
+                  <TR>
+                    <TH>Date</TH>
+                    <TH>Customer</TH>
+                    <TH>Line</TH>
+                    <TH align="right">Calc</TH>
+                    <TH align="right">Shown</TH>
+                    <TH>Label</TH>
+                    <TH>Trend</TH>
+                    <TH>State</TH>
+                    <TH>Actions</TH>
+                  </TR>
+                </THead>
+                <TBody>
                   {recentScores.map((row) => {
                     const busy = busyRowId === row.service_record_id;
                     return (
-                      <tr key={row.id} style={{ borderBottom: `1px solid ${D.border}` }}>
-                        <td style={{ padding: "8px 8px", color: D.text, whiteSpace: "nowrap" }}>
+                      <TR key={row.id}>
+                        <TD className="whitespace-nowrap u-nums">
                           {row.service_date ? String(row.service_date).slice(0, 10) : "—"}
-                        </td>
-                        <td style={{ padding: "8px 8px", color: D.text }}>
-                          <a
-                            href={`/admin/customers?customerId=${encodeURIComponent(row.customer_id)}`}
-                            style={{ color: D.heading, textDecoration: "none" }}
-                          >
+                        </TD>
+                        <TD>
+                          <Link className="inline-flex min-h-11 items-center font-medium text-zinc-900 underline decoration-zinc-300 underline-offset-2 u-focus-ring" to={`/admin/customers?customerId=${encodeURIComponent(row.customer_id)}`}>
                             {row.customer_name || row.customer_id}
-                          </a>
-                        </td>
-                        <td style={{ padding: "8px 8px", color: D.muted }}>{row.service_line || "—"}</td>
-                        <td style={{ padding: "8px 8px", color: D.muted, textAlign: "right", fontFamily: "'JetBrains Mono', monospace" }}>
+                          </Link>
+                        </TD>
+                        <TD className="text-ink-secondary">{row.service_line || "—"}</TD>
+                        <TD align="right" nums className="text-ink-secondary">
                           {row.calculated_score == null ? "—" : Number(row.calculated_score).toFixed(1)}
-                        </td>
-                        <td style={{ padding: "8px 8px", color: D.heading, textAlign: "right", fontFamily: "'JetBrains Mono', monospace", fontWeight: 500 }}>
+                        </TD>
+                        <TD align="right" nums className="font-medium">
                           {row.displayed_score == null ? "—" : Number(row.displayed_score).toFixed(1)}
-                        </td>
-                        <td style={{ padding: "8px 8px", color: D.text }}>{row.label_name || "—"}</td>
-                        <td style={{ padding: "8px 8px", color: D.muted }}>{row.trend}</td>
-                        <td style={{ padding: "8px 8px" }}>
+                        </TD>
+                        <TD>{row.label_name || "—"}</TD>
+                        <TD className="text-ink-secondary">{row.trend}</TD>
+                        <TD>
                           {row.is_overridden
-                            ? <Pill tone="warning"><ShieldAlert size={10} /> override</Pill>
+                            ? <Pill tone="warning"><ShieldAlert size={14} aria-hidden /> override</Pill>
                             : <Pill tone="neutral">calc</Pill>}
-                        </td>
-                        <td style={{ padding: "8px 8px", whiteSpace: "nowrap" }}>
-                          <button
-                            type="button"
+                        </TD>
+                        <TD>
+                          <div className="flex flex-wrap gap-2">
+                          <Button
+                            variant="secondary"
                             disabled={busy}
                             onClick={() => handleRecalculate(row, false)}
                             title="Re-run the engine with current source data"
-                            style={{
-                              marginRight: 6, padding: "4px 8px", fontSize: 11,
-                              border: `1px solid ${D.inputBorder}`, borderRadius: 4,
-                              background: D.white, color: D.text, cursor: busy ? "not-allowed" : "pointer",
-                            }}
                           >
-                            <RefreshCw size={11} style={{ verticalAlign: "middle" }} /> Recalc
-                          </button>
+                            <RefreshCw size={15} aria-hidden /> Recalc
+                          </Button>
                           {row.is_overridden ? (
-                            <button
-                              type="button"
+                            <Button
+                              variant="secondary"
                               disabled={busy}
                               onClick={() => handleRemoveOverride(row)}
-                              style={{
-                                padding: "4px 8px", fontSize: 11,
-                                border: `1px solid ${D.inputBorder}`, borderRadius: 4,
-                                background: D.white, color: D.red, cursor: busy ? "not-allowed" : "pointer",
-                              }}
                             >
                               Remove override
-                            </button>
+                            </Button>
                           ) : (
-                            <button
-                              type="button"
+                            <Button
+                              variant="secondary"
                               disabled={busy || !config.allowManualOverride}
                               onClick={() => openOverrideModal(row)}
                               title={!config.allowManualOverride ? "Overrides disabled in General settings" : ""}
-                              style={{
-                                padding: "4px 8px", fontSize: 11,
-                                border: `1px solid ${D.inputBorder}`, borderRadius: 4,
-                                background: D.white, color: D.text,
-                                cursor: (busy || !config.allowManualOverride) ? "not-allowed" : "pointer",
-                                opacity: config.allowManualOverride ? 1 : 0.5,
-                              }}
                             >
                               Override
-                            </button>
+                            </Button>
                           )}
-                        </td>
-                      </tr>
+                          </div>
+                        </TD>
+                      </TR>
                     );
                   })}
-                </tbody>
-              </table>
-            </div>
+                </TBody>
+              </Table>
           )}
+          </CardBody>
         </Card>
 
         {/* I. Audit log */}
         <Card>
-          <SectionHeading
-            icon={ClipboardList}
-            label="Audit log"
-            description="Recent admin actions on Pest Pressure: config updates and score overrides. Sourced from the generic audit_log table."
-          />
+          <CardHeader><SectionHeading icon={ClipboardList} label="Audit log" description="Recent admin actions on Pest Pressure: config updates and score overrides. Sourced from the generic audit_log table." /></CardHeader>
+          <CardBody>
           {auditEvents.length === 0 ? (
-            <div style={{ fontSize: 13, color: D.muted }}>No Pest Pressure audit events yet.</div>
+            <div className="py-4 text-center text-ink-secondary">No Pest Pressure audit events yet.</div>
           ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <div className="grid gap-3">
               {auditEvents.map((evt) => (
-                <details key={evt.id} style={{ padding: "8px 12px", border: `1px solid ${D.border}`, borderRadius: 6 }}>
-                  <summary style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", fontSize: 12, color: D.text }}>
-                    <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <details key={evt.id} className="rounded-md border-hairline border-zinc-200 p-3">
+                  <summary className="flex min-h-11 cursor-pointer flex-wrap items-center justify-between gap-3 py-2 text-ui-body text-zinc-700 u-focus-ring">
+                    <span className="flex flex-wrap items-center gap-2">
                       <Pill tone={evt.action.includes("override") ? "warning" : "neutral"}>{evt.action}</Pill>
-                      <span style={{ color: D.muted }}>{evt.actor_type} {evt.actor_id ? `· ${String(evt.actor_id).slice(0, 8)}` : ""}</span>
+                      <span className="text-ink-secondary">{evt.actor_type} {evt.actor_id ? `· ${String(evt.actor_id).slice(0, 8)}` : ""}</span>
                     </span>
-                    <span style={{ color: D.muted, fontSize: 11 }}>{evt.created_at ? new Date(evt.created_at).toLocaleString("en-US", { timeZone: "America/New_York" }) : ""}</span>
+                    <span className="text-ui-caption text-ink-secondary u-nums">{evt.created_at ? new Date(evt.created_at).toLocaleString("en-US", { timeZone: "America/New_York" }) : ""}</span>
                   </summary>
-                  <pre style={{ marginTop: 8, fontSize: 11, color: D.text, background: D.subtle, padding: 10, borderRadius: 4, overflow: "auto" }}>
+                  <pre className="mt-2 overflow-auto whitespace-pre-wrap break-words rounded-md bg-zinc-50 p-3 text-14 leading-relaxed text-zinc-700 u-nums">
                     {JSON.stringify(evt.metadata, null, 2)}
                   </pre>
                 </details>
               ))}
             </div>
           )}
+          </CardBody>
         </Card>
       </div>
 
       {/* Override modal */}
-      {overrideTarget ? createPortal(
-        <div
-          role="dialog"
-          aria-modal="true"
-          onClick={(e) => { if (e.target === e.currentTarget) closeOverrideModal(); }}
-          style={{
-            position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
-            display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: isMobile ? 0 : 16,
-          }}
-        >
-          <div style={{ background: D.white, borderRadius: 12, width: "100%", maxWidth: 480, padding: 24, boxShadow: "0 20px 60px rgba(0,0,0,0.25)", ...(isMobile ? { width: "100%", maxWidth: "none", height: "100%", maxHeight: "none", borderRadius: 0, boxSizing: "border-box", overflowY: "auto", paddingTop: "calc(24px + env(safe-area-inset-top, 0px))", paddingBottom: "calc(24px + env(safe-area-inset-bottom, 0px))", paddingLeft: "calc(24px + env(safe-area-inset-left, 0px))", paddingRight: "calc(24px + env(safe-area-inset-right, 0px))" } : {}) }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 500, color: D.heading }}>Override Pest Pressure score</h2>
-              <button type="button" onClick={closeOverrideModal} aria-label="Close" style={{ background: "none", border: 0, cursor: "pointer", color: D.muted }}>
-                <X size={18} />
-              </button>
-            </div>
-            <p style={{ fontSize: 13, color: D.muted, marginTop: 8 }}>
-              Customer: <strong style={{ color: D.text }}>{overrideTarget.customer_name || overrideTarget.customer_id}</strong>
-              {" · "}Service date: {overrideTarget.service_date ? String(overrideTarget.service_date).slice(0, 10) : "—"}
-            </p>
-            <p style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>
-              Calculated: <strong style={{ color: D.text }}>{overrideTarget.calculated_score == null ? "—" : Number(overrideTarget.calculated_score).toFixed(1)}</strong>
-              {" · "}Currently shown: <strong style={{ color: D.text }}>{overrideTarget.displayed_score == null ? "—" : Number(overrideTarget.displayed_score).toFixed(1)}</strong>
-            </p>
-            <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+      <Dialog open={Boolean(overrideTarget)} onClose={closeOverrideModal} size="md">
+        {overrideTarget ? (
+          <>
+            <DialogHeader className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <DialogTitle>Override Pest Pressure score</DialogTitle>
+                <p className="mt-2 text-ui-body text-ink-secondary">
+                  Customer: <strong className="font-medium text-zinc-900">{overrideTarget.customer_name || overrideTarget.customer_id}</strong>
+                  {" · "}Service date: {overrideTarget.service_date ? String(overrideTarget.service_date).slice(0, 10) : "—"}
+                </p>
+                <p className="mt-1 text-ui-body text-ink-secondary">
+                  Calculated: <strong className="font-medium text-zinc-900 u-nums">{overrideTarget.calculated_score == null ? "—" : Number(overrideTarget.calculated_score).toFixed(1)}</strong>
+                  {" · "}Currently shown: <strong className="font-medium text-zinc-900 u-nums">{overrideTarget.displayed_score == null ? "—" : Number(overrideTarget.displayed_score).toFixed(1)}</strong>
+                </p>
+              </div>
+              <Button variant="ghost" onClick={closeOverrideModal} aria-label="Close" className="shrink-0 px-3">
+                <X size={18} aria-hidden />
+              </Button>
+            </DialogHeader>
+            <DialogBody className="space-y-3">
               <NumberField
                 label="New displayed score (0–5)"
                 value={overrideScore}
                 onChange={(v) => setOverrideScore(v === "" ? "" : String(v))}
                 min={0} max={5} step={0.1}
               />
-              <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 13, color: D.muted }}>
-                Reason (required, audited)
-                <textarea
+              <Field label="Reason (required, audited)" required>
+                <Textarea
                   value={overrideReason}
                   rows={3}
                   onChange={(e) => setOverrideReason(e.target.value)}
                   placeholder="Why are you overriding this score? Customer dispute, data correction, etc."
-                  style={{
-                    padding: "8px 10px", border: `1px solid ${D.inputBorder}`, borderRadius: 6,
-                    fontSize: 14, color: D.text, background: D.white, fontFamily: "inherit", resize: "vertical",
-                  }}
                 />
-              </label>
+              </Field>
               {overrideError ? (
-                <div style={{ fontSize: 12, color: D.red }}>{overrideError}</div>
+                <ActionFeedback error>{overrideError}</ActionFeedback>
               ) : null}
-            </div>
-            <div style={{ marginTop: 20, display: "flex", justifyContent: "flex-end", gap: 8 }}>
-              <button
-                type="button"
-                onClick={closeOverrideModal}
-                style={{ padding: "8px 14px", border: `1px solid ${D.inputBorder}`, background: D.white, color: D.text, borderRadius: 6, fontSize: 13, cursor: "pointer" }}
-              >
+            </DialogBody>
+            <DialogFooter>
+              <Button variant="secondary" onClick={closeOverrideModal}>
                 Cancel
-              </button>
-              <button
-                type="button"
-                onClick={submitOverride}
-                disabled={overrideSaving}
-                style={{
-                  padding: "8px 14px", border: 0, background: D.teal, color: D.white,
-                  borderRadius: 6, fontSize: 13, fontWeight: 500,
-                  cursor: overrideSaving ? "not-allowed" : "pointer", opacity: overrideSaving ? 0.7 : 1,
-                }}
-              >
+              </Button>
+              <Button onClick={submitOverride} loading={overrideSaving}>
                 {overrideSaving ? "Saving…" : "Save override"}
-              </button>
-            </div>
-          </div>
-        </div>,
-        document.body,
-      ) : null}
-    </div>
+              </Button>
+            </DialogFooter>
+          </>
+        ) : null}
+      </Dialog>
+    </UiSurface>
   );
 }

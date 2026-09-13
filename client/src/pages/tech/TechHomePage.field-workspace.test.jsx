@@ -30,6 +30,7 @@ let rows;
 let scheduleFails;
 let briefStatus;
 let fetchMock;
+let followThrough;
 
 function mount(path = '/tech', { enabled = true, role = 'technician' } = {}) {
   localStorage.setItem('waves_admin_token', 'fixture-only');
@@ -47,10 +48,12 @@ beforeEach(() => {
   rows = [row('one'), row('two', { status: 'en_route' }), row('other', { technicianId: 'other-tech' })];
   scheduleFails = false;
   briefStatus = 200;
+  followThrough = {};
   mocks.navigationBusy.mockClear();
   fetchMock = vi.fn(async (path, options = {}) => {
     let data = {};
     let status = 200;
+    if (path.includes('/call-recordings/commitments/open')) data = followThrough;
     if (path.includes('/admin/schedule?')) {
       status = scheduleFails ? 503 : 200;
       data = scheduleFails ? { error: 'Route connection unavailable' } : { services: rows };
@@ -71,6 +74,16 @@ beforeEach(() => {
 afterEach(() => { cleanup(); localStorage.clear(); vi.unstubAllGlobals(); });
 
 describe('Tech field workspace uses the existing route workflow', () => {
+  it('shows shared callback actions in the field workspace even when its route fails', async () => {
+    scheduleFails = true;
+    followThrough = { callbacks_enabled: true, commitments: [{ id: 'callback-fixture', kind: 'callback', party: 'waves', customer_first_name: 'Fixture',
+      description: 'Call about service access', effective_due_at: '2099-01-01T17:00:00Z', overdue: false, updated_at: '2099-01-01T15:00:00Z' }] };
+    mount();
+    expect(await screen.findByText('Call about service access')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Done', exact: true })).toBeInTheDocument();
+    expect(await screen.findByText('Route connection unavailable')).toBeInTheDocument();
+  });
+
   it('opens a selected stop and sends arrival and photos to that service, even when it is not first', async () => {
     mount('/tech?visit=row%3Atwo');
     expect(await screen.findByText('Property brief for two')).toBeInTheDocument();
@@ -167,6 +180,35 @@ describe('Tech field workspace uses the existing route workflow', () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     expect(screen.getByRole('button', { name: /Project Report/ })).toBeDisabled();
     expect(screen.queryByText('Existing recap form')).not.toBeInTheDocument();
+  });
+
+  it.each([
+    [false, false],
+    [true, true],
+  ])('Tools exposes completed combined closeout only when has_service_record is %s (disabled=%s)', async (hasRecord, disabled) => {
+    rows = [row('one', { status: 'completed', visit: { id: 'group' }, visitId: 'group',
+      visitCloseoutEnabled: true, has_service_record: hasRecord })];
+    await act(async () => { mount('/tech/tools?visit=visit%3Agroup'); });
+    const report = await screen.findByRole('button', { name: /Project Report/ });
+    if (disabled) expect(report).toBeDisabled();
+    else expect(report).toBeEnabled();
+  });
+
+  it.each([undefined, 'sent', 'closed'])('Tools keeps a saved processing packet available with linked report status %s', async (status) => {
+    rows = [row('one', { status: 'completed', visit: { id: 'group' }, visitId: 'group',
+      visitCloseoutEnabled: true, has_service_record: true,
+      visitCloseoutPacket: { id: 'packet-one', status: 'processing' },
+      linkedProject: status ? { id: 'existing-report', status } : null })];
+    await act(async () => { mount('/tech/tools?visit=visit%3Agroup'); });
+    expect(await screen.findByRole('button', { name: /Project Report/ })).toBeEnabled();
+  });
+
+  it.each(['sent', 'closed'])('Tools keeps recordless combined closeout available with a %s linked report', async (status) => {
+    rows = [row('one', { status: 'completed', visit: { id: 'group' }, visitId: 'group',
+      visitCloseoutEnabled: true, has_service_record: false,
+      linkedProject: { id: 'existing-report', status } })];
+    await act(async () => { mount('/tech/tools?visit=visit%3Agroup'); });
+    expect(await screen.findByRole('button', { name: /Project Report/ })).toBeEnabled();
   });
 
   it.each(['sent', 'closed', 'draft'])('Tools only offers editable linked reports (%s)', async status => {

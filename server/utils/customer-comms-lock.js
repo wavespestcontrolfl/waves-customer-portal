@@ -102,4 +102,63 @@ async function withSmsConsentLock(dbh, { phone, customerId }, fn) {
   });
 }
 
-module.exports = { lockCustomerComms, tryLockCustomerComms, withCustomerCommsLock, lockSmsPhone, withSmsConsentLock };
+// The shared per-address email lock (same key contact-correction, dedupe
+// merge-undo and the email-fanout claim guard take): suppression writers and
+// bearer-link email handoffs serialize on it so an opt-out or an address
+// claim commits either before a handoff's authorization or after its request.
+// Google ignores local-part dots and everything after '+', so every dot/tag
+// variant of one mailbox delivers to one inbox: a Google address also takes
+// its mailbox-identity key (after the exact key, always in that order), so
+// a handoff to john.doe@gmail.com and an assignment of johndoe+x@gmail.com
+// serialize on the same key. Mirrors email-bounce-recovery.js's
+// gmailMailboxOwnedByOther identity.
+function googleMailboxIdentity(normalized) {
+  const [local, domain] = normalized.split('@');
+  if (!local || !['gmail.com', 'googlemail.com'].includes(domain)) return null;
+  const mailbox = local.split('+')[0].replace(/\./g, '');
+  return mailbox ? `${mailbox}@gmail.com` : null;
+}
+
+// The keys one address takes: its exact key and, for a Google address, its
+// mailbox-identity key. Every taker acquires keys in one global order
+// (sorted: all `customer-email:` keys before all `customer-mailbox:` keys),
+// so a multi-address writer and a single-address handoff — or two
+// multi-address writers sharing a mailbox — can never wait on each other.
+function customerEmailLockKeys(email) {
+  const normalized = String(email || '').trim().toLowerCase();
+  if (!normalized) throw new Error('Email authority requires an address');
+  const mailbox = googleMailboxIdentity(normalized);
+  return [`customer-email:${normalized}`, ...(mailbox ? [`customer-mailbox:${mailbox}`] : [])];
+}
+
+async function lockCustomerEmailKeys(trx, keys) {
+  for (const key of [...new Set(keys)].sort()) {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [key]);
+  }
+}
+
+async function lockCustomerEmail(trx, email) {
+  await lockCustomerEmailKeys(trx, customerEmailLockKeys(email));
+}
+
+// Every column a customer's email can be recorded in — the same set the
+// bounce recovery's ownership check consults (email-bounce-recovery.js
+// CUSTOMER_EMAIL_FIELDS). A writer assigning any of them takes the address
+// key for each new value, AFTER its customers row lock (row → key is the
+// established order), in a fixed order so two multi-address writers cannot
+// deadlock on each other. A recovery that found an address unowned then
+// either commits before the assignment or re-judges ownership after it.
+// billing_email (notification_prefs) is the fourth ownership source the
+// recovery consults; its writers pass their prefs update through here too.
+// Every key of every address is collected first and taken in the one
+// global order (customerEmailLockKeys), never address by address.
+const CUSTOMER_EMAIL_COLUMNS = ['email', 'service_contact_email', 'service_contact2_email', 'service_contact3_email', 'billing_email'];
+async function lockAssignedCustomerEmails(trx, updates = {}) {
+  const addresses = [...new Set(CUSTOMER_EMAIL_COLUMNS
+    .map((column) => String(updates[column] || '').trim().toLowerCase()).filter(Boolean))].sort();
+  await lockCustomerEmailKeys(trx, addresses.flatMap(customerEmailLockKeys));
+  return addresses;
+}
+
+module.exports = { lockCustomerComms, tryLockCustomerComms, withCustomerCommsLock, lockSmsPhone, withSmsConsentLock, lockCustomerEmail,
+  lockAssignedCustomerEmails, customerEmailLockKeys, CUSTOMER_EMAIL_COLUMNS };

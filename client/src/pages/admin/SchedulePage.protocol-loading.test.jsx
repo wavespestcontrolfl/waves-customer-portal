@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import { ProtocolPanel } from "./SchedulePage";
@@ -23,6 +24,9 @@ function fixture(url, label = "Current") {
   if (path.endsWith('/intelligence-bar/quick-actions')) return { actions: [] };
   // The job card is gate-off here (GATE_JOB_CARD unset): the legacy tabs render.
   if (path.includes("/protocols/job-card/")) return { enabled: false };
+  // Pay & Growth is gate-off by default; a test that needs the Score tab
+  // overrides this with its own fetch mock.
+  if (path.endsWith("/pay-growth/availability")) return { available: false };
   if (path.endsWith("/turf-profile")) return { profile: { track_key: "A_St_Aug_Sun", lawn_sqft: 10000 } };
   if (path.endsWith("/photos/relevant")) return { photos: [{ name: `${label} photo guide`, description: "Fixture reference" }] };
   if (path.endsWith("/seasonal-index")) return { pests: [] };
@@ -40,6 +44,7 @@ function fixture(url, label = "Current") {
 beforeEach(() => {
   // Exercise the real panel and its HTTP error handling; no request leaves the test.
   vi.stubGlobal("fetch", vi.fn((url) => reply(fixture(url))));
+  vi.stubGlobal("scrollTo", vi.fn());
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
@@ -60,7 +65,8 @@ describe("ProtocolPanel mix previews", () => {
     fireEvent.click(opener);
     expect(within(screen.getByRole('dialog', { name: 'Service SOP' })).getByText('Read the source notes.')).toBeVisible();
     fireEvent.keyDown(document, { key: 'Escape' });
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'Service SOP' })).not.toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Service Protocol' })).toBeVisible();
     expect(opener).toHaveFocus();
     fireEvent.click(screen.getByRole('button', { name: 'View product checks and mixing amounts' }));
     expect(screen.getByText('Spray check')).toBeVisible();
@@ -295,5 +301,77 @@ describe("Job card Tank section rigs", () => {
     expect(await screen.findByText("in 1 gal · covers 55,000 sq ft")).toBeVisible();
     expect(mixCalls().at(-1)).toContain("gallons=1");
     expect(mixCalls().at(-1)).not.toContain("rig=");
+  });
+});
+
+describe("Pay & Growth gate", () => {
+  afterEach(() => { localStorage.removeItem("waves_admin_user"); });
+
+  it("opens the shared service score only when the pay and growth gate is enabled", async () => {
+    render(<ProtocolPanel service={service} onClose={() => {}} />);
+    await screen.findByText("Current mix product");
+    expect(screen.queryByRole("button", { name: "Score" })).not.toBeInTheDocument();
+    cleanup();
+
+    // Score is admin-only, or the assigned technician viewing their own
+    // service (/admin/dispatch is reachable by technician-role staff too).
+    localStorage.setItem("waves_admin_user", JSON.stringify({ id: "admin-1", role: "admin" }));
+    fetch.mockImplementation((url) => {
+      const path = new URL(url, "http://localhost").pathname;
+      if (path.endsWith("/pay-growth/availability")) return reply({ available: true });
+      if (path.endsWith(`/pay-growth/services/${service.id}/score`)) return reply({ entries: [], can_manage: true });
+      return reply(fixture(url));
+    });
+    render(<MemoryRouter><ProtocolPanel service={service} onClose={() => {}} /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole("button", { name: "Score" }));
+    expect(await screen.findByText(/It has not received a passing score/)).toBeVisible();
+    expect(fetch.mock.calls.some(([url]) => String(url).includes(`/pay-growth/services/${service.id}/score`))).toBe(true);
+    expect(screen.getByRole("link", { name: "Open Pay & Growth" })).toHaveAttribute("href", "/admin/timetracking?tab=pay-growth");
+  });
+
+  it("hides the Score tab from a technician the score service does not recognise on a colleague's service", async () => {
+    localStorage.setItem("waves_admin_user", JSON.stringify({ id: "tech-1", role: "technician" }));
+    fetch.mockImplementation((url) => {
+      const path = new URL(url, "http://localhost").pathname;
+      if (path.endsWith("/pay-growth/availability")) return reply({ available: true });
+      if (path.endsWith(`/pay-growth/services/${service.id}/score`)) return reply({ error: "Service not found." }, 404);
+      return reply(fixture(url));
+    });
+    render(<ProtocolPanel service={{ ...service, technician_id: "tech-2" }} onClose={() => {}} />);
+    await screen.findByText("Current mix product");
+    await waitFor(() => expect(fetch.mock.calls.some(([url]) => String(url).includes(`/pay-growth/services/${service.id}/score`))).toBe(true));
+    expect(screen.queryByRole("button", { name: "Score" })).not.toBeInTheDocument();
+  });
+
+  it("shows the Score tab to a retained participant who is not the assignee, reusing the probe's score", async () => {
+    localStorage.setItem("waves_admin_user", JSON.stringify({ id: "tech-1", role: "technician" }));
+    const entry = { id: "row-1", service_label: "Crew stop · Fixture account", service_date: "2026-04-05", revision: 1, service_key: "pest_general_quarterly", workweek_start: "2026-03-30",
+      calculation: { status: "simulated", amount_cents: 600, value_cents: 10000, rate_bps: 600, reason: null },
+      facts: { participants: [{ technician_id: "tech-1", share_bps: 5000 }], source_reference: "visit-fixture-a", complete_at_cutoff: true, cutoff_at: null } };
+    fetch.mockImplementation((url) => {
+      const path = new URL(url, "http://localhost").pathname;
+      if (path.endsWith("/pay-growth/availability")) return reply({ available: true });
+      if (path.endsWith(`/pay-growth/services/${service.id}/score`)) return reply({ entries: [entry], can_manage: false });
+      return reply(fixture(url));
+    });
+    render(<MemoryRouter><ProtocolPanel service={{ ...service, technician_id: "tech-2" }} onClose={() => {}} /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole("button", { name: "Score" }));
+    expect(await screen.findByText("Crew stop · Fixture account")).toBeVisible();
+    expect(fetch.mock.calls.filter(([url]) => String(url).includes(`/pay-growth/services/${service.id}/score`))).toHaveLength(1);
+    expect(screen.getByRole("link", { name: "Open Pay & Growth" })).toHaveAttribute("href", "/tech/pay-growth");
+  });
+
+  it("shows the Score tab, with the tech-portal link, for a technician viewing their own service", async () => {
+    localStorage.setItem("waves_admin_user", JSON.stringify({ id: "tech-1", role: "technician" }));
+    fetch.mockImplementation((url) => {
+      const path = new URL(url, "http://localhost").pathname;
+      if (path.endsWith("/pay-growth/availability")) return reply({ available: true });
+      if (path.endsWith(`/pay-growth/services/${service.id}/score`)) return reply({ entries: [], can_manage: false });
+      return reply(fixture(url));
+    });
+    render(<MemoryRouter><ProtocolPanel service={{ ...service, technician_id: "tech-1" }} onClose={() => {}} /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole("button", { name: "Score" }));
+    expect(await screen.findByText(/It has not received a passing score/)).toBeVisible();
+    expect(screen.getByRole("link", { name: "Open Pay & Growth" })).toHaveAttribute("href", "/tech/pay-growth");
   });
 });

@@ -1,6 +1,5 @@
 import { Fragment, useState, useEffect, useRef, lazy, Suspense } from "react";
-import { createPortal } from "react-dom";
-import useIsMobile from "../../hooks/useIsMobile";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { formatETDate, formatETDateTime } from "../../lib/timezone";
 import {
   Activity,
@@ -13,32 +12,34 @@ import {
   UploadCloud,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import {
+  ActionFeedback,
+  Button,
+  Card as UiCard,
+  Checkbox,
+  Dialog,
+  DialogBody,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  Input,
+  Select,
+  Table,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TR,
+  Textarea,
+  UiSurface,
+} from "../../components/ui";
 const SEODashboardPage = lazy(() => import("./SEODashboardPage"));
 // Pillar 3 V2 — real Google-map heat map overlay. Lazy so the Maps SDK only
 // loads when a user opens the Geo-Grid tab's Map view (not on every SEO page).
 const GeoGridMap = lazy(() => import("../../components/admin/GeoGridMap"));
-
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: `teal` folded to zinc-900, `purple` folded to zinc-900.
 // Semantic green/amber/red preserved for status/change accents.
-const D = {
-  bg: "#F4F4F5",
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  teal: "#18181B",
-  green: "#15803D",
-  amber: "#A16207",
-  red: "#991B1B",
-  orange: "#18181B",
-  text: "#27272A",
-  muted: "#71717A",
-  white: "#FFFFFF",
-  purple: "#18181B",
-  heading: "#09090B",
-  inputBorder: "#D4D4D8",
-};
-const MONO = "'JetBrains Mono', monospace";
-
 function adminFetch(path, options = {}) {
   const body =
     options.body && typeof options.body !== "string"
@@ -77,22 +78,22 @@ function adminFetch(path, options = {}) {
 function adminPost(path, body) {
   return adminFetch(path, { method: "POST", body });
 }
-
 function isAdminUser() {
   try {
-    return JSON.parse(localStorage.getItem("waves_admin_user") || "{}")?.role === "admin";
+    return (
+      JSON.parse(localStorage.getItem("waves_admin_user") || "{}")?.role ===
+      "admin"
+    );
   } catch {
     return false;
   }
 }
-
 function fmt(n) {
   return Number(n || 0).toLocaleString(undefined, {
     minimumFractionDigits: 0,
     maximumFractionDigits: 0,
   });
 }
-
 function fmtMoney(n) {
   return (
     "$" +
@@ -102,84 +103,48 @@ function fmtMoney(n) {
     })
   );
 }
-
-const thStyle = {
-  padding: "10px 14px",
-  textAlign: "left",
-  fontSize: 12,
-  fontWeight: 500,
-  color: D.muted,
-  borderBottom: `1px solid ${D.border}`,
-  textTransform: "uppercase",
-  letterSpacing: "0.5px",
-};
-const thR = { ...thStyle, textAlign: "right" };
-const tdStyle = {
-  padding: "10px 14px",
-  fontSize: 13,
-  color: D.text,
-  borderBottom: `1px solid ${D.border}`,
-  fontFamily: MONO,
-};
-const tdR = { ...tdStyle, textAlign: "right" };
-
-function Card({ children, style }) {
-  return (
-    <div
-      style={{
-        background: D.card,
-        border: `1px solid ${D.border}`,
-        borderRadius: 12,
-        padding: 24,
-        ...style,
-      }}
-    >
-      {children}
-    </div>
-  );
-}
 function KpiCard({ label, value, sub, color }) {
   return (
-    <Card
-      style={{ padding: 20, display: "flex", flexDirection: "column", gap: 4 }}
-    >
+    <UiCard className="[padding:20px] flex flex-col [gap:4px]">
       {" "}
-      <div style={{ fontSize: 12, color: D.muted, fontWeight: 500 }}>
+      <div className="text-ui-body text-ink-secondary font-medium">
         {label}
       </div>{" "}
       <div
         style={{
-          fontSize: 24,
-          fontWeight: 700,
-          color: color || D.heading,
-          fontFamily: MONO,
+          color: color || "#09090B",
         }}
+        className="text-[24px] font-medium"
       >
         {value}
       </div>
       {sub && (
         <div
           style={{
-            fontSize: 11,
-            color: sub.color || D.muted,
-            fontFamily: MONO,
+            color: sub.color || "#71717A",
           }}
+          className="text-ui-body"
         >
           {sub.text}
         </div>
       )}
-    </Card>
+    </UiCard>
   );
 }
-
 const WORKSPACES = [
   {
     key: "command",
     label: "Command",
     Icon: LayoutDashboard,
     sections: [
-      { key: "dashboard", label: "Dashboard" },
-      { key: "advisor", label: "SEO Advisor" },
+      {
+        key: "dashboard",
+        label: "Dashboard",
+      },
+      {
+        key: "advisor",
+        label: "SEO Advisor",
+      },
     ],
   },
   {
@@ -187,9 +152,18 @@ const WORKSPACES = [
     label: "Strategy",
     Icon: Sparkles,
     sections: [
-      { key: "actions", label: "Actions" },
-      { key: "content-qa", label: "Content QA" },
-      { key: "refresh-audit", label: "Refresh Audit" },
+      {
+        key: "actions",
+        label: "Actions",
+      },
+      {
+        key: "content-qa",
+        label: "Content QA",
+      },
+      {
+        key: "refresh-audit",
+        label: "Refresh Audit",
+      },
     ],
   },
   {
@@ -197,10 +171,22 @@ const WORKSPACES = [
     label: "Rankings",
     Icon: TrendingUp,
     sections: [
-      { key: "rankings", label: "Rankings" },
-      { key: "rankings-monitor", label: "Monitor" },
-      { key: "funnel", label: "Funnel" },
-      { key: "geo-grid", label: "Geo-Grid" },
+      {
+        key: "rankings",
+        label: "Rankings",
+      },
+      {
+        key: "rankings-monitor",
+        label: "Monitor",
+      },
+      {
+        key: "funnel",
+        label: "Funnel",
+      },
+      {
+        key: "geo-grid",
+        label: "Geo-Grid",
+      },
     ],
   },
   {
@@ -208,8 +194,14 @@ const WORKSPACES = [
     label: "Authority",
     Icon: Link,
     sections: [
-      { key: "backlinks", label: "Backlinks & Citations" },
-      { key: "ai-overview", label: "AI Overview" },
+      {
+        key: "backlinks",
+        label: "Backlinks & Citations",
+      },
+      {
+        key: "ai-overview",
+        label: "AI Overview",
+      },
     ],
   },
   {
@@ -217,9 +209,18 @@ const WORKSPACES = [
     label: "Technical",
     Icon: Activity,
     sections: [
-      { key: "url-intel", label: "URL Intel" },
-      { key: "indexation", label: "Indexation" },
-      { key: "site-audit", label: "Site Health" },
+      {
+        key: "url-intel",
+        label: "URL Intel",
+      },
+      {
+        key: "indexation",
+        label: "Indexation",
+      },
+      {
+        key: "site-audit",
+        label: "Site Health",
+      },
     ],
   },
   {
@@ -227,18 +228,31 @@ const WORKSPACES = [
     label: "Measurement",
     Icon: BarChart3,
     sections: [
-      { key: "analytics", label: "Analytics" },
-      { key: "by-site", label: "By Site" },
+      {
+        key: "analytics",
+        label: "Analytics",
+      },
+      {
+        key: "by-site",
+        label: "By Site",
+      },
     ],
   },
 ];
-
-const WORKSPACE_BY_KEY = Object.fromEntries(WORKSPACES.map((w) => [w.key, w]));
-
+const SEO_WORKSPACES = WORKSPACES.map((workspace) => ({
+  ...workspace,
+  className: "!h-11 !min-h-11 !text-14 !normal-case !tracking-normal",
+  sections: workspace.sections.map((section) => ({
+    ...section,
+    className: "!h-11 !min-h-11 !text-14 !normal-case !tracking-normal",
+  })),
+}));
+const WORKSPACE_BY_KEY = Object.fromEntries(
+  SEO_WORKSPACES.map((workspace) => [workspace.key, workspace]),
+);
 function defaultViewForWorkspace(key) {
   return WORKSPACE_BY_KEY[key]?.sections?.[0]?.key || "dashboard";
 }
-
 const PRIMARY_DOMAIN = "wavespestcontrol.com";
 
 // ── GSC Dashboard ──
@@ -260,59 +274,33 @@ function DashboardTab({ domain }) {
   }, [period, domain]);
   if (loading)
     return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+      <div className="text-ink-secondary [padding:40px] text-center">
         Loading SEO data...
       </div>
     );
   const cur = data?.current || {};
   const chg = data?.change || {};
-  const posColor = (v) => (v >= 0 ? D.green : D.red);
-
+  const posColor = (v) => (v >= 0 ? "#15803D" : "#991B1B");
   const filteredQueries = (data?.topQueries || []).filter((q) => {
     if (queryFilter === "nonbrand") return !q.is_branded;
     if (queryFilter === "branded") return q.is_branded;
     return true;
   });
-
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+    <div className="flex flex-col [gap:20px]">
       {" "}
-      <div
-        style={{
-          display: "flex",
-          gap: 4,
-          background: D.bg,
-          borderRadius: 8,
-          padding: 3,
-          alignSelf: "flex-start",
-        }}
-      >
+      <div className="flex [gap:4px] bg-zinc-100 rounded-md [padding:3px] self-start">
         {[7, 28, 90].map((p) => (
-          <button
+          <Button
             key={p}
             onClick={() => setPeriod(p)}
-            style={{
-              padding: "6px 14px",
-              borderRadius: 6,
-              border: "none",
-              cursor: "pointer",
-              fontSize: 12,
-              background: period === p ? D.teal : "transparent",
-              color: period === p ? D.white : D.muted,
-            }}
+            variant={period === p ? "primary" : "secondary"}
           >
             {p === 7 ? "7 Days" : p === 28 ? "28 Days" : "90 Days"}
-          </button>
+          </Button>
         ))}
       </div>{" "}
-      <div
-        className="seo-kpi-grid-4"
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(4, 1fr)",
-          gap: 14,
-        }}
-      >
+      <div className="seo-kpi-grid-4 grid max-sm:!grid-cols-2 [grid-template-columns:repeat(4,_1fr)] [gap:14px]">
         {" "}
         <KpiCard
           label="Total Clicks"
@@ -337,117 +325,96 @@ function DashboardTab({ domain }) {
         <KpiCard
           label="Non-Brand Clicks"
           value={cur.nonbrandClicks?.toLocaleString() || "0"}
-          color={D.purple}
+          color={"#18181B"}
         />{" "}
       </div>{" "}
-      <Card>
+      <UiCard className="p-6">
         {" "}
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            marginBottom: 16,
-          }}
-        >
+        <div className="flex justify-between items-center [margin-bottom:16px]">
           {" "}
-          <div style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>
+          <div className="text-ui-body font-medium text-zinc-900">
             Top Queries
           </div>{" "}
-          <div style={{ display: "flex", gap: 4 }}>
+          <div className="flex [gap:4px]">
             {[
               ["all", "All"],
               ["nonbrand", "Non-Brand"],
               ["branded", "Branded"],
             ].map(([k, l]) => (
-              <button
+              <Button
                 key={k}
                 onClick={() => setQueryFilter(k)}
-                style={{
-                  padding: "4px 10px",
-                  borderRadius: 4,
-                  border: "none",
-                  cursor: "pointer",
-                  fontSize: 11,
-                  background: queryFilter === k ? D.teal : D.bg,
-                  color: queryFilter === k ? D.white : D.muted,
-                }}
+                variant={queryFilter === k ? "primary" : "secondary"}
               >
                 {l}
-              </button>
+              </Button>
             ))}
           </div>{" "}
         </div>{" "}
-        <div style={{ overflowX: "auto" }}>
+        <div className="overflow-x-auto">
           {" "}
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            {" "}
-            <thead>
-              <tr>
-                <th style={thStyle}>Query</th>
-                <th style={thR}>Clicks</th>
-                <th style={thR}>Impr</th>
-                <th style={thR}>CTR</th>
-                <th style={thR}>Position</th>
-              </tr>
-            </thead>{" "}
-            <tbody>
+          <Table className="[width:100%] [border-collapse:collapse]">
+            <THead>
+              <TR>
+                <TH>Query</TH>
+                <TH className="text-right u-nums">Clicks</TH>
+                <TH className="text-right u-nums">Impr</TH>
+                <TH className="text-right u-nums">CTR</TH>
+                <TH className="text-right u-nums">Position</TH>
+              </TR>
+            </THead>
+            <TBody>
               {filteredQueries.slice(0, 25).map((q, i) => {
                 const pos = parseFloat(q.avg_position).toFixed(1);
                 return (
-                  <tr key={i}>
-                    {" "}
-                    <td style={{ ...tdStyle, fontFamily: "inherit" }}>
+                  <TR key={i}>
+                    <TD>
                       {q.query}{" "}
                       {q.is_branded && (
                         <span
                           style={{
-                            fontSize: 9,
-                            padding: "1px 5px",
-                            borderRadius: 3,
-                            background: D.teal + "22",
-                            color: D.teal,
-                            marginLeft: 4,
+                            background: "#18181B" + "22",
                           }}
+                          className="text-ui-body [padding:1px_5px] rounded-xs text-zinc-900 [margin-left:4px]"
                         >
                           BRAND
                         </span>
                       )}
-                    </td>{" "}
-                    <td style={tdR}>{parseInt(q.clicks)}</td>{" "}
-                    <td style={tdR}>
+                    </TD>
+                    <TD className="text-right u-nums">{parseInt(q.clicks)}</TD>
+                    <TD className="text-right u-nums">
                       {parseInt(q.impressions).toLocaleString()}
-                    </td>{" "}
-                    <td style={tdR}>
+                    </TD>
+                    <TD className="text-right u-nums">
                       {parseInt(q.impressions) > 0
                         ? (
                             (parseInt(q.clicks) / parseInt(q.impressions)) *
                             100
                           ).toFixed(1) + "%"
                         : "0%"}
-                    </td>{" "}
-                    <td
+                    </TD>
+                    <TD
                       style={{
-                        ...tdR,
                         color:
                           pos <= 3
-                            ? D.green
+                            ? "#15803D"
                             : pos <= 10
-                              ? D.teal
+                              ? "#18181B"
                               : pos <= 20
-                                ? D.amber
-                                : D.red,
+                                ? "#A16207"
+                                : "#991B1B",
                       }}
+                      className="text-right u-nums"
                     >
                       {pos}
-                    </td>{" "}
-                  </tr>
+                    </TD>
+                  </TR>
                 );
               })}
-            </tbody>{" "}
-          </table>{" "}
+            </TBody>
+          </Table>{" "}
         </div>{" "}
-      </Card>{" "}
+      </UiCard>{" "}
     </div>
   );
 }
@@ -476,53 +443,30 @@ function SyncHealthCard() {
   const StatusDot = ({ ok, warn }) => (
     <span
       style={{
-        display: "inline-block",
-        width: 8,
-        height: 8,
-        borderRadius: "50%",
-        background: ok ? D.green : warn ? D.amber : D.red,
-        marginRight: 8,
+        background: ok ? "#15803D" : warn ? "#A16207" : "#991B1B",
       }}
+      className="inline-block [width:8px] [height:8px] rounded-xs [margin-right:8px]"
     />
   );
-
   const section = (label, children) => (
-    <div style={{ marginBottom: 10 }}>
+    <div className="[margin-bottom:10px]">
       {" "}
-      <div
-        style={{
-          fontSize: 12,
-          fontWeight: 700,
-          color: D.heading,
-          marginBottom: 4,
-          textTransform: "uppercase",
-          letterSpacing: 0.5,
-        }}
-      >
+      <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:4px]">
         {label}
       </div>{" "}
-      <div style={{ fontSize: 13, color: D.text, lineHeight: 1.6 }}>
+      <div className="text-ui-body text-zinc-900 [line-height:1.6]">
         {children}
       </div>{" "}
     </div>
   );
-
   return (
-    <Card style={{ borderLeft: `3px solid ${D.amber}` }}>
+    <UiCard className="p-6 border-l border-hairline border-zinc-200">
       {" "}
-      <div
-        style={{
-          fontSize: 14,
-          fontWeight: 700,
-          color: D.heading,
-          marginBottom: 8,
-        }}
-      >
+      <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:8px]">
         SEO sync health
       </div>{" "}
-      <div style={{ fontSize: 12, color: D.muted, marginBottom: 12 }}>
-        The Advisor runs on data from <code>gsc_performance_daily</code>{" "}
-        +{" "}
+      <div className="text-ui-body text-ink-secondary [margin-bottom:12px]">
+        The Advisor runs on data from <code>gsc_performance_daily</code> +{" "}
         <code>gbp_performance_daily</code>. Below is what's actually present in
         the DB right now.
       </div>
@@ -534,7 +478,7 @@ function SyncHealthCard() {
             <StatusDot ok={gsc.configured} />{" "}
             <strong>{gsc.configured ? "Configured" : "Not configured"}</strong>
             {!gsc.configured && (
-              <span style={{ color: D.muted }}>
+              <span className="text-ink-secondary">
                 — set <code>GOOGLE_SERVICE_ACCOUNT_JSON</code> on Railway
               </span>
             )}
@@ -546,7 +490,7 @@ function SyncHealthCard() {
             />{" "}
             <strong>{gsc.daily?.count || 0} daily rows</strong>
             {gsc.daily?.lastDate && (
-              <span style={{ color: D.muted }}>
+              <span className="text-ink-secondary">
                 · last sync {String(gsc.daily.lastDate).slice(0, 10)}
                 {gsc.staleDays != null && gsc.staleDays > 2
                   ? ` (${gsc.staleDays}d old)`
@@ -554,7 +498,7 @@ function SyncHealthCard() {
               </span>
             )}
           </div>{" "}
-          <div style={{ color: D.muted }}>
+          <div className="text-ink-secondary">
             {gsc.queries?.count || 0} query rows in{" "}
             <code>gsc_queries</code>{" "}
           </div>{" "}
@@ -562,9 +506,7 @@ function SyncHealthCard() {
       )}
       {section(
         "Google Business Profile (per location)",
-        <div
-          style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}
-        >
+        <div className="grid [grid-template-columns:1fr_1fr] [gap:6px]">
           {gbpLocations.map((l) => (
             <div key={l.id}>
               {" "}
@@ -573,7 +515,7 @@ function SyncHealthCard() {
                 warn={l.configured && l.rowCount === 0}
               />{" "}
               <strong>{l.name}</strong>{" "}
-              <div style={{ fontSize: 11, color: D.muted, marginLeft: 16 }}>
+              <div className="text-ui-body text-ink-secondary [margin-left:16px]">
                 {!l.configured ? (
                   <>
                     env <code>{l.envVar}</code> missing
@@ -589,27 +531,20 @@ function SyncHealthCard() {
             </div>
           ))}
           {gbpLocations.length === 0 && (
-            <div style={{ color: D.muted }}>No location sync rows reported.</div>
+            <div className="text-ink-secondary">
+              No location sync rows reported.
+            </div>
           )}
         </div>,
       )}
-      <div
-        style={{
-          fontSize: 11,
-          color: D.muted,
-          marginTop: 10,
-          paddingTop: 8,
-          borderTop: `1px solid ${D.border}`,
-        }}
-      >
+      <div className="text-ui-body text-ink-secondary [margin-top:10px] [padding-top:8px] border-t border-hairline border-zinc-200">
         Sync runs daily at 6am ET (see <code>scheduler.js</code>). If rows stay
         at 0 after 24h, grep Railway logs for <code>[GSC]</code> and{" "}
         <code>[GBP]</code> to see init errors.
       </div>{" "}
-    </Card>
+    </UiCard>
   );
 }
-
 function AdvisorTab() {
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -625,7 +560,7 @@ function AdvisorTab() {
   }, []);
   if (loading)
     return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+      <div className="text-ink-secondary [padding:40px] text-center">
         Loading SEO advisor...
       </div>
     );
@@ -643,134 +578,94 @@ function AdvisorTab() {
   };
   if (!report)
     return (
-      <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div className="flex flex-col [gap:20px]">
         {" "}
         <SyncHealthCard />{" "}
-        <Card style={{ padding: 40, textAlign: "center" }}>
+        <UiCard className="[padding:40px] text-center">
           {" "}
-          <div style={{ color: D.muted, marginBottom: 16 }}>
+          <div className="text-ink-secondary [margin-bottom:16px]">
             No SEO reports yet.
           </div>{" "}
           {canRunSeoActions && (
-            <button
-              onClick={generate}
-              disabled={generating}
-              style={{
-                padding: "10px 20px",
-                borderRadius: 8,
-                border: "none",
-                cursor: "pointer",
-                background: D.teal,
-                color: "#fff",
-                fontSize: 13,
-                fontWeight: 500,
-                opacity: generating ? 0.7 : 1,
-              }}
-            >
+            <Button onClick={generate} disabled={generating}>
               {generating
                 ? "Syncing & generating..."
                 : "Sync GSC & Generate Report"}
-            </button>
+            </Button>
           )}{" "}
-        </Card>{" "}
+        </UiCard>{" "}
       </div>
     );
   const data = report.report_data || {};
   const gradeColor = (g) =>
     !g
-      ? D.muted
+      ? "#71717A"
       : g.startsWith("A")
-        ? D.green
+        ? "#15803D"
         : g.startsWith("B")
-          ? D.teal
+          ? "#18181B"
           : g.startsWith("C")
-            ? D.amber
-            : D.red;
+            ? "#A16207"
+            : "#991B1B";
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+    <div className="flex flex-col [gap:20px]">
       {" "}
       <SyncHealthCard />{" "}
-      <Card>
+      <UiCard className="p-6">
         {" "}
-        <div style={{ display: "flex", alignItems: "center", gap: 20 }}>
+        <div className="flex items-center [gap:20px]">
           {" "}
           <div
             style={{
-              width: 72,
-              height: 72,
-              borderRadius: 16,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontSize: 32,
-              fontWeight: 700,
-              fontFamily: MONO,
               background: gradeColor(data.grade) + "22",
               color: gradeColor(data.grade),
               border: `2px solid ${gradeColor(data.grade)}44`,
             }}
+            className="[width:72px] [height:72px] rounded-md flex items-center justify-center text-[32px] font-medium"
           >
             {data.grade || "?"}
           </div>{" "}
-          <div style={{ flex: 1 }}>
+          <div className="[flex:1]">
             {" "}
-            <div
-              style={{
-                fontSize: 14,
-                fontWeight: 500,
-                color: D.heading,
-                marginBottom: 4,
-              }}
-            >
+            <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:4px]">
               SEO Grade
             </div>{" "}
-            <div style={{ fontSize: 14, color: D.text, lineHeight: 1.5 }}>
+            <div className="text-ui-body text-zinc-900 [line-height:1.5]">
               {data.overall_assessment}
             </div>{" "}
           </div>{" "}
         </div>{" "}
-      </Card>
+      </UiCard>
       {(data.recommendations || []).length > 0 && (
-        <Card>
+        <UiCard className="p-6">
           {" "}
-          <div
-            style={{
-              fontSize: 15,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 12,
-            }}
-          >
+          <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
             Recommendations
           </div>
           {data.recommendations.map((rec, i) => (
             <div
               key={i}
               style={{
-                padding: "12px 14px",
-                background: D.bg,
-                borderRadius: 8,
-                marginBottom: 6,
-                borderLeft: `3px solid ${rec.priority === "high" ? D.red : rec.priority === "medium" ? D.amber : D.muted}`,
+                borderLeft: `3px solid ${rec.priority === "high" ? "#991B1B" : rec.priority === "medium" ? "#A16207" : "#71717A"}`,
               }}
+              className="[padding:12px_14px] bg-zinc-100 rounded-md [margin-bottom:6px]"
             >
               {" "}
-              <div style={{ fontSize: 13, fontWeight: 500, color: D.heading }}>
+              <div className="text-ui-body font-medium text-zinc-900">
                 {rec.action}
               </div>
               {rec.reasoning && (
-                <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
+                <div className="text-ui-body text-ink-secondary [margin-top:2px]">
                   {rec.reasoning}
                 </div>
               )}
             </div>
           ))}
-        </Card>
+        </UiCard>
       )}
     </div>
   );
 }
-
 function SimpleTableTab({ endpoint, title, columns, emptyMsg }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -784,25 +679,23 @@ function SimpleTableTab({ endpoint, title, columns, emptyMsg }) {
   }, []);
   if (loading)
     return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+      <div className="text-ink-secondary [padding:40px] text-center">
         Loading...
       </div>
     );
   if (!data)
     return (
-      <Card style={{ padding: 40, textAlign: "center" }}>
-        <div style={{ color: D.muted }}>{emptyMsg || "No data yet."}</div>
-      </Card>
+      <UiCard className="[padding:40px] text-center">
+        <div className="text-ink-secondary">{emptyMsg || "No data yet."}</div>
+      </UiCard>
     );
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+    <div className="flex flex-col [gap:16px]">
       {data.summary && (
         <div
-          className="seo-kpi-grid-5"
+          className="seo-kpi-grid-5 grid max-sm:!grid-cols-2 [gap:12px]"
           style={{
-            display: "grid",
             gridTemplateColumns: `repeat(${Math.min(Object.keys(data.summary).length, 5)}, 1fr)`,
-            gap: 12,
           }}
         >
           {Object.entries(data.summary).map(([k, v]) => (
@@ -814,49 +707,68 @@ function SimpleTableTab({ endpoint, title, columns, emptyMsg }) {
           ))}
         </div>
       )}
-      <Card>
-        <div
-          style={{
-            fontSize: 15,
-            fontWeight: 500,
-            color: D.heading,
-            marginBottom: 4,
-          }}
-        >
+      <UiCard className="p-6">
+        <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:4px]">
           {title}
         </div>
-        <div style={{ fontSize: 13, color: D.muted }}>
+        <div className="text-ui-body text-ink-secondary">
           Data loaded from {endpoint}
         </div>
-      </Card>{" "}
+      </UiCard>{" "}
     </div>
   );
 }
-
 function GeoStat({ label, value }) {
   return (
     <div>
-      <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 0.5 }}>{label}</div>
-      <div style={{ fontSize: 22, fontWeight: 500, color: D.heading, fontFamily: MONO }}>{value}</div>
+      <div className="text-ui-body text-ink-secondary">{label}</div>
+      <div className="text-[22px] font-medium text-zinc-900">{value}</div>
     </div>
   );
 }
-
 function GeoLegend({ color, text }) {
   return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-      <span style={{ width: 12, height: 12, borderRadius: 3, background: color, display: "inline-block" }} />
+    <span className="inline-flex items-center [gap:5px]">
+      <span
+        style={{
+          background: color,
+        }}
+        className="[width:12px] [height:12px] rounded-xs inline-block"
+      />
       {text}
     </span>
   );
 }
-
 function geoRankColor(rank) {
-  if (rank == null) return { bg: "#E4E4E7", fg: D.muted, label: "—" };
-  if (rank <= 3) return { bg: D.green, fg: "#fff", label: String(rank) };
-  if (rank <= 10) return { bg: D.amber, fg: "#fff", label: String(rank) };
-  if (rank <= 20) return { bg: D.red, fg: "#fff", label: String(rank) };
-  return { bg: "#52525B", fg: "#fff", label: "20+" };
+  if (rank == null)
+    return {
+      bg: "#E4E4E7",
+      fg: "#71717A",
+      label: "—",
+    };
+  if (rank <= 3)
+    return {
+      bg: "#15803D",
+      fg: "#fff",
+      label: String(rank),
+    };
+  if (rank <= 10)
+    return {
+      bg: "#A16207",
+      fg: "#fff",
+      label: String(rank),
+    };
+  if (rank <= 20)
+    return {
+      bg: "#991B1B",
+      fg: "#fff",
+      label: String(rank),
+    };
+  return {
+    bg: "#52525B",
+    fg: "#fff",
+    label: "20+",
+  };
 }
 
 // Pillar 3 — geo-grid map-pack tracker. Pick an office + keyword, see a heat map
@@ -874,7 +786,6 @@ function GeoGridTab() {
   const [kwDraft, setKwDraft] = useState("");
   const [kwSaving, setKwSaving] = useState(false);
   const [kwErr, setKwErr] = useState("");
-
   useEffect(() => {
     adminFetch("/admin/seo/geo-grid")
       .then((d) => {
@@ -886,7 +797,6 @@ function GeoGridTab() {
       })
       .catch(() => setLoading(false));
   }, []);
-
   const loadHeat = () => {
     if (!office || !keyword) return;
     adminFetch(
@@ -897,15 +807,23 @@ function GeoGridTab() {
   };
   // Current selection mirror — so an in-flight scan poll doesn't write results
   // for a selection the user has since changed away from.
-  const selRef = useRef({ office, keyword });
+  const selRef = useRef({
+    office,
+    keyword,
+  });
   useEffect(() => {
-    selRef.current = { office, keyword };
+    selRef.current = {
+      office,
+      keyword,
+    };
     setHeat(null);
     loadHeat();
   }, [office, keyword]);
-
   const runScan = async () => {
-    const scanned = { office, keyword };
+    const scanned = {
+      office,
+      keyword,
+    };
     setRunning(true);
     try {
       const r = await adminFetch("/admin/seo/geo-grid/run", {
@@ -924,7 +842,11 @@ function GeoGridTab() {
           clearInterval(t);
           setRunning(false);
           // Only reload if the user hasn't switched office/keyword since starting.
-          if (selRef.current.office === scanned.office && selRef.current.keyword === scanned.keyword) loadHeat();
+          if (
+            selRef.current.office === scanned.office &&
+            selRef.current.keyword === scanned.keyword
+          )
+            loadHeat();
         }
       }, 20000);
     } catch {
@@ -954,15 +876,16 @@ function GeoGridTab() {
       /* surfaced via the disabled-state; a failed export is non-critical */
     }
   };
-
   const openKwEditor = () => {
     setKwDraft((cfg?.keywords || []).join(", "));
     setKwErr("");
     setEditingKw(true);
   };
-
   const saveKeywords = async () => {
-    const list = kwDraft.split(",").map((k) => k.trim()).filter(Boolean);
+    const list = kwDraft
+      .split(",")
+      .map((k) => k.trim())
+      .filter(Boolean);
     if (!list.length) {
       setKwErr("Enter at least one keyword.");
       return;
@@ -975,7 +898,10 @@ function GeoGridTab() {
         body: { keywords: list },
       });
       const saved = r?.keywords || list;
-      setCfg((c) => ({ ...c, keywords: saved }));
+      setCfg((c) => ({
+        ...c,
+        keywords: saved,
+      }));
       if (!saved.includes(keyword)) setKeyword(saved[0]);
       setEditingKw(false);
     } catch (e) {
@@ -984,16 +910,18 @@ function GeoGridTab() {
       setKwSaving(false);
     }
   };
-
   if (loading)
-    return <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>Loading geo-grid…</div>;
+    return (
+      <div className="text-ink-secondary [padding:40px] text-center">
+        Loading geo-grid…
+      </div>
+    );
   if (!cfg)
     return (
-      <Card style={{ padding: 40, textAlign: "center" }}>
-        <div style={{ color: D.muted }}>Geo-grid unavailable.</div>
-      </Card>
+      <UiCard className="[padding:40px] text-center">
+        <div className="text-ink-secondary">Geo-grid unavailable.</div>
+      </UiCard>
     );
-
   const size = heat?.gridSize || cfg.gridSize;
   const byCell = {};
   (heat?.pins || []).forEach((p) => {
@@ -1001,196 +929,137 @@ function GeoGridTab() {
   });
   const stats = heat?.stats;
   const officeCenter = cfg.offices.find((o) => o.id === office);
-  const selStyle = {
-    padding: "8px 10px",
-    border: `1px solid ${D.inputBorder}`,
-    borderRadius: 6,
-    background: D.white,
-    color: D.text,
-    fontSize: 13,
-  };
-
   return (
     <div>
-      <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 16 }}>
-        <select value={office} onChange={(e) => setOffice(e.target.value)} style={selStyle}>
+      <div className="flex [gap:12px] items-center flex-wrap [margin-bottom:16px]">
+        <Select className="!w-auto" value={office} onChange={(e) => setOffice(e.target.value)}>
           {cfg.offices.map((o) => (
-            <option key={o.id} value={o.id}>{o.name}</option>
+            <option key={o.id} value={o.id}>
+              {o.name}
+            </option>
           ))}
-        </select>
-        <select value={keyword} onChange={(e) => setKeyword(e.target.value)} style={selStyle}>
+        </Select>
+        <Select className="!w-auto" value={keyword} onChange={(e) => setKeyword(e.target.value)}>
           {cfg.keywords.map((k) => (
-            <option key={k} value={k}>{k}</option>
+            <option key={k} value={k}>
+              {k}
+            </option>
           ))}
-        </select>
-        <button
+        </Select>
+        <Button
           onClick={openKwEditor}
-          style={{
-            padding: "8px 10px",
-            border: `1px solid ${D.inputBorder}`,
-            borderRadius: 6,
-            background: D.white,
-            color: D.text,
-            fontSize: 13,
-            cursor: "pointer",
-          }}
           title="Edit the tracked keywords"
+          variant="secondary"
         >
           Edit keywords
-        </button>
-        <select
+        </Button>
+        <Select
+          className="!w-auto"
           value={scanGridSize}
           onChange={(e) => setScanGridSize(Number(e.target.value))}
-          style={selStyle}
           title="Grid size for the next scan (N×N pins per office)"
         >
           {(cfg.gridSizeOptions || [cfg.gridSize]).map((n) => (
-            <option key={n} value={n}>{n}×{n}</option>
+            <option key={n} value={n}>
+              {n}×{n}
+            </option>
           ))}
-        </select>
-        <button
-          onClick={runScan}
-          disabled={running || cfg.gated}
-          style={{
-            padding: "8px 14px",
-            border: "none",
-            borderRadius: 6,
-            background: D.heading,
-            color: "#fff",
-            fontSize: 13,
-            fontWeight: 500,
-            cursor: running || cfg.gated ? "default" : "pointer",
-            opacity: running || cfg.gated ? 0.55 : 1,
-          }}
-        >
+        </Select>
+        <Button onClick={runScan} disabled={running || cfg.gated}>
           {running ? "Scanning…" : "Run scan"}
-        </button>
-        <button
+        </Button>
+        <Button
           onClick={downloadCsv}
           disabled={!heat?.pins?.length}
-          style={{
-            padding: "8px 12px",
-            border: `1px solid ${D.inputBorder}`,
-            borderRadius: 6,
-            background: D.white,
-            color: D.text,
-            fontSize: 13,
-            fontWeight: 500,
-            cursor: heat?.pins?.length ? "pointer" : "default",
-            opacity: heat?.pins?.length ? 1 : 0.5,
-          }}
           title="Export this heat map to CSV"
+          variant="secondary"
         >
           Export CSV
-        </button>
+        </Button>
         {cfg.gated && (
-          <span style={{ color: D.amber, fontSize: 12 }}>
+          <span className="text-zinc-700 text-ui-body">
             Gated off — set GATE_GEO_GRID=true to run.
           </span>
         )}
-        <div
-          style={{
-            marginLeft: "auto",
-            display: "inline-flex",
-            border: `1px solid ${D.inputBorder}`,
-            borderRadius: 6,
-            overflow: "hidden",
-          }}
-        >
+        <div className="[margin-left:auto] inline-flex rounded-sm overflow-hidden border-hairline border-zinc-200">
           {["grid", "map"].map((v) => (
-            <button
+            <Button
               key={v}
               onClick={() => setView(v)}
-              style={{
-                padding: "7px 14px",
-                border: "none",
-                background: view === v ? D.heading : D.white,
-                color: view === v ? "#fff" : D.text,
-                fontSize: 13,
-                fontWeight: 500,
-                cursor: "pointer",
-                textTransform: "capitalize",
-              }}
+              variant={view === v ? "primary" : "secondary"}
             >
               {v}
-            </button>
+            </Button>
           ))}
         </div>
       </div>
 
       {editingKw && (
-        <Card style={{ padding: 14, marginBottom: 16 }}>
-          <div style={{ fontSize: 12, color: D.muted, marginBottom: 8 }}>
-            Tracked keywords (comma-separated, up to 6). Fewer keywords = lower DataForSEO spend per scan.
+        <UiCard className="[padding:14px] [margin-bottom:16px]">
+          <div className="text-ui-body text-ink-secondary [margin-bottom:8px]">
+            Tracked keywords (comma-separated, up to 6). Fewer keywords = lower
+            DataForSEO spend per scan.
           </div>
-          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            <input
+          <div className="flex [gap:10px] items-center flex-wrap">
+            <Input
               value={kwDraft}
               onChange={(e) => setKwDraft(e.target.value)}
               placeholder="pest control, exterminator, termite control"
-              style={{ ...selStyle, flex: 1, minWidth: 280 }}
+              className="[flex:1] [min-width:280px]"
             />
-            <button
-              onClick={saveKeywords}
-              disabled={kwSaving}
-              style={{
-                padding: "8px 14px",
-                border: "none",
-                borderRadius: 6,
-                background: D.heading,
-                color: "#fff",
-                fontSize: 13,
-                fontWeight: 500,
-                cursor: kwSaving ? "default" : "pointer",
-                opacity: kwSaving ? 0.55 : 1,
-              }}
-            >
+            <Button onClick={saveKeywords} disabled={kwSaving}>
               {kwSaving ? "Saving…" : "Save"}
-            </button>
-            <button
-              onClick={() => setEditingKw(false)}
-              style={{
-                padding: "8px 12px",
-                border: `1px solid ${D.inputBorder}`,
-                borderRadius: 6,
-                background: D.white,
-                color: D.text,
-                fontSize: 13,
-                cursor: "pointer",
-              }}
-            >
+            </Button>
+            <Button onClick={() => setEditingKw(false)} variant="secondary">
               Cancel
-            </button>
+            </Button>
           </div>
-          {kwErr && <div style={{ color: D.red, fontSize: 12, marginTop: 8 }}>{kwErr}</div>}
-        </Card>
+          {kwErr && (
+            <div className="text-alert-fg text-ui-body [margin-top:8px]">
+              {kwErr}
+            </div>
+          )}
+        </UiCard>
       )}
 
       {stats && (
-        <div style={{ display: "flex", gap: 28, marginBottom: 16, flexWrap: "wrap" }}>
+        <div className="flex [gap:28px] [margin-bottom:16px] flex-wrap">
           <GeoStat label="In top 3" value={`${stats.top3Pct}%`} />
           <GeoStat label="Avg rank" value={stats.avgRank ?? "—"} />
           <GeoStat label="Share of voice" value={`${stats.solv}%`} />
-          <GeoStat label="Found / pins" value={`${stats.found}/${stats.total}`} />
+          <GeoStat
+            label="Found / pins"
+            value={`${stats.found}/${stats.total}`}
+          />
           <GeoStat label="Last scan" value={heat.scanDate} />
         </div>
       )}
 
-      <Card>
+      <UiCard className="p-6">
         {!heat?.pins?.length ? (
-          <div style={{ color: D.muted, padding: 30, textAlign: "center" }}>
+          <div className="text-ink-secondary [padding:30px] text-center">
             No scan yet for this office + keyword.{" "}
-            {cfg.gated ? "Enable GATE_GEO_GRID (and seoIntelligence), then " : ""}click “Run scan”.
+            {cfg.gated
+              ? "Enable GATE_GEO_GRID (and seoIntelligence), then "
+              : ""}
+            click “Run scan”.
           </div>
         ) : view === "map" ? (
           <Suspense
-            fallback={<div style={{ color: D.muted, padding: 30, textAlign: "center" }}>Loading map…</div>}
+            fallback={
+              <div className="text-ink-secondary [padding:30px] text-center">
+                Loading map…
+              </div>
+            }
           >
             <GeoGridMap
               pins={heat.pins}
               center={
                 officeCenter && officeCenter.latitude != null
-                  ? { lat: Number(officeCenter.latitude), lng: Number(officeCenter.longitude) }
+                  ? {
+                      lat: Number(officeCenter.latitude),
+                      lng: Number(officeCenter.longitude),
+                    }
                   : null
               }
             />
@@ -1198,14 +1067,13 @@ function GeoGridTab() {
         ) : (
           <div
             style={{
-              display: "grid",
               gridTemplateColumns: `repeat(${size}, 1fr)`,
-              gap: 4,
-              maxWidth: 360,
-              margin: "0 auto",
             }}
+            className="grid [gap:4px] [max-width:360px] [margin:0_auto]"
           >
-            {Array.from({ length: size * size }).map((_, i) => {
+            {Array.from({
+              length: size * size,
+            }).map((_, i) => {
               const row = Math.floor(i / size);
               const col = i % size;
               const p = byCell[`${row}-${col}`];
@@ -1213,19 +1081,15 @@ function GeoGridTab() {
               return (
                 <div
                   key={i}
-                  title={p ? `(${p.latitude}, ${p.longitude}) — rank ${c.label}` : ""}
+                  data-geo-grid-cell
+                  title={
+                    p ? `(${p.latitude}, ${p.longitude}) — rank ${c.label}` : ""
+                  }
                   style={{
-                    aspectRatio: "1",
                     background: c.bg,
                     color: c.fg,
-                    borderRadius: 6,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    fontFamily: MONO,
-                    fontSize: 13,
-                    fontWeight: 500,
                   }}
+                  className="aspect-square rounded-sm flex items-center justify-center text-ui-body font-medium"
                 >
                   {c.label}
                 </div>
@@ -1233,28 +1097,17 @@ function GeoGridTab() {
             })}
           </div>
         )}
-        <div
-          style={{
-            display: "flex",
-            gap: 14,
-            justifyContent: "center",
-            marginTop: 14,
-            fontSize: 11,
-            color: D.muted,
-            flexWrap: "wrap",
-          }}
-        >
-          <GeoLegend color={D.green} text="1–3" />
-          <GeoLegend color={D.amber} text="4–10" />
-          <GeoLegend color={D.red} text="11–20" />
+        <div className="flex [gap:14px] justify-center [margin-top:14px] text-ui-body text-ink-secondary flex-wrap">
+          <GeoLegend color={"#15803D"} text="1–3" />
+          <GeoLegend color={"#A16207"} text="4–10" />
+          <GeoLegend color={"#991B1B"} text="11–20" />
           <GeoLegend color="#52525B" text="20+" />
           <GeoLegend color="#E4E4E7" text="not in pack" />
         </div>
-      </Card>
+      </UiCard>
     </div>
   );
 }
-
 function RankingsTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -1268,109 +1121,97 @@ function RankingsTab() {
   }, []);
   if (loading)
     return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+      <div className="text-ink-secondary [padding:40px] text-center">
         Loading rankings...
       </div>
     );
   if (!data?.rankings?.length)
     return (
-      <Card style={{ padding: 40, textAlign: "center" }}>
-        <div style={{ color: D.muted }}>
+      <UiCard className="[padding:40px] text-center">
+        <div className="text-ink-secondary">
           No ranking data yet. Configure DataForSEO and enable
           GATE_SEO_INTELLIGENCE.
         </div>
-      </Card>
+      </UiCard>
     );
   const s = data.summary || {};
   const posColor = (p) =>
     !p
-      ? D.muted
+      ? "#71717A"
       : p <= 3
-        ? D.green
+        ? "#15803D"
         : p <= 10
-          ? D.teal
+          ? "#18181B"
           : p <= 20
-            ? D.amber
-            : D.red;
+            ? "#A16207"
+            : "#991B1B";
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+    <div className="flex flex-col [gap:16px]">
       {" "}
-      <div
-        className="seo-kpi-grid-4"
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(4, 1fr)",
-          gap: 12,
-        }}
-      >
+      <div className="seo-kpi-grid-4 grid max-sm:!grid-cols-2 [grid-template-columns:repeat(4,_1fr)] [gap:12px]">
         {" "}
         <KpiCard
           label="Improving"
           value={s.improving || 0}
-          color={D.green}
+          color={"#15803D"}
         />{" "}
-        <KpiCard label="Declining" value={s.declining || 0} color={D.red} />{" "}
+        <KpiCard label="Declining" value={s.declining || 0} color={"#991B1B"} />{" "}
         <KpiCard label="Stable" value={s.stable || 0} />{" "}
         <KpiCard
           label="Map Pack"
           value={s.inMapPack || 0}
-          color={D.teal}
+          color={"#18181B"}
         />{" "}
       </div>{" "}
-      <Card>
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
-                <th style={thStyle}>Keyword</th>
-                <th style={thStyle}>City</th>
-                <th style={thR}>Position</th>
-                <th style={thR}>Change</th>
-                <th style={thStyle}>AIO</th>
-              </tr>
-            </thead>
-            <tbody>
+      <UiCard className="p-6">
+        <div className="overflow-x-auto">
+          <Table className="[width:100%] [border-collapse:collapse]">
+            <THead>
+              <TR>
+                <TH>Keyword</TH>
+                <TH>City</TH>
+                <TH className="text-right u-nums">Position</TH>
+                <TH className="text-right u-nums">Change</TH>
+                <TH>AIO</TH>
+              </TR>
+            </THead>
+            <TBody>
               {data.rankings.map((r, i) => (
-                <tr key={i}>
-                  <td
-                    style={{
-                      ...tdStyle,
-                      fontFamily: "inherit",
-                      fontWeight: 500,
-                    }}
-                  >
-                    {r.keyword}
-                  </td>
-                  <td
-                    style={{
-                      ...tdStyle,
-                      fontFamily: "inherit",
-                      color: D.muted,
-                    }}
-                  >
+                <TR key={i}>
+                  <TD className="font-medium">{r.keyword}</TD>
+                  <TD className="text-ink-secondary">
                     {r.primary_city || "—"}
-                  </td>
-                  <td style={{ ...tdR, color: posColor(r.currentPosition) }}>
-                    {r.currentPosition || "—"}
-                  </td>
-                  <td
+                  </TD>
+                  <TD
                     style={{
-                      ...tdR,
-                      color:
-                        r.delta > 0 ? D.green : r.delta < 0 ? D.red : D.muted,
+                      color: posColor(r.currentPosition),
                     }}
+                    className="text-right u-nums"
+                  >
+                    {r.currentPosition || "—"}
+                  </TD>
+                  <TD
+                    style={{
+                      color:
+                        r.delta > 0
+                          ? "#15803D"
+                          : r.delta < 0
+                            ? "#991B1B"
+                            : "#71717A",
+                    }}
+                    className="text-right u-nums"
                   >
                     {r.delta > 0 ? `+${r.delta}` : r.delta || "—"}
-                  </td>
-                  <td style={{ ...tdStyle, textAlign: "center" }}>
+                  </TD>
+                  <TD className="text-center">
                     {r.aiOverviewCited ? "Yes" : "—"}
-                  </td>
-                </tr>
+                  </TD>
+                </TR>
               ))}
-            </tbody>
-          </table>
+            </TBody>
+          </Table>
         </div>
-      </Card>{" "}
+      </UiCard>{" "}
     </div>
   );
 }
@@ -1378,30 +1219,39 @@ function RankingsTab() {
 // ── Rankings Monitor — per-page position before/now + change chips ──
 
 const CHIP_COLORS = {
-  META: D.amber,
-  CONTENT: D.teal,
-  LINKS: D.green,
-  SCHEMA: D.muted,
+  META: "#A16207",
+  CONTENT: "#18181B",
+  LINKS: "#15803D",
+  SCHEMA: "#71717A",
 };
-const CHIP_MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
-
+const CHIP_MONTHS = [
+  "JAN",
+  "FEB",
+  "MAR",
+  "APR",
+  "MAY",
+  "JUN",
+  "JUL",
+  "AUG",
+  "SEP",
+  "OCT",
+  "NOV",
+  "DEC",
+];
 function chipDateLabel(date) {
   const [, m, d] = String(date || "").split("-");
   if (!m || !d) return date || "";
   return `${parseInt(d, 10)} ${CHIP_MONTHS[parseInt(m, 10) - 1] || ""}`;
 }
-
 function pagePath(url) {
   return String(url || "").replace(/^https?:\/\/[^/]+/i, "") || "/";
 }
-
 function pageHost(url) {
   const m = String(url || "").match(/^https?:\/\/(?:www\.)?([^/]+)/i);
   return m ? m[1].toLowerCase() : null;
 }
-
 function AnnotationChip({ ann }) {
-  const color = CHIP_COLORS[ann.type] || D.muted;
+  const color = CHIP_COLORS[ann.type] || "#71717A";
   const verdict =
     ann.status === "accepted" ? " ✓" : ann.status === "rejected" ? " ✗" : "";
   const title = `${ann.type.toLowerCase()} change on ${ann.date}${ann.count > 1 ? ` (×${ann.count})` : ""} — source: ${(ann.sources || []).join(", ")}${ann.status ? ` · experiment ${ann.status}` : ""}`;
@@ -1409,17 +1259,10 @@ function AnnotationChip({ ann }) {
     <span
       title={title}
       style={{
-        display: "inline-block",
-        padding: "1px 7px",
-        borderRadius: 4,
         border: `1px solid ${color}`,
         color,
-        fontSize: 10,
-        fontWeight: 500,
-        letterSpacing: "0.5px",
-        fontFamily: MONO,
-        whiteSpace: "nowrap",
       }}
+      className="inline-block [padding:1px_7px] rounded-sm text-ui-body font-medium whitespace-nowrap"
     >
       {ann.type} · {chipDateLabel(ann.date)}
       {ann.count > 1 ? ` ×${ann.count}` : ""}
@@ -1427,91 +1270,94 @@ function AnnotationChip({ ann }) {
     </span>
   );
 }
-
 function beforeAfter(before, now, suffix = "") {
-  if (before == null) return <span>{now}{suffix}</span>;
+  if (before == null)
+    return (
+      <span>
+        {now}
+        {suffix}
+      </span>
+    );
   return (
     <span>
-      <span style={{ color: D.muted }}>{before}{suffix} → </span>
-      {now}{suffix}
+      <span className="text-ink-secondary">
+        {before}
+        {suffix} →{" "}
+      </span>
+      {now}
+      {suffix}
     </span>
   );
 }
-
 function MonitorTable({ title, rows, accent }) {
   if (!rows.length) return null;
   return (
-    <Card style={{ padding: 0 }}>
+    <UiCard className="[padding:0px]">
       <div
         style={{
-          padding: "14px 16px",
-          fontSize: 13,
-          fontWeight: 500,
-          color: accent || D.heading,
-          borderBottom: `1px solid ${D.border}`,
+          color: accent || "#09090B",
         }}
+        className="[padding:14px_16px] text-ui-body font-medium border-b border-hairline border-zinc-200"
       >
         {title} ({rows.length})
       </div>
-      <div style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr>
-              <th style={thStyle}>Page</th>
-              <th style={thR}>Pos Before</th>
-              <th style={thR}>Pos Now</th>
-              <th style={thR}>Change</th>
-              <th style={thR}>Clicks</th>
-              <th style={thR}>Imp</th>
-              <th style={thR}>CTR</th>
-            </tr>
-          </thead>
-          <tbody>
+      <div className="overflow-x-auto">
+        <Table className="[width:100%] [border-collapse:collapse]">
+          <THead>
+            <TR>
+              <TH>Page</TH>
+              <TH className="text-right u-nums">Pos Before</TH>
+              <TH className="text-right u-nums">Pos Now</TH>
+              <TH className="text-right u-nums">Change</TH>
+              <TH className="text-right u-nums">Clicks</TH>
+              <TH className="text-right u-nums">Imp</TH>
+              <TH className="text-right u-nums">CTR</TH>
+            </TR>
+          </THead>
+          <TBody>
             {rows.map((p, i) => {
               const host = pageHost(p.page_url);
               const isHub = !host || host === "wavespestcontrol.com";
               return (
-                <tr key={`${p.domain || ""}-${p.page_url}-${i}`}>
-                  <td style={{ ...tdStyle, fontFamily: "inherit", maxWidth: 420 }}>
+                <TR key={`${p.domain || ""}-${p.page_url}-${i}`}>
+                  <TD className="[max-width:420px]">
                     <div
-                      style={{
-                        color: D.heading,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}
                       title={p.page_url}
+                      className="text-zinc-900 overflow-hidden text-ellipsis whitespace-nowrap"
                     >
                       {!isHub && (
-                        <span style={{ color: D.muted, fontSize: 11 }}>{host}</span>
+                        <span className="text-ink-secondary text-ui-body">
+                          {host}
+                        </span>
                       )}
                       {pagePath(p.page_url)}
                     </div>
                     {p.annotations?.length > 0 && (
-                      <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 4 }}>
+                      <div className="flex [gap:4px] flex-wrap [margin-top:4px]">
                         {p.annotations.map((a, j) => (
                           <AnnotationChip key={j} ann={a} />
                         ))}
                       </div>
                     )}
-                  </td>
-                  <td style={tdR}>{p.pos_before ?? "—"}</td>
-                  <td style={{ ...tdR, color: D.heading }}>{p.pos_now ?? "—"}</td>
-                  <td
+                  </TD>
+                  <TD className="text-right u-nums">{p.pos_before ?? "—"}</TD>
+                  <TD className="text-right u-nums text-zinc-900">
+                    {p.pos_now ?? "—"}
+                  </TD>
+                  <TD
                     style={{
-                      ...tdR,
-                      fontWeight: 500,
                       color:
                         p.movement === "lost"
-                          ? D.red
+                          ? "#991B1B"
                           : p.change == null
-                            ? D.muted
+                            ? "#71717A"
                             : p.change < 0
-                              ? D.green
+                              ? "#15803D"
                               : p.change > 0
-                                ? D.red
-                                : D.muted,
+                                ? "#991B1B"
+                                : "#71717A",
                     }}
+                    className="text-right u-nums font-medium"
                   >
                     {p.movement === "lost"
                       ? "GONE"
@@ -1520,31 +1366,35 @@ function MonitorTable({ title, rows, accent }) {
                         : p.change > 0
                           ? `+${p.change}`
                           : p.change}
-                  </td>
-                  <td style={tdR}>{beforeAfter(p.clicks_before, p.clicks_now)}</td>
-                  <td style={tdR}>
+                  </TD>
+                  <TD className="text-right u-nums">
+                    {beforeAfter(p.clicks_before, p.clicks_now)}
+                  </TD>
+                  <TD className="text-right u-nums">
                     {beforeAfter(
-                      p.impressions_before == null ? null : p.impressions_before.toLocaleString(),
-                      p.impressions_now.toLocaleString()
+                      p.impressions_before == null
+                        ? null
+                        : p.impressions_before.toLocaleString(),
+                      p.impressions_now.toLocaleString(),
                     )}
-                  </td>
-                  <td style={tdR}>{beforeAfter(p.ctr_before, p.ctr_now, "%")}</td>
-                </tr>
+                  </TD>
+                  <TD className="text-right u-nums">
+                    {beforeAfter(p.ctr_before, p.ctr_now, "%")}
+                  </TD>
+                </TR>
               );
             })}
-          </tbody>
-        </table>
+          </TBody>
+        </Table>
       </div>
-    </Card>
+    </UiCard>
   );
 }
-
 function RankingsMonitorTab() {
   const [period, setPeriod] = useState(90);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-
   useEffect(() => {
     setLoading(true);
     setError(null);
@@ -1558,38 +1408,36 @@ function RankingsMonitorTab() {
         setLoading(false);
       });
   }, [period]);
-
   if (loading)
     return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+      <div className="text-ink-secondary [padding:40px] text-center">
         Loading rankings monitor...
       </div>
     );
   if (error)
     return (
-      <Card style={{ padding: 40, textAlign: "center" }}>
-        <div style={{ color: D.red }}>{error}</div>
-      </Card>
+      <UiCard className="[padding:40px] text-center">
+        <div className="text-alert-fg">{error}</div>
+      </UiCard>
     );
   // pages holds only visible movers — an all-flat window arrives with
   // pages empty but pages_tracked > 0, and that's healthy data (the
   // no-movement card below covers it), not missing GSC data.
   if (!data?.pages?.length && !data?.summary?.pages_tracked)
     return (
-      <Card style={{ padding: 40, textAlign: "center" }}>
-        <div style={{ color: D.muted }}>
+      <UiCard className="[padding:40px] text-center">
+        <div className="text-ink-secondary">
           No page data in this window yet. GSC syncs daily at 6am ET; data
           publishes with a ~3 day lag.
         </div>
-      </Card>
+      </UiCard>
     );
-
   const s = data.summary || {};
   const wins = data.pages.filter((p) => p.movement === "win");
   // Pages that vanished from GSC entirely are the hardest losses — they
   // share the Losses table, marked GONE.
   const losses = data.pages.filter(
-    (p) => p.movement === "loss" || p.movement === "lost"
+    (p) => p.movement === "loss" || p.movement === "lost",
   );
   const fresh = data.pages.filter((p) => p.movement === "new");
   const deltaSub = (delta, invert = false) => {
@@ -1597,56 +1445,35 @@ function RankingsMonitorTab() {
     const good = invert ? delta < 0 : delta > 0;
     return {
       text: `${delta > 0 ? "+" : ""}${typeof delta === "number" ? delta.toLocaleString() : delta}`,
-      color: good ? D.green : D.red,
+      color: good ? "#15803D" : "#991B1B",
     };
   };
-
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-        <div
-          style={{
-            display: "flex",
-            gap: 4,
-            background: D.bg,
-            borderRadius: 8,
-            padding: 3,
-          }}
-        >
+    <div className="flex flex-col [gap:16px]">
+      <div className="flex items-center [gap:12px] flex-wrap">
+        <div className="flex [gap:4px] bg-zinc-100 rounded-md [padding:3px]">
           {[7, 28, 90].map((p) => (
-            <button
+            <Button
               key={p}
               onClick={() => setPeriod(p)}
-              style={{
-                padding: "6px 14px",
-                borderRadius: 6,
-                border: "none",
-                cursor: "pointer",
-                fontSize: 12,
-                background: period === p ? D.teal : "transparent",
-                color: period === p ? D.white : D.muted,
-              }}
+              variant={period === p ? "primary" : "secondary"}
             >
               {p === 7 ? "7 Days" : p === 28 ? "28 Days" : "3 Months"}
-            </button>
+            </Button>
           ))}
         </div>
-        <div style={{ fontSize: 12, color: D.muted, fontFamily: MONO }}>
+        <div className="text-ui-body text-ink-secondary">
           {data.window?.current?.from} → {data.window?.current?.to} vs{" "}
           {data.window?.prior?.from} → {data.window?.prior?.to}
         </div>
       </div>
-      <div style={{ fontSize: 12, color: D.muted }}>
-        Google Search Console publishes data with a ~3 day lag — the most
-        recent days shown will be 2–3 days behind today. Chips mark shipped
-        page changes: META = title/description rewrite, CONTENT =
-        refresh/new page, LINKS = inbound internal links, SCHEMA = structured
-        data.
+      <div className="text-ui-body text-ink-secondary">
+        Google Search Console publishes data with a ~3 day lag — the most recent
+        days shown will be 2–3 days behind today. Chips mark shipped page
+        changes: META = title/description rewrite, CONTENT = refresh/new page,
+        LINKS = inbound internal links, SCHEMA = structured data.
       </div>
-      <div
-        className="seo-kpi-grid-4"
-        style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}
-      >
+      <div className="seo-kpi-grid-4 grid max-sm:!grid-cols-2 [grid-template-columns:repeat(4,_1fr)] [gap:12px]">
         <KpiCard
           label="Clicks"
           value={(s.clicks || 0).toLocaleString()}
@@ -1668,15 +1495,15 @@ function RankingsMonitorTab() {
           sub={deltaSub(s.pages_tracked_delta)}
         />
       </div>
-      <MonitorTable title="Position wins" rows={wins} accent={D.green} />
-      <MonitorTable title="Position losses" rows={losses} accent={D.red} />
+      <MonitorTable title="Position wins" rows={wins} accent={"#15803D"} />
+      <MonitorTable title="Position losses" rows={losses} accent={"#991B1B"} />
       <MonitorTable title="New pages" rows={fresh} />
       {wins.length + losses.length + fresh.length === 0 && (
-        <Card style={{ padding: 40, textAlign: "center" }}>
-          <div style={{ color: D.muted }}>
+        <UiCard className="[padding:40px] text-center">
+          <div className="text-ink-secondary">
             No position movement past ±0.5 in this window.
           </div>
-        </Card>
+        </UiCard>
       )}
     </div>
   );
@@ -1689,7 +1516,6 @@ const LOST_REASON_LABEL = {
   link_removed: "link removed",
   unreachable: "site unreachable",
 };
-
 function BacklinksTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -1699,7 +1525,6 @@ function BacklinksTab() {
   const [llmError, setLlmError] = useState(false);
   const [llmScanning, setLlmScanning] = useState(false);
   const canRunSeoActions = isAdminUser();
-
   useEffect(() => {
     adminFetch("/admin/seo/backlinks")
       .then((d) => {
@@ -1717,7 +1542,6 @@ function BacklinksTab() {
       .then(setLlmDash)
       .catch(() => setLlmError(true));
   }, [subTab, llmDash, llmError]);
-
   const handleLlmScan = async () => {
     if (!canRunSeoActions) return;
     setLlmScanning(true);
@@ -1733,7 +1557,6 @@ function BacklinksTab() {
       setLlmScanning(false);
     }
   };
-
   const handleScan = async () => {
     if (!canRunSeoActions) return;
     setScanning(true);
@@ -1745,282 +1568,233 @@ function BacklinksTab() {
       setScanning(false);
     }
   };
-
   if (loading)
     return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+      <div className="text-ink-secondary [padding:40px] text-center">
         Loading backlinks...
       </div>
     );
   if (!data)
     return (
-      <Card style={{ padding: 40, textAlign: "center" }}>
-        <div style={{ color: D.muted }}>
-          No backlink data yet.
-        </div>
-      </Card>
+      <UiCard className="[padding:40px] text-center">
+        <div className="text-ink-secondary">No backlink data yet.</div>
+      </UiCard>
     );
-
   const sevColor = {
-    critical: D.red,
-    warning: D.amber,
-    watch: D.muted,
-    clean: D.green,
+    critical: "#991B1B",
+    warning: "#A16207",
+    watch: "#71717A",
+    clean: "#15803D",
   };
   const statusColor = {
-    active: D.green,
-    inconsistent: D.red,
-    missing: D.amber,
-    claimed: D.teal,
-    unchecked: D.muted,
+    active: "#15803D",
+    inconsistent: "#991B1B",
+    missing: "#A16207",
+    claimed: "#18181B",
+    unchecked: "#71717A",
   };
-
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+    <div className="flex flex-col [gap:16px]">
       {/* Sub-tabs */}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          flexWrap: "wrap",
-          gap: 8,
-        }}
-      >
+      <div className="flex justify-between items-center flex-wrap [gap:8px]">
         {" "}
-        <div
-          className="seo-sub-tabs"
-          style={{
-            display: "flex",
-            gap: 4,
-            overflowX: "auto",
-            WebkitOverflowScrolling: "touch",
-          }}
-        >
+        <div className="seo-sub-tabs flex max-sm:flex-nowrap max-sm:overflow-x-auto [gap:4px] overflow-x-auto">
           {[
-            { key: "overview", label: "Overview" },
-            { key: "citations", label: "Citations" },
-            { key: "gaps", label: "Competitor Gaps" },
-            { key: "llm", label: "LLM Mentions" },
-            { key: "prospects", label: "Link Building" },
-            { key: "agent", label: "Agent" },
+            {
+              key: "overview",
+              label: "Overview",
+            },
+            {
+              key: "citations",
+              label: "Citations",
+            },
+            {
+              key: "gaps",
+              label: "Competitor Gaps",
+            },
+            {
+              key: "llm",
+              label: "LLM Mentions",
+            },
+            {
+              key: "prospects",
+              label: "Link Building",
+            },
+            {
+              key: "agent",
+              label: "Agent",
+            },
           ].map((t) => (
-            <button
+            <Button
               key={t.key}
               onClick={() => setSubTab(t.key)}
-              style={{
-                padding: "6px 14px",
-                borderRadius: 6,
-                border: "none",
-                cursor: "pointer",
-                fontSize: 12,
-                background: subTab === t.key ? D.teal : D.bg,
-                color: subTab === t.key ? D.white : D.muted,
-                whiteSpace: "nowrap",
-                flexShrink: 0,
-              }}
+              className="whitespace-nowrap shrink-0"
+              variant={subTab === t.key ? "primary" : "secondary"}
             >
               {t.label}
-            </button>
+            </Button>
           ))}
         </div>{" "}
         {canRunSeoActions && (
-          <button
-            onClick={handleScan}
-            disabled={scanning}
-            style={{
-              padding: "6px 14px",
-              borderRadius: 6,
-              border: `1px solid ${D.teal}`,
-              background: "transparent",
-              color: D.teal,
-              fontSize: 12,
-              cursor: "pointer",
-              opacity: scanning ? 0.5 : 1,
-            }}
-          >
+          <Button onClick={handleScan} disabled={scanning} variant="secondary">
             {scanning ? "Scanning..." : "Scan Backlinks"}
-          </button>
+          </Button>
         )}{" "}
       </div>
       {/* Stats */}
-      <div
-        className="seo-kpi-grid-5"
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(5, 1fr)",
-          gap: 10,
-        }}
-      >
+      <div className="seo-kpi-grid-5 grid max-sm:!grid-cols-2 [grid-template-columns:repeat(5,_1fr)] [gap:10px]">
         {" "}
         <KpiCard label="Total Links" value={data.total || 0} />{" "}
-        <KpiCard label="Critical" value={data.critical || 0} color={D.red} />{" "}
-        <KpiCard label="Warning" value={data.warning || 0} color={D.amber} />{" "}
-        <KpiCard label="Clean" value={data.clean || 0} color={D.green} />{" "}
+        <KpiCard
+          label="Critical"
+          value={data.critical || 0}
+          color={"#991B1B"}
+        />{" "}
+        <KpiCard label="Warning" value={data.warning || 0} color={"#A16207"} />{" "}
+        <KpiCard label="Clean" value={data.clean || 0} color={"#15803D"} />{" "}
         <KpiCard
           label="Citations"
           value={data.citationStats?.total || 0}
-          sub={{ text: `${data.citationStats?.active || 0} active` }}
+          sub={{
+            text: `${data.citationStats?.active || 0} active`,
+          }}
         />{" "}
       </div>
       {/* Velocity KPIs */}
       {data.velocity && (
-        <div className="seo-kpi-grid-4" style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginTop: 10 }}>
-          <KpiCard label="New 7d" value={`+${data.velocity.new_7d}`} color={D.green} />
-          <KpiCard label="Lost 7d" value={data.velocity.lost_7d > 0 ? `-${data.velocity.lost_7d}` : "0"} color={data.velocity.lost_7d > 0 ? D.red : D.muted} />
-          <KpiCard label="Net 7d" value={data.velocity.net_7d >= 0 ? `+${data.velocity.net_7d}` : `${data.velocity.net_7d}`} color={data.velocity.net_7d > 0 ? D.green : data.velocity.net_7d < 0 ? D.red : D.muted} />
-          <KpiCard label="Trend" value={data.velocity.trend === "growing" ? "Growing" : data.velocity.trend === "shrinking" ? "Shrinking" : "Flat"} color={data.velocity.net_7d > 0 ? D.green : data.velocity.net_7d < 0 ? D.red : D.muted} />
+        <div className="seo-kpi-grid-4 grid max-sm:!grid-cols-2 [grid-template-columns:repeat(4,_1fr)] [gap:10px] [margin-top:10px]">
+          <KpiCard
+            label="New 7d"
+            value={`+${data.velocity.new_7d}`}
+            color={"#15803D"}
+          />
+          <KpiCard
+            label="Lost 7d"
+            value={
+              data.velocity.lost_7d > 0 ? `-${data.velocity.lost_7d}` : "0"
+            }
+            color={data.velocity.lost_7d > 0 ? "#991B1B" : "#71717A"}
+          />
+          <KpiCard
+            label="Net 7d"
+            value={
+              data.velocity.net_7d >= 0
+                ? `+${data.velocity.net_7d}`
+                : `${data.velocity.net_7d}`
+            }
+            color={
+              data.velocity.net_7d > 0
+                ? "#15803D"
+                : data.velocity.net_7d < 0
+                  ? "#991B1B"
+                  : "#71717A"
+            }
+          />
+          <KpiCard
+            label="Trend"
+            value={
+              data.velocity.trend === "growing"
+                ? "Growing"
+                : data.velocity.trend === "shrinking"
+                  ? "Shrinking"
+                  : "Flat"
+            }
+            color={
+              data.velocity.net_7d > 0
+                ? "#15803D"
+                : data.velocity.net_7d < 0
+                  ? "#991B1B"
+                  : "#71717A"
+            }
+          />
         </div>
       )}
       {/* Overview sub-tab */}
       {subTab === "overview" && (
         <>
           {data.anchorDistribution && (
-            <Card>
+            <UiCard className="p-6">
               {" "}
-              <div
-                style={{
-                  fontSize: 14,
-                  fontWeight: 500,
-                  color: D.heading,
-                  marginBottom: 12,
-                }}
-              >
+              <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
                 Anchor Text Distribution
               </div>
               {Object.entries(data.anchorDistribution).map(([type, count]) => (
                 <div
                   key={type}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 10,
-                    marginBottom: 6,
-                  }}
+                  className="flex items-center [gap:10px] [margin-bottom:6px]"
                 >
                   {" "}
-                  <div
-                    style={{
-                      width: 100,
-                      fontSize: 12,
-                      color: D.text,
-                      textAlign: "right",
-                      textTransform: "capitalize",
-                    }}
-                  >
+                  <div className="[width:100px] text-ui-body text-zinc-900 text-right">
                     {type.replace("_", " ")}
                   </div>{" "}
-                  <div
-                    style={{
-                      flex: 1,
-                      height: 14,
-                      background: D.bg,
-                      borderRadius: 3,
-                    }}
-                  >
+                  <div className="[flex:1] [height:14px] bg-zinc-100 rounded-xs">
                     {" "}
                     <div
                       style={{
-                        height: "100%",
-                        borderRadius: 3,
                         background:
                           type === "branded"
-                            ? D.green
+                            ? "#15803D"
                             : type === "keyword_rich"
-                              ? D.amber
-                              : D.teal,
+                              ? "#A16207"
+                              : "#18181B",
                         width: `${Math.min(100, (count / Math.max(data.total, 1)) * 100)}%`,
                       }}
+                      className="[height:100%] rounded-xs"
                     />{" "}
                   </div>{" "}
-                  <div
-                    style={{
-                      width: 30,
-                      fontSize: 12,
-                      color: D.muted,
-                      fontFamily: MONO,
-                    }}
-                  >
+                  <div className="[width:30px] text-ui-body text-ink-secondary">
                     {count}
                   </div>{" "}
                 </div>
               ))}
-            </Card>
+            </UiCard>
           )}
           {(data.recentToxic || []).length > 0 && (
-            <Card>
+            <UiCard className="p-6">
               {" "}
-              <div
-                style={{
-                  fontSize: 14,
-                  fontWeight: 500,
-                  color: D.red,
-                  marginBottom: 12,
-                }}
-              >
+              <div className="text-ui-body font-medium text-alert-fg [margin-bottom:12px]">
                 Toxic Links
               </div>
               {data.recentToxic.map((l, i) => (
                 <div
                   key={i}
                   style={{
-                    padding: "8px 12px",
-                    background: D.bg,
-                    borderRadius: 6,
-                    marginBottom: 4,
                     borderLeft: `3px solid ${sevColor[l.severity]}`,
                   }}
+                  className="[padding:8px_12px] bg-zinc-100 rounded-sm [margin-bottom:4px]"
                 >
                   {" "}
-                  <div style={{ fontSize: 12, color: D.heading }}>
+                  <div className="text-ui-body text-zinc-900">
                     {l.source_domain}
                   </div>{" "}
-                  <div style={{ fontSize: 11, color: D.muted }}>
+                  <div className="text-ui-body text-ink-secondary">
                     Anchor: "{l.anchor_text}" · Toxicity: {l.toxicity_score}/100
                   </div>{" "}
                 </div>
               ))}
-            </Card>
+            </UiCard>
           )}
           {/* Trend */}
           {(data.snapshots || []).length > 1 && (
-            <Card>
+            <UiCard className="p-6">
               {" "}
-              <div
-                style={{
-                  fontSize: 14,
-                  fontWeight: 500,
-                  color: D.heading,
-                  marginBottom: 12,
-                }}
-              >
+              <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
                 Backlink Trend
               </div>{" "}
-              <div
-                style={{
-                  display: "flex",
-                  gap: 8,
-                  alignItems: "flex-end",
-                  height: 60,
-                }}
-              >
+              <div className="flex [gap:8px] items-end [height:60px]">
                 {(data.snapshots || []).reverse().map((s, i) => (
-                  <div key={i} style={{ flex: 1, textAlign: "center" }}>
+                  <div key={i} className="[flex:1] text-center">
                     {" "}
-                    <div
-                      style={{ fontSize: 10, color: D.muted, fontFamily: MONO }}
-                    >
+                    <div className="text-ui-body text-ink-secondary">
                       {s.total_backlinks}
                     </div>{" "}
                     <div
                       style={{
                         height: `${Math.max(4, (s.total_backlinks || 0) / 2)}px`,
-                        background: D.teal,
-                        borderRadius: 2,
-                        marginTop: 2,
                       }}
+                      className="bg-zinc-900 rounded-xs [margin-top:2px]"
                     />{" "}
-                    <div style={{ fontSize: 9, color: D.muted, marginTop: 2 }}>
+                    <div className="text-ui-body text-ink-secondary [margin-top:2px]">
                       {new Date(s.snapshot_date).toLocaleDateString("en-US", {
                         month: "short",
                         day: "numeric",
@@ -2029,78 +1803,86 @@ function BacklinksTab() {
                   </div>
                 ))}
               </div>{" "}
-            </Card>
+            </UiCard>
           )}
 
           {/* Recently Lost Links */}
           {(data.recentlyLost || []).length > 0 && (
-            <Card>
-              <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 12 }}>Recently Lost Links</div>
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                  <thead><tr>
-                    <th style={thStyle}>Source Domain</th>
-                    <th style={thR}>DR</th>
-                    <th style={thStyle}>Anchor</th>
-                    <th style={thStyle}>Target</th>
-                    <th style={thStyle}>Reason</th>
-                    <th style={thStyle}>Lost</th>
-                  </tr></thead>
-                  <tbody>
-                    {data.recentlyLost.map((l, i) => (
-                      <tr key={l.id || `${l.source_domain || "lost"}-${l.target_url || i}`}>
-                        <td style={tdStyle}>{l.source_domain}</td>
-                        <td style={tdR}>{l.domain_rating || "—"}</td>
-                        <td style={{ ...tdStyle, maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.anchor_text || "—"}</td>
-                        <td style={{ ...tdStyle, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.target_url || "—"}</td>
-                        <td style={tdStyle}>{LOST_REASON_LABEL[l.lost_reason] || (l.lost_reason ? l.lost_reason : "unverified (legacy)")}</td>
-                        <td style={tdStyle}>{(l.lost_at || l.updated_at) ? formatETDate(l.lost_at || l.updated_at) : "—"}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+            <UiCard className="p-6">
+              <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
+                Recently Lost Links
               </div>
-            </Card>
+              <div className="overflow-x-auto">
+                <Table className="[width:100%] [border-collapse:collapse]">
+                  <THead>
+                    <TR>
+                      <TH>Source Domain</TH>
+                      <TH className="text-right u-nums">DR</TH>
+                      <TH>Anchor</TH>
+                      <TH>Target</TH>
+                      <TH>Reason</TH>
+                      <TH>Lost</TH>
+                    </TR>
+                  </THead>
+                  <TBody>
+                    {data.recentlyLost.map((l, i) => (
+                      <TR
+                        key={
+                          l.id ||
+                          `${l.source_domain || "lost"}-${l.target_url || i}`
+                        }
+                      >
+                        <TD className="u-nums">{l.source_domain}</TD>
+                        <TD className="text-right u-nums">
+                          {l.domain_rating || "—"}
+                        </TD>
+                        <TD className="[max-width:160px] overflow-hidden text-ellipsis whitespace-nowrap">
+                          {l.anchor_text || "—"}
+                        </TD>
+                        <TD className="[max-width:200px] overflow-hidden text-ellipsis whitespace-nowrap">
+                          {l.target_url || "—"}
+                        </TD>
+                        <TD className="u-nums">
+                          {LOST_REASON_LABEL[l.lost_reason] ||
+                            (l.lost_reason
+                              ? l.lost_reason
+                              : "unverified (legacy)")}
+                        </TD>
+                        <TD className="u-nums">
+                          {l.lost_at || l.updated_at
+                            ? formatETDate(l.lost_at || l.updated_at)
+                            : "—"}
+                        </TD>
+                      </TR>
+                    ))}
+                  </TBody>
+                </Table>
+              </div>
+            </UiCard>
           )}
         </>
       )}
 
       {/* Citations sub-tab */}
       {subTab === "citations" && (
-        <Card>
+        <UiCard className="p-6">
           {" "}
-          <div
-            style={{
-              fontSize: 14,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 12,
-            }}
-          >
+          <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
             Directory Citations ({data.citationStats?.total || 0})
           </div>
           {(data.citations || []).map((c, i) => (
             <div
               key={i}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 10,
-                padding: "8px 0",
-                borderBottom: `1px solid ${D.border}`,
-              }}
+              className="flex items-center [gap:10px] [padding:8px_0] border-b border-hairline border-zinc-200"
             >
               {" "}
               <div
                 style={{
-                  width: 8,
-                  height: 8,
-                  borderRadius: 4,
-                  background: statusColor[c.status] || D.muted,
-                  flexShrink: 0,
+                  background: statusColor[c.status] || "#71717A",
                 }}
+                className="[width:8px] [height:8px] rounded-sm shrink-0"
               />{" "}
-              <div style={{ flex: 1, fontSize: 13, color: D.heading }}>
+              <div className="[flex:1] text-ui-body text-zinc-900">
                 {c.directory_name}
               </div>
               {c.listing_url && (
@@ -2108,224 +1890,374 @@ function BacklinksTab() {
                   href={c.listing_url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  style={{
-                    fontSize: 11,
-                    color: D.teal,
-                    textDecoration: "none",
-                  }}
+                  className="text-ui-body text-zinc-900 [text-decoration:none]"
                 >
                   View
                 </a>
               )}
               <span
                 style={{
-                  fontSize: 10,
-                  padding: "2px 8px",
-                  borderRadius: 4,
-                  background: (statusColor[c.status] || D.muted) + "22",
-                  color: statusColor[c.status] || D.muted,
-                  textTransform: "uppercase",
-                  fontWeight: 700,
+                  background: (statusColor[c.status] || "#71717A") + "22",
+                  color: statusColor[c.status] || "#71717A",
                 }}
+                className="text-ui-body [padding:2px_8px] rounded-sm font-medium"
               >
                 {c.status}
               </span>{" "}
             </div>
           ))}
-        </Card>
+        </UiCard>
       )}
 
       {/* Competitor Gaps sub-tab */}
       {subTab === "gaps" && (
-        <Card>
+        <UiCard className="p-6">
           {" "}
-          <div
-            style={{
-              fontSize: 14,
-              fontWeight: 500,
-              color: D.amber,
-              marginBottom: 12,
-            }}
-          >
+          <div className="text-ui-body font-medium text-zinc-700 [margin-bottom:12px]">
             Competitor Gap Opportunities ({(data.competitorGaps || []).length})
             {data.newGapsSince7d > 0 && (
-              <span style={{ marginLeft: 8, padding: "2px 8px", borderRadius: 4, fontSize: 11, fontWeight: 500, background: `${D.green}18`, color: D.green }}>
-                {data.newGapsSince7d} new this week{data.newHighValueGapsSince7d > 0 ? ` (${data.newHighValueGapsSince7d} high-value)` : ""}
+              <span className="[margin-left:8px] [padding:2px_8px] rounded-sm text-ui-body font-medium text-zinc-900 [background:#15803D18]">
+                {data.newGapsSince7d} new this week
+                {data.newHighValueGapsSince7d > 0
+                  ? ` (${data.newHighValueGapsSince7d} high-value)`
+                  : ""}
               </span>
             )}
           </div>{" "}
-          <div style={{ fontSize: 12, color: D.muted, marginBottom: 12 }}>
+          <div className="text-ui-body text-ink-secondary [margin-bottom:12px]">
             Domains linking to competitors but not to Waves
           </div>
           {(data.competitorGaps || []).length === 0 ? (
-            <div
-              style={{
-                fontSize: 13,
-                color: D.muted,
-                padding: 20,
-                textAlign: "center",
-              }}
-            >
+            <div className="text-ui-body text-ink-secondary [padding:20px] text-center">
               Run a competitor gap scan to find opportunities
             </div>
           ) : (
             (data.competitorGaps || []).map((g, i) => (
               <div
                 key={i}
-                style={{
-                  padding: "8px 12px",
-                  background: D.bg,
-                  borderRadius: 6,
-                  marginBottom: 4,
-                }}
+                className="[padding:8px_12px] bg-zinc-100 rounded-sm [margin-bottom:4px]"
               >
                 {" "}
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                  }}
-                >
+                <div className="flex justify-between items-center">
                   {" "}
-                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                    <span style={{ fontSize: 12, color: D.heading, fontWeight: 500 }}>{g.source_domain}</span>
-                    {g.created_at && new Date(g.created_at) >= new Date(Date.now() - 7 * 86400000) && (
-                      <span style={{ padding: "1px 6px", borderRadius: 3, fontSize: 9, fontWeight: 500, background: `${D.green}18`, color: D.green }}>New</span>
-                    )}
+                  <div className="flex items-center [gap:6px]">
+                    <span className="text-ui-body text-zinc-900 font-medium">
+                      {g.source_domain}
+                    </span>
+                    {g.created_at &&
+                      new Date(g.created_at) >=
+                        new Date(Date.now() - 7 * 86400000) && (
+                        <span className="[padding:1px_6px] rounded-xs text-ui-body font-medium text-zinc-900 [background:#15803D18]">
+                          New
+                        </span>
+                      )}
                   </div>{" "}
-                  <span style={{ fontSize: 10, color: D.muted }}>
+                  <span className="text-ui-body text-ink-secondary">
                     DR: {g.source_domain_rating || "?"}
                   </span>{" "}
                 </div>{" "}
-                <div style={{ fontSize: 11, color: D.muted }}>
+                <div className="text-ui-body text-ink-secondary">
                   Links to: {g.competitor_domain} · Anchor: "
                   {(g.anchor_text || "").substring(0, 40)}"
                 </div>{" "}
               </div>
             ))
           )}
-        </Card>
+        </UiCard>
       )}
 
       {/* Citation evidence and brand mentions are separate measurements. */}
       {subTab === "llm" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
-          <Card>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
+        <div className="flex flex-col [gap:12px] [min-width:0px]">
+          <UiCard className="p-6">
+            <div className="flex justify-between [gap:16px] flex-wrap">
               <div>
-                <h3 style={{ fontSize: 18, fontWeight: 500, color: D.heading, margin: "0 0 8px" }}>AI citations and mentions</h3>
-                <p style={{ fontSize: 14, color: D.muted, margin: 0 }}>
-                  {llmDash ? `${llmDash.summary.queriesTracked} active queries observed across ${llmDash.summary.platforms.length} engines` : llmError ? "Observations could not be loaded." : "Loading observations…"}
+                <h3 className="text-[18px] font-medium text-zinc-900 [margin:0_0_8px]">
+                  AI citations and mentions
+                </h3>
+                <p className="text-ui-body text-ink-secondary [margin:0px]">
+                  {llmDash
+                    ? `${llmDash.summary.queriesTracked} active queries observed across ${llmDash.summary.platforms.length} engines`
+                    : llmError
+                      ? "Observations could not be loaded."
+                      : "Loading observations…"}
                 </p>
               </div>
               {canRunSeoActions && (
-                <button onClick={handleLlmScan} disabled={llmScanning}
-                  style={{ padding: "8px 14px", minHeight: 44, borderRadius: 4, border: `1px solid ${D.border}`, background: D.bg, color: D.text, fontSize: 14, cursor: llmScanning ? "default" : "pointer" }}>
+                <Button
+                  onClick={handleLlmScan}
+                  disabled={llmScanning}
+                  variant="secondary"
+                >
                   {llmScanning ? "Scanning…" : "Run Scan"}
-                </button>
+                </Button>
               )}
             </div>
-            <p style={{ fontSize: 14, color: D.muted, lineHeight: 1.6, marginBottom: 0 }}>
-              Citation rate counts answers with a Waves source link attached. Mention rate counts answers that name Waves.
-              Search-result links do not count as citations. Unanswered probes and unresolved links are excluded from rates.
-              These API observations are directional; validate a sample in each consumer app.
+            <p className="text-ui-body text-ink-secondary [line-height:1.6] [margin-bottom:0px]">
+              Citation rate counts answers with a Waves source link attached.
+              Mention rate counts answers that name Waves. Search-result links
+              do not count as citations. Unanswered probes and unresolved links
+              are excluded from rates. These API observations are directional;
+              validate a sample in each consumer app.
             </p>
-            {llmError && <button onClick={() => setLlmError(false)} style={{ marginTop: 12, minHeight: 44, padding: "8px 14px", border: `1px solid ${D.border}`, borderRadius: 4, background: D.bg, color: D.text, fontSize: 14, cursor: "pointer" }}>Retry loading observations</button>}
-          </Card>
+            {llmError && (
+              <Button
+                onClick={() => setLlmError(false)}
+                className="[margin-top:12px]"
+                variant="secondary"
+              >
+                Retry loading observations
+              </Button>
+            )}
+          </UiCard>
           {llmDash?.benchmark && (
-            <Card>
-              <h3 style={{ fontSize: 16, color: D.heading, fontWeight: 500, marginTop: 0 }}>Fixed 40-question benchmark</h3>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 24 }}>
-                <div><div style={{ fontSize: 14, color: D.muted }}>Linked citation rate</div><div style={{ fontSize: 24, color: D.heading }}>{aeoRate(llmDash.benchmark.citationRate)}</div></div>
-                <div><div style={{ fontSize: 14, color: D.muted }}>Brand mention rate</div><div style={{ fontSize: 24, color: D.heading }}>{aeoRate(llmDash.benchmark.mentionRate)}</div></div>
-                <div><div style={{ fontSize: 14, color: D.muted }}>Questions observed</div><div style={{ fontSize: 24, color: D.heading }}>{llmDash.benchmark.observedQuestions} / {llmDash.benchmark.questions}</div></div>
+            <UiCard className="p-6">
+              <h3 className="text-ui-body text-zinc-900 font-medium [margin-top:0px]">
+                Fixed 40-question benchmark
+              </h3>
+              <div className="flex flex-wrap [gap:24px]">
+                <div>
+                  <div className="text-ui-body text-ink-secondary">
+                    Linked citation rate
+                  </div>
+                  <div className="text-[24px] text-zinc-900">
+                    {aeoRate(llmDash.benchmark.citationRate)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-ui-body text-ink-secondary">
+                    Brand mention rate
+                  </div>
+                  <div className="text-[24px] text-zinc-900">
+                    {aeoRate(llmDash.benchmark.mentionRate)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-ui-body text-ink-secondary">
+                    Questions observed
+                  </div>
+                  <div className="text-[24px] text-zinc-900">
+                    {llmDash.benchmark.observedQuestions} /{" "}
+                    {llmDash.benchmark.questions}
+                  </div>
+                </div>
               </div>
-              <p style={{ fontSize: 14, color: D.muted, lineHeight: 1.6, marginBottom: 0 }}>
-                {llmDash.benchmark.activeQuestions} questions active · {llmDash.benchmark.measured} measured answers.
-                Excluded: {llmDash.benchmark.legacy} legacy, {llmDash.benchmark.noAnswer} no answer, {llmDash.benchmark.unresolved} unresolved.
-                Historical observations used a different citation method. Compare the same questions and model in repeat runs.
-                This view uses the latest observations within 30 days; sampling dates may differ by engine.
+              <p className="text-ui-body text-ink-secondary [line-height:1.6] [margin-bottom:0px]">
+                {llmDash.benchmark.activeQuestions} questions active ·{" "}
+                {llmDash.benchmark.measured} measured answers. Excluded:{" "}
+                {llmDash.benchmark.legacy} legacy, {llmDash.benchmark.noAnswer}{" "}
+                no answer, {llmDash.benchmark.unresolved} unresolved. Historical
+                observations used a different citation method. Compare the same
+                questions and model in repeat runs. This view uses the latest
+                observations within 30 days; sampling dates may differ by
+                engine.
               </p>
-            </Card>
+            </UiCard>
           )}
-          <AeoRateTable label="Benchmark by engine and model" rows={llmDash?.benchmark?.byPlatform || []} />
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 320px), 1fr))", gap: 12, minWidth: 0 }}>
-            <AeoRateTable label="Benchmark by question type" rows={llmDash?.benchmark?.byIntent || []} />
-            <AeoRateTable label="Benchmark by city" rows={llmDash?.benchmark?.byCity || []} />
+          <AeoRateTable
+            label="Benchmark by engine and model"
+            rows={llmDash?.benchmark?.byPlatform || []}
+          />
+          <div className="grid [grid-template-columns:repeat(auto-fit,_minmax(min(100%,_320px),_1fr))] [gap:12px] [min-width:0px]">
+            <AeoRateTable
+              label="Benchmark by question type"
+              rows={llmDash?.benchmark?.byIntent || []}
+            />
+            <AeoRateTable
+              label="Benchmark by city"
+              rows={llmDash?.benchmark?.byCity || []}
+            />
           </div>
-          <details style={{ fontSize: 14, color: D.text }}>
-            <summary style={{ cursor: "pointer", padding: "10px 0" }}>All managed queries and benchmark history</summary>
-            <AeoRateTable label="All managed queries by engine" rows={llmDash?.byPlatform || []} />
-            <AeoRateTable label="Daily benchmark observations by engine and model" rows={llmDash?.trend || []} />
+          <details className="text-ui-body text-zinc-900">
+            <summary className="cursor-pointer [padding:10px_0]">
+              All managed queries and benchmark history
+            </summary>
+            <AeoRateTable
+              label="All managed queries by engine"
+              rows={llmDash?.byPlatform || []}
+            />
+            <AeoRateTable
+              label="Daily benchmark observations by engine and model"
+              rows={llmDash?.trend || []}
+            />
           </details>
           {llmDash?.entity && (
-            <Card>
-              <h3 style={{ fontSize: 16, color: D.heading, fontWeight: 500, marginTop: 0 }}>Entity accuracy: what engines say about Waves</h3>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 24 }}>
-                <div><div style={{ fontSize: 14, color: D.muted }}>Facts stated correctly</div><div style={{ fontSize: 24, color: D.heading }}>{aeoRate(llmDash.entity.factAccuracy)}</div></div>
-                <div><div style={{ fontSize: 14, color: D.muted }}>Answers with a wrong claim</div><div style={{ fontSize: 24, color: D.heading }}>{aeoRate(llmDash.entity.wrongClaimRate)}</div></div>
-                <div><div style={{ fontSize: 14, color: D.muted }}>Questions observed</div><div style={{ fontSize: 24, color: D.heading }}>{llmDash.entity.observedQuestions} / {llmDash.entity.questions}</div></div>
+            <UiCard className="p-6">
+              <h3 className="text-ui-body text-zinc-900 font-medium [margin-top:0px]">
+                Entity accuracy: what engines say about Waves
+              </h3>
+              <div className="flex flex-wrap [gap:24px]">
+                <div>
+                  <div className="text-ui-body text-ink-secondary">
+                    Facts stated correctly
+                  </div>
+                  <div className="text-[24px] text-zinc-900">
+                    {aeoRate(llmDash.entity.factAccuracy)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-ui-body text-ink-secondary">
+                    Answers with a wrong claim
+                  </div>
+                  <div className="text-[24px] text-zinc-900">
+                    {aeoRate(llmDash.entity.wrongClaimRate)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-ui-body text-ink-secondary">
+                    Questions observed
+                  </div>
+                  <div className="text-[24px] text-zinc-900">
+                    {llmDash.entity.observedQuestions} /{" "}
+                    {llmDash.entity.questions}
+                  </div>
+                </div>
               </div>
-              <p style={{ fontSize: 14, color: D.muted, lineHeight: 1.6, marginBottom: 0 }}>
-                {llmDash.entity.activeQuestions} questions active · {llmDash.entity.observed} answers scored against the owner-approved cohort {llmDash.entity.version}.
-                Facts are the founder, founding year, license, footprint, services and contact details; wrong claims are the rulings an answer must not contradict (a franchise, fumigation, damage-repair coverage inferred from the termite bond).
-                {llmDash.entity.missingMostOften?.length > 0 && <> Missing most often: {llmDash.entity.missingMostOften.map(f => `${f.label} (${f.count})`).join(", ")}.</>}
-                {llmDash.entity.wrongMostOften?.length > 0 && <> Wrong most often: {llmDash.entity.wrongMostOften.map(f => `${f.label} (${f.count})`).join(", ")}.</>}
+              <p className="text-ui-body text-ink-secondary [line-height:1.6] [margin-bottom:0px]">
+                {llmDash.entity.activeQuestions} questions active ·{" "}
+                {llmDash.entity.observed} answers scored against the
+                owner-approved cohort {llmDash.entity.version}. Facts are the
+                founder, founding year, license, footprint, services and contact
+                details; wrong claims are the rulings an answer must not
+                contradict (a franchise, fumigation, damage-repair coverage
+                inferred from the termite bond).
+                {llmDash.entity.missingMostOften?.length > 0 && (
+                  <>
+                    {" "}
+                    Missing most often:{" "}
+                    {llmDash.entity.missingMostOften
+                      .map((f) => `${f.label} (${f.count})`)
+                      .join(", ")}
+                    .
+                  </>
+                )}
+                {llmDash.entity.wrongMostOften?.length > 0 && (
+                  <>
+                    {" "}
+                    Wrong most often:{" "}
+                    {llmDash.entity.wrongMostOften
+                      .map((f) => `${f.label} (${f.count})`)
+                      .join(", ")}
+                    .
+                  </>
+                )}
               </p>
-            </Card>
+            </UiCard>
           )}
-          <EntityFactsTable label="Entity accuracy by engine and model" rows={llmDash?.entity?.byPlatform || []} />
-          <EntityFactsTable label="Entity accuracy by question" rows={llmDash?.entity?.byQuestion || []} first="Question" />
-          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-            <Card style={{ flex: 1, minWidth: 240 }}>
-              <h3 style={{ fontSize: 16, fontWeight: 500, color: D.heading, marginTop: 0 }}>Linked Waves pages</h3>
-              {(llmDash?.citedPages || []).length === 0 && <p style={{ fontSize: 14, color: D.muted }}>No verified linked citations yet.</p>}
-              {(llmDash?.citedPages || []).map(c => (
-                <div key={c.url} style={{ display: "flex", gap: 12, justifyContent: "space-between", padding: "6px 0", fontSize: 14 }}>
-                  <a href={c.url} target="_blank" rel="noopener noreferrer" style={{ color: D.text, overflowWrap: "anywhere", minWidth: 0 }}>{c.url}</a>
-                  <span style={{ color: D.muted, fontFamily: MONO }}>{c.count}</span>
+          <EntityFactsTable
+            label="Entity accuracy by engine and model"
+            rows={llmDash?.entity?.byPlatform || []}
+          />
+          <EntityFactsTable
+            label="Entity accuracy by question"
+            rows={llmDash?.entity?.byQuestion || []}
+            first="Question"
+          />
+          <div className="flex [gap:12px] flex-wrap">
+            <UiCard className="p-6 [flex:1] [min-width:240px]">
+              <h3 className="text-ui-body font-medium text-zinc-900 [margin-top:0px]">
+                Linked Waves pages
+              </h3>
+              {(llmDash?.citedPages || []).length === 0 && (
+                <p className="text-ui-body text-ink-secondary">
+                  No verified linked citations yet.
+                </p>
+              )}
+              {(llmDash?.citedPages || []).map((c) => (
+                <div
+                  key={c.url}
+                  className="flex [gap:12px] justify-between [padding:6px_0] text-ui-body"
+                >
+                  <a
+                    href={c.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-zinc-900 break-words [min-width:0px]"
+                  >
+                    {c.url}
+                  </a>
+                  <span className="text-ink-secondary">{c.count}</span>
                 </div>
               ))}
-            </Card>
-            <Card style={{ flex: 1, minWidth: 240 }}>
-              <h3 style={{ fontSize: 16, fontWeight: 500, color: D.heading, marginTop: 0 }}>Competitors mentioned</h3>
-              {(llmDash?.competitors || []).length === 0 && <p style={{ fontSize: 14, color: D.muted }}>None detected in measured answers.</p>}
-              {(llmDash?.competitors || []).map(c => (
-                <div key={c.name} style={{ display: "flex", gap: 12, justifyContent: "space-between", padding: "6px 0", fontSize: 14, color: D.text }}>
-                  <span>{c.name}</span><span style={{ fontFamily: MONO }}>{c.count}</span>
+            </UiCard>
+            <UiCard className="p-6 [flex:1] [min-width:240px]">
+              <h3 className="text-ui-body font-medium text-zinc-900 [margin-top:0px]">
+                Competitors mentioned
+              </h3>
+              {(llmDash?.competitors || []).length === 0 && (
+                <p className="text-ui-body text-ink-secondary">
+                  None detected in measured answers.
+                </p>
+              )}
+              {(llmDash?.competitors || []).map((c) => (
+                <div
+                  key={c.name}
+                  className="flex [gap:12px] justify-between [padding:6px_0] text-ui-body text-zinc-900"
+                >
+                  <span>{c.name}</span>
+                  <span>{c.count}</span>
                 </div>
               ))}
-            </Card>
+            </UiCard>
           </div>
-          <Card>
-            <h3 style={{ fontSize: 16, fontWeight: 500, color: D.heading, marginTop: 0 }}>Latest answer evidence</h3>
-            {!llmDash?.grid?.length && <p style={{ fontSize: 14, color: D.muted }}>No observations for active queries yet.</p>}
-            {(llmDash?.grid || []).map(m => (
-              <details key={`${m.query}::${m.llm_platform}::${m.model_version}`} style={{ padding: "12px 0", borderBottom: `1px solid ${D.border}`, fontSize: 14, color: D.text }}>
-                <summary style={{ cursor: "pointer", lineHeight: 1.6 }}>
-                  {m.benchmark_id && `${m.benchmark_id} · `}{m.query}
-                  <span style={{ display: "block", color: D.muted }}>{aeoStatus(m)} · {m.llm_platform} · {m.model_version} · {String(m.check_date).slice(0, 10)}</span>
+          <UiCard className="p-6">
+            <h3 className="text-ui-body font-medium text-zinc-900 [margin-top:0px]">
+              Latest answer evidence
+            </h3>
+            {!llmDash?.grid?.length && (
+              <p className="text-ui-body text-ink-secondary">
+                No observations for active queries yet.
+              </p>
+            )}
+            {(llmDash?.grid || []).map((m) => (
+              <details
+                key={`${m.query}::${m.llm_platform}::${m.model_version}`}
+                className="[padding:12px_0] text-ui-body text-zinc-900 border-b border-hairline border-zinc-200"
+              >
+                <summary className="cursor-pointer [line-height:1.6]">
+                  {m.benchmark_id && `${m.benchmark_id} · `}
+                  {m.query}
+                  <span className="block text-ink-secondary">
+                    {aeoStatus(m)} · {m.llm_platform} · {m.model_version} ·{" "}
+                    {String(m.check_date).slice(0, 10)}
+                  </span>
                 </summary>
-                <p style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", lineHeight: 1.6 }}>{m.response_raw || "No answer text returned."}</p>
-                {m.waves_cited_urls.map(url => <p key={url}><a href={url} target="_blank" rel="noopener noreferrer" style={{ color: D.text, overflowWrap: "anywhere" }}>{url}</a></p>)}
-                {m.target_cited && <p style={{ color: D.muted }}>The guide mapped to this benchmark question was linked.</p>}
+                <p className="whitespace-pre-wrap break-words [line-height:1.6]">
+                  {m.response_raw || "No answer text returned."}
+                </p>
+                {m.waves_cited_urls.map((url) => (
+                  <p key={url}>
+                    <a
+                      href={url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-zinc-900 break-words"
+                    >
+                      {url}
+                    </a>
+                  </p>
+                ))}
+                {m.target_cited && (
+                  <p className="text-ink-secondary">
+                    The guide mapped to this benchmark question was linked.
+                  </p>
+                )}
               </details>
             ))}
-          </Card>
+          </UiCard>
         </div>
       )}
 
-      {subTab === "prospects" && <LinkBuildingBoard canRun={canRunSeoActions} />}
+      {subTab === "prospects" && (
+        <LinkBuildingBoard canRun={canRunSeoActions} />
+      )}
       {subTab === "agent" && <BacklinkAgentPanel />}
     </div>
   );
 }
-
 function aeoRate(value) {
   return typeof value === "number" ? `${value}%` : "Not measured";
 }
-
 function aeoStatus(row) {
   if (row.measurement_version !== 2) return "Historical observation";
   if (!row.answer_available) return "No answer";
@@ -2333,49 +2265,113 @@ function aeoStatus(row) {
   if (row.waves_cited_urls.length) return "Linked citation";
   return row.waves_mentioned ? "Mention only" : "No Waves mention or citation";
 }
-
 function EntityFactsTable({ label, rows, first = "Group" }) {
-  const scored = rows.filter(row => row.observed > 0);
+  const scored = rows.filter((row) => row.observed > 0);
   return (
-    <Card style={{ flex: 1, minWidth: 0 }}>
-      <h3 style={{ fontSize: 16, fontWeight: 500, color: D.heading, marginTop: 0 }}>{label}</h3>
-      {scored.length === 0 ? <p style={{ fontSize: 14, color: D.muted }}>No scored answers yet.</p> : (
-        <div style={{ overflowX: "auto" }}>
-          <table aria-label={label} style={{ width: "100%", minWidth: 520, borderCollapse: "collapse", fontSize: 14, color: D.text }}>
-            <thead><tr>{[first, "Facts right", "Wrong claims", "Answers", "Missing most often"].map(title => <th key={title} style={{ textAlign: "left", fontWeight: 500, padding: "8px", borderBottom: `1px solid ${D.border}` }}>{title}</th>)}</tr></thead>
-            <tbody>{scored.map(row => <tr key={row.key}>
-              <td style={{ padding: "8px", overflowWrap: "anywhere" }}>{row.key}</td>
-              <td style={{ padding: "8px", whiteSpace: "nowrap" }}>{aeoRate(row.factAccuracy)}</td>
-              <td style={{ padding: "8px", whiteSpace: "nowrap" }}>{row.wrongClaims} of {row.observed}</td>
-              <td style={{ padding: "8px" }}>{row.observed}</td>
-              <td style={{ padding: "8px", color: D.muted }}>{(row.missingMostOften || []).map(f => f.label).join(", ") || "None"}</td>
-            </tr>)}</tbody>
-          </table>
+    <UiCard className="p-6 [flex:1] [min-width:0px]">
+      <h3 className="text-ui-body font-medium text-zinc-900 [margin-top:0px]">
+        {label}
+      </h3>
+      {scored.length === 0 ? (
+        <p className="text-ui-body text-ink-secondary">
+          No scored answers yet.
+        </p>
+      ) : (
+        <div className="overflow-x-auto">
+          <Table
+            aria-label={label}
+            className="[width:100%] [min-width:520px] [border-collapse:collapse] text-ui-body text-zinc-900"
+          >
+            <THead>
+              <TR>
+                {[
+                  first,
+                  "Facts right",
+                  "Wrong claims",
+                  "Answers",
+                  "Missing most often",
+                ].map((title) => (
+                  <TH
+                    key={title}
+                    className="text-left font-medium [padding:8px] border-b border-hairline border-zinc-200"
+                  >
+                    {title}
+                  </TH>
+                ))}
+              </TR>
+            </THead>
+            <TBody>
+              {scored.map((row) => (
+                <TR key={row.key}>
+                  <TD className="[padding:8px] break-words">{row.key}</TD>
+                  <TD className="[padding:8px] whitespace-nowrap">
+                    {aeoRate(row.factAccuracy)}
+                  </TD>
+                  <TD className="[padding:8px] whitespace-nowrap">
+                    {row.wrongClaims} of {row.observed}
+                  </TD>
+                  <TD className="[padding:8px]">{row.observed}</TD>
+                  <TD className="[padding:8px] text-ink-secondary">
+                    {(row.missingMostOften || [])
+                      .map((f) => f.label)
+                      .join(", ") || "None"}
+                  </TD>
+                </TR>
+              ))}
+            </TBody>
+          </Table>
         </div>
       )}
-    </Card>
+    </UiCard>
   );
 }
-
 function AeoRateTable({ label, rows }) {
   return (
-    <Card style={{ flex: 1, minWidth: 0 }}>
-      <h3 style={{ fontSize: 16, fontWeight: 500, color: D.heading, marginTop: 0 }}>{label}</h3>
-      {rows.length === 0 ? <p style={{ fontSize: 14, color: D.muted }}>No observations yet.</p> : (
-        <div style={{ overflowX: "auto" }}>
-          <table aria-label={label} style={{ width: "100%", minWidth: 440, borderCollapse: "collapse", fontSize: 14, color: D.text }}>
-            <thead><tr>{["Group", "Linked", "Mentioned", "Answers", "Excluded"].map(title => <th key={title} style={{ textAlign: "left", fontWeight: 500, padding: "8px", borderBottom: `1px solid ${D.border}` }}>{title}</th>)}</tr></thead>
-            <tbody>{rows.map(row => <tr key={row.key}>
-              <td style={{ padding: "8px", overflowWrap: "anywhere" }}>{row.key}</td>
-              <td style={{ padding: "8px", whiteSpace: "nowrap" }}>{aeoRate(row.citationRate)}</td>
-              <td style={{ padding: "8px", whiteSpace: "nowrap" }}>{aeoRate(row.mentionRate)}</td>
-              <td style={{ padding: "8px" }}>{row.measured}</td>
-              <td style={{ padding: "8px" }}>{row.total - row.measured}</td>
-            </tr>)}</tbody>
-          </table>
+    <UiCard className="p-6 [flex:1] [min-width:0px]">
+      <h3 className="text-ui-body font-medium text-zinc-900 [margin-top:0px]">
+        {label}
+      </h3>
+      {rows.length === 0 ? (
+        <p className="text-ui-body text-ink-secondary">No observations yet.</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <Table
+            aria-label={label}
+            className="[width:100%] [min-width:440px] [border-collapse:collapse] text-ui-body text-zinc-900"
+          >
+            <THead>
+              <TR>
+                {["Group", "Linked", "Mentioned", "Answers", "Excluded"].map(
+                  (title) => (
+                    <TH
+                      key={title}
+                      className="text-left font-medium [padding:8px] border-b border-hairline border-zinc-200"
+                    >
+                      {title}
+                    </TH>
+                  ),
+                )}
+              </TR>
+            </THead>
+            <TBody>
+              {rows.map((row) => (
+                <TR key={row.key}>
+                  <TD className="[padding:8px] break-words">{row.key}</TD>
+                  <TD className="[padding:8px] whitespace-nowrap">
+                    {aeoRate(row.citationRate)}
+                  </TD>
+                  <TD className="[padding:8px] whitespace-nowrap">
+                    {aeoRate(row.mentionRate)}
+                  </TD>
+                  <TD className="[padding:8px]">{row.measured}</TD>
+                  <TD className="[padding:8px]">{row.total - row.measured}</TD>
+                </TR>
+              ))}
+            </TBody>
+          </Table>
         </div>
       )}
-    </Card>
+    </UiCard>
   );
 }
 
@@ -2383,32 +2379,63 @@ function AeoRateTable({ label, rows }) {
 // LINK BUILDING BOARD — outbound prospect pipeline (Backlink Manager M1)
 // =========================================================================
 const PROSPECT_VIEWS = [
-  { key: "all", label: "All", statuses: null },
-  { key: "approvals", label: "Needs approval", statuses: null }, // outreach drafts → send (M3b)
-  { key: "outreach", label: "Needs outreach", statuses: ["prospect", "contacted", "negotiating"] },
-  { key: "placed", label: "In progress", statuses: ["placed"] },
-  { key: "notindexed", label: "Live · not indexed", statuses: ["live"] },
-  { key: "indexed", label: "Indexed", statuses: ["indexed"] },
-  { key: "lost", label: "Lost", statuses: ["lost"] },
-  { key: "parked", label: "Parked", statuses: ["awaiting_owner", "watching"] }, // v2: owner decision / unactionable today
+  {
+    key: "all",
+    label: "All",
+    statuses: null,
+  },
+  {
+    key: "approvals",
+    label: "Needs approval",
+    statuses: null,
+  },
+  // outreach drafts → send (M3b)
+  {
+    key: "outreach",
+    label: "Needs outreach",
+    statuses: ["prospect", "contacted", "negotiating"],
+  },
+  {
+    key: "placed",
+    label: "In progress",
+    statuses: ["placed"],
+  },
+  {
+    key: "notindexed",
+    label: "Live · not indexed",
+    statuses: ["live"],
+  },
+  {
+    key: "indexed",
+    label: "Indexed",
+    statuses: ["indexed"],
+  },
+  {
+    key: "lost",
+    label: "Lost",
+    statuses: ["lost"],
+  },
+  {
+    key: "parked",
+    label: "Parked",
+    statuses: ["awaiting_owner", "watching"],
+  }, // v2: owner decision / unactionable today
 ];
 
 // Outreach (M3b): link types whose prospects can be drafted + sent as one-to-one email.
 const OUTREACH_TYPES_UI = ["editorial", "resource", "guest_post", "haro"];
-
 const PROSPECT_STATUS_COLOR = {
-  prospect: D.muted,
-  contacted: D.amber,
-  negotiating: D.amber,
-  placed: D.teal,
-  live: D.green,
-  indexed: D.green,
-  lost: D.red,
-  rejected: D.red,
-  awaiting_owner: D.amber,
-  watching: D.muted,
+  prospect: "#71717A",
+  contacted: "#A16207",
+  negotiating: "#A16207",
+  placed: "#18181B",
+  live: "#15803D",
+  indexed: "#15803D",
+  lost: "#991B1B",
+  rejected: "#991B1B",
+  awaiting_owner: "#A16207",
+  watching: "#71717A",
 };
-
 function LinkBuildingBoard({ canRun }) {
   const [items, setItems] = useState(null);
   const [stats, setStats] = useState(null);
@@ -2416,63 +2443,95 @@ function LinkBuildingBoard({ canRun }) {
   const [busy, setBusy] = useState(false);
   const [adding, setAdding] = useState(false);
   const [drafting, setDrafting] = useState(null); // prospect being drafted for outreach (M3b)
-  const [form, setForm] = useState({ target_url: "", live_url: "", target_page: "", anchor_planned: "", link_type: "editorial", priority: "medium" });
-
+  const [form, setForm] = useState({
+    target_url: "",
+    live_url: "",
+    target_page: "",
+    anchor_planned: "",
+    link_type: "editorial",
+    priority: "medium",
+  });
   const load = () => {
-    adminFetch("/admin/backlink-agent/prospects/stats").then(setStats).catch(() => {});
+    adminFetch("/admin/backlink-agent/prospects/stats")
+      .then(setStats)
+      .catch(() => {});
     // The approvals view is self-fetching (OutreachApprovals) — skip the board query.
-    if (view === "approvals") { setItems([]); return; }
+    if (view === "approvals") {
+      setItems([]);
+      return;
+    }
     const cur = PROSPECT_VIEWS.find((v) => v.key === view);
     const qs = cur?.statuses?.length === 1 ? `?status=${cur.statuses[0]}` : "";
-    const request = cur?.statuses?.length > 1
-      ? Promise.all(cur.statuses.map((status) => adminFetch(`/admin/backlink-agent/prospects?status=${status}`)))
-        .then((results) => {
-          const seen = new Set();
-          return results.flatMap((d) => d.items || []).filter((row) => {
-            if (!row?.id || seen.has(row.id)) return false;
-            seen.add(row.id);
-            return true;
-          });
-        })
-      : adminFetch(`/admin/backlink-agent/prospects${qs}`).then((d) => d.items || []);
-    request
-      .then((rows) => setItems(rows))
-      .catch(() => setItems([]));
+    const request =
+      cur?.statuses?.length > 1
+        ? Promise.all(
+            cur.statuses.map((status) =>
+              adminFetch(`/admin/backlink-agent/prospects?status=${status}`),
+            ),
+          ).then((results) => {
+            const seen = new Set();
+            return results
+              .flatMap((d) => d.items || [])
+              .filter((row) => {
+                if (!row?.id || seen.has(row.id)) return false;
+                seen.add(row.id);
+                return true;
+              });
+          })
+        : adminFetch(`/admin/backlink-agent/prospects${qs}`).then(
+            (d) => d.items || [],
+          );
+    request.then((rows) => setItems(rows)).catch(() => setItems([]));
   };
-
   useEffect(load, [view]);
-
   const runVerify = async () => {
     if (!canRun) return;
     setBusy(true);
-    try { await adminPost("/admin/backlink-agent/prospects/verify", {}); } finally { setBusy(false); }
+    try {
+      await adminPost("/admin/backlink-agent/prospects/verify", {});
+    } finally {
+      setBusy(false);
+    }
   };
-
   const recheck = async (id) => {
     setBusy(true);
-    try { await adminPost(`/admin/backlink-agent/prospects/${id}/recheck`, {}); load(); } finally { setBusy(false); }
+    try {
+      await adminPost(`/admin/backlink-agent/prospects/${id}/recheck`, {});
+      load();
+    } finally {
+      setBusy(false);
+    }
   };
-
   const addProspect = async () => {
     if (!form.target_page || (!form.target_url && !form.live_url)) return;
     setBusy(true);
     try {
       await adminPost("/admin/backlink-agent/prospects", form);
-      setForm({ target_url: "", live_url: "", target_page: "", anchor_planned: "", link_type: "editorial", priority: "medium" });
+      setForm({
+        target_url: "",
+        live_url: "",
+        target_page: "",
+        anchor_planned: "",
+        link_type: "editorial",
+        priority: "medium",
+      });
       setAdding(false);
       load();
-    } finally { setBusy(false); }
+    } finally {
+      setBusy(false);
+    }
   };
-
-  if (items === null) return <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>Loading link prospects...</div>;
-
-  const inputStyle = { padding: "6px 10px", borderRadius: 6, border: `1px solid ${D.inputBorder}`, fontSize: 13, background: D.white, color: D.text };
-
+  if (items === null)
+    return (
+      <div className="text-ink-secondary [padding:40px] text-center">
+        Loading link prospects...
+      </div>
+    );
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+    <div className="flex flex-col [gap:14px]">
       {/* KPIs */}
       {stats && (
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        <div className="flex [gap:10px] flex-wrap">
           {[
             ["Prospects", stats.total],
             ["Placed", stats.byStatus?.placed || 0],
@@ -2481,107 +2540,279 @@ function LinkBuildingBoard({ canRun }) {
             ["Lost", stats.byStatus?.lost || 0],
             ["Indexing rate", `${stats.indexingRate || 0}%`],
           ].map(([label, val]) => (
-            <div key={label} style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: "10px 14px", minWidth: 96 }}>
-              <div style={{ fontSize: 18, fontWeight: 500, color: D.heading }}>{val}</div>
-              <div style={{ fontSize: 11, color: D.muted }}>{label}</div>
-            </div>
+            <UiCard
+              key={label}
+              className="bg-white rounded-md [padding:10px_14px] [min-width:96px] border-hairline border-zinc-200"
+            >
+              <div className="text-[18px] font-medium text-zinc-900">{val}</div>
+              <div className="text-ui-body text-ink-secondary">{label}</div>
+            </UiCard>
           ))}
         </div>
       )}
 
       {/* View filters + actions */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-        <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+      <div className="flex justify-between items-center flex-wrap [gap:8px]">
+        <div className="flex [gap:4px] flex-wrap">
           {PROSPECT_VIEWS.map((v) => (
-            <button key={v.key} onClick={() => setView(v.key)}
-              style={{ padding: "5px 12px", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 12,
-                background: view === v.key ? D.teal : D.bg, color: view === v.key ? D.white : D.muted, whiteSpace: "nowrap" }}>
+            <Button
+              key={v.key}
+              onClick={() => setView(v.key)}
+              className="whitespace-nowrap"
+              variant={view === v.key ? "primary" : "secondary"}
+            >
               {v.label}
-            </button>
+            </Button>
           ))}
         </div>
         {canRun && (
-          <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={() => setAdding((a) => !a)} style={{ padding: "6px 14px", borderRadius: 6, border: `1px solid ${D.teal}`, background: D.teal, color: D.white, fontSize: 12, cursor: "pointer" }}>
-              + Add prospect
-            </button>
-            <button onClick={runVerify} disabled={busy} style={{ padding: "6px 14px", borderRadius: 6, border: `1px solid ${D.teal}`, background: "transparent", color: D.teal, fontSize: 12, cursor: "pointer", opacity: busy ? 0.5 : 1 }}>
+          <div className="flex [gap:8px]">
+            <Button onClick={() => setAdding((a) => !a)}>+ Add prospect</Button>
+            <Button onClick={runVerify} disabled={busy} variant="secondary">
               {busy ? "Verifying..." : "Verify now"}
-            </button>
+            </Button>
           </div>
         )}
       </div>
 
       {/* Outreach approvals (M3b) — its own self-fetching panel */}
-      {view === "approvals" && <OutreachApprovals canRun={canRun} onChange={load} />}
+      {view === "approvals" && (
+        <OutreachApprovals canRun={canRun} onChange={load} />
+      )}
 
       {/* Add form */}
       {view !== "approvals" && adding && canRun && (
-        <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 14, display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
-          <input style={{ ...inputStyle, flex: "1 1 220px" }} placeholder="Prospect site/page URL (planned)" value={form.target_url} onChange={(e) => setForm({ ...form, target_url: e.target.value })} />
-          <input style={{ ...inputStyle, flex: "1 1 220px" }} placeholder="Live URL — if link is already placed" value={form.live_url} onChange={(e) => setForm({ ...form, live_url: e.target.value })} />
-          <input style={{ ...inputStyle, flex: "1 1 220px" }} placeholder="Our target page (money page URL)" value={form.target_page} onChange={(e) => setForm({ ...form, target_page: e.target.value })} />
-          <input style={{ ...inputStyle, flex: "1 1 160px" }} placeholder="Planned anchor" value={form.anchor_planned} onChange={(e) => setForm({ ...form, anchor_planned: e.target.value })} />
-          <select style={inputStyle} value={form.link_type} onChange={(e) => setForm({ ...form, link_type: e.target.value })}>
-            {["editorial", "resource", "guest_post", "haro", "directory", "citation", "social"].map((t) => <option key={t} value={t}>{t}</option>)}
-          </select>
-          <select style={inputStyle} value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value })}>
-            {["high", "medium", "low"].map((p) => <option key={p} value={p}>{p}</option>)}
-          </select>
-          <button onClick={addProspect} disabled={busy} style={{ padding: "6px 14px", borderRadius: 6, border: "none", background: D.green, color: D.white, fontSize: 12, cursor: "pointer" }}>Save</button>
-        </div>
+        <UiCard className="bg-white rounded-md [padding:14px] flex flex-wrap [gap:8px] items-center border-hairline border-zinc-200">
+          <Input
+            placeholder="Prospect site/page URL (planned)"
+            value={form.target_url}
+            onChange={(e) =>
+              setForm({
+                ...form,
+                target_url: e.target.value,
+              })
+            }
+            className="[flex:1_1_220px]"
+          />
+          <Input
+            placeholder="Live URL — if link is already placed"
+            value={form.live_url}
+            onChange={(e) =>
+              setForm({
+                ...form,
+                live_url: e.target.value,
+              })
+            }
+            className="[flex:1_1_220px]"
+          />
+          <Input
+            placeholder="Our target page (money page URL)"
+            value={form.target_page}
+            onChange={(e) =>
+              setForm({
+                ...form,
+                target_page: e.target.value,
+              })
+            }
+            className="[flex:1_1_220px]"
+          />
+          <Input
+            placeholder="Planned anchor"
+            value={form.anchor_planned}
+            onChange={(e) =>
+              setForm({
+                ...form,
+                anchor_planned: e.target.value,
+              })
+            }
+            className="[flex:1_1_160px]"
+          />
+          <Select
+            className="!w-auto"
+            value={form.link_type}
+            onChange={(e) =>
+              setForm({
+                ...form,
+                link_type: e.target.value,
+              })
+            }
+          >
+            {[
+              "editorial",
+              "resource",
+              "guest_post",
+              "haro",
+              "directory",
+              "citation",
+              "social",
+            ].map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </Select>
+          <Select
+            className="!w-auto"
+            value={form.priority}
+            onChange={(e) =>
+              setForm({
+                ...form,
+                priority: e.target.value,
+              })
+            }
+          >
+            {["high", "medium", "low"].map((p) => (
+              <option key={p} value={p}>
+                {p}
+              </option>
+            ))}
+          </Select>
+          <Button onClick={addProspect} disabled={busy}>
+            Save
+          </Button>
+        </UiCard>
       )}
 
       {/* Table */}
-      {view !== "approvals" && (items.length === 0 ? (
-        <Card style={{ padding: 30, textAlign: "center" }}><div style={{ color: D.muted }}>No prospects in this view.</div></Card>
-      ) : (
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-            <thead>
-              <tr style={{ textAlign: "left", color: D.muted, borderBottom: `1px solid ${D.border}` }}>
-                {["Target", "Our page", "Anchor", "Type", "Follow", "Indexed", "Status", "DR", ""].map((h) => (
-                  <th key={h} style={{ padding: "8px 10px", fontWeight: 500, whiteSpace: "nowrap" }}>{h}</th>
+      {view !== "approvals" &&
+        (items.length === 0 ? (
+          <UiCard className="[padding:30px] text-center">
+            <div className="text-ink-secondary">No prospects in this view.</div>
+          </UiCard>
+        ) : (
+          <div className="overflow-x-auto">
+            <Table className="[width:100%] [border-collapse:collapse] text-ui-body">
+              <THead>
+                <TR className="text-left text-ink-secondary border-b border-hairline border-zinc-200">
+                  {[
+                    "Target",
+                    "Our page",
+                    "Anchor",
+                    "Type",
+                    "Follow",
+                    "Indexed",
+                    "Status",
+                    "DR",
+                    "",
+                  ].map((h) => (
+                    <TH
+                      key={h}
+                      className="[padding:8px_10px] font-medium whitespace-nowrap"
+                    >
+                      {h}
+                    </TH>
+                  ))}
+                </TR>
+              </THead>
+              <TBody>
+                {items.map((p) => (
+                  <TR
+                    key={p.id}
+                    className="text-zinc-900 border-b border-hairline border-zinc-200"
+                  >
+                    <TD className="[padding:8px_10px] [max-width:200px] overflow-hidden text-ellipsis">
+                      {p.live_url ? (
+                        <a
+                          href={p.live_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-zinc-900"
+                        >
+                          {p.target_domain}
+                        </a>
+                      ) : (
+                        p.target_domain
+                      )}
+                    </TD>
+                    <TD className="[padding:8px_10px] [max-width:180px] overflow-hidden text-ellipsis text-ink-secondary">
+                      {(p.target_page || "").replace(/^https?:\/\/[^/]+/, "")}
+                    </TD>
+                    <TD className="[padding:8px_10px]">
+                      {p.anchor_text || (
+                        <span className="text-ink-secondary">
+                          {p.anchor_planned || "—"}
+                        </span>
+                      )}
+                    </TD>
+                    <TD className="[padding:8px_10px] text-ink-secondary">
+                      {p.link_type || "—"}
+                    </TD>
+                    <TD className="[padding:8px_10px]">
+                      {p.is_dofollow == null ? (
+                        "—"
+                      ) : p.is_dofollow ? (
+                        <span className="text-zinc-900">dofollow</span>
+                      ) : (
+                        <span className="text-zinc-700">nofollow</span>
+                      )}
+                    </TD>
+                    <TD className="[padding:8px_10px]">
+                      <span
+                        style={{
+                          color:
+                            p.indexing_status === "indexed"
+                              ? "#15803D"
+                              : p.indexing_status === "not_checked"
+                                ? "#71717A"
+                                : "#A16207",
+                        }}
+                      >
+                        {p.indexing_status === "not_checked"
+                          ? "—"
+                          : p.indexing_status}
+                      </span>
+                    </TD>
+                    <TD className="[padding:8px_10px]">
+                      <span
+                        style={{
+                          color: PROSPECT_STATUS_COLOR[p.status] || "#71717A",
+                        }}
+                        className="font-medium"
+                      >
+                        {p.status}
+                      </span>
+                    </TD>
+                    <TD className="[padding:8px_10px] text-ink-secondary">
+                      {p.domain_rating ?? "—"}
+                    </TD>
+                    <TD className="[padding:8px_10px] whitespace-nowrap">
+                      {p.status === "prospect" &&
+                        OUTREACH_TYPES_UI.includes(p.link_type) && (
+                          <Button
+                            onClick={() => setDrafting(p)}
+                            className="[margin-right:6px]"
+                            variant="secondary"
+                          >
+                            {p.outreach_status === "drafted"
+                              ? "Edit draft"
+                              : "Draft"}
+                          </Button>
+                        )}
+                      {p.live_url && (
+                        <Button
+                          onClick={() => recheck(p.id)}
+                          disabled={busy}
+                          variant="secondary"
+                        >
+                          Recheck
+                        </Button>
+                      )}
+                    </TD>
+                  </TR>
                 ))}
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((p) => (
-                <tr key={p.id} style={{ borderBottom: `1px solid ${D.border}`, color: D.text }}>
-                  <td style={{ padding: "8px 10px", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis" }}>
-                    {p.live_url ? <a href={p.live_url} target="_blank" rel="noreferrer" style={{ color: D.teal }}>{p.target_domain}</a> : p.target_domain}
-                  </td>
-                  <td style={{ padding: "8px 10px", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", color: D.muted }}>{(p.target_page || "").replace(/^https?:\/\/[^/]+/, "")}</td>
-                  <td style={{ padding: "8px 10px" }}>{p.anchor_text || <span style={{ color: D.muted }}>{p.anchor_planned || "—"}</span>}</td>
-                  <td style={{ padding: "8px 10px", color: D.muted }}>{p.link_type || "—"}</td>
-                  <td style={{ padding: "8px 10px" }}>{p.is_dofollow == null ? "—" : p.is_dofollow ? <span style={{ color: D.green }}>dofollow</span> : <span style={{ color: D.amber }}>nofollow</span>}</td>
-                  <td style={{ padding: "8px 10px" }}>
-                    <span style={{ color: p.indexing_status === "indexed" ? D.green : p.indexing_status === "not_checked" ? D.muted : D.amber }}>
-                      {p.indexing_status === "not_checked" ? "—" : p.indexing_status}
-                    </span>
-                  </td>
-                  <td style={{ padding: "8px 10px" }}><span style={{ color: PROSPECT_STATUS_COLOR[p.status] || D.muted, fontWeight: 500 }}>{p.status}</span></td>
-                  <td style={{ padding: "8px 10px", color: D.muted }}>{p.domain_rating ?? "—"}</td>
-                  <td style={{ padding: "8px 10px", whiteSpace: "nowrap" }}>
-                    {p.status === "prospect" && OUTREACH_TYPES_UI.includes(p.link_type) && (
-                      <button onClick={() => setDrafting(p)} style={{ padding: "3px 8px", borderRadius: 5, border: `1px solid ${D.teal}`, background: "transparent", color: D.teal, fontSize: 11, cursor: "pointer", marginRight: 6 }}>
-                        {p.outreach_status === "drafted" ? "Edit draft" : "Draft"}
-                      </button>
-                    )}
-                    {p.live_url && <button onClick={() => recheck(p.id)} disabled={busy} style={{ padding: "3px 8px", borderRadius: 5, border: `1px solid ${D.border}`, background: "transparent", color: D.teal, fontSize: 11, cursor: "pointer" }}>Recheck</button>}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ))}
+              </TBody>
+            </Table>
+          </div>
+        ))}
 
       {drafting && (
         <OutreachDraftModal
           prospect={drafting}
           onClose={() => setDrafting(null)}
-          onSaved={() => { setDrafting(null); load(); }}
+          onSaved={() => {
+            setDrafting(null);
+            load();
+          }}
         />
       )}
     </div>
@@ -2593,7 +2824,12 @@ function LinkBuildingBoard({ canRun }) {
 // =========================================================================
 // Friendly text for the structured result codes the outreach routes return.
 // a refusal that means the recipient match the card showed is no longer the one the server would send against
-const REVIEW_RESET_CODES = new Set(["recipient_review_required", "customer_recipient", "recipient_changed", "draft_changed"]);
+const REVIEW_RESET_CODES = new Set([
+  "recipient_review_required",
+  "customer_recipient",
+  "recipient_changed",
+  "draft_changed",
+]);
 const OUTREACH_CODE_MSG = {
   gate_off: "Outreach lane is OFF — set GATE_LINK_OUTREACH to enable sending.",
   gmail_not_connected: "Gmail isn't connected — authorize it first.",
@@ -2610,38 +2846,74 @@ const OUTREACH_CODE_MSG = {
   send_in_flight: "A send is currently in flight.",
   not_found: "Prospect not found.",
   bad_outcome: "Invalid reconcile outcome.",
-  not_authorized: "Not authorized to send yet — the nightly authority bridge decides it, or the inputs changed since.",
-  customer_recipient: "The recipient is a customer contact — outreach never goes to a customer. Re-draft to another address.",
-  recipient_review_required: "The recipient shares a domain with a customer or lead contact — review the match and acknowledge it before sending.",
-  recipient_lookup_failed: "The customer-recipient check failed — not sent. Try again.",
-  inbox_in_flight: "Another placement already has a conversation with this recipient — one conversation per inbox.",
-  recipient_changed: "The draft was re-addressed while you looked at it — reload and send again.",
-  draft_changed: "The draft changed while you looked at it — reload and read the current text before sending.",
+  not_authorized:
+    "Not authorized to send yet — the nightly authority bridge decides it, or the inputs changed since.",
+  customer_recipient:
+    "The recipient is a customer contact — outreach never goes to a customer. Re-draft to another address.",
+  recipient_review_required:
+    "The recipient shares a domain with a customer or lead contact — review the match and acknowledge it before sending.",
+  recipient_lookup_failed:
+    "The customer-recipient check failed — not sent. Try again.",
+  inbox_in_flight:
+    "Another placement already has a conversation with this recipient — one conversation per inbox.",
+  recipient_changed:
+    "The draft was re-addressed while you looked at it — reload and send again.",
+  draft_changed:
+    "The draft changed while you looked at it — reload and read the current text before sending.",
   draft_hash_required: "This card is stale — reload and send again.",
-  path_moved: "The acquisition path changed since the draft — reload and draft again.",
-  path_unlinked: "Not linked to an acquisition path yet — the registry catch-up links it within the hour.",
+  path_moved:
+    "The acquisition path changed since the draft — reload and draft again.",
+  path_unlinked:
+    "Not linked to an acquisition path yet — the registry catch-up links it within the hour.",
 };
 
 // §6.4 / §13 — what the owner sees before a send: the draft review (why it is
 // the owner's to send, not the policy's) and the recipient match to acknowledge.
 function RecipientReview({ review, acked, onAck, disabled }) {
   if (!review) return null;
-  if (review.kind === "clear") return <div style={{ fontSize: 12, color: D.muted }}>Recipient: not a customer or lead contact.</div>;
-  if (review.kind === "customer") return <div style={{ fontSize: 12, color: D.amber }}>Recipient is a customer contact ({review.matched.map((m) => m.source).join(", ")}) — outreach never goes to a customer.</div>;
+  if (review.kind === "clear")
+    return (
+      <div className="text-ui-body text-ink-secondary">
+        Recipient: not a customer or lead contact.
+      </div>
+    );
+  if (review.kind === "customer")
+    return (
+      <div className="text-ui-body text-zinc-700">
+        Recipient is a customer contact (
+        {review.matched.map((m) => m.source).join(", ")}) — outreach never goes
+        to a customer.
+      </div>
+    );
   if (review.kind === "ambiguous") {
     return (
-      <label style={{ display: "flex", gap: 6, alignItems: "flex-start", fontSize: 12, color: D.amber, cursor: disabled ? "default" : "pointer" }}>
-        <input type="checkbox" checked={Boolean(acked)} disabled={disabled} onChange={(e) => onAck(e.target.checked)} style={{ marginTop: 2 }} />
+      <label className="flex cursor-pointer items-start gap-1.5 text-ui-body text-zinc-700 has-[:disabled]:cursor-default">
+        <Checkbox
+          checked={Boolean(acked)}
+          disabled={disabled}
+          onChange={(e) => onAck(e.target.checked)}
+          className="mt-0.5"
+        />
         <span>{`Shares a domain with ${review.matched.length} customer / lead contact${review.matched.length === 1 ? "" : "s"} (${[...new Set(review.matched.map((m) => m.source))].join(", ")}). I reviewed the match — this is a business inbox, not a customer.`}</span>
       </label>
     );
   }
-  return <div style={{ fontSize: 12, color: D.amber }}>Recipient check unavailable ({review.error || "lookup failed"}) — the send re-runs it and fails closed.</div>;
+  return (
+    <div className="text-ui-body text-zinc-700">
+      Recipient check unavailable ({review.error || "lookup failed"}) — the send
+      re-runs it and fails closed.
+    </div>
+  );
 }
 function DraftReviewLine({ review }) {
   if (!review || review.clean) return null;
-  const parts = [...(review.flags || []), ...(review.lint || []).map((l) => `lint: ${l.rule}`)];
-  return <div style={{ fontSize: 12, color: D.muted }}>{`Owner review: ${parts.join(", ") || review.reason}`}</div>;
+  const parts = [
+    ...(review.flags || []),
+    ...(review.lint || []).map((l) => `lint: ${l.rule}`),
+  ];
+  return (
+    <div className="text-ui-body text-ink-secondary">{`Owner review: ${parts.join(", ") || review.reason}`}</div>
+  );
 }
 
 // §3.6b — a send on an attested path attests to the publisher's agreement: the
@@ -2649,10 +2921,18 @@ function DraftReviewLine({ review }) {
 function LegalAttestationLine({ p }) {
   if (!p.legal_attestation) return null;
   return (
-    <div style={{ fontSize: 12, color: D.amber }}>
-      Legal attestation{p.authority_level ? ` (${p.authority_level})` : ""} — sending attests to the publisher's agreement:{" "}
+    <div className="text-ui-body text-zinc-700">
+      Legal attestation{p.authority_level ? ` (${p.authority_level})` : ""} —
+      sending attests to the publisher's agreement:{" "}
       {p.legal_terms_url ? (
-        <a href={p.legal_terms_url} target="_blank" rel="noreferrer" style={{ color: D.text }}>read the agreement</a>
+        <a
+          href={p.legal_terms_url}
+          target="_blank"
+          rel="noreferrer"
+          className="text-zinc-900"
+        >
+          read the agreement
+        </a>
       ) : (
         "no agreement url in the evidence — re-investigate before sending"
       )}
@@ -2672,17 +2952,17 @@ async function outreachPost(path, body) {
     body: JSON.stringify(body || {}),
   });
   let data = {};
-  try { data = await r.json(); } catch { /* ignore */ }
-  return { ok: r.ok, status: r.status, data };
+  try {
+    data = await r.json();
+  } catch {
+    /* ignore */
+  }
+  return {
+    ok: r.ok,
+    status: r.status,
+    data,
+  };
 }
-
-const outreachBtn = (color, filled, busy) => ({
-  padding: "6px 12px", borderRadius: 6, fontSize: 12, whiteSpace: "nowrap",
-  cursor: busy ? "default" : "pointer", border: `1px solid ${color}`,
-  background: filled ? color : "transparent", color: filled ? D.white : color,
-  opacity: busy ? 0.6 : 1,
-});
-
 function OutreachApprovals({ canRun, onChange }) {
   const [data, setData] = useState(null);
   const [busyId, setBusyId] = useState(null);
@@ -2693,123 +2973,265 @@ function OutreachApprovals({ canRun, onChange }) {
   const load = () => {
     adminFetch("/admin/backlink-agent/prospects/outreach/pending")
       .then(setData)
-      .catch(() => setData({ items: [], needsReconcile: [], gateOn: false, rateLimit: {} }));
+      .catch(() =>
+        setData({
+          items: [],
+          needsReconcile: [],
+          gateOn: false,
+          rateLimit: {},
+        }),
+      );
   };
   useEffect(load, []);
-  const refresh = () => { load(); if (onChange) onChange(); };
-
+  const refresh = () => {
+    load();
+    if (onChange) onChange();
+  };
   const send = async (p) => {
     const id = p.id;
-    setBusyId(id); setMsg(null);
+    setBusyId(id);
+    setMsg(null);
     // the acknowledged match travels with the click (§13): the server sends only when the lookup still yields it
     // the acknowledgement is bound to the hash it was given for: a reloaded card with a new match starts unacknowledged
     const ackKey = `${id}:${p.recipient_review?.lookup_hash || ""}`;
     // the click sends the text this card displayed (§3.6b): the server refuses a draft edited since
-    const body = { draft_hash: p.draft_hash || "", ...(acks[ackKey] && p.recipient_review?.lookup_hash ? { reviewed_lookup_hash: p.recipient_review.lookup_hash } : {}) };
+    const body = {
+      draft_hash: p.draft_hash || "",
+      ...(acks[ackKey] && p.recipient_review?.lookup_hash
+        ? {
+            reviewed_lookup_hash: p.recipient_review.lookup_hash,
+          }
+        : {}),
+    };
     const { ok, data: r } = await outreachPost(`/admin/backlink-agent/prospects/${id}/outreach/send`, body);
-    setMsg({ ok, text: ok ? "Outreach sent." : (OUTREACH_CODE_MSG[r.code] || r.error || "Send failed.") });
-    if (!ok && r.code === "recipient_review_required") setAcks((prev) => ({ ...prev, [ackKey]: false })); // the reload below shows the current match
-    setBusyId(null); refresh();
+    setMsg({
+      ok,
+      text: ok
+        ? "Outreach sent."
+        : OUTREACH_CODE_MSG[r.code] || r.error || "Send failed.",
+    });
+    if (!ok && r.code === "recipient_review_required")
+      setAcks((prev) => ({
+        ...prev,
+        [ackKey]: false,
+      })); // the reload below shows the current match
+    setBusyId(null);
+    refresh();
   };
   const reconcile = async (p, outcome) => {
     const id = p.id;
-    setBusyId(id); setMsg(null);
+    setBusyId(id);
+    setMsg(null);
     const { ok, data: r } = await outreachPost(`/admin/backlink-agent/prospects/${id}/outreach/reconcile`, { outcome, ...(p.follow_up ? { follow_up: true } : {}) });
-    setMsg({ ok, text: ok ? (outcome === "sent" ? "Marked as sent." : outcome === "skip" ? "Follow-up skipped." : r.retired ? "Not sent — the placement moved on; the follow-up is retired." : "Returned to drafts.") : (OUTREACH_CODE_MSG[r.code] || r.error || "Reconcile failed.") });
-    setBusyId(null); refresh();
+    setMsg({
+      ok,
+      text: ok
+        ? outcome === "sent"
+          ? "Marked as sent."
+          : outcome === "skip"
+            ? "Follow-up skipped."
+            : r.retired
+              ? "Not sent — the placement moved on; the follow-up is retired."
+              : "Returned to drafts."
+        : OUTREACH_CODE_MSG[r.code] || r.error || "Reconcile failed.",
+    });
+    setBusyId(null);
+    refresh();
   };
-
-  if (!data) return <div style={{ color: D.muted, padding: 30, textAlign: "center" }}>Loading approvals…</div>;
-
+  if (!data)
+    return (
+      <div className="text-ink-secondary [padding:30px] text-center">
+        Loading approvals…
+      </div>
+    );
   const drafts = data.items || [];
   const reconciles = data.needsReconcile || [];
   const cap = data.rateLimit?.cap;
   const sentToday = data.rateLimit?.sentToday;
-
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
-        <span style={{ fontSize: 12, padding: "4px 10px", borderRadius: 6,
-          background: data.gateOn ? "rgba(16,185,129,0.15)" : "rgba(245,158,11,0.15)",
-          color: data.gateOn ? D.green : D.amber }}>
-          {data.gateOn ? "Outreach lane: ON" : "Outreach lane: OFF — sends disabled (GATE_LINK_OUTREACH)"}
+    <div className="flex flex-col [gap:14px]">
+      <div className="flex [gap:12px] flex-wrap items-center">
+        <span
+          style={{
+            background: data.gateOn
+              ? "rgba(16,185,129,0.15)"
+              : "rgba(245,158,11,0.15)",
+            color: data.gateOn ? "#15803D" : "#A16207",
+          }}
+          className="text-ui-body [padding:4px_10px] rounded-sm"
+        >
+          {data.gateOn
+            ? "Outreach lane: ON"
+            : "Outreach lane: OFF — sends disabled (GATE_LINK_OUTREACH)"}
         </span>
-        {cap != null && <span style={{ fontSize: 12, color: D.muted }}>Sent today (ET): {sentToday}/{cap}</span>}
+        {cap != null && (
+          <span className="text-ui-body text-ink-secondary">
+            Sent today (ET): {sentToday}/{cap}
+          </span>
+        )}
       </div>
 
       {msg && (
-        <div style={{ fontSize: 12, padding: "8px 12px", borderRadius: 6, background: D.card,
-          border: `1px solid ${msg.ok ? D.green : D.amber}`, color: msg.ok ? D.green : D.amber }}>
+        <div
+          style={{
+            border: `1px solid ${msg.ok ? "#15803D" : "#A16207"}`,
+            color: msg.ok ? "#15803D" : "#A16207",
+          }}
+          className="text-ui-body [padding:8px_12px] rounded-sm bg-white"
+        >
           {msg.text}
         </div>
       )}
 
       <div>
-        <div style={{ fontSize: 13, fontWeight: 500, color: D.heading, marginBottom: 8 }}>
+        <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:8px]">
           Drafts awaiting approval ({drafts.length})
         </div>
         {drafts.length === 0 ? (
-          <Card style={{ padding: 24, textAlign: "center" }}>
-            <div style={{ color: D.muted, fontSize: 13 }}>
-              No drafts to approve. Use “Draft” on an editorial / resource / guest-post / HARO prospect to queue one here.
+          <UiCard className="[padding:24px] text-center">
+            <div className="text-ink-secondary text-ui-body">
+              No drafts to approve. Use “Draft” on an editorial / resource /
+              guest-post / HARO prospect to queue one here.
             </div>
-          </Card>
-        ) : drafts.map((p) => (
-          <div key={p.id} style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 14, marginBottom: 10 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-              <div style={{ minWidth: 0, flex: "1 1 320px" }}>
-                <div style={{ fontSize: 13, color: D.heading, fontWeight: 500 }}>
-                  {p.target_domain} <span style={{ color: D.muted, fontWeight: 400 }}>· {p.link_type}</span>
+          </UiCard>
+        ) : (
+          drafts.map((p) => (
+            <UiCard
+              key={p.id}
+              className="bg-white rounded-md [padding:14px] [margin-bottom:10px] border-hairline border-zinc-200"
+            >
+              <div className="flex justify-between [gap:12px] flex-wrap">
+                <div className="[min-width:0px] [flex:1_1_320px]">
+                  <div className="text-ui-body text-zinc-900 font-medium">
+                    {p.target_domain}{" "}
+                    <span className="text-ink-secondary font-normal">
+                      · {p.link_type}
+                    </span>
+                  </div>
+                  <div className="text-ui-body text-ink-secondary">
+                    To: {p.outreach_to_email}
+                  </div>
+                  <div className="text-ui-body text-zinc-900 [margin-top:4px]">
+                    <b>{p.outreach_subject}</b>
+                  </div>
+                  <div className="text-ui-body text-ink-secondary [margin-top:4px] whitespace-pre-wrap [max-height:84px] overflow-hidden">
+                    {p.outreach_body}
+                  </div>
+                  <div className="flex flex-col [gap:4px] [margin-top:6px]">
+                    <DraftReviewLine review={p.draft_review} />
+                    <LegalAttestationLine p={p} />
+                    <RecipientReview
+                      review={p.recipient_review}
+                      acked={
+                        acks[`${p.id}:${p.recipient_review?.lookup_hash || ""}`]
+                      }
+                      disabled={busyId === p.id}
+                      onAck={(v) =>
+                        setAcks({
+                          ...acks,
+                          [`${p.id}:${p.recipient_review?.lookup_hash || ""}`]:
+                            v,
+                        })
+                      }
+                    />
+                  </div>
                 </div>
-                <div style={{ fontSize: 12, color: D.muted }}>To: {p.outreach_to_email}</div>
-                <div style={{ fontSize: 12, color: D.text, marginTop: 4 }}><b>{p.outreach_subject}</b></div>
-                <div style={{ fontSize: 12, color: D.muted, marginTop: 4, whiteSpace: "pre-wrap", maxHeight: 84, overflow: "hidden" }}>{p.outreach_body}</div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 6 }}>
-                  <DraftReviewLine review={p.draft_review} />
-                  <LegalAttestationLine p={p} />
-                  <RecipientReview review={p.recipient_review} acked={acks[`${p.id}:${p.recipient_review?.lookup_hash || ""}`]} disabled={busyId === p.id} onAck={(v) => setAcks({ ...acks, [`${p.id}:${p.recipient_review?.lookup_hash || ""}`]: v })} />
+                <div className="flex flex-col [gap:6px] shrink-0">
+                  <Button
+                    onClick={() => send(p)}
+                    disabled={
+                      !canRun ||
+                      busyId === p.id ||
+                      p.recipient_review?.kind === "customer" ||
+                      (p.recipient_review?.kind === "ambiguous" &&
+                        !acks[
+                          `${p.id}:${p.recipient_review?.lookup_hash || ""}`
+                        ])
+                    }
+                  >
+                    {busyId === p.id ? "Sending…" : "Approve & send"}
+                  </Button>
+                  <Button
+                    onClick={() => setEditing(p)}
+                    disabled={busyId === p.id}
+                  >
+                    Edit
+                  </Button>
                 </div>
               </div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
-                <button onClick={() => send(p)} disabled={!canRun || busyId === p.id || p.recipient_review?.kind === "customer" || (p.recipient_review?.kind === "ambiguous" && !acks[`${p.id}:${p.recipient_review?.lookup_hash || ""}`])} style={outreachBtn(D.teal, true, busyId === p.id || p.recipient_review?.kind === "customer" || (p.recipient_review?.kind === "ambiguous" && !acks[`${p.id}:${p.recipient_review?.lookup_hash || ""}`]))}>
-                  {busyId === p.id ? "Sending…" : "Approve & send"}
-                </button>
-                <button onClick={() => setEditing(p)} disabled={busyId === p.id} style={outreachBtn(D.teal, false)}>Edit</button>
-              </div>
-            </div>
-          </div>
-        ))}
+            </UiCard>
+          ))
+        )}
       </div>
 
       {reconciles.length > 0 && (
         <div>
-          <div style={{ fontSize: 13, fontWeight: 500, color: D.amber, marginBottom: 6 }}>
+          <div className="text-ui-body font-medium text-zinc-700 [margin-bottom:6px]">
             Needs reconciliation ({reconciles.length})
           </div>
-          <div style={{ fontSize: 11, color: D.muted, marginBottom: 8 }}>
-            These sends errored ambiguously and may have reached Gmail. Check the Sent folder, then confirm.
+          <div className="text-ui-body text-ink-secondary [margin-bottom:8px]">
+            These sends errored ambiguously and may have reached Gmail. Check
+            the Sent folder, then confirm.
           </div>
           {reconciles.map((p) => (
-            <div key={p.id} style={{ background: D.card, border: `1px solid ${D.amber}`, borderRadius: 8, padding: 14, marginBottom: 10 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 13, color: D.heading, fontWeight: 500 }}>{p.target_domain}{p.follow_up ? " · follow-up" : ""}</div>
-                  <div style={{ fontSize: 12, color: D.muted }}>To: {p.outreach_to_email} · <b>{p.outreach_subject}</b></div>
-                  {p.unverifiable && <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>{`The automatic attempt could not verify this follow-up (${String(p.follow_up_skipped_reason || "").replace(/_/g, " ")}). Send it from the Owner queue once the cause clears, or skip it.`}</div>}
+            <UiCard
+              key={p.id}
+              className="bg-white rounded-md [padding:14px] [margin-bottom:10px] border-hairline border-zinc-200"
+            >
+              <div className="flex justify-between [gap:12px] flex-wrap">
+                <div className="[min-width:0px]">
+                  <div className="text-ui-body text-zinc-900 font-medium">
+                    {p.target_domain}
+                    {p.follow_up ? " · follow-up" : ""}
+                  </div>
+                  <div className="text-ui-body text-ink-secondary">
+                    To: {p.outreach_to_email} · <b>{p.outreach_subject}</b>
+                  </div>
+                  {p.unverifiable && (
+                    <div className="text-ui-body text-ink-secondary [margin-top:4px]">{`The automatic attempt could not verify this follow-up (${String(p.follow_up_skipped_reason || "").replace(/_/g, " ")}). Send it from the Owner queue once the cause clears, or skip it.`}</div>
+                  )}
                 </div>
-                <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-                  {!p.unverifiable && <button onClick={() => reconcile(p, "sent")} disabled={!canRun || busyId === p.id} style={outreachBtn(D.green, false, busyId === p.id)}>It sent</button>}
-                  {!p.unverifiable && <button onClick={() => reconcile(p, "requeue")} disabled={!canRun || busyId === p.id} style={outreachBtn(D.amber, false, busyId === p.id)}>Re-queue</button>}
-                  {p.follow_up && <button onClick={() => reconcile(p, "skip")} disabled={!canRun || busyId === p.id} style={outreachBtn(D.muted, false, busyId === p.id)}>Skip follow-up</button>}
+                <div className="flex [gap:6px] shrink-0">
+                  {!p.unverifiable && (
+                    <Button
+                      onClick={() => reconcile(p, "sent")}
+                      disabled={!canRun || busyId === p.id}
+                    >
+                      It sent
+                    </Button>
+                  )}
+                  {!p.unverifiable && (
+                    <Button
+                      onClick={() => reconcile(p, "requeue")}
+                      disabled={!canRun || busyId === p.id}
+                    >
+                      Re-queue
+                    </Button>
+                  )}
+                  {p.follow_up && (
+                    <Button
+                      onClick={() => reconcile(p, "skip")}
+                      disabled={!canRun || busyId === p.id}
+                    >
+                      Skip follow-up
+                    </Button>
+                  )}
                 </div>
               </div>
-            </div>
+            </UiCard>
           ))}
         </div>
       )}
 
       {editing && (
-        <OutreachDraftModal prospect={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); refresh(); }} />
+        <OutreachDraftModal
+          prospect={editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => {
+            setEditing(null);
+            refresh();
+          }}
+        />
       )}
     </div>
   );
@@ -2818,42 +3240,72 @@ function OutreachApprovals({ canRun, onChange }) {
 // Compose / edit a one-to-one outreach draft (M3b). Saving never sends — an admin
 // approves + sends from the approvals view.
 function OutreachDraftModal({ prospect, onClose, onSaved }) {
-  const isMobile = useIsMobile();
   const [to, setTo] = useState(prospect.outreach_to_email || "");
   const [subject, setSubject] = useState(prospect.outreach_subject || "");
   const [body, setBody] = useState(prospect.outreach_body || "");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
-
   const save = async () => {
-    setBusy(true); setErr(null);
+    setBusy(true);
+    setErr(null);
     const { ok, data } = await outreachPost(`/admin/backlink-agent/prospects/${prospect.id}/outreach/draft`, { to, subject, body });
     setBusy(false);
     if (ok) onSaved();
-    else setErr(OUTREACH_CODE_MSG[data.code] || data.error || "Could not save draft.");
+    else
+      setErr(
+        OUTREACH_CODE_MSG[data.code] || data.error || "Could not save draft.",
+      );
   };
-
-  const field = { width: "100%", padding: "8px 10px", borderRadius: 6, border: `1px solid ${D.inputBorder}`, fontSize: 14, background: D.white, color: D.text, boxSizing: "border-box" };
-
-  return createPortal(
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: isMobile ? 0 : 20 }}>
-      <div onClick={(e) => e.stopPropagation()} style={{ background: D.bg, border: `1px solid ${D.border}`, borderRadius: 10, padding: 20, width: 580, maxWidth: "100%", maxHeight: "90vh", overflowY: "auto", display: "flex", flexDirection: "column", gap: 8, ...(isMobile ? { width: "100%", maxWidth: "none", height: "100%", maxHeight: "none", borderRadius: 0, boxSizing: "border-box", overflowY: "auto", paddingTop: "calc(20px + env(safe-area-inset-top, 0px))", paddingBottom: "calc(20px + env(safe-area-inset-bottom, 0px))", paddingLeft: "calc(20px + env(safe-area-inset-left, 0px))", paddingRight: "calc(20px + env(safe-area-inset-right, 0px))" } : {}) }}>
-        <div style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>Outreach draft — {prospect.target_domain}</div>
-        <div style={{ fontSize: 14, color: D.muted }}>One-to-one only. Saving does not send; an admin approves + sends from the primary inbox.</div>
-        <label style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>Recipient email</label>
-        <input style={field} value={to} onChange={(e) => setTo(e.target.value)} placeholder="editor@example.com" />
-        <label style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>Subject</label>
-        <input style={field} value={subject} onChange={(e) => setSubject(e.target.value)} />
-        <label style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>Body</label>
-        <textarea style={{ ...field, minHeight: 200, resize: "vertical", fontFamily: "inherit" }} value={body} onChange={(e) => setBody(e.target.value)} />
-        {err && <div style={{ fontSize: 14, color: D.amber }}>{err}</div>}
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
-          <button onClick={onClose} style={outreachBtn(D.muted, false)}>Cancel</button>
-          <button onClick={save} disabled={busy || !to || !subject || !body} style={outreachBtn(D.teal, true, busy)}>{busy ? "Saving…" : "Save draft"}</button>
-        </div>
-      </div>
-    </div>,
-    document.body,
+  return (
+    <Dialog open onClose={onClose} size="lg">
+      <DialogHeader>
+        <DialogTitle>Outreach draft — {prospect.target_domain}</DialogTitle>
+        <p className="[margin:4px_0_0] text-ui-body text-ink-secondary">
+          One-to-one only. Saving does not send; an admin approves + sends from
+          the primary inbox.
+        </p>
+      </DialogHeader>
+      <DialogBody className="space-y-3">
+        <label className="block text-ui-body text-ink-secondary">
+          Recipient email
+          <Input
+            value={to}
+            onChange={(e) => setTo(e.target.value)}
+            placeholder="editor@example.com"
+            className="[margin-top:4px]"
+          />
+        </label>
+        <label className="block text-ui-body text-ink-secondary">
+          Subject
+          <Input
+            value={subject}
+            onChange={(e) => setSubject(e.target.value)}
+            className="[margin-top:4px]"
+          />
+        </label>
+        <label className="block text-ui-body text-ink-secondary">
+          Body
+          <Textarea
+            value={body}
+            onChange={(e) => setBody(e.target.value)}
+            className="[margin-top:4px] resize-y"
+          />
+        </label>
+        {err && <ActionFeedback error>{err}</ActionFeedback>}
+      </DialogBody>
+      <DialogFooter>
+        <Button variant="secondary" onClick={onClose}>
+          Cancel
+        </Button>
+        <Button
+          onClick={save}
+          loading={busy}
+          disabled={!to || !subject || !body}
+        >
+          {busy ? "Saving…" : "Save draft"}
+        </Button>
+      </DialogFooter>
+    </Dialog>
   );
 }
 
@@ -2889,14 +3341,21 @@ function BacklinkRegistryCard({ refreshKey = 0, onMutated } = {}) {
   const expandedRef = useRef(null);
   // current controls, readable from async continuations whose closure is
   // stale (an action started before the operator changed filter/page)
-  const controlsRef = useRef({ stateFilter, search, page });
-  controlsRef.current = { stateFilter, search, page };
+  const controlsRef = useRef({
+    stateFilter,
+    search,
+    page,
+  });
+  controlsRef.current = {
+    stateFilter,
+    search,
+    page,
+  };
   const [busyId, setBusyId] = useState(null);
   const [runBusy, setRunBusy] = useState(false);
   const [runResult, setRunResult] = useState(null);
   const [error, setError] = useState(null);
   const loadGen = useRef(0);
-
   const load = async (state = stateFilter, q = search, p = page) => {
     // request generation: a superseded load (filter/page changed while it was
     // in flight) must never write its rows under the newer controls
@@ -2904,7 +3363,10 @@ function BacklinkRegistryCard({ refreshKey = 0, onMutated } = {}) {
     setLoading(true);
     setError(null);
     try {
-      const params = new URLSearchParams({ limit: 50, page: p });
+      const params = new URLSearchParams({
+        limit: 50,
+        page: p,
+      });
       if (state) params.set("agent_state", state);
       if (q.trim()) params.set("q", q.trim());
       const r = await adminFetch(`/admin/backlink-agent/registry?${params}`);
@@ -2930,10 +3392,16 @@ function BacklinkRegistryCard({ refreshKey = 0, onMutated } = {}) {
     try {
       const r = await adminFetch(`/admin/backlink-agent/registry/${id}`);
       if (expandedRef.current !== id || gen !== detailGen.current) return;
-      setDetail({ forId: id, ...r });
+      setDetail({
+        forId: id,
+        ...r,
+      });
     } catch (e) {
       if (expandedRef.current !== id || gen !== detailGen.current) return;
-      setDetail({ forId: id, error: e?.message || "Detail load failed" });
+      setDetail({
+        forId: id,
+        error: e?.message || "Detail load failed",
+      });
     }
   };
   useEffect(() => {
@@ -2942,7 +3410,6 @@ function BacklinkRegistryCard({ refreshKey = 0, onMutated } = {}) {
     // the expanded row's detail (waiver, paths, placements) moves with the same mutations — refetch it in place
     if (expandedRef.current) loadDetail(expandedRef.current);
   }, [refreshKey]);
-
   const toggleExpand = async (id) => {
     if (expandedId === id) {
       setExpandedId(null);
@@ -2954,7 +3421,6 @@ function BacklinkRegistryCard({ refreshKey = 0, onMutated } = {}) {
     setDetail(null);
     await loadDetail(id);
   };
-
   const doAction = async (id, action) => {
     setBusyId(id);
     setError(null);
@@ -2966,7 +3432,12 @@ function BacklinkRegistryCard({ refreshKey = 0, onMutated } = {}) {
       // refresh with the CURRENT controls — this closure's stateFilter/
       // search/page are from the render the action started on
       if (onMutated) onMutated();
-      else await load(controlsRef.current.stateFilter, controlsRef.current.search, controlsRef.current.page);
+      else
+        await load(
+          controlsRef.current.stateFilter,
+          controlsRef.current.search,
+          controlsRef.current.page,
+        );
     } catch (e) {
       setError(e?.message || `${action} failed`);
     } finally {
@@ -2985,39 +3456,39 @@ function BacklinkRegistryCard({ refreshKey = 0, onMutated } = {}) {
       const r = await adminPost(`/admin/backlink-agent/registry/${id}/acquire-anyway`, {});
       setRunResult({
         acquireAnyway: true,
-        text: `${r.domain}: waived ${(r.floors || []).map((f) => `${f.floor} ${f.value} vs ${f.threshold}`).join(", ")} — ${
-          r.bridge?.gated
-            ? "recorded; GATE_LINK_AUTHORITY is off, so the bridge decides it when the gate is on"
-            : r.bridge?.skipped
-              ? "recorded; the nightly bridge decides it"
-              : r.summary_unavailable
-                ? "recorded; the Owner queue below shows what now awaits your decision"
-                : `${r.awaiting} step${r.awaiting === 1 ? "" : "s"} now await your decision in the Owner queue`
-        }`,
+        text: `${r.domain}: waived ${(r.floors || []).map((f) => `${f.floor} ${f.value} vs ${f.threshold}`).join(", ")} — ${r.bridge?.gated ? "recorded; GATE_LINK_AUTHORITY is off, so the bridge decides it when the gate is on" : r.bridge?.skipped ? "recorded; the nightly bridge decides it" : r.summary_unavailable ? "recorded; the Owner queue below shows what now awaits your decision" : `${r.awaiting} step${r.awaiting === 1 ? "" : "s"} now await your decision in the Owner queue`}`,
       });
       if (onMutated) onMutated();
-      else await load(controlsRef.current.stateFilter, controlsRef.current.search, controlsRef.current.page);
+      else
+        await load(
+          controlsRef.current.stateFilter,
+          controlsRef.current.search,
+          controlsRef.current.page,
+        );
     } catch (e) {
       setError(e?.message || "Acquire anyway failed");
     } finally {
       setBusyId(null);
     }
   };
-
   const runInvestigator = async (dryRun) => {
     setRunBusy(true);
     setRunResult(null);
     try {
       const r = await adminPost("/admin/backlink-agent/registry/jobs/investigate", { dryRun });
       setRunResult(r);
-      if (!dryRun) { const c = controlsRef.current; load(c.stateFilter, c.search, c.page); } // same stale-closure rule as doAction
+      if (!dryRun) {
+        const c = controlsRef.current;
+        load(c.stateFilter, c.search, c.page);
+      } // same stale-closure rule as doAction
     } catch (e) {
-      setRunResult({ error: e?.message || "Investigator run failed" });
+      setRunResult({
+        error: e?.message || "Investigator run failed",
+      });
     } finally {
       setRunBusy(false);
     }
   };
-
   const bestPathLabel = (d) => {
     if (!d.best_path) return "—";
     const p = d.best_path;
@@ -3029,101 +3500,62 @@ function BacklinkRegistryCard({ refreshKey = 0, onMutated } = {}) {
           : "";
     return `${p.acquisition_type}${cost} · ${p.expected_rel}`;
   };
-
-  const smallBtn = (disabled) => ({
-    padding: "6px 12px",
-    minHeight: 32,
-    borderRadius: 8,
-    border: `1px solid ${D.border}`,
-    background: "#fff",
-    color: D.text,
-    fontSize: 12,
-    cursor: "pointer",
-    opacity: disabled ? 0.5 : 1,
-  });
-
   return (
-    <Card>
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          gap: 8,
-          flexWrap: "wrap",
-          marginBottom: 4,
-        }}
-      >
-        <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>
-          Registry
-        </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button
-            onClick={() => runInvestigator(true)}
-            disabled={runBusy}
-            style={smallBtn(runBusy)}
-          >
+    <UiCard className="p-6">
+      <div className="flex justify-between items-center [gap:8px] flex-wrap [margin-bottom:4px]">
+        <div className="text-ui-body font-medium text-zinc-900">Registry</div>
+        <div className="flex [gap:8px]">
+          <Button onClick={() => runInvestigator(true)} disabled={runBusy}>
             Preview investigator
-          </button>
-          <button
-            onClick={() => runInvestigator(false)}
-            disabled={runBusy}
-            style={{
-              ...smallBtn(runBusy),
-              background: D.teal,
-              color: "#fff",
-              border: "none",
-            }}
-          >
+          </Button>
+          <Button onClick={() => runInvestigator(false)} disabled={runBusy}>
             {runBusy ? "Working…" : "Run investigator"}
-          </button>
+          </Button>
         </div>
       </div>
-      <div style={{ fontSize: 12, color: D.muted, marginBottom: 10 }}>
-        One row per candidate domain: how a link can be acquired, what it
-        costs, and where it stands. Investigation fetches pages and spends up
-        to two model calls per domain (one, plus a repair retry when the first
-        answer fails validation); it never contacts or pays anyone.
+      <div className="text-ui-body text-ink-secondary [margin-bottom:10px]">
+        One row per candidate domain: how a link can be acquired, what it costs,
+        and where it stands. Investigation fetches pages and spends up to two
+        model calls per domain (one, plus a repair retry when the first answer
+        fails validation); it never contacts or pays anyone.
       </div>
       {runResult && (
         <div
           style={{
-            marginBottom: 8,
-            fontSize: 12,
-            color: runResult.error ? D.red : runResult.acquireAnyway ? D.text : runResult.gated ? D.amber : D.green,
+            color: runResult.error
+              ? "#991B1B"
+              : runResult.acquireAnyway
+                ? "#27272A"
+                : runResult.gated
+                  ? "#A16207"
+                  : "#15803D",
           }}
+          className="[margin-bottom:8px] text-ui-body"
         >
           {runResult.error
             ? runResult.error
             : runResult.acquireAnyway
               ? runResult.text
-            : runResult.gated
-              ? `Held by GATE_LINK_INVESTIGATOR (${runResult.selected} selected, nothing fetched)`
-              : runResult.dryRun
-                ? `Preview: ${runResult.selected} selected, up to ${runResult.wouldFetch ?? 0} fetches and ${runResult.wouldCall ?? 0} model calls`
-                : runResult.skipped === "lease_held"
-                  ? "Another investigator run already holds the lease — nothing new was started."
-                : runResult.skipped === "probe_failed"
-                  ? "Could not check the investigator lease (database busy) — nothing was started; try again."
-                : runResult.started
-                  ? "Investigator started in the background — runs are serialized; refresh the table to see results."
-                  : `Investigated ${runResult.investigated}/${runResult.selected}: ${runResult.qualified} qualified, ${runResult.watching} watching, ${runResult.notReproducible} not reproducible, ${runResult.pathsWritten} paths written${runResult.failed?.length ? `, ${runResult.failed.length} failed` : ""}${runResult.skipped ? " (skipped: run already in progress)" : ""}`}
+              : runResult.gated
+                ? `Held by GATE_LINK_INVESTIGATOR (${runResult.selected} selected, nothing fetched)`
+                : runResult.dryRun
+                  ? `Preview: ${runResult.selected} selected, up to ${runResult.wouldFetch ?? 0} fetches and ${runResult.wouldCall ?? 0} model calls`
+                  : runResult.skipped === "lease_held"
+                    ? "Another investigator run already holds the lease — nothing new was started."
+                    : runResult.skipped === "probe_failed"
+                      ? "Could not check the investigator lease (database busy) — nothing was started; try again."
+                      : runResult.started
+                        ? "Investigator started in the background — runs are serialized; refresh the table to see results."
+                        : `Investigated ${runResult.investigated}/${runResult.selected}: ${runResult.qualified} qualified, ${runResult.watching} watching, ${runResult.notReproducible} not reproducible, ${runResult.pathsWritten} paths written${runResult.failed?.length ? `, ${runResult.failed.length} failed` : ""}${runResult.skipped ? " (skipped: run already in progress)" : ""}`}
         </div>
       )}
-      <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
-        <select
+      <div className="flex [gap:8px] [margin-bottom:10px] flex-wrap">
+        <Select
+          className="!w-auto"
           value={stateFilter}
           onChange={(e) => {
             setStateFilter(e.target.value);
             load(e.target.value, search, 1);
-          }}
-          style={{
-            padding: "8px 10px",
-            borderRadius: 8,
-            border: `1px solid ${D.inputBorder}`,
-            background: "#fff",
-            color: D.text,
-            fontSize: 13,
           }}
         >
           <option value="">All states</option>
@@ -3132,135 +3564,173 @@ function BacklinkRegistryCard({ refreshKey = 0, onMutated } = {}) {
               {s.replace(/_/g, " ")}
             </option>
           ))}
-        </select>
-        <input
+        </Select>
+        <Input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && load(stateFilter, search, 1)}
           placeholder="Search domain…"
-          style={{
-            flex: 1,
-            minWidth: 160,
-            padding: "8px 10px",
-            borderRadius: 8,
-            border: `1px solid ${D.inputBorder}`,
-            background: "#fff",
-            color: D.text,
-            fontSize: 13,
-          }}
+          className="[flex:1] [min-width:160px]"
         />
-        <button onClick={() => load(stateFilter, search, 1)} disabled={loading} style={smallBtn(loading)}>
+        <Button onClick={() => load(stateFilter, search, 1)} disabled={loading}>
           {loading ? "Loading…" : "Search"}
-        </button>
+        </Button>
       </div>
       {error && (
-        <div style={{ marginBottom: 8, fontSize: 12, color: D.red }}>{error}</div>
+        <div className="[margin-bottom:8px] text-ui-body text-alert-fg">
+          {error}
+        </div>
       )}
-      <div style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr>
-              <th style={thStyle}>Domain</th>
-              <th style={thR}>DR</th>
-              <th style={thR}>Traffic</th>
-              <th style={thR}>Spam</th>
-              <th style={thR}>Comp.</th>
-              <th style={thStyle}>Best path</th>
-              <th style={thR}>Score</th>
-              <th style={thStyle}>State</th>
-              <th style={thStyle}>Source</th>
-              <th style={thStyle}>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
+      <div className="overflow-x-auto">
+        <Table className="[width:100%] [border-collapse:collapse]">
+          <THead>
+            <TR>
+              <TH>Domain</TH>
+              <TH className="text-right u-nums">DR</TH>
+              <TH className="text-right u-nums">Traffic</TH>
+              <TH className="text-right u-nums">Spam</TH>
+              <TH className="text-right u-nums">Comp.</TH>
+              <TH>Best path</TH>
+              <TH className="text-right u-nums">Score</TH>
+              <TH>State</TH>
+              <TH>Source</TH>
+              <TH>Actions</TH>
+            </TR>
+          </THead>
+          <TBody>
             {rows.length === 0 && (
-              <tr>
-                <td style={{ ...tdStyle, color: D.muted }} colSpan={10}>
+              <TR>
+                <TD colSpan={10} className="text-ink-secondary">
                   {loading ? "Loading…" : "No registry rows match."}
-                </td>
-              </tr>
+                </TD>
+              </TR>
             )}
             {rows.map((d) => (
               <Fragment key={d.id}>
-                <tr
+                <TR
                   onClick={() => toggleExpand(d.id)}
-                  style={{ cursor: "pointer" }}
+                  className="cursor-pointer"
                 >
-                  <td style={tdStyle}>{d.domain}</td>
-                  <td style={tdR}>{d.domain_rating ?? "—"}</td>
-                  <td style={tdR}>{d.organic_traffic != null ? Number(d.organic_traffic).toLocaleString() : "—"}</td>
-                  <td style={tdR}>{d.spam_score ?? "—"}</td>
-                  <td style={tdR}>{d.competitors_linked ?? 0}</td>
-                  <td style={{ ...tdStyle, fontFamily: "inherit" }}>{bestPathLabel(d)}</td>
-                  <td style={tdR}>{d.score ?? "—"}</td>
-                  <td style={{ ...tdStyle, fontFamily: "inherit" }}>
+                  <TD className="u-nums">{d.domain}</TD>
+                  <TD className="text-right u-nums">
+                    {d.domain_rating ?? "—"}
+                  </TD>
+                  <TD className="text-right u-nums">
+                    {d.organic_traffic != null
+                      ? Number(d.organic_traffic).toLocaleString()
+                      : "—"}
+                  </TD>
+                  <TD className="text-right u-nums">{d.spam_score ?? "—"}</TD>
+                  <TD className="text-right u-nums">
+                    {d.competitors_linked ?? 0}
+                  </TD>
+                  <TD>{bestPathLabel(d)}</TD>
+                  <TD className="text-right u-nums">{d.score ?? "—"}</TD>
+                  <TD>
                     {d.agent_state.replace(/_/g, " ")}
                     {d.discovery_priority === "owner_seed" ? " ★" : ""}
-                  </td>
-                  <td style={{ ...tdStyle, fontFamily: "inherit" }}>{d.source}</td>
-                  <td style={{ ...tdStyle, fontFamily: "inherit", whiteSpace: "nowrap" }}>
+                  </TD>
+                  <TD>{d.source}</TD>
+                  <TD className="whitespace-nowrap">
                     {!LANE_OWNED_STATES.includes(d.agent_state) && (
                       <span
-                        style={{ display: "inline-flex", gap: 6 }}
                         onClick={(e) => e.stopPropagation()}
+                        className="inline-flex [gap:6px]"
                       >
                         {d.agent_state !== "watching" && (
-                          <button onClick={() => doAction(d.id, "watch")} disabled={busyId === d.id} style={smallBtn(busyId === d.id)}>
+                          <Button
+                            onClick={() => doAction(d.id, "watch")}
+                            disabled={busyId === d.id}
+                          >
                             Watch
-                          </button>
+                          </Button>
                         )}
                         {d.agent_state !== "rejected" && (
-                          <button
+                          <Button
                             onClick={() => doAction(d.id, "reject")}
                             disabled={busyId === d.id}
-                            style={{ ...smallBtn(busyId === d.id), color: D.red }}
+                            className="text-alert-fg"
+                            variant="secondary"
                           >
                             Reject
-                          </button>
+                          </Button>
                         )}
-                        {["watching", "rejected", "qualified", "not_reproducible"].includes(d.agent_state) && (
-                          <button onClick={() => doAction(d.id, "reopen")} disabled={busyId === d.id} style={smallBtn(busyId === d.id)}>
+                        {[
+                          "watching",
+                          "rejected",
+                          "qualified",
+                          "not_reproducible",
+                        ].includes(d.agent_state) && (
+                          <Button
+                            onClick={() => doAction(d.id, "reopen")}
+                            disabled={busyId === d.id}
+                          >
                             Reopen
-                          </button>
+                          </Button>
                         )}
-                        {d.agent_state === "rejected" && d.waivable === true && (
-                          <button onClick={() => acquireAnyway(d.id)} disabled={busyId === d.id} style={smallBtn(busyId === d.id)} title="Waive the quality floors this domain fails (audited) and route it to the Owner queue">
-                            Acquire anyway
-                          </button>
-                        )}
+                        {d.agent_state === "rejected" &&
+                          d.waivable === true && (
+                            <Button
+                              onClick={() => acquireAnyway(d.id)}
+                              disabled={busyId === d.id}
+                              title="Waive the quality floors this domain fails (audited) and route it to the Owner queue"
+                            >
+                              Acquire anyway
+                            </Button>
+                          )}
                       </span>
                     )}
-                  </td>
-                </tr>
+                  </TD>
+                </TR>
                 {expandedId === d.id && (
-                  <tr>
-                    <td style={{ ...tdStyle, fontFamily: "inherit", background: D.bg }} colSpan={10}>
-                      {detail?.forId !== d.id && <span style={{ color: D.muted }}>Loading…</span>}
-                      {detail?.forId === d.id && detail.error && <span style={{ color: D.red }}>{detail.error}</span>}
+                  <TR>
+                    <TD colSpan={10} className="bg-zinc-100">
+                      {detail?.forId !== d.id && (
+                        <span className="text-ink-secondary">Loading…</span>
+                      )}
+                      {detail?.forId === d.id && detail.error && (
+                        <span className="text-alert-fg">{detail.error}</span>
+                      )}
                       {detail?.forId === d.id && !detail.error && (
-                        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                        <div className="flex flex-col [gap:8px]">
                           {d.score_reasons && (
-                            <div style={{ fontSize: 12, color: D.muted }}>{d.score_reasons}</div>
+                            <div className="text-ui-body text-ink-secondary">
+                              {d.score_reasons}
+                            </div>
                           )}
                           {detail.waiver && (
-                            <div style={{ fontSize: 12, color: D.amber }}>
+                            <div className="text-ui-body text-zinc-700">
                               {`Floors waived by ${detail.waiver.approved_by} on ${formatETDate(detail.waiver.approved_at)}: ${(detail.waiver.overridden_floors || []).map((f) => `${f.floor} ${f.value} vs ${f.threshold}`).join(", ")}${detail.waiver.note ? ` — ${detail.waiver.note}` : ""}`}
                             </div>
                           )}
                           <div>
-                            <div style={{ fontSize: 12, fontWeight: 500, color: D.heading, marginBottom: 4 }}>
+                            <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:4px]">
                               Paths
                             </div>
                             {(detail.paths || []).length === 0 && (
-                              <div style={{ fontSize: 12, color: D.muted }}>None yet — not investigated.</div>
+                              <div className="text-ui-body text-ink-secondary">
+                                None yet — not investigated.
+                              </div>
                             )}
                             {(detail.paths || []).map((p) => {
                               let ev = null;
-                              try { ev = typeof p.investigation === "string" ? JSON.parse(p.investigation) : p.investigation; } catch { /* unparseable evidence stays hidden */ }
+                              try {
+                                ev =
+                                  typeof p.investigation === "string"
+                                    ? JSON.parse(p.investigation)
+                                    : p.investigation;
+                              } catch {
+                                /* unparseable evidence stays hidden */
+                              }
                               return (
-                                <div key={p.id} style={{ fontSize: 12, color: D.text, padding: "4px 0", borderBottom: `1px solid ${D.border}` }}>
-                                  <span style={{ fontFamily: MONO }}>{p.acquisition_type}</span>
-                                  {p.submission_url ? ` · ${p.submission_url}` : ""}
+                                <div
+                                  key={p.id}
+                                  className="text-ui-body text-zinc-900 [padding:4px_0] border-b border-hairline border-zinc-200"
+                                >
+                                  <span>{p.acquisition_type}</span>
+                                  {p.submission_url
+                                    ? ` · ${p.submission_url}`
+                                    : ""}
                                   {` · conf ${p.confidence ?? "—"}`}
                                   {p.payment_required
                                     ? ` · ${p.estimated_cost_cents != null ? `$${(p.estimated_cost_cents / 100).toFixed(2)}` : `price ${p.currency || "unknown"}`}${
@@ -3270,18 +3740,31 @@ function BacklinkRegistryCard({ refreshKey = 0, onMutated } = {}) {
                                           ? ` · renews $${(p.renewal_cost_cents / 100).toFixed(2)}${p.renewal_period && p.renewal_period !== "none" ? `/${p.renewal_period}` : ""}`
                                           : p.renewal_period === "none"
                                             ? " · one-time"
-                                            : p.renewal_period ? ` · renews ${p.renewal_period}, amount unverified` : ""
+                                            : p.renewal_period
+                                              ? ` · renews ${p.renewal_period}, amount unverified`
+                                              : ""
                                       }`
                                     : " · free"}
                                   {p.superseded_by ? " · superseded" : ""}
                                   {p.baseline ? " · baseline import" : ""}
                                   {ev?.reasons && (
-                                    <div style={{ color: D.muted, marginTop: 2 }}>{ev.reasons}</div>
+                                    <div className="text-ink-secondary [margin-top:2px]">
+                                      {ev.reasons}
+                                    </div>
                                   )}
-                                  {(ev?.disproven_reason || ev?.submission_verification || ev?.terms_verification) && (
-                                    <div style={{ color: D.muted, marginTop: 2 }}>
-                                      {[ev.disproven_reason, ev.submission_verification && `submission: ${ev.submission_verification}`, ev.terms_verification && `terms: ${ev.terms_verification}`]
-                                        .filter(Boolean).join(" · ")}
+                                  {(ev?.disproven_reason ||
+                                    ev?.submission_verification ||
+                                    ev?.terms_verification) && (
+                                    <div className="text-ink-secondary [margin-top:2px]">
+                                      {[
+                                        ev.disproven_reason,
+                                        ev.submission_verification &&
+                                          `submission: ${ev.submission_verification}`,
+                                        ev.terms_verification &&
+                                          `terms: ${ev.terms_verification}`,
+                                      ]
+                                        .filter(Boolean)
+                                        .join(" · ")}
                                     </div>
                                   )}
                                 </div>
@@ -3290,58 +3773,59 @@ function BacklinkRegistryCard({ refreshKey = 0, onMutated } = {}) {
                           </div>
                           {(detail.attempts || []).length > 0 && (
                             <div>
-                              <div style={{ fontSize: 12, fontWeight: 500, color: D.heading, marginBottom: 4 }}>
+                              <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:4px]">
                                 Attempts
                               </div>
                               {detail.attempts.map((a) => (
-                                <div key={a.id} style={{ fontSize: 12, color: D.text, padding: "2px 0" }}>
-                                  {formatETDate(a.created_at)} · {a.provider} · {a.action} → {a.outcome}
-                                  {a.cost_cents ? ` · $${(a.cost_cents / 100).toFixed(2)}` : ""}
+                                <div
+                                  key={a.id}
+                                  className="text-ui-body text-zinc-900 [padding:2px_0]"
+                                >
+                                  {formatETDate(a.created_at)} · {a.provider} ·{" "}
+                                  {a.action} → {a.outcome}
+                                  {a.cost_cents
+                                    ? ` · $${(a.cost_cents / 100).toFixed(2)}`
+                                    : ""}
                                   {a.sandbox ? " · sandbox" : ""}
                                 </div>
                               ))}
                             </div>
                           )}
-                          <div style={{ fontSize: 12, color: D.muted }}>
-                            Seen by: {(detail.touches || []).map((t) => t.source).filter((v, i, a) => a.indexOf(v) === i).join(", ") || "—"}
-                            {(detail.placements || []).length > 0 && ` · ${detail.placements.length} placement${detail.placements.length === 1 ? "" : "s"} on the board`}
+                          <div className="text-ui-body text-ink-secondary">
+                            Seen by:{" "}
+                            {(detail.touches || [])
+                              .map((t) => t.source)
+                              .filter((v, i, a) => a.indexOf(v) === i)
+                              .join(", ") || "—"}
+                            {(detail.placements || []).length > 0 &&
+                              ` · ${detail.placements.length} placement${detail.placements.length === 1 ? "" : "s"} on the board`}
                           </div>
                         </div>
                       )}
-                    </td>
-                  </tr>
+                    </TD>
+                  </TR>
                 )}
               </Fragment>
             ))}
-          </tbody>
-        </table>
+          </TBody>
+        </Table>
       </div>
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "flex-end",
-          alignItems: "center",
-          gap: 8,
-          marginTop: 10,
-        }}
-      >
-        <button
+      <div className="flex justify-end items-center [gap:8px] [margin-top:10px]">
+        <Button
           onClick={() => load(stateFilter, search, page - 1)}
           disabled={loading || page <= 1}
-          style={smallBtn(loading || page <= 1)}
         >
           Prev
-        </button>
-        <span style={{ fontSize: 12, color: D.muted }}>Page {page}</span>
-        <button
+        </Button>
+        <span className="text-ui-body text-ink-secondary">Page {page}</span>
+        <Button
           onClick={() => load(stateFilter, search, page + 1)}
           disabled={loading || rows.length < 50}
-          style={smallBtn(loading || rows.length < 50)}
         >
           Next
-        </button>
+        </Button>
       </div>
-    </Card>
+    </UiCard>
   );
 }
 
@@ -3356,7 +3840,11 @@ function BacklinkRegistryCard({ refreshKey = 0, onMutated } = {}) {
 // button here and the board's Approve & send are the same authenticated click
 // — the sender writes the approval bound to the draft hash and the recipient
 // review the owner acknowledged, then sends.
-const DIMENSION_LABELS = { execution: "Execution", payment: "Payment", communication: "Message" };
+const DIMENSION_LABELS = {
+  execution: "Execution",
+  payment: "Payment",
+  communication: "Message",
+};
 const ACTION_LABELS = {
   acquire: "create the account / submit the listing",
   accept_terms: "accept the agreement",
@@ -3373,8 +3861,12 @@ function dollarsToCents(raw) {
   const cents = Number(m[1]) * 100 + Number((m[2] || "").padEnd(2, "0"));
   return cents > 0 ? cents : null;
 }
-const compact = (n) => (n == null ? "—" : n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n));
-
+const compact = (n) =>
+  n == null
+    ? "—"
+    : n >= 1000
+      ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`
+      : String(n);
 function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
   const [data, setData] = useState(null);
   const [drafting, setDrafting] = useState(null);
@@ -3386,7 +3878,6 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
   const [acks, setAcks] = useState({}); // row id → the owner acknowledged the recipient match (§13)
   const [result, setResult] = useState(null);
   const loadGen = useRef(0);
-
   const load = async () => {
     const gen = ++loadGen.current;
     setError(null);
@@ -3406,11 +3897,20 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
   const refresh = () => (onMutated ? onMutated() : load());
 
   // Preserve edits (including clearing) for this held attempt; untouched verified rows use their exact stored URL.
-  const displayedSubmissionUrl = (card) => placementUrls[card.submission_ambiguity.id]
-    ?? (["live", "indexed"].includes(card.placement.status) ? card.placement.live_url ?? "" : "");
-
+  const displayedSubmissionUrl = (card) =>
+    placementUrls[card.submission_ambiguity.id] ??
+    (["live", "indexed"].includes(card.placement.status)
+      ? (card.placement.live_url ?? "")
+      : "");
   const recordSubmissionVerdict = async (card, verdict) => {
-    if (!window.confirm(verdict === "placed" ? "Confirm this submission reached the publisher at the URL entered below." : "Confirm you reviewed the evidence and no submission reached the publisher. This releases the automatic retry hold.")) return;
+    if (
+      !window.confirm(
+        verdict === "placed"
+          ? "Confirm this submission reached the publisher at the URL entered below."
+          : "Confirm you reviewed the evidence and no submission reached the publisher. This releases the automatic retry hold.",
+      )
+    )
+      return;
     setBusy(card.domain.id);
     setError(null);
     try {
@@ -3419,23 +3919,32 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
         body: JSON.stringify({ submission_verdict: verdict, submission_attempt_id: card.submission_ambiguity.id, ...(verdict === "placed" ? { live_url: displayedSubmissionUrl(card) } : {}) }),
       });
       refresh();
-    } catch (e) { setError(e?.message || "Submission verdict failed"); }
-    finally { setBusy(null); }
+    } catch (e) {
+      setError(e?.message || "Submission verdict failed");
+    } finally {
+      setBusy(null);
+    }
   };
 
   // what the inline bridge run did with the click — or why the nightly run will
   const bridgeNote = (b) => {
     if (!b) return "";
-    if (b.gated) return "recorded; GATE_LINK_AUTHORITY is off, so it takes effect when the gate is on";
-    if (b.skipped) return `recorded; the nightly bridge applies it (${b.skipped === "lease_held" ? "a bridge run is in progress" : b.skipped})`;
+    if (b.gated)
+      return "recorded; GATE_LINK_AUTHORITY is off, so it takes effect when the gate is on";
+    if (b.skipped)
+      return `recorded; the nightly bridge applies it (${b.skipped === "lease_held" ? "a bridge run is in progress" : b.skipped})`;
     return `released ${b.released}, parked ${b.parked}, domain updates ${b.aggregateChanges}`;
   };
 
   // what the payment field SHOWS: the owner's edit (even a cleared one), else the quote
   // (the server picks the quote THIS row authorizes — a renewal row shows the renewal price, never the initial fee;
   // no applicable quote ⇒ blank ⇒ the click is refused until the owner types the amount)
-  const displayedAmount = (card, row) => (amounts[row.id] !== undefined ? amounts[row.id] : row.quote_cents != null ? (row.quote_cents / 100).toFixed(2) : "");
-
+  const displayedAmount = (card, row) =>
+    amounts[row.id] !== undefined
+      ? amounts[row.id]
+      : row.quote_cents != null
+        ? (row.quote_cents / 100).toFixed(2)
+        : "";
   const approve = async (card, row) => {
     setBusy(row.id);
     setError(null);
@@ -3447,7 +3956,9 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
       // binary float — 10.075 * 100 rounds to 1007); a blank field or >2 decimals is refused, not defaulted.
       const cents = dollarsToCents(displayedAmount(card, row));
       if (cents === null) {
-        setError("Enter the amount in dollars with at most two decimals, greater than zero.");
+        setError(
+          "Enter the amount in dollars with at most two decimals, greater than zero.",
+        );
         setBusy(null);
         return;
       }
@@ -3456,7 +3967,10 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
     if (notes[card.domain.id]) body.note = notes[card.domain.id];
     try {
       const r = await adminFetch(`/admin/backlink-agent/owner-queue/rows/${row.id}/approve`, { method: "POST", body });
-      setResult({ tone: D.green, text: `Approved ${DIMENSION_LABELS[row.dimension] || row.dimension} on ${card.domain.domain}${r.attached?.length > 1 ? ` (${r.attached.length} locations share the fee)` : ""} — ${bridgeNote(r.bridge)}` });
+      setResult({
+        tone: "#15803D",
+        text: `Approved ${DIMENSION_LABELS[row.dimension] || row.dimension} on ${card.domain.domain}${r.attached?.length > 1 ? ` (${r.attached.length} locations share the fee)` : ""} — ${bridgeNote(r.bridge)}`,
+      });
       await refresh();
     } catch (e) {
       setError(e?.message || "Approve failed");
@@ -3473,7 +3987,10 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
     setResult(null);
     try {
       await adminFetch(`/admin/backlink-agent/prospects/${card.placement.id}/outreach/reconcile`, { method: "POST", body: { outcome: "skip", follow_up: true } });
-      setResult({ tone: D.muted, text: `Skipped the follow-up on ${card.domain.domain} — the conversation settles without it` });
+      setResult({
+        tone: "#71717A",
+        text: `Skipped the follow-up on ${card.domain.domain} — the conversation settles without it`,
+      });
       await refresh();
     } catch (e) {
       setError(OUTREACH_CODE_MSG[e?.code] || e?.message || "Skip failed");
@@ -3490,31 +4007,46 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
     const lookupHash = row.draft?.recipient_review?.lookup_hash || "";
     const ackKey = `${row.id}:${lookupHash}`; // the acknowledgement is bound to the hash it was given for
     // the click sends the text this card displayed (§3.6b): the server refuses a draft edited since
-    const body = { draft_hash: row.draft?.hash || "", ...(acks[ackKey] && lookupHash ? { reviewed_lookup_hash: lookupHash } : {}) };
+    const body = {
+      draft_hash: row.draft?.hash || "",
+      ...(acks[ackKey] && lookupHash
+        ? {
+            reviewed_lookup_hash: lookupHash,
+          }
+        : {}),
+    };
     try {
       const r = await adminFetch(`/admin/backlink-agent/owner-queue/rows/${row.id}/send`, { method: "POST", body });
-      setResult({ tone: D.green, text: `Sent the ${row.action === "outreach_followup" ? "follow-up" : "pitch"} to ${row.draft?.to || "the recipient"} on ${card.domain.domain}${r.authority ? ` (${r.authority.level})` : ""}` });
+      setResult({
+        tone: "#15803D",
+        text: `Sent the ${row.action === "outreach_followup" ? "follow-up" : "pitch"} to ${row.draft?.to || "the recipient"} on ${card.domain.domain}${r.authority ? ` (${r.authority.level})` : ""}`,
+      });
       await refresh();
     } catch (e) {
       setError(OUTREACH_CODE_MSG[e?.code] || e?.message || "Send failed");
       // the match changed under the card (or the lookup now yields one): drop the stale acknowledgement and reload so
       // the owner reviews the CURRENT match — the server sends only against the hash it just computed
       if (REVIEW_RESET_CODES.has(e?.code)) {
-        setAcks((prev) => ({ ...prev, [ackKey]: false }));
+        setAcks((prev) => ({
+          ...prev,
+          [ackKey]: false,
+        }));
         await load();
       }
     } finally {
       setBusy(null);
     }
   };
-
   const decide = async (card, action) => {
     setBusy(card.domain.id);
     setError(null);
     setResult(null);
     try {
       const r = await adminFetch(`/admin/backlink-agent/owner-queue/domains/${card.domain.id}/${action}`, { method: "POST", body: { note: notes[card.domain.id] || null } });
-      setResult({ tone: D.text, text: `${card.domain.domain} → ${String(r.agent_state).replace(/_/g, " ")}${r.watch_recheck_at ? `, rechecked ${formatETDate(r.watch_recheck_at)}` : ""}` });
+      setResult({
+        tone: "#27272A",
+        text: `${card.domain.domain} → ${String(r.agent_state).replace(/_/g, " ")}${r.watch_recheck_at ? `, rechecked ${formatETDate(r.watch_recheck_at)}` : ""}`,
+      });
       await refresh();
     } catch (e) {
       setError(e?.message || `${action} failed`);
@@ -3522,113 +4054,234 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
       setBusy(null);
     }
   };
-
-  const btn = (disabled, color) => ({
-    padding: "6px 12px",
-    minHeight: 32,
-    borderRadius: 8,
-    border: `1px solid ${D.border}`,
-    background: "#fff",
-    color: color || D.text,
-    fontSize: 12,
-    cursor: "pointer",
-    opacity: disabled ? 0.5 : 1,
-  });
-  const inputStyle = {
-    padding: "6px 8px",
-    borderRadius: 8,
-    border: `1px solid ${D.inputBorder}`,
-    background: "#fff",
-    color: D.text,
-    fontSize: 13,
-    fontFamily: MONO,
-  };
-
   const matchBacklink = async (card) => {
     setBusy(card.domain.id);
     setError(null);
     try {
       await adminFetch(`/admin/backlink-agent/prospects/${card.placement.id}/reconcile-backlink`, { method: "POST", body: { backlink_id: card.backlink_match.id } });
-      setResult({ tone: D.text, text: "Link matched to this placement. Verification will confirm whether it is live." });
+      setResult({
+        tone: "#27272A",
+        text: "Link matched to this placement. Verification will confirm whether it is live.",
+      });
       await refresh();
-    } catch (e) { setError(e?.message || "Could not match backlink"); }
-    finally { setBusy(null); }
+    } catch (e) {
+      setError(e?.message || "Could not match backlink");
+    } finally {
+      setBusy(null);
+    }
   };
-
   const cards = data?.cards || [];
   return (
-    <Card style={{ marginBottom: 20 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 6 }}>
-        <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>
-          Owner queue{data ? ` · ${cards.length} card${cards.length === 1 ? "" : "s"}` : ""}
+    <UiCard className="p-6 [margin-bottom:20px]">
+      <div className="flex items-center justify-between flex-wrap [gap:8px] [margin-bottom:6px]">
+        <div className="text-ui-body font-medium text-zinc-900">
+          Owner queue
+          {data
+            ? ` · ${cards.length} card${cards.length === 1 ? "" : "s"}`
+            : ""}
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <div style={{ fontSize: 12, color: D.muted, fontFamily: MONO }}>
-            {data ? (data.gateOn ? "GATE_LINK_AUTHORITY on" : "GATE_LINK_AUTHORITY off — nothing parks until it is on") : "…"}
+        <div className="flex [gap:8px] items-center">
+          <div className="text-ui-body text-ink-secondary">
+            {data
+              ? data.gateOn
+                ? "GATE_LINK_AUTHORITY on"
+                : "GATE_LINK_AUTHORITY off — nothing parks until it is on"
+              : "…"}
           </div>
-          <button onClick={load} disabled={busy !== null} style={btn(busy !== null)}>
+          <Button onClick={load} disabled={busy !== null}>
             Refresh
-          </button>
+          </Button>
         </div>
       </div>
-      <div style={{ fontSize: 12, color: D.muted, marginBottom: 12 }}>
-        Placements the nightly bridge parked for your decision. Approve freezes exactly the terms shown here; a changed price, agreement or policy
-        invalidates it and the card comes back. Reject and Watch apply to the whole domain. Send the pitch mails the draft shown on the card from
-        contact@ — that click is its approval. Nothing else here signs or pays — the runner does that later, against the approval.
+      <div className="text-ui-body text-ink-secondary [margin-bottom:12px]">
+        Placements the nightly bridge parked for your decision. Approve freezes
+        exactly the terms shown here; a changed price, agreement or policy
+        invalidates it and the card comes back. Reject and Watch apply to the
+        whole domain. Send the pitch mails the draft shown on the card from
+        contact@ — that click is its approval. Nothing else here signs or pays —
+        the runner does that later, against the approval.
       </div>
-      {error && <div style={{ marginBottom: 8, fontSize: 12, color: D.red }}>{error}</div>}
-      {result && <div style={{ marginBottom: 8, fontSize: 12, color: result.tone }}>{result.text}</div>}
-      {!data && !error && <div style={{ fontSize: 13, color: D.muted }}>Loading…</div>}
-      {data && cards.length === 0 && <div style={{ fontSize: 13, color: D.muted }}>Nothing awaits your decision.</div>}
+      {error && (
+        <div className="[margin-bottom:8px] text-ui-body text-alert-fg">
+          {error}
+        </div>
+      )}
+      {result && (
+        <div
+          style={{
+            color: result.tone,
+          }}
+          className="[margin-bottom:8px] text-ui-body"
+        >
+          {result.text}
+        </div>
+      )}
+      {!data && !error && (
+        <div className="text-ui-body text-ink-secondary">Loading…</div>
+      )}
+      {data && cards.length === 0 && (
+        <div className="text-ui-body text-ink-secondary">
+          Nothing awaits your decision.
+        </div>
+      )}
       {cards.map((c) => {
         const domainBusy = busy === c.domain.id;
-        const assignmentHold = c.placement.claimed_at ? "Assignment waits for the active placement work to finish."
-          : ["sending", "send_error"].includes(c.placement.follow_up_status) ? "Resolve the pending follow-up send before assigning this backlink." : null;
+        const assignmentHold = c.placement.claimed_at
+          ? "Assignment waits for the active placement work to finish."
+          : ["sending", "send_error"].includes(c.placement.follow_up_status)
+            ? "Resolve the pending follow-up send before assigning this backlink."
+            : null;
         const p = c.path;
         return (
-          <div key={c.placement.id} style={{ border: `1px solid ${D.border}`, borderRadius: 10, padding: 14, marginBottom: 12 }}>
-            {c.submission_ambiguity && <div style={{ fontSize: 14, marginBottom: 14 }}>
-              <p>The submission may have reached the publisher. Review the evidence before recording a verdict. Automatic retry remains held.</p>
-              {c.submission_ambiguity.evidence_url ? <a href={c.submission_ambiguity.evidence_url} target="_blank" rel="noopener noreferrer">View submission screenshot</a> : <p>Screenshot unavailable. Verify the submission directly with the publisher before recording a verdict.</p>}
-              <label style={{ display: "block", marginTop: 12 }}>Confirmed publisher URL
-                <input type="url" value={displayedSubmissionUrl(c)} onChange={(event) => setPlacementUrls({ ...placementUrls, [c.submission_ambiguity.id]: event.target.value })} placeholder="https://publisher.example/listing" style={{ width: "100%", boxSizing: "border-box", padding: 8, marginTop: 4, border: `1px solid ${D.border}`, borderRadius: 6, fontSize: 14 }} />
-              </label>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
-                <button disabled={busy !== null || Boolean(c.placement.claimed_at) || !displayedSubmissionUrl(c)} style={{ ...btn(busy !== null), fontSize: 14 }} onClick={() => recordSubmissionVerdict(c, "placed")}>Confirm submitted</button>
-                <button disabled={busy !== null || Boolean(c.placement.claimed_at)} style={{ ...btn(busy !== null), fontSize: 14 }} onClick={() => recordSubmissionVerdict(c, "not_submitted")}>Confirm not submitted</button>
+          <div
+            key={c.placement.id}
+            className="rounded-md [padding:14px] [margin-bottom:12px] border-hairline border-zinc-200"
+          >
+            {c.submission_ambiguity && (
+              <div className="text-ui-body [margin-bottom:14px]">
+                <p>
+                  The submission may have reached the publisher. Review the
+                  evidence before recording a verdict. Automatic retry remains
+                  held.
+                </p>
+                {c.submission_ambiguity.evidence_url ? (
+                  <a
+                    href={c.submission_ambiguity.evidence_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    View submission screenshot
+                  </a>
+                ) : (
+                  <p>
+                    Screenshot unavailable. Verify the submission directly with
+                    the publisher before recording a verdict.
+                  </p>
+                )}
+                <label className="block [margin-top:12px]">
+                  Confirmed publisher URL
+                  <Input
+                    type="url"
+                    value={displayedSubmissionUrl(c)}
+                    onChange={(event) =>
+                      setPlacementUrls({
+                        ...placementUrls,
+                        [c.submission_ambiguity.id]: event.target.value,
+                      })
+                    }
+                    placeholder="https://publisher.example/listing"
+                    className="[width:100%] box-border [margin-top:4px]"
+                  />
+                </label>
+                <div className="flex flex-wrap [gap:8px] [margin-top:10px]">
+                  <Button
+                    disabled={
+                      busy !== null ||
+                      Boolean(c.placement.claimed_at) ||
+                      !displayedSubmissionUrl(c)
+                    }
+                    onClick={() => recordSubmissionVerdict(c, "placed")}
+                  >
+                    Confirm submitted
+                  </Button>
+                  <Button
+                    disabled={busy !== null || Boolean(c.placement.claimed_at)}
+                    onClick={() => recordSubmissionVerdict(c, "not_submitted")}
+                  >
+                    Confirm not submitted
+                  </Button>
+                </div>
               </div>
-            </div>}
-            {c.outreach_draft_exhausted && <div style={{ fontSize: 14, marginBottom: 14 }}>
-              <p>Automatic drafting stopped without a pitch. Create or revise its outreach draft to continue.</p>
-              <button disabled={busy !== null || Boolean(c.placement.claimed_at)} style={{ ...btn(busy !== null), fontSize: 14 }} onClick={() => setDrafting({ ...c.placement, target_domain: c.domain.domain })}>Create outreach draft</button>
-            </div>}
-            {c.backlink_match && <div style={{ fontSize: 14, marginBottom: 12 }}>
-              <p>A backlink was found, but more than one placement could match it. Review the source page before assigning it to this placement.</p>
-              <a href={c.backlink_match.source_url} target="_blank" rel="noreferrer" style={{ color: D.text }}>Review source page</a>
-              <button disabled={domainBusy || Boolean(assignmentHold)} onClick={() => matchBacklink(c)} style={{ ...btn(domainBusy || Boolean(assignmentHold)), fontSize: 14, marginLeft: 12 }}>Assign to this placement</button>
-              {assignmentHold && <p>{assignmentHold}</p>}
-            </div>}
+            )}
+            {c.outreach_draft_exhausted && (
+              <div className="text-ui-body [margin-bottom:14px]">
+                <p>
+                  Automatic drafting stopped without a pitch. Create or revise
+                  its outreach draft to continue.
+                </p>
+                <Button
+                  disabled={busy !== null || Boolean(c.placement.claimed_at)}
+                  onClick={() =>
+                    setDrafting({
+                      ...c.placement,
+                      target_domain: c.domain.domain,
+                    })
+                  }
+                >
+                  Create outreach draft
+                </Button>
+              </div>
+            )}
+            {c.backlink_match && (
+              <div className="text-ui-body [margin-bottom:12px]">
+                <p>
+                  A backlink was found, but more than one placement could match
+                  it. Review the source page before assigning it to this
+                  placement.
+                </p>
+                <a
+                  href={c.backlink_match.source_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-zinc-900"
+                >
+                  Review source page
+                </a>
+                <Button
+                  disabled={domainBusy || Boolean(assignmentHold)}
+                  onClick={() => matchBacklink(c)}
+                  className="[margin-left:12px]"
+                >
+                  Assign to this placement
+                </Button>
+                {assignmentHold && <p>{assignmentHold}</p>}
+              </div>
+            )}
 
-            <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8, alignItems: "baseline" }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, fontFamily: MONO }}>
+            <div className="flex justify-between flex-wrap [gap:8px] items-baseline">
+              <div className="text-ui-body font-medium text-zinc-900">
                 {c.domain.domain}
-                {c.placement.location_key && c.placement.location_key !== "-" ? <span style={{ color: D.muted, fontWeight: 400 }}>{` · ${c.placement.location_key}`}</span> : ""}
-                {c.placement.status === "ready_for_payment" && <span style={{ color: D.amber, fontWeight: 400 }}>{" · at the publisher's checkout"}</span>}
-                {["placed", "live", "indexed"].includes(c.placement.status) && (() => {
-                  // the label is the PENDING action, never the status alone: a placed placement can still owe its initial fee — or
-                  // only its follow-up send (§6.4), which owes no fee at all
-                  const pending = c.rows.find((r) => r.dimension === "payment" && !r.satisfied_at); // approved-but-unsettled is still the obligation
-                  const what = pending ? (pending.action === "renewal" ? "renewal" : "initial fee") : c.rows.some((r) => r.action === "outreach_followup" && !r.satisfied_at) ? "follow-up" : null;
-                  return <span style={{ color: D.amber, fontWeight: 400 }}>{` · ${c.placement.status}${what ? ` — ${what}` : ""}`}</span>;
-                })()}
+                {c.placement.location_key &&
+                c.placement.location_key !== "-" ? (
+                  <span className="text-ink-secondary font-normal">{` · ${c.placement.location_key}`}</span>
+                ) : (
+                  ""
+                )}
+                {c.placement.status === "ready_for_payment" && (
+                  <span className="text-zinc-700 font-normal">
+                    {" · at the publisher's checkout"}
+                  </span>
+                )}
+                {["placed", "live", "indexed"].includes(c.placement.status) &&
+                  (() => {
+                    // the label is the PENDING action, never the status alone: a placed placement can still owe its initial fee — or
+                    // only its follow-up send (§6.4), which owes no fee at all
+                    const pending = c.rows.find(
+                      (r) => r.dimension === "payment" && !r.satisfied_at,
+                    ); // approved-but-unsettled is still the obligation
+                    const what = pending
+                      ? pending.action === "renewal"
+                        ? "renewal"
+                        : "initial fee"
+                      : c.rows.some(
+                            (r) =>
+                              r.action === "outreach_followup" &&
+                              !r.satisfied_at,
+                          )
+                        ? "follow-up"
+                        : null;
+                    return (
+                      <span className="text-zinc-700 font-normal">{` · ${c.placement.status}${what ? ` — ${what}` : ""}`}</span>
+                    );
+                  })()}
               </div>
-              <div style={{ fontSize: 12, color: D.muted }}>
+              <div className="text-ui-body text-ink-secondary">
                 {`DR ${c.domain.domain_rating ?? "—"} · traffic ${compact(c.domain.organic_traffic)} · spam ${c.domain.spam_score ?? "—"} · score ${c.domain.score ?? "—"} · ${c.domain.competitors_linked ?? 0} competitor${c.domain.competitors_linked === 1 ? "" : "s"} linked · D30 ${c.d30_confidence == null ? "n/a" : c.d30_confidence}`}
               </div>
             </div>
             {p && (
-              <div style={{ fontSize: 12, color: D.text, marginTop: 6 }}>
-                <span style={{ fontFamily: MONO }}>{p.acquisition_type}</span>
+              <div className="text-ui-body text-zinc-900 [margin-top:6px]">
+                <span>{p.acquisition_type}</span>
                 {` · ${p.expected_rel || "rel unknown"}`}
                 {p.payment_required
                   ? ` · ${p.estimated_cost_cents != null ? money(p.estimated_cost_cents) : `price ${p.currency}`}${p.renewal_cost_cents != null ? ` · renews ${money(p.renewal_cost_cents)}${p.renewal_period && p.renewal_period !== "none" ? `/${p.renewal_period}` : ""}` : p.renewal_period === "none" ? " · one-time" : ""}${p.fee_scope === "account_wide" ? " · one fee for every location" : ""}`
@@ -3636,13 +4289,18 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
                 {p.submission_url && (
                   <>
                     {" · "}
-                    <a href={p.submission_url} target="_blank" rel="noreferrer" style={{ color: D.text }}>
+                    <a
+                      href={p.submission_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-zinc-900"
+                    >
                       submission page
                     </a>
                   </>
                 )}
                 {p.payment_required && (
-                  <span style={{ fontFamily: MONO }}>
+                  <span>
                     {p.merchant_binding
                       ? ` · pays ${p.merchant_binding.merchant_account_id || "?"} via ${p.merchant_binding.processor_host || "?"} at ${p.merchant_binding.checkout_origin || "?"}${p.merchant_binding.issuer_merchant_descriptor ? ` (${p.merchant_binding.issuer_merchant_descriptor})` : ""}`
                       : " · no resolvable merchant — manual settlement only"}
@@ -3652,7 +4310,12 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
                   <>
                     {" · "}
                     {p.legal_terms_url ? (
-                      <a href={p.legal_terms_url} target="_blank" rel="noreferrer" style={{ color: D.text }}>
+                      <a
+                        href={p.legal_terms_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-zinc-900"
+                      >
                         agreement
                       </a>
                     ) : (
@@ -3660,147 +4323,286 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
                     )}
                   </>
                 )}
-                {!p.on_best_path && <span style={{ color: D.amber }}> · not on the current best path — the nightly bridge rotates it</span>}
+                {!p.on_best_path && (
+                  <span className="text-zinc-700">
+                    {" "}
+                    · not on the current best path — the nightly bridge rotates
+                    it
+                  </span>
+                )}
               </div>
             )}
-            {c.domain.score_reasons && <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>{c.domain.score_reasons}</div>}
+            {c.domain.score_reasons && (
+              <div className="text-ui-body text-ink-secondary [margin-top:4px]">
+                {c.domain.score_reasons}
+              </div>
+            )}
             {c.waiver && (
-              <div style={{ fontSize: 12, color: D.amber, marginTop: 4 }}>
+              <div className="text-ui-body text-zinc-700 [margin-top:4px]">
                 {`Floors waived by ${c.waiver.approved_by} on ${formatETDate(c.waiver.approved_at)}: ${(c.waiver.overridden_floors || []).map((f) => `${f.floor} ${f.value} vs ${f.threshold}`).join(", ")}`}
               </div>
             )}
-            <div style={{ overflowX: "auto", marginTop: 10 }}>
-              <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                <thead>
-                  <tr>
-                    <th style={thStyle}>Step</th>
-                    <th style={thStyle}>Level</th>
-                    <th style={thStyle}>Why</th>
-                    <th style={thStyle}>Decision</th>
-                  </tr>
-                </thead>
-                <tbody>
+            <div className="overflow-x-auto [margin-top:10px]">
+              <Table className="[width:100%] [border-collapse:collapse]">
+                <THead>
+                  <TR>
+                    <TH>Step</TH>
+                    <TH>Level</TH>
+                    <TH>Why</TH>
+                    <TH>Decision</TH>
+                  </TR>
+                </THead>
+                <TBody>
                   {c.rows.map((r) => {
                     const rowBusy = busy === r.id;
                     // the service's verdict, not the raw approval: a consumed approval on a still-unsatisfied row is spent — the card asks again
-                    const approvedBy = r.approved && r.approval ? r.approval : null;
+                    const approvedBy =
+                      r.approved && r.approval ? r.approval : null;
                     return (
-                      <tr key={r.id}>
-                        <td style={{ ...tdStyle, fontFamily: "inherit" }}>
+                      <TR key={r.id}>
+                        <TD>
                           {DIMENSION_LABELS[r.dimension] || r.dimension}
-                          <div style={{ color: D.muted }}>{ACTION_LABELS[r.action] || r.action}</div>
-                        </td>
-                        <td style={tdStyle}>{r.level}</td>
-                        <td style={{ ...tdStyle, fontFamily: "inherit", color: D.muted }}>{r.reason || "—"}</td>
-                        <td style={{ ...tdStyle, fontFamily: "inherit" }}>
+                          <div className="text-ink-secondary">
+                            {ACTION_LABELS[r.action] || r.action}
+                          </div>
+                        </TD>
+                        <TD className="u-nums">{r.level}</TD>
+                        <TD className="text-ink-secondary">
+                          {r.reason || "—"}
+                        </TD>
+                        <TD>
                           {approvedBy ? (
-                            <span style={{ color: r.approval_stale ? D.amber : D.green }}>
+                            <span
+                              style={{
+                                color: r.approval_stale ? "#A16207" : "#15803D",
+                              }}
+                            >
                               {`Approved by ${approvedBy.approved_by} ${formatETDateTime(approvedBy.approved_at)}`}
-                              {approvedBy.max_payable_cents != null ? ` · up to ${money(approvedBy.max_payable_cents)}` : ""}
+                              {approvedBy.max_payable_cents != null
+                                ? ` · up to ${money(approvedBy.max_payable_cents)}`
+                                : ""}
                               {r.approval_stale ? ` · ${r.approval_stale}` : ""}
                             </span>
-                          ) : r.approvable && r.dimension === "communication" ? (
-                            <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 260 }}>
-                              <div style={{ fontSize: 12, color: D.text }}>
-                                <span style={{ color: D.muted }}>To </span>{r.draft?.to || "—"}
-                                <div><b>{r.draft?.subject || "—"}</b></div>
-                                <div style={{ color: D.muted, whiteSpace: "pre-wrap", maxHeight: 84, overflow: "hidden" }}>{r.draft?.body || ""}</div>
+                          ) : r.approvable &&
+                            r.dimension === "communication" ? (
+                            <div className="flex flex-col [gap:6px] [min-width:260px]">
+                              <div className="text-ui-body text-zinc-900">
+                                <span className="text-ink-secondary">To </span>
+                                {r.draft?.to || "—"}
+                                <div>
+                                  <b>{r.draft?.subject || "—"}</b>
+                                </div>
+                                <div className="text-ink-secondary whitespace-pre-wrap [max-height:84px] overflow-hidden">
+                                  {r.draft?.body || ""}
+                                </div>
                               </div>
                               <DraftReviewLine review={r.draft?.review} />
-                              <RecipientReview review={r.draft?.recipient_review} acked={acks[`${r.id}:${r.draft?.recipient_review?.lookup_hash || ""}`]} disabled={rowBusy} onAck={(v) => setAcks({ ...acks, [`${r.id}:${r.draft?.recipient_review?.lookup_hash || ""}`]: v })} />
+                              <RecipientReview
+                                review={r.draft?.recipient_review}
+                                acked={
+                                  acks[
+                                    `${r.id}:${r.draft?.recipient_review?.lookup_hash || ""}`
+                                  ]
+                                }
+                                disabled={rowBusy}
+                                onAck={(v) =>
+                                  setAcks({
+                                    ...acks,
+                                    [`${r.id}:${r.draft?.recipient_review?.lookup_hash || ""}`]:
+                                      v,
+                                  })
+                                }
+                              />
                               <span>
-                                <button onClick={() => send(c, r)} disabled={rowBusy || domainBusy || (r.draft?.recipient_review?.kind === "ambiguous" && !acks[`${r.id}:${r.draft?.recipient_review?.lookup_hash || ""}`])} style={btn(rowBusy || domainBusy || (r.draft?.recipient_review?.kind === "ambiguous" && !acks[`${r.id}:${r.draft?.recipient_review?.lookup_hash || ""}`]), D.green)}>
-                                  {rowBusy ? "Sending…" : r.action === "outreach_followup" ? "Send the follow-up" : "Send the pitch"}
-                                </button>
+                                <Button
+                                  onClick={() => send(c, r)}
+                                  disabled={
+                                    rowBusy ||
+                                    domainBusy ||
+                                    (r.draft?.recipient_review?.kind ===
+                                      "ambiguous" &&
+                                      !acks[
+                                        `${r.id}:${r.draft?.recipient_review?.lookup_hash || ""}`
+                                      ])
+                                  }
+                                >
+                                  {rowBusy
+                                    ? "Sending…"
+                                    : r.action === "outreach_followup"
+                                      ? "Send the follow-up"
+                                      : "Send the pitch"}
+                                </Button>
                                 {r.action === "outreach_followup" && (
-                                  <button onClick={() => skipFollowUp(c, r)} disabled={rowBusy || domainBusy} style={{ ...btn(rowBusy || domainBusy, D.muted), marginLeft: 6 }}>Skip the follow-up</button>
+                                  <Button
+                                    onClick={() => skipFollowUp(c, r)}
+                                    disabled={rowBusy || domainBusy}
+                                    className="[margin-left:6px]"
+                                  >
+                                    Skip the follow-up
+                                  </Button>
                                 )}
                               </span>
                             </div>
                           ) : r.approvable ? (
-                            <span style={{ display: "inline-flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                            <span className="inline-flex [gap:6px] items-center flex-wrap">
                               {r.dimension === "payment" && (
-                                <label style={{ display: "inline-flex", gap: 4, alignItems: "center", color: D.muted }}>
+                                <label className="inline-flex [gap:4px] items-center text-ink-secondary">
                                   $
-                                  <input
+                                  <Input
                                     type="number"
                                     min="0.01"
                                     step="0.01"
                                     value={displayedAmount(c, r)}
                                     disabled={rowBusy}
-                                    onChange={(e) => setAmounts({ ...amounts, [r.id]: e.target.value })}
-                                    style={{ ...inputStyle, width: 96 }}
+                                    onChange={(e) =>
+                                      setAmounts({
+                                        ...amounts,
+                                        [r.id]: e.target.value,
+                                      })
+                                    }
+                                    className="[width:96px]"
                                   />
-                                  {c.price_tolerance_cents > 0 ? `+${money(c.price_tolerance_cents)} tolerance` : "exact"}
-                                  {r.shared_fee ? ` · covers ${r.shared_fee.placements} locations` : ""}
+                                  {c.price_tolerance_cents > 0
+                                    ? `+${money(c.price_tolerance_cents)} tolerance`
+                                    : "exact"}
+                                  {r.shared_fee
+                                    ? ` · covers ${r.shared_fee.placements} locations`
+                                    : ""}
                                 </label>
                               )}
-                              <button onClick={() => approve(c, r)} disabled={rowBusy || domainBusy} style={btn(rowBusy || domainBusy, D.green)}>
+                              <Button
+                                onClick={() => approve(c, r)}
+                                disabled={rowBusy || domainBusy}
+                              >
                                 {rowBusy ? "Approving…" : "Approve"}
-                              </button>
+                              </Button>
                             </span>
                           ) : (
-                            <span style={{ color: D.muted }}>{r.why_not}</span>
+                            <span className="text-ink-secondary">
+                              {r.why_not}
+                            </span>
                           )}
-                        </td>
-                      </tr>
+                        </TD>
+                      </TR>
                     );
                   })}
-                </tbody>
-              </table>
+                </TBody>
+              </Table>
             </div>
-            <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
-              <input
+            <div className="flex [gap:8px] items-center [margin-top:10px] flex-wrap">
+              <Input
                 type="text"
                 placeholder="Note (optional, kept with the decision)"
                 value={notes[c.domain.id] || ""}
                 disabled={domainBusy}
-                onChange={(e) => setNotes({ ...notes, [c.domain.id]: e.target.value })}
-                style={{ ...inputStyle, fontFamily: "inherit", flex: "1 1 240px" }}
+                onChange={(e) =>
+                  setNotes({
+                    ...notes,
+                    [c.domain.id]: e.target.value,
+                  })
+                }
+                className="[flex:1_1_240px]"
               />
               {c.decidable ? (
                 <>
-                  <button onClick={() => decide(c, "watch")} disabled={domainBusy} style={btn(domainBusy)}>
+                  <Button
+                    onClick={() => decide(c, "watch")}
+                    disabled={domainBusy}
+                  >
                     Watch domain
-                  </button>
-                  <button onClick={() => decide(c, "reject")} disabled={domainBusy} style={btn(domainBusy, D.red)}>
+                  </Button>
+                  <Button
+                    onClick={() => decide(c, "reject")}
+                    disabled={domainBusy}
+                  >
                     Reject domain
-                  </button>
+                  </Button>
                 </>
               ) : (
-                <span style={{ fontSize: 14, color: D.muted }}>
-                  {c.submission_ambiguity ? "Recording a submission verdict does not reopen acquisition for this domain." : `Domain is ${String(c.domain.agent_state).replace(/_/g, " ")} — a sibling placement is approved or in flight; reject or watch it from the Link Building board`}
+                <span className="text-ui-body text-ink-secondary">
+                  {c.submission_ambiguity
+                    ? "Recording a submission verdict does not reopen acquisition for this domain."
+                    : `Domain is ${String(c.domain.agent_state).replace(/_/g, " ")} — a sibling placement is approved or in flight; reject or watch it from the Link Building board`}
                 </span>
               )}
             </div>
           </div>
         );
       })}
-      {drafting && <OutreachDraftModal prospect={drafting} onClose={() => setDrafting(null)} onSaved={() => { setDrafting(null); refresh(); }} />}
-    </Card>
+      {drafting && (
+        <OutreachDraftModal
+          prospect={drafting}
+          onClose={() => setDrafting(null)}
+          onSaved={() => {
+            setDrafting(null);
+            refresh();
+          }}
+        />
+      )}
+    </UiCard>
   );
 }
-
 const POLICY_GROUPS = [
-  { title: "Floors (any action, auto or owner-routed)", fields: ["min_score", "min_path_confidence", "max_spam_score"] },
-  { title: "Automatic acquisition", fields: ["auto_free_acquisition", "auto_account_creation", "auto_submission_daily_cap", "membership_requires_owner", "legal_attestation_requires_owner"] },
-  { title: "Automatic outreach", fields: ["auto_outreach_min_score", "auto_outreach_daily_cap"] },
-  { title: "Automatic spend", fields: ["monthly_paid_budget_cents", "max_auto_purchase_cents", "auto_paid_min_score", "auto_paid_min_d30_confidence"] },
-  { title: "Owner-approved spend", fields: ["owner_monthly_budget_cents", "owner_price_tolerance_cents", "presentment_window_days"] },
-  { title: "Provider", fields: ["preferred_provider"] },
+  {
+    title: "Floors (any action, auto or owner-routed)",
+    fields: ["min_score", "min_path_confidence", "max_spam_score"],
+  },
+  {
+    title: "Automatic acquisition",
+    fields: [
+      "auto_free_acquisition",
+      "auto_account_creation",
+      "auto_submission_daily_cap",
+      "membership_requires_owner",
+      "legal_attestation_requires_owner",
+    ],
+  },
+  {
+    title: "Automatic outreach",
+    fields: ["auto_outreach_min_score", "auto_outreach_daily_cap"],
+  },
+  {
+    title: "Automatic spend",
+    fields: [
+      "monthly_paid_budget_cents",
+      "max_auto_purchase_cents",
+      "auto_paid_min_score",
+      "auto_paid_min_d30_confidence",
+    ],
+  },
+  {
+    title: "Owner-approved spend",
+    fields: [
+      "owner_monthly_budget_cents",
+      "owner_price_tolerance_cents",
+      "presentment_window_days",
+    ],
+  },
+  {
+    title: "Provider",
+    fields: ["preferred_provider"],
+  },
 ];
 const POLICY_LABELS = {
-  min_score: "Minimum score", min_path_confidence: "Minimum path confidence (0–1)", max_spam_score: "Maximum spam score",
-  auto_free_acquisition: "Auto free acquisition", auto_account_creation: "Auto account creation",
-  auto_submission_daily_cap: "Auto submissions / day (0 = none)", membership_requires_owner: "Memberships need the owner",
+  min_score: "Minimum score",
+  min_path_confidence: "Minimum path confidence (0–1)",
+  max_spam_score: "Maximum spam score",
+  auto_free_acquisition: "Auto free acquisition",
+  auto_account_creation: "Auto account creation",
+  auto_submission_daily_cap: "Auto submissions / day (0 = none)",
+  membership_requires_owner: "Memberships need the owner",
   legal_attestation_requires_owner: "Signed terms need the owner",
-  auto_outreach_min_score: "Auto outreach min score (blank = never)", auto_outreach_daily_cap: "Auto outreach / day (0 = none)",
-  monthly_paid_budget_cents: "Auto monthly budget (¢)", max_auto_purchase_cents: "Max auto purchase (¢)",
-  auto_paid_min_score: "Auto paid min score (blank = never)", auto_paid_min_d30_confidence: "Auto paid min D30 confidence (blank = never)",
-  owner_monthly_budget_cents: "Owner monthly budget (¢, blank = no cap)", owner_price_tolerance_cents: "Owner price tolerance (¢)",
-  presentment_window_days: "Presentment window (days, raise only)", preferred_provider: "Preferred provider",
+  auto_outreach_min_score: "Auto outreach min score (blank = never)",
+  auto_outreach_daily_cap: "Auto outreach / day (0 = none)",
+  monthly_paid_budget_cents: "Auto monthly budget (¢)",
+  max_auto_purchase_cents: "Max auto purchase (¢)",
+  auto_paid_min_score: "Auto paid min score (blank = never)",
+  auto_paid_min_d30_confidence: "Auto paid min D30 confidence (blank = never)",
+  owner_monthly_budget_cents: "Owner monthly budget (¢, blank = no cap)",
+  owner_price_tolerance_cents: "Owner price tolerance (¢)",
+  presentment_window_days: "Presentment window (days, raise only)",
+  preferred_provider: "Preferred provider",
 };
-
 function LinkPolicyPanel() {
   const [data, setData] = useState(null);
   const [draft, setDraft] = useState({});
@@ -3808,7 +4610,6 @@ function LinkPolicyPanel() {
   const [error, setError] = useState(null);
   const [saved, setSaved] = useState(null);
   const loadGen = useRef(0);
-
   const load = async () => {
     const gen = ++loadGen.current;
     setError(null);
@@ -3825,12 +4626,15 @@ function LinkPolicyPanel() {
   useEffect(() => {
     load();
   }, []);
-
   const stored = data?.stored || {};
   const fields = data?.fields || {};
-  const dirty = Object.keys(draft).filter((k) => draft[k] !== undefined && String(draft[k] ?? "") !== String(stored[k] ?? ""));
-  const overrideFor = (name) => (data?.overrides || []).find((o) => o.field === name);
-
+  const dirty = Object.keys(draft).filter(
+    (k) =>
+      draft[k] !== undefined &&
+      String(draft[k] ?? "") !== String(stored[k] ?? ""),
+  );
+  const overrideFor = (name) =>
+    (data?.overrides || []).find((o) => o.field === name);
   const save = async () => {
     if (!dirty.length) return;
     setSaving(true);
@@ -3842,7 +4646,11 @@ function LinkPolicyPanel() {
     });
     try {
       const r = await adminFetch("/admin/backlink-agent/policy", { method: "PATCH", body: patch });
-      setSaved(r?.changed?.length ? `${r.changed.length} field${r.changed.length === 1 ? "" : "s"} changed` : "No changes");
+      setSaved(
+        r?.changed?.length
+          ? `${r.changed.length} field${r.changed.length === 1 ? "" : "s"} changed`
+          : "No changes",
+      );
       await load();
     } catch (e) {
       setError(e?.message || "Save failed");
@@ -3850,52 +4658,32 @@ function LinkPolicyPanel() {
       setSaving(false);
     }
   };
-
-  const inputStyle = {
-    width: "100%",
-    padding: "8px 10px",
-    borderRadius: 8,
-    border: `1px solid ${D.inputBorder}`,
-    background: "#fff",
-    color: D.text,
-    fontSize: 13,
-    fontFamily: MONO,
-  };
-  const btn = (disabled) => ({
-    padding: "6px 12px",
-    minHeight: 32,
-    borderRadius: 8,
-    border: `1px solid ${D.border}`,
-    background: "#fff",
-    color: D.text,
-    fontSize: 12,
-    cursor: "pointer",
-    opacity: disabled ? 0.5 : 1,
-  });
-
   const renderField = (name) => {
     const spec = fields[name];
     if (!spec) return null;
     const value = draft[name] !== undefined ? draft[name] : stored[name];
     const override = overrideFor(name);
     const label = (
-      <div style={{ fontSize: 12, color: D.muted, marginBottom: 4 }}>
+      <div className="text-ui-body text-ink-secondary [margin-bottom:4px]">
         {POLICY_LABELS[name] || name}
         {override && (
-          <span style={{ color: D.amber }}>{` · env ${override.env} tightens to ${override.applied}`}</span>
+          <span className="text-zinc-700">{` · env ${override.env} tightens to ${override.applied}`}</span>
         )}
       </div>
     );
     if (spec.type === "boolean") {
       return (
-        <label key={name} style={{ display: "block", fontSize: 13, color: D.text }}>
+        <label key={name} className="block text-ui-body text-zinc-900">
           {label}
-          <input
-            type="checkbox"
+          <Checkbox
             checked={value === true}
             disabled={saving}
-            onChange={(e) => setDraft({ ...draft, [name]: e.target.checked })}
-            style={{ width: 18, height: 18 }}
+            onChange={(e) =>
+              setDraft({
+                ...draft,
+                [name]: e.target.checked,
+              })
+            }
           />
         </label>
       );
@@ -3904,20 +4692,29 @@ function LinkPolicyPanel() {
       return (
         <div key={name}>
           {label}
-          <select value={value ?? ""} disabled={saving} onChange={(e) => setDraft({ ...draft, [name]: e.target.value })} style={inputStyle}>
+          <Select
+            value={value ?? ""}
+            disabled={saving}
+            onChange={(e) =>
+              setDraft({
+                ...draft,
+                [name]: e.target.value,
+              })
+            }
+          >
             {spec.values.map((v) => (
               <option key={v} value={v}>
                 {v}
               </option>
             ))}
-          </select>
+          </Select>
         </div>
       );
     }
     return (
       <div key={name}>
         {label}
-        <input
+        <Input
           type="number"
           step={spec.type === "int" ? 1 : 0.01}
           min={spec.min}
@@ -3925,95 +4722,122 @@ function LinkPolicyPanel() {
           value={value === null || value === undefined ? "" : value}
           placeholder={spec.nullable ? "blank = off" : ""}
           disabled={saving}
-          onChange={(e) => setDraft({ ...draft, [name]: e.target.value === "" ? null : e.target.value })}
-          style={inputStyle}
+          onChange={(e) =>
+            setDraft({
+              ...draft,
+              [name]: e.target.value === "" ? null : e.target.value,
+            })
+          }
         />
       </div>
     );
   };
-
   return (
-    <Card style={{ marginBottom: 20 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 6 }}>
-        <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>Acquisition authority policy</div>
-        <div style={{ fontSize: 12, color: D.muted, fontFamily: MONO }}>
-          {data ? (data.gateOn ? "GATE_LINK_AUTHORITY on" : "GATE_LINK_AUTHORITY off — every row routes to you") : "…"}
+    <UiCard className="p-6 [margin-bottom:20px]">
+      <div className="flex items-center justify-between flex-wrap [gap:8px] [margin-bottom:6px]">
+        <div className="text-ui-body font-medium text-zinc-900">
+          Acquisition authority policy
+        </div>
+        <div className="text-ui-body text-ink-secondary">
+          {data
+            ? data.gateOn
+              ? "GATE_LINK_AUTHORITY on"
+              : "GATE_LINK_AUTHORITY off — every row routes to you"
+            : "…"}
         </div>
       </div>
-      <div style={{ fontSize: 12, color: D.muted, marginBottom: 14 }}>
-        The only place thresholds change. Shipped defaults grant nothing automatically; every save is logged. Environment limits can only tighten a value.
+      <div className="text-ui-body text-ink-secondary [margin-bottom:14px]">
+        The only place thresholds change. Shipped defaults grant nothing
+        automatically; every save is logged. Environment limits can only tighten
+        a value.
       </div>
-      {error && <div style={{ marginBottom: 8, fontSize: 12, color: D.red }}>{error}</div>}
-      {!data && !error && <div style={{ fontSize: 13, color: D.muted }}>Loading…</div>}
+      {error && (
+        <div className="[margin-bottom:8px] text-ui-body text-alert-fg">
+          {error}
+        </div>
+      )}
+      {!data && !error && (
+        <div className="text-ui-body text-ink-secondary">Loading…</div>
+      )}
       {data && (
         <>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 16 }}>
+          <div className="grid [grid-template-columns:repeat(auto-fill,_minmax(240px,_1fr))] [gap:16px]">
             {POLICY_GROUPS.map((g) => (
-              <div key={g.title} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, textTransform: "uppercase", letterSpacing: "0.5px" }}>{g.title}</div>
+              <div key={g.title} className="flex flex-col [gap:10px]">
+                <div className="text-ui-body font-medium text-zinc-900">
+                  {g.title}
+                </div>
                 {g.fields.map(renderField)}
               </div>
             ))}
           </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 16, flexWrap: "wrap" }}>
-            <button onClick={save} disabled={saving || !dirty.length} style={btn(saving || !dirty.length)}>
-              {saving ? "Saving…" : dirty.length ? `Save ${dirty.length} change${dirty.length === 1 ? "" : "s"}` : "No changes"}
-            </button>
+          <div className="flex [gap:8px] items-center [margin-top:16px] flex-wrap">
+            <Button onClick={save} disabled={saving || !dirty.length}>
+              {saving
+                ? "Saving…"
+                : dirty.length
+                  ? `Save ${dirty.length} change${dirty.length === 1 ? "" : "s"}`
+                  : "No changes"}
+            </Button>
             {dirty.length > 0 && (
-              <button
+              <Button
                 onClick={() => {
                   setDraft({});
                   setError(null);
                 }}
                 disabled={saving}
-                style={btn(saving)}
               >
                 Discard
-              </button>
+              </Button>
             )}
-            {saved && <span style={{ fontSize: 12, color: D.green }}>{saved}</span>}
+            {saved && (
+              <span className="text-ui-body text-zinc-900">{saved}</span>
+            )}
             {data.updated_at && (
-              <span style={{ fontSize: 12, color: D.muted }}>
+              <span className="text-ui-body text-ink-secondary">
                 Last change {formatETDate(data.updated_at)}
                 {data.updated_by ? ` by ${data.updated_by}` : ""}
               </span>
             )}
           </div>
           {data.audit?.length > 0 && (
-            <div style={{ marginTop: 14 }}>
-              <div style={{ fontSize: 12, color: D.muted, marginBottom: 6 }}>Recent changes</div>
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                  <thead>
-                    <tr>
-                      <th style={thStyle}>When</th>
-                      <th style={thStyle}>Who</th>
-                      <th style={thStyle}>Field</th>
-                      <th style={thStyle}>From</th>
-                      <th style={thStyle}>To</th>
-                    </tr>
-                  </thead>
-                  <tbody>
+            <div className="[margin-top:14px]">
+              <div className="text-ui-body text-ink-secondary [margin-bottom:6px]">
+                Recent changes
+              </div>
+              <div className="overflow-x-auto">
+                <Table className="[width:100%] [border-collapse:collapse]">
+                  <THead>
+                    <TR>
+                      <TH>When</TH>
+                      <TH>Who</TH>
+                      <TH>Field</TH>
+                      <TH>From</TH>
+                      <TH>To</TH>
+                    </TR>
+                  </THead>
+                  <TBody>
                     {data.audit.map((a) => (
-                      <tr key={a.id}>
-                        <td style={tdStyle}>{formatETDateTime(a.changed_at)}</td>
-                        <td style={{ ...tdStyle, fontFamily: "inherit" }}>{a.changed_by || "—"}</td>
-                        <td style={tdStyle}>{a.field}</td>
-                        <td style={tdStyle}>{a.old_value ?? "null"}</td>
-                        <td style={tdStyle}>{a.new_value ?? "null"}</td>
-                      </tr>
+                      <TR key={a.id}>
+                        <TD className="u-nums">
+                          {formatETDateTime(a.changed_at)}
+                        </TD>
+                        <TD>{a.changed_by || "—"}</TD>
+                        <TD className="u-nums">{a.field}</TD>
+                        <TD className="u-nums">{a.old_value ?? "null"}</TD>
+                        <TD className="u-nums">{a.new_value ?? "null"}</TD>
+                      </TR>
                     ))}
-                  </tbody>
-                </table>
+                  </TBody>
+                </Table>
               </div>
             </div>
           )}
         </>
       )}
-    </Card>
+    </UiCard>
   );
 }
-
 function BacklinkAgentPanel() {
   const [stats, setStats] = useState(null);
   // one refresh key for the Registry card and the Owner queue: a mutation in either reloads both
@@ -4032,7 +4856,6 @@ function BacklinkAgentPanel() {
   const [intakeSeed, setIntakeSeed] = useState(false);
   const [intakeBusy, setIntakeBusy] = useState(false);
   const [intakeResult, setIntakeResult] = useState(null);
-
   const loadData = () => {
     Promise.all([
       adminFetch("/admin/backlink-agent/stats").catch(() => null),
@@ -4053,11 +4876,9 @@ function BacklinkAgentPanel() {
       setLoading(false);
     });
   };
-
   useEffect(() => {
     loadData();
   }, []);
-
   const handleAddUrls = async () => {
     const urls = urlInput
       .split("\n")
@@ -4070,7 +4891,6 @@ function BacklinkAgentPanel() {
     setUrlInput("");
     loadData();
   };
-
   const runIntake = async (dryRun) => {
     if (!intakeText.trim()) return;
     setIntakeBusy(true);
@@ -4083,12 +4903,13 @@ function BacklinkAgentPanel() {
       setIntakeResult(r);
       if (!dryRun && !r?.error) setIntakeText("");
     } catch (e) {
-      setIntakeResult({ error: e?.message || "Intake failed" });
+      setIntakeResult({
+        error: e?.message || "Intake failed",
+      });
     } finally {
       setIntakeBusy(false);
     }
   };
-
   const handleProcess = async () => {
     setProcessing(true);
     try {
@@ -4101,17 +4922,14 @@ function BacklinkAgentPanel() {
       setProcessing(false);
     }
   };
-
   const handleRetry = async (id) => {
     await adminPost(`/admin/backlink-agent/queue/${id}/retry`, {});
     loadData();
   };
-
   const handleSkip = async (id) => {
     await adminPost(`/admin/backlink-agent/queue/${id}/skip`, {});
     loadData();
   };
-
   const handleAddTarget = async () => {
     if (!newTarget.trim()) return;
     await adminPost("/admin/backlink-agent/targets", {
@@ -4120,228 +4938,121 @@ function BacklinkAgentPanel() {
     setNewTarget("");
     loadData();
   };
-
   const handleDeleteTarget = async (id) => {
     await adminFetch(`/admin/backlink-agent/targets/${id}`, {
       method: "DELETE",
     });
     loadData();
   };
-
   const handlePoll = async () => {
     await adminPost("/admin/backlink-agent/poll", {});
     loadData();
   };
-
   const handleVerifyEmails = async () => {
     await adminPost("/admin/backlink-agent/verify-emails", {});
     loadData();
   };
-
   const statusColor = {
-    pending: D.muted,
-    processing: D.teal,
-    signup_complete: D.amber,
-    verified: D.green,
-    failed: D.red,
+    pending: "#71717A",
+    processing: "#18181B",
+    signup_complete: "#A16207",
+    verified: "#15803D",
+    failed: "#991B1B",
     skipped: "#475569",
   };
-
   if (loading)
     return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+      <div className="text-ink-secondary [padding:40px] text-center">
         Loading backlink agent...
       </div>
     );
-
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+    <div className="flex flex-col [gap:16px]">
       {/* Stats */}
-      <div
-        className="seo-kpi-grid-5"
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(5, 1fr)",
-          gap: 10,
-        }}
-      >
+      <div className="seo-kpi-grid-5 grid max-sm:!grid-cols-2 [grid-template-columns:repeat(5,_1fr)] [gap:10px]">
         {" "}
         <KpiCard label="Total Queued" value={stats?.total || 0} />{" "}
-        <KpiCard label="Pending" value={stats?.pending || 0} color={D.muted} />{" "}
+        <KpiCard
+          label="Pending"
+          value={stats?.pending || 0}
+          color={"#71717A"}
+        />{" "}
         <KpiCard
           label="Completed"
           value={stats?.completed || 0}
-          color={D.amber}
+          color={"#A16207"}
         />{" "}
         <KpiCard
           label="Verified"
           value={stats?.verified || 0}
-          color={D.green}
+          color={"#15803D"}
         />{" "}
         <KpiCard
           label="Success Rate"
           value={`${stats?.successRate || 0}%`}
-          color={stats?.successRate >= 50 ? D.green : D.amber}
+          color={stats?.successRate >= 50 ? "#15803D" : "#A16207"}
         />{" "}
       </div>
       {/* Controls */}
-      <div style={{ display: "flex", gap: 8 }}>
+      <div className="flex [gap:8px]">
         {" "}
-        <button
+        <Button
           onClick={handleProcess}
           disabled={processing || (stats?.pending || 0) === 0}
-          style={{
-            padding: "8px 16px",
-            borderRadius: 8,
-            border: "none",
-            background: D.teal,
-            color: "#fff",
-            fontSize: 13,
-            fontWeight: 500,
-            cursor: "pointer",
-            opacity: processing || !stats?.pending ? 0.5 : 1,
-          }}
         >
           {processing
             ? "Processing..."
             : `Process Queue (${stats?.pending || 0})`}
-        </button>{" "}
-        <button
-          onClick={handlePoll}
-          style={{
-            padding: "8px 16px",
-            borderRadius: 8,
-            border: `1px solid ${D.border}`,
-            background: "#fff",
-            color: D.text,
-            fontSize: 13,
-            cursor: "pointer",
-          }}
-        >
+        </Button>{" "}
+        <Button onClick={handlePoll} variant="secondary">
           Poll X Targets
-        </button>{" "}
-        <button
-          onClick={handleVerifyEmails}
-          style={{
-            padding: "8px 16px",
-            borderRadius: 8,
-            border: `1px solid ${D.border}`,
-            background: "#fff",
-            color: D.text,
-            fontSize: 13,
-            cursor: "pointer",
-          }}
-        >
+        </Button>{" "}
+        <Button onClick={handleVerifyEmails} variant="secondary">
           Verify Emails
-        </button>{" "}
-        <button
-          onClick={loadData}
-          style={{
-            padding: "8px 16px",
-            borderRadius: 8,
-            border: `1px solid ${D.border}`,
-            background: "transparent",
-            color: D.muted,
-            fontSize: 13,
-            cursor: "pointer",
-          }}
-        >
+        </Button>{" "}
+        <Button onClick={loadData} variant="secondary">
           Refresh
-        </button>{" "}
+        </Button>{" "}
       </div>{" "}
-      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div className="flex flex-col [gap:16px]">
         {/* X Targets */}
-        <Card>
+        <UiCard className="p-6">
           {" "}
-          <div
-            style={{
-              fontSize: 14,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 12,
-            }}
-          >
+          <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
             X Targets
           </div>{" "}
-          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+          <div className="flex [gap:8px] [margin-bottom:12px]">
             {" "}
-            <input
+            <Input
               value={newTarget}
               onChange={(e) => setNewTarget(e.target.value)}
               placeholder="@username"
-              style={{
-                flex: 1,
-                padding: 10,
-                background: D.bg,
-                border: `1px solid ${D.border}`,
-                borderRadius: 8,
-                color: D.text,
-                fontSize: 13,
-                outline: "none",
-              }}
+              className="[flex:1]"
             />{" "}
-            <button
-              onClick={handleAddTarget}
-              style={{
-                padding: "8px 18px",
-                borderRadius: 8,
-                border: "none",
-                background: D.teal,
-                color: "#fff",
-                fontSize: 13,
-                fontWeight: 500,
-                cursor: "pointer",
-              }}
-            >
-              Add Target
-            </button>{" "}
+            <Button onClick={handleAddTarget}>Add Target</Button>{" "}
           </div>
           {targets.length === 0 ? (
-            <div style={{ color: D.muted, fontSize: 13 }}>
+            <div className="text-ink-secondary text-ui-body">
               No X targets configured.
             </div>
           ) : (
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-                gap: 8,
-              }}
-            >
+            <div className="grid [grid-template-columns:repeat(auto-fit,_minmax(180px,_1fr))] [gap:8px]">
               {targets.map((target) => (
                 <div
                   key={target.id}
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                    gap: 8,
-                    padding: "8px 10px",
-                    background: D.bg,
-                    border: `1px solid ${D.border}`,
-                    borderRadius: 8,
-                  }}
+                  className="flex justify-between items-center [gap:8px] [padding:8px_10px] bg-zinc-100 rounded-md border-hairline border-zinc-200"
                 >
                   {" "}
-                  <div style={{ minWidth: 0 }}>
+                  <div className="[min-width:0px]">
                     {" "}
-                    <div
-                      style={{
-                        fontSize: 13,
-                        color: D.heading,
-                        fontWeight: 500,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
+                    <div className="text-ui-body text-zinc-900 font-medium overflow-hidden text-ellipsis whitespace-nowrap">
                       @{target.x_username}
                     </div>{" "}
                     <div
                       style={{
-                        fontSize: 11,
-                        color: target.is_active ? D.green : D.muted,
+                        color: target.is_active ? "#15803D" : "#71717A",
                       }}
+                      className="text-ui-body"
                     >
                       {target.is_active ? "active" : "inactive"}
                       {target.last_polled_at
@@ -4349,132 +5060,70 @@ function BacklinkAgentPanel() {
                         : ""}
                     </div>{" "}
                   </div>{" "}
-                  <button
+                  <Button
                     onClick={() => handleDeleteTarget(target.id)}
-                    style={{
-                      border: "none",
-                      background: "transparent",
-                      color: D.red,
-                      fontSize: 12,
-                      cursor: "pointer",
-                    }}
+                    className="text-alert-fg"
+                    variant="secondary"
                   >
                     Remove
-                  </button>{" "}
+                  </Button>{" "}
                 </div>
               ))}
             </div>
           )}
-        </Card>
+        </UiCard>
         {/* Registry intake — paste box + CSV (plan v2 step 2) */}
-        <Card>
+        <UiCard className="p-6">
           {" "}
-          <div
-            style={{
-              fontSize: 14,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 4,
-            }}
-          >
+          <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:4px]">
             Add opportunities to the registry
           </div>{" "}
-          <div style={{ fontSize: 12, color: D.muted, marginBottom: 10 }}>
+          <div className="text-ui-body text-ink-secondary [margin-bottom:10px]">
             Domains, URLs, free text, or a CSV with a Website column. Shortener
             links and X posts are kept and resolved on the hourly sweep. Nothing
             is contacted or paid.
           </div>{" "}
-          <textarea
+          <Textarea
             value={intakeText}
             onChange={(e) => setIntakeText(e.target.value)}
-            placeholder={"academia.edu\nhttps://producthunt.com/…\nWebsite,Primary Action\n…"}
+            placeholder={
+              "academia.edu\nhttps://producthunt.com/…\nWebsite,Primary Action\n…"
+            }
             rows={5}
-            style={{
-              width: "100%",
-              padding: 10,
-              background: D.bg,
-              border: `1px solid ${D.border}`,
-              borderRadius: 8,
-              color: D.text,
-              fontSize: 13,
-              fontFamily: "Roboto, Arial, sans-serif",
-              resize: "vertical",
-              outline: "none",
-              boxSizing: "border-box",
-              marginBottom: 8,
-            }}
+            className="[width:100%] resize-y box-border [margin-bottom:8px]"
           />{" "}
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              gap: 8,
-              flexWrap: "wrap",
-            }}
-          >
+          <div className="flex justify-between items-center [gap:8px] flex-wrap">
             {" "}
-            <label
-              style={{
-                fontSize: 12,
-                color: D.muted,
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                minHeight: 44,
-              }}
-            >
-              <input
-                type="checkbox"
+            <label className="text-ui-body text-ink-secondary flex items-center [gap:6px] [min-height:44px]">
+              <Checkbox
                 checked={intakeSeed}
                 onChange={(e) => setIntakeSeed(e.target.checked)}
               />
               Owner seed (investigate first)
             </label>{" "}
-            <div style={{ display: "flex", gap: 8 }}>
+            <div className="flex [gap:8px]">
               {" "}
-              <button
+              <Button
                 onClick={() => runIntake(true)}
                 disabled={intakeBusy || !intakeText.trim()}
-                style={{
-                  padding: "8px 16px",
-                  borderRadius: 8,
-                  border: `1px solid ${D.border}`,
-                  background: "#fff",
-                  color: D.text,
-                  fontSize: 13,
-                  cursor: "pointer",
-                  opacity: intakeBusy || !intakeText.trim() ? 0.5 : 1,
-                }}
+                variant="secondary"
               >
                 Preview
-              </button>{" "}
-              <button
+              </Button>{" "}
+              <Button
                 onClick={() => runIntake(false)}
                 disabled={intakeBusy || !intakeText.trim()}
-                style={{
-                  padding: "8px 18px",
-                  borderRadius: 8,
-                  border: "none",
-                  background: D.teal,
-                  color: "#fff",
-                  fontSize: 13,
-                  fontWeight: 500,
-                  cursor: "pointer",
-                  opacity: intakeBusy || !intakeText.trim() ? 0.5 : 1,
-                }}
               >
                 {intakeBusy ? "Working…" : "Add to registry"}
-              </button>{" "}
+              </Button>{" "}
             </div>
           </div>
           {intakeResult && (
             <div
               style={{
-                marginTop: 8,
-                fontSize: 12,
-                color: intakeResult.error ? D.red : D.green,
+                color: intakeResult.error ? "#991B1B" : "#15803D",
               }}
+              className="[margin-top:8px] text-ui-body"
             >
               {intakeResult.error
                 ? intakeResult.error
@@ -4483,288 +5132,160 @@ function BacklinkAgentPanel() {
                   `${intakeResult.dropped?.length ? `, ${intakeResult.dropped.length} dropped` : ""}`}
             </div>
           )}
-        </Card>
+        </UiCard>
         {/* Registry view + investigator (plan v2 step 3) */}
-        <BacklinkRegistryCard refreshKey={linkRefresh} onMutated={bumpLinkRefresh} />
+        <BacklinkRegistryCard
+          refreshKey={linkRefresh}
+          onMutated={bumpLinkRefresh}
+        />
         {/* Owner queue — the cards the authority bridge parked (plan v2 step 4 PR 2b) */}
         <OwnerQueuePanel refreshKey={linkRefresh} onMutated={bumpLinkRefresh} />
         {/* Acquisition authority policy (plan v2 step 4a) */}
         <LinkPolicyPanel />
         {/* Manual URL Input */}
-        <Card>
+        <UiCard className="p-6">
           {" "}
-          <div
-            style={{
-              fontSize: 14,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 12,
-            }}
-          >
+          <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
             Add URLs
           </div>{" "}
-          <textarea
+          <Textarea
             value={urlInput}
             onChange={(e) => setUrlInput(e.target.value)}
             placeholder="Paste URLs here, one per line..."
             rows={4}
-            style={{
-              width: "100%",
-              padding: 10,
-              background: D.bg,
-              border: `1px solid ${D.border}`,
-              borderRadius: 8,
-              color: D.text,
-              fontSize: 13,
-              fontFamily: "Roboto, Arial, sans-serif",
-              resize: "vertical",
-              outline: "none",
-              boxSizing: "border-box",
-              marginBottom: 8,
-            }}
+            className="[width:100%] resize-y box-border [margin-bottom:8px]"
           />{" "}
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-            }}
-          >
+          <div className="flex justify-between items-center">
             {" "}
-            <span style={{ fontSize: 12, color: D.muted }}>
+            <span className="text-ui-body text-ink-secondary">
               {urlInput.split("\n").filter((u) => u.trim()).length} URLs
               detected
             </span>{" "}
-            <button
-              onClick={handleAddUrls}
-              style={{
-                padding: "8px 18px",
-                borderRadius: 8,
-                border: "none",
-                background: D.teal,
-                color: "#fff",
-                fontSize: 13,
-                fontWeight: 500,
-                cursor: "pointer",
-              }}
-            >
-              Add to Queue
-            </button>{" "}
+            <Button onClick={handleAddUrls}>Add to Queue</Button>{" "}
           </div>
           {addResult && (
-            <div style={{ marginTop: 8, fontSize: 12, color: D.green }}>
+            <div className="[margin-top:8px] text-ui-body text-zinc-900">
               Added {addResult.added}, skipped {addResult.skipped}
               {addResult.duplicates?.length > 0
                 ? ` (dupes: ${addResult.duplicates.join(", ")})`
                 : ""}
             </div>
           )}
-        </Card>
+        </UiCard>
         {/* Queue Table */}
-        <Card>
+        <UiCard className="p-6">
           {" "}
-          <div
-            style={{
-              fontSize: 14,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 12,
-            }}
-          >
+          <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
             Queue ({queue.length})
           </div>{" "}
           {/* overflowX spelled explicitly (overflow-y alone computes x to auto
               but never serializes "overflow-x: auto", so the index.css
               scroll-shadow affordance selector would miss this wrapper). */}
-          <div style={{ maxHeight: 400, overflowY: "auto", overflowX: "auto" }}>
+          <div className="[max-height:400px] overflow-y-auto overflow-x-auto">
             {queue.length === 0 ? (
-              <div
-                style={{
-                  color: D.muted,
-                  fontSize: 13,
-                  padding: 20,
-                  textAlign: "center",
-                }}
-              >
+              <div className="text-ink-secondary text-ui-body [padding:20px] text-center">
                 No URLs in queue. Add some above or poll X feeds.
               </div>
             ) : (
-              <table
-                style={{
-                  width: "100%",
-                  borderCollapse: "collapse",
-                  fontSize: 12,
-                }}
-              >
-                {" "}
-                <thead>
-                  {" "}
-                  <tr style={{ borderBottom: `1px solid ${D.border}` }}>
-                    {" "}
-                    <th
-                      style={{
-                        padding: "8px 10px",
-                        textAlign: "left",
-                        color: D.muted,
-                        fontSize: 11,
-                        textTransform: "uppercase",
-                      }}
-                    >
+              <Table className="[width:100%] [border-collapse:collapse] text-ui-body">
+                <THead>
+                  <TR className="border-b border-hairline border-zinc-200">
+                    <TH className="[padding:8px_10px] text-left text-ink-secondary text-ui-body">
                       Domain
-                    </th>{" "}
-                    <th
-                      style={{
-                        padding: "8px 10px",
-                        textAlign: "left",
-                        color: D.muted,
-                        fontSize: 11,
-                        textTransform: "uppercase",
-                      }}
-                    >
+                    </TH>
+                    <TH className="[padding:8px_10px] text-left text-ink-secondary text-ui-body">
                       Source
-                    </th>{" "}
-                    <th
-                      style={{
-                        padding: "8px 10px",
-                        textAlign: "left",
-                        color: D.muted,
-                        fontSize: 11,
-                        textTransform: "uppercase",
-                      }}
-                    >
+                    </TH>
+                    <TH className="[padding:8px_10px] text-left text-ink-secondary text-ui-body">
                       Status
-                    </th>{" "}
-                    <th
-                      style={{
-                        padding: "8px 10px",
-                        textAlign: "right",
-                        color: D.muted,
-                        fontSize: 11,
-                        textTransform: "uppercase",
-                      }}
-                    >
+                    </TH>
+                    <TH className="[padding:8px_10px] text-right text-ink-secondary text-ui-body">
                       Actions
-                    </th>{" "}
-                  </tr>{" "}
-                </thead>{" "}
-                <tbody>
+                    </TH>
+                  </TR>
+                </THead>
+                <TBody>
                   {queue.map((item) => (
-                    <tr
+                    <TR
                       key={item.id}
-                      style={{ borderBottom: `1px solid ${D.border}33` }}
+                      className="border-b border-hairline border-zinc-200"
                     >
-                      {" "}
-                      <td style={{ padding: "8px 10px", color: D.text }}>
+                      <TD className="[padding:8px_10px] text-zinc-900">
                         <a
                           href={item.url}
                           target="_blank"
                           rel="noopener noreferrer"
-                          style={{ color: D.teal, textDecoration: "none" }}
+                          className="text-zinc-900 [text-decoration:none]"
                         >
                           {item.domain}
                         </a>
-                      </td>{" "}
-                      <td style={{ padding: "8px 10px", color: D.muted }}>
+                      </TD>
+                      <TD className="[padding:8px_10px] text-ink-secondary">
                         {item.source}
-                      </td>{" "}
-                      <td style={{ padding: "8px 10px" }}>
+                      </TD>
+                      <TD className="[padding:8px_10px]">
                         {" "}
                         <span
                           style={{
-                            fontSize: 10,
-                            fontWeight: 700,
-                            textTransform: "uppercase",
-                            padding: "2px 8px",
-                            borderRadius: 6,
                             background:
-                              (statusColor[item.status] || D.muted) + "22",
-                            color: statusColor[item.status] || D.muted,
+                              (statusColor[item.status] || "#71717A") + "22",
+                            color: statusColor[item.status] || "#71717A",
                           }}
+                          className="text-ui-body font-medium [padding:2px_8px] rounded-sm"
                         >
                           {item.status}
                         </span>
                         {item.error_message && (
-                          <div
-                            style={{ fontSize: 10, color: D.red, marginTop: 2 }}
-                          >
+                          <div className="text-ui-body text-alert-fg [margin-top:2px]">
                             {item.error_message.substring(0, 60)}
                           </div>
                         )}
-                      </td>{" "}
-                      <td style={{ padding: "8px 10px", textAlign: "right" }}>
+                      </TD>
+                      <TD className="[padding:8px_10px] text-right">
                         {(item.status === "failed" ||
                           item.status === "skipped") && (
-                          <button
+                          <Button
                             onClick={() => handleRetry(item.id)}
-                            style={{
-                              padding: "3px 8px",
-                              borderRadius: 4,
-                              border: `1px solid ${D.teal}`,
-                              background: "transparent",
-                              color: D.teal,
-                              fontSize: 10,
-                              cursor: "pointer",
-                              marginRight: 4,
-                            }}
+                            className="[margin-right:4px]"
+                            variant="secondary"
                           >
                             Retry
-                          </button>
+                          </Button>
                         )}
                         {(item.status === "pending" ||
                           item.status === "failed") && (
-                          <button
+                          <Button
                             onClick={() => handleSkip(item.id)}
-                            style={{
-                              padding: "3px 8px",
-                              borderRadius: 4,
-                              border: `1px solid ${D.border}`,
-                              background: "transparent",
-                              color: D.muted,
-                              fontSize: 10,
-                              cursor: "pointer",
-                            }}
+                            variant="secondary"
                           >
                             Skip
-                          </button>
+                          </Button>
                         )}
-                      </td>{" "}
-                    </tr>
+                      </TD>
+                    </TR>
                   ))}
-                </tbody>{" "}
-              </table>
+                </TBody>
+              </Table>
             )}
           </div>{" "}
-        </Card>
+        </UiCard>
         {/* Profiles */}
         {profiles.length > 0 && (
-          <Card>
+          <UiCard className="p-6">
             {" "}
-            <div
-              style={{
-                fontSize: 14,
-                fontWeight: 500,
-                color: D.heading,
-                marginBottom: 12,
-              }}
-            >
+            <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
               Completed Profiles ({profiles.length})
             </div>{" "}
-            <div style={{ maxHeight: 300, overflowY: "auto" }}>
+            <div className="[max-height:300px] overflow-y-auto">
               {profiles.map((p) => (
                 <div
                   key={p.id}
-                  style={{
-                    padding: "8px 0",
-                    borderBottom: `1px solid ${D.border}33`,
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                  }}
+                  className="[padding:8px_0] flex justify-between items-center border-b border-hairline border-zinc-200"
                 >
                   {" "}
                   <div>
                     {" "}
-                    <div style={{ fontSize: 13, color: D.text }}>
+                    <div className="text-ui-body text-zinc-900">
                       {p.domain || p.site_url}
                     </div>
                     {p.profile_url && (
@@ -4772,11 +5293,7 @@ function BacklinkAgentPanel() {
                         href={p.profile_url}
                         target="_blank"
                         rel="noopener noreferrer"
-                        style={{
-                          fontSize: 11,
-                          color: D.teal,
-                          textDecoration: "none",
-                        }}
+                        className="text-ui-body text-zinc-900 [text-decoration:none]"
                       >
                         View Profile
                       </a>
@@ -4784,16 +5301,14 @@ function BacklinkAgentPanel() {
                   </div>{" "}
                   <span
                     style={{
-                      fontSize: 10,
-                      fontWeight: 700,
-                      padding: "2px 8px",
-                      borderRadius: 6,
                       background:
                         p.queue_status === "verified"
-                          ? D.green + "22"
-                          : D.amber + "22",
-                      color: p.queue_status === "verified" ? D.green : D.amber,
+                          ? "#15803D" + "22"
+                          : "#A16207" + "22",
+                      color:
+                        p.queue_status === "verified" ? "#15803D" : "#A16207",
                     }}
+                    className="text-ui-body font-medium [padding:2px_8px] rounded-sm"
                   >
                     {p.queue_status === "verified"
                       ? "VERIFIED"
@@ -4802,13 +5317,12 @@ function BacklinkAgentPanel() {
                 </div>
               ))}
             </div>{" "}
-          </Card>
+          </UiCard>
         )}
       </div>{" "}
     </div>
   );
 }
-
 function ContentQATab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -4822,22 +5336,28 @@ function ContentQATab() {
   }, []);
   if (loading)
     return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+      <div className="text-ink-secondary [padding:40px] text-center">
         Loading QA scores...
       </div>
     );
   if (!data || data.total === 0)
     return (
-      <Card style={{ padding: 40, textAlign: "center" }}>
-        <div style={{ color: D.muted }}>
+      <UiCard className="[padding:40px] text-center">
+        <div className="text-ink-secondary">
           No QA scores yet. Run Content QA to populate scored URLs, fix-first
           items, and publish readiness.
         </div>
-      </Card>
+      </UiCard>
     );
   const scores = data.scores || [];
   const fixFirst = data.fixFirst || [];
-  const gc = { A: D.green, B: D.teal, C: D.amber, D: D.orange, F: D.red };
+  const gc = {
+    A: "#15803D",
+    B: "#18181B",
+    C: "#A16207",
+    D: "#18181B",
+    F: "#991B1B",
+  };
   const avgScore = scores.length
     ? Math.round(
         scores.reduce((sum, row) => sum + Number(row.total_score || 0), 0) /
@@ -4845,144 +5365,127 @@ function ContentQATab() {
       )
     : 0;
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div
-        className="seo-kpi-grid-4"
-        style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}
-      >
+    <div className="flex flex-col [gap:16px]">
+      <div className="seo-kpi-grid-4 grid max-sm:!grid-cols-2 [grid-template-columns:repeat(4,_1fr)] [gap:12px]">
         <KpiCard label="Scored URLs" value={fmt(data.total)} />
         <KpiCard
           label="Avg Latest 50"
           value={avgScore}
-          color={avgScore >= 38 ? D.green : avgScore >= 30 ? D.amber : D.red}
+          color={
+            avgScore >= 38 ? "#15803D" : avgScore >= 30 ? "#A16207" : "#991B1B"
+          }
         />
         <KpiCard
           label="Publish Ready"
-          value={(data.gradeDistribution?.A || 0) + (data.gradeDistribution?.B || 0)}
-          color={D.green}
+          value={
+            (data.gradeDistribution?.A || 0) + (data.gradeDistribution?.B || 0)
+          }
+          color={"#15803D"}
         />
         <KpiCard
           label="Top Fixes"
           value={fixFirst.length}
-          color={fixFirst.length ? D.red : D.green}
+          color={fixFirst.length ? "#991B1B" : "#15803D"}
         />
       </div>
 
-      <div
-        className="seo-kpi-grid-5"
-        style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 12 }}
-      >
+      <div className="seo-kpi-grid-5 grid max-sm:!grid-cols-2 [grid-template-columns:repeat(5,_1fr)] [gap:12px]">
         {Object.entries(data.gradeDistribution || {}).map(([g, c]) => (
           <KpiCard key={g} label={`Grade ${g}`} value={c} color={gc[g]} />
         ))}
       </div>
 
       {fixFirst.length > 0 && (
-        <Card>
-          <div
-            style={{
-              fontSize: 15,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 12,
-            }}
-          >
+        <UiCard className="p-6">
+          <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
             Top Fixes
           </div>
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr>
-                  <th style={thStyle}>URL</th>
-                  <th style={thR}>Score</th>
-                  <th style={thStyle}>Grade</th>
-                  <th style={thStyle}>Recommendation</th>
-                </tr>
-              </thead>
-              <tbody>
+          <div className="overflow-x-auto">
+            <Table className="[width:100%] [border-collapse:collapse]">
+              <THead>
+                <TR>
+                  <TH>URL</TH>
+                  <TH className="text-right u-nums">Score</TH>
+                  <TH>Grade</TH>
+                  <TH>Recommendation</TH>
+                </TR>
+              </THead>
+              <TBody>
                 {fixFirst.map((row) => (
-                  <tr key={row.id || row.blog_post_id || row.url}>
-                    <td
-                      style={{
-                        ...tdStyle,
-                        fontFamily: "inherit",
-                        maxWidth: 420,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}
+                  <TR key={row.id || row.blog_post_id || row.url}>
+                    <TD
                       title={row.url}
+                      className="[max-width:420px] overflow-hidden text-ellipsis whitespace-nowrap"
                     >
                       {row.url || `Blog post ${row.blog_post_id}`}
-                    </td>
-                    <td style={{ ...tdR, color: gc[row.grade] || D.text }}>
+                    </TD>
+                    <TD
+                      style={{
+                        color: gc[row.grade] || "#27272A",
+                      }}
+                      className="text-right u-nums"
+                    >
                       {row.total_score}/50
-                    </td>
-                    <td style={tdStyle}>{row.grade || "—"}</td>
-                    <td style={{ ...tdStyle, fontFamily: "inherit" }}>
-                      {row.recommendation || "—"}
-                    </td>
-                  </tr>
+                    </TD>
+                    <TD className="u-nums">{row.grade || "—"}</TD>
+                    <TD>{row.recommendation || "—"}</TD>
+                  </TR>
                 ))}
-              </tbody>
-            </table>
+              </TBody>
+            </Table>
           </div>
-        </Card>
+        </UiCard>
       )}
 
       {scores.length > 0 && (
-        <Card>
-          <div
-            style={{
-              fontSize: 15,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 12,
-            }}
-          >
+        <UiCard className="p-6">
+          <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
             Latest Scores
           </div>
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr>
-                  <th style={thStyle}>URL</th>
-                  <th style={thR}>Total</th>
-                  <th style={thR}>Technical</th>
-                  <th style={thR}>On Page</th>
-                  <th style={thR}>Local</th>
-                  <th style={thStyle}>Grade</th>
-                </tr>
-              </thead>
-              <tbody>
+          <div className="overflow-x-auto">
+            <Table className="[width:100%] [border-collapse:collapse]">
+              <THead>
+                <TR>
+                  <TH>URL</TH>
+                  <TH className="text-right u-nums">Total</TH>
+                  <TH className="text-right u-nums">Technical</TH>
+                  <TH className="text-right u-nums">On Page</TH>
+                  <TH className="text-right u-nums">Local</TH>
+                  <TH>Grade</TH>
+                </TR>
+              </THead>
+              <TBody>
                 {scores.slice(0, 20).map((row) => (
-                  <tr key={`score-${row.id || row.blog_post_id || row.url}`}>
-                    <td
-                      style={{
-                        ...tdStyle,
-                        fontFamily: "inherit",
-                        maxWidth: 420,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}
+                  <TR key={`score-${row.id || row.blog_post_id || row.url}`}>
+                    <TD
                       title={row.url}
+                      className="[max-width:420px] overflow-hidden text-ellipsis whitespace-nowrap"
                     >
                       {row.url || `Blog post ${row.blog_post_id}`}
-                    </td>
-                    <td style={tdR}>{row.total_score}/50</td>
-                    <td style={tdR}>{row.technical_score ?? "—"}</td>
-                    <td style={tdR}>{row.onpage_score ?? "—"}</td>
-                    <td style={tdR}>{row.local_score ?? "—"}</td>
-                    <td style={{ ...tdStyle, color: gc[row.grade] || D.text }}>
+                    </TD>
+                    <TD className="text-right u-nums">{row.total_score}/50</TD>
+                    <TD className="text-right u-nums">
+                      {row.technical_score ?? "—"}
+                    </TD>
+                    <TD className="text-right u-nums">
+                      {row.onpage_score ?? "—"}
+                    </TD>
+                    <TD className="text-right u-nums">
+                      {row.local_score ?? "—"}
+                    </TD>
+                    <TD
+                      style={{
+                        color: gc[row.grade] || "#27272A",
+                      }}
+                    >
                       {row.grade || "—"}
-                    </td>
-                  </tr>
+                    </TD>
+                  </TR>
                 ))}
-              </tbody>
-            </table>
+              </TBody>
+            </Table>
           </div>
-        </Card>
+        </UiCard>
       )}
     </div>
   );
@@ -4992,10 +5495,10 @@ function ContentQATab() {
 // gap + decay) and queues a chosen page into the existing autonomous refresh
 // engine (opportunity_queue). Reuses content-qa + content-decay signals.
 function priorityColor(p) {
-  if (p >= 60) return D.red;
-  if (p >= 40) return D.amber;
-  if (p >= 20) return D.teal;
-  return D.muted;
+  if (p >= 60) return "#991B1B";
+  if (p >= 40) return "#A16207";
+  if (p >= 20) return "#18181B";
+  return "#71717A";
 }
 function RefreshAuditTab() {
   const [data, setData] = useState(null);
@@ -5006,7 +5509,6 @@ function RefreshAuditTab() {
   // Queue refresh + Run QA batch POST to requireAdmin routes — non-admins (tech/
   // CSR) can VIEW the ranking but would only get a 403, so hide the actions.
   const isAdmin = isAdminUser();
-
   const load = () => {
     setLoading(true);
     adminFetch("/admin/seo/refresh-audit?limit=200")
@@ -5017,7 +5519,6 @@ function RefreshAuditTab() {
       .catch(() => setLoading(false));
   };
   useEffect(load, []);
-
   const runQaBatch = async () => {
     setBatching(true);
     try {
@@ -5031,9 +5532,11 @@ function RefreshAuditTab() {
       setBatching(false);
     }
   };
-
   const queueRefresh = async (c) => {
-    setEnq((s) => ({ ...s, [c.blogPostId]: "queuing" }));
+    setEnq((s) => ({
+      ...s,
+      [c.blogPostId]: "queuing",
+    }));
     try {
       const r = await adminFetch("/admin/seo/refresh-audit/enqueue", {
         method: "POST",
@@ -5043,178 +5546,213 @@ function RefreshAuditTab() {
         // Page already has a claimed/done/in-review opportunity — the upsert
         // preserved it, so this wasn't (re)queued. Show the real state.
         const label =
-          { pending: "Already queued", claimed: "Running", done: "Already done", pending_review: "In review" }[
-            r.status
-          ] || `Already ${r.status}`;
-        setEnq((s) => ({ ...s, [c.blogPostId]: "already" }));
-        setEnqErr((s) => ({ ...s, [c.blogPostId]: label }));
+          {
+            pending: "Already queued",
+            claimed: "Running",
+            done: "Already done",
+            pending_review: "In review",
+          }[r.status] || `Already ${r.status}`;
+        setEnq((s) => ({
+          ...s,
+          [c.blogPostId]: "already",
+        }));
+        setEnqErr((s) => ({
+          ...s,
+          [c.blogPostId]: label,
+        }));
       } else {
-        setEnq((s) => ({ ...s, [c.blogPostId]: "queued" }));
+        setEnq((s) => ({
+          ...s,
+          [c.blogPostId]: "queued",
+        }));
       }
     } catch (e) {
       // Distinguish permanent blocks (no GSC signal, unmappable service, not
       // published) from a transient failure (which offers Retry).
       const msg = e?.message || "Enqueue failed";
       const noGsc = /search console|gsc/i.test(msg);
-      const blocked = /could not (map|determine)|not published|no resolvable url/i.test(msg);
-      setEnq((s) => ({ ...s, [c.blogPostId]: noGsc ? "no_gsc" : blocked ? "blocked" : "error" }));
-      setEnqErr((s) => ({ ...s, [c.blogPostId]: msg }));
+      const blocked =
+        /could not (map|determine)|not published|no resolvable url/i.test(msg);
+      setEnq((s) => ({
+        ...s,
+        [c.blogPostId]: noGsc ? "no_gsc" : blocked ? "blocked" : "error",
+      }));
+      setEnqErr((s) => ({
+        ...s,
+        [c.blogPostId]: msg,
+      }));
     }
   };
-
   if (loading)
     return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+      <div className="text-ink-secondary [padding:40px] text-center">
         Loading refresh audit…
       </div>
     );
   if (!data || !data.summary)
     return (
-      <Card style={{ padding: 40, textAlign: "center" }}>
-        <div style={{ color: D.muted }}>Refresh audit unavailable.</div>
-      </Card>
+      <UiCard className="[padding:40px] text-center">
+        <div className="text-ink-secondary">Refresh audit unavailable.</div>
+      </UiCard>
     );
-
   const s = data.summary;
   const candidates = data.candidates || [];
-  const gradeColor = { A: D.green, B: D.teal, C: D.amber, D: D.orange, F: D.red };
-
+  const gradeColor = {
+    A: "#15803D",
+    B: "#18181B",
+    C: "#A16207",
+    D: "#18181B",
+    F: "#991B1B",
+  };
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
-        <div style={{ fontSize: 13, color: D.muted }}>
-          Ranks published pages by refresh priority — age since update, QA helpfulness gap, and traffic decay.
-          “Queue refresh” hands a page to the autonomous engine (safe: shadow mode unless activated).
+    <div className="flex flex-col [gap:16px]">
+      <div className="flex justify-between items-center flex-wrap [gap:10px]">
+        <div className="text-ui-body text-ink-secondary">
+          Ranks published pages by refresh priority — age since update, QA
+          helpfulness gap, and traffic decay. “Queue refresh” hands a page to
+          the autonomous engine (safe: shadow mode unless activated).
         </div>
         {isAdmin && (
-          <button
+          <Button
             onClick={runQaBatch}
             disabled={batching}
-            style={{
-              padding: "8px 14px",
-              border: `1px solid ${D.inputBorder}`,
-              borderRadius: 6,
-              background: D.white,
-              color: D.text,
-              fontSize: 13,
-              fontWeight: 500,
-              cursor: batching ? "default" : "pointer",
-              opacity: batching ? 0.6 : 1,
-              whiteSpace: "nowrap",
-            }}
             title="Score up to 100 unscored pages with the Content QA gate, then re-rank"
+            className="whitespace-nowrap"
+            variant="secondary"
           >
             {batching ? "Scoring…" : "Run QA batch"}
-          </button>
+          </Button>
         )}
       </div>
 
-      <div className="seo-kpi-grid-5" style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 12 }}>
+      <div className="seo-kpi-grid-5 grid max-sm:!grid-cols-2 [grid-template-columns:repeat(5,_1fr)] [gap:12px]">
         <KpiCard label="Published" value={fmt(s.totalPublished)} />
-        <KpiCard label="High priority" value={fmt(s.highPriority)} color={s.highPriority ? D.red : D.green} />
-        <KpiCard label="Stale 180d+" value={fmt(s.stale)} color={s.stale ? D.amber : D.green} />
-        <KpiCard label="Traffic decay" value={fmt(s.withDecay)} color={s.withDecay ? D.red : D.green} />
-        <KpiCard label="Not QA-scored" value={fmt(s.unscored)} color={s.unscored ? D.amber : D.green} />
+        <KpiCard
+          label="High priority"
+          value={fmt(s.highPriority)}
+          color={s.highPriority ? "#991B1B" : "#15803D"}
+        />
+        <KpiCard
+          label="Stale 180d+"
+          value={fmt(s.stale)}
+          color={s.stale ? "#A16207" : "#15803D"}
+        />
+        <KpiCard
+          label="Traffic decay"
+          value={fmt(s.withDecay)}
+          color={s.withDecay ? "#991B1B" : "#15803D"}
+        />
+        <KpiCard
+          label="Not QA-scored"
+          value={fmt(s.unscored)}
+          color={s.unscored ? "#A16207" : "#15803D"}
+        />
       </div>
 
-      <Card>
-        <div style={{ fontSize: 15, fontWeight: 500, color: D.heading, marginBottom: 12 }}>
+      <UiCard className="p-6">
+        <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
           Refresh candidates
         </div>
         {candidates.length === 0 ? (
-          <div style={{ color: D.muted, padding: 20, textAlign: "center" }}>
+          <div className="text-ink-secondary [padding:20px] text-center">
             No published pages found.
           </div>
         ) : (
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr>
-                  <th style={thR}>Priority</th>
-                  <th style={thStyle}>Page</th>
-                  <th style={thR}>Age</th>
-                  <th style={thStyle}>QA</th>
-                  <th style={thR}>Decay</th>
-                  <th style={thStyle}>Why</th>
-                  {isAdmin && <th style={thStyle}>Action</th>}
-                </tr>
-              </thead>
-              <tbody>
+          <div className="overflow-x-auto">
+            <Table className="[width:100%] [border-collapse:collapse]">
+              <THead>
+                <TR>
+                  <TH className="text-right u-nums">Priority</TH>
+                  <TH>Page</TH>
+                  <TH className="text-right u-nums">Age</TH>
+                  <TH>QA</TH>
+                  <TH className="text-right u-nums">Decay</TH>
+                  <TH>Why</TH>
+                  {isAdmin && <TH>Action</TH>}
+                </TR>
+              </THead>
+              <TBody>
                 {candidates.map((c) => {
                   const st = enq[c.blogPostId];
                   return (
-                    <tr key={c.blogPostId}>
-                      <td style={{ ...tdR, color: priorityColor(c.priority), fontWeight: 700 }}>{c.priority}</td>
-                      <td
-                        style={{ ...tdStyle, fontFamily: "inherit", maxWidth: 360, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                    <TR key={c.blogPostId}>
+                      <TD
+                        style={{
+                          color: priorityColor(c.priority),
+                        }}
+                        className="text-right u-nums font-medium"
+                      >
+                        {c.priority}
+                      </TD>
+                      <TD
                         title={c.url || c.title}
+                        className="[max-width:360px] overflow-hidden text-ellipsis whitespace-nowrap"
                       >
                         {c.title || c.url || c.slug}
-                      </td>
-                      <td style={tdR}>{c.ageDays != null ? `${c.ageDays}d` : "—"}</td>
-                      <td style={{ ...tdStyle, color: gradeColor[c.qaGrade] || D.muted }}>
+                      </TD>
+                      <TD className="text-right u-nums">
+                        {c.ageDays != null ? `${c.ageDays}d` : "—"}
+                      </TD>
+                      <TD
+                        style={{
+                          color: gradeColor[c.qaGrade] || "#71717A",
+                        }}
+                      >
                         {c.qaGrade ? `${c.qaGrade} (${c.qaScore})` : "—"}
-                      </td>
-                      <td style={{ ...tdR, color: c.decayPct != null ? D.red : D.muted }}>
+                      </TD>
+                      <TD
+                        style={{
+                          color: c.decayPct != null ? "#991B1B" : "#71717A",
+                        }}
+                        className="text-right u-nums"
+                      >
                         {c.decayPct != null ? `${c.decayPct}%` : "—"}
-                      </td>
-                      <td style={{ ...tdStyle, fontFamily: "inherit", fontSize: 12, color: D.muted, maxWidth: 240 }}>
+                      </TD>
+                      <TD className="text-ui-body text-ink-secondary [max-width:240px]">
                         {(c.reasons || []).join(" · ") || "—"}
-                      </td>
+                      </TD>
                       {isAdmin && (
-                      <td style={tdStyle}>
-                        <button
-                          onClick={() => queueRefresh(c)}
-                          disabled={["queuing", "queued", "no_gsc", "blocked", "already"].includes(st)}
-                          title={enqErr[c.blogPostId] || ""}
-                          style={{
-                            padding: "5px 10px",
-                            border: "none",
-                            borderRadius: 5,
-                            background:
-                              st === "queued"
-                                ? D.green
-                                : st === "no_gsc" || st === "blocked" || st === "already"
-                                  ? D.muted
-                                  : st === "error"
-                                    ? D.red
-                                    : D.heading,
-                            color: "#fff",
-                            fontSize: 12,
-                            fontWeight: 500,
-                            cursor: ["queuing", "queued", "no_gsc", "blocked", "already"].includes(st) ? "default" : "pointer",
-                            opacity: st === "queuing" ? 0.6 : 1,
-                            whiteSpace: "nowrap",
-                          }}
-                        >
-                          {st === "queued"
-                            ? "Queued ✓"
-                            : st === "queuing"
-                              ? "Queuing…"
-                              : st === "already"
-                                ? enqErr[c.blogPostId] || "Already queued"
-                                : st === "no_gsc"
-                                  ? "No GSC data"
-                                  : st === "blocked"
-                                    ? "Can't queue"
-                                    : st === "error"
-                                      ? "Retry"
-                                      : "Queue refresh"}
-                        </button>
-                      </td>
+                        <TD className="u-nums">
+                          <Button
+                            onClick={() => queueRefresh(c)}
+                            disabled={[
+                              "queuing",
+                              "queued",
+                              "no_gsc",
+                              "blocked",
+                              "already",
+                            ].includes(st)}
+                            title={enqErr[c.blogPostId] || ""}
+                            className="whitespace-nowrap"
+                            variant={st === "queued" ? "primary" : "secondary"}
+                          >
+                            {st === "queued"
+                              ? "Queued ✓"
+                              : st === "queuing"
+                                ? "Queuing…"
+                                : st === "already"
+                                  ? enqErr[c.blogPostId] || "Already queued"
+                                  : st === "no_gsc"
+                                    ? "No GSC data"
+                                    : st === "blocked"
+                                      ? "Can't queue"
+                                      : st === "error"
+                                        ? "Retry"
+                                        : "Queue refresh"}
+                          </Button>
+                        </TD>
                       )}
-                    </tr>
+                    </TR>
                   );
                 })}
-              </tbody>
-            </table>
+              </TBody>
+            </Table>
           </div>
         )}
-      </Card>
+      </UiCard>
     </div>
   );
 }
-
 function AIOverviewTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -5228,42 +5766,34 @@ function AIOverviewTab() {
   }, []);
   if (loading)
     return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+      <div className="text-ink-secondary [padding:40px] text-center">
         Loading...
       </div>
     );
   if (!data)
     return (
-      <Card style={{ padding: 40, textAlign: "center" }}>
-        <div style={{ color: D.muted }}>No AI Overview data yet.</div>
-      </Card>
+      <UiCard className="[padding:40px] text-center">
+        <div className="text-ink-secondary">No AI Overview data yet.</div>
+      </UiCard>
     );
   return (
-    <div
-      className="seo-kpi-grid-4"
-      style={{
-        display: "grid",
-        gridTemplateColumns: "repeat(4, 1fr)",
-        gap: 12,
-      }}
-    >
+    <div className="seo-kpi-grid-4 grid max-sm:!grid-cols-2 [grid-template-columns:repeat(4,_1fr)] [gap:12px]">
       {" "}
       <KpiCard label="Tracked" value={data.total || 0} />{" "}
-      <KpiCard label="With AIO" value={data.withAIO || 0} color={D.purple} />{" "}
+      <KpiCard label="With AIO" value={data.withAIO || 0} color={"#18181B"} />{" "}
       <KpiCard
         label="Waves Cited"
         value={data.wavesCited || 0}
-        color={D.green}
+        color={"#15803D"}
       />{" "}
       <KpiCard
         label="GEO Score"
         value={`${data.geoScore || 0}%`}
-        color={data.geoScore >= 30 ? D.green : D.amber}
+        color={data.geoScore >= 30 ? "#15803D" : "#A16207"}
       />{" "}
     </div>
   );
 }
-
 function FunnelTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -5277,26 +5807,19 @@ function FunnelTab() {
   }, []);
   if (loading)
     return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+      <div className="text-ink-secondary [padding:40px] text-center">
         Loading...
       </div>
     );
   if (!data)
     return (
-      <Card style={{ padding: 40, textAlign: "center" }}>
-        <div style={{ color: D.muted }}>No funnel data yet.</div>
-      </Card>
+      <UiCard className="[padding:40px] text-center">
+        <div className="text-ink-secondary">No funnel data yet.</div>
+      </UiCard>
     );
   const o = data.organic || {};
   return (
-    <div
-      className="seo-kpi-grid-4"
-      style={{
-        display: "grid",
-        gridTemplateColumns: "repeat(4, 1fr)",
-        gap: 12,
-      }}
-    >
+    <div className="seo-kpi-grid-4 grid max-sm:!grid-cols-2 [grid-template-columns:repeat(4,_1fr)] [gap:12px]">
       {" "}
       <KpiCard
         label="Impressions"
@@ -5305,18 +5828,22 @@ function FunnelTab() {
       <KpiCard
         label="Clicks"
         value={(o.clicks || 0).toLocaleString()}
-        sub={{ text: `${o.ctr || 0}% CTR` }}
+        sub={{
+          text: `${o.ctr || 0}% CTR`,
+        }}
       />{" "}
       <KpiCard
         label="Sitewide Booked"
         value={data.estimates?.booked || 0}
-        color={D.green}
+        color={"#15803D"}
       />{" "}
       <KpiCard
         label="Sitewide Revenue"
         value={fmtMoney(data.revenue || 0)}
-        color={D.green}
-        sub={{ text: "correlated, not attributed" }}
+        color={"#15803D"}
+        sub={{
+          text: "correlated, not attributed",
+        }}
       />{" "}
     </div>
   );
@@ -5338,15 +5865,15 @@ function BySiteTab() {
   }, [days]);
   if (loading)
     return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+      <div className="text-ink-secondary [padding:40px] text-center">
         Loading site rollup...
       </div>
     );
   if (!data)
     return (
-      <Card style={{ padding: 40, textAlign: "center" }}>
-        <div style={{ color: D.muted }}>No rollup data yet.</div>
-      </Card>
+      <UiCard className="[padding:40px] text-center">
+        <div className="text-ink-secondary">No rollup data yet.</div>
+      </UiCard>
     );
   const t = data.totals || {};
   const sites = data.sites || [];
@@ -5358,235 +5885,205 @@ function BySiteTab() {
   const hubChip = (
     <span
       style={{
-        fontSize: 9,
-        padding: "1px 5px",
-        borderRadius: 3,
-        background: D.teal + "22",
-        color: D.teal,
-        marginLeft: 6,
+        background: "#18181B" + "22",
       }}
+      className="text-ui-body [padding:1px_5px] rounded-xs text-zinc-900 [margin-left:6px]"
     >
       HUB
     </span>
   );
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div className="seo-analytics-period" style={{ display: "flex", gap: 8 }}>
+    <div className="flex flex-col [gap:16px]">
+      <div className="seo-analytics-period flex max-sm:flex-wrap [gap:8px]">
         {[7, 30, 90].map((d) => (
-          <button
+          <Button
             key={d}
             onClick={() => setDays(d)}
-            style={{
-              padding: "6px 14px",
-              borderRadius: 8,
-              border: "none",
-              fontSize: 12,
-              fontWeight: 500,
-              cursor: "pointer",
-              background: days === d ? D.teal : D.card,
-              color: days === d ? D.white : D.muted,
-            }}
+            variant={days === d ? "primary" : "secondary"}
           >
             {d}d
-          </button>
+          </Button>
         ))}
       </div>
-      <div
-        className="seo-kpi-grid-4"
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(4, 1fr)",
-          gap: 12,
-        }}
-      >
+      <div className="seo-kpi-grid-4 grid max-sm:!grid-cols-2 [grid-template-columns:repeat(4,_1fr)] [gap:12px]">
         <KpiCard
           label="Inbound Calls"
           value={num(t.calls)}
           sub={{
             text: `${num(t.missedCalls)} missed`,
-            color: t.missedCalls > 0 ? D.amber : undefined,
+            color: t.missedCalls > 0 ? "#A16207" : undefined,
           }}
         />
         <KpiCard
           label="Leads"
           value={num(t.leads)}
-          sub={{ text: `${num(t.won)} won`, color: D.green }}
+          sub={{
+            text: `${num(t.won)} won`,
+            color: "#15803D",
+          }}
         />
         <KpiCard
           label="Site Calls"
           value={num(t.siteCalls)}
-          sub={{ text: "attributed to a fleet domain" }}
+          sub={{
+            text: "attributed to a fleet domain",
+          }}
         />
         <KpiCard
           label="Site Leads"
           value={num(t.siteLeads)}
-          sub={{ text: "attributed to a fleet domain" }}
+          sub={{
+            text: "attributed to a fleet domain",
+          }}
         />
       </div>
-      <Card>
-        <div
-          style={{
-            fontSize: 15,
-            fontWeight: 500,
-            color: D.heading,
-            marginBottom: 12,
-          }}
-        >
+      <UiCard className="p-6">
+        <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
           Calls + Leads by Site
         </div>
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
-                <th style={thStyle}>Site</th>
-                <th style={thStyle}>Lane</th>
-                <th style={thR}>Calls</th>
-                <th style={thR}>Missed</th>
-                <th style={thR}>Form Leads</th>
-                <th style={thR}>Call Leads</th>
-                <th style={thR}>Leads</th>
-                <th style={thR}>Won</th>
-              </tr>
-            </thead>
-            <tbody>
+        <div className="overflow-x-auto">
+          <Table className="[width:100%] [border-collapse:collapse]">
+            <THead>
+              <TR>
+                <TH>Site</TH>
+                <TH>Lane</TH>
+                <TH className="text-right u-nums">Calls</TH>
+                <TH className="text-right u-nums">Missed</TH>
+                <TH className="text-right u-nums">Form Leads</TH>
+                <TH className="text-right u-nums">Call Leads</TH>
+                <TH className="text-right u-nums">Leads</TH>
+                <TH className="text-right u-nums">Won</TH>
+              </TR>
+            </THead>
+            <TBody>
               {sites.map((s) => (
-                <tr key={s.domain}>
-                  <td style={{ ...tdStyle, fontFamily: "inherit" }}>
+                <TR key={s.domain}>
+                  <TD>
                     {s.domain}
                     {s.kind === "hub" && hubChip}
-                  </td>
-                  <td style={{ ...tdStyle, fontFamily: "inherit", color: D.muted }}>
-                    {s.lane}
-                  </td>
-                  <td style={tdR}>{cell(s.calls)}</td>
-                  <td style={{ ...tdR, color: s.missedCalls ? D.amber : D.text }}>
+                  </TD>
+                  <TD className="text-ink-secondary">{s.lane}</TD>
+                  <TD className="text-right u-nums">{cell(s.calls)}</TD>
+                  <TD
+                    style={{
+                      color: s.missedCalls ? "#A16207" : "#27272A",
+                    }}
+                    className="text-right u-nums"
+                  >
                     {cell(s.missedCalls)}
-                  </td>
-                  <td style={tdR}>{cell(s.formLeads)}</td>
-                  <td style={tdR}>{cell(s.callLeads)}</td>
-                  <td style={tdR}>{cell(s.leads)}</td>
-                  <td style={{ ...tdR, color: s.won ? D.green : D.text }}>
+                  </TD>
+                  <TD className="text-right u-nums">{cell(s.formLeads)}</TD>
+                  <TD className="text-right u-nums">{cell(s.callLeads)}</TD>
+                  <TD className="text-right u-nums">{cell(s.leads)}</TD>
+                  <TD
+                    style={{
+                      color: s.won ? "#15803D" : "#27272A",
+                    }}
+                    className="text-right u-nums"
+                  >
                     {cell(s.won)}
-                  </td>
-                </tr>
+                  </TD>
+                </TR>
               ))}
-            </tbody>
-          </table>
+            </TBody>
+          </Table>
         </div>
-        <div style={{ fontSize: 11, color: D.muted, marginTop: 10 }}>
+        <div className="text-ui-body text-ink-secondary [margin-top:10px]">
           Calls attribute by tracking number; leads by lead source. Call Leads
           are calls that became pipeline entries, so they overlap with Calls.
         </div>
-      </Card>
+      </UiCard>
       {(nonSite.length > 0 || other.length > 0 || un.leads > 0) && (
-        <div
-          className="seo-kpi-grid-3"
-          style={{
-            display: "grid",
-            gridTemplateColumns: "1fr 1fr",
-            gap: 12,
-            alignItems: "start",
-          }}
-        >
+        <div className="seo-kpi-grid-3 grid max-sm:!grid-cols-1 [grid-template-columns:1fr_1fr] [gap:12px] [align-items:start]">
           {nonSite.length > 0 && (
-            <Card>
-              <div
-                style={{
-                  fontSize: 15,
-                  fontWeight: 500,
-                  color: D.heading,
-                  marginBottom: 12,
-                }}
-              >
+            <UiCard className="p-6">
+              <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
                 Non-Site Lines
               </div>
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                  <thead>
-                    <tr>
-                      <th style={thStyle}>Line</th>
-                      <th style={thR}>Calls</th>
-                      <th style={thR}>Missed</th>
-                    </tr>
-                  </thead>
-                  <tbody>
+              <div className="overflow-x-auto">
+                <Table className="[width:100%] [border-collapse:collapse]">
+                  <THead>
+                    <TR>
+                      <TH>Line</TH>
+                      <TH className="text-right u-nums">Calls</TH>
+                      <TH className="text-right u-nums">Missed</TH>
+                    </TR>
+                  </THead>
+                  <TBody>
                     {nonSite.map((l) => (
-                      <tr key={l.label}>
-                        <td style={{ ...tdStyle, fontFamily: "inherit" }}>
-                          {l.label}
-                        </td>
-                        <td style={tdR}>{cell(l.calls)}</td>
-                        <td style={{ ...tdR, color: l.missedCalls ? D.amber : D.text }}>
+                      <TR key={l.label}>
+                        <TD>{l.label}</TD>
+                        <TD className="text-right u-nums">{cell(l.calls)}</TD>
+                        <TD
+                          style={{
+                            color: l.missedCalls ? "#A16207" : "#27272A",
+                          }}
+                          className="text-right u-nums"
+                        >
                           {cell(l.missedCalls)}
-                        </td>
-                      </tr>
+                        </TD>
+                      </TR>
                     ))}
-                  </tbody>
-                </table>
+                  </TBody>
+                </Table>
               </div>
-            </Card>
+            </UiCard>
           )}
           {(other.length > 0 || un.leads > 0) && (
-            <Card>
-              <div
-                style={{
-                  fontSize: 15,
-                  fontWeight: 500,
-                  color: D.heading,
-                  marginBottom: 12,
-                }}
-              >
+            <UiCard className="p-6">
+              <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
                 Non-Site Lead Sources
               </div>
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                  <thead>
-                    <tr>
-                      <th style={thStyle}>Source</th>
-                      <th style={thR}>Leads</th>
-                      <th style={thR}>Won</th>
-                    </tr>
-                  </thead>
-                  <tbody>
+              <div className="overflow-x-auto">
+                <Table className="[width:100%] [border-collapse:collapse]">
+                  <THead>
+                    <TR>
+                      <TH>Source</TH>
+                      <TH className="text-right u-nums">Leads</TH>
+                      <TH className="text-right u-nums">Won</TH>
+                    </TR>
+                  </THead>
+                  <TBody>
                     {other.map((s) => (
-                      <tr key={s.name}>
-                        <td style={{ ...tdStyle, fontFamily: "inherit" }}>
-                          {s.name}
-                        </td>
-                        <td style={tdR}>{cell(s.leads)}</td>
-                        <td style={{ ...tdR, color: s.won ? D.green : D.text }}>
+                      <TR key={s.name}>
+                        <TD>{s.name}</TD>
+                        <TD className="text-right u-nums">{cell(s.leads)}</TD>
+                        <TD
+                          style={{
+                            color: s.won ? "#15803D" : "#27272A",
+                          }}
+                          className="text-right u-nums"
+                        >
                           {cell(s.won)}
-                        </td>
-                      </tr>
+                        </TD>
+                      </TR>
                     ))}
                     {un.leads > 0 && (
-                      <tr>
-                        <td
-                          style={{
-                            ...tdStyle,
-                            fontFamily: "inherit",
-                            color: D.muted,
-                          }}
-                        >
+                      <TR>
+                        <TD className="text-ink-secondary">
                           No source attributed
-                        </td>
-                        <td style={tdR}>{cell(un.leads)}</td>
-                        <td style={{ ...tdR, color: un.won ? D.green : D.text }}>
+                        </TD>
+                        <TD className="text-right u-nums">{cell(un.leads)}</TD>
+                        <TD
+                          style={{
+                            color: un.won ? "#15803D" : "#27272A",
+                          }}
+                          className="text-right u-nums"
+                        >
                           {cell(un.won)}
-                        </td>
-                      </tr>
+                        </TD>
+                      </TR>
                     )}
-                  </tbody>
-                </table>
+                  </TBody>
+                </Table>
               </div>
-            </Card>
+            </UiCard>
           )}
         </div>
       )}
     </div>
   );
 }
-
 function CitationsTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -5600,86 +6097,67 @@ function CitationsTab() {
   }, []);
   if (loading)
     return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+      <div className="text-ink-secondary [padding:40px] text-center">
         Loading...
       </div>
     );
   if (!data)
     return (
-      <Card style={{ padding: 40, textAlign: "center" }}>
-        <div style={{ color: D.muted }}>No citations.</div>
-      </Card>
+      <UiCard className="[padding:40px] text-center">
+        <div className="text-ink-secondary">No citations.</div>
+      </UiCard>
     );
   const bs = data.byStatus || {};
   const sc = {
-    active: D.green,
-    inconsistent: D.red,
-    missing: D.amber,
-    claimed: D.teal,
-    unchecked: D.muted,
+    active: "#15803D",
+    inconsistent: "#991B1B",
+    missing: "#A16207",
+    claimed: "#18181B",
+    unchecked: "#71717A",
   };
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+    <div className="flex flex-col [gap:16px]">
       {" "}
-      <div
-        className="seo-kpi-grid-5"
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(5, 1fr)",
-          gap: 12,
-        }}
-      >
+      <div className="seo-kpi-grid-5 grid max-sm:!grid-cols-2 [grid-template-columns:repeat(5,_1fr)] [gap:12px]">
         {" "}
-        <KpiCard label="Active" value={bs.active || 0} color={D.green} />{" "}
+        <KpiCard label="Active" value={bs.active || 0} color={"#15803D"} />{" "}
         <KpiCard
           label="Inconsistent"
           value={bs.inconsistent || 0}
-          color={D.red}
+          color={"#991B1B"}
         />{" "}
-        <KpiCard label="Missing" value={bs.missing || 0} color={D.amber} />{" "}
-        <KpiCard label="Claimed" value={bs.claimed || 0} color={D.teal} />{" "}
+        <KpiCard label="Missing" value={bs.missing || 0} color={"#A16207"} />{" "}
+        <KpiCard label="Claimed" value={bs.claimed || 0} color={"#18181B"} />{" "}
         <KpiCard label="Unchecked" value={bs.unchecked || 0} />{" "}
       </div>{" "}
-      <Card>
+      <UiCard className="p-6">
         {(data.citations || []).map((c, i) => (
           <div
             key={i}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 10,
-              padding: "8px 0",
-              borderBottom: `1px solid ${D.border}`,
-            }}
+            className="flex items-center [gap:10px] [padding:8px_0] border-b border-hairline border-zinc-200"
           >
             {" "}
             <div
               style={{
-                width: 8,
-                height: 8,
-                borderRadius: 4,
-                background: sc[c.status] || D.muted,
+                background: sc[c.status] || "#71717A",
               }}
+              className="[width:8px] [height:8px] rounded-sm"
             />{" "}
-            <div style={{ flex: 1, fontSize: 13, color: D.heading }}>
+            <div className="[flex:1] text-ui-body text-zinc-900">
               {c.directory_name}
             </div>{" "}
             <span
               style={{
-                fontSize: 10,
-                padding: "2px 8px",
-                borderRadius: 4,
-                background: (sc[c.status] || D.muted) + "22",
-                color: sc[c.status] || D.muted,
-                textTransform: "uppercase",
-                fontWeight: 700,
+                background: (sc[c.status] || "#71717A") + "22",
+                color: sc[c.status] || "#71717A",
               }}
+              className="text-ui-body [padding:2px_8px] rounded-sm font-medium"
             >
               {c.status}
             </span>{" "}
           </div>
         ))}
-      </Card>{" "}
+      </UiCard>{" "}
     </div>
   );
 }
@@ -5695,15 +6173,30 @@ function AnalyticsTab() {
   const [dataManagerResult, setDataManagerResult] = useState(null);
   const [loading, setLoading] = useState(true);
   const [days, setDays] = useState(30);
-
   useEffect(() => {
     setLoading(true);
     Promise.all([
-      adminFetch(`/admin/analytics/overview?period=${days}`).catch((e) => ({ error: e.message })),
-      adminFetch(`/admin/analytics/sources?period=${days}`).catch((e) => ({ data: [], error: e.message })),
-      adminFetch(`/admin/analytics/landing-pages?period=${days}`).catch((e) => ({ data: [], error: e.message })),
-      adminFetch(`/admin/analytics/local-performance?period=${days}`).catch((e) => ({ error: e.message })),
-      adminFetch(`/admin/analytics/data-manager/readiness?period=${days}`).catch((e) => ({ error: e.message })),
+      adminFetch(`/admin/analytics/overview?period=${days}`).catch((e) => ({
+        error: e.message,
+      })),
+      adminFetch(`/admin/analytics/sources?period=${days}`).catch((e) => ({
+        data: [],
+        error: e.message,
+      })),
+      adminFetch(`/admin/analytics/landing-pages?period=${days}`).catch(
+        (e) => ({
+          data: [],
+          error: e.message,
+        }),
+      ),
+      adminFetch(`/admin/analytics/local-performance?period=${days}`).catch(
+        (e) => ({
+          error: e.message,
+        }),
+      ),
+      adminFetch(`/admin/analytics/data-manager/readiness?period=${days}`).catch((e) => ({
+        error: e.message,
+      })),
     ])
       .then(([o, t, p, l, dm]) => {
         setOverview(o);
@@ -5715,14 +6208,12 @@ function AnalyticsTab() {
       })
       .catch(() => setLoading(false));
   }, [days]);
-
   if (loading)
     return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+      <div className="text-ink-secondary [padding:40px] text-center">
         Loading analytics...
       </div>
     );
-
   const totals = overview?.totals || overview?.data || {};
   const data = {
     sessions: totals.sessions,
@@ -5747,24 +6238,41 @@ function AnalyticsTab() {
   const dmQualified = dmConversions.qualified_lead || {};
   const dmCompleted = dmConversions.completed_job_revenue || {};
   const profiles = Array.isArray(local.profiles) ? local.profiles : [];
-  const setupLinks = Array.isArray(local.setup?.utmWebsiteLinks) ? local.setup.utmWebsiteLinks : [];
+  const setupLinks = Array.isArray(local.setup?.utmWebsiteLinks)
+    ? local.setup.utmWebsiteLinks
+    : [];
   const localWarnings = Array.isArray(local.warnings) ? local.warnings : [];
   const dataManagerWarnings = Array.isArray(dm.warnings) ? dm.warnings : [];
   const analyticsNotices = [
     ...(overview?.configured === false
-      ? [{
-        title: "Google Analytics access",
-        message: "Set GOOGLE_SERVICE_ACCOUNT_JSON and GA4_PROPERTY_ID, then grant the service account Viewer access in GA4.",
-      }]
+      ? [
+          {
+            title: "Google Analytics access",
+            message:
+              "Set GOOGLE_SERVICE_ACCOUNT_JSON and GA4_PROPERTY_ID, then grant the service account Viewer access in GA4.",
+          },
+        ]
       : []),
     ...(overview?.configured !== false && overview?.error
-      ? [{ title: "Google Analytics access", message: overview.error }]
+      ? [
+          {
+            title: "Google Analytics access",
+            message: overview.error,
+          },
+        ]
       : []),
     ...localWarnings.map((warning) => ({
       title: "Local performance data",
       message: `${warning?.source || "source"}: ${warning?.message || "Unavailable"}`,
     })),
-    ...(dm.error ? [{ title: "Google Ads Data Manager", message: dm.error }] : []),
+    ...(dm.error
+      ? [
+          {
+            title: "Google Ads Data Manager",
+            message: dm.error,
+          },
+        ]
+      : []),
     ...dataManagerWarnings.map((warning) => ({
       title: "Google Ads Data Manager",
       message: `${warning?.source || "source"}: ${warning?.message || "Unavailable"}`,
@@ -5788,272 +6296,242 @@ function AnalyticsTab() {
       validateOnly: true,
     })
       .then((result) => setDataManagerResult(result))
-      .catch((e) => setDataManagerResult({ synced: false, conversionType, error: e.message }))
+      .catch((e) =>
+        setDataManagerResult({
+          synced: false,
+          conversionType,
+          error: e.message,
+        }),
+      )
       .finally(() => setDataManagerBusy(null));
   };
   const dmStatus = (config) => {
-    if (config?.configured) return dm.liveUploadsAllowed ? "Live-ready" : "Validate-only";
+    if (config?.configured)
+      return dm.liveUploadsAllowed ? "Live-ready" : "Validate-only";
     if (config?.missing?.length) return "Needs config";
     return "Checking";
   };
-  const dmTone = (config) => (config?.configured ? D.green : D.amber);
+  const dmTone = (config) => (config?.configured ? "#15803D" : "#A16207");
   const dmMetric = (config, key) => fmt(config?.candidates?.[key] || 0);
   const dmResultText = dataManagerResult
-    ? `${dataManagerResult.conversionType === "qualified_lead" ? "Qualified Lead" : "Completed Revenue"}: ${
-      dataManagerResult.synced
-        ? `${fmt(dataManagerResult.sent || 0)} event${Number(dataManagerResult.sent || 0) === 1 ? "" : "s"} validated`
-        : dataManagerResult.error || "Validation failed"
-    }`
+    ? `${dataManagerResult.conversionType === "qualified_lead" ? "Qualified Lead" : "Completed Revenue"}: ${dataManagerResult.synced ? `${fmt(dataManagerResult.sent || 0)} event${Number(dataManagerResult.sent || 0) === 1 ? "" : "s"} validated` : dataManagerResult.error || "Validation failed"}`
     : null;
-
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+    <div className="flex flex-col [gap:16px]">
       {/* Period selector */}
-      <div className="seo-analytics-period" style={{ display: "flex", gap: 8 }}>
+      <div className="seo-analytics-period flex max-sm:flex-wrap [gap:8px]">
         {[7, 14, 28, 30, 90].map((d) => (
-          <button
+          <Button
             key={d}
             onClick={() => setDays(d)}
-            style={{
-              padding: "6px 14px",
-              borderRadius: 8,
-              border: "none",
-              fontSize: 12,
-              fontWeight: 500,
-              cursor: "pointer",
-              background: days === d ? D.teal : D.card,
-              color: days === d ? D.white : D.muted,
-            }}
+            variant={days === d ? "primary" : "secondary"}
           >
             {d}d
-          </button>
+          </Button>
         ))}
       </div>
       {analyticsNotices.length > 0 && (
-        <Card style={{ padding: 16, borderColor: D.amber }}>
-          <div style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>
+        <UiCard className="[padding:16px] text-zinc-700">
+          <div className="text-ui-body font-medium text-zinc-900">
             Analytics data notices
           </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
+          <div className="flex flex-col [gap:6px] [margin-top:8px]">
             {analyticsNotices.map((notice, idx) => (
-              <div key={`${notice.title}-${idx}`} style={{ fontSize: 12, color: D.muted, lineHeight: 1.5 }}>
-                <strong style={{ color: D.heading }}>{notice.title}:</strong> {notice.message}
+              <div
+                key={`${notice.title}-${idx}`}
+                className="text-ui-body text-ink-secondary [line-height:1.5]"
+              >
+                <strong className="text-zinc-900">{notice.title}:</strong>{" "}
+                {notice.message}
               </div>
             ))}
           </div>
-        </Card>
+        </UiCard>
       )}
       {profiles.length > 0 && (
         <>
-          <div
-            className="seo-kpi-grid-3"
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(4, 1fr)",
-              gap: 12,
-            }}
-          >
+          <div className="seo-kpi-grid-3 grid max-sm:!grid-cols-1 [grid-template-columns:repeat(4,_1fr)] [gap:12px]">
             <KpiCard
               label="GBP Interactions"
               value={fmt(localGbp.interactions)}
-              sub={{ text: `${fmt(localGbp.calls)} calls · ${fmt(localGbp.directionRequests)} directions` }}
+              sub={{
+                text: `${fmt(localGbp.calls)} calls · ${fmt(localGbp.directionRequests)} directions`,
+              }}
             />
             <KpiCard
               label="GBP Website Clicks"
               value={fmt(localGbp.websiteClicks)}
-              sub={{ text: "4-profile blended total" }}
+              sub={{
+                text: "4-profile blended total",
+              }}
             />
             <KpiCard
               label="GBP UTM Sessions"
               value={fmt(localGa4.sessions)}
-              sub={{ text: `${fmt(localGa4.conversions)} GA4 key events` }}
+              sub={{
+                text: `${fmt(localGa4.conversions)} GA4 key events`,
+              }}
             />
             <KpiCard
               label="GBP CRM Revenue"
               value={money(localCrm.acceptedEstimateRevenue)}
-              sub={{ text: `${fmt(localCrm.leads)} leads · ${fmt(localCrm.bookedJobs)} booked` }}
+              sub={{
+                text: `${fmt(localCrm.leads)} leads · ${fmt(localCrm.bookedJobs)} booked`,
+              }}
             />
           </div>
-          <Card>
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                gap: 16,
-                alignItems: "flex-start",
-                marginBottom: 12,
-              }}
-            >
+          <UiCard className="p-6">
+            <div className="flex justify-between [gap:16px] items-start [margin-bottom:12px]">
               <div>
-                <div style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>
+                <div className="text-ui-body font-medium text-zinc-900">
                   Local Performance By Profile
                 </div>
-                <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>
-                  Native GBP totals stay blended in GA4; profile rows use Waves GBP sync, UTMs, and CRM attribution.
+                <div className="text-ui-body text-ink-secondary [margin-top:4px]">
+                  Native GBP totals stay blended in GA4; profile rows use Waves
+                  GBP sync, UTMs, and CRM attribution.
                 </div>
               </div>
-              <div style={{ fontSize: 12, color: D.muted, fontFamily: MONO }}>
-                {fmt(readiness.eligible)}/{fmt(readiness.leads)} upload-ready leads
+              <div className="text-ui-body text-ink-secondary">
+                {fmt(readiness.eligible)}/{fmt(readiness.leads)} upload-ready
+                leads
               </div>
             </div>
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 860 }}>
-                <thead>
-                  <tr>
-                    <th style={thStyle}>Profile</th>
-                    <th style={thR}>GBP Clicks</th>
-                    <th style={thR}>GA4 Sessions</th>
-                    <th style={thR}>Leads</th>
-                    <th style={thR}>Booked</th>
-                    <th style={thR}>Revenue</th>
-                    <th style={thR}>Upload Ready</th>
-                  </tr>
-                </thead>
-                <tbody>
+            <div className="overflow-x-auto">
+              <Table className="[width:100%] [border-collapse:collapse] [min-width:860px]">
+                <THead>
+                  <TR>
+                    <TH>Profile</TH>
+                    <TH className="text-right u-nums">GBP Clicks</TH>
+                    <TH className="text-right u-nums">GA4 Sessions</TH>
+                    <TH className="text-right u-nums">Leads</TH>
+                    <TH className="text-right u-nums">Booked</TH>
+                    <TH className="text-right u-nums">Revenue</TH>
+                    <TH className="text-right u-nums">Upload Ready</TH>
+                  </TR>
+                </THead>
+                <TBody>
                   {profiles.map((profile) => (
-                    <tr key={profile.id}>
-                      <td style={{ ...tdStyle, fontFamily: "inherit" }}>
-                        <div style={{ fontWeight: 700, color: D.heading }}>{profile.name}</div>
+                    <TR key={profile.id}>
+                      <TD>
+                        <div className="font-medium text-zinc-900">
+                          {profile.name}
+                        </div>
                         <a
                           href={profile.trackingUrl}
                           target="_blank"
                           rel="noreferrer"
-                          style={{
-                            display: "block",
-                            marginTop: 4,
-                            fontSize: 11,
-                            color: D.muted,
-                            textDecoration: "none",
-                            maxWidth: 320,
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                            whiteSpace: "nowrap",
-                          }}
+                          className="block [margin-top:4px] text-ui-body text-ink-secondary [text-decoration:none] [max-width:320px] overflow-hidden text-ellipsis whitespace-nowrap"
                         >
                           {profile.trackingUrl}
                         </a>
-                      </td>
-                      <td style={tdR}>{fmt(profile.gbp?.websiteClicks)}</td>
-                      <td style={tdR}>{fmt(profile.ga4?.sessions)}</td>
-                      <td style={tdR}>{fmt(profile.crm?.leads)}</td>
-                      <td style={tdR}>{fmt(profile.crm?.bookedJobs)}</td>
-                      <td style={tdR}>{money(profile.crm?.acceptedEstimateRevenue)}</td>
-                      <td style={tdR}>{fmt(profile.crm?.dataManagerEligible)}</td>
-                    </tr>
+                      </TD>
+                      <TD className="text-right u-nums">
+                        {fmt(profile.gbp?.websiteClicks)}
+                      </TD>
+                      <TD className="text-right u-nums">
+                        {fmt(profile.ga4?.sessions)}
+                      </TD>
+                      <TD className="text-right u-nums">
+                        {fmt(profile.crm?.leads)}
+                      </TD>
+                      <TD className="text-right u-nums">
+                        {fmt(profile.crm?.bookedJobs)}
+                      </TD>
+                      <TD className="text-right u-nums">
+                        {money(profile.crm?.acceptedEstimateRevenue)}
+                      </TD>
+                      <TD className="text-right u-nums">
+                        {fmt(profile.crm?.dataManagerEligible)}
+                      </TD>
+                    </TR>
                   ))}
-                </tbody>
-              </table>
+                </TBody>
+              </Table>
             </div>
-          </Card>
-          <Card style={{ padding: 16 }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>
+          </UiCard>
+          <UiCard className="[padding:16px]">
+            <div className="text-ui-body font-medium text-zinc-900">
               GA4 And Google Ads Setup
             </div>
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(3, 1fr)",
-                gap: 12,
-                marginTop: 12,
-              }}
-            >
-              <div style={{ fontSize: 12, color: D.text, lineHeight: 1.5 }}>
+            <div className="grid [grid-template-columns:repeat(3,_1fr)] [gap:12px] [margin-top:12px]">
+              <div className="text-ui-body text-zinc-900 [line-height:1.5]">
                 <strong>GA4 GBP link</strong>
                 <br />
-                <span style={{ color: D.muted }}>
-                  Link all 4 profiles in GA4 Admin. Native GBP metrics are aggregate-only.
+                <span className="text-ink-secondary">
+                  Link all 4 profiles in GA4 Admin. Native GBP metrics are
+                  aggregate-only.
                 </span>
               </div>
-              <div style={{ fontSize: 12, color: D.text, lineHeight: 1.5 }}>
+              <div className="text-ui-body text-zinc-900 [line-height:1.5]">
                 <strong>GBP website URLs</strong>
                 <br />
-                <span style={{ color: D.muted }}>
-                  {setupLinks.length} tagged links configured for per-profile website attribution.
+                <span className="text-ink-secondary">
+                  {setupLinks.length} tagged links configured for per-profile
+                  website attribution.
                 </span>
               </div>
-              <div style={{ fontSize: 12, color: D.text, lineHeight: 1.5 }}>
+              <div className="text-ui-body text-zinc-900 [line-height:1.5]">
                 <strong>Ads feedback loop</strong>
                 <br />
-                <span style={{ color: D.muted }}>
-                  {dmStatus(dmCompleted)} · {dmMetric(dmCompleted, "eligible")} completed-revenue events ready
+                <span className="text-ink-secondary">
+                  {dmStatus(dmCompleted)} · {dmMetric(dmCompleted, "eligible")}{" "}
+                  completed-revenue events ready
                 </span>
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
-                  <button
+                <div className="flex [gap:8px] flex-wrap [margin-top:10px]">
+                  <Button
                     type="button"
                     onClick={() => validateDataManager("qualified_lead")}
                     disabled={!!dataManagerBusy || !dmQualified?.configured}
-                    style={{
-                      display: "inline-flex",
-                      alignItems: "center",
-                      gap: 6,
-                      padding: "7px 10px",
-                      borderRadius: 8,
-                      border: `1px solid ${D.border}`,
-                      background: dmQualified?.configured ? D.card : D.bg,
-                      color: dmQualified?.configured ? D.heading : D.muted,
-                      fontSize: 12,
-                      fontWeight: 700,
-                      cursor: dmQualified?.configured && !dataManagerBusy ? "pointer" : "not-allowed",
-                    }}
+                    className="inline-flex items-center [gap:6px]"
+                    variant={dmQualified?.configured ? "primary" : "secondary"}
                   >
                     <UploadCloud size={14} />
-                    {dataManagerBusy === "qualified_lead" ? "Validating" : "Validate leads"}
-                  </button>
-                  <button
+                    {dataManagerBusy === "qualified_lead"
+                      ? "Validating"
+                      : "Validate leads"}
+                  </Button>
+                  <Button
                     type="button"
                     onClick={() => validateDataManager("completed_job_revenue")}
                     disabled={!!dataManagerBusy || !dmCompleted?.configured}
-                    style={{
-                      display: "inline-flex",
-                      alignItems: "center",
-                      gap: 6,
-                      padding: "7px 10px",
-                      borderRadius: 8,
-                      border: `1px solid ${D.border}`,
-                      background: dmCompleted?.configured ? D.card : D.bg,
-                      color: dmCompleted?.configured ? D.heading : D.muted,
-                      fontSize: 12,
-                      fontWeight: 700,
-                      cursor: dmCompleted?.configured && !dataManagerBusy ? "pointer" : "not-allowed",
-                    }}
+                    className="inline-flex items-center [gap:6px]"
+                    variant={dmCompleted?.configured ? "primary" : "secondary"}
                   >
                     <UploadCloud size={14} />
-                    {dataManagerBusy === "completed_job_revenue" ? "Validating" : "Validate revenue"}
-                  </button>
+                    {dataManagerBusy === "completed_job_revenue"
+                      ? "Validating"
+                      : "Validate revenue"}
+                  </Button>
                 </div>
               </div>
             </div>
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(2, 1fr)",
-                gap: 12,
-                marginTop: 14,
-                paddingTop: 12,
-                borderTop: `1px solid ${D.border}`,
-              }}
-            >
+            <div className="grid [grid-template-columns:repeat(2,_1fr)] [gap:12px] [margin-top:14px] [padding-top:12px] border-t border-hairline border-zinc-200">
               {[
                 ["Qualified Lead", dmQualified],
                 ["Completed Revenue", dmCompleted],
               ].map(([label, config]) => (
-                <div key={label} style={{ fontSize: 12, color: D.text, lineHeight: 1.5 }}>
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                <div
+                  key={label}
+                  className="text-ui-body text-zinc-900 [line-height:1.5]"
+                >
+                  <div className="flex items-center justify-between [gap:8px]">
                     <strong>{label}</strong>
-                    <span style={{
-                      color: dmTone(config),
-                      fontSize: 11,
-                      fontWeight: 700,
-                      textTransform: "uppercase",
-                    }}>
+                    <span
+                      style={{
+                        color: dmTone(config),
+                      }}
+                      className="text-ui-body font-medium"
+                    >
                       {dmStatus(config)}
                     </span>
                   </div>
-                  <div style={{ color: D.muted, marginTop: 4 }}>
-                    {dmMetric(config, "eligible")} ready · {dmMetric(config, "alreadySent")} sent · {dmMetric(config, "missingMatchKeys")} missing match keys
+                  <div className="text-ink-secondary [margin-top:4px]">
+                    {dmMetric(config, "eligible")} ready ·{" "}
+                    {dmMetric(config, "alreadySent")} sent ·{" "}
+                    {dmMetric(config, "missingMatchKeys")} missing match keys
                   </div>
                   {config?.missing?.length > 0 && (
-                    <div style={{ color: D.amber, marginTop: 4 }}>
+                    <div className="text-zinc-700 [margin-top:4px]">
                       Missing {config.missing.join(", ")}
                     </div>
                   )}
@@ -6061,55 +6539,53 @@ function AnalyticsTab() {
               ))}
             </div>
             {dmResultText && (
-              <div style={{
-                marginTop: 12,
-                fontSize: 12,
-                color: dataManagerResult?.synced ? D.green : D.red,
-                fontWeight: 700,
-              }}>
+              <div
+                style={{
+                  color: dataManagerResult?.synced ? "#15803D" : "#991B1B",
+                }}
+                className="[margin-top:12px] text-ui-body font-medium"
+              >
                 {dmResultText}
               </div>
             )}
-          </Card>
+          </UiCard>
         </>
       )}
       {/* KPI Row */}
-      <div
-        className="seo-kpi-grid-3"
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(3, 1fr)",
-          gap: 12,
-        }}
-      >
+      <div className="seo-kpi-grid-3 grid max-sm:!grid-cols-1 [grid-template-columns:repeat(3,_1fr)] [gap:12px]">
         {[
-          { label: "Sessions", value: fmt(data.sessions) },
-          { label: "Users", value: fmt(data.users) },
-          { label: "New Users", value: fmt(data.newUsers) },
+          {
+            label: "Sessions",
+            value: fmt(data.sessions),
+          },
+          {
+            label: "Users",
+            value: fmt(data.users),
+          },
+          {
+            label: "New Users",
+            value: fmt(data.newUsers),
+          },
         ].map((k) => (
           <KpiCard key={k.label} label={k.label} value={k.value} />
         ))}
       </div>{" "}
-      <div
-        className="seo-kpi-grid-3"
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(3, 1fr)",
-          gap: 12,
-        }}
-      >
+      <div className="seo-kpi-grid-3 grid max-sm:!grid-cols-1 [grid-template-columns:repeat(3,_1fr)] [gap:12px]">
         {[
           {
             label: "Bounce Rate",
             value: pct(data.bounceRate),
             color:
               data.bounceRate > 0.6
-                ? D.red
+                ? "#991B1B"
                 : data.bounceRate > 0.4
-                  ? D.amber
-                  : D.green,
+                  ? "#A16207"
+                  : "#15803D",
           },
-          { label: "Avg Session", value: dur(data.avgSessionDuration) },
+          {
+            label: "Avg Session",
+            value: dur(data.avgSessionDuration),
+          },
           {
             label: "Pages / Session",
             value: data.pageviewsPerSession
@@ -6127,19 +6603,12 @@ function AnalyticsTab() {
       </div>
       {/* Traffic Sources */}
       {sources.length > 0 && (
-        <Card>
+        <UiCard className="p-6">
           {" "}
-          <div
-            style={{
-              fontSize: 14,
-              fontWeight: 700,
-              color: D.heading,
-              marginBottom: 12,
-            }}
-          >
+          <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
             Traffic Sources
           </div>{" "}
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <div className="flex flex-col [gap:6px]">
             {sources.map((s, i) => {
               const totalSessions = sources.reduce(
                 (sum, x) => sum + (parseInt(x.sessions) || 0),
@@ -6152,179 +6621,93 @@ function AnalyticsTab() {
                 : 0;
               const srcColor =
                 {
-                  organic: D.green,
-                  paid: D.amber,
-                  direct: D.teal,
-                  referral: D.purple,
+                  organic: "#15803D",
+                  paid: "#A16207",
+                  direct: "#18181B",
+                  referral: "#18181B",
                   social: "#ec4899",
-                }[s.source?.toLowerCase()] || D.muted;
+                }[s.source?.toLowerCase()] || "#71717A";
               return (
                 <div
                   key={i}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 10,
-                    padding: "8px 12px",
-                    background: D.bg,
-                    borderRadius: 8,
-                  }}
+                  className="flex items-center [gap:10px] [padding:8px_12px] bg-zinc-100 rounded-md"
                 >
                   {" "}
                   <span
                     style={{
-                      width: 8,
-                      height: 8,
-                      borderRadius: "50%",
                       background: srcColor,
-                      flexShrink: 0,
                     }}
+                    className="[width:8px] [height:8px] rounded-xs shrink-0"
                   />{" "}
-                  <div style={{ flex: 1, minWidth: 0 }}>
+                  <div className="[flex:1] [min-width:0px]">
                     {" "}
-                    <div
-                      style={{
-                        fontSize: 13,
-                        color: D.heading,
-                        fontWeight: 500,
-                      }}
-                    >
+                    <div className="text-ui-body text-zinc-900 font-medium">
                       {s.source || "unknown"}
                       {s.medium ? ` / ${s.medium}` : ""}
                     </div>{" "}
                   </div>{" "}
-                  <div
-                    style={{
-                      fontSize: 13,
-                      fontWeight: 700,
-                      color: D.heading,
-                      fontFamily: MONO,
-                    }}
-                  >
+                  <div className="text-ui-body font-medium text-zinc-900">
                     {fmt(s.sessions)}
                   </div>{" "}
-                  <div
-                    style={{
-                      fontSize: 11,
-                      color: D.muted,
-                      fontFamily: MONO,
-                      width: 50,
-                      textAlign: "right",
-                    }}
-                  >
+                  <div className="text-ui-body text-ink-secondary [width:50px] text-right">
                     {pctOfTotal}%
                   </div>{" "}
                 </div>
               );
             })}
           </div>{" "}
-        </Card>
+        </UiCard>
       )}
       {/* Top Pages */}
       {topPages.length > 0 && (
-        <Card>
+        <UiCard className="p-6">
           {" "}
-          <div
-            style={{
-              fontSize: 14,
-              fontWeight: 700,
-              color: D.heading,
-              marginBottom: 12,
-            }}
-          >
+          <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
             Top Landing Pages
           </div>{" "}
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <div className="flex flex-col [gap:4px]">
             {" "}
-            <div
-              className="seo-top-pages-header"
-              style={{
-                display: "flex",
-                padding: "0 12px 8px",
-                fontSize: 10,
-                color: D.muted,
-                textTransform: "uppercase",
-                letterSpacing: 0.5,
-              }}
-            >
+            <div className="seo-top-pages-header flex max-sm:hidden [padding:0_12px_8px] text-ui-body text-ink-secondary">
               {" "}
-              <div style={{ flex: 1 }}>Page</div>{" "}
-              <div style={{ width: 70, textAlign: "right" }}>Sessions</div>{" "}
-              <div style={{ width: 70, textAlign: "right" }}>Bounce</div>{" "}
-              <div style={{ width: 70, textAlign: "right" }}>Avg Time</div>{" "}
+              <div className="[flex:1]">Page</div>{" "}
+              <div className="[width:70px] text-right">Sessions</div>{" "}
+              <div className="[width:70px] text-right">Bounce</div>{" "}
+              <div className="[width:70px] text-right">Avg Time</div>{" "}
             </div>
             {topPages.slice(0, 20).map((p, i) => (
               <div
                 key={i}
-                className="seo-top-pages-row"
+                className="seo-top-pages-row flex max-sm:flex-wrap max-sm:gap-1 max-sm:[&>div:first-child]:w-full max-sm:[&>div:first-child]:flex-none items-center [padding:8px_12px] rounded-sm"
                 style={{
-                  display: "flex",
-                  alignItems: "center",
-                  padding: "8px 12px",
-                  background: i % 2 === 0 ? D.bg : "transparent",
-                  borderRadius: 6,
+                  background: i % 2 === 0 ? "#F4F4F5" : "transparent",
                 }}
               >
                 {" "}
-                <div
-                  style={{
-                    flex: 1,
-                    fontSize: 12,
-                    color: D.text,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                    wordBreak: "break-all",
-                  }}
-                >
+                <div className="[flex:1] text-ui-body text-zinc-900 overflow-hidden text-ellipsis whitespace-nowrap break-all">
                   {p.landingPage || p.page || p.pagePath}
                 </div>{" "}
-                <div
-                  style={{
-                    width: 70,
-                    textAlign: "right",
-                    fontSize: 12,
-                    fontWeight: 500,
-                    color: D.heading,
-                    fontFamily: MONO,
-                    flexShrink: 0,
-                  }}
-                >
+                <div className="[width:70px] text-right text-ui-body font-medium text-zinc-900 shrink-0">
                   {fmt(p.sessions || p.pageviews)}
                 </div>{" "}
                 <div
                   style={{
-                    width: 70,
-                    textAlign: "right",
-                    fontSize: 12,
-                    color: p.bounceRate > 0.6 ? D.red : D.muted,
-                    fontFamily: MONO,
-                    flexShrink: 0,
+                    color: p.bounceRate > 0.6 ? "#991B1B" : "#71717A",
                   }}
+                  className="[width:70px] text-right text-ui-body shrink-0"
                 >
                   {pct(p.bounceRate)}
                 </div>{" "}
-                <div
-                  style={{
-                    width: 70,
-                    textAlign: "right",
-                    fontSize: 12,
-                    color: D.muted,
-                    fontFamily: MONO,
-                    flexShrink: 0,
-                  }}
-                >
+                <div className="[width:70px] text-right text-ui-body text-ink-secondary shrink-0">
                   {dur(p.avgSessionDuration)}
                 </div>{" "}
               </div>
             ))}
           </div>{" "}
-        </Card>
+        </UiCard>
       )}
     </div>
   );
 }
-
 function SiteAuditTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -6332,7 +6715,6 @@ function SiteAuditTab() {
   const [filter, setFilter] = useState("all"); // all, critical, warning, healthy
   const [expandedPage, setExpandedPage] = useState(null);
   const canRunSeoActions = isAdminUser();
-
   useEffect(() => {
     adminFetch("/admin/seo/audit")
       .then((d) => {
@@ -6341,7 +6723,6 @@ function SiteAuditTab() {
       })
       .catch(() => setLoading(false));
   }, []);
-
   const runAudit = async () => {
     if (!canRunSeoActions) return;
     setRunning(true);
@@ -6355,66 +6736,42 @@ function SiteAuditTab() {
       setRunning(false);
     }
   };
-
   if (loading)
     return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+      <div className="text-ink-secondary [padding:40px] text-center">
         Loading site audit...
       </div>
     );
   if (!data?.hasData)
     return (
-      <Card style={{ textAlign: "center", padding: 60 }}>
-        <div
-          style={{
-            fontSize: 18,
-            fontWeight: 500,
-            color: D.heading,
-            marginBottom: 8,
-          }}
-        >
+      <UiCard className="text-center [padding:60px]">
+        <div className="text-[18px] font-medium text-zinc-900 [margin-bottom:8px]">
           No Audit Data Yet
         </div>{" "}
         {canRunSeoActions && (
-          <button
-            onClick={runAudit}
-            disabled={running}
-            style={{
-              padding: "10px 20px",
-              borderRadius: 8,
-              border: "none",
-              background: D.teal,
-              color: "#fff",
-              fontSize: 14,
-              fontWeight: 500,
-              cursor: "pointer",
-              opacity: running ? 0.5 : 1,
-            }}
-          >
+          <Button onClick={runAudit} disabled={running}>
             {running ? "Auditing..." : "Run Site Audit"}
-          </button>
+          </Button>
         )}{" "}
-      </Card>
+      </UiCard>
     );
-
   const run = data.latestRun || {};
   const pages = data.pages || [];
   const issues = data.issues || [];
   const history = data.history || [];
-  const scoreColor = (s) => (s >= 80 ? D.green : s >= 50 ? D.amber : D.red);
+  const scoreColor = (s) =>
+    s >= 80 ? "#15803D" : s >= 50 ? "#A16207" : "#991B1B";
   const severityColor = {
-    critical: D.red,
-    warning: D.amber,
-    info: D.muted,
-    healthy: D.green,
+    critical: "#991B1B",
+    warning: "#A16207",
+    info: "#71717A",
+    healthy: "#15803D",
   };
-
   const getPageStatus = (p) => {
     if (p.issue_count_critical > 0) return "critical";
     if (p.issue_count_warning > 0) return "warning";
     return "healthy";
   };
-
   const parseAuditIssues = (value) => {
     if (Array.isArray(value)) return value;
     if (!value) return [];
@@ -6425,12 +6782,10 @@ function SiteAuditTab() {
       return [];
     }
   };
-
   const filteredPages = pages.filter((p) => {
     if (filter === "all") return true;
     return getPageStatus(p) === filter;
   });
-
   const shortUrl = (url) => {
     try {
       return new URL(url).pathname || "/";
@@ -6438,228 +6793,149 @@ function SiteAuditTab() {
       return url;
     }
   };
-
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+    <div className="flex flex-col [gap:16px]">
       {/* KPI Row */}
-      <div
-        className="seo-audit-kpi-grid"
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(4, 1fr)",
-          gap: 12,
-        }}
-      >
+      <div className="seo-audit-kpi-grid grid max-sm:!grid-cols-2 [grid-template-columns:repeat(4,_1fr)] [gap:12px]">
         {" "}
-        <Card style={{ padding: 16, textAlign: "center" }}>
+        <UiCard className="[padding:16px] text-center">
           {" "}
-          <div style={{ fontSize: 11, color: D.muted }}>
+          <div className="text-ui-body text-ink-secondary">
             Site Health Score
           </div>{" "}
           <div
             style={{
-              fontSize: 36,
-              fontWeight: 700,
               color: scoreColor(parseFloat(run.avg_health_score || 0)),
-              fontFamily: MONO,
             }}
+            className="text-[36px] font-medium"
           >
             {Math.round(run.avg_health_score || 0)}
           </div>{" "}
-          <div style={{ fontSize: 10, color: D.muted }}>
+          <div className="text-ui-body text-ink-secondary">
             {run.pages_crawled || 0} pages crawled
           </div>{" "}
-        </Card>
+        </UiCard>
         {[
           {
             label: "Healthy",
             key: "healthy",
             count: run.pages_healthy || 0,
-            color: D.green,
+            color: "#15803D",
           },
           {
             label: "Warning",
             key: "warning",
             count: run.pages_warning || 0,
-            color: D.amber,
+            color: "#A16207",
           },
           {
             label: "Critical",
             key: "critical",
             count: run.pages_critical || 0,
-            color: D.red,
+            color: "#991B1B",
           },
         ].map((s) => (
-          <Card
+          <UiCard
             key={s.key}
             onClick={() => setFilter(filter === s.key ? "all" : s.key)}
             style={{
-              padding: 16,
-              textAlign: "center",
-              cursor: "pointer",
               border:
-                filter === s.key
-                  ? `2px solid ${s.color}`
-                  : `1px solid ${D.border}`,
+                filter === s.key ? `2px solid ${s.color}` : "1px solid #E4E4E7",
             }}
+            className="[padding:16px] text-center cursor-pointer"
           >
             {" "}
-            <div style={{ fontSize: 11, color: D.muted }}>{s.label}</div>{" "}
+            <div className="text-ui-body text-ink-secondary">
+              {s.label}
+            </div>{" "}
             <div
               style={{
-                fontSize: 28,
-                fontWeight: 700,
                 color: s.color,
-                fontFamily: MONO,
               }}
+              className="text-[28px] font-medium"
             >
               {s.count}
             </div>{" "}
-          </Card>
+          </UiCard>
         ))}
       </div>
       {/* Re-run + last run info */}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-        }}
-      >
+      <div className="flex justify-between items-center">
         {" "}
-        <div style={{ fontSize: 12, color: D.muted }}>
+        <div className="text-ui-body text-ink-secondary">
           Last audit:{" "}
           {run.run_date ? new Date(run.run_date).toLocaleString() : "N/A"}
         </div>{" "}
         {canRunSeoActions && (
-          <button
-            onClick={runAudit}
-            disabled={running}
-            style={{
-              padding: "8px 16px",
-              borderRadius: 8,
-              border: "none",
-              background: D.teal,
-              color: "#fff",
-              fontSize: 12,
-              fontWeight: 500,
-              cursor: "pointer",
-              opacity: running ? 0.5 : 1,
-            }}
-          >
+          <Button onClick={runAudit} disabled={running}>
             {running ? "Running..." : "Re-run Audit"}
-          </button>
+          </Button>
         )}{" "}
       </div>
       {/* Top Issues Summary */}
       {issues.length > 0 && (
-        <Card>
+        <UiCard className="p-6">
           {" "}
-          <div
-            style={{
-              fontSize: 14,
-              fontWeight: 700,
-              color: D.heading,
-              marginBottom: 12,
-            }}
-          >
+          <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
             Top Issues
           </div>{" "}
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <div className="flex flex-col [gap:8px]">
             {issues.slice(0, 15).map((iss, i) => (
               <div
                 key={i}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 10,
-                  padding: "8px 12px",
-                  background: D.bg,
-                  borderRadius: 8,
-                  border: `1px solid ${D.border}`,
-                }}
+                className="flex items-center [gap:10px] [padding:8px_12px] bg-zinc-100 rounded-md border-hairline border-zinc-200"
               >
                 {" "}
                 <span
                   style={{
-                    width: 8,
-                    height: 8,
-                    borderRadius: "50%",
-                    flexShrink: 0,
-                    background: severityColor[iss.severity] || D.muted,
+                    background: severityColor[iss.severity] || "#71717A",
                   }}
+                  className="[width:8px] [height:8px] rounded-xs shrink-0"
                 />{" "}
-                <div style={{ flex: 1, minWidth: 0 }}>
+                <div className="[flex:1] [min-width:0px]">
                   {" "}
-                  <div
-                    style={{ fontSize: 13, color: D.heading, fontWeight: 500 }}
-                  >
+                  <div className="text-ui-body text-zinc-900 font-medium">
                     {iss.issue_type?.replace(/_/g, " ")}
                   </div>
                   {iss.details && (
-                    <div
-                      style={{
-                        fontSize: 11,
-                        color: D.muted,
-                        marginTop: 2,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
+                    <div className="text-ui-body text-ink-secondary [margin-top:2px] overflow-hidden text-ellipsis whitespace-nowrap">
                       {iss.details}
                     </div>
                   )}
                 </div>{" "}
                 <div
                   style={{
-                    fontSize: 12,
-                    fontWeight: 700,
-                    color: severityColor[iss.severity] || D.muted,
-                    fontFamily: MONO,
-                    flexShrink: 0,
+                    color: severityColor[iss.severity] || "#71717A",
                   }}
+                  className="text-ui-body font-medium shrink-0"
                 >
                   {iss.affected_count} page{iss.affected_count !== 1 ? "s" : ""}
                 </div>{" "}
               </div>
             ))}
           </div>{" "}
-        </Card>
+        </UiCard>
       )}
 
       {/* Page-by-Page Breakdown */}
-      <Card>
+      <UiCard className="p-6">
         {" "}
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            marginBottom: 12,
-          }}
-        >
+        <div className="flex justify-between items-center [margin-bottom:12px]">
           {" "}
-          <div style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>
+          <div className="text-ui-body font-medium text-zinc-900">
             Pages {filter !== "all" ? `(${filter})` : ""} —{" "}
             {filteredPages.length}
           </div>
           {filter !== "all" && (
-            <button
+            <Button
               onClick={() => setFilter("all")}
-              style={{
-                fontSize: 11,
-                color: D.teal,
-                background: "none",
-                border: "none",
-                cursor: "pointer",
-              }}
+              className="[background:none]"
             >
               Show all
-            </button>
+            </Button>
           )}
         </div>{" "}
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <div className="flex flex-col [gap:6px]">
           {filteredPages.slice(0, 50).map((p, i) => {
             const status = getPageStatus(p);
             const pageIssues = parseAuditIssues(p.issues);
@@ -6669,57 +6945,32 @@ function SiteAuditTab() {
                 {" "}
                 <div
                   onClick={() => setExpandedPage(isExpanded ? null : i)}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 10,
-                    padding: "10px 12px",
-                    background: D.bg,
-                    borderRadius: 8,
-                    border: `1px solid ${D.border}`,
-                    cursor: "pointer",
-                  }}
+                  className="flex items-center [gap:10px] [padding:10px_12px] bg-zinc-100 rounded-md cursor-pointer border-hairline border-zinc-200"
                 >
                   {/* Score circle */}
                   <div
                     style={{
-                      width: 36,
-                      height: 36,
-                      borderRadius: "50%",
-                      flexShrink: 0,
                       border: `3px solid ${scoreColor(p.technical_health_score || 0)}`,
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      fontSize: 11,
-                      fontWeight: 700,
                       color: scoreColor(p.technical_health_score || 0),
-                      fontFamily: MONO,
                     }}
+                    className="[width:36px] [height:36px] rounded-xs shrink-0 flex items-center justify-center text-ui-body font-medium"
                   >
                     {Math.round(p.technical_health_score || 0)}
                   </div>
                   {/* URL + meta */}
-                  <div style={{ flex: 1, minWidth: 0 }}>
+                  <div className="[flex:1] [min-width:0px]">
                     {" "}
-                    <div
-                      style={{
-                        fontSize: 13,
-                        color: D.heading,
-                        fontWeight: 500,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
+                    <div className="text-ui-body text-zinc-900 font-medium overflow-hidden text-ellipsis whitespace-nowrap">
                       {shortUrl(p.url)}
                     </div>{" "}
-                    <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
+                    <div className="text-ui-body text-ink-secondary [margin-top:2px]">
                       {p.status_code && (
-                        <span style={{ marginRight: 8 }}>{p.status_code}</span>
+                        <span className="[margin-right:8px]">
+                          {p.status_code}
+                        </span>
                       )}
                       {p.response_time_ms != null && (
-                        <span style={{ marginRight: 8 }}>
+                        <span className="[margin-right:8px]">
                           {p.response_time_ms}ms
                         </span>
                       )}
@@ -6729,17 +6980,13 @@ function SiteAuditTab() {
                     </div>{" "}
                   </div>
                   {/* Issue counts */}
-                  <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                  <div className="flex [gap:6px] shrink-0">
                     {p.issue_count_critical > 0 && (
                       <span
                         style={{
-                          fontSize: 10,
-                          fontWeight: 700,
-                          color: D.red,
-                          background: D.red + "18",
-                          padding: "2px 6px",
-                          borderRadius: 6,
+                          background: "#991B1B" + "18",
                         }}
+                        className="text-ui-body font-medium text-alert-fg [padding:2px_6px] rounded-sm"
                       >
                         {p.issue_count_critical} critical
                       </span>
@@ -6747,13 +6994,9 @@ function SiteAuditTab() {
                     {p.issue_count_warning > 0 && (
                       <span
                         style={{
-                          fontSize: 10,
-                          fontWeight: 700,
-                          color: D.amber,
-                          background: D.amber + "18",
-                          padding: "2px 6px",
-                          borderRadius: 6,
+                          background: "#A16207" + "18",
                         }}
+                        className="text-ui-body font-medium text-zinc-700 [padding:2px_6px] rounded-sm"
                       >
                         {p.issue_count_warning} warning
                       </span>
@@ -6761,19 +7004,15 @@ function SiteAuditTab() {
                     {status === "healthy" && (
                       <span
                         style={{
-                          fontSize: 10,
-                          fontWeight: 700,
-                          color: D.green,
-                          background: D.green + "18",
-                          padding: "2px 6px",
-                          borderRadius: 6,
+                          background: "#15803D" + "18",
                         }}
+                        className="text-ui-body font-medium text-zinc-900 [padding:2px_6px] rounded-sm"
                       >
                         OK
                       </span>
                     )}
                   </div>{" "}
-                  <span style={{ fontSize: 12, color: D.muted, flexShrink: 0 }}>
+                  <span className="text-ui-body text-ink-secondary shrink-0">
                     {isExpanded ? "▲" : "▼"}
                   </span>{" "}
                 </div>
@@ -6781,81 +7020,48 @@ function SiteAuditTab() {
                 {isExpanded && (
                   <div
                     style={{
-                      padding: "12px 16px",
-                      background: D.bg,
-                      borderRadius: "0 0 8px 8px",
-                      borderTop: "none",
-                      border: `1px solid ${D.border}`,
-                      borderTopColor: "transparent",
                       marginTop: -2,
                     }}
+                    className="[padding:12px_16px] bg-zinc-100 rounded-xs border-t border-hairline border-zinc-200 [border-top-color:transparent] border-hairline border-zinc-200"
                   >
                     {/* Meta info */}
-                    <div
-                      className="seo-audit-expanded-grid"
-                      style={{
-                        display: "grid",
-                        gridTemplateColumns: "1fr 1fr",
-                        gap: 8,
-                        marginBottom: 12,
-                      }}
-                    >
+                    <div className="seo-audit-expanded-grid grid max-sm:!grid-cols-1 [grid-template-columns:1fr_1fr] [gap:8px] [margin-bottom:12px]">
                       {p.meta_title && (
                         <div>
-                          <div style={{ fontSize: 10, color: D.muted }}>
+                          <div className="text-ui-body text-ink-secondary">
                             Title ({p.meta_title_length} chars)
                           </div>
-                          <div
-                            style={{
-                              fontSize: 12,
-                              color: D.text,
-                              marginTop: 2,
-                            }}
-                          >
+                          <div className="text-ui-body text-zinc-900 [margin-top:2px]">
                             {p.meta_title}
                           </div>
                         </div>
                       )}
                       {p.meta_description && (
                         <div>
-                          <div style={{ fontSize: 10, color: D.muted }}>
+                          <div className="text-ui-body text-ink-secondary">
                             Description ({p.meta_description_length} chars)
                           </div>
-                          <div
-                            style={{
-                              fontSize: 12,
-                              color: D.text,
-                              marginTop: 2,
-                            }}
-                          >
+                          <div className="text-ui-body text-zinc-900 [margin-top:2px]">
                             {p.meta_description?.substring(0, 160)}
                           </div>
                         </div>
                       )}
                       {p.h1_text && (
                         <div>
-                          <div style={{ fontSize: 10, color: D.muted }}>
+                          <div className="text-ui-body text-ink-secondary">
                             H1 (count: {p.h1_count})
                           </div>
-                          <div
-                            style={{
-                              fontSize: 12,
-                              color: D.text,
-                              marginTop: 2,
-                            }}
-                          >
+                          <div className="text-ui-body text-zinc-900 [margin-top:2px]">
                             {p.h1_text}
                           </div>
                         </div>
                       )}
                       <div>
                         {" "}
-                        <div style={{ fontSize: 10, color: D.muted }}>
+                        <div className="text-ui-body text-ink-secondary">
                           Structure
                         </div>{" "}
-                        <div
-                          style={{ fontSize: 12, color: D.text, marginTop: 2 }}
-                        >
+                        <div className="text-ui-body text-zinc-900 [margin-top:2px]">
                           H2s: {p.h2_count || 0} | Links:{" "}
                           {p.internal_links_count || 0} int /{" "}
                           {p.external_links_count || 0} ext | Images:{" "}
@@ -6865,12 +7071,10 @@ function SiteAuditTab() {
                       </div>{" "}
                       <div>
                         {" "}
-                        <div style={{ fontSize: 10, color: D.muted }}>
+                        <div className="text-ui-body text-ink-secondary">
                           Schema
                         </div>{" "}
-                        <div
-                          style={{ fontSize: 12, color: D.text, marginTop: 2 }}
-                        >
+                        <div className="text-ui-body text-zinc-900 [margin-top:2px]">
                           {(() => {
                             try {
                               const s = JSON.parse(
@@ -6882,12 +7086,12 @@ function SiteAuditTab() {
                             }
                           })()}
                           {p.has_faq_schema && (
-                            <span style={{ color: D.green, marginLeft: 6 }}>
+                            <span className="text-zinc-900 [margin-left:6px]">
                               FAQ
                             </span>
                           )}
                           {p.has_local_business_schema && (
-                            <span style={{ color: D.green, marginLeft: 6 }}>
+                            <span className="text-zinc-900 [margin-left:6px]">
                               LocalBusiness
                             </span>
                           )}
@@ -6895,15 +7099,16 @@ function SiteAuditTab() {
                       </div>
                       {p.canonical_url && (
                         <div>
-                          <div style={{ fontSize: 10, color: D.muted }}>
+                          <div className="text-ui-body text-ink-secondary">
                             Canonical
                           </div>
                           <div
                             style={{
-                              fontSize: 12,
-                              color: p.canonical_mismatch ? D.red : D.green,
-                              marginTop: 2,
+                              color: p.canonical_mismatch
+                                ? "#991B1B"
+                                : "#15803D",
                             }}
+                            className="text-ui-body [margin-top:2px]"
                           >
                             {p.canonical_self_referencing
                               ? "Self-referencing"
@@ -6916,57 +7121,35 @@ function SiteAuditTab() {
                     {pageIssues.length > 0 && (
                       <div>
                         {" "}
-                        <div
-                          style={{
-                            fontSize: 11,
-                            fontWeight: 700,
-                            color: D.muted,
-                            marginBottom: 6,
-                            textTransform: "uppercase",
-                            letterSpacing: 0.5,
-                          }}
-                        >
+                        <div className="text-ui-body font-medium text-ink-secondary [margin-bottom:6px]">
                           Issues
                         </div>
                         {pageIssues.map((iss, j) => (
                           <div
                             key={j}
                             style={{
-                              display: "flex",
-                              alignItems: "flex-start",
-                              gap: 8,
-                              padding: "6px 0",
                               borderBottom:
                                 j < pageIssues.length - 1
-                                  ? `1px solid ${D.border}`
+                                  ? "1px solid #E4E4E7"
                                   : "none",
                             }}
+                            className="flex items-start [gap:8px] [padding:6px_0]"
                           >
                             {" "}
                             <span
                               style={{
-                                width: 6,
-                                height: 6,
-                                borderRadius: "50%",
                                 background:
-                                  severityColor[iss.severity] || D.muted,
-                                marginTop: 5,
-                                flexShrink: 0,
+                                  severityColor[iss.severity] || "#71717A",
                               }}
+                              className="[width:6px] [height:6px] rounded-xs [margin-top:5px] shrink-0"
                             />{" "}
                             <div>
                               {" "}
-                              <div style={{ fontSize: 12, color: D.text }}>
+                              <div className="text-ui-body text-zinc-900">
                                 {iss.message || iss.type?.replace(/_/g, " ")}
                               </div>
                               {iss.details && (
-                                <div
-                                  style={{
-                                    fontSize: 11,
-                                    color: D.muted,
-                                    marginTop: 1,
-                                  }}
-                                >
+                                <div className="text-ui-body text-ink-secondary [margin-top:1px]">
                                   {iss.details}
                                 </div>
                               )}
@@ -6976,7 +7159,7 @@ function SiteAuditTab() {
                       </div>
                     )}
                     {pageIssues.length === 0 && (
-                      <div style={{ fontSize: 12, color: D.green }}>
+                      <div className="text-ui-body text-zinc-900">
                         No issues found — page is healthy
                       </div>
                     )}
@@ -6986,43 +7169,30 @@ function SiteAuditTab() {
             );
           })}
         </div>{" "}
-      </Card>
+      </UiCard>
       {/* Audit History */}
       {history.length > 1 && (
-        <Card>
+        <UiCard className="p-6">
           {" "}
-          <div
-            style={{
-              fontSize: 14,
-              fontWeight: 700,
-              color: D.heading,
-              marginBottom: 12,
-            }}
-          >
+          <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
             Audit History
           </div>{" "}
           <div
-            className="seo-audit-history-grid"
+            className="seo-audit-history-grid grid max-sm:!grid-cols-3 [gap:8px]"
             style={{
-              display: "grid",
               gridTemplateColumns: `repeat(${Math.min(history.length, 6)}, 1fr)`,
-              gap: 8,
             }}
           >
             {history.slice(0, 6).map((h, i) => (
               <div
                 key={i}
                 style={{
-                  textAlign: "center",
-                  padding: 12,
-                  background: D.bg,
-                  borderRadius: 8,
-                  border:
-                    i === 0 ? `2px solid ${D.teal}` : `1px solid ${D.border}`,
+                  border: i === 0 ? "2px solid #18181B" : "1px solid #E4E4E7",
                 }}
+                className="text-center [padding:12px] bg-zinc-100 rounded-md"
               >
                 {" "}
-                <div style={{ fontSize: 10, color: D.muted }}>
+                <div className="text-ui-body text-ink-secondary">
                   {new Date(h.date).toLocaleDateString("en-US", {
                     month: "short",
                     day: "numeric",
@@ -7030,26 +7200,24 @@ function SiteAuditTab() {
                 </div>{" "}
                 <div
                   style={{
-                    fontSize: 22,
-                    fontWeight: 700,
                     color: scoreColor(h.score),
-                    fontFamily: MONO,
                   }}
+                  className="text-[22px] font-medium"
                 >
                   {Math.round(h.score)}
                 </div>{" "}
-                <div style={{ fontSize: 10, color: D.muted }}>
+                <div className="text-ui-body text-ink-secondary">
                   {h.pages} pages
                 </div>
                 {h.critical > 0 && (
-                  <div style={{ fontSize: 10, color: D.red }}>
+                  <div className="text-ui-body text-alert-fg">
                     {h.critical} critical
                   </div>
                 )}
               </div>
             ))}
           </div>{" "}
-        </Card>
+        </UiCard>
       )}
     </div>
   );
@@ -7064,14 +7232,12 @@ function UrlIntelTab({ domain }) {
   const [diagnosisFilter, setDiagnosisFilter] = useState("");
   const [scanPage, setScanPage] = useState(0);
   const canRefresh = isAdminUser();
-
   useEffect(() => {
     adminFetch(`/admin/seo/url-intelligence/dashboard?domain=${domain}`)
       .then(setData)
       .catch(() => setData(null))
       .finally(() => setLoading(false));
   }, [domain]);
-
   useEffect(() => {
     if (subTab === "diagnosis" || subTab === "priority") {
       const diag = subTab === "priority" ? "" : diagnosisFilter;
@@ -7081,7 +7247,6 @@ function UrlIntelTab({ domain }) {
         .catch(() => setScanData(null));
     }
   }, [subTab, diagnosisFilter, scanPage, domain]);
-
   function handleRefresh() {
     adminPost("/admin/seo/url-intelligence/refresh", { domain })
       .then(() => {
@@ -7089,18 +7254,40 @@ function UrlIntelTab({ domain }) {
       })
       .catch(() => {});
   }
-
-  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>Loading URL Intelligence...</div>;
-  if (!data) return <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>No data — run a refresh to populate.</div>;
-
+  if (loading)
+    return (
+      <div className="text-ink-secondary [padding:40px] text-center">
+        Loading URL Intelligence...
+      </div>
+    );
+  if (!data)
+    return (
+      <div className="text-ink-secondary [padding:40px] text-center">
+        No data — run a refresh to populate.
+      </div>
+    );
   const subTabs = [
-    { key: "overview", label: "Overview" },
-    { key: "diagnosis", label: "By Diagnosis" },
-    { key: "priority", label: "Priority Queue" },
-    { key: "duplicates", label: "Duplicates" },
-    { key: "intent", label: "Intent Routing" },
+    {
+      key: "overview",
+      label: "Overview",
+    },
+    {
+      key: "diagnosis",
+      label: "By Diagnosis",
+    },
+    {
+      key: "priority",
+      label: "Priority Queue",
+    },
+    {
+      key: "duplicates",
+      label: "Duplicates",
+    },
+    {
+      key: "intent",
+      label: "Intent Routing",
+    },
   ];
-
   const diagnosisLabels = {
     indexation_problem: "Indexation",
     canonical_problem: "Canonical",
@@ -7117,231 +7304,276 @@ function UrlIntelTab({ domain }) {
     healthy: "Healthy",
     unknown: "Unknown",
   };
-
   const statusColors = {
-    healthy: D.green,
-    needs_technical_fix: D.red,
-    needs_canonical_fix: D.amber,
-    needs_content_refresh: D.amber,
-    needs_indexation_fix: D.red,
-    low_priority: D.muted,
-    review_required: D.amber,
-    unknown: D.muted,
+    healthy: "#15803D",
+    needs_technical_fix: "#991B1B",
+    needs_canonical_fix: "#A16207",
+    needs_content_refresh: "#A16207",
+    needs_indexation_fix: "#991B1B",
+    low_priority: "#71717A",
+    review_required: "#A16207",
+    unknown: "#71717A",
   };
-
   return (
-    <div style={{ padding: 24, display: "flex", flexDirection: "column", gap: 20 }}>
-      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }} className="seo-sub-tabs">
+    <div className="[padding:24px] flex flex-col [gap:20px]">
+      <div className="seo-sub-tabs flex max-sm:flex-nowrap max-sm:overflow-x-auto [gap:8px] items-center flex-wrap">
         {subTabs.map((st) => (
-          <button
+          <Button
             key={st.key}
-            onClick={() => { setSubTab(st.key); setScanPage(0); }}
-            style={{
-              padding: "6px 14px", borderRadius: 8, fontSize: 13, fontWeight: 500, cursor: "pointer",
-              background: subTab === st.key ? D.heading : "transparent",
-              color: subTab === st.key ? D.white : D.muted,
-              border: `1px solid ${subTab === st.key ? D.heading : D.border}`,
+            onClick={() => {
+              setSubTab(st.key);
+              setScanPage(0);
             }}
-          >{st.label}</button>
+            variant={subTab === st.key ? "primary" : "secondary"}
+          >
+            {st.label}
+          </Button>
         ))}
         {canRefresh && (
-          <button
-            onClick={handleRefresh}
-            style={{
-              marginLeft: "auto", padding: "6px 14px", borderRadius: 8, fontSize: 12,
-              background: D.heading, color: D.white, border: "none", cursor: "pointer",
-            }}
-          >Refresh Domain</button>
+          <Button onClick={handleRefresh} className="[margin-left:auto]">
+            Refresh Domain
+          </Button>
         )}
       </div>
 
       {subTab === "overview" && (
         <>
-          <div className="seo-kpi-grid-4" style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16 }}>
+          <div className="seo-kpi-grid-4 grid max-sm:!grid-cols-2 [grid-template-columns:repeat(4,_1fr)] [gap:16px]">
             <KpiCard label="Total URLs" value={fmt(data.total_urls)} />
             <KpiCard
               label="Healthy"
               value={`${data.by_status.find((s) => s.status === "healthy")?.count || 0}`}
-              color={D.green}
+              color={"#15803D"}
             />
             <KpiCard
               label="Needs Fix"
               value={`${data.total_urls - (data.by_status.find((s) => s.status === "healthy")?.count || 0) - (data.by_status.find((s) => s.status === "unknown")?.count || 0)}`}
-              color={D.red}
+              color={"#991B1B"}
             />
-            <KpiCard label="Indexation Gap" value={`${data.indexation_gap?.gap_pct || 0}%`} color={data.indexation_gap?.gap_pct > 20 ? D.red : D.green} />
+            <KpiCard
+              label="Indexation Gap"
+              value={`${data.indexation_gap?.gap_pct || 0}%`}
+              color={data.indexation_gap?.gap_pct > 20 ? "#991B1B" : "#15803D"}
+            />
           </div>
 
-          <Card>
-            <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 16 }}>Diagnosis Breakdown</div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 10 }}>
-              {data.by_diagnosis.filter((d) => d.count > 0).map((d) => (
-                <div
-                  key={d.diagnosis}
-                  onClick={() => { setSubTab("diagnosis"); setDiagnosisFilter(d.diagnosis); setScanPage(0); }}
-                  style={{
-                    padding: 12, borderRadius: 8, border: `1px solid ${D.border}`, cursor: "pointer",
-                    display: "flex", justifyContent: "space-between", alignItems: "center",
-                  }}
-                >
-                  <span style={{ fontSize: 12, color: D.text }}>{diagnosisLabels[d.diagnosis] || d.diagnosis}</span>
-                  <span style={{ fontSize: 16, fontWeight: 700, fontFamily: MONO, color: D.heading }}>{d.count}</span>
-                </div>
-              ))}
+          <UiCard className="p-6">
+            <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:16px]">
+              Diagnosis Breakdown
             </div>
-          </Card>
+            <div className="grid [grid-template-columns:repeat(auto-fill,_minmax(180px,_1fr))] [gap:10px]">
+              {data.by_diagnosis
+                .filter((d) => d.count > 0)
+                .map((d) => (
+                  <div
+                    key={d.diagnosis}
+                    onClick={() => {
+                      setSubTab("diagnosis");
+                      setDiagnosisFilter(d.diagnosis);
+                      setScanPage(0);
+                    }}
+                    className="[padding:12px] rounded-md cursor-pointer flex justify-between items-center border-hairline border-zinc-200"
+                  >
+                    <span className="text-ui-body text-zinc-900">
+                      {diagnosisLabels[d.diagnosis] || d.diagnosis}
+                    </span>
+                    <span className="text-ui-body font-medium text-zinc-900">
+                      {d.count}
+                    </span>
+                  </div>
+                ))}
+            </div>
+          </UiCard>
 
           {data.top_issues?.length > 0 && (
-            <Card>
-              <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 16 }}>Top Priority Issues</div>
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                  <thead><tr>
-                    <th style={thStyle}>URL</th>
-                    <th style={thStyle}>Diagnosis</th>
-                    <th style={thR}>Priority</th>
-                    <th style={thStyle}>Action</th>
-                  </tr></thead>
-                  <tbody>
-                    {data.top_issues.map((row) => (
-                      <tr key={row.id}>
-                        <td style={{ ...tdStyle, maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {row.url}
-                        </td>
-                        <td style={tdStyle}>
-                          <span style={{
-                            padding: "2px 8px", borderRadius: 4, fontSize: 11, fontWeight: 500,
-                            background: statusColors[row.primary_status] ? `${statusColors[row.primary_status]}18` : `${D.muted}18`,
-                            color: statusColors[row.primary_status] || D.muted,
-                          }}>{diagnosisLabels[row.primary_diagnosis] || row.primary_diagnosis}</span>
-                        </td>
-                        <td style={tdR}>{row.priority_score}</td>
-                        <td style={{ ...tdStyle, fontSize: 12, maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {row.recommended_action}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+            <UiCard className="p-6">
+              <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:16px]">
+                Top Priority Issues
               </div>
-            </Card>
+              <div className="overflow-x-auto">
+                <Table className="[width:100%] [border-collapse:collapse]">
+                  <THead>
+                    <TR>
+                      <TH>URL</TH>
+                      <TH>Diagnosis</TH>
+                      <TH className="text-right u-nums">Priority</TH>
+                      <TH>Action</TH>
+                    </TR>
+                  </THead>
+                  <TBody>
+                    {data.top_issues.map((row) => (
+                      <TR key={row.id}>
+                        <TD className="[max-width:300px] overflow-hidden text-ellipsis whitespace-nowrap">
+                          {row.url}
+                        </TD>
+                        <TD className="u-nums">
+                          <span
+                            style={{
+                              background: statusColors[row.primary_status]
+                                ? `${statusColors[row.primary_status]}18`
+                                : "#71717A18",
+                              color:
+                                statusColors[row.primary_status] || "#71717A",
+                            }}
+                            className="[padding:2px_8px] rounded-sm text-ui-body font-medium"
+                          >
+                            {diagnosisLabels[row.primary_diagnosis] ||
+                              row.primary_diagnosis}
+                          </span>
+                        </TD>
+                        <TD className="text-right u-nums">
+                          {row.priority_score}
+                        </TD>
+                        <TD className="text-ui-body [max-width:300px] overflow-hidden text-ellipsis whitespace-nowrap">
+                          {row.recommended_action}
+                        </TD>
+                      </TR>
+                    ))}
+                  </TBody>
+                </Table>
+              </div>
+            </UiCard>
           )}
 
           {data.canonical_conflicts > 0 && (
-            <Card style={{ borderLeft: `3px solid ${D.amber}` }}>
-              <div style={{ fontSize: 13, color: D.amber, fontWeight: 500 }}>
-                {data.canonical_conflicts} canonical conflict{data.canonical_conflicts > 1 ? "s" : ""} detected
+            <UiCard className="p-6 border-l border-hairline border-zinc-200">
+              <div className="text-ui-body text-zinc-700 font-medium">
+                {data.canonical_conflicts} canonical conflict
+                {data.canonical_conflicts > 1 ? "s" : ""} detected
               </div>
-              <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>
+              <div className="text-ui-body text-ink-secondary [margin-top:4px]">
                 Switch to the Indexation tab → Canonical Conflicts to review.
               </div>
-            </Card>
+            </UiCard>
           )}
         </>
       )}
 
       {(subTab === "diagnosis" || subTab === "priority") && (
-        <Card>
+        <UiCard className="p-6">
           {subTab === "diagnosis" && (
-            <div style={{ marginBottom: 16, display: "flex", gap: 8, alignItems: "center" }}>
-              <span style={{ fontSize: 12, color: D.muted }}>Filter:</span>
-              <select
+            <div className="[margin-bottom:16px] flex [gap:8px] items-center">
+              <span className="text-ui-body text-ink-secondary">Filter:</span>
+              <Select
+                className="!w-auto"
                 value={diagnosisFilter}
-                onChange={(e) => { setDiagnosisFilter(e.target.value); setScanPage(0); }}
-                style={{
-                  padding: "6px 10px", borderRadius: 6, fontSize: 13, border: `1px solid ${D.border}`,
-                  background: D.card, color: D.text,
+                onChange={(e) => {
+                  setDiagnosisFilter(e.target.value);
+                  setScanPage(0);
                 }}
               >
                 <option value="">All</option>
                 {Object.entries(diagnosisLabels).map(([k, v]) => (
-                  <option key={k} value={k}>{v}</option>
+                  <option key={k} value={k}>
+                    {v}
+                  </option>
                 ))}
-              </select>
+              </Select>
             </div>
           )}
 
           {subTab === "priority" && (
-            <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 16 }}>
+            <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:16px]">
               Priority Queue — highest impact first
             </div>
           )}
 
           {scanData?.urls?.length > 0 ? (
             <>
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                  <thead><tr>
-                    <th style={thStyle}>URL</th>
-                    <th style={thStyle}>Status</th>
-                    <th style={thStyle}>Diagnosis</th>
-                    <th style={thR}>Priority</th>
-                    <th style={thR}>Clicks 28d</th>
-                    <th style={thR}>Position</th>
-                    {subTab === "priority" && <th style={thStyle}>Recommended Action</th>}
-                  </tr></thead>
-                  <tbody>
+              <div className="overflow-x-auto">
+                <Table className="[width:100%] [border-collapse:collapse]">
+                  <THead>
+                    <TR>
+                      <TH>URL</TH>
+                      <TH>Status</TH>
+                      <TH>Diagnosis</TH>
+                      <TH className="text-right u-nums">Priority</TH>
+                      <TH className="text-right u-nums">Clicks 28d</TH>
+                      <TH className="text-right u-nums">Position</TH>
+                      {subTab === "priority" && <TH>Recommended Action</TH>}
+                    </TR>
+                  </THead>
+                  <TBody>
                     {scanData.urls.map((row) => (
-                      <tr key={row.id}>
-                        <td style={{ ...tdStyle, maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      <TR key={row.id}>
+                        <TD className="[max-width:260px] overflow-hidden text-ellipsis whitespace-nowrap">
                           {row.url}
-                        </td>
-                        <td style={tdStyle}>
-                          <span style={{
-                            padding: "2px 8px", borderRadius: 4, fontSize: 11,
-                            background: statusColors[row.primary_status] ? `${statusColors[row.primary_status]}18` : `${D.muted}18`,
-                            color: statusColors[row.primary_status] || D.muted,
-                          }}>{row.primary_status}</span>
-                        </td>
-                        <td style={tdStyle}>{diagnosisLabels[row.primary_diagnosis] || row.primary_diagnosis}</td>
-                        <td style={tdR}>{row.priority_score}</td>
-                        <td style={tdR}>{fmt(row.gsc_clicks_28d)}</td>
-                        <td style={tdR}>{row.gsc_avg_position_28d ? parseFloat(row.gsc_avg_position_28d).toFixed(1) : "—"}</td>
+                        </TD>
+                        <TD className="u-nums">
+                          <span
+                            style={{
+                              background: statusColors[row.primary_status]
+                                ? `${statusColors[row.primary_status]}18`
+                                : "#71717A18",
+                              color:
+                                statusColors[row.primary_status] || "#71717A",
+                            }}
+                            className="[padding:2px_8px] rounded-sm text-ui-body"
+                          >
+                            {row.primary_status}
+                          </span>
+                        </TD>
+                        <TD className="u-nums">
+                          {diagnosisLabels[row.primary_diagnosis] ||
+                            row.primary_diagnosis}
+                        </TD>
+                        <TD className="text-right u-nums">
+                          {row.priority_score}
+                        </TD>
+                        <TD className="text-right u-nums">
+                          {fmt(row.gsc_clicks_28d)}
+                        </TD>
+                        <TD className="text-right u-nums">
+                          {row.gsc_avg_position_28d
+                            ? parseFloat(row.gsc_avg_position_28d).toFixed(1)
+                            : "—"}
+                        </TD>
                         {subTab === "priority" && (
-                          <td style={{ ...tdStyle, fontSize: 12, maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          <TD className="text-ui-body [max-width:260px] overflow-hidden text-ellipsis whitespace-nowrap">
                             {row.recommended_action}
-                          </td>
+                          </TD>
                         )}
-                      </tr>
+                      </TR>
                     ))}
-                  </tbody>
-                </table>
+                  </TBody>
+                </Table>
               </div>
-              <div style={{ display: "flex", gap: 8, marginTop: 16, alignItems: "center" }}>
-                <button
+              <div className="flex [gap:8px] [margin-top:16px] items-center">
+                <Button
                   disabled={scanPage === 0}
                   onClick={() => setScanPage((p) => Math.max(0, p - 1))}
-                  style={{ padding: "4px 12px", borderRadius: 6, fontSize: 12, border: `1px solid ${D.border}`, background: D.card, color: D.text, cursor: scanPage === 0 ? "default" : "pointer", opacity: scanPage === 0 ? 0.4 : 1 }}
-                >Prev</button>
-                <span style={{ fontSize: 12, color: D.muted }}>
-                  {scanPage * 25 + 1}–{Math.min((scanPage + 1) * 25, scanData.total)} of {scanData.total}
+                  variant="secondary"
+                >
+                  Prev
+                </Button>
+                <span className="text-ui-body text-ink-secondary">
+                  {scanPage * 25 + 1}–
+                  {Math.min((scanPage + 1) * 25, scanData.total)} of{" "}
+                  {scanData.total}
                 </span>
-                <button
+                <Button
                   disabled={(scanPage + 1) * 25 >= scanData.total}
                   onClick={() => setScanPage((p) => p + 1)}
-                  style={{ padding: "4px 12px", borderRadius: 6, fontSize: 12, border: `1px solid ${D.border}`, background: D.card, color: D.text, cursor: (scanPage + 1) * 25 >= scanData.total ? "default" : "pointer", opacity: (scanPage + 1) * 25 >= scanData.total ? 0.4 : 1 }}
-                >Next</button>
+                  variant="secondary"
+                >
+                  Next
+                </Button>
               </div>
             </>
           ) : (
-            <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: "center" }}>
+            <div className="text-ink-secondary text-ui-body [padding:20px] text-center">
               {scanData ? "No URLs match the current filter." : "Loading..."}
             </div>
           )}
-        </Card>
+        </UiCard>
       )}
 
-      {subTab === "duplicates" && (
-        <DuplicatesSubTab domain={domain} />
-      )}
+      {subTab === "duplicates" && <DuplicatesSubTab domain={domain} />}
 
-      {subTab === "intent" && (
-        <IntentSubTab domain={domain} />
-      )}
+      {subTab === "intent" && <IntentSubTab domain={domain} />}
     </div>
   );
 }
-
 function DuplicatesSubTab({ domain }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -7351,47 +7583,58 @@ function DuplicatesSubTab({ domain }) {
       .catch(() => setData([]))
       .finally(() => setLoading(false));
   }, [domain]);
-
-  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>Loading...</div>;
+  if (loading)
+    return (
+      <div className="text-ink-secondary [padding:40px] text-center">
+        Loading...
+      </div>
+    );
   return (
-    <Card>
-      <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 16 }}>
+    <UiCard className="p-6">
+      <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:16px]">
         Duplicate Content Clusters — body similarity &gt; 80%
       </div>
       {data && data.length > 0 ? (
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead><tr>
-              <th style={thStyle}>URL</th>
-              <th style={thStyle}>Domain</th>
-              <th style={thR}>Similarity</th>
-              <th style={thStyle}>City</th>
-              <th style={thStyle}>Service</th>
-              <th style={thStyle}>Page Type</th>
-            </tr></thead>
-            <tbody>
+        <div className="overflow-x-auto">
+          <Table className="[width:100%] [border-collapse:collapse]">
+            <THead>
+              <TR>
+                <TH>URL</TH>
+                <TH>Domain</TH>
+                <TH className="text-right u-nums">Similarity</TH>
+                <TH>City</TH>
+                <TH>Service</TH>
+                <TH>Page Type</TH>
+              </TR>
+            </THead>
+            <TBody>
               {data.map((row) => (
-                <tr key={row.id}>
-                  <td style={{ ...tdStyle, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.url}</td>
-                  <td style={tdStyle}>{row.domain}</td>
-                  <td style={tdR}>{row.body_similarity_max != null ? `${row.body_similarity_max}%` : "—"}</td>
-                  <td style={tdStyle}>{row.city || "—"}</td>
-                  <td style={tdStyle}>{row.service || "—"}</td>
-                  <td style={tdStyle}>{row.page_type || "—"}</td>
-                </tr>
+                <TR key={row.id}>
+                  <TD className="[max-width:280px] overflow-hidden text-ellipsis whitespace-nowrap">
+                    {row.url}
+                  </TD>
+                  <TD className="u-nums">{row.domain}</TD>
+                  <TD className="text-right u-nums">
+                    {row.body_similarity_max != null
+                      ? `${row.body_similarity_max}%`
+                      : "—"}
+                  </TD>
+                  <TD className="u-nums">{row.city || "—"}</TD>
+                  <TD className="u-nums">{row.service || "—"}</TD>
+                  <TD className="u-nums">{row.page_type || "—"}</TD>
+                </TR>
               ))}
-            </tbody>
-          </table>
+            </TBody>
+          </Table>
         </div>
       ) : (
-        <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: "center" }}>
+        <div className="text-ink-secondary text-ui-body [padding:20px] text-center">
           No duplicate clusters detected. Run duplicate detection to populate.
         </div>
       )}
-    </Card>
+    </UiCard>
   );
 }
-
 function IntentSubTab({ domain }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -7403,66 +7646,91 @@ function IntentSubTab({ domain }) {
       .catch(() => setData([]))
       .finally(() => setLoading(false));
   }, [domain, severityFilter]);
-
-  const severityColors = { severe: D.red, moderate: D.amber, mild: D.muted, none: D.green };
-
-  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>Loading...</div>;
+  const severityColors = {
+    severe: "#991B1B",
+    moderate: "#A16207",
+    mild: "#71717A",
+    none: "#15803D",
+  };
+  if (loading)
+    return (
+      <div className="text-ink-secondary [padding:40px] text-center">
+        Loading...
+      </div>
+    );
   return (
-    <Card>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-        <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>Intent Routing — Query → Page Alignment</div>
-        <select
+    <UiCard className="p-6">
+      <div className="flex justify-between items-center [margin-bottom:16px]">
+        <div className="text-ui-body font-medium text-zinc-900">
+          Intent Routing — Query → Page Alignment
+        </div>
+        <Select
+          className="!w-auto"
           value={severityFilter}
           onChange={(e) => setSeverityFilter(e.target.value)}
-          style={{ padding: "6px 10px", borderRadius: 6, fontSize: 13, border: `1px solid ${D.border}`, background: D.card, color: D.text }}
         >
           <option value="">All</option>
           <option value="severe">Severe</option>
           <option value="moderate">Moderate</option>
           <option value="mild">Mild</option>
-        </select>
+        </Select>
       </div>
       {data && data.length > 0 ? (
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead><tr>
-              <th style={thStyle}>Query Cluster</th>
-              <th style={thStyle}>Intent</th>
-              <th style={thStyle}>Expected</th>
-              <th style={thStyle}>Actual Winner</th>
-              <th style={thStyle}>Misroute</th>
-              <th style={thStyle}>Severity</th>
-              <th style={thR}>Impressions</th>
-            </tr></thead>
-            <tbody>
+        <div className="overflow-x-auto">
+          <Table className="[width:100%] [border-collapse:collapse]">
+            <THead>
+              <TR>
+                <TH>Query Cluster</TH>
+                <TH>Intent</TH>
+                <TH>Expected</TH>
+                <TH>Actual Winner</TH>
+                <TH>Misroute</TH>
+                <TH>Severity</TH>
+                <TH className="text-right u-nums">Impressions</TH>
+              </TR>
+            </THead>
+            <TBody>
               {data.map((row) => (
-                <tr key={row.id}>
-                  <td style={{ ...tdStyle, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.query_cluster}</td>
-                  <td style={tdStyle}>{row.intent_type}</td>
-                  <td style={tdStyle}>{row.expected_page_type}</td>
-                  <td style={{ ...tdStyle, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.actual_winner_url}</td>
-                  <td style={tdStyle}>{row.misroute_type}</td>
-                  <td style={tdStyle}>
-                    {row.misroute_severity && row.misroute_severity !== "none" && (
-                      <span style={{
-                        padding: "2px 8px", borderRadius: 4, fontSize: 11,
-                        background: `${severityColors[row.misroute_severity] || D.muted}18`,
-                        color: severityColors[row.misroute_severity] || D.muted,
-                      }}>{row.misroute_severity}</span>
-                    )}
-                  </td>
-                  <td style={tdR}>{fmt(row.impressions_total)}</td>
-                </tr>
+                <TR key={row.id}>
+                  <TD className="[max-width:200px] overflow-hidden text-ellipsis whitespace-nowrap">
+                    {row.query_cluster}
+                  </TD>
+                  <TD className="u-nums">{row.intent_type}</TD>
+                  <TD className="u-nums">{row.expected_page_type}</TD>
+                  <TD className="[max-width:200px] overflow-hidden text-ellipsis whitespace-nowrap">
+                    {row.actual_winner_url}
+                  </TD>
+                  <TD className="u-nums">{row.misroute_type}</TD>
+                  <TD className="u-nums">
+                    {row.misroute_severity &&
+                      row.misroute_severity !== "none" && (
+                        <span
+                          style={{
+                            background: `${severityColors[row.misroute_severity] || "#71717A"}18`,
+                            color:
+                              severityColors[row.misroute_severity] ||
+                              "#71717A",
+                          }}
+                          className="[padding:2px_8px] rounded-sm text-ui-body"
+                        >
+                          {row.misroute_severity}
+                        </span>
+                      )}
+                  </TD>
+                  <TD className="text-right u-nums">
+                    {fmt(row.impressions_total)}
+                  </TD>
+                </TR>
               ))}
-            </tbody>
-          </table>
+            </TBody>
+          </Table>
         </div>
       ) : (
-        <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: "center" }}>
+        <div className="text-ink-secondary text-ui-body [padding:20px] text-center">
           No intent routes found. Run intent map builder to populate.
         </div>
       )}
-    </Card>
+    </UiCard>
   );
 }
 
@@ -7473,7 +7741,6 @@ function ActionsTab({ domain }) {
   const [actions, setActions] = useState([]);
   const [loading, setLoading] = useState(true);
   const canAdmin = isAdminUser();
-
   const loadData = () => {
     setLoading(true);
     Promise.all([
@@ -7493,224 +7760,416 @@ function ActionsTab({ domain }) {
   };
 
   useEffect(loadData, [domain, subTab]);
-
   function handleAction(id, verb) {
     adminPost(`/admin/seo/actions/${id}/${verb}`, {})
       .then(loadData)
       .catch(() => {});
   }
-
   const subTabs = [
-    { key: "queue", label: "Queue" },
-    { key: "drafts", label: "AI Drafts" },
-    { key: "progress", label: "In Progress" },
-    { key: "experiments", label: "Experiments" },
+    {
+      key: "queue",
+      label: "Queue",
+    },
+    {
+      key: "drafts",
+      label: "AI Drafts",
+    },
+    {
+      key: "progress",
+      label: "In Progress",
+    },
+    {
+      key: "experiments",
+      label: "Experiments",
+    },
   ];
-
-  const tierColors = { auto: D.green, editor: D.muted, seo: D.amber, owner: D.red };
-
+  const tierColors = {
+    auto: "#15803D",
+    editor: "#71717A",
+    seo: "#A16207",
+    owner: "#991B1B",
+  };
   return (
-    <div style={{ padding: 24, display: "flex", flexDirection: "column", gap: 20 }}>
-      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }} className="seo-sub-tabs">
+    <div className="[padding:24px] flex flex-col [gap:20px]">
+      <div className="seo-sub-tabs flex max-sm:flex-nowrap max-sm:overflow-x-auto [gap:8px] items-center flex-wrap">
         {subTabs.map((st) => (
-          <button
+          <Button
             key={st.key}
             onClick={() => setSubTab(st.key)}
-            style={{
-              padding: "6px 14px", borderRadius: 8, fontSize: 13, fontWeight: 500, cursor: "pointer",
-              background: subTab === st.key ? D.heading : "transparent",
-              color: subTab === st.key ? D.white : D.muted,
-              border: `1px solid ${subTab === st.key ? D.heading : D.border}`,
-            }}
-          >{st.label}</button>
+            variant={subTab === st.key ? "primary" : "secondary"}
+          >
+            {st.label}
+          </Button>
         ))}
         {canAdmin && subTab === "queue" && (
-          <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-            <button onClick={() => adminPost("/admin/seo/actions/generate", { domain }).then(loadData)} style={{ padding: "6px 14px", borderRadius: 8, fontSize: 12, background: D.heading, color: D.white, border: "none", cursor: "pointer" }}>Generate Actions</button>
-            <button onClick={() => adminPost("/admin/seo/actions/auto-approve", { domain }).then(loadData)} style={{ padding: "6px 14px", borderRadius: 8, fontSize: 12, background: "transparent", color: D.text, border: `1px solid ${D.border}`, cursor: "pointer" }}>Auto-Approve</button>
+          <div className="[margin-left:auto] flex [gap:8px]">
+            <Button
+              onClick={() =>
+                adminPost("/admin/seo/actions/generate", { domain }).then(loadData)
+              }
+            >
+              Generate Actions
+            </Button>
+            <Button
+              onClick={() =>
+                adminPost("/admin/seo/actions/auto-approve", { domain }).then(loadData)
+              }
+              variant="secondary"
+            >
+              Auto-Approve
+            </Button>
           </div>
         )}
         {canAdmin && subTab === "drafts" && (
-          <button onClick={() => adminPost("/admin/seo/actions/generate-drafts", {}).then(loadData)} style={{ marginLeft: "auto", padding: "6px 14px", borderRadius: 8, fontSize: 12, background: D.heading, color: D.white, border: "none", cursor: "pointer" }}>Generate Drafts</button>
+          <Button
+            onClick={() =>
+              adminPost("/admin/seo/actions/generate-drafts", {}).then(loadData)
+            }
+            className="[margin-left:auto]"
+          >
+            Generate Drafts
+          </Button>
         )}
       </div>
 
       {summary && (
-        <div className="seo-kpi-grid-4" style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16 }}>
-          <KpiCard label="Pending Auto" value={fmt(summary.pending_by_tier?.auto || 0)} color={D.green} />
-          <KpiCard label="Pending Editor" value={fmt(summary.pending_by_tier?.editor || 0)} />
-          <KpiCard label="Pending SEO" value={fmt(summary.pending_by_tier?.seo || 0)} color={D.amber} />
-          <KpiCard label="Done" value={fmt(summary.done)} color={D.green} />
+        <div className="seo-kpi-grid-4 grid max-sm:!grid-cols-2 [grid-template-columns:repeat(4,_1fr)] [gap:16px]">
+          <KpiCard
+            label="Pending Auto"
+            value={fmt(summary.pending_by_tier?.auto || 0)}
+            color={"#15803D"}
+          />
+          <KpiCard
+            label="Pending Editor"
+            value={fmt(summary.pending_by_tier?.editor || 0)}
+          />
+          <KpiCard
+            label="Pending SEO"
+            value={fmt(summary.pending_by_tier?.seo || 0)}
+            color={"#A16207"}
+          />
+          <KpiCard label="Done" value={fmt(summary.done)} color={"#15803D"} />
         </div>
       )}
 
-      {loading ? <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>Loading...</div> : (
-        <Card>
+      {loading ? (
+        <div className="text-ink-secondary [padding:40px] text-center">
+          Loading...
+        </div>
+      ) : (
+        <UiCard className="p-6">
           {subTab === "queue" && (
             <>
-              <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 16 }}>Pending Actions — by priority</div>
+              <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:16px]">
+                Pending Actions — by priority
+              </div>
               {actions.length > 0 ? (
-                <div style={{ overflowX: "auto" }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                    <thead><tr>
-                      <th style={thStyle}>URL</th>
-                      <th style={thStyle}>Issue</th>
-                      <th style={thStyle}>Action</th>
-                      <th style={thR}>Priority</th>
-                      <th style={thStyle}>Tier</th>
-                      {canAdmin && <th style={thStyle}>Actions</th>}
-                    </tr></thead>
-                    <tbody>
+                <div className="overflow-x-auto">
+                  <Table className="[width:100%] [border-collapse:collapse]">
+                    <THead>
+                      <TR>
+                        <TH>URL</TH>
+                        <TH>Issue</TH>
+                        <TH>Action</TH>
+                        <TH className="text-right u-nums">Priority</TH>
+                        <TH>Tier</TH>
+                        {canAdmin && <TH>Actions</TH>}
+                      </TR>
+                    </THead>
+                    <TBody>
                       {actions.map((a) => (
-                        <tr key={a.id}>
-                          <td style={{ ...tdStyle, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.url}</td>
-                          <td style={tdStyle}>{a.issue_type}</td>
-                          <td style={tdStyle}>{a.action_type.replace(/_/g, " ")}</td>
-                          <td style={tdR}>{a.priority_score}</td>
-                          <td style={tdStyle}>
-                            <span style={{ padding: "2px 8px", borderRadius: 4, fontSize: 11, background: `${tierColors[a.approval_tier] || D.muted}18`, color: tierColors[a.approval_tier] || D.muted }}>{a.approval_tier}</span>
-                          </td>
+                        <TR key={a.id}>
+                          <TD className="[max-width:240px] overflow-hidden text-ellipsis whitespace-nowrap">
+                            {a.url}
+                          </TD>
+                          <TD className="u-nums">{a.issue_type}</TD>
+                          <TD className="u-nums">
+                            {a.action_type.replace(/_/g, " ")}
+                          </TD>
+                          <TD className="text-right u-nums">
+                            {a.priority_score}
+                          </TD>
+                          <TD className="u-nums">
+                            <span
+                              style={{
+                                background: `${tierColors[a.approval_tier] || "#71717A"}18`,
+                                color: tierColors[a.approval_tier] || "#71717A",
+                              }}
+                              className="[padding:2px_8px] rounded-sm text-ui-body"
+                            >
+                              {a.approval_tier}
+                            </span>
+                          </TD>
                           {canAdmin && (
-                            <td style={tdStyle}>
-                              <div style={{ display: "flex", gap: 4 }}>
-                                <button onClick={() => handleAction(a.id, "approve")} style={{ padding: "2px 8px", borderRadius: 4, fontSize: 11, background: `${D.green}18`, color: D.green, border: "none", cursor: "pointer" }}>Approve</button>
-                                <button onClick={() => handleAction(a.id, "reject")} style={{ padding: "2px 8px", borderRadius: 4, fontSize: 11, background: `${D.red}18`, color: D.red, border: "none", cursor: "pointer" }}>Reject</button>
+                            <TD className="u-nums">
+                              <div className="flex [gap:4px]">
+                                <Button
+                                  onClick={() => handleAction(a.id, "approve")}
+                                  className="[background:#15803D18]"
+                                >
+                                  Approve
+                                </Button>
+                                <Button
+                                  onClick={() => handleAction(a.id, "reject")}
+                                  className="text-alert-fg"
+                                  variant="secondary"
+                                >
+                                  Reject
+                                </Button>
                               </div>
-                            </td>
+                            </TD>
                           )}
-                        </tr>
+                        </TR>
                       ))}
-                    </tbody>
-                  </table>
+                    </TBody>
+                  </Table>
                 </div>
               ) : (
-                <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: "center" }}>No pending actions. Run the pipeline to generate.</div>
+                <div className="text-ink-secondary text-ui-body [padding:20px] text-center">
+                  No pending actions. Run the pipeline to generate.
+                </div>
               )}
             </>
           )}
 
           {subTab === "drafts" && (
             <>
-              <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 16 }}>AI Title/Meta Drafts</div>
+              <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:16px]">
+                AI Title/Meta Drafts
+              </div>
               {actions.filter((a) => a.ai_draft).length > 0 ? (
-                <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-                  {actions.filter((a) => a.ai_draft).map((a) => {
-                    let draft = {};
-                    try { draft = typeof a.ai_draft === "string" ? JSON.parse(a.ai_draft) : (a.ai_draft || {}); } catch {}
-                    let detail = {};
-                    try { detail = typeof a.detail === "string" ? JSON.parse(a.detail) : (a.detail || {}); } catch {}
-                    return (
-                      <div key={a.id} style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: 16 }}>
-                        <div style={{ fontSize: 13, color: D.muted, marginBottom: 8 }}>{a.url}</div>
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-                          <div>
-                            <div style={{ fontSize: 11, color: D.muted, fontWeight: 500, textTransform: "uppercase", marginBottom: 4 }}>Current</div>
-                            <div style={{ fontSize: 13, color: D.text }}>{detail.current_title || "—"}</div>
-                            <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>{detail.current_meta || "—"}</div>
+                <div className="flex flex-col [gap:16px]">
+                  {actions
+                    .filter((a) => a.ai_draft)
+                    .map((a) => {
+                      let draft = {};
+                      try {
+                        draft =
+                          typeof a.ai_draft === "string"
+                            ? JSON.parse(a.ai_draft)
+                            : a.ai_draft || {};
+                      } catch {}
+                      let detail = {};
+                      try {
+                        detail =
+                          typeof a.detail === "string"
+                            ? JSON.parse(a.detail)
+                            : a.detail || {};
+                      } catch {}
+                      return (
+                        <div
+                          key={a.id}
+                          className="rounded-md [padding:16px] border-hairline border-zinc-200"
+                        >
+                          <div className="text-ui-body text-ink-secondary [margin-bottom:8px]">
+                            {a.url}
                           </div>
-                          <div>
-                            <div style={{ fontSize: 11, color: D.green, fontWeight: 500, textTransform: "uppercase", marginBottom: 4 }}>Proposed</div>
-                            <div style={{ fontSize: 13, color: D.text, fontWeight: 500 }}>{draft.title || "—"}</div>
-                            <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>{draft.meta_description || "—"}</div>
+                          <div className="grid [grid-template-columns:1fr_1fr] [gap:16px]">
+                            <div>
+                              <div className="text-ui-body text-ink-secondary font-medium [margin-bottom:4px]">
+                                Current
+                              </div>
+                              <div className="text-ui-body text-zinc-900">
+                                {detail.current_title || "—"}
+                              </div>
+                              <div className="text-ui-body text-ink-secondary [margin-top:4px]">
+                                {detail.current_meta || "—"}
+                              </div>
+                            </div>
+                            <div>
+                              <div className="text-ui-body text-zinc-900 font-medium [margin-bottom:4px]">
+                                Proposed
+                              </div>
+                              <div className="text-ui-body text-zinc-900 font-medium">
+                                {draft.title || "—"}
+                              </div>
+                              <div className="text-ui-body text-ink-secondary [margin-top:4px]">
+                                {draft.meta_description || "—"}
+                              </div>
+                            </div>
                           </div>
+                          {draft.reasoning && (
+                            <div className="text-ui-body text-ink-secondary [margin-top:8px] [font-style:italic]">
+                              {draft.reasoning}
+                            </div>
+                          )}
+                          {canAdmin && (
+                            <div className="flex [gap:8px] [margin-top:12px]">
+                              <Button
+                                onClick={() => handleAction(a.id, "approve")}
+                              >
+                                Approve
+                              </Button>
+                              <Button
+                                onClick={() => handleAction(a.id, "reject")}
+                                className="text-alert-fg"
+                                variant="secondary"
+                              >
+                                Reject
+                              </Button>
+                            </div>
+                          )}
                         </div>
-                        {draft.reasoning && <div style={{ fontSize: 12, color: D.muted, marginTop: 8, fontStyle: "italic" }}>{draft.reasoning}</div>}
-                        {canAdmin && (
-                          <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-                            <button onClick={() => handleAction(a.id, "approve")} style={{ padding: "4px 12px", borderRadius: 6, fontSize: 12, background: D.green, color: D.white, border: "none", cursor: "pointer" }}>Approve</button>
-                            <button onClick={() => handleAction(a.id, "reject")} style={{ padding: "4px 12px", borderRadius: 6, fontSize: 12, background: "transparent", color: D.red, border: `1px solid ${D.red}`, cursor: "pointer" }}>Reject</button>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
+                      );
+                    })}
                 </div>
               ) : (
-                <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: "center" }}>No AI drafts yet. Click "Generate Drafts" to create title/meta suggestions.</div>
+                <div className="text-ink-secondary text-ui-body [padding:20px] text-center">
+                  No AI drafts yet. Click "Generate Drafts" to create title/meta
+                  suggestions.
+                </div>
               )}
             </>
           )}
 
           {subTab === "progress" && (
             <>
-              <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 16 }}>Execution Status</div>
+              <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:16px]">
+                Execution Status
+              </div>
               {actions.length > 0 ? (
-                <div style={{ overflowX: "auto" }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                    <thead><tr>
-                      <th style={thStyle}>URL</th>
-                      <th style={thStyle}>Action</th>
-                      <th style={thStyle}>Status</th>
-                      <th style={thStyle}>Executor</th>
-                      <th style={thStyle}>Completed</th>
-                      <th style={thStyle}>Notes</th>
-                    </tr></thead>
-                    <tbody>
+                <div className="overflow-x-auto">
+                  <Table className="[width:100%] [border-collapse:collapse]">
+                    <THead>
+                      <TR>
+                        <TH>URL</TH>
+                        <TH>Action</TH>
+                        <TH>Status</TH>
+                        <TH>Executor</TH>
+                        <TH>Completed</TH>
+                        <TH>Notes</TH>
+                      </TR>
+                    </THead>
+                    <TBody>
                       {actions.map((a) => (
-                        <tr key={a.id}>
-                          <td style={{ ...tdStyle, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.url}</td>
-                          <td style={tdStyle}>{a.action_type.replace(/_/g, " ")}</td>
-                          <td style={tdStyle}>
-                            <span style={{ padding: "2px 8px", borderRadius: 4, fontSize: 11, background: a.execution_status === "done" ? `${D.green}18` : `${D.amber}18`, color: a.execution_status === "done" ? D.green : D.amber }}>{a.execution_status}</span>
-                          </td>
-                          <td style={tdStyle}>{a.executor || "—"}</td>
-                          <td style={tdStyle}>{a.completed_at ? new Date(a.completed_at).toLocaleDateString() : "—"}</td>
-                          <td style={{ ...tdStyle, fontSize: 12, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.execution_notes || "—"}</td>
-                        </tr>
+                        <TR key={a.id}>
+                          <TD className="[max-width:240px] overflow-hidden text-ellipsis whitespace-nowrap">
+                            {a.url}
+                          </TD>
+                          <TD className="u-nums">
+                            {a.action_type.replace(/_/g, " ")}
+                          </TD>
+                          <TD className="u-nums">
+                            <span
+                              style={{
+                                background:
+                                  a.execution_status === "done"
+                                    ? "#15803D18"
+                                    : "#A1620718",
+                                color:
+                                  a.execution_status === "done"
+                                    ? "#15803D"
+                                    : "#A16207",
+                              }}
+                              className="[padding:2px_8px] rounded-sm text-ui-body"
+                            >
+                              {a.execution_status}
+                            </span>
+                          </TD>
+                          <TD className="u-nums">{a.executor || "—"}</TD>
+                          <TD className="u-nums">
+                            {a.completed_at
+                              ? new Date(a.completed_at).toLocaleDateString()
+                              : "—"}
+                          </TD>
+                          <TD className="text-ui-body [max-width:200px] overflow-hidden text-ellipsis whitespace-nowrap">
+                            {a.execution_notes || "—"}
+                          </TD>
+                        </TR>
                       ))}
-                    </tbody>
-                  </table>
+                    </TBody>
+                  </Table>
                 </div>
               ) : (
-                <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: "center" }}>No actions in progress.</div>
+                <div className="text-ink-secondary text-ui-body [padding:20px] text-center">
+                  No actions in progress.
+                </div>
               )}
             </>
           )}
 
           {subTab === "experiments" && (
             <>
-              <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 16 }}>SEO Experiments</div>
+              <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:16px]">
+                SEO Experiments
+              </div>
               {actions.length > 0 ? (
-                <div style={{ overflowX: "auto" }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                    <thead><tr>
-                      <th style={thStyle}>URL</th>
-                      <th style={thStyle}>Action</th>
-                      <th style={thStyle}>Published</th>
-                      <th style={thR}>Pre Clicks</th>
-                      <th style={thR}>Post Clicks</th>
-                      <th style={thR}>Pre Pos</th>
-                      <th style={thR}>Post Pos</th>
-                      <th style={thStyle}>Status</th>
-                    </tr></thead>
-                    <tbody>
+                <div className="overflow-x-auto">
+                  <Table className="[width:100%] [border-collapse:collapse]">
+                    <THead>
+                      <TR>
+                        <TH>URL</TH>
+                        <TH>Action</TH>
+                        <TH>Published</TH>
+                        <TH className="text-right u-nums">Pre Clicks</TH>
+                        <TH className="text-right u-nums">Post Clicks</TH>
+                        <TH className="text-right u-nums">Pre Pos</TH>
+                        <TH className="text-right u-nums">Post Pos</TH>
+                        <TH>Status</TH>
+                      </TR>
+                    </THead>
+                    <TBody>
                       {actions.map((e) => (
-                        <tr key={e.id}>
-                          <td style={{ ...tdStyle, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.url}</td>
-                          <td style={tdStyle}>{e.action_type.replace(/_/g, " ")}</td>
-                          <td style={tdStyle}>{e.publish_date || "—"}</td>
-                          <td style={tdR}>{fmt(e.pre_28d_clicks)}</td>
-                          <td style={tdR}>{e.post_28d_clicks != null ? fmt(e.post_28d_clicks) : "—"}</td>
-                          <td style={tdR}>{e.pre_28d_position ? parseFloat(e.pre_28d_position).toFixed(1) : "—"}</td>
-                          <td style={tdR}>{e.post_28d_position ? parseFloat(e.post_28d_position).toFixed(1) : "—"}</td>
-                          <td style={tdStyle}>
-                            <span style={{
-                              padding: "2px 8px", borderRadius: 4, fontSize: 11,
-                              background: e.status === "accepted" ? `${D.green}18` : e.status === "rejected" ? `${D.red}18` : `${D.amber}18`,
-                              color: e.status === "accepted" ? D.green : e.status === "rejected" ? D.red : D.amber,
-                            }}>{e.status}</span>
-                          </td>
-                        </tr>
+                        <TR key={e.id}>
+                          <TD className="[max-width:240px] overflow-hidden text-ellipsis whitespace-nowrap">
+                            {e.url}
+                          </TD>
+                          <TD className="u-nums">
+                            {e.action_type.replace(/_/g, " ")}
+                          </TD>
+                          <TD className="u-nums">{e.publish_date || "—"}</TD>
+                          <TD className="text-right u-nums">
+                            {fmt(e.pre_28d_clicks)}
+                          </TD>
+                          <TD className="text-right u-nums">
+                            {e.post_28d_clicks != null
+                              ? fmt(e.post_28d_clicks)
+                              : "—"}
+                          </TD>
+                          <TD className="text-right u-nums">
+                            {e.pre_28d_position
+                              ? parseFloat(e.pre_28d_position).toFixed(1)
+                              : "—"}
+                          </TD>
+                          <TD className="text-right u-nums">
+                            {e.post_28d_position
+                              ? parseFloat(e.post_28d_position).toFixed(1)
+                              : "—"}
+                          </TD>
+                          <TD className="u-nums">
+                            <span
+                              style={{
+                                background:
+                                  e.status === "accepted"
+                                    ? "#15803D18"
+                                    : e.status === "rejected"
+                                      ? "#991B1B18"
+                                      : "#A1620718",
+                                color:
+                                  e.status === "accepted"
+                                    ? "#15803D"
+                                    : e.status === "rejected"
+                                      ? "#991B1B"
+                                      : "#A16207",
+                              }}
+                              className="[padding:2px_8px] rounded-sm text-ui-body"
+                            >
+                              {e.status}
+                            </span>
+                          </TD>
+                        </TR>
                       ))}
-                    </tbody>
-                  </table>
+                    </TBody>
+                  </Table>
                 </div>
               ) : (
-                <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: "center" }}>No experiments yet. Complete actions to create experiments.</div>
+                <div className="text-ink-secondary text-ui-body [padding:20px] text-center">
+                  No experiments yet. Complete actions to create experiments.
+                </div>
               )}
             </>
           )}
-        </Card>
+        </UiCard>
       )}
     </div>
   );
@@ -7726,7 +8185,6 @@ function IndexationTab({ domain }) {
   const [inspectData, setInspectData] = useState(null);
   const [inspectLoading, setInspectLoading] = useState(false);
   const [loading, setLoading] = useState(true);
-
   useEffect(() => {
     if (subTab === "gap") {
       setLoading(true);
@@ -7748,220 +8206,300 @@ function IndexationTab({ domain }) {
         .finally(() => setLoading(false));
     }
   }, [subTab, domain]);
-
   function handleInspect() {
     if (!inspectUrl.trim()) return;
     setInspectLoading(true);
     setInspectData(null);
     adminFetch(`/admin/seo/url-intelligence/inspect?url=${encodeURIComponent(inspectUrl.trim())}`)
       .then(setInspectData)
-      .catch(() => setInspectData({ _error: true }))
+      .catch(() =>
+        setInspectData({
+          _error: true,
+        }),
+      )
       .finally(() => setInspectLoading(false));
   }
-
   const subTabs = [
-    { key: "gap", label: "Indexation Gap" },
-    { key: "conflicts", label: "Canonical Conflicts" },
-    { key: "crawled", label: "Not Indexed" },
-    { key: "sitemap", label: "Sitemap Issues" },
-    { key: "inspector", label: "URL Inspector" },
+    {
+      key: "gap",
+      label: "Indexation Gap",
+    },
+    {
+      key: "conflicts",
+      label: "Canonical Conflicts",
+    },
+    {
+      key: "crawled",
+      label: "Not Indexed",
+    },
+    {
+      key: "sitemap",
+      label: "Sitemap Issues",
+    },
+    {
+      key: "inspector",
+      label: "URL Inspector",
+    },
   ];
-
   return (
-    <div style={{ padding: 24, display: "flex", flexDirection: "column", gap: 20 }}>
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }} className="seo-sub-tabs">
+    <div className="[padding:24px] flex flex-col [gap:20px]">
+      <div className="seo-sub-tabs flex max-sm:flex-nowrap max-sm:overflow-x-auto [gap:8px] flex-wrap">
         {subTabs.map((st) => (
-          <button
+          <Button
             key={st.key}
             onClick={() => setSubTab(st.key)}
-            style={{
-              padding: "6px 14px", borderRadius: 8, fontSize: 13, fontWeight: 500, cursor: "pointer",
-              background: subTab === st.key ? D.heading : "transparent",
-              color: subTab === st.key ? D.white : D.muted,
-              border: `1px solid ${subTab === st.key ? D.heading : D.border}`,
-            }}
-          >{st.label}</button>
+            variant={subTab === st.key ? "primary" : "secondary"}
+          >
+            {st.label}
+          </Button>
         ))}
       </div>
 
-      {subTab === "gap" && (
-        loading ? <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>Loading...</div> : (
+      {subTab === "gap" &&
+        (loading ? (
+          <div className="text-ink-secondary [padding:40px] text-center">
+            Loading...
+          </div>
+        ) : (
           gapData && (
-            <Card>
-              <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 20 }}>
+            <UiCard className="p-6">
+              <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:20px]">
                 Indexation Gap — {gapData.domain}
               </div>
-              <div className="seo-kpi-grid-4" style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16, marginBottom: 24 }}>
+              <div className="seo-kpi-grid-4 grid max-sm:!grid-cols-2 [grid-template-columns:repeat(4,_1fr)] [gap:16px] [margin-bottom:24px]">
                 <KpiCard label="Submitted" value={fmt(gapData.submitted)} />
-                <KpiCard label="Indexed" value={fmt(gapData.indexed)} color={D.green} />
-                <KpiCard label="Gap" value={fmt(gapData.gap)} color={gapData.gap > 0 ? D.red : D.green} />
-                <KpiCard label="Gap %" value={`${gapData.gap_pct}%`} color={gapData.gap_pct > 20 ? D.red : gapData.gap_pct > 10 ? D.amber : D.green} />
+                <KpiCard
+                  label="Indexed"
+                  value={fmt(gapData.indexed)}
+                  color={"#15803D"}
+                />
+                <KpiCard
+                  label="Gap"
+                  value={fmt(gapData.gap)}
+                  color={gapData.gap > 0 ? "#991B1B" : "#15803D"}
+                />
+                <KpiCard
+                  label="Gap %"
+                  value={`${gapData.gap_pct}%`}
+                  color={
+                    gapData.gap_pct > 20
+                      ? "#991B1B"
+                      : gapData.gap_pct > 10
+                        ? "#A16207"
+                        : "#15803D"
+                  }
+                />
               </div>
 
               {gapData.gap_pct > 20 && (
-                <div style={{ padding: 12, borderRadius: 8, background: `${D.red}0A`, border: `1px solid ${D.red}30`, marginBottom: 16 }}>
-                  <span style={{ fontSize: 12, color: D.red, fontWeight: 500 }}>
-                    Indexation gap above 20% — indicates quality, duplication, or crawl-budget issues.
+                <div className="[padding:12px] rounded-md [margin-bottom:16px] bg-alert-bg border-hairline border-zinc-200">
+                  <span className="text-ui-body text-alert-fg font-medium">
+                    Indexation gap above 20% — indicates quality, duplication,
+                    or crawl-budget issues.
                   </span>
                 </div>
               )}
 
               {gapData.by_coverage_state?.length > 0 && (
                 <>
-                  <div style={{ fontSize: 13, fontWeight: 500, color: D.heading, marginBottom: 12 }}>By Coverage State</div>
-                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                    <thead><tr>
-                      <th style={thStyle}>Coverage State</th>
-                      <th style={thR}>Count</th>
-                    </tr></thead>
-                    <tbody>
+                  <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
+                    By Coverage State
+                  </div>
+                  <Table className="[width:100%] [border-collapse:collapse]">
+                    <THead>
+                      <TR>
+                        <TH>Coverage State</TH>
+                        <TH className="text-right u-nums">Count</TH>
+                      </TR>
+                    </THead>
+                    <TBody>
                       {gapData.by_coverage_state.map((row) => (
-                        <tr key={row.coverage_state}>
-                          <td style={tdStyle}>{row.coverage_state}</td>
-                          <td style={tdR}>{row.count}</td>
-                        </tr>
+                        <TR key={row.coverage_state}>
+                          <TD className="u-nums">{row.coverage_state}</TD>
+                          <TD className="text-right u-nums">{row.count}</TD>
+                        </TR>
                       ))}
-                    </tbody>
-                  </table>
+                    </TBody>
+                  </Table>
                 </>
               )}
-            </Card>
+            </UiCard>
           )
-        )
-      )}
+        ))}
 
-      {subTab === "conflicts" && (
-        loading ? <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>Loading...</div> : (
-          <Card>
-            <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 16 }}>
+      {subTab === "conflicts" &&
+        (loading ? (
+          <div className="text-ink-secondary [padding:40px] text-center">
+            Loading...
+          </div>
+        ) : (
+          <UiCard className="p-6">
+            <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:16px]">
               Canonical Conflicts — Hub / Spoke
             </div>
             {conflictsData?.length > 0 ? (
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                  <thead><tr>
-                    <th style={thStyle}>Spoke URL</th>
-                    <th style={thStyle}>Hub URL</th>
-                    <th style={thR}>Body Sim %</th>
-                    <th style={thStyle}>Google Canonical</th>
-                    <th style={thStyle}>Status</th>
-                    <th style={thStyle}>Fix</th>
-                  </tr></thead>
-                  <tbody>
+              <div className="overflow-x-auto">
+                <Table className="[width:100%] [border-collapse:collapse]">
+                  <THead>
+                    <TR>
+                      <TH>Spoke URL</TH>
+                      <TH>Hub URL</TH>
+                      <TH className="text-right u-nums">Body Sim %</TH>
+                      <TH>Google Canonical</TH>
+                      <TH>Status</TH>
+                      <TH>Fix</TH>
+                    </TR>
+                  </THead>
+                  <TBody>
                     {conflictsData.map((row) => (
-                      <tr key={row.id}>
-                        <td style={{ ...tdStyle, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.spoke_url}</td>
-                        <td style={{ ...tdStyle, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.hub_url}</td>
-                        <td style={tdR}>{row.body_similarity_pct != null ? `${row.body_similarity_pct}%` : "—"}</td>
-                        <td style={{ ...tdStyle, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.google_selected_canonical || "—"}</td>
-                        <td style={tdStyle}>
-                          <span style={{
-                            padding: "2px 8px", borderRadius: 4, fontSize: 11,
-                            background: row.status === "open" ? `${D.amber}18` : `${D.green}18`,
-                            color: row.status === "open" ? D.amber : D.green,
-                          }}>{row.status}</span>
-                        </td>
-                        <td style={{ ...tdStyle, fontSize: 12, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.recommended_fix}</td>
-                      </tr>
+                      <TR key={row.id}>
+                        <TD className="[max-width:200px] overflow-hidden text-ellipsis whitespace-nowrap">
+                          {row.spoke_url}
+                        </TD>
+                        <TD className="[max-width:200px] overflow-hidden text-ellipsis whitespace-nowrap">
+                          {row.hub_url}
+                        </TD>
+                        <TD className="text-right u-nums">
+                          {row.body_similarity_pct != null
+                            ? `${row.body_similarity_pct}%`
+                            : "—"}
+                        </TD>
+                        <TD className="[max-width:200px] overflow-hidden text-ellipsis whitespace-nowrap">
+                          {row.google_selected_canonical || "—"}
+                        </TD>
+                        <TD className="u-nums">
+                          <span
+                            style={{
+                              background:
+                                row.status === "open"
+                                  ? "#A1620718"
+                                  : "#15803D18",
+                              color:
+                                row.status === "open" ? "#A16207" : "#15803D",
+                            }}
+                            className="[padding:2px_8px] rounded-sm text-ui-body"
+                          >
+                            {row.status}
+                          </span>
+                        </TD>
+                        <TD className="text-ui-body [max-width:240px] overflow-hidden text-ellipsis whitespace-nowrap">
+                          {row.recommended_fix}
+                        </TD>
+                      </TR>
                     ))}
-                  </tbody>
-                </table>
+                  </TBody>
+                </Table>
               </div>
             ) : (
-              <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: "center" }}>
-                No canonical conflicts detected. Run a refresh + conflict detection to populate.
+              <div className="text-ink-secondary text-ui-body [padding:20px] text-center">
+                No canonical conflicts detected. Run a refresh + conflict
+                detection to populate.
               </div>
             )}
-          </Card>
-        )
-      )}
+          </UiCard>
+        ))}
 
-      {subTab === "crawled" && (
-        loading ? <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>Loading...</div> : (
-          <Card>
-            <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 16 }}>
+      {subTab === "crawled" &&
+        (loading ? (
+          <div className="text-ink-secondary [padding:40px] text-center">
+            Loading...
+          </div>
+        ) : (
+          <UiCard className="p-6">
+            <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:16px]">
               Not Indexed — Priority URLs
             </div>
             {crawledNotIndexed?.urls?.length > 0 ? (
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                  <thead><tr>
-                    <th style={thStyle}>URL</th>
-                    <th style={thStyle}>Coverage State</th>
-                    <th style={thR}>Priority</th>
-                    <th style={thStyle}>In Sitemap</th>
-                    <th style={thStyle}>Action</th>
-                  </tr></thead>
-                  <tbody>
+              <div className="overflow-x-auto">
+                <Table className="[width:100%] [border-collapse:collapse]">
+                  <THead>
+                    <TR>
+                      <TH>URL</TH>
+                      <TH>Coverage State</TH>
+                      <TH className="text-right u-nums">Priority</TH>
+                      <TH>In Sitemap</TH>
+                      <TH>Action</TH>
+                    </TR>
+                  </THead>
+                  <TBody>
                     {crawledNotIndexed.urls.map((row) => (
-                      <tr key={row.id}>
-                        <td style={{ ...tdStyle, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.url}</td>
-                        <td style={tdStyle}>{row.coverage_state || "—"}</td>
-                        <td style={tdR}>{row.priority_score}</td>
-                        <td style={tdStyle}>{row.in_sitemap ? "Yes" : "No"}</td>
-                        <td style={{ ...tdStyle, fontSize: 12, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.recommended_action}</td>
-                      </tr>
+                      <TR key={row.id}>
+                        <TD className="[max-width:280px] overflow-hidden text-ellipsis whitespace-nowrap">
+                          {row.url}
+                        </TD>
+                        <TD className="u-nums">{row.coverage_state || "—"}</TD>
+                        <TD className="text-right u-nums">
+                          {row.priority_score}
+                        </TD>
+                        <TD className="u-nums">
+                          {row.in_sitemap ? "Yes" : "No"}
+                        </TD>
+                        <TD className="text-ui-body [max-width:240px] overflow-hidden text-ellipsis whitespace-nowrap">
+                          {row.recommended_action}
+                        </TD>
+                      </TR>
                     ))}
-                  </tbody>
-                </table>
+                  </TBody>
+                </Table>
               </div>
             ) : (
-              <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: "center" }}>
+              <div className="text-ink-secondary text-ui-body [padding:20px] text-center">
                 No indexation problems found — or data not yet populated.
               </div>
             )}
-          </Card>
-        )
-      )}
+          </UiCard>
+        ))}
 
-      {subTab === "sitemap" && (
-        <SitemapIssuesSubTab domain={domain} />
-      )}
+      {subTab === "sitemap" && <SitemapIssuesSubTab domain={domain} />}
 
       {subTab === "inspector" && (
-        <Card>
-          <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 16 }}>URL Inspector</div>
-          <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
-            <input
+        <UiCard className="p-6">
+          <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:16px]">
+            URL Inspector
+          </div>
+          <div className="flex [gap:8px] [margin-bottom:20px]">
+            <Input
               type="text"
               value={inspectUrl}
               onChange={(e) => setInspectUrl(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && handleInspect()}
               placeholder="Enter URL to inspect..."
-              style={{
-                flex: 1, padding: "8px 12px", borderRadius: 8, fontSize: 13,
-                border: `1px solid ${D.inputBorder}`, background: D.card, color: D.text,
-              }}
+              className="[flex:1]"
             />
-            <button
-              onClick={handleInspect}
-              disabled={inspectLoading}
-              style={{
-                padding: "8px 20px", borderRadius: 8, fontSize: 13, fontWeight: 500,
-                background: D.heading, color: D.white, border: "none", cursor: "pointer",
-                opacity: inspectLoading ? 0.6 : 1,
-              }}
-            >{inspectLoading ? "Inspecting..." : "Inspect"}</button>
+            <Button onClick={handleInspect} disabled={inspectLoading}>
+              {inspectLoading ? "Inspecting..." : "Inspect"}
+            </Button>
           </div>
 
           {inspectData && !inspectData._error && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            <div className="flex flex-col [gap:16px]">
               {/* Status banner */}
-              <div style={{
-                padding: 16, borderRadius: 8,
-                background: inspectData.primary_status === "healthy" ? `${D.green}0A` : `${D.amber}0A`,
-                border: `1px solid ${inspectData.primary_status === "healthy" ? `${D.green}30` : `${D.amber}30`}`,
-              }}>
-                <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>{inspectData.url}</div>
-                <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>
-                  Status: <strong>{inspectData.primary_status}</strong> · Diagnosis: <strong>{inspectData.primary_diagnosis}</strong> · Priority: <strong>{inspectData.priority_score}</strong>
+              <div
+                style={{
+                  background:
+                    inspectData.primary_status === "healthy"
+                      ? "#15803D0A"
+                      : "#A162070A",
+                  border: `1px solid ${inspectData.primary_status === "healthy" ? "#15803D30" : "#A1620730"}`,
+                }}
+                className="[padding:16px] rounded-md"
+              >
+                <div className="text-ui-body font-medium text-zinc-900">
+                  {inspectData.url}
+                </div>
+                <div className="text-ui-body text-ink-secondary [margin-top:4px]">
+                  Status: <strong>{inspectData.primary_status}</strong> ·
+                  Diagnosis: <strong>{inspectData.primary_diagnosis}</strong> ·
+                  Priority: <strong>{inspectData.priority_score}</strong>
                 </div>
               </div>
 
               {/* Detail sections */}
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }} className="seo-audit-expanded-grid">
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  <div style={{ fontSize: 12, fontWeight: 500, color: D.heading, textTransform: "uppercase", letterSpacing: "0.5px" }}>Identity</div>
+              <div className="seo-audit-expanded-grid grid max-sm:!grid-cols-1 [grid-template-columns:1fr_1fr] [gap:16px]">
+                <div className="flex flex-col [gap:8px]">
+                  <div className="text-ui-body font-medium text-zinc-900">
+                    Identity
+                  </div>
                   {[
                     ["Domain", inspectData.domain],
                     ["Type", inspectData.hub_or_spoke],
@@ -7969,57 +8507,87 @@ function IndexationTab({ domain }) {
                     ["City", inspectData.city || "—"],
                     ["Service", inspectData.service || "—"],
                   ].map(([k, v]) => (
-                    <div key={k} style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
-                      <span style={{ color: D.muted }}>{k}</span>
-                      <span style={{ color: D.text, fontFamily: MONO }}>{v}</span>
+                    <div key={k} className="flex justify-between text-ui-body">
+                      <span className="text-ink-secondary">{k}</span>
+                      <span className="text-zinc-900">{v}</span>
                     </div>
                   ))}
                 </div>
 
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  <div style={{ fontSize: 12, fontWeight: 500, color: D.heading, textTransform: "uppercase", letterSpacing: "0.5px" }}>Indexation</div>
+                <div className="flex flex-col [gap:8px]">
+                  <div className="text-ui-body font-medium text-zinc-900">
+                    Indexation
+                  </div>
                   {[
                     ["Coverage", inspectData.coverage_state || "—"],
                     ["Indexing State", inspectData.indexing_state || "—"],
                     ["In Sitemap", inspectData.in_sitemap ? "Yes" : "No"],
-                    ["Canonical Match", inspectData.canonical_match === true ? "Yes" : inspectData.canonical_match === false ? "No" : "—"],
+                    [
+                      "Canonical Match",
+                      inspectData.canonical_match === true
+                        ? "Yes"
+                        : inspectData.canonical_match === false
+                          ? "No"
+                          : "—",
+                    ],
                     ["Status Code", inspectData.status_code || "—"],
                   ].map(([k, v]) => (
-                    <div key={k} style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
-                      <span style={{ color: D.muted }}>{k}</span>
-                      <span style={{ color: D.text, fontFamily: MONO }}>{v}</span>
+                    <div key={k} className="flex justify-between text-ui-body">
+                      <span className="text-ink-secondary">{k}</span>
+                      <span className="text-zinc-900">{v}</span>
                     </div>
                   ))}
                 </div>
 
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  <div style={{ fontSize: 12, fontWeight: 500, color: D.heading, textTransform: "uppercase", letterSpacing: "0.5px" }}>Performance (28d)</div>
+                <div className="flex flex-col [gap:8px]">
+                  <div className="text-ui-body font-medium text-zinc-900">
+                    Performance (28d)
+                  </div>
                   {[
                     ["Clicks", fmt(inspectData.gsc_clicks_28d)],
                     ["Impressions", fmt(inspectData.gsc_impressions_28d)],
-                    ["CTR", inspectData.gsc_ctr_28d != null ? `${(parseFloat(inspectData.gsc_ctr_28d) * 100).toFixed(1)}%` : "—"],
-                    ["Avg Position", inspectData.gsc_avg_position_28d ? parseFloat(inspectData.gsc_avg_position_28d).toFixed(1) : "—"],
+                    [
+                      "CTR",
+                      inspectData.gsc_ctr_28d != null
+                        ? `${(parseFloat(inspectData.gsc_ctr_28d) * 100).toFixed(1)}%`
+                        : "—",
+                    ],
+                    [
+                      "Avg Position",
+                      inspectData.gsc_avg_position_28d
+                        ? parseFloat(inspectData.gsc_avg_position_28d).toFixed(
+                            1,
+                          )
+                        : "—",
+                    ],
                     ["Backlinks", fmt(inspectData.backlinks_count)],
                   ].map(([k, v]) => (
-                    <div key={k} style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
-                      <span style={{ color: D.muted }}>{k}</span>
-                      <span style={{ color: D.text, fontFamily: MONO }}>{v}</span>
+                    <div key={k} className="flex justify-between text-ui-body">
+                      <span className="text-ink-secondary">{k}</span>
+                      <span className="text-zinc-900">{v}</span>
                     </div>
                   ))}
                 </div>
 
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  <div style={{ fontSize: 12, fontWeight: 500, color: D.heading, textTransform: "uppercase", letterSpacing: "0.5px" }}>Scores</div>
+                <div className="flex flex-col [gap:8px]">
+                  <div className="text-ui-body font-medium text-zinc-900">
+                    Scores
+                  </div>
                   {[
                     ["Technical QA", inspectData.technical_qa_score ?? "—"],
                     ["Content QA", inspectData.content_qa_score ?? "—"],
                     ["Local QA", inspectData.local_qa_score ?? "—"],
-                    ["Word Count", inspectData.word_count ? fmt(inspectData.word_count) : "—"],
+                    [
+                      "Word Count",
+                      inspectData.word_count
+                        ? fmt(inspectData.word_count)
+                        : "—",
+                    ],
                     ["Approval", inspectData.approval_level || "—"],
                   ].map(([k, v]) => (
-                    <div key={k} style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
-                      <span style={{ color: D.muted }}>{k}</span>
-                      <span style={{ color: D.text, fontFamily: MONO }}>{v}</span>
+                    <div key={k} className="flex justify-between text-ui-body">
+                      <span className="text-ink-secondary">{k}</span>
+                      <span className="text-zinc-900">{v}</span>
                     </div>
                   ))}
                 </div>
@@ -8027,49 +8595,78 @@ function IndexationTab({ domain }) {
 
               {/* Recommended action */}
               {inspectData.recommended_action && (
-                <div style={{ padding: 16, borderRadius: 8, background: `${D.heading}08`, border: `1px solid ${D.border}` }}>
-                  <div style={{ fontSize: 12, fontWeight: 500, color: D.heading, marginBottom: 6 }}>RECOMMENDED ACTION</div>
-                  <div style={{ fontSize: 13, color: D.text }}>{inspectData.recommended_action}</div>
+                <div className="[padding:16px] rounded-md [background:#09090B08] border-hairline border-zinc-200">
+                  <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:6px]">
+                    RECOMMENDED ACTION
+                  </div>
+                  <div className="text-ui-body text-zinc-900">
+                    {inspectData.recommended_action}
+                  </div>
                   {inspectData.alternative_action && (
-                    <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>Alt: {inspectData.alternative_action}</div>
+                    <div className="text-ui-body text-ink-secondary [margin-top:6px]">
+                      Alt: {inspectData.alternative_action}
+                    </div>
                   )}
                 </div>
               )}
 
               {/* Canonical detail */}
-              {(inspectData.user_declared_canonical || inspectData.google_selected_canonical) && (
-                <div style={{ padding: 16, borderRadius: 8, border: `1px solid ${D.border}` }}>
-                  <div style={{ fontSize: 12, fontWeight: 500, color: D.heading, marginBottom: 8 }}>CANONICAL</div>
-                  <div style={{ fontSize: 12, color: D.muted }}>
-                    User declared: <span style={{ color: D.text, fontFamily: MONO }}>{inspectData.user_declared_canonical || "—"}</span>
+              {(inspectData.user_declared_canonical ||
+                inspectData.google_selected_canonical) && (
+                <div className="[padding:16px] rounded-md border-hairline border-zinc-200">
+                  <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:8px]">
+                    CANONICAL
                   </div>
-                  <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>
-                    Google selected: <span style={{ color: D.text, fontFamily: MONO }}>{inspectData.google_selected_canonical || "—"}</span>
+                  <div className="text-ui-body text-ink-secondary">
+                    User declared:{" "}
+                    <span className="text-zinc-900">
+                      {inspectData.user_declared_canonical || "—"}
+                    </span>
+                  </div>
+                  <div className="text-ui-body text-ink-secondary [margin-top:4px]">
+                    Google selected:{" "}
+                    <span className="text-zinc-900">
+                      {inspectData.google_selected_canonical || "—"}
+                    </span>
                   </div>
                 </div>
               )}
 
               {/* Title / Meta */}
-              <div style={{ padding: 16, borderRadius: 8, border: `1px solid ${D.border}` }}>
-                <div style={{ fontSize: 12, fontWeight: 500, color: D.heading, marginBottom: 8 }}>CONTENT</div>
-                <div style={{ fontSize: 12, color: D.muted }}>Title: <span style={{ color: D.text }}>{inspectData.title || "—"}</span></div>
-                <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>H1: <span style={{ color: D.text }}>{inspectData.h1 || "—"}</span></div>
-                <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>Meta: <span style={{ color: D.text }}>{inspectData.meta_description || "—"}</span></div>
+              <div className="[padding:16px] rounded-md border-hairline border-zinc-200">
+                <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:8px]">
+                  CONTENT
+                </div>
+                <div className="text-ui-body text-ink-secondary">
+                  Title:{" "}
+                  <span className="text-zinc-900">
+                    {inspectData.title || "—"}
+                  </span>
+                </div>
+                <div className="text-ui-body text-ink-secondary [margin-top:4px]">
+                  H1:{" "}
+                  <span className="text-zinc-900">{inspectData.h1 || "—"}</span>
+                </div>
+                <div className="text-ui-body text-ink-secondary [margin-top:4px]">
+                  Meta:{" "}
+                  <span className="text-zinc-900">
+                    {inspectData.meta_description || "—"}
+                  </span>
+                </div>
               </div>
             </div>
           )}
 
           {inspectData?._error && (
-            <div style={{ color: D.red, fontSize: 13, padding: 20, textAlign: "center" }}>
+            <div className="text-alert-fg text-ui-body [padding:20px] text-center">
               URL not found in intelligence layer. Run a domain refresh first.
             </div>
           )}
-        </Card>
+        </UiCard>
       )}
     </div>
   );
 }
-
 function SitemapIssuesSubTab({ domain }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -8079,171 +8676,192 @@ function SitemapIssuesSubTab({ domain }) {
       .catch(() => setData(null))
       .finally(() => setLoading(false));
   }, [domain]);
-
-  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>Loading...</div>;
-  if (!data) return <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>No sitemap issues data. Run validation first.</div>;
-
-  const severityColor = { critical: D.red, warning: D.amber };
-
+  if (loading)
+    return (
+      <div className="text-ink-secondary [padding:40px] text-center">
+        Loading...
+      </div>
+    );
+  if (!data)
+    return (
+      <div className="text-ink-secondary [padding:40px] text-center">
+        No sitemap issues data. Run validation first.
+      </div>
+    );
+  const severityColor = {
+    critical: "#991B1B",
+    warning: "#A16207",
+  };
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      <div className="seo-kpi-grid-4" style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16 }}>
-        <KpiCard label="Total Issues" value={fmt(data.total_issues)} color={data.total_issues > 0 ? D.red : D.green} />
-        <KpiCard label="Critical" value={fmt(data.by_severity?.find((s) => s.severity === "critical")?.count || 0)} color={D.red} />
-        <KpiCard label="Warning" value={fmt(data.by_severity?.find((s) => s.severity === "warning")?.count || 0)} color={D.amber} />
+    <div className="flex flex-col [gap:20px]">
+      <div className="seo-kpi-grid-4 grid max-sm:!grid-cols-2 [grid-template-columns:repeat(4,_1fr)] [gap:16px]">
+        <KpiCard
+          label="Total Issues"
+          value={fmt(data.total_issues)}
+          color={data.total_issues > 0 ? "#991B1B" : "#15803D"}
+        />
+        <KpiCard
+          label="Critical"
+          value={fmt(
+            data.by_severity?.find((s) => s.severity === "critical")?.count ||
+              0,
+          )}
+          color={"#991B1B"}
+        />
+        <KpiCard
+          label="Warning"
+          value={fmt(
+            data.by_severity?.find((s) => s.severity === "warning")?.count || 0,
+          )}
+          color={"#A16207"}
+        />
         <KpiCard label="Issue Types" value={fmt(data.by_type?.length || 0)} />
       </div>
 
       {data.issues?.length > 0 ? (
-        <Card>
-          <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, marginBottom: 16 }}>Sitemap Issues — {data.domain}</div>
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead><tr>
-                <th style={thStyle}>URL</th>
-                <th style={thStyle}>Issue</th>
-                <th style={thStyle}>Severity</th>
-                <th style={thStyle}>Detail</th>
-              </tr></thead>
-              <tbody>
-                {data.issues.map((row) => (
-                  <tr key={row.id}>
-                    <td style={{ ...tdStyle, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.page_url}</td>
-                    <td style={tdStyle}>{row.issue_type.replace(/_/g, " ")}</td>
-                    <td style={tdStyle}>
-                      <span style={{
-                        padding: "2px 8px", borderRadius: 4, fontSize: 11,
-                        background: `${severityColor[row.severity] || D.muted}18`,
-                        color: severityColor[row.severity] || D.muted,
-                      }}>{row.severity}</span>
-                    </td>
-                    <td style={{ ...tdStyle, fontSize: 12, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.detail}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+        <UiCard className="p-6">
+          <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:16px]">
+            Sitemap Issues — {data.domain}
           </div>
-        </Card>
+          <div className="overflow-x-auto">
+            <Table className="[width:100%] [border-collapse:collapse]">
+              <THead>
+                <TR>
+                  <TH>URL</TH>
+                  <TH>Issue</TH>
+                  <TH>Severity</TH>
+                  <TH>Detail</TH>
+                </TR>
+              </THead>
+              <TBody>
+                {data.issues.map((row) => (
+                  <TR key={row.id}>
+                    <TD className="[max-width:280px] overflow-hidden text-ellipsis whitespace-nowrap">
+                      {row.page_url}
+                    </TD>
+                    <TD className="u-nums">
+                      {row.issue_type.replace(/_/g, " ")}
+                    </TD>
+                    <TD className="u-nums">
+                      <span
+                        style={{
+                          background: `${severityColor[row.severity] || "#71717A"}18`,
+                          color: severityColor[row.severity] || "#71717A",
+                        }}
+                        className="[padding:2px_8px] rounded-sm text-ui-body"
+                      >
+                        {row.severity}
+                      </span>
+                    </TD>
+                    <TD className="text-ui-body [max-width:280px] overflow-hidden text-ellipsis whitespace-nowrap">
+                      {row.detail}
+                    </TD>
+                  </TR>
+                ))}
+              </TBody>
+            </Table>
+          </div>
+        </UiCard>
       ) : (
-        <Card>
-          <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: "center" }}>
+        <UiCard className="p-6">
+          <div className="text-ink-secondary text-ui-body [padding:20px] text-center">
             No sitemap issues found.
           </div>
-        </Card>
+        </UiCard>
       )}
     </div>
   );
 }
 
 // ── Main Page ──
-function SEOWorkspaceNav({ sections, activeKey, onChange }) {
-  if (!sections?.length || sections.length === 1) return null;
-  return (
-    <div
-      className="seo-workspace-nav"
-      style={{
-        display: "flex",
-        gap: 6,
-        overflowX: "auto",
-        WebkitOverflowScrolling: "touch",
-        margin: "-4px 0 18px",
-        padding: "0 2px 2px",
-      }}
-    >
-      {sections.map((section) => {
-        const active = activeKey === section.key;
-        return (
-          <button
-            key={section.key}
-            type="button"
-            onClick={() => onChange(section.key)}
-            style={{
-              padding: "7px 13px",
-              borderRadius: 7,
-              border: `1px solid ${active ? D.heading : D.border}`,
-              background: active ? D.heading : D.card,
-              color: active ? D.white : D.text,
-              cursor: "pointer",
-              fontSize: 12,
-              fontWeight: 500,
-              whiteSpace: "nowrap",
-              flexShrink: 0,
-            }}
-          >
-            {section.label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
 
 export default function SEOPage() {
-  const [workspace, setWorkspace] = useState("command");
+  const [searchParams] = useSearchParams();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const requestedWorkspace = searchParams.get("workspace");
+  const workspace = Object.hasOwn(WORKSPACE_BY_KEY, requestedWorkspace)
+    ? requestedWorkspace
+    : "command";
   const [activeViews, setActiveViews] = useState(() =>
     Object.fromEntries(
-      WORKSPACES.map((item) => [item.key, defaultViewForWorkspace(item.key)]),
+      SEO_WORKSPACES.map((item) => [
+        item.key,
+        defaultViewForWorkspace(item.key),
+      ]),
     ),
   );
-  const activeWorkspace = WORKSPACE_BY_KEY[workspace] || WORKSPACES[0];
-  const activeView =
-    activeViews[workspace] || defaultViewForWorkspace(workspace);
+  const activeWorkspace = WORKSPACE_BY_KEY[workspace] || SEO_WORKSPACES[0];
+  const requestedView = searchParams.get("view");
+  const activeView = activeWorkspace.sections.some(
+    (section) => section.key === requestedView,
+  )
+    ? requestedView
+    : defaultViewForWorkspace(workspace);
+
+  useEffect(() => {
+    setActiveViews((prev) =>
+      prev[workspace] === activeView
+        ? prev
+        : { ...prev, [workspace]: activeView },
+    );
+  }, [activeView, workspace]);
 
   function handleWorkspaceChange(key) {
-    setWorkspace(key);
-    setActiveViews((prev) =>
-      prev[key] ? prev : { ...prev, [key]: defaultViewForWorkspace(key) },
-    );
+    if (!Object.hasOwn(WORKSPACE_BY_KEY, key) || key === workspace) return;
+    const nextView = activeViews[key] || defaultViewForWorkspace(key);
+    const next = new URLSearchParams(searchParams);
+    next.set("workspace", key);
+    next.set("view", nextView);
+    navigate({
+      pathname: location.pathname,
+      search: `?${next.toString()}`,
+      hash: location.hash,
+    });
   }
-
   function handleViewChange(key) {
-    setActiveViews((prev) => ({ ...prev, [workspace]: key }));
+    if (
+      key === activeView ||
+      !activeWorkspace.sections.some((section) => section.key === key)
+    )
+      return;
+    setActiveViews((prev) => ({
+      ...prev,
+      [workspace]: key,
+    }));
+    const next = new URLSearchParams(searchParams);
+    next.set("workspace", workspace);
+    next.set("view", key);
+    navigate({
+      pathname: location.pathname,
+      search: `?${next.toString()}`,
+      hash: location.hash,
+    });
   }
-
   return (
-    <div>
+    <UiSurface
+      density="comfortable"
+      className="seo-page mx-auto w-full max-w-[1400px] [&_a[href]]:inline-flex [&_a[href]]:min-h-11 [&_a[href]]:items-center"
+    >
       {" "}
-      <style>{`
-        @media (max-width: 640px) {
-          .seo-tab-bar { overflow-x: auto !important; -webkit-overflow-scrolling: touch !important; justify-content: flex-start !important; scrollbar-width: none; }
-          .seo-tab-bar::-webkit-scrollbar { display: none; }
-          .seo-tab-bar-inner { flex-wrap: nowrap !important; }
-          .seo-tab-bar button { padding: 8px 12px !important; font-size: 12px !important; flex-shrink: 0 !important; }
-          .seo-kpi-grid-4 { grid-template-columns: repeat(2, 1fr) !important; }
-          .seo-kpi-grid-5 { grid-template-columns: repeat(2, 1fr) !important; }
-          .seo-kpi-grid-3 { grid-template-columns: 1fr !important; }
-          .seo-sub-tabs { overflow-x: auto !important; -webkit-overflow-scrolling: touch !important; flex-wrap: nowrap !important; }
-          .seo-sub-tabs button { flex-shrink: 0 !important; }
-          .seo-workspace-nav { scrollbar-width: none; }
-          .seo-workspace-nav::-webkit-scrollbar { display: none; }
-          .seo-top-pages-header { display: none !important; }
-          .seo-top-pages-row { flex-wrap: wrap !important; gap: 4px !important; }
-          .seo-top-pages-row >div:first-child { width: 100% !important; flex: none !important; }
-          .seo-audit-kpi-grid { grid-template-columns: repeat(2, 1fr) !important; }
-          .seo-audit-expanded-grid { grid-template-columns: 1fr !important; }
-          .seo-audit-history-grid { grid-template-columns: repeat(3, 1fr) !important; }
-          .seo-funnel-stats { grid-template-columns: 1fr 1fr 1fr !important; }
-          .seo-analytics-period { flex-wrap: wrap !important; }
-        }
-      `}</style>{" "}
       <AdminCommandHeader
         title="SEO"
         icon={Search}
-        sections={WORKSPACES}
+        sections={SEO_WORKSPACES}
         activeKey={workspace}
         onSectionChange={handleWorkspaceChange}
         ariaLabel="SEO section"
         navGridClassName="grid-cols-2 md:grid-cols-3 xl:grid-cols-6"
-      />
-      <SEOWorkspaceNav
-        sections={activeWorkspace.sections}
-        activeKey={activeView}
-        onChange={handleViewChange}
+        secondarySections={activeWorkspace.sections}
+        secondaryActiveKey={activeView}
+        onSecondaryChange={handleViewChange}
+        secondaryAriaLabel={`${activeWorkspace.label} SEO view`}
+        secondaryNavGridClassName="grid-cols-2 md:grid-cols-3 xl:grid-cols-5"
       />
       {activeView === "dashboard" && (
         <Suspense
           fallback={
-            <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+            <div className="text-ink-secondary [padding:40px] text-center">
               Loading dashboard...
             </div>
           }
@@ -8266,6 +8884,6 @@ export default function SEOPage() {
       {activeView === "actions" && <ActionsTab domain={PRIMARY_DOMAIN} />}
       {activeView === "indexation" && <IndexationTab domain={PRIMARY_DOMAIN} />}
       {activeView === "site-audit" && <SiteAuditTab />}
-    </div>
+    </UiSurface>
   );
 }

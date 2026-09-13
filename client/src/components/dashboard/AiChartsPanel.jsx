@@ -1,6 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ImagePlus, X } from "lucide-react";
 import { ChartCard, EmptyState, CHART_PRIMARY } from "./charts";
 import DictationButton from "../tech/DictationButton";
+import {
+  ActionFeedback,
+  Button,
+  Card,
+  CardBody,
+  Field,
+  Input,
+  Table,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TR,
+} from "../ui";
 
 const MAX_IMAGES = 3;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -71,7 +86,7 @@ const num = (v) => (v == null || v === "" ? NaN : Number(v));
 // Legend for multi-series charts — a swatch + the column alias per series.
 function Legend({ keys }) {
   return (
-    <div className="flex flex-wrap gap-x-3 gap-y-1 mb-2 text-11 text-ink-tertiary">
+    <div className="mb-2 flex flex-wrap gap-x-3 gap-y-1 text-ui-caption text-ink-secondary">
       {keys.map((k, i) => (
         <span key={k} className="inline-flex items-center gap-1">
           <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: shade(i) }} />
@@ -96,27 +111,25 @@ function AiChart({ chartType, spec, rows, fields }) {
     return (
       <div className="py-4">
         <div className="text-28 u-nums text-ink-primary">{fmtVal(v, fmt)}</div>
-        {spec?.explanation && <div className="text-12 text-ink-tertiary mt-1">{spec.explanation}</div>}
+        {spec?.explanation && <div className="mt-1 text-ui-caption text-ink-secondary">{spec.explanation}</div>}
       </div>
     );
   }
 
   if (chartType === "table") {
     return (
-      <div className="overflow-x-auto">
-        <table className="min-w-full text-12">
-          <thead>
-            <tr>{cols.map((c) => <th key={c} className="text-left u-label text-ink-tertiary pr-4 pb-1">{c}</th>)}</tr>
-          </thead>
-          <tbody>
+      <Table>
+          <THead>
+            <TR>{cols.map((c) => <TH key={c}>{c}</TH>)}</TR>
+          </THead>
+          <TBody>
             {rows.slice(0, 50).map((r, i) => (
-              <tr key={i} className="border-t border-hairline border-zinc-100">
-                {cols.map((c) => <td key={c} className="pr-4 py-1 u-nums text-ink-secondary">{typeof r[c] === "number" ? fmtVal(r[c], yCols.has(c) ? fmt : "number") : String(r[c] ?? "—")}</td>)}
-              </tr>
+              <TR key={i}>
+                {cols.map((c) => <TD key={c} nums className="text-ink-secondary">{typeof r[c] === "number" ? fmtVal(r[c], yCols.has(c) ? fmt : "number") : String(r[c] ?? "—")}</TD>)}
+              </TR>
             ))}
-          </tbody>
-        </table>
-      </div>
+          </TBody>
+      </Table>
     );
   }
 
@@ -131,12 +144,17 @@ function AiChart({ chartType, spec, rows, fields }) {
     const finiteX = rows.filter((_, i) => series.some((s) => Number.isFinite(s[i]))).length;
     if (finiteX < 2) return <AiChart chartType="bar" spec={spec} rows={rows} fields={fields} />;
     const max = Math.max(...allVals), min = Math.min(...allVals, 0);
-    const W = 600, H = 180, padL = 56, padR = 8, padT = 10, padB = 22;
+    const W = 600, H = 180, padR = 8, padT = 10, padB = 22;
     const span = max - min || 1;
     const n = rows.length;
+    const ticks = [max, (max + min) / 2, min];
+    // Reserve the left gutter for the widest tick label: currency values such
+    // as "$100,000" run ~8.5px per character at 14px, and a fixed 56px gutter
+    // sized for the old 10px font clipped them off the viewBox.
+    const tickLabels = ticks.map((t) => fmtVal(t, fmt));
+    const padL = Math.max(56, 12 + Math.ceil(8.5 * Math.max(...tickLabels.map((l) => l.length))));
     const xAt = (i) => padL + (n > 1 ? i / (n - 1) : 0.5) * (W - padL - padR);
     const yAt = (v) => padT + (1 - (v - min) / span) * (H - padT - padB);
-    const ticks = [max, (max + min) / 2, min];
     const xIdx = n > 2 ? [0, Math.floor((n - 1) / 2), n - 1] : [0, n - 1];
     // Split each series into contiguous runs of finite points, so a NULL bucket
     // (e.g. a NULLIF rate with no leads that month) reads as a GAP — not a drop
@@ -157,7 +175,7 @@ function AiChart({ chartType, spec, rows, fields }) {
           {ticks.map((t, i) => (
             <g key={`t${i}`}>
               <line x1={padL} x2={W - padR} y1={yAt(t)} y2={yAt(t)} stroke="#E4E4E7" strokeWidth="1" />
-              <text x={padL - 6} y={yAt(t) + 3} textAnchor="end" fontSize="10" fill="#A1A1AA">{fmtVal(t, fmt)}</text>
+              <text x={padL - 6} y={yAt(t) + 3} textAnchor="end" fontSize="14" fill="#71717A">{tickLabels[i]}</text>
             </g>
           ))}
           {series.map((s, si) => {
@@ -169,7 +187,7 @@ function AiChart({ chartType, spec, rows, fields }) {
             ));
           })}
           {xIdx.map((idx, j) => (
-            <text key={`x${j}`} x={xAt(idx)} y={H - 6} textAnchor={j === 0 ? "start" : j === xIdx.length - 1 ? "end" : "middle"} fontSize="10" fill="#A1A1AA">{String(rows[idx][xKey] ?? "")}</text>
+            <text key={`x${j}`} x={xAt(idx)} y={H - 6} textAnchor={j === 0 ? "start" : j === xIdx.length - 1 ? "end" : "middle"} fontSize="14" fill="#71717A">{String(rows[idx][xKey] ?? "")}</text>
           ))}
         </svg>
       </div>
@@ -193,7 +211,7 @@ function AiChart({ chartType, spec, rows, fields }) {
           const missing = !Number.isFinite(value);
           return (
             <li key={i}>
-              <div className="flex items-baseline justify-between text-12 mb-1">
+              <div className="mb-1 flex items-baseline justify-between text-ui-caption">
                 <span className="text-ink-secondary truncate pr-2">{String(r[xKey] ?? "—")}</span>
                 <span className="u-nums text-ink-primary">{missing ? "—" : fmtVal(value, fmt)}</span>
               </div>
@@ -214,7 +232,7 @@ function AiChart({ chartType, spec, rows, fields }) {
       <ul className="space-y-3">
         {cats.map((r, i) => (
           <li key={i}>
-            <div className="text-12 text-ink-secondary truncate mb-1">{String(r[xKey] ?? "—")}</div>
+            <div className="mb-1 truncate text-ui-caption text-ink-secondary">{String(r[xKey] ?? "—")}</div>
             {barKeys.map((k, ki) => {
               const v = num(r[k]);
               const missing = !Number.isFinite(v);
@@ -223,7 +241,7 @@ function AiChart({ chartType, spec, rows, fields }) {
                   <div className="h-2 flex-1 bg-surface-sunken rounded-sm overflow-hidden">
                     {!missing && <div className="h-full" style={{ width: `${Math.min(100, (Math.abs(v) / absMax) * 100)}%`, background: shade(ki), opacity: v < 0 ? 0.5 : 1 }} />}
                   </div>
-                  <span className="u-nums text-ink-primary text-11" style={{ minWidth: 56, textAlign: "right" }}>{missing ? "—" : fmtVal(v, fmt)}</span>
+                  <span className="u-nums text-ui-caption text-ink-primary" style={{ minWidth: 56, textAlign: "right" }}>{missing ? "—" : fmtVal(v, fmt)}</span>
                 </div>
               );
             })}
@@ -315,19 +333,20 @@ export default function AiChartsPanel() {
 
   return (
     <ChartCard title="Ask for a chart" sub="Describe a metric — the AI builds it from your data">
-      <div className="flex items-center gap-2 mb-2">
-        <input
-          value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter") onGenerate(); }}
-          placeholder="e.g. new customers per month by city, last 6 months — or attach an image"
-          className="flex-1 min-w-0 h-9 px-3 text-13 border-hairline border-zinc-300 rounded-sm u-focus-ring"
-        />
+      <div className="mb-3 flex flex-wrap items-end gap-2">
+        <Field label="Describe a metric" className="min-w-[220px] flex-1">
+          <Input
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") onGenerate(); }}
+            placeholder="e.g. new customers per month by city, last 6 months — or attach an image"
+          />
+        </Field>
         <DictationButton
           onAppend={(t) => setPrompt((p) => (p ? `${p} ${t}` : t))}
           palette={{ accent: "#18181B", muted: "#A1A1AA", red: "#C8312F", card: "#FFFFFF" }}
           title="Dictate"
-          size={36}
+          size={44}
         />
         <input
           ref={fileInputRef}
@@ -337,60 +356,67 @@ export default function AiChartsPanel() {
           className="hidden"
           onChange={(e) => { addImages(e.target.files); e.target.value = ""; }}
         />
-        <button
+        <Button
           type="button"
           onClick={() => fileInputRef.current?.click()}
           disabled={images.length >= MAX_IMAGES}
           title="Attach a reference image"
           aria-label="Attach a reference image"
-          className="h-9 w-9 inline-flex items-center justify-center border-hairline border-zinc-300 rounded-sm text-ink-secondary hover:bg-zinc-50 disabled:opacity-40 u-focus-ring shrink-0"
+          variant="secondary"
+          className="ui-icon-action shrink-0"
         >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" />
-          </svg>
-        </button>
-        <button
+          <ImagePlus size={16} aria-hidden />
+        </Button>
+        <Button
           type="button"
           onClick={onGenerate}
-          disabled={busy || (!prompt.trim() && !images.length)}
-          className="h-9 px-4 text-12 font-medium rounded-sm bg-zinc-900 text-white disabled:opacity-40 u-focus-ring shrink-0"
+          loading={busy}
+          disabled={!prompt.trim() && !images.length}
+          className="shrink-0"
         >
           {busy ? "Building…" : "Generate"}
-        </button>
+        </Button>
       </div>
       {images.length > 0 && (
         <div className="flex flex-wrap gap-2 mb-3">
           {images.map((im, i) => (
             <div key={i} className="relative">
               <img src={im.preview} alt={im.name} className="h-14 w-14 object-cover rounded-sm border-hairline border-zinc-200" />
-              <button
+              {/* The 44px hit target stays for touch, but only a small badge is
+                  painted so the thumbnail underneath remains inspectable. */}
+              <Button
                 type="button"
                 onClick={() => removeImage(i)}
                 aria-label={`Remove ${im.name}`}
-                className="absolute -top-1.5 -right-1.5 h-4 w-4 inline-flex items-center justify-center rounded-full bg-zinc-900 text-white text-[10px] u-focus-ring"
+                variant="ghost"
+                className="ui-icon-action absolute -right-4 -top-4 min-h-11 w-11 p-0"
               >
-                ×
-              </button>
+                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-zinc-900 text-white shadow-sm" aria-hidden>
+                  <X size={12} />
+                </span>
+              </Button>
             </div>
           ))}
         </div>
       )}
 
-      {error && <div className="text-12 text-alert-fg mb-3">{error}</div>}
+      {error && <ActionFeedback error className="mb-3">{error}</ActionFeedback>}
 
       {preview && (
-        <div className="border-hairline border-zinc-200 rounded-sm p-3 mb-4">
-          <div className="flex items-baseline justify-between mb-2">
-            <div className="text-13 font-medium text-ink-primary">{preview.spec.title}</div>
-            <div className="flex gap-2">
-              <button type="button" onClick={onPin} disabled={pinning} className="text-12 text-ink-secondary hover:text-ink-primary u-focus-ring">
+        <Card className="mb-4">
+          <CardBody>
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <div className="text-14 font-medium text-ink-primary">{preview.spec.title}</div>
+            <div className="ui-record-actions">
+              <Button type="button" onClick={onPin} loading={pinning} variant="secondary">
                 {pinning ? "Pinning…" : "Pin"}
-              </button>
-              <button type="button" onClick={() => setPreview(null)} className="text-12 text-ink-tertiary hover:text-ink-secondary u-focus-ring">Discard</button>
+              </Button>
+              <Button type="button" onClick={() => setPreview(null)} variant="ghost">Discard</Button>
             </div>
           </div>
           <AiChart chartType={preview.spec.chartType} spec={preview.spec} rows={preview.rows} fields={preview.fields} />
-        </div>
+          </CardBody>
+        </Card>
       )}
 
       {widgets.length === 0 && !preview ? (
@@ -398,15 +424,19 @@ export default function AiChartsPanel() {
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {widgets.map((w) => (
-            <div key={w.id} className="border-hairline border-zinc-200 rounded-sm p-3">
-              <div className="flex items-baseline justify-between mb-2">
-                <div className="text-13 font-medium text-ink-primary truncate pr-2">{w.title}</div>
-                <button type="button" onClick={() => onUnpin(w.id)} title="Unpin" aria-label="Unpin" className="text-12 text-ink-tertiary hover:text-ink-primary u-focus-ring">×</button>
+            <Card key={w.id}>
+              <CardBody>
+              <div className="mb-3 flex items-center justify-between gap-2">
+                <div className="truncate pr-2 text-14 font-medium text-ink-primary">{w.title}</div>
+                <Button type="button" onClick={() => onUnpin(w.id)} title="Unpin" aria-label="Unpin" variant="ghost" className="ui-icon-action">
+                  <X size={16} aria-hidden />
+                </Button>
               </div>
               {w.error
                 ? <EmptyState>{w.error}</EmptyState>
                 : <AiChart chartType={w.chartSpec?.chartType} spec={w.chartSpec} rows={w.rows} fields={w.fields} />}
-            </div>
+              </CardBody>
+            </Card>
           ))}
         </div>
       )}

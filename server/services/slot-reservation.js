@@ -59,6 +59,31 @@ const {
 const DEFAULT_HOLD_MINUTES = 15;
 const DEFAULT_DURATION_MINUTES = 60;
 const MAX_SERVICE_TYPE_LENGTH = 100;
+
+// Commit-time grace window (2026-09-11 incident): a customer who taps Confirm
+// moments after her 15-minute hold's reservation_expires_at ticked over still
+// believes she booked and paid — the accept 409ing on a 34-second-late click
+// is the failure, not a correctness bug. commitReservation graduates a hold
+// that is expired by LESS than this many minutes (the slot's own conflict
+// re-checks still run, so an in-grace commit can't double-book); the expiry
+// sweep (releaseExpiredReservations) leaves the same window alone so the row
+// survives to be graduated. Read at CALL TIME via commitGraceMinutes() (never
+// cache the resolved value) so a per-request env change and tests that flip
+// process.env take effect immediately. 0 disables grace outright.
+const RESERVATION_COMMIT_GRACE_MINUTES = commitGraceMinutesFromEnv();
+function commitGraceMinutesFromEnv() {
+  const raw = Number.parseInt(process.env.RESERVATION_COMMIT_GRACE_MINUTES, 10);
+  const value = Number.isFinite(raw) ? raw : 10;
+  return Math.max(0, Math.min(30, value));
+}
+function commitGraceMinutes() {
+  return commitGraceMinutesFromEnv();
+}
+// Hard cap on how long ANY one hold row may live past its created_at, across
+// every refresh (reserveSlot's same-slot idempotent retry) and extend
+// (extendReservation) — a customer stalling indefinitely on the confirm
+// screen must not hold a slot forever.
+const MAX_HOLD_MINUTES = 60;
 // classifySlot's roundUpToHour can push a proven-feasible route slot's
 // DISPLAY window up to 59 minutes later than the gap find-time validated, so
 // a legitimately offered slot can end up to 59 minutes past the 17:00 day
@@ -341,7 +366,21 @@ function cadenceCatalogKeyForProfile(primary, isOneTime) {
 }
 
 async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapacity = false, strictAllowanceRead = false, validateAllowance = false } = {}) {
+  // CATALOG SERIALIZATION under capacity: a `services` table SHARE lock
+  // (scheduling/catalog-lock.js), taken as the FIRST statement of the
+  // lookup savepoint and held to the outer commit. It replaced per-row FOR
+  // SHARE (codex #4344 P1 + #4369 r1/r2): a row lock protects only a MATCHED
+  // row, so an absent match could be overtaken by a row activated or mapped
+  // before the commit; and mixing row locks with a table lock deadlocked
+  // against writers that pre-lock rows (deactivateService's FOR UPDATE) or
+  // against this transaction's own earlier FOR SHARE reads. SHARE conflicts
+  // with every INSERT/UPDATE/DELETE (implicit ROW EXCLUSIVE) — admin writes
+  // and pre-deploy migrations alike — and not with other SHARE readers, so
+  // reads under it need no row lock at all and concurrent bookings never
+  // block each other. Inside the savepoint so a lock_timeout stays a
+  // recoverable catalog_unavailable and never aborts the outer transaction.
   const lockCatalog = conn?.isTransaction && (capacityEnabled() || preserveCapacity);
+  const lockCatalogTable = async (sp) => { if (lockCatalog) await require('./scheduling/catalog-lock').lockCatalogIdentity(sp); };
   const catalogColumns = ['id', 'name', 'service_key', 'default_duration_minutes', 'min_duration_minutes', 'max_duration_minutes',
     ...(capacityEnabled() || preserveCapacity ? ['scheduling_duration_policy'] : [])];
   const services = Array.isArray(serviceProfile?.services) ? serviceProfile.services : [];
@@ -399,11 +438,11 @@ async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapaci
     let byKey = null;
     try {
       await conn.transaction(async (sp) => {
+        await lockCatalogTable(sp);
         const rows = await sp('services')
           .where({ service_key: catalogKey })
           .limit(2)
-          .select(...catalogColumns)
-          .modify(query => { if (lockCatalog) query.forShare(); });
+          .select(...catalogColumns);
         if (rows.length === 1) byKey = rows[0];
         else if (rows.length > 1) {
           logger.error(`[slot-reservation] catalog key "${catalogKey}" names MULTIPLE active rows — refusing to stamp service_id`);
@@ -430,6 +469,7 @@ async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapaci
   let resolved = null;
   try {
     await conn.transaction(async (sp) => {
+        await lockCatalogTable(sp);
       // Containment, not equality: engine_keys is a jsonb ARRAY because the
       // engine emits versioned aliases for one catalog service
       // (stinging_insect + stinging_insect_v2 → bee_wasp_removal). Codex
@@ -454,8 +494,7 @@ async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapaci
         const cadenceRows = await sp('services')
           .where({ service_key: cadenceKey, is_active: true })
           .limit(2)
-          .select(...catalogColumns)
-          .modify(query => { if (lockCatalog) query.forShare(); });
+          .select(...catalogColumns);
         if (cadenceRows.length === 1) resolved = cadenceRows[0];
         else if (cadenceRows.length > 1 && (strictAllowanceRead || validateAllowance)) throw capacityError('catalog_unavailable');
         return;
@@ -464,8 +503,7 @@ async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapaci
         .whereRaw('engine_keys @> ?::jsonb', [JSON.stringify([engineKey])])
         .andWhere({ is_active: true })
         .limit(2)
-        .select(...catalogColumns)
-        .modify(query => { if (lockCatalog) query.forShare(); });
+        .select(...catalogColumns);
       if (rows.length === 1) {
         resolved = rows[0];
       } else if (rows.length > 1) {
@@ -1068,11 +1106,7 @@ async function reserveSlot({
           // is thrown after commit via the sentinel below — a plain throw
           // here would roll the delete back and leave the phantom hold
           // occupying route time until expiry.
-          await trx('scheduled_services')
-            .where({ id: sameSlotHold.id })
-            .whereNull('customer_id')
-            .whereNotNull('reservation_expires_at')
-            .del();
+          await uncommittedHoldQuery(trx, { scheduledServiceId: sameSlotHold.id }).del();
           logger.warn('[slot-reservation] superseded hold over committed visit on same-slot refresh', {
             estimateId,
             slotId,
@@ -1084,9 +1118,22 @@ async function reserveSlot({
         // Refresh expiry only — commitReservation recomputes service_type /
         // notes / window_end from the accept-time profile, so the hold's
         // stamped labels don't need to be rebuilt on a retry.
+        // The lifetime cap binds THIS path too (hold-grace self-audit): without it a
+        // token holder could keep one hold alive forever by re-POSTing
+        // /reserve for the same slot, bypassing the ceiling /extend enforces
+        // and monopolising the window. LEAST() rather than a refusal — a
+        // capped refresh is still idempotent for the client's "go back"
+        // retry; once the ceiling is reached the hold simply stops moving
+        // and lapses on its own, and a genuine re-pick mints a FRESH hold
+        // through the full conflict path like any other customer.
         const [refreshed] = await trx('scheduled_services')
           .where({ id: sameSlotHold.id })
-          .update({ reservation_expires_at: trx.raw(`NOW() + INTERVAL '${holdMins} minutes'`) })
+          .update({
+            reservation_expires_at: trx.raw(
+              'GREATEST(reservation_expires_at, LEAST(NOW() + make_interval(mins => ?), created_at + make_interval(mins => ?)))',
+              [holdMins, MAX_HOLD_MINUTES],
+            ),
+          })
           .returning(['id', 'reservation_expires_at']);
         const refreshedExpiresAt = refreshed?.reservation_expires_at || null;
         if (capacityFit) await persistArrivalOrder(trx, capacityFit, sameSlotHold.id);
@@ -1349,9 +1396,15 @@ async function commitReservation({
     // this key: it pre-acquires rung 1 as its first statements — before its
     // estimates UPDATE / customers insert take row locks — and passes the
     // locked key down as preLockedDate (checked against the pre-read below).
+    // The whole row, not a column list: the early catalog lock below keys on
+    // reservation_policy_version for a persisted version-2 hold after the
+    // gate is turned off (codex #4369 r4 P1), and naming that column breaks
+    // the golden-master schemas that predate the capacity columns (CI's
+    // combined PG suite) — `select *` reads undefined there, exactly like the
+    // FOR UPDATE reload below, and the early lock then follows the gate alone.
     const preRow = await client('scheduled_services')
       .where({ id: scheduledServiceId })
-      .first('scheduled_date', 'technician_id');
+      .first();
     if (!preRow) {
       const err = new Error('reservation not found');
       err.code = 'RESERVATION_NOT_FOUND';
@@ -1381,6 +1434,23 @@ async function commitReservation({
     // before its own row locks. Standalone commits acquire it here.
     if (preparedCapacity) await lockTechDays(client, [{ techId: preRow.technician_id, date: lockedDate },
       { techId: null, date: lockedDate }]);
+    // Catalog SHARE lock BEFORE this row's FOR UPDATE (codex #4369 r3 P1):
+    // catalog migrations lock `services` first and then update
+    // scheduled_services rows (20260902000010), so reaching the catalog
+    // lock only later, through the commit-time profile resolution, would
+    // ABBA-deadlock against one that targets this visit. Same condition
+    // the resolver uses to lock at all; re-issued there as a no-op.
+    if (capacityEnabled() || preRow.reservation_policy_version === 2) {
+      // Same error contract as the resolver's savepoint: a lock_timeout
+      // behind a catalog write or migration is a recoverable
+      // catalog_unavailable (409 slot recovery), never a raw 55P03 that the
+      // accept route would surface as a 500 (pre-push codex P1).
+      try {
+        await require('./scheduling/catalog-lock').lockCatalogIdentity(client);
+      } catch (err) {
+        throw Object.assign(capacityError('catalog_unavailable'), { cause: err });
+      }
+    }
 
     // Canonical order with the scheduled-invoice writers (PR #3476 r21
     // P1): the shared advisory mint lock comes BEFORE this row FOR
@@ -1393,9 +1463,33 @@ async function commitReservation({
       await acquireScheduledInvoiceMintLock(client, scheduledServiceId);
     }
 
+    // Commit-time grace window (2026-09-11 incident): a hold expired by LESS
+    // than commitGraceMinutes() still graduates — every conflict re-check
+    // below still runs, so an in-grace commit can't double-book. Read the
+    // grace fresh (call-time, not a cached module constant) so an env change
+    // takes effect on the next commit. `_expired` gates the throw; the
+    // seconds-ago figure (computed even when the row is NOT past grace) lets
+    // the log below say whether this commit actually landed inside the
+    // window.
+    const grace = commitGraceMinutes();
     const row = await client('scheduled_services')
       .where({ id: scheduledServiceId })
-      .select('*', client.raw('(reservation_expires_at IS NOT NULL AND reservation_expires_at < NOW()) AS _expired'))
+      .select(
+        '*',
+        client.raw(
+          '(reservation_expires_at IS NOT NULL AND reservation_expires_at < NOW() - make_interval(mins => ?)) AS _expired',
+          [grace],
+        ),
+        client.raw("EXTRACT(EPOCH FROM (NOW() - reservation_expires_at))::int AS _expired_seconds_ago"),
+        // A BOOLEAN for the two decisions that must not round (codex r6 P2):
+        // `_expired_seconds_ago::int` truncates a sub-second lapse to 0, so a
+        // hold every reserve-side predicate already treats as expired looked
+        // punctual here — skipping the newer-hold guard and probing with
+        // includeHolds:false, which is exactly how a stale hold could
+        // graduate over its replacement. The seconds figure stays, for the
+        // log line only.
+        client.raw('(reservation_expires_at IS NOT NULL AND reservation_expires_at <= NOW()) AS _lapsed'),
+      )
       .forUpdate()
       .first();
     if (!row) {
@@ -1418,6 +1512,36 @@ async function commitReservation({
       const err = new Error('reservation expired');
       err.code = 'RESERVATION_EXPIRED';
       throw err;
+    }
+    // Graduating inside the grace window: reservation_expires_at itself has
+    // passed (the row would have 409ed before this PR), but not by enough to
+    // trip `_expired` above. Visible in prod logs so the grace's real-world
+    // hit rate is observable.
+    if (Number(row._expired_seconds_ago) > 0) {
+      logger.info('[slot-reservation] graduated hold inside commit grace', {
+        scheduledServiceId,
+        expiredSecondsAgo: row._expired_seconds_ago,
+      });
+    }
+    // The newer selection wins (codex r5 P2, same rule extendReservation
+    // applies): if this hold lapsed and the customer re-picked in another tab,
+    // reserveSlot minted a second live row — it ignores expired ones — and
+    // the window-scoped probes below cannot see a NON-overlapping rival on
+    // another date or time. Graduating this one would book the older time
+    // while the customer's newer hold sat live beside it.
+    if (row._lapsed && row.source_estimate_id) {
+      const rivalLiveHold = await client('scheduled_services')
+        .where({ source_estimate_id: row.source_estimate_id })
+        .whereNot({ id: scheduledServiceId })
+        .whereNull('customer_id')
+        .whereNotNull('reservation_expires_at')
+        .andWhereRaw('reservation_expires_at > NOW()')
+        .first('id');
+      if (rivalLiveHold) {
+        const err = new Error('reservation expired');
+        err.code = 'RESERVATION_EXPIRED';
+        throw err;
+      }
     }
 
     // Technician eligibility re-check at COMMIT (FOR SHARE on this txn): the
@@ -1442,7 +1566,8 @@ async function commitReservation({
     // the accept flow already handles (customer re-picks a time).
     {
       const { isBlackoutDate } = require('./scheduling/blackout-dates');
-      if (await isBlackoutDate(row.scheduled_date)) {
+      // Same transaction-scoped read as the extend path (codex r11 P2).
+      if (await isBlackoutDate(row.scheduled_date, client)) {
         const err = new Error('that day is no longer available');
         err.code = 'RESERVATION_EXPIRED';
         throw err;
@@ -1513,11 +1638,22 @@ async function commitReservation({
     // ENTIRELY when no accept-time duration resolved, though the row
     // occupies its held window either way (probe end falls back to the
     // held window_end, then to the module's duration-or-60 convention).
-    // includeHolds:false + excluding this hold's own row: the probe
-    // arbitrates against COMMITTED visits — of two overlapping live holds
-    // the reserve-time checks permitted, first-to-graduate wins and this
-    // stops the second. Same RESERVATION_EXPIRED-style recovery as every
-    // other commit failure: the customer re-picks a time.
+    // Excluding this hold's own row: the probe arbitrates against COMMITTED
+    // visits — of two overlapping live holds the reserve-time checks
+    // permitted, first-to-graduate wins and this stops the second. Same
+    // RESERVATION_EXPIRED-style recovery as every other commit failure: the
+    // customer re-picks a time.
+    //
+    // A hold graduating INSIDE THE GRACE also weighs live rival holds
+    // (codex r3 P1, mirroring extendReservation's `includeHolds:
+    // alreadyLapsed`). Once an expiry passes, every reserve-side check stops
+    // counting that row, so another customer may legitimately be holding the
+    // same window right now; the narrow check above is technician-scoped, so
+    // a rival unassigned hold slips past it entirely. Reviving on top of that
+    // would break the other customer's valid accept. A hold that never
+    // lapsed keeps includeHolds:false — it has been excluding rivals all
+    // along, and counting live holds there would refuse a punctual accept
+    // over a hold the reserve path already arbitrated.
     const probeWindowEnd = windowEnd
       || row.window_end
       || (windowStart
@@ -1532,7 +1668,7 @@ async function commitReservation({
         windowStart,
         windowEnd: probeWindowEnd,
         excludeServiceIds: [scheduledServiceId],
-        includeHolds: false,
+        includeHolds: !!row._lapsed,
         // Travel gap: the pin reserveSlot stamped on the hold row.
         travel: { lat: row.lat ?? null, lng: row.lng ?? null },
       });
@@ -1648,16 +1784,22 @@ async function commitReservation({
  *
  * Returns: { released: boolean } (true if a row was actually deleted).
  */
-async function releaseReservation({ scheduledServiceId, estimateId }) {
-  if (!scheduledServiceId) return { released: false };
-  const count = await db('scheduled_services')
+// The ONE still-uncommitted-hold predicate every deleter in this module
+// shares (pre-push audit P1): a row that is this hold, still has no customer,
+// and still carries an expiry — so no deleter can ever destroy a COMMITTED
+// visit. Plain chaining rather than .modify() so the builder stays a bare
+// where/whereNull/whereNotNull sequence for callers that pass no estimateId.
+function uncommittedHoldQuery(client, { scheduledServiceId, estimateId }) {
+  const q = client('scheduled_services')
     .where({ id: scheduledServiceId })
     .whereNull('customer_id')
-    .whereNotNull('reservation_expires_at')
-    .modify((q) => {
-      if (estimateId) q.where({ source_estimate_id: estimateId });
-    })
-    .del();
+    .whereNotNull('reservation_expires_at');
+  return estimateId ? q.where({ source_estimate_id: estimateId }) : q;
+}
+
+async function releaseReservation({ scheduledServiceId, estimateId }) {
+  if (!scheduledServiceId) return { released: false };
+  const count = await uncommittedHoldQuery(db, { scheduledServiceId, estimateId }).del();
   return { released: count > 0 };
 }
 
@@ -1674,6 +1816,15 @@ async function releaseReservation({ scheduledServiceId, estimateId }) {
  * inherently ephemeral — no audit value in keeping them. The
  * idx_scheduled_services_reservation_cleanup partial index (only rows
  * where reservation_expires_at IS NOT NULL) makes this scan narrow.
+ *
+ * Commit-time grace window (2026-09-11 incident): commitReservation still
+ * graduates an uncommitted hold expired by LESS than commitGraceMinutes(),
+ * so this sweep must not delete a row while it's still inside that window —
+ * doing so would race a customer's in-grace accept and 404 it instead of the
+ * 409 the grace exists to avoid. Only the uncommitted-hold delete below
+ * shifts its cutoff back by the grace; the COMMITTED-row rescue above stays
+ * on `now` (a real booking's stray timestamp is a different failure mode,
+ * unrelated to the commit race this grace protects against).
  *
  * Wired to a 15-min cron in services/scheduler.js (matching the
  * reservation TTL so worst-case stale-hold lifetime is ~30 min).
@@ -1782,8 +1933,15 @@ async function releaseExpiredReservations() {
       logger.error(`[slot-reservation] rescue-collision notify failed: ${notifyErr.message}`);
     }
   }
+  // Uncommitted-hold cutoff shifted back by the commit grace (read fresh —
+  // see the doc comment above): a hold inside the window must survive this
+  // sweep so an in-grace accept still has a row to graduate. The cutoff is
+  // computed by POSTGRES, not this process (pre-push audit r3 P1): an app
+  // clock running ahead would delete rows the DB — and therefore
+  // commitReservation — still considers in-grace, racing the very accept the
+  // grace exists to save.
   const released = await db('scheduled_services')
-    .where('reservation_expires_at', '<', now)
+    .whereRaw('reservation_expires_at < NOW() - make_interval(mins => ?)', [commitGraceMinutes()])
     .whereNull('customer_id')
     .del();
   if (released > 0) {
@@ -1792,12 +1950,359 @@ async function releaseExpiredReservations() {
   return { released, rescued };
 }
 
+/**
+ * Extend a live, uncommitted hold's expiry — backs the public "extend my
+ * hold" endpoint (2026-09-11 incident: give the customer a way to buy more
+ * time on the confirm screen instead of relying solely on commit-time grace).
+ *
+ * Semantics:
+ *   - The hold must exist, still be uncommitted, and be within the commit
+ *     grace window (a hold already beyond grace is gone for good — the
+ *     customer re-picks a time). Same RESERVATION_NOT_FOUND either way, so a
+ *     stale id and an out-of-grace id are indistinguishable to the caller.
+ *   - The estimate must still be acceptable (mirrors reserveSlot's
+ *     not-found/expired/terminal guard).
+ *   - The new expiry is capped at `created_at + MAX_HOLD_MINUTES` regardless
+ *     of how many times a hold has been extended — a stalled customer can't
+ *     keep a slot forever. Past that cap, HOLD_LIMIT_REACHED (customer must
+ *     re-pick). Short of it but the requested extension wouldn't move the
+ *     expiry forward, the call is a no-op (idempotent retry-safe).
+ *   - A committed-visit probe (same shape reserveSlot's same-slot refresh
+ *     branch runs) guards against extending a hold whose window was taken by
+ *     a real booking while it sat idle; a clash supersedes (deletes) the
+ *     hold instead of extending it, same as that branch does.
+ *
+ * opts: { estimateId, scheduledServiceId, holdMinutes? }
+ * returns: { scheduledServiceId, expiresAt }
+ */
+async function extendReservation({ estimateId, scheduledServiceId, holdMinutes = DEFAULT_HOLD_MINUTES, revalidateEstimate = null }) {
+  const grace = commitGraceMinutes();
+  const holdMins = Math.max(1, Math.min(120, Number(holdMinutes) || DEFAULT_HOLD_MINUTES));
+
+  return db.transaction(async (trx) => {
+    // Unlocked pre-read ONLY to key rung 1's date — mirrors commitReservation's
+    // preRow pattern (ORDERING CONTRACT, scheduling/occupancy.js: the
+    // date-wide occupancy lock must be acquired before ANY row lock, so the
+    // date has to come from an unlocked read first). Every real predicate is
+    // re-verified on the FOR UPDATE read below.
+    const preRow = await trx('scheduled_services')
+      .where({ id: scheduledServiceId, source_estimate_id: estimateId })
+      .whereNull('customer_id')
+      .whereNotNull('reservation_expires_at')
+      .first('id', 'scheduled_date');
+    if (!preRow) {
+      const err = new Error('reservation not found');
+      err.code = 'RESERVATION_NOT_FOUND';
+      throw err;
+    }
+    const scheduledDate = dateOnly(preRow.scheduled_date);
+    await acquireOccupancyLock(trx, scheduledDate);
+
+    // LOCK ORDER (codex r3 P1): the estimate is locked BEFORE the hold row,
+    // matching reserveSlot (which locks the estimate, then selects its live
+    // holds FOR UPDATE). Taking them in the other order deadlocked a
+    // cross-date re-pick against an extend — the two hold different rung-1
+    // date locks, so each could own one row and wait for the other, and
+    // Postgres aborts one side as a customer-facing 500.
+    // Estimate guard — the SAME not-found/expired/terminal checks reserveSlot
+    // enforces before minting a hold in the first place, so an extend can't
+    // keep a hold alive for an estimate that can no longer be booked.
+    const estimate = await trx('estimates')
+      .where({ id: estimateId })
+      .select('*', trx.raw('(expires_at IS NOT NULL AND expires_at < NOW()) AS _expired'))
+      .forUpdate()
+      .first();
+    if (!estimate) {
+      const err = new Error('estimate not found');
+      err.code = 'ESTIMATE_NOT_FOUND';
+      throw err;
+    }
+    if (estimate._expired) {
+      const err = new Error('estimate expired');
+      err.code = 'ESTIMATE_EXPIRED';
+      throw err;
+    }
+    if (['accepted', 'declined', 'expired', 'void'].includes(estimate.status)) {
+      const err = new Error(`estimate in terminal state '${estimate.status}'`);
+      err.code = 'ESTIMATE_TERMINAL';
+      throw err;
+    }
+    // The SAME locked off-surface / call-side revalidation reserveSlot runs
+    // before minting a hold (hold-grace self-audit): the route's pre-txn visibility
+    // read can go stale while this txn waits on the occupancy or row lock,
+    // and a linkage correction or re-price hold landing in that window must
+    // not have its hold kept alive for a quote the renderer now refuses.
+    // Same generic ESTIMATE_NOT_FOUND the route maps to a 404.
+    {
+      const { callSideBlockForEstimateData, estimateOffCustomerSurface } = require('../utils/estimate-claim-sql');
+      // The FULL viewability predicate, not a subset (codex r3 P0): a row
+      // that flips sent -> draft / scheduled / send_failed while this txn
+      // waits on its locks passes the terminal-status list and the
+      // off-surface check, yet isEstimateCustomerViewable refuses it — so
+      // the extend would keep a hold alive for a quote the renderer no
+      // longer serves. Required lazily: estimate-public owns the predicate
+      // and itself requires this module.
+      // eslint-disable-next-line global-require
+      const { isEstimateCustomerViewable } = require('../routes/estimate-public');
+      if (typeof isEstimateCustomerViewable === 'function' && !isEstimateCustomerViewable(estimate)) {
+        const err = new Error('estimate is not customer-viewable');
+        err.code = 'ESTIMATE_NOT_FOUND';
+        throw err;
+      }
+      if (estimate.archived_at || estimateOffCustomerSurface(estimate)) {
+        const err = new Error('estimate is off the customer surface');
+        err.code = 'ESTIMATE_NOT_FOUND';
+        throw err;
+      }
+      const extendData = (() => {
+        try {
+          const d = typeof estimate.estimate_data === 'string'
+            ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {});
+          return d && typeof d === 'object' ? d : null;
+        } catch { return null; }
+      })();
+      // Caller-supplied no-booking revalidation, run on the LOCKED row
+      // (codex r6 P1): the route checked the same shapes on its pre-txn read,
+      // but that read can go stale while this txn waits on the occupancy or
+      // row lock, and these shapes live in estimate_data — which the
+      // viewability predicate above does not re-derive. The route owns the
+      // predicate and the response bodies; this only enforces the verdict.
+      if (typeof revalidateEstimate === 'function') {
+        const refusal = await revalidateEstimate(estimate);
+        if (refusal) {
+          const err = new Error('estimate cannot be self-booked');
+          err.code = 'ESTIMATE_NO_BOOKING';
+          err.response = refusal;
+          throw err;
+        }
+      }
+      if (extendData?.estimatorEngine?.callLogId) {
+        await trx('call_log').where({ id: extendData.estimatorEngine.callLogId }).forUpdate().first('id');
+        if (await callSideBlockForEstimateData(trx, extendData)) {
+          const err = new Error('estimate is quarantined by a call-linkage correction');
+          err.code = 'ESTIMATE_NOT_FOUND';
+          throw err;
+        }
+      }
+    }
+
+    // Full predicate set, locked: still uncommitted, still THIS estimate's
+    // hold, and within grace — a hold beyond grace is gone for good (same
+    // not-found the caller gets for a stale/foreign id). The hold-limit and
+    // new-expiry figures are computed here, in Postgres, alongside the grace
+    // check, so every timestamp comparison in this function uses the SAME
+    // clock (server clock skew across app instances can't bypass either
+    // gate — same reasoning as commitReservation's `_expired`).
+    const row = await trx('scheduled_services')
+      .where({ id: scheduledServiceId, source_estimate_id: estimateId })
+      .whereNull('customer_id')
+      .whereNotNull('reservation_expires_at')
+      .andWhereRaw('reservation_expires_at >= NOW() - make_interval(mins => ?)', [grace])
+      .select(
+        '*',
+        trx.raw('(created_at + make_interval(mins => ?) <= NOW()) AS _hold_limit_reached', [MAX_HOLD_MINUTES]),
+        // Also POSTGRES-side (pre-push audit r2 P1): this boolean decides
+        // whether to refuse under capacity and whether the conflict probe
+        // must count rival LIVE holds. Measuring it with the Node process's
+        // clock would, on skew, either 404 a hold the DB still considers
+        // in-grace (this PR's own bug, reintroduced) or skip the rival-hold
+        // check and leave two live holds on one window.
+        trx.raw('(reservation_expires_at <= NOW()) AS _already_lapsed'),
+        trx.raw('LEAST(NOW() + make_interval(mins => ?), created_at + make_interval(mins => ?)) AS _new_expiry', [holdMins, MAX_HOLD_MINUTES]),
+      )
+      .forUpdate()
+      .first();
+    if (!row || dateOnly(row.scheduled_date) !== scheduledDate) {
+      // Not found under the full predicate (expired beyond grace, superseded,
+      // or committed between the two reads), or the row moved dates and this
+      // txn is holding the wrong rung-1 key — either way, re-pick a time.
+      const err = new Error('reservation not found');
+      err.code = 'RESERVATION_NOT_FOUND';
+      throw err;
+    }
+
+    if (row._hold_limit_reached) {
+      const err = new Error('Your time-slot hold has reached its limit — pick a time again');
+      err.code = 'HOLD_LIMIT_REACHED';
+      err.expiresAt = row.reservation_expires_at;
+      throw err;
+    }
+
+    const newExpiry = row._new_expiry;
+
+    const windowStart = row.window_start;
+    const windowEnd = row.window_end
+      || addMinutesToTime(windowStart, Number(row.estimated_duration_minutes) > 0
+        ? Number(row.estimated_duration_minutes)
+        : DEFAULT_DURATION_MINUTES);
+
+    // A hold whose expiry has ALREADY PASSED stopped occupying this window
+    // the moment it lapsed: every reserve-side conflict check ignores expired
+    // rows, so another customer may legitimately hold the same slot right
+    // now. Reviving it must therefore arbitrate against LIVE HOLDS too, not
+    // just committed visits (hold-grace self-audit) — otherwise two live holds overlap
+    // and the other customer's valid accept fails. A still-live hold needs
+    // no such check: it never stopped occupying the window, and the other
+    // writers have been excluding it all along.
+    const alreadyLapsed = !!row._already_lapsed;
+    // Capacity semantics follow the PERSISTED policy, not the gate alone
+    // (codex r4 P1) — the same rule commitReservation applies
+    // (`capacityEnabled() || reservation_policy_version === 2`). After a gate
+    // rollback, a version-2 hold's window is governed by its arrival
+    // allocation, so running the legacy global overlap probe here could
+    // delete a perfectly valid hold over an appointment its allocation
+    // permits.
+    // EXACTLY commitReservation's predicate, version-1 exception included
+    // (codex r13 P2): a legacy combined hold (reservation_service_mix
+    // version 1, no reservation_policy_version 2) stays on the LEGACY path at
+    // commit even with the gate on, so classifying it as capacity-managed
+    // here made the extend skip findConflictingVisits for a live hold — and
+    // refuse an in-grace revival — while /accept applied the opposite
+    // semantics. Same expression, same module helper, so the two cannot
+    // drift.
+    const heldCapacity = require('./combined-visit-capacity').capacityFromReservation(row);
+    const rowUnderCapacity = row.reservation_policy_version === 2
+      || (capacityEnabled() && heldCapacity?.version !== 1);
+    // Capacity mode allocates arrival promises, which findConflictingVisits
+    // does not measure — there is no cheap equivalent probe here, so a
+    // LAPSED hold is simply not revived under capacity (the customer
+    // re-picks, and /reserve runs the full capacity path). A live hold's
+    // allocation is still on the row, so extending its expiry alone changes
+    // no occupancy.
+    if (alreadyLapsed && rowUnderCapacity) {
+      const err = new Error('reservation not found');
+      err.code = 'RESERVATION_NOT_FOUND';
+      throw err;
+    }
+    // One live hold per estimate (codex r4 P2). If this hold lapsed and the
+    // customer re-picked in another tab, reserveSlot legitimately minted a
+    // second row — it ignores expired ones — and this window-scoped probe
+    // cannot see a NON-overlapping rival on another date or time. Reviving
+    // here would leave one estimate holding two live slots, which
+    // reserveSlot explicitly supersedes, and /data could then surface the
+    // stale one instead of the customer's newer selection. The newer hold
+    // wins: this one stays dead and the caller re-picks.
+    if (alreadyLapsed) {
+      const rivalLiveHold = await trx('scheduled_services')
+        .where({ source_estimate_id: estimateId })
+        .whereNot({ id: row.id })
+        .whereNull('customer_id')
+        .whereNotNull('reservation_expires_at')
+        .andWhereRaw('reservation_expires_at > NOW()')
+        .first('id');
+      if (rivalLiveHold) {
+        const err = new Error('reservation not found');
+        err.code = 'RESERVATION_NOT_FOUND';
+        throw err;
+      }
+    }
+    // The SAME definitive validity checks commitReservation runs (codex r10
+    // P2). Occupancy alone is not enough: if the office de-listed the held
+    // technician or blacked the day out after the reserve, the commit refuses
+    // this hold — so answering 200 here would tell the customer their time
+    // was kept for up to an hour when confirmation is guaranteed to fail.
+    // Same error codes, so the route and client recovery are unchanged.
+    if (row.technician_id) {
+      try {
+        await assertAssignableTechnician(row.technician_id, { conn: trx });
+      } catch (eligErr) {
+        if (eligErr.code !== NOT_ASSIGNABLE) throw eligErr;
+        const err = new Error('slot technician is not available');
+        err.code = 'SLOT_UNAVAILABLE';
+        err.slotId = `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id}`;
+        throw err;
+      }
+    }
+    {
+      const { isBlackoutDate } = require('./scheduling/blackout-dates');
+      // Read THROUGH this transaction (codex r11 P2): a second pooled
+      // connection taken while this txn holds one lets concurrent extensions
+      // wait on each other's connections until the lookup fails open.
+      if (await isBlackoutDate(row.scheduled_date, trx)) {
+        const err = new Error('that day is no longer available');
+        err.code = 'RESERVATION_EXPIRED';
+        throw err;
+      }
+    }
+
+    // The rung-1 date lock acquired above is the same lock reserveSlot's
+    // refresh branch holds before probing.
+    const clash = rowUnderCapacity ? [] : await findConflictingVisits({
+      db: trx,
+      date: scheduledDate,
+      windowStart,
+      windowEnd,
+      excludeServiceIds: [row.id],
+      includeHolds: alreadyLapsed,
+      travel: { lat: row.lat ?? null, lng: row.lng ?? null },
+    });
+    if (clash.length) {
+      // Supersede — same narrow still-uncommitted predicate releaseReservation
+      // uses — rather than leave a hold extending is guaranteed to lose at
+      // commit occupying the window until it eventually expires.
+      // Same still-uncommitted predicate releaseReservation uses — shared,
+      // not re-typed (pre-push audit P1). releaseReservation itself can't be
+      // called here: it runs on the pool, and this txn already holds a FOR
+      // UPDATE lock on exactly this row, so it would deadlock against us.
+      await uncommittedHoldQuery(trx, { scheduledServiceId: row.id, estimateId }).del();
+      // Sentinel, not a throw (hold-grace self-audit): throwing here would roll the
+      // txn back INCLUDING this delete, leaving the superseded hold alive
+      // and consuming the window until expiry. Same pattern as reserveSlot's
+      // refresh branch — commit the delete, then raise outside.
+      return {
+        staleHoldSuperseded: true,
+        slotId: `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id || 'unassigned'}`,
+      };
+    }
+
+    // The capped no-op returns HERE, after the probe (codex r4 P2): a hold
+    // already sitting at its created_at + 60 ceiling recomputes the same
+    // expiry, and returning early skipped the occupancy check — so the page
+    // kept claiming a window a committed visit had since taken, and only the
+    // confirm found out. Every extension now answers the same supersede
+    // contract.
+    if (!(new Date(newExpiry).getTime() > new Date(row.reservation_expires_at).getTime())) {
+      // Idempotent: the requested extension would not move the expiry
+      // forward — hand back the unchanged row rather than no-op-writing.
+      return { scheduledServiceId: row.id, expiresAt: row.reservation_expires_at };
+    }
+
+    const [updated] = await trx('scheduled_services')
+      .where({ id: row.id })
+      .update({ reservation_expires_at: newExpiry })
+      .returning(['id', 'reservation_expires_at']);
+    const expiresAt = updated?.reservation_expires_at || newExpiry;
+    logger.info('[slot-reservation] extended hold', {
+      estimateId,
+      scheduledServiceId: row.id,
+      expiresAt: expiresAt instanceof Date ? expiresAt.toISOString() : expiresAt,
+    });
+    return { scheduledServiceId: updated?.id || row.id, expiresAt };
+  }).then((result) => {
+    if (result?.staleHoldSuperseded) {
+      const err = new Error('slot no longer available');
+      err.code = 'SLOT_UNAVAILABLE';
+      err.slotId = result.slotId;
+      throw err;
+    }
+    return result;
+  });
+}
+
 module.exports = {
   reserveSlot,
   prepareReservationCommit,
   commitReservation,
   releaseReservation,
   releaseExpiredReservations,
+  extendReservation,
+  // Commit-time grace window: RESERVATION_COMMIT_GRACE_MINUTES is the
+  // resolved-at-require-time default; commitGraceMinutes() is the call-time
+  // resolver every gate in this module actually uses — tests set
+  // process.env.RESERVATION_COMMIT_GRACE_MINUTES and call it fresh.
+  RESERVATION_COMMIT_GRACE_MINUTES,
+  commitGraceMinutes,
+  MAX_HOLD_MINUTES,
   // Canonical service_type normalization — appointment-reminders'
   // estimate-backed label recovery compares stored fall-through values
   // against this exact transform, so it must reuse it, never re-implement.

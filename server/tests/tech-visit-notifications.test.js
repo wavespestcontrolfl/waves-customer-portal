@@ -478,3 +478,131 @@ describe('formatWhen', () => {
     expect(formatWhen(null, '09:00', '11:00')).toBeNull();
   });
 });
+
+describe('formatPromisedWindow', () => {
+  const { formatPromisedWindow } = notices;
+  test('reads the promised window instants, in ET, same style as formatWhen', () => {
+    // 13:00Z / 15:00Z = 9 AM / 11 AM EDT.
+    expect(formatPromisedWindow('2026-09-10T13:00:00.000Z', '2026-09-10T15:00:00.000Z')).toBe('Thu Sep 10, 9–11 AM');
+  });
+  test('a service block shorter than the arrival promise does not shrink the rendered window', () => {
+    // The promise was 9-11 AM; a same-day service block of 9-10 AM (or any
+    // other mutable visit field) must never be consulted here — this
+    // function only ever sees the two promised instants (codex P1).
+    const promised = formatPromisedWindow('2026-09-10T13:00:00.000Z', '2026-09-10T15:00:00.000Z');
+    expect(promised).toBe('Thu Sep 10, 9–11 AM');
+    expect(promised).not.toContain('9–10 AM');
+  });
+  test('no end instant renders a single time, matching formatWhen', () => {
+    expect(formatPromisedWindow('2026-09-10T13:30:00.000Z', null)).toBe('Thu Sep 10, 9:30 AM');
+  });
+  test('no start instant is null', () => {
+    expect(formatPromisedWindow(null, '2026-09-10T15:00:00.000Z')).toBeNull();
+  });
+});
+
+
+describe('recordTrackingNotice (dedupe_key revival for an auto-superseded row)', () => {
+  const { recordTrackingNotice } = notices;
+  const techRow = { id: 'tech-a', employment_status: 'active', field_dispatchable: true };
+
+  beforeAll(() => { process.env.GATE_NOSHOW_DETECTOR = 'true'; });
+  afterAll(() => { delete process.env.GATE_NOSHOW_DETECTOR; });
+
+  // A -> B -> A across sweeps: trackingKey is deterministic (no-show-detector.js),
+  // so A's third-tick notice reuses the EXACT dedupe_key its own first-tick
+  // notice used. dedupe_key is a GLOBAL unique index (unlike dispatch_alerts'
+  // partial one), so once that row exists — dismissed or not — a plain insert
+  // always conflicts. The fix distinguishes the sweep's own auto-dismissal
+  // (payload.superseded_at stamped) from a tech's real Got-it tap (routes/
+  // tech-notifications.js /dismiss, /confirm-start — no stamp) and revives
+  // the same row only in the former case (codex P1, pre-push audit on
+  // f32a48e35).
+  function fakeTrx({ techResult = techRow, insertRows = [], reviveRows = [] } = {}) {
+    const first = jest.fn().mockResolvedValue(techResult);
+    const techWhere = jest.fn(() => ({ first }));
+    const technicians = { where: techWhere };
+
+    const insertReturning = jest.fn().mockResolvedValue(insertRows);
+    const insertIgnore = jest.fn(() => ({ returning: insertReturning }));
+    const onConflict = jest.fn(() => ({ ignore: insertIgnore }));
+    const insert = jest.fn(() => ({ onConflict }));
+
+    const reviveReturning = jest.fn().mockResolvedValue(reviveRows);
+    const reviveUpdate = jest.fn(() => ({ returning: reviveReturning }));
+    const reviveWhereRaw = jest.fn(() => ({ update: reviveUpdate }));
+    const reviveWhereNotNull = jest.fn(() => ({ whereRaw: reviveWhereRaw }));
+    const reviveWhere = jest.fn(() => ({ whereNotNull: reviveWhereNotNull }));
+    const techNotifications = { insert, where: reviveWhere };
+
+    const trx = jest.fn((name) => {
+      if (name === 'technicians') return technicians;
+      if (name === 'tech_notifications') return techNotifications;
+      throw new Error(`fake trx: unexpected table ${name}`);
+    });
+    trx.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    return {
+      trx, techWhere, first, insert, onConflict, insertIgnore, insertReturning,
+      reviveWhere, reviveWhereNotNull, reviveWhereRaw, reviveUpdate, reviveReturning,
+    };
+  }
+
+  const args = { visitId: 'visit-1', technicianId: 'tech-a', stage: 2, dedupeKey: 'tracking:visit-1:2026-09-10T13:00:00.000Z:2:tech_late:tech-a',
+    message: 'The promised window ended over 30 minutes ago; no arrival is recorded.', payload: { customer_name: 'Test Customer' } };
+
+  test('a plain insert (no conflict) never touches the revive path', async () => {
+    const mocks = fakeTrx({ insertRows: [{ id: 'row-1' }] });
+    const result = await recordTrackingNotice(mocks.trx, args);
+    expect(result).toMatchObject({ technicianId: 'tech-a', visitId: 'visit-1' });
+    expect(mocks.reviveWhere).not.toHaveBeenCalled();
+  });
+
+  test('a conflict with no matching dismissed+superseded row stays quiet (already active, or a human dismissed it)', async () => {
+    const mocks = fakeTrx({ insertRows: [], reviveRows: [] });
+    const result = await recordTrackingNotice(mocks.trx, args);
+    expect(result).toBeNull();
+    expect(mocks.reviveWhere).toHaveBeenCalledWith({ dedupe_key: args.dedupeKey });
+    expect(mocks.reviveWhereNotNull).toHaveBeenCalledWith('dismissed_at');
+    expect(mocks.reviveWhereRaw.mock.calls[0][0]).toMatch(/payload->>'superseded_at'.*IS NOT NULL/);
+  });
+
+  test('a conflict against an auto-superseded, dismissed row revives it in place', async () => {
+    const mocks = fakeTrx({ insertRows: [], reviveRows: [{ id: 'row-1' }] });
+    const result = await recordTrackingNotice(mocks.trx, args);
+    expect(result).toMatchObject({ technicianId: 'tech-a', visitId: 'visit-1' });
+    expect(mocks.reviveUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      technician_id: 'tech-a', message: args.message, payload: args.payload, read: false, dismissed_at: null,
+    }));
+  });
+
+  // codex P1 (pre-push audit on bb2ff6752): routes/tech-notifications.js's
+  // GET feed classifies freshness and orders its 20-row window by
+  // created_at. A revive that bumped only updated_at would keep the row's
+  // ORIGINAL created_at — a stage-2 tracking card re-alerted days after its
+  // first occurrence would still sort/classify as stale, not the fresh
+  // occurrence it actually is.
+  // The module's owner ruling (header, 2026-09-05) keeps push copy generic —
+  // a push lands on a lock screen, and the who/when wait inside the
+  // authenticated app. Round 1 put the customer's name in the tracking
+  // push title; round 5 took it back out and left it on the durable card.
+  test('the push title stays generic — the customer name rides the card, not the lock screen', async () => {
+    const mocks = fakeTrx({ insertRows: [{ id: 'row-1' }] });
+    const stage2 = await recordTrackingNotice(mocks.trx, args);
+    expect(stage2.pushTitle).toBe('A visit needs an arrival check');
+    expect(stage2.pushTitle).not.toMatch(/Test Customer/);
+    const stage1 = await recordTrackingNotice(fakeTrx({ insertRows: [{ id: 'row-2' }] }).trx, { ...args, stage: 1 });
+    expect(stage1.pushTitle).toBe('A visit window is underway');
+    // The identifying detail is still written to the row the tech feed renders.
+    expect(mocks.insert.mock.calls[0][0].payload).toEqual(args.payload);
+  });
+
+  test('a revive refreshes created_at, not just updated_at — the row reads as a fresh occurrence', async () => {
+    const mocks = fakeTrx({ insertRows: [], reviveRows: [{ id: 'row-1' }] });
+    await recordTrackingNotice(mocks.trx, args);
+    const updateArg = mocks.reviveUpdate.mock.calls[0][0];
+    expect(updateArg.created_at).toBeInstanceOf(Date);
+    expect(updateArg.updated_at).toBeInstanceOf(Date);
+    // Same instant for both — one revive is one "this is now" stamp, not two.
+    expect(updateArg.created_at.getTime()).toBe(updateArg.updated_at.getTime());
+  });
+});

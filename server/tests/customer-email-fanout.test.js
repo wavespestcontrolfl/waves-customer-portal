@@ -1486,7 +1486,9 @@ describe('r49 — review scope authority and lock-set symmetry', () => {
     await propagateCustomerEmailChange({ before: HOLD_BEFORE, after: HOLD_AFTER }, conn);
     const calls = conn.__calls;
     const advisoryIdx = calls
-      .map((c, i) => (c.table === '__raw' && String(c.arg.sql).includes('pg_advisory_xact_lock') ? i : -1))
+      // The call-snapshot locks (two bindings); the propagated address's own
+      // single-binding key is a different, later fence.
+      .map((c, i) => (c.table === '__raw' && String(c.arg.sql).includes('pg_advisory_xact_lock') && (c.arg.bindings || []).length === 2 ? i : -1))
       .filter((i) => i >= 0);
     const holdLockIdx = calls.findIndex((c) => c.table === 'first_touch_holds' && c.op === 'forUpdate');
     expect(advisoryIdx.length).toBe(2);

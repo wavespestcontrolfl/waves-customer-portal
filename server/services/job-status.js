@@ -325,6 +325,11 @@ async function buildPayloads(trx, jobId, fromStatus, toStatus, transitionedBy) {
 async function transitionJobStatus({
   jobId, fromStatus, toStatus, transitionedBy, lat, lng, notes, trx, notifyCustomer,
   cancelNoticeToken, legacyOutboundActivation, suppressTechNotice = false,
+  // A caller transitioning a BATCH of rows passes one Set and refreshes the
+  // affected routes once after its loop (dispatch-assignment.js
+  // flushDispatchQualityDates). Without it a 100-row bulk cancel would
+  // launch 100 concurrent route repair/measurement passes (codex #4295 r1 P2).
+  qualityDates = null,
 }) {
   if (!jobId || !toStatus || fromStatus === undefined) {
     throw new Error(
@@ -645,6 +650,13 @@ async function transitionJobStatus({
     // ordering easier to follow.
     emitToCustomer(customerId, customerPayload);
     emitToAdmins(adminPayload);
+    if (qualityDates) {
+      // The row's own day is what changed; the batch caller refreshes it once.
+      if (adminPayload?.scheduled_date) qualityDates.add(adminPayload.scheduled_date);
+      return;
+    }
+    void require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({ jobId, trx })
+      .catch(() => logger.error(`[job-status] route measurement failed for ${jobId}`));
   }
 
   function processCancelNoticeClaim() {

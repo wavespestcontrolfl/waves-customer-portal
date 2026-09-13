@@ -1,5 +1,14 @@
 import React, { useEffect, useState } from "react";
-import { Card, cn } from "../../components/ui";
+import {
+  Button,
+  Card,
+  Table,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TR,
+} from "../../components/ui";
 import { adminFetch } from "../../utils/admin-fetch";
 
 // Estimate performance by source (learning loop). Answers: do AI-drafted
@@ -73,38 +82,34 @@ export default function SourcePerformanceCard() {
           <div className="text-14 font-medium text-zinc-900">
             Estimate performance by source
           </div>
-          <div className="text-13 text-zinc-500">
-            Do AI drafts close like manual quotes — and how often do they go
-            out untouched?
+          <div className="text-ui-body text-zinc-500">
+            Do AI drafts close like manual quotes — and how often do they go out
+            untouched?
           </div>
         </div>
         <div className="flex gap-1">
           {DAY_OPTIONS.map((option) => (
-            <button
+            <Button
               key={option}
               type="button"
               onClick={() => setDays(option)}
-              className={cn(
-                "text-13 px-2 py-1 rounded-xs border-hairline",
-                option === days
-                  ? "bg-zinc-900 text-white"
-                  : "bg-white text-zinc-600 hover:bg-zinc-50",
-              )}
+              variant={option === days ? "primary" : "secondary"}
+              size="sm"
             >
               {option}d
-            </button>
+            </Button>
           ))}
         </div>
       </div>
 
-      {loading && <div className="text-13 text-zinc-500">Loading…</div>}
+      {loading && <div className="text-ui-body text-zinc-500">Loading…</div>}
       {error && (
-        <div className="text-13 text-zinc-500">
+        <div className="text-ui-body text-zinc-500">
           Couldn&apos;t load source performance ({error.message}).
         </div>
       )}
       {!loading && !error && data && sources.length === 0 && (
-        <div className="text-13 text-zinc-500">
+        <div className="text-ui-body text-zinc-500">
           No estimates in the last {days} days.
         </div>
       )}
@@ -112,99 +117,103 @@ export default function SourcePerformanceCard() {
       {!loading && !error && sources.length > 0 && (
         <div className="grid gap-4 md:grid-cols-2">
           <div>
-            <div className="text-13 text-zinc-500 mb-1">
-              Funnel and close rate ({data.drafted} drafted,{" "}
-              {data.resolved} resolved)
+            <div className="text-ui-body text-zinc-500 mb-1">
+              Funnel and close rate ({data.drafted} drafted, {data.resolved}{" "}
+              resolved)
             </div>
-            <table className="w-full text-13">
-              <thead>
-                <tr className="text-zinc-500">
-                  <th className="text-left font-normal py-1">Source</th>
-                  <th className="text-right font-normal py-1">Drafted</th>
-                  <th className="text-right font-normal py-1">Sent</th>
-                  <th className="text-right font-normal py-1">Win rate</th>
-                  <th className="text-right font-normal py-1">Hrs to send</th>
-                </tr>
-              </thead>
-              <tbody>
+            <Table>
+              <THead>
+                <TR className="text-zinc-500">
+                  <TH className="text-left font-normal py-1">Source</TH>
+                  <TH className="text-right font-normal py-1">Drafted</TH>
+                  <TH className="text-right font-normal py-1">Sent</TH>
+                  <TH className="text-right font-normal py-1">Win rate</TH>
+                  <TH className="text-right font-normal py-1">Hrs to send</TH>
+                </TR>
+              </THead>
+              <TBody>
                 {sources.map((row) => (
-                  <tr
+                  <TR
                     key={row.source}
                     className="border-b border-hairline last:border-0"
                   >
-                    <td className="py-1 text-zinc-700">
+                    <TD className="py-1 text-zinc-700">
                       {SOURCE_LABELS[row.source] || row.source}
-                    </td>
-                    <td className="py-1 text-right text-zinc-900">
+                    </TD>
+                    <TD className="py-1 text-right text-zinc-900">
                       {row.drafted}
-                    </td>
-                    <td className="py-1 text-right text-zinc-900">{row.sent}</td>
-                    <td className="py-1 text-right font-medium text-zinc-900">
+                    </TD>
+                    <TD className="py-1 text-right text-zinc-900">
+                      {row.sent}
+                    </TD>
+                    <TD className="py-1 text-right font-medium text-zinc-900">
                       {pct(row.winRatePct)}
                       <span className="text-zinc-500"> (n={row.resolved})</span>
-                    </td>
-                    <td className="py-1 text-right text-zinc-900">
+                    </TD>
+                    <TD className="py-1 text-right text-zinc-900">
                       {num(row.sendLatencyHoursMedian)}
-                    </td>
-                  </tr>
+                    </TD>
+                  </TR>
                 ))}
-              </tbody>
-            </table>
+              </TBody>
+            </Table>
           </div>
 
           <div>
-            <div className="text-13 text-zinc-500 mb-1">
+            <div className="text-ui-body text-zinc-500 mb-1">
               AI drafts — how much editing before send?
             </div>
             {aiSources.length === 0 && (
-              <div className="text-13 text-zinc-500">
+              <div className="text-ui-body text-zinc-500">
                 No AI-drafted estimates sent in this window yet.
               </div>
             )}
             {aiSources.length > 0 && (
-              <table className="w-full text-13">
-                <thead>
-                  <tr className="text-zinc-500">
-                    <th className="text-left font-normal py-1">Source</th>
-                    <th className="text-right font-normal py-1">Sent as-is</th>
-                    <th className="text-right font-normal py-1">Avg revises</th>
-                    <th className="text-right font-normal py-1">Price edited</th>
-                    <th className="text-right font-normal py-1">
+              <Table>
+                <THead>
+                  <TR className="text-zinc-500">
+                    <TH className="text-left font-normal py-1">Source</TH>
+                    <TH className="text-right font-normal py-1">Sent as-is</TH>
+                    <TH className="text-right font-normal py-1">Avg revises</TH>
+                    <TH className="text-right font-normal py-1">
+                      Price edited
+                    </TH>
+                    <TH className="text-right font-normal py-1">
                       Services edited
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
+                    </TH>
+                  </TR>
+                </THead>
+                <TBody>
                   {aiSources.map((row) => (
-                    <tr
+                    <TR
                       key={row.source}
                       className="border-b border-hairline last:border-0"
                     >
-                      <td className="py-1 text-zinc-700">
+                      <TD className="py-1 text-zinc-700">
                         {SOURCE_LABELS[row.source] || row.source}
-                      </td>
-                      <td className="py-1 text-right font-medium text-zinc-900">
+                      </TD>
+                      <TD className="py-1 text-right font-medium text-zinc-900">
                         {pct(row.edits.sentUneditedPct)}
                         <span className="text-zinc-500">
                           {" "}
                           (n={row.edits.events})
                         </span>
-                      </td>
-                      <td className="py-1 text-right text-zinc-900">
+                      </TD>
+                      <TD className="py-1 text-right text-zinc-900">
                         {num(row.edits.avgReviseCount)}
-                      </td>
-                      <td className="py-1 text-right text-zinc-900">
+                      </TD>
+                      <TD className="py-1 text-right text-zinc-900">
                         {row.edits.totalsChanged}
-                      </td>
-                      <td className="py-1 text-right text-zinc-900">
+                      </TD>
+                      <TD className="py-1 text-right text-zinc-900">
                         {row.edits.servicesChanged}
-                      </td>
-                    </tr>
+                      </TD>
+                    </TR>
                   ))}
-                </tbody>
-              </table>
+                </TBody>
+              </Table>
             )}
-            <div className="text-13 text-zinc-500 mt-2">
+            <div className="text-ui-body text-zinc-500 mt-2">
               Edit stats start accumulating from first send after this ships —
               older sends have no baseline.
             </div>

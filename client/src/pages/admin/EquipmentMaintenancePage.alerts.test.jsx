@@ -2,7 +2,7 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { MemoryRouter } from 'react-router-dom';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import EquipmentMaintenancePage from './EquipmentMaintenancePage';
 const ok = body => ({ ok: true, json: async () => body });
@@ -63,11 +63,12 @@ it('keeps loaded fleet data visible when a post-save refresh fails', async () =>
  fireEvent.change(input, { target: { value: 'Blade sharpening' } });
  failReads = true;
  fireEvent.click(screen.getByRole('button', { name: 'Save Record' }));
- await screen.findByText(/Could not refresh fleet/);
+ const fleetNotice = (await screen.findByText(/Could not refresh fleet/)).closest('[role="alert"]');
  expect(screen.getByText(eq.name)).toBeInTheDocument();
  expect(screen.getByText(/4 Active Alerts/)).toBeInTheDocument();
  failReads = false;
- fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+ // The expanded card's own detail retry also renders 'Try again'; scope to the fleet notice.
+ fireEvent.click(within(fleetNotice).getByRole('button', { name: 'Try again' }));
  await waitFor(() => expect(screen.queryByText(/Could not refresh fleet/)).not.toBeInTheDocument());
  expect(screen.getByText(eq.name)).toBeInTheDocument();
 });

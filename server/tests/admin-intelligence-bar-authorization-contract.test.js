@@ -237,6 +237,38 @@ describe('W0B authorization contract', () => {
   });
 });
 
+/**
+ * Source-level invariant (pre-push audit P1). The merge drift pins are
+ * route-owned: /confirm-action assigns _approved_versions/_approved_effects
+ * from the LIVE re-run preview and from nowhere else. Stored action.params
+ * originate in the model's tool input and merge_customers' input_schema does
+ * not set additionalProperties:false, so the handler drops any inbound copy
+ * before its own assignment. This asserts the ordering rather than driving
+ * the route (the lifecycle module is not mocked in this harness); the
+ * behavioural half — that executeMerge honours exactly the pins it is
+ * handed — is covered in intelligence-bar-customer-lifecycle.test.js.
+ */
+describe('merge drift pins are route-owned', () => {
+  const source = require('fs').readFileSync(require.resolve('../routes/admin-intelligence-bar.js'), 'utf8');
+  test('/confirm-action deletes any inbound _approved_* before assigning its own', () => {
+    const handler = source.split('const execParams = { ...action.params };')[1];
+    expect(handler).toBeDefined();
+    const dropVersions = handler.indexOf('delete execParams._approved_versions;');
+    const dropEffects = handler.indexOf('delete execParams._approved_effects;');
+    const assign = handler.indexOf('execParams._approved_versions = {');
+    expect(dropVersions).toBeGreaterThan(-1);
+    expect(dropEffects).toBeGreaterThan(-1);
+    expect(dropVersions).toBeLessThan(assign);
+    expect(dropEffects).toBeLessThan(assign);
+  });
+  test('the live re-run preview is the only source of the pins', () => {
+    // Exactly one assignment of each, both off livePreview.
+    expect(source.match(/execParams\._approved_versions = /g)).toHaveLength(1);
+    expect(source.match(/execParams\._approved_effects = /g)).toHaveLength(1);
+    expect(source).toContain('execParams._approved_versions = { winner: String(livePreview.winner_version), loser: String(livePreview.loser_version) };');
+  });
+});
+
 describe('W0B cancel_appointment is not card-confirmable', () => {
   beforeEach(() => jest.clearAllMocks());
   test('every cancel proposal is refused and routed to the Dispatch screen — no pending action, no execution', async () => {

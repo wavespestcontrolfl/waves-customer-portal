@@ -288,6 +288,11 @@ async function propagateCustomerEmailChange({
       .where((q) => q.whereNull('status').orWhereNotIn('status', TERMINAL_LEAD_STATUSES))
       .update({ email: newEmail, updated_at: now });
 
+    // The propagated address is an ownership source for the bounce recovery
+    // (estimates.customer_email, notification_prefs.billing_email): its key
+    // is held while these rows change (re-entrant when the caller's claim
+    // guard already took it).
+    await require('../utils/customer-comms-lock').lockCustomerEmail(conn, newEmail);
     counts.estimates += await conn('estimates')
       .where({ customer_id: customerId })
       .whereRaw('LOWER(customer_email) = ?', [oldEmail])
@@ -1602,7 +1607,7 @@ async function applyCustomerUpdatesWithEmailClaimGuard({
         if (Object.keys(rest).length) await trx('customers').where({ id: customerId }).update(rest);
         return { emailApplied: false, emailDroppedReason: 'email filled concurrently' };
       }
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`customer-email:${emailKeyNorm}`]);
+      await require('../utils/customer-comms-lock').lockCustomerEmail(trx, emailKeyNorm);
       // MERGE-SPECIFIC evidence, not global uniqueness (r38 — the same
       // ruling every other claimant site adopted): customers.email is
       // deliberately non-unique, so a spouse/tenant/shared-household

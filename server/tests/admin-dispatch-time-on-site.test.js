@@ -372,7 +372,7 @@ describe('route wiring contracts', () => {
     expect(source).toMatch(/if \(livePlan\.error\) \{\s*\n\s*return \(\{ status: livePlan\.status, body: livePlan\.error \}\);/);
     const backfillPlanAt = source.indexOf('backfillCompletionPlan({ backfill, scheduledDate: svc.scheduled_date');
     const livePlanAt = source.indexOf('const livePlan = liveTimeOnSitePlan(');
-    const completionTrxAt = source.indexOf('const completionEndedAt = new Date();');
+    const completionTrxAt = source.indexOf('const completionEndedAt = packetRecords');
     expect(backfillPlanAt).toBeGreaterThan(-1);
     expect(livePlanAt).toBeGreaterThan(backfillPlanAt);
     expect(completionTrxAt).toBeGreaterThan(livePlanAt);
@@ -1059,7 +1059,7 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     // The live-override completion reuses the SAME fenced sync (audit
     // round 20c) — gated off backfills, on for numeric corrected minutes,
     // idempotent on crash-resumed retries.
-    expect(source).toMatch(/if \(!isBackfillCompletion && typeof effectiveTimeOnSite === 'number'\) \{\s*\n\s*completionTimerSync = await syncLinkedJobTimer\(\{/);
+    expect(source).toMatch(/if \(!packetDurationAllocation && !isBackfillCompletion && typeof effectiveTimeOnSite === 'number'\) \{\s*\n\s*completionTimerSync = await syncLinkedJobTimer\(\{/);
     expect((source.match(/\.\.\.\(completionTimerSync\.corrected != null \? \{ timeEntryCorrected: completionTimerSync\.corrected \} : \{\}\),/g) || []).length).toBe(2);
     const timerLockAt = source.indexOf("await timerTrx('scheduled_services').where({ id: serviceId }).forUpdate().first();");
     const timerEditAt = source.indexOf("await require('../services/time-tracking').adminEditEntry(");
@@ -1080,8 +1080,38 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
 
   test('a ledgered visit whose in-transaction tier reread errors aborts retryably instead of freezing the handler-entry tier (codex #4113 P2)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
-    expect(source).toMatch(/\} catch \{ snapshotCustomer = null; \}\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(lawnLedgerVisit && waveguardPlan && !snapshotCustomer\) \{[^}]*err\.statusCode = 409;[^}]*err\.code = 'VISIT_TIER_UNVERIFIED';\s*throw err;\s*\}/);
+    expect(source).toMatch(/\} catch \{ snapshotCustomer = null; \}\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(\(lawnLedgerVisit \|\| waveguardCloseout\) && waveguardPlan && !snapshotCustomer\) \{[^}]*err\.statusCode = 409;[^}]*err\.code = 'VISIT_TIER_UNVERIFIED';\s*throw err;\s*\}/);
     expect(source).toMatch(/if \(lawnLedgerVisit && waveguardPlan\s*&& String\(snapshotCustomer\.waveguard_tier \|\| ''\) !== String\(waveguardPlan\.propertyGate\?\.serviceTier \|\| ''\)\) \{/);
+  });
+
+  test('a ledgered visit rechecks the billing lane under the customer share lock and aborts retryably when billing_mode changed mid-flight (codex #4365 P2)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    expect(source).toMatch(/if \(\(lawnLedgerVisit \|\| waveguardCloseout\) && waveguardPlan && billingModeColumnsExist\s*&& String\(snapshotCustomer\.billing_mode \|\| ''\) !== String\(waveguardPlan\.propertyGate\?\.billingMode \|\| ''\)\) \{[^}]*err\.statusCode = 409;[^}]*err\.code = 'VISIT_BILLING_LANE_CHANGED';\s*throw err;\s*\}/);
+    // Reads the column the same reread already selects (billing_mode), after the tier check.
+    const tierAt = source.indexOf("err.code = 'VISIT_TIER_CHANGED';");
+    const laneAt = source.indexOf("err.code = 'VISIT_BILLING_LANE_CHANGED';");
+    expect(tierAt).toBeGreaterThan(-1);
+    expect(laneAt).toBeGreaterThan(tierAt);
+  });
+
+  test('the closeout stamps lawn_protocol_* assignment fields only when the plan attributes a program — a legacy tier on an explicit per_visit / one_time lane cannot mint an assignment (codex #4365 r2 P2)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    expect(source).toMatch(/require\('\.\.\/services\/lawn-completion-defaults'\)/);
+    expect(source).toMatch(/const \{ [^}]*lawnPlanProgramApplies[^}]* \} = require\('\.\.\/services\/lawn-completion-defaults'\);/);
+    expect(source).toMatch(/if \(!isIncompleteVisit && isWaveGuardLawnCompletion\(svc\) && waveguardPlan\?\.protocol\?\.structured\s*&& lawnPlanProgramApplies\(waveguardPlan\)\) \{\s*const structured = waveguardPlan\.protocol\.structured;[\s\S]{0,400}scheduledServiceUpdate\.lawn_protocol_key = /);
+    // No other stamp of the assignment fields bypasses the predicate.
+    expect(source.match(/scheduledServiceUpdate\.lawn_protocol_assignment_source = /g)).toHaveLength(1);
+  });
+
+  test('the closeout passes its billing_mode column probe to the planner so a pre-migration schema still plans (codex #4365 r3 P2)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    expect(source).toMatch(/buildPlanForService\(svc\.id, \{[^}]*billingModeColumnExists: billingModeColumnsExist,[^}]*\}\)/);
+    // A failed handler-entry probe stays closed for the closeout (retryable 409) before any plan build (codex #4365 r6 P2).
+    expect(source).toMatch(/if \(billingModeProbeFailed\) \{[^}]*err\.statusCode = 409;[^}]*err\.code = 'VISIT_BILLING_LANE_UNVERIFIED';\s*throw err;\s*\}\s*waveguardPlan = await savepointScope\(db, \(database\) => buildPlanForService\(svc\.id, \{/);
+    // Only the billing-lane probe's own failure blocks the closeout; a failed provenance probe does not (codex #4365 r7 P2).
+    expect(source).toMatch(/\} catch \{ billingModeProbeFailed = true; customerColumnsProbeFailed = true;[^}]*\}\s*try \{\s*customerTierSourceColumnExists = await savepointRead\(db, \(k\) => k\.schema\.hasColumn\('customers', 'waveguard_tier_source'\)\);\s*\} catch \{ customerColumnsProbeFailed = true;/);
+    // The legacy (gate-off) writer path shares the program predicate with the stamp (codex #4365 r6 P2).
+    expect(source).toMatch(/plan: waveguardPlan && !\(lawnLedgerVisit \? lawnPlanAttributesVisit\(waveguardPlan\) : lawnPlanProgramApplies\(waveguardPlan\)\)\s*\? \{ \.\.\.waveguardPlan, protocol: null \} : waveguardPlan,/);
   });
 
   test('a ledgered visit whose planner fails drops assignment-derived equipment IDs instead of recording the unverified rig (codex #4113 P2)', () => {
@@ -1150,7 +1180,7 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     // fields), and its stamped minutes outrank a plain stale-timer elapsed
     // in this request — explicit adjusted/backfill values keep authority.
     expect(source).toMatch(/for \(const field of \[\s*\n\s*'actual_end_time', 'check_out_time', 'completed_at',\s*\n\s*'service_time_minutes', 'actual_duration_minutes',\s*\n\s*'time_on_site_adjusted_minutes', 'time_on_site_correction_seq',\s*\n\s*\]\) \{\s*\n\s*if \(field in lockedSvcRow\) svc\[field\] = lockedSvcRow\[field\];/);
-    expect(source).toMatch(/if \(Number\.isFinite\(stampedMinutes\) && stampedMinutes > 0\s*\n\s*&& \(stampMovedMidFlight\s*\n\s*\|\| \(!isBackfillCompletion && !liveAdjustedTimeOnSite\s*\n\s*&& typeof effectiveTimeOnSite !== 'number'\)\)\) \{\s*\n\s*effectiveTimeOnSite = stampedMinutes;\s*\n\s*correctionPreservedMidFlight = true;/);
+    expect(source).toMatch(/if \(Number\.isFinite\(stampedMinutes\) && stampedMinutes > 0\s*\n\s*&& \(stampMovedMidFlight\s*\n\s*\|\| \(!isBackfillCompletion && !liveAdjustedTimeOnSite\s*\n\s*&& \(packetRecords \|\| typeof effectiveTimeOnSite !== 'number'\)\)\)\) \{\s*\n\s*effectiveTimeOnSite = stampedMinutes;\s*packetDurationAllocation = null;\s*correctionPreservedMidFlight = true;/);
     // The reconcile block sits between the lock and the wall-clock capture.
     const lockAt = source.indexOf("const lockedSvcRow = await trx('scheduled_services')");
     const preserveAt = source.indexOf('correctionPreservedMidFlight = true;');
@@ -1555,7 +1585,7 @@ describe('job costing durable re-derivation from the timeOnSiteAdjusted marker',
   // entry span. Same durable-policy shape as the backfill marker above it.
   test('calculateJobCost re-derives overrideLaborMinutes from the persisted marker + corrected column', () => {
     expect(costingSource).toMatch(/if \(recordNotes\.timeOnSiteAdjusted === true && overrideLaborMinutes == null\) \{\s*\n\s*const correctedMinutes = Number\(svc\.service_time_minutes\);\s*\n\s*if \(Number\.isFinite\(correctedMinutes\) && correctedMinutes > 0\) \{\s*\n\s*overrideLaborMinutes = correctedMinutes;/);
-    expect(costingSource).toMatch(/\{ untrustedLifecycleSpan, explicitLaborMinutes, overrideLaborMinutes \},/);
+    expect(costingSource).toMatch(/\{ untrustedLifecycleSpan, explicitLaborMinutes, overrideLaborMinutes, allocatedLaborMinutes \},/);
     // The override is checked BEFORE the direct job-entries lookup.
     const overrideAt = costingSource.indexOf('const override = Number(overrideLaborMinutes);');
     const entriesAt = costingSource.indexOf("await db('time_entries')");
@@ -1612,7 +1642,7 @@ describe('job costing durable re-derivation from the timeOnSiteAdjusted marker',
     // lock in the SAME transaction as both financial writes — no window
     // between check and write remains.
     expect(costingSource).toMatch(/await db\.transaction\(async \(trx\) => \{\s*\n\s*const rowNow = await trx\('scheduled_services'\)\.where\(\{ id: scheduledServiceId \}\)\.forUpdate\(\)\.first\(\);/);
-    const fenceAt = costingSource.indexOf('correction stamp moved during recalculation');
+    const fenceAt = costingSource.indexOf('costing inputs moved during recalculation');
     const jobCostsWriteAt = costingSource.indexOf("await trx('job_costs').insert(row);");
     const writeThroughAt = costingSource.indexOf("await trx('service_records').where({ id: record.id }).update(upd);");
     expect(fenceAt).toBeGreaterThan(-1);

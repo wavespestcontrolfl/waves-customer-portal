@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { parse } from "@babel/parser";
 
 import {
   CROSS_KEY_COMPLETED_MESSAGE,
@@ -164,6 +166,26 @@ describe("live admin time-on-site override (forgotten-closeout fix)", () => {
     expect(completionPreferencesNeedDraft({ adjustedTimeOnSite: "45" })).toBe(true);
     expect(completionPreferencesNeedDraft({ adjustedTimeOnSite: "  " })).toBe(false);
     expect(completionPreferencesNeedDraft({ adjustedTimeOnSite: "" })).toBe(false);
+  });
+});
+
+describe("prepared combined-visit time on site", () => {
+  it("omits the automatic shared timer while ordinary completion keeps it", () => {
+    expect(
+      completionTimeOnSiteBody({ backfill: false, elapsed: "0:42:18", preparing: true }),
+    ).toEqual({});
+    expect(
+      completionTimeOnSiteBody({ backfill: false, elapsed: "0:42:18", preparing: false }),
+    ).toEqual({ timeOnSite: "0:42:18" });
+  });
+
+  it("retains explicit live and backfill minutes on prepared member forms", () => {
+    expect(
+      completionTimeOnSiteBody({ backfill: false, elapsed: "0:42:18", adjustedMinutes: "15", preparing: true }),
+    ).toEqual({ timeOnSite: 15 });
+    expect(
+      completionTimeOnSiteBody({ backfill: true, elapsed: "412:07:33", typedMinutes: "30", preparing: true }),
+    ).toEqual({ timeOnSite: 30 });
   });
 });
 
@@ -374,11 +396,37 @@ describe("completion status-poll plan", () => {
 // one of them, not just the original invoice-mint code (codex P1 #3745 r3 —
 // service_report_token_mint_failed fell to the generic error path).
 describe("completionResumeOwedError", () => {
+  it("covers every server 503 carrying a committed service record", () => {
+    const source = readFileSync(new URL('../../../../server/services/complete-scheduled-service.js', import.meta.url), 'utf8');
+    const ast = parse(source, { sourceType: 'script' });
+    const codes = new Set();
+    const property = (node, name) => node?.properties?.find((entry) => entry.key?.name === name)?.value;
+    function visit(node) {
+      if (!node || typeof node !== 'object') return;
+      if (node.type === 'ObjectExpression' && property(node, 'status')?.value === 503) {
+        const body = property(node, 'body');
+        if (property(body, 'serviceRecordId')) codes.add(property(body, 'code')?.value);
+      }
+      Object.values(node).forEach((value) => {
+        if (Array.isArray(value)) value.forEach(visit);
+        else if (value && typeof value === 'object') visit(value);
+      });
+    }
+    visit(ast);
+    expect(codes.size).toBeGreaterThan(0);
+    for (const code of codes) expect(completionResumeOwedError({ status: 503, code }), code).toBe(true);
+  });
+
   it("recognises every committed-but-not-finalized 503 the route emits", () => {
     for (const code of [
       "backfill_invoice_mint_failed",
       "service_report_token_mint_failed",
       "completion_sms_send_failed",
+      "terminal_invoice_lookup_failed",
+      "historic_setup_fee_alert_failed",
+      "unminted_setup_fee_lookup_failed",
+      "terminal_invoice_manual_billing_alert_failed",
+      "unminted_setup_fee_alert_failed",
     ]) {
       expect(completionResumeOwedError({ status: 503, code })).toBe(true);
     }

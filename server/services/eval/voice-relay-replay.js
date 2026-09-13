@@ -105,11 +105,22 @@ const WRITE_TOOLS = Object.freeze(Object.keys(TOOL_EFFECT));
 // send you a receipt" is service guidance, not a commitment the office must
 // have on file. A definite progressive ("the office is calling you shortly",
 // "someone is emailing the estimate") presents the follow-up as already
-// under way, which commits the office just as "will" does.
+// under way, which commits the office just as "will" does — and so does a
+// FUTURE progressive ("we will be calling you", "the office is going to be
+// reaching out"): PROMISE_VERB_ING is the same -ing vocabulary
+// PROMISE_PROGRESSIVE already names, shared here so "will be calling"
+// promises exactly what "will call" and "is calling" already do.
 const PROMISE_SUBJECT = "(?:i|we|they|the office|the team|someone|(?:a |the )?(?:waves )?team member)";
 const PROMISE_MODAL = "(?:['’]ll| will|(?:['’](?:m|re)| is| are| am)? (?:going to|gonna))";
-const PROMISE_PROGRESSIVE = "(?:['’](?:m|re)| is| are| am) (?:calling|texting|emailing|reaching out|following up|sending|getting back|contacting|giving you a (?:call|ring|shout)(?: back)?)";
-const PROMISE_RE = new RegExp(`\\b(?:${PROMISE_SUBJECT}(?:${PROMISE_MODAL} (?:call|text|email|reach out|follow up|send|get back|contact|be in touch|give you a (?:call|ring|shout)(?: back)?)|${PROMISE_PROGRESSIVE})|` + String.raw`(?:i|we)(?:['’]ll| will) (?:(?:ask|get|arrange for) (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) to (?:call|text|email|reach out|follow up|get back|give you a (?:call|ring|shout)(?: back)?)|have (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:call|text|email|reach out|follow up|get back|give you a (?:call|ring|shout)(?: back)?)|make sure (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:calls?|texts?|emails?|reaches? out|follows? up|gets? back|gives? you a (?:call|ring|shout)(?: back)?)|note (?:your|the|a) (?:callback|call-back|follow-up) request|let (?:the office|(?:a |the )?(?:waves )?team member|the team) know|pass (?:this|that|it|your (?:message|request)) (?:on|along) to (?:the office|(?:a |the )?(?:waves )?team member|the team))|(?:you'?ll|you will) (?:hear (?:from|back)|(?:get|receive) (?:a |an |the |your )?(?:call|callback|call-back|text|email|message|written estimate|estimate|quote|details))|(?:le|te|les) (?:llamar(?:é|emos|á|án)?|devolver(?:é|emos|á|án)?|enviar(?:é|emos|á|án)?|contactar(?:é|emos|á|án)?|dar(?:é|emos|á|án)?)|se comunicar)\b`, 'i');
+const PROMISE_VERB_ING = "(?:calling|texting|emailing|reaching out|following up|sending|getting back|contacting|giving you a (?:call|ring|shout)(?: back)?)";
+const PROMISE_PROGRESSIVE = `(?:['’](?:m|re)| is| are| am) ${PROMISE_VERB_ING}`;
+// An adverb may sit between the modal and "be" (and between "be" and the
+// -ing verb) in a future-progressive promise — "will definitely be calling
+// you", "will shortly be reaching out" — without opening the door to a
+// filler WORD standing in for "be": only an -ly adverb, and only ahead of
+// the literal "be", counts.
+const PROMISE_ADVERB = '(?:\\w+ly\\s+)?';
+const PROMISE_RE = new RegExp(`\\b(?:${PROMISE_SUBJECT}(?:${PROMISE_MODAL} (?:${PROMISE_ADVERB}be ${PROMISE_ADVERB}${PROMISE_VERB_ING}|call|text|email|reach out|follow up|send|get back|contact|be in touch|give you a (?:call|ring|shout)(?: back)?)|${PROMISE_PROGRESSIVE})|` + String.raw`(?:i|we)(?:['’]ll| will) (?:(?:ask|get|arrange for) (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) to (?:call|text|email|reach out|follow up|get back|give you a (?:call|ring|shout)(?: back)?)|have (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:call|text|email|reach out|follow up|get back|give you a (?:call|ring|shout)(?: back)?)|make sure (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:calls?|texts?|emails?|reaches? out|follows? up|gets? back|gives? you a (?:call|ring|shout)(?: back)?)|note (?:your|the|a) (?:callback|call-back|follow-up) request|let (?:the office|(?:a |the )?(?:waves )?team member|the team) know|pass (?:this|that|it|your (?:message|request)) (?:on|along) to (?:the office|(?:a |the )?(?:waves )?team member|the team))|(?:you'?ll|you will) (?:hear (?:from|back)|(?:get|receive) (?:a |an |the |your )?(?:call|callback|call-back|text|email|message|written estimate|estimate|quote|details))|(?:le|te|les) (?:llamar(?:é|emos|á|án)?|devolver(?:é|emos|á|án)?|enviar(?:é|emos|á|án)?|contactar(?:é|emos|á|án)?|dar(?:é|emos|á|án)?)|se comunicar)\b`, 'i');
 // Commitments are graded per clause: a negation or condition governs only the
 // promise in ITS clause ("I cannot access your schedule, so we will call you
 // back" and "I can't access that, the office will call you" still commit),

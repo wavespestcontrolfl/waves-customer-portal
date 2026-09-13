@@ -22,25 +22,18 @@ const path = require('path');
 // What to scan
 // =========================================================================
 const ROOT = path.join(__dirname, '..');
+// The policy is repo-wide — "nothing under 14px on a glass surface" (waves-design
+// hard lines). The gate used to name seven directories, which meant the rule was
+// only enforced where someone had remembered to add a path: SecurePlanChoice
+// shipped 13px on /secure and the 09-07 audit's NotificationBell / InstallPrompt
+// / NewsletterSignup findings were invisible to CI. Owner ruling C8
+// (DECISIONS 2026-09-11) makes the scan repo-wide, so a NEW customer file is
+// covered the moment it is written rather than when someone widens this list.
+// What is genuinely not a customer surface is excluded below by name, and the
+// legacy debt that this widening exposed is enumerated in LEGACY_BASELINE —
+// visible and counted, instead of hidden behind a missing directory.
 const SCAN_DIRS = [
-  path.join(ROOT, 'client/src/pages'),
-  path.join(ROOT, 'client/src/components/billing'),
-  path.join(ROOT, 'client/src/components/customer'),
-  path.join(ROOT, 'client/src/components/brand'),
-  // The cookie notice on /book and /pay lives here (UI audit F0107).
-  path.join(ROOT, 'client/src/components/analytics'),
-  // Customer-facing /book widgets — the 13px chips fixed on the 07-07 portal
-  // audit (F-057) lived here unscanned. components/estimate is NOT listed:
-  // it carries ~35 legacy violations (13px labels, star glyphs, W tokens)
-  // that need their own cleanup pass before the gate can cover it.
-  path.join(ROOT, 'client/src/components/booking'),
-  // The V2 report bodies (lawn / pest / mosquito / cockroach / tree & shrub)
-  // and the gauge primitives — swept onto the sheet with #3895.
-  path.join(ROOT, 'client/src/components/report'),
-  // Portal-only components (cancel flow, cancelled plan): the button-weight
-  // rule removal on #3971 exposed 800/850 weights here that the gate could
-  // not see.
-  path.join(ROOT, 'client/src/components/portal'),
+  path.join(ROOT, 'client/src'),
 ];
 // Files explicitly excluded — dev-only demos, theme tokens themselves, etc.
 const EXCLUDED_FILES = new Set([
@@ -57,12 +50,81 @@ const EXCLUDED_FILES = new Set([
   'AdminLoginPage.jsx', // admin surface that happens to live in pages/
   'TechCapturePreview.jsx', // tech-portal preview harness in pages/
 ]);
+// theme-brand.js is NOT excluded. It exports customer tokens — BUTTON_BASE is
+// spread into portal controls, GOLD_CTA into the estimate slot picker — so a
+// wholesale exclusion would hide a weight regression in the shared tokens from
+// the very gate that exists to catch it. Only `local-palette` is exempt there,
+// because that file IS the palette every other file is told to import; every
+// other rule applies, and what it carries today is in LEGACY_BASELINE.
+const PALETTE_RULE_EXEMPT = 'client/src/theme-brand.js';
 // Filename prefixes that belong to the admin/tech surfaces — separate design
 // system (D palette + DM Sans + density-first, per admin brief), NOT subject
 // to the customer brand rules this script enforces.
 const NON_CUSTOMER_FILENAME_PREFIXES = ['Admin', 'Tech', 'Dispatch', 'Inventory', 'Revenue', 'Compliance', 'Protocol'];
 // Any file inside these dirs is out of scope.
-const EXCLUDED_DIR_HINTS = ['/admin/', '/tech/', '/dispatch/', '/equipment/'];
+const EXCLUDED_DIR_HINTS = [
+  '/admin/', '/tech/', '/dispatch/', '/equipment/',
+  // Imported only by pages/admin/* — the Dispatch calendar, its mobile sheets
+  // and the scheduling modals. Admin design system (D palette + DM Sans +
+  // density-first), same as the prefixes above.
+  '/schedule/',
+  '/dashboard/',
+  // Staff document library, mounted on a staff route and authored on D.
+  '/staffDocuments/',
+  // Developer visual-QA harnesses, never shipped to a customer — the same
+  // exemption ButtonExamples.jsx already has by name.
+  '/dev-preview/',
+];
+
+// =========================================================================
+// Legacy baseline — the debt the repo-wide scan exposed (owner ruling C8)
+// =========================================================================
+// Widening SCAN_DIRS to `client/src` surfaced 76 pre-existing violations in 21
+// customer files. Excluding their directories is what hid them in the first
+// place, so they are enumerated here instead, with the count each file is
+// allowed to carry. The gate fails if a file exceeds its number, so this list
+// can only shrink: you may not add a violation to a file that already has
+// some, and a file not listed here gets zero tolerance. It also fails on a
+// stale entry — clean up a file and the gate tells you to delete its line.
+//
+// These are NOT exemptions. They are R3 and R4 work in the Liquid Glass audit:
+// - estimate/* is the ~35-item legacy cluster the old SCAN_DIRS comment
+//   described (13px labels, ★ glyphs, the local W palette in tokens.js);
+//   ReportShowcaseCard's 8.5–13px is a scaled-down phone mockup.
+// - NotificationBell / NewsletterSignup are the 09-07 audit's own findings,
+//   invisible to CI until now. Their weights are cleared; the undersized
+//   labels are what is left. InstallPrompt and VanScene were weight-only and
+//   are gone from this list entirely.
+// - BrandFooter and AppShowcaseCard's 7.5px is App Store / Google Play badge
+//   artwork reproduced as inline SVG — fixed proportions, not page type.
+// - ServiceRecapModal and Icon carry emoji the Icon sweep has not reached.
+const LEGACY_BASELINE = {
+  'client/src/App.jsx': { 'banned-font-size': 2 },
+  'client/src/components/ActivityCard.jsx': { 'banned-font-size': 1 },
+  'client/src/components/BrandFooter.jsx': { 'banned-font-size': 2 },
+  'client/src/components/GlassNewsletterCard.jsx': { 'banned-font-size': 1 },
+  'client/src/components/Icon.jsx': { 'emoji': 1 },
+  'client/src/components/NewsletterSignup.jsx': { 'banned-font-size': 2 },
+  'client/src/components/NotificationBell.jsx': { 'banned-font-size': 9 },
+  'client/src/components/PestPressureCard.jsx': { 'banned-font-size': 6 },
+  'client/src/components/ServiceRecapModal.jsx': { 'emoji': 8 },
+  'client/src/components/StationMapCard.jsx': { 'banned-font-size': 3 },
+  'client/src/components/estimate/AppShowcaseCard.jsx': { 'banned-font-size': 2 },
+  'client/src/components/estimate/CustomerReviews.jsx': { 'emoji': 1 },
+  'client/src/components/estimate/GoogleProfilesCard.jsx': { 'emoji': 1 },
+  'client/src/components/estimate/InlineAutoPayCapture.jsx': { 'emoji': 1, 'font-family-literal': 1 },
+  'client/src/components/estimate/PriceCard.jsx': { 'banned-font-size': 1 },
+  'client/src/components/estimate/ProposalDetailCard.jsx': { 'banned-font-size': 1 },
+  'client/src/components/estimate/ReportShowcaseCard.jsx': { 'banned-font-size': 14 },
+  'client/src/components/estimate/glass/GlassEstimateExtras.jsx': { 'emoji': 4 },
+  'client/src/components/estimate/glass/glass-components.css': { 'banned-font-size': 3 },
+  'client/src/components/estimate/tokens.js': { 'local-palette': 1 },
+  'client/src/index.css': { 'banned-font-size': 2 },
+  'client/src/pages/ServiceOutlinePage.jsx': { 'banned-font-size': 3 },
+  'client/src/styles/buttons.css': { 'banned-font-size': 2 },
+  'client/src/styles/tokens.css': { 'banned-font-size': 1 },
+  'client/src/theme-brand.js': { 'banned-font-size': 2 },
+};
 
 // =========================================================================
 // Rules
@@ -89,6 +151,11 @@ const BANNED_FONT_SIZE_RX = /fontSize:\s*[^,}\n]*?(?<![\w.-])(?<![*/+-]\s*)((?:[
 // Token spellings of the same sizes (FS.micro / FS.caption were 11 / 12 until
 // #3892 deleted them) — a live page must not reach under the floor by name.
 const BANNED_FONT_TOKEN_RX = /fontSize:\s*FS\.(micro|caption)\b/;
+// Tailwind utilities reach the same sizes by class name. `text-xs` is 12px and
+// `text-[13px]` is a literal; the public service-outline page renders several.
+// text-sm is 14 and stays legal. A responsive variant is still a render, so
+// `md:text-xs` is matched the same as the bare class.
+const BANNED_TW_CLASS_RX = /(?:^|[\s"'`])(?:[a-z]{2}:)?text-(xs|\[(?:[1-9]|1[0-3])(?:\.\d+)?px\])(?=$|[\s"'`])/;
 // Customer glass sheet (owner 2026-09-03/05): weights stop at 700. 800/850/900
 // literals render heavier on iPhone than on the Inter/Segoe fallbacks and read
 // as a different face next to the sheet's 600/700; 650/750 are variable-font
@@ -118,7 +185,11 @@ function walk(dir) {
       continue;
     }
     if (!entry.isFile()) continue;
-    if (!/\.(jsx?|tsx?)$/.test(entry.name)) continue;
+    // CSS too: `buttons.css` is imported globally by index.css and carried
+    // `font-weight: 800` and a 13px `.btn-nav` past a gate that called itself
+    // repo-wide. The kebab-case rules below already exist for CSS authored
+    // inside <style> templates and apply unchanged to a real stylesheet.
+    if (!/\.(jsx?|tsx?|css)$/.test(entry.name)) continue;
     if (EXCLUDED_FILES.has(entry.name)) continue;
     // Test fixtures style stub components; they are not customer surfaces.
     if (/\.test\.[jt]sx?$/.test(entry.name)) continue;
@@ -132,8 +203,16 @@ function walk(dir) {
 // =========================================================================
 // Check
 // =========================================================================
+// Baseline keys and report paths are repository-style, forward-slash. On
+// Windows `path.relative` hands back `client\\src\\...`, which matches no
+// entry, so every baselined file would be treated as zero-tolerance and the
+// gate would fail on a clean tree. Normalise at both boundaries.
+function relKey(filePath) {
+  return path.relative(ROOT, filePath).split(path.sep).join('/');
+}
+
 function checkFile(filePath) {
-  const rel = path.relative(ROOT, filePath);
+  const rel = relKey(filePath);
   const text = fs.readFileSync(filePath, 'utf8');
   const lines = text.split('\n');
   const violations = [];
@@ -158,7 +237,7 @@ function checkFile(filePath) {
         snippet: line.trim().slice(0, 140),
       });
     }
-    if (LOCAL_PALETTE_RX.test(line)) {
+    if (LOCAL_PALETTE_RX.test(line) && rel !== PALETTE_RULE_EXEMPT) {
       violations.push({
         rule: 'local-palette',
         line: n,
@@ -172,6 +251,16 @@ function checkFile(filePath) {
         rule: 'banned-font-size',
         line: n,
         msg: `fontSize: ${m[1]} — nothing under 14px on a customer surface (labels 14, body 16; owner sheet 2026-09-03)`,
+        snippet: line.trim().slice(0, 140),
+      });
+    }
+    if (BANNED_TW_CLASS_RX.test(line)) {
+      const m = line.match(BANNED_TW_CLASS_RX);
+      const label = m[1] === 'xs' ? 'text-xs (12px)' : `text-${m[1]}`;
+      violations.push({
+        rule: 'banned-font-size',
+        line: n,
+        msg: `${label} — nothing under 14px on a customer surface; text-sm (14px) is the floor (owner sheet 2026-09-03)`,
         snippet: line.trim().slice(0, 140),
       });
     }
@@ -237,35 +326,100 @@ function checkFile(filePath) {
 // =========================================================================
 // Main
 // =========================================================================
-function main() {
-  let files = [];
-  for (const d of SCAN_DIRS) files = files.concat(walk(d));
+function tally(violations) {
+  const byRule = {};
+  for (const v of violations) byRule[v.rule] = (byRule[v.rule] || 0) + 1;
+  return byRule;
+}
 
-  const perFile = [];
-  let total = 0;
-  for (const f of files) {
-    const v = checkFile(f);
-    if (v.length) {
-      perFile.push({ file: path.relative(ROOT, f), violations: v });
-      total += v.length;
-    }
-  }
-
-  if (!total) {
-    console.log(`[check-portal-brand] clean — scanned ${files.length} files, zero violations.`);
-    process.exit(0);
-  }
-
-  console.error(`[check-portal-brand] FAIL — ${total} violation${total === 1 ? '' : 's'} across ${perFile.length} file${perFile.length === 1 ? '' : 's'}:\n`);
-  for (const { file, violations } of perFile) {
+function reportRegressions(regressions) {
+  const total = regressions.reduce((a, e) => a + e.over, 0);
+  console.error(`[check-portal-brand] FAIL — ${total} violation${total === 1 ? '' : 's'} over baseline across ${regressions.length} file${regressions.length === 1 ? '' : 's'}:\n`);
+  for (const { file, violations, allowed, rules } of regressions) {
     console.error(`  ${file}`);
-    for (const v of violations) {
+    for (const rule of rules) {
+      console.error(`    ${rule}: ${tally(violations)[rule] || 0} found, ${(allowed[rule] || 0)} allowed`);
+    }
+    for (const v of violations.filter((x) => rules.includes(x.rule))) {
       console.error(`    ${file}:${v.line}  [${v.rule}]  ${v.msg}`);
       console.error(`      > ${v.snippet}`);
     }
     console.error('');
   }
-  console.error(`Fix the violations above, or justify with a per-line disable if the codebase adopts one.`);
+  console.error('Fix the violations above. Do not raise a LEGACY_BASELINE number to make this pass —');
+  console.error('the list exists to shrink, and a customer surface has no floor under 14px or weight over 700.');
+}
+
+function reportSlack(slack) {
+  console.error(`\n[check-portal-brand] baseline is behind the code — ${slack.length} entr${slack.length === 1 ? 'y has' : 'ies have'} fewer violations than allowed. Lower the allowance to what is actually left, or delete the line at zero:`);
+  for (const { file, found, allowed } of slack) {
+    const shape = Object.keys(found).length
+      ? `{ ${Object.keys(found).sort().map((r) => `${r}: ${found[r]}`).join(', ')} }`
+      : null;
+    console.error(shape
+      ? `  lower   '${file}': ${shape},   (was { ${Object.keys(allowed).sort().map((r) => `${r}: ${allowed[r]}`).join(', ')} })`
+      : `  delete  '${file}',            (was allowed, now clean)`);
+  }
+}
+
+function main() {
+  let files = [];
+  for (const d of SCAN_DIRS) files = files.concat(walk(d));
+
+  const found = new Map();
+  for (const f of files) {
+    const v = checkFile(f);
+    if (v.length) found.set(relKey(f), v);
+  }
+
+  // The allowance is per RULE, not a single total. A total lets a change swap
+  // one violation for another of a different kind and stay green — clear an
+  // undersized label in NotificationBell, add an 800-weight control, count
+  // unchanged, nothing fires. Per-rule counts make that a heavy-weight
+  // regression. (A same-rule swap inside an already-dirty file still passes;
+  // the file is scheduled for cleanup and its count cannot grow.)
+  const regressions = [];
+  let carried = 0;
+  for (const [file, violations] of found) {
+    const allowed = LEGACY_BASELINE[file] || {};
+    const counts = tally(violations);
+    const over = Object.keys(counts).filter((r) => counts[r] > (allowed[r] || 0));
+    if (over.length) {
+      regressions.push({
+        file,
+        violations,
+        allowed,
+        rules: over,
+        over: over.reduce((a, r) => a + (counts[r] - (allowed[r] || 0)), 0),
+      });
+    } else {
+      carried += violations.length;
+    }
+  }
+
+  // Under the allowance fails too. An allowance left above what the file
+  // actually carries is headroom for the cleaned-up violations to come back
+  // silently — drop NotificationBell's undersized labels from 11 to 1 and the
+  // entry would still wave ten through. The numbers have to follow the code
+  // down, and the line has to go once the file is clean, which is what keeps
+  // this a ratchet rather than a permanent exemption list.
+  const slack = [];
+  for (const [file, allowed] of Object.entries(LEGACY_BASELINE)) {
+    const counts = found.has(file) ? tally(found.get(file)) : {};
+    if (Object.keys(allowed).some((r) => (counts[r] || 0) < allowed[r])) {
+      slack.push({ file, found: counts, allowed });
+    }
+  }
+
+  if (!regressions.length && !slack.length) {
+    const n = Object.keys(LEGACY_BASELINE).length;
+    const debt = carried ? ` — ${carried} baselined violation${carried === 1 ? '' : 's'} in ${n} legacy file${n === 1 ? '' : 's'} still to clear` : '';
+    console.log(`[check-portal-brand] clean — scanned ${files.length} files, no new violations${debt}.`);
+    process.exit(0);
+  }
+
+  if (regressions.length) reportRegressions(regressions);
+  if (slack.length) reportSlack(slack);
   process.exit(1);
 }
 

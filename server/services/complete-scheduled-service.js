@@ -22,7 +22,7 @@ const { publicPortalUrl } = require('../utils/portal-url');
 const { countSegments } = require('../services/messaging/segment-counter');
 const { recordServiceProductNutrients, amountToPounds, nutrientTreatedSqft, ledgerRowCoverage } = require('../services/nutrient-ledger');
 const { buildPlanForService, isDateInWindow } = require('../services/waveguard-plan-engine');
-const { lawnCompletionDefaultsEnabled, lawnPlanAttributesVisit } = require('../services/lawn-completion-defaults');
+const { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, lawnPlanAttributesVisit } = require('../services/lawn-completion-defaults');
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
@@ -46,15 +46,19 @@ const {
 } = require('../services/service-report/delivery');
 const { enqueueServiceReportV1EmailDelivery } = require('../services/service-report/delivery-queue');
 const { enqueuePdfRenderJob } = require('../services/service-report/pdf-queue');
+const { stripPhotoSummaryForRecovery, restorePhotoSummaryAfterRecovery, expectedImageHashesFor } = require('../services/service-report/photo-summary-recovery');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
 const { buildAndStoreSmsPreviewImage } = require('../services/service-report/preview-image');
 const { buildNoActivityFinding } = require('../services/service-report/no-activity-finding');
 const { buildServiceRecordCompletionTimingFields } = require('../services/service-report/service-record-timing');
 const {
+  MAX_COMPLETION_PHOTO_DATA_URL_BYTES,
   cleanupUploadedServicePhotoObjects,
+  decodeDataUrlPhoto,
   promoteStagedServicePhotos,
   uploadServicePhotoDataUrls,
 } = require('../services/service-photos');
+const { hashBuffer } = require('../services/service-report/photo-chain');
 const {
   recordLawnProtocolCompletion,
   lawnActualsLedgerEnabled,
@@ -416,7 +420,13 @@ function parseCompletionReviewDelayMinutes(body = {}) {
     Object.prototype.hasOwnProperty.call(body, 'reviewScheduledFor');
   if (!hasExplicitTiming) return undefined;
 
-  if (body.reviewTiming === 'now') return 0;
+  // "Automatic (recommended)" = no operator override: legacy 120-min separate
+  // ask (never bundled), cadence smart send window (calculateReviewSendPlan).
+  if (body.reviewTiming === 'auto') return undefined;
+  // 'now' is the legacy value (still posted by the one-time recap path);
+  // 'customer_requested' is the panel's "Customer asked for the link" — same
+  // timing (next cadence tick), plus the request is recorded on the sequence.
+  if (body.reviewTiming === 'now' || body.reviewTiming === 'customer_requested') return 0;
   if (body.reviewTiming === 'tomorrow_8') {
     const targetDay = etDateString(addETDays(new Date(), 1));
     const target = parseETDateTime(`${targetDay}T08:00`);
@@ -2315,6 +2325,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
       || (packetRecords && (!db?.isTransaction || !Array.isArray(packetContext.uploadedPhotoRows))))) {
     throw new TypeError('Packet completion requires its phase, item and record transaction');
   }
+  // New grouped packets freeze one server-measured visit duration and an
+  // integer allocation for each automatic member. Null is a deliberate
+  // "unknown" allocation (no trustworthy visit/member start), while zero is
+  // a real rounded observation. Old packets carry no marker and retain their
+  // original replay behavior.
+  let packetDurationAllocation = packetContext?.durationAllocation
+    && packetContext.durationAllocation.version === 1
+    && (packetContext.durationAllocation.allocatedMinutes === null
+      || (Number.isInteger(packetContext.durationAllocation.allocatedMinutes)
+        && packetContext.durationAllocation.allocatedMinutes >= 0))
+    ? packetContext.durationAllocation
+    : null;
   let completionAttempt = null;
   let legacyVisitToDissolve = null;
   let markedSucceeded = false;
@@ -2531,8 +2553,24 @@ async function completeScheduledService(completionInput, packetContext = null) {
     let preCommitCompletionPhotoRows = [];
     const promotedPhotoIds = new Set();
     let completionReviewDelayMinutes;
+    let customerRequestedReview = null;
     try {
       completionReviewDelayMinutes = parseCompletionReviewDelayMinutes(completionInput.body || {});
+      // The timing selector can be retained after the review checkbox is
+      // cleared or a client suppression turns the ask off; the stamp must not
+      // claim the customer asked when nothing was authorized (codex #4140
+      // r23 P2). parseCompletionReviewDelayMinutes is null without
+      // requestReview, so a real customer request is exactly delay 0 here.
+      const clientSuppressesReview = !!reviewSuppression && reviewSuppression !== 'invoice_created';
+      if (completionInput.body?.reviewTiming === 'customer_requested'
+        && completionReviewDelayMinutes === 0 && !clientSuppressesReview) {
+        customerRequestedReview = {
+          by: completionInput.actor?.technicianId || null,
+          byName: completionInput.actor?.technician?.name || null,
+          at: new Date().toISOString(),
+          source: 'completion_panel',
+        };
+      }
     } catch (timingErr) {
       // A committed chain replays an immutable body, and by the time a
       // retry lands its custom reviewScheduledFor can legitimately be in
@@ -2579,8 +2617,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // — or an auto-derived label could be frozen as a paid membership and
     // print "$0.00 billed" forever (codex r13 P1).
     let customerColumnsProbeFailed = false;
+    // The billing-lane probe is tracked on its own: only ITS failure blocks
+    // a plan-building lawn closeout (the lane cannot be verified), while a
+    // failed provenance-column probe keeps feeding provenanceUnknown alone
+    // (Codex #4365 r7 P2).
+    let billingModeProbeFailed = false;
     try {
       billingModeColumnsExist = await savepointRead(db, (k) => k.schema.hasColumn('customers', 'billing_mode'));
+    } catch { billingModeProbeFailed = true; customerColumnsProbeFailed = true; /* legacy select shape */ }
+    try {
       customerTierSourceColumnExists = await savepointRead(db, (k) => k.schema.hasColumn('customers', 'waveguard_tier_source'));
     } catch { customerColumnsProbeFailed = true; /* legacy select shape */ }
     const svc = await db('scheduled_services').where('scheduled_services.id', completionInput.serviceId)
@@ -2711,6 +2756,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
     let effectiveTimeOnSite = isBackfillCompletion
       ? backfillTimeOnSiteMinutes(timeOnSite)
       : livePlan.effectiveTimeOnSite;
+    // The packet coordinator, not a repeated client timer, owns automatic
+    // grouped duration. Explicit admin/backfill values are not assigned a
+    // packet allocation and continue through the existing validator above.
+    if (packetDurationAllocation && !isBackfillCompletion) {
+      effectiveTimeOnSite = packetDurationAllocation.allocatedMinutes;
+    }
     if (isBackfillCompletion && effectiveTimeOnSite == null && timeOnSite != null && timeOnSite !== '') {
       logger.warn(`[completion] backfill timeOnSite ${JSON.stringify(timeOnSite)} rejected for service ${svc.id} (not a positive duration ≤ ${BACKFILL_MAX_TIME_ON_SITE_MINUTES}min) — recorded as unknown`);
     }
@@ -3544,7 +3595,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // The guard must precede replay/resume too: a saved packet member
           // has a resumable single-service attempt, whose legacy side effects
           // would otherwise invoice and message the customer independently.
-          const member = await lockTrx('scheduled_services').where({ id: svc.id }).first('visit_id');
+          const member = await lockTrx('scheduled_services as member')
+            .leftJoin('service_visits as visit', 'visit.id', 'member.visit_id')
+            .where('member.id', svc.id).first('member.visit_id', 'visit.behavior_version');
           // Invoice-issued closeout: the grouped-stop refusal ran unlocked
           // in invoice-issued-closeout.js; a createOrJoinVisit that grouped
           // this row since would otherwise let a packet-less open group
@@ -3570,7 +3623,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               derived_idempotency_key: idempotencyKey,
             }).first('id', 'service_record_id', 'attempt_count')
             : null;
-          if (((packet || packetContext) && !ownedItem) || (packetEffects && !ownedItem.service_record_id)) {
+          if (((packet || packetContext || Number(member?.behavior_version) >= 2) && !ownedItem) || (packetEffects && !ownedItem.service_record_id)) {
             return { action: 'conflict', status: 409, payload: {
               error: 'This service is owned by a visit closeout. Resume the visit closeout.',
               code: 'visit_grouped', visitId: member?.visit_id || null,
@@ -3667,6 +3720,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         if (!parent) return { blockedBy: lockedRow.visit_id }; // orphan: fail closed
         if (ownedPacketVisitId === parent.id) return parent.status === 'closing' ? null : { blockedBy: parent.id };
         if (String(parent.status) === 'dissolved') return null;
+        if (Number(parent.behavior_version) >= 2) return { blockedBy: parent.id };
         // READ-ONLY (codex #3590 r4: later validators can still 422, and a
         // rejected completion must not have dissolved anything): an open
         // packet-less visit is allowed through and remembered — the
@@ -4293,11 +4347,29 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // fail-soft path real (Codex #4113 P1). savepointScope, not
         // savepointRead: the planner performs its own fail-soft reads on this
         // transaction, and the queued variant would wait on itself.
+        // A FAILED handler-entry column probe is unknown, not absent, and it
+        // stays closed for this closeout: the visit row and the lock-time
+        // customer reread were both selected under that probe, so a planner
+        // retry that succeeded would read a lane the recheck below cannot
+        // compare (Codex #4365 r4 + r6 P2). Retryable: the retry re-probes.
+        // Only the billing-lane probe counts here (r7 P2).
+        if (billingModeProbeFailed) {
+          const err = new Error('This customer\'s billing lane could not be verified while completing — reload the job and complete it again.');
+          err.statusCode = 409;
+          err.isOperational = true;
+          err.code = 'VISIT_BILLING_LANE_UNVERIFIED';
+          throw err;
+        }
         waveguardPlan = await savepointScope(db, (database) => buildPlanForService(svc.id, {
           db: database,
           equipmentSystemId: waveguardEquipmentSystemId || null,
           calibrationId: waveguardCalibrationId || null,
           lawnSqft: lawnCompletionArea,
+          // The closeout's own column probe: the planner must not select
+          // customers.billing_mode on a pre-migration schema (Codex #4365 r3
+          // P2), and the lane recheck under the customer lock compares the
+          // same column under the same probe (a failed probe aborted above).
+          billingModeColumnExists: billingModeColumnsExist,
         }));
       } catch (planErr) {
         if (waveguardCloseout) throw planErr;
@@ -4692,6 +4764,16 @@ async function completeScheduledService(completionInput, packetContext = null) {
         } });
       }
       const resumedStructuredNotes = parseJsonObject(record.structured_notes);
+      // An authorized correction can land after the packet committed its
+      // records but before an effects replay. Its durable revision and notes
+      // supersede the original allocation for lifecycle/tracker handling;
+      // the frozen marker remains historical evidence for costing readers,
+      // where the correction stamp has explicit precedence.
+      if (packetDurationAllocation
+        && (resumedStructuredNotes.timeOnSiteAdjusted === true
+          || Number(svc.time_on_site_adjusted_minutes) > 0)) {
+        packetDurationAllocation = null;
+      }
       linkedLawnAssessmentId = resumedStructuredNotes.lawnAssessmentId || null;
       // The WaveGuard advisory records were committed with the record, but
       // the resume path skips the preflight and the deduction transaction —
@@ -4703,6 +4785,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
       waveguardManagerApproval = resumedStructuredNotes.waveguardManagerApproval || null;
       waveguardCalibrationAdvisory = resumedStructuredNotes.waveguardCalibrationAdvisory || null;
       waveguardInventoryAdvisory = resumedStructuredNotes.waveguardInventoryAdvisory || null;
+      // "Customer asked for the link" was frozen with the record — a resumed
+      // retry (possibly another operator, later) must not re-stamp who/when
+      // (codex #4140 r2).
+      customerRequestedReview = resumedStructuredNotes.customerRequestedReview
+        && typeof resumedStructuredNotes.customerRequestedReview === 'object'
+        ? resumedStructuredNotes.customerRequestedReview
+        : null;
       durableCompletionCommitted = true;
       // Phase-1 legacy fallback, deferred to durable commit (codex #3590
       // r4; r6 resume path): the open packet-less visit this completion
@@ -5252,12 +5341,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
             if (Number.isFinite(stampedMinutes) && stampedMinutes > 0
               && (stampMovedMidFlight
                 || (!isBackfillCompletion && !liveAdjustedTimeOnSite
-                  && typeof effectiveTimeOnSite !== 'number'))) {
+                  && (packetRecords || typeof effectiveTimeOnSite !== 'number')))) {
               effectiveTimeOnSite = stampedMinutes;
+              packetDurationAllocation = null;
               correctionPreservedMidFlight = true;
             }
           }
-          const completionEndedAt = new Date();
+          const completionEndedAt = packetRecords
+            ? (finiteDate(packetContext.completionAt) || new Date())
+            : new Date();
           completionWallClockAt = completionEndedAt;
           // Backfill: the service happened on its scheduled day — stamp the
           // record (and everything keyed off it: activity-score dates, the
@@ -5295,7 +5387,21 @@ async function completeScheduledService(completionInput, packetContext = null) {
             ? adjustedCompletionEndInstant(svc, effectiveTimeOnSite, completionEndedAt)
             : null;
           const completionLifecycleAt = backfillEndedAt || adjustedEndedAt || completionEndedAt;
-          const lifecycleUpdates = buildCompletionLifecycleUpdates(svc, completionLifecycleAt, { elapsed: effectiveTimeOnSite });
+          // The allocation is costing metadata, not a claim that each member
+          // started at completion minus its share. Let the lifecycle helper
+          // use only real row timestamps, then overwrite duration columns.
+          const lifecycleUpdates = buildCompletionLifecycleUpdates(svc, completionLifecycleAt, {
+            elapsed: packetDurationAllocation ? null : effectiveTimeOnSite,
+          });
+          // Zero and unknown are meaningful for an allocated visit. The
+          // generic helper treats both as absent and would fall back to this
+          // member row's whole arrival→completion span, duplicating labor.
+          // Keep truthful shared timestamps, but make the integer columns
+          // carry the allocation (including zero) or explicit unknown.
+          if (packetDurationAllocation) {
+            lifecycleUpdates.service_time_minutes = packetDurationAllocation.allocatedMinutes;
+            lifecycleUpdates.actual_duration_minutes = packetDurationAllocation.allocatedMinutes;
+          }
           // Backfill: never derive a duration from the stale on-row
           // timestamps (a weeks-old check-in against today's checkout), and
           // never let a typed duration back-derive a today-dated arrival for
@@ -5369,10 +5475,38 @@ async function completeScheduledService(completionInput, packetContext = null) {
             reviewTiming: reviewTiming || null,
             reviewDelayMinutes: completionReviewDelayMinutes == null ? null : completionReviewDelayMinutes,
             reviewScheduledFor: reviewScheduledFor || null,
+            // Who captured "Customer asked for the link", when, and where —
+            // carried through the paid-invoice deferral (enrollForPaidInvoice).
+            // Frozen off with requestReview: an incomplete / internal-only /
+            // backfill completion never carries a customer request either.
+            customerRequestedReview: (isIncompleteVisit || isInternalOnlyCompletion || isBackfillCompletion)
+              ? null : (customerRequestedReview || null),
             incompleteReason,
             customerConcernText: concernText || null,
             customerRecap: effectiveCustomerRecap || null,
-            timeOnSite: effectiveTimeOnSite || null,
+            timeOnSite: packetDurationAllocation
+              ? packetDurationAllocation.allocatedMinutes
+              : (effectiveTimeOnSite || null),
+            ...(packetDurationAllocation ? {
+              visitDurationAllocation: {
+                version: 1,
+                packetId: packetContext.packetId || null,
+                source: packetDurationAllocation.source,
+                completedAtSource: packetDurationAllocation.completedAtSource,
+                visitStartedAt: packetDurationAllocation.startedAt,
+                visitCompletedAt: packetDurationAllocation.completedAt,
+                visitTotalMinutes: packetDurationAllocation.totalMinutes,
+                estimatedMinutes: packetDurationAllocation.estimatedMinutes,
+                allocatedMinutes: packetDurationAllocation.allocatedMinutes,
+              },
+            } : {}),
+            ...(packetRecords && !isBackfillCompletion && packetContext.driveCostOwnerServiceId ? {
+              visitDriveCostAllocation: {
+                version: 1,
+                packetId: packetContext.packetId,
+                ownerServiceId: packetContext.driveCostOwnerServiceId,
+              },
+            } : {}),
             customerInteraction: normalizedCustomerInteraction,
             invoiceAlreadySent: !!invoiceAlreadySent,
             // Backfill frozen on the record: a crash-resumed retry may lack
@@ -5937,7 +6071,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // non-ledger fallback to the entry read is exactly the stale tier
           // this recheck exists to catch, so a ledgered visit whose reread
           // errored aborts instead of comparing nothing (Codex #4113 P2).
-          if (lawnLedgerVisit && waveguardPlan && !snapshotCustomer) {
+          // WaveGuard-only closeouts (ledger gate off) compare the billing
+          // lane below, so an unverifiable reread aborts for them too instead
+          // of dereferencing a null snapshot (Codex #4365 r6 P2).
+          if ((lawnLedgerVisit || waveguardCloseout) && waveguardPlan && !snapshotCustomer) {
             const err = new Error('This customer\'s membership tier could not be verified while completing — reload the job and complete it again.');
             err.statusCode = 409;
             err.isOperational = true;
@@ -5950,6 +6087,23 @@ async function completeScheduledService(completionInput, packetContext = null) {
             err.statusCode = 409;
             err.isOperational = true;
             err.code = 'VISIT_TIER_CHANGED';
+            throw err;
+          }
+          // The billing lane likewise (Codex #4365 P2): lawnPlanProgramApplies
+          // lets an explicit per_visit / one_time lane defeat the tier, so a
+          // billing_mode edit that committed between the plan build and this
+          // customer share lock would stamp attribution the current lane
+          // denies (or omit attribution it now allows). Same retryable shape;
+          // the retry rebuilds the plan from the current lane. WaveGuard-only
+          // closeouts (ledger gate off) read the lane too, through the
+          // lawn_protocol_* stamp guard (Codex #4365 r5 P2), so they recheck
+          // as well.
+          if ((lawnLedgerVisit || waveguardCloseout) && waveguardPlan && billingModeColumnsExist
+            && String(snapshotCustomer.billing_mode || '') !== String(waveguardPlan.propertyGate?.billingMode || '')) {
+            const err = new Error('This customer\'s billing lane changed while completing — reload the job and complete it again.');
+            err.statusCode = 409;
+            err.isOperational = true;
+            err.code = 'VISIT_BILLING_LANE_CHANGED';
             throw err;
           }
           Object.assign(recordInsert, completionTierSnapshotFields({
@@ -6622,7 +6776,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // visit's protocol — record the actuals without attribution.
             // Only the protocol portion is withheld: the plan's calibrated rig
             // carrier is still the visit's measured carrier (Codex #4113 P2).
-            plan: lawnLedgerVisit && waveguardPlan && !lawnPlanAttributesVisit(waveguardPlan) ? { ...waveguardPlan, protocol: null } : waveguardPlan,
+            // The legacy (gate-off) writer keeps its attribution rules but
+            // shares the program predicate with the lawn_protocol_* stamp: a
+            // per_visit / one_time customer's lingering tier is not a program
+            // there either (Codex #4365 r6 P2).
+            plan: waveguardPlan && !(lawnLedgerVisit ? lawnPlanAttributesVisit(waveguardPlan) : lawnPlanProgramApplies(waveguardPlan))
+              ? { ...waveguardPlan, protocol: null } : waveguardPlan,
             serviceProducts: insertedServiceProducts,
             completionInput: {
               ...(lawnProtocolCompletion || {}),
@@ -6776,7 +6935,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // owns status + updated_at; we own the service timing columns
         // on the same row.
         const scheduledServiceUpdate = { ...lifecycleUpdates };
-        if (!isIncompleteVisit && isWaveGuardLawnCompletion(svc) && waveguardPlan?.protocol?.structured) {
+        // The closeout stamp follows the same program-attribution predicate
+        // as the ledger (Codex #4365 r2 P2): a per_visit / one_time customer
+        // keeping a legacy tier is a WaveGuard closeout for the completion
+        // lockouts, but the calendar-resolved plan is not a protocol the
+        // technician was assigned. Stamping it would mint a COMPLETE
+        // explicit assignment on the appointment, which lawnPlanProgramApplies
+        // then accepts as a program on every later plan build.
+        if (!isIncompleteVisit && isWaveGuardLawnCompletion(svc) && waveguardPlan?.protocol?.structured
+          && lawnPlanProgramApplies(waveguardPlan)) {
           const structured = waveguardPlan.protocol.structured;
           const window = structured.window || {};
           scheduledServiceUpdate.lawn_protocol_key = structured.protocolKey || null;
@@ -7239,16 +7406,41 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // The photo summary was frozen into the snapshot before these
         // best-effort uploads ran — if any photo is missing, the summary
         // can describe photos the report doesn't show. Strip it rather
-        // than ship copy about absent images.
+        // than ship copy about absent images — but park the copy in the
+        // snapshot so a completed photo recovery (/photos/reconcile) can
+        // put it back on the rebuilt report (Codex #4091 P1).
         const sd = parseJsonObject(record.service_data);
-        if (sd?.typedReportSnapshot?.photoSummary) {
-          sd.typedReportSnapshot.photoSummary = null;
+        if (stripPhotoSummaryForRecovery(sd).changed) {
           await db('service_records').where({ id: record.id }).update({
             service_data: serializeJsonb(sd),
           }).then(() => {
             record.service_data = sd;
           }).catch((stripErr) => {
             logger.warn(`[dispatch] photo summary strip failed for ${record.id}: ${stripErr.message}`);
+          });
+        }
+      } else {
+        // A resumed closeout (a later SMS/token step returned 503 and the
+        // client replayed the pinned body) re-uploads the same photos; the
+        // uploader dedupes the ones that landed and attaches the rest. When
+        // none fail now, every closeout photo has a row — put back the
+        // summary a prior attempt parked. Nothing else would: the client
+        // sees failed=0, clears its recovery state and never calls
+        // /photos/reconcile (pre-push Codex P1 on be543f284).
+        const sd = parseJsonObject(record.service_data);
+        if (restorePhotoSummaryAfterRecovery(sd).changed) {
+          await db('service_records').where({ id: record.id }).update({
+            service_data: serializeJsonb(sd),
+          }).then(() => {
+            record.service_data = sd;
+          }).catch((restoreErr) => {
+            // The copy stays parked. Tell the client reconciliation is
+            // still owed: CompletionPanel keeps its recovery marker on
+            // reconcileOwed and drives /photos/reconcile, which restores
+            // the summary (pre-push Codex P1 on 19acd4765). Without this
+            // flag failed=0 would clear recovery and park the copy forever.
+            logger.error(`[dispatch] parked photo summary restore failed for ${record.id} (still parked; reconciliation owed): ${restoreErr.message}`);
+            completionPhotoUploadResult = { ...completionPhotoUploadResult, reconcileOwed: true };
           });
         }
       }
@@ -7258,6 +7450,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
           uploaded: completionPhotoUploadResult.uploaded,
           failed: completionPhotoUploadResult.failed,
           uploadedAt: new Date().toISOString(),
+          // Distinct image hashes closeout submitted: /photos/reconcile
+          // restores the parked photo summary only once every one has a
+          // row (uploads dedupe by hash, so raw counts would overstate).
+          ...(completionPhotoUploadResult.failed > 0 ? {
+            expectedImageHashes: expectedImageHashesFor(completionPhotos, {
+              decode: (dataUrl) => decodeDataUrlPhoto(dataUrl, { maxBytes: MAX_COMPLETION_PHOTO_DATA_URL_BYTES }),
+              hash: hashBuffer,
+            }),
+          } : {}),
         },
       };
       const photoNotes = { ...latestNotes, ...completionPhotosDelta };
@@ -7606,8 +7807,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // completed_at comes from the backdated end-instant rule (or stays
         // NULL for the unknown-end shape); the policy's persisted values
         // survive.
-        untrustedLifecycleSpan: isBackfillCompletion,
-        completedAt: backfillTrackerCompletedAt,
+        // Allocated grouped members already persisted their duration in the
+        // record transaction. Rebuilding from their shared lifecycle span
+        // here would overwrite zero/unknown with the whole visit duration.
+        untrustedLifecycleSpan: isBackfillCompletion || !!packetDurationAllocation,
+        completedAt: packetDurationAllocation?.completedAtSource === 'packet_save'
+          ? packetDurationAllocation.completedAt
+          : backfillTrackerCompletedAt,
         // Fences the tracker writes (codex P2 #3152 rounds 13/17): this
         // instant belongs to the correction revision this request observed
         // on the (lock-reconciled) row — null when it has never been
@@ -7853,7 +8059,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // excluded: their entries are historic and the quiet-closeout posture
     // owns them.
     let completionTimerSync = { corrected: null, blocked: null };
-    if (!isBackfillCompletion && typeof effectiveTimeOnSite === 'number') {
+    if (!packetDurationAllocation && !isBackfillCompletion && typeof effectiveTimeOnSite === 'number') {
       completionTimerSync = await syncLinkedJobTimer({
         serviceId: svc.id,
         minutes: effectiveTimeOnSite,
@@ -10926,7 +11132,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
       effectiveRequestReview &&
       svc.cust_phone &&
       !serviceReportV1Delivery &&
-      (completionReviewDelayMinutes === undefined || completionReviewDelayMinutes === 0) &&
+      // Only an operator-chosen immediate ask rides inside the completion
+      // text. No timing ("Automatic", or a client that sent none) is the
+      // legacy 120-minute separate ask that enrollPostService schedules
+      // below — bundling it instantly contradicted both that schedule and
+      // the panel's preview (codex #4140 r1).
+      completionReviewDelayMinutes === 0 &&
       // Cadence mode owns the ask: the review link is its own Day-0 message at
       // the smart send window, never bundled into the completion/receipt SMS
       // (bundling would also dodge the sequence's cap/cooldown bookkeeping).
@@ -10961,9 +11172,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const bundledReviewRetryAt = (sendResult = {}) => {
       const explicit = sendResult.nextAllowedAt ? new Date(sendResult.nextAllowedAt) : null;
       if (explicit && !Number.isNaN(explicit.getTime())) return explicit;
-      const delayMinutes = completionReviewDelayMinutes === undefined
-        ? 120
-        : Math.max(5, Number(completionReviewDelayMinutes) || 5);
+      // A bundled ask only exists for an explicit immediate timing, so the
+      // retry is a short back-off, never the legacy 120-minute schedule.
+      const delayMinutes = Math.max(5, Number(completionReviewDelayMinutes) || 5);
       return new Date(Date.now() + delayMinutes * 60000);
     };
     const markBundledReviewFailed = async (sendResult = {}) => {
@@ -12480,7 +12691,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // it wins in both modes (Codex P2, r2). Untouched selector =
           // undefined = legacy 120-min default / cadence smart window.
           delayMinutes: completionReviewDelayMinutes,
-          legacyDelayMinutes: 120,
+          legacyDelayMinutes: ReviewService.LEGACY_REVIEW_DELAY_MINUTES,
+          customerRequested: customerRequestedReview,
         });
       } catch (e) { logger.error(`[dispatch] Review request schedule failed: ${e.message}`); }
     }
@@ -12493,12 +12705,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
       const result = await trackTransitions.markComplete(svc.id, {
         actorType: 'admin',
         actorId: completionInput.actor.technicianId,
-        // Same backfill contract as the first markComplete above: normally
+        // Same duration contract as the first markComplete above: normally
         // idempotent by now, but when that call failed this one performs the
         // real flip — it must honor the duration policy AND the backdated
         // completed_at stamp too.
-        untrustedLifecycleSpan: isBackfillCompletion,
-        completedAt: backfillTrackerCompletedAt,
+        untrustedLifecycleSpan: isBackfillCompletion || !!packetDurationAllocation,
+        completedAt: packetDurationAllocation?.completedAtSource === 'packet_save'
+          ? packetDurationAllocation.completedAt
+          : backfillTrackerCompletedAt,
         // Same fence as the first markComplete above (codex rounds 13/17).
         expectedCorrectionSeq: svc.time_on_site_correction_seq ?? null,
       });
@@ -12972,4 +13186,5 @@ module.exports = {
   completionSmsWithheldForMissingReportToken,
   backfillExpectedMintAtCommit,
   shouldAutoInvoiceCompletion,
+  parseCompletionReviewDelayMinutes,
 };

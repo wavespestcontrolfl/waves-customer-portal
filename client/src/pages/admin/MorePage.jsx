@@ -13,6 +13,7 @@ import { markUsageSource } from "../../lib/adminUsage";
 import { ADMIN_MOBILE_MORE_SECTIONS, ADMIN_MOBILE_TABS } from "../../config/adminNavigation";
 import { MOBILE_SETTINGS_SECTIONS } from "../../config/mobileSettingsSections";
 import { clearEmailDrafts } from "../../lib/emailDrafts";
+import { clearScheduleSaveNotices } from "../../components/schedule/ScheduleSaveNotice";
 import { UiSurface } from "../../components/ui";
 import { PinnedWorkspaceLinks, WorkspaceGroup } from "../../components/admin/AdminWorkspaceNavigation";
 import useAdminNavigation from "../../hooks/useAdminNavigation";
@@ -50,6 +51,7 @@ export default function MorePage() {
 
   const handleLogout = () => {
     clearEmailDrafts();
+    clearScheduleSaveNotices();
     localStorage.removeItem("waves_admin_token");
     localStorage.removeItem("waves_admin_user");
     refetchFlags();

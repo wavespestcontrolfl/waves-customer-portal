@@ -179,7 +179,7 @@ describe('the shared send claim (claimInvoiceForSend) under interleaving', () =>
     try {
       settle.mockResolvedValueOnce({ settled: true, invoice: { ...row, status: 'prepaid' } });
       await expect(claimInvoiceForSend('inv-1')).rejects.toThrow(/Cannot send a prepaid invoice/);
-      expect(settle).toHaveBeenCalledWith('inv-1');
+      expect(settle).toHaveBeenCalledWith('inv-1', db);
       expect(db.__state.status).toBe('draft'); // no claim flip happened
       settle.mockResolvedValueOnce({ settled: false, reason: 'followup_in_flight', retryable: true });
       await expect(claimInvoiceForSend('inv-1')).rejects.toMatchObject({ code: 'deposit_settlement_pending' });
@@ -231,7 +231,7 @@ describe('the shared send claim (claimInvoiceForSend) under interleaving', () =>
       flippedRow = { ...readRow, total: 0 };
       settle.mockResolvedValueOnce({ settled: true, invoice: { ...flippedRow, status: 'prepaid' } });
       await expect(claimInvoiceForSend('inv-1')).rejects.toThrow(/Cannot send a prepaid invoice/);
-      expect(settle).toHaveBeenCalledWith('inv-1');
+      expect(settle).toHaveBeenCalledWith('inv-1', db);
       expect(db.__state.status).toBe('draft'); // claim given back BEFORE settling (settleZeroBalance refuses 'sending')
       // (b) the linked visit was cancelled since the invoice was created
       flippedRow = { ...readRow };

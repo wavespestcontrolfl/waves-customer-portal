@@ -1,27 +1,23 @@
 /*
  * PortalUsageTab — Settings → Advanced → Portal Usage.
- *
- * Reads GET /api/admin/usage/summary (first-party page-view log written by
- * AdminLayoutV2; see lib/adminUsage.js) and answers "what do I actually use
- * on a regular recurring basis, and how do I get there" so the owner can
- * arrange the dashboard/nav around real usage instead of guesswork.
- *
- * Styled to match SettingsPage's light token pass (inline styles, zinc-ish
- * D palette) — this file deliberately mirrors that idiom, not components/ui.
+ * Reads the first-party page-view log written by AdminLayoutV2.
  */
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
 import { ADMIN_NAV_ITEMS } from "../../config/adminNavigation";
-
-const D = {
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  text: "#27272A",
-  muted: "#71717A",
-  heading: "#09090B",
-  hover: "#F4F4F5",
-};
-const MONO = "'JetBrains Mono', monospace";
+import {
+  ActionFeedback,
+  Button,
+  Card,
+  CardBody,
+  Table,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TR,
+  UiSurface,
+} from "../ui";
 
 const WINDOWS = [
   { days: 7, label: "7 days" },
@@ -38,9 +34,6 @@ const SOURCE_LABELS = {
   "in-app": "In-app link",
 };
 
-// path segment after /admin → human label, derived from the nav registry so
-// labels can't drift from the sidebar. Pages reachable outside the nav get
-// explicit entries; anything else falls back to a prettified slug.
 const EXTRA_LABELS = {
   dispatch: "Dispatch",
   schedule: "Schedule",
@@ -50,10 +43,6 @@ const EXTRA_LABELS = {
 };
 
 function buildLabelMap() {
-  // Null prototype: page keys are server-validated slugs but include words
-  // like 'constructor' — an inherited Object.prototype member must never
-  // win over the prettifySlug fallback (same class as the server's
-  // null-proto summary accumulators).
   const map = Object.assign(Object.create(null), EXTRA_LABELS);
   for (const item of Object.values(ADMIN_NAV_ITEMS)) {
     const segment = String(item.path || "")
@@ -68,7 +57,7 @@ function buildLabelMap() {
 function prettifySlug(slug) {
   return String(slug)
     .split("-")
-    .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
+    .map((word) => (word ? word[0].toUpperCase() + word.slice(1) : word))
     .join(" ");
 }
 
@@ -79,10 +68,9 @@ function relativeTime(iso) {
   const min = Math.floor(ms / 60000);
   if (min < 1) return "just now";
   if (min < 60) return `${min}m ago`;
-  const h = Math.floor(min / 60);
-  if (h < 24) return `${h}h ago`;
-  const d = Math.floor(h / 24);
-  return `${d}d ago`;
+  const hours = Math.floor(min / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
 }
 
 function topSource(sources) {
@@ -90,20 +78,6 @@ function topSource(sources) {
   if (!entries.length) return null;
   entries.sort((a, b) => b[1] - a[1]);
   return entries[0][0];
-}
-
-function pillStyle(active) {
-  return {
-    padding: "0 12px",
-    height: 32,
-    borderRadius: 6,
-    border: `1px solid ${active ? D.heading : D.border}`,
-    background: active ? D.heading : D.card,
-    color: active ? "#FFFFFF" : D.text,
-    fontSize: 14,
-    fontWeight: 500,
-    cursor: "pointer",
-  };
 }
 
 export default function PortalUsageTab({ canAdmin }) {
@@ -121,14 +95,14 @@ export default function PortalUsageTab({ canAdmin }) {
     setLoading(true);
     setError(null);
     adminFetch(`/admin/usage/summary?days=${days}&scope=${scope}`)
-      .then((d) => {
+      .then((next) => {
         if (cancelled) return;
-        setData(d);
+        setData(next);
         setLoading(false);
       })
-      .catch((e) => {
+      .catch((nextError) => {
         if (cancelled) return;
-        setError(e);
+        setError(nextError);
         setLoading(false);
       });
     return () => {
@@ -137,37 +111,29 @@ export default function PortalUsageTab({ canAdmin }) {
   }, [days, scope]);
 
   const pages = data?.pages || [];
-
-  // The three questions that drive rearranging, computed from the same rows:
-  // what's most regular, where the app gets opened, and what's used a lot but
-  // only reachable through the More menu / in-page links.
   const insights = useMemo(() => {
     if (!pages.length) return null;
-    const regular = pages.slice(0, 3).map((p) => labelFor(p.pageKey));
+    const regular = pages.slice(0, 3).map((page) => labelFor(page.pageKey));
     const opens = [...pages]
-      .filter((p) => (p.sources?.load || 0) > 0)
+      .filter((page) => (page.sources?.load || 0) > 0)
       .sort((a, b) => (b.sources?.load || 0) - (a.sources?.load || 0))
       .slice(0, 3)
-      .map((p) => labelFor(p.pageKey));
+      .map((page) => labelFor(page.pageKey));
     const buried = pages
-      .filter((p) => {
-        const top = topSource(p.sources);
+      .filter((page) => {
+        const top = topSource(page.sources);
         return top === "more" || top === "in-app";
       })
       .slice(0, 3)
-      .map((p) => labelFor(p.pageKey));
+      .map((page) => labelFor(page.pageKey));
     return { regular, opens, buried };
-    // labelFor reads only the mount-stable labelMap memo, so pages is the
-    // one real input here.
   }, [pages]);
 
   return (
-    <div>
-      <div style={{ marginBottom: 16 }}>
-        <h2 style={{ fontSize: 18, fontWeight: 500, color: D.heading, margin: 0 }}>
-          Portal usage
-        </h2>
-        <p style={{ fontSize: 14, color: D.muted, margin: "6px 0 0", maxWidth: 640 }}>
+    <UiSurface className="space-y-5">
+      <div>
+        <h2 className="text-18 leading-[1.35] font-medium text-zinc-900">Portal usage</h2>
+        <p className="mt-1 max-w-2xl text-ui-body text-ink-secondary">
           Which admin pages actually get used, how regularly, and how you reach
           them — collected privately in your own database (page names only,
           never customer data). Use it to decide what deserves the dashboard
@@ -175,246 +141,112 @@ export default function PortalUsageTab({ canAdmin }) {
         </p>
       </div>
 
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
-        {WINDOWS.map((w) => (
-          <button
-            key={w.days}
-            type="button"
-            onClick={() => setDays(w.days)}
-            style={pillStyle(days === w.days)}
+      <div className="flex flex-wrap gap-2">
+        {WINDOWS.map((window) => (
+          <Button
+            key={window.days}
+            variant={days === window.days ? "primary" : "secondary"}
+            aria-pressed={days === window.days}
+            onClick={() => setDays(window.days)}
           >
-            {w.label}
-          </button>
+            {window.label}
+          </Button>
         ))}
         {canAdmin && (
-          <div style={{ display: "flex", gap: 8, marginLeft: "auto" }}>
-            <button
-              type="button"
-              onClick={() => setScope("me")}
-              style={pillStyle(scope === "me")}
-            >
+          <div className="flex flex-wrap gap-2 sm:ml-auto">
+            <Button variant={scope === "me" ? "primary" : "secondary"} aria-pressed={scope === "me"} onClick={() => setScope("me")}>
               Just me
-            </button>
-            <button
-              type="button"
-              onClick={() => setScope("all")}
-              style={pillStyle(scope === "all")}
-            >
+            </Button>
+            <Button variant={scope === "all" ? "primary" : "secondary"} aria-pressed={scope === "all"} onClick={() => setScope("all")}>
               Everyone
-            </button>
+            </Button>
           </div>
         )}
       </div>
 
-      {loading && (
-        <div style={{ color: D.muted, fontSize: 14, padding: "24px 0" }}>
-          Loading usage…
-        </div>
-      )}
-
+      {loading && <ActionFeedback className="min-h-20">Loading usage…</ActionFeedback>}
       {!loading && error && (
-        <div style={{ color: D.muted, fontSize: 14, padding: "24px 0" }}>
+        <ActionFeedback error>
           {isRateLimitError(error)
             ? "Too many requests — wait a few seconds and switch the window again."
             : "Couldn't load usage data. Try again in a moment."}
-        </div>
+        </ActionFeedback>
       )}
-
       {!loading && !error && !pages.length && (
-        <div
-          style={{
-            background: D.card,
-            border: `1px solid ${D.border}`,
-            borderRadius: 8,
-            padding: 24,
-            fontSize: 14,
-            color: D.muted,
-          }}
-        >
-          Nothing recorded in this window yet. Tracking starts the moment this
-          feature is live — browse the portal normally for a week or two, then
-          come back to see real patterns.
-        </div>
+        <Card>
+          <CardBody className="py-8 text-center text-ink-secondary">
+            Nothing recorded in this window yet. Tracking starts the moment this
+            feature is live — browse the portal normally for a week or two, then
+            come back to see real patterns.
+          </CardBody>
+        </Card>
       )}
 
       {!loading && !error && pages.length > 0 && (
         <>
-          <div style={{ fontSize: 14, color: D.muted, marginBottom: 12 }}>
-            <span style={{ fontFamily: MONO }}>{data.totals.views}</span> page
-            views across{" "}
-            <span style={{ fontFamily: MONO }}>{data.totals.activeDays}</span>{" "}
-            active {data.totals.activeDays === 1 ? "day" : "days"} in the last{" "}
-            {data.windowDays} days
-            {scope === "all" && data.users?.length ? (
-              <>
-                {" · "}
-                {data.users
-                  .map((u) => `${u.name || "Unknown"} (${u.views})`)
-                  .join(", ")}
-              </>
-            ) : null}
-          </div>
+          <p className="text-ui-body text-ink-secondary u-nums">
+            {data.totals.views} page views across {data.totals.activeDays} active{" "}
+            {data.totals.activeDays === 1 ? "day" : "days"} in the last {data.windowDays} days
+            {scope === "all" && data.users?.length
+              ? ` · ${data.users.map((user) => `${user.name || "Unknown"} (${user.views})`).join(", ")}`
+              : null}
+          </p>
 
           {insights && (
-            <div
-              style={{
-                background: D.card,
-                border: `1px solid ${D.border}`,
-                borderRadius: 8,
-                padding: "14px 16px",
-                marginBottom: 16,
-                display: "grid",
-                gap: 6,
-              }}
-            >
-              <div style={{ fontSize: 14, color: D.text }}>
-                <strong style={{ fontWeight: 500 }}>Most regular:</strong>{" "}
-                {insights.regular.join(", ")}
-              </div>
-              {insights.opens.length > 0 && (
-                <div style={{ fontSize: 14, color: D.text }}>
-                  <strong style={{ fontWeight: 500 }}>App opens land on:</strong>{" "}
-                  {insights.opens.join(", ")}
-                </div>
-              )}
-              {insights.buried.length > 0 && (
-                <div style={{ fontSize: 14, color: D.text }}>
-                  <strong style={{ fontWeight: 500 }}>
-                    Used often but not in the nav you tap:
-                  </strong>{" "}
-                  {insights.buried.join(", ")} — candidates for a promotion to
-                  the dashboard or tab bar.
-                </div>
-              )}
-            </div>
+            <Card>
+              <CardBody className="space-y-2">
+                <p><span className="font-medium">Most regular:</span> {insights.regular.join(", ")}</p>
+                {insights.opens.length > 0 && (
+                  <p><span className="font-medium">App opens land on:</span> {insights.opens.join(", ")}</p>
+                )}
+                {insights.buried.length > 0 && (
+                  <p>
+                    <span className="font-medium">Used often but not in the nav you tap:</span>{" "}
+                    {insights.buried.join(", ")} — candidates for a promotion to the dashboard or tab bar.
+                  </p>
+                )}
+              </CardBody>
+            </Card>
           )}
 
-          <div
-            style={{
-              background: D.card,
-              border: `1px solid ${D.border}`,
-              borderRadius: 8,
-              overflowX: "auto",
-            }}
-          >
-            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 640 }}>
-              <thead>
-                <tr>
-                  {[
-                    "Page",
-                    "Views",
-                    "Days used",
-                    "Top tab",
-                    "Reached via",
-                    "Last used",
-                  ].map((h, i) => (
-                    <th
-                      key={h}
-                      style={{
-                        textAlign: i === 1 || i === 2 ? "right" : "left",
-                        fontSize: 14,
-                        textTransform: "uppercase",
-                        letterSpacing: "0.05em",
-                        fontWeight: 500,
-                        color: D.muted,
-                        padding: "10px 14px",
-                        borderBottom: `1px solid ${D.border}`,
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {pages.map((p) => {
-                  const top = topSource(p.sources);
-                  return (
-                    <tr key={p.pageKey}>
-                      <td
-                        style={{
-                          fontSize: 14,
-                          color: D.text,
-                          fontWeight: 500,
-                          padding: "10px 14px",
-                          borderBottom: `1px solid ${D.border}`,
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {labelFor(p.pageKey)}
-                      </td>
-                      <td
-                        style={{
-                          fontSize: 14,
-                          fontFamily: MONO,
-                          color: D.text,
-                          textAlign: "right",
-                          padding: "10px 14px",
-                          borderBottom: `1px solid ${D.border}`,
-                        }}
-                      >
-                        {p.views}
-                      </td>
-                      <td
-                        style={{
-                          fontSize: 14,
-                          fontFamily: MONO,
-                          color: D.text,
-                          textAlign: "right",
-                          padding: "10px 14px",
-                          borderBottom: `1px solid ${D.border}`,
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {p.activeDays} of {data.windowDays}
-                      </td>
-                      <td
-                        style={{
-                          fontSize: 14,
-                          color: D.muted,
-                          padding: "10px 14px",
-                          borderBottom: `1px solid ${D.border}`,
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {p.tabs?.length ? p.tabs[0].tab : "—"}
-                      </td>
-                      <td
-                        style={{
-                          fontSize: 14,
-                          color: D.muted,
-                          padding: "10px 14px",
-                          borderBottom: `1px solid ${D.border}`,
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {top ? SOURCE_LABELS[top] || top : "—"}
-                      </td>
-                      <td
-                        style={{
-                          fontSize: 14,
-                          color: D.muted,
-                          padding: "10px 14px",
-                          borderBottom: `1px solid ${D.border}`,
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {relativeTime(p.lastUsed)}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+          <Card>
+            <CardBody className="p-0">
+              <Table className="min-w-[640px]" aria-label="Portal usage">
+                <THead>
+                  <TR>
+                    <TH>Page</TH>
+                    <TH align="right">Views</TH>
+                    <TH align="right">Days used</TH>
+                    <TH>Top tab</TH>
+                    <TH>Reached via</TH>
+                    <TH>Last used</TH>
+                  </TR>
+                </THead>
+                <TBody>
+                  {pages.map((page) => {
+                    const top = topSource(page.sources);
+                    return (
+                      <TR key={page.pageKey}>
+                        <TD className="font-medium whitespace-nowrap">{labelFor(page.pageKey)}</TD>
+                        <TD align="right" nums>{page.views}</TD>
+                        <TD align="right" nums className="whitespace-nowrap">{page.activeDays} of {data.windowDays}</TD>
+                        <TD className="whitespace-nowrap text-ink-secondary">{page.tabs?.length ? page.tabs[0].tab : "—"}</TD>
+                        <TD className="whitespace-nowrap text-ink-secondary">{top ? SOURCE_LABELS[top] || top : "—"}</TD>
+                        <TD className="whitespace-nowrap text-ink-secondary">{relativeTime(page.lastUsed)}</TD>
+                      </TR>
+                    );
+                  })}
+                </TBody>
+              </Table>
+            </CardBody>
+          </Card>
 
-          <p style={{ fontSize: 14, color: D.muted, marginTop: 12, maxWidth: 640 }}>
+          <p className="max-w-2xl text-ui-body text-ink-secondary">
             Ranked by days used, then views — regular daily pages float to the
             top even when a one-off deep dive racks up more clicks.
           </p>
         </>
       )}
-    </div>
+    </UiSurface>
   );
 }

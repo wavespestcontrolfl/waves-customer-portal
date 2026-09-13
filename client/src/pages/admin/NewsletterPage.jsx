@@ -21,7 +21,22 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
-import { Badge, Button, Card, CardBody } from "../../components/ui";
+import {
+  Badge,
+  Button,
+  Card,
+  CardBody,
+  Select,
+  Input,
+  Table,
+  THead,
+  TR,
+  TH,
+  Checkbox,
+  TBody,
+  TD,
+  UiSurface,
+} from "../../components/ui";
 import {
   Users,
   Zap,
@@ -46,9 +61,7 @@ import { ComposeView, HistoryView, SubscribersView } from "./NewsletterTabs";
 import EmailAutomationsPanelV2 from "./EmailAutomationsPanelV2";
 import { NEWSLETTER_UI_COPY } from "./newsletterUiCopy";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
-
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
-
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     headers: {
@@ -63,17 +76,50 @@ function adminFetch(path, options = {}) {
     return data;
   });
 }
-
 const TABS = [
-  { key: "dashboard", label: "Dashboard", desc: "Overview", Icon: TrendingUp },
-  { key: "calendar", label: "Calendar", desc: NEWSLETTER_UI_COPY.sendCadence, Icon: CalendarDays },
-  { key: "compose", label: "Compose", desc: "Draft + send", Icon: MailPlus },
-  { key: "history", label: "History", desc: "Performance", Icon: FileText },
-  { key: "subscribers", label: "Subscribers", desc: "Audience", Icon: Users },
-  { key: "events", label: "Events", desc: "Inbox + sources", Icon: ListFilter },
-  { key: "automations", label: "Automations", desc: "Drips", Icon: Zap },
+  {
+    key: "dashboard",
+    label: "Dashboard",
+    desc: "Overview",
+    Icon: TrendingUp,
+  },
+  {
+    key: "calendar",
+    label: "Calendar",
+    desc: NEWSLETTER_UI_COPY.sendCadence,
+    Icon: CalendarDays,
+  },
+  {
+    key: "compose",
+    label: "Compose",
+    desc: "Draft + send",
+    Icon: MailPlus,
+  },
+  {
+    key: "history",
+    label: "History",
+    desc: "Performance",
+    Icon: FileText,
+  },
+  {
+    key: "subscribers",
+    label: "Subscribers",
+    desc: "Audience",
+    Icon: Users,
+  },
+  {
+    key: "events",
+    label: "Events",
+    desc: "Inbox + sources",
+    Icon: ListFilter,
+  },
+  {
+    key: "automations",
+    label: "Automations",
+    desc: "Drips",
+    Icon: Zap,
+  },
 ];
-
 const TAB_BY_KEY = Object.fromEntries(TABS.map((t) => [t.key, t]));
 
 // The 7-tab bar is grouped into parent sections, each revealing its leaf
@@ -81,8 +127,18 @@ const TAB_BY_KEY = Object.fromEntries(TABS.map((t) => [t.key, t]));
 // {tab === "..."} render block below is unchanged. Default/primary tab
 // (dashboard) is the first group.
 const NEWSLETTER_TAB_GROUPS = [
-  { key: "dashboard", label: "Dashboard", Icon: TrendingUp, tabs: ["dashboard"] },
-  { key: "compose", label: "Compose", Icon: MailPlus, tabs: ["compose"] },
+  {
+    key: "dashboard",
+    label: "Dashboard",
+    Icon: TrendingUp,
+    tabs: ["dashboard"],
+  },
+  {
+    key: "compose",
+    label: "Compose",
+    Icon: MailPlus,
+    tabs: ["compose"],
+  },
   {
     key: "schedule",
     label: "Schedule",
@@ -95,9 +151,13 @@ const NEWSLETTER_TAB_GROUPS = [
     Icon: Zap,
     tabs: ["automations", "events"],
   },
-  { key: "audience", label: "Audience", Icon: Users, tabs: ["subscribers"] },
+  {
+    key: "audience",
+    label: "Audience",
+    Icon: Users,
+    tabs: ["subscribers"],
+  },
 ];
-
 function StatTile({ icon: Icon, label, value, sub }) {
   return (
     <Card>
@@ -109,18 +169,16 @@ function StatTile({ icon: Icon, label, value, sub }) {
           <Icon size={14} strokeWidth={1.75} aria-hidden />{" "}
           <span className="u-label">{label}</span>{" "}
         </div>{" "}
-        <div
-          className="u-nums font-medium text-ink-primary"
-          style={{ fontSize: 24 }}
-        >
+        <div className="u-nums font-medium text-ink-primary text-[24px]">
           {value}
         </div>
-        {sub && <div className="text-11 text-ink-tertiary mt-1">{sub}</div>}
+        {sub && (
+          <div className="text-ui-body text-ink-tertiary mt-1">{sub}</div>
+        )}
       </CardBody>{" "}
     </Card>
   );
 }
-
 function SectionHeader({ title, hint, action }) {
   return (
     <div className="flex items-start justify-between gap-3 mb-3">
@@ -128,125 +186,14 @@ function SectionHeader({ title, hint, action }) {
       <div className="min-w-0">
         {" "}
         <h2 className="text-14 font-medium text-ink-primary">{title}</h2>
-        {hint && <div className="text-12 text-ink-tertiary mt-0.5">{hint}</div>}
+        {hint && (
+          <div className="text-ui-body text-ink-tertiary mt-0.5">{hint}</div>
+        )}
       </div>
       {action}
     </div>
   );
 }
-
-function PageHeader({ onCompose, subscribersActive, sendsData }) {
-  const sentCount = sendsData ? (sendsData.counts?.sent ?? 0) : null;
-  const scheduledCount = sendsData ? (sendsData.counts?.scheduled ?? 0) : null;
-  return (
-    <div className="bg-white border-hairline border-zinc-200 rounded-sm p-4 sm:p-5 mb-4">
-      {" "}
-      <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
-        {" "}
-        <div className="min-w-0">
-          {" "}
-          <div className="flex items-center gap-2 mb-2">
-            {" "}
-            <div className="h-8 w-8 rounded-sm bg-zinc-900 text-white inline-flex items-center justify-center">
-              {" "}
-              <MailPlus size={16} strokeWidth={1.75} aria-hidden />{" "}
-            </div>{" "}
-            <div>
-              {" "}
-              <h1 className="text-24 sm:text-28 font-medium text-ink-primary leading-tight m-0">
-                Newsletter
-              </h1>{" "}
-              <p className="text-12 text-ink-tertiary mt-0.5">
-                Plan, write, send, and track the Waves neighborhood email list.
-              </p>{" "}
-            </div>{" "}
-          </div>{" "}
-          <div className="flex flex-wrap gap-2 mt-3">
-            {" "}
-            <Badge tone="neutral">
-              {subscribersActive != null
-                ? subscribersActive.toLocaleString()
-                : "—"}{" "}
-              active subscribers
-            </Badge>{" "}
-            <Badge tone="neutral">
-              {sentCount != null ? sentCount.toLocaleString() : "—"} sent
-              campaigns
-            </Badge>{" "}
-            <Badge tone="neutral">
-              {scheduledCount ?? "—"} scheduled
-            </Badge>{" "}
-          </div>{" "}
-        </div>{" "}
-        <div className="flex flex-col sm:flex-row gap-2 lg:justify-end">
-          {" "}
-          <Button onClick={onCompose}>
-            {" "}
-            <MailPlus
-              size={14}
-              strokeWidth={1.75}
-              className="mr-2"
-              aria-hidden
-            />
-            New Campaign
-          </Button>{" "}
-        </div>{" "}
-      </div>{" "}
-    </div>
-  );
-}
-
-function TabBar({ tab, tabs, tabCounts, onSelect }) {
-  return (
-    <div className="tab-pill-scroll mb-5">
-      {" "}
-      <div className="tab-pill-scroll-inner inline-flex min-w-full sm:min-w-0 items-stretch gap-1 bg-zinc-100 border-hairline border-zinc-200 rounded-sm p-1">
-        {tabs.map((t) => {
-          const active = tab === t.key;
-          return (
-            <button
-              key={t.key}
-              type="button"
-              onClick={() => onSelect(t.key)}
-              className={[
-                "min-h-[44px] sm:min-h-0 sm:h-12 px-3 sm:px-4 rounded-xs text-left transition-colors u-focus-ring flex-1 sm:flex-none",
-                active
-                  ? "bg-zinc-900 text-white"
-                  : "bg-transparent text-ink-secondary hover:bg-white hover:text-ink-primary",
-              ].join(" ")}
-            >
-              {" "}
-              <span className="block text-12 font-medium uppercase tracking-label whitespace-nowrap">
-                {t.label}
-                {tabCounts[t.key] != null && (
-                  <span
-                    className={
-                      active
-                        ? "text-zinc-300 ml-1.5"
-                        : "text-ink-tertiary ml-1.5"
-                    }
-                  >
-                    ({tabCounts[t.key].toLocaleString()})
-                  </span>
-                )}
-              </span>{" "}
-              <span
-                className={
-                  active
-                    ? "block text-10 text-zinc-300 mt-0.5"
-                    : "block text-10 text-ink-tertiary mt-0.5"
-                }
-              >
-                {t.desc}
-              </span>{" "}
-            </button>
-          );
-        })}
-      </div>{" "}
-    </div>
-  );
-}
-
 // Allowlist URL protocols on the render side too — events_raw rows
 // pre-dating the ingestion-side validation could still contain a
 // `javascript:` URL, and rendering that into <a href>would execute
@@ -293,7 +240,6 @@ function EventCard({ event, onDraft }) {
       : event.venueAddress
         ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(event.venueAddress)}`
         : null;
-
   return (
     <div className="bg-white border-hairline border-zinc-200 rounded-sm p-3 flex flex-col gap-2">
       {" "}
@@ -301,10 +247,10 @@ function EventCard({ event, onDraft }) {
         {" "}
         <div className="flex-1 min-w-0">
           {" "}
-          <div className="text-13 font-medium text-ink-primary truncate">
+          <div className="text-ui-body font-medium text-ink-primary truncate">
             {event.title}
           </div>{" "}
-          <div className="text-11 text-ink-tertiary mt-0.5 u-nums">
+          <div className="text-ui-body text-ink-tertiary mt-0.5 u-nums">
             {dateLabel}
             {cityLabel ? ` · ${cityLabel}` : ""}
           </div>{" "}
@@ -312,7 +258,7 @@ function EventCard({ event, onDraft }) {
         <Badge tone="neutral">{sourceLabel}</Badge>{" "}
       </div>
       {(event.venueName || event.venueAddress) && (
-        <div className="flex items-start gap-1.5 text-11 text-ink-tertiary leading-snug">
+        <div className="flex items-start gap-1.5 text-ui-body text-ink-tertiary leading-snug">
           {" "}
           <MapPin
             size={11}
@@ -333,7 +279,7 @@ function EventCard({ event, onDraft }) {
         </div>
       )}
       {event.description && (
-        <div className="text-12 text-ink-secondary leading-snug line-clamp-2">
+        <div className="text-ui-body text-ink-secondary leading-snug line-clamp-2">
           {event.description}
         </div>
       )}
@@ -343,7 +289,7 @@ function EventCard({ event, onDraft }) {
             href={mapUrl}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center text-12 font-medium text-zinc-700 hover:text-zinc-900 underline underline-offset-2"
+            className="inline-flex items-center text-ui-body font-medium text-zinc-700 hover:text-zinc-900 underline underline-offset-2"
           >
             View on map
           </a>
@@ -353,7 +299,7 @@ function EventCard({ event, onDraft }) {
             href={safeUrl}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center text-12 font-medium text-zinc-700 hover:text-zinc-900 underline underline-offset-2"
+            className="inline-flex items-center text-ui-body font-medium text-zinc-700 hover:text-zinc-900 underline underline-offset-2"
           >
             View source
           </a>
@@ -377,7 +323,6 @@ function EventCard({ event, onDraft }) {
     </div>
   );
 }
-
 function QuickActions({ onSelectTab }) {
   // "Draft from event" was retired — that workflow is the "Draft
   // newsletter" button on each EventCard tile in the section below.
@@ -403,19 +348,20 @@ function QuickActions({ onSelectTab }) {
               Compose manually
             </span>{" "}
           </div>{" "}
-          <div className="text-12 text-ink-tertiary">
+          <div className="text-ui-body text-ink-tertiary">
             Start a blank draft in the composer.
           </div>{" "}
-          <button
+          <Button
             type="button"
             onClick={(e) => {
               e.stopPropagation();
               onSelectTab("compose");
             }}
-            className="inline-block mt-3 text-12 font-medium text-zinc-900 underline underline-offset-2 bg-transparent border-0 p-0 cursor-pointer"
+            className="inline-block mt-3"
+            variant="secondary"
           >
             Open composer →
-          </button>{" "}
+          </Button>{" "}
         </CardBody>{" "}
       </Card>{" "}
       <Card
@@ -436,25 +382,25 @@ function QuickActions({ onSelectTab }) {
               Import subscribers
             </span>{" "}
           </div>{" "}
-          <div className="text-12 text-ink-tertiary">
+          <div className="text-ui-body text-ink-tertiary">
             Bulk import subscribers from a CSV.
           </div>{" "}
-          <button
+          <Button
             type="button"
             onClick={(e) => {
               e.stopPropagation();
               onSelectTab("subscribers");
             }}
-            className="inline-block mt-3 text-12 font-medium text-zinc-900 underline underline-offset-2 bg-transparent border-0 p-0 cursor-pointer"
+            className="inline-block mt-3"
+            variant="secondary"
           >
             Go to subscribers →
-          </button>{" "}
+          </Button>{" "}
         </CardBody>{" "}
       </Card>{" "}
     </div>
   );
 }
-
 function ManageTile({ icon: Icon, title, body, onClick }) {
   return (
     <Card
@@ -475,7 +421,7 @@ function ManageTile({ icon: Icon, title, body, onClick }) {
             <div className="text-14 font-medium text-ink-primary">
               {title}
             </div>{" "}
-            <div className="text-12 text-ink-tertiary mt-1 leading-snug">
+            <div className="text-ui-body text-ink-tertiary mt-1 leading-snug">
               {body}
             </div>{" "}
           </div>{" "}
@@ -484,7 +430,6 @@ function ManageTile({ icon: Icon, title, body, onClick }) {
     </Card>
   );
 }
-
 function PostStatusBadge({ status }) {
   if (status === "sent") return <Badge tone="strong">Sent</Badge>;
   if (status === "sending") return <Badge tone="neutral">Sending…</Badge>;
@@ -492,11 +437,12 @@ function PostStatusBadge({ status }) {
   if (status === "failed") return <Badge tone="alert">Failed</Badge>;
   return <Badge tone="neutral">Draft</Badge>;
 }
-
 function RecentPosts({ posts, loading }) {
   if (loading) {
     return (
-      <div className="p-6 text-center text-13 text-ink-secondary">Loading…</div>
+      <div className="p-6 text-center text-ui-body text-ink-secondary">
+        Loading…
+      </div>
     );
   }
   if (!posts || posts.length === 0) {
@@ -506,7 +452,7 @@ function RecentPosts({ posts, loading }) {
         <CardBody className="text-center">
           {" "}
           <div className="text-14 text-ink-primary mb-1">No posts yet</div>{" "}
-          <div className="text-13 text-ink-tertiary">
+          <div className="text-ui-body text-ink-tertiary">
             Draft your first newsletter from an event, or compose manually.
           </div>{" "}
         </CardBody>{" "}
@@ -526,10 +472,10 @@ function RecentPosts({ posts, loading }) {
             {" "}
             <div className="flex-1 min-w-0">
               {" "}
-              <div className="text-13 font-medium text-ink-primary truncate">
+              <div className="text-ui-body font-medium text-ink-primary truncate">
                 {p.subject || "(untitled)"}
               </div>{" "}
-              <div className="text-11 text-ink-tertiary mt-0.5 u-nums flex items-center gap-2 flex-wrap">
+              <div className="text-ui-body text-ink-tertiary mt-0.5 u-nums flex items-center gap-2 flex-wrap">
                 {p.sent_at && (
                   <span>
                     Sent{" "}
@@ -554,7 +500,6 @@ function RecentPosts({ posts, loading }) {
     </div>
   );
 }
-
 function DashboardView({
   onSelectTab,
   onDraftFromEvent,
@@ -585,16 +530,13 @@ function DashboardView({
   }, [sendsData]);
   const scheduledCount = sendsData ? (sendsData.counts?.scheduled ?? 0) : null;
   const loadingPosts = sendsLoading;
-
   const stats = {
     subscribers: subscribersActive,
     lastOpenRate,
     scheduledCount,
   };
-
   const [events, setEvents] = useState([]);
   const [loadingEvents, setLoadingEvents] = useState(true);
-
   useEffect(() => {
     let ignore = false;
     adminFetch("/admin/newsletter/events?days=14&limit=12")
@@ -611,7 +553,6 @@ function DashboardView({
       ignore = true;
     };
   }, []);
-
   return (
     <div>
       {/* Stats strip */}
@@ -661,7 +602,9 @@ function DashboardView({
           hint="Pulled from local SWFL feeds (Tampa.gov, Bay News 9, Manatee Chamber, Sarasota Magazine, The Gabber, Lakewood Ranch). Refreshes daily 4am ET."
         />
         {loadingEvents ? (
-          <div className="text-13 text-ink-tertiary p-3">Loading events…</div>
+          <div className="text-ui-body text-ink-tertiary p-3">
+            Loading events…
+          </div>
         ) : events.length === 0 ? (
           <Card>
             {" "}
@@ -670,7 +613,7 @@ function DashboardView({
               <div className="text-14 text-ink-primary mb-1">
                 No upcoming events
               </div>{" "}
-              <div className="text-13 text-ink-tertiary">
+              <div className="text-ui-body text-ink-tertiary">
                 The next ingestion run is at 4am ET. Sources can be inspected in
                 the event_sources table.
               </div>{" "}
@@ -694,13 +637,14 @@ function DashboardView({
         <SectionHeader
           title="Recent posts"
           action={
-            <button
+            <Button
               type="button"
               onClick={() => onSelectTab("history")}
-              className="text-12 font-medium text-zinc-900 underline underline-offset-2 bg-transparent border-0 p-0 cursor-pointer"
+              className=""
+              variant="secondary"
             >
               View all →
-            </button>
+            </Button>
           }
         />{" "}
         <RecentPosts posts={recentPosts} loading={loadingPosts} />{" "}
@@ -748,14 +692,11 @@ const FRESHNESS_LABELS = {
   expired: "Expired",
   needs_review: "Needs Review",
 };
-
 const STATUS_FILTERS = ["all", "pending", "approved", "rejected", "featured"];
-
 function FreshnessBadge({ status }) {
   const label = FRESHNESS_LABELS[status] || status;
   const isFresh = status?.startsWith("fresh_");
-  const isStale =
-    status === "stale_recurring" || status === "expired";
+  const isStale = status === "stale_recurring" || status === "expired";
   const cls = isFresh
     ? "bg-zinc-700 text-white"
     : isStale
@@ -763,13 +704,12 @@ function FreshnessBadge({ status }) {
       : "bg-zinc-100 text-zinc-500 border border-dashed border-zinc-300";
   return (
     <span
-      className={`inline-block px-1.5 py-0.5 rounded text-10 font-medium ${cls}`}
+      className={`inline-block px-1.5 py-0.5 rounded text-ui-body font-medium ${cls}`}
     >
       {label}
     </span>
   );
 }
-
 function AdminStatusBadge({ status }) {
   const map = {
     pending: "bg-zinc-200 text-zinc-600",
@@ -779,14 +719,13 @@ function AdminStatusBadge({ status }) {
   };
   return (
     <span
-      className={`inline-block px-1.5 py-0.5 rounded text-10 font-medium ${map[status] || "bg-zinc-100 text-zinc-500"}`}
+      className={`inline-block px-1.5 py-0.5 rounded text-ui-body font-medium ${map[status] || "bg-zinc-100 text-zinc-500"}`}
     >
       {status === "featured" && "★ "}
       {status}
     </span>
   );
 }
-
 function EventInboxView({ onDraftFromEvent }) {
   const [events, setEvents] = useState([]);
   const [counts, setCounts] = useState({});
@@ -800,13 +739,14 @@ function EventInboxView({ onDraftFromEvent }) {
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const eventsAbortRef = useRef(null);
   const [actionStatus, setActionStatus] = useState("");
-
   const fetchEvents = () => {
     eventsAbortRef.current?.abort();
     const controller = new AbortController();
     eventsAbortRef.current = controller;
     setLoading(true);
-    const params = new URLSearchParams({ limit: "100" });
+    const params = new URLSearchParams({
+      limit: "100",
+    });
     if (statusFilter && statusFilter !== "all")
       params.set("status", statusFilter);
     if (freshnessFilter) params.set("freshness", freshnessFilter);
@@ -819,24 +759,24 @@ function EventInboxView({ onDraftFromEvent }) {
         setCounts(d.counts || {});
         setSelected(new Set());
       })
-      .catch((e) => { if (e.name !== "AbortError") setEvents([]); })
-      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+      .catch((e) => {
+        if (e.name !== "AbortError") setEvents([]);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
   };
-
   const fetchSources = () => {
     adminFetch("/admin/newsletter/events/sources")
       .then((d) => setSources(d.sources || []))
       .catch(() => {});
   };
-
   useEffect(() => {
     fetchEvents();
     fetchSources();
     return () => eventsAbortRef.current?.abort();
   }, [statusFilter, freshnessFilter, zoneFilter]);
-
   const doSearch = () => fetchEvents();
-
   const patchEvent = async (id, body) => {
     setActionStatus("Saving event…");
     try {
@@ -850,17 +790,24 @@ function EventInboxView({ onDraftFromEvent }) {
       setActionStatus("Event update failed: " + e.message);
     }
   };
-
   const bulkAction = async (action) => {
     if (selected.size === 0) return;
-    if (action === "reject" && !confirm(`Reject ${selected.size} selected event${selected.size === 1 ? "" : "s"}?`)) return;
+    if (
+      action === "reject" &&
+      !confirm(
+        `Reject ${selected.size} selected event${selected.size === 1 ? "" : "s"}?`,
+      )
+    )
+      return;
     setActionStatus(`${action} in progress…`);
     try {
       await adminFetch("/admin/newsletter/events/bulk-action", {
         method: "POST",
         body: JSON.stringify({ action, ids: [...selected] }),
       });
-      setActionStatus(`${selected.size} event${selected.size === 1 ? "" : "s"} updated.`);
+      setActionStatus(
+        `${selected.size} event${selected.size === 1 ? "" : "s"} updated.`,
+      );
       fetchEvents();
     } catch (e) {
       setActionStatus(`Bulk ${action} failed: ${e.message}`);
@@ -877,10 +824,14 @@ function EventInboxView({ onDraftFromEvent }) {
     // keeps table order for equally-complete rows.
     const chosen = events.filter((e) => selected.has(e.id));
     const completeness = (e) => (e.imageUrl ? 2 : 0) + (e.eventUrl ? 1 : 0);
-    const primary = [...chosen].sort((a, b) => completeness(b) - completeness(a))[0];
+    const primary = [...chosen].sort(
+      (a, b) => completeness(b) - completeness(a),
+    )[0];
     if (!primary) return;
     const primaryId = primary.id;
-    const duplicateIds = chosen.filter((e) => e.id !== primaryId).map((e) => e.id);
+    const duplicateIds = chosen
+      .filter((e) => e.id !== primaryId)
+      .map((e) => e.id);
     if (
       !confirm(
         `Keep "${primary.title}" and merge ${duplicateIds.length} duplicate${duplicateIds.length === 1 ? "" : "s"} into it?\n\n` +
@@ -899,7 +850,6 @@ function EventInboxView({ onDraftFromEvent }) {
       alert("Merge failed: " + e.message);
     }
   };
-
   const toggleSelect = (id) => {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -908,12 +858,10 @@ function EventInboxView({ onDraftFromEvent }) {
       return next;
     });
   };
-
   const toggleAll = () => {
     if (selected.size === events.length) setSelected(new Set());
     else setSelected(new Set(events.map((e) => e.id)));
   };
-
   const fmtDate = (d) => {
     if (!d) return "—";
     return new Date(d).toLocaleDateString("en-US", {
@@ -923,45 +871,49 @@ function EventInboxView({ onDraftFromEvent }) {
       timeZone: "America/New_York",
     });
   };
-
   return (
     <div className="space-y-4 mt-4">
       {/* Source Health Strip */}
       <div className="bg-white border-hairline border-zinc-200 rounded-sm">
-        <button
+        <Button
           type="button"
           onClick={() => setSourcesOpen(!sourcesOpen)}
-          className="w-full flex items-center justify-between px-4 py-3 text-left"
+          className="w-full text-left"
+          variant="secondary"
         >
-          <span className="text-13 font-medium text-ink-primary">
+          <span className="text-ui-body font-medium text-ink-primary">
             Event Sources ({sources.length})
           </span>
-          <span className="text-11 text-ink-tertiary">
+          <span className="text-ui-body text-ink-tertiary">
             {sourcesOpen ? "Hide" : "Show"}
           </span>
-        </button>
+        </Button>
         {sourcesOpen && (
           <div className="px-4 pb-3 flex flex-wrap gap-2">
             {sources.map((s) => {
               // A source can "succeed" while yielding nothing for days —
               // that's a broken feed, not a healthy one. Amber once the
               // empty streak passes a week.
-              const zeroYieldDegraded = s.lastPullStatus === "success" && (s.consecutiveZeroYields ?? 0) >= 7;
+              const zeroYieldDegraded =
+                s.lastPullStatus === "success" &&
+                (s.consecutiveZeroYields ?? 0) >= 7;
               return (
                 <div
                   key={s.id}
-                  title={zeroYieldDegraded ? `Pulls succeed but 0 events for ${s.consecutiveZeroYields} runs` : (s.lastError || undefined)}
-                  className="flex items-center gap-1.5 px-2 py-1 bg-zinc-50 border-hairline border-zinc-200 rounded text-11"
+                  title={
+                    zeroYieldDegraded
+                      ? `Pulls succeed but 0 events for ${s.consecutiveZeroYields} runs`
+                      : s.lastError || undefined
+                  }
+                  className="flex items-center gap-1.5 px-2 py-1 bg-zinc-50 border-hairline border-zinc-200 rounded text-ui-body"
                 >
                   <span
-                    className={`inline-block w-1.5 h-1.5 rounded-full ${s.lastPullStatus === "error" ? "bg-red-500" : zeroYieldDegraded ? "bg-amber-500" : s.lastPullStatus === "success" ? "bg-green-500" : "bg-zinc-300"}`}
+                    className={`inline-block w-1.5 h-1.5 rounded-full ${s.lastPullStatus === "error" ? "bg-alert-fg" : zeroYieldDegraded ? "bg-warn-fg" : s.lastPullStatus === "success" ? "bg-green-500" : "bg-zinc-300"}`}
                   />
                   <span className="text-ink-primary font-medium truncate max-w-[140px]">
                     {s.name.split("—")[0].trim()}
                   </span>
-                  <span className="text-ink-tertiary">
-                    {s.eventCount}
-                  </span>
+                  <span className="text-ink-tertiary">{s.eventCount}</span>
                 </div>
               );
             })}
@@ -974,43 +926,47 @@ function EventInboxView({ onDraftFromEvent }) {
         {/* Status tabs */}
         <div className="flex flex-wrap gap-1">
           {STATUS_FILTERS.map((s) => (
-            <button
+            <Button
               key={s}
               type="button"
               onClick={() => setStatusFilter(s)}
-              className={`px-2.5 py-1 rounded text-12 font-medium ${statusFilter === s ? "bg-zinc-900 text-white" : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200"}`}
+              className="rounded-sm"
+              aria-pressed={statusFilter === s}
+              variant={statusFilter === s ? "primary" : "secondary"}
             >
               {s}
               {counts[s] != null ? ` (${counts[s]})` : ""}
-            </button>
+            </Button>
           ))}
         </div>
 
         {/* Secondary filters */}
         <div className="flex flex-wrap gap-2 items-end">
           <div>
-            <label className="block text-11 text-ink-tertiary mb-0.5">
+            <label className="block text-ui-body text-ink-tertiary mb-0.5">
               Freshness
             </label>
-            <select
+            <Select
               value={freshnessFilter}
               onChange={(e) => setFreshnessFilter(e.target.value)}
-              className="h-8 px-2 text-12 bg-white border-hairline border-zinc-300 rounded-sm"
+              className=""
+              aria-label="Freshness"
             >
               <option value="">All</option>
               <option value="fresh">Fresh</option>
               <option value="stale">Stale</option>
               <option value="needs_review">Needs Review</option>
-            </select>
+            </Select>
           </div>
           <div>
-            <label className="block text-11 text-ink-tertiary mb-0.5">
+            <label className="block text-ui-body text-ink-tertiary mb-0.5">
               Zone
             </label>
-            <select
+            <Select
               value={zoneFilter}
               onChange={(e) => setZoneFilter(e.target.value)}
-              className="h-8 px-2 text-12 bg-white border-hairline border-zinc-300 rounded-sm"
+              className=""
+              aria-label="Zone"
             >
               <option value="">All zones</option>
               <option value="south_sarasota">South Sarasota</option>
@@ -1018,51 +974,52 @@ function EventInboxView({ onDraftFromEvent }) {
               <option value="manatee">Manatee</option>
               <option value="pinellas">Pinellas</option>
               <option value="tampa">Tampa</option>
-            </select>
+            </Select>
           </div>
           <div className="flex-1 min-w-[160px]">
-            <label className="block text-11 text-ink-tertiary mb-0.5">
+            <label className="block text-ui-body text-ink-tertiary mb-0.5">
               Search
             </label>
             <div className="flex gap-1">
-              <input
+              <Input
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && doSearch()}
                 placeholder="Search event titles..."
-                className="flex-1 h-8 px-2 text-12 bg-white border-hairline border-zinc-300 rounded-sm"
+                className="flex-1"
+                aria-label="Search"
               />
-              <button
+              <Button
                 type="button"
                 onClick={doSearch}
                 aria-label="Search"
-                className="h-11 w-11 sm:h-8 sm:w-8 inline-flex items-center justify-center border-hairline border-zinc-300 rounded-sm hover:bg-zinc-50"
+                className=""
+                variant="secondary"
               >
                 <Search size={13} strokeWidth={1.75} aria-hidden />
-              </button>
+              </Button>
             </div>
           </div>
-          <button
+          <Button
             type="button"
             onClick={fetchEvents}
-            className="h-8 w-8 inline-flex items-center justify-center border-hairline border-zinc-300 rounded-sm hover:bg-zinc-50"
+            className=""
             title="Refresh"
+            variant="secondary"
+            aria-label="Refresh"
           >
             <RefreshCw size={13} strokeWidth={1.75} />
-          </button>
+          </Button>
         </div>
 
         {/* Bulk actions */}
         {selected.size > 0 && (
           <div className="flex items-center gap-2 pt-1">
-            <span className="text-12 text-ink-secondary">
+            <span className="text-ui-body text-ink-secondary">
               {selected.size} selected
             </span>
-            <Button
-              size="sm"
-              onClick={() => bulkAction("approve")}
-            >
+            <Button size="sm" onClick={() => bulkAction("approve")}>
               <Check size={12} className="mr-1" />
               Approve
             </Button>
@@ -1098,7 +1055,7 @@ function EventInboxView({ onDraftFromEvent }) {
       </div>
 
       {actionStatus && (
-        <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm px-3 py-2 text-12 text-ink-secondary">
+        <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm px-3 py-2 text-ui-body text-ink-secondary">
           {actionStatus}
         </div>
       )}
@@ -1106,62 +1063,64 @@ function EventInboxView({ onDraftFromEvent }) {
       {/* Event Table */}
       <div className="bg-white border-hairline border-zinc-200 rounded-sm overflow-x-auto">
         {loading ? (
-          <div className="p-8 text-center text-13 text-ink-tertiary">
+          <div className="p-8 text-center text-ui-body text-ink-tertiary">
             Loading events...
           </div>
         ) : events.length === 0 ? (
-          <div className="p-8 text-center text-13 text-ink-tertiary">
+          <div className="p-8 text-center text-ui-body text-ink-tertiary">
             No events match the current filters.
           </div>
         ) : (
-          <table className="w-full text-left">
-            <thead>
-              <tr className="border-b border-zinc-100">
-                <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-8">
-                  <input
-                    type="checkbox"
-                    checked={selected.size === events.length && events.length > 0}
+          <Table className="w-full text-left">
+            <THead>
+              <TR className="border-b border-zinc-100">
+                <TH className="px-3 py-2 text-ui-body font-medium text-ink-tertiary w-8">
+                  <Checkbox
+                    checked={
+                      selected.size === events.length && events.length > 0
+                    }
                     onChange={toggleAll}
+                    className="shrink-0"
                   />
-                </th>
-                <th className="px-3 py-2 text-11 font-medium text-ink-tertiary">
+                </TH>
+                <TH className="px-3 py-2 text-ui-body font-medium text-ink-tertiary">
                   Event
-                </th>
-                <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-24">
+                </TH>
+                <TH className="px-3 py-2 text-ui-body font-medium text-ink-tertiary w-24">
                   Date
-                </th>
-                <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-24">
+                </TH>
+                <TH className="px-3 py-2 text-ui-body font-medium text-ink-tertiary w-24">
                   City
-                </th>
-                <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-28">
+                </TH>
+                <TH className="px-3 py-2 text-ui-body font-medium text-ink-tertiary w-28">
                   Freshness
-                </th>
-                <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-20">
+                </TH>
+                <TH className="px-3 py-2 text-ui-body font-medium text-ink-tertiary w-20">
                   Status
-                </th>
-                <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-20">
+                </TH>
+                <TH className="px-3 py-2 text-ui-body font-medium text-ink-tertiary w-20">
                   Score
-                </th>
-                <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-28">
+                </TH>
+                <TH className="px-3 py-2 text-ui-body font-medium text-ink-tertiary w-28">
                   Actions
-                </th>
-              </tr>
-            </thead>
-            <tbody>
+                </TH>
+              </TR>
+            </THead>
+            <TBody>
               {events.map((ev) => (
-                <tr
+                <TR
                   key={ev.id}
                   className={`border-b border-zinc-50 hover:bg-zinc-25 ${ev.adminStatus === "rejected" ? "opacity-50" : ""}`}
                 >
-                  <td className="px-3 py-2">
-                    <input
-                      type="checkbox"
+                  <TD className="px-3 py-2">
+                    <Checkbox
                       checked={selected.has(ev.id)}
                       onChange={() => toggleSelect(ev.id)}
+                      className="shrink-0"
                     />
-                  </td>
-                  <td className="px-3 py-2">
-                    <div className="text-13 font-medium text-ink-primary leading-snug line-clamp-1">
+                  </TD>
+                  <TD className="px-3 py-2">
+                    <div className="text-ui-body font-medium text-ink-primary leading-snug line-clamp-1">
                       {(() => {
                         const safe = safeHttpUrl(ev.eventUrl);
                         return safe ? (
@@ -1179,72 +1138,83 @@ function EventInboxView({ onDraftFromEvent }) {
                       })()}
                     </div>
                     {ev.venueName && (
-                      <div className="text-11 text-ink-tertiary mt-0.5 line-clamp-1">
+                      <div className="text-ui-body text-ink-tertiary mt-0.5 line-clamp-1">
                         {ev.venueName}
                       </div>
                     )}
-                    <div className="text-10 text-ink-tertiary mt-0.5">
+                    <div className="text-ui-body text-ink-tertiary mt-0.5">
                       {ev.sourceName?.split("—")[0]?.trim()}
                     </div>
-                  </td>
-                  <td className="px-3 py-2 text-12 text-ink-secondary">
+                  </TD>
+                  <TD className="px-3 py-2 text-ui-body text-ink-secondary">
                     {fmtDate(ev.startAt)}
-                  </td>
-                  <td className="px-3 py-2 text-12 text-ink-secondary">
+                  </TD>
+                  <TD className="px-3 py-2 text-ui-body text-ink-secondary">
                     {ev.city || "—"}
-                  </td>
-                  <td className="px-3 py-2">
+                  </TD>
+                  <TD className="px-3 py-2">
                     <FreshnessBadge status={ev.freshnessStatus} />
-                  </td>
-                  <td className="px-3 py-2">
+                  </TD>
+                  <TD className="px-3 py-2">
                     <div className="flex items-center gap-1.5">
                       <AdminStatusBadge status={ev.adminStatus} />
                       {ev.approvedVia === "auto_curation" && (
                         <span
                           title={ev.curationNote || "Approved by auto-curation"}
-                          className="text-10 uppercase tracking-label text-ink-tertiary border-hairline border-zinc-200 rounded px-1 py-0.5"
+                          className="text-ui-body uppercase tracking-label text-ink-tertiary border-hairline border-zinc-200 rounded px-1 py-0.5"
                         >
                           Auto
                         </span>
                       )}
-                      {!ev.approvedVia && ev.curatedAt && ev.adminStatus === "pending" && (
-                        <span
-                          title={ev.curationNote || "Examined by auto-curation, left for human review"}
-                          className="text-10 uppercase tracking-label text-ink-tertiary border-hairline border-zinc-200 rounded px-1 py-0.5"
-                        >
-                          Held
-                        </span>
-                      )}
+                      {!ev.approvedVia &&
+                        ev.curatedAt &&
+                        ev.adminStatus === "pending" && (
+                          <span
+                            title={
+                              ev.curationNote ||
+                              "Examined by auto-curation, left for human review"
+                            }
+                            className="text-ui-body uppercase tracking-label text-ink-tertiary border-hairline border-zinc-200 rounded px-1 py-0.5"
+                          >
+                            Held
+                          </span>
+                        )}
                     </div>
-                  </td>
-                  <td className="px-3 py-2 text-12 text-ink-secondary u-nums">
+                  </TD>
+                  <TD className="px-3 py-2 text-ui-body text-ink-secondary u-nums">
                     {ev.compositeScore ?? "—"}
-                  </td>
-                  <td className="px-3 py-2">
+                  </TD>
+                  <TD className="px-3 py-2">
                     <div className="flex items-center gap-1">
-                      <button
+                      <Button
                         type="button"
                         onClick={() => onDraftFromEvent?.(ev)}
-                        className="h-6 w-6 inline-flex items-center justify-center rounded hover:bg-zinc-100"
+                        className=""
                         title="Draft a newsletter with this event preloaded"
+                        variant="secondary"
+                        aria-label="Draft a newsletter with this event preloaded"
                       >
                         <FileText size={13} strokeWidth={2} />
-                      </button>
+                      </Button>
                       {ev.adminStatus !== "approved" &&
                         ev.adminStatus !== "featured" && (
-                          <button
+                          <Button
                             type="button"
                             onClick={() =>
-                              patchEvent(ev.id, { adminStatus: "approved" })
+                              patchEvent(ev.id, {
+                                adminStatus: "approved",
+                              })
                             }
-                            className="h-6 w-6 inline-flex items-center justify-center rounded hover:bg-zinc-100"
+                            className=""
                             title="Approve"
+                            variant="secondary"
+                            aria-label="Approve"
                           >
                             <Check size={13} strokeWidth={2} />
-                          </button>
+                          </Button>
                         )}
                       {ev.adminStatus !== "rejected" && (
-                        <button
+                        <Button
                           type="button"
                           onClick={() =>
                             patchEvent(ev.id, {
@@ -1252,30 +1222,36 @@ function EventInboxView({ onDraftFromEvent }) {
                               suppressionReason: "manual_reject",
                             })
                           }
-                          className="h-6 w-6 inline-flex items-center justify-center rounded hover:bg-zinc-100"
+                          className=""
                           title="Reject"
+                          variant="secondary"
+                          aria-label="Reject"
                         >
                           <X size={13} strokeWidth={2} />
-                        </button>
+                        </Button>
                       )}
                       {ev.adminStatus !== "featured" && (
-                        <button
+                        <Button
                           type="button"
                           onClick={() =>
-                            patchEvent(ev.id, { adminStatus: "featured" })
+                            patchEvent(ev.id, {
+                              adminStatus: "featured",
+                            })
                           }
-                          className="h-6 w-6 inline-flex items-center justify-center rounded hover:bg-zinc-100"
+                          className=""
                           title="Feature"
+                          variant="secondary"
+                          aria-label="Feature"
                         >
                           <Star size={13} strokeWidth={2} />
-                        </button>
+                        </Button>
                       )}
                     </div>
-                  </td>
-                </tr>
+                  </TD>
+                </TR>
               ))}
-            </tbody>
-          </table>
+            </TBody>
+          </Table>
         )}
       </div>
     </div>
@@ -1284,107 +1260,148 @@ function EventInboxView({ onDraftFromEvent }) {
 
 // ── Calendar View ───────────────────────────────────────────────────
 
-function CalendarRow({ row, isPast, isCurrent, rowCls, saving, onSave, onDraft, drafting, fmtWeekLabel, STATUS_STYLE }) {
-  const [editTopic, setEditTopic] = useState(row.topic || '');
-  const [editTip, setEditTip] = useState(row.homeownerMinuteTopic || '');
+function CalendarRow({
+  row,
+  isPast,
+  isCurrent,
+  rowCls,
+  saving,
+  onSave,
+  onDraft,
+  drafting,
+  fmtWeekLabel,
+  STATUS_STYLE,
+}) {
+  const [editTopic, setEditTopic] = useState(row.topic || "");
+  const [editTip, setEditTip] = useState(row.homeownerMinuteTopic || "");
   const [dirty, setDirty] = useState(false);
 
   // Reset local state when row data changes (after save/fetch)
   useEffect(() => {
-    setEditTopic(row.topic || '');
-    setEditTip(row.homeownerMinuteTopic || '');
+    setEditTopic(row.topic || "");
+    setEditTip(row.homeownerMinuteTopic || "");
     setDirty(false);
   }, [row.topic, row.homeownerMinuteTopic]);
-
-  const handleTopicChange = (e) => { setEditTopic(e.target.value); setDirty(true); };
-  const handleTipChange = (e) => { setEditTip(e.target.value); setDirty(true); };
-
+  const handleTopicChange = (e) => {
+    setEditTopic(e.target.value);
+    setDirty(true);
+  };
+  const handleTipChange = (e) => {
+    setEditTip(e.target.value);
+    setDirty(true);
+  };
   const handleSave = () => {
     if (!dirty) return;
-    onSave({ topic: editTopic || null, homeownerMinuteTopic: editTip || null });
+    onSave({
+      topic: editTopic || null,
+      homeownerMinuteTopic: editTip || null,
+    });
+  };
+  const handleBlur = () => {
+    if (dirty) handleSave();
+  };
+  const handleKeyDown = (e) => {
+    if (e.key === "Enter") {
+      e.target.blur();
+    }
   };
 
-  const handleBlur = () => { if (dirty) handleSave(); };
-  const handleKeyDown = (e) => { if (e.key === 'Enter') { e.target.blur(); } };
-
   // Draft button is enabled only for planned rows that are not past
-  const canDraft = !isPast
-    && row.status === 'planned'
-    && !drafting;
-
+  const canDraft = !isPast && row.status === "planned" && !drafting;
   return (
-    <tr className={`border-b border-zinc-50 hover:bg-zinc-25 ${rowCls}`}>
-      <td className="px-3 py-2">
-        <div className="text-12 font-medium text-ink-primary">{fmtWeekLabel(row.weekOf)}</div>
-        {isCurrent && <div className="text-10 text-ink-tertiary font-medium">This week</div>}
-      </td>
-      <td className="px-3 py-2">
+    <TR className={`border-b border-zinc-50 hover:bg-zinc-25 ${rowCls}`}>
+      <TD className="px-3 py-2">
+        <div className="text-ui-body font-medium text-ink-primary">
+          {fmtWeekLabel(row.weekOf)}
+        </div>
+        {isCurrent && (
+          <div className="text-ui-body text-ink-tertiary font-medium">
+            This week
+          </div>
+        )}
+      </TD>
+      <TD className="px-3 py-2">
         {isPast ? (
-          <span className="text-12 text-ink-secondary">{row.topic || '—'}</span>
+          <span className="text-ui-body text-ink-secondary">
+            {row.topic || "—"}
+          </span>
         ) : (
-          <input
+          <Input
             type="text"
             value={editTopic}
             onChange={handleTopicChange}
             onBlur={handleBlur}
             onKeyDown={handleKeyDown}
             placeholder="Add topic..."
-            className="w-full h-7 px-2 text-12 bg-transparent border-hairline border-zinc-200 rounded-sm focus:border-zinc-400 focus:outline-none"
+            className="w-full"
+            aria-label="Add topic..."
           />
         )}
-      </td>
-      <td className="px-3 py-2">
+      </TD>
+      <TD className="px-3 py-2">
         {isPast ? (
-          <span className="text-12 text-ink-secondary">{row.homeownerMinuteTopic || '—'}</span>
+          <span className="text-ui-body text-ink-secondary">
+            {row.homeownerMinuteTopic || "—"}
+          </span>
         ) : (
-          <input
+          <Input
             type="text"
             value={editTip}
             onChange={handleTipChange}
             onBlur={handleBlur}
             onKeyDown={handleKeyDown}
             placeholder="Tip topic..."
-            className="w-full h-7 px-2 text-12 bg-transparent border-hairline border-zinc-200 rounded-sm focus:border-zinc-400 focus:outline-none"
+            className="w-full"
+            aria-label="Tip topic..."
           />
         )}
-      </td>
-      <td className="px-3 py-2">
-        <span className={`inline-block px-1.5 py-0.5 rounded text-10 font-medium ${STATUS_STYLE[row.status] || STATUS_STYLE.planned}`}>
+      </TD>
+      <TD className="px-3 py-2">
+        <span
+          className={`inline-block px-1.5 py-0.5 rounded text-ui-body font-medium ${STATUS_STYLE[row.status] || STATUS_STYLE.planned}`}
+        >
           {row.status}
         </span>
-      </td>
-      <td className="px-3 py-2 text-12 text-ink-secondary u-nums">
-        {(row.eventIds || []).length || '—'}
-      </td>
-      <td className="px-3 py-2">
+      </TD>
+      <TD className="px-3 py-2 text-ui-body text-ink-secondary u-nums">
+        {(row.eventIds || []).length || "—"}
+      </TD>
+      <TD className="px-3 py-2">
         {row.send ? (
-          <div className="text-10 text-ink-tertiary u-nums">
+          <div className="text-ui-body text-ink-tertiary u-nums">
             <span>{row.send.deliveredCount || 0} delivered</span>
-            {row.send.openedCount > 0 && <span> · {row.send.openedCount} opened</span>}
+            {row.send.openedCount > 0 && (
+              <span> · {row.send.openedCount} opened</span>
+            )}
           </div>
         ) : (
-          <span className="text-10 text-ink-tertiary">—</span>
+          <span className="text-ui-body text-ink-tertiary">—</span>
         )}
-      </td>
-      <td className="px-3 py-2">
+      </TD>
+      <TD className="px-3 py-2">
         {canDraft ? (
           <Button
             size="sm"
             variant="secondary"
-            onClick={() => onDraft({ ...row, topic: editTopic || null, homeownerMinuteTopic: editTip || null })}
+            onClick={() =>
+              onDraft({
+                ...row,
+                topic: editTopic || null,
+                homeownerMinuteTopic: editTip || null,
+              })
+            }
             disabled={drafting}
           >
             <Sparkles size={12} strokeWidth={1.75} className="mr-1" />
             Draft
           </Button>
         ) : drafting ? (
-          <span className="text-10 text-ink-tertiary">Drafting...</span>
+          <span className="text-ui-body text-ink-tertiary">Drafting...</span>
         ) : null}
-      </td>
-    </tr>
+      </TD>
+    </TR>
   );
 }
-
 function CalendarView() {
   const [calendar, setCalendar] = useState([]);
   const [currentWeek, setCurrentWeek] = useState(null);
@@ -1403,14 +1420,14 @@ function CalendarView() {
       .catch(() => setCalendar([]))
       .finally(() => setLoading(false));
   };
-
-  useEffect(() => { fetchCalendar(); }, []);
-
+  useEffect(() => {
+    fetchCalendar();
+  }, []);
   const saveEntry = async (weekOf, updates) => {
     setSaving(weekOf);
     setCalendarStatus("Saving calendar…");
     try {
-      const entry = calendar.find(c => c.weekOf === weekOf);
+      const entry = calendar.find((c) => c.weekOf === weekOf);
       if (entry && entry.id) {
         await adminFetch(`/admin/newsletter/calendar/${entry.id}`, {
           method: 'PATCH',
@@ -1430,7 +1447,6 @@ function CalendarView() {
       setSaving(null);
     }
   };
-
   const handleDraft = async (row) => {
     setDraftingWeek(row.weekOf);
     setCalendarStatus("Drafting newsletter…");
@@ -1449,7 +1465,7 @@ function CalendarView() {
           }),
         });
         calendarId = created.entry?.id;
-        if (!calendarId) throw new Error('Failed to create calendar entry');
+        if (!calendarId) throw new Error("Failed to create calendar entry");
       } else {
         // Existing row — persist any pending edits
         await adminFetch(`/admin/newsletter/calendar/${calendarId}`, {
@@ -1465,7 +1481,6 @@ function CalendarView() {
       await adminFetch(`/admin/newsletter/calendar/${calendarId}/draft-from-plan`, {
         method: 'POST',
       });
-
       fetchCalendar();
       setCalendarStatus("Draft created. Open Compose to review it.");
     } catch (e) {
@@ -1474,56 +1489,73 @@ function CalendarView() {
       setDraftingWeek(null);
     }
   };
-
   const fmtWeekLabel = (weekOf) => {
-    const start = new Date(weekOf + 'T12:00:00Z');
+    const start = new Date(weekOf + "T12:00:00Z");
     const end = new Date(start);
     end.setDate(end.getDate() + 6);
-    return `${start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ${end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+    return `${start.toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+    })} – ${end.toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+    })}`;
   };
-
   const STATUS_STYLE = {
-    planned: 'bg-zinc-200 text-zinc-600',
-    drafted: 'bg-zinc-700 text-white',
-    scheduled: 'bg-zinc-800 text-white',
-    sent: 'bg-zinc-900 text-white',
-    skipped: 'bg-zinc-100 text-zinc-400 line-through',
+    planned: "bg-zinc-200 text-zinc-600",
+    drafted: "bg-zinc-700 text-white",
+    scheduled: "bg-zinc-800 text-white",
+    sent: "bg-zinc-900 text-white",
+    skipped: "bg-zinc-100 text-zinc-400 line-through",
   };
-
   if (loading) {
-    return <div className="p-8 text-center text-13 text-ink-tertiary">Loading calendar...</div>;
+    return (
+      <div className="p-8 text-center text-ui-body text-ink-tertiary">
+        Loading calendar...
+      </div>
+    );
   }
-
   return (
     <div className="space-y-4 mt-4">
       {calendarStatus && (
-        <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm px-3 py-2 text-12 text-ink-secondary">
+        <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm px-3 py-2 text-ui-body text-ink-secondary">
           {calendarStatus}
         </div>
       )}
       <div className="bg-white border-hairline border-zinc-200 rounded-sm overflow-x-auto">
-        <table className="w-full text-left">
-          <thead>
-            <tr className="border-b border-zinc-100">
-              <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-44">{NEWSLETTER_UI_COPY.calendarWeekHeading}</th>
-              <th className="px-3 py-2 text-11 font-medium text-ink-tertiary">Topic</th>
-              <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-40">Homeowner Tip</th>
-              <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-20">Status</th>
-              <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-16">Events</th>
-              <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-32">Performance</th>
-              <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-24"></th>
-            </tr>
-          </thead>
-          <tbody>
+        <Table className="w-full text-left">
+          <THead>
+            <TR className="border-b border-zinc-100">
+              <TH className="px-3 py-2 text-ui-body font-medium text-ink-tertiary w-44">
+                {NEWSLETTER_UI_COPY.calendarWeekHeading}
+              </TH>
+              <TH className="px-3 py-2 text-ui-body font-medium text-ink-tertiary">
+                Topic
+              </TH>
+              <TH className="px-3 py-2 text-ui-body font-medium text-ink-tertiary w-40">
+                Homeowner Tip
+              </TH>
+              <TH className="px-3 py-2 text-ui-body font-medium text-ink-tertiary w-20">
+                Status
+              </TH>
+              <TH className="px-3 py-2 text-ui-body font-medium text-ink-tertiary w-16">
+                Events
+              </TH>
+              <TH className="px-3 py-2 text-ui-body font-medium text-ink-tertiary w-32">
+                Performance
+              </TH>
+              <TH className="px-3 py-2 text-ui-body font-medium text-ink-tertiary w-24"></TH>
+            </TR>
+          </THead>
+          <TBody>
             {calendar.map((row) => {
               const isPast = row.weekOf < currentWeek;
               const isCurrent = row.weekOf === currentWeek;
               const rowCls = isCurrent
-                ? 'bg-zinc-50 border-l-2 border-l-zinc-900'
+                ? "bg-zinc-50 border-l-2 border-l-zinc-900"
                 : isPast
-                  ? 'opacity-60'
-                  : '';
-
+                  ? "opacity-60"
+                  : "";
               return (
                 <CalendarRow
                   key={row.weekOf}
@@ -1540,13 +1572,12 @@ function CalendarView() {
                 />
               );
             })}
-          </tbody>
-        </table>
+          </TBody>
+        </Table>
       </div>
     </div>
   );
 }
-
 export default function NewsletterPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const tab = useMemo(() => {
@@ -1590,7 +1621,12 @@ export default function NewsletterPage() {
     adminFetch("/admin/newsletter/sends")
       .then((d) => {
         if (!ignore) {
-          setSendsData(d || { sends: [], counts: {} });
+          setSendsData(
+            d || {
+              sends: [],
+              counts: {},
+            },
+          );
           setSendsLoading(false);
         }
       })
@@ -1637,7 +1673,6 @@ export default function NewsletterPage() {
     history: sendsData ? (sendsData.counts?.sent ?? 0) : null,
     subscribers: subscribersActive,
   };
-
   const setTab = (next) => {
     const newParams = new URLSearchParams(searchParams);
     if (next === "dashboard") newParams.delete("tab");
@@ -1646,9 +1681,10 @@ export default function NewsletterPage() {
     // campaign (or away from Compose) must not silently rehydrate an old row.
     newParams.delete("draftId");
     if (next === "compose") newParams.delete("autopilotType");
-    setSearchParams(newParams, { replace: true });
+    setSearchParams(newParams, {
+      replace: true,
+    });
   };
-
   const onDraftFromEvent = (event) => {
     setPendingDraftEvent(event);
     setTab("compose");
@@ -1668,105 +1704,90 @@ export default function NewsletterPage() {
       ? `${g.label} (${Number(tabCounts[badged]).toLocaleString()})`
       : g.label;
   };
-
   return (
-    <div className="space-y-0">
-      {" "}
-      <AdminCommandHeader
-        title="Newsletter"
-        icon={MailPlus}
-        sections={NEWSLETTER_TAB_GROUPS.map((g) => ({
-          key: g.key,
-          label: groupBadgeLabel(g),
-          Icon: g.Icon,
-        }))}
-        activeKey={activeGroup.key}
-        onSectionChange={(key) => {
-          const g = NEWSLETTER_TAB_GROUPS.find((x) => x.key === key);
-          if (g) setTab(g.tabs[0]);
-        }}
-        ariaLabel="Newsletter section"
-        navGridClassName="grid-cols-2 md:grid-cols-3 lg:grid-cols-5"
-        action={{
-          label: "New Campaign",
-          icon: MailPlus,
-          onClick: () => setTab("compose"),
-        }}
-      />
-      {/* Leaf sub-tab pill row — only when the active group has >1 leaf. */}
-      {activeGroup.tabs.length > 1 && (
-        <div
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            gap: 8,
-            margin: "16px 0 4px",
+    <UiSurface density="comfortable" className="space-y-4">
+      <div className="space-y-0">
+        {" "}
+        <AdminCommandHeader
+          title="Newsletter"
+          icon={MailPlus}
+          sections={NEWSLETTER_TAB_GROUPS.map((g) => ({
+            key: g.key,
+            label: groupBadgeLabel(g),
+            Icon: g.Icon,
+          }))}
+          activeKey={activeGroup.key}
+          onSectionChange={(key) => {
+            const g = NEWSLETTER_TAB_GROUPS.find((x) => x.key === key);
+            if (g) setTab(g.tabs[0]);
           }}
-        >
-          {activeGroup.tabs.map((leafKey) => {
-            const leaf = TAB_BY_KEY[leafKey];
-            if (!leaf) return null;
-            const LeafIcon = leaf.Icon;
-            const active = tab === leafKey;
-            const badge =
-              tabCounts[leafKey] != null
-                ? ` (${Number(tabCounts[leafKey]).toLocaleString()})`
-                : "";
-            return (
-              <button
-                key={leafKey}
-                type="button"
-                onClick={() => setTab(leafKey)}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 6,
-                  height: 36,
-                  padding: "0 14px",
-                  borderRadius: 6,
-                  fontSize: 12,
-                  fontWeight: 700,
-                  textTransform: "uppercase",
-                  letterSpacing: "0.04em",
-                  cursor: "pointer",
-                  border: active ? "1px solid #18181B" : "1px solid #E4E4E7",
-                  background: active ? "#18181B" : "#FFFFFF",
-                  color: active ? "#fff" : "#27272A",
-                }}
-              >
-                {LeafIcon && <LeafIcon size={14} strokeWidth={1.9} aria-hidden />}
-                {leaf.label}
-                {badge}
-              </button>
-            );
-          })}
-        </div>
-      )}
-      {/* Tab content */}
-      {tab === "dashboard" && (
-        <DashboardView
-          onSelectTab={setTab}
-          onDraftFromEvent={onDraftFromEvent}
-          sendsData={sendsData}
-          sendsLoading={sendsLoading}
-          subscribersActive={subscribersActive}
-        />
-      )}
-      {tab === "calendar" && <CalendarView />}
-      {tab === "compose" && (
-        <ComposeView
-          pendingEvent={pendingDraftEvent}
-          onPendingEventConsumed={clearPendingDraftEvent}
-          onSendComplete={() => {
-            setRefreshKey((k) => k + 1);
-            setTab("history");
+          ariaLabel="Newsletter section"
+          navGridClassName="grid-cols-2 md:grid-cols-3 lg:grid-cols-5"
+          action={{
+            label: "New Campaign",
+            icon: MailPlus,
+            onClick: () => setTab("compose"),
           }}
+          variant="workspace"
         />
-      )}
-      {tab === "history" && <HistoryView />}
-      {tab === "subscribers" && <SubscribersView />}
-      {tab === "events" && <EventInboxView onDraftFromEvent={onDraftFromEvent} />}
-      {tab === "automations" && <EmailAutomationsPanelV2 />}
-    </div>
+        {/* Leaf sub-tab pill row — only when the active group has >1 leaf. */}
+        {activeGroup.tabs.length > 1 && (
+          <div className="my-4 flex flex-wrap gap-2">
+            {activeGroup.tabs.map((leafKey) => {
+              const leaf = TAB_BY_KEY[leafKey];
+              if (!leaf) return null;
+              const LeafIcon = leaf.Icon;
+              const active = tab === leafKey;
+              const badge =
+                tabCounts[leafKey] != null
+                  ? ` (${Number(tabCounts[leafKey]).toLocaleString()})`
+                  : "";
+              return (
+                <Button
+                  key={leafKey}
+                  type="button"
+                  onClick={() => setTab(leafKey)}
+                  variant={active ? "primary" : "secondary"}
+                  aria-pressed={active}
+                >
+                  {LeafIcon && (
+                    <LeafIcon size={14} strokeWidth={1.9} aria-hidden />
+                  )}
+                  {leaf.label}
+                  {badge}
+                </Button>
+              );
+            })}
+          </div>
+        )}
+        {/* Tab content */}
+        {tab === "dashboard" && (
+          <DashboardView
+            onSelectTab={setTab}
+            onDraftFromEvent={onDraftFromEvent}
+            sendsData={sendsData}
+            sendsLoading={sendsLoading}
+            subscribersActive={subscribersActive}
+          />
+        )}
+        {tab === "calendar" && <CalendarView />}
+        {tab === "compose" && (
+          <ComposeView
+            pendingEvent={pendingDraftEvent}
+            onPendingEventConsumed={clearPendingDraftEvent}
+            onSendComplete={() => {
+              setRefreshKey((k) => k + 1);
+              setTab("history");
+            }}
+          />
+        )}
+        {tab === "history" && <HistoryView />}
+        {tab === "subscribers" && <SubscribersView />}
+        {tab === "events" && (
+          <EventInboxView onDraftFromEvent={onDraftFromEvent} />
+        )}
+        {tab === "automations" && <EmailAutomationsPanelV2 />}
+      </div>
+    </UiSurface>
   );
 }

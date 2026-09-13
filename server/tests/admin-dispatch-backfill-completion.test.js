@@ -2525,7 +2525,7 @@ describe('completion route wiring (source contracts)', () => {
     // timeOnSite or unknown for the duration, and the pre-update row (svc)
     // so inferred start fields are stripped while row-backed ones survive
     // (behavioral coverage above).
-    expect(source).toMatch(/const lifecycleUpdates = buildCompletionLifecycleUpdates\(svc, completionLifecycleAt, \{ elapsed: effectiveTimeOnSite \}\);[\s\S]{0,600}if \(isBackfillCompletion\) applyBackfillDurationPolicy\(lifecycleUpdates, effectiveTimeOnSite, svc\);/);
+    expect(source).toMatch(/const lifecycleUpdates = buildCompletionLifecycleUpdates\(svc, completionLifecycleAt, \{\s*elapsed: packetDurationAllocation \? null : effectiveTimeOnSite,\s*\}\);[\s\S]{0,1800}if \(isBackfillCompletion\) applyBackfillDurationPolicy\(lifecycleUpdates, effectiveTimeOnSite, svc\);/);
   });
 
   test('the kept lifecycle stamps are built from the backdated end instant, and the wall clock survives only as policy input (fix round 4)', () => {
@@ -2642,7 +2642,7 @@ describe('completion route wiring (source contracts)', () => {
     expect(source).toMatch(/if \(isBackfillCompletion && effectiveTimeOnSite == null && timeOnSite != null && timeOnSite !== ''\) \{\s*\n\s*logger\.warn\([\s\S]{0,300}recorded as unknown/);
     // The structured_notes stamp — the report's on-site metric reads it via
     // computeOnSiteMin — carries the sanitized value, never the raw span.
-    expect(source).toMatch(/timeOnSite: effectiveTimeOnSite \|\| null,/);
+    expect(source).toMatch(/timeOnSite: packetDurationAllocation\s*\? packetDurationAllocation\.allocatedMinutes\s*: \(effectiveTimeOnSite \|\| null\),/);
     // And no other consumer still reads the raw body value: `timeOnSite`
     // appears only in the destructure, the sanitation, and the helpers'
     // definitions/comments — never as a bare argument past the intake.
@@ -2662,11 +2662,11 @@ describe('completion route wiring (source contracts)', () => {
     // and the actual_start/end span fallback are both skipped for untrusted
     // bounds; only direct job entries or the explicit minutes may count.
     const costingSource = fs.readFileSync(path.join(__dirname, '../services/job-costing.js'), 'utf8');
-    expect(costingSource).toMatch(/if \(!minutes && !untrustedLifecycleSpan && technicianId && startTime && endTime\) \{/);
-    expect(costingSource).toMatch(/if \(!minutes && untrustedLifecycleSpan\) \{\s*\n\s*const explicit = Number\(explicitLaborMinutes\);\s*\n\s*if \(Number\.isFinite\(explicit\) && explicit > 0\) minutes = Math\.round\(explicit\);\s*\n\s*\}/);
-    expect(costingSource).toMatch(/if \(!minutes && !untrustedLifecycleSpan && startTime && endTime\) \{/);
+    expect(costingSource).toMatch(/if \(!minutes && !hasAllocatedLabor && !untrustedLifecycleSpan && technicianId && startTime && endTime\) \{/);
+    expect(costingSource).toMatch(/if \(!minutes && !hasAllocatedLabor && untrustedLifecycleSpan\) \{\s*\n\s*const explicit = Number\(explicitLaborMinutes\);\s*\n\s*if \(Number\.isFinite\(explicit\) && explicit > 0\) minutes = Math\.round\(explicit\);\s*\n\s*\}/);
+    expect(costingSource).toMatch(/if \(!minutes && !hasAllocatedLabor && !untrustedLifecycleSpan && startTime && endTime\) \{/);
     // calculateJobCost threads the options through to calcLaborCost.
-    expect(costingSource).toMatch(/\{ untrustedLifecycleSpan, explicitLaborMinutes, overrideLaborMinutes \},\s*\n\s*\);/);
+    expect(costingSource).toMatch(/\{ untrustedLifecycleSpan, explicitLaborMinutes, overrideLaborMinutes, allocatedLaborMinutes \},\s*\n\s*\);/);
   });
 
   test('job costing runs on RESUMED retries too — a released mint failure cannot finalize with financials missing (Codex P2, fix round 13)', () => {
@@ -2704,7 +2704,7 @@ describe('completion route wiring (source contracts)', () => {
     // the first call failed) — must flag the span untrusted AND carry the
     // backdated completed_at stamp (fix round 4).
     const flaggedCalls = source.match(
-      /trackTransitions\.markComplete\(svc\.id, \{\s*\n\s*actorType: 'admin',\s*\n\s*actorId: completionInput\.actor\.technicianId,\s*\n(?:\s*\/\/[^\n]*\n)*\s*untrustedLifecycleSpan: isBackfillCompletion,\s*\n\s*completedAt: backfillTrackerCompletedAt,\s*\n(?:\s*\/\/[^\n]*\n)*\s*expectedCorrectionSeq: svc\.time_on_site_correction_seq \?\? null,\s*\n\s*\}\)/g,
+      /trackTransitions\.markComplete\(svc\.id, \{\s*\n\s*actorType: 'admin',\s*\n\s*actorId: completionInput\.actor\.technicianId,\s*\n(?:\s*\/\/[^\n]*\n)*\s*untrustedLifecycleSpan: isBackfillCompletion \|\| !!packetDurationAllocation,\s*\n\s*completedAt: packetDurationAllocation\?\.completedAtSource === 'packet_save'\s*\? packetDurationAllocation\.completedAt\s*: backfillTrackerCompletedAt,\s*\n(?:\s*\/\/[^\n]*\n)*\s*expectedCorrectionSeq: svc\.time_on_site_correction_seq \?\? null,\s*\n\s*\}\)/g,
     ) || [];
     expect(flaggedCalls.length).toBe(2);
     // Both completion calls live in this service. PUT /:id/status retains
@@ -2714,7 +2714,7 @@ describe('completion route wiring (source contracts)', () => {
     // a flagless resumed retry that still owes the tracker flip reads the
     // healed flag, not the body's stale `false`.
     const rederivation = source.indexOf('const frozenResume = frozenResumeCompletionState(');
-    const firstFlagged = source.indexOf('untrustedLifecycleSpan: isBackfillCompletion,');
+    const firstFlagged = source.indexOf('untrustedLifecycleSpan: isBackfillCompletion || !!packetDurationAllocation,');
     expect(rederivation).toBeGreaterThan(-1);
     expect(firstFlagged).toBeGreaterThan(rederivation);
     // And the tracker honors the flag: the lifecycle rebuild is skipped
@@ -2745,7 +2745,7 @@ describe('completion route wiring (source contracts)', () => {
     // consumes it.
     const rederivation = source.indexOf('const frozenResume = frozenResumeCompletionState(');
     const stampAt = source.indexOf('const backfillTrackerCompletedAt = isBackfillCompletion');
-    const firstCall = source.indexOf('completedAt: backfillTrackerCompletedAt,');
+    const firstCall = source.indexOf(': backfillTrackerCompletedAt,');
     expect(stampAt).toBeGreaterThan(rederivation);
     expect(firstCall).toBeGreaterThan(stampAt);
     // And the tracker enforces the contract: under the flag completed_at is
@@ -2833,7 +2833,7 @@ describe('completion route wiring (source contracts)', () => {
       // digital-business-card issued email
       'suppressIssuedEmail: isBackfillCompletion,',
       // payment-decline notice SMS
-      '&& !isBackfillCompletion) {',
+      "} else if (paymentFailedSmsContext && !['sending', 'deferred'].includes(priorPaymentFailedNoticeStatus)",
       // payer AP invoice email
       'invoice.payer_id && !payerInvoiceAlreadyDelivered && !isBackfillCompletion',
       // referral credit — an issued-invoice closeout is carved out (credits
@@ -2861,6 +2861,7 @@ describe('completion route wiring (source contracts)', () => {
       expect(at).toBeGreaterThan(-1);
       expect(at).toBeGreaterThan(rederivation);
     }
+    expect(source).toMatch(/else if \(paymentFailedSmsContext[^{}]*&& !isBackfillCompletion\) \{/);
   });
 
   test('backfill is reachable ONLY through POST /complete — the other completion entry points ignore it', () => {

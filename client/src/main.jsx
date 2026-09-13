@@ -41,7 +41,7 @@ initNativeLinks();
 // Register PWA service worker
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js?v=20260827-app-icon-badge')
+    navigator.serviceWorker.register('/sw.js?v=20260909-cache-prune')
       .then(reg => console.log('SW registered:', reg?.scope || 'scope unavailable'))
       .catch(err => console.error('SW failed:', err));
   });

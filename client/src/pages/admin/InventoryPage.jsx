@@ -1,6 +1,15 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { useOutletContext, useSearchParams } from "react-router-dom";
+import {
+  useLocation,
+  useNavigate,
+  useOutletContext,
+  useSearchParams,
+} from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
+import {
+  useIntelligenceBarActions,
+  usePublishIntelligenceBarPageData,
+} from "../../hooks/useIntelligenceBarPageData";
 import {
   CheckCircle2,
   ClipboardList,
@@ -14,26 +23,26 @@ import {
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import ProductLabelReview from "../../components/admin/ProductLabelReview";
-
+import {
+  ActionFeedback,
+  Badge,
+  Button,
+  Card,
+  Checkbox,
+  Input,
+  Select,
+  Table,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TR,
+  Textarea,
+  UiSurface,
+  Field,
+  cn,
+} from "../../components/ui";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
-// V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
-const D = {
-  bg: "#F4F4F5",
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  teal: "#18181B",
-  green: "#15803D",
-  amber: "#A16207",
-  red: "#991B1B",
-  purple: "#18181B",
-  text: "#27272A",
-  muted: "#71717A",
-  white: "#FFFFFF",
-  input: "#FFFFFF",
-  heading: "#09090B",
-  inputBorder: "#D4D4D8",
-};
-
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     headers: {
@@ -46,7 +55,6 @@ function adminFetch(path, options = {}) {
     return r.json();
   });
 }
-
 function safeExternalHref(value) {
   try {
     const url = new URL(String(value || ""));
@@ -55,13 +63,11 @@ function safeExternalHref(value) {
     return null;
   }
 }
-
 function formatMoney(value, decimals = 2) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return "—";
   return `$${numeric.toFixed(decimals)}`;
 }
-
 function formatUnitCost(value, unit) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric) || !unit) return "—";
@@ -92,63 +98,16 @@ function formatUnitPriceList(unitPrices) {
   return parts.length ? parts.join(" · ") : null;
 }
 
-const sCard = {
-  background: D.card,
-  border: `1px solid ${D.border}`,
-  borderRadius: 12,
-  padding: 20,
-  marginBottom: 12,
-  boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
-};
-const sBtn = (bg, color) => ({
-  padding: "8px 16px",
-  background: bg,
-  color,
-  border: "none",
-  borderRadius: 8,
-  fontSize: 13,
-  fontWeight: 500,
-  cursor: "pointer",
-});
-const sBadge = (bg, color) => ({
-  fontSize: 11,
-  padding: "2px 8px",
-  borderRadius: 4,
-  background: bg,
-  color,
-  fontWeight: 500,
-});
-const sInput = {
-  padding: "8px 12px",
-  background: D.input,
-  border: `1px solid ${D.border}`,
-  borderRadius: 8,
-  color: D.text,
-  fontSize: 13,
-  outline: "none",
-  boxSizing: "border-box",
-};
-const thS = {
-  fontSize: 11,
-  color: D.muted,
-  textTransform: "uppercase",
-  letterSpacing: 1,
-  textAlign: "left",
-  padding: "8px 10px",
-  borderBottom: `1px solid ${D.border}`,
-};
-const tdS = {
-  padding: "10px",
-  borderBottom: `1px solid ${D.border}22`,
-  fontSize: 13,
-  color: D.text,
-};
-
 // The flat 13-tab bar is organized into parent groups, each revealing its leaf
 // tabs in a sub-row. `tab` state still holds the LEAF key, so every
 // {tab === "..."} render block below is unchanged.
 const TAB_GROUPS = [
-  { key: "products", label: "Products", Icon: Package, tabs: ["products"] },
+  {
+    key: "products",
+    label: "Products",
+    Icon: Package,
+    tabs: ["products"],
+  },
   {
     key: "vendors",
     label: "Vendors & Pricing",
@@ -174,23 +133,60 @@ const TAB_GROUPS = [
     tabs: ["protocols", "margins"],
   },
 ];
-
 const LEAF_META = {
-  products: { label: "Products", Icon: Package },
-  "price-sync": { label: "Price Sync", Icon: Store },
-  approvals: { label: "Approvals", Icon: CheckCircle2 },
-  vendors: { label: "Vendors", Icon: Store },
-  scrape: { label: "Scrape Health", Icon: ShieldCheck },
-  forecast: { label: "Forecast", Icon: ShoppingCart },
-  "unit-review": { label: "Unit Review", Icon: ClipboardList },
-  restock: { label: "Restock", Icon: ShoppingCart },
-  registry: { label: "Registry", Icon: ClipboardList },
-  lawnFacts: { label: "Lawn Facts", Icon: ShieldCheck },
-  lawnContent: { label: "Lawn Content", Icon: FileText },
-  protocols: { label: "Protocols", Icon: FileText },
-  margins: { label: "Service Margins", Icon: Percent },
+  products: {
+    label: "Products",
+    Icon: Package,
+  },
+  "price-sync": {
+    label: "Price Sync",
+    Icon: Store,
+  },
+  approvals: {
+    label: "Approvals",
+    Icon: CheckCircle2,
+  },
+  vendors: {
+    label: "Vendors",
+    Icon: Store,
+  },
+  scrape: {
+    label: "Scrape Health",
+    Icon: ShieldCheck,
+  },
+  forecast: {
+    label: "Forecast",
+    Icon: ShoppingCart,
+  },
+  "unit-review": {
+    label: "Unit Review",
+    Icon: ClipboardList,
+  },
+  restock: {
+    label: "Restock",
+    Icon: ShoppingCart,
+  },
+  registry: {
+    label: "Registry",
+    Icon: ClipboardList,
+  },
+  lawnFacts: {
+    label: "Lawn Facts",
+    Icon: ShieldCheck,
+  },
+  lawnContent: {
+    label: "Lawn Content",
+    Icon: FileText,
+  },
+  protocols: {
+    label: "Protocols",
+    Icon: FileText,
+  },
+  margins: {
+    label: "Service Margins",
+    Icon: Percent,
+  },
 };
-
 const ALL_LEAF_TABS = TAB_GROUPS.flatMap((g) => g.tabs);
 
 // Vendor credentials, pricing sync/approvals, scrape health, and service
@@ -211,55 +207,85 @@ const OWNER_ONLY_INVENTORY_TABS = new Set([
   // techs get protocol reference in the tech portal instead.
   "protocols",
 ]);
-
 export default function InventoryPage() {
+  const { lastMutation } = useIntelligenceBarActions();
+  const inventoryRefresh =
+    lastMutation?.domain === "inventory" ? lastMutation.id : null;
+  const statsSequence = useRef(0);
   const [searchParams] = useSearchParams();
+  const location = useLocation();
+  const navigate = useNavigate();
   // Server-verified role from the shell's Outlet context (never localStorage).
   const outletContext = useOutletContext();
   const isAdminRole = outletContext?.user?.role === "admin";
-  const visibleGroups = TAB_GROUPS
-    .map((g) => ({
-      ...g,
-      tabs: g.tabs.filter((t) => isAdminRole || !OWNER_ONLY_INVENTORY_TABS.has(t)),
-    }))
-    .filter((g) => g.tabs.length > 0);
+  const visibleGroups = TAB_GROUPS.map((g) => ({
+    ...g,
+    tabs: g.tabs.filter(
+      (t) => isAdminRole || !OWNER_ONLY_INVENTORY_TABS.has(t),
+    ),
+  })).filter((g) => g.tabs.length > 0);
   const requestedTab = searchParams.get("tab");
-  const initialTab = ALL_LEAF_TABS.includes(requestedTab)
-    && (isAdminRole || !OWNER_ONLY_INVENTORY_TABS.has(requestedTab))
-    ? requestedTab
-    : "products";
-  const [tab, setTab] = useState(initialTab);
+  const tab =
+    ALL_LEAF_TABS.includes(requestedTab) &&
+    (isAdminRole || !OWNER_ONLY_INVENTORY_TABS.has(requestedTab))
+      ? requestedTab
+      : "products";
 
-  // Usage beacon for the tab that actually RENDERS. The URL only SEEDS
-  // this state (validated, Products default) and switches never write
-  // back, so query-less landings went unnamed and a ?tab=typo deep link
-  // recorded a leaf that never rendered (same class as the r17 sweep;
-  // found in the r19 route-key enumeration). searchParams dep per the
-  // unchanged-leaf contract: a same-route URL change re-asserts the leaf.
+  const setTab = useCallback(
+    (nextTab) => {
+      const normalizedTab =
+        ALL_LEAF_TABS.includes(nextTab) &&
+        (isAdminRole || !OWNER_ONLY_INVENTORY_TABS.has(nextTab))
+          ? nextTab
+          : "products";
+      if (normalizedTab === tab) return;
+      const next = new URLSearchParams(searchParams);
+      next.set("tab", normalizedTab);
+      navigate({
+        pathname: location.pathname,
+        search: `?${next.toString()}`,
+        hash: location.hash,
+      });
+    },
+    [isAdminRole, location.hash, location.pathname, navigate, searchParams, tab],
+  );
+
+  // Report the validated, role-allowed leaf that actually renders. The
+  // searchParams dependency also re-asserts the fallback after same-route
+  // history navigation to an invalid or restricted deep link.
   useRenderedTabBeacon("/admin/inventory", tab, [searchParams]);
   const [stats, setStats] = useState(null);
   const [toast, setToast] = useState("");
   const [productFilter, setProductFilter] = useState("all");
   const [showAddForm, setShowAddForm] = useState(false);
 
-  const loadStats = () =>
-    adminFetch("/admin/inventory/stats")
-      .then(setStats)
+  const loadStats = useCallback(() => {
+    const sequence = ++statsSequence.current;
+    return adminFetch("/admin/inventory/stats")
+      .then((value) => {
+        if (sequence === statsSequence.current) setStats(value);
+      })
+
       .catch(() => {});
+  }, []);
   useEffect(() => {
     loadStats();
-  }, []);
-  const showToast = (m) => {
+    return () => {
+      statsSequence.current += 1;
+    };
+  }, [loadStats, inventoryRefresh]);
+  const showToast = useCallback((m) => {
     setToast(m);
     setTimeout(() => setToast(""), 3500);
-  };
+  }, []);
 
   const activeGroup =
     visibleGroups.find((g) => g.tabs.includes(tab)) || visibleGroups[0];
   const groupSections = visibleGroups.map((g) => {
     let pending = 0;
     if (g.tabs.includes("approvals")) pending += stats?.approvals?.pending || 0;
-    if (g.tabs.includes("restock")) pending += stats?.restockRequests?.open || 0;
+    if (g.tabs.includes("restock"))
+      pending += stats?.restockRequests?.open || 0;
     return {
       key: g.key,
       label: pending > 0 ? `${g.label} (${pending})` : g.label,
@@ -273,11 +299,14 @@ export default function InventoryPage() {
       return `Restock (${stats.restockRequests.open})`;
     return LEAF_META[key].label;
   };
-
   return (
-    <div style={{ maxWidth: 1300, margin: "0 auto" }}>
+    <UiSurface
+      density="comfortable"
+      className="mx-auto max-w-[1300px] text-ui-body text-ink-primary"
+    >
       {" "}
       <AdminCommandHeader
+        variant="workspace"
         title="Inventory"
         icon={Package}
         sections={groupSections}
@@ -300,158 +329,119 @@ export default function InventoryPage() {
         }
       />
       {activeGroup.tabs.length > 1 && (
-        <div
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            gap: 8,
-            marginBottom: 16,
-          }}
-        >
+        <div className="flex flex-wrap gap-[8px] mb-[16px]">
           {activeGroup.tabs.map((key) => {
             const active = tab === key;
             const LeafIcon = LEAF_META[key].Icon;
             return (
-              <button
+              <Button
                 key={key}
                 type="button"
                 onClick={() => setTab(key)}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 6,
-                  height: 36,
-                  padding: "0 14px",
-                  borderRadius: 6,
-                  fontSize: 12,
-                  fontWeight: 700,
-                  textTransform: "uppercase",
-                  letterSpacing: "0.04em",
-                  cursor: "pointer",
-                  border: `1px solid ${active ? "#18181B" : "#E4E4E7"}`,
-                  background: active ? "#18181B" : "#FFFFFF",
-                  color: active ? "#fff" : "#27272A",
-                }}
+                variant={active ? "primary" : "secondary"}
               >
                 <LeafIcon size={14} strokeWidth={1.9} />
                 {leafLabel(key)}
-              </button>
+              </Button>
             );
           })}
         </div>
       )}
       {stats && (
-        <div
-          style={{
-            display: "flex",
-            gap: 10,
-            marginBottom: 20,
-            flexWrap: "wrap",
-          }}
-        >
+        <div className="flex gap-[10px] mb-[20px] flex-wrap">
           {[
             {
               label: "Products",
               value: stats.products?.total,
-              color: D.heading,
               filter: "all",
             },
             {
               label: "Priced",
               value: stats.products?.priced,
-              color: D.green,
               filter: "priced",
             },
             {
               label: "Needs Price",
               value: stats.products?.needsPrice,
-              color: D.amber,
+              // Main: unconditional amber (routine, not a failure state).
+              tone: "warn",
               filter: "needs_price",
             },
             {
               label: "Low Stock",
               value: stats.products?.lowStock,
-              color: stats.products?.lowStock > 0 ? D.red : D.green,
+              tone: stats.products?.lowStock > 0 ? "alert" : undefined,
               filter: "low_stock",
             },
             {
               label: "Vendors",
               value: stats.vendors?.total,
-              color: D.teal,
               action: () => setTab("vendors"),
               adminOnly: true,
             },
             {
               label: "Pending Approvals",
               value: stats.approvals?.pending,
-              color: stats.approvals?.pending > 0 ? D.amber : D.green,
+              // Main: amber — routine queued work, not a failure.
+              tone: stats.approvals?.pending > 0 ? "warn" : undefined,
               action: () => setTab("approvals"),
               adminOnly: true,
             },
             {
               label: "Restock",
               value: stats.restockRequests?.open,
-              color: stats.restockRequests?.open > 0 ? D.amber : D.green,
+              tone: stats.restockRequests?.open > 0 ? "warn" : undefined,
               action: () => setTab("restock"),
             },
             {
               label: "Scrape Jobs",
               value: stats.scrapeJobs?.completed,
-              color: D.purple,
               action: () => setTab("scrape"),
               adminOnly: true,
             },
             // Shortcut cards into owner-only tabs are hidden for techs —
             // clicking them would land on a tab the role can't open.
-          ].filter((s) => isAdminRole || !s.adminOnly).map((s) => (
-            <button type="button"
-              key={s.label}
-              onClick={() => {
-                if (s.action) s.action();
-                else if (s.filter) {
-                  setTab("products");
-                  setProductFilter(s.filter);
-                }
-              }}
-              style={{
-                ...sCard,
-                flex: "1 1 120px",
-                minWidth: 120,
-                marginBottom: 0,
-                textAlign: "center",
-                cursor: "pointer",
-                font: "inherit",
-                color: "inherit",
-              }}
-            >
-              {" "}
-              <div
-                style={{
-                  fontFamily: "'JetBrains Mono', monospace",
-                  fontSize: 22,
-                  fontWeight: 700,
-                  color: s.color,
+          ]
+            .filter((s) => isAdminRole || !s.adminOnly)
+            .map((s) => (
+              <Button
+                type="button"
+                key={s.label}
+                onClick={() => {
+                  if (s.action) s.action();
+                  else if (s.filter) {
+                    setTab("products");
+                    setProductFilter(s.filter);
+                  }
                 }}
+                variant="secondary"
+                className={cn(
+                  "flex-[1_1_120px] min-w-[120px] min-h-20 flex-col text-center",
+                  s.tone === "alert" && "border-alert-fg",
+                  s.tone === "warn" && "border-warn-fg",
+                )}
               >
-                {s.value ?? 0}
-              </div>{" "}
-              <div
-                style={{
-                  fontSize: 11,
-                  color: D.muted,
-                  textTransform: "uppercase",
-                  letterSpacing: 1,
-                  marginTop: 2,
-                }}
-              >
-                {s.label}
-              </div>{" "}
-            </button>
-          ))}
+                {" "}
+                <div
+                  className={cn(
+                    "text-22 font-medium u-nums",
+                    s.tone === "alert" ? "text-alert-fg" : s.tone === "warn" ? "text-warn-fg" : "text-zinc-900",
+                  )}
+                >
+                  {s.value ?? 0}
+                </div>{" "}
+                <div className="text-ui-body text-ink-secondary mt-[2px]">
+                  {s.label}
+                </div>{" "}
+              </Button>
+            ))}
         </div>
       )}
       {tab === "products" && (
         <ProductsTab
+          refreshId={inventoryRefresh}
+          initialSearch={searchParams.get("search") || ""}
+          initialProductId={searchParams.get("productId")}
           showToast={showToast}
           filter={productFilter}
           onFilterChange={setProductFilter}
@@ -479,40 +469,34 @@ export default function InventoryPage() {
           }
         />
       )}
-      {tab === "forecast" && <WaveGuardForecastTab showToast={showToast} onUpdate={loadStats} />}
+      {tab === "forecast" && (
+        <WaveGuardForecastTab
+          showToast={showToast}
+          onUpdate={loadStats}
+          refreshId={inventoryRefresh}
+        />
+      )}
       {tab === "unit-review" && <UnitReviewTab showToast={showToast} />}
-      {tab === "restock" && <RestockRequestsTab showToast={showToast} onUpdate={loadStats} canAuthor={isAdminRole} />}
+      {tab === "restock" && (
+        <RestockRequestsTab
+          showToast={showToast}
+          onUpdate={loadStats}
+          canAuthor={isAdminRole}
+          refreshId={inventoryRefresh}
+          requestId={searchParams.get("requestId")}
+        />
+      )}
       {tab === "margins" && <MarginsTab showToast={showToast} />}
       {tab === "scrape" && <ScrapeTab showToast={showToast} />}
-      <div
-        style={{
-          position: "fixed",
-          bottom: 20,
-          right: 20,
-          background: D.card,
-          border: `1px solid ${D.green}`,
-          borderRadius: 8,
-          padding: "10px 16px",
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          boxShadow: "0 8px 32px rgba(0,0,0,.4)",
-          zIndex: 300,
-          fontSize: 12,
-          transform: toast ? "translateY(0)" : "translateY(80px)",
-          opacity: toast ? 1 : 0,
-          transition: "all .3s",
-          pointerEvents: "none",
-        }}
-      >
-        {" "}
-        <span style={{ color: D.green }}></span>
-        <span style={{ color: D.text }}>{toast}</span>{" "}
-      </div>{" "}
-    </div>
+      {toast && (
+        <ActionFeedback className="fixed bottom-[calc(20px+env(safe-area-inset-bottom,0px))] right-[calc(20px+env(safe-area-inset-right,0px))] z-[300] max-w-[calc(100vw-40px)] pointer-events-none rounded-md border-hairline border-zinc-200 bg-white px-3.5 py-3 shadow-lg">
+          {" "}
+          {toast}
+        </ActionFeedback>
+      )}
+    </UiSurface>
   );
 }
-
 function LawnFactsTab({ showToast }) {
   const [facts, setFacts] = useState([]);
   const [summary, setSummary] = useState(null);
@@ -520,7 +504,6 @@ function LawnFactsTab({ showToast }) {
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({});
   const [statusFilter, setStatusFilter] = useState("all");
-
   const load = useCallback(() => {
     setLoading(true);
     adminFetch("/admin/inventory/lawn-outline-facts")
@@ -531,17 +514,19 @@ function LawnFactsTab({ showToast }) {
       .catch((err) => showToast(`Load failed: ${err.message}`))
       .finally(() => setLoading(false));
   }, [showToast]);
-
   useEffect(() => {
     load();
   }, [load]);
-
   const startEdit = (row) => {
     const p = row.product || {};
     const suggestion = row.suggestedCopy || {};
     setEditing(row);
     setForm({
-      productType: p.productType || row.readiness?.productType || suggestion.productType || "",
+      productType:
+        p.productType ||
+        row.readiness?.productType ||
+        suggestion.productType ||
+        "",
       customerVisibility: p.customerVisibility || "internal_only",
       contentStatus: p.contentStatus || "draft",
       epaRegNumber: p.epaRegNumber || "",
@@ -552,11 +537,12 @@ function LawnFactsTab({ showToast }) {
       petKidGuidanceText: p.petKidGuidanceText || "",
       reentrySummary: p.reentrySummary || p.reentryText || "",
       labelSourceUrl: p.labelSourceUrl || p.labelUrl || "",
-      labelVerifiedAt: p.labelVerifiedAt ? String(p.labelVerifiedAt).slice(0, 10) : "",
+      labelVerifiedAt: p.labelVerifiedAt
+        ? String(p.labelVerifiedAt).slice(0, 10)
+        : "",
       labelVersion: p.labelVersion || "",
     });
   };
-
   const applySuggestedCopy = () => {
     if (!editing?.suggestedCopy) return;
     const suggestion = editing.suggestedCopy;
@@ -564,11 +550,13 @@ function LawnFactsTab({ showToast }) {
       ...current,
       productType: current.productType || suggestion.productType || "",
       publicSummary: current.publicSummary || suggestion.publicSummary || "",
-      customerPrecautionSummary: current.customerPrecautionSummary || suggestion.customerPrecautionSummary || "",
+      customerPrecautionSummary:
+        current.customerPrecautionSummary ||
+        suggestion.customerPrecautionSummary ||
+        "",
       reentrySummary: current.reentrySummary || suggestion.reentrySummary || "",
     }));
   };
-
   const save = async (approve = false) => {
     if (!editing?.product?.id) return;
     try {
@@ -576,14 +564,17 @@ function LawnFactsTab({ showToast }) {
         method: "PATCH",
         body: JSON.stringify({ ...form, approve }),
       });
-      showToast(approve ? "Product fact approved for estimate packets" : "Product fact saved");
+      showToast(
+        approve
+          ? "Product fact approved for estimate packets"
+          : "Product fact saved",
+      );
       setEditing(null);
       load();
     } catch (err) {
       showToast(err.message || "Save failed");
     }
   };
-
   const approveRow = async (row) => {
     if (!row?.product?.id) return;
     try {
@@ -597,27 +588,27 @@ function LawnFactsTab({ showToast }) {
       showToast(err.message || "Approve failed");
     }
   };
-
   const badge = (status) => {
-    const colors = {
-      approved: [D.green, "#DCFCE7"],
-      ready_to_approve: [D.teal, "#E0F2FE"],
-      needs_facts: [D.amber, "#FEF3C7"],
-      missing_product: [D.red, "#FEE2E2"],
-    };
-    const [fg, bg] = colors[status] || [D.muted, "#F4F4F5"];
-    return <span style={sBadge(bg, fg)}>{String(status || "unknown").replaceAll("_", " ")}</span>;
+    const tone =
+      status === "missing_product" ? "alert" : status === "needs_facts" ? "warn" : "neutral";
+    return (
+      <Badge tone={tone}>
+        {String(status || "unknown").replaceAll("_", " ")}
+      </Badge>
+    );
   };
-
-  if (loading) return <div style={sCard}>Loading lawn product facts...</div>;
-  const visibleFacts = statusFilter === "all"
-    ? facts
-    : facts.filter((row) => row.readiness?.status === statusFilter);
-  const missingFieldEntries = Object.entries(summary?.missingFields || {}).sort((a, b) => b[1] - a[1]).slice(0, 6);
-
+  if (loading)
+    return <ActionFeedback>Loading lawn product facts...</ActionFeedback>;
+  const visibleFacts =
+    statusFilter === "all"
+      ? facts
+      : facts.filter((row) => row.readiness?.status === statusFilter);
+  const missingFieldEntries = Object.entries(summary?.missingFields || {})
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 6);
   return (
     <div>
-      <div style={{ ...sCard, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 12 }}>
+      <Card className="p-5 mb-3 grid grid-cols-[repeat(auto-fit,minmax(130px,1fr))] gap-[12px]">
         {[
           ["Protocol Products", summary?.total || 0],
           ["Approved", summary?.approved || 0],
@@ -626,121 +617,187 @@ function LawnFactsTab({ showToast }) {
           ["Missing", summary?.missing_product || 0],
         ].map(([label, value]) => (
           <div key={label}>
-            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 22, fontWeight: 700, color: D.heading }}>{value}</div>
-            <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 1 }}>{label}</div>
+            <div className="text-22 font-medium text-zinc-900 u-nums">{value}</div>
+            <div className="text-ui-body text-ink-secondary">{label}</div>
           </div>
         ))}
-      </div>
+      </Card>
 
       {missingFieldEntries.length > 0 && (
-        <div style={sCard}>
-          <div style={{ fontSize: 15, fontWeight: 700, color: D.heading, marginBottom: 10 }}>Most Common Readiness Gaps</div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <Card className="p-5 mb-3">
+          <div className="text-ui-body font-medium text-zinc-900 mb-[10px]">
+            Most Common Readiness Gaps
+          </div>
+          <div className="flex gap-[8px] flex-wrap">
             {missingFieldEntries.map(([field, count]) => (
-              <span key={field} style={sBadge("#FEF3C7", D.amber)}>{field} · {count}</span>
+              <Badge key={field} tone="warn">
+                {field} · {count}
+              </Badge>
             ))}
           </div>
-        </div>
+        </Card>
       )}
 
-      <div style={sCard}>
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center", marginBottom: 16 }}>
+      <Card className="p-5 mb-3">
+        <div className="flex justify-between gap-[12px] flex-wrap items-center mb-[16px]">
           <div>
-            <div style={{ fontSize: 18, fontWeight: 700, color: D.heading, marginBottom: 6 }}>Lawn Estimate Product Facts</div>
-            <div style={{ fontSize: 13, color: D.muted }}>
-              Product cards in lawn service outlines only render from products approved here. Draft or incomplete products stay hidden.
+            <div className="text-18 font-medium text-zinc-900 mb-[6px]">
+              Lawn Estimate Product Facts
+            </div>
+            <div className="text-ui-body text-ink-secondary">
+              Product cards in lawn service outlines only render from products
+              approved here. Draft or incomplete products stay hidden.
             </div>
           </div>
-          <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={{ ...sInput, minWidth: 190 }}>
+          <Select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            className="min-w-[190px]"
+          >
             <option value="all">All statuses</option>
             <option value="missing_product">Missing product</option>
             <option value="needs_facts">Needs facts</option>
             <option value="ready_to_approve">Ready to approve</option>
             <option value="approved">Approved</option>
-          </select>
+          </Select>
         </div>
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
-                <th style={thS}>Protocol item</th>
-                <th style={thS}>Used In</th>
-                <th style={thS}>Catalog match</th>
-                <th style={thS}>Status</th>
-                <th style={thS}>Missing</th>
-                <th style={thS}>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
+        <div className="overflow-x-auto">
+          <Table className="w-full">
+            <THead>
+              <TR>
+                <TH>Protocol item</TH>
+                <TH>Used In</TH>
+                <TH>Catalog match</TH>
+                <TH>Status</TH>
+                <TH>Missing</TH>
+                <TH>Actions</TH>
+              </TR>
+            </THead>
+            <TBody>
               {visibleFacts.map((row) => (
-                <tr key={row.key || row.needle}>
-                  <td style={tdS}>
-                    <div style={{ fontWeight: 700, color: D.heading }}>{row.needle}</div>
-                    <div style={{ fontSize: 11, color: D.muted }}>{row.expectedCategory}</div>
-                  </td>
-                  <td style={tdS}>
-                    <div style={{ fontSize: 12, color: D.heading }}>{(row.turfTracks || []).join(", ")}</div>
-                    <div style={{ fontSize: 11, color: D.muted }}>{(row.months || []).join(", ")} · {row.referenceCount || 0} refs</div>
-                  </td>
-                  <td style={tdS}>
+                <TR key={row.key || row.needle}>
+                  <TD>
+                    <div className="font-medium text-zinc-900">
+                      {row.needle}
+                    </div>
+                    <div className="text-ui-body text-ink-secondary">
+                      {row.expectedCategory}
+                    </div>
+                  </TD>
+                  <TD>
+                    <div className="text-ui-body text-zinc-900">
+                      {(row.turfTracks || []).join(", ")}
+                    </div>
+                    <div className="text-ui-body text-ink-secondary">
+                      {(row.months || []).join(", ")} ·{" "}
+                      {row.referenceCount || 0} refs
+                    </div>
+                  </TD>
+                  <TD>
                     {row.product ? (
                       <>
-                        <div style={{ fontWeight: 700, color: D.heading }}>{row.product.name}</div>
-                        <div style={{ fontSize: 11, color: D.muted }}>
-                          {row.product.productType || row.readiness?.productType || "type pending"} · {row.product.contentStatus} · {row.product.customerVisibility}
+                        <div className="font-medium text-zinc-900">
+                          {row.product.name}
+                        </div>
+                        <div className="text-ui-body text-ink-secondary">
+                          {row.product.productType ||
+                            row.readiness?.productType ||
+                            "type pending"}{" "}
+                          · {row.product.contentStatus} ·{" "}
+                          {row.product.customerVisibility}
                         </div>
                       </>
                     ) : (
-                      <span style={{ color: D.red }}>No product match</span>
+                      <span className="text-alert-fg">No product match</span>
                     )}
-                  </td>
-                  <td style={tdS}>{badge(row.readiness?.status)}</td>
-                  <td style={tdS}>
+                  </TD>
+                  <TD>{badge(row.readiness?.status)}</TD>
+                  <TD>
                     {(row.readiness?.missing || []).length ? (
-                      <ul style={{ margin: 0, paddingLeft: 18, maxWidth: 360 }}>
-                        {row.readiness.missing.map((m) => <li key={m}>{m}</li>)}
+                      <ul className="m-0 pl-[18px] max-w-[360px]">
+                        {row.readiness.missing.map((m) => (
+                          <li key={m}>{m}</li>
+                        ))}
                       </ul>
                     ) : (
-                      <span style={{ color: D.green }}>Complete</span>
+                      <span className="text-zinc-900">Complete</span>
                     )}
-                  </td>
-                  <td style={tdS}>
+                  </TD>
+                  <TD>
                     {row.product && (
-                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                        <button type="button" style={sBtn(D.card, D.heading)} onClick={() => startEdit(row)}>Edit</button>
-                        {row.readiness?.eligible && row.readiness?.status !== "approved" && (
-                          <button type="button" style={sBtn(D.green, D.white)} onClick={() => approveRow(row)}>Approve</button>
-                        )}
+                      <div className="flex gap-[8px] flex-wrap">
+                        <Button
+                          type="button"
+                          onClick={() => startEdit(row)}
+                          variant="secondary"
+                        >
+                          Edit
+                        </Button>
+                        {row.readiness?.eligible &&
+                          row.readiness?.status !== "approved" && (
+                            <Button
+                              type="button"
+                              onClick={() => approveRow(row)}
+                              variant="primary"
+                            >
+                              Approve
+                            </Button>
+                          )}
                       </div>
                     )}
-                  </td>
-                </tr>
+                  </TD>
+                </TR>
               ))}
-            </tbody>
-          </table>
-          {visibleFacts.length === 0 && <div style={{ padding: 18, color: D.muted }}>No products match this status.</div>}
-        </div>
-      </div>
-
-      {editing && (
-        <div style={{ ...sCard, borderColor: D.heading }}>
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", marginBottom: 14 }}>
-            <div>
-              <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>Edit Product Fact</div>
-              <div style={{ fontSize: 13, color: D.muted }}>{editing.product?.name}</div>
-            </div>
-            <button type="button" style={sBtn(D.card, D.heading)} onClick={() => setEditing(null)}>Close</button>
-          </div>
-          {editing.suggestedCopy && (
-            <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: 12, marginBottom: 14, background: D.bg }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: D.heading }}>Starter copy</div>
-              <div style={{ fontSize: 12, color: D.muted, lineHeight: 1.6, marginTop: 4 }}>
-                This is draft customer-safe language from the protocol item category. It does not approve EPA numbers, label claims, or product eligibility.
-              </div>
-              <button type="button" style={{ ...sBtn(D.card, D.heading), marginTop: 10 }} onClick={applySuggestedCopy}>Fill empty copy fields</button>
+            </TBody>
+          </Table>
+          {visibleFacts.length === 0 && (
+            <div className="p-[18px] text-ink-secondary">
+              No products match this status.
             </div>
           )}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 12 }}>
+        </div>
+      </Card>
+
+      {editing && (
+        <Card className="p-5 mb-3">
+          <div className="flex justify-between gap-[12px] items-center mb-[14px]">
+            <div>
+              <div className="text-18 font-medium text-zinc-900">
+                Edit Product Fact
+              </div>
+              <div className="text-ui-body text-ink-secondary">
+                {editing.product?.name}
+              </div>
+            </div>
+            <Button
+              type="button"
+              onClick={() => setEditing(null)}
+              variant="secondary"
+            >
+              Close
+            </Button>
+          </div>
+          {editing.suggestedCopy && (
+            <Card className="p-3 mb-[14px] bg-zinc-50">
+              <div className="text-ui-body font-medium text-zinc-900">
+                Starter copy
+              </div>
+              <div className="text-ui-body text-ink-secondary mt-[4px]">
+                This is draft customer-safe language from the protocol item
+                category. It does not approve EPA numbers, label claims, or
+                product eligibility.
+              </div>
+              <Button
+                type="button"
+                onClick={applySuggestedCopy}
+                variant="secondary"
+                className="mt-[10px]"
+              >
+                Fill empty copy fields
+              </Button>
+            </Card>
+          )}
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] gap-[12px]">
             {[
               ["productType", "Product type"],
               ["customerVisibility", "Visibility"],
@@ -750,15 +807,19 @@ function LawnFactsTab({ showToast }) {
               ["labelVerifiedAt", "Label verified date"],
               ["labelVersion", "Label version"],
             ].map(([key, label]) => (
-              <label key={key} style={{ display: "block" }}>
-                <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>{label}</div>
-                <input
+              <Field label={label} key={key} className="block">
+                <Input
                   type={key === "labelVerifiedAt" ? "date" : "text"}
                   value={form[key] || ""}
-                  onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
-                  style={{ ...sInput, width: "100%" }}
+                  onChange={(e) =>
+                    setForm((f) => ({
+                      ...f,
+                      [key]: e.target.value,
+                    }))
+                  }
+                  className="w-full"
                 />
-              </label>
+              </Field>
             ))}
           </div>
           {[
@@ -769,32 +830,38 @@ function LawnFactsTab({ showToast }) {
             ["petKidGuidanceText", "Pet/child guidance"],
             ["reentrySummary", "Re-entry summary"],
           ].map(([key, label]) => (
-            <label key={key} style={{ display: "block", marginTop: 12 }}>
-              <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>{label}</div>
-              <textarea
+            <Field label={label} key={key} className="block mt-[12px]">
+              <Textarea
                 value={form[key] || ""}
-                onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
-                style={{ ...sInput, width: "100%", minHeight: 72, resize: "vertical" }}
+                onChange={(e) =>
+                  setForm((f) => ({
+                    ...f,
+                    [key]: e.target.value,
+                  }))
+                }
+                className="w-full min-h-[72px] resize-y"
               />
-            </label>
+            </Field>
           ))}
-          <div style={{ display: "flex", gap: 10, marginTop: 16, flexWrap: "wrap" }}>
-            <button type="button" style={sBtn(D.heading, D.white)} onClick={() => save(false)}>Save</button>
-            <button type="button" style={sBtn(D.green, D.white)} onClick={() => save(true)}>Save + Approve</button>
+          <div className="flex gap-[10px] mt-[16px] flex-wrap">
+            <Button type="button" onClick={() => save(false)} variant="primary">
+              Save
+            </Button>
+            <Button type="button" onClick={() => save(true)} variant="primary">
+              Save + Approve
+            </Button>
           </div>
-        </div>
+        </Card>
       )}
     </div>
   );
 }
-
 function LawnContentModulesTab({ showToast }) {
   const [modules, setModules] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedKey, setSelectedKey] = useState("all");
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({});
-
   const load = useCallback(() => {
     setLoading(true);
     adminFetch("/admin/service-outlines/content-modules")
@@ -802,11 +869,9 @@ function LawnContentModulesTab({ showToast }) {
       .catch((err) => showToast(`Load failed: ${err.message}`))
       .finally(() => setLoading(false));
   }, [showToast]);
-
   useEffect(() => {
     load();
   }, [load]);
-
   const latest = [];
   const seen = new Set();
   for (const module of modules) {
@@ -815,8 +880,10 @@ function LawnContentModulesTab({ showToast }) {
     latest.push(module);
   }
   const keys = ["all", ...latest.map((module) => module.key)];
-  const visible = selectedKey === "all" ? latest : latest.filter((module) => module.key === selectedKey);
-
+  const visible =
+    selectedKey === "all"
+      ? latest
+      : latest.filter((module) => module.key === selectedKey);
   const startEdit = (module) => {
     setEditing(module);
     setForm({
@@ -827,7 +894,6 @@ function LawnContentModulesTab({ showToast }) {
       sourceNotes: module.source_notes || "",
     });
   };
-
   const save = async (status = form.status) => {
     if (!editing?.id) return;
     try {
@@ -835,131 +901,203 @@ function LawnContentModulesTab({ showToast }) {
         method: "PATCH",
         body: JSON.stringify({ ...form, status }),
       });
-      showToast(status === "approved" ? "Content module approved" : "Content module saved");
+      showToast(
+        status === "approved"
+          ? "Content module approved"
+          : "Content module saved",
+      );
       setEditing(null);
       load();
     } catch (err) {
       showToast(err.message || "Save failed");
     }
   };
-
-  if (loading) return <div style={sCard}>Loading lawn content modules...</div>;
-
+  if (loading)
+    return <ActionFeedback>Loading lawn content modules...</ActionFeedback>;
   return (
     <div>
-      <div style={sCard}>
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+      <Card className="p-5 mb-3">
+        <div className="flex justify-between gap-[12px] flex-wrap items-center">
           <div>
-            <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>Lawn Outline Content Library</div>
-            <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>
-              These approved modules power the public page, estimate packet, and service-report language.
+            <div className="text-18 font-medium text-zinc-900">
+              Lawn Outline Content Library
+            </div>
+            <div className="text-ui-body text-ink-secondary mt-[4px]">
+              These approved modules power the public page, estimate packet, and
+              service-report language.
             </div>
           </div>
-          <select value={selectedKey} onChange={(e) => setSelectedKey(e.target.value)} style={{ ...sInput, minWidth: 240 }}>
+          <Select
+            value={selectedKey}
+            onChange={(e) => setSelectedKey(e.target.value)}
+            className="min-w-[240px]"
+          >
             {keys.map((key) => (
-              <option key={key} value={key}>{key === "all" ? "All modules" : key}</option>
+              <option key={key} value={key}>
+                {key === "all" ? "All modules" : key}
+              </option>
             ))}
-          </select>
+          </Select>
         </div>
-      </div>
+      </Card>
 
-      <div style={sCard}>
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
-                <th style={thS}>Key</th>
-                <th style={thS}>Title</th>
-                <th style={thS}>Audience</th>
-                <th style={thS}>Status</th>
-                <th style={thS}>Copy</th>
-                <th style={thS}>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
+      <Card className="p-5 mb-3">
+        <div className="overflow-x-auto">
+          <Table className="w-full">
+            <THead>
+              <TR>
+                <TH>Key</TH>
+                <TH>Title</TH>
+                <TH>Audience</TH>
+                <TH>Status</TH>
+                <TH>Copy</TH>
+                <TH>Actions</TH>
+              </TR>
+            </THead>
+            <TBody>
               {visible.map((module) => (
-                <tr key={module.id}>
-                  <td style={tdS}>
-                    <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}>{module.key}</div>
-                    <div style={{ fontSize: 11, color: D.muted }}>v{module.version}</div>
-                  </td>
-                  <td style={tdS}>{module.title}</td>
-                  <td style={tdS}>{module.audience}</td>
-                  <td style={tdS}>
-                    <span style={sBadge(module.status === "approved" ? "#DCFCE7" : "#FEF3C7", module.status === "approved" ? D.green : D.amber)}>
-                      {module.status}
-                    </span>
-                  </td>
-                  <td style={{ ...tdS, maxWidth: 460 }}>
-                    <div style={{ overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical" }}>
-                      {module.plain_text}
+                <TR key={module.id}>
+                  <TD>
+                    <div className="text-ui-body">{module.key}</div>
+                    <div className="text-ui-body text-ink-secondary">
+                      v{module.version}
                     </div>
-                  </td>
-                  <td style={tdS}>
-                    <button type="button" style={sBtn(D.card, D.heading)} onClick={() => startEdit(module)}>Edit</button>
-                  </td>
-                </tr>
+                  </TD>
+                  <TD>{module.title}</TD>
+                  <TD>{module.audience}</TD>
+                  <TD>
+                    {/* Main: green when approved, amber otherwise (draft/
+                        review/deprecated/retired) — the module status enum
+                        has no failed/rejected state to reserve alert for.
+                        The kit has no success tone, so approved is strong. */}
+                    <Badge tone={module.status === "approved" ? "strong" : "warn"}>
+                      {module.status}
+                    </Badge>
+                  </TD>
+                  <TD className="max-w-[460px]">
+                    <div className="line-clamp-3 overflow-hidden">{module.plain_text}</div>
+                  </TD>
+                  <TD>
+                    <Button
+                      type="button"
+                      onClick={() => startEdit(module)}
+                      variant="secondary"
+                    >
+                      Edit
+                    </Button>
+                  </TD>
+                </TR>
               ))}
-            </tbody>
-          </table>
+            </TBody>
+          </Table>
         </div>
-      </div>
+      </Card>
 
       {editing && (
-        <div style={{ ...sCard, borderColor: D.heading }}>
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", marginBottom: 14 }}>
+        <Card className="p-5 mb-3">
+          <div className="flex justify-between gap-[12px] items-center mb-[14px]">
             <div>
-              <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>Edit Content Module</div>
-              <div style={{ fontSize: 13, color: D.muted, fontFamily: "'JetBrains Mono', monospace" }}>{editing.key}</div>
+              <div className="text-18 font-medium text-zinc-900">
+                Edit Content Module
+              </div>
+              <div className="text-ui-body text-ink-secondary">
+                {editing.key}
+              </div>
             </div>
-            <button type="button" style={sBtn(D.card, D.heading)} onClick={() => setEditing(null)}>Close</button>
+            <Button
+              type="button"
+              onClick={() => setEditing(null)}
+              variant="secondary"
+            >
+              Close
+            </Button>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
-            <label>
-              <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Title</div>
-              <input value={form.title || ""} onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))} style={{ ...sInput, width: "100%" }} />
-            </label>
-            <label>
-              <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Audience</div>
-              <select value={form.audience || "estimate_packet"} onChange={(e) => setForm((f) => ({ ...f, audience: e.target.value }))} style={{ ...sInput, width: "100%" }}>
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-[12px]">
+            <Field label="Title">
+              <Input
+                value={form.title || ""}
+                onChange={(e) =>
+                  setForm((f) => ({
+                    ...f,
+                    title: e.target.value,
+                  }))
+                }
+                className="w-full"
+              />
+            </Field>
+            <Field label="Audience">
+              <Select
+                value={form.audience || "estimate_packet"}
+                onChange={(e) =>
+                  setForm((f) => ({
+                    ...f,
+                    audience: e.target.value,
+                  }))
+                }
+                className="w-full"
+              >
                 <option value="public">Public</option>
                 <option value="estimate_packet">Estimate packet</option>
                 <option value="service_report">Service report</option>
                 <option value="admin">Admin</option>
-              </select>
-            </label>
-            <label>
-              <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Status</div>
-              <select value={form.status || "draft"} onChange={(e) => setForm((f) => ({ ...f, status: e.target.value }))} style={{ ...sInput, width: "100%" }}>
+              </Select>
+            </Field>
+            <Field label="Status">
+              <Select
+                value={form.status || "draft"}
+                onChange={(e) =>
+                  setForm((f) => ({
+                    ...f,
+                    status: e.target.value,
+                  }))
+                }
+                className="w-full"
+              >
                 <option value="draft">Draft</option>
                 <option value="review">Review</option>
                 <option value="approved">Approved</option>
                 <option value="deprecated">Deprecated</option>
                 <option value="retired">Retired</option>
-              </select>
-            </label>
+              </Select>
+            </Field>
           </div>
-          <label style={{ display: "block", marginTop: 12 }}>
-            <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Approved copy</div>
-            <textarea
+          <Field label="Approved copy" className="block mt-[12px]">
+            <Textarea
               value={form.plainText || ""}
-              onChange={(e) => setForm((f) => ({ ...f, plainText: e.target.value }))}
-              style={{ ...sInput, width: "100%", minHeight: 140, resize: "vertical" }}
+              onChange={(e) =>
+                setForm((f) => ({
+                  ...f,
+                  plainText: e.target.value,
+                }))
+              }
+              className="w-full min-h-[140px] resize-y"
             />
-          </label>
-          <label style={{ display: "block", marginTop: 12 }}>
-            <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Source notes</div>
-            <textarea
+          </Field>
+          <Field label="Source notes" className="block mt-[12px]">
+            <Textarea
               value={form.sourceNotes || ""}
-              onChange={(e) => setForm((f) => ({ ...f, sourceNotes: e.target.value }))}
-              style={{ ...sInput, width: "100%", minHeight: 72, resize: "vertical" }}
+              onChange={(e) =>
+                setForm((f) => ({
+                  ...f,
+                  sourceNotes: e.target.value,
+                }))
+              }
+              className="w-full min-h-[72px] resize-y"
             />
-          </label>
-          <div style={{ display: "flex", gap: 10, marginTop: 16, flexWrap: "wrap" }}>
-            <button type="button" style={sBtn(D.heading, D.white)} onClick={() => save()}>Save</button>
-            <button type="button" style={sBtn(D.green, D.white)} onClick={() => save("approved")}>Save + Approve</button>
+          </Field>
+          <div className="flex gap-[10px] mt-[16px] flex-wrap">
+            <Button type="button" onClick={() => save()} variant="primary">
+              Save
+            </Button>
+            <Button
+              type="button"
+              onClick={() => save("approved")}
+              variant="primary"
+            >
+              Save + Approve
+            </Button>
           </div>
-        </div>
+        </Card>
       )}
     </div>
   );
@@ -983,11 +1121,9 @@ function PriceSyncTab({ showToast }) {
   const [loginDiscoveryResult, setLoginDiscoveryResult] = useState(null);
   const [autoMapIds, setAutoMapIds] = useState(() => new Set());
   const showToastRef = useRef(showToast);
-
   useEffect(() => {
     showToastRef.current = showToast;
   }, [showToast]);
-
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -1005,11 +1141,9 @@ function PriceSyncTab({ showToast }) {
       setLoading(false);
     }
   }, []);
-
   useEffect(() => {
     load();
   }, [load]);
-
   const loadCsv = async (type) => {
     try {
       const path =
@@ -1024,13 +1158,11 @@ function PriceSyncTab({ showToast }) {
       showToast?.(`CSV failed: ${e.message}`);
     }
   };
-
   const copyCsv = async () => {
     if (!csvPreview) return;
     await navigator.clipboard.writeText(csvPreview);
     showToast?.(`${csvName} copied`);
   };
-
   const importMappings = async () => {
     if (!mappingImportCsv.trim()) {
       showToast?.("Paste mapping CSV first");
@@ -1051,7 +1183,6 @@ function PriceSyncTab({ showToast }) {
       showToast?.(`Import failed: ${e.message}`);
     }
   };
-
   const autoMapVendor = async (vendorId) => {
     if (autoMapIds.has(vendorId)) return;
     setAutoMapIds((prev) => new Set(prev).add(vendorId));
@@ -1060,7 +1191,9 @@ function PriceSyncTab({ showToast }) {
         method: "POST",
         body: JSON.stringify({ vendorId, limit: 8 }),
       });
-      showToast?.(result.message || `Auto-mapped ${result.mapped || 0} products`);
+      showToast?.(
+        result.message || `Auto-mapped ${result.mapped || 0} products`,
+      );
       await load();
     } catch (e) {
       showToast?.(`Auto-map failed: ${e.message}`);
@@ -1072,7 +1205,6 @@ function PriceSyncTab({ showToast }) {
       });
     }
   };
-
   const queueLoginDiscovery = async () => {
     setLoginDiscoveryQueueing(true);
     try {
@@ -1092,15 +1224,9 @@ function PriceSyncTab({ showToast }) {
       setLoginDiscoveryQueueing(false);
     }
   };
-
   if (loading) {
-    return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
-        Loading price sync...
-      </div>
-    );
+    return <ActionFeedback>Loading price sync...</ActionFeedback>;
   }
-
   const totalConnections = vendors.reduce(
     (sum, vendor) => sum + (vendor.connections?.length || 0),
     0,
@@ -1116,86 +1242,90 @@ function PriceSyncTab({ showToast }) {
   const loginDiscoveryVendors = vendors.filter(
     (vendor) => vendor.loginDiscoveryNeeded || vendor.loginDiscoveryStatus,
   );
-
   return (
     <div>
-      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+      <div className="flex gap-[10px] flex-wrap">
         {[
-          { label: "Vendors", value: vendors.length },
-          { label: "Connections", value: totalConnections },
-          { label: "Needs Mapping", value: needsMapping.length },
-          { label: "Verified Maps", value: verifiedMappings },
-          { label: "Current Prices", value: currentPrices },
-          { label: "Needs Login", value: loginDiscoveryVendors.length },
-          { label: "Pending Review", value: reviewQueue.length },
+          {
+            label: "Vendors",
+            value: vendors.length,
+          },
+          {
+            label: "Connections",
+            value: totalConnections,
+          },
+          {
+            label: "Needs Mapping",
+            value: needsMapping.length,
+          },
+          {
+            label: "Verified Maps",
+            value: verifiedMappings,
+          },
+          {
+            label: "Current Prices",
+            value: currentPrices,
+          },
+          {
+            label: "Needs Login",
+            value: loginDiscoveryVendors.length,
+          },
+          {
+            label: "Pending Review",
+            value: reviewQueue.length,
+          },
         ].map((item) => (
-          <div
+          <Card
             key={item.label}
-            style={{
-              ...sCard,
-              flex: "1 1 130px",
-              minWidth: 130,
-              marginBottom: 12,
-              textAlign: "center",
-            }}
+            className="p-5 mb-3 flex-[1_1_130px] min-w-[130px] mb-[12px] text-center"
           >
-            <div
-              style={{
-                fontFamily: "'JetBrains Mono', monospace",
-                fontSize: 22,
-                fontWeight: 700,
-                color: item.value ? D.heading : D.muted,
-              }}
-            >
-              {item.value}
-            </div>
-            <div
-              style={{
-                fontSize: 11,
-                color: D.muted,
-                textTransform: "uppercase",
-                letterSpacing: 1,
-                marginTop: 2,
-              }}
-            >
+            <div className="text-22 font-medium u-nums">{item.value}</div>
+            <div className="text-ui-body text-ink-secondary mt-[2px]">
               {item.label}
             </div>
-          </div>
+          </Card>
         ))}
       </div>
 
-      <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
+      <div className="flex gap-[6px] mb-[12px] flex-wrap">
         {[
-          { key: "vendors", label: "Vendor Sync Status" },
-          { key: "mapping", label: "Needs Mapping" },
-          { key: "login", label: "Login Discovery" },
-          { key: "csv", label: "CSV Import / Export" },
-          { key: "review", label: "Price Review Queue" },
+          {
+            key: "vendors",
+            label: "Vendor Sync Status",
+          },
+          {
+            key: "mapping",
+            label: "Needs Mapping",
+          },
+          {
+            key: "login",
+            label: "Login Discovery",
+          },
+          {
+            key: "csv",
+            label: "CSV Import / Export",
+          },
+          {
+            key: "review",
+            label: "Price Review Queue",
+          },
         ].map((tab) => (
-          <button
+          <Button
             key={tab.key}
             onClick={() => setView(tab.key)}
-            style={{
-              padding: "7px 14px",
-              borderRadius: 20,
-              border: "none",
-              fontSize: 12,
-              fontWeight: 500,
-              cursor: "pointer",
-              background: view === tab.key ? D.teal : D.card,
-              color: view === tab.key ? D.white : D.muted,
-            }}
+            variant={view === tab.key ? "primary" : "secondary"}
+            aria-pressed={view === tab.key}
           >
             {tab.label}
-          </button>
+          </Button>
         ))}
       </div>
 
       {view === "vendors" && (
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
+        <div className="overflow-x-auto">
+          <Table className="w-full">
+            <THead>
+              <TR>
                 {[
                   "Vendor",
                   "Connections",
@@ -1206,76 +1336,60 @@ function PriceSyncTab({ showToast }) {
                   "Pending",
                   "Next Action",
                 ].map((h) => (
-                  <th key={h} style={thS}>
-                    {h}
-                  </th>
+                  <TH key={h}>{h}</TH>
                 ))}
-              </tr>
-            </thead>
-            <tbody>
+              </TR>
+            </THead>
+            <TBody>
               {vendors.map((vendor) => (
-                <tr key={vendor.id}>
-                  <td style={{ ...tdS, fontWeight: 700, color: D.heading }}>
-                    {vendor.name}
-                  </td>
-                  <td style={tdS}>
-                    <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                <TR key={vendor.id}>
+                  <TD className="font-medium text-zinc-900">{vendor.name}</TD>
+                  <TD>
+                    <div className="flex gap-[4px] flex-wrap">
                       {(vendor.connections || []).map((connection) => (
-                        <span
+                        <Badge
                           key={connection.id}
-                          style={sBadge(
-                            connection.credentialStatus === "missing"
-                              ? `${D.amber}22`
-                              : `${D.green}22`,
-                            connection.credentialStatus === "missing"
-                              ? D.amber
-                              : D.green,
-                          )}
                           title={`${connection.approvalStatus} / ${connection.credentialStatus}`}
+                          tone={connection.credentialStatus === "missing" ? "warn" : "neutral"}
                         >
                           {connection.type}
-                        </span>
+                        </Badge>
                       ))}
                     </div>
-                  </td>
-                  <td style={tdS}>{vendor.mappedProducts}</td>
-                  <td style={tdS}>{vendor.verifiedMappings}</td>
-                  <td style={tdS}>{vendor.currentPrices}</td>
-                  <td style={tdS}>{vendor.bestPrices}</td>
-                  <td style={tdS}>{vendor.pendingApprovals}</td>
-                  <td style={{ ...tdS, color: D.muted }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  </TD>
+                  <TD nums>{vendor.mappedProducts}</TD>
+                  <TD nums>{vendor.verifiedMappings}</TD>
+                  <TD nums>{vendor.currentPrices}</TD>
+                  <TD nums>{vendor.bestPrices}</TD>
+                  <TD nums>{vendor.pendingApprovals}</TD>
+                  <TD className="text-ink-secondary">
+                    <div className="flex items-center gap-[8px] flex-wrap">
                       <span>{vendor.nextAction}</span>
-                      {(vendor.nextAction === "Needs mapping" || vendor.nextAction === "Verify mappings") && (
-                        <button
+                      {(vendor.nextAction === "Needs mapping" ||
+                        vendor.nextAction === "Verify mappings") && (
+                        <Button
                           onClick={() => autoMapVendor(vendor.id)}
                           disabled={autoMapIds.has(vendor.id)}
                           title="AI-propose vendor SKUs/URLs for this vendor's unmapped products (writes unverified — review before pricing)"
-                          style={{
-                            ...sBtn(D.teal, D.white),
-                            padding: "4px 10px",
-                            fontSize: 11,
-                            opacity: autoMapIds.has(vendor.id) ? 0.6 : 1,
-                            cursor: autoMapIds.has(vendor.id) ? "default" : "pointer",
-                          }}
+                          variant="primary"
                         >
                           {autoMapIds.has(vendor.id) ? "Mapping…" : "Auto-map"}
-                        </button>
+                        </Button>
                       )}
                     </div>
-                  </td>
-                </tr>
+                  </TD>
+                </TR>
               ))}
-            </tbody>
-          </table>
+            </TBody>
+          </Table>
         </div>
       )}
 
       {view === "mapping" && (
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
+        <div className="overflow-x-auto">
+          <Table className="w-full">
+            <THead>
+              <TR>
                 {[
                   "Product",
                   "Category",
@@ -1286,250 +1400,243 @@ function PriceSyncTab({ showToast }) {
                   "Verified",
                   "Package Maps",
                 ].map((h) => (
-                  <th key={h} style={thS}>
-                    {h}
-                  </th>
+                  <TH key={h}>{h}</TH>
                 ))}
-              </tr>
-            </thead>
-            <tbody>
+              </TR>
+            </THead>
+            <TBody>
               {needsMapping.map((product) => (
-                <tr key={product.id}>
-                  <td style={{ ...tdS, fontWeight: 700, color: D.heading }}>
-                    {product.name}
-                  </td>
-                  <td style={tdS}>{product.category || "—"}</td>
-                  <td style={tdS}>{product.sku || "—"}</td>
-                  <td style={tdS}>{product.containerSize || "—"}</td>
-                  <td style={tdS}>
-                    <span style={sBadge(`${D.amber}22`, D.amber)}>
+                <TR key={product.id}>
+                  <TD className="font-medium text-zinc-900">{product.name}</TD>
+                  <TD>{product.category || "—"}</TD>
+                  <TD>{product.sku || "—"}</TD>
+                  <TD>{product.containerSize || "—"}</TD>
+                  <TD>
+                    <Badge tone="warn">
                       {product.bestPriceStatus || "needs_mapping"}
-                    </span>
-                  </td>
-                  <td style={tdS}>{product.mappedVendors}</td>
-                  <td style={tdS}>{product.verifiedMappings}</td>
-                  <td style={tdS}>{product.completePackageMaps}</td>
-                </tr>
+                    </Badge>
+                  </TD>
+                  <TD nums>{product.mappedVendors}</TD>
+                  <TD nums>{product.verifiedMappings}</TD>
+                  <TD nums>{product.completePackageMaps}</TD>
+                </TR>
               ))}
-            </tbody>
-          </table>
+            </TBody>
+          </Table>
           {needsMapping.length === 0 && (
-            <div style={{ ...sCard, color: D.muted, textAlign: "center" }}>
+            <Card className="p-5 mb-3 text-ink-secondary text-center">
               All active products have verified mappings.
-            </div>
+            </Card>
           )}
         </div>
       )}
 
       {view === "login" && (
-        <div style={sCard}>
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 14 }}>
+        <Card className="p-5 mb-3">
+          <div className="flex justify-between gap-[12px] flex-wrap items-end mb-[14px]">
             <div>
-              <h3 style={{ margin: "0 0 4px", color: D.heading, fontSize: 18 }}>Hermes vendor login discovery</h3>
-              <div style={{ color: D.muted, fontSize: 13 }}>
-                Queue active vendors missing login setup so Hermes can find portal, registration, and rep-contact paths.
+              <h3 className="m-0 mb-1 text-zinc-900 text-18">
+                Hermes vendor login discovery
+              </h3>
+              <div className="text-ink-secondary text-ui-body">
+                Queue active vendors missing login setup so Hermes can find
+                portal, registration, and rep-contact paths.
               </div>
             </div>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
-              <label>
-                <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Vendor cap</div>
-                <input
+            <div className="flex gap-[8px] flex-wrap items-end">
+              <Field label="Vendor cap">
+                <Input
                   type="number"
                   min="1"
                   max="200"
                   value={loginDiscoveryLimit}
                   onChange={(e) => setLoginDiscoveryLimit(e.target.value)}
-                  style={{ ...sInput, width: 110 }}
+                  className="w-[110px]"
                 />
-              </label>
-              <button
+              </Field>
+              <Button
                 type="button"
                 onClick={queueLoginDiscovery}
                 disabled={loginDiscoveryQueueing}
-                style={sBtn(loginDiscoveryQueueing ? D.card : D.green, loginDiscoveryQueueing ? D.muted : D.white)}
+                variant="secondary"
               >
                 {loginDiscoveryQueueing ? "Queueing..." : "Queue Hermes"}
-              </button>
+              </Button>
             </div>
           </div>
 
           {loginDiscoveryResult && (
-            <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, marginBottom: 12, color: D.text, fontSize: 12, background: D.input }}>
-              Queued {loginDiscoveryResult.queued || 0}; skipped open jobs {loginDiscoveryResult.duplicates || 0}; candidates {loginDiscoveryResult.candidateCount || 0}.
-            </div>
+            <ActionFeedback className="mb-[12px]">
+              Queued {loginDiscoveryResult.queued || 0}; skipped open jobs{" "}
+              {loginDiscoveryResult.duplicates || 0}; candidates{" "}
+              {loginDiscoveryResult.candidateCount || 0}.
+            </ActionFeedback>
           )}
 
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr>
-                  {["Vendor", "Website", "Login URL", "Credentials", "Status", "Hermes"].map((h) => (
-                    <th key={h} style={thS}>{h}</th>
+          <div className="overflow-x-auto">
+            <Table className="w-full">
+              <THead>
+                <TR>
+                  {[
+                    "Vendor",
+                    "Website",
+                    "Login URL",
+                    "Credentials",
+                    "Status",
+                    "Hermes",
+                  ].map((h) => (
+                    <TH key={h}>{h}</TH>
                   ))}
-                </tr>
-              </thead>
-              <tbody>
+                </TR>
+              </THead>
+              <TBody>
                 {loginDiscoveryVendors.map((vendor) => {
                   const websiteHref = safeExternalHref(vendor.website);
                   const loginHref = safeExternalHref(vendor.loginUrl);
                   return (
-                    <tr key={vendor.id}>
-                      <td style={{ ...tdS, fontWeight: 700, color: D.heading }}>{vendor.name}</td>
-                      <td style={tdS}>
+                    <TR key={vendor.id}>
+                      <TD className="font-medium text-zinc-900">
+                        {vendor.name}
+                      </TD>
+                      <TD>
                         {websiteHref ? (
-                          <a href={websiteHref} target="_blank" rel="noopener noreferrer" style={{ color: D.teal }}>
+                          <a
+                            href={websiteHref}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-zinc-900 underline underline-offset-2"
+                          >
                             {vendor.website}
                           </a>
-                        ) : (vendor.website || "—")}
-                      </td>
-                      <td style={tdS}>
+                        ) : (
+                          vendor.website || "—"
+                        )}
+                      </TD>
+                      <TD>
                         {loginHref ? (
-                          <a href={loginHref} target="_blank" rel="noopener noreferrer" style={{ color: D.teal }}>
+                          <a
+                            href={loginHref}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-zinc-900 underline underline-offset-2"
+                          >
                             {vendor.loginUrl}
                           </a>
-                        ) : (vendor.loginUrl || "—")}
-                      </td>
-                      <td style={tdS}>{vendor.hasCredentials ? "Saved login metadata" : "Missing"}</td>
-                      <td style={tdS}>
-                        <span style={sBadge(vendor.loginDiscoveryNeeded ? `${D.amber}22` : `${D.green}22`, vendor.loginDiscoveryNeeded ? D.amber : D.green)}>
+                        ) : (
+                          vendor.loginUrl || "—"
+                        )}
+                      </TD>
+                      <TD>
+                        {vendor.hasCredentials
+                          ? "Saved login metadata"
+                          : "Missing"}
+                      </TD>
+                      <TD>
+                        <Badge tone={vendor.loginDiscoveryNeeded ? "warn" : "neutral"}>
                           {vendor.credentialStatus || "needs_login"}
-                        </span>
-                      </td>
-                      <td style={tdS}>{vendor.loginDiscoveryStatus || "not queued"}</td>
-                    </tr>
+                        </Badge>
+                      </TD>
+                      <TD>{vendor.loginDiscoveryStatus || "not queued"}</TD>
+                    </TR>
                   );
                 })}
-              </tbody>
-            </table>
+              </TBody>
+            </Table>
             {loginDiscoveryVendors.length === 0 && (
-              <div style={{ color: D.muted, textAlign: "center", padding: 18 }}>
+              <div className="text-ink-secondary text-center p-[18px]">
                 No vendors currently need login discovery.
               </div>
             )}
           </div>
-        </div>
+        </Card>
       )}
 
       {view === "csv" && (
-        <div style={sCard}>
-          <div
-            style={{
-              display: "flex",
-              gap: 8,
-              flexWrap: "wrap",
-              marginBottom: 12,
-            }}
-          >
-            <button onClick={() => loadCsv("needs_mapping")} style={sBtn(D.teal, D.white)}>
+        <Card className="p-5 mb-3">
+          <div className="flex gap-[8px] flex-wrap mb-[12px]">
+            <Button onClick={() => loadCsv("needs_mapping")} variant="primary">
               Needs Mapping Export
-            </button>
-            <button onClick={() => loadCsv("existing")} style={sBtn(D.teal, D.white)}>
+            </Button>
+            <Button onClick={() => loadCsv("existing")} variant="primary">
               Existing Mappings Export
-            </button>
-            <button onClick={() => loadCsv("manual_seed")} style={sBtn(D.teal, D.white)}>
+            </Button>
+            <Button onClick={() => loadCsv("manual_seed")} variant="primary">
               Manual Seed Template
-            </button>
-            <button
+            </Button>
+            <Button
               onClick={copyCsv}
               disabled={!csvPreview}
-              style={sBtn(csvPreview ? D.green : D.card, csvPreview ? D.white : D.muted)}
+              variant="secondary"
             >
               Copy CSV
-            </button>
+            </Button>
           </div>
-          <div style={{ fontSize: 12, color: D.muted, marginBottom: 8 }}>
+          <div className="text-ui-body text-ink-secondary mb-[8px]">
             Mapping import writes verified product mappings only. Manual seed
             price import remains disabled until the pricing approval worker is
             built.
           </div>
-          <textarea
+          <Textarea
             readOnly
             value={csvPreview}
             placeholder="Choose an export/template..."
-            style={{
-              ...sInput,
-              width: "100%",
-              minHeight: 260,
-              fontFamily: "'JetBrains Mono', monospace",
-              fontSize: 11,
-            }}
+            className="w-full min-h-[260px]"
           />
-          <div
-            style={{
-              marginTop: 16,
-              borderTop: `1px solid ${D.border}`,
-              paddingTop: 14,
-            }}
-          >
-            <div
-              style={{
-                fontSize: 11,
-                color: D.muted,
-                textTransform: "uppercase",
-                letterSpacing: 1,
-                marginBottom: 8,
-              }}
-            >
+
+          <div className="mt-[16px] border-t border-solid border-zinc-200 pt-[14px]">
+            <div className="text-ui-body text-ink-secondary mb-[8px]">
               Mapping Import
             </div>
-            <textarea
+            <Textarea
               value={mappingImportCsv}
               onChange={(e) => setMappingImportCsv(e.target.value)}
               placeholder="Paste mapping CSV here..."
-              style={{
-                ...sInput,
-                width: "100%",
-                minHeight: 180,
-                fontFamily: "'JetBrains Mono', monospace",
-                fontSize: 11,
-              }}
+              className="w-full min-h-[180px]"
             />
-            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-              <button onClick={importMappings} style={sBtn(D.green, D.white)}>
+
+            <div className="flex gap-[8px] mt-[8px]">
+              <Button onClick={importMappings} variant="primary">
                 Import Mappings
-              </button>
-              <button
+              </Button>
+              <Button
                 onClick={() => {
                   setMappingImportCsv("");
                   setImportResult(null);
                 }}
-                style={sBtn(D.card, D.muted)}
+                variant="secondary"
               >
                 Clear
-              </button>
+              </Button>
             </div>
+            {/* Structured, multi-row result — ActionFeedback wraps children
+                in a <span>, which can't hold these block-level divs without
+                producing invalid DOM/nesting warnings. Use a plain surfaced
+                container with the same neutral feedback styling instead. */}
             {importResult && (
               <div
-                style={{
-                  marginTop: 10,
-                  padding: 10,
-                  border: `1px solid ${D.border}`,
-                  borderRadius: 8,
-                  fontSize: 12,
-                  color: D.text,
-                  background: D.input,
-                }}
+                role="status"
+                className="mt-[10px] rounded-lg border border-solid border-zinc-200 bg-zinc-50 p-[10px] text-ui-caption text-zinc-900"
               >
                 <div>
                   Imported {importResult.imported || 0} of{" "}
                   {importResult.rowsReceived || 0} rows.
                 </div>
                 {(importResult.rowErrors || []).slice(0, 8).map((err) => (
-                  <div key={err.row} style={{ color: D.red, marginTop: 4 }}>
+                  <div key={err.row} className="text-alert-fg mt-[4px]">
                     Row {err.row}: {(err.errors || []).join("; ")}
                   </div>
                 ))}
               </div>
             )}
           </div>
-        </div>
+        </Card>
       )}
 
       {view === "review" && (
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
+        <div className="overflow-x-auto">
+          <Table className="w-full">
+            <THead>
+              <TR>
                 {[
                   "Product",
                   "Vendor",
@@ -1541,34 +1648,54 @@ function PriceSyncTab({ showToast }) {
                   "Reason",
                   "Captured",
                 ].map((h) => (
-                  <th key={h} style={thS}>
-                    {h}
-                  </th>
+                  <TH key={h}>{h}</TH>
                 ))}
-              </tr>
-            </thead>
-            <tbody>
+              </TR>
+            </THead>
+            <TBody>
               {reviewQueue.map((approval) => (
-                <tr key={approval.id}>
-                  <td style={{ ...tdS, fontWeight: 700, color: D.heading }}>
+                <TR key={approval.id}>
+                  <TD className="font-medium text-zinc-900">
                     {approval.productName}
-                  </td>
-                  <td style={tdS}>{approval.vendorName}</td>
-                  <td style={tdS}>{approval.oldPrice != null ? `$${approval.oldPrice.toFixed(2)}` : "—"}</td>
-                  <td style={tdS}>{approval.newPrice != null ? `$${approval.newPrice.toFixed(2)}` : "—"}</td>
-                  <td style={tdS}>{approval.changePercent != null ? `${approval.changePercent.toFixed(1)}%` : "—"}</td>
-                  <td style={tdS}>{approval.sourceType || "—"}</td>
-                  <td style={tdS}>{approval.confidence != null ? `${Math.round(approval.confidence * 100)}%` : "—"}</td>
-                  <td style={{ ...tdS, color: D.muted }}>{approval.approvalReason || "—"}</td>
-                  <td style={tdS}>{approval.capturedAt ? new Date(approval.capturedAt).toLocaleDateString() : "—"}</td>
-                </tr>
+                  </TD>
+                  <TD>{approval.vendorName}</TD>
+                  <TD nums>
+                    {approval.oldPrice != null
+                      ? `$${approval.oldPrice.toFixed(2)}`
+                      : "—"}
+                  </TD>
+                  <TD nums>
+                    {approval.newPrice != null
+                      ? `$${approval.newPrice.toFixed(2)}`
+                      : "—"}
+                  </TD>
+                  <TD nums>
+                    {approval.changePercent != null
+                      ? `${approval.changePercent.toFixed(1)}%`
+                      : "—"}
+                  </TD>
+                  <TD>{approval.sourceType || "—"}</TD>
+                  <TD nums>
+                    {approval.confidence != null
+                      ? `${Math.round(approval.confidence * 100)}%`
+                      : "—"}
+                  </TD>
+                  <TD className="text-ink-secondary">
+                    {approval.approvalReason || "—"}
+                  </TD>
+                  <TD nums>
+                    {approval.capturedAt
+                      ? new Date(approval.capturedAt).toLocaleDateString()
+                      : "—"}
+                  </TD>
+                </TR>
               ))}
-            </tbody>
-          </table>
+            </TBody>
+          </Table>
           {reviewQueue.length === 0 && (
-            <div style={{ ...sCard, color: D.muted, textAlign: "center" }}>
+            <Card className="p-5 mb-3 text-ink-secondary text-center">
               No pending price approvals.
-            </div>
+            </Card>
           )}
         </div>
       )}
@@ -1576,30 +1703,36 @@ function PriceSyncTab({ showToast }) {
   );
 }
 
-function WaveGuardForecastTab({ showToast, onUpdate }) {
+function WaveGuardForecastTab({ showToast, onUpdate, refreshId }) {
   const [days, setDays] = useState(14);
   const [forecast, setForecast] = useState(null);
   const [loading, setLoading] = useState(true);
+  const loadSequence = useRef(0);
   const [creatingId, setCreatingId] = useState("");
-
   const load = useCallback(async () => {
+    const sequence = ++loadSequence.current;
     setLoading(true);
     try {
       const data = await adminFetch(`/admin/inventory/waveguard-forecast?days=${encodeURIComponent(days)}`);
-      setForecast(data.forecast || null);
+      if (sequence === loadSequence.current) setForecast(data.forecast || null);
     } catch (err) {
-      showToast(`Forecast failed: ${err.message}`);
+      if (sequence === loadSequence.current)
+        showToast(`Forecast failed: ${err.message}`);
     } finally {
-      setLoading(false);
+      if (sequence === loadSequence.current) setLoading(false);
     }
   }, [days, showToast]);
-
   useEffect(() => {
-    load();
-  }, [load]);
+    void load();
+    return () => {
+      loadSequence.current += 1;
+    };
+  }, [load, refreshId]);
 
   async function createRestock(product) {
-    const qty = Number(product.recommendedOrderQuantity || product.shortfall || 0);
+    const qty = Number(
+      product.recommendedOrderQuantity || product.shortfall || 0,
+    );
     if (!qty || qty <= 0) {
       showToast("No forecasted order quantity for this product");
       return;
@@ -1621,7 +1754,11 @@ function WaveGuardForecastTab({ showToast, onUpdate }) {
           reason: `${forecast?.days || days}-day WaveGuard forecast needs ${product.committedDemand} ${product.demandUnit || product.inventoryUnit || ""} of ${product.productName}.`,
         }),
       });
-      showToast(data.existing ? "Open restock request already exists" : "Forecast restock request created");
+      showToast(
+        data.existing
+          ? "Open restock request already exists"
+          : "Forecast restock request created",
+      );
       onUpdate && onUpdate();
       await load();
     } catch (err) {
@@ -1630,171 +1767,246 @@ function WaveGuardForecastTab({ showToast, onUpdate }) {
       setCreatingId("");
     }
   }
-
   const products = forecast?.products || [];
   const counts = forecast?.statusCounts || {};
-  const statusColor = (status) => {
-    if (status === "short") return D.red;
-    if (status === "warning" || status === "unit_mismatch") return D.amber;
-    if (status === "not_tracked") return D.muted;
-    return D.green;
-  };
   const statusLabel = (status) => String(status || "ok").replace(/_/g, " ");
-
   return (
-    <div style={sCard}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
+    <Card className="p-5 mb-3">
+      <div className="flex justify-between gap-[12px] flex-wrap mb-[14px]">
         <div>
-          <h3 style={{ margin: 0, color: D.heading }}>WaveGuard inventory forecast</h3>
-          <p style={{ margin: "4px 0 0", color: D.muted, fontSize: 13 }}>
+          <h3 className="m-0 text-zinc-900">WaveGuard inventory forecast</h3>
+          <p className="[margin:4px_0_0] text-ink-secondary text-ui-body">
             Upcoming lawn protocol demand compared against live product stock.
           </p>
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <select value={days} onChange={(e) => setDays(Number(e.target.value))} style={{ ...sInput, width: 130 }}>
+        <div className="flex gap-[8px] items-center flex-wrap">
+          <Select
+            value={days}
+            onChange={(e) => setDays(Number(e.target.value))}
+            className="w-[130px]"
+          >
             <option value={7}>7 days</option>
             <option value={14}>14 days</option>
             <option value={30}>30 days</option>
             <option value={60}>60 days</option>
-          </select>
-          <button onClick={load} disabled={loading} style={sBtn(D.card, D.text)}>Refresh</button>
+          </Select>
+          <Button onClick={load} disabled={loading} variant="secondary">
+            Refresh
+          </Button>
         </div>
       </div>
 
       {forecast && (
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
+        <div className="flex gap-[10px] flex-wrap mb-[14px]">
           {[
-            { label: "Appointments", value: forecast.serviceCount || 0, color: D.heading },
-            { label: "Products", value: forecast.productCount || 0, color: D.heading },
-            { label: "Short", value: counts.short || 0, color: counts.short ? D.red : D.green },
-            { label: "Warnings", value: counts.warning || 0, color: counts.warning ? D.amber : D.green },
-            { label: "Unit Review", value: counts.unit_mismatch || 0, color: counts.unit_mismatch ? D.amber : D.green },
+            {
+              label: "Appointments",
+              value: forecast.serviceCount || 0,
+            },
+            {
+              label: "Products",
+              value: forecast.productCount || 0,
+            },
+            {
+              label: "Short",
+              value: counts.short || 0,
+              // Main: red when short, green (no kit equivalent) otherwise.
+              tone: counts.short > 0 ? "alert" : "neutral",
+            },
+            {
+              label: "Warnings",
+              value: counts.warning || 0,
+              tone: counts.warning > 0 ? "warn" : "neutral",
+            },
+            {
+              label: "Unit Review",
+              value: counts.unit_mismatch || 0,
+              tone: counts.unit_mismatch > 0 ? "warn" : "neutral",
+            },
           ].map((item) => (
-            <div key={item.label} style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: "10px 12px", minWidth: 120 }}>
-              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 20, fontWeight: 700, color: item.color }}>{item.value}</div>
-              <div style={{ color: D.muted, fontSize: 11, textTransform: "uppercase", letterSpacing: 1 }}>{item.label}</div>
-            </div>
+            <Card
+              key={item.label}
+              className={cn(
+                "min-w-[120px] p-3",
+                item.tone === "alert" && "border-alert-fg",
+                item.tone === "warn" && "border-warn-fg",
+              )}
+            >
+              <div
+                className={cn(
+                  "text-20 font-medium u-nums",
+                  item.tone === "alert" && "text-alert-fg",
+                  item.tone === "warn" && "text-warn-fg",
+                )}
+              >
+                {item.value}
+              </div>
+              <div className="text-ink-secondary text-ui-body">
+                {item.label}
+              </div>
+            </Card>
           ))}
         </div>
       )}
 
       {loading ? (
-        <div style={{ color: D.muted, fontSize: 13 }}>Building forecast...</div>
+        <ActionFeedback>Building forecast...</ActionFeedback>
       ) : products.length === 0 ? (
-        <div style={{ color: D.muted, fontSize: 13 }}>No forecasted WaveGuard product demand in this window.</div>
+        <div className="text-ink-secondary text-ui-body">
+          No forecasted WaveGuard product demand in this window.
+        </div>
       ) : (
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
-                {["Product", "Demand", "Stock", "Projected", "Status", "Upcoming", "Action"].map((h) => (
-                  <th key={h} style={thS}>{h}</th>
+        <div className="overflow-x-auto">
+          <Table className="w-full">
+            <THead>
+              <TR>
+                {[
+                  "Product",
+                  "Demand",
+                  "Stock",
+                  "Projected",
+                  "Status",
+                  "Upcoming",
+                  "Action",
+                ].map((h) => (
+                  <TH key={h}>{h}</TH>
                 ))}
-              </tr>
-            </thead>
-            <tbody>
+              </TR>
+            </THead>
+            <TBody>
               {products.map((product) => (
-                <tr key={product.productId}>
-                  <td style={tdS}>
+                <TR key={product.productId}>
+                  <TD>
                     <strong>{product.productName}</strong>
-                    <div style={{ color: D.muted, fontSize: 12 }}>{product.category || "Product"}</div>
-                  </td>
-                  <td style={tdS}>
-                    <strong>{product.committedDemand} {product.demandUnit || product.inventoryUnit || ""}</strong>
-                    <div style={{ color: product.conversionConfidence === "needs_review" ? D.amber : D.muted, fontSize: 12 }}>
-                      {String(product.conversionConfidence || "exact_unit").replace(/_/g, " ")}
+                    <div className="text-ink-secondary text-ui-body">
+                      {product.category || "Product"}
+                    </div>
+                  </TD>
+                  <TD nums>
+                    <strong>
+                      {product.committedDemand}{" "}
+                      {product.demandUnit || product.inventoryUnit || ""}
+                    </strong>
+                    <div className="text-ui-body">
+                      {String(
+                        product.conversionConfidence || "exact_unit",
+                      ).replace(/_/g, " ")}
                     </div>
                     {product.unconvertedDemand > 0 && (
-                      <div style={{ color: D.amber, fontSize: 12 }}>
+                      <div className="text-zinc-900 text-ui-body">
                         {product.unconvertedDemand} unit review
                       </div>
                     )}
-                  </td>
-                  <td style={tdS}>
+                  </TD>
+                  <TD nums>
                     {product.onHand ?? "—"} {product.inventoryUnit || ""}
                     {product.lowStockThreshold != null && (
-                      <div style={{ color: D.muted, fontSize: 12 }}>Low at {product.lowStockThreshold}</div>
+                      <div className="text-ink-secondary text-ui-body">
+                        Low at {product.lowStockThreshold}
+                      </div>
                     )}
-                  </td>
-                  <td style={tdS}>
-                    {product.projectedRemaining ?? "—"} {product.inventoryUnit || ""}
+                  </TD>
+                  <TD nums>
+                    {product.projectedRemaining ?? "—"}{" "}
+                    {product.inventoryUnit || ""}
                     {product.shortfall > 0 && (
-                      <div style={{ color: D.red, fontSize: 12 }}>Short {product.shortfall}</div>
+                      <div className="text-alert-fg text-ui-body">
+                        Short {product.shortfall}
+                      </div>
                     )}
-                  </td>
-                  <td style={tdS}>
-                    <span style={{
-                      padding: "4px 8px",
-                      borderRadius: 999,
-                      border: `1px solid ${statusColor(product.status)}`,
-                      color: statusColor(product.status),
-                      fontSize: 11,
-                      fontWeight: 700,
-                      textTransform: "uppercase",
-                    }}>
+                  </TD>
+                  <TD>
+                    <Badge
+                      tone={
+                        product.status === "short"
+                          ? "alert"
+                          : ["warning", "unit_mismatch"].includes(product.status)
+                            ? "warn"
+                            : "neutral"
+                      }
+                    >
                       {statusLabel(product.status)}
-                    </span>
+                    </Badge>
                     {product.firstShortDate && (
-                      <div style={{ color: D.red, fontSize: 12, marginTop: 4 }}>Blocks by {product.firstShortDate}</div>
+                      <div className="text-alert-fg text-ui-body mt-[4px]">
+                        Blocks by {product.firstShortDate}
+                      </div>
                     )}
-                  </td>
-                  <td style={tdS}>
+                  </TD>
+                  <TD>
                     {(product.appointments || []).slice(0, 3).map((appt) => (
-                      <div key={`${product.productId}-${appt.serviceId}`} style={{ marginBottom: 4 }}>
-                        <strong>{appt.scheduledDate}</strong> · {appt.customerName}
-                        <div style={{ color: D.muted, fontSize: 12 }}>
+                      <div
+                        key={`${product.productId}-${appt.serviceId}`}
+                        className="mb-[4px]"
+                      >
+                        <strong>{appt.scheduledDate}</strong> ·{" "}
+                        {appt.customerName}
+                        <div className="text-ink-secondary text-ui-body">
                           {appt.amount} {appt.unit}
-                          {appt.inventoryAmount != null && appt.inventoryUnit && appt.inventoryUnit !== appt.unit
+                          {appt.inventoryAmount != null &&
+                          appt.inventoryUnit &&
+                          appt.inventoryUnit !== appt.unit
                             ? ` = ${appt.inventoryAmount} ${appt.inventoryUnit}`
                             : ""}
-                          {" · "}{appt.protocolWindowTitle || appt.serviceType}
+                          {" · "}
+                          {appt.protocolWindowTitle || appt.serviceType}
                         </div>
                       </div>
                     ))}
                     {(product.appointments || []).length > 3 && (
-                      <div style={{ color: D.muted, fontSize: 12 }}>+{product.appointments.length - 3} more</div>
+                      <div className="text-ink-secondary text-ui-body">
+                        +{product.appointments.length - 3} more
+                      </div>
                     )}
-                  </td>
-                  <td style={tdS}>
+                  </TD>
+                  <TD>
                     {["short", "warning"].includes(product.status) ? (
-                      <button
+                      <Button
                         onClick={() => createRestock(product)}
                         disabled={creatingId === product.productId}
-                        style={sBtn(D.green, D.white)}
+                        variant="primary"
                       >
-                        Request {product.recommendedOrderQuantity} {product.inventoryUnit || product.demandUnit || ""}
-                      </button>
+                        Request {product.recommendedOrderQuantity}{" "}
+                        {product.inventoryUnit || product.demandUnit || ""}
+                      </Button>
                     ) : (
-                      <span style={{ color: D.muted }}>No request</span>
+                      <span className="text-ink-secondary">No request</span>
                     )}
-                  </td>
-                </tr>
+                  </TD>
+                </TR>
               ))}
-            </tbody>
-          </table>
+            </TBody>
+          </Table>
         </div>
       )}
 
       {(forecast?.errors || []).length > 0 && (
-        <div style={{ marginTop: 12, borderTop: `1px solid ${D.border}`, paddingTop: 12 }}>
-          <div style={{ color: D.amber, fontWeight: 700, fontSize: 13 }}>Plan errors</div>
+        <div className="mt-[12px] border-t border-solid border-zinc-200 pt-[12px]">
+          <div className="text-zinc-900 font-medium text-ui-body">
+            Plan errors
+          </div>
           {(forecast.errors || []).slice(0, 5).map((err) => (
-            <div key={err.serviceId} style={{ color: D.muted, fontSize: 12, marginTop: 4 }}>
+            <div
+              key={err.serviceId}
+              className="text-ink-secondary text-ui-body mt-[4px]"
+            >
               {err.scheduledDate} · {err.customerName}: {err.message}
             </div>
           ))}
         </div>
       )}
-    </div>
+    </Card>
   );
 }
-
 function UnitReviewTab({ showToast }) {
-  const [data, setData] = useState({ products: [], forecastRows: [], counts: {} });
+  const [data, setData] = useState({
+    products: [],
+    forecastRows: [],
+    counts: {},
+  });
   const [loading, setLoading] = useState(true);
   const [savingId, setSavingId] = useState("");
   const [drafts, setDrafts] = useState({});
-
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -1806,13 +2018,12 @@ function UnitReviewTab({ showToast }) {
       setLoading(false);
     }
   }, [showToast]);
-
   useEffect(() => {
     load();
   }, [load]);
-
   async function fixUnit(product, unit) {
-    const inventoryUnit = unit || drafts[product.id]?.inventoryUnit || product.suggestedUnit;
+    const inventoryUnit =
+      unit || drafts[product.id]?.inventoryUnit || product.suggestedUnit;
     if (!inventoryUnit) {
       showToast("Choose a unit first");
       return;
@@ -1823,7 +2034,8 @@ function UnitReviewTab({ showToast }) {
         method: "POST",
         body: JSON.stringify({
           inventoryUnit,
-          convertExistingStock: drafts[product.id]?.convertExistingStock !== false,
+          convertExistingStock:
+            drafts[product.id]?.convertExistingStock !== false,
         }),
       });
       showToast("Inventory unit updated");
@@ -1834,115 +2046,160 @@ function UnitReviewTab({ showToast }) {
       setSavingId("");
     }
   }
-
   const products = data.products || [];
   const forecastRows = data.forecastRows || [];
   const unitChoices = ["fl_oz", "gal", "oz", "lb", "g", "kg", "ml", "l"];
-
   return (
-    <div style={sCard}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
+    <Card className="p-5 mb-3">
+      <div className="flex justify-between gap-[12px] flex-wrap mb-[14px]">
         <div>
-          <h3 style={{ margin: 0, color: D.heading }}>Inventory unit review</h3>
-          <p style={{ margin: "4px 0 0", color: D.muted, fontSize: 13 }}>
-            Clean up unsupported, missing, and ambiguous inventory units before they affect forecast or closeout math.
+          <h3 className="m-0 text-zinc-900">Inventory unit review</h3>
+          <p className="[margin:4px_0_0] text-ink-secondary text-ui-body">
+            Clean up unsupported, missing, and ambiguous inventory units before
+            they affect forecast or closeout math.
           </p>
         </div>
-        <button onClick={load} disabled={loading} style={sBtn(D.card, D.text)}>Refresh</button>
+        <Button onClick={load} disabled={loading} variant="secondary">
+          Refresh
+        </Button>
       </div>
 
       {loading ? (
-        <div style={{ color: D.muted, fontSize: 13 }}>Loading unit review...</div>
+        <ActionFeedback>Loading unit review...</ActionFeedback>
       ) : products.length === 0 && forecastRows.length === 0 ? (
-        <div style={{ color: D.green, fontSize: 13 }}>No inventory unit issues found.</div>
+        <div className="text-zinc-900 text-ui-body">
+          No inventory unit issues found.
+        </div>
       ) : (
         <>
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr>
+          <div className="overflow-x-auto">
+            <Table className="w-full">
+              <THead>
+                <TR>
                   {["Product", "Current", "Issues", "Fix"].map((h) => (
-                    <th key={h} style={thS}>{h}</th>
+                    <TH key={h}>{h}</TH>
                   ))}
-                </tr>
-              </thead>
-              <tbody>
+                </TR>
+              </THead>
+              <TBody>
                 {products.map((product) => {
                   const draft = drafts[product.id] || {};
                   return (
-                    <tr key={product.id}>
-                      <td style={tdS}>
+                    <TR key={product.id}>
+                      <TD>
                         <strong>{product.name}</strong>
-                        <div style={{ color: D.muted, fontSize: 12 }}>
-                          {product.category || "Product"} · {product.formulation || "unspecified"}
+                        <div className="text-ink-secondary text-ui-body">
+                          {product.category || "Product"} ·{" "}
+                          {product.formulation || "unspecified"}
                         </div>
-                      </td>
-                      <td style={tdS}>
-                        {product.inventoryOnHand ?? "—"} {product.inventoryUnit || "no unit"}
+                      </TD>
+                      <TD nums>
+                        {product.inventoryOnHand ?? "—"}{" "}
+                        {product.inventoryUnit || "no unit"}
                         {product.lowStockThreshold != null && (
-                          <div style={{ color: D.muted, fontSize: 12 }}>Low at {product.lowStockThreshold}</div>
+                          <div className="text-ink-secondary text-ui-body">
+                            Low at {product.lowStockThreshold}
+                          </div>
                         )}
-                      </td>
-                      <td style={tdS}>
+                      </TD>
+                      <TD>
                         {(product.reasons || []).map((reason) => (
-                          <div key={reason.code} style={{ color: reason.severity === "block" ? D.red : D.amber, fontSize: 12, marginBottom: 3 }}>
+                          <div
+                            key={reason.code}
+                            className={cn(
+                              "text-ui-body mb-[3px]",
+                              reason.severity === "block" ? "text-alert-fg" : "text-warn-fg",
+                            )}
+                          >
                             {reason.message}
                           </div>
                         ))}
-                      </td>
-                      <td style={tdS}>
-                        <div style={{ display: "grid", gap: 6, minWidth: 260 }}>
-                          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      </TD>
+                      <TD>
+                        <div className="grid gap-[6px] min-w-[260px]">
+                          <div className="flex gap-[6px] flex-wrap">
                             {unitChoices.map((unit) => (
-                              <button
+                              <Button
                                 key={unit}
                                 onClick={() => fixUnit(product, unit)}
                                 disabled={savingId === product.id}
-                                style={sBtn(product.suggestedUnit === unit ? D.green : D.card, product.suggestedUnit === unit ? D.white : D.text)}
+                                variant={
+                                  unit === product.suggestedUnit
+                                    ? "primary"
+                                    : "secondary"
+                                }
                               >
                                 {unit}
-                              </button>
+                              </Button>
                             ))}
                           </div>
-                          <div style={{ display: "flex", gap: 6 }}>
-                            <input
+                          <div className="flex gap-[6px]">
+                            <Input
+                              aria-label={`Custom unit for ${product.name}`}
                               value={draft.inventoryUnit ?? ""}
-                              onChange={(e) => setDrafts((prev) => ({ ...prev, [product.id]: { ...(prev[product.id] || {}), inventoryUnit: e.target.value } }))}
-                              style={{ ...sInput, flex: 1 }}
+                              onChange={(e) =>
+                                setDrafts((prev) => ({
+                                  ...prev,
+                                  [product.id]: {
+                                    ...(prev[product.id] || {}),
+                                    inventoryUnit: e.target.value,
+                                  },
+                                }))
+                              }
                               placeholder="custom supported unit"
+                              className="flex-[1]"
                             />
-                            <button onClick={() => fixUnit(product)} disabled={savingId === product.id} style={sBtn(D.teal, D.white)}>Apply</button>
+
+                            <Button
+                              onClick={() => fixUnit(product)}
+                              disabled={savingId === product.id}
+                              variant="primary"
+                            >
+                              Apply
+                            </Button>
                           </div>
-                          <label style={{ color: D.muted, fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
-                            <input
-                              type="checkbox"
-                              checked={draft.convertExistingStock !== false}
-                              onChange={(e) => setDrafts((prev) => ({ ...prev, [product.id]: { ...(prev[product.id] || {}), convertExistingStock: e.target.checked } }))}
-                            />
-                            Convert existing stock and low-stock threshold
-                          </label>
+                          <Checkbox
+                            label="Convert existing stock and low-stock threshold"
+                            checked={draft.convertExistingStock !== false}
+                            onChange={(e) =>
+                              setDrafts((prev) => ({
+                                ...prev,
+                                [product.id]: {
+                                  ...(prev[product.id] || {}),
+                                  convertExistingStock: e.target.checked,
+                                },
+                              }))
+                            }
+                          />
                         </div>
-                      </td>
-                    </tr>
+                      </TD>
+                    </TR>
                   );
                 })}
-              </tbody>
-            </table>
+              </TBody>
+            </Table>
           </div>
 
           {forecastRows.length > 0 && (
-            <div style={{ marginTop: 16, borderTop: `1px solid ${D.border}`, paddingTop: 12 }}>
-              <h4 style={{ margin: "0 0 8px", color: D.heading }}>Forecast Unit Review</h4>
+            <div className="mt-[16px] border-t border-solid border-zinc-200 pt-[12px]">
+              <h4 className="[margin:0_0_8px] text-zinc-900">Forecast Unit Review</h4>
               {forecastRows.map((row) => (
-                <div key={row.productId} style={{ color: D.muted, fontSize: 13, marginBottom: 8 }}>
-                  <strong style={{ color: D.text }}>{row.productName}</strong>: {row.unconvertedDemand} {row.demandUnit || "unknown unit"} could not convert to {row.inventoryUnit || "inventory unit"} across {row.unitMismatchCount} appointment{row.unitMismatchCount === 1 ? "" : "s"}.
+                <div
+                  key={row.productId}
+                  className="text-ink-secondary text-ui-body mb-[8px]"
+                >
+                  <strong className="text-zinc-900">{row.productName}</strong>:{" "}
+                  {row.unconvertedDemand} {row.demandUnit || "unknown unit"}{" "}
+                  could not convert to {row.inventoryUnit || "inventory unit"}{" "}
+                  across {row.unitMismatchCount} appointment
+                  {row.unitMismatchCount === 1 ? "" : "s"}.
                 </div>
               ))}
             </div>
           )}
         </>
       )}
-    </div>
+    </Card>
   );
 }
 
@@ -1950,6 +2207,9 @@ function UnitReviewTab({ showToast }) {
 // PRODUCTS TAB — with inline editing
 // ══════════════════════════════════════════════════════════════
 export function ProductsTab({
+  refreshId,
+  initialSearch = "",
+  initialProductId = null,
   showToast,
   filter = "all",
   onFilterChange,
@@ -1963,18 +2223,24 @@ export function ProductsTab({
   useEffect(() => {
     let cancelled = false;
     setLabelPipelineEnabled(false);
-    if (canAuthor) adminFetch("/admin/inventory/label-pipeline")
-      .then((data) => { if (!cancelled) setLabelPipelineEnabled(data.enabled === true); })
-      .catch(() => {});
-    return () => { cancelled = true; };
+    if (canAuthor)
+      adminFetch("/admin/inventory/label-pipeline")
+        .then((data) => {
+          if (!cancelled) setLabelPipelineEnabled(data.enabled === true);
+        })
+        .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, [canAuthor]);
   const [products, setProducts] = useState([]);
   const [categories, setCategories] = useState([]);
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = useState(initialSearch);
   const [catFilter, setCatFilter] = useState("");
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
-  const [expanded, setExpanded] = useState(null);
+  const [expanded, setExpanded] = useState(initialProductId);
+  const loadSequence = useRef(0);
   const [editing, setEditing] = useState(null);
   const [editForm, setEditForm] = useState({});
   const [vendors, setVendors] = useState([]);
@@ -1992,8 +2258,8 @@ export function ProductsTab({
   const [page, setPage] = useState(1);
   const [totalProducts, setTotalProducts] = useState(0);
   const PER_PAGE = 50;
-
   const load = useCallback(async () => {
+    const sequence = ++loadSequence.current;
     const needsPricingParam =
       filter === "needs_price"
         ? "&needsPricing=true"
@@ -2009,25 +2275,35 @@ export function ProductsTab({
         // Vendors are owner-only under the role lockdown — a technician's
         // Products load must not hang on that 403 (codex P1). Empty vendor
         // list just hides per-vendor pricing affordances they can't use.
-        adminFetch("/admin/inventory/vendors").catch(() => ({ vendors: [] })),
+        adminFetch("/admin/inventory/vendors").catch(() => ({
+          vendors: [],
+        })),
       ]);
+      if (sequence !== loadSequence.current) return;
       setProducts(pData.products || []);
       setCategories(pData.categories || []);
       setTotalProducts(pData.total || 0);
       setVendors(vData.vendors || []);
       setLoadError(null);
     } catch (e) {
+      if (sequence !== loadSequence.current) return;
       // The products request had no catch, so a non-2xx left
       // "Loading products..." up forever (UI audit F0474).
       setLoadError(e?.message || "Request failed");
     } finally {
-      setLoading(false);
+      if (sequence === loadSequence.current) setLoading(false);
     }
   }, [search, catFilter, page, filter]);
-
   useEffect(() => {
-    load();
-  }, [load]);
+    let current = true;
+    void load().catch(() => {
+      if (current) setLoading(false);
+    });
+    return () => {
+      current = false;
+      loadSequence.current += 1;
+    };
+  }, [load, refreshId]);
 
   const savePrice = async (productId, vendorId, price, quantity) => {
     try {
@@ -2047,7 +2323,6 @@ export function ProductsTab({
       showToast(`Failed: ${e.message}`);
     }
   };
-
   const startEdit = (p, e) => {
     e && e.stopPropagation();
     setEditing(p.id);
@@ -2064,7 +2339,6 @@ export function ProductsTab({
       lowStockThreshold: p.lowStockThreshold ?? "",
     });
   };
-
   const saveEdit = async (id) => {
     try {
       await adminFetch(`/admin/inventory/${id}`, {
@@ -2078,14 +2352,12 @@ export function ProductsTab({
       showToast(`Failed: ${e.message}`);
     }
   };
-
   if (loadError)
     return (
-      <div role="alert" style={{ color: D.red, padding: 40, textAlign: "center" }}>
+      <ActionFeedback error>
         Failed to load products: {loadError}{" "}
-        <button
+        <Button
           type="button"
-          style={{ ...sBtn(D.teal, D.white), marginLeft: 8 }}
           onClick={() => {
             // Clear the error first so the loading branch renders during the
             // retry; leaving it up allowed repeated clicks and overlapping loads.
@@ -2093,78 +2365,68 @@ export function ProductsTab({
             setLoading(true);
             load();
           }}
+          variant="primary"
+          className="ml-[8px]"
         >
           Retry
-        </button>
-      </div>
+        </Button>
+      </ActionFeedback>
     );
-  if (loading)
-    return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
-        Loading products...
-      </div>
-    );
-
+  if (loading) return <ActionFeedback>Loading products...</ActionFeedback>;
   return (
     <div>
       {" "}
-      <div
-        style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}
-      >
+      <div className="flex gap-[6px] mb-[12px] flex-wrap">
         {[
-          { key: "all", label: "All Products" },
-          { key: "priced", label: "Priced" },
-          { key: "needs_price", label: "Needs Price" },
-          { key: "low_stock", label: "Low Stock" },
+          {
+            key: "all",
+            label: "All Products",
+          },
+          {
+            key: "priced",
+            label: "Priced",
+          },
+          {
+            key: "needs_price",
+            label: "Needs Price",
+          },
+          {
+            key: "low_stock",
+            label: "Low Stock",
+          },
         ].map((f) => (
-          <button
+          <Button
             key={f.key}
             onClick={() => {
               onFilterChange?.(f.key);
               setPage(1);
             }}
-            style={{
-              minHeight: 40,
-              padding: "6px 14px",
-              borderRadius: 20,
-              border: "none",
-              fontSize: 12,
-              fontWeight: 500,
-              cursor: "pointer",
-              background: filter === f.key ? D.teal : D.card,
-              color: filter === f.key ? D.white : D.muted,
-            }}
+            variant={filter === f.key ? "primary" : "secondary"}
           >
             {f.label}
-          </button>
+          </Button>
         ))}
       </div>{" "}
-      <div
-        style={{
-          display: "flex",
-          gap: 8,
-          marginBottom: 12,
-          flexWrap: "wrap",
-          alignItems: "center",
-        }}
-      >
+      <div className="flex gap-[8px] mb-[12px] flex-wrap items-center">
         {" "}
-        <input
+        <Input
+          aria-label="Search products"
           value={search}
           onChange={(e) => {
             setSearch(e.target.value);
             setPage(1);
           }}
           placeholder="Search products..."
-          style={{ ...sInput, flex: 1, minWidth: 200 }}
+          className="flex-[1] min-w-[200px]"
         />{" "}
-        <select
+        <Select
+          aria-label="Product category"
           value={catFilter}
           onChange={(e) => {
             setCatFilter(e.target.value);
             setPage(1);
           }}
-          style={{ ...sInput, cursor: "pointer", minWidth: 150 }}
+          className="min-w-[150px]"
         >
           {" "}
           <option value="">All Categories</option>
@@ -2173,141 +2435,133 @@ export function ProductsTab({
               {c.name} ({c.count})
             </option>
           ))}
-        </select>{" "}
+        </Select>{" "}
       </div>
       {canAuthor && showAddForm && (
-        <div
-          style={{
-            background: D.card,
-            borderRadius: 10,
-            padding: 16,
-            border: `1px solid ${D.green}44`,
-            marginBottom: 16,
-          }}
-        >
+        <Card className="p-4 mb-[16px]">
           {" "}
-          <div
-            style={{
-              fontSize: 13,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 10,
-            }}
-          >
+          <div className="text-ui-body font-medium text-zinc-900 mb-[10px]">
             New Product
           </div>{" "}
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr 1fr 1fr",
-              gap: 8,
-              marginBottom: 10,
-            }}
-          >
+          <div className="grid gap-3 mb-[10px] md:grid-cols-3">
             {" "}
-            <input
-              value={newProduct.name}
-              onChange={(e) =>
-                setNewProduct((p) => ({ ...p, name: e.target.value }))
-              }
-              placeholder="Product name *"
-              style={sInput}
-            />{" "}
-            <input
-              value={newProduct.category}
-              onChange={(e) =>
-                setNewProduct((p) => ({ ...p, category: e.target.value }))
-              }
-              placeholder="Category"
-              style={sInput}
-            />{" "}
-            <input
-              value={newProduct.activeIngredient}
-              onChange={(e) =>
-                setNewProduct((p) => ({
-                  ...p,
-                  activeIngredient: e.target.value,
-                }))
-              }
-              placeholder="Active ingredient"
-              style={sInput}
-            />{" "}
+            <Field label="Product name" required>
+              <Input
+                value={newProduct.name}
+                onChange={(e) =>
+                  setNewProduct((p) => ({
+                    ...p,
+                    name: e.target.value,
+                  }))
+                }
+                placeholder="Product name"
+              />
+            </Field>{" "}
+            <Field label="Category">
+              <Input
+                value={newProduct.category}
+                onChange={(e) =>
+                  setNewProduct((p) => ({
+                    ...p,
+                    category: e.target.value,
+                  }))
+                }
+                placeholder="Category"
+              />
+            </Field>{" "}
+            <Field label="Active ingredient">
+              <Input
+                value={newProduct.activeIngredient}
+                onChange={(e) =>
+                  setNewProduct((p) => ({
+                    ...p,
+                    activeIngredient: e.target.value,
+                  }))
+                }
+                placeholder="Active ingredient"
+              />
+            </Field>{" "}
           </div>{" "}
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr 1fr 1fr",
-              gap: 8,
-            }}
-          >
+          <div className="grid gap-3 md:grid-cols-3">
             {" "}
-            <input
-              value={newProduct.moaGroup}
-              onChange={(e) =>
-                setNewProduct((p) => ({ ...p, moaGroup: e.target.value }))
-              }
-              placeholder="MOA/FRAC group"
-              style={sInput}
-            />{" "}
-            <select
-              value={newProduct.defaultUnit}
-              onChange={(e) =>
-                setNewProduct((p) => ({ ...p, defaultUnit: e.target.value }))
-              }
-              style={sInput}
-            >
+            <Field label="MOA/FRAC group">
+              <Input
+                value={newProduct.moaGroup}
+                onChange={(e) =>
+                  setNewProduct((p) => ({
+                    ...p,
+                    moaGroup: e.target.value,
+                  }))
+                }
+                placeholder="MOA/FRAC group"
+              />
+            </Field>{" "}
+            <Field label="Default unit">
+              <Select
+                value={newProduct.defaultUnit}
+                onChange={(e) =>
+                  setNewProduct((p) => ({
+                    ...p,
+                    defaultUnit: e.target.value,
+                  }))
+                }
+              >
+                {" "}
+                <option value="oz">oz</option>
+                <option value="ml">ml</option>
+                <option value="gal">gal</option>
+                <option value="lb">lb</option>
+                <option value="g">g</option>
+                <option value="each">each</option>{" "}
+              </Select>
+            </Field>{" "}
+            <div className="grid grid-cols-3 gap-2">
               {" "}
-              <option value="oz">oz</option>
-              <option value="ml">ml</option>
-              <option value="gal">gal</option>
-              <option value="lb">lb</option>
-              <option value="g">g</option>
-              <option value="each">each</option>{" "}
-            </select>{" "}
-            <div style={{ display: "flex", gap: 6 }}>
-              {" "}
-              <input
-                value={newProduct.inventoryOnHand}
-                onChange={(e) =>
-                  setNewProduct((p) => ({
-                    ...p,
-                    inventoryOnHand: e.target.value,
-                  }))
-                }
-                type="number"
-                step="0.0001"
-                placeholder="Stock"
-                style={{ ...sInput, width: "100%" }}
-              />{" "}
-              <input
-                value={newProduct.inventoryUnit}
-                onChange={(e) =>
-                  setNewProduct((p) => ({
-                    ...p,
-                    inventoryUnit: e.target.value,
-                  }))
-                }
-                placeholder="unit"
-                style={{ ...sInput, width: 70 }}
-              />{" "}
-              <input
-                value={newProduct.lowStockThreshold}
-                onChange={(e) =>
-                  setNewProduct((p) => ({
-                    ...p,
-                    lowStockThreshold: e.target.value,
-                  }))
-                }
-                type="number"
-                step="0.0001"
-                placeholder="low"
-                style={{ ...sInput, width: 70 }}
-              />{" "}
+              <Field label="Stock">
+                <Input
+                  value={newProduct.inventoryOnHand}
+                  onChange={(e) =>
+                    setNewProduct((p) => ({
+                      ...p,
+                      inventoryOnHand: e.target.value,
+                    }))
+                  }
+                  type="number"
+                  step="0.0001"
+                  placeholder="Stock"
+                />
+              </Field>{" "}
+              <Field label="Unit">
+                <Input
+                  value={newProduct.inventoryUnit}
+                  onChange={(e) =>
+                    setNewProduct((p) => ({
+                      ...p,
+                      inventoryUnit: e.target.value,
+                    }))
+                  }
+                  placeholder="unit"
+                />
+              </Field>{" "}
+              <Field label="Low at">
+                <Input
+                  value={newProduct.lowStockThreshold}
+                  onChange={(e) =>
+                    setNewProduct((p) => ({
+                      ...p,
+                      lowStockThreshold: e.target.value,
+                    }))
+                  }
+                  type="number"
+                  step="0.0001"
+                  placeholder="low"
+                />
+              </Field>{" "}
             </div>{" "}
           </div>{" "}
-          <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+          <div className="flex gap-[6px] mt-[8px]">
             {" "}
-            <button
+            <Button
               onClick={async () => {
                 if (!newProduct.name.trim()) {
                   showToast("Product name required");
@@ -2335,42 +2589,22 @@ export function ProductsTab({
                   showToast("Failed: " + e.message);
                 }
               }}
-              style={{
-                flex: 1,
-                padding: "10px",
-                borderRadius: 8,
-                border: "none",
-                background: D.green,
-                color: "#fff",
-                fontSize: 13,
-                fontWeight: 500,
-                cursor: "pointer",
-              }}
+              variant="primary"
+              className="flex-[1]"
             >
               Save
-            </button>{" "}
-            <button
-              onClick={() => setShowAddForm(false)}
-              style={{
-                padding: "10px 14px",
-                borderRadius: 8,
-                border: `1px solid ${D.border}`,
-                background: "none",
-                color: D.muted,
-                fontSize: 13,
-                cursor: "pointer",
-              }}
-            >
+            </Button>{" "}
+            <Button onClick={() => setShowAddForm(false)} variant="secondary">
               Cancel
-            </button>{" "}
+            </Button>{" "}
           </div>{" "}
-        </div>
+        </Card>
       )}
-      <div style={{ overflowX: "auto" }}>
+      <div className="overflow-x-auto">
         {" "}
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr>
+        <Table className="w-full min-w-[1120px]">
+          <THead>
+            <TR>
               {[
                 "Product",
                 "Category",
@@ -2384,48 +2618,45 @@ export function ProductsTab({
                 "Status",
                 "",
               ].map((h) => (
-                <th key={h} style={thS}>
-                  {h}
-                </th>
+                <TH key={h}>{h}</TH>
               ))}
-            </tr>
-          </thead>
-          <tbody>
+            </TR>
+          </THead>
+          <TBody>
             {products.map((p) => {
               const isEditing = editing === p.id;
               const isExpanded = expanded === p.id && !isEditing;
               return [
-                <tr
+                <TR
                   key={p.id}
                   onClick={() =>
                     !isEditing && setExpanded(expanded === p.id ? null : p.id)
                   }
-                  style={{
-                    cursor: isEditing ? "default" : "pointer",
-                    background: isEditing
-                      ? `${D.teal}10`
-                      : isExpanded
-                        ? `${D.teal}08`
-                        : "transparent",
-                  }}
+                  className={cn(
+                    isEditing ? "cursor-default" : "cursor-pointer",
+                    isEditing ? "bg-zinc-100" : isExpanded ? "bg-zinc-50" : undefined,
+                  )}
                 >
-                  <td style={{ ...tdS, fontWeight: 500, color: D.heading }}>
+                  <TD className="font-medium text-zinc-900">
                     {isEditing ? (
-                      <input
+                      <Input
                         value={editForm.name}
                         onChange={(e) =>
-                          setEditForm((f) => ({ ...f, name: e.target.value }))
+                          setEditForm((f) => ({
+                            ...f,
+                            name: e.target.value,
+                          }))
                         }
-                        style={{ ...sInput, width: "100%", fontWeight: 500 }}
                         onClick={(e) => e.stopPropagation()}
+                        className="w-full"
                       />
                     ) : (
                       p.name
                     )}
-                  </td>
-                  <td style={tdS}>
+                  </TD>
+                  <TD>
                     {isEditing ? (
-                      <input
+                      <Input
                         value={editForm.category}
                         onChange={(e) =>
                           setEditForm((f) => ({
@@ -2433,18 +2664,16 @@ export function ProductsTab({
                             category: e.target.value,
                           }))
                         }
-                        style={{ ...sInput, width: 100 }}
                         onClick={(e) => e.stopPropagation()}
+                        className="w-[100px]"
                       />
                     ) : (
-                      <span style={sBadge(`${D.teal}22`, D.teal)}>
-                        {p.category}
-                      </span>
+                      <Badge tone="neutral">{p.category}</Badge>
                     )}
-                  </td>
-                  <td style={{ ...tdS, color: D.muted, fontSize: 12 }}>
+                  </TD>
+                  <TD className="text-ink-secondary">
                     {isEditing ? (
-                      <input
+                      <Input
                         value={editForm.activeIngredient}
                         onChange={(e) =>
                           setEditForm((f) => ({
@@ -2452,16 +2681,16 @@ export function ProductsTab({
                             activeIngredient: e.target.value,
                           }))
                         }
-                        style={{ ...sInput, width: "100%" }}
                         onClick={(e) => e.stopPropagation()}
+                        className="w-full"
                       />
                     ) : (
                       p.activeIngredient || "—"
                     )}
-                  </td>
-                  <td style={{ ...tdS, color: D.muted, fontSize: 11 }}>
+                  </TD>
+                  <TD className="text-ink-secondary">
                     {isEditing ? (
-                      <input
+                      <Input
                         value={editForm.moaGroup}
                         onChange={(e) =>
                           setEditForm((f) => ({
@@ -2469,16 +2698,16 @@ export function ProductsTab({
                             moaGroup: e.target.value,
                           }))
                         }
-                        style={{ ...sInput, width: 80 }}
                         onClick={(e) => e.stopPropagation()}
+                        className="w-[80px]"
                       />
                     ) : (
                       p.moaGroup || "—"
                     )}
-                  </td>
-                  <td style={{ ...tdS, fontSize: 12 }}>
+                  </TD>
+                  <TD>
                     {isEditing ? (
-                      <input
+                      <Input
                         value={editForm.containerSize}
                         onChange={(e) =>
                           setEditForm((f) => ({
@@ -2486,21 +2715,21 @@ export function ProductsTab({
                             containerSize: e.target.value,
                           }))
                         }
-                        style={{ ...sInput, width: 80 }}
                         onClick={(e) => e.stopPropagation()}
+                        className="w-[80px]"
                       />
                     ) : (
                       p.containerSize || "—"
                     )}
-                  </td>
-                  <td style={{ ...tdS, fontSize: 12 }}>
+                  </TD>
+                  <TD nums>
                     {isEditing ? (
                       <div
-                        style={{ display: "flex", gap: 4 }}
                         onClick={(e) => e.stopPropagation()}
+                        className="flex gap-[4px]"
                       >
                         {" "}
-                        <input
+                        <Input
                           value={editForm.inventoryOnHand}
                           onChange={(e) =>
                             setEditForm((f) => ({
@@ -2511,9 +2740,9 @@ export function ProductsTab({
                           type="number"
                           step="0.0001"
                           placeholder="Stock"
-                          style={{ ...sInput, width: 76 }}
+                          className="w-[76px]"
                         />{" "}
-                        <input
+                        <Input
                           value={editForm.inventoryUnit}
                           onChange={(e) =>
                             setEditForm((f) => ({
@@ -2522,9 +2751,9 @@ export function ProductsTab({
                             }))
                           }
                           placeholder="unit"
-                          style={{ ...sInput, width: 56 }}
+                          className="w-[56px]"
                         />{" "}
-                        <input
+                        <Input
                           value={editForm.lowStockThreshold}
                           onChange={(e) =>
                             setEditForm((f) => ({
@@ -2535,196 +2764,115 @@ export function ProductsTab({
                           type="number"
                           step="0.0001"
                           placeholder="low"
-                          style={{ ...sInput, width: 66 }}
+                          className="w-[66px]"
                         />{" "}
                       </div>
                     ) : (
-                      <span
-                        style={{
-                          color: p.lowStock ? D.red : D.text,
-                          fontFamily: "'JetBrains Mono', monospace",
-                        }}
-                      >
+                      <span>
                         {p.inventoryOnHand != null
                           ? `${p.inventoryOnHand} ${p.inventoryUnit || ""}`
                           : "—"}
                         {p.lowStock && (
-                          <span
-                            style={{
-                              ...sBadge(`${D.red}22`, D.red),
-                              marginLeft: 6,
-                            }}
-                          >
+                          <Badge tone="alert" className="ml-[6px]">
                             Low
-                          </span>
+                          </Badge>
                         )}
                       </span>
                     )}
-                  </td>
-                  <td
-                    style={{
-                      ...tdS,
-                      fontFamily: "'JetBrains Mono', monospace",
-                      color: p.bestPrice ? D.green : D.muted,
-                  }}
-                >
-                    {formatMoney(p.bestPrice)}
-                  </td>
-                  <td
-                    style={{
-                      ...tdS,
-                      fontFamily: "'JetBrains Mono', monospace",
-                      fontSize: 11,
-                      color: p.unitPrices?.length || p.costPerUnit ? D.text : D.muted,
-                    }}
-                  >
+                  </TD>
+                  <TD nums>{formatMoney(p.bestPrice)}</TD>
+                  <TD nums>
                     {formatUnitPriceList(p.unitPrices) ||
                       formatUnitCost(p.costPerUnit, p.costUnit)}
-                  </td>
-                  <td style={{ ...tdS, fontSize: 12 }}>
-                    {p.bestVendor || "—"}
-                  </td>
-                  <td style={tdS}>
+                  </TD>
+                  <TD>{p.bestVendor || "—"}</TD>
+                  <TD>
+                    {/* Main painted these amber vs green; both sides neutral
+                        erased the at-a-glance signal. The kit has no success
+                        tone, so Priced keeps neutral and Needs Price is warn. */}
                     {p.needsPricing ? (
-                      <span style={sBadge(`${D.amber}22`, D.amber)}>
-                        Needs Price
-                      </span>
+                      <Badge tone="warn">Needs Price</Badge>
                     ) : (
-                      <span style={sBadge(`${D.green}22`, D.green)}>
-                        Priced
-                      </span>
+                      <Badge tone="neutral">Priced</Badge>
                     )}
-                  </td>
-                  <td style={{ ...tdS, width: 90 }}>
+                  </TD>
+                  <TD className="min-w-[128px]">
                     {" "}
                     <div
-                      style={{ display: "flex", gap: 4 }}
                       onClick={(e) => e.stopPropagation()}
+                      className="flex gap-[4px]"
                     >
-                      {canAuthor && (isEditing ? (
-                        <>
-                          {" "}
-                          <button
-                            onClick={() => saveEdit(p.id)}
-                            style={{
-                              fontSize: 11,
-                              padding: "3px 8px",
-                              borderRadius: 4,
-                              border: "none",
-                              background: D.green,
-                              color: "#fff",
-                              cursor: "pointer",
-                              fontWeight: 500,
-                            }}
-                          >
-                            Save
-                          </button>{" "}
-                          <button
-                            onClick={() => setEditing(null)}
-                            style={{
-                              fontSize: 11,
-                              padding: "3px 6px",
-                              borderRadius: 4,
-                              border: `1px solid ${D.border}`,
-                              background: "none",
-                              color: D.muted,
-                              cursor: "pointer",
-                            }}
-                          >
-                            ×
-                          </button>{" "}
-                        </>
-                      ) : (
-                        <>
-                          {" "}
-                          <button
-                            onClick={(e) => startEdit(p, e)}
-                            style={{
-                              fontSize: 11,
-                              padding: "2px 6px",
-                              borderRadius: 4,
-                              border: `1px solid ${D.border}`,
-                              background: "none",
-                              color: D.teal,
-                              cursor: "pointer",
-                            }}
-                            title="Edit"
-                          >
-                            Edit
-                          </button>
-                          {deleting === p.id ? (
-                            <>
-                              {" "}
-                              <button
-                                onClick={async () => {
-                                  try {
-                                    await adminFetch(
+                      {canAuthor &&
+                        (isEditing ? (
+                          <>
+                            {" "}
+                            <Button
+                              onClick={() => saveEdit(p.id)}
+                              variant="primary"
+                            >
+                              Save
+                            </Button>{" "}
+                            <Button
+                              onClick={() => setEditing(null)}
+                              variant="secondary"
+                            >
+                              ×
+                            </Button>{" "}
+                          </>
+                        ) : (
+                          <>
+                            {" "}
+                            <Button
+                              onClick={(e) => startEdit(p, e)}
+                              title="Edit"
+                              variant="secondary"
+                            >
+                              Edit
+                            </Button>
+                            {deleting === p.id ? (
+                              <>
+                                {" "}
+                                <Button
+                                  onClick={async () => {
+                                    try {
+                                      await adminFetch(
                                       `/admin/inventory/${p.id}`,
                                       { method: "DELETE" },
                                     );
-                                    showToast("Deleted");
-                                    load();
-                                  } catch {
-                                    showToast("Delete failed");
-                                  }
-                                  setDeleting(null);
-                                }}
-                                style={{
-                                  fontSize: 11,
-                                  padding: "2px 6px",
-                                  borderRadius: 4,
-                                  border: "none",
-                                  background: D.red,
-                                  color: "#fff",
-                                  cursor: "pointer",
-                                }}
+                                      showToast("Deleted");
+                                      load();
+                                    } catch {
+                                      showToast("Delete failed");
+                                    }
+                                    setDeleting(null);
+                                  }}
+                                  variant="danger"
+                                >
+                                  Yes
+                                </Button>{" "}
+                                <Button
+                                  onClick={() => setDeleting(null)}
+                                  variant="secondary"
+                                >
+                                  No
+                                </Button>{" "}
+                              </>
+                            ) : (
+                              <Button
+                                onClick={() => setDeleting(p.id)}
+                                variant="secondary"
                               >
-                                Yes
-                              </button>{" "}
-                              <button
-                                onClick={() => setDeleting(null)}
-                                style={{
-                                  fontSize: 11,
-                                  padding: "2px 6px",
-                                  borderRadius: 4,
-                                  border: `1px solid ${D.border}`,
-                                  background: "none",
-                                  color: D.muted,
-                                  cursor: "pointer",
-                                }}
-                              >
-                                No
-                              </button>{" "}
-                            </>
-                          ) : (
-                            <button
-                              onClick={() => setDeleting(p.id)}
-                              style={{
-                                fontSize: 12,
-                                background: "none",
-                                border: "none",
-                                color: D.muted,
-                                cursor: "pointer",
-                                padding: 4,
-                              }}
-                            >
-                              ×
-                            </button>
-                          )}
-                        </>
-                      ))}
+                                ×
+                              </Button>
+                            )}
+                          </>
+                        ))}
                     </div>{" "}
-                  </td>
-                </tr>,
+                  </TD>
+                </TR>,
                 isExpanded && (
-                  <tr key={`${p.id}-exp`}>
-                    <td
-                      colSpan={10}
-                      style={{
-                        padding: "0 10px 16px",
-                        background: `${D.teal}05`,
-                      }}
-                    >
+                  <TR key={`${p.id}-exp`}>
+                    <TD colSpan={10}>
                       {" "}
                       <ExpandedProduct
                         product={p}
@@ -2735,76 +2883,46 @@ export function ProductsTab({
                         onInventoryChanged={load}
                         showToast={showToast}
                       />{" "}
-                    </td>
-                  </tr>
+                    </TD>
+                  </TR>
                 ),
               ];
             })}
-          </tbody>
-        </table>{" "}
+          </TBody>
+        </Table>{" "}
       </div>
       {products.length === 0 && (
-        <div
-          style={{ ...sCard, textAlign: "center", padding: 40, color: D.muted }}
-        >
+        <Card className="p-5 mb-3 text-center p-[40px] text-ink-secondary">
           No products found
-        </div>
+        </Card>
       )}
       {totalProducts > PER_PAGE && (
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            padding: "12px 0",
-          }}
-        >
+        <div className="flex justify-between items-center">
           {" "}
-          <div style={{ fontSize: 12, color: D.muted }}>
+          <div className="text-ui-body text-ink-secondary">
             Showing {(page - 1) * PER_PAGE + 1}–
             {Math.min(page * PER_PAGE, totalProducts)} of {totalProducts}{" "}
             products
           </div>{" "}
-          <div style={{ display: "flex", gap: 6 }}>
+          <div className="flex gap-[6px]">
             {" "}
-            <button
+            <Button
               disabled={page <= 1}
               onClick={() => setPage((p) => p - 1)}
-              style={{
-                ...sBtn(
-                  page <= 1 ? D.card : D.teal,
-                  page <= 1 ? D.muted : D.white,
-                ),
-                opacity: page <= 1 ? 0.5 : 1,
-              }}
+              variant="secondary"
             >
               ← Prev
-            </button>{" "}
-            <span
-              style={{
-                fontSize: 13,
-                color: D.text,
-                padding: "8px 12px",
-                fontFamily: "'JetBrains Mono', monospace",
-              }}
-            >
+            </Button>{" "}
+            <span className="text-ui-body text-zinc-900">
               {page} / {Math.ceil(totalProducts / PER_PAGE)}
             </span>{" "}
-            <button
+            <Button
               disabled={page >= Math.ceil(totalProducts / PER_PAGE)}
               onClick={() => setPage((p) => p + 1)}
-              style={{
-                ...sBtn(
-                  page >= Math.ceil(totalProducts / PER_PAGE) ? D.card : D.teal,
-                  page >= Math.ceil(totalProducts / PER_PAGE)
-                    ? D.muted
-                    : D.white,
-                ),
-                opacity: page >= Math.ceil(totalProducts / PER_PAGE) ? 0.5 : 1,
-              }}
+              variant="secondary"
             >
               Next →
-            </button>{" "}
+            </Button>{" "}
           </div>{" "}
         </div>
       )}
@@ -2815,10 +2933,22 @@ export function ProductsTab({
 // Presigned evidence URLs last 1 h server-side; treat them as stale 5 min early.
 const EVIDENCE_LINK_TTL_MS = 55 * 60 * 1000;
 
-function RestockRequestsTab({ showToast, onUpdate, canAuthor = false }) {
+function RestockRequestsTab({
+  showToast,
+  onUpdate,
+  canAuthor = false,
+  refreshId,
+  requestId = null,
+}) {
+  const [, setSearchParams] = useSearchParams();
+
   const [requests, setRequests] = useState([]);
   const [status, setStatus] = useState("active");
+  // Back may restore the pinned URL before React commits the intermediate
+  // unpinned render. A saved request always includes its terminal state.
+  const queueStatus = requestId ? "all" : status;
   const [loading, setLoading] = useState(true);
+  const loadSequence = useRef(0);
   const [receivingId, setReceivingId] = useState("");
   const [receiveDrafts, setReceiveDrafts] = useState({});
   // requestId → { screenshots: [{ label, url }], expiresAt } once fetched. The
@@ -2829,39 +2959,61 @@ function RestockRequestsTab({ showToast, onUpdate, canAuthor = false }) {
   // expiry so the cell actually falls back to the Refresh action (Codex
   // #3853 r20 P2).
   useEffect(() => {
-    const next = Math.min(...Object.values(evidence).map((e) => e.expiresAt).filter((t) => Number.isFinite(t)));
+    const next = Math.min(
+      ...Object.values(evidence)
+        .map((e) => e.expiresAt)
+        .filter((t) => Number.isFinite(t)),
+    );
     if (!Number.isFinite(next)) return undefined;
-    const timer = setTimeout(() => {
-      setEvidence((e) => Object.fromEntries(Object.entries(e).filter(([, v]) => v.expiresAt > Date.now())));
-    }, Math.max(0, next - Date.now()) + 50);
+    const timer = setTimeout(
+      () => {
+        setEvidence((e) =>
+          Object.fromEntries(
+            Object.entries(e).filter(([, v]) => v.expiresAt > Date.now()),
+          ),
+        );
+      },
+      Math.max(0, next - Date.now()) + 50,
+    );
     return () => clearTimeout(timer);
   }, [evidence]);
   const loadEvidence = async (requestId) => {
     try {
       const data = await adminFetch(`/admin/inventory/restock-requests/${requestId}/order-evidence`);
       const screenshots = data.screenshots || [];
-      setEvidence((e) => ({ ...e, [requestId]: { screenshots, expiresAt: Date.now() + EVIDENCE_LINK_TTL_MS } }));
-      if (!screenshots.length) showToast?.("No screenshots were captured for this order");
+      setEvidence((e) => ({
+        ...e,
+        [requestId]: {
+          screenshots,
+          expiresAt: Date.now() + EVIDENCE_LINK_TTL_MS,
+        },
+      }));
+      if (!screenshots.length)
+        showToast?.("No screenshots were captured for this order");
     } catch (e) {
       showToast?.(`Failed: ${e.message}`);
     }
   };
-
   const load = useCallback(async () => {
+    const sequence = ++loadSequence.current;
     setLoading(true);
     try {
-      const data = await adminFetch(`/admin/inventory/restock-requests?status=${encodeURIComponent(status)}`);
-      setRequests(data.requests || []);
+      const data = await adminFetch(`/admin/inventory/restock-requests?status=${encodeURIComponent(queueStatus)}${requestId ? `&requestId=${encodeURIComponent(requestId)}` : ""}`);
+      if (sequence === loadSequence.current) setRequests(data.requests || []);
     } catch (err) {
-      showToast(`Failed to load restock requests: ${err.message}`);
+      if (sequence === loadSequence.current)
+        showToast(`Failed to load restock requests: ${err.message}`);
     } finally {
-      setLoading(false);
+      if (sequence === loadSequence.current) setLoading(false);
     }
-  }, [status, showToast]);
+  }, [queueStatus, showToast, requestId]);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    void load();
+    return () => {
+      loadSequence.current += 1;
+    };
+  }, [load, refreshId]);
 
   async function runAction(request, action) {
     setReceivingId(request.id);
@@ -2882,7 +3034,9 @@ function RestockRequestsTab({ showToast, onUpdate, canAuthor = false }) {
       if (action === "receive") {
         showToast("Stock received.");
       } else {
-        showToast(action === "mark_ordered" ? "Marked ordered" : "Request cancelled");
+        showToast(
+          action === "mark_ordered" ? "Marked ordered" : "Request cancelled",
+        );
       }
       await load();
       onUpdate && onUpdate();
@@ -2892,154 +3046,256 @@ function RestockRequestsTab({ showToast, onUpdate, canAuthor = false }) {
       setReceivingId("");
     }
   }
-
   return (
-    <div style={sCard}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
+    <Card className="p-5 mb-3">
+      <div className="flex justify-between gap-[12px] flex-wrap mb-[14px]">
         <div>
-          <h3 style={{ margin: 0, color: D.heading }}>Restock requests</h3>
-          <p style={{ margin: "4px 0 0", color: D.muted, fontSize: 13 }}>
+          <h3 className="m-0 text-zinc-900">Restock requests</h3>
+          <p className="[margin:4px_0_0] text-ink-secondary text-ui-body">
             Product requests for inventory needs.
           </p>
         </div>
-        <select
-          value={status}
-          onChange={(e) => setStatus(e.target.value)}
-          style={{ ...sInput, width: 160 }}
-        >
-          <option value="active">Open + Ordered</option>
-          <option value="open">Open</option>
-          <option value="ordered">Ordered</option>
-          <option value="received">Received</option>
-          <option value="cancelled">Cancelled</option>
-          <option value="all">All</option>
-        </select>
+        {requestId ? (
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => {
+              setSearchParams((params) => {
+                const next = new URLSearchParams(params);
+                next.delete("requestId");
+                return next;
+              });
+              setStatus("active");
+            }}
+          >
+            Show all requests
+          </Button>
+        ) : (
+          <Select
+            value={status}
+            onChange={(e) => setStatus(e.target.value)}
+            className="w-[160px]"
+          >
+            <option value="active">Open + Ordered</option>
+            <option value="open">Open</option>
+            <option value="ordered">Ordered</option>
+            <option value="received">Received</option>
+            <option value="cancelled">Cancelled</option>
+            <option value="all">All</option>
+          </Select>
+        )}
       </div>
       {loading ? (
-        <div style={{ color: D.muted, fontSize: 13 }}>Loading restock requests...</div>
+        <ActionFeedback>Loading restock requests...</ActionFeedback>
       ) : requests.length === 0 ? (
-        <div style={{ color: D.muted, fontSize: 13 }}>No restock requests in this view.</div>
+        <div className="text-ink-secondary text-ui-body">
+          No restock requests in this view.
+        </div>
       ) : (
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
+        <div className="overflow-x-auto">
+          <Table className="w-full">
+            <THead>
+              <TR>
                 {["Product", "Need", "Source", "Status", "Receive"].map((h) => (
-                  <th key={h} style={thS}>{h}</th>
+                  <TH key={h}>{h}</TH>
                 ))}
-              </tr>
-            </thead>
-            <tbody>
+              </TR>
+            </THead>
+            <TBody>
               {requests.map((request) => {
                 const draft = receiveDrafts[request.id] || {};
                 return (
-                  <tr key={request.id}>
-                    <td style={tdS}>
+                  <TR key={request.id}>
+                    <TD>
                       <strong>{request.productName}</strong>
-                      <div style={{ color: D.muted, fontSize: 12 }}>
-                        {request.productCategory || "Product"} · live stock {request.liveStock ?? "—"} {request.inventoryUnit || request.unit || ""}
+                      <div className="text-ink-secondary text-ui-body">
+                        {request.productCategory || "Product"} · live stock{" "}
+                        {request.liveStock ?? "—"}{" "}
+                        {request.inventoryUnit || request.unit || ""}
                       </div>
-                    </td>
-                    <td style={tdS}>
-                      <strong>{request.requestedQuantity ?? "—"} {request.unit || ""}</strong>
-                      <div style={{ color: D.muted, fontSize: 12 }}>
-                        Needed {request.neededBy || "as soon as possible"} · {request.priority}
+                    </TD>
+                    <TD nums>
+                      <strong>
+                        {request.requestedQuantity ?? "—"} {request.unit || ""}
+                      </strong>
+                      <div className="text-ink-secondary text-ui-body">
+                        Needed {request.neededBy || "as soon as possible"} ·{" "}
+                        {request.priority}
                       </div>
-                      {request.vendor && <div style={{ color: D.muted, fontSize: 12 }}>Vendor: {request.vendor}{request.vendorSku ? ` · SKU ${request.vendorSku}` : ""}</div>}
+                      {request.vendor && (
+                        <div className="text-ink-secondary text-ui-body">
+                          Vendor: {request.vendor}
+                          {request.vendorSku
+                            ? ` · SKU ${request.vendorSku}`
+                            : ""}
+                        </div>
+                      )}
                       {safeExternalHref(request.vendorProductUrl) && (
                         <a
                           href={safeExternalHref(request.vendorProductUrl)}
                           target="_blank"
                           rel="noopener noreferrer"
-                          style={{ color: D.text, fontSize: 12, textDecoration: "underline" }}
+                          className="text-zinc-900 text-ui-body underline underline-offset-2"
                         >
                           Open order page ↗
                         </a>
                       )}
-                    </td>
-                    <td style={tdS}>
-                      <div>{request.customerName || (request.source === "auto_reorder" ? "Auto-reorder sweep" : request.source)}</div>
-                      <div style={{ color: D.muted, fontSize: 12 }}>
-                        {request.scheduledDate || request.createdAt?.slice?.(0, 10)} · {request.serviceType || "inventory"}
+                    </TD>
+                    <TD>
+                      <div>
+                        {request.customerName ||
+                          (request.source === "auto_reorder"
+                            ? "Auto-reorder sweep"
+                            : request.source)}
                       </div>
-                      <div style={{ color: D.muted, fontSize: 12 }}>{request.reason}</div>
-                    </td>
-                    <RestockStatusCell request={request} receivingId={receivingId} runAction={runAction} canAuthor={canAuthor} evidence={evidence[request.id]} loadEvidence={loadEvidence} />
-                    <RestockActionCell request={request} draft={draft} setReceiveDrafts={setReceiveDrafts} receivingId={receivingId} runAction={runAction} />
-                  </tr>
+                      <div className="text-ink-secondary text-ui-body">
+                        {request.scheduledDate ||
+                          request.createdAt?.slice?.(0, 10)}{" "}
+                        · {request.serviceType || "inventory"}
+                      </div>
+                      <div className="text-ink-secondary text-ui-body">
+                        {request.reason}
+                      </div>
+                    </TD>
+                    <RestockStatusCell
+                      request={request}
+                      receivingId={receivingId}
+                      runAction={runAction}
+                      canAuthor={canAuthor}
+                      evidence={evidence[request.id]}
+                      loadEvidence={loadEvidence}
+                    />
+                    <RestockActionCell
+                      request={request}
+                      draft={draft}
+                      setReceiveDrafts={setReceiveDrafts}
+                      receivingId={receivingId}
+                      runAction={runAction}
+                    />
+                  </TR>
                 );
               })}
-            </tbody>
-          </table>
+            </TBody>
+          </Table>
         </div>
       )}
-    </div>
+    </Card>
   );
+}
+
+// Main coloured a vendor's last scrape green/amber/red/muted; the kit has no
+// success tone, so completed reads in the default ink.
+function scrapeStatusTone(status) {
+  if (status === "failed") return "alert";
+  return status === "running" ? "warn" : "neutral";
 }
 
 // How an automatic order's outcome reads on the Restock tab: colour + label.
 function autoOrderSummary(order) {
   if (order.status === "placed") {
-    const number = order.externalOrderNumber ? ` · #${order.externalOrderNumber}` : "";
-    const total = order.amountCents != null ? ` · $${(order.amountCents / 100).toFixed(2)}` : "";
-    return { color: D.green, label: `Ordered automatically${number}${total}` };
+    const number = order.externalOrderNumber
+      ? ` · #${order.externalOrderNumber}`
+      : "";
+    const total =
+      order.amountCents != null
+        ? ` · $${(order.amountCents / 100).toFixed(2)}`
+        : "";
+    // Main carried a colour with each outcome. The kit has no success tone, so a
+    // placed order reads in the default ink, but "failed"/"needs review" keeps
+    // its amber and the in-progress state its muted ink.
+    return {
+      label: `Ordered automatically${number}${total}`,
+    };
   }
-  if (order.status === "placing") return { color: D.muted, label: "Auto-order in progress" };
-  return { color: D.amber, label: `Auto-order ${order.status === "failed" ? "failed" : "needs review"}` };
+  if (order.status === "placing")
+    return {
+      tone: "text-ink-secondary",
+      label: "Auto-order in progress",
+    };
+  return {
+    tone: "text-warn-fg",
+    label: `Auto-order ${order.status === "failed" ? "failed" : "needs review"}`,
+  };
 }
 
 // Restock tab — the request's status pill, its automatic-order outcome and
 // the Mark Ordered action, in one cell.
-function RestockStatusCell({ request, receivingId, runAction, canAuthor = false, evidence = null, loadEvidence = null }) {
-  const pillColor = request.status === "received" ? D.green : request.status === "cancelled" ? D.red : D.amber;
+function RestockStatusCell({
+  request,
+  receivingId,
+  runAction,
+  canAuthor = false,
+  evidence = null,
+  loadEvidence = null,
+}) {
   const order = request.order;
   const summary = order ? autoOrderSummary(order) : null;
   // Links show only while their presigned URLs are live; an expired or empty
   // fetch falls back to the button, and live links keep a Refresh beside them.
-  const liveShots = evidence && evidence.expiresAt > Date.now() ? evidence.screenshots : [];
+  const liveShots =
+    evidence && evidence.expiresAt > Date.now() ? evidence.screenshots : [];
   const evidenceButton = (label) => (
-    <button type="button" onClick={() => loadEvidence?.(request.id)} style={{ ...sBtn("transparent", D.muted), padding: "2px 6px", fontSize: 12 }}>
+    <Button
+      type="button"
+      onClick={() => loadEvidence?.(request.id)}
+      variant="secondary"
+    >
       {label}
-    </button>
+    </Button>
   );
   return (
-    <td style={tdS}>
-      <span style={{ padding: "4px 8px", borderRadius: 999, border: `1px solid ${pillColor}`, color: pillColor, fontSize: 11, fontWeight: 700, textTransform: "uppercase" }}>
+    <TD>
+      <Badge
+        tone={
+          ["cancelled", "failed"].includes(request.status) ? "alert" : "neutral"
+        }
+      >
         {request.status}
-      </span>
+      </Badge>
       {order && (
-        <div style={{ marginTop: 6, fontSize: 12, color: summary.color }}>
+        <div className={`mt-[6px] text-ui-body u-nums ${summary.tone || ""}`}>
           {summary.label}
           {order.status !== "placed" && order.error && (
-            <div style={{ color: D.muted, marginTop: 2, maxWidth: 260 }}>{order.error}</div>
+            <div className="text-ink-secondary mt-[2px] max-w-[260px]">
+              {order.error}
+            </div>
           )}
           {/* Owner-only: the screenshots show the billing account + totals; the route is requireAdmin. */}
           {canAuthor && (
-            <div style={{ marginTop: 4, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <div className="mt-[4px] flex gap-[8px] flex-wrap items-center">
               {liveShots.length ? (
                 <>
                   {liveShots.map((s) => (
-                    <a key={s.label} href={s.url} target="_blank" rel="noopener noreferrer" style={{ color: D.text, textDecoration: "underline" }}>
+                    <a
+                      key={s.label}
+                      href={s.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-zinc-900 underline underline-offset-2"
+                    >
                       {s.label} ↗
                     </a>
                   ))}
                   {evidenceButton("Refresh")}
                 </>
-              ) : evidenceButton("Screenshots")}
+              ) : (
+                evidenceButton("Screenshots")
+              )}
             </div>
           )}
         </div>
       )}
       {request.status === "open" && order?.status !== "placing" && (
-        <button
+        <Button
           onClick={() => runAction(request, "mark_ordered")}
           disabled={receivingId === request.id}
-          style={{ ...sBtn(D.card, D.text), marginTop: 8, display: "block" }}
+          variant="secondary"
+          className="mt-[8px] block"
         >
           Mark Ordered
-        </button>
+        </Button>
       )}
-    </td>
+    </TD>
   );
 }
 
@@ -3048,69 +3304,145 @@ function RestockStatusCell({ request, receivingId, runAction, canAuthor = false,
 // is neither received nor revoked cannot be cancelled (the server 409s both).
 // A received request whose automatic order landed after that receipt gets
 // ONE more receive — the late order's own (the server admits exactly that).
-function RestockActionCell({ request, draft, setReceiveDrafts, receivingId, runAction }) {
-  const setDraft = (patch) => setReceiveDrafts((prev) => ({ ...prev, [request.id]: { ...(prev[request.id] || {}), ...patch } }));
-  if (request.order?.status === "placing") return <td style={tdS}><span style={{ color: D.muted }}>Auto-order in progress</span></td>;
-  const lateOrderReceive = request.status === "received" && !!request.order?.landedAfterReceive;
-  if (!["open", "ordered"].includes(request.status) && !lateOrderReceive) return <td style={tdS}><span style={{ color: D.muted }}>Closed</span></td>;
+function RestockActionCell({
+  request,
+  draft,
+  setReceiveDrafts,
+  receivingId,
+  runAction,
+}) {
+  const setDraft = (patch) =>
+    setReceiveDrafts((prev) => ({
+      ...prev,
+      [request.id]: {
+        ...(prev[request.id] || {}),
+        ...patch,
+      },
+    }));
+  if (request.order?.status === "placing")
+    return (
+      <TD>
+        <span className="text-ink-secondary">Auto-order in progress</span>
+      </TD>
+    );
+  const lateOrderReceive =
+    request.status === "received" && !!request.order?.landedAfterReceive;
+  if (!["open", "ordered"].includes(request.status) && !lateOrderReceive)
+    return (
+      <TD>
+        <span className="text-ink-secondary">Closed</span>
+      </TD>
+    );
   const orderOut = !!request.order?.placedAt && !request.order?.revokedAt;
   return (
-    <td style={tdS}>
-      <div style={{ display: "grid", gap: 6, minWidth: 220 }}>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 80px", gap: 6 }}>
-          <input
-            value={draft.quantity ?? request.order?.orderedQuantity ?? request.requestedQuantity ?? ""}
-            onChange={(e) => setDraft({ quantity: e.target.value })}
-            style={sInput}
+    <TD>
+      <div className="grid gap-[6px] min-w-[220px]">
+        <div className="grid grid-cols-[1fr_80px] gap-[6px]">
+          <Input
+            value={
+              draft.quantity ??
+              request.order?.orderedQuantity ??
+              request.requestedQuantity ??
+              ""
+            }
+            onChange={(e) =>
+              setDraft({
+                quantity: e.target.value,
+              })
+            }
             placeholder="Qty"
           />
-          <input
+
+          <Input
             value={draft.unit ?? request.unit ?? request.inventoryUnit ?? ""}
-            onChange={(e) => setDraft({ unit: e.target.value })}
-            style={sInput}
+            onChange={(e) =>
+              setDraft({
+                unit: e.target.value,
+              })
+            }
             placeholder="Unit"
           />
         </div>
-        <div style={{ display: "flex", gap: 6 }}>
-          <button onClick={() => runAction(request, "receive")} disabled={receivingId === request.id} style={sBtn(D.green, D.white)}>
+        <div className="flex gap-[6px]">
+          <Button
+            onClick={() => runAction(request, "receive")}
+            disabled={receivingId === request.id}
+            variant="primary"
+          >
             Receive
-          </button>
+          </Button>
           {lateOrderReceive ? (
-            <span style={{ color: D.muted, fontSize: 12, alignSelf: "center" }}>Late auto-order — receive it, or revoke</span>
+            <span className="text-ink-secondary text-ui-body self-center">
+              Late auto-order — receive it, or revoke
+            </span>
           ) : orderOut ? (
-            <span style={{ color: D.muted, fontSize: 12, alignSelf: "center" }}>Order out — receive, or revoke first</span>
+            <span className="text-ink-secondary text-ui-body self-center">
+              Order out — receive, or revoke first
+            </span>
           ) : (
-            <button onClick={() => runAction(request, "cancel")} disabled={receivingId === request.id} style={sBtn(D.card, D.red)}>
+            <Button
+              onClick={() => runAction(request, "cancel")}
+              disabled={receivingId === request.id}
+              variant="danger"
+            >
               Cancel
-            </button>
+            </Button>
           )}
         </div>
       </div>
-    </td>
+    </TD>
   );
 }
 
 // detectServiceLine ids (server/services/service-report/service-line-configs.js)
 const COMPLETION_SERVICE_LINES = [
-  { id: "pest", label: "Pest" },
-  { id: "lawn", label: "Lawn" },
-  { id: "mosquito", label: "Mosquito" },
-  { id: "tree_shrub", label: "Tree & shrub" },
-  { id: "termite", label: "Termite" },
-  { id: "rodent", label: "Rodent" },
-  { id: "palm", label: "Palm" },
+  {
+    id: "pest",
+    label: "Pest",
+  },
+  {
+    id: "lawn",
+    label: "Lawn",
+  },
+  {
+    id: "mosquito",
+    label: "Mosquito",
+  },
+  {
+    id: "tree_shrub",
+    label: "Tree & shrub",
+  },
+  {
+    id: "termite",
+    label: "Termite",
+  },
+  {
+    id: "rodent",
+    label: "Rodent",
+  },
+  {
+    id: "palm",
+    label: "Palm",
+  },
 ];
 
 // Auto-reorder + per-visit consumable authoring for one product: its own
 // form state and save path (PUT /admin/inventory/:id).
-function AutoReorderEditor({ product, vendors, showToast, onInventoryChanged }) {
+function AutoReorderEditor({
+  product,
+  vendors,
+  showToast,
+  onInventoryChanged,
+}) {
   const [autoForm, setAutoForm] = useState({
     autoReorderEnabled: !!product.autoReorderEnabled,
     autoReorderVendorId: product.autoReorderVendorId || "",
     reorderQuantity: product.reorderQuantity ?? "",
     perCompletionUsage: product.perCompletionUsage ?? "",
     // null = every service line; array = only those lines consume this item
-    perCompletionServiceLines: Array.isArray(product.perCompletionServiceLines) ? product.perCompletionServiceLines : null,
+    perCompletionServiceLines: Array.isArray(product.perCompletionServiceLines)
+      ? product.perCompletionServiceLines
+      : null,
   });
   const [autoSaving, setAutoSaving] = useState(false);
   const saveAutoReorder = async () => {
@@ -3121,8 +3453,14 @@ function AutoReorderEditor({ product, vendors, showToast, onInventoryChanged }) 
         body: JSON.stringify({
           autoReorderEnabled: !!autoForm.autoReorderEnabled,
           autoReorderVendorId: autoForm.autoReorderVendorId || null,
-          reorderQuantity: autoForm.reorderQuantity === "" ? null : Number(autoForm.reorderQuantity),
-          perCompletionUsage: autoForm.perCompletionUsage === "" ? null : Number(autoForm.perCompletionUsage),
+          reorderQuantity:
+            autoForm.reorderQuantity === ""
+              ? null
+              : Number(autoForm.reorderQuantity),
+          perCompletionUsage:
+            autoForm.perCompletionUsage === ""
+              ? null
+              : Number(autoForm.perCompletionUsage),
           perCompletionServiceLines: autoForm.perCompletionServiceLines,
         }),
       });
@@ -3134,107 +3472,125 @@ function AutoReorderEditor({ product, vendors, showToast, onInventoryChanged }) 
       setAutoSaving(false);
     }
   };
-
   return (
-      <div style={{ marginBottom: 12 }}>
-        <div
-          style={{
-            fontSize: 11,
-            color: D.muted,
-            textTransform: "uppercase",
-            letterSpacing: 1,
-            marginBottom: 6,
-          }}
-        >
-          Auto-reorder
-        </div>
-        <div
-          style={{
-            display: "flex",
-            gap: 8,
-            alignItems: "center",
-            flexWrap: "wrap",
-            fontSize: 12,
-          }}
-        >
-          <label style={{ color: D.text, display: "flex", alignItems: "center", gap: 4 }}>
-            <input
-              type="checkbox"
-              checked={!!autoForm.autoReorderEnabled}
-              onChange={(e) => setAutoForm((f) => ({ ...f, autoReorderEnabled: e.target.checked }))}
-            />
-            Reorder when low
-          </label>
-          <select
-            value={autoForm.autoReorderVendorId}
-            onChange={(e) => setAutoForm((f) => ({ ...f, autoReorderVendorId: e.target.value }))}
-            style={{ ...sInput, width: 160 }}
-          >
-            <option value="">No vendor</option>
-            {vendors.map((v) => (
-              <option key={v.id} value={v.id}>{v.name}</option>
-            ))}
-          </select>
-          <input
-            type="number"
-            step="0.0001"
-            min="0"
-            placeholder="Reorder qty"
-            title="Quantity to request when stock reaches the low-stock threshold"
-            value={autoForm.reorderQuantity}
-            onChange={(e) => setAutoForm((f) => ({ ...f, reorderQuantity: e.target.value }))}
-            style={{ ...sInput, width: 100 }}
-          />
-          <input
-            type="number"
-            step="0.0001"
-            min="0"
-            placeholder="Used per visit"
-            title="Units consumed by every completed visit (yard-sign kit items); blank = not a per-visit consumable"
-            value={autoForm.perCompletionUsage}
-            onChange={(e) => setAutoForm((f) => ({ ...f, perCompletionUsage: e.target.value }))}
-            style={{ ...sInput, width: 110 }}
-          />
-          <button type="button" onClick={saveAutoReorder} disabled={autoSaving} style={sBtn(D.teal, D.white)}>
-            {autoSaving ? "Saving…" : "Save"}
-          </button>
-        </div>
-        <div
-          style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", fontSize: 12, marginTop: 6 }}
-          title="Which completed visits consume this item. All = every service line."
-        >
-          <span style={{ color: D.muted }}>Used on:</span>
-          <label style={{ color: D.text, display: "flex", alignItems: "center", gap: 4 }}>
-            <input
-              type="checkbox"
-              checked={autoForm.perCompletionServiceLines == null}
-              onChange={(e) => setAutoForm((f) => ({ ...f, perCompletionServiceLines: e.target.checked ? null : [] }))}
-            />
-            All
-          </label>
-          {COMPLETION_SERVICE_LINES.map((line) => {
-            const scoped = Array.isArray(autoForm.perCompletionServiceLines);
-            const on = scoped && autoForm.perCompletionServiceLines.includes(line.id);
-            return (
-              <label key={line.id} style={{ color: scoped ? D.text : D.muted, display: "flex", alignItems: "center", gap: 4 }}>
-                <input
-                  type="checkbox"
-                  disabled={!scoped}
-                  checked={on}
-                  onChange={(e) => setAutoForm((f) => {
-                    const cur = Array.isArray(f.perCompletionServiceLines) ? f.perCompletionServiceLines : [];
-                    return { ...f, perCompletionServiceLines: e.target.checked ? [...new Set([...cur, line.id])] : cur.filter((x) => x !== line.id) };
-                  })}
-                />
-                {line.label}
-              </label>
-            );
-          })}
-        </div>
+    <div className="mb-[12px]">
+      <div className="text-ui-body text-ink-secondary mb-[6px]">
+        Auto-reorder
       </div>
+      <div className="flex gap-[8px] items-center flex-wrap text-ui-body">
+        <Checkbox
+          label="Reorder when low"
+          checked={!!autoForm.autoReorderEnabled}
+          onChange={(e) =>
+            setAutoForm((f) => ({
+              ...f,
+              autoReorderEnabled: e.target.checked,
+            }))
+          }
+        />
+        <Select
+          value={autoForm.autoReorderVendorId}
+          onChange={(e) =>
+            setAutoForm((f) => ({
+              ...f,
+              autoReorderVendorId: e.target.value,
+            }))
+          }
+          className="w-[160px]"
+        >
+          <option value="">No vendor</option>
+          {vendors.map((v) => (
+            <option key={v.id} value={v.id}>
+              {v.name}
+            </option>
+          ))}
+        </Select>
+        <Input
+          type="number"
+          step="0.0001"
+          min="0"
+          placeholder="Reorder qty"
+          title="Quantity to request when stock reaches the low-stock threshold"
+          value={autoForm.reorderQuantity}
+          onChange={(e) =>
+            setAutoForm((f) => ({
+              ...f,
+              reorderQuantity: e.target.value,
+            }))
+          }
+          className="w-[100px]"
+        />
+
+        <Input
+          type="number"
+          step="0.0001"
+          min="0"
+          placeholder="Used per visit"
+          title="Units consumed by every completed visit (yard-sign kit items); blank = not a per-visit consumable"
+          value={autoForm.perCompletionUsage}
+          onChange={(e) =>
+            setAutoForm((f) => ({
+              ...f,
+              perCompletionUsage: e.target.value,
+            }))
+          }
+          className="w-[110px]"
+        />
+
+        <Button
+          type="button"
+          onClick={saveAutoReorder}
+          disabled={autoSaving}
+          variant="primary"
+        >
+          {autoSaving ? "Saving…" : "Save"}
+        </Button>
+      </div>
+      <div
+        title="Which completed visits consume this item. All = every service line."
+        className="flex gap-[10px] items-center flex-wrap text-ui-body mt-[6px]"
+      >
+        <span className="text-ink-secondary">Used on:</span>
+        <Checkbox
+          label="All"
+          checked={autoForm.perCompletionServiceLines == null}
+          onChange={(e) =>
+            setAutoForm((f) => ({
+              ...f,
+              perCompletionServiceLines: e.target.checked ? null : [],
+            }))
+          }
+        />
+        {COMPLETION_SERVICE_LINES.map((line) => {
+          const scoped = Array.isArray(autoForm.perCompletionServiceLines);
+          const on =
+            scoped && autoForm.perCompletionServiceLines.includes(line.id);
+          return (
+            <Checkbox
+              key={line.id}
+              label={line.label}
+              disabled={!scoped}
+              checked={on}
+              onChange={(e) =>
+                setAutoForm((f) => {
+                  const cur = Array.isArray(f.perCompletionServiceLines)
+                    ? f.perCompletionServiceLines
+                    : [];
+                  return {
+                    ...f,
+                    perCompletionServiceLines: e.target.checked
+                      ? [...new Set([...cur, line.id])]
+                      : cur.filter((x) => x !== line.id),
+                  };
+                })
+              }
+            />
+          );
+        })}
+      </div>
+    </div>
   );
 }
-
 function ExpandedProduct({
   labelPipelineEnabled = false,
   product,
@@ -3244,11 +3600,16 @@ function ExpandedProduct({
   onInventoryChanged,
   showToast,
 }) {
+  usePublishIntelligenceBarPageData({ product_id: product.id });
+  const { lastMutation } = useIntelligenceBarActions();
+  const inventoryRefresh =
+    lastMutation?.product_id === product.id ? lastMutation.id : null;
   const [vendorId, setVendorId] = useState(vendors[0]?.id || "");
   const [price, setPrice] = useState("");
   const [qty, setQty] = useState("");
   const [movements, setMovements] = useState([]);
   const [movementLoading, setMovementLoading] = useState(true);
+  const movementSequence = useRef(0);
   const [adjustForm, setAdjustForm] = useState({
     movementType: "restock",
     quantity: "",
@@ -3257,29 +3618,31 @@ function ExpandedProduct({
     reason: "",
     note: "",
   });
-
   const loadMovements = useCallback(async () => {
+    const sequence = ++movementSequence.current;
     setMovementLoading(true);
     try {
       // Movements are owner-only (rows carry costUsed) — a technician's
       // expanded product just shows no history instead of erroring.
-      const data = await adminFetch(`/admin/inventory/${product.id}/movements`)
-        .catch(() => ({ movements: [] }));
-      setMovements(data.movements || []);
+      const data = await adminFetch(`/admin/inventory/${product.id}/movements`);
+      if (sequence === movementSequence.current)
+        setMovements(data.movements || []);
     } catch {
-      setMovements([]);
+      if (sequence === movementSequence.current) setMovements([]);
     } finally {
-      setMovementLoading(false);
+      if (sequence === movementSequence.current) setMovementLoading(false);
     }
   }, [product.id]);
-
   useEffect(() => {
-    loadMovements();
+    void loadMovements();
     setAdjustForm((f) => ({
       ...f,
       unit: product.inventoryUnit || f.unit || "oz",
     }));
-  }, [loadMovements, product.inventoryUnit]);
+    return () => {
+      movementSequence.current += 1;
+    };
+  }, [loadMovements, product.inventoryUnit, inventoryRefresh]);
 
   const submitAdjustment = async () => {
     if (!adjustForm.quantity || !adjustForm.unit) {
@@ -3308,7 +3671,6 @@ function ExpandedProduct({
       showToast?.(`Failed: ${e.message}`);
     }
   };
-
   const queueRefresh = async (vendorPricing) => {
     try {
       const data = await adminFetch(
@@ -3323,197 +3685,143 @@ function ExpandedProduct({
       showToast?.(`Refresh failed: ${e.message}`);
     }
   };
-
   return (
-    <div style={{ padding: 12 }}>
+    <div className="p-[12px]">
       {" "}
-      <div
-        style={{
-          display: "flex",
-          gap: 16,
-          marginBottom: 12,
-          flexWrap: "wrap",
-          fontSize: 12,
-        }}
-      >
+      <div className="flex gap-[16px] mb-[12px] flex-wrap text-ui-body">
         {product.formulation && (
-          <span style={{ color: D.muted }}>
+          <span className="text-ink-secondary">
             Formulation:{" "}
-            <span style={{ color: D.text }}>{product.formulation}</span>
+            <span className="text-zinc-900">{product.formulation}</span>
           </span>
         )}
         {product.unitSizeOz && (
-          <span style={{ color: D.muted }}>
+          <span className="text-ink-secondary">
             Size (oz):{" "}
-            <span style={{ color: D.text }}>{product.unitSizeOz}</span>
+            <span className="text-zinc-900">{product.unitSizeOz}</span>
           </span>
         )}
         {product.sku && (
-          <span style={{ color: D.muted }}>
-            SKU: <span style={{ color: D.text }}>{product.sku}</span>
+          <span className="text-ink-secondary">
+            SKU: <span className="text-zinc-900">{product.sku}</span>
           </span>
         )}
-        <span style={{ color: D.muted }}>
+        <span className="text-ink-secondary">
           Stock:{" "}
-          <span style={{ color: product.lowStock ? D.red : D.text }}>
+          <span>
             {product.inventoryOnHand != null
               ? `${product.inventoryOnHand} ${product.inventoryUnit || ""}`
               : "not set"}
           </span>
         </span>
         {product.lowStockThreshold != null && (
-          <span style={{ color: D.muted }}>
+          <span className="text-ink-secondary">
             Low at:{" "}
-            <span style={{ color: D.text }}>
+            <span className="text-zinc-900">
               {product.lowStockThreshold} {product.inventoryUnit || ""}
             </span>
           </span>
         )}
       </div>
       {/* Authoring only: PUT /admin/inventory/:id is requireAdmin, so a
-          technician would only ever see a 403 here. */}
+           technician would only ever see a 403 here. */}
       {canAuthor && (
-        <AutoReorderEditor product={product} vendors={vendors} showToast={showToast} onInventoryChanged={onInventoryChanged} />
+        <AutoReorderEditor
+          product={product}
+          vendors={vendors}
+          showToast={showToast}
+          onInventoryChanged={onInventoryChanged}
+        />
       )}
-      {canAuthor && labelPipelineEnabled && <ProductLabelReview key={product.id} product={product} />}
+      {canAuthor && labelPipelineEnabled && (
+        <ProductLabelReview key={product.id} product={product} />
+      )}
       {product.vendorPricing.length > 0 && (
-        <div style={{ marginBottom: 12 }}>
+        <div className="mb-[12px]">
           {" "}
-          <div
-            style={{
-              fontSize: 11,
-              color: D.muted,
-              textTransform: "uppercase",
-              letterSpacing: 1,
-              marginBottom: 6,
-            }}
-          >
+          <div className="text-ui-body text-ink-secondary mb-[6px]">
             Vendor Prices
           </div>{" "}
-          <div style={{ display: "grid", gap: 4 }}>
+          <div className="grid gap-[4px]">
             {product.vendorPricing.map((vp, i) => (
               <div
                 key={i}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 12,
-                  padding: "6px 10px",
-                  background: D.input,
-                  borderRadius: 6,
-                  fontSize: 12,
-                }}
+                className="flex items-center gap-[12px] text-ui-body"
               >
                 {" "}
-                <span
-                  style={{ color: D.heading, fontWeight: 500, minWidth: 140 }}
-                >
+                <span className="text-zinc-900 font-medium min-w-[140px]">
                   {vp.vendorName}
                 </span>{" "}
-                <span
-                  style={{
-                    fontFamily: "'JetBrains Mono', monospace",
-                    color: vp.isBest ? D.green : D.text,
-                  }}
-                >
-                  ${vp.price.toFixed(2)}
-                </span>
+                <span className="u-nums">${vp.price.toFixed(2)}</span>
                 {vp.quantity && (
-                  <span style={{ color: D.muted }}>{vp.quantity}</span>
+                  <span className="text-ink-secondary u-nums">{vp.quantity}</span>
                 )}
                 {(() => {
                   const unitLabel =
                     formatUnitPriceList(vp.unitPrices) ||
                     (vp.normalizedUnitPrice != null && vp.normalizedUnit
-                      ? formatUnitCost(vp.normalizedUnitPrice, vp.normalizedUnit)
+                      ? formatUnitCost(
+                          vp.normalizedUnitPrice,
+                          vp.normalizedUnit,
+                        )
                       : null);
                   return unitLabel ? (
-                    <span
-                      style={{
-                        color: D.muted,
-                        fontFamily: "'JetBrains Mono', monospace",
-                        fontSize: 11,
-                      }}
-                    >
+                    <span className="text-ink-secondary text-ui-body">
                       {unitLabel}
                     </span>
                   ) : null;
                 })()}
                 {vp.sourceType && (
-                  <span style={sBadge(`${D.teal}14`, D.muted)}>
+                  <Badge tone="neutral">
                     {String(vp.sourceType).replace(/_/g, " ")}
-                  </span>
+                  </Badge>
                 )}
                 {vp.availability && (
-                  <span style={{ color: D.muted, fontSize: 11 }}>
+                  <span className="text-ink-secondary text-ui-body">
                     {vp.availability}
                   </span>
                 )}
                 {vp.branchLocation && (
-                  <span style={{ color: D.muted, fontSize: 11 }}>
+                  <span className="text-ink-secondary text-ui-body">
                     {vp.branchLocation}
                   </span>
                 )}
                 {vp.confidenceScore != null && (
-                  <span style={{ color: D.muted, fontSize: 11 }}>
+                  <span className="text-ink-secondary text-ui-body">
                     {Math.round(vp.confidenceScore * 100)}% conf
                   </span>
                 )}
-                {vp.isBest && (
-                  <span style={sBadge(`${D.green}22`, D.green)}>Best</span>
-                )}
+                {vp.isBest && <Badge tone="neutral">Best</Badge>}
                 {vp.url && (
                   <a
                     href={vp.url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    style={{ color: D.teal, fontSize: 11 }}
+                    className="text-zinc-900 text-ui-body underline underline-offset-2"
                   >
                     Open
                   </a>
                 )}
                 {vp.lastChecked && (
-                  <span style={{ color: D.muted, fontSize: 11 }}>
+                  <span className="text-ink-secondary text-ui-body">
                     {new Date(vp.lastChecked).toLocaleDateString()}
                   </span>
                 )}
-                <button
-                  onClick={() => queueRefresh(vp)}
-                  style={{
-                    marginLeft: "auto",
-                    fontSize: 11,
-                    padding: "3px 8px",
-                    borderRadius: 4,
-                    border: `1px solid ${D.border}`,
-                    background: D.card,
-                    color: D.teal,
-                    cursor: "pointer",
-                  }}
-                >
+                <Button onClick={() => queueRefresh(vp)} variant="secondary">
                   Refresh
-                </button>
+                </Button>
               </div>
             ))}
           </div>{" "}
         </div>
       )}
-      <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+      <div className="flex gap-[8px] items-end">
         {" "}
-        <div>
-          <label
-            style={{
-              fontSize: 11,
-              color: D.muted,
-              display: "block",
-              marginBottom: 2,
-            }}
-          >
-            Vendor
-          </label>{" "}
-          <select
+        <Field label="Vendor">
+          <Select
             value={vendorId}
             onChange={(e) => setVendorId(e.target.value)}
-            style={{ ...sInput, width: 160 }}
+            className="w-[160px]"
           >
             {vendors
               .filter((v) => v.active)
@@ -3522,47 +3830,27 @@ function ExpandedProduct({
                   {v.name}
                 </option>
               ))}
-          </select>
-        </div>{" "}
-        <div>
-          <label
-            style={{
-              fontSize: 11,
-              color: D.muted,
-              display: "block",
-              marginBottom: 2,
-            }}
-          >
-            Price
-          </label>{" "}
-          <input
+          </Select>
+        </Field>{" "}
+        <Field label="Price">
+          <Input
             value={price}
             onChange={(e) => setPrice(e.target.value)}
             type="number"
             step="0.01"
             placeholder="0.00"
-            style={{ ...sInput, width: 100 }}
+            className="w-[100px]"
           />
-        </div>{" "}
-        <div>
-          <label
-            style={{
-              fontSize: 11,
-              color: D.muted,
-              display: "block",
-              marginBottom: 2,
-            }}
-          >
-            Quantity
-          </label>{" "}
-          <input
+        </Field>{" "}
+        <Field label="Quantity">
+          <Input
             value={qty}
             onChange={(e) => setQty(e.target.value)}
             placeholder="e.g. 32 oz"
-            style={{ ...sInput, width: 120 }}
+            className="w-[120px]"
           />
-        </div>{" "}
-        <button
+        </Field>{" "}
+        <Button
           onClick={() => {
             if (price) {
               onSave(product.id, vendorId, price, qty);
@@ -3570,212 +3858,168 @@ function ExpandedProduct({
               setQty("");
             }
           }}
-          style={sBtn(D.teal, D.white)}
+          variant="primary"
         >
           Add Price
-        </button>{" "}
+        </Button>{" "}
       </div>{" "}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "minmax(260px, 380px) 1fr",
-          gap: 12,
-          marginTop: 14,
-        }}
-      >
+      <div className="grid grid-cols-[minmax(260px,380px)_1fr] gap-[12px] mt-[14px]">
         {" "}
-        <div
-          style={{
-            background: D.input,
-            border: `1px solid ${D.border}`,
-            borderRadius: 8,
-            padding: 12,
-          }}
-        >
+        <Card className="p-3">
           {" "}
-          <div
-            style={{
-              fontSize: 11,
-              color: D.muted,
-              textTransform: "uppercase",
-              letterSpacing: 1,
-              marginBottom: 8,
-            }}
-          >
+          <div className="text-ui-body text-ink-secondary mb-[8px]">
             Manual Adjustment
           </div>{" "}
-          <div
-            style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}
-          >
+          <div className="grid grid-cols-2 gap-[8px]">
             {" "}
-            <select
+            <Select
               value={adjustForm.movementType}
               onChange={(e) =>
-                setAdjustForm((f) => ({ ...f, movementType: e.target.value }))
+                setAdjustForm((f) => ({
+                  ...f,
+                  movementType: e.target.value,
+                }))
               }
-              style={sInput}
             >
               {" "}
               <option value="restock">Restock</option>{" "}
               <option value="correction">Correction</option>{" "}
               <option value="damaged_lost">Damaged/Lost</option>{" "}
-            </select>{" "}
-            <div style={{ display: "flex", gap: 6 }}>
+            </Select>{" "}
+            <div className="flex gap-[6px]">
               {" "}
-              <input
+              <Input
                 value={adjustForm.quantity}
                 onChange={(e) =>
-                  setAdjustForm((f) => ({ ...f, quantity: e.target.value }))
+                  setAdjustForm((f) => ({
+                    ...f,
+                    quantity: e.target.value,
+                  }))
                 }
                 type="number"
                 step="0.0001"
                 placeholder="Amount"
-                style={{ ...sInput, width: "100%" }}
+                className="w-full"
               />{" "}
-              <input
+              <Input
                 value={adjustForm.unit}
                 onChange={(e) =>
-                  setAdjustForm((f) => ({ ...f, unit: e.target.value }))
+                  setAdjustForm((f) => ({
+                    ...f,
+                    unit: e.target.value,
+                  }))
                 }
                 placeholder="unit"
-                style={{ ...sInput, width: 70 }}
+                className="w-[70px]"
               />{" "}
             </div>{" "}
-            <input
+            <Input
               value={adjustForm.lotNumber}
               onChange={(e) =>
-                setAdjustForm((f) => ({ ...f, lotNumber: e.target.value }))
+                setAdjustForm((f) => ({
+                  ...f,
+                  lotNumber: e.target.value,
+                }))
               }
               placeholder="Lot number"
-              style={sInput}
             />{" "}
-            <input
+            <Input
               value={adjustForm.reason}
               onChange={(e) =>
-                setAdjustForm((f) => ({ ...f, reason: e.target.value }))
+                setAdjustForm((f) => ({
+                  ...f,
+                  reason: e.target.value,
+                }))
               }
               placeholder="Reason"
-              style={sInput}
             />{" "}
-            <input
+            <Input
               value={adjustForm.note}
               onChange={(e) =>
-                setAdjustForm((f) => ({ ...f, note: e.target.value }))
+                setAdjustForm((f) => ({
+                  ...f,
+                  note: e.target.value,
+                }))
               }
               placeholder="Note"
-              style={{ ...sInput, gridColumn: "1 / -1" }}
+              className="col-span-full"
             />{" "}
           </div>{" "}
-          <button
+          <Button
             onClick={submitAdjustment}
-            style={{ ...sBtn(D.green, D.white), marginTop: 8, width: "100%" }}
+            variant="primary"
+            className="mt-[8px] w-full"
           >
             Apply Adjustment
-          </button>{" "}
-        </div>{" "}
-        <div
-          style={{
-            background: D.input,
-            border: `1px solid ${D.border}`,
-            borderRadius: 8,
-            padding: 12,
-            minWidth: 0,
-          }}
-        >
+          </Button>{" "}
+        </Card>{" "}
+        <Card className="p-3 min-w-[0px]">
           {" "}
-          <div
-            style={{
-              fontSize: 11,
-              color: D.muted,
-              textTransform: "uppercase",
-              letterSpacing: 1,
-              marginBottom: 8,
-            }}
-          >
+          <div className="text-ui-body text-ink-secondary mb-[8px]">
             Movement History
           </div>
           {movementLoading ? (
-            <div style={{ color: D.muted, fontSize: 12 }}>
+            <div className="text-ink-secondary text-ui-body">
               Loading movements...
             </div>
           ) : movements.length === 0 ? (
-            <div style={{ color: D.muted, fontSize: 12 }}>
+            <div className="text-ink-secondary text-ui-body">
               No inventory movements yet.
             </div>
           ) : (
             // overflowX spelled explicitly (not the `overflow` shorthand) so
             // the serialized style attribute contains "overflow-x: auto" and
             // the index.css scroll-shadow affordance selector matches.
-            <div style={{ maxHeight: 220, overflowY: "auto", overflowX: "auto" }}>
+            <div className="max-h-[220px] overflow-y-auto overflow-x-auto">
               {" "}
-              <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                <thead>
-                  <tr>
+              <Table className="w-full">
+                <THead>
+                  <TR>
                     {["Date", "Type", "Amount", "Stock", "Job/Reason"].map(
                       (h) => (
-                        <th key={h} style={thS}>
-                          {h}
-                        </th>
+                        <TH key={h}>{h}</TH>
                       ),
                     )}
-                  </tr>
-                </thead>
-                <tbody>
+                  </TR>
+                </THead>
+                <TBody>
                   {movements.map((m) => (
-                    <tr key={m.id}>
-                      <td style={{ ...tdS, fontSize: 11, color: D.muted }}>
+                    <TR key={m.id}>
+                      <TD nums className="text-ink-secondary">
                         {m.createdAt
                           ? new Date(m.createdAt).toLocaleDateString()
                           : "—"}
-                      </td>
-                      <td style={tdS}>
-                        <span
-                          style={sBadge(
-                            m.movementType === "usage"
-                              ? `${D.teal}22`
-                              : m.movementType === "damaged_lost"
-                                ? `${D.red}22`
-                                : `${D.green}22`,
+                      </TD>
+                      <TD>
+                        <Badge
+                          tone={
                             m.movementType === "damaged_lost"
-                              ? D.red
-                              : m.movementType === "usage"
-                                ? D.teal
-                                : D.green,
-                          )}
+                              ? "alert"
+                              : "neutral"
+                          }
                         >
                           {m.movementType}
-                        </span>
-                      </td>
-                      <td
-                        style={{
-                          ...tdS,
-                          fontFamily: "'JetBrains Mono', monospace",
-                        }}
-                      >
+                        </Badge>
+                      </TD>
+                      <TD nums>
                         {m.quantity ?? "—"} {m.unit || ""}
-                      </td>
-                      <td
-                        style={{
-                          ...tdS,
-                          fontFamily: "'JetBrains Mono', monospace",
-                          fontSize: 12,
-                        }}
-                      >
+                      </TD>
+                      <TD nums>
                         {m.stockBefore ?? "—"} → {m.stockAfter ?? "—"}
-                      </td>
-                      <td style={{ ...tdS, fontSize: 11, color: D.muted }}>
+                      </TD>
+                      <TD className="text-ink-secondary">
                         {m.customerName ||
                           m.metadata?.reason ||
                           m.metadata?.note ||
                           "—"}
-                      </td>
-                    </tr>
+                      </TD>
+                    </TR>
                   ))}
-                </tbody>
-              </table>{" "}
+                </TBody>
+              </Table>{" "}
             </div>
           )}
-        </div>{" "}
+        </Card>{" "}
       </div>{" "}
     </div>
   );
@@ -3785,24 +4029,43 @@ function ExpandedProduct({
 // REGISTRY TAB — Customer-facing content & visibility
 // ══════════════════════════════════════════════════════════════
 const VISIBILITY_OPTIONS = [
-  { value: "internal_only", label: "Internal Only", color: D.muted },
-  { value: "portal_only", label: "Portal", color: D.teal },
-  { value: "public", label: "Public", color: D.green },
+  {
+    value: "internal_only",
+    label: "Internal Only",
+  },
+  {
+    value: "portal_only",
+    label: "Portal",
+  },
+  {
+    value: "public",
+    label: "Public",
+  },
 ];
 const STATUS_OPTIONS = [
-  { value: "draft", label: "Draft", color: D.muted },
-  { value: "approved_for_portal", label: "Approved (Portal)", color: D.teal },
-  { value: "approved_for_public", label: "Approved (Public)", color: D.green },
-  { value: "retired", label: "Retired", color: D.red },
+  {
+    value: "draft",
+    label: "Draft",
+  },
+  {
+    value: "approved_for_portal",
+    label: "Approved (Portal)",
+  },
+  {
+    value: "approved_for_public",
+    label: "Approved (Public)",
+  },
+  {
+    value: "retired",
+    label: "Retired",
+  },
 ];
-
 function RegistryTab({ showToast }) {
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({});
   const [filter, setFilter] = useState("all");
-
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -3814,9 +4077,9 @@ function RegistryTab({ showToast }) {
       setLoading(false);
     }
   }, []);
-
-  useEffect(() => { load(); }, [load]);
-
+  useEffect(() => {
+    load();
+  }, [load]);
   const startEdit = (p) => {
     setEditing(p.id);
     setForm({
@@ -3831,16 +4094,21 @@ function RegistryTab({ showToast }) {
       applicationZones: (p.applicationZones || []).join(", "),
     });
   };
-
   const save = async (id) => {
     try {
       const payload = {
         ...form,
         targetPests: form.targetPests
-          ? form.targetPests.split(",").map((s) => s.trim()).filter(Boolean)
+          ? form.targetPests
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean)
           : [],
         applicationZones: form.applicationZones
-          ? form.applicationZones.split(",").map((s) => s.trim()).filter(Boolean)
+          ? form.applicationZones
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean)
           : [],
       };
       await adminFetch(`/admin/inventory/${id}`, {
@@ -3854,137 +4122,246 @@ function RegistryTab({ showToast }) {
       showToast(`Failed: ${e.message}`);
     }
   };
-
   const filtered = products.filter((p) => {
     if (filter === "all") return true;
     if (filter === "public") return p.customerVisibility === "public";
     if (filter === "portal") return p.customerVisibility === "portal_only";
     if (filter === "draft") return p.contentStatus === "draft";
-    if (filter === "needs_content") return p.customerVisibility !== "internal_only" && !p.publicSummary;
+    if (filter === "needs_content")
+      return p.customerVisibility !== "internal_only" && !p.publicSummary;
     return true;
   });
-
-  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>Loading...</div>;
-
+  if (loading)
+    return <ActionFeedback>Loading...</ActionFeedback>;
   return (
     <div>
-      <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
+      <div className="flex gap-[6px] mb-[12px] flex-wrap">
         {[
-          { key: "all", label: "All Products" },
-          { key: "public", label: "Public" },
-          { key: "portal", label: "Portal" },
-          { key: "draft", label: "Drafts" },
-          { key: "needs_content", label: "Needs Content" },
+          {
+            key: "all",
+            label: "All Products",
+          },
+          {
+            key: "public",
+            label: "Public",
+          },
+          {
+            key: "portal",
+            label: "Portal",
+          },
+          {
+            key: "draft",
+            label: "Drafts",
+          },
+          {
+            key: "needs_content",
+            label: "Needs Content",
+          },
         ].map((f) => (
-          <button
+          <Button
             key={f.key}
             onClick={() => setFilter(f.key)}
-            style={{
-              minHeight: 40,
-              ...sBtn(filter === f.key ? D.teal : "transparent", filter === f.key ? "#fff" : D.muted),
-              border: filter === f.key ? "none" : `1px solid ${D.border}`,
-              fontSize: 11,
-              padding: "4px 10px",
-            }}
+            variant={filter === f.key ? "primary" : "secondary"}
+            aria-pressed={filter === f.key}
           >
             {f.label}
-          </button>
+          </Button>
         ))}
-        <span style={{ color: D.muted, fontSize: 11, alignSelf: "center", marginLeft: 8 }}>
+        <span className="text-ink-secondary text-ui-body self-center ml-[8px]">
           {filtered.length} product{filtered.length !== 1 ? "s" : ""}
         </span>
       </div>
 
-      <div style={{ display: "grid", gap: 8 }}>
+      <div className="grid gap-[8px]">
         {filtered.map((p) => {
           const isEditing = editing === p.id;
-          const vis = VISIBILITY_OPTIONS.find((v) => v.value === (p.customerVisibility || "internal_only"));
-          const stat = STATUS_OPTIONS.find((s) => s.value === (p.contentStatus || "draft"));
-
+          const vis = VISIBILITY_OPTIONS.find(
+            (v) => v.value === (p.customerVisibility || "internal_only"),
+          );
+          const stat = STATUS_OPTIONS.find(
+            (s) => s.value === (p.contentStatus || "draft"),
+          );
           return (
-            <div key={p.id} style={{ ...sCard, padding: 12 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: isEditing ? 12 : 0 }}>
-                <span style={{ color: D.text, fontWeight: 500, flex: 1 }}>{p.name}</span>
-                <span style={{ fontSize: 11, color: D.muted }}>{p.category}</span>
-                <span style={sBadge(`${vis.color}22`, vis.color)}>{vis.label}</span>
-                <span style={sBadge(`${stat.color}22`, stat.color)}>{stat.label}</span>
+            <Card key={p.id} className="p-5 mb-3 p-[12px]">
+              <div className="flex items-center gap-[10px]">
+                <span className="text-zinc-900 font-medium flex-[1]">
+                  {p.name}
+                </span>
+                <span className="text-ui-body text-ink-secondary">
+                  {p.category}
+                </span>
+                <Badge tone="neutral">{vis.label}</Badge>
+                {/* Main: muted/teal/green for the rest (no kit equivalent,
+                    stay neutral) but retired was red. */}
+                <Badge tone={stat.value === "retired" ? "alert" : "neutral"}>
+                  {stat.label}
+                </Badge>
                 {!isEditing && (
-                  <button onClick={() => startEdit(p)} style={{ ...sBtn(D.teal, "#fff"), fontSize: 11, padding: "3px 10px" }}>
+                  <Button onClick={() => startEdit(p)} variant="secondary">
                     Edit
-                  </button>
+                  </Button>
                 )}
               </div>
 
               {isEditing && (
-                <div style={{ display: "grid", gap: 10 }}>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-                    <div>
-                      <label style={{ fontSize: 11, color: D.muted, display: "block", marginBottom: 2 }}>Visibility</label>
-                      <select value={form.customerVisibility} onChange={(e) => setForm((f) => ({ ...f, customerVisibility: e.target.value }))} style={sInput}>
-                        {VISIBILITY_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                      </select>
-                    </div>
-                    <div>
-                      <label style={{ fontSize: 11, color: D.muted, display: "block", marginBottom: 2 }}>Status</label>
-                      <select value={form.contentStatus} onChange={(e) => setForm((f) => ({ ...f, contentStatus: e.target.value }))} style={sInput}>
-                        {STATUS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                      </select>
-                    </div>
-                    <div>
-                      <label style={{ fontSize: 11, color: D.muted, display: "block", marginBottom: 2 }}>Common Name</label>
-                      <input value={form.commonName} onChange={(e) => setForm((f) => ({ ...f, commonName: e.target.value }))} placeholder="Plain-language name" style={sInput} />
-                    </div>
+                <div className="grid gap-[10px]">
+                  <div className="grid grid-cols-3 gap-[8px]">
+                    <Field label="Visibility">
+                      <Select
+                        value={form.customerVisibility}
+                        onChange={(e) =>
+                          setForm((f) => ({
+                            ...f,
+                            customerVisibility: e.target.value,
+                          }))
+                        }
+                      >
+                        {VISIBILITY_OPTIONS.map((o) => (
+                          <option key={o.value} value={o.value}>
+                            {o.label}
+                          </option>
+                        ))}
+                      </Select>
+                    </Field>
+                    <Field label="Status">
+                      <Select
+                        value={form.contentStatus}
+                        onChange={(e) =>
+                          setForm((f) => ({
+                            ...f,
+                            contentStatus: e.target.value,
+                          }))
+                        }
+                      >
+                        {STATUS_OPTIONS.map((o) => (
+                          <option key={o.value} value={o.value}>
+                            {o.label}
+                          </option>
+                        ))}
+                      </Select>
+                    </Field>
+                    <Field label="Common Name">
+                      <Input
+                        value={form.commonName}
+                        onChange={(e) =>
+                          setForm((f) => ({
+                            ...f,
+                            commonName: e.target.value,
+                          }))
+                        }
+                        placeholder="Plain-language name"
+                      />
+                    </Field>
                   </div>
 
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                    <div>
-                      <label style={{ fontSize: 11, color: D.muted, display: "block", marginBottom: 2 }}>Target Pests (comma-separated)</label>
-                      <input value={form.targetPests} onChange={(e) => setForm((f) => ({ ...f, targetPests: e.target.value }))} placeholder="ants, roaches, spiders" style={sInput} />
-                    </div>
-                    <div>
-                      <label style={{ fontSize: 11, color: D.muted, display: "block", marginBottom: 2 }}>Application Zones (comma-separated)</label>
-                      <input value={form.applicationZones} onChange={(e) => setForm((f) => ({ ...f, applicationZones: e.target.value }))} placeholder="exterior perimeter, interior cracks" style={sInput} />
-                    </div>
+                  <div className="grid grid-cols-2 gap-[8px]">
+                    <Field label="Target Pests (comma-separated)">
+                      <Input
+                        value={form.targetPests}
+                        onChange={(e) =>
+                          setForm((f) => ({
+                            ...f,
+                            targetPests: e.target.value,
+                          }))
+                        }
+                        placeholder="ants, roaches, spiders"
+                      />
+                    </Field>
+                    <Field label="Application Zones (comma-separated)">
+                      <Input
+                        value={form.applicationZones}
+                        onChange={(e) =>
+                          setForm((f) => ({
+                            ...f,
+                            applicationZones: e.target.value,
+                          }))
+                        }
+                        placeholder="exterior perimeter, interior cracks"
+                      />
+                    </Field>
                   </div>
 
-                  <div>
-                    <label style={{ fontSize: 11, color: D.muted, display: "block", marginBottom: 2 }}>Public Summary (why we use it — 1-2 sentences)</label>
-                    <textarea value={form.publicSummary} onChange={(e) => setForm((f) => ({ ...f, publicSummary: e.target.value }))} rows={2} placeholder="Non-repellent transfer insecticide that eliminates entire colonies..." style={{ ...sInput, resize: "vertical" }} />
+                  <Field label="Public Summary (why we use it — 1-2 sentences)">
+                    <Textarea
+                      value={form.publicSummary}
+                      onChange={(e) =>
+                        setForm((f) => ({
+                          ...f,
+                          publicSummary: e.target.value,
+                        }))
+                      }
+                      rows={2}
+                      placeholder="Non-repellent transfer insecticide that eliminates entire colonies..."
+                      className="resize-y"
+                    />
+                  </Field>
+
+                  <Field label="Portal Summary (shown in service history)">
+                    <Textarea
+                      value={form.portalSummary}
+                      onChange={(e) =>
+                        setForm((f) => ({
+                          ...f,
+                          portalSummary: e.target.value,
+                        }))
+                      }
+                      rows={2}
+                      placeholder="Applied to your exterior perimeter to create a transfer zone..."
+                      className="resize-y"
+                    />
+                  </Field>
+
+                  <div className="grid grid-cols-2 gap-[8px]">
+                    <Field label="Customer Safety Summary">
+                      <Textarea
+                        value={form.customerSafetySummary}
+                        onChange={(e) =>
+                          setForm((f) => ({
+                            ...f,
+                            customerSafetySummary: e.target.value,
+                          }))
+                        }
+                        rows={2}
+                        placeholder="Applied according to label directions..."
+                        className="resize-y"
+                      />
+                    </Field>
+                    <Field label="Pet/Kid Guidance">
+                      <Textarea
+                        value={form.petKidGuidanceText}
+                        onChange={(e) =>
+                          setForm((f) => ({
+                            ...f,
+                            petKidGuidanceText: e.target.value,
+                          }))
+                        }
+                        rows={2}
+                        placeholder="Safe once dry — technician confirms timing"
+                        className="resize-y"
+                      />
+                    </Field>
                   </div>
 
-                  <div>
-                    <label style={{ fontSize: 11, color: D.muted, display: "block", marginBottom: 2 }}>Portal Summary (shown in service history)</label>
-                    <textarea value={form.portalSummary} onChange={(e) => setForm((f) => ({ ...f, portalSummary: e.target.value }))} rows={2} placeholder="Applied to your exterior perimeter to create a transfer zone..." style={{ ...sInput, resize: "vertical" }} />
-                  </div>
-
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                    <div>
-                      <label style={{ fontSize: 11, color: D.muted, display: "block", marginBottom: 2 }}>Customer Safety Summary</label>
-                      <textarea value={form.customerSafetySummary} onChange={(e) => setForm((f) => ({ ...f, customerSafetySummary: e.target.value }))} rows={2} placeholder="Applied according to label directions..." style={{ ...sInput, resize: "vertical" }} />
-                    </div>
-                    <div>
-                      <label style={{ fontSize: 11, color: D.muted, display: "block", marginBottom: 2 }}>Pet/Kid Guidance</label>
-                      <textarea value={form.petKidGuidanceText} onChange={(e) => setForm((f) => ({ ...f, petKidGuidanceText: e.target.value }))} rows={2} placeholder="Safe once dry — technician confirms timing" style={{ ...sInput, resize: "vertical" }} />
-                    </div>
-                  </div>
-
-                  <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-                    <button onClick={() => setEditing(null)} style={{ ...sBtn("transparent", D.muted), border: `1px solid ${D.border}`, fontSize: 11, padding: "4px 12px" }}>
+                  <div className="flex gap-[8px] justify-end">
+                    <Button
+                      onClick={() => setEditing(null)}
+                      variant="secondary"
+                    >
                       Cancel
-                    </button>
-                    <button onClick={() => save(p.id)} style={{ ...sBtn(D.green, "#fff"), fontSize: 11, padding: "4px 12px" }}>
+                    </Button>
+                    <Button onClick={() => save(p.id)} variant="primary">
                       Save Registry
-                    </button>
+                    </Button>
                   </div>
                 </div>
               )}
 
               {!isEditing && p.publicSummary && (
-                <div style={{ marginTop: 6, fontSize: 12, color: D.muted, fontStyle: "italic" }}>
+                <div className="mt-[6px] text-ui-body text-ink-secondary">
                   {p.publicSummary}
                 </div>
               )}
-            </div>
+            </Card>
           );
         })}
       </div>
@@ -4020,59 +4397,27 @@ function VendorsTab({ showToast }) {
       showToast("Failed: " + e.message);
     }
   };
-  if (loading)
-    return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
-        Loading vendors...
-      </div>
-    );
+  if (loading) return <ActionFeedback>Loading vendors...</ActionFeedback>;
   return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
-        gap: 12,
-      }}
-    >
+    <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-[12px]">
       {vendors.map((v) => (
-        <div key={v.id} style={{ ...sCard, marginBottom: 0 }}>
+        <Card key={v.id} className="p-5 mb-3 mb-[0px]">
           {" "}
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "flex-start",
-              marginBottom: 8,
-            }}
-          >
+          <div className="flex justify-between items-start mb-[8px]">
             {" "}
             <div>
-              <div style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>
+              <div className="text-ui-body font-medium text-zinc-900">
                 {v.name}
               </div>
-              <div style={{ fontSize: 11, color: D.muted }}>{v.type}</div>
+              <div className="text-ui-body text-ink-secondary">{v.type}</div>
             </div>{" "}
-            <div style={{ display: "flex", gap: 4 }}>
-              {v.scrapingEnabled && (
-                <span style={sBadge(`${D.green}22`, D.green)}>Scrape</span>
-              )}
-              {v.hasCredentials && (
-                <span style={sBadge(`${D.teal}22`, D.teal)}>Login</span>
-              )}
-              {!v.active && (
-                <span style={sBadge(`${D.red}22`, D.red)}>Inactive</span>
-              )}
+            <div className="flex gap-[4px]">
+              {v.scrapingEnabled && <Badge tone="neutral">Scrape</Badge>}
+              {v.hasCredentials && <Badge tone="neutral">Login</Badge>}
+              {!v.active && <Badge tone="alert">Inactive</Badge>}
             </div>{" "}
           </div>{" "}
-          <div
-            style={{
-              display: "flex",
-              gap: 12,
-              fontSize: 12,
-              color: D.muted,
-              marginBottom: 8,
-            }}
-          >
+          <div className="flex gap-[12px] text-ui-body text-ink-secondary mb-[8px]">
             <span>{v.productCount} products</span>
             <span>{v.bestPriceCount} best prices</span>
           </div>
@@ -4081,12 +4426,7 @@ function VendorsTab({ showToast }) {
               href={v.website}
               target="_blank"
               rel="noopener noreferrer"
-              style={{
-                fontSize: 11,
-                color: D.teal,
-                display: "block",
-                marginTop: 4,
-              }}
+              className="text-ui-body text-zinc-900 underline underline-offset-2 block mt-[4px]"
             >
               {v.website}
             </a>
@@ -4098,25 +4438,19 @@ function VendorsTab({ showToast }) {
               onCancel={() => setEditing(null)}
             />
           ) : (
-            <button
+            <Button
               onClick={() => setEditing(v.id)}
-              style={{
-                ...sBtn("transparent", D.muted),
-                border: `1px solid ${D.border}`,
-                marginTop: 8,
-                width: "100%",
-                fontSize: 11,
-              }}
+              variant="secondary"
+              className="mt-[8px] w-full"
             >
               Edit Credentials
-            </button>
+            </Button>
           )}
-        </div>
+        </Card>
       ))}
     </div>
   );
 }
-
 function VendorEditForm({ vendor, onSave, onCancel }) {
   const [form, setForm] = useState({
     loginUsername: vendor.loginUsername || "",
@@ -4126,61 +4460,54 @@ function VendorEditForm({ vendor, onSave, onCancel }) {
     loginUrl: vendor.loginUrl || "",
   });
   return (
-    <div
-      style={{
-        marginTop: 8,
-        padding: 12,
-        background: D.input,
-        borderRadius: 8,
-      }}
-    >
+    <Card className="mt-[8px] p-3 bg-zinc-50">
       {[
-        { key: "loginUsername", label: "Username" },
-        { key: "loginEmail", label: "Email" },
-        { key: "loginPassword", label: "Password", type: "password" },
-        { key: "accountNumber", label: "Account #" },
-        { key: "loginUrl", label: "Login URL" },
+        {
+          key: "loginUsername",
+          label: "Username",
+        },
+        {
+          key: "loginEmail",
+          label: "Email",
+        },
+        {
+          key: "loginPassword",
+          label: "Password",
+          type: "password",
+        },
+        {
+          key: "accountNumber",
+          label: "Account #",
+        },
+        {
+          key: "loginUrl",
+          label: "Login URL",
+        },
       ].map((f) => (
-        <div key={f.key} style={{ marginBottom: 6 }}>
-          <label
-            style={{
-              fontSize: 11,
-              color: D.muted,
-              display: "block",
-              marginBottom: 2,
-            }}
-          >
-            {f.label}
-          </label>{" "}
-          <input
+        <Field key={f.key} label={f.label} className="mb-[6px]">
+          <Input
             value={form[f.key]}
             onChange={(e) =>
-              setForm((p) => ({ ...p, [f.key]: e.target.value }))
+              setForm((p) => ({
+                ...p,
+                [f.key]: e.target.value,
+              }))
             }
             type={f.type || "text"}
             placeholder={f.label}
-            style={{ ...sInput, width: "100%" }}
+            className="w-full"
           />
-        </div>
+        </Field>
       ))}
-      <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
-        <button
-          onClick={() => onSave(vendor.id, form)}
-          style={sBtn(D.teal, D.white)}
-        >
+      <div className="flex gap-[6px] mt-[8px]">
+        <Button onClick={() => onSave(vendor.id, form)} variant="primary">
           Save
-        </button>
-        <button
-          onClick={onCancel}
-          style={{
-            ...sBtn("transparent", D.muted),
-            border: `1px solid ${D.border}`,
-          }}
-        >
+        </Button>
+        <Button onClick={onCancel} variant="secondary">
           Cancel
-        </button>
+        </Button>
       </div>{" "}
-    </div>
+    </Card>
   );
 }
 
@@ -4250,63 +4577,32 @@ function ApprovalsTab({ showToast, onUpdate }) {
       else n.add(id);
       return n;
     });
-  if (loading)
-    return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
-        Loading approvals...
-      </div>
-    );
+  if (loading) return <ActionFeedback>Loading approvals...</ActionFeedback>;
   return (
     <div>
       {selected.size > 0 && (
-        <div
-          style={{
-            display: "flex",
-            gap: 8,
-            alignItems: "center",
-            marginBottom: 12,
-            padding: "10px 16px",
-            background: D.card,
-            border: `1px solid ${D.teal}`,
-            borderRadius: 10,
-          }}
-        >
+        <Card className="flex gap-[8px] items-center mb-[12px] p-3">
           {" "}
-          <span style={{ fontSize: 13, fontWeight: 500, color: D.teal }}>
+          <span className="text-ui-body font-medium text-zinc-900">
             {selected.size} selected
           </span>{" "}
-          <button
-            onClick={() => handleBulk("approve")}
-            style={sBtn(D.green, D.white)}
-          >
+          <Button onClick={() => handleBulk("approve")} variant="primary">
             Approve All
-          </button>{" "}
-          <button
-            onClick={() => handleBulk("reject")}
-            style={sBtn(D.red, D.white)}
-          >
+          </Button>{" "}
+          <Button onClick={() => handleBulk("reject")} variant="danger">
             Reject All
-          </button>{" "}
-          <button
-            onClick={() => setSelected(new Set())}
-            style={{
-              ...sBtn("transparent", D.muted),
-              border: `1px solid ${D.border}`,
-            }}
-          >
+          </Button>{" "}
+          <Button onClick={() => setSelected(new Set())} variant="secondary">
             Clear
-          </button>{" "}
-        </div>
+          </Button>{" "}
+        </Card>
       )}
       {approvals.length === 0 ? (
-        <div
-          style={{ ...sCard, textAlign: "center", padding: 40, color: D.muted }}
-        >
-          <div style={{ fontSize: 24, marginBottom: 8 }}></div>No pending
-          approvals
-        </div>
+        <Card className="p-5 mb-3 text-center p-[40px] text-ink-secondary">
+          No pending approvals
+        </Card>
       ) : (
-        <div style={{ display: "grid", gap: 8 }}>
+        <div className="grid gap-[8px]">
           {approvals.map((a) => {
             const pct =
               a.price_change_pct ||
@@ -4315,91 +4611,62 @@ function ApprovalsTab({ showToast, onUpdate }) {
                 : null);
             const isUp = pct > 0;
             return (
-              <div
+              <Card
                 key={a.id}
-                style={{
-                  ...sCard,
-                  marginBottom: 0,
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 12,
-                }}
+                className="p-5 mb-3 mb-[0px] flex items-center gap-[12px]"
               >
                 {" "}
-                <input
-                  type="checkbox"
+                <Checkbox
+                  aria-label={`Select ${a.product_name} from ${a.vendor_name}`}
                   checked={selected.has(a.id)}
                   onChange={() => toggleSel(a.id)}
-                  style={{ accentColor: D.teal, cursor: "pointer" }}
                 />{" "}
-                <div style={{ flex: 1 }}>
+                <div className="flex-[1]">
                   {" "}
-                  <div
-                    style={{ fontSize: 14, fontWeight: 500, color: D.heading }}
-                  >
+                  <div className="text-ui-body font-medium text-zinc-900">
                     {a.product_name}
                   </div>{" "}
-                  <div style={{ fontSize: 12, color: D.muted }}>
+                  <div className="text-ui-body text-ink-secondary">
                     {a.vendor_name} · {a.category}
                   </div>
                   {a.notes && (
-                    <div
-                      style={{ fontSize: 11, color: D.purple, marginTop: 2 }}
-                    >
+                    <div className="text-ui-body text-zinc-900 mt-[2px]">
                       {a.notes}
                     </div>
                   )}
                 </div>{" "}
-                <div style={{ textAlign: "center", minWidth: 80 }}>
+                <div className="text-center min-w-[80px]">
                   {a.old_price && (
-                    <div
-                      style={{
-                        fontSize: 12,
-                        color: D.muted,
-                        textDecoration: "line-through",
-                      }}
-                    >
+                    <div className="text-ui-body text-ink-secondary line-through">
                       ${parseFloat(a.old_price).toFixed(2)}
                     </div>
                   )}
-                  <div
-                    style={{
-                      fontSize: 16,
-                      fontWeight: 700,
-                      fontFamily: "'JetBrains Mono', monospace",
-                      color: D.heading,
-                    }}
-                  >
+                  <div className="text-ui-body font-medium text-zinc-900">
                     ${parseFloat(a.new_price).toFixed(2)}
                   </div>{" "}
                 </div>
                 {pct !== null && (
-                  <span
-                    style={sBadge(
-                      isUp ? `${D.red}22` : `${D.green}22`,
-                      isUp ? D.red : D.green,
-                    )}
-                  >
+                  <Badge tone={isUp ? "strong" : "neutral"}>
                     {isUp ? "+" : ""}
                     {pct}%
-                  </span>
+                  </Badge>
                 )}
-                <div style={{ display: "flex", gap: 4 }}>
+                <div className="flex gap-[4px]">
                   {" "}
-                  <button
+                  <Button
                     onClick={() => handleAction(a.id, "approve")}
-                    style={sBtn(D.green, D.white)}
+                    variant="primary"
                   >
                     Approve
-                  </button>{" "}
-                  <button
+                  </Button>{" "}
+                  <Button
                     onClick={() => handleAction(a.id, "reject")}
-                    style={sBtn(D.red, D.white)}
+                    variant="danger"
                   >
                     Reject
-                  </button>{" "}
+                  </Button>{" "}
                 </div>{" "}
-              </div>
+              </Card>
             );
           })}
         </div>
@@ -4416,17 +4683,36 @@ function costSourceLabel(product) {
   if (product.costSource === "best_price_unit_size") return "Best price";
   return product.costWarning ? "Missing" : "Fallback";
 }
-
 const PROTOCOL_FILTERS = [
-  { key: "all", label: "All" },
-  { key: "pest", label: "Pest" },
-  { key: "termite", label: "Termite" },
-  { key: "lawn", label: "Lawn" },
-  { key: "mosquito", label: "Mosquito" },
-  { key: "rodent", label: "Rodent" },
-  { key: "tree_shrub", label: "Tree & Shrub" },
+  {
+    key: "all",
+    label: "All",
+  },
+  {
+    key: "pest",
+    label: "Pest",
+  },
+  {
+    key: "termite",
+    label: "Termite",
+  },
+  {
+    key: "lawn",
+    label: "Lawn",
+  },
+  {
+    key: "mosquito",
+    label: "Mosquito",
+  },
+  {
+    key: "rodent",
+    label: "Rodent",
+  },
+  {
+    key: "tree_shrub",
+    label: "Tree & Shrub",
+  },
 ];
-
 function protocolLineForService(serviceType) {
   const value = String(serviceType || "").toLowerCase();
   if (
@@ -4442,7 +4728,6 @@ function protocolLineForService(serviceType) {
   if (value.includes("tree") || value.includes("shrub")) return "tree_shrub";
   return "pest";
 }
-
 const DEFAULT_PROTOCOL_SERVICE = {
   pest: "General Pest Perimeter",
   termite: "Termite Bait Station",
@@ -4451,7 +4736,6 @@ const DEFAULT_PROTOCOL_SERVICE = {
   rodent: "Rodent Control",
   tree_shrub: "Tree & Shrub",
 };
-
 function ProtocolsTab({
   showToast,
   initialServiceLine = "all",
@@ -4484,7 +4768,6 @@ function ProtocolsTab({
   const [newServiceType, setNewServiceType] = useState("");
   const [showNewService, setShowNewService] = useState(false);
   const [appliedDeepLink, setAppliedDeepLink] = useState(false);
-
   const load = async () => {
     const [sData, pData, hData] = await Promise.all([
       adminFetch("/admin/inventory/service-usage"),
@@ -4499,7 +4782,6 @@ function ProtocolsTab({
   useEffect(() => {
     load();
   }, []);
-
   useEffect(() => {
     if (loading || appliedDeepLink || normalizedInitialLine === "all") return;
     setAppliedDeepLink(true);
@@ -4530,7 +4812,6 @@ function ProtocolsTab({
     services,
     showToast,
   ]);
-
   const startEdit = (row) => {
     setEditingRow(row.id);
     setEditForm({
@@ -4598,14 +4879,7 @@ function ProtocolsTab({
       showToast(`Failed: ${e.message}`);
     }
   };
-
-  if (loading)
-    return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
-        Loading protocols...
-      </div>
-    );
-
+  if (loading) return <ActionFeedback>Loading protocols...</ActionFeedback>;
   const unitOpts = [
     "oz",
     "ml",
@@ -4625,7 +4899,6 @@ function ProtocolsTab({
       : services.filter(
           (svc) => protocolLineForService(svc.serviceType) === serviceFilter,
         );
-
   const lineLabel = (lineKey) =>
     PROTOCOL_FILTERS.find((f) => f.key === lineKey)?.label || lineKey;
   const firstServiceForLine = (lineKey) =>
@@ -4652,341 +4925,190 @@ function ProtocolsTab({
     setCostHighlightLine(lineKey);
     showToast(`Highlighted missing cost data for ${lineLabel(lineKey)}`);
   };
-
   return (
     <div>
       {" "}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          marginBottom: 16,
-        }}
-      >
+      <div className="flex justify-between items-center mb-[16px]">
         {" "}
         <div>
-          <div style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>
+          <div className="text-ui-body font-medium text-zinc-900">
             Treatment Protocols by Service Line
           </div>{" "}
-          <div style={{ fontSize: 12, color: D.muted }}>
+          <div className="text-ui-body text-ink-secondary">
             Define which products each service uses, at what rates — drives COGS
             calculations
           </div>
         </div>{" "}
-        <button
+        <Button
           onClick={() => setShowNewService(!showNewService)}
-          style={sBtn(D.green, D.white)}
+          variant="primary"
         >
           + New Service Type
-        </button>{" "}
+        </Button>{" "}
       </div>
       {health?.lines?.length > 0 && (
-        <div style={{ ...sCard, padding: 16 }}>
+        <Card className="p-5 mb-3 p-[16px]">
           {" "}
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              gap: 12,
-              alignItems: "center",
-              marginBottom: 12,
-            }}
-          >
+          <div className="flex justify-between gap-[12px] items-center mb-[12px]">
             {" "}
             <div>
               {" "}
-              <div style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>
+              <div className="text-ui-body font-medium text-zinc-900">
                 Protocol Health
               </div>{" "}
-              <div style={{ fontSize: 11, color: D.muted }}>
+              <div className="text-ui-body text-ink-secondary">
                 Template coverage, linked inventory COGS rows, and missing cost
                 warnings
               </div>{" "}
             </div>{" "}
-            <button
-              onClick={load}
-              style={{
-                ...sBtn("transparent", D.muted),
-                border: `1px solid ${D.border}`,
-                fontSize: 11,
-                padding: "6px 10px",
-              }}
-            >
+            <Button onClick={load} variant="secondary">
               Refresh
-            </button>{" "}
+            </Button>{" "}
           </div>{" "}
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(155px, 1fr))",
-              gap: 8,
-            }}
-          >
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(155px,1fr))] gap-[8px]">
             {health.lines.map((line) => {
               const label = lineLabel(line.serviceLine);
-              const color =
-                line.status === "healthy"
-                  ? D.green
-                  : line.status === "warning"
-                    ? D.amber
-                    : D.red;
               const needsCogs = line.cogsRows === 0;
               const needsCosts = line.missingCostRows > 0;
+              // Main colored these by line.status (healthy/warning/missing),
+              // not by the needsCogs/needsCosts booleans — a "warning" line
+              // was amber, only "missing" was red.
+              const lineTone =
+                line.status === "warning" ? "warn" : line.status === "healthy" ? "neutral" : "alert";
               return (
-                <div
+                <Card
                   key={line.serviceLine}
-                  style={{
-                    textAlign: "left",
-                    background: D.input,
-                    border: `1px solid ${color}55`,
-                    borderRadius: 8,
-                    padding: 10,
-                  }}
                   title={(line.warnings || [])
                     .map((w) => `${w.serviceType}: ${w.warning}`)
                     .join("\n")}
+                  className={cn(
+                    "text-left p-3",
+                    lineTone === "alert" && "border-alert-fg",
+                    lineTone === "warn" && "border-warn-fg",
+                  )}
                 >
                   {" "}
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      gap: 8,
-                    }}
-                  >
+                  <div className="flex justify-between items-center gap-[8px]">
                     {" "}
-                    <div
-                      style={{
-                        fontSize: 12,
-                        fontWeight: 700,
-                        color: D.heading,
-                      }}
-                    >
+                    <div className="text-ui-body font-medium text-zinc-900">
                       {label}
                     </div>{" "}
-                    <span style={sBadge(`${color}22`, color)}>
+                    <Badge tone={lineTone}>
                       {line.status}
-                    </span>{" "}
+                    </Badge>{" "}
                   </div>{" "}
-                  <div
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: "repeat(3, 1fr)",
-                      gap: 6,
-                      marginTop: 8,
-                    }}
-                  >
+                  <div className="grid grid-cols-3 gap-[6px] mt-[8px]">
                     {" "}
                     <div>
-                      <div
-                        style={{
-                          fontFamily: "'JetBrains Mono', monospace",
-                          fontSize: 15,
-                          color: D.heading,
-                        }}
-                      >
+                      <div className="text-ui-body text-zinc-900">
                         {line.templateCount}
                       </div>
-                      <div
-                        style={{
-                          fontSize: 11,
-                          color: D.muted,
-                          textTransform: "uppercase",
-                        }}
-                      >
+                      <div className="text-ui-body text-ink-secondary">
                         Templates
                       </div>
                     </div>{" "}
                     <div>
-                      <div
-                        style={{
-                          fontFamily: "'JetBrains Mono', monospace",
-                          fontSize: 15,
-                          color: D.heading,
-                        }}
-                      >
+                      <div className="text-ui-body text-zinc-900">
                         {line.cogsRows}
                       </div>
-                      <div
-                        style={{
-                          fontSize: 11,
-                          color: D.muted,
-                          textTransform: "uppercase",
-                        }}
-                      >
+                      <div className="text-ui-body text-ink-secondary">
                         COGS
                       </div>
                     </div>{" "}
                     <div>
-                      <div
-                        style={{
-                          fontFamily: "'JetBrains Mono', monospace",
-                          fontSize: 15,
-                          color,
-                        }}
-                      >
-                        {line.missingCostRows}
-                      </div>
-                      <div
-                        style={{
-                          fontSize: 11,
-                          color: D.muted,
-                          textTransform: "uppercase",
-                        }}
-                      >
+                      <div className="text-ui-body">{line.missingCostRows}</div>
+                      <div className="text-ui-body text-ink-secondary">
                         Missing
                       </div>
                     </div>{" "}
                   </div>{" "}
-                  <div
-                    style={{
-                      display: "flex",
-                      gap: 6,
-                      flexWrap: "wrap",
-                      marginTop: 10,
-                    }}
-                  >
+                  <div className="flex gap-[6px] flex-wrap mt-[10px]">
                     {" "}
-                    <button
+                    <Button
                       onClick={() => filterToLine(line.serviceLine)}
-                      style={{
-                        ...sBtn("transparent", D.teal),
-                        border: `1px solid ${D.border}`,
-                        fontSize: 11,
-                        padding: "5px 8px",
-                      }}
+                      variant="secondary"
                     >
                       View
-                    </button>
+                    </Button>
                     {needsCogs && (
-                      <button
+                      <Button
                         onClick={() => openAddForLine(line.serviceLine)}
-                        style={{
-                          ...sBtn(D.teal, D.white),
-                          fontSize: 11,
-                          padding: "5px 8px",
-                        }}
+                        variant="primary"
                       >
                         + COGS
-                      </button>
+                      </Button>
                     )}
                     {needsCosts && (
-                      <button
+                      <Button
                         onClick={() => highlightMissingCosts(line.serviceLine)}
-                        style={{
-                          ...sBtn(`${D.amber}22`, D.amber),
-                          border: `1px solid ${D.amber}44`,
-                          fontSize: 11,
-                          padding: "5px 8px",
-                        }}
+                        variant="primary"
                       >
                         Cost Data
-                      </button>
+                      </Button>
                     )}
-                    <button
+                    <Button
                       onClick={() => {
                         window.location.href = "/admin/dispatch?tab=protocols";
                       }}
-                      style={{
-                        ...sBtn(
-                          line.templateCount === 0
-                            ? `${D.red}12`
-                            : "transparent",
-                          line.templateCount === 0 ? D.red : D.muted,
-                        ),
-                        border: `1px solid ${line.templateCount === 0 ? `${D.red}33` : D.border}`,
-                        fontSize: 11,
-                        padding: "5px 8px",
-                      }}
+                      variant={
+                        line.templateCount === 0 ? "danger" : "secondary"
+                      }
                     >
                       Templates
-                    </button>{" "}
+                    </Button>{" "}
                   </div>{" "}
-                </div>
+                </Card>
               );
             })}
           </div>{" "}
-        </div>
+        </Card>
       )}
-      <div
-        style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}
-      >
+      <div className="flex gap-[6px] flex-wrap mb-[14px]">
         {PROTOCOL_FILTERS.map((filter) => {
           const active = serviceFilter === filter.key;
           return (
-            <button
+            <Button
               key={filter.key}
               onClick={() => {
                 setServiceFilter(filter.key);
                 setCostHighlightLine(null);
               }}
-              style={{
-                ...sBtn(
-                  active ? D.teal : "transparent",
-                  active ? D.white : D.muted,
-                ),
-                border: `1px solid ${active ? D.teal : D.border}`,
-                fontSize: 11,
-                padding: "6px 10px",
-              }}
+              variant={active ? "primary" : "secondary"}
             >
               {filter.label}
-            </button>
+            </Button>
           );
         })}
       </div>
       {showNewService && (
-        <div
-          style={{
-            ...sCard,
-            display: "flex",
-            gap: 8,
-            alignItems: "center",
-            border: `1px solid ${D.green}44`,
-          }}
-        >
+        <Card className="p-5 mb-3 flex gap-[8px] items-center">
           {" "}
-          <input
+          <Input
             value={newServiceType}
             onChange={(e) => setNewServiceType(e.target.value)}
             placeholder="Service type (e.g. Mole Trapping)"
-            style={{ ...sInput, flex: 1 }}
+            className="flex-[1]"
           />{" "}
-          <button
+          <Button
             onClick={() => {
               if (newServiceType.trim()) {
                 setShowAdd(newServiceType.trim());
                 setShowNewService(false);
               }
             }}
-            style={sBtn(D.green, D.white)}
+            variant="primary"
           >
             Create
-          </button>{" "}
-          <button
-            onClick={() => setShowNewService(false)}
-            style={{
-              ...sBtn("transparent", D.muted),
-              border: `1px solid ${D.border}`,
-            }}
-          >
+          </Button>{" "}
+          <Button onClick={() => setShowNewService(false)} variant="secondary">
             Cancel
-          </button>{" "}
-        </div>
+          </Button>{" "}
+        </Card>
       )}
       {showAdd && !services.find((s) => s.serviceType === showAdd) && (
-        <div style={{ ...sCard, border: `1px solid ${D.teal}44` }}>
+        <Card className="p-5 mb-3">
           {" "}
-          <div
-            style={{
-              fontSize: 15,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 12,
-            }}
-          >
+          <div className="text-ui-body font-medium text-zinc-900 mb-[12px]">
             {showAdd}
           </div>{" "}
           <AddProtocolRow
@@ -4997,21 +5119,17 @@ function ProtocolsTab({
             onAdd={() => addRow(showAdd)}
             onCancel={() => setShowAdd(null)}
           />{" "}
-        </div>
+        </Card>
       )}
       {services.length === 0 && !showAdd && (
-        <div
-          style={{ ...sCard, textAlign: "center", padding: 40, color: D.muted }}
-        >
+        <Card className="p-5 mb-3 text-center p-[40px] text-ink-secondary">
           No protocols defined yet.
-        </div>
+        </Card>
       )}
       {services.length > 0 && visibleServices.length === 0 && !showAdd && (
-        <div
-          style={{ ...sCard, textAlign: "center", padding: 40, color: D.muted }}
-        >
+        <Card className="p-5 mb-3 text-center p-[40px] text-ink-secondary">
           No protocols in this service category yet.
-        </div>
+        </Card>
       )}
       {visibleServices.map((svc) => {
         const serviceLine = protocolLineForService(svc.serviceType);
@@ -5019,334 +5137,220 @@ function ProtocolsTab({
           costHighlightLine === serviceLine &&
           svc.products.some((p) => p.costWarning || !p.costPerApp);
         return (
-          <div
+          <Card
             key={svc.serviceType}
-            style={{
-              ...sCard,
-              border: highlightService ? `1px solid ${D.amber}` : sCard.border,
-              boxShadow: highlightService
-                ? `0 0 0 3px ${D.amber}18`
-                : sCard.boxShadow,
-            }}
+            className={
+              highlightService
+                ? "p-5 mb-3 border-warn-fg ring-2 ring-warn-bg"
+                : "p-5 mb-3"
+            }
           >
             {" "}
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                marginBottom: 12,
-              }}
-            >
+            <div className="flex justify-between items-center mb-[12px]">
               {" "}
-              <div style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>
+              <div className="text-ui-body font-medium text-zinc-900">
                 {svc.serviceType}
               </div>{" "}
-              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <div className="flex gap-[8px] items-center">
                 {" "}
-                <div
-                  style={{
-                    fontFamily: "'JetBrains Mono', monospace",
-                    fontSize: 16,
-                    fontWeight: 700,
-                    color: D.green,
-                  }}
-                >
+                <div className="text-ui-body font-medium text-zinc-900">
                   ${svc.totalCost.toFixed(2)}/app
                 </div>{" "}
-                <button
+                <Button
                   onClick={() => {
                     setCostHighlightLine(null);
                     setShowAdd(
                       showAdd === svc.serviceType ? null : svc.serviceType,
                     );
                   }}
-                  style={{
-                    ...sBtn(D.teal, D.white),
-                    fontSize: 11,
-                    padding: "6px 12px",
-                  }}
+                  variant="primary"
                 >
                   + Product
-                </button>{" "}
+                </Button>{" "}
               </div>{" "}
             </div>{" "}
             {/* overflow-x wrapper: phones scroll the wide table instead of
-                clipping it; index.css adds the scroll-shadow affordance. */}
-            <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr>
-                  {[
-                    "Product",
-                    "Usage",
-                    "Per 1000sf",
-                    "Best Price",
-                    "Cost/App",
-                    "Cost Source",
-                    "Primary",
-                    "Notes",
-                    "",
-                  ].map((h) => (
-                    <th key={h} style={thS}>
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {svc.products.map((p) => {
-                  const highlightProductCost =
-                    costHighlightLine === serviceLine &&
-                    (p.costWarning || !p.costPerApp);
-                  return editingRow === p.id ? (
-                    <tr key={p.id} style={{ background: `${D.teal}10` }}>
-                      <td style={{ ...tdS, fontWeight: 500 }}>
-                        {p.productName}
-                      </td>
-                      <td style={tdS}>
-                        <div style={{ display: "flex", gap: 4 }}>
-                          <input
-                            value={editForm.usageAmount}
+                 clipping it; index.css adds the scroll-shadow affordance. */}
+            <div className="overflow-x-auto">
+              <Table className="w-full">
+                <THead>
+                  <TR>
+                    {[
+                      "Product",
+                      "Usage",
+                      "Per 1000sf",
+                      "Best Price",
+                      "Cost/App",
+                      "Cost Source",
+                      "Primary",
+                      "Notes",
+                      "",
+                    ].map((h) => (
+                      <TH key={h}>{h}</TH>
+                    ))}
+                  </TR>
+                </THead>
+                <TBody>
+                  {svc.products.map((p) => {
+                    const highlightProductCost =
+                      costHighlightLine === serviceLine &&
+                      (p.costWarning || !p.costPerApp);
+                    return editingRow === p.id ? (
+                      <TR key={p.id} className="bg-zinc-50">
+                        <TD className="font-medium">{p.productName}</TD>
+                        <TD>
+                          <div className="flex gap-[4px]">
+                            <Input
+                              value={editForm.usageAmount}
+                              onChange={(e) =>
+                                setEditForm((f) => ({
+                                  ...f,
+                                  usageAmount: e.target.value,
+                                }))
+                              }
+                              type="number"
+                              step="0.01"
+                              className="w-[60px]"
+                            />
+
+                            <Select
+                              value={editForm.usageUnit}
+                              onChange={(e) =>
+                                setEditForm((f) => ({
+                                  ...f,
+                                  usageUnit: e.target.value,
+                                }))
+                              }
+                              className="w-[70px]"
+                            >
+                              {unitOpts.map((u) => (
+                                <option key={u} value={u}>
+                                  {u}
+                                </option>
+                              ))}
+                            </Select>
+                          </div>
+                        </TD>
+                        <TD>
+                          <Input
+                            value={editForm.usagePer1000sf}
                             onChange={(e) =>
                               setEditForm((f) => ({
                                 ...f,
-                                usageAmount: e.target.value,
+                                usagePer1000sf: e.target.value,
                               }))
                             }
                             type="number"
-                            step="0.01"
-                            style={{ ...sInput, width: 60 }}
+                            step="0.001"
+                            placeholder="—"
+                            className="w-[70px]"
                           />
-                          <select
-                            value={editForm.usageUnit}
+                        </TD>
+                        <TD nums>
+                          {p.bestPrice
+                            ? `$${parseFloat(p.bestPrice).toFixed(2)}`
+                            : "—"}
+                        </TD>
+                        <TD nums className="text-zinc-900">
+                          {p.costPerApp ? `$${p.costPerApp.toFixed(2)}` : "—"}
+                        </TD>
+                        <TD className="text-ink-secondary">
+                          {costSourceLabel(p)}
+                        </TD>
+                        <TD>
+                          <Checkbox
+                            aria-label={`Set ${p.productName} as primary`}
+                            checked={editForm.isPrimary}
                             onChange={(e) =>
                               setEditForm((f) => ({
                                 ...f,
-                                usageUnit: e.target.value,
+                                isPrimary: e.target.checked,
                               }))
                             }
-                            style={{ ...sInput, width: 70 }}
-                          >
-                            {unitOpts.map((u) => (
-                              <option key={u} value={u}>
-                                {u}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                      </td>
-                      <td style={tdS}>
-                        <input
-                          value={editForm.usagePer1000sf}
-                          onChange={(e) =>
-                            setEditForm((f) => ({
-                              ...f,
-                              usagePer1000sf: e.target.value,
-                            }))
-                          }
-                          type="number"
-                          step="0.001"
-                          placeholder="—"
-                          style={{ ...sInput, width: 70 }}
-                        />
-                      </td>
-                      <td
-                        style={{
-                          ...tdS,
-                          fontFamily: "'JetBrains Mono', monospace",
-                        }}
+                          />
+                        </TD>
+                        <TD>
+                          <Input
+                            value={editForm.notes}
+                            onChange={(e) =>
+                              setEditForm((f) => ({
+                                ...f,
+                                notes: e.target.value,
+                              }))
+                            }
+                            className="w-full"
+                          />
+                        </TD>
+                        <TD className="w-[80px]">
+                          <div className="flex gap-[4px]">
+                            <Button
+                              onClick={() => saveEdit(p.id)}
+                              variant="primary"
+                            >
+                              Save
+                            </Button>
+                            <Button
+                              onClick={() => setEditingRow(null)}
+                              variant="secondary"
+                            >
+                              ×
+                            </Button>
+                          </div>
+                        </TD>
+                      </TR>
+                    ) : (
+                      <TR
+                        key={p.id}
+                        className={highlightProductCost ? "bg-warn-bg" : ""}
                       >
-                        {p.bestPrice
-                          ? `$${parseFloat(p.bestPrice).toFixed(2)}`
-                          : "—"}
-                      </td>
-                      <td
-                        style={{
-                          ...tdS,
-                          fontFamily: "'JetBrains Mono', monospace",
-                          color: D.green,
-                        }}
-                      >
-                        {p.costPerApp ? `$${p.costPerApp.toFixed(2)}` : "—"}
-                      </td>
-                      <td style={{ ...tdS, fontSize: 11, color: D.muted }}>
-                        {costSourceLabel(p)}
-                      </td>
-                      <td style={tdS}>
-                        <input
-                          type="checkbox"
-                          checked={editForm.isPrimary}
-                          onChange={(e) =>
-                            setEditForm((f) => ({
-                              ...f,
-                              isPrimary: e.target.checked,
-                            }))
-                          }
-                          style={{ accentColor: D.teal }}
-                        />
-                      </td>
-                      <td style={tdS}>
-                        <input
-                          value={editForm.notes}
-                          onChange={(e) =>
-                            setEditForm((f) => ({
-                              ...f,
-                              notes: e.target.value,
-                            }))
-                          }
-                          style={{ ...sInput, width: "100%" }}
-                        />
-                      </td>
-                      <td style={{ ...tdS, width: 80 }}>
-                        <div style={{ display: "flex", gap: 4 }}>
-                          <button
-                            onClick={() => saveEdit(p.id)}
-                            style={{
-                              fontSize: 11,
-                              padding: "3px 6px",
-                              borderRadius: 4,
-                              border: "none",
-                              background: D.green,
-                              color: "#fff",
-                              cursor: "pointer",
-                            }}
-                          >
-                            Save
-                          </button>
-                          <button
-                            onClick={() => setEditingRow(null)}
-                            style={{
-                              fontSize: 11,
-                              padding: "3px 6px",
-                              borderRadius: 4,
-                              border: `1px solid ${D.border}`,
-                              background: "none",
-                              color: D.muted,
-                              cursor: "pointer",
-                            }}
-                          >
-                            ×
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ) : (
-                    <tr
-                      key={p.id}
-                      style={{
-                        background: highlightProductCost
-                          ? `${D.amber}12`
-                          : "transparent",
-                      }}
-                    >
-                      <td style={{ ...tdS, fontWeight: 500 }}>
-                        {p.productName}{" "}
-                        {p.isPrimary && (
-                          <span style={sBadge(`${D.teal}22`, D.teal)}>
-                            Primary
-                          </span>
-                        )}
-                      </td>
-                      <td style={{ ...tdS, fontSize: 12 }}>
-                        {p.usageAmount} {p.usageUnit}
-                      </td>
-                      <td style={{ ...tdS, fontSize: 12 }}>
-                        {p.usagePer1000sf || "—"}
-                      </td>
-                      <td
-                        style={{
-                          ...tdS,
-                          fontFamily: "'JetBrains Mono', monospace",
-                        }}
-                      >
-                        {p.bestPrice
-                          ? `$${parseFloat(p.bestPrice).toFixed(2)}`
-                          : "—"}
-                      </td>
-                      <td
-                        style={{
-                          ...tdS,
-                          fontFamily: "'JetBrains Mono', monospace",
-                          color: D.green,
-                        }}
-                      >
-                        {p.costPerApp ? `$${p.costPerApp.toFixed(2)}` : "—"}
-                      </td>
-                      <td
-                        style={{
-                          ...tdS,
-                          fontSize: 11,
-                          color: p.costWarning ? D.amber : D.muted,
-                        }}
-                        title={p.costWarning || ""}
-                      >
-                        {costSourceLabel(p)}
-                      </td>
-                      <td style={{ ...tdS, fontSize: 11 }}>
-                        {p.isPrimary ? "" : ""}
-                      </td>
-                      <td
-                        style={{
-                          ...tdS,
-                          fontSize: 11,
-                          color: D.muted,
-                          maxWidth: 200,
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {p.notes || "—"}
-                      </td>
-                      <td style={{ ...tdS, width: 80 }}>
-                        <div style={{ display: "flex", gap: 4 }}>
-                          {" "}
-                          <button
-                            onClick={() => startEdit(p)}
-                            style={{
-                              fontSize: 11,
-                              padding: "2px 6px",
-                              borderRadius: 4,
-                              border: `1px solid ${D.border}`,
-                              background: "none",
-                              color: D.teal,
-                              cursor: "pointer",
-                            }}
-                          >
-                            Edit
-                          </button>{" "}
-                          <button
-                            onClick={() => deleteRow(p.id)}
-                            style={{
-                              fontSize: 11,
-                              padding: "2px 6px",
-                              borderRadius: 4,
-                              border: "none",
-                              background: `${D.red}22`,
-                              color: D.red,
-                              cursor: "pointer",
-                            }}
-                          >
-                            ×
-                          </button>{" "}
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                        <TD className="font-medium">
+                          {p.productName}{" "}
+                          {p.isPrimary && <Badge tone="neutral">Primary</Badge>}
+                        </TD>
+                        <TD nums>
+                          {p.usageAmount} {p.usageUnit}
+                        </TD>
+                        <TD nums>{p.usagePer1000sf || "—"}</TD>
+                        <TD nums>
+                          {p.bestPrice
+                            ? `$${parseFloat(p.bestPrice).toFixed(2)}`
+                            : "—"}
+                        </TD>
+                        <TD nums className="text-zinc-900">
+                          {p.costPerApp ? `$${p.costPerApp.toFixed(2)}` : "—"}
+                        </TD>
+                        <TD title={p.costWarning || ""}>
+                          {costSourceLabel(p)}
+                        </TD>
+                        <TD>{p.isPrimary ? "" : ""}</TD>
+                        <TD className="text-ink-secondary max-w-[200px] overflow-hidden whitespace-nowrap text-ellipsis">
+                          {p.notes || "—"}
+                        </TD>
+                        <TD className="w-[80px]">
+                          <div className="flex gap-[4px]">
+                            {" "}
+                            <Button
+                              onClick={() => startEdit(p)}
+                              variant="secondary"
+                            >
+                              Edit
+                            </Button>{" "}
+                            <Button
+                              onClick={() => deleteRow(p.id)}
+                              variant="danger"
+                            >
+                              ×
+                            </Button>{" "}
+                          </div>
+                        </TD>
+                      </TR>
+                    );
+                  })}
+                </TBody>
+              </Table>
             </div>
             {showAdd === svc.serviceType && (
-              <div
-                style={{
-                  marginTop: 8,
-                  padding: 12,
-                  background: D.input,
-                  borderRadius: 8,
-                }}
-              >
+              <Card className="mt-[8px] p-3 bg-zinc-50">
                 {" "}
                 <AddProtocolRow
                   products={products}
@@ -5356,15 +5360,14 @@ function ProtocolsTab({
                   onAdd={() => addRow(svc.serviceType)}
                   onCancel={() => setShowAdd(null)}
                 />{" "}
-              </div>
+              </Card>
             )}
-          </div>
+          </Card>
         );
       })}
     </div>
   );
 }
-
 function AddProtocolRow({
   products,
   newRow,
@@ -5374,32 +5377,18 @@ function AddProtocolRow({
   onCancel,
 }) {
   return (
-    <div
-      style={{
-        display: "flex",
-        gap: 8,
-        alignItems: "flex-end",
-        flexWrap: "wrap",
-      }}
-    >
+    <div className="flex gap-[8px] items-end flex-wrap">
       {" "}
-      <div>
-        <label
-          style={{
-            fontSize: 11,
-            color: D.muted,
-            display: "block",
-            marginBottom: 2,
-          }}
-        >
-          Product
-        </label>{" "}
-        <select
+      <Field label="Product">
+        <Select
           value={newRow.productId}
           onChange={(e) =>
-            setNewRow((r) => ({ ...r, productId: e.target.value }))
+            setNewRow((r) => ({
+              ...r,
+              productId: e.target.value,
+            }))
           }
-          style={{ ...sInput, width: 200 }}
+          className="w-[200px]"
         >
           <option value="">Select...</option>
           {products.map((p) => (
@@ -5407,117 +5396,86 @@ function AddProtocolRow({
               {p.name}
             </option>
           ))}
-        </select>
-      </div>{" "}
-      <div>
-        <label
-          style={{
-            fontSize: 11,
-            color: D.muted,
-            display: "block",
-            marginBottom: 2,
-          }}
-        >
-          Amount
-        </label>{" "}
-        <input
+        </Select>
+      </Field>{" "}
+      <Field label="Amount">
+        <Input
           value={newRow.usageAmount}
           onChange={(e) =>
-            setNewRow((r) => ({ ...r, usageAmount: e.target.value }))
+            setNewRow((r) => ({
+              ...r,
+              usageAmount: e.target.value,
+            }))
           }
           type="number"
           step="0.01"
-          style={{ ...sInput, width: 70 }}
+          className="w-[70px]"
         />
-      </div>{" "}
-      <div>
-        <label
-          style={{
-            fontSize: 11,
-            color: D.muted,
-            display: "block",
-            marginBottom: 2,
-          }}
-        >
-          Unit
-        </label>{" "}
-        <select
+      </Field>{" "}
+      <Field label="Unit">
+        <Select
           value={newRow.usageUnit}
           onChange={(e) =>
-            setNewRow((r) => ({ ...r, usageUnit: e.target.value }))
+            setNewRow((r) => ({
+              ...r,
+              usageUnit: e.target.value,
+            }))
           }
-          style={{ ...sInput, width: 80 }}
+          className="w-[80px]"
         >
           {unitOpts.map((u) => (
             <option key={u} value={u}>
               {u}
             </option>
           ))}
-        </select>
-      </div>{" "}
-      <div>
-        <label
-          style={{
-            fontSize: 11,
-            color: D.muted,
-            display: "block",
-            marginBottom: 2,
-          }}
-        >
-          Per 1000sf
-        </label>{" "}
-        <input
+        </Select>
+      </Field>{" "}
+      <Field label="Per 1000sf">
+        <Input
           value={newRow.usagePer1000sf}
           onChange={(e) =>
-            setNewRow((r) => ({ ...r, usagePer1000sf: e.target.value }))
+            setNewRow((r) => ({
+              ...r,
+              usagePer1000sf: e.target.value,
+            }))
           }
           type="number"
           step="0.001"
           placeholder="—"
-          style={{ ...sInput, width: 70 }}
+          className="w-[70px]"
         />
-      </div>{" "}
-      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-        <input
-          type="checkbox"
+      </Field>{" "}
+      <div className="flex items-center">
+        <Checkbox
+          label="Primary"
           checked={newRow.isPrimary}
           onChange={(e) =>
-            setNewRow((r) => ({ ...r, isPrimary: e.target.checked }))
+            setNewRow((r) => ({
+              ...r,
+              isPrimary: e.target.checked,
+            }))
           }
-          style={{ accentColor: D.teal }}
         />
-        <label style={{ fontSize: 11, color: D.muted }}>Primary</label>
       </div>{" "}
-      <div>
-        <label
-          style={{
-            fontSize: 11,
-            color: D.muted,
-            display: "block",
-            marginBottom: 2,
-          }}
-        >
-          Notes
-        </label>{" "}
-        <input
+      <Field label="Notes">
+        <Input
           value={newRow.notes}
-          onChange={(e) => setNewRow((r) => ({ ...r, notes: e.target.value }))}
+          onChange={(e) =>
+            setNewRow((r) => ({
+              ...r,
+              notes: e.target.value,
+            }))
+          }
           placeholder="Usage notes..."
-          style={{ ...sInput, width: 150 }}
+          className="w-[150px]"
         />
-      </div>{" "}
-      <button onClick={onAdd} style={sBtn(D.green, D.white)}>
+      </Field>{" "}
+      <Button onClick={onAdd} variant="primary">
         Add
-      </button>{" "}
-      <button
-        onClick={onCancel}
-        style={{
-          ...sBtn("transparent", D.muted),
-          border: `1px solid ${D.border}`,
-        }}
-      >
+      </Button>{" "}
+      <Button onClick={onCancel} variant="secondary">
         Cancel
-      </button>{" "}
+      </Button>{" "}
     </div>
   );
 }
@@ -5536,130 +5494,74 @@ function MarginsTab({ showToast }) {
       })
       .catch(() => setLoading(false));
   }, []);
-  if (loading)
-    return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
-        Loading service margins...
-      </div>
-    );
+  if (loading) return <ActionFeedback>Loading service margins...</ActionFeedback>;
   return (
     <div>
       {" "}
-      <div
-        style={{
-          fontSize: 15,
-          fontWeight: 500,
-          color: D.heading,
-          marginBottom: 16,
-        }}
-      >
+      <div className="text-ui-body font-medium text-zinc-900 mb-[16px]">
         COGS by Service Line
       </div>
       {services.length === 0 ? (
-        <div
-          style={{ ...sCard, textAlign: "center", padding: 40, color: D.muted }}
-        >
+        <Card className="p-5 mb-3 text-center p-[40px] text-ink-secondary">
           No service product mappings yet.
-        </div>
+        </Card>
       ) : (
         services.map((svc) => (
-          <div key={svc.serviceType} style={{ ...sCard }}>
+          <Card key={svc.serviceType} className="p-5 mb-3">
             {" "}
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                marginBottom: 12,
-              }}
-            >
+            <div className="flex justify-between items-center mb-[12px]">
               {" "}
-              <div style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>
+              <div className="text-ui-body font-medium text-zinc-900">
                 {svc.serviceType}
               </div>{" "}
-              <div
-                style={{
-                  fontFamily: "'JetBrains Mono', monospace",
-                  fontSize: 16,
-                  fontWeight: 700,
-                  color: D.green,
-                }}
-              >
+              <div className="text-ui-body font-medium text-zinc-900">
                 ${svc.totalCost.toFixed(2)}/app
               </div>{" "}
             </div>{" "}
             {/* overflow-x wrapper: phones scroll the wide table instead of
-                clipping it; index.css adds the scroll-shadow affordance. */}
-            <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr>
-                  {[
-                    "Product",
-                    "Usage",
-                    "Per 1000sf",
-                    "Best Price",
-                    "Cost/App",
-                    "Cost Source",
-                  ].map((h) => (
-                    <th key={h} style={thS}>
-                      {h}
-                    </th>
+             clipping it; index.css adds the scroll-shadow affordance. */}
+            <div className="overflow-x-auto">
+              <Table className="w-full">
+                <THead>
+                  <TR>
+                    {[
+                      "Product",
+                      "Usage",
+                      "Per 1000sf",
+                      "Best Price",
+                      "Cost/App",
+                      "Cost Source",
+                    ].map((h) => (
+                      <TH key={h}>{h}</TH>
+                    ))}
+                  </TR>
+                </THead>
+                <TBody>
+                  {svc.products.map((p) => (
+                    <TR key={p.id}>
+                      <TD className="font-medium">
+                        {p.productName}{" "}
+                        {p.isPrimary && <Badge tone="neutral">Primary</Badge>}
+                      </TD>
+                      <TD nums>
+                        {p.usageAmount} {p.usageUnit}
+                      </TD>
+                      <TD nums>{p.usagePer1000sf || "—"}</TD>
+                      <TD nums>
+                        {p.bestPrice
+                          ? `$${parseFloat(p.bestPrice).toFixed(2)}`
+                          : "—"}
+                      </TD>
+                      <TD nums className="text-zinc-900">
+                        {p.costPerApp ? `$${p.costPerApp.toFixed(2)}` : "—"}
+                      </TD>
+                      <TD title={p.costWarning || ""}>{costSourceLabel(p)}</TD>
+                    </TR>
                   ))}
-                </tr>
-              </thead>
-              <tbody>
-                {svc.products.map((p) => (
-                  <tr key={p.id}>
-                    <td style={{ ...tdS, fontWeight: 500 }}>
-                      {p.productName}{" "}
-                      {p.isPrimary && (
-                        <span style={sBadge(`${D.teal}22`, D.teal)}>
-                          Primary
-                        </span>
-                      )}
-                    </td>
-                    <td style={{ ...tdS, fontSize: 12 }}>
-                      {p.usageAmount} {p.usageUnit}
-                    </td>
-                    <td style={{ ...tdS, fontSize: 12 }}>
-                      {p.usagePer1000sf || "—"}
-                    </td>
-                    <td
-                      style={{
-                        ...tdS,
-                        fontFamily: "'JetBrains Mono', monospace",
-                      }}
-                    >
-                      {p.bestPrice
-                        ? `$${parseFloat(p.bestPrice).toFixed(2)}`
-                        : "—"}
-                    </td>
-                    <td
-                      style={{
-                        ...tdS,
-                        fontFamily: "'JetBrains Mono', monospace",
-                        color: D.green,
-                      }}
-                    >
-                      {p.costPerApp ? `$${p.costPerApp.toFixed(2)}` : "—"}
-                    </td>
-                    <td
-                      style={{
-                        ...tdS,
-                        fontSize: 11,
-                        color: p.costWarning ? D.amber : D.muted,
-                      }}
-                      title={p.costWarning || ""}
-                    >
-                      {costSourceLabel(p)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>{" "}
+                </TBody>
+              </Table>{" "}
             </div>
-          </div>
+          </Card>
         ))
       )}
     </div>
@@ -5697,177 +5599,101 @@ function ScrapeTab({ showToast }) {
       showToast(`Failed: ${e.message}`);
     }
   };
-  if (loading)
-    return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
-        Loading scrape data...
-      </div>
-    );
+  if (loading) return <ActionFeedback>Loading scrape data...</ActionFeedback>;
   return (
     <div>
       {" "}
-      <div
-        style={{
-          fontSize: 15,
-          fontWeight: 500,
-          color: D.heading,
-          marginBottom: 16,
-        }}
-      >
+      <div className="text-ui-body font-medium text-zinc-900 mb-[16px]">
         Vendor Scrape Status
       </div>{" "}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
-          gap: 10,
-          marginBottom: 24,
-        }}
-      >
+      <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-[10px] mb-[24px]">
         {vendors.map((v) => {
-          const sc =
-            v.lastScrapeStatus === "completed"
-              ? D.green
-              : v.lastScrapeStatus === "running"
-                ? D.amber
-                : v.lastScrapeStatus === "failed"
-                  ? D.red
-                  : D.muted;
           return (
-            <div
-              key={v.id}
-              style={{ ...sCard, marginBottom: 0, textAlign: "center" }}
-            >
-              <div
-                style={{
-                  fontSize: 14,
-                  fontWeight: 500,
-                  color: D.heading,
-                  marginBottom: 4,
-                }}
-              >
+            <Card key={v.id} className="p-5 mb-3 mb-[0px] text-center">
+              <div className="text-ui-body font-medium text-zinc-900 mb-[4px]">
                 {v.name}
               </div>
-              <div style={{ fontSize: 11, color: D.muted, marginBottom: 8 }}>
+              <div className="text-ui-body text-ink-secondary mb-[8px]">
                 {v.productCount} products
               </div>
-              <span style={sBadge(`${sc}22`, sc)}>
-                {v.lastScrapeStatus || "never"}
-              </span>
-              <button
+              <Badge tone={scrapeStatusTone(v.lastScrapeStatus)}>{v.lastScrapeStatus || "never"}</Badge>
+              <Button
                 onClick={() => triggerScrape(v.id)}
-                style={{
-                  ...sBtn(D.teal, D.white),
-                  marginTop: 8,
-                  width: "100%",
-                  fontSize: 11,
-                }}
+                variant="primary"
+                className="mt-[8px] w-full"
               >
                 Trigger Scrape
-              </button>
-            </div>
+              </Button>
+            </Card>
           );
         })}
         {!vendors.length && (
-          <div
-            style={{
-              color: D.muted,
-              gridColumn: "1 / -1",
-              textAlign: "center",
-              padding: 20,
-            }}
-          >
+          <div className="text-ink-secondary col-span-full text-center p-[20px]">
             No vendors with scraping enabled
           </div>
         )}
       </div>{" "}
-      <div
-        style={{
-          fontSize: 15,
-          fontWeight: 500,
-          color: D.heading,
-          marginBottom: 12,
-        }}
-      >
+      <div className="text-ui-body font-medium text-zinc-900 mb-[12px]">
         Recent Scrape Jobs
       </div>
       {!jobs.length ? (
-        <div
-          style={{ ...sCard, textAlign: "center", padding: 30, color: D.muted }}
-        >
+        <Card className="p-5 mb-3 text-center p-[30px] text-ink-secondary">
           No scrape jobs yet
-        </div>
+        </Card>
       ) : (
         // overflow-x wrapper: phones scroll the wide table instead of
         // clipping it; index.css adds the scroll-shadow affordance.
-        <div style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr>
-              {[
-                "Vendor",
-                "Status",
-                "Products",
-                "Updated",
-                "New",
-                "Errors",
-                "Duration",
-                "Date",
-              ].map((h) => (
-                <th key={h} style={thS}>
-                  {h}
-                </th>
+        <div className="overflow-x-auto">
+          <Table className="w-full">
+            <THead>
+              <TR>
+                {[
+                  "Vendor",
+                  "Status",
+                  "Products",
+                  "Updated",
+                  "New",
+                  "Errors",
+                  "Duration",
+                  "Date",
+                ].map((h) => (
+                  <TH key={h}>{h}</TH>
+                ))}
+              </TR>
+            </THead>
+            <TBody>
+              {jobs.map((j) => (
+                <TR key={j.id}>
+                  <TD className="font-medium">{j.vendor_name}</TD>
+                  <TD>
+                    <Badge
+                      tone={
+                        j.status === "failed"
+                          ? "alert"
+                          : j.status === "completed"
+                            ? "neutral"
+                            : "warn"
+                      }
+                    >
+                      {j.status}
+                    </Badge>
+                  </TD>
+                  <TD nums>{j.products_found}</TD>
+                  <TD nums>{j.prices_updated}</TD>
+                  <TD nums>{j.prices_new}</TD>
+                  <TD nums>{j.errors}</TD>
+                  <TD nums>
+                    {j.duration_ms
+                      ? `${(j.duration_ms / 1000).toFixed(1)}s`
+                      : "—"}
+                  </TD>
+                  <TD nums className="text-ink-secondary">
+                    {new Date(j.created_at).toLocaleString()}
+                  </TD>
+                </TR>
               ))}
-            </tr>
-          </thead>
-          <tbody>
-            {jobs.map((j) => (
-              <tr key={j.id}>
-                <td style={{ ...tdS, fontWeight: 500 }}>
-                  {j.vendor_name}
-                </td>
-                <td style={tdS}>
-                  <span
-                    style={sBadge(
-                      j.status === "completed"
-                        ? `${D.green}22`
-                        : j.status === "failed"
-                          ? `${D.red}22`
-                          : `${D.amber}22`,
-                      j.status === "completed"
-                        ? D.green
-                        : j.status === "failed"
-                          ? D.red
-                          : D.amber,
-                    )}
-                  >
-                    {j.status}
-                  </span>
-                </td>
-                <td style={tdS}>{j.products_found}</td>
-                <td style={tdS}>{j.prices_updated}</td>
-                <td style={tdS}>{j.prices_new}</td>
-                <td style={{ ...tdS, color: j.errors > 0 ? D.red : D.muted }}>
-                  {j.errors}
-                </td>
-                <td
-                  style={{
-                    ...tdS,
-                    fontSize: 11,
-                    fontFamily: "'JetBrains Mono', monospace",
-                  }}
-                >
-                  {j.duration_ms
-                    ? `${(j.duration_ms / 1000).toFixed(1)}s`
-                    : "—"}
-                </td>
-                <td style={{ ...tdS, fontSize: 11, color: D.muted }}>
-                  {new Date(j.created_at).toLocaleString()}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+            </TBody>
+          </Table>
         </div>
       )}
     </div>

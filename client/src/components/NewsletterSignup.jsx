@@ -191,7 +191,7 @@ export default function NewsletterSignup({
             background: buttonBg,
             color: '#fff',
             fontFamily: FONTS.ui,
-            fontWeight: 850,
+            fontWeight: 700,
             fontSize: 14,
             letterSpacing: 0,
             cursor: state === 'loading' || locked ? 'default' : 'pointer',

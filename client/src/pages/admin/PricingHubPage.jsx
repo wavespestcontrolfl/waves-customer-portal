@@ -8,6 +8,9 @@ import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import { getAdminUser } from "../../lib/adminAuth";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 
+import { UiSurface } from "../../components/ui";
+import { cn } from "../../components/ui/cn";
+
 export const PRICING_AREAS = [
   { key: "logic", label: "Logic & Margins", Icon: Calculator },
   // /api/admin/pricing is admin-only (requireAdmin) — hide the area for
@@ -52,14 +55,24 @@ export default function PricingHubPage() {
   // active area has none).
   const [secondary, setSecondary] = useState(null);
 
+  // Only Price Notices is migrated, so the comfortable density has to stop at
+  // it — the comfortable rule sets font-size and line-height on the surface
+  // itself, and letting that cascade would push Tier-1 typography through the
+  // unmigrated inline-`D` Logic and Strategy pages. The density flips rather
+  // than the element: swapping the wrapper's type would make React unmount and
+  // remount this whole subtree, AdminCommandHeader included, on every area
+  // switch, since a host element and a component never reconcile. `legacy` is
+  // the context default, so those two areas render exactly as they do on main.
+  const density = activeArea === "notices" ? "comfortable" : "legacy";
+
   return (
-    <div>
+    <UiSurface density={density}>
       {/* One header card for the whole hub: area tabs on the first row; the
           active area (Logic & Margins) hands its own section tabs up for the
           second row instead of stacking a second header. */}
       {/* Width goes on the header itself (its sticky box must stay a direct
           child of the element that also contains the area content). */}
-      <AdminCommandHeader
+      <AdminCommandHeader variant="workspace"
           className="max-w-[1300px] mx-auto"
           title="Pricing"
           icon={Calculator}
@@ -67,13 +80,18 @@ export default function PricingHubPage() {
           activeKey={activeArea}
           onSectionChange={selectArea}
           ariaLabel="Pricing areas"
-          navGridClassName="grid-cols-1 sm:grid-cols-3"
+          // `.ui-workspace-nav` is inline-flex, so the area strip and an area's
+          // own section strip sit side by side whenever their combined width
+          // fits the 1300px header — collapsing the two hierarchical rows the
+          // block-level framed variant used to give. Full-width strips restore
+          // the rows without touching the shared header component.
+          navGridClassName="w-full grid-cols-1 sm:grid-cols-3"
           actions={secondary?.actions}
           secondarySections={secondary?.sections || []}
           secondaryActiveKey={secondary?.activeKey}
           onSecondaryChange={secondary?.onChange}
           secondaryAriaLabel={secondary?.ariaLabel}
-          secondaryNavGridClassName={secondary?.navGridClassName}
+          secondaryNavGridClassName={cn("w-full", secondary?.navGridClassName)}
       />
 
       {activeArea === "logic" && (
@@ -83,6 +101,6 @@ export default function PricingHubPage() {
         <PricingStrategyPage embedded onSecondaryNav={setSecondary} />
       )}
       {activeArea === "notices" && <AdminPriceChangePage embedded />}
-    </div>
+    </UiSurface>
   );
 }

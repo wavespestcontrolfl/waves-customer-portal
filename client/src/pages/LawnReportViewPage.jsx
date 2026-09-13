@@ -1,16 +1,14 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
-import { DOC_COLUMN_MAX, DOC_EYEBROW } from '../theme-doc';
+import { DOC_EYEBROW } from '../theme-doc';
 import { estimateCard, estimateInnerBox, ESTIMATE_CARD_BORDER } from '../components/estimate/cardStyles';
+import { CustomerColumn, PublicStateCard } from '../components/brand';
 import { useGlassSurface } from '../glass/glass-engine';
 import GuaranteeStrip from '../components/estimate/GuaranteeStrip';
 import QuestionsEscapeHatch from '../components/estimate/QuestionsEscapeHatch';
-import PublicLoadError from '../components/PublicLoadError';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-const WAVES_PHONE_DISPLAY = '(941) 297-5749';
-const WAVES_PHONE_TEL = '+19412975749';
 
 // Warm-brand tokens — mirror the public estimate view (customer surface, not admin).
 const BG = '#FAF8F3';
@@ -59,7 +57,7 @@ function Page({ children }) {
       {/* Page-local header removed — the WavesShell top bar (App.jsx route
           wrap, owner 2026-07-06) provides the standard chrome. */}
       {/* div, not <main> — WavesShell supplies the main landmark. */}
-      <div style={{ flex: 1, width: '100%', maxWidth: DOC_COLUMN_MAX, margin: '0 auto', padding: '20px 16px 48px' }}>{children}</div>
+      <CustomerColumn>{children}</CustomerColumn>
     </div>
   );
 }
@@ -77,20 +75,6 @@ function SectionCard({ children, style, ...rest }) {
 
 function SectionTitle({ children }) {
   return <h2 style={{ fontFamily: FONTS.serif, fontSize: 24, fontWeight: 500, lineHeight: 1.2, color: TEXT, margin: '0 0 12px' }}>{children}</h2>;
-}
-
-function NotFoundCard() {
-  return (
-    <SectionCard role="alert" style={{ textAlign: 'center', marginTop: 40 }}>
-      <SectionTitle>This lawn report isn&apos;t available</SectionTitle>
-      <p style={{ margin: '0 0 16px', color: BODY, fontSize: 16, lineHeight: 1.55 }}>
-        The link may have expired or is no longer active. Give us a call and we&apos;ll take a fresh look at your lawn.
-      </p>
-      <a data-glass-accent="" href={`tel:${WAVES_PHONE_TEL}`} style={{ display: 'inline-block', padding: '12px 18px', borderRadius: 10, background: COLORS.glassNavy, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, textDecoration: 'none' }}>
-        Call {WAVES_PHONE_DISPLAY}
-      </a>
-    </SectionCard>
-  );
 }
 
 function QuoteRequestForm({ token, firstName }) {
@@ -228,10 +212,22 @@ export default function LawnReportViewPage() {
     );
   }
   if (loadError) {
-    return <Page><SectionCard><PublicLoadError resource="lawn report" onRetry={load} /></SectionCard></Page>;
+    return (
+      <Page>
+        <PublicStateCard state="error" title="We couldn&rsquo;t load that lawn report" onRetry={load}>
+          This looks temporary. Your link is still valid&mdash;check your connection and try again.
+        </PublicStateCard>
+      </Page>
+    );
   }
   if (notFound || !report) {
-    return <Page><NotFoundCard /></Page>;
+    return (
+      <Page>
+        <PublicStateCard state="not-found" title="This lawn report isn&apos;t available" contact="call" style={{ marginTop: 40 }}>
+          The link may have expired or is no longer active. Give us a call and we&apos;ll take a fresh look at your lawn.
+        </PublicStateCard>
+      </Page>
+    );
   }
 
   const placeLabel = report.city ? `your ${report.city} lawn` : 'your lawn';

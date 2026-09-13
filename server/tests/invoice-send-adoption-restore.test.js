@@ -99,6 +99,7 @@ describe('claimInvoiceForSend adoption survives a failed replacement delivery', 
     restoreClaimChain.update = jest.fn((v) => { callOrder.push('claim'); return restoreClaimChain._baseUpdate(v); });
     restoreClaimChain._baseUpdate = jest.fn(() => restoreClaimChain);
     db
+      .mockReturnValueOnce(chain({ first: { visit_completion_packet_id: null, payer_id: null } })) // direct-send Bill-To precheck
       .mockReturnValueOnce(chain({ first: draftInvoice })) // claim read
       .mockReturnValueOnce(chain({ first: undefined })) // pre-claim queued check (none)
       .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending' }] })) // claim flip
@@ -133,6 +134,7 @@ describe('claimInvoiceForSend adoption survives a failed replacement delivery', 
   test('sendViaSMS (direct caller) held by a quiet-hours-style provider hold requeues the text instead of losing it', async () => {
     const requeueInsertChain = chain();
     db
+      .mockReturnValueOnce(chain({ first: { visit_completion_packet_id: null, payer_id: null } })) // direct-send Bill-To precheck
       .mockReturnValueOnce(chain({ first: draftInvoice })) // claim read
       .mockReturnValueOnce(chain({ first: undefined })) // pre-claim queued check (none)
       .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending' }] })) // claim flip
@@ -204,6 +206,7 @@ describe('claimInvoiceForSend adoption survives a failed replacement delivery', 
   test('a fully delivered send leaves the consumed queue row cancelled — nothing restores a row a live send actually superseded', async () => {
     const fallback = chain();
     db
+      .mockReturnValueOnce(chain({ first: { visit_completion_packet_id: null, payer_id: null } })) // direct-send Bill-To precheck
       .mockReturnValueOnce(chain({ first: draftInvoice })) // claim read
       .mockReturnValueOnce(chain({ first: undefined })) // pre-claim queued check (none)
       .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending' }] })) // claim flip
@@ -228,6 +231,7 @@ describe('claimInvoiceForSend adoption survives a failed replacement delivery', 
   test('the provider ACCEPTS the replacement SMS but the post-send audit-row write then throws (providerOutcome.sent === true): the consumed queue row stays cancelled and the claim is never released back to draft (pre-push Codex P1 #4131, fourth instance of the send-then-bookkeeping-throw shape)', async () => {
     const fallback = chain();
     db
+      .mockReturnValueOnce(chain({ first: { visit_completion_packet_id: null, payer_id: null } })) // direct-send Bill-To precheck
       .mockReturnValueOnce(chain({ first: draftInvoice })) // claim read
       .mockReturnValueOnce(chain({ first: undefined })) // pre-claim queued check (none)
       .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending' }] })) // claim flip
@@ -336,6 +340,7 @@ describe('sendViaSMS: every pre-delivery exit restores the consumed queue row (t
     const restoreClaimChain = chain();
     const invoiceRow = { ...draftInvoice, ...invoiceOverrides };
     const mocks = [
+      chain({ first: { visit_completion_packet_id: null, payer_id: invoiceRow.payer_id } }), // direct-send Bill-To precheck
       chain({ first: invoiceRow }),
       chain({ first: undefined }),
       chain({ returning: [{ ...invoiceRow, status: 'sending' }] }),

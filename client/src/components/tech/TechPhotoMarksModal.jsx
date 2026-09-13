@@ -22,6 +22,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import useIsMobile from '../../hooks/useIsMobile';
+import useModalFocus from '../../hooks/useModalFocus';
+import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import { getAdminAuthToken } from '../../lib/adminAuth';
 import { DVH } from '../../lib/viewportUnits';
 // The SHARED palette (codex P1). A local copy made the comment below a lie:
@@ -29,16 +31,8 @@ import { DVH } from '../../lib/viewportUnits';
 // left the capture UI showing the technician different colours from the ones
 // the customer sees.
 import { markColor } from '../report/markedPhotoCopy';
-
-const DARK = {
-  bg: '#0f1923',
-  card: '#1e293b',
-  border: '#334155',
-  teal: '#0ea5e9',
-  red: '#ef4444',
-  text: '#e2e8f0',
-  muted: '#94a3b8',
-};
+import { UiSurface, Button, ActionFeedback, cn } from '../ui';
+import '../../styles/tech-workflow.css';
 
 const API = import.meta.env.VITE_API_URL || '';
 const LONG_PRESS_MS = 500;
@@ -60,6 +54,8 @@ export default function TechPhotoMarksModal({ serviceId, photo, onClose, onSaved
   const imgRef = useRef(null);
   const pressRef = useRef(null);
   const removedRef = useRef(false);
+  const dialogRef = useModalFocus(true, () => { if (!saving) onClose(); });
+  useLockBodyScroll(true);
 
   const authHeaders = () => {
     const token = getAdminAuthToken();
@@ -153,177 +149,126 @@ export default function TechPhotoMarksModal({ serviceId, photo, onClose, onSaved
     }
   };
 
-  const chipStyle = (on) => ({
-    fontSize: 13, padding: '7px 11px', borderRadius: 999,
-    border: `1px solid ${on ? DARK.teal : DARK.border}`,
-    background: on ? DARK.teal : DARK.card,
-    color: on ? '#04222f' : DARK.text,
-    cursor: 'pointer', fontWeight: on ? 600 : 500,
-  });
-
+  // DVH is 'dvh' where the engine supports it, 'vh' on pre-15.4 WebKit — see
+  // lib/viewportUnits.js. Bridged in as a single CSS custom property so the
+  // desktop height cap stays expressed in tech-workflow.css.
   return createPortal(
-    <div
-      // This modal mounts INSIDE the photo manager, whose backdrop closes it
-      // on click. Without stopping propagation here the very first tap — the
-      // one placing a mark — would bubble out and unmount the whole workflow
+    <UiSurface
+      density="touch"
+      className={cn('tech-visit-surface tech-visit-overlay tech-visit-overlay--stacked', isMobile && 'tech-visit-overlay--fullscreen')}
+      style={{ '--tech-vh': `1${DVH}` }}
+      // This modal mounts INSIDE the photo manager's React tree (only the DOM
+      // node is portaled), whose backdrop closes it on click. React bubbles
+      // synthetic events along the component tree, not the real DOM, so
+      // without stopping propagation here the very first tap — the one
+      // placing a mark — would bubble out and unmount the whole workflow
       // before anything could be saved (codex P1). Stopped at the root so
       // every descendant is covered, including the photo and the chips.
-      onClick={(e) => e.stopPropagation()}
-      style={{
-        position: 'fixed', inset: 0, fontFamily: "'DM Sans', sans-serif", zIndex: 1001, background: 'rgba(4,10,16,.72)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center', padding: isMobile ? 0 : 14,
-      }}
-      role="dialog"
-      aria-modal="true"
-      aria-label="Mark treated spots"
+      onClick={(event) => event.stopPropagation()}
     >
-      <div style={{
-        background: DARK.bg, border: `1px solid ${DARK.border}`, borderRadius: 14,
-        width: '100%', maxWidth: 420, maxHeight: `calc(100${DVH} - 28px)`, boxSizing: 'border-box',
-        ...(isMobile ? { borderRadius: 0, maxWidth: 'none', height: '100%', maxHeight: '100%' } : {}),
-        display: 'flex', flexDirection: 'column', overflow: 'hidden',
-        paddingTop: 'calc(14px + env(safe-area-inset-top, 0px))',
-        paddingBottom: 'calc(14px + env(safe-area-inset-bottom, 0px))',
-        paddingLeft: 'calc(14px + env(safe-area-inset-left, 0px))',
-        paddingRight: 'calc(14px + env(safe-area-inset-right, 0px))',
-      }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 11, flexShrink: 0 }}>
-          <span style={{ color: DARK.text, fontWeight: 650, fontSize: 15 }}>Mark treated spots</span>
-          <span style={{ color: DARK.muted, fontSize: 12 }}>
-            {marks.length} {marks.length === 1 ? 'mark' : 'marks'}
-          </span>
-        </div>
+      <section
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Mark treated spots"
+        className={cn('tech-visit-dialog', isMobile ? 'tech-visit-dialog--fullscreen' : 'tech-visit-dialog--marks-cap')}
+      >
+        <header className="tech-visit-header">
+          <span className="tech-visit-title">Mark treated spots</span>
+          <span className="tech-visit-muted">{marks.length} {marks.length === 1 ? 'mark' : 'marks'}</span>
+        </header>
+        <div className="tech-visit-body">
+          {loading && <ActionFeedback className="tech-visit-feedback">Loading…</ActionFeedback>}
 
-        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain' }}>
-        {loading && <p style={{ color: DARK.muted, fontSize: 13 }}>Loading…</p>}
+          {!loading && !kinds.length && (
+            <p className="tech-visit-muted">This service does not use treated-point marks.</p>
+          )}
 
-        {!loading && !kinds.length && (
-          <p style={{ color: DARK.muted, fontSize: 13 }}>
-            This service does not use treated-point marks.
-          </p>
-        )}
-
-        {!loading && kinds.length > 0 && (
-          <>
-            <div
-              style={{ position: 'relative', borderRadius: 9, overflow: 'hidden', lineHeight: 0 }}
-              onClick={addMark}
-            >
-              <img
-                ref={imgRef}
-                src={photo?.url}
-                alt="Treated area"
-                onError={() => setImageFailed(true)}
-                style={{ width: '100%', display: 'block', touchAction: 'manipulation' }}
-                draggable={false}
-              />
-              {marks.map((mark, i) => (
-                <div
-                  key={`${mark.x}-${mark.y}-${i}`}
-                  onPointerDown={(e) => { e.stopPropagation(); startPress(i); }}
-                  onPointerUp={cancelPress}
-                  onPointerLeave={cancelPress}
-                  onClick={(e) => e.stopPropagation()}
-                  style={{
-                    position: 'absolute',
-                    left: `${mark.x * 100}%`,
-                    top: `${mark.y * 100}%`,
-                    transform: 'translate(-50%, -50%)',
-                    cursor: 'pointer',
-                  }}
-                >
-                  <span style={{
-                    position: 'absolute', left: '50%', top: '50%',
-                    width: 7, height: 7, margin: '-3.5px 0 0 -3.5px',
-                    borderRadius: '50%', background: '#fff',
-                    boxShadow: '0 0 0 2px rgba(8,20,28,.55)',
-                  }}
-                  />
-                  {/* Same edge handling as the customer card (codex P2): the
-                      frame clips overflow, so a mark near the top edge lost
-                      its badge — and the tech saved it without ever seeing
-                      the final pin. The dot stays on the exact point. */}
-                  <span style={{
-                    position: 'absolute', left: '50%',
-                    ...(mark.y < 0.08 ? { top: 13 } : { bottom: 13 }),
-                    transform: `translateX(${mark.x < 0.04 ? '-10%' : (mark.x > 0.96 ? '-90%' : '-50%')})`,
-                    minWidth: 25, height: 25, padding: '0 6px', borderRadius: 999,
-                    border: '2px solid rgba(255,255,255,.94)',
-                    background: markColor(mark.kind),
-                    color: '#fff', fontSize: 12, fontWeight: 600, lineHeight: 1,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    boxShadow: '0 2px 7px rgba(6,16,24,.5)',
-                  }}
+          {!loading && kinds.length > 0 && (
+            <>
+              <div className="tech-visit-mark-frame" onClick={addMark}>
+                <img
+                  ref={imgRef}
+                  src={photo?.url}
+                  alt="Treated area"
+                  onError={() => setImageFailed(true)}
+                  className="tech-visit-mark-image"
+                  draggable={false}
+                />
+                {marks.map((mark, i) => (
+                  <div
+                    key={`${mark.x}-${mark.y}-${i}`}
+                    className="tech-visit-mark-pin"
+                    style={{ left: `${mark.x * 100}%`, top: `${mark.y * 100}%` }}
+                    onPointerDown={(e) => { e.stopPropagation(); startPress(i); }}
+                    onPointerUp={cancelPress}
+                    onPointerLeave={cancelPress}
+                    onClick={(e) => e.stopPropagation()}
                   >
-                    {i + 1}
-                  </span>
-                </div>
-              ))}
-            </div>
+                    <span className="tech-visit-mark-dot" />
+                    {/* Same edge handling as the customer card (codex P2): the
+                        frame clips overflow, so a mark near the top edge lost
+                        its badge — and the tech saved it without ever seeing
+                        the final pin. The dot stays on the exact point. */}
+                    <span
+                      className={cn('tech-visit-mark-badge', mark.y < 0.08 ? 'tech-visit-mark-badge--below' : 'tech-visit-mark-badge--above')}
+                      style={{
+                        background: markColor(mark.kind),
+                        transform: `translateX(${mark.x < 0.04 ? '-10%' : (mark.x > 0.96 ? '-90%' : '-50%')})`,
+                      }}
+                    >
+                      {i + 1}
+                    </span>
+                  </div>
+                ))}
+              </div>
 
-            <div style={{ display: 'flex', gap: 7, marginTop: 12, flexWrap: 'wrap' }}>
-              {kinds.map((entry) => (
-                <button
-                  key={entry.kind}
-                  type="button"
-                  onClick={() => setActiveKind(entry.kind)}
-                  style={chipStyle(activeKind === entry.kind)}
-                >
-                  {entry.label}
-                </button>
-              ))}
-            </div>
+              <div className="tech-visit-products" role="group" aria-label="Mark kind">
+                {kinds.map((entry) => (
+                  <Button
+                    key={entry.kind}
+                    variant="secondary"
+                    className="tech-visit-action tech-visit-product"
+                    aria-pressed={activeKind === entry.kind}
+                    onClick={() => setActiveKind(entry.kind)}
+                  >
+                    {entry.label}
+                  </Button>
+                ))}
+              </div>
 
-            {imageFailed && (
-              <p style={{ color: DARK.red, fontSize: 13, marginTop: 10 }}>
-                This photo could not be loaded, so marks can&apos;t be placed on it.
-                Close and reopen to try again.
+              {imageFailed && (
+                <ActionFeedback error className="tech-visit-feedback">
+                  This photo could not be loaded, so marks can&apos;t be placed on it.
+                  Close and reopen to try again.
+                </ActionFeedback>
+              )}
+              <p className="tech-visit-muted">
+                Tap to add · hold a mark to remove
+                {marks.length >= maxMarks ? ` · limit ${maxMarks} reached` : ''}
               </p>
-            )}
-            <p style={{ color: DARK.muted, fontSize: 12, marginTop: 10 }}>
-              Tap to add · hold a mark to remove
-              {marks.length >= maxMarks ? ` · limit ${maxMarks} reached` : ''}
-            </p>
-          </>
-        )}
+            </>
+          )}
 
+          {errorMsg && <ActionFeedback error className="tech-visit-feedback">{errorMsg}</ActionFeedback>}
         </div>
-        <div style={{ flexShrink: 0 }}>
-        {errorMsg && (
-          <p style={{ color: DARK.red, fontSize: 13, marginTop: 10 }}>{errorMsg}</p>
-        )}
-
-        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-          {/* Skip carries equal visual weight: marks are optional, and a nag
-              would contradict the ruling. */}
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={saving}
-            style={{
-              flex: 1, padding: 10, borderRadius: 8, fontSize: 13.5, fontWeight: 600,
-              border: `1px solid ${DARK.border}`, background: 'transparent',
-              color: DARK.text, cursor: 'pointer',
-            }}
-          >
-            Skip
-          </button>
-          <button
-            type="button"
-            onClick={save}
-            disabled={saving || loading || !kinds.length || imageFailed}
-            style={{
-              flex: 1, padding: 10, borderRadius: 8, fontSize: 13.5, fontWeight: 600,
-              border: `1px solid ${DARK.teal}`, background: DARK.teal,
-              color: '#04222f', cursor: saving ? 'wait' : 'pointer',
-            }}
-          >
-            {saving ? 'Saving…' : 'Save marks'}
-          </button>
-        </div>
-        </div>
-      </div>
-    </div>,
-    document.body
+        <footer className="tech-visit-footer">
+          <div className="tech-visit-actions">
+            {/* Skip carries equal visual weight: marks are optional, and a nag
+                would contradict the ruling. */}
+            <Button variant="secondary" className="tech-visit-action" onClick={onClose} disabled={saving}>Skip</Button>
+            <Button
+              className="tech-visit-action tech-visit-primary"
+              onClick={save}
+              loading={saving}
+              disabled={saving || loading || !kinds.length || imageFailed}
+            >
+              Save marks
+            </Button>
+          </div>
+        </footer>
+      </section>
+    </UiSurface>,
+    document.body,
   );
 }

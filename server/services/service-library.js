@@ -605,6 +605,12 @@ async function deactivateService(id, { audit } = {}) {
   // row cannot be newly LINKED; a text-only late reference is a display
   // label, not a lane.
   return db.transaction(async (trx) => {
+    // Table lock BEFORE the row lock: a capacity certification holding the
+    // catalog SHARE lock later takes FOR KEY SHARE on this row through its
+    // scheduled_services.service_id FK, and this UPDATE needs ROW EXCLUSIVE
+    // behind that SHARE — row-first here deadlocks through the FK (codex
+    // #4369 r4 P1). See scheduling/catalog-lock.js.
+    await require('./scheduling/catalog-lock').lockCatalogForWrite(trx);
     const before = await trx('services').where({ id }).forUpdate().first();
     if (!before) return null;
     const references = await getServiceReferences(before, trx);

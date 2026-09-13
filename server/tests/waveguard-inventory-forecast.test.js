@@ -2,13 +2,13 @@
 // Only persistence, plan lookup and auth are mocked; conversion/date math stay real.
 jest.mock('../models/db', () => Object.assign(jest.fn(), { transaction: jest.fn() }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/waveguard-plan-engine', () => ({ buildPlanForService: jest.fn() }));
+jest.mock('../services/waveguard-plan-engine', () => ({ buildPlanForService: jest.fn(), customerBillingModeColumnExists: jest.fn(async () => true) }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: jest.fn(), requireTechOrAdmin: jest.fn(), requireAdmin: jest.fn(),
 }));
 
 const db = require('../models/db');
-const { buildPlanForService } = require('../services/waveguard-plan-engine');
+const { buildPlanForService, customerBillingModeColumnExists } = require('../services/waveguard-plan-engine');
 const { buildWaveGuardInventoryForecast, runWaveGuardInventoryForecastCheck } = require('../services/waveguard-inventory-forecast');
 const router = require('../routes/admin-inventory');
 
@@ -38,6 +38,7 @@ let visits;
 let products;
 beforeEach(() => {
   jest.resetAllMocks();
+  customerBillingModeColumnExists.mockResolvedValue(true);
   // Fixed clock deliberately straddles UTC/ET dates; no freshness validator involved.
   jest.useFakeTimers().setSystemTime(new Date('2030-01-10T02:00:00Z'));
   visits = readQuery([
@@ -62,7 +63,7 @@ beforeEach(() => {
       item('ok', 1, 'lb', { unit: 'lb', onHand: 4 }),
       item('zero', 0, 'gal', stock),
     ];
-    return { mixCalculator: { items } };
+    return { propertyGate: { serviceTier: 'Silver' }, mixCalculator: { items } };
   });
 });
 afterEach(() => jest.useRealTimers());
@@ -108,11 +109,68 @@ test.each([
   visits = readQuery([{ id: 'visit-withheld', scheduled_date: '2030-01-10', first_name: 'Ada', last_name: 'Lovelace' }]);
   buildPlanForService.mockResolvedValue({
     mixCalculator: { items: [] },
-    propertyGate: { blocks: [{ code, severity: 'block', message }] },
+    propertyGate: { serviceTier: 'Silver', blocks: [{ code, severity: 'block', message }] },
   });
   const result = await buildWaveGuardInventoryForecast({ days: 2, limit: 20 });
   expect(result.errors).toEqual([{ serviceId: 'visit-withheld', scheduledDate: '2030-01-10', customerName: 'Ada Lovelace', message }]);
   expect(result).toMatchObject({ serviceCount: 1, productCount: 0, products: [] });
+});
+
+test.each([
+  ['per_visit', {}, false],
+  ['one_time', {}, false],
+  ['per_application', {}, true],
+  ['one_time', { protocolKey: 'protocol', protocolVersion: '1', windowKey: 'june' }, true],
+])('forecast counts a lingering-tier visit on an explicit %s lane only when the program predicate applies (assignment %j → counted %s) (codex #4365 r7 P2)', async (billingMode, appointmentAssignment, counted) => {
+  visits = readQuery([{ id: 'visit-lane', scheduled_date: '2030-01-10', first_name: 'Ada', last_name: 'Lovelace' }]);
+  buildPlanForService.mockResolvedValue({
+    propertyGate: { serviceTier: 'Silver', billingMode },
+    appointmentAssignment,
+    mixCalculator: { items: [item('short', 64, 'fl_oz', { unit: 'gal', onHand: 1, lowStockThreshold: 0.25 })] },
+  });
+  const result = await buildWaveGuardInventoryForecast({ days: 2, limit: 20 });
+  expect(result.errors).toEqual([]);
+  if (counted) {
+    expect(result.productCount).toBe(1);
+    expect(result.skippedNonProgram).toEqual([]);
+  } else {
+    expect(result.productCount).toBe(0);
+    // Office-only lane stays out of the (technician-readable) response (codex #4365 r8 P2).
+    expect(result.skippedNonProgram).toEqual([{ serviceId: 'visit-lane', scheduledDate: '2030-01-10', customerName: 'Ada Lovelace' }]);
+  }
+});
+
+const laneWhereClause = (query) => {
+  const clauses = query.where.mock.calls.map(([arg]) => arg).filter((arg) => typeof arg === 'function' && arg.name === 'programLane');
+  if (!clauses.length) return null;
+  const calls = [];
+  const builder = {};
+  for (const method of ['whereNull', 'orWhereNotIn', 'orWhere', 'whereNotNull']) {
+    builder[method] = jest.fn((...args) => { calls.push([method, ...args]); if (method === 'orWhere' && typeof args[0] === 'function') args[0].call(builder); return builder; });
+  }
+  clauses[0].call(builder);
+  return calls;
+};
+
+test('non-program lanes are excluded in SQL before the limit when the column exists (codex #4365 r8 P2)', async () => {
+  await buildWaveGuardInventoryForecast({ days: 2, limit: 20 });
+  const calls = laneWhereClause(visits);
+  expect(calls).toEqual([
+    ['whereNull', 'c.billing_mode'],
+    ['orWhereNotIn', 'c.billing_mode', ['per_visit', 'one_time']],
+    ['orWhere', expect.any(Function)],
+    ['whereNotNull', 'ss.lawn_protocol_key'],
+    ['whereNotNull', 'ss.lawn_protocol_version'],
+    ['whereNotNull', 'ss.lawn_protocol_window_key'],
+  ]);
+  // The lane clause is applied before the limit consumes the window's slots.
+  expect(visits.where.mock.invocationCallOrder.at(-1)).toBeLessThan(visits.limit.mock.invocationCallOrder[0]);
+});
+
+test('a legacy schema (no billing_mode column) adds no lane clause', async () => {
+  customerBillingModeColumnExists.mockResolvedValue(false);
+  await buildWaveGuardInventoryForecast({ days: 2, limit: 20 });
+  expect(laneWhereClause(visits)).toBeNull();
 });
 
 test('forecast HTTP handler returns computed demand and forwards query bounds', async () => {
@@ -169,8 +227,11 @@ test('cron runs forecast and deduplicated alert writes on its locked transaction
   expect(db.transaction).toHaveBeenCalledTimes(1);
   expect(trx.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', ['waveguard-inventory-forecast-cron']);
   expect(trx.raw.mock.invocationCallOrder[0]).toBeLessThan(buildPlanForService.mock.invocationCallOrder[0]);
+  // One schema probe per batch, passed to every plan build (codex #4365 r4 P2).
+  expect(customerBillingModeColumnExists).toHaveBeenCalledTimes(1);
+  expect(customerBillingModeColumnExists).toHaveBeenCalledWith(trx);
   expect(buildPlanForService.mock.calls).toEqual([
-    ['visit-1', { db: trx }], ['visit-2', { db: trx }], ['visit-3', { db: trx }],
+    ['visit-1', { db: trx, billingModeColumnExists: true }], ['visit-2', { db: trx, billingModeColumnExists: true }], ['visit-3', { db: trx, billingModeColumnExists: true }],
   ]);
   expect(alert.insert).toHaveBeenCalledWith(expect.objectContaining({ dedupe_key: 'waveguard_inventory_forecast', severity: 'high' }));
   expect(alert.onConflict).toHaveBeenCalledWith('dedupe_key');

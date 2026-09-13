@@ -378,7 +378,7 @@ describe('sendViaSMSAndEmail: nothing due on a pre-completion open-visit invoice
     const settle = jest.spyOn(InvoiceService, 'settleZeroBalance').mockResolvedValue({ settled: true, invoice: { id: 'inv-1', status: 'prepaid' } });
     const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {});
     expect(result).toMatchObject({ ok: true, settled_by_deposit: true, sms: { code: 'settled_by_deposit' }, email: { code: 'settled_by_deposit' } });
-    expect(settle).toHaveBeenCalledWith('inv-1');
+    expect(settle).toHaveBeenCalledWith('inv-1', db);
     expect(smsSpy).not.toHaveBeenCalled();
     expect(db).toHaveBeenCalledTimes(1); // the pre-check read only — the claim never ran
   });
@@ -397,7 +397,7 @@ describe('sendViaSMSAndEmail: nothing due on a pre-completion open-visit invoice
     db.mockReturnValueOnce(chain({ first: zeroDue({ service_record_id: 'sr-1' }) }));
     const settle = jest.spyOn(InvoiceService, 'settleZeroBalance').mockResolvedValue({ settled: true, invoice: { id: 'inv-1', status: 'prepaid' } });
     expect(await InvoiceService.sendViaSMSAndEmail('inv-1', {})).toMatchObject({ ok: true, settled_by_deposit: true });
-    expect(settle).toHaveBeenCalledWith('inv-1');
+    expect(settle).toHaveBeenCalledWith('inv-1', db);
     expect(smsSpy).not.toHaveBeenCalled();
   });
 

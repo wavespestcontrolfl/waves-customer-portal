@@ -1,4 +1,8 @@
-import { CustomerSmsProvider, useCustomerSms, openEstimateMessages } from "../../components/admin/customer360/CustomerSmsPanel";
+import {
+  CustomerSmsProvider,
+  useCustomerSms,
+  openEstimateMessages,
+} from "../../components/admin/customer360/CustomerSmsPanel";
 // client/src/pages/admin/EstimatesPageV2.jsx
 // Monochrome V2 of EstimatePage. Strict 1:1 on data, endpoints, behavior:
 //   - GET   /admin/estimates
@@ -13,10 +17,16 @@ import { CustomerSmsProvider, useCustomerSms, openEstimateMessages } from "../..
 //   PR #5c → FollowUpModalV2 + DeclineModalV2 replace V1 modals (Dialog
 //            primitive, danger variant on Mark-as-Lost)
 // Leads / Pricing Logic tabs still render V1 panels.
-import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { createPortal } from "react-dom";
+import React, {
+  useState,
+  useEffect,
+  useCallback,
+  useMemo,
+  useRef,
+} from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
+import { useIntelligenceBarActions } from "../../hooks/useIntelligenceBarPageData";
 import {
   STATUS_CONFIG,
   PIPELINE_FILTERS,
@@ -25,10 +35,14 @@ import {
   detectCompetitor,
 } from "./EstimatePage";
 import { LeadsSection } from "./LeadsTabs";
+import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import PricingLogicPanel from "../../components/admin/PricingLogicPanel";
 import { MarginCalculator } from "./PricingLogicPage";
 import EstimateToolViewV2 from "./EstimateToolViewV2";
-import { EstimateSendProvider, useEstimateSend } from "../../components/admin/EstimateSendDialog";
+import {
+  EstimateSendProvider,
+  useEstimateSend,
+} from "../../components/admin/EstimateSendDialog";
 import CustomerEstimatesPanel from "./CustomerEstimatesPanel";
 import ServiceOutlineComposerModal from "../../components/admin/ServiceOutlineComposerModal";
 import WinLossSlicesCard from "./WinLossSlicesCard";
@@ -44,7 +58,19 @@ import {
 } from "../../components/admin/EstimateModalsV2";
 import useIsMobile from "../../hooks/useIsMobile";
 import { useFeatureFlag } from "../../hooks/useFeatureFlag";
-import { Badge, Button, Card, CardBody, cn } from "../../components/ui";
+import {
+  Badge,
+  Button,
+  Card,
+  CardBody,
+  Dialog,
+  DialogBody,
+  DialogHeader,
+  DialogTitle,
+  Input,
+  UiSurface,
+  cn,
+} from "../../components/ui";
 import {
   Flag,
   Globe,
@@ -72,12 +98,8 @@ import {
   DollarSign,
   Pencil,
 } from "lucide-react";
-
 import CreateAppointmentModal from "../../components/schedule/CreateAppointmentModal";
-
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
-const ROBOTO = "'Roboto', Arial, sans-serif";
-
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     headers: {
@@ -103,17 +125,16 @@ function adminFetch(path, options = {}) {
     return r.json();
   });
 }
-
 function mergeEstimateRows(...lists) {
   const byId = new Map();
   for (const list of lists) {
     for (const estimate of list || []) {
-      if (estimate?.id && !byId.has(estimate.id)) byId.set(estimate.id, estimate);
+      if (estimate?.id && !byId.has(estimate.id))
+        byId.set(estimate.id, estimate);
     }
   }
   return Array.from(byId.values());
 }
-
 function estimatePipelineFetchPaths(filter) {
   // limit=all → server-side ESTIMATE_LIST_LIMIT cap. PipelineAnalytics
   // computes all-time KPIs from this list, so a numeric page-size here would
@@ -127,7 +148,6 @@ function estimatePipelineFetchPaths(filter) {
     `/admin/estimates?status=draft&${base}`,
   ];
 }
-
 async function fetchEstimatePipelineRows(filter) {
   const responses = await Promise.all(
     estimatePipelineFetchPaths(filter).map((path) => adminFetch(path)),
@@ -156,56 +176,26 @@ function StatusBadgeV2({ status }) {
 // today" in under 5 seconds. Gated by the `estimates_v2_status_pills` flag.
 function StatusPillV3({ status }) {
   const label = (STATUS_CONFIG[status] || STATUS_CONFIG.draft).label;
-  // Common base for the filled-pill variants.
-  const filled =
-    "inline-flex items-center gap-1 h-5 px-2 rounded-full text-11 font-medium whitespace-nowrap";
-  switch (status) {
-    case "expired":
-      return (
-        <span className={cn(filled, "bg-alert-fg text-white")}>{label}</span>
-      );
-    case "viewed":
-      return (
-        <span className={cn(filled, "bg-zinc-200 text-zinc-900")}>
-          {" "}
-          <span aria-hidden className="w-1.5 h-1.5 rounded-full bg-zinc-900" />
-          {label}
-        </span>
-      );
-    case "accepted":
-      return (
-        <span className={cn(filled, "bg-zinc-200 text-zinc-900")}>
-          {" "}
-          <Check size={10} strokeWidth={2.5} aria-hidden />
-          {label}
-        </span>
-      );
-    case "sent":
-      return (
-        <span className={cn(filled, "bg-zinc-200 text-zinc-900")}>{label}</span>
-      );
-    case "scheduled":
-      return (
-        <span className={cn(filled, "bg-zinc-200 text-zinc-900")}>
-          {" "}
-          <CalendarCheck size={10} strokeWidth={2.5} aria-hidden />
-          {label}
-        </span>
-      );
-    case "declined":
-      return (
-        <span className="inline-flex items-center h-5 px-2 rounded-full text-11 font-normal whitespace-nowrap border-hairline border-zinc-300 text-ink-tertiary bg-white">
-          {label}
-        </span>
-      );
-    case "draft":
-    default:
-      return (
-        <span className="inline-flex items-center h-5 px-2 rounded-full text-11 font-normal whitespace-nowrap border-hairline border-zinc-300 text-ink-tertiary bg-white">
-          {label}
-        </span>
-      );
-  }
+  const tone =
+    status === "expired"
+      ? "alert"
+      : status === "accepted"
+        ? "strong"
+        : "neutral";
+  return (
+    <Badge tone={tone}>
+      {status === "viewed" && (
+        <span aria-hidden className="w-1.5 h-1.5 rounded-full bg-current" />
+      )}
+      {status === "accepted" && (
+        <Check size={14} strokeWidth={2.5} aria-hidden />
+      )}
+      {status === "scheduled" && (
+        <CalendarCheck size={14} strokeWidth={2.5} aria-hidden />
+      )}
+      {label}
+    </Badge>
+  );
 }
 
 // Estimates v2 status-rank sort. Available as an explicit mobile sort option,
@@ -219,7 +209,6 @@ const V3_STATUS_RANK = {
   declined: 3,
   draft: 4,
 };
-
 function v3SortFn(a, b) {
   const ra = V3_STATUS_RANK[a.status] ?? 5;
   const rb = V3_STATUS_RANK[b.status] ?? 5;
@@ -232,18 +221,47 @@ function v3SortFn(a, b) {
 // Estimates v2 filter chips (spec §7). Action Required = expired plus viewed
 // sitting idle (viewed >48h). Open = sent+viewed. Closed = accepted+declined.
 const V3_CHIPS = [
-  { key: "all", label: "All" },
-  { key: "action", label: "Action Required" },
-  { key: "pricing_risk", label: "Pricing Risk" },
-  { key: "missing_cogs", label: "Missing COGS" },
-  { key: "low_margin", label: "Low Margin" },
-  { key: "risk_type_review", label: "Risk Type" },
-  { key: "open", label: "Open" },
-  { key: "closed", label: "Closed" },
-  { key: "drafts", label: "Drafts" },
-  { key: "archived", label: "Archived" },
+  {
+    key: "all",
+    label: "All",
+  },
+  {
+    key: "action",
+    label: "Action Required",
+  },
+  {
+    key: "pricing_risk",
+    label: "Pricing Risk",
+  },
+  {
+    key: "missing_cogs",
+    label: "Missing COGS",
+  },
+  {
+    key: "low_margin",
+    label: "Low Margin",
+  },
+  {
+    key: "risk_type_review",
+    label: "Risk Type",
+  },
+  {
+    key: "open",
+    label: "Open",
+  },
+  {
+    key: "closed",
+    label: "Closed",
+  },
+  {
+    key: "drafts",
+    label: "Drafts",
+  },
+  {
+    key: "archived",
+    label: "Archived",
+  },
 ];
-
 function v3ChipMatches(e, chip) {
   if (chip === "all") return true;
   if (chip === "pricing_risk") return !!e.pricingRisk?.hasRisk;
@@ -269,18 +287,24 @@ function v3ChipMatches(e, chip) {
   }
   return true;
 }
-
 const PRICING_RISK_FILTERS = [
-  { key: "pricing_risk", label: "Pricing Risk" },
-  { key: "missing_cogs", label: "Missing COGS" },
-  { key: "low_margin", label: "Low Margin" },
+  {
+    key: "pricing_risk",
+    label: "Pricing Risk",
+  },
+  {
+    key: "missing_cogs",
+    label: "Missing COGS",
+  },
+  {
+    key: "low_margin",
+    label: "Low Margin",
+  },
 ];
-
 const PIPELINE_AND_RISK_FILTERS = [
   ...PIPELINE_FILTERS,
   ...PRICING_RISK_FILTERS,
 ];
-
 function estimateMatchesFilter(e, filter) {
   // Archived-accepted rows ride along in the pipeline fetch for the Won
   // funnel/MRR stats; the Archived tab (its own fetch) is where archived
@@ -305,7 +329,6 @@ function estimateMatchesFilter(e, filter) {
   if (filter === "pricing_warning") return e.pricingRisk?.status === "warning";
   return e._class === filter;
 }
-
 function estimateFilterLabel(filter) {
   if (filter === "drafts") return "Drafts";
   if (filter === "sent_group") return "Sent";
@@ -314,7 +337,6 @@ function estimateFilterLabel(filter) {
   if (filter === "pricing_warning") return "Pricing warnings";
   return PIPELINE_AND_RISK_FILTERS.find((f) => f.key === filter)?.label;
 }
-
 function serviceLineFromAuditLine(line) {
   const value = String(
     line?.protocol?.serviceType || line?.serviceKey || line?.label || "",
@@ -332,38 +354,39 @@ function serviceLineFromAuditLine(line) {
   if (value.includes("tree") || value.includes("shrub")) return "tree_shrub";
   return "pest";
 }
-
 function PricingRiskBadges({ risk, onMissingCogs, onLowMargin }) {
   if (!risk?.hasRisk) return null;
   return (
     <>
       {(risk.missingCogsCount || 0) > 0 && (
-        <button
+        <Button
           type="button"
+          variant="ghost"
           onClick={(e) => {
             e.stopPropagation();
             onMissingCogs?.();
           }}
-          className="inline-flex u-focus-ring rounded-full"
+          className="h-auto p-0"
           title="Open pricing audit focused on missing inventory COGS"
         >
           {" "}
           <Badge tone="alert">Missing COGS</Badge>{" "}
-        </button>
+        </Button>
       )}
       {(risk.lowMarginCount || 0) > 0 && (
-        <button
+        <Button
           type="button"
+          variant="ghost"
           onClick={(e) => {
             e.stopPropagation();
             onLowMargin?.();
           }}
-          className="inline-flex u-focus-ring rounded-full"
+          className="h-auto p-0"
           title="Open pricing audit focused on low-margin lines"
         >
           {" "}
           <Badge tone="alert">Low Margin</Badge>{" "}
-        </button>
+        </Button>
       )}
       {risk.status === "warning" &&
         !(risk.missingCogsCount || risk.lowMarginCount) && (
@@ -372,7 +395,6 @@ function PricingRiskBadges({ risk, onMissingCogs, onLowMargin }) {
     </>
   );
 }
-
 function automationBadgeLabel(automation) {
   switch (automation?.status) {
     case "generated":
@@ -389,7 +411,6 @@ function automationBadgeLabel(automation) {
       return null;
   }
 }
-
 function AutomationStatusBadge({ automation }) {
   const label = automationBadgeLabel(automation);
   if (!label) return null;
@@ -411,32 +432,45 @@ function AutomationStatusBadge({ automation }) {
     </Badge>
   );
 }
-
 function LawnOutlineStatusBadge({ outline }) {
   if (!outline) return null;
-  const status = outline.validationStatus === "blocked" ? "blocked" : outline.status || "draft";
-  const tone = status === "blocked" || outline.stale ? "alert" : ["sent", "viewed"].includes(status) ? "strong" : "neutral";
-  const label = status === "blocked"
-    ? "Outline blocked"
-    : outline.stale
-      ? "Outline stale"
-    : outline.ctaClickCount > 0
-      ? `Outline clicked${outline.ctaClickCount > 1 ? ` ${outline.ctaClickCount}x` : ""}`
-    : status === "viewed"
-      ? `Outline viewed${outline.viewCount > 1 ? ` ${outline.viewCount}x` : ""}`
-      : status === "sent"
-        ? "Outline sent"
-        : status === "revoked"
-          ? "Outline revoked"
-          : "Outline draft";
+  const status =
+    outline.validationStatus === "blocked"
+      ? "blocked"
+      : outline.status || "draft";
+  const tone =
+    status === "blocked" || outline.stale
+      ? "alert"
+      : ["sent", "viewed"].includes(status)
+        ? "strong"
+        : "neutral";
+  const label =
+    status === "blocked"
+      ? "Outline blocked"
+      : outline.stale
+        ? "Outline stale"
+        : outline.ctaClickCount > 0
+          ? `Outline clicked${outline.ctaClickCount > 1 ? ` ${outline.ctaClickCount}x` : ""}`
+          : status === "viewed"
+            ? `Outline viewed${outline.viewCount > 1 ? ` ${outline.viewCount}x` : ""}`
+            : status === "sent"
+              ? "Outline sent"
+              : status === "revoked"
+                ? "Outline revoked"
+                : "Outline draft";
   const detail = [
     outline.turfType && `Turf: ${outline.turfType}`,
     outline.validationStatus && `Validation: ${outline.validationStatus}`,
-    outline.lastCtaClickedAt && `Estimate clicked ${timeAgo(outline.lastCtaClickedAt)}`,
+    outline.lastCtaClickedAt &&
+      `Estimate clicked ${timeAgo(outline.lastCtaClickedAt)}`,
     outline.lastViewedAt && `Last viewed ${timeAgo(outline.lastViewedAt)}`,
     outline.sentAt && `Sent ${timeAgo(outline.sentAt)}`,
-    outline.staleReasons?.length ? `Regenerate: ${outline.staleReasons.join(", ")}` : null,
-  ].filter(Boolean).join(" · ");
+    outline.staleReasons?.length
+      ? `Regenerate: ${outline.staleReasons.join(", ")}`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
   return (
     <Badge tone={tone} title={detail || undefined}>
       <ClipboardList size={11} strokeWidth={1.75} aria-hidden />
@@ -444,7 +478,6 @@ function LawnOutlineStatusBadge({ outline }) {
     </Badge>
   );
 }
-
 function v3ChipCounts(estimates) {
   const out = {};
   for (const c of V3_CHIPS) {
@@ -469,284 +502,178 @@ function UrgencyBadge({ urgency }) {
 // the row's status. Mobile = bottom sheet, desktop = small centered popover.
 function RowActionsMenu({ items, label = "More actions" }) {
   const [open, setOpen] = useState(false);
-  const visible = (items || []).filter((it) => it && !it.hidden);
-
-  useEffect(() => {
-    if (!open) return undefined;
-    const onKey = (e) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("keydown", onKey);
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = prev;
-    };
-  }, [open]);
-
+  const visible = (items || []).filter((item) => item && !item.hidden);
   if (visible.length === 0) return null;
-
   return (
     <>
-      {" "}
-      <button
+      <Button
         type="button"
-        onClick={(e) => {
-          e.stopPropagation();
+        variant="secondary"
+        onClick={(event) => {
+          event.stopPropagation();
           setOpen(true);
         }}
         aria-label={label}
-        aria-haspopup="menu"
+        aria-haspopup="dialog"
         aria-expanded={open}
         title={label}
-        className={cn(
-          "inline-flex items-center justify-center flex-shrink-0",
-          "h-11 w-11 sm:h-9 sm:w-9 rounded-xs",
-          "border-hairline border-zinc-300 bg-white text-ink-secondary",
-          "hover:bg-zinc-50 u-focus-ring transition-colors",
-        )}
+        className="h-11 w-11 shrink-0 px-0 sm:h-9 sm:w-9"
       >
-        {" "}
-        <MoreHorizontal size={16} strokeWidth={1.75} aria-hidden />{" "}
-      </button>
-      {open &&
-        createPortal(
-          <div
-            className="fixed inset-0 z-[120] flex items-end justify-center sm:items-center sm:p-4"
-            role="dialog"
-            aria-modal="true"
-            style={{ fontFamily: ROBOTO }}
+        <MoreHorizontal size={16} strokeWidth={1.75} aria-hidden />
+      </Button>
+      <Dialog open={open} onClose={() => setOpen(false)} size="sm">
+        <DialogHeader className="flex items-center justify-between gap-3">
+          <DialogTitle>Actions</DialogTitle>
+          <Button
+            type="button"
+            variant="ghost"
             onClick={() => setOpen(false)}
+            aria-label="Close actions menu"
+            className="h-9 w-9 px-0"
           >
-            {" "}
-            <div className="absolute inset-0 bg-zinc-900/30" />{" "}
-            <div
-              onClick={(e) => e.stopPropagation()}
-              className="relative bg-white border-hairline border-zinc-200 rounded-t-md sm:rounded-md w-full sm:w-72 max-w-md shadow-lg overflow-hidden"
-              style={{ paddingBottom: "env(safe-area-inset-bottom, 0px)" }}
-            >
-              {" "}
-              <div className="px-4 py-3 border-b border-zinc-200 text-11 uppercase tracking-label text-ink-tertiary font-medium flex items-center justify-between">
-                {" "}
-                <span>Actions</span>{" "}
-                <button
+            <X size={16} strokeWidth={1.75} aria-hidden />
+          </Button>
+        </DialogHeader>
+        <DialogBody className="p-2">
+          <ul className="max-h-[70vh] overflow-y-auto">
+            {visible.map((item) => (
+              <li key={item.key}>
+                <Button
                   type="button"
-                  onClick={() => setOpen(false)}
-                  aria-label="Close actions menu"
-                  className="text-ink-tertiary hover:text-ink-primary"
+                  variant="ghost"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setOpen(false);
+                    item.onClick?.();
+                  }}
+                  disabled={item.disabled}
+                  title={item.title || undefined}
+                  className={cn(
+                    "h-auto min-h-11 w-full justify-start gap-3 px-3 py-2 text-left",
+                    item.variant === "danger" &&
+                      "text-alert-fg hover:bg-alert-bg",
+                  )}
                 >
-                  {" "}
-                  <X size={14} strokeWidth={1.75} aria-hidden />{" "}
-                </button>{" "}
-              </div>{" "}
-              <ul className="py-1 max-h-[70vh] overflow-y-auto">
-                {visible.map((it) => (
-                  <li key={it.key}>
-                    {" "}
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setOpen(false);
-                        it.onClick?.();
-                      }}
-                      disabled={it.disabled}
-                      title={it.title || undefined}
-                      className={cn(
-                        "w-full text-left px-4 py-3 sm:py-2 text-14 flex items-center gap-3 u-focus-ring",
-                        "hover:bg-zinc-50 disabled:opacity-50 disabled:cursor-not-allowed",
-                        it.variant === "danger" &&
-                          "text-alert-fg hover:bg-alert-bg",
-                      )}
-                    >
-                      {it.icon ? (
-                        <span
-                          className={cn(
-                            "flex-shrink-0",
-                            it.variant === "danger"
-                              ? "text-alert-fg"
-                              : "text-ink-tertiary",
-                          )}
-                        >
-                          {it.icon}
-                        </span>
-                      ) : (
-                        <span className="w-4" />
-                      )}{" "}
-                      <span className="flex-1">{it.label}</span>
-                      {it.detail && (
-                        <span className="text-11 text-ink-tertiary">
-                          {it.detail}
-                        </span>
-                      )}{" "}
-                    </button>{" "}
-                  </li>
-                ))}{" "}
-              </ul>{" "}
-            </div>{" "}
-          </div>,
-          document.body,
-        )}{" "}
+                  <span
+                    className={cn(
+                      "w-4 shrink-0",
+                      item.variant === "danger"
+                        ? "text-alert-fg"
+                        : "text-ink-tertiary",
+                    )}
+                  >
+                    {item.icon || null}
+                  </span>
+                  <span className="flex-1">{item.label}</span>
+                  {item.detail && (
+                    <span className="text-ui-body text-ink-tertiary">
+                      {item.detail}
+                    </span>
+                  )}
+                </Button>
+              </li>
+            ))}
+          </ul>
+        </DialogBody>
+      </Dialog>
     </>
   );
 }
 
 // Filter — 7 pipeline filters exceed the 4-item pill cap. Per UI SoR §6.1
-// "over 4" rule + §6.6, we collapse to a single FILTER pill that opens a
-// bottom-anchored sheet on mobile (centered modal on desktop) listing every
-// option with its live count. Active option marked with a trailing check.
+// "over 4" rule + §6.6, we collapse to a single FILTER control that opens a
+// shared dialog listing every option with its live count.
 function FilterSheetV2({ value, onChange, options, counts }) {
   const [open, setOpen] = useState(false);
-  const active = options.find((o) => o.key === value) || options[0];
-
-  useEffect(() => {
-    if (!open) return undefined;
-    const onKey = (e) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("keydown", onKey);
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = prevOverflow;
-    };
-  }, [open]);
-
+  const active = options.find((option) => option.key === value) || options[0];
   return (
     <>
-      {" "}
-      <button
+      <Button
         type="button"
         onClick={() => setOpen(true)}
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-label={`Filter estimates. Current filter: ${active.label} (${counts[active.key] ?? 0})`}
-        className={cn(
-          "inline-flex items-center gap-2 h-11 sm:h-9 pl-4 pr-5 rounded-full",
-          "text-12 font-medium uppercase tracking-label",
-          "bg-zinc-900 text-white border-hairline border-zinc-900",
-          "u-focus-ring hover:bg-zinc-800 transition-colors",
-        )}
+        className="gap-2"
       >
-        {" "}
-        <SlidersHorizontal size={16} strokeWidth={1.75} aria-hidden />{" "}
+        <SlidersHorizontal size={16} strokeWidth={1.75} aria-hidden />
         <span>
           Filter: {active.label} ({counts[active.key] ?? 0})
-        </span>{" "}
-      </button>
-      {open &&
-        createPortal(
-          <div
-            className="fixed inset-0 z-[120] flex items-end justify-center sm:items-center sm:p-4"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Filter estimates"
-            style={{ fontFamily: ROBOTO }}
+        </span>
+      </Button>
+      <Dialog
+        open={open}
+        onClose={() => setOpen(false)}
+        size="md"
+        aria-label="Filter estimates"
+      >
+        <DialogHeader className="flex items-center justify-between gap-3">
+          <DialogTitle>Filter estimates</DialogTitle>
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={() => setOpen(false)}
+            aria-label="Close"
+            className="h-9 w-9 px-0"
           >
-            {" "}
-            <div
-              className="absolute inset-0 bg-zinc-900/40"
-              onClick={() => setOpen(false)}
-            />{" "}
-            <div
-              className={cn(
-                "relative w-full bg-white outline-none",
-                "rounded-t-md sm:rounded-md sm:max-w-md",
-                "border-hairline border-zinc-200",
-                "flex flex-col max-h-[85vh]",
-              )}
-              style={{ paddingBottom: "env(safe-area-inset-bottom, 0)" }}
-            >
-              {/* Drag handle (mobile only) */}
-              <div className="pt-2 pb-1 sm:hidden">
-                {" "}
-                <div className="mx-auto w-10 h-1 rounded-full bg-zinc-300" />{" "}
-              </div>{" "}
-              <div className="px-5 py-3 flex items-center justify-between border-b border-hairline border-zinc-200">
-                {" "}
-                <div className="text-11 uppercase tracking-label font-medium text-ink-tertiary">
-                  Filter estimates
-                </div>{" "}
-                <button
+            <X size={16} strokeWidth={1.75} aria-hidden />
+          </Button>
+        </DialogHeader>
+        <DialogBody className="p-2">
+          <div className="space-y-1">
+            {options.map((option) => {
+              const isActive = option.key === value;
+              return (
+                <Button
+                  key={option.key}
                   type="button"
-                  onClick={() => setOpen(false)}
-                  aria-label="Close"
-                  className="h-9 w-9 flex items-center justify-center rounded-full bg-zinc-100 text-zinc-900 hover:bg-zinc-200 u-focus-ring"
+                  variant={isActive ? "secondary" : "ghost"}
+                  onClick={() => {
+                    onChange(option.key);
+                    setOpen(false);
+                  }}
+                  className="h-auto min-h-11 w-full justify-between gap-3 px-3 py-2 text-left"
                 >
-                  {" "}
-                  <X size={16} strokeWidth={1.75} aria-hidden />{" "}
-                </button>{" "}
-              </div>{" "}
-              <div className="flex-1 overflow-y-auto">
-                {options.map((o) => {
-                  const isActive = o.key === value;
-                  return (
-                    <button
-                      key={o.key}
-                      type="button"
-                      onClick={() => {
-                        onChange(o.key);
-                        setOpen(false);
-                      }}
-                      className={cn(
-                        "w-full flex items-center justify-between gap-3",
-                        "px-5 py-4 text-left u-focus-ring",
-                        "border-b border-hairline border-zinc-100 last:border-b-0",
-                        isActive ? "bg-zinc-50" : "bg-white hover:bg-zinc-50",
-                      )}
-                    >
-                      {" "}
-                      <span
-                        className={cn(
-                          "text-14 tracking-tight",
-                          isActive
-                            ? "font-medium text-zinc-900"
-                            : "text-zinc-700",
-                        )}
-                      >
-                        {o.label}
-                      </span>{" "}
-                      <span className="flex items-center gap-3">
-                        {" "}
-                        <span className="text-12 u-nums text-ink-tertiary">
-                          {counts[o.key] ?? 0}
-                        </span>
-                        {isActive && (
-                          <Check
-                            size={16}
-                            strokeWidth={2}
-                            className="text-zinc-900"
-                            aria-hidden
-                          />
-                        )}
-                      </span>{" "}
-                    </button>
-                  );
-                })}
-              </div>{" "}
-            </div>{" "}
-          </div>,
-          document.body,
-        )}
+                  <span>{option.label}</span>
+                  <span className="flex items-center gap-3">
+                    <span className="u-nums text-ink-tertiary">
+                      {counts[option.key] ?? 0}
+                    </span>
+                    {isActive && (
+                      <Check size={16} strokeWidth={2} aria-hidden />
+                    )}
+                  </span>
+                </Button>
+              );
+            })}
+          </div>
+        </DialogBody>
+      </Dialog>
     </>
   );
 }
-
 function fmtMoney(value) {
   const n = Number(value || 0);
   return `$${Math.round(n).toLocaleString()}`;
 }
-
 function estimateAmountDisplay(estimate) {
   const monthly = Number(estimate?.monthlyTotal || 0);
   const oneTime = Number(estimate?.onetimeTotal || estimate?.oneTimeTotal || 0);
-  if (monthly > 0) return { value: monthly, suffix: "/mo" };
-  if (oneTime > 0) return { value: oneTime, suffix: " one-time" };
-  return { value: 0, suffix: "/mo" };
+  if (monthly > 0)
+    return {
+      value: monthly,
+      suffix: "/mo",
+    };
+  if (oneTime > 0)
+    return {
+      value: oneTime,
+      suffix: " one-time",
+    };
+  return {
+    value: 0,
+    suffix: "/mo",
+  };
 }
-
 function canSendEstimate(estimate) {
   // Rows without a share token (quote-wizard mirrors, legacy imports) have no
   // customer link to send — the SMS/email would carry a literal /estimate/null.
@@ -755,7 +682,6 @@ function canSendEstimate(estimate) {
   if (!String(estimate?.token || "").trim()) return false;
   return estimateAmountDisplay(estimate).value > 0;
 }
-
 function classifyEstimateForPipeline(estimate) {
   if (estimate?.archivedAt) return classifyEstimate(estimate);
   if (estimate?.status === "draft") {
@@ -763,12 +689,10 @@ function classifyEstimateForPipeline(estimate) {
   }
   return classifyEstimate(estimate);
 }
-
 function fmtPct(value) {
   if (value == null || Number.isNaN(Number(value))) return "—";
   return `${Math.round(Number(value) * 100)}%`;
 }
-
 function fmtDateTime(value) {
   if (!value) return "—";
   try {
@@ -793,7 +717,7 @@ function StatCard({ label, value, sub, alert }) {
   return (
     <Card className="flex-1 min-w-[140px] p-4 min-h-[104px] flex flex-col items-center justify-center text-center">
       {" "}
-      <div className="text-11 uppercase tracking-label text-ink-tertiary mb-1">
+      <div className="text-ui-body uppercase tracking-label text-ink-tertiary mb-1">
         {label}
       </div>{" "}
       <div
@@ -804,11 +728,10 @@ function StatCard({ label, value, sub, alert }) {
       >
         {value}
       </div>
-      {sub && <div className="text-11 text-ink-tertiary mt-1">{sub}</div>}
+      {sub && <div className="text-ui-body text-ink-tertiary mt-1">{sub}</div>}
     </Card>
   );
 }
-
 const WORK_QUEUE_GROUPS = [
   {
     label: "Work Queue",
@@ -829,37 +752,30 @@ const WORK_QUEUE_GROUPS = [
     keys: ["won", "lost", "archived"],
   },
 ];
-
 function WorkQueueRail({ value, onChange, counts }) {
   const optionsByKey = useMemo(() => {
     const entries = PIPELINE_AND_RISK_FILTERS.map((item) => [item.key, item]);
     return Object.fromEntries(entries);
   }, []);
-
   return (
     <Card className="hidden xl:block sticky top-[132px] p-3">
       {" "}
-      <button
+      <Button
         type="button"
+        variant={value === "all" ? "primary" : "ghost"}
         onClick={() => onChange("all")}
-        className={cn(
-          "w-full h-10 px-3 rounded-sm border-hairline text-left",
-          "flex items-center justify-between gap-2 u-focus-ring",
-          value === "all"
-            ? "bg-zinc-900 text-white border-zinc-900"
-            : "bg-white text-zinc-900 border-zinc-200 hover:bg-zinc-50",
-        )}
+        className="w-full justify-between gap-2 text-left"
       >
         {" "}
-        <span className="text-12 font-medium uppercase tracking-label">
+        <span className="text-ui-body font-medium uppercase tracking-label">
           All Work
         </span>{" "}
-        <span className="text-11 u-nums">{counts.all ?? 0}</span>{" "}
-      </button>
+        <span className="text-ui-body u-nums">{counts.all ?? 0}</span>{" "}
+      </Button>
       {WORK_QUEUE_GROUPS.map((group) => (
         <div key={group.label} className="mt-4">
           {" "}
-          <div className="px-1 mb-1.5 text-10 uppercase tracking-label font-medium text-ink-tertiary">
+          <div className="px-1 mb-1.5 text-ui-body uppercase tracking-label font-medium text-ink-tertiary">
             {group.label}
           </div>{" "}
           <div className="space-y-1">
@@ -868,24 +784,19 @@ function WorkQueueRail({ value, onChange, counts }) {
               if (!item) return null;
               const active = value === key;
               return (
-                <button
+                <Button
                   key={key}
                   type="button"
+                  variant={active ? "primary" : "ghost"}
                   onClick={() => onChange(key)}
-                  className={cn(
-                    "w-full min-h-9 px-3 rounded-sm text-left",
-                    "flex items-center justify-between gap-2 u-focus-ring",
-                    active
-                      ? "bg-zinc-900 text-white"
-                      : "bg-transparent text-zinc-700 hover:bg-zinc-50 hover:text-zinc-900",
-                  )}
+                  className="w-full justify-between gap-2 text-left"
                 >
                   {" "}
-                  <span className="text-12">{item.label}</span>{" "}
-                  <span className="text-11 u-nums opacity-80">
+                  <span className="text-ui-body">{item.label}</span>{" "}
+                  <span className="text-ui-body u-nums opacity-80">
                     {counts[key] ?? 0}
                   </span>{" "}
-                </button>
+                </Button>
               );
             })}
           </div>{" "}
@@ -894,30 +805,40 @@ function WorkQueueRail({ value, onChange, counts }) {
     </Card>
   );
 }
-
 function PipelineCommandHeader({ activeTab, onTabChange, onNewLead }) {
   if (activeTab === "new") return null;
+  const sections = TABS.filter((item) => item.key !== "new");
+  const actions = [
+    {
+      key: "create-estimate",
+      label: "Create estimate",
+      icon: FilePlus2,
+      onClick: () => onTabChange("new"),
+      variant: activeTab === "leads" ? "secondary" : "primary",
+    },
+    activeTab === "leads"
+      ? {
+          key: "new-lead",
+          label: "New lead",
+          icon: Plus,
+          onClick: onNewLead,
+        }
+      : null,
+  ].filter(Boolean);
   return (
-    <header className="mb-4">
-      <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
-        <h1 className="text-22 font-medium text-zinc-900 m-0">Pipeline</h1>
-        <div className="flex gap-2">
-          <Button variant={activeTab === "leads" ? "secondary" : "primary"} onClick={() => onTabChange("new")} className="min-h-11 text-14 normal-case tracking-normal">
-            Create estimate
-          </Button>
-          {activeTab === "leads" && <Button onClick={onNewLead} className="min-h-11 text-14 normal-case tracking-normal">New lead</Button>}
-        </div>
-      </div>
-      <nav aria-label="Pipeline section" className="flex gap-4 border-b-hairline border-zinc-200">
-        {TABS.filter((item) => item.key !== "new").map(({ key, label }) => (
-          <button key={key} type="button" onClick={() => onTabChange(key)} aria-current={activeTab === key ? "page" : undefined}
-            className={cn("min-h-11 px-0 border-0 border-b-2 border-solid bg-transparent text-14 font-medium u-focus-ring cursor-pointer", activeTab === key ? "border-zinc-900 text-zinc-900" : "border-transparent text-ink-secondary")}>{label}</button>
-        ))}
-      </nav>
-    </header>
+    <AdminCommandHeader
+      variant="workspace"
+      title="Pipeline"
+      icon={Users}
+      sections={sections}
+      activeKey={activeTab}
+      onSectionChange={onTabChange}
+      ariaLabel="Pipeline section"
+      navGridClassName="grid-cols-3"
+      actions={actions}
+    />
   );
 }
-
 function EstimatePricingAuditModal({
   estimate,
   initialFocus = "all",
@@ -927,7 +848,6 @@ function EstimatePricingAuditModal({
   const [audit, setAudit] = useState(null);
   const [error, setError] = useState("");
   const [focus, setFocus] = useState(initialFocus || "all");
-
   useEffect(() => {
     let alive = true;
     setAudit(null);
@@ -944,20 +864,6 @@ function EstimatePricingAuditModal({
       alive = false;
     };
   }, [estimate.id, initialFocus]);
-
-  useEffect(() => {
-    const onKey = (e) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = prevOverflow;
-    };
-  }, [onClose]);
-
   const lineMatchesFocus = (line) => {
     if (focus === "missing_cogs")
       return ["missing_cogs", "unmapped"].includes(line.cogs?.status);
@@ -972,7 +878,6 @@ function EstimatePricingAuditModal({
       : focus === "low_margin"
         ? "Low Margin"
         : "All Lines";
-
   const goFixSource = (line) => {
     const serviceLine = serviceLineFromAuditLine(line);
     if (["missing_cogs", "unmapped"].includes(line.cogs?.status)) {
@@ -994,325 +899,315 @@ function EstimatePricingAuditModal({
     );
     onClose();
   };
-
-  return createPortal(
-    <div
-      className="fixed inset-0 z-[1000] bg-black/45 flex items-center justify-center p-0 sm:p-4"
-      role="dialog"
-      aria-modal="true"
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      size="lg"
+      layer={1000}
       aria-label="Estimate pricing audit"
-      style={{ fontFamily: ROBOTO }}
-      onClick={onClose}
+      className="max-w-5xl"
     >
-      {" "}
-      <div
-        className="bg-white border-hairline border-zinc-200 rounded-none sm:rounded-md shadow-xl w-full h-full sm:h-auto max-w-none sm:max-w-5xl max-h-none sm:max-h-[88vh] overflow-hidden flex flex-col box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
-        onClick={(e) => e.stopPropagation()}
-      >
+      <DialogHeader className="flex items-start justify-between gap-4">
         {" "}
-        <div className="p-5 border-b border-zinc-200 flex items-start justify-between gap-4">
+        <div>
           {" "}
-          <div>
-            {" "}
-            <div className="text-16 font-medium text-zinc-900">
-              Estimate pricing audit
-            </div>{" "}
-            <div className="text-12 text-ink-secondary mt-1">
-              {estimate.customerName || "Unknown"} ·{" "}
-              {estimate.address || "No address"}
-            </div>{" "}
+          <DialogTitle>Estimate pricing audit</DialogTitle>{" "}
+          <div className="text-ui-body text-ink-secondary mt-1">
+            {estimate.customerName || "Unknown"} ·{" "}
+            {estimate.address || "No address"}
           </div>{" "}
-          <button
-            type="button"
-            onClick={onClose}
-            className="h-9 w-9 inline-flex items-center justify-center rounded-xs border-hairline border-zinc-300 text-zinc-700 hover:bg-zinc-50"
-            aria-label="Close pricing audit"
-          >
+        </div>{" "}
+        <Button
+          type="button"
+          variant="ghost"
+          onClick={onClose}
+          className="h-9 w-9 px-0"
+          aria-label="Close pricing audit"
+        >
+          {" "}
+          <X size={16} strokeWidth={1.75} />{" "}
+        </Button>{" "}
+      </DialogHeader>
+      <DialogBody>
+        {error && (
+          <div className="border-hairline border-alert-fg bg-alert-bg text-alert-fg rounded-xs p-3 text-ui-body">
+            {error}
+          </div>
+        )}
+        {!audit && !error && (
+          <div className="p-8 text-center text-ui-body text-ink-secondary">
+            Loading audit…
+          </div>
+        )}
+        {audit && (
+          <div className="space-y-4">
             {" "}
-            <X size={16} strokeWidth={1.75} />{" "}
-          </button>{" "}
-        </div>{" "}
-        <div className="p-5 overflow-auto">
-          {error && (
-            <div className="border-hairline border-alert-fg bg-alert-bg text-alert-fg rounded-xs p-3 text-13">
-              {error}
-            </div>
-          )}
-          {!audit && !error && (
-            <div className="p-8 text-center text-13 text-ink-secondary">
-              Loading audit…
-            </div>
-          )}
-          {audit && (
-            <div className="space-y-4">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
               {" "}
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                {" "}
-                <StatCard
-                  label="Annual + 1x Revenue"
-                  value={fmtMoney(audit.totals.revenue)}
-                  sub="stored estimate"
-                />{" "}
-                <StatCard
-                  label="Inventory COGS"
-                  value={fmtMoney(audit.totals.estimatedCost)}
-                  sub="current products"
-                />{" "}
-                <StatCard
-                  label="Gross Profit"
-                  value={fmtMoney(audit.totals.grossProfit)}
-                  sub={fmtPct(audit.totals.margin)}
-                  alert={
-                    audit.totals.margin != null && audit.totals.margin < 0.35
-                  }
-                />{" "}
-                <StatCard
-                  label="WaveGuard"
-                  value={audit.estimate.waveguardTier || "—"}
-                  sub={audit.estimate.pricingVersion || "saved result"}
-                />{" "}
-              </div>
-              {audit.snapshot && (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                  {" "}
-                  <Card className="p-4">
-                    {" "}
-                    <div className="text-11 uppercase tracking-label text-ink-tertiary mb-2">
-                      Sent Snapshot
-                    </div>{" "}
-                    <div className="grid grid-cols-3 gap-3">
-                      {" "}
-                      <div>
-                        {" "}
-                        <div className="text-11 text-ink-tertiary">
-                          COGS
-                        </div>{" "}
-                        <div className="text-16 font-medium u-nums text-zinc-900">
-                          {fmtMoney(audit.snapshot.totals?.estimatedCost)}
-                        </div>{" "}
-                      </div>{" "}
-                      <div>
-                        {" "}
-                        <div className="text-11 text-ink-tertiary">
-                          Margin
-                        </div>{" "}
-                        <div className="text-16 font-medium u-nums text-zinc-900">
-                          {fmtPct(audit.snapshot.totals?.margin)}
-                        </div>{" "}
-                      </div>{" "}
-                      <div>
-                        {" "}
-                        <div className="text-11 text-ink-tertiary">
-                          Captured
-                        </div>{" "}
-                        <div className="text-12 text-zinc-900">
-                          {fmtDateTime(audit.snapshot.snapshotAt)}
-                        </div>{" "}
-                      </div>{" "}
-                    </div>{" "}
-                  </Card>{" "}
-                  <Card className="p-4">
-                    {" "}
-                    <div className="text-11 uppercase tracking-label text-ink-tertiary mb-2">
-                      Current Audit
-                    </div>{" "}
-                    <div className="grid grid-cols-3 gap-3">
-                      {" "}
-                      <div>
-                        {" "}
-                        <div className="text-11 text-ink-tertiary">
-                          COGS
-                        </div>{" "}
-                        <div className="text-16 font-medium u-nums text-zinc-900">
-                          {fmtMoney(audit.totals.estimatedCost)}
-                        </div>{" "}
-                      </div>{" "}
-                      <div>
-                        {" "}
-                        <div className="text-11 text-ink-tertiary">
-                          Margin
-                        </div>{" "}
-                        <div className="text-16 font-medium u-nums text-zinc-900">
-                          {fmtPct(audit.totals.margin)}
-                        </div>{" "}
-                      </div>{" "}
-                      <div>
-                        {" "}
-                        <div className="text-11 text-ink-tertiary">
-                          Delta
-                        </div>{" "}
-                        <div className="text-16 font-medium u-nums text-zinc-900">
-                          {audit.snapshot.totals?.margin == null ||
-                          audit.totals.margin == null
-                            ? "—"
-                            : `${Math.round((audit.totals.margin - audit.snapshot.totals.margin) * 100)} pts`}
-                        </div>{" "}
-                      </div>{" "}
-                    </div>{" "}
-                  </Card>{" "}
-                </div>
-              )}
-              <div className="flex flex-wrap items-center justify-between gap-2 border-hairline border-zinc-200 rounded-md px-3 py-2">
-                {" "}
-                <div className="text-12 text-ink-secondary">
-                  Showing{" "}
-                  <span className="font-medium text-zinc-900">
-                    {focusLabel}
-                  </span>
-                  {focus !== "all"
-                    ? ` (${visibleLines.length} of ${audit.lines.length})`
-                    : ""}
-                </div>{" "}
-                <div className="flex flex-wrap gap-1.5">
-                  {[
-                    { key: "all", label: "All" },
-                    { key: "missing_cogs", label: "Missing COGS" },
-                    { key: "low_margin", label: "Low Margin" },
-                  ].map((item) => (
-                    <button
-                      key={item.key}
-                      type="button"
-                      onClick={() => setFocus(item.key)}
-                      className={cn(
-                        "h-8 px-3 rounded-full text-11 font-medium border-hairline u-focus-ring",
-                        focus === item.key
-                          ? "bg-zinc-900 text-white border-zinc-900"
-                          : "bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50",
-                      )}
-                    >
-                      {item.label}
-                    </button>
-                  ))}
-                </div>{" "}
-              </div>{" "}
-              <div className="border-hairline border-zinc-200 rounded-md overflow-hidden">
-                {" "}
-                <div className="hidden md:grid grid-cols-[1.1fr_0.85fr_0.75fr_0.65fr_0.75fr_1fr_0.65fr] gap-3 px-3 py-2 bg-zinc-50 text-10 uppercase tracking-label text-ink-tertiary font-medium">
-                  {" "}
-                  <div>Line</div> <div>Price Source</div> <div>Protocol</div>{" "}
-                  <div>Revenue</div> <div>COGS</div>{" "}
-                  <div>Margin / Warnings</div> <div>Fix</div>{" "}
-                </div>
-                {visibleLines.length === 0 ? (
-                  <div className="p-4 text-13 text-ink-secondary">
-                    {audit.lines.length === 0
-                      ? "No saved estimate lines found."
-                      : `No ${focusLabel.toLowerCase()} lines found.`}
-                  </div>
-                ) : (
-                  visibleLines.map((line, idx) => (
-                    <div
-                      key={`${line.serviceKey}-${idx}`}
-                      className="grid grid-cols-1 md:grid-cols-[1.1fr_0.85fr_0.75fr_0.65fr_0.75fr_1fr_0.65fr] gap-3 px-3 py-3 border-t border-zinc-100 text-12"
-                    >
-                      {" "}
-                      <div>
-                        {" "}
-                        <div className="font-medium text-zinc-900">
-                          {line.label}
-                        </div>{" "}
-                        <div className="text-ink-secondary">
-                          {line.cadence === "recurring"
-                            ? `${line.monthly ? fmtMoney(line.monthly) : "—"}/mo`
-                            : "one-time"}{" "}
-                          · {line.cogs?.visitsPerYear || 0} visit
-                          {line.cogs?.visitsPerYear === 1 ? "" : "s"}
-                        </div>{" "}
-                      </div>{" "}
-                      <div className="text-ink-secondary break-words">
-                        {line.priceSource}
-                      </div>{" "}
-                      <div>
-                        {" "}
-                        <div className="text-zinc-900">
-                          {line.protocol?.programKey || "—"}
-                        </div>{" "}
-                        <div className="text-ink-secondary">
-                          {line.protocol?.matched
-                            ? line.protocol.visitName || "matched"
-                            : line.protocol?.reason || "not matched"}
-                        </div>{" "}
-                      </div>{" "}
-                      <div className="u-nums font-medium text-zinc-900">
-                        {fmtMoney(line.price)}
-                      </div>{" "}
-                      <div>
-                        {" "}
-                        <div className="u-nums font-medium text-zinc-900">
-                          {fmtMoney(line.cogs?.estimatedCost)}
-                        </div>{" "}
-                        <div className="text-ink-secondary">
-                          {fmtMoney(line.cogs?.totalPerVisit)}/visit ·{" "}
-                          {line.cogs?.status}
-                        </div>
-                        {line.cogs?.lines?.length > 0 && (
-                          <div className="mt-1 text-11 text-ink-tertiary">
-                            {line.cogs.lines
-                              .slice(0, 2)
-                              .map((p) => p.productName)
-                              .join(", ")}
-                            {line.cogs.lines.length > 2
-                              ? ` +${line.cogs.lines.length - 2}`
-                              : ""}
-                          </div>
-                        )}
-                      </div>{" "}
-                      <div>
-                        {" "}
-                        <Badge
-                          tone={line.status === "ok" ? "neutral" : "alert"}
-                        >
-                          {fmtPct(line.margin)}
-                        </Badge>
-                        {line.warnings?.length > 0 && (
-                          <div className="mt-1 space-y-1">
-                            {line.warnings.slice(0, 3).map((w, i) => (
-                              <div key={i} className="text-11 text-alert-fg">
-                                {w}
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>{" "}
-                      <div>
-                        {line.status === "ok" ? (
-                          <span className="text-ink-tertiary">—</span>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => goFixSource(line)}
-                            className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-full border-hairline border-zinc-300 text-11 font-medium text-zinc-800 hover:bg-zinc-50 u-focus-ring"
-                            title="Open the source setup for this pricing issue"
-                          >
-                            {" "}
-                            <ExternalLink
-                              size={13}
-                              strokeWidth={1.75}
-                              aria-hidden
-                            />
-                            Fix source
-                          </button>
-                        )}
-                      </div>{" "}
-                    </div>
-                  ))
-                )}
-              </div>{" "}
-              <div className="text-11 text-ink-tertiary">
-                Pricing is read from the saved estimate result. Current COGS is
-                recalculated from today's inventory product costs and service
-                protocol mappings; sent snapshots preserve the audit values
-                captured when the estimate was delivered.
-              </div>{" "}
+              <StatCard
+                label="Annual + 1x Revenue"
+                value={fmtMoney(audit.totals.revenue)}
+                sub="stored estimate"
+              />{" "}
+              <StatCard
+                label="Inventory COGS"
+                value={fmtMoney(audit.totals.estimatedCost)}
+                sub="current products"
+              />{" "}
+              <StatCard
+                label="Gross Profit"
+                value={fmtMoney(audit.totals.grossProfit)}
+                sub={fmtPct(audit.totals.margin)}
+                alert={
+                  audit.totals.margin != null && audit.totals.margin < 0.35
+                }
+              />{" "}
+              <StatCard
+                label="WaveGuard"
+                value={audit.estimate.waveguardTier || "—"}
+                sub={audit.estimate.pricingVersion || "saved result"}
+              />{" "}
             </div>
-          )}
-        </div>{" "}
-      </div>{" "}
-    </div>,
-    document.body,
+            {audit.snapshot && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {" "}
+                <Card className="p-4">
+                  {" "}
+                  <div className="text-ui-body uppercase tracking-label text-ink-tertiary mb-2">
+                    Sent Snapshot
+                  </div>{" "}
+                  <div className="grid grid-cols-3 gap-3">
+                    {" "}
+                    <div>
+                      {" "}
+                      <div className="text-ui-body text-ink-tertiary">
+                        COGS
+                      </div>{" "}
+                      <div className="text-16 font-medium u-nums text-zinc-900">
+                        {fmtMoney(audit.snapshot.totals?.estimatedCost)}
+                      </div>{" "}
+                    </div>{" "}
+                    <div>
+                      {" "}
+                      <div className="text-ui-body text-ink-tertiary">
+                        Margin
+                      </div>{" "}
+                      <div className="text-16 font-medium u-nums text-zinc-900">
+                        {fmtPct(audit.snapshot.totals?.margin)}
+                      </div>{" "}
+                    </div>{" "}
+                    <div>
+                      {" "}
+                      <div className="text-ui-body text-ink-tertiary">
+                        Captured
+                      </div>{" "}
+                      <div className="text-ui-body text-zinc-900">
+                        {fmtDateTime(audit.snapshot.snapshotAt)}
+                      </div>{" "}
+                    </div>{" "}
+                  </div>{" "}
+                </Card>{" "}
+                <Card className="p-4">
+                  {" "}
+                  <div className="text-ui-body uppercase tracking-label text-ink-tertiary mb-2">
+                    Current Audit
+                  </div>{" "}
+                  <div className="grid grid-cols-3 gap-3">
+                    {" "}
+                    <div>
+                      {" "}
+                      <div className="text-ui-body text-ink-tertiary">
+                        COGS
+                      </div>{" "}
+                      <div className="text-16 font-medium u-nums text-zinc-900">
+                        {fmtMoney(audit.totals.estimatedCost)}
+                      </div>{" "}
+                    </div>{" "}
+                    <div>
+                      {" "}
+                      <div className="text-ui-body text-ink-tertiary">
+                        Margin
+                      </div>{" "}
+                      <div className="text-16 font-medium u-nums text-zinc-900">
+                        {fmtPct(audit.totals.margin)}
+                      </div>{" "}
+                    </div>{" "}
+                    <div>
+                      {" "}
+                      <div className="text-ui-body text-ink-tertiary">
+                        Delta
+                      </div>{" "}
+                      <div className="text-16 font-medium u-nums text-zinc-900">
+                        {audit.snapshot.totals?.margin == null ||
+                        audit.totals.margin == null
+                          ? "—"
+                          : `${Math.round((audit.totals.margin - audit.snapshot.totals.margin) * 100)} pts`}
+                      </div>{" "}
+                    </div>{" "}
+                  </div>{" "}
+                </Card>{" "}
+              </div>
+            )}
+            <div className="flex flex-wrap items-center justify-between gap-2 border-hairline border-zinc-200 rounded-md px-3 py-2">
+              {" "}
+              <div className="text-ui-body text-ink-secondary">
+                Showing{" "}
+                <span className="font-medium text-zinc-900">{focusLabel}</span>
+                {focus !== "all"
+                  ? ` (${visibleLines.length} of ${audit.lines.length})`
+                  : ""}
+              </div>{" "}
+              <div className="flex flex-wrap gap-1.5">
+                {[
+                  {
+                    key: "all",
+                    label: "All",
+                  },
+                  {
+                    key: "missing_cogs",
+                    label: "Missing COGS",
+                  },
+                  {
+                    key: "low_margin",
+                    label: "Low Margin",
+                  },
+                ].map((item) => (
+                  <Button
+                    key={item.key}
+                    type="button"
+                    variant={focus === item.key ? "primary" : "secondary"}
+                    size="sm"
+                    onClick={() => setFocus(item.key)}
+                  >
+                    {item.label}
+                  </Button>
+                ))}
+              </div>{" "}
+            </div>{" "}
+            <div className="border-hairline border-zinc-200 rounded-md overflow-hidden">
+              {" "}
+              <div className="hidden md:grid grid-cols-[1.1fr_0.85fr_0.75fr_0.65fr_0.75fr_1fr_0.65fr] gap-3 px-3 py-2 bg-zinc-50 text-ui-body uppercase tracking-label text-ink-tertiary font-medium">
+                {" "}
+                <div>Line</div> <div>Price Source</div> <div>Protocol</div>{" "}
+                <div>Revenue</div> <div>COGS</div> <div>Margin / Warnings</div>{" "}
+                <div>Fix</div>{" "}
+              </div>
+              {visibleLines.length === 0 ? (
+                <div className="p-4 text-ui-body text-ink-secondary">
+                  {audit.lines.length === 0
+                    ? "No saved estimate lines found."
+                    : `No ${focusLabel.toLowerCase()} lines found.`}
+                </div>
+              ) : (
+                visibleLines.map((line, idx) => (
+                  <div
+                    key={`${line.serviceKey}-${idx}`}
+                    className="grid grid-cols-1 md:grid-cols-[1.1fr_0.85fr_0.75fr_0.65fr_0.75fr_1fr_0.65fr] gap-3 px-3 py-3 border-t border-zinc-100 text-ui-body"
+                  >
+                    {" "}
+                    <div>
+                      {" "}
+                      <div className="font-medium text-zinc-900">
+                        {line.label}
+                      </div>{" "}
+                      <div className="text-ink-secondary">
+                        {line.cadence === "recurring"
+                          ? `${line.monthly ? fmtMoney(line.monthly) : "—"}/mo`
+                          : "one-time"}{" "}
+                        · {line.cogs?.visitsPerYear || 0} visit
+                        {line.cogs?.visitsPerYear === 1 ? "" : "s"}
+                      </div>{" "}
+                    </div>{" "}
+                    <div className="text-ink-secondary break-words">
+                      {line.priceSource}
+                    </div>{" "}
+                    <div>
+                      {" "}
+                      <div className="text-zinc-900">
+                        {line.protocol?.programKey || "—"}
+                      </div>{" "}
+                      <div className="text-ink-secondary">
+                        {line.protocol?.matched
+                          ? line.protocol.visitName || "matched"
+                          : line.protocol?.reason || "not matched"}
+                      </div>{" "}
+                    </div>{" "}
+                    <div className="u-nums font-medium text-zinc-900">
+                      {fmtMoney(line.price)}
+                    </div>{" "}
+                    <div>
+                      {" "}
+                      <div className="u-nums font-medium text-zinc-900">
+                        {fmtMoney(line.cogs?.estimatedCost)}
+                      </div>{" "}
+                      <div className="text-ink-secondary">
+                        {fmtMoney(line.cogs?.totalPerVisit)}/visit ·{" "}
+                        {line.cogs?.status}
+                      </div>
+                      {line.cogs?.lines?.length > 0 && (
+                        <div className="mt-1 text-ui-body text-ink-tertiary">
+                          {line.cogs.lines
+                            .slice(0, 2)
+                            .map((p) => p.productName)
+                            .join(", ")}
+                          {line.cogs.lines.length > 2
+                            ? ` +${line.cogs.lines.length - 2}`
+                            : ""}
+                        </div>
+                      )}
+                    </div>{" "}
+                    <div>
+                      {" "}
+                      <Badge tone={line.status === "ok" ? "neutral" : "alert"}>
+                        {fmtPct(line.margin)}
+                      </Badge>
+                      {line.warnings?.length > 0 && (
+                        <div className="mt-1 space-y-1">
+                          {line.warnings.slice(0, 3).map((w, i) => (
+                            <div key={i} className="text-ui-body text-alert-fg">
+                              {w}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>{" "}
+                    <div>
+                      {line.status === "ok" ? (
+                        <span className="text-ink-tertiary">—</span>
+                      ) : (
+                        <Button
+                          type="button"
+                          onClick={() => goFixSource(line)}
+                          className="inline-flex items-center gap-1.5 h-8 u-focus-ring"
+                          title="Open the source setup for this pricing issue"
+                        >
+                          {" "}
+                          <ExternalLink
+                            size={13}
+                            strokeWidth={1.75}
+                            aria-hidden
+                          />
+                          Fix source
+                        </Button>
+                      )}
+                    </div>{" "}
+                  </div>
+                ))
+              )}
+            </div>{" "}
+            <div className="text-ui-body text-ink-tertiary">
+              Pricing is read from the saved estimate result. Current COGS is
+              recalculated from today's inventory product costs and service
+              protocol mappings; sent snapshots preserve the audit values
+              captured when the estimate was delivered.
+            </div>{" "}
+          </div>
+        )}
+      </DialogBody>
+    </Dialog>
   );
 }
-
 function fmtDate(d) {
   if (!d) return "—";
   return new Date(d).toLocaleDateString("en-US", {
@@ -1321,7 +1216,6 @@ function fmtDate(d) {
     year: "numeric",
   });
 }
-
 function estimatePreviewHref(estimate) {
   if (!estimate?.token) return null;
   const base = `/estimate/${encodeURIComponent(estimate.token)}`;
@@ -1356,7 +1250,6 @@ function formatApptShort(appt) {
   const t = appt.windowDisplay ? ` · ${appt.windowDisplay}` : "";
   return `${dow} ${md}${t}`;
 }
-
 function timeAgo(d) {
   if (!d) return "";
   const mins = Math.floor((Date.now() - new Date(d)) / 60000);
@@ -1366,20 +1259,22 @@ function timeAgo(d) {
   const days = Math.floor(hrs / 24);
   return `${days}d ago`;
 }
-
 function estimateHasLawnLine(estimate = {}) {
-  const serviceLines = Array.isArray(estimate.serviceLines) ? estimate.serviceLines : [];
+  const serviceLines = Array.isArray(estimate.serviceLines)
+    ? estimate.serviceLines
+    : [];
   const haystack = [
     estimate.serviceInterest,
     estimate.description,
     estimate.notes,
     ...serviceLines,
-  ].join(" ").toLowerCase();
+  ]
+    .join(" ")
+    .toLowerCase();
   // 'turf' covers the commercial turf-treatment label ("Commercial Turf
   // Treatment Program") so the Lawn service-outline workflow still gates on.
   return haystack.includes("lawn") || haystack.includes("turf");
 }
-
 function LawnOutlineQuickButton({ estimate, onClick, compact = false }) {
   if (!estimateHasLawnLine(estimate)) return null;
   const outline = estimate.lawnServiceOutline;
@@ -1387,47 +1282,71 @@ function LawnOutlineQuickButton({ estimate, onClick, compact = false }) {
   const viewed = outline?.viewCount > 0;
   const blocked = outline?.validationStatus === "blocked";
   const stale = outline?.stale;
-  const active = clicked || viewed || ["sent", "viewed"].includes(outline?.status);
+  const active =
+    clicked || viewed || ["sent", "viewed"].includes(outline?.status);
   const title = outline
     ? [
-        stale && `Stale: ${outline.staleReasons?.join(", ") || "regenerate recommended"}`,
+        stale &&
+          `Stale: ${outline.staleReasons?.join(", ") || "regenerate recommended"}`,
         clicked && `Estimate clicked ${timeAgo(outline.lastCtaClickedAt)}`,
         viewed && `Viewed ${outline.viewCount}x`,
         outline.sentAt && `Sent ${timeAgo(outline.sentAt)}`,
-        outline.productCardCount ? `${outline.productCardCount} product cards` : null,
+        outline.productCardCount
+          ? `${outline.productCardCount} product cards`
+          : null,
         blocked ? "Validation blocked" : null,
-      ].filter(Boolean).join(" · ")
+      ]
+        .filter(Boolean)
+        .join(" · ")
     : "Generate lawn service outline";
   return (
-    <button
+    <Button
       type="button"
+      variant={blocked || stale ? "danger" : active ? "primary" : "secondary"}
       onClick={(event) => {
         event.stopPropagation();
         onClick?.(estimate);
       }}
-      aria-label={outline ? "Open lawn service outline" : "Generate lawn service outline"}
+      aria-label={
+        outline ? "Open lawn service outline" : "Generate lawn service outline"
+      }
       title={title || "Open lawn service outline"}
-      className={cn(
-        "inline-flex items-center justify-center border-hairline rounded-xs u-focus-ring transition-colors",
-        compact ? "h-11 w-11 sm:h-9 sm:w-9" : "h-9 px-3 gap-1.5 text-12 font-medium",
-        blocked || stale
-          ? "border-red-300 bg-red-50 text-red-700 hover:bg-red-100"
-          : active
-            ? "border-emerald-700 bg-emerald-700 text-white hover:bg-emerald-800"
-            : "border-zinc-300 bg-white text-zinc-800 hover:bg-zinc-50",
-      )}
+      className={compact ? "h-11 w-11 px-0 sm:h-9 sm:w-9" : "gap-1.5"}
     >
       <ClipboardList size={16} strokeWidth={1.75} aria-hidden />
-      {!compact && <span>{stale ? "Stale" : clicked ? "Clicked" : viewed ? "Viewed" : outline ? "Outline" : "Outline"}</span>}
-    </button>
+      {!compact && (
+        <span>
+          {stale
+            ? "Stale"
+            : clicked
+              ? "Clicked"
+              : viewed
+                ? "Viewed"
+                : outline
+                  ? "Outline"
+                  : "Outline"}
+        </span>
+      )}
+    </Button>
   );
 }
-
 const SOURCE_ICON = {
-  lead_webhook: { Icon: Globe, title: "Website lead" },
-  referral: { Icon: Users, title: "Referral" },
-  ai_agent: { Icon: Bot, title: "AI agent draft — review before sending" },
-  call_recording: { Icon: Phone, title: "Phone call recording draft" },
+  lead_webhook: {
+    Icon: Globe,
+    title: "Website lead",
+  },
+  referral: {
+    Icon: Users,
+    title: "Referral",
+  },
+  ai_agent: {
+    Icon: Bot,
+    title: "AI agent draft — review before sending",
+  },
+  call_recording: {
+    Icon: Phone,
+    title: "Phone call recording draft",
+  },
   estimator_engine: {
     Icon: Bot,
     title: "Estimator engine draft — review before sending",
@@ -1440,204 +1359,188 @@ const SOURCE_ICON = {
 // the public endpoint. This badge is the operator's pre-send surface for it.
 function EngineReviewBadge({ engine, agentReview, onOpen }) {
   if (!engine?.lane && !agentReview) return null;
-  const flagged = (engine?.lane && engine.lane !== "green")
-    || (engine?.marginWarnings || []).length > 0
-    || (agentReview?.uncertainty || []).length > 0
-    || (agentReview?.belowTargetServices || []).length > 0
-    || (agentReview?.unverifiedLineCount || 0) > 0;
+  const flagged =
+    (engine?.lane && engine.lane !== "green") ||
+    (engine?.marginWarnings || []).length > 0 ||
+    (agentReview?.uncertainty || []).length > 0 ||
+    (agentReview?.belowTargetServices || []).length > 0 ||
+    (agentReview?.unverifiedLineCount || 0) > 0;
   return (
-    <button
+    <Button
       type="button"
+      variant="ghost"
       onClick={(evt) => {
         evt.stopPropagation();
         onOpen();
       }}
-      className="bg-transparent border-0 p-0 cursor-pointer"
       title={
         flagged
           ? "AI draft flagged for review — open the engine's reasons before sending"
           : "AI draft — open the engine's review notes"
       }
+      className="h-auto p-0"
     >
       <Badge tone={flagged ? "alert" : "neutral"}>
         <Bot size={11} strokeWidth={1.75} aria-hidden />
         {flagged ? "AI Review" : "AI Draft"}
       </Badge>
-    </button>
+    </Button>
   );
 }
-
 export function EngineReviewModal({ estimate, onClose }) {
   const engine = estimate.estimatorEngine || {};
   const agentReview = estimate.agentDraftReview || null;
-  const flagged = (estimate.estimatorEngine && engine.lane !== "green")
-    || (engine.marginWarnings || []).length > 0
-    || (agentReview?.uncertainty || []).length > 0
-    || (agentReview?.belowTargetServices || []).length > 0
-    || (agentReview?.unverifiedLineCount || 0) > 0;
-
-  useEffect(() => {
-    const onKey = (e) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = prevOverflow;
-    };
-  }, [onClose]);
-
-  return createPortal(
-    <div
-      className="fixed inset-0 z-[1000] bg-black/45 flex items-center justify-center p-0 sm:p-4"
-      role="dialog"
-      aria-modal="true"
+  const flagged =
+    (estimate.estimatorEngine && engine.lane !== "green") ||
+    (engine.marginWarnings || []).length > 0 ||
+    (agentReview?.uncertainty || []).length > 0 ||
+    (agentReview?.belowTargetServices || []).length > 0 ||
+    (agentReview?.unverifiedLineCount || 0) > 0;
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      size="lg"
+      layer={1000}
       aria-label="AI draft review"
-      style={{ fontFamily: ROBOTO }}
-      onClick={onClose}
+      className="max-w-2xl"
     >
-      <div
-        className="bg-white border-hairline border-zinc-200 rounded-none sm:rounded-md shadow-xl w-full h-full sm:h-auto max-w-none sm:max-w-2xl max-h-none sm:max-h-[88vh] overflow-hidden flex flex-col box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="p-5 border-b border-zinc-200 flex items-start justify-between gap-4">
-          <div>
-            <div className="text-16 font-medium text-zinc-900">
-              AI draft review
-            </div>
-            <div className="text-12 text-ink-secondary mt-1">
-              {estimate.customerName || "Unknown"} ·{" "}
-              {estimate.address || "No address"}
-            </div>
+      <DialogHeader className="flex items-start justify-between gap-4">
+        <div>
+          <DialogTitle>AI draft review</DialogTitle>
+          <div className="text-ui-body text-ink-secondary mt-1">
+            {estimate.customerName || "Unknown"} ·{" "}
+            {estimate.address || "No address"}
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="h-9 w-9 inline-flex items-center justify-center rounded-xs border-hairline border-zinc-300 text-zinc-700 hover:bg-zinc-50"
-            aria-label="Close AI draft review"
-          >
-            <X size={16} strokeWidth={1.75} />
-          </button>
         </div>
-        <div className="p-5 overflow-auto space-y-4">
-          <Badge tone={flagged ? "alert" : "neutral"}>
-            {flagged ? "Flagged for review" : "No gaps flagged"}
-          </Badge>
-          {(engine.laneReasons || []).length > 0 && (
-            <div>
-              <div className="text-11 uppercase tracking-label text-ink-tertiary mb-2">
-                Review reasons
+        <Button
+          type="button"
+          variant="ghost"
+          onClick={onClose}
+          className="h-9 w-9 px-0"
+          aria-label="Close AI draft review"
+        >
+          <X size={16} strokeWidth={1.75} />
+        </Button>
+      </DialogHeader>
+      <DialogBody className="space-y-4">
+        <Badge tone={flagged ? "alert" : "neutral"}>
+          {flagged ? "Flagged for review" : "No gaps flagged"}
+        </Badge>
+        {(engine.laneReasons || []).length > 0 && (
+          <div>
+            <div className="text-ui-body uppercase tracking-label text-ink-tertiary mb-2">
+              Review reasons
+            </div>
+            <ul className="list-disc pl-5 space-y-1 text-ui-body text-zinc-800">
+              {engine.laneReasons.map((reason, i) => (
+                <li key={i}>{reason}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {engine.reviewNotes && (
+          <div>
+            <div className="text-ui-body uppercase tracking-label text-ink-tertiary mb-2">
+              Engine notes and evidence
+            </div>
+            <pre className="whitespace-pre-wrap font-sans text-ui-body text-zinc-800 bg-zinc-50 border-hairline border-zinc-200 rounded-xs p-3">
+              {engine.reviewNotes}
+            </pre>
+          </div>
+        )}
+        {(engine.marginWarnings || []).length > 0 && (
+          <div>
+            <div className="text-ui-body uppercase tracking-label text-ink-tertiary mb-2">
+              Margin review (report-only — nothing moved the price)
+            </div>
+            <ul className="list-disc pl-5 space-y-1 text-ui-body text-zinc-800">
+              {engine.marginWarnings.map((warning, i) => (
+                <li key={i}>
+                  {String(warning?.message || warning?.code || warning).replace(
+                    /_/g,
+                    " ",
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {agentReview?.reasoning && (
+          <div>
+            <div className="text-ui-body uppercase tracking-label text-ink-tertiary mb-2">
+              Agent reasoning
+            </div>
+            <pre className="whitespace-pre-wrap font-sans text-ui-body text-zinc-800 bg-zinc-50 border-hairline border-zinc-200 rounded-xs p-3">
+              {agentReview.reasoning}
+            </pre>
+            {agentReview.sqftSource && (
+              <div className="text-ui-body text-ink-secondary mt-1">
+                Sqft source:{" "}
+                {agentReview.sqftSource === "property_lookup"
+                  ? "property lookup"
+                  : "operator input"}
               </div>
-              <ul className="list-disc pl-5 space-y-1 text-13 text-zinc-800">
-                {engine.laneReasons.map((reason, i) => (
-                  <li key={i}>{reason}</li>
-                ))}
-              </ul>
+            )}
+          </div>
+        )}
+        {(agentReview?.assumptions || []).length > 0 && (
+          <div>
+            <div className="text-ui-body uppercase tracking-label text-ink-tertiary mb-2">
+              Assumptions made
             </div>
-          )}
-          {engine.reviewNotes && (
-            <div>
-              <div className="text-11 uppercase tracking-label text-ink-tertiary mb-2">
-                Engine notes and evidence
-              </div>
-              <pre className="whitespace-pre-wrap font-sans text-13 text-zinc-800 bg-zinc-50 border-hairline border-zinc-200 rounded-xs p-3">
-                {engine.reviewNotes}
-              </pre>
+            <ul className="list-disc pl-5 space-y-1 text-ui-body text-zinc-800">
+              {agentReview.assumptions.map((item, i) => (
+                <li key={i}>{item}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {(agentReview?.uncertainty || []).length > 0 && (
+          <div>
+            <div className="text-ui-body uppercase tracking-label text-ink-tertiary mb-2">
+              Uncertainty flags
             </div>
-          )}
-          {(engine.marginWarnings || []).length > 0 && (
-            <div>
-              <div className="text-11 uppercase tracking-label text-ink-tertiary mb-2">
-                Margin review (report-only — nothing moved the price)
-              </div>
-              <ul className="list-disc pl-5 space-y-1 text-13 text-zinc-800">
-                {engine.marginWarnings.map((warning, i) => (
-                  <li key={i}>
-                    {String(warning?.message || warning?.code || warning).replace(/_/g, " ")}
-                  </li>
-                ))}
-              </ul>
+            <ul className="list-disc pl-5 space-y-1 text-ui-body text-zinc-800">
+              {agentReview.uncertainty.map((item, i) => (
+                <li key={i}>{item}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {(agentReview?.belowTargetServices || []).length > 0 && (
+          <div>
+            <div className="text-ui-body uppercase tracking-label text-ink-tertiary mb-2">
+              Below margin target
             </div>
-          )}
-          {agentReview?.reasoning && (
-            <div>
-              <div className="text-11 uppercase tracking-label text-ink-tertiary mb-2">
-                Agent reasoning
-              </div>
-              <pre className="whitespace-pre-wrap font-sans text-13 text-zinc-800 bg-zinc-50 border-hairline border-zinc-200 rounded-xs p-3">
-                {agentReview.reasoning}
-              </pre>
-              {agentReview.sqftSource && (
-                <div className="text-12 text-ink-secondary mt-1">
-                  Sqft source:{" "}
-                  {agentReview.sqftSource === "property_lookup"
-                    ? "property lookup"
-                    : "operator input"}
-                </div>
-              )}
-            </div>
-          )}
-          {(agentReview?.assumptions || []).length > 0 && (
-            <div>
-              <div className="text-11 uppercase tracking-label text-ink-tertiary mb-2">
-                Assumptions made
-              </div>
-              <ul className="list-disc pl-5 space-y-1 text-13 text-zinc-800">
-                {agentReview.assumptions.map((item, i) => (
-                  <li key={i}>{item}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-          {(agentReview?.uncertainty || []).length > 0 && (
-            <div>
-              <div className="text-11 uppercase tracking-label text-ink-tertiary mb-2">
-                Uncertainty flags
-              </div>
-              <ul className="list-disc pl-5 space-y-1 text-13 text-zinc-800">
-                {agentReview.uncertainty.map((item, i) => (
-                  <li key={i}>{item}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-          {(agentReview?.belowTargetServices || []).length > 0 && (
-            <div>
-              <div className="text-11 uppercase tracking-label text-ink-tertiary mb-2">
-                Below margin target
-              </div>
-              <ul className="list-disc pl-5 space-y-1 text-13 text-zinc-800">
-                {agentReview.belowTargetServices.map((item, i) => (
-                  <li key={i}>{item}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-          {(agentReview?.unverifiedLineCount || 0) > 0 && (
-            <div className="text-13 text-zinc-800">
-              Margin could not be verified on {agentReview.unverifiedLineCount}{" "}
-              priced line{agentReview.unverifiedLineCount === 1 ? "" : "s"} —
-              check the pricing audit before sending.
-            </div>
-          )}
-          {!engine.reviewNotes
-            && !(engine.laneReasons || []).length
-            && !(engine.marginWarnings || []).length
-            && !agentReview?.reasoning
-            && !(agentReview?.assumptions || []).length
-            && !(agentReview?.uncertainty || []).length
-            && !(agentReview?.belowTargetServices || []).length
-            && !(agentReview?.unverifiedLineCount || 0) && (
-            <div className="text-13 text-ink-secondary">
+            <ul className="list-disc pl-5 space-y-1 text-ui-body text-zinc-800">
+              {agentReview.belowTargetServices.map((item, i) => (
+                <li key={i}>{item}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {(agentReview?.unverifiedLineCount || 0) > 0 && (
+          <div className="text-ui-body text-zinc-800">
+            Margin could not be verified on {agentReview.unverifiedLineCount}{" "}
+            priced line{agentReview.unverifiedLineCount === 1 ? "" : "s"} —
+            check the pricing audit before sending.
+          </div>
+        )}
+        {!engine.reviewNotes &&
+          !(engine.laneReasons || []).length &&
+          !(engine.marginWarnings || []).length &&
+          !agentReview?.reasoning &&
+          !(agentReview?.assumptions || []).length &&
+          !(agentReview?.uncertainty || []).length &&
+          !(agentReview?.belowTargetServices || []).length &&
+          !(agentReview?.unverifiedLineCount || 0) && (
+            <div className="text-ui-body text-ink-secondary">
               No review material recorded for this draft.
             </div>
           )}
-        </div>
-      </div>
-    </div>,
-    document.body,
+      </DialogBody>
+    </Dialog>
   );
 }
 
@@ -1664,14 +1567,16 @@ function useEstimateDeepLinkHighlight({ targetId, token, rows }) {
   // The nav token we've already highlighted — guards against re-scrolling on
   // every later render, while a new token (repeat click) re-arms.
   const doneTokenRef = useRef(null);
-
   useEffect(() => {
     if (!targetId || doneTokenRef.current === token) return;
     const sel = window.CSS?.escape ? window.CSS.escape(targetId) : targetId;
     const node = document.querySelector(`[data-estimate-id="${sel}"]`);
     if (!node) return; // not visible in the current view — leave the list as-is
     doneTokenRef.current = token;
-    node.scrollIntoView({ behavior: "smooth", block: "center" });
+    node.scrollIntoView({
+      behavior: "smooth",
+      block: "center",
+    });
     setActiveId(targetId);
   }, [token, targetId, rows]);
 
@@ -1681,11 +1586,12 @@ function useEstimateDeepLinkHighlight({ targetId, token, rows }) {
     const t = setTimeout(() => setActiveId(null), 2600);
     return () => clearTimeout(t);
   }, [activeId]);
-
   return activeId;
 }
-
-function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }) {
+function EstimatePipelineViewV2({
+  deepLinkEstimateId = null,
+  deepLinkToken = 0,
+}) {
   const openMessages = useCustomerSms();
   const sendEstimateFromPipeline = useEstimateSend();
   const v3Flag = useFeatureFlag("estimates_v2_status_pills");
@@ -1706,7 +1612,9 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
   const [outlineTarget, setOutlineTarget] = useState(null);
   const [pendingToggleKeys, setPendingToggleKeys] = useState(() => new Set());
   const [scheduleEstimate, setScheduleEstimate] = useState(null);
-
+  const { lastMutation } = useIntelligenceBarActions();
+  const estimatesRefresh =
+    lastMutation?.domain === "estimate" ? lastMutation.id : null;
   const activeFilterRef = useRef(filter);
   activeFilterRef.current = filter;
   const estimatesRequestRef = useRef(0);
@@ -1730,7 +1638,9 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
     Promise.all(fetches)
       .then(([pipeline, archived = {}]) => {
         if (requestId !== estimatesRequestRef.current) return;
-        setEstimates(mergeEstimateRows(pipeline.rows, archived.estimates || []));
+        setEstimates(
+          mergeEstimateRows(pipeline.rows, archived.estimates || []),
+        );
         setEstimatesTruncated(!!pipeline.truncated || !!archived.truncated);
         setLoading(false);
       })
@@ -1740,12 +1650,12 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
         setLoading(false);
       });
   }, []);
-
   useEffect(() => {
     refreshEstimates();
-    return () => { estimatesRequestRef.current += 1; };
-  }, [filter, refreshEstimates]);
-
+    return () => {
+      estimatesRequestRef.current += 1;
+    };
+  }, [filter, refreshEstimates, estimatesRefresh]);
   const archiveEstimate = useCallback(
     async (e) => {
       if (
@@ -1765,7 +1675,6 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
     },
     [refreshEstimates],
   );
-
   const unarchiveEstimate = useCallback(
     async (e) => {
       try {
@@ -1779,7 +1688,6 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
     },
     [refreshEstimates],
   );
-
   const patchEstimateToggle = useCallback(
     async (estimate, field, value) => {
       const key = `${estimate.id}:${field}`;
@@ -1792,7 +1700,12 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
         });
         setEstimates((prev) =>
           prev.map((est) =>
-            est.id === estimate.id ? { ...est, [field]: value } : est,
+            est.id === estimate.id
+              ? {
+                  ...est,
+                  [field]: value,
+                }
+              : est,
           ),
         );
         return true;
@@ -1806,12 +1719,10 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
     },
     [pendingToggleKeys],
   );
-
   const isEstimateTogglePending = useCallback(
     (estimateId, field) => pendingToggleKeys.has(`${estimateId}:${field}`),
     [pendingToggleKeys],
   );
-
   const togglePriority = useCallback(
     async (e) => {
       const newVal = !e.isPriority;
@@ -1823,7 +1734,6 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
     },
     [patchEstimateToggle],
   );
-
   const toggleOneTimeOption = useCallback(
     async (e) => {
       const newVal = !e.showOneTimeOption;
@@ -1835,7 +1745,6 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
     },
     [patchEstimateToggle],
   );
-
   const toggleBillByInvoice = useCallback(
     async (e) => {
       const newVal = !e.billByInvoice;
@@ -1854,7 +1763,6 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
     },
     [patchEstimateToggle],
   );
-
   const markEstimateAccepted = useCallback(
     async (e) => {
       // A commercial proposal win auto-creates the customer when none is linked
@@ -1863,8 +1771,8 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
       const confirmMsg = proposalInvoiceMode
         ? `Mark ${e.customerName || "this proposal"} as won?\n\nThis stamps the proposal as won, creates the customer if none is linked, and creates the first invoice from the proposal line items (one-time items plus the first period of each recurring service). The customer is NOT texted and NOT auto-scheduled — ongoing recurring visits are billed as completed.`
         : e.isCommercialProposal
-        ? `Mark ${e.customerName || "this proposal"} as won?\n\nThis stamps the proposal as won and creates the customer if none is linked. The customer is NOT texted, NOT auto-scheduled, and NO invoice is created — bill it from the proposal when ready.`
-        : `Mark ${e.customerName || "this customer"} as accepted from a verbal yes?\n\nThis stamps the estimate as won for the funnel and activates the customer. The customer is NOT texted, NOT auto-scheduled, and NO setup or annual prepay invoice is created — use the customer link for annual prepay, or schedule the visit on the calendar and draft any invoice manually.`;
+          ? `Mark ${e.customerName || "this proposal"} as won?\n\nThis stamps the proposal as won and creates the customer if none is linked. The customer is NOT texted, NOT auto-scheduled, and NO invoice is created — bill it from the proposal when ready.`
+          : `Mark ${e.customerName || "this customer"} as accepted from a verbal yes?\n\nThis stamps the estimate as won for the funnel and activates the customer. The customer is NOT texted, NOT auto-scheduled, and NO setup or annual prepay invoice is created — use the customer link for annual prepay, or schedule the visit on the calendar and draft any invoice manually.`;
       if (!window.confirm(confirmMsg)) return;
       try {
         const result = await adminFetch(`/admin/estimates/${e.id}/mark-accepted`, {
@@ -1878,9 +1786,7 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
         }
         if (result?.proposalInvoice?.invoiceNumber) {
           notes.push(
-            `Invoice ${result.proposalInvoice.invoiceNumber} for $${Number(
-              result.proposalInvoice.total || 0,
-            ).toFixed(2)} was created.`,
+            `Invoice ${result.proposalInvoice.invoiceNumber} for $${Number(result.proposalInvoice.total || 0).toFixed(2)} was created.`,
           );
         }
         if (result?.warnings?.length) notes.push(...result.warnings);
@@ -1891,12 +1797,10 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
     },
     [refreshEstimates],
   );
-
   const markEstimateAnnualPrepayAccepted = useCallback(
     async (e) => {
-      const annualAmount = e.annualTotal > 0
-        ? e.annualTotal
-        : (e.monthlyTotal || 0) * 12;
+      const annualAmount =
+        e.annualTotal > 0 ? e.annualTotal : (e.monthlyTotal || 0) * 12;
       if (
         !window.confirm(
           `Mark ${e.customerName || "this customer"} as accepted for annual prepay?\n\nThis activates the customer, creates a pending annual prepay invoice${annualAmount > 0 ? ` for about $${annualAmount.toFixed(2)}` : ""}, and creates the renewal term. The customer is NOT texted, NOT emailed, and NOT auto-scheduled.`,
@@ -1913,7 +1817,9 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
         });
         refreshEstimates();
         if (result?.warnings?.length) {
-          window.alert(`Marked annual prepay accepted, but:\n\n${result.warnings.join("\n")}`);
+          window.alert(
+            `Marked annual prepay accepted, but:\n\n${result.warnings.join("\n")}`,
+          );
         }
       } catch (err) {
         alert(`Failed to mark annual prepay accepted: ${err.message}`);
@@ -1921,7 +1827,6 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
     },
     [refreshEstimates],
   );
-
   const sendBookingLink = useCallback(
     async (e) => {
       if (!e.customerPhone) {
@@ -1959,7 +1864,6 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
   const sorted = [...classified].sort(
     (a, b) => new Date(b.createdAt) - new Date(a.createdAt),
   );
-
   const filtered = sorted
     .filter((e) => estimateMatchesFilter(e, filter))
     .filter((e) => {
@@ -1974,21 +1878,18 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
         ref.includes(q)
       );
     });
-
   const highlightId = useEstimateDeepLinkHighlight({
     targetId: deepLinkEstimateId,
     token: deepLinkToken,
     rows: filtered,
   });
-
   if (loading) {
     return (
-      <div className="p-10 text-center text-13 text-ink-secondary">
+      <div className="p-10 text-center text-ui-body text-ink-secondary">
         Loading estimates…
       </div>
     );
   }
-
   if (error) {
     return (
       <div className="p-10 text-center">
@@ -1996,7 +1897,7 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
         <div className="text-14 text-alert-fg mb-3">
           Failed to load estimates
         </div>{" "}
-        <div className="text-13 text-ink-tertiary mb-4">
+        <div className="text-ui-body text-ink-tertiary mb-4">
           {error.message || String(error)}
         </div>{" "}
         <Button variant="primary" onClick={() => refreshEstimates()}>
@@ -2010,9 +1911,8 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
       </div>
     );
   }
-
   return (
-    <div style={{ fontFamily: ROBOTO }}>
+    <div>
       {followUpTarget && (
         <FollowUpModalV2
           estimate={followUpTarget}
@@ -2075,10 +1975,15 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
           }}
           defaultCustomer={{
             id: scheduleEstimate.customerId,
-            first_name: (scheduleEstimate.customerName || '').split(' ')[0] || '',
-            last_name: (scheduleEstimate.customerName || '').split(' ').slice(1).join(' ') || '',
-            phone: scheduleEstimate.customerPhone || '',
-            email: scheduleEstimate.customerEmail || '',
+            first_name:
+              (scheduleEstimate.customerName || "").split(" ")[0] || "",
+            last_name:
+              (scheduleEstimate.customerName || "")
+                .split(" ")
+                .slice(1)
+                .join(" ") || "",
+            phone: scheduleEstimate.customerPhone || "",
+            email: scheduleEstimate.customerEmail || "",
           }}
           defaultEstimateId={scheduleEstimate.id}
         />
@@ -2089,10 +1994,10 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
           {estimatesTruncated && (
             <div
               role="status"
-              className="mb-3 px-3 py-2 rounded-sm border-hairline border-zinc-300 bg-zinc-50 text-12 text-ink-secondary"
+              className="mb-3 px-3 py-2 rounded-sm border-hairline border-zinc-300 bg-zinc-50 text-ui-body text-ink-secondary"
             >
-              Showing the most recent estimates only — the list hit its size cap,
-              so these KPIs may undercount older offers.
+              Showing the most recent estimates only — the list hit its size
+              cap, so these KPIs may undercount older offers.
             </div>
           )}
           <PipelineAnalytics
@@ -2109,17 +2014,13 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
               from "Going cold > 48h" into a specific customer fast. */}
           <div className="mb-3 relative">
             {" "}
-            <input
+            <Input
               type="search"
               value={search}
               onChange={(ev) => setSearch(ev.target.value)}
               placeholder="Search by customer name, address, phone, email, or #ref"
               aria-label="Search estimates"
-              className={cn(
-                "w-full h-10 pl-10 pr-10 text-14 rounded-sm",
-                "bg-white border-hairline border-zinc-300",
-                "placeholder:text-ink-tertiary u-focus-ring",
-              )}
+              className="w-full pl-10 pr-10"
             />{" "}
             <span
               className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-tertiary pointer-events-none"
@@ -2129,20 +2030,21 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
               <SlidersHorizontal size={16} strokeWidth={1.75} />{" "}
             </span>
             {search && (
-              <button
+              <Button
                 type="button"
+                variant="ghost"
                 onClick={() => setSearch("")}
                 aria-label="Clear search"
-                className="absolute right-2 top-1/2 -translate-y-1/2 inline-flex items-center justify-center h-7 w-7 rounded-full text-ink-tertiary hover:bg-zinc-100 u-focus-ring"
+                className="absolute right-2 top-1/2 h-9 w-9 -translate-y-1/2 px-0"
               >
                 {" "}
                 <X size={14} strokeWidth={1.75} aria-hidden />{" "}
-              </button>
+              </Button>
             )}{" "}
           </div>
           {/* Estimates list */}
           {filtered.length === 0 ? (
-            <div className="p-10 text-center text-13 text-ink-secondary">
+            <div className="p-10 text-center text-ui-body text-ink-secondary">
               No estimates{" "}
               {filter !== "all"
                 ? `in "${estimateFilterLabel(filter) || filter}"`
@@ -2158,7 +2060,6 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                 const previewHref = estimatePreviewHref(e);
                 const amount = estimateAmountDisplay(e);
                 const canSend = canSendEstimate(e);
-
                 return (
                   <Card
                     key={e.id}
@@ -2171,7 +2072,7 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                     )}
                   >
                     {e.isPriority && (
-                      <div className="absolute -top-px right-4 bg-alert-fg text-white text-11 uppercase tracking-label font-medium px-2 py-0.5 rounded-b-xs">
+                      <div className="absolute -top-px right-4 bg-alert-fg text-white text-ui-body uppercase tracking-label font-medium px-2 py-0.5 rounded-b-xs">
                         Urgent
                       </div>
                     )}
@@ -2185,17 +2086,18 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                       {" "}
                       <div className="flex items-center gap-2 flex-wrap">
                         {e.customerId ? (
-                          <button
+                          <Button
                             type="button"
+                            variant="ghost"
                             onClick={(evt) => {
                               evt.stopPropagation();
                               setCustomerPanelId(e.customerId);
                             }}
-                            className="text-14 sm:text-14 font-medium text-zinc-900 bg-transparent border-0 p-0 cursor-pointer hover:underline"
+                            className="h-auto justify-start p-0 text-left"
                             title="Open customer + estimate history"
                           >
                             {e.customerName || "Unknown"}
-                          </button>
+                          </Button>
                         ) : (
                           <span className="text-14 sm:text-14 font-medium text-zinc-900">
                             {e.customerName || "Unknown"}
@@ -2235,7 +2137,10 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                             })
                           }
                           onLowMargin={() =>
-                            setAuditTarget({ estimate: e, focus: "low_margin" })
+                            setAuditTarget({
+                              estimate: e,
+                              focus: "low_margin",
+                            })
                           }
                         />
                         <AutomationStatusBadge automation={e.automation} />
@@ -2257,7 +2162,9 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                             </Badge>
                           </>
                         )}
-                        <LawnOutlineStatusBadge outline={e.lawnServiceOutline} />
+                        <LawnOutlineStatusBadge
+                          outline={e.lawnServiceOutline}
+                        />
                         {e.confirmedAppointment && (
                           <Badge
                             tone="neutral"
@@ -2280,22 +2187,27 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                           </Badge>
                         )}
                       </div>{" "}
-                      <div className="text-13 sm:text-12 text-ink-secondary mt-0.5 truncate">
+                      <div className="text-ui-body sm:text-ui-body text-ink-secondary mt-0.5 truncate">
                         {e.address || "—"}
                         {e.serviceInterest ? ` · ${e.serviceInterest}` : ""}
                       </div>{" "}
                     </div>
                     {/* Call + text + send-estimate trailing buttons — matches the
-                    CustomersPageV2 list row's icon trio. Send is shown for
-                    states where it's a real action (draft / sent / viewed);
-                    accepted/declined/expired hide it. */}
+                     CustomersPageV2 list row's icon trio. Send is shown for
+                     states where it's a real action (draft / sent / viewed);
+                     accepted/declined/expired hide it. */}
                     {(e.customerPhone ||
                       estimateHasLawnLine(e) ||
-                      (["draft", "sent", "viewed"].includes(e.status) && canSend)) && (
+                      (["draft", "sent", "viewed"].includes(e.status) &&
+                        canSend)) && (
                       <div className="flex gap-1.5">
-                        <LawnOutlineQuickButton estimate={e} onClick={setOutlineTarget} compact />
+                        <LawnOutlineQuickButton
+                          estimate={e}
+                          onClick={setOutlineTarget}
+                          compact
+                        />
                         {e.customerPhone && (
-                          <button
+                          <Button
                             type="button"
                             onClick={async (evt) => {
                               evt.stopPropagation();
@@ -2327,29 +2239,33 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                             }}
                             aria-label={`Call ${e.customerName || "customer"} via Waves`}
                             title="Call via Waves — rings your phone first, press 1 to connect"
-                            className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
+                            className="ui-icon-action inline-flex h-11 w-11 items-center justify-center sm:h-9 sm:w-9"
                           >
                             {" "}
                             <Phone size={16} strokeWidth={1.75} />{" "}
-                          </button>
+                          </Button>
                         )}
                         {e.customerPhone && (
-                          <button type="button"
-                            onClick={(evt) => { evt.stopPropagation(); void openEstimateMessages(e, openMessages); }}
+                          <Button
+                            type="button"
+                            onClick={(evt) => {
+                              evt.stopPropagation();
+                              void openEstimateMessages(e, openMessages);
+                            }}
                             aria-label={`Message ${e.customerName || "customer"}`}
                             title={`Message ${e.customerPhone}`}
-                            className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
+                            className="ui-icon-action inline-flex h-11 w-11 items-center justify-center sm:h-9 sm:w-9"
                           >
                             {" "}
                             <MessageSquare size={16} strokeWidth={1.75} />{" "}
-                          </button>
+                          </Button>
                         )}
                         {/* Create-estimate icon — carries customer fields into the
-                        new-estimate form via query string. Always shown when
-                        we have a customerId so the operator can start a
-                        follow-up quote without leaving the list. */}
+                         new-estimate form via query string. Always shown when
+                         we have a customerId so the operator can start a
+                         follow-up quote without leaving the list. */}
                         {e.customerId && (
-                          <button
+                          <Button
                             type="button"
                             onClick={(evt) => {
                               evt.stopPropagation();
@@ -2366,36 +2282,37 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                             }}
                             aria-label={`Create new estimate for ${e.customerName || "customer"}`}
                             title="Create a new estimate for this customer"
-                            className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
+                            className="ui-icon-action inline-flex h-11 w-11 items-center justify-center sm:h-9 sm:w-9"
                           >
                             {" "}
                             <FilePlus2 size={16} strokeWidth={1.75} />{" "}
-                          </button>
+                          </Button>
                         )}
-                        {["draft", "sent", "viewed"].includes(e.status) && canSend && (
-                          <button
-                            type="button"
-                            onClick={async (evt) => {
-                              evt.stopPropagation();
-                              try {
-                                await sendEstimateFromPipeline(e.id);
-                                refreshEstimates();
-                              } catch (err) {
-                                window.alert("Send failed: " + err.message);
+                        {["draft", "sent", "viewed"].includes(e.status) &&
+                          canSend && (
+                            <Button
+                              type="button"
+                              onClick={async (evt) => {
+                                evt.stopPropagation();
+                                try {
+                                  await sendEstimateFromPipeline(e.id);
+                                  refreshEstimates();
+                                } catch (err) {
+                                  window.alert("Send failed: " + err.message);
+                                }
+                              }}
+                              aria-label={`${e.status === "draft" ? "Send" : "Resend"} estimate to ${e.customerName || "customer"}`}
+                              title={
+                                e.status === "draft"
+                                  ? "Review recipient and send estimate"
+                                  : "Review recipient and resend estimate"
                               }
-                            }}
-                            aria-label={`${e.status === "draft" ? "Send" : "Resend"} estimate to ${e.customerName || "customer"}`}
-                            title={
-                              e.status === "draft"
-                                ? "Review recipient and send estimate"
-                                : "Review recipient and resend estimate"
-                            }
-                            className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
-                          >
-                            {" "}
-                            <Send size={16} strokeWidth={1.75} />{" "}
-                          </button>
-                        )}
+                              className="ui-icon-action inline-flex h-11 w-11 items-center justify-center sm:h-9 sm:w-9"
+                            >
+                              {" "}
+                              <Send size={16} strokeWidth={1.75} />{" "}
+                            </Button>
+                          )}
                       </div>
                     )}
                     {e.tier && <Badge tone="neutral">{e.tier}</Badge>}
@@ -2411,13 +2328,13 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                         )}
                       >
                         ${amount.value.toFixed(0)}
-                        <span className="text-11 font-normal text-ink-tertiary">
+                        <span className="text-ui-body font-normal text-ink-tertiary">
                           {amount.suffix}
                         </span>{" "}
                       </div>{" "}
                     </div>
                     {/* Timeline */}
-                    <div className="text-right min-w-[110px] text-11 text-ink-secondary space-y-0.5">
+                    <div className="text-right min-w-[110px] text-ui-body text-ink-secondary space-y-0.5">
                       {" "}
                       <div>Created {fmtDate(e.createdAt)}</div>
                       {e.scheduledAt && (
@@ -2450,13 +2367,14 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                       )}
                     </div>
                     {/* Actions — flag toggle + primary status action(s) +
-                    overflow menu. Secondary tools (toggles, audit, preview,
-                    copy link, resend, archive, delete) live in the overflow
-                    so the inline row stays scannable. */}
+                     overflow menu. Secondary tools (toggles, audit, preview,
+                     copy link, resend, archive, delete) live in the overflow
+                     so the inline row stays scannable. */}
                     <div className="flex items-center gap-1.5 w-full sm:w-auto">
                       {" "}
-                      <button
+                      <Button
                         type="button"
+                        variant={e.isPriority ? "danger" : "secondary"}
                         onClick={() => togglePriority(e)}
                         disabled={isEstimateTogglePending(e.id, "isPriority")}
                         title={
@@ -2466,23 +2384,20 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                           e.isPriority ? "Remove priority" : "Flag as urgent"
                         }
                         className={cn(
-                          "h-11 w-11 sm:h-9 sm:w-9 flex-shrink-0 flex items-center justify-center rounded-full sm:rounded-xs border-hairline u-focus-ring transition-colors",
+                          "h-11 w-11 shrink-0 px-0 sm:h-9 sm:w-9",
                           isEstimateTogglePending(e.id, "isPriority") &&
-                            "opacity-60 cursor-wait",
-                          e.isPriority
-                            ? "bg-alert-bg text-alert-fg border-alert-fg"
-                            : "bg-white text-ink-secondary border-zinc-300 hover:bg-zinc-50",
+                            "cursor-wait opacity-60",
                         )}
                       >
                         {" "}
                         <Flag size={16} strokeWidth={1.75} aria-hidden />{" "}
-                      </button>{" "}
+                      </Button>{" "}
                       <div className="grid grid-cols-2 sm:flex sm:flex-none gap-1.5 flex-1 sm:flex-none">
                         {e.status === "draft" && canSend && (
                           <Button
                             size="sm"
                             variant="primary"
-                            className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                            className="w-full sm:w-auto whitespace-nowrap"
                             onClick={async () => {
                               try {
                                 await sendEstimateFromPipeline(e.id);
@@ -2500,7 +2415,7 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                           <Button
                             size="sm"
                             variant="primary"
-                            className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                            className="w-full sm:w-auto whitespace-nowrap"
                             onClick={() => setFollowUpTarget(e)}
                           >
                             Follow Up
@@ -2512,23 +2427,28 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                             accept-on-book). For a lead's quote (no customer yet) the
                             modal stages the customer from the quote's contact and the
                             estimate is attached to them on book. */}
-                        {(e.status === "sent" || e.status === "viewed") && !e.archivedAt && (
-                          <Button
-                            size="sm"
-                            variant="secondary"
-                            className="w-full sm:w-auto rounded-full whitespace-nowrap"
-                            onClick={() => setScheduleEstimate(e)}
-                          >
-                            <CalendarPlus size={14} strokeWidth={1.75} className="mr-1" />
-                            Schedule
-                          </Button>
-                        )}
+                        {(e.status === "sent" || e.status === "viewed") &&
+                          !e.archivedAt && (
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              className="w-full sm:w-auto whitespace-nowrap"
+                              onClick={() => setScheduleEstimate(e)}
+                            >
+                              <CalendarPlus
+                                size={14}
+                                strokeWidth={1.75}
+                                className="mr-1"
+                              />
+                              Schedule
+                            </Button>
+                          )}
 
                         {canMarkEstimateWon(e) && (
                           <Button
                             size="sm"
                             variant="secondary"
-                            className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                            className="w-full sm:w-auto whitespace-nowrap"
                             onClick={() => markEstimateAccepted(e)}
                           >
                             Mark Won
@@ -2539,7 +2459,7 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                           <Button
                             size="sm"
                             variant="secondary"
-                            className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                            className="w-full sm:w-auto whitespace-nowrap"
                             onClick={() => markEstimateAnnualPrepayAccepted(e)}
                           >
                             Annual Prepay
@@ -2551,16 +2471,20 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                             <Button
                               size="sm"
                               variant="primary"
-                              className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                              className="w-full sm:w-auto whitespace-nowrap"
                               onClick={() => setScheduleEstimate(e)}
                             >
-                              <CalendarPlus size={14} strokeWidth={1.75} className="mr-1" />
+                              <CalendarPlus
+                                size={14}
+                                strokeWidth={1.75}
+                                className="mr-1"
+                              />
                               Schedule
                             </Button>
                             <Button
                               size="sm"
                               variant="secondary"
-                              className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                              className="w-full sm:w-auto whitespace-nowrap"
                               onClick={() => sendBookingLink(e)}
                               disabled={!e.customerPhone}
                               title={
@@ -2578,7 +2502,7 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                           <Button
                             size="sm"
                             variant="secondary"
-                            className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                            className="w-full sm:w-auto whitespace-nowrap"
                             onClick={() => unarchiveEstimate(e)}
                           >
                             Unarchive
@@ -2637,20 +2561,19 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                               ),
                               onClick: () => toggleBillByInvoice(e),
                             },
-                            (e.status === "sent" ||
-                              e.status === "viewed") &&
+                            (e.status === "sent" || e.status === "viewed") &&
                               canSend && {
-                              key: "send-booking",
-                              label: "Send booking link",
-                              icon: (
-                                <CalendarCheck size={16} strokeWidth={1.75} />
-                              ),
-                              disabled: !e.customerPhone,
-                              title: e.customerPhone
-                                ? "Text the customer a link to self-schedule"
-                                : "No phone on file",
-                              onClick: () => sendBookingLink(e),
-                            },
+                                key: "send-booking",
+                                label: "Send booking link",
+                                icon: (
+                                  <CalendarCheck size={16} strokeWidth={1.75} />
+                                ),
+                                disabled: !e.customerPhone,
+                                title: e.customerPhone
+                                  ? "Text the customer a link to self-schedule"
+                                  : "No phone on file",
+                                onClick: () => sendBookingLink(e),
+                              },
                             ["sent", "viewed", "expired"].includes(
                               e.status,
                             ) && {
@@ -2664,29 +2587,28 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                               ),
                               onClick: () => setExtendTarget(e),
                             },
-                            (e.status === "sent" ||
-                              e.status === "viewed") &&
+                            (e.status === "sent" || e.status === "viewed") &&
                               canSend && {
-                              key: "resend",
-                              label: "Resend estimate",
-                              icon: <RotateCw size={16} strokeWidth={1.75} />,
-                              onClick: async () => {
-                                try {
-                                  await sendEstimateFromPipeline(e.id);
-                                  refreshEstimates();
-                                } catch (err) {
-                                  window.alert("Send failed: " + err.message);
-                                }
+                                key: "resend",
+                                label: "Resend estimate",
+                                icon: <RotateCw size={16} strokeWidth={1.75} />,
+                                onClick: async () => {
+                                  try {
+                                    await sendEstimateFromPipeline(e.id);
+                                    refreshEstimates();
+                                  } catch (err) {
+                                    window.alert("Send failed: " + err.message);
+                                  }
+                                },
                               },
-                            },
                             canMarkEstimateAnnualPrepay(e) && {
                               key: "annual-prepay",
                               label: "Mark annual prepay",
                               icon: <DollarSign size={16} strokeWidth={1.75} />,
-                              onClick: () => markEstimateAnnualPrepayAccepted(e),
+                              onClick: () =>
+                                markEstimateAnnualPrepayAccepted(e),
                             },
-                            (e.status === "sent" ||
-                              e.status === "viewed") &&
+                            (e.status === "sent" || e.status === "viewed") &&
                               // Rows without a share token have no customer
                               // link — /estimate/<id> 404s for customers, so
                               // never offer that as a copyable fallback.
@@ -2703,10 +2625,7 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                               key: "lawn-outline",
                               label: "Lawn service outline",
                               icon: (
-                                <ClipboardList
-                                  size={16}
-                                  strokeWidth={1.75}
-                                />
+                                <ClipboardList size={16} strokeWidth={1.75} />
                               ),
                               onClick: () => setOutlineTarget(e),
                             },
@@ -2729,7 +2648,10 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                                 />
                               ),
                               onClick: () =>
-                                setAuditTarget({ estimate: e, focus: "all" }),
+                                setAuditTarget({
+                                  estimate: e,
+                                  focus: "all",
+                                }),
                             },
                             previewHref && {
                               key: "preview",
@@ -2744,8 +2666,7 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                                   "noopener,noreferrer",
                                 ),
                             },
-                            (e.status === "sent" ||
-                              e.status === "viewed") && {
+                            (e.status === "sent" || e.status === "viewed") && {
                               key: "mark-lost",
                               label: "Mark lost",
                               icon: <X size={16} strokeWidth={1.75} />,
@@ -2807,14 +2728,28 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
     </div>
   );
 }
-
 const TABS = [
-  { key: "leads", label: "Leads", Icon: Users },
-  { key: "estimates", label: "Estimates", Icon: ClipboardList },
-  { key: "new", label: "Create Estimate", Icon: FilePlus2 },
-  { key: "pricing", label: "Pricing Logic", Icon: SlidersHorizontal },
+  {
+    key: "leads",
+    label: "Leads",
+    Icon: Users,
+  },
+  {
+    key: "estimates",
+    label: "Estimates",
+    Icon: ClipboardList,
+  },
+  {
+    key: "new",
+    label: "Create Estimate",
+    Icon: FilePlus2,
+  },
+  {
+    key: "pricing",
+    label: "Pricing Logic",
+    Icon: SlidersHorizontal,
+  },
 ];
-
 const PREFILL_PARAM_KEYS = [
   "leadId",
   "customerId",
@@ -2834,20 +2769,45 @@ const PREFILL_PARAM_KEYS = [
 // Mobile-only filter dimensions. FILTER reuses PIPELINE_FILTERS. DATE filters on
 // createdAt relative to now. SORT controls row order; grouping is always by day.
 const MOBILE_DATE_FILTERS = [
-  { key: "all", label: "All" },
-  { key: "today", label: "Today" },
-  { key: "week", label: "This week" },
-  { key: "month", label: "This month" },
-  { key: "last30", label: "Last 30 days" },
+  {
+    key: "all",
+    label: "All",
+  },
+  {
+    key: "today",
+    label: "Today",
+  },
+  {
+    key: "week",
+    label: "This week",
+  },
+  {
+    key: "month",
+    label: "This month",
+  },
+  {
+    key: "last30",
+    label: "Last 30 days",
+  },
 ];
-
 const MOBILE_SORT_OPTIONS = [
-  { key: "newest", label: "Newest" },
-  { key: "oldest", label: "Oldest" },
-  { key: "amount-desc", label: "Amount: high → low" },
-  { key: "amount-asc", label: "Amount: low → high" },
+  {
+    key: "newest",
+    label: "Newest",
+  },
+  {
+    key: "oldest",
+    label: "Oldest",
+  },
+  {
+    key: "amount-desc",
+    label: "Amount: high → low",
+  },
+  {
+    key: "amount-asc",
+    label: "Amount: low → high",
+  },
 ];
-
 function mobileMatchesDate(createdAt, dateKey, nowTs) {
   if (dateKey === "all") return true;
   if (!createdAt) return false;
@@ -2862,7 +2822,6 @@ function mobileMatchesDate(createdAt, dateKey, nowTs) {
     return nowTs - ts <= 30 * MS_DAY;
   return true;
 }
-
 function mobileSortFn(sortKey) {
   switch (sortKey) {
     case "oldest":
@@ -2891,130 +2850,62 @@ function shortEstimateRef(id) {
 // visual is lighter (zinc-100 bg, label + bold value) to match the mockup.
 function MobileChipSheet({ label, value, options, onChange, title }) {
   const [open, setOpen] = useState(false);
-  const active = options.find((o) => o.key === value) || options[0];
-
-  useEffect(() => {
-    if (!open) return undefined;
-    const onKey = (e) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("keydown", onKey);
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = prev;
-    };
-  }, [open]);
-
+  const active = options.find((option) => option.key === value) || options[0];
   return (
     <>
-      {" "}
-      <button
+      <Button
         type="button"
+        variant="secondary"
         onClick={() => setOpen(true)}
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-label={`${label}: ${active.label}`}
-        className={cn(
-          "inline-flex items-center gap-1.5 h-9 px-4 rounded-sm",
-          "bg-zinc-100 border-hairline border-zinc-100",
-          "text-13 text-zinc-600 u-focus-ring",
-          "hover:bg-zinc-200 active:bg-zinc-200 whitespace-nowrap",
-        )}
+        className="gap-1.5 whitespace-nowrap"
       >
-        {" "}
-        <span>{label}</span>{" "}
-        <span className="font-medium text-zinc-900">{active.label}</span>{" "}
-      </button>
-      {open &&
-        createPortal(
-          <div
-            className="fixed inset-0 z-[120] flex items-end justify-center sm:items-center sm:p-4"
-            role="dialog"
-            aria-modal="true"
-            aria-label={title}
-            style={{ fontFamily: ROBOTO }}
+        <span className="text-ink-secondary">{label}</span>
+        <span>{active.label}</span>
+      </Button>
+      <Dialog
+        open={open}
+        onClose={() => setOpen(false)}
+        size="md"
+        aria-label={title}
+      >
+        <DialogHeader className="flex items-center justify-between gap-3">
+          <DialogTitle>{title}</DialogTitle>
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={() => setOpen(false)}
+            aria-label="Close"
+            className="h-9 w-9 px-0"
           >
-            {" "}
-            <div
-              className="absolute inset-0 bg-zinc-900/40"
-              onClick={() => setOpen(false)}
-            />{" "}
-            <div
-              className={cn(
-                "relative w-full bg-white outline-none",
-                "rounded-t-md sm:rounded-md sm:max-w-md",
-                "border-hairline border-zinc-200",
-                "flex flex-col max-h-[85vh]",
-              )}
-              style={{ paddingBottom: "env(safe-area-inset-bottom, 0)" }}
-            >
-              {" "}
-              <div className="pt-2 pb-1 sm:hidden">
-                {" "}
-                <div className="mx-auto w-10 h-1 rounded-full bg-zinc-300" />{" "}
-              </div>{" "}
-              <div className="px-5 py-3 flex items-center justify-between border-b border-hairline border-zinc-200">
-                {" "}
-                <div className="text-11 uppercase tracking-label font-medium text-ink-tertiary">
-                  {title}
-                </div>{" "}
-                <button
+            <X size={16} strokeWidth={1.75} aria-hidden />
+          </Button>
+        </DialogHeader>
+        <DialogBody className="p-2">
+          <div className="space-y-1">
+            {options.map((option) => {
+              const isActive = option.key === value;
+              return (
+                <Button
+                  key={option.key}
                   type="button"
-                  onClick={() => setOpen(false)}
-                  aria-label="Close"
-                  className="h-9 w-9 flex items-center justify-center rounded-full bg-zinc-100 text-zinc-900 hover:bg-zinc-200 u-focus-ring"
+                  variant={isActive ? "secondary" : "ghost"}
+                  onClick={() => {
+                    onChange(option.key);
+                    setOpen(false);
+                  }}
+                  className="h-auto min-h-11 w-full justify-between gap-3 px-3 py-2 text-left"
                 >
-                  {" "}
-                  <X size={16} strokeWidth={1.75} aria-hidden />{" "}
-                </button>{" "}
-              </div>{" "}
-              <div className="flex-1 overflow-y-auto">
-                {options.map((o) => {
-                  const isActive = o.key === value;
-                  return (
-                    <button
-                      key={o.key}
-                      type="button"
-                      onClick={() => {
-                        onChange(o.key);
-                        setOpen(false);
-                      }}
-                      className={cn(
-                        "w-full flex items-center justify-between gap-3",
-                        "px-5 py-4 text-left u-focus-ring",
-                        "border-b border-hairline border-zinc-100 last:border-b-0",
-                        isActive ? "bg-zinc-50" : "bg-white hover:bg-zinc-50",
-                      )}
-                    >
-                      {" "}
-                      <span
-                        className={cn(
-                          "text-14 tracking-tight",
-                          isActive
-                            ? "font-medium text-zinc-900"
-                            : "text-zinc-700",
-                        )}
-                      >
-                        {o.label}
-                      </span>
-                      {isActive && (
-                        <Check
-                          size={16}
-                          strokeWidth={2}
-                          className="text-zinc-900"
-                          aria-hidden
-                        />
-                      )}
-                    </button>
-                  );
-                })}
-              </div>{" "}
-            </div>{" "}
-          </div>,
-          document.body,
-        )}
+                  <span>{option.label}</span>
+                  {isActive && <Check size={16} strokeWidth={2} aria-hidden />}
+                </Button>
+              );
+            })}
+          </div>
+        </DialogBody>
+      </Dialog>
     </>
   );
 }
@@ -3055,7 +2946,6 @@ function canEditEstimateInPlace(estimate) {
     !estimate.archivedAt
   );
 }
-
 function canMarkEstimateWon(estimate) {
   if (!["sent", "viewed"].includes(estimate.status)) return false;
   // The server rejects any estimate with a one-time option from manual accept
@@ -3072,7 +2962,6 @@ function canMarkEstimateWon(estimate) {
     !estimate.showOneTimeOption
   );
 }
-
 function canMarkEstimateAnnualPrepay(estimate) {
   // Commercial proposals are won-eligible (above) but the server rejects
   // annualPrepaySelected for them, so never expose the Annual Prepay action for
@@ -3118,28 +3007,28 @@ export function MobileEstimateRow({
     if (hasCustomer) onOpenCustomerPanel?.(estimate.customerId);
   };
   return (
-    <div
+    <Card
       data-estimate-id={estimate.id}
       className={cn(
-        "bg-white border-hairline border-zinc-200 rounded-sm px-3 flex items-center gap-1.5",
+        "h-16 px-3 flex items-center gap-1.5",
         "cursor-default",
         isDraftMuted && "opacity-60",
         highlighted &&
           "ring-2 ring-zinc-500 ring-offset-2 ring-offset-white transition-shadow",
       )}
-      style={{ height: 64 }}
     >
       {" "}
       <div className="flex-1 min-w-0 flex flex-col gap-0.5">
         {hasCustomer ? (
-          <button
+          <Button
             type="button"
+            variant="ghost"
             onClick={openPanel}
             aria-label={`Open ${customerName} customer estimate history`}
-            className="text-14 font-medium text-zinc-900 hover:underline truncate text-left bg-transparent border-0 p-0 cursor-pointer u-focus-ring rounded-xs"
+            className="h-auto max-w-full justify-start truncate p-0 text-left"
           >
             {customerName}
-          </button>
+          </Button>
         ) : (
           <span
             className="text-14 font-medium text-ink-primary truncate"
@@ -3151,13 +3040,14 @@ export function MobileEstimateRow({
         {v3Flag ? (
           <div className="flex items-center gap-2 flex-wrap">
             {" "}
-            <span className="u-nums text-11 text-ink-tertiary">
-              ${amount.value.toFixed(0)}{amount.suffix}
+            <span className="u-nums text-ui-body text-ink-tertiary">
+              ${amount.value.toFixed(0)}
+              {amount.suffix}
             </span>{" "}
             <StatusPillV3 status={estimate.status} />
             {estimate.viewCount > 1 && (
               <span
-                className="u-nums text-11 text-ink-tertiary"
+                className="u-nums text-ui-body text-ink-tertiary"
                 title={
                   estimate.lastViewedAt
                     ? `Last viewed ${timeAgo(estimate.lastViewedAt)}`
@@ -3194,7 +3084,7 @@ export function MobileEstimateRow({
             <LawnOutlineStatusBadge outline={estimate.lawnServiceOutline} />
             {estimate.confirmedAppointment && (
               <span
-                className="text-11 text-ink-tertiary truncate"
+                className="text-ui-body text-ink-tertiary truncate"
                 title={
                   estimate.confirmedAppointment.linked
                     ? `This call also booked ${formatApptShort(estimate.confirmedAppointment)} — review the schedule before sending a fresh quote.`
@@ -3211,14 +3101,17 @@ export function MobileEstimateRow({
                 {formatApptShort(estimate.confirmedAppointment)}
               </span>
             )}
-            <span className="u-nums text-11 text-ink-tertiary">
+            <span className="u-nums text-ui-body text-ink-tertiary">
               #{shortEstimateRef(estimate.id)}
             </span>{" "}
           </div>
         ) : (
-          <div className="text-11 text-ink-tertiary truncate">
+          <div className="text-ui-body text-ink-tertiary truncate">
             {" "}
-            <span className="u-nums">${amount.value.toFixed(0)}{amount.suffix}</span>{" "}
+            <span className="u-nums">
+              ${amount.value.toFixed(0)}
+              {amount.suffix}
+            </span>{" "}
             <span
               className={cn(
                 "ml-2 font-medium",
@@ -3252,9 +3145,11 @@ export function MobileEstimateRow({
               <span
                 className={cn(
                   "ml-2",
-                  ["manual_review_required", "generation_failed", "blocked"].includes(
-                    estimate.automation?.status,
-                  )
+                  [
+                    "manual_review_required",
+                    "generation_failed",
+                    "blocked",
+                  ].includes(estimate.automation?.status)
                     ? "text-alert-fg"
                     : "text-ink-tertiary",
                 )}
@@ -3288,7 +3183,12 @@ export function MobileEstimateRow({
                 )}
                 title={`Outline ${estimate.lawnServiceOutline.status || "draft"} · ${estimate.lawnServiceOutline.validationStatus || "unchecked"}`}
               >
-                Outline {estimate.lawnServiceOutline.stale ? "stale" : estimate.lawnServiceOutline.ctaClickCount > 0 ? "clicked" : estimate.lawnServiceOutline.status || "draft"}
+                Outline{" "}
+                {estimate.lawnServiceOutline.stale
+                  ? "stale"
+                  : estimate.lawnServiceOutline.ctaClickCount > 0
+                    ? "clicked"
+                    : estimate.lawnServiceOutline.status || "draft"}
               </span>
             )}
             {estimate.confirmedAppointment && (
@@ -3317,7 +3217,7 @@ export function MobileEstimateRow({
         )}
       </div>
       {estimate.customerPhone && (
-        <button
+        <Button
           type="button"
           onClick={async (e) => {
             e.stopPropagation();
@@ -3343,26 +3243,34 @@ export function MobileEstimateRow({
           }}
           aria-label="Call via Waves"
           title="Call via Waves — rings your phone first, press 1 to connect"
-          className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
+          className="ui-icon-action inline-flex h-11 w-11 items-center justify-center sm:h-9 sm:w-9"
         >
           {" "}
           <Phone size={16} strokeWidth={1.75} />{" "}
-        </button>
+        </Button>
       )}
       {estimate.customerPhone && (
-        <button type="button"
-          onClick={(e) => { e.stopPropagation(); void openEstimateMessages(estimate, openMessages); }}
+        <Button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            void openEstimateMessages(estimate, openMessages);
+          }}
           aria-label="SMS"
-          className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
+          className="ui-icon-action inline-flex h-11 w-11 items-center justify-center sm:h-9 sm:w-9"
         >
           {" "}
           <MessageSquare size={16} strokeWidth={1.75} />{" "}
-        </button>
+        </Button>
       )}
-      <LawnOutlineQuickButton estimate={estimate} onClick={onLawnOutline} compact />
+      <LawnOutlineQuickButton
+        estimate={estimate}
+        onClick={onLawnOutline}
+        compact
+      />
       {/* Trailing actions — Call + Text (when phone) + Overflow. All
-      secondary actions live in the overflow sheet so the row stays a
-      single 64px scan line. */}
+       secondary actions live in the overflow sheet so the row stays a
+       single 64px scan line. */}
       <RowActionsMenu
         label={`Actions for ${customerName}`}
         items={[
@@ -3375,19 +3283,23 @@ export function MobileEstimateRow({
             onClick: () =>
               navigate(`/admin/estimates?editEstimateId=${estimate.id}`),
           },
-          ["draft", "sent", "viewed"].includes(estimate.status) && canSend && {
-            key: "send",
-            label: estimate.status === "draft" ? "Send estimate" : "Resend estimate",
-            icon: <Send size={16} strokeWidth={1.75} />,
-            onClick: async () => {
-              try {
-                await sendEstimateFromPipeline(estimate.id);
-                onSend?.();
-              } catch (err) {
-                window.alert("Send failed: " + err.message);
-              }
+          ["draft", "sent", "viewed"].includes(estimate.status) &&
+            canSend && {
+              key: "send",
+              label:
+                estimate.status === "draft"
+                  ? "Send estimate"
+                  : "Resend estimate",
+              icon: <Send size={16} strokeWidth={1.75} />,
+              onClick: async () => {
+                try {
+                  await sendEstimateFromPipeline(estimate.id);
+                  onSend?.();
+                } catch (err) {
+                  window.alert("Send failed: " + err.message);
+                }
+              },
             },
-          },
           (estimate.status === "sent" ||
             estimate.status === "viewed" ||
             (estimate.status === "accepted" && !estimate.archivedAt)) && {
@@ -3488,7 +3400,7 @@ export function MobileEstimateRow({
           },
         ]}
       />
-    </div>
+    </Card>
   );
 }
 
@@ -3516,7 +3428,9 @@ function EstimatesMobileListView({
   const [extendTarget, setExtendTarget] = useState(null);
   const [outlineTarget, setOutlineTarget] = useState(null);
   const [sort, setSort] = useState("newest");
-
+  const { lastMutation } = useIntelligenceBarActions();
+  const estimatesRefresh =
+    lastMutation?.domain === "estimate" ? lastMutation.id : null;
   const activeFilterRef = useRef(filter);
   activeFilterRef.current = filter;
   const estimatesRequestRef = useRef(0);
@@ -3534,14 +3448,14 @@ function EstimatesMobileListView({
         if (requestId === estimatesRequestRef.current) setLoading(false);
       });
   }, []);
-
   useEffect(() => {
     setLoading(true);
     refreshEstimates();
     // A filter change or unmount invalidates every callback of the old load.
-    return () => { estimatesRequestRef.current += 1; };
-  }, [filter, refreshEstimates]);
-
+    return () => {
+      estimatesRequestRef.current += 1;
+    };
+  }, [filter, refreshEstimates, estimatesRefresh]);
   const markEstimateAccepted = useCallback(
     async (e) => {
       // A commercial proposal win auto-creates the customer when none is linked
@@ -3550,8 +3464,8 @@ function EstimatesMobileListView({
       const confirmMsg = proposalInvoiceMode
         ? `Mark ${e.customerName || "this proposal"} as won?\n\nThis stamps the proposal as won, creates the customer if none is linked, and creates the first invoice from the proposal line items (one-time items plus the first period of each recurring service). The customer is NOT texted and NOT auto-scheduled — ongoing recurring visits are billed as completed.`
         : e.isCommercialProposal
-        ? `Mark ${e.customerName || "this proposal"} as won?\n\nThis stamps the proposal as won and creates the customer if none is linked. The customer is NOT texted, NOT auto-scheduled, and NO invoice is created — bill it from the proposal when ready.`
-        : `Mark ${e.customerName || "this customer"} as accepted from a verbal yes?\n\nThis stamps the estimate as won for the funnel and activates the customer. The customer is NOT texted, NOT auto-scheduled, and NO setup or annual prepay invoice is created — use the customer link for annual prepay, or schedule the visit on the calendar and draft any invoice manually.`;
+          ? `Mark ${e.customerName || "this proposal"} as won?\n\nThis stamps the proposal as won and creates the customer if none is linked. The customer is NOT texted, NOT auto-scheduled, and NO invoice is created — bill it from the proposal when ready.`
+          : `Mark ${e.customerName || "this customer"} as accepted from a verbal yes?\n\nThis stamps the estimate as won for the funnel and activates the customer. The customer is NOT texted, NOT auto-scheduled, and NO setup or annual prepay invoice is created — use the customer link for annual prepay, or schedule the visit on the calendar and draft any invoice manually.`;
       if (!window.confirm(confirmMsg)) return;
       try {
         const result = await adminFetch(`/admin/estimates/${e.id}/mark-accepted`, {
@@ -3565,9 +3479,7 @@ function EstimatesMobileListView({
         }
         if (result?.proposalInvoice?.invoiceNumber) {
           notes.push(
-            `Invoice ${result.proposalInvoice.invoiceNumber} for $${Number(
-              result.proposalInvoice.total || 0,
-            ).toFixed(2)} was created.`,
+            `Invoice ${result.proposalInvoice.invoiceNumber} for $${Number(result.proposalInvoice.total || 0).toFixed(2)} was created.`,
           );
         }
         if (result?.warnings?.length) notes.push(...result.warnings);
@@ -3578,12 +3490,10 @@ function EstimatesMobileListView({
     },
     [refreshEstimates],
   );
-
   const markEstimateAnnualPrepayAccepted = useCallback(
     async (e) => {
-      const annualAmount = e.annualTotal > 0
-        ? e.annualTotal
-        : (e.monthlyTotal || 0) * 12;
+      const annualAmount =
+        e.annualTotal > 0 ? e.annualTotal : (e.monthlyTotal || 0) * 12;
       if (
         !window.confirm(
           `Mark ${e.customerName || "this customer"} as accepted for annual prepay?\n\nThis activates the customer, creates a pending annual prepay invoice${annualAmount > 0 ? ` for about $${annualAmount.toFixed(2)}` : ""}, and creates the renewal term. The customer is NOT texted, NOT emailed, and NOT auto-scheduled.`,
@@ -3600,7 +3510,9 @@ function EstimatesMobileListView({
         });
         refreshEstimates();
         if (result?.warnings?.length) {
-          window.alert(`Marked annual prepay accepted, but:\n\n${result.warnings.join("\n")}`);
+          window.alert(
+            `Marked annual prepay accepted, but:\n\n${result.warnings.join("\n")}`,
+          );
         }
       } catch (err) {
         alert(`Failed to mark annual prepay accepted: ${err.message}`);
@@ -3608,7 +3520,6 @@ function EstimatesMobileListView({
     },
     [refreshEstimates],
   );
-
   const sendBookingLink = useCallback(
     async (e) => {
       if (!e.customerPhone) {
@@ -3634,7 +3545,6 @@ function EstimatesMobileListView({
     },
     [refreshEstimates],
   );
-
   const archiveEstimateMobile = useCallback(
     async (e) => {
       if (
@@ -3652,7 +3562,6 @@ function EstimatesMobileListView({
     },
     [refreshEstimates],
   );
-
   const unarchiveEstimateMobile = useCallback(
     async (e) => {
       try {
@@ -3666,7 +3575,6 @@ function EstimatesMobileListView({
     },
     [refreshEstimates],
   );
-
   const deleteDraftMobile = useCallback(
     async (e) => {
       if (
@@ -3684,11 +3592,12 @@ function EstimatesMobileListView({
     },
     [refreshEstimates],
   );
-
   const resendEstimateMobile = useCallback(
     async (e) => {
       if (!canSendEstimate(e)) {
-        window.alert("Estimate needs a positive monthly or one-time total before it can be sent.");
+        window.alert(
+          "Estimate needs a positive monthly or one-time total before it can be sent.",
+        );
         return;
       }
       try {
@@ -3700,7 +3609,6 @@ function EstimatesMobileListView({
     },
     [refreshEstimates],
   );
-
   const copyEstimateLinkMobile = useCallback((e) => {
     // The menu item is token-gated, but keep the guard here too — an id-based
     // /estimate/<id> URL 404s for customers and must never reach a clipboard.
@@ -3708,7 +3616,6 @@ function EstimatesMobileListView({
     const link = `${window.location.origin}/estimate/${e.token}`;
     navigator.clipboard?.writeText(link);
   }, []);
-
   const groups = useMemo(() => {
     const now = Date.now();
     const q = search.trim().toLowerCase();
@@ -3759,14 +3666,18 @@ function EstimatesMobileListView({
     );
     return sortedGroups;
   }, [estimates, search, filter, dateFilter, sort, v3Flag]);
-
   const filterCounts = useMemo(() => {
     if (v3Flag) return v3ChipCounts(estimates);
-    const counts = { all: estimates.length };
+    const counts = {
+      all: estimates.length,
+    };
     for (const f of PIPELINE_AND_RISK_FILTERS) {
       if (f.key === "all") continue;
       counts[f.key] = estimates
-        .map((e) => ({ ...e, _class: classifyEstimateForPipeline(e) }))
+        .map((e) => ({
+          ...e,
+          _class: classifyEstimateForPipeline(e),
+        }))
         .filter((e) => estimateMatchesFilter(e, f.key)).length;
     }
     return counts;
@@ -3779,31 +3690,29 @@ function EstimatesMobileListView({
 
   // Flat list across all days — mirrors CustomersPageV2 directory layout.
   const flat = useMemo(() => groups.flatMap(([, items]) => items), [groups]);
-
   const highlightId = useEstimateDeepLinkHighlight({
     targetId: deepLinkEstimateId,
     token: deepLinkToken,
     rows: flat,
   });
-
   return (
     // Mirrors CustomersPageV2: page padding comes from AdminLayout, no
     // edge-to-edge overrides, list rows are cards (not hairlined rows).
-    <div style={{ fontFamily: ROBOTO }}>
+    <div>
       {/* Title + tab switcher come from the page-level PipelineCommandHeader
           now that the mobile estimates list renders under the shared tabs;
           the list owns only its search/filter row and rows below. */}
       {/* Search + Add/filter row — mirrors Customers mobile block. */}
       <div className="mb-3">
         {" "}
-        <input
+        <Input
           type="search"
           inputMode="search"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search by customer name or reference"
           aria-label="Search estimates"
-          className="block w-full bg-white text-14 text-ink-primary border-hairline border-zinc-300 rounded-sm h-12 px-4 focus:outline-none focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900"
+          className="block w-full text-14 h-12"
         />{" "}
         <div className="mt-3 flex items-center gap-2 flex-wrap">
           {" "}
@@ -3836,7 +3745,10 @@ function EstimatesMobileListView({
             options={
               v3Flag
                 ? [
-                    { key: "v3", label: "Action Priority" },
+                    {
+                      key: "v3",
+                      label: "Action Priority",
+                    },
                     ...MOBILE_SORT_OPTIONS,
                   ]
                 : MOBILE_SORT_OPTIONS
@@ -3846,9 +3758,9 @@ function EstimatesMobileListView({
         </div>{" "}
       </div>
       {error && (
-        <div className="mb-3 border-hairline border-alert-fg bg-alert-bg text-alert-fg rounded-xs p-3 text-13">
+        <div className="mb-3 border-hairline border-alert-fg bg-alert-bg text-alert-fg rounded-xs p-3 text-ui-body">
           Failed to load estimates: {error.message || String(error)}
-          <button
+          <Button
             type="button"
             onClick={() => {
               setLoading(true);
@@ -3857,17 +3769,17 @@ function EstimatesMobileListView({
             className="ml-2 underline"
           >
             Retry
-          </button>{" "}
+          </Button>{" "}
         </div>
       )}
 
       {/* Result count — mirrors Customers */}
-      <div className="u-nums text-11 text-ink-tertiary text-right mb-3 mt-3">
+      <div className="u-nums text-ui-body text-ink-tertiary text-right mb-3 mt-3">
         {flat.length} result{flat.length !== 1 ? "s" : ""}
       </div>
       {/* List */}
       {loading ? (
-        <div className="p-10 text-center text-13 text-ink-secondary">
+        <div className="p-10 text-center text-ui-body text-ink-secondary">
           Loading estimates…
         </div>
       ) : flat.length === 0 ? (
@@ -3880,7 +3792,7 @@ function EstimatesMobileListView({
                 ? "No estimates yet"
                 : "No estimates found"}
             </div>{" "}
-            <div className="text-13 text-ink-tertiary">
+            <div className="text-ui-body text-ink-tertiary">
               {estimates.length === 0
                 ? "Create or send an estimate before it appears here"
                 : "Try adjusting your filters"}
@@ -3901,7 +3813,10 @@ function EstimatesMobileListView({
               onMarkAnnualPrepayAccepted={markEstimateAnnualPrepayAccepted}
               onDeleted={refreshEstimates}
               onAudit={(estimate, focus = "all") =>
-                setAuditTarget({ estimate, focus })
+                setAuditTarget({
+                  estimate,
+                  focus,
+                })
               }
               onSendBooking={sendBookingLink}
               onArchive={archiveEstimateMobile}
@@ -3957,7 +3872,6 @@ function EstimatesMobileListView({
     </div>
   );
 }
-
 function EstimatesWorkspace() {
   const isMobile = useIsMobile(768);
   const [searchParams, setSearchParams] = useSearchParams();
@@ -4033,7 +3947,10 @@ function EstimatesWorkspace() {
   // Estimates. `token` bumps on every consume so clicking the same notification
   // again still re-highlights. The effect is the sole consumer (keeps it to a
   // single arming per navigation).
-  const [deepLink, setDeepLink] = useState({ id: null, token: 0 });
+  const [deepLink, setDeepLink] = useState({
+    id: null,
+    token: 0,
+  });
 
   // Watch URL params for incoming prefill. Two cases this needs to handle:
   //   1. First mount with prefill in URL (e.g. arriving from a Customer panel
@@ -4071,13 +3988,19 @@ function EstimatesWorkspace() {
     } else if (estimateId) {
       setActiveTab("estimates");
     }
-    if (estimateId) setDeepLink((prev) => ({ id: estimateId, token: prev.token + 1 }));
+    if (estimateId)
+      setDeepLink((prev) => ({
+        id: estimateId,
+        token: prev.token + 1,
+      }));
     // Keep editor identity in the URL so refresh reopens the saved draft.
     // Notification highlights remain one-shot; selectTab clears editor keys.
     if (estimateId) {
       const next = new URLSearchParams(searchParams);
       next.delete("estimateId");
-      setSearchParams(next, { replace: true });
+      setSearchParams(next, {
+        replace: true,
+      });
     }
   }, [searchParams, setSearchParams, readLeadPrefill]);
 
@@ -4087,7 +4010,10 @@ function EstimatesWorkspace() {
   // they returned to the tab. A fresh ?estimateId re-populates it (new token).
   useEffect(() => {
     if (activeTab !== "estimates" && deepLink.id) {
-      setDeepLink((prev) => ({ id: null, token: prev.token }));
+      setDeepLink((prev) => ({
+        id: null,
+        token: prev.token,
+      }));
     }
   }, [activeTab, deepLink.id]);
 
@@ -4111,7 +4037,6 @@ function EstimatesWorkspace() {
       editEstimateId: "",
     });
   }, [activeTab, hasPrefill]);
-
   const selectTab = useCallback(
     (key) => {
       setNewLeadRequest(0);
@@ -4120,16 +4045,26 @@ function EstimatesWorkspace() {
       PREFILL_PARAM_KEYS.forEach((k) => next.delete(k));
       if (key === "leads") next.delete("tab");
       else next.set("tab", key);
-      setSearchParams(next, { replace: false });
+      setSearchParams(next, {
+        replace: false,
+      });
     },
     [searchParams, setSearchParams],
   );
-
   return (
-    <div style={{ fontFamily: ROBOTO }}>
+    <UiSurface
+      density={activeTab === "new" ? "legacy" : "comfortable"}
+      className="mx-auto max-w-[1400px] text-ui-body text-ink-primary"
+    >
       {" "}
-      <PipelineCommandHeader activeTab={activeTab} onTabChange={selectTab} onNewLead={() => setNewLeadRequest((value) => value + 1)} />
-      {activeTab === "leads" && <LeadsSection newLeadRequest={newLeadRequest} />}
+      <PipelineCommandHeader
+        activeTab={activeTab}
+        onTabChange={selectTab}
+        onNewLead={() => setNewLeadRequest((value) => value + 1)}
+      />
+      {activeTab === "leads" && (
+        <LeadsSection newLeadRequest={newLeadRequest} />
+      )}
       {activeTab === "estimates" &&
         // Estimates list: mobile gets the touch-optimized card list with its
         // own filters/sort; desktop gets the full table/board pipeline view.
@@ -4177,7 +4112,9 @@ function EstimatesWorkspace() {
             PREFILL_PARAM_KEYS.forEach((key) => next.delete(key));
             next.set("tab", "new");
             next.set("editEstimateId", id);
-            setSearchParams(next, { replace: true });
+            setSearchParams(next, {
+              replace: true,
+            });
           }}
         />
       )}
@@ -4187,10 +4124,15 @@ function EstimatesWorkspace() {
           <MarginCalculator /> <PricingLogicPanel />{" "}
         </>
       )}
-    </div>
+    </UiSurface>
   );
 }
-
 export default function EstimatesPageV2() {
-  return <CustomerSmsProvider><EstimateSendProvider><EstimatesWorkspace /></EstimateSendProvider></CustomerSmsProvider>;
+  return (
+    <CustomerSmsProvider>
+      <EstimateSendProvider>
+        <EstimatesWorkspace />
+      </EstimateSendProvider>
+    </CustomerSmsProvider>
+  );
 }

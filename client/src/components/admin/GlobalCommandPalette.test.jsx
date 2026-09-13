@@ -17,8 +17,8 @@ vi.mock('../tech/DictationButton', () => ({ default: () => null }));
 const ok = body => ({ ok: true, json: async () => body });
 let navigate, queryResolvers, fetchMock;
 function RouteHarness({ paletteRef }) { navigate = useNavigate(); return <GlobalCommandPalette ref={paletteRef} />; }
-function SelectedAppointment({ id }) {
-  usePublishIntelligenceBarPageData({ appointment_id: id });
+function SelectedRecord({ kind, id }) {
+  usePublishIntelligenceBarPageData({ [kind]: id });
   return null;
 }
 async function mount() {
@@ -120,24 +120,24 @@ it('close/reopen retains the in-flight request, and double Enter starts only one
   expect(await screen.findByText('Saved request result')).toBeInTheDocument();
 });
 
-it('a new selected appointment on the same route invalidates a late response', async () => {
+it.each(['appointment_id', 'product_id', 'property_id', 'estimate_id'])('a new selected %s on the same route invalidates a late response', async kind => {
   const ref = createRef();
-  const tree = id => <MemoryRouter initialEntries={['/admin/dispatch']}>
-    <IntelligenceBarPageDataProvider><SelectedAppointment id={id} /><GlobalCommandPalette ref={ref} /></IntelligenceBarPageDataProvider>
+  const tree = id => <MemoryRouter initialEntries={[kind === 'product_id' ? '/admin/inventory' : '/admin/dispatch']}>
+    <IntelligenceBarPageDataProvider><SelectedRecord kind={kind} id={id} /><GlobalCommandPalette ref={ref} /></IntelligenceBarPageDataProvider>
   </MemoryRouter>;
   const view = render(tree('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'));
   act(() => ref.current.open());
   submit('Read this appointment');
   await waitFor(() => expect(queryResolvers).toHaveLength(1));
   const body = JSON.parse(fetchMock.mock.calls.find(([url]) => url.endsWith('/query'))[1].body);
-  expect(body.pageData.appointment_id).toBe('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+  expect(body.pageData[kind]).toBe('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
   view.rerender(tree('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'));
   await act(async () => queryResolvers[0](ok({ response: 'Old appointment result', conversationHistory: [] })));
   expect(screen.queryByText('Old appointment result')).not.toBeInTheDocument();
   submit('Read the selected appointment');
   await waitFor(() => expect(queryResolvers).toHaveLength(2));
   const bodies = fetchMock.mock.calls.filter(([url]) => url.endsWith('/query')).map(([, options]) => JSON.parse(options.body));
-  expect(bodies[1].pageData.appointment_id).toBe('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
+  expect(bodies[1].pageData[kind]).toBe('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
 });
 
 it('drops a task-backed card on navigation while the task-list probe is still pending', async () => {

@@ -200,7 +200,7 @@ export default function RetentionSection({
         sub={`${reviewTrend?.total ?? 0} reviews · ${reviewTrend?.avgRating ?? "—"}★ avg`}
         action={
           kpis?.quality?.nps != null ? (
-            <span className="text-12 text-ink-secondary">
+            <span className="text-ui-caption text-ink-secondary">
               Index{" "}
               <span className="u-nums font-medium text-zinc-900 ml-1">
                 {kpis.quality.nps}

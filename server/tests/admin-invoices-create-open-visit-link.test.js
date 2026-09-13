@@ -80,7 +80,7 @@ const PAYER_VISIT = '55555555-5555-4555-8555-555555555555';
 
 function qb(overrides = {}) {
   const q = {};
-  for (const m of ['where', 'whereIn', 'leftJoin', 'select', 'orderBy', 'offset', 'limit', 'whereNull', 'whereNot', 'whereNotExists', 'modify']) q[m] = jest.fn(() => q);
+  for (const m of ['where', 'whereRaw', 'whereIn', 'leftJoin', 'select', 'orderBy', 'offset', 'limit', 'whereNull', 'whereNot', 'whereNotExists', 'modify']) q[m] = jest.fn(() => q);
   q.first = jest.fn(async () => null);
   q.then = undefined;
   Object.assign(q, overrides);

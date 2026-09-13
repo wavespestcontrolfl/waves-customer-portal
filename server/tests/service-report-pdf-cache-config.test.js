@@ -25,6 +25,14 @@ jest.mock('../services/service-report/report-data', () => ({
   // Non-lawn fixture: nothing to pin, empty key component (#3172).
   resolveCanonicalLawnRender: jest.fn(async () => ({ pin: null, signature: '' })),
 }));
+// Photo-set key component (#4091). Stubbed empty like the lawn / time-on-site
+// components above: the real one queries service_photos with orderBy, which
+// this suite's minimal knex stub does not model, and its failure posture
+// (unique token → fence trips → nothing stored) would mask the config
+// assertions. Its own behavior is pinned in photo-set-signature.test.js.
+jest.mock('../services/service-report/photo-set-signature', () => ({
+  reportPhotoSetPdfSignature: async () => '',
+}));
 jest.mock('../services/service-report/dynamic-context', () => ({
   buildServiceReportDynamicContext: mockBuildServiceReportDynamicContext,
 }));

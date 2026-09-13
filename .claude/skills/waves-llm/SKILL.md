@@ -98,6 +98,16 @@ Gemini parsing trap (twin of the DEEP thinking-block rule): Gemini 3.x
 Flash is a thinking model — always JOIN ALL text parts of the response,
 never read `parts[0]`, and budget output tokens for the thinking spend.
 
+**One deliberate exception (owner 2026-09-08, DECISIONS.md):** the lawn visit
+assessment (`services/lawn-visit-assessment.js`, `GATE_LAWN_VISIT_ASSESSMENT`)
+is Gemini-first with **GPT-6 Astra** (`MODEL_OPENAI_FRONTIER`) as its fallback —
+no Claude vision leg, no parallel providers. It is still a two-provider
+`TEXT_POLICIES` entry (`lawnVisitAssessment`) through `dispatchWithFallback`;
+only the fallback provider differs. Do not copy this shape to another lane
+without an owner ruling. Gemini `thinkingLevel` (LOW | MEDIUM | HIGH) and
+image `label` parts (numbered photos) are dispatcher payload fields any lane
+may use.
+
 Adding a new cross-provider feature: add a `ROUTES` entry (env-overridable),
 dispatch through `llm/call.js`, implement the Claude fallback, and document
 the route in `models.js`. Never call the OpenAI/Gemini SDK directly from a

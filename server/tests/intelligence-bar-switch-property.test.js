@@ -1,4 +1,4 @@
-jest.mock('../services/dispatch-assignment', () => ({ emitDispatchJobUpdate: jest.fn(async () => ({})) }));
+jest.mock('../services/dispatch-assignment', () => ({ emitDispatchJobUpdate: jest.fn(async () => ({})), flushDispatchQualityDates: jest.fn(async () => null) }));
 jest.mock('../services/scheduling/tech-day-lock', () => ({ lockTechDays: jest.fn() }));
 jest.mock('../utils/customer-comms-lock', () => ({ lockCustomerComms: jest.fn() }));
 jest.mock('../models/db', () => {
@@ -55,7 +55,7 @@ test('confirmed execution holds locks and applies only the pinned preview', asyn
   expect(result).toMatchObject({ success: true, messages_sent: false });
   expect(address.lockAppointmentAddress).toHaveBeenCalled();
   expect(address.applyAppointmentAddress).toHaveBeenCalledWith(db, expect.objectContaining({ scope: 'visit' }), 'actor');
-  expect(emitDispatchJobUpdate).toHaveBeenCalledWith({ jobId: 'stop', actorId: 'actor' });
+  expect(emitDispatchJobUpdate).toHaveBeenCalledWith({ jobId: 'stop', actorId: 'actor', qualityDates: expect.any(Set) });
   expect(emitDispatchJobUpdate.mock.invocationCallOrder[0]).toBeGreaterThan(address.applyAppointmentAddress.mock.invocationCallOrder[0]);
 });
 

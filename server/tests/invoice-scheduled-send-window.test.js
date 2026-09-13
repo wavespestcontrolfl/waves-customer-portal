@@ -204,6 +204,34 @@ describe('processScheduledSends send-window handling', () => {
     expect(result).toEqual({ sent: 1, failed: 0, deferred: 0 });
   });
 
+  test('a failed packet Bill-To recheck restores this worker\'s token-owned claim without spending an attempt', async () => {
+    isWithinSendWindowET.mockReturnValue(true);
+    const claimToken = 'ca2fdf33-5baa-4490-b24a-a4f1b6918234';
+    const staleRecovery = chain();
+    const dueQuery = chain({ rows: [dueRow] });
+    const claim = chain({ returning: [{ id: 'inv-1', scheduled_request_review: false, scheduled_review_delay_minutes: null, send_claim_token: claimToken }] });
+    const restore = chain();
+    db
+      .mockReturnValueOnce(staleRecovery)
+      .mockReturnValueOnce(dueQuery)
+      .mockReturnValueOnce(claim)
+      .mockReturnValueOnce(restore);
+    sendSpy.mockResolvedValue({
+      ok: false,
+      code: 'bill_to_fence_failed',
+      sms: { ok: false, code: 'bill_to_fence_failed' },
+      email: { ok: false, code: 'bill_to_fence_failed' },
+    });
+
+    const result = await InvoiceService.processScheduledSends();
+
+    expect(result).toEqual({ sent: 0, failed: 0, deferred: 0 });
+    expect(restore.where).toHaveBeenCalledWith({ id: 'inv-1', status: 'sending', send_claim_token: claimToken });
+    expect(restore.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled', send_claim_token: null }));
+    expect(restore.update.mock.calls[0][0].scheduled_send_attempts).toBeUndefined();
+    expect(restore.update.mock.calls[0][0].scheduled_send_at).toBeUndefined();
+  });
+
   test.each(['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD'])('%s reschedules at nextAllowedAt without spending an attempt', async (code) => {
     isWithinSendWindowET.mockReturnValue(true); // guard passed at 19:59...
     const staleRecovery = chain();

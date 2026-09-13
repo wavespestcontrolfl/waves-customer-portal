@@ -18,23 +18,38 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 const dbMock = require('../models/db');
-const { executeProcurementTool } = require('../services/intelligence-bar/procurement-tools');
+const { executeProcurementTool: executeRaw } = require('../services/intelligence-bar/procurement-tools');
+
+// Drive the server-owned preview/confirmation contract. A model-supplied
+// confirmed flag alone is intentionally no longer an execution credential.
+async function executeProcurementTool(name, input) {
+  if (!input.confirmed) return executeRaw(name, input);
+  const { confirmed, _verified_receive, ...fields } = input;
+  const preview = await executeRaw(name, fields);
+  if (preview.error) return preview;
+  return executeRaw(name, { ...fields, product_id: preview.product?.id,
+    _verified_inventory_version: _verified_receive ? 'stale-receive-version' : preview._version,
+  }, { confirmed: true, isAdmin: true, technicianId: 'actor-1' });
+}
 
 function makeRecordingDb(seed = {}) {
   const mutations = [];
   const MUTATING_OPS = new Set(['insert', 'update', 'del', 'delete', 'increment', 'decrement', 'truncate', 'upsert']);
   const firstIndex = {};
+  const tables = structuredClone(seed);
+  let inserted = 0;
 
   function makeBuilder(table) {
-    const rows = seed[table] || [];
-    const state = { single: false };
+    const rows = tables[table] || (tables[table] = []);
+    const state = { single: false, result: null };
     const builder = new Proxy(function () {}, {
       get(_target, prop) {
         if (prop === 'then') {
+          if (state.result) return resolve => resolve(state.result);
           if (state.single) {
             const i = firstIndex[table] || 0;
             firstIndex[table] = i + 1;
-            return (resolve) => resolve(rows.length ? rows[i % rows.length] : undefined);
+            return (resolve) => resolve(rows.length ? structuredClone(rows[i % rows.length]) : undefined);
           }
           return (resolve) => resolve(rows);
         }
@@ -42,7 +57,17 @@ function makeRecordingDb(seed = {}) {
           return () => { state.single = true; return builder; };
         }
         if (MUTATING_OPS.has(prop)) {
-          return (...args) => { mutations.push({ table, op: String(prop), args }); return builder; };
+          return (...args) => {
+            mutations.push({ table, op: String(prop), args });
+            if (prop === 'insert') {
+              const row = { id: `inserted-${++inserted}`, ...args[0] };
+              rows.push(row); state.result = [structuredClone(row)];
+            } else if (prop === 'update') {
+              for (const row of rows) Object.assign(row, args[0]);
+              state.result = structuredClone(rows);
+            }
+            return builder;
+          };
         }
         return () => builder;
       },
@@ -174,10 +199,10 @@ describe('adjust_stock', () => {
     })).error).toMatch(/positive/);
     expect((await executeProcurementTool('adjust_stock', {
       product_name: 'Bifen', movement_type: 'restock', set_total: 10,
-    })).error).toMatch(/set_total is only valid/);
+    })).error).toMatch(/setTotal.*not allowed/);
     expect((await executeProcurementTool('adjust_stock', {
       product_name: 'Bifen', movement_type: 'correction', quantity: 4, set_total: 10,
-    })).error).toMatch(/not both/);
+    })).error).toMatch(/exclusive peers/);
   });
 
   test('ambiguous product name returns candidates without writing', async () => {
@@ -235,7 +260,7 @@ describe('create_restock_request', () => {
     const result = await executeProcurementTool('create_restock_request', {
       product_name: 'Bifen', quantity: 128, priority: 'high', confirmed: true,
     });
-    expect(result.error).toMatch(/already open/);
+    expect(result.error).toMatch(/already exists/);
     expect(result.existing_request).toMatchObject({ id: 'req-auto', source: 'auto_reorder', requested_quantity: 256 });
     expect(mutations.some(m => m.table === 'product_restock_requests' && m.op === 'insert')).toBe(false);
   });
@@ -245,7 +270,7 @@ describe('create_restock_request', () => {
     const result = await executeProcurementTool('create_restock_request', {
       product_name: 'Bifen', quantity: 128, needed_by: 'next tuesday',
     });
-    expect(result.error).toMatch(/YYYY-MM-DD/);
+    expect(result.error).toMatch(/iso format/);
     expect(mutations).toEqual([]);
   });
 });

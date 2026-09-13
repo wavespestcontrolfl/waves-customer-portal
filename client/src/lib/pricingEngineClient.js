@@ -3,7 +3,7 @@
  *
  * The server at POST /admin/pricing-config/estimate runs the modular engine
  * in server/services/pricing-engine/ with live DB-synced constants from the
- * 📐 Pricing Logic admin UI. All estimators (admin EstimatePage, public
+ * Pricing Logic admin UI. All estimators (admin EstimatePage, public
  * estimate view, property lookup, tech portal, AI agents) should go through
  * this helper so there is one pricing source of truth.
  *

@@ -93,9 +93,11 @@ function followupRow(overrides = {}) {
     due_date: '2026-05-19',
     invoice_number: 'WPC-2026-1042',
     invoice_created_at: '2026-05-20T12:00:00.000Z',
-    // runPending() selects `i.payer_id as invoice_payer_id`; mirror it so
-    // fireStep's payer guard reads the row instead of an extra lookup.
+    // runPending() selects `i.payer_id as invoice_payer_id` and
+    // `i.scheduled_send_error as invoice_send_error`; mirror both so
+    // fireStep's Bill-To guard reads the row instead of an extra lookup.
     invoice_payer_id: null,
+    invoice_send_error: null,
     ...overrides,
   };
 }
@@ -157,8 +159,9 @@ describe('invoice follow-up email sidecar', () => {
       // again for the eligibility check — two reads per fired step.
       // Claim-txn row lock read + the credit path's own invoice read (it
       // bails at its payment_plans probe in this harness) + the pre-dun
-      // refresh + the email-eligibility read.
-      invoices: [chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() })],
+      // refresh + fireTouch's live ownership re-read + the email-eligibility
+      // read.
+      invoices: [chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() })],
       notification_prefs: [chain({ first: { email_enabled: true } })],
       customer_interactions: [emailInteraction, finalInteraction],
       // fireStep now claims the sequence (touch_claimed_at) before sending
@@ -367,7 +370,7 @@ describe('invoice follow-up email sidecar', () => {
       // Claim-txn row lock read + the credit path's own invoice read (it
       // bails at its payment_plans probe in this harness) + the pre-dun
       // refresh + the email-eligibility read.
-      invoices: [chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() })],
+      invoices: [chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() })],
       notification_prefs: [chain({ first: { email_enabled: true } })],
       customer_interactions: [emailInteraction, finalInteraction],
       // Claim → cadence advance → claim clear (see the sidecar test above).
@@ -410,7 +413,7 @@ describe('invoice follow-up email sidecar', () => {
     setDbQueues({
       'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
       customers: [chain({ first: customer() })],
-      invoices: [chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() })],
+      invoices: [chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() })],
       notification_prefs: [chain({ first: { email_enabled: true } })],
       customer_interactions: [emailInteraction],
       sms_log: [failingSmsLog],

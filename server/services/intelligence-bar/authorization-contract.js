@@ -47,6 +47,7 @@ const PREVIEW_NOISE_KEYS = new Set([
 const VOLATILE_KEY_RE = /(_at$|^at$|timestamp|generated|elapsed|took_ms|_ms$|latency|request_id|trace)/i;
 const PREVIEW_EFFECT_LINES = 12;
 const PREVIEW_EFFECT_CHARS = 200;
+const PROPERTY_ACTION_TOOL_NAMES = new Set(['add_customer_property', 'update_customer_property', 'set_primary_property']);
 
 // Tools whose commit cannot be undone from the portal (a message leaves,
 // money moves, a public reply posts). Everything else is editable after.
@@ -98,6 +99,7 @@ const JOB_EFFECTS = {
 };
 
 const BILLING_TOOL_NAMES = new Set([
+  'save_customer_estimate',
   'request_instant_payout',
   'request_standard_payout',
   'approve_price',
@@ -107,6 +109,7 @@ const BILLING_TOOL_NAMES = new Set([
 ]);
 
 const ACTION_LABELS = {
+  save_customer_estimate: 'Save customer estimate',
   send_sms: 'Send a text message',
   reply_via_sms: 'Reply by text',
   send_email_reply: 'Send an email reply',
@@ -114,6 +117,10 @@ const ACTION_LABELS = {
   update_customer: 'Update customer record',
   bulk_update_customers: 'Update multiple customers',
   update_property_access: 'Update property access notes',
+  merge_customers: 'Merge duplicate customer',
+  add_customer_property: 'Add saved property',
+  update_customer_property: 'Update saved property',
+  set_primary_property: 'Change primary property',
   create_appointment: 'Book an appointment',
   reschedule_appointment: 'Move an appointment',
   cancel_appointment: 'Cancel an appointment',
@@ -143,6 +150,17 @@ const ACTION_LABELS = {
   run_seo_pipeline: 'Run the SEO pipeline',
   approve_seo_action: 'Approve an SEO action',
 };
+
+// A preview whose combined-payment disclosure cancels a PaymentIntent in
+// Stripe: the DB merge may still be undoable, but that cancellation is
+// permanent, so the card must carry the prominent "Cannot be undone"
+// warning.
+function cancelsStripeCheckoutSession(preview) {
+  const sessions = preview?.financial_effects?.combined_payment_sessions;
+  if (!sessions) return false;
+  return [...(sessions.winner || []), ...(sessions.loser || [])]
+    .some((s) => s && (s.outcome === 'cancel' || s.outcome === 'cancel_single_invoice'));
+}
 
 function tierFor(toolName) {
   if (CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES.has(toolName)) return 'red';
@@ -247,6 +265,37 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     seen.add(key);
     effects.push({ kind, label, ...extra });
   };
+  const propertyAction = PROPERTY_ACTION_TOOL_NAMES.has(toolName);
+  const customerEstimateAction = toolName === 'save_customer_estimate';
+  if (customerEstimateAction) {
+    if (preview.estimate_id) push('operational', `Saved estimate: ${preview.estimate_id}`);
+    push('billing', `WaveGuard ${preview.quote_tier} pricing`);
+    push('customer', `${preview.customer.name} — ${preview.property.address}`);
+    push('operational', `${preview.property.treatable_lawn_sqft} sq ft saved treatable lawn; ${humanKey(preview.property.grass_type)}`);
+    for (const line of preview.lines) {
+      push('billing', `${humanKey(line.service)}: $${Number(line.per_application).toFixed(2)} per application, ${line.applications} applications per year`);
+      if (line.initial) push('billing', `Initial: $${Number(line.initial).toFixed(2)}`);
+    }
+    for (const cadence of preview.offered_cadences) {
+      push('billing', `Customer option${cadence.selected ? ' (selected)' : ''}: ${cadence.applications} applications per year at $${Number(cadence.per_application).toFixed(2)} per application`);
+    }
+    push('operational', preview.effect);
+  }
+  if (propertyAction) {
+    if (preview?.customer?.name) push('customer', preview.customer.name);
+    if (preview?.address) push('customer', `Save property: ${preview.address}`);
+    if (preview?.property?.address) push('customer', preview.property.address);
+    if (preview?.previous_primary?.address) push('customer', `Previous primary: ${preview.previous_primary.address}`);
+    if (preview?.primary_property?.address) push('customer', `New primary: ${preview.primary_property.address}`);
+    for (const [field, value] of Object.entries(preview?.changes || {})) {
+      if (!['label', 'occupancy_type', 'relationship'].includes(field)) continue; // complete address is shown above
+      push('customer', `${humanKey(field)}: ${value === null ? '(cleared)' : field === 'label' ? value : humanKey(value)}`, {
+        ...(preview?.before ? { before: preview.before[field] ?? null } : {}), after: value,
+      });
+    }
+    const impacts = Array.isArray(preview?.effects) ? preview.effects : [preview?.effects];
+    for (const impact of impacts.filter(Boolean)) push('operational', impact);
+  }
   // A null in a customer `updates` map is a WRITE (the field is cleared) —
   // it must render as an effect, never vanish like an absent value.
   if (CUSTOMER_UPDATE_TOOL_NAMES.has(toolName) && displayParams?.updates && typeof displayParams.updates === 'object') {
@@ -518,7 +567,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     for (const n of preview.all_customer_names) moreEffects.push({ kind: 'customer', label: String(n) });
     push('customer', `All ${preview.all_customer_names.length} customer names are listed under "Show more"`);
   }
-  if (WRITE_TWO_STEP_TOOL_NAMES.has(toolName) && preview && typeof preview === 'object') {
+  if (!propertyAction && !customerEstimateAction && WRITE_TWO_STEP_TOOL_NAMES.has(toolName) && preview && typeof preview === 'object') {
     let shown = 0;
     for (const [k, v] of Object.entries(preview)) {
       if (PREVIEW_NOISE_KEYS.has(k) || String(k).startsWith('_') || VOLATILE_KEY_RE.test(k)) continue;
@@ -542,7 +591,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // one level of plain-object params flattens to its own lines (so an
   // update_customer card says WHAT changes), deeper structure is described
   // in full rather than dropped.
-  for (const [k, v] of Object.entries(displayParams || {})) {
+  for (const [k, v] of Object.entries(propertyAction || customerEstimateAction ? {} : (displayParams || {}))) {
     if (k.startsWith('_')) continue;
     if (v && typeof v === 'object' && !Array.isArray(v)) {
       for (const [k2, v2] of Object.entries(v)) {
@@ -675,7 +724,15 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // an outbound message (customer texts on a notifying move, the tax
     // advisor's admin SMS) or spends externally (price research) cannot be
     // undone from the portal.
-    irreversible: IRREVERSIBLE_TOOL_NAMES.has(toolName) || notifiesCustomer || toolName === 'run_tax_advisor' || toolName === 'run_price_lookup',
+    // Input-dependent irreversibility rides on the preview: a merge whose
+    // fold the duplicates-queue undo refuses says revertible_from_queue:false,
+    // and a merge that CANCELS a customer's Stripe checkout session is
+    // irreversible whatever the database undo can do — the canceled
+    // PaymentIntent cannot be restored, and the customer's payment link is
+    // dead (codex #4348 r7 P2).
+    irreversible: IRREVERSIBLE_TOOL_NAMES.has(toolName) || notifiesCustomer || toolName === 'run_tax_advisor' || toolName === 'run_price_lookup'
+      || preview?.financial_effects?.revertible_from_queue === false
+      || cancelsStripeCheckoutSession(preview),
     notifies_customer: notifiesCustomer,
     summary: summary || null,
     ...(moreEffects.length ? { more_effects: moreEffects } : {}),
@@ -731,7 +788,8 @@ function normalizePreview(value, depth = 0) {
   if (value && typeof value === 'object') {
     const out = {};
     for (const [k, v] of Object.entries(value)) {
-      if (String(k).startsWith('_') || VOLATILE_KEY_RE.test(k)) continue;
+      // Domain record versions bind approval while remaining hidden from the card.
+      if ((String(k).startsWith('_') && k !== '_version') || VOLATILE_KEY_RE.test(k)) continue;
       if (depth === 0 && PREVIEW_NOISE_KEYS.has(k) && k !== 'matches' && k !== 'preview' && k !== 'action') continue;
       out[k] = normalizePreview(v, depth + 1);
     }
