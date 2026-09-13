@@ -1799,7 +1799,7 @@ const PET_GUIDANCE_RE = new RegExp(
 
 const PET_SPECULATIVE_GUIDANCE_RE = /\b(?:might|may|could|would|should|maybe|perhaps|possibly|potentially|hope[sd]?|refuse[sd]?|decline[sd]?|failed|unable)\b/i;
 
-const PET_TRAILING_CONDITION_RE = /^(?:(?!\b(?:and|or|but|however|then|so)\b(?!\s+(?:(?:only\s+)?(?:if|unless)|only\s+when)\b))[^.!?;—–])*?\b(?:(?:only\s+)?if|unless|only\s+when)\b/i;
+const PET_TRAILING_CONDITION_RE = /^(?:(?!\b(?:and|or|but|however|then|so)\b(?!\s+(?:(?:only\s+)?(?:if|unless)|only\s+when)\b))[^.!?;—–])*?\b(?:(?:only\s+)?if|unless|only\s+when|when\s+(?:asked|requested))\b/i;
 
 const PET_INDEPENDENT_CONDITIONAL_ACTION_RE = /^\s*,?\s*(?:and|or|but)\s+(?:(?:only\s+)?if|unless|only\s+when)\b[^,.!?;—–]{0,60},\s*(?:(?:they|you|the technician|the team member)\s+)?(?:can|will|may|could|would|should|review|explain|answer|check|verify|go over|talk)\b/i;
 
