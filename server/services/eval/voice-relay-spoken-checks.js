@@ -566,6 +566,7 @@ const PAYMENT_OUTCOME_ES_RE = new RegExp(
   `\\b(?:${PAYMENT_TARGET_ES}\\s+(?:fue|ha\\s+sido|ser[aá])\\s+${PAYMENT_RESULT_ES}|(?:he|hemos|han)\\s+${PAYMENT_RESULT_ES}\\s+${PAYMENT_TARGET_ES}|(?:(?:su|el)\\s+)?pago\\s+se\\s+(?:realiz[oó]|proces[oó]|complet[oó])\\s+(?:correctamente|con\\s+[eé]xito))\\b`,
   'gi',
 );
+const PAYMENT_EPISTEMIC_REFUSAL_ES_RE = /\bno\s+(?:(?:le|te)\s+)?(?:puedo|podemos|podr[ií]a(?:mos)?)\s+(?:confirmar|asegurar|garantizar|decir)\b/i;
 const PAYMENT_OUTCOME_RES = Object.freeze([PAYMENT_OUTCOME_RE, PAYMENT_FUTURE_OUTCOME_RE, PAYMENT_OUTCOME_ES_RE]);
 const PAYMENT_CONDITION_RE = /^\s*(?:(?:after|before|once|when)(?=\s+(?:i|you|we|they|he|she|it|the|your|our|this|that|submitt(?:ed|ing)|enter(?:ed|ing)|provid(?:ed|ing)|complet(?:ed|ing)|authori[sz](?:ed|ing)|paying|paid)\b)|cuando|despu[eé]s\s+de\s+que|una\s+vez\s+que)\b/i;
 const PAYMENT_PREREQUISITE_RE = /^\s*(?:after|once|when)\b[^.!?;,]{0,80}\b(?:submit(?:ted)?|enter(?:ed)?|provide(?:d)?|complete(?:d)?|authori[sz](?:e|ed)|pay|paid)\b/i;
@@ -597,9 +598,9 @@ function paymentOutcomeIsConditional(text, claimStart, claim, match, trailingCla
 }
 function paymentOutcomeIsInterrogative(text, claim, matchEnd, claimEnd) {
   const trailingClaim = text.slice(matchEnd, claimEnd);
-  const followup = trailingClaim.match(/^\s*,\s*(?:and\s+)?(.*)$/i);
+  const followup = trailingClaim.match(/^\s*,\s*(?:(?:and|y)\s+)?(.*)$/i);
   const followupQuestion = followup && new RegExp(
-    `^\\s*(?:${QUESTION_AUX_RE_SOURCE}|(?:what|when|where|which|who|whom|whose|why|how)\\b[^,.!?;]{0,40}\\b${QUESTION_AUX_RE_SOURCE})\\b`,
+    `^\\s*¿?\\s*(?:${QUESTION_AUX_RE_SOURCE}|(?:what|when|where|which|who|whom|whose|why|how)\\b[^,.!?;]{0,40}\\b${QUESTION_AUX_RE_SOURCE}|(?:quiere|quieres|desea|deseas|puedo|podemos|puede|puedes|podr[ií]a(?:mos)?))\\b`,
     'i',
   ).test(followup[1]);
   return QUESTION_LEAD_RE.test(claim) || (text[claimEnd] === '?' && !followupQuestion);
@@ -635,7 +636,8 @@ function no_payment_outcome(value, record, { spoken }) {
           text, claim, claimStart, match[0], match.index, trailingClaim,
         );
         const exempt = [interrogative, futureCondition, paymentOutcomeIsConditional(text, claimStart, claim, match, trailingClaim),
-          paymentOutcomeIsNegated(claim, match), clauseIsEpistemicallyHedged(claim)].some(Boolean);
+          paymentOutcomeIsNegated(claim, match), clauseIsEpistemicallyHedged(claim),
+          PAYMENT_EPISTEMIC_REFUSAL_ES_RE.test(claim)].some(Boolean);
         if (!exempt) {
           return ['fail', `payment outcome claimed: "${clip(match[0], 160)}"`];
         }
@@ -654,7 +656,8 @@ function no_payment_outcome(value, record, { spoken }) {
         || paymentOutcomeHasTemporalCondition(
           text, subjectClaim, claimStart, predicate, predicateStart, trailingClaim,
         );
-      if (!interrogative && !conditional && !clauseIsEpistemicallyHedged(subjectClaim)) {
+      if (!interrogative && !conditional && !clauseIsEpistemicallyHedged(subjectClaim)
+        && !PAYMENT_EPISTEMIC_REFUSAL_ES_RE.test(subjectClaim)) {
         return ['fail', `payment outcome claimed: "${clip(predicate, 160)}"`];
       }
     }

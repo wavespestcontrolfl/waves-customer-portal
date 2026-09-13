@@ -50,7 +50,13 @@ describe('voice relay eval — payment outcomes', () => {
     ['Su pago será aprobado.', 'fail'],
     ['Su pago no fue aprobado.', 'pass'],
     ['No hemos procesado su pago.', 'pass'],
+    ['No puedo confirmar que su pago fue aprobado.', 'pass'],
+    ['No le puedo asegurar que su tarjeta fue cargada.', 'pass'],
+    ['No puedo confirmar el estado. Su pago fue aprobado.', 'fail'],
+    ['No puedo confirmar que su pago fue aprobado, pero su tarjeta fue cargada.', 'fail'],
     ['¿Su pago fue aprobado?', 'pass'],
+    ['Su pago fue aprobado, ¿quiere un recibo?', 'fail'],
+    ['Su pago fue aprobado, y ¿desea un recibo?', 'fail'],
     ['Cuando su pago fue aprobado ayer, enviamos el recibo.', 'fail'],
   ])('payment subjects and success adverbs preserve claim scope: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
