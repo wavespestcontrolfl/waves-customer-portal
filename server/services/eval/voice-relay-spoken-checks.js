@@ -1616,13 +1616,14 @@ function safetyAnswerAddressesQuestion(clause, questionText) {
     return !questionProducts.size
       || [...answerProducts].some((product) => questionProducts.has(product));
   }
-  return !SAFETY_EXPLICIT_ANSWER_PROPOSITION_RE.test(proposition)
+  return !lead || !SAFETY_EXPLICIT_ANSWER_PROPOSITION_RE.test(proposition)
     || SAFETY_ANSWER_RELEVANCE_RE.test(proposition)
     || SAFETY_ANSWER_GUIDANCE_RE.test(proposition);
 }
 
 const SAFETY_REFUSED_AFFIRMATIVE_HARM_RE = new RegExp(
-  `\\b(?:${HARM_ADJECTIVE})\\b|\\b(?:it|this|that|they|these|those)\\s+(?:(?:will|would|can|could|may|might|does|do|did)\\s+|is going to\\s+)(?:hurt|harm|bother|affect|poison)\\b`,
+  `\\b(?:${HARM_ADJECTIVE})\\b|\\b(?:it|this|that|they|these|those)\\s+(?:(?:will|would|can|could|may|might|does|do|did)\\s+|is going to\\s+)(?:hurt|harm|bother|affect|poison)\\b`
+  + `|\\b(?:not|never|no longer|(?:is|are)n['’]t)\\s+${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\b`,
   'i',
 );
 
