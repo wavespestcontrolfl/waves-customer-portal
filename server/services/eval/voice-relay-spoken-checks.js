@@ -1382,14 +1382,19 @@ function reportLocationIsTreatmentTarget(
   if (!reportCoordinatorSharesLocation(
     affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb,
   )) return false;
-  const locationLink = locationAt < subjectAt
-    ? affirmed.slice(0, locationAt) : affirmed.slice(subjectAt + subjectLength, locationAt);
-  if (locationAt < subjectAt) return REPORT_FRONTED_LOCATION_PREFIX_RE.test(locationLink);
+  if (locationAt < subjectAt) {
+    return REPORT_FRONTED_LOCATION_PREFIX_RE.test(affirmed.slice(0, locationAt));
+  }
+  const relationshipStart = Math.max(
+    subjectAt + subjectLength, findingVerb.index + findingVerb[0].length,
+  );
+  const locationLink = affirmed.slice(relationshipStart, locationAt);
   const targetLinks = [...locationLink.matchAll(new RegExp(REPORT_TREATMENT_LOCATION_LINK_RE.source, 'gi'))];
   const finalTargetLink = targetLinks[targetLinks.length - 1];
   const precedingTargetLink = targetLinks[targetLinks.length - 2];
-  const targetPrefix = finalTargetLink
-    ? locationLink.slice(finalTargetLink.index + finalTargetLink[0].length) : locationLink;
+  const targetPrefix = (finalTargetLink
+    ? locationLink.slice(finalTargetLink.index + finalTargetLink[0].length) : locationLink)
+    .replace(/^\s*(?:apply|place|put|spray|treat|use)\s+/i, '');
   const precedingTarget = precedingTargetLink && locationLink.slice(
     precedingTargetLink.index + precedingTargetLink[0].length, finalTargetLink.index,
   );
