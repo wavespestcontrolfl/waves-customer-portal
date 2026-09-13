@@ -130,7 +130,8 @@ function dateFacts(context) {
 }
 
 function normalizeTemporal(value) {
-  return String(value).toLowerCase().replace(/\./g, '').replace(/\s+/g, ' ').trim();
+  return String(value).toLowerCase().replace(/\./g, '').replace(/\s+/g, ' ')
+    .replace(/\b(\d{1,2}):00\s*(am|pm)\b/g, '$1 $2').trim();
 }
 
 function temporalClaims(value) {

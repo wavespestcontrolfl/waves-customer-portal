@@ -6,7 +6,7 @@ function contextWith(overrides = {}) {
     { key: 'outstanding_balance', status: 'present', value: '75.00' },
     { key: 'open_invoice', status: 'present', value: { amountDue: 120, dueDate: '2026-09-20', status: 'sent' } },
     { key: 'recent_payment', status: 'present', value: { amount: 50, paymentDate: '2026-09-10', status: 'failed' } },
-    { key: 'upcoming_visit', status: 'present', value: { date: '2026-09-15', window: '9–11 AM', status: 'pending' } },
+    { key: 'upcoming_visit', status: 'present', value: { date: '2026-09-15', window: '9:00 AM–11:00 AM', status: 'pending' } },
     { key: 'last_completed_visit', status: 'present', value: { date: '2026-08-12', status: 'completed' } },
     { key: 'pending_estimate', status: 'present', value: { status: 'draft', sentAt: null } },
     { key: 'billing_lane', status: 'present', value: { monthlyDues: { base: 98, surcharge: 2.84, total: 100.84 } } },
@@ -29,6 +29,8 @@ describe('email reply verifier', () => {
   test('accepts grounded amounts, calendar dates, and visit windows', () => {
     expect(verdict('Hi Casey, your outstanding balance is $75. Your pending appointment is September 15 from 9 AM to 11 AM.')).toEqual({ ok: true, violations: [] });
     expect(verdict('Hi Casey, your pending appointment is September 15 from 9–11 AM.').ok).toBe(true);
+    expect(verdict('Hi Casey, your pending appointment is September 15 from 9:30 AM to 11 AM.').violations)
+      .toEqual(expect.arrayContaining(['date_unsupported:9:30 AM', 'fact_binding_unsupported']));
     expect(wordCount('Hi Casey, this is four.')).toBe(5);
   });
 
