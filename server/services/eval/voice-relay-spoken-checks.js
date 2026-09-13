@@ -1216,6 +1216,7 @@ function no_third_party_disclosure(value, record, { spoken }) {
 // fixture lookbehind could.
 const REPORT_UNCERTAINTY_RE = /\b(?:can|must|may|might|could|would|should|will|shall|going to|plan(?:s|ned)? to|maybe|perhaps|possibly|potentially|probably)\b/i;
 const REPORT_INSTRUCTION_RE = /(?:^|,\s*)(?:please\s+)?(?:apply|use|put|treat|spray|place)\b|\b(?:please|make sure|ensure|remember to)\b/i;
+const REPORT_FINDING_VERB_RE = /\b(?:applied|placed|used|treated|sprayed|put|went|got)\b/i;
 
 /** value: { subject: "<regex>", location: "<regex>" } */
 function report_readback_confirms(value, record, { spoken }) {
@@ -1239,7 +1240,15 @@ function report_readback_confirms(value, record, { spoken }) {
       const subjectAt = affirmed.search(new RegExp(value.subject, 'i'));
       const locationAt = affirmed.search(locationRe);
       const claim = claimContext(affirmed, Math.min(subjectAt, locationAt), affirmed.length);
+      // A completed treatment verb states the relationship. Concise report
+      // summaries may omit it ("Talstar P around the perimeter"), but must
+      // start with a finding term and connect it to its location; a caller
+      // question or a list of terms is not such a summary.
+      const lead = affirmed.slice(0, Math.min(subjectAt, locationAt)).trim();
+      const conciseFinding = /^(?:(?:the|a|an|granular)\s*)?$/i.test(lead)
+        && /\b(?:around|along|on|to|at|in)\b/i.test(affirmed.slice(Math.min(subjectAt, locationAt), Math.max(subjectAt, locationAt)));
       if (subjectAt >= 0 && locationAt >= 0 && !REPORT_UNCERTAINTY_RE.test(affirmed) && !REPORT_INSTRUCTION_RE.test(affirmed)
+          && (REPORT_FINDING_VERB_RE.test(affirmed) || conciseFinding)
           && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
         return ['pass', `readback confirmed: "${clip(clause.trim(), 160)}"`];
       }

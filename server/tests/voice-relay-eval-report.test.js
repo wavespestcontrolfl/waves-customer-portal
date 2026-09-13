@@ -3,6 +3,10 @@ const report = { subject: 'talstar p', location: 'exterior perimeter' };
 
 test.each([
   ['Talstar P was applied to the exterior perimeter.', 'pass'],
+  ['The report mentions Talstar P and the exterior perimeter.', 'fail'],
+  ['You asked about Talstar P on the exterior perimeter.', 'fail'],
+  ['Talstar P around the exterior perimeter.', 'pass'],
+  ['The exterior perimeter got Talstar P.', 'pass'],
   ['Talstar P was applied indoors rather than around the exterior perimeter.', 'fail'],
   ['Rather than indoors, Talstar P was applied around the exterior perimeter.', 'pass'],
   ['I doubt Talstar P was applied to the exterior perimeter.', 'fail'],
