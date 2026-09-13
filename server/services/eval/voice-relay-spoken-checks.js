@@ -1196,7 +1196,8 @@ function report_readback_confirms(value, record, { spoken }) {
       const [, clauseEnd] = clauseBounds(text, m.index);
       const sentencePrefix = text.slice(0, m.index).split(/[.!?;]/).pop();
       const interrogative = /^\s*(?:(?:and|but|so)\s+)?(?:was|were|is|are|has|have|had|did|do|does|can|could|would|will|should|what|where|when|why|how)\b/i.test(sentencePrefix);
-      if (text[clauseEnd] === '?' || interrogative) continue;
+      const alternativeQuestion = /^or\b[^.!?;]*\?/i.test(text.slice(clauseEnd));
+      if (text[clauseEnd] === '?' || interrogative || alternativeQuestion) continue;
       const clause = clauseOf(text, m.index);
       // A contrast excludes its following alternative, not the location
       // affirmed before it: "exterior rather than indoors" still confirms

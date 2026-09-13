@@ -14,6 +14,7 @@ test.each([
   ['Perhaps, Talstar P was applied to the exterior perimeter.', 'fail'],
   ['Was Talstar P applied to the exterior perimeter?', 'fail'],
   ['Was Talstar P applied to the exterior perimeter or indoors?', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, or was it indoors?', 'fail'],
   ['Was Talstar P applied to the exterior perimeter and was bait used?', 'fail'],
   ['Can you confirm Talstar P was applied to the exterior perimeter or indoors?', 'fail'],
   ['Talstar P was applied to the exterior perimeter, right?', 'fail'],
