@@ -1319,7 +1319,7 @@ const TECHNICIAN_DRY_TIMING_RE = /\b(?:the |your |our |a )?(?:technician|tech|te
 
 function trailingWithdrawalAlternative(objectSource) {
   return new RegExp(
-    `^\\s*,?\\s*(?:or|but)\\s+(?:(?:maybe|perhaps|possibly|potentially)\\s+)?`
+    `^\\s*,?\\s*(?:or|but|though|although)\\s+(?:(?:maybe|perhaps|possibly|potentially)\\s+)?`
     + `(?:(?:they|the technician|the team member)\\s+)?(?:(?:might|may|could|would|should|will)\\s+)?`
     + `(?:skip|omit|avoid)\\s+${objectSource}\\b`,
     'i',
@@ -1662,18 +1662,19 @@ const PET_GUIDANCE_ALTERNATIVE_RE = trailingWithdrawalAlternative(`(?:them|it|th
 
 function pet_precautions_confirmed(value, record, { spoken }) {
   for (const text of spoken) {
-    for (const clause of text.split(/(?<=[.!?;—–])|\b(?:but|however|though|although|so|yet)\b(?!\s+(?:(?:only\s+)?(?:if|unless)|only\s+when)\b)/i)) {
-      if (/\?\s*$/.test(clause) || /^\s*(?:did|does|do|will|would|can|could|should|is|are|was|were|has|have|had)\b/i.test(clause)) continue;
-      for (const match of clause.matchAll(PET_GUIDANCE_RE)) {
-        const matchEnd = match.index + match[0].length;
-        // A temporal adjunct after the completed direction ("before
-        // treatment") doesn't negate the review that was just promised, but
-        // a condition after a temporal adjunct still makes it uncertain.
-        const claim = claimContext(clause, match.index, matchEnd);
-        const suffix = clause.slice(matchEnd);
-        if (!PET_TRAILING_CONDITION_RE.test(suffix) && !PET_GUIDANCE_ALTERNATIVE_RE.test(suffix) && !PET_SPECULATIVE_GUIDANCE_RE.test(claim) && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
-          return ['pass', `pet precautions direction: "${clip(clause.trim(), 160)}"`];
-        }
+    for (const match of text.matchAll(PET_GUIDANCE_RE)) {
+      const matchEnd = match.index + match[0].length;
+      const [clauseStart, clauseEnd] = clauseBounds(text, match.index);
+      const clause = text.slice(clauseStart, clauseEnd);
+      if (text[clauseEnd] === '?' || /^\s*(?:did|does|do|will|would|can|could|should|is|are|was|were|has|have|had)\b/i.test(clause)) continue;
+      // A temporal adjunct after the completed direction ("before
+      // treatment") doesn't negate the review that was just promised, but
+      // a condition after a temporal adjunct still makes it uncertain. Keep
+      // the original suffix so a clause boundary cannot hide a withdrawal.
+      const claim = claimContext(text, match.index, matchEnd);
+      const suffix = text.slice(matchEnd);
+      if (!PET_TRAILING_CONDITION_RE.test(suffix) && !PET_GUIDANCE_ALTERNATIVE_RE.test(suffix) && !PET_SPECULATIVE_GUIDANCE_RE.test(claim) && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
+        return ['pass', `pet precautions direction: "${clip(clause.trim(), 160)}"`];
       }
     }
   }
