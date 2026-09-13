@@ -120,7 +120,7 @@ const DROPPED_ESTIMATE_KEYS = new Set([
 // are dropped: a sibling is never individually composed, so nothing here
 // knows whether its own page would have withheld them.
 function siblingEntry(sibling) {
-  const { monthlyTotal, annualTotal, onetimeTotal, token, ...rest } = sibling || {};
+  const { monthlyTotal, annualTotal: _annualTotal, onetimeTotal, token, ...rest } = sibling || {};
   const displayed = Number(onetimeTotal) > 0 && !(Number(monthlyTotal) > 0) ? Number(onetimeTotal) : null;
   return {
     ...rest,
@@ -146,11 +146,15 @@ function siblingEntry(sibling) {
 // keyed off the server's OWN marker, one generic pass, no mirror of the
 // client's band arithmetic. The stamp itself rides along, so the bar can say
 // the price is a confirmed-on-site range and point at the page for the band.
-const RANGED_EXACT_FIELDS = ['monthly', 'annual', 'perTreatment', 'perServiceTreatments', 'monthlySubtotal', 'annualSubtotal'];
+const RANGED_METADATA_FIELDS = ['key', 'label', 'selection', 'lowConfidenceRangePct', 'lowConfidenceFraction', 'quoteRequired', 'quoteRequiredReason'];
 
 function sanitizeRangedNode(node) {
-  const out = { ...node };
-  for (const field of RANGED_EXACT_FIELDS) delete out[field];
+  // Keep only cadence/range metadata. Base amounts, discount amounts and
+  // nested treatment rows also reveal the hidden exact price.
+  const out = {};
+  for (const field of RANGED_METADATA_FIELDS) {
+    if (Object.hasOwn(node, field)) out[field] = node[field];
+  }
   out.ranged = 'low_confidence_confirmed_on_site';
   out.ranged_note = 'the page renders this as a "confirmed on site" range around a price it never shows exactly; open the estimate link for the band';
   return out;
@@ -186,7 +190,16 @@ function stripPayload(payload) {
     out[key] = value;
   }
   if (Array.isArray(out.propertyGroup)) out.propertyGroup = out.propertyGroup.map(siblingEntry);
-  if (out.pricing) out.pricing = sanitizeRanges(out.pricing);
+  if (out.pricing) {
+    out.pricing = sanitizeRanges(out.pricing);
+    // The page renders the stamped service cards; its aggregate fallback
+    // frequencies retain exact, unstamped prices in the same payload.
+    if (out.pricing.combinedRecurring?.ranged) {
+      for (const key of ['frequencies', 'serviceCadenceCombos']) {
+        if (Array.isArray(out.pricing[key])) out.pricing[key] = out.pricing[key].map(sanitizeRangedNode);
+      }
+    }
+  }
   // The page renders NO pricing for a quote-required bundle — the client
   // exits to the terminal card first — so neither does this tool. The
   // composer's own verdict decides it; the reason rides along because that
@@ -235,14 +248,15 @@ async function pageProjection(row, linkState) {
 // the staff draft preview for an unpublished, unarchived row, nothing
 // otherwise.
 async function estimateLinks(row, data) {
-  if (!row.token) return { customer_link: null, staff_preview_link: null, link_state: 'no_token' };
   let blocked = false;
   try {
-    blocked = !!(await lazy.claimSql().callSideBlockForEstimateData(db, data));
+    const { estimateOffCustomerSurface, callSideBlockForEstimateData } = lazy.claimSql();
+    blocked = estimateOffCustomerSurface(row) || !!(await callSideBlockForEstimateData(db, data));
   } catch {
     blocked = true; // fail closed: an unverifiable block is not a link
   }
   if (blocked) return { customer_link: null, staff_preview_link: null, link_state: 'blocked' };
+  if (!row.token) return { customer_link: null, staff_preview_link: null, link_state: 'no_token' };
   const publicRoute = lazy.publicRoute();
   if (publicRoute.isEstimateCustomerViewable(row)) {
     return { customer_link: estimateLink(row.token), staff_preview_link: null, link_state: 'customer_viewable' };
@@ -335,7 +349,7 @@ function blockedRecord(row) {
     id: row.id,
     withheld: 'provenance_blocked',
     page: null,
-    page_unavailable: 'withheld: a call-side block is on this estimate — its provenance is unverified, so the page serves it to no one and its contents may belong to another customer',
+    page_unavailable: 'withheld: an estimate or call-side hold prevents verifying this estimate — its contents or pricing may no longer match the customer',
     customer_link: null,
     staff_preview_link: null,
     link_state: 'blocked',

@@ -18,7 +18,10 @@ jest.mock('../models/db', () => {
   return db;
 });
 const mockCallSideBlock = jest.fn(async () => null);
-jest.mock('../utils/estimate-claim-sql', () => ({ callSideBlockForEstimateData: (...a) => mockCallSideBlock(...a) }));
+jest.mock('../utils/estimate-claim-sql', () => ({
+  ...jest.requireActual('../utils/estimate-claim-sql'),
+  callSideBlockForEstimateData: (...a) => mockCallSideBlock(...a),
+}));
 const calls = [];
 const mockCompose = jest.fn(async () => ({}));
 const mockReconcile = jest.fn(async () => undefined);
@@ -224,8 +227,8 @@ test('a RANGED cadence loses its exact figures at whatever depth it sits — the
   expect(ranged.monthly).toBeUndefined();
   expect(ranged.annual).toBeUndefined();
   expect(ranged.perTreatment).toBeUndefined();
-  // the un-stamped sibling cadence keeps its exact price
-  expect(shaped.page.pricing.frequencies[1]).toMatchObject({ monthly: 1000, annual: 12000 });
+  // Aggregate fallback cadences contain the ranged combined amount too.
+  expect(shaped.page.pricing.frequencies[1].monthly).toBeUndefined();
   // nested inside a service ladder, and on the combined card
   const nested = shaped.page.pricing.services[0].frequencies[0];
   expect(nested.ranged).toBe('low_confidence_confirmed_on_site');
@@ -233,6 +236,29 @@ test('a RANGED cadence loses its exact figures at whatever depth it sits — the
   expect(shaped.page.pricing.combinedRecurring).toMatchObject({ ranged: 'low_confidence_confirmed_on_site' });
   expect(shaped.page.pricing.combinedRecurring.monthlySubtotal).toBeUndefined();
   expect(JSON.stringify(shaped.page.pricing)).not.toMatch(/920|11040|2760/);
+});
+
+test('real commercial range contracts withhold aggregate and base amounts while preserving healthy service pricing', async () => {
+  const { attachPublicPricingContract } = jest.requireActual('../routes/estimate-public');
+  const estimateData = {
+    result: { recurring: { services: [{
+      service: 'commercial_lawn', name: 'Commercial Turf Treatment Program',
+      pricingConfidence: 'LOW', mo: 400, annual: 4800, estimatedPricing: true,
+    }] } },
+  };
+  const pricing = attachPublicPricingContract({
+    frequencies: [{ key: 'monthly', label: 'Commercial Turf Treatment Program', monthly: 400, annual: 4800 }],
+  }, {}, estimateData);
+  expect(pricing.services[0].frequencies[0].lowConfidenceRangePct).toBeGreaterThan(0);
+  expect(pricing.frequencies[0].monthly).toBe(400);
+  pricing.serviceCadenceCombos = [{ selection: { commercial_lawn: 'monthly' }, monthly: 400, annual: 4800 }];
+  pricing.services.push({ key: 'pest_control', frequencies: [{ key: 'quarterly', monthly: 47, annual: 564 }] });
+  mockCompose.mockResolvedValue({ ...PAGE_PAYLOAD, pricing });
+  const shaped = await shapeEstimate(estimateRow());
+  expect(shaped.page.pricing.services[1].frequencies[0]).toMatchObject({ monthly: 47, annual: 564 });
+  expect(shaped.page.pricing.frequencies[0].ranged).toBe('low_confidence_confirmed_on_site');
+  expect(shaped.page.pricing.serviceCadenceCombos[0]).toMatchObject({ selection: { commercial_lawn: 'monthly' }, ranged: 'low_confidence_confirmed_on_site' });
+  expect(JSON.stringify(shaped.page.pricing)).not.toMatch(/400|4800/);
 });
 
 test('a quote-required cadence needs no range stripping — PriceCard zeroes the band for it and the bundle gate already applies', async () => {
@@ -346,7 +372,7 @@ test('a call-side block suppresses the WHOLE record — identity and money may b
     id: 'est-1',
     withheld: 'provenance_blocked',
     page: null,
-    page_unavailable: expect.stringMatching(/call-side block/),
+    page_unavailable: expect.stringMatching(/estimate or call-side hold/),
     customer_link: null,
     staff_preview_link: null,
     link_state: 'blocked',
@@ -361,6 +387,23 @@ test('an unverifiable call-side block fails closed the same way', async () => {
   const shaped = await shapeEstimate(estimateRow());
   expect(shaped.withheld).toBe('provenance_blocked');
   expect(shaped.customer).toBeUndefined();
+});
+
+test.each(['linkage_invalidated_at', 'invalidation_pending_at'])('an estimate-side %s marker withholds the record even after call processing settles', async (marker) => {
+  for (const token of ['invalidated-token', null]) {
+    const row = estimateRow({
+      status: 'accepted',
+      token,
+      estimate_data: JSON.stringify({ estimatorEngine: { callLogId: 'settled-call', [marker]: new Date().toISOString() } }),
+    });
+    const shaped = await shapeEstimate(row, [{ status: 'received', amount: '100.00', card_surcharge: '3.00' }]);
+    expect(shaped).toMatchObject({ id: row.id, withheld: 'provenance_blocked', page: null, link_state: 'blocked' });
+    expect(shaped.customer_id).toBeUndefined();
+    expect(shaped.deposits).toBeUndefined();
+    expect(shaped.committed_totals).toBeUndefined();
+    expect(JSON.stringify(shaped)).not.toMatch(/Avery Example|100 Test St|perimeter/);
+  }
+  expect(mockCompose).not.toHaveBeenCalled();
 });
 
 test('an EXPIRED estimate still reports its amounts — the page\'s 404 is a customer-surface rule, not a staff-disclosure one', async () => {
