@@ -142,6 +142,22 @@ describe('email reply verifier', () => {
     expect(verdict('Hi Casey, your appointment is September 15 at 8:30.').violations).toContain('clock_format_unsupported');
     expect(verdict('Hi Casey, your visit is pending.\n\nBest,\nAdam\nWaves Pest Control').violations).toContain('signature_unsupported');
   });
+  test('dotted meridiems cannot detach an unsupported appointment status', () => {
+    for (const window of ['9 a.m. to 11 a.m.', '9 A.M. to 11 A.M.']) {
+      expect(verdict(`Hi Casey, your pending appointment is September 15 from ${window} and is confirmed.`).violations)
+        .toContain('visit_status_unsupported');
+    }
+    expect(verdict('Hi Casey, your pending appointment is September 15 from 9 a.m. to 11 a.m. AND IS CONFIRMED.').violations)
+      .toContain('visit_status_unsupported');
+    expect(verdict('Hi Casey, your pending appointment is September 15 from 9 a.m. to 11 a.m.\nYour outstanding balance is $75.').ok)
+      .toBe(true);
+  });
+
+  test.each(['at 8', 'from 8 to 10', 'between 8 and 10', 'at 8–10'])('bare appointment hours require review: %s', (time) => {
+    expect(verdict(`Hi Casey, your appointment is September 15 ${time}.`).violations)
+      .toContain('clock_format_unsupported');
+  });
+
   test('greetings support Unicode names and canonically equivalent spelling', () => {
     const context = { customer: { id: 'customer-1', firstName: 'José' } };
     expect(verdict('Hi José, I will check and follow up.', { context }).ok).toBe(true);

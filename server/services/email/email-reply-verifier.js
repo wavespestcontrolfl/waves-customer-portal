@@ -321,7 +321,8 @@ function forgedSignature(text) {
 }
 
 function sentences(text) {
-  return String(text).replace(/\b([ap])\.m\.(?=\s+(?:to\b|[-–—]))/gi, '$1m')
+  // Treat dotted meridiems as indivisible; ambiguous prose stays together for review.
+  return String(text).replace(/\b([ap])\.m\./gi, '$1m')
     .split(/(?<=[.!?])\s+|\n+/).map((item) => item.trim()).filter(Boolean);
 }
 
@@ -331,7 +332,8 @@ function structuralViolations(draft, context, wordBudget) {
   if (!Number.isInteger(wordBudget) || wordBudget < 1 || wordCount(draft) > wordBudget) violations.push('word_budget_exceeded');
   if (/<\/?[a-z][^>]*>/i.test(draft)) violations.push('html_not_allowed');
   if (/^\s*(?:[-*•]|\d+[.)])\s+/m.test(draft)) violations.push('bullets_not_allowed');
-  if (/\b\d{1,2}:\d{2}\b/.test(draft.replace(TIME_RE, ''))) violations.push('clock_format_unsupported');
+  const withoutClockTimes = draft.replace(TIME_RANGE_RE, '').replace(TIME_RE, '');
+  if (/\b\d{1,2}:\d{2}\b|\b(?:at|from|between)\s+\d{1,2}\b(?![\d:/])/i.test(withoutClockTimes)) violations.push('clock_format_unsupported');
   if (BOILERPLATE_RE.test(draft)) violations.push('boilerplate_not_allowed');
   if (!exemplarLooksClean('', draft)) violations.push('untrusted_instruction');
   if (forgedSignature(draft)) violations.push('signature_unsupported');

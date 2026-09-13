@@ -10,7 +10,9 @@ dates, time windows and status claims; source observation timestamps and
 free-text history are not evidence. Payment amount/date and appointment
 date/window claims must match one record. Matching records must agree on
 claimed status. Multiple amounts require separate sentences, and time-window
-endpoints must match in order. Bare clock times without AM/PM require review.
+endpoints must match in order. Bare clock times and contextual hours without AM/PM require review. Dotted
+AM/PM abbreviations stay intact during sentence checks; use a newline when
+an abbreviation ends a sentence to avoid ambiguous fact grouping.
 Independent fact categories also use separate sentences: the verifier does
 not infer subject relationships across coordinated billing/service clauses. Billing dues, surcharge and collected
 total keep their separate meanings. Viewed estimates retain sent evidence.
