@@ -155,7 +155,7 @@ describe('scoring', () => {
   });
 
   test('an unavailable replay carries the reason and no scores', () => {
-    const r = evalLib.scoreResult(testCase, { status: 'unavailable', reason: 'all_providers_failed', failures: [{ provider: 'gemini', reason: 'gemini_503' }], latencyMs: 900, usage: null });
+    const r = evalLib.scoreResult(testCase, { status: 'unavailable', reason: 'all_providers_failed', failures: [{ provider: 'gemini', reason: 'no_key' }], latencyMs: 900, usage: null });
     expect(r).toMatchObject({ status: 'unavailable', unavailableReason: 'all_providers_failed', derived: null, deltas: null, costUsd: null, usage: null, legs: [], findings: [] });
     expect(r.undeterminable).toEqual(evalLib.SCORE_KEYS);
   });
@@ -176,15 +176,38 @@ describe('scoring', () => {
     expect(both.legs).toHaveLength(2);
     expect(both.usage).toEqual({ input_tokens: 9100, output_tokens: 1050, reasoning_tokens: 500 });
     expect(both.costUsd).toBe(evalLib.costUsd('gemini-3.8-flash', rejected.usage) + evalLib.costUsd('gpt-6-astra', { input_tokens: 100, output_tokens: 50 }));
-    // A failure without usage (never reached the model) is not a leg; a chain with an unpriced leg has an UNKNOWN cost
+    // A missing-key failure never reached the model and is not a leg; a chain with an unpriced leg has an UNKNOWN cost
     // (never the priced legs presented as the total), while its tokens still count.
-    const mixed = evalLib.scoreResult(testCase, { ...analysis(), failures: [{ provider: 'gemini', reason: 'gemini_503' }, { provider: 'openai', model: 'mystery', reason: 'x', usage: { input_tokens: 1, output_tokens: 1 } }] });
+    const mixed = evalLib.scoreResult(testCase, { ...analysis(), failures: [{ provider: 'gemini', reason: 'no_key' }, { provider: 'openai', model: 'mystery', reason: 'x', usage: { input_tokens: 1, output_tokens: 1 } }] });
     expect(mixed.legs.map((leg) => leg.model)).toEqual(['mystery', 'gemini-3.8-flash']);
     expect(mixed.costUsd).toBeNull();
     expect(mixed.unpricedLegs).toBe(1);
     expect(mixed.usage.input_tokens).toBe(9001);
     expect(evalLib.legsCostUsd([])).toBeNull();
     expect(both.unpricedLegs).toBe(0);
+  });
+
+  test('executed legs without token metadata remain unpriced, including the winning answer', () => {
+    for (const failure of [
+      { reason: 'invalid_shape', validator: true },
+      { reason: 'empty_json' },
+      { reason: 'gemini_timeout' },
+    ]) {
+      const result = evalLib.scoreResult(testCase, analysis({ failures: [{ provider: 'gemini', model: 'gemini-3.8-flash', ...failure }] }));
+      expect(result.legs).toHaveLength(2);
+      expect(result.legs[0].usage).toBeNull();
+      expect(result.unpricedLegs).toBe(1);
+      expect(result.costUsd).toBeNull();
+      expect(result.usage.input_tokens).toBe(9000);
+    }
+    const missingWinnerUsage = evalLib.scoreResult(testCase, analysis({ usage: null }));
+    expect(missingWinnerUsage.legs).toHaveLength(1);
+    expect(missingWinnerUsage.unpricedLegs).toBe(1);
+    expect(missingWinnerUsage.costUsd).toBeNull();
+    expect(evalLib.billedLegs({ status: 'unavailable', failures: [
+      { reason: 'no_key' }, { reason: 'no_route' }, { reason: 'unsupported_pdf_provider' },
+      { reason: 'timeout_budget_exhausted' }, { reason: 'unknown_provider_example' },
+    ] })).toEqual([]);
   });
 
   test('summary: MAE + bias per metric, undeterminable and unavailable rates, provider mix, percentiles, cost, repeat variance', () => {
@@ -225,12 +248,13 @@ describe('scoring', () => {
   });
 
   test('the markdown report names the run, the metric table and one row per replay', () => {
-    const r = evalLib.scoreResult(testCase, analysis(), { adjust: (s) => s });
+    const r = { ...evalLib.scoreResult(testCase, analysis(), { adjust: (s) => s }), inputHash: 'a'.repeat(64), contextHash: 'b'.repeat(64), repeatIndex: 1 };
     const md = evalLib.renderMarkdown(evalLib.summarize([r]), [r], { title: 'T' });
     expect(md).toContain('## T');
     expect(md).toContain('| turf_density | 5 |');
     expect(md).toMatch(/\| a1 \| 2026-08-30 \| 2 \| complete \| gemini \| 4200 \| 70 \(-5\) \| 80 \(-5\) \| n\/d \|/);
     expect(md).toContain('general lawn stress @ low (n/d)');
+    expect(md).toContain(`| a1 | 2 | ${'a'.repeat(64)} | ${'b'.repeat(64)} |`);
   });
 });
 

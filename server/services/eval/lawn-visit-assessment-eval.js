@@ -175,13 +175,15 @@ function costUsd(model, usage) {
   return Math.round(((input * price.input) + (output * price.output)) / 1e6 * 1e4) / 1e4;
 }
 
-// The legs that spent tokens, in call order: a failed leg carries its usage
-// on the failure entry (llm/call.js failedLeg); the winning leg is the outcome.
+// Exclude only failures known to occur before dispatch. Executed requests
+// without token metadata may be billed, so their cost must remain unknown.
+const BEFORE_DISPATCH_FAILURES = new Set(['no_key', 'no_route', 'unsupported_pdf_provider', 'timeout_budget_exhausted']);
 function billedLegs(analysis) {
-  const failed = (analysis.failures || []).filter((leg) => leg && leg.usage)
-    .map((leg) => ({ provider: leg.provider || null, model: leg.model || null, reason: leg.reason || null, usage: leg.usage }));
-  const won = analysis.status === 'complete' && analysis.usage
-    ? [{ provider: analysis.provider || null, model: analysis.model || null, reason: null, usage: analysis.usage }]
+  const failed = (analysis.failures || []).filter((leg) => leg && (leg.usage || leg.validator
+    || (!BEFORE_DISPATCH_FAILURES.has(leg.reason) && !String(leg.reason).startsWith('unknown_provider_'))))
+    .map((leg) => ({ provider: leg.provider || null, model: leg.model || null, reason: leg.reason || null, usage: leg.usage || null }));
+  const won = analysis.status === 'complete'
+    ? [{ provider: analysis.provider || null, model: analysis.model || null, reason: null, usage: analysis.usage || null }]
     : [];
   return [...failed, ...won];
 }
@@ -189,9 +191,9 @@ function billedLegs(analysis) {
 function sumUsage(legs) {
   const total = { input_tokens: 0, output_tokens: 0, reasoning_tokens: 0 };
   for (const { usage } of legs) {
-    total.input_tokens += Number(usage.input_tokens) || 0;
-    total.output_tokens += Number(usage.output_tokens) || 0;
-    total.reasoning_tokens += Number(usage.reasoning_tokens) || 0;
+    total.input_tokens += Number(usage?.input_tokens) || 0;
+    total.output_tokens += Number(usage?.output_tokens) || 0;
+    total.reasoning_tokens += Number(usage?.reasoning_tokens) || 0;
   }
   return total;
 }
@@ -376,18 +378,18 @@ function provenanceLine({ promptVersion, promptDigest, propertyHistory } = {}) {
 }
 function renderMarkdown(summary, results = [], { title = 'Lawn visit assessment eval', promptVersion, promptDigest, propertyHistory } = {}) {
   const lines = [`## ${title}`, '', provenanceLine({ promptVersion, promptDigest, propertyHistory })];
-  lines.push(`runs ${summary.runs} · cases ${summary.cases} · unavailable ${summary.unavailable} (${fmtRate(summary.unavailableRate)}) · findings/run ${summary.findingsPerRun ?? 'n/a'} · cause named below moderate: ${summary.causeNamedBelowModerate}`);
-  lines.push(`latency p50 ${summary.latencyMs.p50 ?? 'n/a'} ms · p95 ${summary.latencyMs.p95 ?? 'n/a'} ms · tokens in ${summary.tokens.input} / out ${summary.tokens.output} / reasoning ${summary.tokens.reasoning} · est. cost $${summary.costUsd.total ?? 'n/a'} ($${summary.costUsd.perRun ?? 'n/a'} per run, ${summary.costUsd.priced} priced${unpricedNote(summary)})`);
+  lines.push(`runs ${summary.runs} · cases ${summary.cases} · unavailable ${summary.unavailable} (${fmtRate(summary.unavailableRate)}) · findings/run ${fmtOptional(summary.findingsPerRun)} · cause named below moderate: ${summary.causeNamedBelowModerate}`);
+  lines.push(`latency p50 ${fmtOptional(summary.latencyMs.p50)} ms · p95 ${fmtOptional(summary.latencyMs.p95)} ms · tokens in ${summary.tokens.input} / out ${summary.tokens.output} / reasoning ${summary.tokens.reasoning} · est. cost $${fmtOptional(summary.costUsd.total)} ($${fmtOptional(summary.costUsd.perRun)} per run, ${summary.costUsd.priced} priced${unpricedNote(summary)})`);
   lines.push(`answered by: ${Object.entries(summary.byProvider).map(([k, v]) => `${k} ×${v}`).join(', ') || 'n/a'}`);
   lines.push(omittedNote(summary), '');
   lines.push('| metric | MAE vs confirmed | bias | n | MAE vs legacy AI | bias | n | not determinable |');
   lines.push('|---|---|---|---|---|---|---|---|');
   for (const key of SCORE_KEYS) {
     const c = summary.mae.vsConfirmed[key]; const l = summary.mae.vsLegacyAi[key];
-    lines.push(`| ${key} | ${c.mae ?? 'n/a'} | ${fmtSigned(c.bias)} | ${c.n} | ${l.mae ?? 'n/a'} | ${fmtSigned(l.bias)} | ${l.n} | ${fmtRate(summary.undeterminableRate[key])} |`);
+    lines.push(`| ${key} | ${fmtOptional(c.mae)} | ${fmtSigned(c.bias)} | ${c.n} | ${fmtOptional(l.mae)} | ${fmtSigned(l.bias)} | ${l.n} | ${fmtRate(summary.undeterminableRate[key])} |`);
   }
   if (summary.repeatVariance) {
-    lines.push('', `repeat-run spread (mean per-case stddev): ${SCORE_KEYS.map((key) => `${key} ${summary.repeatVariance[key] ?? 'n/a'}`).join(' · ')}`);
+    lines.push('', `repeat-run spread (mean per-case stddev): ${SCORE_KEYS.map((key) => `${key} ${fmtOptional(summary.repeatVariance[key])}`).join(' · ')}`);
   }
   lines.push('', '| assessment | date | photos | status | answered by | ms | turf | weeds | color | fungus | thatch | stress | findings (label @ confidence) |', '|---|---|---|---|---|---|---|---|---|---|---|---|---|');
   for (const r of results) {
@@ -395,9 +397,14 @@ function renderMarkdown(summary, results = [], { title = 'Lawn visit assessment 
     const findings = r.status === 'complete' ? r.findings.map((f) => `${f.label} @ ${f.confidence}${f.can_determine ? '' : ' (n/d)'}`).join('; ') : (r.unavailableReason || 'unavailable');
     lines.push(`| ${String(r.assessmentId).slice(0, 8)} | ${r.visitDate} | ${r.photoCount} | ${r.status} | ${r.status === 'complete' ? `${r.provider}${r.fallbackUsed ? ' (fallback)' : ''}` : '—'} | ${r.latencyMs ?? ''} | ${cell('turf_density')} | ${cell('weed_suppression')} | ${cell('color_health')} | ${cell('fungus_control')} | ${cell('thatch_level')} | ${cell('stress_damage')} | ${findings} |`);
   }
+  lines.push('', '| assessment | repeat | input hash | service context hash |', '|---|---|---|---|');
+  for (const r of results) {
+    lines.push(`| ${r.assessmentId} | ${r.repeatIndex == null ? 'n/a' : r.repeatIndex + 1} | ${r.inputHash || 'unknown'} | ${r.contextHash || 'unknown'} |`);
+  }
   lines.push('', 'Score cells: seasonally adjusted derived score, then its delta vs the confirmed score in parentheses; n/d = the model could not determine it. Confirmed scores carry technician corrections and, for same-day visits, a weather-driven seasonal factor the replay cannot reproduce.');
   return lines.join('\n');
 }
+const fmtOptional = (value) => value ?? 'n/a';
 const fmtRate = (value) => (value == null ? 'n/a' : `${Math.round(value * 100)}%`);
 const fmtSigned = (value) => (value == null ? 'n/a' : `${value > 0 ? '+' : ''}${value}`);
 const fmtDelta = (value) => (value == null ? '' : ` (${value > 0 ? '+' : ''}${value})`);
