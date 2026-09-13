@@ -308,7 +308,10 @@ function styleTemplateNode(node) {
   if (children.length !== 1) return null;
   const child = children[0];
   const expr = child.type === 'JSXExpressionContainer' ? child.expression : null;
-  return expr && expr.type === 'TemplateLiteral' && expr.expressions.length === 0 ? expr : null;
+  if (!expr || expr.type !== 'TemplateLiteral' || expr.expressions.length !== 0) return null;
+  // React receives cooked CSS. Escapes can close a comment that remains open
+  // in the source, so raw-source ranges are safe only when the text agrees.
+  return expr.quasis.every((q) => q.value.raw === q.value.cooked) ? expr : null;
 }
 
 function styleTemplateRanges(node, out) {

@@ -296,3 +296,15 @@ test('sibling style expressions cannot hide live CSS as a template comment', () 
   ].join('\n'));
   assert.ok(hits.includes('banned-font-size:4'), `expected the live 12px rule, got ${JSON.stringify(hits)}`);
 });
+
+test('cooked template escapes cannot hide live CSS behind a raw comment', () => {
+  const hits = scan('Sample.jsx', [
+    'export default function S() {',
+    '  return <style>{`/* \\u002a/',
+    '    .b { font-size: 12px; }',
+    '    /* real comment */',
+    '  `}</style>;',
+    '}',
+  ].join('\n'));
+  assert.ok(hits.includes('banned-font-size:3'), `expected the live 12px rule, got ${JSON.stringify(hits)}`);
+});
