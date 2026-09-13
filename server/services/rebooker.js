@@ -81,6 +81,7 @@ function seriesOccurrenceWindow(win, sib, options = {}) {
 function reviewedOccurrence(row, date, window = {}, options = {}, clearWindow = false) {
   const target = clearWindow ? { start: null, end: null } : seriesOccurrenceWindow(window, row, options);
   return { id: String(row.id), from_date: dateOnly(row.scheduled_date), status: row.status,
+    customer_confirmed: row.customer_confirmed ?? null,
     from_start: row.window_start || null, from_end: row.window_end || null,
     duration: row.estimated_duration_minutes || null, property_id: row.property_id || null,
     date_exception: row.date_exception === true, cadence_date: dateOnly(row.date_exception_cadence_date) || null,
@@ -88,7 +89,7 @@ function reviewedOccurrence(row, date, window = {}, options = {}, clearWindow = 
 }
 
 const REVIEWED_OCCURRENCE_FIELDS = [
-  'id', 'from_date', 'status', 'from_start', 'from_end', 'duration', 'property_id',
+  'id', 'from_date', 'status', 'customer_confirmed', 'from_start', 'from_end', 'duration', 'property_id',
   'date_exception', 'cadence_date', 'to_date', 'to_start', 'to_end',
 ];
 
@@ -430,7 +431,10 @@ async function replaySeriesMoveCleanup(prior) {
         logger.error(`[rebooker] tech_status clear on series replay failed for ${anchor.id}: ${err.message}`);
       }
     }
-    emitCustomerJobRefresh({ id: anchor.id, customer_id: prior.customer_id }, 'confirmed');
+    emitCustomerJobRefresh(
+      { id: anchor.id, customer_id: prior.customer_id },
+      String(anchor.after?.status ?? 'confirmed'),
+    );
   }
   for (const row of rows) {
     if (row.anchor || !rewound.has(String(row.id))) continue;
@@ -1654,7 +1658,7 @@ class SmartRebooker {
           logger.error(`[rebooker] tech_status clear after live reschedule failed for ${serviceId}: ${err.message}`);
         }
       }
-      emitCustomerJobRefresh({ ...service, ...updates, id: serviceId }, 'confirmed');
+      emitCustomerJobRefresh({ ...service, ...updates, id: serviceId }, landedStatus);
     }
 
     // Keep a call-created follow-up (visit 2) spaced from its parent —
@@ -3073,7 +3077,10 @@ class SmartRebooker {
           logger.error(`[rebooker] tech_status clear after live series reschedule failed for ${serviceId}: ${err.message}`);
         }
       }
-      emitCustomerJobRefresh({ ...service, ...(rewoundAnchorRow || {}), id: serviceId }, 'confirmed');
+      emitCustomerJobRefresh(
+        { ...service, ...(rewoundAnchorRow || {}), id: serviceId },
+        options.pendingConfirmation === true ? 'pending' : 'confirmed',
+      );
     }
     // Rewound non-anchor siblings get the same cleanup: release any tech
     // pinned to them and refresh open trackers. Siblings keep their own
@@ -3186,7 +3193,7 @@ class SmartRebooker {
       .whereRaw('COALESCE(date_exception_cadence_date, scheduled_date) >= ?::date', [seriesPosition(service)])
       .whereNotIn('status', TERMINAL)
       .orderByRaw('COALESCE(date_exception_cadence_date, scheduled_date) asc, scheduled_date asc')
-      .select('id', 'status', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'date_exception', 'date_exception_cadence_date', 'property_id');
+      .select('id', 'status', 'customer_confirmed', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'date_exception', 'date_exception_cadence_date', 'property_id');
     const droppedIdx = siblings.findIndex((s) => String(s.id) === String(serviceId));
     if (droppedIdx === -1) return empty;
     const { deltaDays, cadenceSlotDate, projectOccurrenceDate } = await makeSeriesProjector({ service, parent, newDate, seriesDateStr });

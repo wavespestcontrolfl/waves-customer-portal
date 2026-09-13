@@ -20,9 +20,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/tech-status', () => ({
   clearTechCurrentJob: jest.fn().mockResolvedValue(null),
 }));
-jest.mock('../sockets', () => ({
-  getIo: jest.fn(() => ({ to: jest.fn(() => ({ emit: jest.fn() })) })),
-}));
+const mockIoEmit = jest.fn();
+const mockIoTo = jest.fn(() => ({ emit: mockIoEmit }));
+jest.mock('../sockets', () => ({ getIo: jest.fn(() => ({ to: mockIoTo })) }));
 jest.mock('../services/scheduling/occupancy', () => ({
   ...jest.requireActual('../services/scheduling/occupancy'),
   findConflictingVisits: jest.fn().mockResolvedValue([]),
@@ -415,6 +415,16 @@ describe('single-path date exceptions', () => {
     else expect(update).not.toHaveProperty('customer_confirmed');
     expect(activateLegacyOutboundReviewRowIfNeeded).toHaveBeenCalledTimes(clearsConfirmation ? 0 : 1);
   });
+
+  test('a reviewed live single move refreshes the customer with its pending landing', async () => {
+    wireSingleMocks(anchorRow({ id: 'svc-2', recurring_parent_id: 'svc-1', status: 'on_site' }));
+    await SmartRebooker.reschedule('svc-2', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
+      seriesPolicy: 'single', allowLive: true, pendingConfirmation: true,
+    });
+    expect(mockIoEmit).toHaveBeenCalledWith('customer:job_update', expect.objectContaining({
+      job_id: 'svc-2', status: 'pending',
+    }));
+  });
 });
 
 describe('rescheduleSeries — date-only sweep', () => {
@@ -444,15 +454,26 @@ describe('rescheduleSeries — date-only sweep', () => {
     expect(activateLegacyOutboundReviewRowIfNeeded).not.toHaveBeenCalled();
   });
 
-  test.each(['id', 'from_date', 'status', 'from_start', 'from_end', 'duration', 'property_id', 'date_exception', 'cadence_date', 'to_date', 'to_start', 'to_end'])('a stale disclosed occurrence %s refuses the entire reviewed move', async (field) => {
+  test.each(['id', 'from_date', 'status', 'customer_confirmed', 'from_start', 'from_end', 'duration', 'property_id', 'date_exception', 'cadence_date', 'to_date', 'to_start', 'to_end'])('a stale disclosed occurrence %s refuses the entire reviewed move', async (field) => {
     const { updates } = wireSeriesMocks([sib('svc-1', BASE)]);
-    const disclosed = { id: 'svc-1', from_date: BASE, status: 'confirmed', from_start: '09:00:00', from_end: '11:00:00',
+    const disclosed = { id: 'svc-1', from_date: BASE, status: 'confirmed', customer_confirmed: null, from_start: '09:00:00', from_end: '11:00:00',
       duration: null, property_id: null, date_exception: false, cadence_date: null,
       to_date: TARGET, to_start: '09:00', to_end: '11:00', [field]: 'stale' };
     await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
       ...ADMIN_OPTS, expectOccurrenceIds: ['svc-1'], expectOccurrences: [disclosed],
     })).rejects.toMatchObject({ statusCode: 409, code: 'SERIES_CHANGED' });
     expect(updates[0].update).not.toHaveBeenCalled();
+  });
+
+  test('a reviewed live series move refreshes the customer with its pending landing', async () => {
+    const anchor = anchorRow({ status: 'on_site' });
+    wireSeriesMocks([sib('svc-1', BASE, { status: 'on_site' })], { anchor });
+    await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
+      ...ADMIN_OPTS, pendingConfirmation: true,
+    });
+    expect(mockIoEmit).toHaveBeenCalledWith('customer:job_update', expect.objectContaining({
+      job_id: 'svc-1', status: 'pending',
+    }));
   });
 
   test('anchor takes the new window + confirmed; siblings keep window, status and tech (a pending placeholder stays pending)', async () => {
@@ -719,12 +740,15 @@ describe('rescheduleSeries — one recorded operation', () => {
       priorMove: {
         id: 'sm-prior', new_date: TARGET, customer_id: 'cust-1',
         result: { success: true, newDate: TARGET, occurrencesRescheduled: 1, rescheduledOccurrences: [{ id: 'svc-1', date: TARGET, windowStart: '09:00', windowEnd: '11:00' }] },
-        rows: [{ id: 'svc-1', anchor: true, before: { status: 'on_site', technician_id: 'tech-9' }, after: {} }],
+        rows: [{ id: 'svc-1', anchor: true, before: { status: 'on_site', technician_id: 'tech-9' }, after: { status: 'pending' } }],
       },
       anchor: anchorRow({ scheduled_date: TARGET }),
     });
     await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00' }, 'admin', 'admin', { ...ADMIN_OPTS, operationKey: 'op-123' });
     expect(clearTechCurrentJob).toHaveBeenCalledWith({ tech_id: 'tech-9', current_job_id: 'svc-1', status: 'idle' });
+    expect(mockIoEmit).toHaveBeenCalledWith('customer:job_update', expect.objectContaining({
+      job_id: 'svc-1', status: 'pending',
+    }));
     expect(shiftCallFollowUpsForParentMove).not.toHaveBeenCalled();
   });
 
