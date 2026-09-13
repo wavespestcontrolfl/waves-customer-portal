@@ -1344,7 +1344,8 @@ const CALLBACK_LIGHT_ACTION_FINITE = `(?:(?:\\w+\\s+){0,2}?${CALLBACK_LIGHT_VERB
 // What follows the promise grammar: the direct verb and its recipient
 // ("call her"), or the light verb with the recipient before the contact noun
 // ("give her a call") or after it ("place a call to her").
-const CALLBACK_RECIPIENT_END = `(?=\\s*(?:[.!?,;:—–]|$|and\\b|but\\b|so\\b|back\\b|again\\b|directly\\b|personally\\b|today\\b|tomorrow\\b|tonight\\b|later\\b|soon\\b|next\\s+(?:week|${WEEKDAYS})\\b|at\\b|on\\b|by\\b|before\\b|after\\b|if\\b|unless\\b|when\\b|once\\b|provided\\b|because\\b|to\\b|about\\b|regarding\\b|with\\b|(?:the|an?|this|that|these|those|some)\\b))`;
+const CALLBACK_TIMING_ADVERB = '(?:soon|shortly|immediately|promptly|right away|as soon as possible|at once)';
+const CALLBACK_RECIPIENT_END = `(?=\\s*(?:[.!?,;:—–]|$|and\\b|but\\b|so\\b|back\\b|again\\b|directly\\b|personally\\b|today\\b|tomorrow\\b|tonight\\b|later\\b|${CALLBACK_TIMING_ADVERB}\\b|next\\s+(?:week|${WEEKDAYS})\\b|at\\b|on\\b|by\\b|before\\b|after\\b|if\\b|unless\\b|when\\b|once\\b|provided\\b|because\\b|to\\b|about\\b|regarding\\b|with\\b|(?:the|an?|this|that|these|those|some)\\b))`;
 const callbackTarget = (targets, action, lightAction) => `(?:${action}\\s+(?:${targets})\\b${CALLBACK_RECIPIENT_END}|${lightAction}\\s+(?:(?:${targets})\\s+an?\\s+${CALLBACK_CONTACT_NOUN}|an?\\s+${CALLBACK_CONTACT_NOUN}\\s+(?:to|for)\\s+(?:${targets})\\b${CALLBACK_RECIPIENT_END}))`;
 const CALLBACK_QUESTION_AUX = '(?:can|could|will|would|should|shall|may|might|is|are|has|have)';
 const CALLBACK_QUESTION_AFFIRMATIVE = `(?:(?:${AFFIRMATION}|${BARE_CONFIRMATION})(?:[\\s,]+(?:${AFFIRMATION}|${BARE_CONFIRMATION}))*|(?:(?:${AFFIRMATION})\\s*[,—–:-]\\s*)?(?:we|i|they|the office|our office|the team|our team)(?:[\\x27\\u2019]ll|\\s+(?:will|can|could))(?:\\s+do\\s+(?:that|so|it))?)`;
@@ -1360,7 +1361,7 @@ const CALLBACK_DECLINE_ACTION = '(?:declines?|refuses?)';
 // phrase for each combination. Named clock boundaries such as "before noon"
 // are components too. This grammar is consulted only before a trailing
 // condition; an unconditional timed callback still fails.
-const CALLBACK_TIMING_COMPONENT = `(?:${VISIT_TIME_RE.source}|morning|afternoon|evening|night|(?:before|after|until|till)\\s+(?:noon|midday|midnight))`;
+const CALLBACK_TIMING_COMPONENT = `(?:${VISIT_TIME_RE.source}|${CALLBACK_TIMING_ADVERB}|morning|afternoon|evening|night|(?:before|after|until|till)\\s+(?:noon|midday|midnight))`;
 const CALLBACK_TIMING_MODIFIERS_RE = new RegExp(
   `^(?:\\s*(?:(?:for|on|at|by|from|between|around|about)\\s+)?${CALLBACK_TIMING_COMPONENT})*(?:\\s+or\\s+not)?\\s*$`,
   'i',
