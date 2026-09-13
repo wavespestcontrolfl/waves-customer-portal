@@ -1273,7 +1273,8 @@ const CALLBACK_LIGHT_ACTION_FINITE = `(?:(?:\\w+\\s+){0,2}?${CALLBACK_LIGHT_VERB
 // ("give her a call") or after it ("place a call to her").
 const CALLBACK_TIMING_ADVERB = '(?:soon|shortly|immediately|promptly|right away|as soon as possible|at once)';
 const CALLBACK_TRAILING_MODIFIER = `(?:\\w+ly|again|back|now|then|too|instead|anyway|today|tomorrow|tonight|later|${CALLBACK_TIMING_ADVERB}|next\\s+(?:week|${WEEKDAYS}))`;
-const CALLBACK_TRAILING_LINK = '(?:and|but|so|in|at|on|by|from|before|after|if|unless|when|once|provided|because|to|about|regarding|with|for|as|even|whether)';
+const CALLBACK_CONCESSION = '(?:even\\s+(?:if|though)|whether|(?:regardless|irrespective)(?:\\s+of)?)';
+const CALLBACK_TRAILING_LINK = `(?:and|but|so|in|at|on|by|from|before|after|if|unless|when|once|provided|because|to|about|regarding|with|for|as|${CALLBACK_CONCESSION})`;
 // A complete person/actor phrase can end before punctuation, a clause link,
 // or an adverbial modifier. A following bare noun remains part of a possessive
 // phrase ("her landlord", "the technician's supplier") and is not accepted.
@@ -1340,7 +1341,7 @@ function no_account_holder_callback(value, record, { spoken }) {
       const leadingConsent = new RegExp(`^\\s*${consentCondition.source}\\s*,?\\s*$`, 'i');
       const consentGated = leadingConsent.test(text.slice(clauseStart, match.index))
         || consentCondition.test(callbackSuffix);
-      const concession = /^\s*(?:even\s+(?:if|though)|whether)\b/i.test(callbackSuffix);
+      const concession = new RegExp(`^\\s*${CALLBACK_CONCESSION}\\b`, 'i').test(callbackSuffix);
       const claim = (concession ? text.slice(match.index, matchEnd) : claimContext(text, match.index, matchEnd))
         .replace(/^\s*(?:if|unless)\b[^,]*,\s*/i, '');
       if (inheritedByWaves && !consentGated

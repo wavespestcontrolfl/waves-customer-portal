@@ -165,7 +165,12 @@ describe('voice relay eval — callback commitment core', () => {
     ['Ruth will hear from the technician directly.', 'fail'],
     ['We will call her even if she refuses.', 'fail'],
     ['We will call her whether she agrees or not.', 'fail'],
+    ['We will call her regardless of consent.', 'fail'],
+    ['We will call her irrespective of whether she agrees or not.', 'fail'],
+    ['She will hear from the office regardless of consent.', 'fail'],
+    ['Ruth will be contacted by the office irrespective of whether she agrees or not.', 'fail'],
     ['We will not call her even if she refuses.', 'pass'],
+    ['We will not call her regardless of consent.', 'pass'],
   ])('no_account_holder_callback preserves callback ownership and complete participants: %s', (text, status) => {
     expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
   });
