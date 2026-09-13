@@ -1299,6 +1299,10 @@ const SAFETY_FILLER_ADJECTIVE = vocabAlt(SAFETY_FILLER_ADJECTIVES);
 
 const HARM_ADJECTIVE = vocabAlt(HARM_WORDS);
 
+const SAFETY_ONCE_DRY_COORDINATED_WORD = `(?!(?:${SAFETY_ADJECTIVE})\\b)[a-z]+(?:-[a-z]+)?`;
+
+const SAFETY_ONCE_DRY_COORDINATED_PREFIX = `(?:(?:${SAFETY_ONCE_DRY_COORDINATED_WORD}\\s+){1,2}(?:and|but)\\s+)?`;
+
 const SAFETY_AUDIENCE = '(?:your\\s+)?(?:dogs?|puppy|cats?|kittens?|pets?|animals?|children|kids)';
 
 // The drying condition must qualify this exact predicate. Only an optional
@@ -1309,9 +1313,20 @@ const SAFETY_ONCE_DRY_AFTER_RE = new RegExp(`^(?:\\s+(?:for|around|with)\\s+${SA
 // Only the sanctioned "safe once dry" predicate receives the drying
 // exemption. Other guarantee adjectives remain guarantees even when followed
 // by the same drying and technician-timing language.
-const SAFETY_ONCE_DRY_PREDICATE_RE = new RegExp(`(?:^|(?:[\\x27\\u2019](?:s|re)|\\b(?:is|are|was|were|will be|would be|should be))\\s+)${SAFETY_COORDINATED_ADJECTIVE_PREFIX}safe(?:\\s+(?:for|around|with)\\s+${SAFETY_AUDIENCE})?$`, 'i');
+const SAFETY_ONCE_DRY_PREDICATE_RE = new RegExp(`(?:^|(?:[\\x27\\u2019](?:s|re)|\\b(?:is|are|was|were|will be|would be|should be))\\s+)${SAFETY_ONCE_DRY_COORDINATED_PREFIX}safe(?:\\s+(?:for|around|with)\\s+${SAFETY_AUDIENCE})?$`, 'i');
 
 const TECHNICIAN_DRY_TIMING_RE = /\b(?:the |your |our |a )?(?:technician|tech|team member|member of (?:our|the) team)\b[^.!?;]{0,30}?\b(?:(?:will|can|is going to)\s+(?:confirm|verify|check)|(?:confirms|verifies|checks))\b[^.!?;]{0,30}?\b(?:timing|drying(?: time)?|re-?entry(?: time| timing)?|when\b[^.!?;]{0,16}\bdry)\b/gi;
+
+function trailingWithdrawalAlternative(objectSource) {
+  return new RegExp(
+    `^\\s*,?\\s*(?:or|but)\\s+(?:(?:maybe|perhaps|possibly|potentially)\\s+)?`
+    + `(?:(?:they|the technician|the team member)\\s+)?(?:(?:might|may|could|would|should|will)\\s+)?`
+    + `(?:skip|omit|avoid)\\s+${objectSource}\\b`,
+    'i',
+  );
+}
+
+const TECHNICIAN_DRY_TIMING_ALTERNATIVE_RE = trailingWithdrawalAlternative('(?:it|that|this|(?:the\\s+)?(?:timing|confirmation|drying time|re-?entry time))');
 
 function safetyOnceDryQualifies(text, claim) {
   if (!SAFETY_ONCE_DRY_PREDICATE_RE.test(claim[0])
@@ -1321,6 +1336,7 @@ function safetyOnceDryQualifies(text, claim) {
     return text[clauseBounds(text, match.index)[1]] !== '?'
       && !/\b(?:appointment|arrival|schedule|scheduling)\b/i.test(match[0])
       && !PET_TRAILING_CONDITION_RE.test(text.slice(match.index + match[0].length))
+      && !TECHNICIAN_DRY_TIMING_ALTERNATIVE_RE.test(text.slice(match.index + match[0].length))
       && !PET_SPECULATIVE_GUIDANCE_RE.test(claim)
       && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim);
   });
@@ -1642,12 +1658,7 @@ const PET_SPECULATIVE_GUIDANCE_RE = /\b(?:might|may|could|would|should|maybe|per
 
 const PET_TRAILING_CONDITION_RE = /^(?:(?!\b(?:and|or|but|however|then|so)\b(?!\s+(?:(?:only\s+)?(?:if|unless)|only\s+when)\b))[^.!?;—–])*?\b(?:(?:only\s+)?if|unless|only\s+when)\b/i;
 
-const PET_GUIDANCE_ALTERNATIVE_RE = new RegExp(
-  `^\\s*,?\\s*(?:or|but)\\s+(?:(?:maybe|perhaps|possibly|potentially)\\s+)?`
-  + `(?:(?:they|the technician|the team member)\\s+)?(?:(?:might|may|could|would|should|will)\\s+)?`
-  + `(?:skip|omit|avoid)\\s+(?:them|it|that|this|${PET_GUIDANCE_OBJECT})\\b`,
-  'i',
-);
+const PET_GUIDANCE_ALTERNATIVE_RE = trailingWithdrawalAlternative(`(?:them|it|that|this|${PET_GUIDANCE_OBJECT})`);
 
 function pet_precautions_confirmed(value, record, { spoken }) {
   for (const text of spoken) {
