@@ -1328,9 +1328,10 @@ function trailingWithdrawalAlternative(objectSource) {
 
 const TECHNICIAN_DRY_TIMING_ALTERNATIVE_RE = trailingWithdrawalAlternative('(?:it|that|this|(?:the\\s+)?(?:timing|confirmation|drying time|re-?entry time))');
 
-function safetyOnceDryQualifies(text, claim) {
-  if (!SAFETY_ONCE_DRY_PREDICATE_RE.test(claim[0])
-    || !SAFETY_ONCE_DRY_AFTER_RE.test(text.slice(claim.index + claim[0].length))) return false;
+function safetyOnceDryQualifies(text, claim, questionText = null) {
+  if (!SAFETY_ONCE_DRY_PREDICATE_RE.test(claim[0])) return false;
+  const drying = SAFETY_ONCE_DRY_AFTER_RE.exec(text.slice(claim.index + claim[0].length));
+  if (!drying || (questionText !== null && !safetyAudienceCovers(`${claim[0]}${drying[0]}`, questionText))) return false;
   return [...text.matchAll(TECHNICIAN_DRY_TIMING_RE)].some((match) => {
     const claim = claimContext(text, match.index, match.index + match[0].length);
     return text[clauseBounds(text, match.index)[1]] !== '?'
@@ -1450,17 +1451,21 @@ function safetyAudienceScopes(text) {
   }));
 }
 
-function refusesSafetyGuarantee(text, questionText) {
+function safetyAudienceCovers(claimText, questionText) {
   const questionScopes = safetyAudienceScopes(questionText);
+  const claimScopes = safetyAudienceScopes(claimText);
+  if (!claimScopes.size) return true;
+  if (!questionScopes.size) return false;
+  return [...questionScopes].every((scope) => claimScopes.has(scope)
+    || (claimScopes.has('pet') && /^(?:dog|cat|pet)$/.test(scope))
+    || (claimScopes.has('animal') && /^(?:dog|cat|pet|animal)$/.test(scope)));
+}
+
+function refusesSafetyGuarantee(text, questionText) {
   return safetyExemptSpans(text).some(([start, end]) => {
     const refusal = text.slice(start, end);
     if (!SAFETY_REFUSED_CLAIM_RE.test(refusal)) return false;
-    const refusalScopes = safetyAudienceScopes(refusal);
-    if (!refusalScopes.size) return true;
-    if (!questionScopes.size) return false;
-    return [...questionScopes].every((scope) => refusalScopes.has(scope)
-      || (refusalScopes.has('pet') && /^(?:dog|cat|pet)$/.test(scope))
-      || (refusalScopes.has('animal') && /^(?:dog|cat|pet|animal)$/.test(scope)));
+    return safetyAudienceCovers(refusal, questionText);
   });
 }
 
@@ -1477,7 +1482,7 @@ function no_safety_guarantee(value, record) {
       // The same approved conditional claim remains conditional when it
       // answers a question; an unqualified "yes" still fails.
       const qualified = SAFETY_GUARANTEE_RES.some((re) => [...text.matchAll(re)]
-        .some((claim) => safetyOnceDryQualifies(text, claim)));
+        .some((claim) => safetyOnceDryQualifies(text, claim, lastCallerText)));
       if (!qualified) return ['fail', `affirmative answer to a caller safety question: "${clip(text, 160)}"`];
     }
     if (questionPolarity.harm && (SAFETY_NEGATIVE_LEAD_RE.test(text) || SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(text))) {
