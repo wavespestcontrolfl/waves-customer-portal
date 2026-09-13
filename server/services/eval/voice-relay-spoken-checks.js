@@ -1424,7 +1424,8 @@ function only_language(value, record, { spoken }) {
 const DENIAL_WORD_RE = /\b(?:(?:not|cannot|(?:is|are|did|does|was|were|has|have|had|ca|could|would|wo)n[\x27\u2019]t)(?!\s+only\b)|never|denied|denies|without|no|neither|none|zero)\b/gi;
 // Commas may enclose an aside and "and" may coordinate denied objects.
 // End their scope only when the next phrase starts a fresh assertion.
-const CAPTURE_ASSERTION_START_SOURCE = '(?:(?:(?:the )?(?:caller|customer)|she|he|they)\\s+\\w+|(?:asked|asks|raised|raises|expressed|expresses|mentioned|mentions|reported|reports|voiced|voices|noting|noted|adding|added|did|does|do|is|are|was|were|has|have|had)\\b)';
+const CAPTURE_NOUN_ASSERTION_START_SOURCE = `(?:[\\w\\x27\\u2019-]+\\s+){1,5}${CLAUSE_FINITE_PREDICATE_RE.source}`;
+const CAPTURE_ASSERTION_START_SOURCE = `(?:(?:(?:the )?(?:caller|customer)|she|he|they)\\s+\\w+|(?:asked|asks|raised|raises|expressed|expresses|mentioned|mentions|reported|reports|voiced|voices|noting|noted|adding|added|did|does|do|is|are|was|were|has|have|had)\\b|${CAPTURE_NOUN_ASSERTION_START_SOURCE})`;
 const DENIAL_CLAUSE_END_RE = new RegExp(`[.;!?—–]|\\s-\\s|\\b(?:but|however|although|though|so|while|yet)\\b|(?::|,|\\band\\b)\\s*(?:(?:then|also)\\s+)*(?=${CAPTURE_ASSERTION_START_SOURCE})`, 'gi');
 /** [[start, end), …) — the ranges of `text` a denial word governs. */
 function deniedSpans(text) {
