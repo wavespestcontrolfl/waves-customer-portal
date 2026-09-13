@@ -1685,7 +1685,7 @@ function refusesSafetyGuarantee(text, questionText) {
     // preceding safety guarantee: "Yes. I cannot confirm whether it will
     // harm dogs" still contains the unqualified "Yes".
     if (SAFETY_REFUSED_AFFIRMATIVE_HARM_RE.test(refusal)) return false;
-    return safetyAudienceCovers(refusal, questionText);
+    return safetyAudienceCovers(refusal, questionText) && safetyProductCovers(refusal, questionText);
   });
 }
 
