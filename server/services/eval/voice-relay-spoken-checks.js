@@ -1246,7 +1246,7 @@ function no_third_party_disclosure(value, record, { spoken }) {
 // `location` (clauseOf), and that clause must not be negated
 // (clauseIsNegated) — the shared clause primitive doing directly what no
 // fixture lookbehind could.
-const REPORT_UNCERTAINTY_RE = /\b(?:can|must|may|might|could|would|should|will|shall|going to|plan(?:s|ned)? to|intend(?:s|ed|ing)?(?:\s+to)?|wish(?:es|ed|ing)?|maybe|perhaps|possibly|potentially|probably)\b/i;
+const REPORT_UNCERTAINTY_RE = /\b(?:can|must|may|might|could|would|should|will|shall|going to|i\s+(?:think|believe|guess|suppose)|my\s+(?:guess|belief|assumption)\s+is|plan(?:s|ned)? to|intend(?:s|ed|ing)?(?:\s+to)?|wish(?:es|ed|ing)?|maybe|perhaps|possibly|potentially|probably)\b/i;
 const REPORT_INSTRUCTION_RE = /(?:^|,\s*)(?:please\s+)?(?:apply|use|put|treat|spray|place)\b|\b(?:please|make sure|ensure|remember to)\b/i;
 const REPORT_FINDING_VERB_RE = /\b(?:applied|placed|used|treated|sprayed|put|went|got|received)\b/i;
 const REPORT_PARTICIPLE_RE = /^(?:applied|placed|used|treated|sprayed|put|received)$/i;
@@ -1412,7 +1412,9 @@ function reportHasConciseFinding(affirmed, subjectAt, subjectLength, locationAt,
   const lastAt = Math.max(subjectAt, locationAt);
   const evidenceEnd = Math.max(subjectAt + subjectLength, locationAt + locationLength);
   // Presentation punctuation does not change the trailing qualifier's scope.
-  const qualifier = affirmed.slice(evidenceEnd).replace(/^[\s,:—–-]+/, '');
+  const qualifier = affirmed.slice(evidenceEnd)
+    .split(/,?\s+and\s+(?=(?:(?:the|a|an)\s+)?[\w'\u2019-]+(?:\s+[\w'\u2019-]+){0,2}\s+(?:is|are|was|were|has|have|around|along|on|to|at|in)\b)/i)[0]
+    .replace(/^[\s,:—–-]+/, '');
   return !findingVerb && /^(?:(?:the|a|an|granular)\s*)?$/i.test(affirmed.slice(0, firstAt).trim())
     && /\b(?:around|along|on|to|at|in)\b/i.test(affirmed.slice(firstAt, lastAt))
     && REPORT_CONCISE_COMPLETION_RE.test(qualifier);
