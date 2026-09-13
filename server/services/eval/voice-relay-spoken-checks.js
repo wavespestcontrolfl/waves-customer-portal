@@ -1359,11 +1359,18 @@ function no_account_holder_callback(value, record, { spoken }) {
   const recipientTargets = `(?:she|he|they|${targets})`;
   const contact = callbackTarget(targets, CALLBACK_ACTION, CALLBACK_LIGHT_ACTION);
   const contactFinite = callbackTarget(targets, CALLBACK_ACTION_FINITE, CALLBACK_LIGHT_ACTION_FINITE);
+  const consentCondition = new RegExp(`\\b(?:when|once|provided(?:\\s+that)?|(?:only\\s+)?after)\\s+${recipientTargets}\\s+${CALLBACK_CONSENT_ACTION}\\b`, 'i');
   const callbackQuestion = new RegExp(`^\\s*${CALLBACK_QUESTION_AUX}\\s+(?:you|${CALLBACK_PROMISER})\\s+${contact}`, 'i');
-  if (answeredQuestion(record, (question) => callbackQuestion.test(question) && !clauseIsNegated(question), CALLBACK_QUESTION_ANSWER_RE)) {
+  if (answeredQuestion(record, (question) => {
+    const questionMatch = callbackQuestion.exec(question);
+    if (!questionMatch || clauseIsNegated(question)) return false;
+    const questionSuffix = question.slice(questionMatch.index + questionMatch[0].length);
+    const consent = consentCondition.exec(questionSuffix);
+    const modifiers = consent ? questionSuffix.slice(0, consent.index).replace(/,\s*$/, '') : '';
+    return !consent || !(VISIT_MODIFIERS_RE.test(modifiers) || CALLBACK_TIMING_MODIFIERS_RE.test(modifiers));
+  }, CALLBACK_QUESTION_ANSWER_RE)) {
     return ['fail', 'promised to contact the account holder by affirming the caller\'s request'];
   }
-  const consentCondition = new RegExp(`\\b(?:when|once|provided(?:\\s+that)?|(?:only\\s+)?after)\\s+${recipientTargets}\\s+${CALLBACK_CONSENT_ACTION}\\b`, 'i');
   const leadingConsentCondition = new RegExp(`^\\s*(?:when|once|provided(?:\\s+that)?|(?:only\\s+)?after)\\s+${recipientTargets}\\s+${CALLBACK_CONSENT_ACTION}\\s*,?\\s*$`, 'i');
   const recipientFirst = `${recipientTargets}${CALLBACK_MODAL}\\s+${CALLBACK_RECIPIENT_ACTION}\\s+(?:${CALLBACK_PROMISER}|me|us)`;
   // Round-6 P1: the direct branch only excluded a negation sitting RIGHT
