@@ -416,7 +416,7 @@ const NEGATION_RE = /\b(?:not(?!\s+only\b)|never|cannot|can[\x27\u2019]?t|\w+n[\
 const CLAUSE_BOUNDARY_TOKEN_RE = /[.!?;:]|[—–]|\b(?:but|and|or|though|although|however|yet|so|then|while|because|pero|sin embargo|aunque)\b/gi;
 const COORDINATED_REPORT_VERBS = vocabAlt([...EPISTEMIC_REFUSAL_VERBS, 'deny']);
 const REFUND_PAYMENT_ACTION_RE = /\b(?:refund(?:ed|ing)?|revers(?:e|ed|ing)|return(?:ed|ing)?)\s+(?:(?:your|the|that|a|an)\s+)?(?:last\s+|full\s+|partial\s+|original\s+)?(?:payment|charge|amount)\b/i;
-const CLAUSE_FINITE_PREDICATE_RE = /\b(?:is|are|was|were|has|have|had|will|would|should|can|cannot|could|did|does|do|\w+n[\x27\u2019]t|applied|placed|processed)\b/i;
+const CLAUSE_FINITE_PREDICATE_RE = /\b(?:is|are|was|were|has|have|had|will|would|should|can|cannot|could|did|does|do|\w+n[\x27\u2019]t|applied|placed|processed|came)\b/i;
 const RIGHT_NOUN_PHRASE_SUBJECT_RE = new RegExp(
   `^\\s*(?:an?|the|this|that|these|those)\\s+(?:[\\w\\x27\\u2019-]+\\s+){0,5}${CLAUSE_FINITE_PREDICATE_RE.source}`,
   'i',
@@ -1320,10 +1320,15 @@ function deniedSpans(text) {
     // were not raised". Keep that scope inside the same assertion so a
     // separate negated booking does not erase an affirmative concern.
     if (new RegExp(`\\b(?:${QUESTION_AUX_RE_SOURCE}|be|been|being)\\s*(?:\\w+ly\\s+|,[^,.;!?]*,\\s*)*$`, 'i').test(prefix)
-      || /^(?:is|are|was|were|has|have|had|did|does|ca|could|would|wo)n[\x27\u2019]t$/i.test(m[0])) {
+      || /^(?:is|are|was|were|has|have|had|did|does|ca|could|would|wo)n[\x27\u2019]t$/i.test(m[0])
+      || (/^never$/i.test(m[0])
+        && new RegExp(`^\\s*${CLAUSE_FINITE_PREDICATE_RE.source}`, 'i').test(text.slice(m.index + m[0].length)))) {
       start = 0;
       DENIAL_CLAUSE_END_RE.lastIndex = 0;
-      for (const boundary of prefix.matchAll(DENIAL_CLAUSE_END_RE)) start = boundary.index + boundary[0].length;
+      for (const boundary of text.matchAll(DENIAL_CLAUSE_END_RE)) {
+        if (boundary.index >= m.index) break;
+        start = boundary.index + boundary[0].length;
+      }
     }
     DENIAL_CLAUSE_END_RE.lastIndex = m.index + m[0].length;
     let end = DENIAL_CLAUSE_END_RE.exec(text);
