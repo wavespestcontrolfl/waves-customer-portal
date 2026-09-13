@@ -115,6 +115,8 @@ test.each([
   ['Talstar P might have been applied to the exterior perimeter.', 'fail'],
   ['Perhaps, Talstar P was applied to the exterior perimeter.', 'fail'],
   ['Talstar P was applied to the exterior perimeter, possibly.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, possibly, according to the report.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, I think, as the report says.', 'fail'],
   ['Talstar P was applied to the exterior perimeter, probably.', 'fail'],
   ['Talstar P was applied to the exterior perimeter probably.', 'fail'],
   ['Talstar P was applied to the exterior perimeter, I think.', 'fail'],
@@ -259,4 +261,12 @@ test('zero-width subjects finish without confirming an absent location', () => {
     process.stdout.write(JSON.stringify(statuses));
   `, modulePath], { encoding: 'utf8', timeout: 2000 });
   expect(JSON.parse(output)).toEqual(['fail', 'fail']);
+});
+
+// Scenario location expressions can match the first noun in a full location.
+test.each([
+  ['Talstar P is on the exterior perimeter, and bait is along the foundation.', 'pass'],
+  ['Talstar P is on the exterior perimeter is an option.', 'fail'],
+])('concise report with partial location match: %s', (text, status) => {
+  expect(checks.report_readback_confirms({ subject: '\\btalstar\\b', location: '\\b(?:exterior|perimeter)\\b' }, {}, { spoken: [text] })[0]).toBe(status);
 });

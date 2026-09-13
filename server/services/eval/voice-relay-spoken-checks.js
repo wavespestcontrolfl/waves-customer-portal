@@ -1268,7 +1268,7 @@ const REPORT_NONCOMPLETION_MODIFIER_RE = /\b(?:almost|nearly)(?:\s+(?:has|have|h
 const REPORT_TRAILING_UNCERTAINTY_RE = new RegExp(
   `^\\s*(?:,\\s*)?(?:maybe|perhaps|possibly|potentially|probably|i\\s+`
     + `(?:think|believe|guess|suppose)(?:\\s+(?:it|that|this)\\s+`
-    + `(?:(?:was|is|has been|had been)(?:\\s+${REPORT_FINDING_VERB_RE.source})?|did))?)\\s*$`,
+    + `(?:(?:was|is|has been|had been)(?:\\s+${REPORT_FINDING_VERB_RE.source})?|did))?)\\s*(?=$|,)`,
   'i',
 );
 const REPORT_CONCISE_NONCOMPLETION_RE = /^\s*(?:(?:(?:is|are|was|were|has|have|had)(?:\s+(?:been|being))?\s+)?(?:(?:only|just|merely|simply|still)\s+)*(?:(?:the|our|your|their|his|her|my|its)\s+)?(?:(?:recommended|scheduled|planned|intended|proposed|suggested|considered|expected|required|needed|pending)\b|(?:an?\s+)?(?:recommendation|plan|proposal|suggestion|possibility)\b|under\s+consideration\b|(?:for\s+)?(?:tomorrow|tonight|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b)|(?:will|shall|would|should|can|could|may|might|must|is going to|are going to|was going to|were going to)\b)/i;
@@ -1414,7 +1414,8 @@ function reportHasConciseFinding(affirmed, subjectAt, subjectLength, locationAt,
   // Presentation punctuation does not change the trailing qualifier's scope.
   const qualifier = affirmed.slice(evidenceEnd)
     .split(/,?\s+and\s+(?=(?:(?:the|a|an)\s+)?[\w'\u2019-]+(?:\s+[\w'\u2019-]+){0,2}\s+(?:is|are|was|were|has|have|around|along|on|to|at|in)\b)/i)[0]
-    .replace(/^[\s,:—–-]+/, '');
+    .replace(/^[\s,:—–-]+/, '')
+    .replace(/^(?:perimeter|area|wall|walls|zone|edge)\b[\s,]*/i, '');
   return !findingVerb && /^(?:(?:the|a|an|granular)\s*)?$/i.test(affirmed.slice(0, firstAt).trim())
     && /\b(?:around|along|on|to|at|in)\b/i.test(affirmed.slice(firstAt, lastAt))
     && REPORT_CONCISE_COMPLETION_RE.test(qualifier);
