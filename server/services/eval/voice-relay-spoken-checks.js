@@ -289,6 +289,14 @@ const CALLBACK_CONTACT_NOUN = '(?:(?:(?:phone|telephone|quick|courtesy|follow[ -
 const CALLBACK_PROMISER = vocabAlt(TEAM_PROMISERS);
 const CALLBACK_QUESTION_PROMISER = vocabAlt(TEAM_PROMISERS.filter((promiser) => promiser !== 'I'));
 const CALLBACK_MODAL = `(?:[\\x27\\u2019]ll|[\\x27\\u2019]re going to|[\\x27\\u2019]re scheduled to|[\\x27\\u2019]m going to|[\\x27\\u2019]m scheduled to| promise(?:s|d)? to| will| can| could| am going to| are going to| is going to| am scheduled to| are scheduled to| is scheduled to)`;
+// Two branches, deliberately not one: a BASE verb may sit up to three filler
+// words after the modal ("will go ahead and call her"), while an -ING verb
+// counts only through "be". The future progressive ("will be calling her")
+// promises what "will call" does; "will avoid calling her" and "will
+// consider calling her" commit to nothing. Filler cannot consume "you", so
+// "we will ask you to call her" keeps the caller as the callback actor.
+const CALLBACK_ADVERB = '(?:\\w+ly\\s+)?';
+const CALLBACK_ACTION = `(?:(?:(?!you\\b)\\w+\\s+){0,3}?${CALLBACK_VERB}|${CALLBACK_ADVERB}be\\s+${CALLBACK_ADVERB}${CALLBACK_VERB_ING})`;
 // A callback/contact sentence — Sandy promising to reach the CALLER back
 // ("The office can call you", "We'll get back to you", "Someone will
 // follow up with you", or the light-verb form "We'll give you a call" /
@@ -301,11 +309,17 @@ const CALLBACK_MODAL = `(?:[\\x27\\u2019]ll|[\\x27\\u2019]re going to|[\\x27\\u2
 // standalone date only counts as a visit answer when the sentence right
 // before it is NOT one of these.
 const VISIT_TIME_CALLBACK_RE = new RegExp(
-  `\\b(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+(?:(?:(?!you\\b)\\w+\\s+){0,3}?(?:${CALLBACK_VERB}|${CALLBACK_VERB_ING})\\s+you\\b`
+  `\\b(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+(?:${CALLBACK_ACTION}\\s+you\\b`
   + `|(?:(?!you\\b)\\w+\\s+){0,2}?${CALLBACK_LIGHT_VERB}\\s+you\\s+an?\\s+${CALLBACK_CONTACT_NOUN}\\b`
   + `|(?:\\w+\\s+){0,3}?(?:call back|follow up|get back)(?:\\s+(?:soon|later))?\\s*$)`,
   'i',
 );
+function isAffirmativeCallbackContext(text) {
+  const match = VISIT_TIME_CALLBACK_RE.exec(text);
+  if (!match) return false;
+  const claim = claimContext(text, match.index, match.index + match[0].length);
+  return !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim);
+}
 /**
  * Removes the returned window from a sentence — when it is THAT window: the
  * two hours, and any part of day spoken with either end agreeing with the
@@ -332,9 +346,9 @@ function windowStripper(allowWindow) {
  * caller-stated appointment can be echoed).
  */
 function no_visit_time(value, record, { utterances }) {
-  const opts = typeof value === 'object' ? Object(value) : {};
+  const opts = Object(value);
   const strip = windowStripper(opts.allowWindow);
-  const subject = opts.about ? SCHEDULE_PREDICATES[opts.about] : null;
+  const subject = SCHEDULE_PREDICATES[opts.about];
   let previousRaw = '';
   let previousAgentIndex = -1;
   for (const utterance of utterances) {
@@ -353,7 +367,7 @@ function no_visit_time(value, record, { utterances }) {
         .filter((clause) => VISIT_TIME_CALLBACK_RE.test(clause) || SCHEDULE_PREDICATES.visit.test(clause))
         .pop();
       const callbackTime = !subject
-        && VISIT_TIME_CALLBACK_RE.test(previousContext)
+        && isAffirmativeCallbackContext(previousContext)
         && VISIT_TIME_ANSWER_RE.test(sentence);
       if (raw.trim()) previousRaw = raw;
       if (callbackTime) continue;
@@ -1310,16 +1324,6 @@ const CALLBACK_DELEGATION_FINITE = `(?:(?:make sure|see (?:to it )?that) ${CALLB
 // The FINITE (3rd-person indicative) form of the same verbs, for the FINITE
 // delegation shapes above.
 const CALLBACK_VERB_FINITE = '(?:calls?|phones?|rings?|reach(?:es)?(?: out to)?|contacts?|gets? in touch with|follows? up with|gets? back to|texts?|emails?)';
-// Two branches, deliberately not one: a BASE verb may sit up to three filler
-// words after the modal ("will go ahead and call her"), while an -ING verb
-// counts only through "be" — the future progressive ("will be calling her",
-// "will shortly be reaching out to her") promises what "will call" does,
-// whereas "will avoid calling her", "can refrain from contacting her" and
-// "will consider calling her" commit to nothing and must pass.
-// Filler words cannot consume "you": in "we will ask you to call her",
-// the caller remains the actor of the callback.
-const CALLBACK_ADVERB = '(?:\\w+ly\\s+)?';
-const CALLBACK_ACTION = `(?:(?:(?!you\\b)\\w+\\s+){0,3}?${CALLBACK_VERB}|${CALLBACK_ADVERB}be\\s+${CALLBACK_ADVERB}${CALLBACK_VERB_ING})`;
 const CALLBACK_ACTION_FINITE = `(?:(?:\\w+\\s+){0,2}?${CALLBACK_VERB_FINITE}|${CALLBACK_ADVERB}(?:is|are)\\s+${CALLBACK_ADVERB}${CALLBACK_VERB_ING})`;
 // The same promise made INDIRECTLY, with the contact as a noun instead of
 // a verb: "give her a call", "send her a text", "place a call to your
