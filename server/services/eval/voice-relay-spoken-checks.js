@@ -1326,7 +1326,7 @@ const SAFETY_COORDINATED_ADJECTIVE_ITEM = '(?:[a-z]+(?:-[a-z]+)?\\s+)?[a-z]+(?:-
 
 const SAFETY_COORDINATED_ADJECTIVE_SEPARATOR = '\\s*(?:,\\s*(?:(?:and|but)(?:\\s+also)?\\s+)?|(?:and|but)(?:\\s+also)?\\s+)';
 
-const SAFETY_ADDITIVE_ADJECTIVE_PREFIX = '(?:not\\s+only\\s+)?';
+const SAFETY_ADDITIVE_ADJECTIVE_PREFIX = '(?:not\\s+(?:only|just|merely)\\s+)?';
 
 const SAFETY_COORDINATED_ADJECTIVE_PREFIX = `${SAFETY_ADDITIVE_ADJECTIVE_PREFIX}(?:(?:${SAFETY_COORDINATED_ADJECTIVE_ITEM})${SAFETY_COORDINATED_ADJECTIVE_SEPARATOR}){0,3}`;
 
@@ -1497,7 +1497,8 @@ const SAFETY_CLAUSE_CONTINUATION_RE = new RegExp(`^\\s*(?:that\\b|it['’]s\\b|i
 
 const safetyClauseContinues = (before, after) => SAFETY_CLAUSE_CONTINUATION_RE.test(after)
   && (/^\s*(?:that|whether)?\s*$/i.test(before)
-    || new RegExp(`\\b(?:${SAFETY_ADJECTIVE}|${HARM_ADJECTIVE}|risk|danger|harm)\\b`, 'i').test(before));
+    || (!/^[\s]*(?:it|that|this|they)(?:['’](?:s|re)|\s+(?:is|are|was|were))\b/i.test(after)
+      && new RegExp(`\\b(?:${SAFETY_ADJECTIVE}|${HARM_ADJECTIVE}|risk|danger|harm)\\b`, 'i').test(before)));
 
 const SAFETY_REFUSED_HARM_RE = new RegExp(
   `${SAFETY_REFUSAL_PREFIX}\\s+${SAFETY_SUBJECT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_INTENSIFIER}${HARM_ADJECTIVE}\\b`,
