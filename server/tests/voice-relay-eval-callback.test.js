@@ -64,6 +64,9 @@ describe('voice relay eval — callback and date checks', () => {
     ['We can call you if you need anything. Tuesday.', 'pass', null],
     ['The office can call you. Probably September 20th.', 'pass', null],
     ['The office can call you. Probably at 3 PM.', 'pass', null],
+    ['The office can call you, but your visit is set. Probably at 3 PM.', 'fail', '3 PM'],
+    ['Your visit is set, but the office can call you. Probably at 3 PM.', 'pass', null],
+    ['The office can call you, but I need to check the portal. Probably at 3 PM.', 'pass', null],
     ['Your visit is set. Probably September 20th.', 'fail', 'September 20th'],
   ])('no_visit_time (no time at all): %s', (text, status, phrase) => {
     const check = run('no_visit_time', true, text);

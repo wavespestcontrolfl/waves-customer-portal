@@ -349,8 +349,11 @@ function no_visit_time(value, record, { utterances }) {
       const sentence = strip ? strip(raw) : raw;
       const anywhere = TIME_ANYWHERE_RES.map((re) => re.exec(sentence)).find(Boolean);
       const standaloneDate = STANDALONE_DATE_RE.test(sentence);
+      const previousContext = previousRaw.split(CLAUSE_SPLIT_RE)
+        .filter((clause) => VISIT_TIME_CALLBACK_RE.test(clause) || SCHEDULE_PREDICATES.visit.test(clause))
+        .pop();
       const callbackTime = !subject
-        && VISIT_TIME_CALLBACK_RE.test(previousRaw)
+        && VISIT_TIME_CALLBACK_RE.test(previousContext)
         && VISIT_TIME_ANSWER_RE.test(sentence);
       if (raw.trim()) previousRaw = raw;
       if (callbackTime) continue;
