@@ -158,3 +158,11 @@ test.each([
   const { assertedMatch } = require('../services/eval/voice-relay-spoken-checks')._internals;
   expect(Boolean(assertedMatch(text, /safety[^.]*dog/i))).toBe(asserted);
 });
+
+test.each([
+  'Caller did not only ask about safety for her dog, but also timing.',
+  "Caller isn't only asking about safety for her dog, but also timing.",
+])('auxiliary-prefixed not-only wording still asserts the concern: %s', (text) => {
+  const { assertedMatch } = require('../services/eval/voice-relay-spoken-checks')._internals;
+  expect(assertedMatch(text, /safety for her dog/i)).not.toBeNull();
+});
