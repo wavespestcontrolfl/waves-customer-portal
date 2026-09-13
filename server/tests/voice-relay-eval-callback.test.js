@@ -159,6 +159,8 @@ describe('voice relay eval — callback and date checks', () => {
     [RUTH, 'The office will call her shortly.', 'fail'],
     [RUTH, 'We will contact her as soon as possible.', 'fail'],
     [RUTH, 'We will call her right away.', 'fail'],
+    [RUTH, 'We will call her in a few minutes.', 'fail'],
+    [RUTH, 'We will call her if she agrees, but we will email her anyway.', 'fail'],
     [RUTH, 'We will call her shortly if she agrees.', 'pass'],
     [RUTH, 'We will contact her next week.', 'fail'],
     [RUTH, 'We will contact her next Tuesday.', 'fail'],
