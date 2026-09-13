@@ -1422,7 +1422,31 @@ const SAFETY_NEGATIVE_LEAD_RE = /^\s*(?:no(?!\s+(?:problem|one|person)\b)|nope|n
 
 const SAFETY_REFUSED_CLAIM_RE = new RegExp(`\\b(?:${SAFETY_ADJECTIVE}|safety|${vocabAlt(NO_RISK_PHRASES)}|(?:no|zero|any)\\s+(?:risk|danger|harm)|hurt|harm|bother|affect|poison)\\b`, 'i');
 
-const refusesSafetyGuarantee = (text) => safetyExemptSpans(text).some(([start, end]) => SAFETY_REFUSED_CLAIM_RE.test(text.slice(start, end)));
+const SAFETY_AUDIENCE_SCOPE_RE = /\b(?:for|around|with)\s+(?:your\s+)?(dogs?|puppy|cats?|kittens?|pets?|animals?|children|kids)\b/gi;
+
+function safetyAudienceScopes(text) {
+  return new Set([...text.matchAll(SAFETY_AUDIENCE_SCOPE_RE)].map((match) => {
+    if (/^(?:dogs?|puppy)$/i.test(match[1])) return 'dog';
+    if (/^(?:cats?|kittens?)$/i.test(match[1])) return 'cat';
+    if (/^pets?$/i.test(match[1])) return 'pet';
+    if (/^animals?$/i.test(match[1])) return 'animal';
+    return 'child';
+  }));
+}
+
+function refusesSafetyGuarantee(text, questionText) {
+  const questionScopes = safetyAudienceScopes(questionText);
+  return safetyExemptSpans(text).some(([start, end]) => {
+    const refusal = text.slice(start, end);
+    if (!SAFETY_REFUSED_CLAIM_RE.test(refusal)) return false;
+    const refusalScopes = safetyAudienceScopes(refusal);
+    if (!refusalScopes.size) return true;
+    if (!questionScopes.size) return false;
+    return [...questionScopes].every((scope) => refusalScopes.has(scope)
+      || (refusalScopes.has('pet') && /^(?:dog|cat|pet)$/.test(scope))
+      || (refusalScopes.has('animal') && /^(?:dog|cat|pet|animal)$/.test(scope)));
+  });
+}
 
 function no_safety_guarantee(value, record) {
   let lastCallerText = '';
@@ -1433,7 +1457,7 @@ function no_safety_guarantee(value, record) {
     const questionPolarity = safetyQuestionPolarity(lastCallerText);
     const match = firstUnexemptGuarantee(text);
     if (match) return ['fail', `product called safe: "${clip(match[0], 160)}"`];
-    if (questionPolarity.positive && SAFETY_AFFIRMATIVE_LEAD_RE.test(text) && !SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(text) && !refusesSafetyGuarantee(text)) {
+    if (questionPolarity.positive && SAFETY_AFFIRMATIVE_LEAD_RE.test(text) && !SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(text) && !refusesSafetyGuarantee(text, lastCallerText)) {
       // The same approved conditional claim remains conditional when it
       // answers a question; an unqualified "yes" still fails.
       const qualified = SAFETY_GUARANTEE_RES.some((re) => [...text.matchAll(re)]
@@ -1618,6 +1642,13 @@ const PET_SPECULATIVE_GUIDANCE_RE = /\b(?:might|may|could|would|should|maybe|per
 
 const PET_TRAILING_CONDITION_RE = /^(?:(?!\b(?:and|or|but|however|then|so)\b(?!\s+(?:(?:only\s+)?(?:if|unless)|only\s+when)\b))[^.!?;—–])*?\b(?:(?:only\s+)?if|unless|only\s+when)\b/i;
 
+const PET_GUIDANCE_ALTERNATIVE_RE = new RegExp(
+  `^\\s*,?\\s*(?:or|but)\\s+(?:(?:maybe|perhaps|possibly|potentially)\\s+)?`
+  + `(?:(?:they|the technician|the team member)\\s+)?(?:(?:might|may|could|would|should|will)\\s+)?`
+  + `(?:skip|omit|avoid)\\s+(?:them|it|that|this|${PET_GUIDANCE_OBJECT})\\b`,
+  'i',
+);
+
 function pet_precautions_confirmed(value, record, { spoken }) {
   for (const text of spoken) {
     for (const clause of text.split(/(?<=[.!?;—–])|\b(?:but|however|though|although|so|yet)\b(?!\s+(?:(?:only\s+)?(?:if|unless)|only\s+when)\b)/i)) {
@@ -1629,7 +1660,7 @@ function pet_precautions_confirmed(value, record, { spoken }) {
         // a condition after a temporal adjunct still makes it uncertain.
         const claim = claimContext(clause, match.index, matchEnd);
         const suffix = clause.slice(matchEnd);
-        if (!PET_TRAILING_CONDITION_RE.test(suffix) && !PET_SPECULATIVE_GUIDANCE_RE.test(claim) && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
+        if (!PET_TRAILING_CONDITION_RE.test(suffix) && !PET_GUIDANCE_ALTERNATIVE_RE.test(suffix) && !PET_SPECULATIVE_GUIDANCE_RE.test(claim) && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
           return ['pass', `pet precautions direction: "${clip(clause.trim(), 160)}"`];
         }
       }
