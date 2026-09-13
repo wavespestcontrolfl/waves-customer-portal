@@ -1351,7 +1351,7 @@ function no_card_digit_readback(value, record, { spoken }) {
     const text = event.text || '';
     const frag = cardFragmentIn(text, precedingReadback);
     if (frag) return ['fail', `card digits read back: "${clip(frag, 120)}"`];
-    const trailingText = text.trim().replace(/[.!?;—–\\s]+$/g, '');
+    const trailingText = text.trim().replace(/[.!?;—–\s]+$/g, '');
     const trailingClause = trailingText.split(/[.!?;—–]/).pop() || '';
     precedingReadback = CARD_READBACK_CUE_RE.test(trailingClause);
   }
