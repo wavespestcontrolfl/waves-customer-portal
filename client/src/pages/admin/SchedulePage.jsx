@@ -34,6 +34,8 @@ import lawnScores from '@lawn-scores';
 //   chosen slot is taken between modal open and submit?
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import useIsMobile from "../../hooks/useIsMobile";
+import useLockBodyScroll from "../../hooks/useLockBodyScroll";
+import useModalFocus from "../../hooks/useModalFocus";
 import CompletionPricingCard from "../../components/schedule/CompletionPricingCard";
 import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
@@ -5598,6 +5600,8 @@ function JobCardTab({ card, loading, error, D }) {
 export function ProtocolPanel({ service, onClose }) {
   // Reactive (rotation-safe) — the module-level snapshot never recomputes.
   const isMobile = useIsMobile(640);
+  const panelRef = useModalFocus(true, onClose);
+  useLockBodyScroll();
   // Monochrome admin V2 palette — shadows the module-level D inside this panel
   // so the Service Protocol flyout matches the zinc admin shell instead of the
   // warmer legacy slate/teal/amber accents.
@@ -5890,31 +5894,46 @@ export function ProtocolPanel({ service, onClose }) {
 
   return createPortal(
     <div
+      onClick={(event) => {
+        event.stopPropagation();
+        if (event.target === event.currentTarget) onClose();
+      }}
       style={{
         position: "fixed",
-        top: 0,
-        right: 0,
-        width: isMobile ? "100%" : "60%",
-        maxWidth: isMobile ? "100%" : 600,
-        minWidth: isMobile ? 0 : 380,
-        height: "100vh",
-        background: D.card,
-        borderLeft: isMobile ? "none" : `1px solid ${D.border}`,
+        inset: 0,
         zIndex: 1000,
         display: "flex",
-        flexDirection: "column",
-        boxShadow: "-8px 0 32px rgba(0,0,0,0.3)",
-        ...(isMobile
-          ? {
-              height: "100dvh",
-              boxSizing: "border-box",
-              paddingBottom: "env(safe-area-inset-bottom, 0px)",
-              paddingLeft: "env(safe-area-inset-left, 0px)",
-              paddingRight: "env(safe-area-inset-right, 0px)",
-            }
-          : {}),
+        justifyContent: "flex-end",
+        background: "rgba(24, 24, 27, 0.35)",
       }}
     >
+      <section
+        ref={panelRef}
+        tabIndex={-1}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="service-protocol-title"
+        style={{
+          width: isMobile ? "100%" : "60%",
+          maxWidth: isMobile ? "100%" : 600,
+          minWidth: isMobile ? 0 : 380,
+          height: "100%",
+          background: D.card,
+          borderLeft: isMobile ? "none" : `1px solid ${D.border}`,
+          display: "flex",
+          flexDirection: "column",
+          boxShadow: "-8px 0 32px rgba(0,0,0,0.3)",
+          outline: "none",
+          ...(isMobile
+            ? {
+                boxSizing: "border-box",
+                paddingBottom: "env(safe-area-inset-bottom, 0px)",
+                paddingLeft: "env(safe-area-inset-left, 0px)",
+                paddingRight: "env(safe-area-inset-right, 0px)",
+              }
+            : {}),
+        }}
+      >
       {/* Header */}
       <div
         style={{
@@ -5931,9 +5950,9 @@ export function ProtocolPanel({ service, onClose }) {
         {" "}
         <div>
           {" "}
-          <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
+          <h2 id="service-protocol-title" style={{ fontSize: 16, fontWeight: 500, color: D.heading, margin: 0 }}>
             Service Protocol
-          </div>{" "}
+          </h2>{" "}
           {!jobCardEnabled && service && (
             <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
               {service.serviceType} — {service.customerName}
@@ -5946,16 +5965,20 @@ export function ProtocolPanel({ service, onClose }) {
           )}
         </div>{" "}
         <button
+          type="button"
           onClick={onClose}
+          aria-label="Close service protocol"
           style={{
             background: "none",
             border: "none",
             color: D.muted,
             fontSize: 20,
             cursor: "pointer",
+            width: 44,
+            height: 44,
           }}
         >
-          ×
+          <span aria-hidden="true">×</span>
         </button>{" "}
       </div>
       {/* Ask bar — the dispatch IB context, scoped to this stop */}
@@ -7298,6 +7321,7 @@ export function ProtocolPanel({ service, onClose }) {
           </>
         )}
       </div>{" "}
+      </section>
     </div>,
     document.body,
   );
