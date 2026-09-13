@@ -1059,12 +1059,35 @@ function generateEstimate(input) {
       // ignored and the program prices as outright purchase, exactly as it
       // did before this lane. Kill = unset the var.
       const rentalGateOn = ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_STATION_RENTAL || '').toLowerCase());
-      const wantsRental = rentalGateOn && String(termiteOptions.ownership || '').toLowerCase() === 'rent';
+      // Annual protection plan (ruling A-1 = P1) is dark-shipped the same
+      // way: with GATE_TERMITE_ANNUAL_PLAN off a plan request is ignored and
+      // the program prices as today's quarterly program. Kill = unset the
+      // var. On the plan, rental and the bond rider are retired (plan §A2).
+      const planGateOn = ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_ANNUAL_PLAN || '').toLowerCase());
+      // An ALREADY-ISSUED plan keeps replaying as the plan after the gate is
+      // unset: the stamped snapshot (server-derived replay signal, never a
+      // browser value) is the evidence; the gate governs FRESH selections
+      // only. Unsetting the var stops new plan quotes, it does not reprice
+      // in-flight contracts to the quarterly program (codex #4424 r2 P0).
+      const replayedPlan = input.termitePricingKnobs && typeof input.termitePricingKnobs === 'object'
+        && input.termitePricingKnobs.plan === 'annual_protection';
+      // The stored RESULT also stamps quarterly. That negative evidence must
+      // outrank a later live gate: a request made while the gate was off can
+      // legitimately retain plan='annual_protection' in its stored inputs,
+      // but the issued quote was still install + four quarterly checks.
+      const replayedQuarterly = input.termitePricingKnobs && typeof input.termitePricingKnobs === 'object'
+        && input.termitePricingKnobs.plan === 'quarterly';
+      const wantsAnnualPlan = !replayedQuarterly && (planGateOn || replayedPlan)
+        && String(termiteOptions.plan || '').toLowerCase() === 'annual_protection';
+      const wantsRental = !wantsAnnualPlan && rentalGateOn && String(termiteOptions.ownership || '').toLowerCase() === 'rent';
       const result = priceTermiteBait(property, {
         ...termiteOptions,
-        system: termiteOptions.system || 'trelona',
+        // The annual plan is Trelona-only (company-owned ATBS stations at the
+        // label 15-ft spacing); a legacy Advance request cannot ride it.
+        system: wantsAnnualPlan ? 'trelona' : (termiteOptions.system || 'trelona'),
         monitoringTier: termiteOptions.monitoringTier || 'basic',
         ownership: wantsRental ? 'rent' : 'own',
+        plan: wantsAnnualPlan ? 'annual_protection' : null,
         modifiers,
         // Quote-time station-cost snapshot replayed from a stored estimate
         // (estimate-tree-shrub-knob-replay#termiteKnobSignalForReplay, set
@@ -1135,7 +1158,7 @@ function generateEstimate(input) {
         // client-side, so picking a term while dark trips the pricing-drift
         // flag on that draft (visible only to staff; harmless nudge that the
         // gate is off).
-        const bondGateOn = ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_BOND_OPTION || '').toLowerCase());
+        const bondGateOn = !wantsAnnualPlan && ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_BOND_OPTION || '').toLowerCase());
         if (bondGateOn) {
           const bondTerm = termiteOptions.bondTerm;
           if (bondTerm) {
