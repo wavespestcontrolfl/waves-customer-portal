@@ -360,6 +360,12 @@ describe('voice relay eval — payment outcomes', () => {
     ["Your payment was declined but your payment method was received and is now approved.", 'pass'],
     ["Your payment was declined but your payment request was received and is now approved.", 'pass'],
     ["Your payment was declined but your card was charged and is now approved.", 'fail'],
+    ["Your payment was approved, any questions?", 'fail'],
+    ["Your payment was approved, any further questions?", 'fail'],
+    ["Your payment was approved, questions?", 'fail'],
+    ["Your payment was approved, right?", 'pass'],
+    ["Your payment was approved, correct?", 'pass'],
+    ["Your payment was approved?", 'pass'],
   ])('current-head review regressions: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
   });
