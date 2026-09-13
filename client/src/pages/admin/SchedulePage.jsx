@@ -1726,6 +1726,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     })(),
   });
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
+  const [saveError, setSaveError] = useState("");
+  const saveErrorRef = useRef(null);
+  useEffect(() => { saveErrorRef.current?.focus(); }, [saveError]);
   // "Apply price & service change to" — series rows only, rendered only when
   // the server says the lane is live (seriesSummary.canScopePriceService,
   // dark behind GATE_EDIT_APPT_PRICE_SERVICE_SCOPE) AND the primary line's
@@ -1807,6 +1811,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const cancelFee = useCancelFeeNotice(service?.id, { enabled: cancelOpen, scope: cancelScope });
   const [cancelNotificationType, setCancelNotificationType] = useState("text");
   const [cancelling, setCancelling] = useState(false);
+  const cancellingRef = useRef(false);
+  const [cancelError, setCancelError] = useState("");
   const [serviceGroups, setServiceGroups] = useState(EDIT_FALLBACK_SERVICES);
   // True once the live service catalog loaded; the static fallback carries
   // no server-derived percent-exclusion flags, so percentage previews are
@@ -2072,6 +2078,15 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const [newPayerSaving, setNewPayerSaving] = useState(false);
   const [newPayerError, setNewPayerError] = useState("");
   const [newPayerNotice, setNewPayerNotice] = useState("");
+  const closeEditor = () => {
+    if (!savingRef.current && !cancellingRef.current && !newPayerSaving) onClose();
+  };
+  const closeCancel = () => {
+    if (!cancellingRef.current) setCancelOpen(false);
+  };
+  const editorRef = useModalFocus(true, closeEditor);
+  const cancelRef = useModalFocus(cancelOpen, closeCancel);
+  useLockBodyScroll();
 
   useEffect(() => {
     (async () => {
@@ -2457,6 +2472,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     !!form.windowStart;
 
   const handleSave = async ({ takePayment = false } = {}) => {
+    if (savingRef.current || cancellingRef.current) return;
+    savingRef.current = true;
+    setSaveError("");
     setSaving(true);
     // Time-on-site correction rides the same Save button but its own
     // endpoint: validate before anything writes so a typo aborts the whole
@@ -2473,7 +2491,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     if (timeOnSiteDirty) {
       const minutes = Math.round(Number(String(timeOnSiteMinutes).trim()));
       if (!Number.isFinite(minutes) || minutes < 1 || minutes > 720) {
-        alert("Time on site must be 1–720 minutes.");
+        setSaveError("Time on site must be 1–720 minutes.");
+        savingRef.current = false;
         setSaving(false);
         return;
       }
@@ -2506,7 +2525,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         if (raw == null) continue;
         const minutes = Math.round(Number(String(raw).trim()));
         if (!Number.isFinite(minutes) || minutes < 0 || minutes > 1440) {
-          alert("Re-entry must be 0–1440 minutes (0 removes the wait).");
+          setSaveError("Re-entry must be 0–1440 minutes (0 removes the wait).");
+          savingRef.current = false;
           setSaving(false);
           return;
         }
@@ -2843,11 +2863,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         // the refreshed recurring-plan line; the operator saves again.
         seriesPreview.replace(ack.preview);
         setSeriesStale(ack.message || "The recurring plan changed — confirm again.");
-        alert(ack.message || "This save moves a recurring visit and its later visits — review the recurring-plan line and save again.");
+        setSaveError(ack.message || "This save moves a recurring visit and its later visits — review the recurring-plan line and save again.");
       } else {
-        alert("Save failed: " + e.message);
+        setSaveError("Save failed: " + e.message);
       }
     }
+    savingRef.current = false;
     setSaving(false);
   };
 
@@ -2856,16 +2877,15 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const canCancelAppointment = !isTerminalVisit;
 
   const handleCancelAppointment = async () => {
-    if (cancelling) return;
+    if (cancellingRef.current || savingRef.current) return;
+    cancellingRef.current = true;
+    setCancelError("");
     setCancelling(true);
     // Card-hold visits inside the late-cancel window: the fee decision comes
     // first — backing out of it aborts the cancel entirely.
-    const { proceed, waiveCardHoldFee } = await confirmCardHoldFeeChoice(service.id, { scope: cancelScope });
-    if (!proceed) {
-      setCancelling(false);
-      return;
-    }
     try {
+      const { proceed, waiveCardHoldFee } = await confirmCardHoldFeeChoice(service.id, { scope: cancelScope });
+      if (!proceed) return;
       const result = await adminFetch(`/admin/dispatch/${service.id}/status`, {
         method: "PUT",
         body: JSON.stringify({
@@ -2887,9 +2907,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       setCancelOpen(false);
       onSaved?.();
     } catch (e) {
-      alert("Failed to cancel appointment: " + e.message);
+      setCancelError("Failed to cancel appointment: " + e.message);
+    } finally {
+      cancellingRef.current = false;
+      setCancelling(false);
     }
-    setCancelling(false);
   };
 
   const customer = customerData?.customer || {};
@@ -3349,6 +3371,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
 
   return createPortal(
     <div
+      ref={editorRef}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="edit-appointment-title"
+      tabIndex={-1}
+      onClick={(event) => event.stopPropagation()}
       style={{
         position: "fixed",
         inset: 0,
@@ -3386,9 +3414,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           {" "}
           <div className="min-w-0 flex-1">
             {" "}
-            <div style={{ fontSize: 22, fontWeight: 500, color: "#111827" }}>
+            <h2 id="edit-appointment-title" style={{ fontSize: 22, fontWeight: 500, color: "#111827", margin: 0 }}>
               Edit appointment
-            </div>{" "}
+            </h2>{" "}
             <div
               style={{
                 display: "flex",
@@ -3441,7 +3469,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             {" "}
             {canCancelAppointment && (
               <button
-                onClick={() => setCancelOpen(true)}
+                onClick={(event) => {
+                  event.currentTarget.focus({ preventScroll: true });
+                  setCancelError("");
+                  setCancelOpen(true);
+                }}
                 disabled={saving || cancelling}
                 className="font-medium flex-1 md:flex-initial"
                 style={{
@@ -3461,7 +3493,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             )}{" "}
             <button
               onClick={() => handleSave({ takePayment: true })}
-              disabled={saving}
+              disabled={saving || cancelling || newPayerSaving}
               className="font-medium flex-1 md:flex-initial"
               style={{
                 padding: "11px 14px",
@@ -3479,7 +3511,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             </button>{" "}
             <button
               onClick={() => handleSave()}
-              disabled={saving}
+              disabled={saving || cancelling || newPayerSaving}
               className="font-medium flex-1 md:flex-initial"
               style={{
                 padding: "11px 14px",
@@ -3496,12 +3528,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               {saving ? "Saving..." : "Save"}
             </button>{" "}
             <button
-              onClick={onClose}
-              disabled={saving}
+              onClick={closeEditor}
+              disabled={saving || cancelling || newPayerSaving}
               className="font-medium"
               style={{
-                width: 38,
-                height: 38,
+                width: 44,
+                height: 44,
                 borderRadius: 4,
                 background: "#fff",
                 color: D.muted,
@@ -3516,6 +3548,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             </button>{" "}
           </div>{" "}
         </div>{" "}
+        {saveError && <div ref={saveErrorRef} tabIndex={-1} role="alert" style={{ padding: "16px 20px", color: "#C8312F", background: "#fff", fontSize: 14 }}>{saveError}</div>}
         <div
           className="grid grid-cols-1 md:[grid-template-columns:340px_1fr]"
           style={{
@@ -3824,7 +3857,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   <label htmlFor="appointment-property" style={{ ...labelStyle, fontSize: 14 }}>Service address</label>
                   <select id="appointment-property" value={selectedPropertyId}
                     onChange={(event) => setSelectedPropertyId(event.target.value)}
-                    disabled={saving} style={{ ...inputStyle, maxWidth: "100%" }}>
+                    disabled={saving || cancelling || newPayerSaving} style={{ ...inputStyle, maxWidth: "100%" }}>
                     <option value="">Keep current appointment address</option>
                     {addressOptions.map((property) => (
                       <option key={property.id} value={property.id}>
@@ -4922,7 +4955,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       </div>{" "}
       {cancelOpen && (
         <div
-          onClick={() => !cancelling && setCancelOpen(false)}
+          onClick={closeCancel}
           style={{
             position: "fixed",
             inset: 0,
@@ -4936,6 +4969,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         >
           {" "}
           <div
+            ref={cancelRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="cancel-appointment-title"
+            tabIndex={-1}
             onClick={(e) => e.stopPropagation()}
             style={{
               background: "#fff",
@@ -4963,6 +5001,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           >
             {" "}
             <div
+              id="cancel-appointment-title"
               style={{
                 fontSize: 16,
                 fontWeight: 500,
@@ -4976,6 +5015,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               This appointment will be removed from your calendar and will
               appear as canceled in {customerName}&rsquo;s appointment history.
             </div>{" "}
+            {cancelError && <p role="alert" style={{ color: "#C8312F", fontSize: 14 }}>{cancelError}</p>}
             {serviceHasSeries && (
               <div style={{ marginBottom: 14 }}>
                 {" "}
@@ -5039,7 +5079,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             >
               {" "}
               <button
-                onClick={() => setCancelOpen(false)}
+                onClick={closeCancel}
                 disabled={cancelling}
                 className="font-medium"
                 style={{
@@ -10292,6 +10332,7 @@ export function StationMarkingStep({
 function RecapCapture({ serviceId }) {
   const [items, setItems] = useState([]);
   const [pendingFile, setPendingFile] = useState(null);
+  const rolePickerRef = useModalFocus(!!pendingFile, () => setPendingFile(null));
   const [showMore, setShowMore] = useState(false);
   const [uploading, setUploading] = useState(0);
   const [err, setErr] = useState(null);
@@ -10373,7 +10414,7 @@ function RecapCapture({ serviceId }) {
 
       {pendingFile && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(5,8,13,.7)", zIndex: 50, display: "flex", alignItems: "flex-end" }} onClick={() => setPendingFile(null)}>
-          <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", background: D.card, borderRadius: "18px 18px 0 0", border: `1px solid ${D.border}`, padding: "16px 14px 22px", maxHeight: "82%", overflowY: "auto" }}>
+          <div ref={rolePickerRef} role="dialog" aria-modal="true" aria-label="What were you doing?" tabIndex={-1} onClick={(e) => e.stopPropagation()} style={{ width: "100%", background: D.card, borderRadius: "18px 18px 0 0", border: `1px solid ${D.border}`, padding: "16px 14px 22px", maxHeight: "82%", overflowY: "auto" }}>
             <div style={{ width: 40, height: 4, background: D.border, borderRadius: 3, margin: "0 auto 12px" }} />
             <div style={{ fontWeight: 500, fontSize: 16, color: D.heading, textAlign: "center" }}>What were you doing?</div>
             <div style={{ fontSize: 12, color: D.muted, textAlign: "center", margin: "4px 0 12px" }}>One tap. We caption it for the customer.</div>
@@ -10798,6 +10839,15 @@ export function CompletionPanel({
   // F2 (ratified Q13): windowed comms context on the AI report draft — default CHECKED.
   const [aiReportIncludeComms, setAiReportIncludeComms] = useState(true);
   const [success, setSuccess] = useState(false);
+  // Keep nested trace/capture state mounted if the viewport rotates mid-form.
+  const [isMobile] = useState(() => window.innerWidth < 640);
+  const panelRef = useModalFocus(true, () => onClose(success));
+  const successRef = useModalFocus(success, () => onClose(true));
+  useLockBodyScroll();
+  const [submitError, setSubmitError] = useState("");
+  const submitErrorRef = useRef(null);
+  useEffect(() => { submitErrorRef.current?.focus(); }, [submitError]);
+
   const [completionResult, setCompletionResult] = useState(null);
   // The annual-prepay offer was REMOVED from the completion success screen
   // (owner 2026-07-29: success stays minimal — service complete + delivery
@@ -14750,7 +14800,9 @@ export function CompletionPanel({
     setSuccess(true);
     const autoCloseDelay = completionAutoCloseDelay(completion, photosOwed, recapEligible);
     if (autoCloseDelay !== null) {
-      setTimeout(() => onClose(true), autoCloseDelay);
+      setTimeout(() => {
+        if (!completionPanelClosedRef.current) onClose(true);
+      }, autoCloseDelay);
     }
     return "done";
   }
@@ -14924,6 +14976,7 @@ export function CompletionPanel({
     // Draft discovery still settling (see baseCompletionCtaLabel): the button
     // is disabled, but a keyboard/programmatic submit must not race it.
     if (draftLoading) return;
+    setSubmitError("");
     // A committed chain replays the pinned body byte-for-byte — the stored
     // body already passed every pre-submit gate when it committed, and the
     // reopened panel's form is empty (drafts never persist photos), so none
@@ -15925,7 +15978,7 @@ export function CompletionPanel({
       return;
     }
     if (!completionPanelClosedRef.current) {
-      alert("Failed to complete service: " + e.message);
+      setSubmitError((onPrepared ? "Failed to save service form: " : "Failed to complete service: ") + e.message);
     }
     setSubmitting(false);
   }
@@ -16535,7 +16588,7 @@ export function CompletionPanel({
         {" "}
         <div
           role="presentation"
-          onClick={() => onClose(false)}
+          onClick={(event) => { event.stopPropagation(); onClose(false); }}
           style={{
             position: "fixed",
             inset: 0,
@@ -16545,6 +16598,9 @@ export function CompletionPanel({
         />{" "}
         <div
           role="dialog"
+        ref={panelRef}
+        tabIndex={-1}
+        onClick={(event) => event.stopPropagation()}
           aria-modal="true"
           aria-labelledby={`completion-panel-title-${service.id}`}
           style={{
@@ -16558,11 +16614,19 @@ export function CompletionPanel({
             WebkitOverflowScrolling: "touch",
             paddingTop: "env(safe-area-inset-top)",
             paddingBottom: "calc(160px + env(safe-area-inset-bottom))",
+            paddingLeft: "env(safe-area-inset-left, 0px)",
+            paddingRight: "env(safe-area-inset-right, 0px)",
             animation: "slideIn 0.25s ease",
           }}
         >
+          {submitError && <div ref={submitErrorRef} tabIndex={-1} role="alert" style={{ padding: 20, fontSize: 14, color: "#C8312F" }}>{submitError}</div>}
           {success && (
             <div
+              ref={successRef}
+              tabIndex={-1}
+              role="dialog"
+              aria-modal="true"
+              aria-label="Completion result"
               style={{
                 // Fixed, not absolute: the panel scrolls, and completion is
                 // triggered from its bottom — an absolute overlay renders at
@@ -16754,7 +16818,7 @@ export function CompletionPanel({
             {" "}
             <button
               type="button"
-              onClick={() => onClose(false)}
+              onClick={(event) => { event.stopPropagation(); onClose(false); }}
               aria-label="Back"
               style={{
                 width: 44,
@@ -18966,7 +19030,7 @@ export function CompletionPanel({
     <>
       {" "}
       <div
-        onClick={() => onClose(false)}
+        onClick={(event) => { event.stopPropagation(); onClose(false); }}
         style={{
           position: "fixed",
           inset: 0,
@@ -18976,6 +19040,9 @@ export function CompletionPanel({
       />{" "}
       <div
         role="dialog"
+          ref={panelRef}
+          tabIndex={-1}
+          onClick={(event) => event.stopPropagation()}
         aria-modal="true"
         aria-labelledby={`completion-panel-title-${service.id}`}
         style={{
@@ -18998,11 +19065,23 @@ export function CompletionPanel({
           accentColor: CP_DESKTOP.text,
         }}
       >
+        {submitError && <div ref={submitErrorRef} tabIndex={-1} role="alert" style={{ padding: 20, fontSize: 14, color: "#C8312F" }}>{submitError}</div>}
         {success && (
           <div
+            ref={successRef}
+            tabIndex={-1}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Completion result"
             style={{
-              position: "absolute",
-              inset: 0,
+              position: "fixed",
+              top: 0,
+              right: 0,
+              bottom: 0,
+              width: "60%",
+              minWidth: 360,
+              maxWidth: 640,
+              boxSizing: "border-box",
               background: D.bg + "ee",
               display: "flex",
               flexDirection: "column",
@@ -19175,7 +19254,7 @@ export function CompletionPanel({
             <button
               type="button"
               aria-label="Close complete service"
-              onClick={() => onClose(false)}
+              onClick={(event) => { event.stopPropagation(); onClose(false); }}
               style={{
                 background: "none",
                 border: "none",
