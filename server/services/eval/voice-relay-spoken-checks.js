@@ -1217,16 +1217,18 @@ function no_third_party_disclosure(value, record, { spoken }) {
 const REPORT_UNCERTAINTY_RE = /\b(?:can|must|may|might|could|would|should|will|shall|going to|plan(?:s|ned)? to|maybe|perhaps|possibly|potentially|probably)\b/i;
 const REPORT_INSTRUCTION_RE = /(?:^|,\s*)(?:please\s+)?(?:apply|use|put|treat|spray|place)\b|\b(?:please|make sure|ensure|remember to)\b/i;
 const REPORT_FINDING_VERB_RE = /\b(?:applied|placed|used|treated|sprayed|put|went|got)\b/i;
-const REPORT_COMMA_ASSERTION_RE = new RegExp(`,\\s*(?=(?:(?:the|a|an)\\s+)?(?:[\\w'\u2019-]+\\s+){1,4}(?:(?:(?:was|were|is|are|has|have|had|got)\\s+(?:\\w+ly\\s+)?)?${REPORT_FINDING_VERB_RE.source}))`, 'gi');
+const REPORT_ASSERTION_START = `(?:(?:the|a|an)\\s+)?(?:[\\w'\u2019-]+\\s+){1,4}(?:(?:(?:was|were|is|are|has|have|had|got)\\s+(?:\\w+ly\\s+)?)?${REPORT_FINDING_VERB_RE.source})`;
+const REPORT_ASSERTION_BOUNDARY_RE = new RegExp(`(?:,\\s*|\\bwith\\s+)(?=${REPORT_ASSERTION_START})`, 'gi');
 
-// A comma opens a separate report assertion only when its right side has a
-// fresh treatment subject/predicate and its left side already completed one.
-// This separates "Talstar was applied indoors, bait was placed outside"
-// without splitting leading or parenthetical adjuncts at every comma.
+// A comma or "with" opens a separate report assertion only when its right
+// side has a fresh treatment subject/predicate and its left side already
+// completed one. This separates "Talstar was applied indoors, bait was
+// placed outside" and "...with bait placed outside" without splitting
+// leading/parenthetical commas or ordinary "with a backpack sprayer" terms.
 function reportAssertionOf(clause, subjectAt) {
   let start = 0;
-  REPORT_COMMA_ASSERTION_RE.lastIndex = 0;
-  for (const boundary of clause.matchAll(REPORT_COMMA_ASSERTION_RE)) {
+  REPORT_ASSERTION_BOUNDARY_RE.lastIndex = 0;
+  for (const boundary of clause.matchAll(REPORT_ASSERTION_BOUNDARY_RE)) {
     if (!REPORT_FINDING_VERB_RE.test(clause.slice(start, boundary.index))) continue;
     if (boundary.index >= subjectAt) return clause.slice(start, boundary.index);
     start = boundary.index + boundary[0].length;
@@ -1255,16 +1257,22 @@ function report_readback_confirms(value, record, { spoken }) {
         .split(/\b(?:rather than|instead of)\b/i)[0];
       const subjectAt = affirmed.search(new RegExp(value.subject, 'i'));
       const locationAt = affirmed.search(locationRe);
-      const claim = claimContext(affirmed, Math.min(subjectAt, locationAt), affirmed.length);
       // A completed treatment verb states the relationship. Concise report
       // summaries may omit it ("Talstar P around the perimeter"), but must
       // start with a finding term and connect it to its location; a caller
       // question or a list of terms is not such a summary.
+      const findingVerb = REPORT_FINDING_VERB_RE.exec(affirmed);
       const lead = affirmed.slice(0, Math.min(subjectAt, locationAt)).trim();
       const conciseFinding = /^(?:(?:the|a|an|granular)\s*)?$/i.test(lead)
         && /\b(?:around|along|on|to|at|in)\b/i.test(affirmed.slice(Math.min(subjectAt, locationAt), Math.max(subjectAt, locationAt)));
+      // A trailing "before" dates completed evidence. Remove only that
+      // temporal marker, preserving any actual denial or condition later.
+      const evidenceEnd = Math.max(subjectAt, locationAt, findingVerb ? findingVerb.index : -1);
+      const claimText = evidenceEnd >= 0 && (findingVerb || conciseFinding)
+        ? affirmed.slice(0, evidenceEnd) + affirmed.slice(evidenceEnd).replace(/\bbefore\b/gi, 'prior to') : affirmed;
+      const claim = claimContext(claimText, Math.min(subjectAt, locationAt), claimText.length);
       if (subjectAt >= 0 && locationAt >= 0 && !REPORT_UNCERTAINTY_RE.test(affirmed) && !REPORT_INSTRUCTION_RE.test(affirmed)
-          && (REPORT_FINDING_VERB_RE.test(affirmed) || conciseFinding)
+          && (findingVerb || conciseFinding)
           && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
         return ['pass', `readback confirmed: "${clip(clause.trim(), 160)}"`];
       }
