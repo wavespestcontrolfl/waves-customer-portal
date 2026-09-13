@@ -1394,6 +1394,8 @@ function trailingWithdrawalAlternative(objectSource) {
 
 const TECHNICIAN_DRY_TIMING_ALTERNATIVE_RE = trailingWithdrawalAlternative('(?:it|that|this|(?:the\\s+)?(?:timing|confirmation|drying time|re-?entry time))');
 
+const TECHNICIAN_DRY_TIMING_OBJECT_NEGATION_RE = /^\s*[^.!?;—–]{0,60}?\s*,?\s*(?:and|but|though|although)\s+not\s+(?:the\s+)?(?:timing|confirmation|drying time|re-?entry time)\b/i;
+
 function safetyOnceDryQualifies(text, claim, questionText = null) {
   if (!SAFETY_ONCE_DRY_PREDICATE_RE.test(claim[0])) return false;
   const drying = SAFETY_ONCE_DRY_AFTER_RE.exec(text.slice(claim.index + claim[0].length));
@@ -1407,6 +1409,7 @@ function safetyOnceDryQualifies(text, claim, questionText = null) {
       && (TECHNICIAN_EXPLICIT_DRY_TIMING_RE.test(match[0]) || !TECHNICIAN_VISIT_TIMING_RE.test(timingClaim))
       && (!PET_TRAILING_CONDITION_RE.test(suffix) || PET_INDEPENDENT_CONDITIONAL_ACTION_RE.test(suffix))
       && !TECHNICIAN_DRY_TIMING_ALTERNATIVE_RE.test(suffix)
+      && !TECHNICIAN_DRY_TIMING_OBJECT_NEGATION_RE.test(suffix)
       && !PET_SPECULATIVE_GUIDANCE_RE.test(claim)
       && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim);
   });
