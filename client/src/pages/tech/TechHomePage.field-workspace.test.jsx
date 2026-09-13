@@ -16,6 +16,11 @@ vi.mock('../../components/tech/TechServicePhotosModal', () => ({ default: ({ ser
 vi.mock('../../components/tech/TechTreatmentZoneModal', () => ({ default: () => null }));
 vi.mock('../../components/tech/FieldLeadModal', () => ({ default: () => null }));
 vi.mock('../../components/ServiceRecapModal', () => ({ default: () => <div>Existing recap form</div> }));
+vi.mock('../admin/ProjectsPage', () => ({ ProjectDetail: ({ onDirtyChange, onClose }) => <div data-testid="project-detail">
+  <button onClick={() => onDirtyChange(true)}>Edit report</button>
+  <button onClick={() => onDirtyChange(false)}>Save report</button>
+  <button onClick={onClose}>Close report</button>
+</div> }));
 vi.mock('./VisitBriefPanel', () => ({ default: ({ stop, detail, onRetry, onPhotos, onBusyChange }) => <div>
   <p>Property brief for {stop.primary.id}</p>
   <p>{detail?.byService?.[stop.primary.id]?.brief?.facts?.access?.accessNotes}</p>
@@ -217,6 +222,40 @@ describe('Tech field workspace uses the existing route workflow', () => {
     const report = await screen.findByRole('button', { name: /Project Report/ });
     if (status === 'draft') expect(report).toBeEnabled();
     else expect(report).toBeDisabled();
+  });
+
+  it('guards dirty report close and backdrop exits, then closes without a prompt after save', async () => {
+    rows = [row('one', { linkedProject: { id: 'existing-report', status: 'draft' } })];
+    const confirmClose = vi.fn(() => false);
+    vi.stubGlobal('confirm', confirmClose);
+    mount('/tech/tools');
+    fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
+    const editor = await screen.findByTestId('project-detail');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit report' }));
+    fireEvent.click(editor.parentElement.parentElement);
+    fireEvent.click(screen.getByRole('button', { name: 'Close report' }));
+    expect(confirmClose).toHaveBeenCalledTimes(2);
+    expect(confirmClose).toHaveBeenCalledWith('Discard unsaved report edits?');
+    expect(screen.getByTestId('project-detail')).toBeInTheDocument();
+
+    confirmClose.mockReturnValue(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Close report' }));
+    await waitFor(() => expect(screen.queryByTestId('project-detail')).not.toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole('button', { name: /Project Report/ }));
+    await screen.findByTestId('project-detail');
+    fireEvent.click(screen.getByRole('button', { name: 'Close report' }));
+    expect(confirmClose).toHaveBeenCalledTimes(3);
+    await waitFor(() => expect(screen.queryByTestId('project-detail')).not.toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole('button', { name: /Project Report/ }));
+    await screen.findByTestId('project-detail');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit report' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save report' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Close report' }));
+    expect(confirmClose).toHaveBeenCalledTimes(3);
+    await waitFor(() => expect(screen.queryByTestId('project-detail')).not.toBeInTheDocument());
   });
 
   it('preserves owner-only estimating and the social feature gate in Tools', async () => {

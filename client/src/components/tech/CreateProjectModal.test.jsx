@@ -102,6 +102,15 @@ function renderWdoSheet(overrides = {}) {
 const field = (key) => document.querySelector(`#create-project-wdo_inspection-${key}`);
 const dateInput = () => document.querySelector('input[type="date"]');
 
+async function queueReportPhoto(name = 'evidence.jpg') {
+  await waitFor(() => expect(field('inspection_fee')).toBeTruthy());
+  const libraryInputs = document.querySelectorAll('input[type="file"]:not([capture])');
+  const libraryInput = libraryInputs[libraryInputs.length - 1];
+  const file = new File(['photo'], name, { type: 'image/jpeg' });
+  fireEvent.change(libraryInput, { target: { files: [file] } });
+  await screen.findByText(name);
+}
+
 describe('CreateProjectModal WDO inspection date', () => {
   it('exposes a named Complete Service dialog', async () => {
     renderWdoSheet();
@@ -199,6 +208,26 @@ describe('CreateProjectModal WDO Property & scope prefill', () => {
   });
 });
 
+describe('CreateProjectModal queued-photo exits', () => {
+  it('keeps queued photos open when the tech cancels close from the header, footer, scrim, or Escape', async () => {
+    const onClose = vi.fn();
+    const confirmClose = vi.fn(() => false);
+    vi.stubGlobal('confirm', confirmClose);
+    renderWdoSheet({ onClose });
+    await queueReportPhoto();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    fireEvent.click(screen.getByRole('dialog'));
+    fireEvent.keyDown(document, { key: 'Escape' });
+
+    expect(confirmClose).toHaveBeenCalledTimes(4);
+    expect(confirmClose).toHaveBeenCalledWith('Discard unsaved report edits?');
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByText('evidence.jpg')).toBeTruthy();
+  });
+});
+
 describe('wdoFeeSeedFromVisit', () => {
   it('seeds the net visit price for a single-line WDO visit', () => {
     expect(wdoFeeSeedFromVisit({ estimatedPrice: 150, serviceAddons: [] })).toBe(150);
@@ -289,6 +318,24 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
     expect(pad.getAttribute('data-project-id')).toBe('p-1');
     expect(pad.getAttribute('data-signer')).toBe('Adam Benetti');
     expect(pad.getAttribute('data-idcard')).toBe('JE362022');
+  });
+
+  it('uploads a queued photo before save and does not warn when closing the saved sign step', async () => {
+    const onCreated = vi.fn();
+    const onClose = vi.fn();
+    renderWdoSheet({ onCreated, onClose });
+    await queueReportPhoto('saved-evidence.jpg');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Report' }));
+    await screen.findByText('✓ Report draft saved');
+    expect(fetch.mock.calls.some(([url, opts]) => (
+      String(url).includes('/admin/projects/p-1/photos') && opts?.method === 'POST'
+    ))).toBe(true);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(confirm).not.toHaveBeenCalled();
+    expect(onCreated).toHaveBeenCalledWith(expect.objectContaining({ id: 'p-1' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it('"Sign later" leaves the saved draft and reports the project to the parent', async () => {

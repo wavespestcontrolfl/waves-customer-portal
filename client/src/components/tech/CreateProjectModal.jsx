@@ -474,13 +474,19 @@ export default function CreateProjectModal({
   // checkbox — the sheet previously FORCED the hold whenever it was available,
   // with no way to send invoice + report together. Default ON (same as admin).
   const [mobileHoldReport, setMobileHoldReport] = useState(true);
+
+  function requestClose() {
+    if (photoQueue.length && !confirm('Discard unsaved report edits?')) return;
+    onClose?.();
+  }
+
   // Escape follows the same exit contract as the scrim and close button: on
   // the sign step it must route through finishSignStep so the parent still
   // learns about the saved project.
   const dialogRef = useModalFocus(true, () => {
     if (saving || completionBusy) return;
     if (signStep) { finishSignStep(); return; }
-    onClose?.();
+    requestClose();
   });
 
   // Previous-treatment photo extraction (WDO Section 3): AI reads a prior
@@ -1838,7 +1844,7 @@ export default function CreateProjectModal({
         // through finishSignStep so the parent still learns about the saved
         // project (onCreated drives list refreshes / opening the report).
         if (signStep) { finishSignStep(); return; }
-        onClose?.();
+        requestClose();
       }}
     >
       {isOfficialDocument && (
@@ -1929,7 +1935,7 @@ export default function CreateProjectModal({
             )}
             <button
               type="button"
-              onClick={() => !saving && !completionBusy && (signStep ? finishSignStep() : onClose?.())}
+              onClick={() => !saving && !completionBusy && (signStep ? finishSignStep() : requestClose())}
               aria-label="Close"
               style={{
                 background: 'transparent', border: 'none', color: P.muted,
@@ -2686,7 +2692,7 @@ export default function CreateProjectModal({
           )}
           <button
             type="button"
-            onClick={() => !saving && onClose?.()}
+            onClick={() => !saving && requestClose()}
             disabled={saving}
             style={{
               minHeight: isEstimateStyle ? 48 : undefined,
