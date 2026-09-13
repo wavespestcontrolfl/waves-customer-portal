@@ -1248,7 +1248,7 @@ function only_language(value, record, { spoken }) {
 // clause (DENIAL_CLAUSE_END_RE), so "did not raise a safety concern" denies
 // the concern, while "did not book, but asked if the bait is safe for her
 // dog" asserts it — the "but" ends the denial's clause before the concern.
-const DENIAL_WORD_RE = /\b(?:(?:not|cannot|(?:is|are|did|does|was|were|has|have|had|ca|could|would|wo)n[\x27\u2019]t)(?!\s+only\b)|never|denied|denies|without|no(?![-\u2010-\u2015])|neither|none|zero)\b/gi;
+const DENIAL_WORD_RE = /\b(?:(?:not|cannot|(?:is|are|do|did|does|was|were|has|have|had|ca|could|would|wo)n[\x27\u2019]t)(?!\s+only\b)|never|denied|denies|without|no(?![-\u2010-\u2015])|neither|none|zero)\b/gi;
 // Commas may enclose an aside and "and" may coordinate denied objects.
 // End their scope only when the next phrase starts a fresh assertion.
 const CAPTURE_NOUN_ASSERTION_START_SOURCE = `(?:[\\w\\x27\\u2019-]+\\s+){1,5}${CLAUSE_FINITE_PREDICATE_RE.source}`;
