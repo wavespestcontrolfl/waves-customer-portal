@@ -80,6 +80,9 @@ describe('voice relay eval — capture_lead_input_asserts validation', () => {
     ['capture_lead_input_asserts', { call_summary: [] }, /regex/],
     ['capture_lead_input_asserts', { call_summary: ['(unclosed'] }, /regex/],
     ['capture_lead_input_asserts', { call_summary: [' '] }, /regex/],
+    ['capture_lead_input_asserts', { call_summary: ['.*'] }, /regex/],
+    ['capture_lead_input_asserts', { call_summary: ['(?:dog)?'] }, /regex/],
+    ['capture_lead_input_asserts', { call_summary: ['^$'] }, /regex/],
     ['capture_lead_input_asserts', {}, /regex/],
     ['capture_lead_input_asserts', true, /regex/],
   ])('%s lints its value %j', (check, value, problem) => {
@@ -126,6 +129,10 @@ describe('voice relay eval — capture_lead_input_asserts', () => {
     ['Customer asked whether the bait was safe and never mentioned a safety concern for her dog.', 'fail'],
     ['Customer asked whether the bait was safe for ants and not safe for her dog.', 'pass'],
     ['Customer asked whether an appointment was available, noting there were no safety concerns for her dog.', 'fail'],
+    ['Customer failed to raise a safety concern for her dog.', 'fail'],
+    ['Customer failed to mention a safety concern for her dog.', 'fail'],
+    ['Customer failed to report a safety concern for her dog.', 'fail'],
+    ['Customer failed to book an appointment and raised a safety concern for her dog.', 'pass'],
   ])('capture_lead_input_asserts grades the concern as asserted, not merely mentioned — %s', (summary, status) => {
     const check = runCheck(exp('capture_lead_input_asserts', PET_CONCERN, 'critical'), captured(summary));
     expect(check.status).toBe(status);
@@ -162,6 +169,9 @@ describe('voice relay eval — capture_lead_input_asserts', () => {
 test.each([
   ['Caller asked about scheduling, not safety for her dog.', false],
   ['Caller asked not only about safety for her dog, but also timing.', true],
+  ['Caller asked not just about safety for her dog, but also timing.', true],
+  ['Caller asked not merely about safety for her dog, but also timing.', true],
+  ['Caller asked not simply about safety for her dog, but also timing.', true],
   ['Caller asked not about scheduling, but about safety for her dog.', true],
 ])('captured concern distinguishes standalone negation from additive wording: %s', (text, asserted) => {
   const { assertedMatch } = require('../services/eval/voice-relay-spoken-checks')._internals;
@@ -183,6 +193,7 @@ test.each([
   ["Customer said they don't only have safety concerns for their dog, but also scheduling concerns.", true],
   ['No appointment booked: customer asked about safety for her dog.', true],
   ['Customer denied this concern: safety for her dog.', false],
+  ['Customer denied the following: she raised a safety concern for her dog.', false],
   ['Customer denied this concern: she later raised a safety concern for her dog.', true],
   ['There is no doubt the customer raised a safety concern for her dog.', true],
   ['No appointment booked — customer asked about safety for her dog.', true],
@@ -195,6 +206,9 @@ test.each([
 
 test.each([
   'Caller did not only ask about safety for her dog, but also timing.',
+  'Caller did not just ask about safety for her dog, but also timing.',
+  'Caller did not merely ask about safety for her dog, but also timing.',
+  'Caller did not simply ask about safety for her dog, but also timing.',
   "Caller isn't only asking about safety for her dog, but also timing.",
 ])('auxiliary-prefixed not-only wording still asserts the concern: %s', (text) => {
   const { assertedMatch } = require('../services/eval/voice-relay-spoken-checks')._internals;
@@ -239,6 +253,8 @@ test('an asserted concern can begin inside an earlier denied regex match', () =>
 
 test.each([
   ["I can't confirm, your refund was processed.", 'pass'],
+  ["I can't, at this time, confirm your refund was processed.", 'pass'],
+  ["I can't, at this time, confirm the appointment, your refund was processed.", 'fail'],
   ["I can't confirm your refund was processed, but your refund was issued.", 'fail'],
   ["I can't confirm the appointment; your refund was processed.", 'fail'],
   ['I cannot confirm your appointment, your refund was processed.', 'fail'],
@@ -247,6 +263,8 @@ test.each([
   ['No doubt your refund was processed.', 'fail'],
   ['Your refund for the no-show was processed.', 'fail'],
   ['I cannot confirm or deny your refund was processed.', 'pass'],
+  ['I can neither confirm nor deny your refund was processed.', 'pass'],
+  ['I can neither confirm nor deny the appointment, your refund was processed.', 'fail'],
   ['I cannot confirm or check that your refund was processed.', 'pass'],
   ['I cannot confirm or verify that your refund was processed.', 'pass'],
   ['I cannot confirm or deny it, but your refund was processed.', 'fail'],
@@ -274,6 +292,7 @@ test.each([
   ['I cannot confirm the appointment and refund details.', 'pass'],
   ['Before leaving, your refund was processed.', 'fail'],
   ['If eligible, then your refund was processed.', 'pass'],
+  ['Only if eligible, your refund will be processed.', 'pass'],
   ['I am doubtful, your refund was processed.', 'pass'],
   ['Doubtless your refund was processed.', 'fail'],
   ['Not only was your refund processed, it was expedited.', 'fail'],

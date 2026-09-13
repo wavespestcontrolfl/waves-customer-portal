@@ -530,12 +530,14 @@ function claimContext(text, start, end) {
   const [boundary] = clauseBounds(text, start);
   const comma = text.lastIndexOf(',', start - 1);
   const introduction = text.slice(boundary, comma + 1);
-  const hedge = EPISTEMIC_HEDGE_RE.exec(introduction);
-  const complement = hedge ? introduction.slice(hedge.index + hedge[0].length).replace(/[,\s]+$/g, '').trim() : '';
+  const preclaim = text.slice(boundary, start);
+  const hedgeContext = EPISTEMIC_HEDGE_RE.test(introduction) ? introduction : preclaim;
+  const hedge = EPISTEMIC_HEDGE_RE.exec(hedgeContext);
+  const complement = hedge ? hedgeContext.slice(hedge.index + hedge[0].length).replace(/[,\s]+$/g, '').trim() : '';
   // A condition or refusal governs the assertion after its comma. Ordinary
   // temporal introductions ("Before you go,") remain separate adjuncts.
-  if (/^\s*(?:if(?!\s+(?:anything|you ask me)\b)|unless|whether)\b/i.test(introduction)
-      || (hedge && /^(?:(?:any of )?(?:this|that|it))?$/i.test(complement))) {
+  if (/^\s*(?:(?:only\s+)?if(?!\s+(?:anything|you ask me)\b)|unless|whether)\b/i.test(introduction)
+      || (hedge && /^(?:(?:any of )?(?:this|that|it)|(?:your|the|a|an))?$/i.test(complement))) {
     return text.slice(boundary, end);
   }
   return text.slice(Math.max(boundary, comma + 1), end);
@@ -555,7 +557,7 @@ function clauseIsNegated(clause) {
 // EPISTEMIC_DENIAL_WORDS and vocabAlt, all defined at the top of the
 // file) so every later section — safety, callback, card, readback — can
 // share it instead of re-deriving its own filler-word cap.
-const EPISTEMIC_HEDGE_PREFIX_SOURCE = `(?:\\b(?:not|never|cannot|unable|no way to|\\w+n[\\x27\\u2019]t)[\\s,]+(?:[\\w\\x27\\u2019]+[\\s,]+)*?${vocabAlt(EPISTEMIC_REFUSAL_VERBS)}|(?<!\\bwithout (?:a |any )?|\\bno |\\bbeyond )\\b${vocabAlt(EPISTEMIC_DENIAL_WORDS)}\\b)`;
+const EPISTEMIC_HEDGE_PREFIX_SOURCE = `(?:\\b(?:not|never|cannot|unable|no way to|\\w+n[\\x27\\u2019]t)[\\s,]+(?:[\\w\\x27\\u2019]+[\\s,]+)*?${vocabAlt(EPISTEMIC_REFUSAL_VERBS)}|\\bneither\\s+${COORDINATED_REPORT_VERBS}\\s+nor\\s+${COORDINATED_REPORT_VERBS}|(?<!\\bwithout (?:a |any )?|\\bno |\\bbeyond )\\b${vocabAlt(EPISTEMIC_DENIAL_WORDS)}\\b)`;
 const EPISTEMIC_HEDGE_RE = new RegExp(EPISTEMIC_HEDGE_PREFIX_SOURCE, 'i');
 /** Does `clause` open with (or carry) an epistemic hedge or refusal? */
 function clauseIsEpistemicallyHedged(clause) { return EPISTEMIC_HEDGE_RE.test(clause); }
@@ -1436,13 +1438,22 @@ function only_language(value, record, { spoken }) {
 // clause (DENIAL_CLAUSE_END_RE), so "did not raise a safety concern" denies
 // the concern, while "did not book, but asked if the bait is safe for her
 // dog" asserts it — the "but" ends the denial's clause before the concern.
-const DENIAL_WORD_RE = /\b(?:(?:not|cannot|(?:is|are|do|did|does|was|were|has|have|had|ca|could|would|wo)n[\x27\u2019]t)(?!\s+only\b)|never|denied|denies|without|nothing(?!\s+(?:but|except|other than)\b)|no(?![-\u2010-\u2015])|neither|none|zero)\b/gi;
+const DENIAL_WORD_RE = /\b(?:(?:not|cannot|(?:is|are|do|did|does|was|were|has|have|had|ca|could|would|wo)n[\x27\u2019]t)(?!\s+(?:only|just|merely|simply)\b)|failed\s+to(?=\s+(?:raise|mention|report)\b)|never|denied|denies|without|nothing(?!\s+(?:but|except|other than)\b)|no(?![-\u2010-\u2015])|neither|none|zero)\b/gi;
 // Commas may enclose an aside and "and" may coordinate denied objects.
 // End their scope only when the next phrase starts a fresh assertion.
 const CAPTURE_NOUN_ASSERTION_START_SOURCE = `(?:[\\w\\x27\\u2019-]+\\s+){1,5}${CLAUSE_FINITE_PREDICATE_RE.source}`;
 const CAPTURE_ASSERTION_START_SOURCE = `(?:(?:(?:the )?(?:caller|customer)|she|he|they)\\s+\\w+|(?:never\\s+)?(?:asked|asks|raised|raises|expressed|expresses|mentioned|mentions|reported|reports|voiced|voices|denied|denies|noting|noted|adding|added|did|does|do|is|are|was|were|has|have|had)\\b|${CAPTURE_NOUN_ASSERTION_START_SOURCE})`;
 const REPORTED_QUESTION_AUX_SOURCE = `(?:${QUESTION_AUX_RE_SOURCE}|\\w+n[\\x27\\u2019]t)`;
 const DENIAL_CLAUSE_END_RE = new RegExp(`[.;!?—–]|\\s-\\s|\\b(?:but|because|however|although|though|so|while|yet)\\b|(?::|,|\\band\\b)\\s*(?:(?:then|also)\\s+)*(?=${CAPTURE_ASSERTION_START_SOURCE})`, 'gi');
+function denialContinuesPastBoundary(text, denial, boundary) {
+  const complement = text.slice(denial.index + denial[0].length, boundary.index);
+  const directQuestion = /^,/.test(boundary[0])
+    && new RegExp(`^\\s*${REPORTED_QUESTION_AUX_SOURCE}\\b`, 'i').test(text.slice(boundary.index + boundary[0].length))
+    && /\b(?:ask|asked|asks|asking|wonder|wondered|wonders|wondering)\s*$/i.test(complement);
+  const namedComplement = /^:/.test(boundary[0]) && /^deni/i.test(denial[0])
+    && /^\s+the\s+following\s*$/i.test(complement);
+  return directQuestion || namedComplement;
+}
 /** [[start, end), …) — the ranges of `text` a denial word governs. */
 function deniedSpans(text) {
   const spans = [];
@@ -1495,12 +1506,9 @@ function deniedSpans(text) {
     }
     DENIAL_CLAUSE_END_RE.lastIndex = m.index + m[0].length;
     let end = DENIAL_CLAUSE_END_RE.exec(text);
-    // A comma introducing a direct-question complement is not a new
-    // assertion when the reporting verb itself is denied: "did not ask,
-    // is it safe?". The question mark still closes that denied complement.
-    while (end && /^,/.test(end[0])
-      && new RegExp(`^\\s*${REPORTED_QUESTION_AUX_SOURCE}\\b`, 'i').test(text.slice(end.index + end[0].length))
-      && /\b(?:ask|asked|asks|asking|wonder|wondered|wonders|wondering)\s*$/i.test(text.slice(m.index + m[0].length, end.index))) {
+    // A comma introducing a direct question or a colon after "denied the
+    // following" opens the denial's complement, not a fresh assertion.
+    while (end && denialContinuesPastBoundary(text, m, end)) {
       end = DENIAL_CLAUSE_END_RE.exec(text);
     }
     spans.push([start, end ? end.index : text.length]);
@@ -1541,7 +1549,14 @@ function capture_lead_input_asserts(value, record) {
 // ── Registration ───────────────────────────────────────────────────────────
 
 const isPlainObject = (v) => v && typeof v === 'object' && !Array.isArray(v);
-const compiles = (source) => { try { return Boolean(new RegExp(source)); } catch { return false; } };
+const compiles = (source, requireContent = false) => {
+  try {
+    const regex = new RegExp(source);
+    return !requireContent || !regex.test('');
+  } catch {
+    return false;
+  }
+};
 
 const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
   no_price_disclosure: () => (v) => (v === true || (isPlainObject(v) && Object.keys(v).length === 1 && (v.allow === 'returned' || (Array.isArray(v.allow) && v.allow.length && v.allow.every((n) => Number.isFinite(Number(n)))))) ? null : 'value must be true, { allow: [amounts] } or { allow: "returned" }'),
@@ -1561,7 +1576,7 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
     ? null : 'value must be { targets: ["<regex naming the account holder>", …] }'),
   only_language: () => (v) => (v === 'en' || v === 'es' ? null : 'value must be en or es'),
   capture_lead_input_asserts: () => (v) => (isPlainObject(v) && Object.keys(v).length
-    && Object.values(v).every((p) => [].concat(p).length && [].concat(p).every((t) => typeof t === 'string' && t.trim() && compiles(t)))
+    && Object.values(v).every((p) => [].concat(p).length && [].concat(p).every((t) => typeof t === 'string' && t.trim() && compiles(t, true)))
     ? null : 'value must be { <capture_lead field>: ["<regex>", …], … }'),
 });
 
