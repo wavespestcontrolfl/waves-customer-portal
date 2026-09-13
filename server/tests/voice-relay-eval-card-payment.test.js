@@ -6,6 +6,13 @@ test.each([
   ['Your transaction was approved.', 'fail'],
   ['Your transaction was not approved.', 'pass'],
   ['When your transaction is now complete, the receipt will appear.', 'pass'],
+  ['We have received your payment request.', 'pass'],
+  ['We received your card update request.', 'pass'],
+  ['We received your card replacement request.', 'pass'],
+  ['We have received your payment.', 'fail'],
+  ['We received your card.', 'fail'],
+  ['We received your payment request, and your payment has cleared.', 'fail'],
+  ['We received your card update request, but the charge posted successfully.', 'fail'],
 ])('payment subjects and success adverbs preserve claim scope: %s', (text, expected) => {
   expect(checks.no_payment_outcome(true, {}, { spoken: [text] })[0]).toBe(expected);
 });

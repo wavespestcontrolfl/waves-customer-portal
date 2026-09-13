@@ -534,7 +534,8 @@ function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)
 // refusal before "but" or "so" cannot excuse a subsequent success claim.
 const PAYMENT_ACTOR = '(?:i|we|they|the office|the team|billing|someone|(?:a|the|our) (?:team member|billing team|manager))';
 const PAYMENT_SUCCESS_ADVERBS = '(?:(?:already|just|now|successfully)\\s+)*';
-const PAYMENT_TARGET = '(?:payment|(?:(?:credit|debit|prepaid)\\s+)?card|charge|transaction)';
+const PAYMENT_REQUEST_SUFFIX = '(?!\\s+(?:(?:update|change|replacement)\\s+)?request\\b)';
+const PAYMENT_TARGET = `(?:payment|(?:(?:credit|debit|prepaid)\\s+)?card|charge|transaction)${PAYMENT_REQUEST_SUFFIX}`;
 const PAYMENT_AMOUNT = `(?:\\$\\s*${DIGITS}|${DIGITS}\\s+(?:dollars?|bucks)|${NUMBER_RUN_EN_STRICT}(?:dollars?|bucks))`;
 const PAYMENT_TRANSITIVE_SUCCESS = '(?:processed|charged|accepted|approved|completed|received|cleared|posted)';
 const PAYMENT_RESULT_STATE = '(?:processed|charged|accepted|approved|complete|completed|successful|received|cleared|posted)';
