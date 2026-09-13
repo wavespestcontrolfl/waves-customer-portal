@@ -152,6 +152,7 @@ describe('voice relay eval — payment outcomes', () => {
     ['Can you confirm your payment was approved?', 'pass'],
     ['I can confirm your payment was approved.', 'fail'],
     ['Your payment was declined but is now approved.', 'fail'],
+    ['Your payment was declined but has now been approved.', 'fail'],
     ['Your payment failed yesterday but has now gone through.', 'fail'],
     ['Your payment was not declined but is now approved.', 'fail'],
     ['Your payment was declined but is not approved.', 'pass'],
@@ -159,6 +160,7 @@ describe('voice relay eval — payment outcomes', () => {
     ['Your payment was declined but the appointment is now approved.', 'pass'],
     ['Your payment failed yesterday but she has now gone through the options.', 'pass'],
     ['Was your payment declined but is now approved?', 'pass'],
+    ['Was your payment declined but has now been approved?', 'pass'],
     ['If your payment was declined but is now approved, the portal will show a receipt.', 'pass'],
     ['I cannot confirm whether your payment was declined but is now approved.', 'pass'],
     ["I'm not sure whether your payment failed but has now gone through.", 'pass'],
@@ -205,9 +207,11 @@ describe('voice relay eval — payment outcomes', () => {
     ['We received your card.', 'fail'],
     ['Your card was charged.', 'fail'],
     ['Si su pago fue aprobado, recibirá un recibo.', 'pass'],
+    ['Si usted autoriza el cargo, su pago será aprobado.', 'pass'],
     ['Su pago será aprobado si usted lo autoriza.', 'pass'],
     ['Sí, su pago fue aprobado.', 'fail'],
     ['Si necesita ayuda, llámenos. Su pago fue aprobado.', 'fail'],
+    ['Si usted autoriza el cargo, llámenos. Su pago será aprobado.', 'fail'],
   ])('round-five payment regressions: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
   });
