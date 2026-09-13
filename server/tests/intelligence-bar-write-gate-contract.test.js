@@ -82,7 +82,7 @@ afterAll(() => {
 // Helpers in services/intelligence-bar/ that are not tool modules. A new
 // non-tool helper added to the directory must be listed here explicitly —
 // otherwise the suite fails, which is the safe default.
-const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js']);
+const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js']);
 
 function isToolShaped(entry) {
   return entry && typeof entry === 'object'
@@ -254,7 +254,7 @@ const READ_ONLY = [
   'get_stripe_balance', 'get_payout_history', 'get_payout_details', 'get_cash_flow',
   'get_fee_analysis', 'get_unreconciled_payouts', 'export_payouts',
   'lookup_property', 'compute_estimate', 'read_pricing_config', 'recent_pricing_changes',
-  'find_similar_estimates', 'match_existing_customer', 'get_waveguard_tiers',
+  'get_estimate_detail', 'find_similar_estimates', 'match_existing_customer', 'get_waveguard_tiers',
   'get_neighborhood_grass_profile',
   'get_railway_status', 'get_railway_deployments', 'get_railway_logs', 'get_railway_variable_names',
   'get_sentry_top_issues', 'get_sentry_new_issues', 'get_sentry_issue_detail',
