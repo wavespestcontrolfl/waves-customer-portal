@@ -56,6 +56,10 @@ describe('no_card_digit_readback card expiration values', () => {
 
 test.each([
   'The expiration date is September 2029.',
+  'Your card expires: September 2029.',
+  'The expiration date is: September 2029.',
+  'Your card expires:09/29.',
+  'Your card expires — September 2029.',
   'Your card expires September 4, 2026 per the portal.',
   'Your card expiration date is September 4, 2026.',
   'My card expires 09/29.',
@@ -69,4 +73,11 @@ test.each([
 
 test('an ordinary Spanish calendar date remains exempt', () => {
   expect(statusFor('La fecha de la cita es 09/29/2029.')).toBe('pass');
+});
+
+test.each([
+  'The appointment date is: September 2029.',
+  'Your card expiration is unavailable. The appointment date is: September 2029.',
+])('punctuation does not turn an appointment date into expiry: %s', (text) => {
+  expect(statusFor(text)).toBe('pass');
 });

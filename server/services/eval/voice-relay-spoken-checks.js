@@ -1265,7 +1265,7 @@ const CARD_NON_FRAGMENT_RES = Object.freeze([
 const CARD_EXPIRATION_CUE = `(?:card(?:[\\x27\\u2019]s)?\\s+(?:that\\s+)?(?:(?:will|does|did)\\s+)?expir(?:e|es|ed|y|ation)|expir(?:y|ation)|card(?:[\\x27\\u2019]s)?\\s+(?:is|was)\\s+(?:valid|good)\\s+through|(?:fecha\\s+de\\s+)?vencimiento(?:\\s+de\\s+(?:la\\s+)?tarjeta)?)`;
 const CARD_EXPIRATION_VALUE_RE = new RegExp(
   `\\b${CARD_EXPIRATION_CUE}(?:\\s+date)?(?:\\s+on\\s+(?:(?:your|the|my|this|that)\\s+)?card)?`
-  + `(?:\\s+(?:(?:is|was|es|era)(?:\\s+(?:on|in))?|on|in|of|at\\s+(?:the\\s+)?end\\s+of))?\\s+`
+  + `(?:\\s+(?:(?:is|was|es|era)(?:\\s+(?:on|in))?|on|in|of|at\\s+(?:the\\s+)?end\\s+of))?(?:\\s+|\\s*[:—–,-]\\s*)`
   + `((?:(?:${MONTHS})\\s+(?:(?:\\d{1,2}(?:st|nd|rd|th)?(?:,\\s*|\\s+)(?:19|20)\\d{2})|(?:(?:19|20)\\d{2})|(?:\\d{2})))|(?:(?:0?[1-9]|1[0-2])\\s*[/.-]\\s*(?:(?:0?[1-9]|[12]\\d|3[01])\\s*[/.-]\\s*)?(?:\\d{2}|(?:19|20)\\d{2}))|(?:(?:19|20)\\d{2}))\\b`,
   'gi',
 );
