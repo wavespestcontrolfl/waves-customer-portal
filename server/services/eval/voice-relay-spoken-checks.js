@@ -47,6 +47,7 @@ const EPISTEMIC_DENIAL_WORDS = Object.freeze(['doubt', 'doubtful', 'unsure', 'un
 // Beyond the canonical list: "someone from the office", "the technician"
 // and "somebody"/"waves" stay too — an existing scenario names each.
 const TEAM_PROMISERS = Object.freeze(['I', 'we', 'the office', 'our office', 'the team', 'our team', 'a member of our team', 'a team member', 'someone', 'someone from the office', 'someone from our office', 'somebody', 'one of us', 'a technician', 'the technician', 'our technician', 'our tech', 'the tech', 'a tech', 'dispatch', 'waves']);
+const CERTAINTY_IDIOM_RE = /\b(?:without (?:a |any )?|no |beyond )doubt\b/gi;
 
 // ── Numbers ────────────────────────────────────────────────────────────────
 
@@ -472,9 +473,11 @@ function clauseBounds(text, at) {
   let m = CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
   while (m) {
     const left = text.slice(start, m.index);
-    // "whether X or Y" presents two alternatives under the same inquiry,
-    // even when both alternatives have their own subject and predicate.
-    if (/^or$/i.test(m[0]) && /\bwhether\b/i.test(left)) {
+    // "whether X or Y" presents two alternatives under the same inquiry.
+    // A refusal also governs the alternatives when "whether" is omitted:
+    // "can't confirm X or Y". Keep both complements intact without teaching
+    // the general clause splitter more finite predicates.
+    if (/^or$/i.test(m[0]) && (/\bwhether\b/i.test(left) || EPISTEMIC_HEDGE_RE.test(left))) {
       m = CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
       continue;
     }
@@ -539,7 +542,7 @@ function claimContext(text, start, end) {
 /** Does `clause` carry a negation or conditional marker anywhere in it? */
 function clauseIsNegated(clause) {
   // These reassurance prefixes do not deny the claim that follows them.
-  return NEGATION_RE.test(clause.replace(/\b(?:without (?:a |any )?|no |beyond )doubt\b/gi, '').replace(/^\s*(?:no worries|no problem|do not worry|don['’]t worry)\b[\s,:—–]*/i, ''));
+  return NEGATION_RE.test(clause.replace(CERTAINTY_IDIOM_RE, '').replace(/^\s*(?:no worries|no problem|do not worry|don['’]t worry)\b[\s,:—–]*/i, ''));
 }
 // A refusal/hedge prefix — negation + a short filler + a reporting verb
 // ("can't say", "not able to promise"), or a verb that carries its own
@@ -1421,13 +1424,20 @@ function only_language(value, record, { spoken }) {
 const DENIAL_WORD_RE = /\b(?:(?:not|cannot|(?:is|are|did|does|was|were|has|have|had|ca|could|would|wo)n[\x27\u2019]t)(?!\s+only\b)|never|denied|denies|without|no|neither|none|zero)\b/gi;
 // Commas may enclose an aside and "and" may coordinate denied objects.
 // End their scope only when the next phrase starts a fresh assertion.
-const DENIAL_CLAUSE_END_RE = /[.:;!?—–]|\s-\s|\b(?:but|however|although|though|so|while|yet)\b|(?:,|\band\b)\s*(?:(?:then|also)\s+)*(?=(?:(?:the )?(?:caller|customer)|she|he|they)\s+\w+|(?:asked|asks|raised|raises|expressed|expresses|mentioned|mentions|reported|reports|voiced|voices|noting|noted|adding|added|did|does|do|is|are|was|were|has|have|had)\b)/gi;
+const CAPTURE_ASSERTION_START_SOURCE = '(?:(?:(?:the )?(?:caller|customer)|she|he|they)\\s+\\w+|(?:asked|asks|raised|raises|expressed|expresses|mentioned|mentions|reported|reports|voiced|voices|noting|noted|adding|added|did|does|do|is|are|was|were|has|have|had)\\b)';
+const DENIAL_CLAUSE_END_RE = new RegExp(`[.;!?—–]|\\s-\\s|\\b(?:but|however|although|though|so|while|yet)\\b|(?::|,|\\band\\b)\\s*(?:(?:then|also)\\s+)*(?=${CAPTURE_ASSERTION_START_SOURCE})`, 'gi');
 /** [[start, end), …) — the ranges of `text` a denial word governs. */
 function deniedSpans(text) {
   const spans = [];
+  const certaintySpans = [...text.matchAll(new RegExp(CERTAINTY_IDIOM_RE.source, CERTAINTY_IDIOM_RE.flags))]
+    .map((match) => [match.index, match.index + match[0].length]);
   DENIAL_WORD_RE.lastIndex = 0;
   let m = DENIAL_WORD_RE.exec(text);
   while (m) {
+    if (certaintySpans.some(([start, end]) => m.index >= start && m.index < end)) {
+      m = DENIAL_WORD_RE.exec(text);
+      continue;
+    }
     let start = m.index;
     const prefix = text.slice(0, m.index);
     // Negation inside a reported question is its content, not a denial
@@ -1437,7 +1447,18 @@ function deniedSpans(text) {
     DENIAL_CLAUSE_END_RE.lastIndex = 0;
     for (const boundary of prefix.matchAll(DENIAL_CLAUSE_END_RE)) assertionStart = boundary.index + boundary[0].length;
     const assertionPrefix = prefix.slice(assertionStart);
-    if (/\b(?:asked|asks|asking|wondered|wonders)\b[^.;!?]*\b(?:if|whether)\b/i.test(assertionPrefix)) {
+    const indirectQuestion = /\b(?:asked|asks|asking|wondered|wonders)\b[^.;!?]*\b(?:if|whether)\b/i.test(assertionPrefix);
+    const directQuestion = prefix.match(/\b(?:asked|asks|asking|wondered|wonders)\b\s*,\s*(?:is|are|was|were|do|does|did|can|could|would|will|has|have|had)\b[^.;!?]*$/i);
+    let directQuestionDenied = false;
+    if (directQuestion) {
+      let reporterStart = 0;
+      DENIAL_CLAUSE_END_RE.lastIndex = 0;
+      for (const boundary of prefix.slice(0, directQuestion.index).matchAll(DENIAL_CLAUSE_END_RE)) {
+        reporterStart = boundary.index + boundary[0].length;
+      }
+      directQuestionDenied = clauseIsNegated(prefix.slice(reporterStart, directQuestion.index + directQuestion[0].indexOf(',')));
+    }
+    if (indirectQuestion || (directQuestion && !directQuestionDenied)) {
       m = DENIAL_WORD_RE.exec(text);
       continue;
     }
@@ -1451,7 +1472,15 @@ function deniedSpans(text) {
       for (const boundary of prefix.matchAll(DENIAL_CLAUSE_END_RE)) start = boundary.index + boundary[0].length;
     }
     DENIAL_CLAUSE_END_RE.lastIndex = m.index + m[0].length;
-    const end = DENIAL_CLAUSE_END_RE.exec(text);
+    let end = DENIAL_CLAUSE_END_RE.exec(text);
+    // A comma introducing a direct-question complement is not a new
+    // assertion when the reporting verb itself is denied: "did not ask,
+    // is it safe?". The question mark still closes that denied complement.
+    while (end && /^,/.test(end[0])
+      && QUESTION_LEAD_RE.test(text.slice(end.index + end[0].length))
+      && /\b(?:ask|asked|asks|asking|wonder|wondered|wonders|wondering)\s*$/i.test(text.slice(m.index + m[0].length, end.index))) {
+      end = DENIAL_CLAUSE_END_RE.exec(text);
+    }
     spans.push([start, end ? end.index : text.length]);
     m = DENIAL_WORD_RE.exec(text);
   }
