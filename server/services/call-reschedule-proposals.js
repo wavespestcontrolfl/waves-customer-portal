@@ -17,7 +17,7 @@ const norm = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g,
 const openStates = ['open', 'in_progress'];
 const ADDRESS_COLUMNS = ['address_line1', 'address_line2', 'city', 'state', 'zip'];
 const CUSTOMER_COLUMNS = ['id', 'first_name', 'last_name', 'deleted_at', 'phone', 'secondary_phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone', ...ADDRESS_COLUMNS];
-const PROPERTY_COLUMNS = ['id', ...ADDRESS_COLUMNS, 'updated_at'];
+const PROPERTY_COLUMNS = ['id', 'customer_id', ...ADDRESS_COLUMNS, 'updated_at'];
 
 // Display only: keep the raw property identity untouched for the Apply guard.
 function proposalAddress(visit, customer) {
@@ -149,7 +149,7 @@ async function visitsForCard(conn, customerId, now) {
     serviceIds.length ? conn('services').whereIn('id', serviceIds).select('id', 'name') : [],
     propertyIds.length ? conn('customer_properties').where({ active: true })
       .whereIn('customer_id', Array.isArray(customerId) ? customerId : [customerId])
-      .whereIn('id', propertyIds).select('customer_id', ...PROPERTY_COLUMNS) : [],
+      .whereIn('id', propertyIds).select(PROPERTY_COLUMNS) : [],
   ]);
   return rows.map((r) => ({ ...r, service_name: services.find((s) => s.id === r.service_id)?.name || 'Service',
     property: properties.find((p) => p.id === r.property_id && p.customer_id === r.customer_id) || null, current_window: customerWindow(r.scheduled_date, r.window_start) }));
