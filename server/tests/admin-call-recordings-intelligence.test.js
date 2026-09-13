@@ -10,6 +10,7 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), ga
 jest.mock('../services/sms-operational-actions', () => ({
   smsCommitmentsEnabled: jest.fn(() => false), listSmsCommitments: jest.fn(async () => []), applySmsCommitmentUpdate: jest.fn(),
 }));
+jest.mock('../services/call-reschedule-proposals', () => ({ enabled: jest.fn(), listProposals: jest.fn(), dismissProposal: jest.fn() }));
 jest.mock('../services/call-intelligence', () => ({ loadCallIntelligence: jest.fn() }));
 jest.mock('../services/callback-cards', () => ({
   enabled: jest.fn(() => false), prepareCallbackCards: jest.fn(), decorateCallbackRows: jest.fn(async (_db, rows) => rows), actOnCallback: jest.fn(),
@@ -892,4 +893,31 @@ describe('POST /calls/:id/adopt-recording', () => {
     });
     expect(processor.processRecording).not.toHaveBeenCalled();
   });
+});
+
+
+describe('proposal lifecycle routes', () => {
+  const proposals = require('../services/call-reschedule-proposals');
+  beforeEach(() => { jest.clearAllMocks(); proposals.enabled.mockReturnValue(true); });
+  test('invalid pagination refuses before loading; a full page returns a next offset', () => withServer(async (base) => {
+    const invalid = await fetch(`${base}/admin/call-recordings/proposals?offset=-1`);
+    expect(invalid.status).toBe(400);
+    expect(proposals.listProposals).not.toHaveBeenCalled();
+    proposals.listProposals.mockResolvedValue(Array.from({ length: 101 }, (_, id) => ({ id })));
+    const response = await fetch(`${base}/admin/call-recordings/proposals?offset=100`);
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.proposals).toHaveLength(100);
+    expect(body).toMatchObject({ proposals_enabled: true, has_more: true, next_offset: 200 });
+    expect(proposals.listProposals).toHaveBeenCalledWith(db, { limit: 101, offset: 100 });
+  }));
+  test('dismissal passes the authenticated actor and preserves stale-version refusal', () => withServer(async (base) => {
+    proposals.dismissProposal.mockRejectedValue(Object.assign(new Error('The proposal changed.'), { status: 409 }));
+    const expectedAt = '2026-09-13T03:00:00Z';
+    const response = await fetch(`${base}/admin/call-recordings/proposals/${COMMIT_ID}/dismiss`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expected_at: expectedAt, actorId: 'forged' }),
+    });
+    expect(response.status).toBe(409);
+    expect(proposals.dismissProposal).toHaveBeenCalledWith(db, COMMIT_ID, { actorId: 'tech-1', expectedAt });
+  }));
 });
