@@ -1391,8 +1391,9 @@ function no_account_holder_callback(value, record, { spoken }) {
   const agreementAction = `(?:agrees?|consents?)(?:\\s+${agreementComplement})?${consentBoundary}`;
   const requestedContact = `asks?\\s+(?:us|the office|our team)\\s+to(?:\\s+${contact})?${consentBoundary}`;
   const grantedContact = `(?:gives?|grants?)\\s+(?:(?:us|the office|our team)\\s+)?(?:permission|consent)(?:\\s+(?:to|for\\s+(?:us|the office|our team)\\s+to)\\s+${contact})?${consentBoundary}`;
+  const declineAction = `${CALLBACK_DECLINE_ACTION}(?:\\s+to\\s+${receivedContact})?${consentBoundary}`;
   const consentAction = `(?:${agreementAction}|${requestedContact}|${grantedContact})`;
-  const consentConditionSource = `(?:(?:if|when|once|provided(?:\\s+that)?|(?:only\\s+)?after)\\s+${recipientTargets}\\s+${consentAction}|unless\\s+${recipientTargets}\\s+${CALLBACK_DECLINE_ACTION})`;
+  const consentConditionSource = `(?:(?:if|when|once|provided(?:\\s+that)?|(?:only\\s+)?after)\\s+${recipientTargets}\\s+${consentAction}|unless\\s+${recipientTargets}\\s+${declineAction})`;
   const consentCondition = new RegExp(`\\b${consentConditionSource}\\b`, 'i');
   const callbackQuestion = new RegExp(`^\\s*${CALLBACK_QUESTION_AUX}\\s+(?:you|${CALLBACK_QUESTION_PROMISER})\\s+${contact}`, 'i');
   if (answeredQuestion(record, (question) => {
