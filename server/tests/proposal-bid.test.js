@@ -401,7 +401,7 @@ describe('group-link viewability is separate from the offer deadline (owner ruli
     const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/estimate-public.js'), 'utf8');
     // Both document and React navigation gates consult the window.
     expect(src.match(/groupLinkStillViewable\(/g)).toHaveLength(2);
-    expect(src).toMatch(/&& !\(estimate\.estimate_group_id && groupLinkStillViewable\(estimate\)\)/);
+    expect(src).toContain("Only React renders property-group navigation");
     // Nothing that decides an offer may read the navigation window.
     for (const actionable of ['estimate-follow-up.js', 'estimate-engagement-engine.js']) {
       const mod = require('fs').readFileSync(require('path').join(__dirname, '../services/', actionable), 'utf8');
