@@ -298,6 +298,25 @@ describe('reschedule() choke point', () => {
     expect(seriesOperationKey('svc-1', TARGET, { start: '09:00', end: '11:00' }, {}).requestKey).not.toMatch(/:tech=/);
   });
 
+  test('the longest derived pending key fits series_moves.operation_key and stays distinct from the default key', async () => {
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    const serviceId = '11111111-1111-4111-8111-111111111111';
+    const technicianId = '22222222-2222-4222-8222-222222222222';
+    const service = anchorRow({ id: serviceId });
+    const window = { start: '08:00', end: '18:00' };
+    const common = { ...ADMIN_OPTS, clearAnchorWindow: true, technicianId };
+    const { priorLookup: pendingLookup } = wireLookup(service);
+    await SmartRebooker.reschedule(serviceId, TARGET, window, 'admin', 'admin', { ...common, pendingConfirmation: true });
+    const pendingKey = pendingLookup.where.mock.calls.map(([arg]) => arg?.operation_key).find(Boolean);
+    const { priorLookup: defaultLookup } = wireLookup(service);
+    await SmartRebooker.reschedule(serviceId, TARGET, window, 'admin', 'admin', common);
+    const defaultKey = defaultLookup.where.mock.calls.map(([arg]) => arg?.operation_key).find(Boolean);
+    expect(pendingKey).toBe(`${serviceId}:${TARGET}:08:00:18:00:clear:pending:tech=${technicianId}`);
+    expect(pendingKey.length).toBeLessThanOrEqual(120);
+    expect(defaultKey).toBe(`${serviceId}:${TARGET}:08:00:18:00:clear:tech=${technicianId}`);
+    expect(pendingKey).not.toBe(defaultKey);
+  });
+
   test('a completed ROUND TRIP (A→B, B→A, A→B within the horizon) proceeds: a later committed move of this anchor makes the A→B row history, not this request\'s earlier attempt', async () => {
     process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
     const priorMove = { id: 'sm-prior', original_date: BASE, new_date: TARGET, created_at: new Date(Date.now() - 5 * 60 * 1000), result: { rescheduledOccurrences: [{ id: 'svc-1', date: TARGET, windowStart: '13:00', windowEnd: '15:00' }] } };
@@ -464,16 +483,16 @@ describe('rescheduleSeries — date-only sweep', () => {
     expect(updates[1].update.mock.calls[0][0]).toMatchObject({ status: 'confirmed' });
     expect(updates[1].update.mock.calls[0][0]).not.toHaveProperty('customer_confirmed');
     expect(historyInsert.insert).toHaveBeenCalledWith({ job_id: 'svc-1', from_status: 'confirmed', to_status: 'pending', transitioned_by: null });
-    expect(seriesMovesDb.where).toHaveBeenCalledWith(expect.objectContaining({ operation_key: expect.stringMatching(/:pending-confirmation$/) }));
+    expect(seriesMovesDb.where).toHaveBeenCalledWith(expect.objectContaining({ operation_key: expect.stringMatching(/:pending$/) }));
     expect(activateLegacyOutboundReviewRowIfNeeded).not.toHaveBeenCalled();
   });
 
   test('a reviewed occurrence pins customer confirmation in its write CAS', async () => {
-    const row = sib('svc-1', BASE, { customer_confirmed: false });
+    const row = sib('svc-1', BASE, { customer_confirmed: false, estimated_duration_minutes: 90 });
     const { updates } = wireSeriesMocks([row]);
     const disclosed = {
       id: 'svc-1', from_date: BASE, status: 'confirmed', customer_confirmed: false,
-      from_start: '09:00:00', from_end: '11:00:00', duration: null, property_id: null,
+      from_start: '09:00:00', from_end: '11:00:00', duration: 90, property_id: null,
       date_exception: false, cadence_date: null,
       to_date: TARGET, to_start: '09:00', to_end: '11:00',
     };
@@ -481,6 +500,7 @@ describe('rescheduleSeries — date-only sweep', () => {
       ...ADMIN_OPTS, expectOccurrenceIds: ['svc-1'], expectOccurrences: [disclosed],
     });
     expect(updates[0].where).toHaveBeenCalledWith(expect.objectContaining({ customer_confirmed: false }));
+    expect(updates[0].where).toHaveBeenCalledWith(expect.objectContaining({ estimated_duration_minutes: 90 }));
     expect(updates[0].update.mock.calls[0][0]).not.toHaveProperty('customer_confirmed');
   });
 

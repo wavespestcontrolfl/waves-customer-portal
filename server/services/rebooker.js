@@ -282,7 +282,7 @@ function seriesOperationKey(serviceId, newDate, newWindow, options = {}) {
   // request of its own, distinct from an omitted technician (codex r16 P2).
   const techRequested = Object.prototype.hasOwnProperty.call(options, 'technicianId');
   const techKey = techRequested ? `:tech=${options.technicianId ? String(options.technicianId) : '-'}` : '';
-  const confirmationKey = options.pendingConfirmation === true ? ':pending-confirmation' : '';
+  const confirmationKey = options.pendingConfirmation === true ? ':pending' : '';
   const requestKey = `${serviceId}:${dateOnly(newDate)}:${hm(win.start)}:${hm(win.end)}${options.clearAnchorWindow === true ? ':clear' : ''}${confirmationKey}${techKey}`;
   const technician = techRequested ? { id: options.technicianId ? String(options.technicianId) : null } : null;
   if (typeof options.operationKey === 'string' && options.operationKey) {
@@ -2850,13 +2850,16 @@ class SmartRebooker {
                 ? { customer_confirmed: sib.customer_confirmed ?? null }
                 : {}),
               technician_id: sib.technician_id ?? null,
-              // Duration pin, only when the occupancy probes above derived
-              // their span from it (null landing end + gate on): a
+              // Reviewed proposals compare duration above, so their write
+              // always pins it. Otherwise pin only when the occupancy probes
+              // derived their span from it (null landing end + gate on): a
               // concurrent duration-only edit must invalidate the match —
               // same rationale as the single-path CAS (codex #3377 P1).
               // Also pinned when a start-only move derived this row's end
               // from its own duration (seriesOccurrenceWindow).
-              ...(((!updateData.window_end && process.env.REBOOKER_NULL_END_OCCUPANCY !== 'off') || (win.start && !win.end))
+              ...((Array.isArray(options.expectOccurrences)
+                || (!updateData.window_end && process.env.REBOOKER_NULL_END_OCCUPANCY !== 'off')
+                || (win.start && !win.end))
                 ? { estimated_duration_minutes: sib.estimated_duration_minutes ?? null }
                 : {}),
             }),
