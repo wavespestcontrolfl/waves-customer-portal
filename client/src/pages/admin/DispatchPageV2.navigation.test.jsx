@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { MemoryRouter } from 'react-router-dom';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { MemoryRouter, useNavigate } from 'react-router-dom';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import DispatchPageV2 from './DispatchPageV2';
 import { adminFetch } from '../../utils/admin-fetch';
@@ -17,10 +17,17 @@ vi.mock('./SchedulePage', () => ({
   ProtocolPanel: () => null,
   completionResumeOwed: () => false,
 }));
-vi.mock('../../components/schedule/TimeGridDay', () => ({ default: ({ onEdit }) => <div>Schedule visits
+vi.mock('../../components/schedule/TimeGridDay', () => ({ default: ({ onEdit, services = [] }) => <div>Schedule visits {services.map((service) => service.customerName).join(', ')}
   <button onClick={() => onEdit(enabledVisit)}>Open day visit</button>
   <button onClick={() => onEdit(enabledStandalone)}>Open standalone day</button>
 </div> }));
+const appointmentModalState = vi.hoisted(() => ({ props: null }));
+vi.mock('../../components/schedule/CreateAppointmentModal', () => ({
+  default: (props) => {
+    appointmentModalState.props = props;
+    return <div role="dialog">New booking for {props.defaultDate}</div>;
+  },
+}));
 vi.mock('../../components/schedule/MobileDispatchList', () => ({ default: () => null }));
 vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false }));
 vi.mock('../../components/admin/VisitCloseoutSheet', () => ({ default: ({ visitId }) => <div>Visit closeout {visitId}</div> }));
@@ -29,6 +36,22 @@ beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ alerts: [] }) })));
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.clearAllMocks(); });
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+function schedulePayload(date, customerName) {
+  return {
+    date,
+    services: customerName ? [{ id: customerName, customerName }] : [],
+    technicians: [],
+    products: [],
+    types: [],
+  };
+}
 
 
 vi.mock('../../components/schedule/TimeGridDays', () => ({ default: ({ date, dayCount, onEdit }) => <div>Grid date: {date}<button onClick={() => onEdit(enabledVisit)}>Open {dayCount}-day visit</button></div> }));
@@ -85,6 +108,85 @@ it('keeps a standalone row in the normal editor when the legacy gate marks every
   expect(screen.queryByText(/Visit closeout/)).not.toBeInTheDocument();
 });
 
+it('keeps a reopened draft open when a cancelled booking finishes in the background', async () => {
+  const refresh = deferred();
+  let nextDateLoads = 0;
+  vi.mocked(adminFetch).mockImplementation((url) => {
+    if (url === '/admin/dispatch/products/catalog') return Promise.resolve({ products: [] });
+    if (url === '/admin/schedule?date=2026-09-30') {
+      return Promise.resolve(schedulePayload('2026-09-30', 'First day'));
+    }
+    if (url === '/admin/schedule?date=2026-10-01') {
+      nextDateLoads += 1;
+      return nextDateLoads === 1
+        ? Promise.resolve(schedulePayload('2026-10-01', 'Next day'))
+        : refresh.promise;
+    }
+    return Promise.resolve(schedulePayload('', null));
+  });
+  const setOpenCreateHandler = vi.fn();
+  render(
+    <MemoryRouter initialEntries={['/admin/dispatch?date=2026-09-30']}>
+      <DispatchPageV2 activeTab="board" setOpenCreateHandler={setOpenCreateHandler} />
+    </MemoryRouter>,
+  );
+  await screen.findByText(/First day/);
+  await waitFor(() => expect(setOpenCreateHandler).toHaveBeenCalled());
+
+  act(() => setOpenCreateHandler.mock.calls.at(-1)[0]());
+  const firstOnCreated = appointmentModalState.props.onCreated;
+  act(() => appointmentModalState.props.onClose());
+  fireEvent.click(screen.getByRole('button', { name: 'Next', exact: true }));
+  await screen.findByText(/Next day/);
+  act(() => setOpenCreateHandler.mock.calls.at(-1)[0]());
+  expect(screen.getByRole('dialog')).toHaveTextContent('2026-10-01');
+
+  act(() => firstOnCreated({ id: 'created' }, { background: true }));
+  expect(screen.getByRole('dialog')).toHaveTextContent('2026-10-01');
+  expect(screen.queryByText('Loading schedule…')).not.toBeInTheDocument();
+  await act(async () => {
+    refresh.resolve(schedulePayload('2026-10-01', 'Background refresh'));
+  });
+  expect(await screen.findByText(/Background refresh/)).toBeInTheDocument();
+  expect(screen.getByRole('dialog')).toHaveTextContent('2026-10-01');
+});
+
+it('discards a refresh response after its date is no longer displayed', async () => {
+  const staleRefresh = deferred();
+  let firstDateLoads = 0;
+  vi.mocked(adminFetch).mockImplementation((url) => {
+    if (url === '/admin/dispatch/products/catalog') return Promise.resolve({ products: [] });
+    if (url === '/admin/schedule?date=2026-09-30') {
+      firstDateLoads += 1;
+      return firstDateLoads === 1
+        ? Promise.resolve(schedulePayload('2026-09-30', 'First day'))
+        : staleRefresh.promise;
+    }
+    if (url === '/admin/schedule?date=2026-10-01') {
+      return Promise.resolve(schedulePayload('2026-10-01', 'Current day'));
+    }
+    return Promise.resolve(schedulePayload('', null));
+  });
+  const setOpenCreateHandler = vi.fn();
+  render(
+    <MemoryRouter initialEntries={['/admin/dispatch?date=2026-09-30']}>
+      <DispatchPageV2 activeTab="board" setOpenCreateHandler={setOpenCreateHandler} />
+    </MemoryRouter>,
+  );
+  await screen.findByText(/First day/);
+  await waitFor(() => expect(setOpenCreateHandler).toHaveBeenCalled());
+  act(() => setOpenCreateHandler.mock.calls.at(-1)[0]());
+  act(() => appointmentModalState.props.onCreated({}, { background: true }));
+  fireEvent.click(screen.getByRole('button', { name: 'Next', exact: true }));
+  expect(await screen.findByText(/Current day/)).toBeInTheDocument();
+
+  await act(async () => {
+    staleRefresh.resolve(schedulePayload('2026-09-30', 'Stale first day'));
+  });
+  expect(screen.getByText(/Current day/)).toBeInTheDocument();
+  expect(screen.queryByText(/Stale first day/)).not.toBeInTheDocument();
+});
+
 vi.mock('../../components/schedule/MobileDayStrip', () => ({ default: () => <div>Day strip</div> }));
 vi.mock('../../components/dispatch/TechMatchPanelV2', () => ({ default: () => <div>Tech Match tools</div> }));
 vi.mock('../../components/dispatch/CSRPanelV2', () => ({ default: () => <div>CSR Booking tools</div> }));
@@ -106,4 +208,88 @@ it('keeps the mobile board Day and Week switches available', async () => {
   render(<MemoryRouter><DispatchPageV2 activeTab="board" /></MemoryRouter>);
   expect(await screen.findByRole('button', { name: 'Week', exact: true })).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Day', exact: true })).toBeInTheDocument();
+});
+
+
+it('recovers a failed day load when a late booking refresh succeeds', async () => {
+  let nextDayLoads = 0;
+  vi.mocked(adminFetch).mockImplementation((url) => {
+    if (url === '/admin/dispatch/products/catalog') return Promise.resolve({ products: [] });
+    if (url === '/admin/schedule?date=2026-10-01' && ++nextDayLoads === 1) {
+      return Promise.reject(new Error('Day unavailable'));
+    }
+    return Promise.resolve(schedulePayload('2026-10-01', 'Recovered schedule'));
+  });
+  const setOpenCreateHandler = vi.fn();
+  render(<MemoryRouter initialEntries={['/admin/dispatch?date=2026-09-30']}>
+    <DispatchPageV2 activeTab="board" setOpenCreateHandler={setOpenCreateHandler} />
+  </MemoryRouter>);
+  await screen.findByText(/Recovered schedule/);
+  await waitFor(() => expect(setOpenCreateHandler).toHaveBeenCalled());
+  act(() => setOpenCreateHandler.mock.calls.at(-1)[0]());
+  const lateRefresh = appointmentModalState.props.onCreated;
+  act(() => appointmentModalState.props.onClose());
+  fireEvent.click(screen.getByRole('button', { name: 'Next', exact: true }));
+  await screen.findByText(/Failed to load schedule: Day unavailable/);
+  act(() => lateRefresh({}, { background: true }));
+  expect(await screen.findByText(/Recovered schedule/)).toBeInTheDocument();
+  expect(screen.queryByText(/Failed to load schedule/)).not.toBeInTheDocument();
+});
+
+
+it.each(['success', 'failure', 'new-failure'])('keeps the latest same-day outcome when an older load settles (%s)', async (outcome) => {
+  const older = deferred();
+  let nextDayLoads = 0;
+  vi.mocked(adminFetch).mockImplementation((url) => {
+    if (url === '/admin/dispatch/products/catalog') return Promise.resolve({ products: [] });
+    if (url === '/admin/schedule?date=2026-10-01') {
+      nextDayLoads += 1;
+      if (nextDayLoads === 1) return older.promise;
+      if (outcome === 'new-failure') return Promise.reject(new Error('Latest error'));
+    }
+    return Promise.resolve(schedulePayload('2026-10-01', 'Current schedule'));
+  });
+  const setOpenCreateHandler = vi.fn();
+  render(<MemoryRouter initialEntries={['/admin/dispatch?date=2026-09-30']}>
+    <DispatchPageV2 activeTab="board" setOpenCreateHandler={setOpenCreateHandler} />
+  </MemoryRouter>);
+  await screen.findByText(/Current schedule/);
+  await waitFor(() => expect(setOpenCreateHandler).toHaveBeenCalled());
+  act(() => setOpenCreateHandler.mock.calls.at(-1)[0]());
+  const lateRefresh = appointmentModalState.props.onCreated;
+  act(() => appointmentModalState.props.onClose());
+  fireEvent.click(screen.getByRole('button', { name: 'Next', exact: true }));
+  await screen.findByText('Loading schedule…');
+  act(() => lateRefresh({}, { background: true }));
+  const expected = outcome === 'new-failure' ? /Latest error/ : /Current schedule/;
+  expect(await screen.findByText(expected)).toBeInTheDocument();
+  expect(screen.queryByText('Loading schedule…')).not.toBeInTheDocument();
+  await act(async () => older.resolve(outcome === 'failure'
+    ? Promise.reject(new Error('Stale error'))
+    : schedulePayload('2026-10-01', 'Stale schedule')));
+  expect(screen.getByText(expected)).toBeInTheDocument();
+  expect(screen.queryByText(/Stale schedule|Stale error/)).not.toBeInTheDocument();
+});
+
+function MissingAppointmentLink() {
+  const navigate = useNavigate();
+  return <button onClick={() => navigate('/admin/dispatch?date=2026-09-30&appointment=missing')}>Missing appointment link</button>;
+}
+
+it('preserves a consumed missing-appointment message during background refresh', async () => {
+  vi.mocked(adminFetch).mockResolvedValue(schedulePayload('2026-09-30', 'Current schedule'));
+  const setOpenCreateHandler = vi.fn();
+  render(<MemoryRouter initialEntries={['/admin/dispatch?date=2026-09-30']}>
+    <MissingAppointmentLink />
+    <DispatchPageV2 activeTab="board" setOpenCreateHandler={setOpenCreateHandler} />
+  </MemoryRouter>);
+  await screen.findByText(/Current schedule/);
+  await waitFor(() => expect(setOpenCreateHandler).toHaveBeenCalled());
+  act(() => setOpenCreateHandler.mock.calls.at(-1)[0]());
+  const lateRefresh = appointmentModalState.props.onCreated;
+  act(() => appointmentModalState.props.onClose());
+  fireEvent.click(screen.getByRole('button', { name: 'Missing appointment link' }));
+  await screen.findByText(/That appointment is no longer on this date/);
+  await act(async () => lateRefresh({}, { background: true }));
+  expect(screen.getByText(/That appointment is no longer on this date/)).toBeInTheDocument();
 });
