@@ -140,6 +140,14 @@ describe('voice relay eval — capture_lead_input_asserts', () => {
     ['Customer was unable to mention a safety concern for her dog.', 'fail'],
     ['Customer was unable to report a safety concern for her dog.', 'fail'],
     ['Customer was unable to book an appointment and raised a safety concern for her dog.', 'pass'],
+    ['Customer refused to raise a safety concern for her dog.', 'fail'],
+    ['Customer refused to mention a safety concern for her dog.', 'fail'],
+    ['Customer refused to report a safety concern for her dog.', 'fail'],
+    ['Customer declined to raise a safety concern for her dog.', 'fail'],
+    ['Customer declined to mention a safety concern for her dog.', 'fail'],
+    ['Customer declined to report a safety concern for her dog.', 'fail'],
+    ['Customer refused to book an appointment and raised a safety concern for her dog.', 'pass'],
+    ['Customer declined to book an appointment and raised a safety concern for her dog.', 'pass'],
   ])('capture_lead_input_asserts grades the concern as asserted, not merely mentioned — %s', (summary, status) => {
     const check = runCheck(exp('capture_lead_input_asserts', PET_CONCERN, 'critical'), captured(summary));
     expect(check.status).toBe(status);
@@ -288,6 +296,10 @@ test.each([
   ['I can check if you are eligible, your refund was processed.', 'fail'],
   ['I cannot access your account and your refund was processed.', 'fail'],
   ['I doubt the appointment details and your refund was processed.', 'fail'],
+  ['I doubt the appointment: we processed your refund.', 'fail'],
+  ['I cannot confirm the appointment: we processed your refund.', 'fail'],
+  ['I doubt this: your refund was processed.', 'pass'],
+  ['I cannot confirm: your refund was processed.', 'pass'],
   ['If anything, your refund was processed.', 'fail'],
   ['If you ask me, your refund was processed.', 'fail'],
   ['I cannot confirm the appointment details and the office processed your refund.', 'fail'],

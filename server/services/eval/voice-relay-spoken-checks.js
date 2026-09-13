@@ -406,14 +406,14 @@ const NEGATION_RE = /\b(?:not(?!\s+only\b)|never|cannot|can[\x27\u2019]?t|\w+n[\
 // One shared primitive every exemption, negation and cue-proximity rule
 // below is built from, instead of each hand-rolling its own filler-word
 // cap or fixed-distance window. A CLAUSE is the span between two
-// boundaries: a sentence terminator (. ! ? ;), an em/en dash, or a
-// COORDINATOR (but/and/or/though/however/yet/so) that starts a genuinely NEW
-// clause. A word-count cap reads "I doubt it, but yes, the next visit is
+// boundaries: a sentence terminator (. ! ? ;), a colon before a fresh
+// subject, an em/en dash, or a COORDINATOR (but/and/or/though/however/yet/so)
+// that starts a genuinely NEW clause. A word-count cap reads "I doubt it, but yes, the next visit is
 // free." as one exempt clause too many — "but" is exactly the boundary a
 // cap can't see — and, symmetrically, drops a refusal that sits a little
 // further from its claim than the cap happens to reach. Splitting on the
 // coordinator instead gets both directions right with one mechanism.
-const CLAUSE_BOUNDARY_TOKEN_RE = /[.!?;]|[—–]|\b(?:but|and|or|though|although|however|yet|so|then|while|because|pero|sin embargo|aunque)\b/gi;
+const CLAUSE_BOUNDARY_TOKEN_RE = /[.!?;:]|[—–]|\b(?:but|and|or|though|although|however|yet|so|then|while|because|pero|sin embargo|aunque)\b/gi;
 const COORDINATED_REPORT_VERBS = vocabAlt([...EPISTEMIC_REFUSAL_VERBS, 'deny']);
 const REFUND_PAYMENT_ACTION_RE = /\b(?:refund(?:ed|ing)?|revers(?:e|ed|ing)|return(?:ed|ing)?)\s+(?:(?:your|the|that|a|an)\s+)?(?:last\s+|full\s+|partial\s+|original\s+)?(?:payment|charge|amount)\b/i;
 const CLAUSE_FINITE_PREDICATE_RE = /\b(?:is|are|was|were|has|have|had|will|would|should|can|cannot|could|did|does|do|\w+n[\x27\u2019]t|applied|placed|processed)\b/i;
@@ -421,6 +421,16 @@ const RIGHT_NOUN_PHRASE_SUBJECT_RE = new RegExp(
   `^\\s*(?:an?|the|this|that|these|those)\\s+(?:[\\w\\x27\\u2019-]+\\s+){0,5}${CLAUSE_FINITE_PREDICATE_RE.source}`,
   'i',
 );
+function colonContinuesClause(token, left, independentSubject) {
+  if (!/^:$/.test(token)) return false;
+  const hedge = EPISTEMIC_HEDGE_RE.exec(left);
+  const complement = hedge ? left.slice(hedge.index + hedge[0].length).trim() : null;
+  return !independentSubject || (complement !== null && /^(?:(?:any of )?(?:this|that|it))?$/i.test(complement));
+}
+function coordinatorContinuesNominal(token, nominal, independentSubject) {
+  return /^(?:and|or)$/i.test(token) && !independentSubject && nominal
+    && !/^(?:it|this|that)$/i.test(nominal) && !CLAUSE_FINITE_PREDICATE_RE.test(nominal);
+}
 /** [start, end) of the clause in `text` containing character index `at`. */
 function clauseBounds(text, at) {
   let start = 0;
@@ -454,8 +464,13 @@ function clauseBounds(text, at) {
       // assertion: "... appointment details and a refund was issued".
       || (/^and$/i.test(m[0]) && (RIGHT_NOUN_PHRASE_SUBJECT_RE.test(right)
         || new RegExp(`^\\s*(?:${CLAUSE_FINITE_PREDICATE_RE.source}|${REFUND_PAYMENT_ACTION_RE.source})`, 'i').test(right)));
-    if (/^(?:and|or)$/i.test(m[0]) && !independentSubject && nominal && !/^(?:it|this|that)$/i.test(nominal)
-        && !CLAUSE_FINITE_PREDICATE_RE.test(nominal)) {
+    // A colon only separates a fresh subject. A bare hedge or deictic
+    // object still governs its colon-introduced complement.
+    if (colonContinuesClause(m[0], left, independentSubject)) {
+      m = CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
+      continue;
+    }
+    if (coordinatorContinuesNominal(m[0], nominal, independentSubject)) {
       m = CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
       continue;
     }
@@ -1250,7 +1265,7 @@ function only_language(value, record, { spoken }) {
 // clause (DENIAL_CLAUSE_END_RE), so "did not raise a safety concern" denies
 // the concern, while "did not book, but asked if the bait is safe for her
 // dog" asserts it — the "but" ends the denial's clause before the concern.
-const DENIAL_WORD_RE = /\b(?:(?:not|cannot|(?:is|are|do|did|does|was|were|has|have|had|ca|could|would|wo)n[\x27\u2019]t)(?!\s+(?:only|just|merely|simply)\b)|(?:failed|unable)\s+to(?=\s+(?:raise|mention|report)\b)|never|denied|denies|without|nothing(?!\s+(?:but|except|other than)\b)|no(?![-\u2010-\u2015])|neither|none|zero)\b/gi;
+const DENIAL_WORD_RE = /\b(?:(?:not|cannot|(?:is|are|do|did|does|was|were|has|have|had|ca|could|would|wo)n[\x27\u2019]t)(?!\s+(?:only|just|merely|simply)\b)|(?:failed|unable|refused|declined)\s+to(?=\s+(?:raise|mention|report)\b)|never|denied|denies|without|nothing(?!\s+(?:but|except|other than)\b)|no(?![-\u2010-\u2015])|neither|none|zero)\b/gi;
 // Commas may enclose an aside and "and" may coordinate denied objects.
 // End their scope only when the next phrase starts a fresh assertion.
 const CAPTURE_NOUN_ASSERTION_START_SOURCE = `(?:[\\w\\x27\\u2019-]+\\s+){1,5}${CLAUSE_FINITE_PREDICATE_RE.source}`;
