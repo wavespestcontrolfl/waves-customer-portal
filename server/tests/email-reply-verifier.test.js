@@ -286,6 +286,18 @@ describe('email reply verifier', () => {
     }
   });
 
+  test('estimate sent dates cannot support other lifecycle dates', () => {
+    const facts = contextWith().facts.map((fact) => (fact.key === 'pending_estimate'
+      ? { ...fact, value: { status: 'sent', sentAt: '2026-09-09T16:00:00Z' } }
+      : fact));
+    expect(verdict('Hi Casey, your estimate was sent September 9.', { context: { facts } }).ok).toBe(true);
+    expect(verdict('Hi Casey, your estimate was emailed September 9.', { context: { facts } }).ok).toBe(true);
+    for (const wording of ['expires', 'was created', 'was sent and expires']) {
+      expect(verdict(`Hi Casey, your estimate ${wording} September 9.`, { context: { facts } }).violations)
+        .toContain('date_unsupported:September 9');
+    }
+  });
+
   test('requires payment context before treating received as a payment claim', () => {
     expect(verdict('Hi Casey, we received your email about your appointment.').ok).toBe(true);
     const facts = contextWith().facts.map((fact) => (fact.key === 'recent_payment'

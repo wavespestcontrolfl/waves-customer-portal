@@ -22,7 +22,8 @@ unsigned numeric dollar figures and calendar dates without ordinal suffixes
 remain the supported forms. Withheld dues quotes do not establish a surcharge
 or collected total. Invoice statuses and payment-due dates bind to the invoice. Invoice dates require
 due-date wording in a sentence without lifecycle-event claims; the assembler
-does not expose invoice event timestamps. Viewed estimates retain sent evidence.
+does not expose invoice event timestamps. Estimate dates require sent/emailed wording without other lifecycle claims.
+Viewed estimates retain sent evidence.
 
 The verifier also checks plain-text structure, greeting, unsupported signatures,
 boilerplate, links, access codes, existing customer-copy compliance, copied
