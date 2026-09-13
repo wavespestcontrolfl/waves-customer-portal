@@ -1420,6 +1420,8 @@ function safetyOnceDryQualifies(text, claim, questionText = null) {
   if (!drying || (questionText !== null
     && (!safetyAudienceCovers(`${claim[0]}${drying[0]}`, questionText)
       || !safetyProductCovers(clauseOf(text, claim.index), questionText)))) return false;
+  const claimedProductText = questionText === null
+    ? clauseOf(text, claim.index) : `${clauseOf(text, claim.index)} ${questionText}`;
   return [...text.matchAll(TECHNICIAN_DRY_TIMING_RE)].some((match) => {
     const [, timingClaimEnd] = clauseBounds(text, match.index);
     const timingClaim = text.slice(match.index, timingClaimEnd);
@@ -1432,6 +1434,7 @@ function safetyOnceDryQualifies(text, claim, questionText = null) {
       && (!PET_TRAILING_CONDITION_RE.test(suffix) || PET_INDEPENDENT_CONDITIONAL_ACTION_RE.test(suffix))
       && !TECHNICIAN_DRY_TIMING_ALTERNATIVE_RE.test(suffix)
       && !TECHNICIAN_DRY_TIMING_OBJECT_NEGATION_RE.test(suffix)
+      && safetyProductDetailCovers(claimedProductText, timingClaim)
       && !PET_SPECULATIVE_GUIDANCE_RE.test(claim)
       && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim);
   });
@@ -1577,7 +1580,7 @@ const SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE = /^\s*(?:absolutely|certainly|definite
 
 const SAFETY_NEGATIVE_LEAD_RE = /^\s*(?:no(?!\s+(?:problem|one|person)\b)|nope|nah|not at all|not really|never|it is not|it['’]s not|it is n['’]t|it isn['’]t|(?:it|they)\s+(?:is not|are not|isn['’]t|aren['’]t|cannot|can not|can['’]t|will not|won['’]t|do(?:es)? not|do(?:es)?n['’]t))\b/i;
 
-const SAFETY_DRYING_CONDITION_WITHDRAWAL_RE = /\b(?:even\s+)?before\s+(?:it|they)\s+(?:dr(?:y|ies)|(?:is|are)\s+dry)\b/i;
+const SAFETY_DRYING_CONDITION_WITHDRAWAL_RE = /\b(?:even\s+)?(?:before\s+(?:it|they)\s+(?:dr(?:y|ies)|(?:is|are)\s+dry)|(?:while|when)\s+(?:(?:it|they)\s+(?:is|are)\s+)?wet)\b/i;
 
 const SAFETY_REFUSED_CLAIM_RE = new RegExp(`\\b(?:${SAFETY_ADJECTIVE}|safety|${vocabAlt(NO_RISK_PHRASES)}|(?:no|zero|any)\\s+(?:risk|danger|harm)|hurt|harm|bother|affect|poison)\\b`, 'i');
 
@@ -1707,6 +1710,18 @@ function safetyProductCovers(claimText, questionText) {
   const claimedProducts = safetyProductScope(claimText);
   return !questionedProducts.size || !claimedProducts.size
     || [...questionedProducts].every((product) => claimedProducts.has(product));
+}
+
+const SAFETY_PRODUCT_EXCLUSION_RE = /\b(?:not(?!\s+only\b)|except(?:\s+for)?|excluding)\b[^,.!?;—–]*/gi;
+
+function safetyProductDetailCovers(claimText, detailText) {
+  const claimedProducts = safetyProductScope(claimText);
+  const mentionedProducts = safetyProductScope(detailText);
+  if (!mentionedProducts.size) return true;
+  for (const exclusion of detailText.matchAll(SAFETY_PRODUCT_EXCLUSION_RE)) {
+    for (const product of safetyProductScope(exclusion[0])) mentionedProducts.delete(product);
+  }
+  return [...claimedProducts].every((product) => mentionedProducts.has(product));
 }
 
 function refusesSafetyGuarantee(text, questionText, afterIndex = -1) {
