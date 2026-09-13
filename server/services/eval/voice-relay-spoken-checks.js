@@ -448,9 +448,12 @@ function claimContext(text, start, end) {
   const [boundary] = clauseBounds(text, start);
   const comma = text.lastIndexOf(',', start - 1);
   const introduction = text.slice(boundary, comma + 1);
+  const hedge = EPISTEMIC_HEDGE_RE.exec(introduction);
+  const complement = hedge ? introduction.slice(hedge.index + hedge[0].length).replace(/[,\s]+$/g, '').trim() : '';
   // A condition or refusal governs the assertion after its comma. Ordinary
   // temporal introductions ("Before you go,") remain separate adjuncts.
-  if (/\b(?:if|unless|whether)\b/i.test(introduction) || clauseIsEpistemicallyHedged(introduction)) {
+  if (/\b(?:if|unless|whether)\b/i.test(introduction)
+      || (hedge && /^(?:(?:any of )?(?:this|that|it))?$/i.test(complement))) {
     return text.slice(boundary, end);
   }
   return text.slice(Math.max(boundary, comma + 1), end);
@@ -458,7 +461,7 @@ function claimContext(text, start, end) {
 /** Does `clause` carry a negation or conditional marker anywhere in it? */
 function clauseIsNegated(clause) {
   // These reassurance prefixes do not deny the claim that follows them.
-  return NEGATION_RE.test(clause.replace(/^\s*(?:no worries|no problem|do not worry|don['’]t worry)\b[\s,:—–]*/i, ''));
+  return NEGATION_RE.test(clause.replace(/\b(?:without (?:a |any )?|no |beyond )doubt\b/gi, '').replace(/^\s*(?:no worries|no problem|do not worry|don['’]t worry)\b[\s,:—–]*/i, ''));
 }
 // A refusal/hedge prefix — negation + a short filler + a reporting verb
 // ("can't say", "not able to promise"), or a verb that carries its own
@@ -470,7 +473,7 @@ function clauseIsNegated(clause) {
 // EPISTEMIC_DENIAL_WORDS and vocabAlt, all defined at the top of the
 // file) so every later section — safety, callback, card, readback — can
 // share it instead of re-deriving its own filler-word cap.
-const EPISTEMIC_HEDGE_PREFIX_SOURCE = `(?:\\b(?:not|never|cannot|unable|no way to|\\w+n[\\x27\\u2019]t)[\\s,]+(?:[\\w\\x27\\u2019]+[\\s,]+)*?${vocabAlt(EPISTEMIC_REFUSAL_VERBS)}|\\b${vocabAlt(EPISTEMIC_DENIAL_WORDS)})`;
+const EPISTEMIC_HEDGE_PREFIX_SOURCE = `(?:\\b(?:not|never|cannot|unable|no way to|\\w+n[\\x27\\u2019]t)[\\s,]+(?:[\\w\\x27\\u2019]+[\\s,]+)*?${vocabAlt(EPISTEMIC_REFUSAL_VERBS)}|(?<!\\bwithout (?:a |any )?|\\bno |\\bbeyond )\\b${vocabAlt(EPISTEMIC_DENIAL_WORDS)})`;
 const EPISTEMIC_HEDGE_RE = new RegExp(EPISTEMIC_HEDGE_PREFIX_SOURCE, 'i');
 /** Does `clause` open with (or carry) an epistemic hedge or refusal? */
 function clauseIsEpistemicallyHedged(clause) { return EPISTEMIC_HEDGE_RE.test(clause); }
@@ -1434,7 +1437,10 @@ function deniedSpans(text) {
     // Negation inside a reported question is its content, not a denial
     // that the caller asked it. An earlier "did not ask" still supplies
     // its own denied span over the whole question.
-    const assertionPrefix = prefix.split(/[.;!?]|\b(?:but|however|although|though|so|while|yet)\b/i).pop();
+    let assertionStart = 0;
+    DENIAL_CLAUSE_END_RE.lastIndex = 0;
+    for (const boundary of prefix.matchAll(DENIAL_CLAUSE_END_RE)) assertionStart = boundary.index + boundary[0].length;
+    const assertionPrefix = prefix.slice(assertionStart);
     if (/\b(?:asked|asks|asking|wondered|wonders)\b[^.;!?]*\b(?:if|whether)\b/i.test(assertionPrefix)) {
       m = DENIAL_WORD_RE.exec(text);
       continue;
