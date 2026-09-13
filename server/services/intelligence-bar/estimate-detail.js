@@ -210,6 +210,10 @@ function stripPayload(payload) {
   // quote-required BY DESIGN and its page does show the proposal (that is
   // the billed quote), so `proposal` is untouched here.
   if (out.cta && out.cta.quoteRequired === true) {
+    // The terminal card also precedes the payment controls. Their deposit
+    // and no-show amounts are not part of the offer the customer sees.
+    delete out.depositPolicy;
+    delete out.cardHoldPolicy;
     out.pricing = {
       withheld: 'quote_required',
       reason: out.cta.quoteRequiredReason || null,

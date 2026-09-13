@@ -71,7 +71,7 @@ module.exports = {
   // (estimates, already listed), and resolveProposalBillingContext's
   // customers + annual_prepay_terms reads on an authored proposal.
   get_estimate_detail: {
-    tables: ['estimates', 'estimate_deposits', 'call_log', 'leads', 'scheduled_services', 'services', 'customers', 'annual_prepay_terms'],
+    tables: ['estimates', 'estimate_deposits', 'estimate_acceptances', 'call_log', 'leads', 'scheduled_services', 'services', 'customers', 'annual_prepay_terms'],
     columns: {
       // select('*') plus every estimates.<column> read off the row: by
       // getEstimateDetail/shapeEstimate directly (where/orderBy/whereNull
@@ -88,13 +88,18 @@ module.exports = {
         'monthly_total', 'annual_total', 'onetime_total', 'accepted_at', 'accepted_service_mode',
         'accepted_frequency_key', 'notes', 'token', 'sent_at', 'viewed_at', 'view_count', 'declined_at',
         'expires_at', 'archived_at', 'created_at', 'updated_at', 'estimate_data',
-        'price_locked_at', 'customer_phone', 'customer_email',
+        'price_locked_at', 'customer_phone', 'customer_email', 'terms_version',
       ],
       // Exactly the .select(...) list in getEstimateDetail(), plus the
       // orderBy column.
       estimate_deposits: [
         'estimate_id', 'amount', 'card_surcharge', 'credited_amount', 'refunded_amount', 'refunded_surcharge',
         'status', 'received_at', 'created_at',
+      ],
+      // acceptanceRecordForEstimate reads the latest persisted acceptance
+      // whenever an accepted estimate carries a terms-version stamp.
+      estimate_acceptances: [
+        'id', 'estimate_id', 'terms_version', 'terms_text', 'accepted_at', 'ip', 'user_agent',
       ],
       // callSideBlockForEstimateData's own reads, reached from estimateLinks
       // for an engine-drafted row (estimatorEngine.callLogId): the blocking

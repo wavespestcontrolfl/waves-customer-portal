@@ -92,7 +92,8 @@ const PAGE_PAYLOAD = {
     { token: 'sib-a', address: '100 Test St', status: 'sent', monthlyTotal: 92, annualTotal: 1104, onetimeTotal: 0, isCurrent: true },
     { token: 'sib-b', address: '200 Test St', status: 'sent', monthlyTotal: 0, annualTotal: 0, onetimeTotal: 450, isCurrent: false },
   ],
-  depositPolicy: { required: false },
+  depositPolicy: { required: true, amount: 75, recurringAmount: 75, oneTimeAmount: 125 },
+  cardHoldPolicy: { enforced: true, requiredForOneTime: true, noShowFeeAmount: 85, cancelWindowHours: 24 },
   showYourWork: { steps: ['internal only'] },
   meta: { generatedAt: '2026-09-11T22:00:00Z', engineVersion: 'v2', cacheHit: false },
 };
@@ -130,6 +131,7 @@ test('every priced section is the composer\'s own output, byte-for-byte — noth
   expect(shaped.page.pricing).toEqual(PAGE_PAYLOAD.pricing);
   expect(shaped.page.cta).toEqual(PAGE_PAYLOAD.cta);
   expect(shaped.page.depositPolicy).toEqual(PAGE_PAYLOAD.depositPolicy);
+  expect(shaped.page.cardHoldPolicy).toEqual(PAGE_PAYLOAD.cardHoldPolicy);
   expect(shaped.page.meta).toEqual(PAGE_PAYLOAD.meta);
   expect(shaped.page.proposal).toBeNull();
   expect(shaped.page_unavailable).toBeUndefined();
@@ -177,6 +179,8 @@ test('a quote-required bundle reports NO amounts: the page exits to the terminal
     note: expect.stringMatching(/shows no amounts/),
   });
   expect(JSON.stringify(shaped.page.pricing)).not.toMatch(/1104|455\.5|99/);
+  expect(shaped.page.depositPolicy).toBeUndefined();
+  expect(shaped.page.cardHoldPolicy).toBeUndefined();
   // …and the verdict itself still rides along, so the bar can say why.
   expect(shaped.page.cta).toMatchObject({ quoteRequired: true, quoteRequiredReason: 'manager_approval' });
 });
