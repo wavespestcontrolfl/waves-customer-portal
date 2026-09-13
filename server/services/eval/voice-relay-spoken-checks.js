@@ -1286,7 +1286,8 @@ function reportAssertionOf(clause, subjectAt) {
   const governingStart = clause.length - claimContext(clause, subjectAt, clause.length).length;
   REPORT_ASSERTION_BOUNDARY_RE.lastIndex = 0;
   for (const boundary of clause.matchAll(REPORT_ASSERTION_BOUNDARY_RE)) {
-    if (!REPORT_FINDING_VERB_RE.test(clause.slice(start, boundary.index))) continue;
+    if (!REPORT_FINDING_VERB_RE.test(clause.slice(start, boundary.index))
+      || REPORT_TRAILING_UNCERTAINTY_RE.test(clause.slice(boundary.index))) continue;
     if (boundary.index >= subjectAt) return clause.slice(start, boundary.index);
     // Keep a conditional introduction that governs the matched assertion.
     // An ordinary prior treatment still opens a separate assertion here.

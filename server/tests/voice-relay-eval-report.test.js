@@ -103,6 +103,8 @@ test.each([
   ['Talstar P was applied to the exterior perimeter probably.', 'fail'],
   ['Talstar P was applied to the exterior perimeter, I think.', 'fail'],
   ['Talstar P was applied to the exterior perimeter, I believe it was.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, I think it was applied.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, I believe it was applied.', 'fail'],
   ['Talstar P was applied to the exterior perimeter, which you can see in the report.', 'pass'],
   ['Talstar P was applied to the exterior perimeter, and I think the report is ready.', 'pass'],
   ['Talstar P was applied to the exterior perimeter, I believe the report is ready.', 'pass'],
