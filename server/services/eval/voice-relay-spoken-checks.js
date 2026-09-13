@@ -581,7 +581,7 @@ const PAYMENT_PAST_OUTCOME_RE = new RegExp(
   'i',
 );
 const PAYMENT_PRESENT_PERFECT_OUTCOME_RE = new RegExp(
-  `\\b(?:has|have)\\s+${PAYMENT_SUCCESS_ADVERBS}been\\s+${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_RESULT_STATE}\\b`,
+  `(?:\\b(?:has|have)|[\\x27\\u2019](?:s|ve))\\s+${PAYMENT_SUCCESS_ADVERBS}(?:been\\s+${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_RESULT_STATE}|gone\\s+through|succeeded|${PAYMENT_TRANSITIVE_SUCCESS})\\b`,
   'i',
 );
 const PAYMENT_TRAILING_CONDITION_RE = /^\s*,?\s*(?:(?:only\s+)?(?:if|unless)|si|a\s+menos\s+que)\b/i;

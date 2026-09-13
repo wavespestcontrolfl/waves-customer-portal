@@ -321,6 +321,16 @@ describe('voice relay eval — payment outcomes', () => {
     ['Your payment was approved, if you want to know.', 'fail'],
     ['Your payment was approved, if that answers your question.', 'fail'],
     ['Your payment was approved, if you want to check the processing status.', 'fail'],
+    ["Your payment has gone through after you submitted the form yesterday.", 'fail'],
+    ["Your payment has cleared after you submitted the form yesterday.", 'fail'],
+    ["Your payment's gone through after you submitted the form yesterday.", 'fail'],
+    ["We've charged your card after you submitted the form yesterday.", 'fail'],
+    ["Your payment has succeeded after you submitted the form yesterday.", 'fail'],
+    ["Your payment has posted after you submitted the form yesterday.", 'fail'],
+    ["Once your payment has gone through, we will send a receipt.", 'pass'],
+    ["Once your payment has cleared, we will send a receipt.", 'pass'],
+    ["Once we've charged your card, we will send a receipt.", 'pass'],
+    ["Once your payment's gone through, we will send a receipt.", 'pass'],
   ])('current-head review regressions: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
   });
