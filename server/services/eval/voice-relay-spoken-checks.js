@@ -1464,6 +1464,12 @@ function reportHasConciseFinding(affirmed, subjectAt, subjectLength, locationAt,
 function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb, precedingText) {
   if (REPORT_SHARED_LIST_CONDITION_RE.test(precedingText)) return true;
   if (clauseIsNegated(claim) || clauseIsEpistemicallyHedged(claim)) return true;
+  const precedingClause = precedingText.split(/[.!?;]/).pop();
+  const sharedFindingVerb = [...precedingClause.matchAll(new RegExp(REPORT_FINDING_VERB_RE.source, 'gi'))].pop();
+  if (!findingVerb && sharedFindingVerb && /\band\s*$/i.test(precedingClause)) {
+    const sharedClaim = claimContext(precedingClause, sharedFindingVerb.index, precedingClause.length);
+    if (clauseIsNegated(sharedClaim) || REPORT_UNCERTAINTY_RE.test(sharedClaim)) return true;
+  }
   if (subjectAt < 0 || locationAt < 0) return false;
   const firstAt = Math.min(subjectAt, locationAt, findingVerb ? findingVerb.index : affirmed.length);
   const lastAt = Math.max(subjectAt, locationAt, findingVerb ? findingVerb.index : 0) + 1;
