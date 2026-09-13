@@ -1315,7 +1315,7 @@ const REPORT_TRAILING_UNCERTAINTY_RE = new RegExp(
 );
 const REPORT_TRAILING_DENIAL_RE = new RegExp(
   `^(?:actually\\s+)?(?:not(?:\\s+(?:really|actually))?(?:\\s+${REPORT_FINDING_VERB_RE.source})?|no|`
-    + `(?:it|that|this)\\s+(?:was|is|has|had)(?:n[\x27\u2019]t|\\s+not)(?:\\s+been)?(?:\\s+(?:true|correct|accurate))?)\\s*$`,
+    + `(?:it|that|this)\\s+(?:was|is)\\s+(?:false|untrue|incorrect|inaccurate)|(?:it|that|this)\\s+(?:was|is|has|had)(?:n[\x27\u2019]t|\\s+not)(?:\\s+been)?(?:\\s+(?:true|correct|accurate))?)\\s*$`,
   'i',
 );
 const REPORT_CONCISE_NONCOMPLETION_RE = /^\s*(?:(?:(?:is|are|was|were|has|have|had)(?:\s+(?:been|being))?\s+)?(?:(?:only|just|merely|simply|still)\s+)*(?:(?:the|our|your|their|his|her|my|its)\s+)?(?:(?:recommended|scheduled|planned|intended|proposed|suggested|considered|expected|required|needed|pending)\b|(?:an?\s+)?(?:recommendation|plan|proposal|suggestion|possibility)\b|under\s+consideration\b|(?:for\s+)?(?:tomorrow|tonight|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b)|(?:will|shall|would|should|can|could|may|might|must|is going to|are going to|was going to|were going to)\b)/i;

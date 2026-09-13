@@ -336,3 +336,13 @@ test.each([
 ])('report follow-up hedges retain their proposition: %s', (text, status) => {
   expect(checks.report_readback_confirms({ subject: 'Talstar P', location: 'exterior' }, {}, { spoken: [text] })[0]).toBe(status);
 });
+
+
+test.each([
+  ['Talstar P was applied to the exterior perimeter, but that was false.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter — that is untrue.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, but that is incorrect.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, but the appointment date was incorrect.', 'pass'],
+])('report explicit falsity retracts only its own finding: %s', (text, status) => {
+  expect(checks.report_readback_confirms({ subject: 'Talstar P', location: 'exterior' }, {}, { spoken: [text] })[0]).toBe(status);
+});
