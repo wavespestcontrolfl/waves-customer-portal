@@ -1389,10 +1389,10 @@ const TECHNICIAN_VISIT_TIMING_RE = /\b(?:appointment|arrival|schedule|scheduling
 function trailingWithdrawalAlternative(objectSource) {
   return new RegExp(
     `^\\s*(?:[^.!?;—–]{0,60}?\\s*,?\\s*(?:or|and|but|though|although)\\s+|[.!?;—–]\\s*(?:[^.!?;—–]*[.!?;—–]\\s*)*?(?:(?:actually|however)\\s*,?\\s*)?)(?:(?:maybe|perhaps|possibly|potentially)\\s+)?`
-    + `(?:(?:they|the technician|the team member)\\s+)?(?:`
+    + `(?:(?:i|we)\\s+${EPISTEMIC_HEDGE_PREFIX_SOURCE}\\s+${objectSource}(?=\\s*(?:[,.!?;—–]|$))|(?:(?:they|the technician|the team member)\\s+)?(?:`
     + `not(?=\\s*(?:[,.!?;—–]|$))|(?:(?:might|may|could|would|should|will)\\s+)?(?:skip|omit|avoid)\\s+${objectSource}\\b`
     + `|(?:(?:might|may|could|would|should|will|can)\\s+not|(?:might|could|would|should|ca|wo)n[\\x27\\u2019]t)`
-    + `(?:\\s+(?:be able to\\s+)?(?:(?:confirm|verify|check|review|explain|go over|talk(?: you)? through)\\s+${objectSource}\\b|do\\s+(?:so|that)\\b)|(?=\\s*(?:[,.!?;—–]|$))))`,
+    + `(?:\\s+(?:be able to\\s+)?(?:(?:confirm|verify|check|review|explain|go over|talk(?: you)? through)\\s+${objectSource}\\b|do\\s+(?:so|that)\\b)|(?=\\s*(?:[,.!?;—–]|$)))))`,
     'i',
   );
 }
@@ -1557,7 +1557,9 @@ const SAFETY_ANSWER_POLARITY_PREFIX_RE = /^\s*(?:(?:yes|yeah|yep|yup|sure|certai
 
 const SAFETY_ELLIPTICAL_ANSWER_RE = /^\s*(?:(?:it|this|that)[\x27\u2019]s\s+not|(?:it|this|that|they)\s+(?:(?:is|are|was|were|does|do|did|will|would|can|could)(?:\s+not)?|(?:isn|aren|wasn|weren|doesn|don|didn|won|wouldn|can|couldn)[\x27\u2019]t))(?=\s*(?:[,;:—–-]|$))/i;
 
-const SAFETY_EXPLICIT_ANSWER_PROPOSITION_RE = /^\s*(?:i|we|you|he|she|they|it|this|that|there|(?:the|our|your|my|a|an)\s+[a-z][\w\x27\u2019-]*(?:\s+[a-z][\w\x27\u2019-]*){0,2})(?:(?:\s+(?:am|is|are|was|were|can|could|will|would|shall|should|may|might|must|have|has|had|do|does|did|cannot|can[\x27\u2019]t|won[\x27\u2019]t))\b|[\x27\u2019](?:m|re|s|ll|d|ve)\b|\s+[a-z]+(?:s|ed|ing)\b)/i;
+const SAFETY_REFERENTIAL_CONFIRMATION_RE = /^\s*(?:it|this|that)(?:[\x27\u2019]s|\s+(?:is|was))\s+(?:correct|right|true)\s*$/i;
+
+const SAFETY_EXPLICIT_ANSWER_PROPOSITION_RE = /^\s*(?:i|we|you|he|she|they|it|this|that|there|(?:the|our|your|my|this|that|a|an)\s+[a-z][\w\x27\u2019-]*(?:\s+[a-z][\w\x27\u2019-]*){0,2})(?:(?:\s+(?:am|is|are|was|were|can|could|will|would|shall|should|may|might|must|have|has|had|do|does|did|cannot|can[\x27\u2019]t|won[\x27\u2019]t))\b|[\x27\u2019](?:m|re|s|ll|d|ve)\b|\s+[a-z]+(?:s|ed|ing)\b)/i;
 
 const SAFETY_ANSWER_GUIDANCE_RE = /\b(?:technician|team member)\b[^.!?;]{0,100}?\b(?:go(?:es)? over|review(?:s)?|explain(?:s)?|(?:talk|walk)(?:s)?(?:\s+you)?\s+through|follow(?:s)?)\b[^.!?;]{0,60}?\b(?:everything|products?|labels?|precautions?)\b/i;
 
@@ -1565,7 +1567,8 @@ function safetyAnswerAddressesQuestion(clause) {
   const lead = SAFETY_ANSWER_POLARITY_PREFIX_RE.exec(clause);
   if (!lead) return true;
   const proposition = clause.slice(lead[0].length);
-  if (!proposition.trim() || SAFETY_ELLIPTICAL_ANSWER_RE.test(proposition)) return true;
+  if (!proposition.trim() || SAFETY_ELLIPTICAL_ANSWER_RE.test(proposition)
+    || SAFETY_REFERENTIAL_CONFIRMATION_RE.test(proposition)) return true;
   return !SAFETY_EXPLICIT_ANSWER_PROPOSITION_RE.test(proposition)
     || SAFETY_REFUSED_CLAIM_RE.test(proposition)
     || SAFETY_ANSWER_GUIDANCE_RE.test(proposition);
