@@ -1391,7 +1391,7 @@ const TECHNICIAN_DRY_TIMING_RE = new RegExp(
   'gi',
 );
 const TECHNICIAN_EXPLICIT_DRY_TIMING_RE = /\b(?:drying(?: time)?|re-?entry(?: time| timing)?|when\b[^.!?;]{0,16}\bdry)\s*$/i;
-const TECHNICIAN_VISIT_TIMING_RE = /\b(?:appointment|arrival|schedule|scheduling)\b/i;
+const TECHNICIAN_VISIT_TIMING_RE = /\b(?:appointment|arrival|schedule|scheduling)\s+(?:time|timing)\b|\btiming\s+(?:for|of)\s+(?:(?:the|your|our)\s+)?(?:appointment|arrival|schedule)\b/i;
 
 function trailingWithdrawalAlternative(objectSource) {
   return new RegExp(
@@ -2033,7 +2033,7 @@ const PET_GUIDANCE_NEGATION_EXCEPTION_RE = /\bdon[\x27\u2019]t hesitate to\b/gi;
 
 const PET_CALLER_SHOULD_ASK_RE = /^\s*you\s+should\s+ask\b/i;
 
-const PET_CONDITION = '(?:(?:only\\s+)?if|unless|only\\s+when|when\\s+(?:asked|requested)|only\\s+on\\s+request|provided(?:\\s+that)?|as\\s+long\\s+as)';
+const PET_CONDITION = '(?:(?:only\\s+)?if|unless|only\\s+when|when\\s+(?:asked|requested)|only\\s+on\\s+request|only\\s+after\\s+you\\s+(?:ask|request)|provided(?:\\s+that)?|as\\s+long\\s+as)';
 
 const PET_TRAILING_CONDITION_RE = new RegExp(`^(?:(?!\\b(?:and|or|but|however|then|so)\\b(?!\\s+(?:(?:not\\s+)?${PET_CONDITION})\\b))[^.!?;—–])*?\\b${PET_CONDITION}\\b`, 'i');
 
