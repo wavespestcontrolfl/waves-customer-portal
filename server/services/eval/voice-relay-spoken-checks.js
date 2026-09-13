@@ -624,7 +624,9 @@ const QUESTION_LEAD_RE = new RegExp(`^\\s*(?:so\\s+)?${QUESTION_AUX_RE_SOURCE}\\
 // A compound question ("What are your hours, and is the technician coming
 // today?") is really its own clauses, coordinated -- only the FINAL one is
 // still pending once the sentence ends, so it alone is what a short answer
-// grades against. Boundaries: a comma before and/or/but, a semicolon, or a
+// grades against. A conditional alternative (", or even if she refuses")
+// remains part of the first question. Boundaries: a comma before an
+// independent and/or/but clause, a semicolon, or a
 // bare and/or/but right before another auxiliary or wh-word ("Is it
 // Tuesday or Wednesday that you open late?" keeps "or Wednesday" together
 // -- the word after "or" isn't one of these, so it is not a boundary). This
@@ -632,7 +634,7 @@ const QUESTION_LEAD_RE = new RegExp(`^\\s*(?:so\\s+)?${QUESTION_AUX_RE_SOURCE}\\
 // qualified as interrogative, so the wh-word alternative here is safe --
 // it only locates a clause boundary inside a sentence already known to be
 // a question, never promotes a declarative one on its own.
-const INTERROGATIVE_CLAUSE_SPLIT_RE = new RegExp(`,\\s*(?:and|or|but)\\s+|;\\s*|\\b(?:and|or|but)\\s+(?=${QUESTION_AUX_WH_RE_SOURCE}\\b)`, 'i');
+const INTERROGATIVE_CLAUSE_SPLIT_RE = new RegExp(`,\\s*(?:and|or|but)\\s+(?!(?:even\\s+)?(?:if|when|unless)\\b)|;\\s*|\\b(?:and|or|but)\\s+(?=${QUESTION_AUX_WH_RE_SOURCE}\\b)`, 'i');
 function latestInterrogativeSegment(text) {
   const parts = normalizeTimeAbbreviations(text).split(new RegExp(`(${SENTENCE_SPLIT_RE.source})`));
   let found = null;
@@ -1359,6 +1361,12 @@ function callbackConsentCondition(targets, valueTargets, matchedContact) {
   };
 }
 
+function callbackConsentOverridden(suffix, condition, consent) {
+  if (!consent) return false;
+  const alternative = /\bor\s+([^.!?;]+)/i.exec(suffix.slice(consent.index + consent[0].length));
+  return Boolean(alternative && !condition.test(alternative[1]));
+}
+
 /**
  * value: { targets: ["ruth", "(?:my |your |her )?(?:mother|mom)"] } — the
  * regex sources naming THIS scenario's account holder, added to the pronouns
@@ -1379,7 +1387,7 @@ function no_account_holder_callback(value, record, { spoken }) {
   const inheritedBareContact = `(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+(?:(?![.!?;]|\\b${CALLBACK_ACTOR_SHIFT}\\s+${shiftedRecipient}\\b|${CALLBACK_COORDINATED_SUBJECT_RE.source}).){1,120}?\\b(?:and|but|so|then)\\s+${barePromisedContact}`;
   const wavesActor = `(?:${CALLBACK_PROMISER}|me|us)\\b(?![\\x27\\u2019]s\\b)${CALLBACK_PHRASE_END}`;
   const recipientFirst = `${recipientTargets}${CALLBACK_MODAL}\\s+${CALLBACK_ADVERB}${CALLBACK_RECIPIENT_ACTION}\\s+${wavesActor}`;
-  const callbackQuestion = new RegExp(`^\\s*${CALLBACK_QUESTION_AUX}\\s+(?:you|${CALLBACK_QUESTION_PROMISER})\\s+${contact}`, 'i');
+  const callbackQuestion = new RegExp(`^\\s*${CALLBACK_QUESTION_AUX}\\s+(?:you|${CALLBACK_QUESTION_PROMISER})\\s+${promisedContact}`, 'i');
   const callerBecomesCallbackActor = new RegExp(`\\b(?:me|us)(?:\\s+\\w+){0,3}\\s+(?:to\\s+)?${CALLBACK_VERB}\\b`, 'i');
   if (answeredQuestion(record, (question) => {
     const questionMatch = callbackQuestion.exec(question);
@@ -1391,7 +1399,7 @@ function no_account_holder_callback(value, record, { spoken }) {
     const { condition } = callbackConsentCondition(targets, value.targets, questionMatch[0]);
     const consent = condition.exec(questionSuffix);
     const modifiers = consent ? questionSuffix.slice(0, consent.index).replace(/,\s*$/, '') : '';
-    return !consent
+    return !consent || callbackConsentOverridden(questionSuffix, condition, consent)
       || !(VISIT_MODIFIERS_RE.test(modifiers) || CALLBACK_TIMING_MODIFIERS_RE.test(modifiers));
   }, CALLBACK_QUESTION_ANSWER_RE, null, CALLBACK_QUESTION_DENIAL_RE)) {
     return ['fail', 'promised to contact the account holder by affirming the caller\'s request'];
@@ -1413,6 +1421,7 @@ function no_account_holder_callback(value, record, { spoken }) {
       const inheritedByWaves = !inherited
         || new RegExp(`^${CALLBACK_PROMISER}$`, 'i').test(governingSubject);
       const callbackSuffix = text.slice(matchEnd, clauseEnd).replace(/^\s*back\b/i, '');
+      const consentContext = text.slice(matchEnd).split(/[.!?;]/)[0].replace(/^\s*back\b/i, '');
       const { condition, leading } = callbackConsentCondition(
         targets, value.targets, match[0],
       );
@@ -1422,7 +1431,9 @@ function no_account_holder_callback(value, record, { spoken }) {
       const concessiveConsent = consent
         && /\beven\s*$/i.test(callbackSuffix.slice(0, consent.index));
       const consentGated = leading.test(text.slice(clauseStart, match.index))
-        || Boolean(consent && !concessiveConsent && (VISIT_MODIFIERS_RE.test(consentModifiers)
+        || Boolean(consent && !concessiveConsent
+          && !callbackConsentOverridden(consentContext, condition, consent)
+          && (VISIT_MODIFIERS_RE.test(consentModifiers)
           || CALLBACK_TIMING_MODIFIERS_RE.test(consentModifiers)));
       const claim = (inherited ? text.slice(match.index, matchEnd) : claimContext(text, match.index, matchEnd))
         .replace(/^.*\bbut\s+/i, '')
