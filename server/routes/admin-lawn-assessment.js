@@ -1260,6 +1260,7 @@ router.get('/service/:serviceId', async (req, res, next) => {
 
     if (!assessment) return res.json({ assessment: null });
 
+    const visitRun = await visitRuns.loadRun(assessment.id, db);
     const photos = await db('lawn_assessment_photos')
       .where({ assessment_id: assessment.id })
       .orderBy('photo_order', 'asc')
@@ -1270,6 +1271,7 @@ router.get('/service/:serviceId', async (req, res, next) => {
         ...normalizeAssessmentRow(assessment),
         photo_records: photos,
       },
+      visitAssessment: visitRuns.responseForRun(visitRun),
     });
   } catch (err) {
     next(err);

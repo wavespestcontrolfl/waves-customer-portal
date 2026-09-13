@@ -20,9 +20,10 @@ const COMPLETE = { turf_density: 80, weed_suppression: 82, color_health: 76, fun
 const UNKNOWN = Object.fromEntries(Object.keys(COMPLETE).map((key) => [key, null]));
 const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
 
-(SKIP ? describe.skip : describe)('visit confirmation route (real PostgreSQL)', () => {
+(SKIP ? describe.skip : describe)('visit confirmation and reload routes (real PostgreSQL)', () => {
   let owned;
   let confirm;
+  let reload;
   let runs;
   let copy;
   let delivery;
@@ -43,6 +44,7 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
     intel = require('../services/lawn-intelligence');
     wiki = require('../services/agronomic-wiki').linkTreatmentOutcome;
     confirm = require('../routes/admin-lawn-assessment').stack.find((layer) => layer.route?.path === '/confirm').route.stack[0].handle;
+    reload = require('../routes/admin-lawn-assessment').stack.find((layer) => layer.route?.path === '/service/:serviceId').route.stack[0].handle;
   }, 60000);
   beforeEach(() => {
     process.env.GATE_LAWN_VISIT_ASSESSMENT = 'false';
@@ -87,6 +89,87 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
   }
   const drain = async () => { for (const work of scheduled.splice(0)) await work(); };
   const read = (id) => mockKnex('lawn_assessments').where({ id }).first();
+
+  async function reloadService(serviceId) {
+    const res = { json: jest.fn() };
+    const next = jest.fn();
+    await reload({ params: { serviceId } }, res, next);
+    if (next.mock.calls.length) throw next.mock.calls[0][0];
+    return JSON.parse(JSON.stringify(res.json.mock.calls[0][0]));
+  }
+
+  test('reopening a partial review restores decisions, stable IDs and unknown scores with the gate off', async () => {
+    const { assessment, visit } = await seed({}, { service: true });
+    const [photo] = await mockKnex('lawn_assessment_photos').insert({
+      assessment_id: assessment.id, customer_id: assessment.customer_id,
+      s3_key: 'fixture/review-photo.jpg', photo_order: 0,
+    }).returning('*');
+    await mockKnex('lawn_assessment_runs').where({ assessment_id: assessment.id }).update({
+      raw_response: JSON.stringify({ private: 'provider payload' }),
+      vision_context: JSON.stringify({ priorSummary: 'Internal prompt context' }), tokens_in: 123,
+    });
+    const saved = await request(assessment.id, {
+      adjustedScores: { turf_density: 61 },
+      reviewedFindings: [{ finding_id: 'F1', keep: false, tech_note: 'Not seen during inspection' }],
+      addedDetails: [{ text: 'Nutsedge confirmed at the front edge', zone: 'front' }],
+      observationEdit: 'Technician inspection summary',
+    });
+    const before = await runs.loadRun(assessment.id, mockKnex);
+    const result = await reloadService(visit.id);
+    expect(result.assessment).toMatchObject({ id: assessment.id, confirmed_by_tech: false, turf_density: 61, color_health: null, observations: 'Technician inspection summary', photo_records: [{ id: photo.id }] });
+    expect(result.visitAssessment).toEqual(JSON.parse(JSON.stringify(saved.body.visitAssessment)));
+    expect(result.visitAssessment).toMatchObject({ findings: [{ finding_id: 'F1' }], reviewedFindings: [{ finding_id: 'F1', keep: false, tech_note: 'Not seen during inspection' }], addedDetails: [{ finding_id: expect.any(String), zone: 'front' }] });
+    for (const key of ['raw_response', 'vision_context', 'context_hash', 'tokens_in', 'failures']) {
+      expect(result.visitAssessment).not.toHaveProperty(key);
+    }
+    expect(await runs.loadRun(assessment.id, mockKnex)).toEqual(before);
+    expect(scheduled).toHaveLength(0);
+    expect(delivery).not.toHaveBeenCalled();
+  });
+
+  test('reopening an unavailable run preserves its reason, photo quality and null scores', async () => {
+    const { assessment, visit } = await seed({}, { service: true });
+    await mockKnex('lawn_assessment_runs').where({ assessment_id: assessment.id }).update({
+      status: 'unavailable', unavailable_reason: 'all_providers_failed', findings: '[]',
+      photo_quality: JSON.stringify([{ photo: 1, quality: 'poor', issue: 'blur' }]),
+    });
+    expect(await reloadService(visit.id)).toMatchObject({
+      assessment: { confirmed_by_tech: false, turf_density: null, color_health: null },
+      visitAssessment: { status: 'unavailable', unavailableReason: 'all_providers_failed', findings: [], photoQuality: [{ photo: 1, quality: 'poor', issue: 'blur' }], reviewedFindings: null },
+    });
+  });
+
+  test('the selected latest assessment cannot inherit an older assessment run from the same visit', async () => {
+    const { assessment, f, visit } = await seed({}, { service: true });
+    const newer = await f.assessment(visit, { created_at: new Date(new Date(assessment.created_at).getTime() + 1000) });
+    const result = await reloadService(visit.id);
+    expect(result.assessment.id).toBe(newer.id);
+    expect(result.visitAssessment).toBeNull();
+  });
+
+  test.each([false, true])('legacy reload works when the optional run table is missing: %s', async (missingTable) => {
+    const { assessment, visit } = await seed(COMPLETE, { service: true, run: false });
+    if (missingTable) await mockKnex.schema.renameTable('lawn_assessment_runs', 'temporarily_missing_runs');
+    try {
+      expect(await reloadService(visit.id)).toMatchObject({ assessment: { id: assessment.id, turf_density: 80, photo_records: [] }, visitAssessment: null });
+    } finally { if (missingTable) await mockKnex.schema.renameTable('temporarily_missing_runs', 'lawn_assessment_runs'); }
+  });
+
+  test('a visit without an assessment retains the empty response', async () => {
+    const f = await fixture(mockKnex);
+    const visit = await f.visit();
+    expect(await reloadService(visit.id)).toEqual({ assessment: null });
+  });
+
+  test('unexpected run-store errors are surfaced instead of appearing to be a legacy assessment', async () => {
+    const { visit } = await seed({}, { service: true });
+    await mockKnex.schema.alterTable('lawn_assessment_runs', (table) => table.renameColumn('assessment_id', 'unavailable_assessment_id'));
+    try {
+      await expect(reloadService(visit.id)).rejects.toMatchObject({ code: '42703' });
+    } finally {
+      await mockKnex.schema.alterTable('lawn_assessment_runs', (table) => table.renameColumn('unavailable_assessment_id', 'assessment_id'));
+    }
+  });
 
   test('a stored run remains pending with the visit gate off and produces no delivery or wiki work', async () => {
     const { assessment } = await seed();
