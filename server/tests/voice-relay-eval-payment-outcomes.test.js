@@ -392,6 +392,13 @@ describe('voice relay eval — payment outcomes', () => {
     ["Your payment failed, but the bank confirmed that it is now approved.", 'fail'],
     ["I submitted the form and the bank says it was approved.", 'pass'],
     ["Your payment failed, but the bank says it is not approved.", 'pass'],
+    ["Su pago fue aprobado, ¿necesita un recibo?", 'fail'],
+    ["Su pago fue aprobado, ¿tiene alguna pregunta?", 'fail'],
+    ["Su pago fue aprobado, ¿verdad?", 'pass'],
+    ["¿Su pago fue aprobado?", 'pass'],
+    ["Your payment was declined but the bank has reviewed it and it was approved.", 'fail'],
+    ["Your payment was declined but the bank reviewed it and it was approved.", 'fail'],
+    ["I submitted the form and the bank has reviewed it and it was approved.", 'pass'],
   ])('current-head review regressions: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
   });

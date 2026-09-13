@@ -614,10 +614,10 @@ function paymentOutcomeIsConditional(text, claimStart, claim, outcome, outcomeSt
 function paymentOutcomeIsInterrogative(text, claim, matchEnd, claimEnd) {
   const trailingClaim = text.slice(matchEnd, claimEnd);
   const followup = trailingClaim.match(/^\s*,\s*(?:(?:and|y)\s+)?(.*)$/i);
-  const followupQuestion = followup && new RegExp(
+  const followupQuestion = followup && (/^\s*¿(?!\s*(?:verdad|cierto|correcto|no|s[ií])\s*$)/i.test(followup[1]) || new RegExp(
     `^\\s*¿?\\s*(?:${QUESTION_AUX_RE_SOURCE}|(?:what|when|where|which|who|whom|whose|why|how)\\b[^,.!?;]{0,40}\\b${QUESTION_AUX_RE_SOURCE}|(?:need\\s+)?(?:anything|something)\\s+else|(?:any\\s+)?(?:(?:more|further)\\s+)?questions?|(?:quiere|quieres|desea|deseas|puedo|podemos|puede|puedes|podr[ií]a(?:mos)?))\\b`,
     'i',
-  ).test(followup[1]);
+  ).test(followup[1]));
   return QUESTION_LEAD_RE.test(claim) || (text[claimEnd] === '?' && !followupQuestion);
 }
 function paymentOutcomeHasTemporalCondition(text, claim, claimStart, outcome, outcomeStart, trailingClaim) {
@@ -635,12 +635,14 @@ function paymentOutcomePronounHasNonTargetAntecedent(text, match) {
   // Use the last explicit noun phrase, excluding locative adjuncts such as
   // "in the portal" after "checked your payment". Its head can be any noun;
   // an allowlist of non-payment nouns misses ordinary forms and documents.
-  const phrases = [...sentencePrefix.matchAll(/\b(?:your|the|an?|my|our|their|this|that)\s+[a-z][\w'-]*(?:\s+(?!(?:your|the|an?|my|our|their|this|that|and|or|then|but|in|on|at|to|from|for|with|by)\b)[a-z][\w'-]*){0,2}/gi)];
+  const phrases = [...sentencePrefix.matchAll(/\b(?:your|the|an?|my|our|their|this|that)\s+[a-z][\w'-]*(?:\s+(?!(?:your|the|an?|my|our|their|this|that|it|and|or|then|but|in|on|at|to|from|for|with|by)\b)[a-z][\w'-]*){0,2}/gi)];
   for (const phrase of phrases.reverse()) {
     const before = sentencePrefix.slice(0, phrase.index);
     if (/\b(?:in|on|at|to|from|for|with|by|about|through|after|before|under)\s*$/i.test(before)) continue;
     // A reporting actor supplies evidence, not the object being approved.
     if (/\b(?:says?|said|reports?|reported|confirms?|confirmed|indicates?|indicated|shows?|showed)\s*$/i.test(phrase[0])) continue;
+    if (/\b(?:review(?:ed|s)?|check(?:ed|s)?|process(?:ed|es)?)\s*$/i.test(phrase[0])
+      && /^\s+it\b/i.test(sentencePrefix.slice(phrase.index + phrase[0].length))) continue;
     const candidate = phrase[0].split(/\s+\b(?:and|or|then|but|in|on|at|to|from|for|with|by|was|were|is|are|has|had|will|should|did|does|do)\b/i)[0];
     return !new RegExp(`\\b${PAYMENT_TARGET}\\b`, 'i').test(candidate);
   }
