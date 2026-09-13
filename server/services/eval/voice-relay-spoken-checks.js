@@ -1194,7 +1194,9 @@ function report_readback_confirms(value, record, { spoken }) {
       // Preserve the sentence's question mark before clauseOf removes it.
       // A question about a finding does not confirm that finding.
       const [, clauseEnd] = clauseBounds(text, m.index);
-      if (text[clauseEnd] === '?') continue;
+      const sentencePrefix = text.slice(0, m.index).split(/[.!?;]/).pop();
+      const interrogative = /^\s*(?:(?:and|but|so)\s+)?(?:was|were|is|are|has|have|had|did|do|does|can|could|would|will|should|what|where|when|why|how)\b/i.test(sentencePrefix);
+      if (text[clauseEnd] === '?' || interrogative) continue;
       const clause = clauseOf(text, m.index);
       // A contrast excludes its following alternative, not the location
       // affirmed before it: "exterior rather than indoors" still confirms
