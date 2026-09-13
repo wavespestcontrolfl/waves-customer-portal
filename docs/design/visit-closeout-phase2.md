@@ -34,6 +34,24 @@ allocates automatic member minutes by their scheduled estimated durations.
 Integer rounding must preserve the total, with deterministic service-ID ties.
 Retained historical members receive no allocation.
 
+Already-recorded work from this same stop reserves its durable minutes before
+the remainder is allocated. Match the visit's customer, property and service
+date and require its completion inside the measured stop, with no earlier
+arrival. A record stamped as a backfill never consumes current minutes. An
+unknown duration for identified same-stop work leaves the remainder unknown.
+Freeze record IDs, minutes and completion evidence in the packet; replay does
+not infer them again from subsequently edited rows.
+
+For new packets, one stable service owns the configured drive cost for the stop.
+Keep it on already-recorded same-stop work when present; otherwise use the
+lexicographically first submitted non-backfill service ID. Freeze that owner in
+every live member's record, including explicit-duration and already-recorded
+same-stop members. Ordinary
+cost recalculation assigns the configured stop charge only to its owner and
+zero to the other members. Already-recorded same-stop members are recalculated in the packet transaction
+so prior duplicate drive charges collapse to one. Other historical records and
+legacy packets are not rewritten; backfills retain their separate accounting.
+
 Explicit administrator duration corrections and quiet backfill durations retain
 their existing authorization and semantics. Automatic allocation must not widen
 the administrator-only numeric override contract. Freeze the allocation with the
