@@ -1219,6 +1219,7 @@ const REPORT_INSTRUCTION_RE = /(?:^|,\s*)(?:please\s+)?(?:apply|use|put|treat|sp
 const REPORT_FINDING_VERB_RE = /\b(?:applied|placed|used|treated|sprayed|put|went|got)\b/i;
 const REPORT_ASSERTION_START = `(?:(?:the|a|an)\\s+)?(?:[\\w'\u2019-]+\\s+){1,4}(?:(?:(?:was|were|is|are|has|have|had|got)\\s+(?:\\w+ly\\s+)?)?${REPORT_FINDING_VERB_RE.source})`;
 const REPORT_ASSERTION_BOUNDARY_RE = new RegExp(`(?:,\\s*|\\bwith\\s+)(?=${REPORT_ASSERTION_START})`, 'gi');
+const REPORT_UNRELATED_OR_CLAUSE_RE = /^or\s+(?:(?:the|our|your|their)\s+)?(?:technician|tech|crew|team|office|report|i|we|you|he|she|they|it)\s+(?:is|are|was|were|has|have|had|will|would|should|can|could|did|does|do)\b/i;
 
 // A comma or "with" opens a separate report assertion only when its right
 // side has a fresh treatment subject/predicate and its left side already
@@ -1234,6 +1235,15 @@ function reportAssertionOf(clause, subjectAt) {
     start = boundary.index + boundary[0].length;
   }
   return clause.slice(start);
+}
+
+// clauseOf stops at "or", so inspect that boundary's right side long enough
+// to distinguish an alternative location ("exterior or the garage") from a
+// separate action ("or the technician can explain"). "Either" makes the
+// first finding explicitly alternative regardless.
+function reportHasAlternativeLocation(affirmed, locationAt, orTail) {
+  if (!/^or\b/i.test(orTail) || locationAt < 0) return false;
+  return /\beither\b/i.test(affirmed) || !REPORT_UNRELATED_OR_CLAUSE_RE.test(orTail);
 }
 
 /** value: { subject: "<regex>", location: "<regex>" } */
@@ -1257,6 +1267,8 @@ function report_readback_confirms(value, record, { spoken }) {
         .split(/\b(?:rather than|instead of)\b/i)[0];
       const subjectAt = affirmed.search(new RegExp(value.subject, 'i'));
       const locationAt = affirmed.search(locationRe);
+      const orTail = text.slice(clauseEnd);
+      const alternativeLocation = reportHasAlternativeLocation(affirmed, locationAt, orTail);
       // A completed treatment verb states the relationship. Concise report
       // summaries may omit it ("Talstar P around the perimeter"), but must
       // start with a finding term and connect it to its location; a caller
@@ -1272,6 +1284,7 @@ function report_readback_confirms(value, record, { spoken }) {
         ? affirmed.slice(0, evidenceEnd) + affirmed.slice(evidenceEnd).replace(/\bbefore\b/gi, 'prior to') : affirmed;
       const claim = claimContext(claimText, Math.min(subjectAt, locationAt), claimText.length);
       if (subjectAt >= 0 && locationAt >= 0 && !REPORT_UNCERTAINTY_RE.test(affirmed) && !REPORT_INSTRUCTION_RE.test(affirmed)
+          && !alternativeLocation
           && (findingVerb || conciseFinding)
           && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
         return ['pass', `readback confirmed: "${clip(clause.trim(), 160)}"`];
