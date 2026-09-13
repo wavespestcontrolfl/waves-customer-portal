@@ -1343,11 +1343,17 @@ function no_account_holder_callback(value, record, { spoken }) {
   const contact = callbackTarget(targets, CALLBACK_ACTION, CALLBACK_LIGHT_ACTION);
   const contactFinite = callbackTarget(targets, CALLBACK_ACTION_FINITE, CALLBACK_LIGHT_ACTION_FINITE);
   const promisedContact = `(?:${contact}|${CALLBACK_DELEGATION_INFINITIVE}\\s+${contact}|${CALLBACK_DELEGATION_FINITE}\\s+${contactFinite})`;
+  const bareContact = callbackTarget(
+    targets, `${CALLBACK_ADVERB}${CALLBACK_VERB}`, `${CALLBACK_ADVERB}${CALLBACK_LIGHT_VERB}`,
+  );
+  const barePromisedContact = `(?:${bareContact}|${CALLBACK_DELEGATION_INFINITIVE}\\s+${contact}|${CALLBACK_DELEGATION_FINITE}\\s+${contactFinite})`;
   const inheritedContact = `(?:and|but|so|then)\\s+${CALLBACK_COORDINATED_MODAL}\\s+${promisedContact}`;
+  const shiftedRecipient = '(?:you|me|us|him|her|them|(?:your|my|our|his|their)\\s+[a-z][\\w\\x27\\u2019-]*)';
+  const inheritedBareContact = `(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+(?:(?![.!?;]|\\b${CALLBACK_ACTOR_SHIFT}\\s+${shiftedRecipient}\\b).){1,120}?\\b(?:and|but|so|then)\\s+${barePromisedContact}`;
   const wavesActor = `(?:${CALLBACK_PROMISER}|me|us)\\b(?![\\x27\\u2019]s\\b)${CALLBACK_PHRASE_END}`;
   const recipientFirst = `${recipientTargets}${CALLBACK_MODAL}\\s+${CALLBACK_ADVERB}${CALLBACK_RECIPIENT_ACTION}\\s+${wavesActor}`;
   const re = new RegExp(
-    `\\b(?:(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+${promisedContact}|${inheritedContact}|${recipientFirst})`,
+    `\\b(?:(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+${promisedContact}|${inheritedContact}|${recipientFirst}|${inheritedBareContact})`,
     'gi',
   );
   for (const text of spoken) {
