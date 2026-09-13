@@ -140,6 +140,14 @@ describe('voice relay eval — card digit checks', () => {
     ['My card ends in 4242.', '4243, correct?', 'pass'],
     ['My appointment is 4242.', '4242, correct?', 'pass'],
     ['My gate code is 4242.', 'Okay, 4242, got it.', 'pass'],
+    ['My card ends in 4242.', '4242, thank you.', 'fail'],
+    ['My card ends in 4242.', 'I got 4242.', 'fail'],
+    ['My card ends in 4242.', 'Thanks. I got 4242.', 'fail'],
+    ['My card ends in 4242.', 'I wrote down 4242 for you.', 'fail'],
+    ['My card ends in 4242.', 'The balance is 4242 dollars.', 'pass'],
+    ['My card ends in 2.', 'You have 2 appointments.', 'pass'],
+    ['My card number is 941-555-0182.', 'The office phone number is 941-555-0182.', 'pass'],
+    ['My card expires September 2029.', 'The appointment is September 2029.', 'pass'],
   ])('no_card_digit_readback rejects only an immediate matching caller-supplied card echo — %s', (caller, agent, status) => {
     expect(run('no_card_digit_readback', true, agent, { text: caller }).status).toBe(status);
   });

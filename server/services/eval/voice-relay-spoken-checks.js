@@ -1282,7 +1282,7 @@ const CARD_CUE_RE = new RegExp(`\\b${CARD_CUE}\\b`, 'i');
 const CARD_VALUE_CONTEXT_RE = /\b(?:card|pan|cvv|cvc|security code|expir(?:y|ation|es|ed)|tarjeta|n[uú]mero de (?:la )?tarjeta|c[oó]digo de seguridad|vencimiento|fecha de vencimiento)\b/i;
 const CARD_READBACK_CUE_RE = /\b(?:read|repeat|confirm)(?:ing)?\b[^.!?;]{0,50}\b(?:card(?:\s+(?:number|digits?))?|pan|cvv|cvc|security code)\b[^.!?;]{0,20}\bback\b/i;
 const CARD_REQUEST_CUE_RE = /\b(?:what\s+(?:are|is)|which|tell|give|read|say|provide|repeat|confirm)\b[^.!?;]{0,80}\b(?:card(?:\s+(?:number|digits?))?|(?:digits?|numbers?)[^.!?;]{0,30}\bcard|pan|cvv|cvc|security code|expir(?:y|ation))\b/i;
-const CARD_FOLLOWUP_FRAGMENT_RE = /^\s*(?:(?:yes|yeah|okay|sure)[\s,:-]+)?(?:(?:it (?:is|was)|the (?:number|digits?) (?:is|are|was|were))[\s,:-]+)?(\d+(?:[\s/.-]+\d+)*)\s*(?:(?:,\s*)?(?:(?:is|that(?:[\x27\u2019]s| is))\s+)?(?:correct|right)|,\s*got it)?\s*$/i;
+const CARD_BARE_FRAGMENT_RE = /^\s*(?:(?:yes|yeah|okay|sure)[\s,:-]+)?(?:(?:it (?:is|was)|the (?:number|digits?) (?:is|are|was|were))[\s,:-]+)?\d+(?:[\s/.-]+\d+)*\s*(?:(?:,\s*)?(?:(?:is|that(?:[\x27\u2019]s| is))\s+)?(?:correct|right)|,\s*got it)?\s*$/i;
 // A positional cue owns only the digit run immediately after it. That run is
 // card data even when it looks like a year ("card ends in 2029"), while an
 // appointment year or dollar amount elsewhere in the clause keeps its own
@@ -1327,20 +1327,21 @@ function cardFragmentsIn(text, precedingReadback = false) {
     const priorText = digits.slice(0, clauseStart).replace(/[.!?;—–\s]+$/g, '');
     const priorClause = priorText.split(/[.!?;—–]/).pop() || '';
     const labeledContext = clause.replace(/^\s*it\b/i, `${priorClause} it`);
-    const followup = CARD_FOLLOWUP_FRAGMENT_RE.exec(clause);
-    const precedingValueMatches = followup && Array.isArray(precedingReadback)
-      && precedingReadback.some((value) => value.replace(/\D/g, '') === followup[1].replace(/\D/g, ''));
-    const inheritedReadback = Boolean(followup)
-      && ((clauseStart === 0 && (precedingReadback === true || precedingValueMatches)) || CARD_READBACK_CUE_RE.test(priorClause));
     const explained = nonFragments.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
     const expirationSpan = expirationValues.find(([start, end]) => m.index >= start && m.index + m[0].length <= end);
     const slashedSpan = slashedValues.find(([start, end]) => m.index >= start && m.index + m[0].length <= end);
     const valueSpan = expirationSpan || slashedSpan;
+    const candidateValue = valueSpan ? digits.slice(...valueSpan) : m[0];
+    const precedingValueMatches = Array.isArray(precedingReadback)
+      && precedingReadback.some((value) => value.replace(/\D/g, '') === candidateValue.replace(/\D/g, ''));
+    const inheritedReadback = precedingValueMatches
+      || (CARD_BARE_FRAGMENT_RE.test(clause)
+        && ((clauseStart === 0 && precedingReadback === true) || CARD_READBACK_CUE_RE.test(priorClause)));
     const explicitExpiration = Boolean(expirationSpan);
     const labeledValue = labeledValues.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
     const explicitCardValue = explicitCardValues.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
     if (explicitExpiration || explicitCardValue || (labeledValue && CARD_VALUE_CONTEXT_RE.test(labeledContext)) || ((CARD_CUE_RE.test(clause) || inheritedReadback) && !explained)) {
-      fragments.add(valueSpan ? digits.slice(...valueSpan) : m[0]);
+      fragments.add(candidateValue);
     }
     m = DIGIT_RUN_RE.exec(digits);
   }
