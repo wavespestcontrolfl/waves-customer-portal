@@ -166,3 +166,17 @@ test.each([
   const { assertedMatch } = require('../services/eval/voice-relay-spoken-checks')._internals;
   expect(assertedMatch(text, /safety for her dog/i)).not.toBeNull();
 });
+
+test.each([
+  ['Safety concerns for her dog were not raised.', false],
+  ["Safety concerns for her dog weren't raised.", false],
+  ["Safety for her dog hasn't been discussed.", false],
+  ['Safety for her dog did not come up.', false],
+  ['Safety for her dog was discussed, but an appointment was not booked.', true],
+  ['Customer asked about safety for her dog and did not book an appointment.', true],
+  ['An appointment was not booked, but safety for her dog was discussed.', true],
+  ['Safety for her dog was not only discussed, but recorded.', true],
+])('a negated predicate governs only its own captured subject: %s', (text, asserted) => {
+  const { assertedMatch } = require('../services/eval/voice-relay-spoken-checks')._internals;
+  expect(Boolean(assertedMatch(text, /safety[^.]*dog/i))).toBe(asserted);
+});
