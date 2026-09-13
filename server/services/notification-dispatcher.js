@@ -324,6 +324,18 @@ const NotificationDispatcher = {
         // A throw past the provider carries the KNOWN outcome; without one the
         // send is uncertain, never assumed undelivered.
         smsOutcome = outcomeOfThrow(err);
+        if (err?.providerOutcome && typeof err.providerOutcome === 'object') {
+          smsDelivery = { ...err.providerOutcome };
+          if (smsOutcome === 'not_sent') {
+            // sendCustomerMessage attaches its initialized not_sent outcome to
+            // failures before provider handoff as well as classified provider
+            // refusals. Both are safe to retry unless the attached evidence
+            // explicitly says terminal/nonretryable.
+            const retryable = smsDelivery.retryable !== false && smsDelivery.terminal !== true;
+            smsDelivery.retryable = retryable;
+            smsDelivery.deferred = retryable;
+          }
+        }
         logger.error(`[notify] SMS failed for ${customerId}: ${err.message} (outcome: ${smsOutcome})`);
         results.sms = `error: ${err.message}`;
       }

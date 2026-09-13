@@ -373,6 +373,35 @@ postgres('deferred standalone lawn assessment notification (real PostgreSQL)', (
       .toMatchObject({ pipeline_claimed_at: expect.any(Date), pipeline_owner_token: null, pipeline_completed_at: null });
   });
 
+  test('a retryable provider rejection followed by an audit throw remains retryable through real dispatcher replay', async () => {
+    const seeded = await seed();
+    const { queued } = await queueHeld(seeded.assessment.id);
+    const providerOutcome = {
+      sent: false,
+      provider: 'twilio',
+      deliveryOutcome: 'not_sent',
+      code: 'PROVIDER_RETRY',
+      error: 'rate limited',
+      retryable: true,
+      terminal: false,
+      retryAfterMs: 300000,
+      nextAllowedAt: new Date(Date.now() + 300000).toISOString(),
+      providerErrorCode: '20429',
+      providerHttpStatus: 429,
+    };
+    mockNotify.mockImplementation((...args) => RealNotificationDispatcher.notify(...args));
+    mockSendCustomerMessage.mockRejectedValue(Object.assign(new Error('audit write failed'), { providerOutcome }));
+
+    await expect(replayDeferredNotification(replayMeta(seeded, queued), replayDeps())).resolves.toMatchObject({
+      ...providerOutcome,
+      retryable: true,
+      deferred: true,
+    });
+    expect(await fixture.knex('sms_log').where({ customer_id: seeded.customerId })).toHaveLength(1);
+    expect(await fixture.knex('lawn_assessments').where({ id: seeded.assessment.id }).first())
+      .toMatchObject({ notification_sent: false, notification_sent_at: null });
+  });
+
   test('an uncertain replay retains the durable claim and cannot dispatch a second time', async () => {
     const seeded = await seed();
     const { queued } = await queueHeld(seeded.assessment.id);
