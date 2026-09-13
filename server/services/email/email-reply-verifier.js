@@ -6,10 +6,13 @@ const { etParts, addETDays } = require('../../utils/datetime-et');
 
 const PLACEHOLDER_RE = /\[([a-z][a-z0-9_ -]{0,30})\]|\{\{?([a-z][a-z0-9_ -]{0,30})\}?\}/gi;
 const LINK_RE = /(?:https?:\/\/|www\.)[^\s<>()]+|\b(?:[a-z0-9-]+\.)+[a-z]{2,63}(?:\/[^\s<>()]*)?/gi;
+const PHONE_URI_RE = /\b(?:tel|sms):(?:\/\/)?(?:\+?\d|\(\d)[\d()+.,;*#?=&%-]*/i;
 const MONEY_RE = /\$\s*\d(?:[\d,.]*\d)?|\b\d(?:[\d,.]*\d)?\s+(?:dollars?|bucks?)\b/gi;
 const SIGNED_MONEY_RE = /(?:[+\-\u2212]\s*\$\s*|\$\s*[+\-\u2212]\s*)\d[\d,]*(?:\.\d{1,2})?|[+\-\u2212]\s*\d[\d,]*(?:\.\d{1,2})?\s+(?:dollars?|bucks?)\b/gi;
+const MAGNITUDE_MONEY_RE = /(?:\$\s*\d(?:[\d,]*\d)?(?:\.\d+)?\s*(?:[kmbt]\b|thousand\b|million\b|billion\b|trillion\b)|\b\d(?:[\d,]*\d)?(?:\.\d+)?\s*(?:[kmbt]|thousand|million|billion|trillion)\s+(?:dollars?|bucks?)\b)/gi;
 const WRITTEN_MONEY_RE = /\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)\s+(?:dollars?|bucks?)\b/gi;
 const DATE_RE = /\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b|\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?\b|\b\d{1,2}(?:st|nd|rd|th)\b|\b(?:sun|mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|sat(?:ur)?)(?:day)?\b|\b(?:today|tomorrow)\b/gi;
+const DOTTED_MONTH_DATE_RE = /\b(?:jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\.\s*\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?\b/gi;
 const TIME_RE = /\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)\b/gi;
 const TIME_RANGE_RE = /\b(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?\s*(?:[-–—]|to|(?<=\bbetween\s+\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?\s*)and)\s*(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)\b/gi;
 const BOILERPLATE_RE = /\bthank you for (?:reaching out|contacting us)\b|\bhope this (?:email )?finds you well\b|\bplease (?:do not|don't) hesitate to (?:reach out|contact us)\b|\blet us know if you have any (?:other |further )?questions\b/i;
@@ -287,6 +290,15 @@ function stateWordsSupported(sentence, key, context, pattern) {
     (fact) => normalized(fact.value?.status) === normalized(claim)));
 }
 
+function balanceStatusViolations(text, context) {
+  const balance = factByKey(context, 'outstanding_balance');
+  const amount = balance?.status === 'present' ? storedCents(balance.value) : null;
+  const zeroClaim = /\b(?:paid in full|no (?:outstanding )?balance|balance is (?:zero|current)|account is current)\b/i.test(text);
+  const positiveClaim = /\b(?:you (?:still )?have (?:an? )?(?:outstanding )?balance|there (?:is|remains) (?:an? )?(?:outstanding )?balance(?: due)?(?: on your account)?|(?:an? )?(?:outstanding )?balance (?:is|remains) due)\b/i.test(text);
+  if ((zeroClaim && amount !== 0) || (positiveClaim && !(amount > 0))) return ['balance_status_unsupported'];
+  return [];
+}
+
 function statusViolations(text, context) {
   const violations = [];
   for (const sentence of sentences(text)) {
@@ -333,10 +345,7 @@ function statusViolations(text, context) {
     }
   }
 
-  const balance = factByKey(context, 'outstanding_balance');
-  if (/\b(?:paid in full|no (?:outstanding )?balance|balance is (?:zero|current)|account is current)\b/i.test(text)
-    && !(balance?.status === 'present' && Number(balance.value) === 0)) violations.push('balance_status_unsupported');
-  return violations;
+  return violations.concat(balanceStatusViolations(text, context));
 }
 
 function placeholderViolations(text, context) {
@@ -402,7 +411,7 @@ function structuralViolations(draft, context, wordBudget) {
   if (!draft) violations.push('empty_reply');
   if (!Number.isInteger(wordBudget) || wordBudget < 1 || wordCount(draft) > wordBudget) violations.push('word_budget_exceeded');
   if (/<\/?[a-z][^>]*>/i.test(draft)) violations.push('html_not_allowed');
-  if (/^\s*(?:[-*•]|\d+[.)])\s+/m.test(draft)) violations.push('bullets_not_allowed');
+  if (/^\s*(?:[-*•]|\d+[.)])\s+/m.test(normalizedCopy)) violations.push('bullets_not_allowed');
   const withoutClockTimes = draft.replace(TIME_RANGE_RE, '').replace(TIME_RE, '');
   if (/\b(?:noon|midnight)\b|\b\d{1,2}:\d{2}\b|\b(?:at|from|between)\s+\d{1,2}\b(?![\d:/])/i.test(withoutClockTimes)) violations.push('clock_format_unsupported');
   if (BOILERPLATE_RE.test(draft)) violations.push('boilerplate_not_allowed');
@@ -421,17 +430,20 @@ function groundingViolations(draft, context, exemplars) {
   const violations = [];
   const facts = presentFacts(context);
   const availableDates = dateFacts(context);
+  for (const date of draft.match(DOTTED_MONTH_DATE_RE) || []) violations.push(`date_unsupported:${date}`);
   for (const sentence of sentences(draft)) {
     if (mentionedFactKeys(sentence).length > 1) violations.push('mixed_fact_categories_unsupported');
     const amounts = sentence.match(MONEY_RE) || [];
     const signedAmounts = sentence.match(SIGNED_MONEY_RE) || [];
+    const magnitudeAmounts = sentence.match(MAGNITUDE_MONEY_RE) || [];
     const writtenAmounts = sentence.match(WRITTEN_MONEY_RE) || [];
     if (amounts.length > 1) violations.push('multiple_amounts_unsupported');
     for (const amount of amounts) {
       if (!amountSupported(amount, sentence, facts)) violations.push(`amount_unsupported:${amount}`);
     }
-    for (const amount of signedAmounts) violations.push(`amount_unsupported:${amount}`);
-    for (const amount of writtenAmounts) violations.push(`amount_unsupported:${amount}`);
+    for (const amount of [...signedAmounts, ...magnitudeAmounts, ...writtenAmounts]) {
+      violations.push(`amount_unsupported:${amount}`);
+    }
     for (const date of temporalClaims(sentence)) {
       if (!dateSupported(date, sentence, availableDates)) violations.push(`date_unsupported:${date}`);
     }
@@ -439,7 +451,7 @@ function groundingViolations(draft, context, exemplars) {
   }
   violations.push(...statusViolations(draft, context), ...placeholderViolations(draft, context));
   const links = allowedLinks(context);
-  if ((draft.match(LINK_RE) || []).some((link) => !links.has(link))) violations.push('link_unsupported');
+  if (PHONE_URI_RE.test(draft) || (draft.match(LINK_RE) || []).some((link) => !links.has(link))) violations.push('link_unsupported');
   if (exemplarLeak(draft, exemplars, context)) violations.push('few_shot_leak');
   return violations;
 }

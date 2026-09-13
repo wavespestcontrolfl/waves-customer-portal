@@ -43,6 +43,14 @@ describe('email reply verifier', () => {
     expect(verdict(`Hi Casey, your pending appointment is ${date.replace('15', '16')}.`).ok).toBe(false);
   });
 
+  test('dotted month dates require review without splitting the claim', () => {
+    for (const date of ['Sept.15', 'Sept. 15', 'Sep. 15, 2026']) {
+      expect(verdict(`Hi Casey, your pending appointment is ${date}.`).violations)
+        .toContain(`date_unsupported:${date}`);
+    }
+    expect(verdict('Hi Casey, your pending appointment is Sept 15.').ok).toBe(true);
+  });
+
   test.each(['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'])('grounds the full weekday name %s', (day) => {
     expect(verdict(`Hi Casey, your pending appointment is ${day}.`).ok).toBe(day === 'Tuesday');
     if (day !== 'Tuesday') {
@@ -261,6 +269,14 @@ describe('email reply verifier', () => {
     expect(verdict('Hi Casey, your outstanding balance is $75.').ok).toBe(true);
   });
 
+  test('rejects currency magnitude suffixes instead of grounding their numeric prefix', () => {
+    for (const amount of ['$75k', '$75 K', '$75m', '$75 million', '$75 billion', '$75 trillion', '75 thousand dollars']) {
+      expect(verdict(`Hi Casey, your outstanding balance is ${amount}.`).violations)
+        .toContain(`amount_unsupported:${amount}`);
+    }
+    expect(verdict('Hi Casey, your outstanding balance is $75.').ok).toBe(true);
+  });
+
   test('invoice mentions cannot suppress a failed payment status', () => {
     const facts = contextWith().facts.map((fact) => (fact.key === 'recent_payment'
       ? { ...fact, value: { ...fact.value, amount: 120, status: 'failed' } }
@@ -454,6 +470,29 @@ describe('email reply verifier', () => {
     ]));
   });
 
+  test('positive balance claims require an authoritative positive balance', () => {
+    for (const wording of ['you have an outstanding balance', 'there is a balance due on your account']) {
+      expect(verdict(`Hi Casey, ${wording}.`).ok).toBe(true);
+      for (const status of ['unavailable', 'absent']) {
+        const facts = contextWith().facts.map((fact) => (fact.key === 'outstanding_balance'
+          ? { ...fact, status, value: null }
+          : fact));
+        expect(verdict(`Hi Casey, ${wording}.`, { context: { facts } }).violations)
+          .toContain('balance_status_unsupported');
+      }
+      const zeroFacts = contextWith().facts.map((fact) => (fact.key === 'outstanding_balance'
+        ? { ...fact, value: 0 }
+        : fact));
+      expect(verdict(`Hi Casey, ${wording}.`, { context: { facts: zeroFacts } }).violations)
+        .toContain('balance_status_unsupported');
+    }
+    const zeroFacts = contextWith().facts.map((fact) => (fact.key === 'outstanding_balance'
+      ? { ...fact, value: 0 }
+      : fact));
+    expect(verdict('Hi Casey, your outstanding balance is $0.', { context: { facts: zeroFacts } }).ok).toBe(true);
+    expect(verdict('Hi Casey, you have no outstanding balance.', { context: { facts: zeroFacts } }).ok).toBe(true);
+  });
+
   test('accepts sent estimate wording for a viewed estimate with sent evidence', () => {
     const facts = contextWith().facts.map((fact) => (fact.key === 'pending_estimate'
       ? { ...fact, value: { status: 'viewed', sentAt: '2026-09-09T16:00:00Z' } }
@@ -519,8 +558,17 @@ describe('email reply verifier', () => {
     ['Hi Casey, view https://example.test/invoice for details.', 'link_unsupported'],
     ['Hi Casey, pay at www.example.test/payment.', 'link_unsupported'],
     ['Hi Casey, pay at billing.example.info/payment.', 'link_unsupported'],
+    ['Hi Casey, call tel:+15551234567.', 'link_unsupported'],
+    ['Hi Casey, text sms:5551234567.', 'link_unsupported'],
+    ['Hi Casey,\n– Your visit is pending.', 'bullets_not_allowed'],
+    ['Hi Casey,\n— Your visit is pending.', 'bullets_not_allowed'],
   ])('rejects unsafe structure: %s', (text, expected) => {
     expect(verdict(text).violations).toContain(expected);
+  });
+
+  test('ordinary colons and inline dashes remain valid prose', () => {
+    expect(verdict('Hi Casey, note: your visit is pending.').ok).toBe(true);
+    expect(verdict('Hi Casey—your visit is pending.').ok).toBe(true);
   });
 
   test('rejects retired pricing units and company copy', () => {
