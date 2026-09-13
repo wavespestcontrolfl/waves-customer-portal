@@ -35,6 +35,7 @@ test.each([
   ['Talstar P was applied indoors while bait was placed on the exterior perimeter.', 'fail'],
   ['Talstar P was applied indoors, bait was placed on the exterior perimeter.', 'fail'],
   ['Talstar P was applied indoors, the exterior perimeter received bait.', 'fail'],
+  ['Talstar P was applied indoors, with the exterior perimeter receiving bait.', 'fail'],
   ['The technician received Talstar P for the exterior perimeter.', 'fail'],
   ['The technician got Talstar P for the exterior perimeter.', 'fail'],
   ['The technician at the exterior perimeter received Talstar P.', 'fail'],
@@ -76,6 +77,8 @@ test.each([
   ['The technician may have applied Talstar P to the exterior perimeter.', 'fail'],
   ['Talstar P might have been applied to the exterior perimeter.', 'fail'],
   ['Perhaps, Talstar P was applied to the exterior perimeter.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, possibly.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, probably.', 'fail'],
   ['Talstar P was applied to the exterior perimeter, which you can see in the report.', 'pass'],
   ['Talstar P was applied to the exterior perimeter, as the report will show.', 'pass'],
   ['The technician applied Talstar P to the exterior perimeter, which you may verify in the report.', 'pass'],
@@ -100,6 +103,14 @@ test.each([
   ['Talstar P is going to be applied to the exterior perimeter.', 'fail'],
 ])('report findings preserve their affirmative location: %s', (text, status) => {
   expect(checks.report_readback_confirms(report, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  [{ subject: '\\btalstar\\b', location: '\\b(?:exterior|perimeter)\\b' }, 'pass'],
+  [{ subject: '\\bbait\\b', location: '\\bfoundation\\b' }, 'pass'],
+])('coordinated location recipients preserve each report finding: %j', (finding, status) => {
+  const spoken = ['The perimeter got Talstar P and the foundation got bait.'];
+  expect(checks.report_readback_confirms(finding, {}, { spoken })[0]).toBe(status);
 });
 
 test.each([

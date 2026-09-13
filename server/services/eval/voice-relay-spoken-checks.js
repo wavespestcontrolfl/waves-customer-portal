@@ -1243,8 +1243,9 @@ const REPORT_LOCATION_RECIPIENT_PREDICATE_RE = /^\s*(?:(?:itself|has|have|had|al
 const REPORT_COMPLETED_PASSIVE_RE = /\b(?:(?:was|were|got)|(?:has|have|had)(?:\s+(?:\w+ly|already|just|now))*\s+been)\s+(?:(?:\w+ly|already|just|now)\s+)*$/i;
 const REPORT_NONCOMPLETION_GOVERNOR_RE = /(?:\b(?:supposed|expected|required|meant|scheduled|instructed|asked|told|directed|ordered|needed|intended|planned|ought)\s+to(?:\s+(?:\w+ly|already|just|now))*(?:\s+have(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?)?(?:\s+(?:\w+ly|already|just|now))*|\bplan(?:s|ned|ning)?\s+on\s+having(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?(?:\s+(?:\w+ly|already|just|now))*)\s*$/i;
 const REPORT_NONCOMPLETION_MODIFIER_RE = /\b(?:almost|nearly)(?:\s+(?:has|have|had|was|were|got|been)){0,2}\s*$/i;
-const REPORT_ASSERTION_START = `(?:(?:the|a|an)\\s+)?(?:[\\w'\u2019-]+\\s+){1,4}(?:(?:(?:was|were|is|are|has|have|had|got)\\s+(?:\\w+ly\\s+)?)?${REPORT_FINDING_VERB_RE.source})`;
-const REPORT_ASSERTION_BOUNDARY_RE = new RegExp(`(?:,\\s*|\\bwith\\s+)(?=${REPORT_ASSERTION_START})`, 'gi');
+const REPORT_TRAILING_UNCERTAINTY_RE = /^\s*,\s*(?:maybe|perhaps|possibly|potentially|probably)\s*$/i;
+const REPORT_ASSERTION_START = `(?:(?:the|a|an)\\s+)?(?:[\\w'\u2019-]+\\s+){1,4}(?:(?:(?:was|were|is|are|has|have|had|got)\\s+(?:\\w+ly\\s+)?)?(?:${REPORT_FINDING_VERB_RE.source}|\\b(?:receiving|getting)\\b))`;
+const REPORT_ASSERTION_BOUNDARY_RE = new RegExp(`(?:,\\s*|\\b(?:with|and)\\s+)(?=${REPORT_ASSERTION_START})`, 'gi');
 const REPORT_UNRELATED_OR_CLAUSE_RE = /^or\s+(?:(?:the|our|your|their)\s+)?(?:technician|tech|crew|team|office|report|i|we|you|he|she|they|it)\s+(?:is|are|was|were|has|have|had|will|would|should|can|could|did|does|do)\b/i;
 
 // A comma or "with" opens a separate report assertion only when its right
@@ -1369,13 +1370,15 @@ function report_readback_confirms(value, record, { spoken }) {
         findingVerb ? findingVerb.index + findingVerb[0].length : -1,
       );
       const findingEvidence = affirmed.slice(0, findingEvidenceEnd);
+      const trailingEvidence = affirmed.slice(findingEvidenceEnd);
       // A trailing "before" dates completed evidence. Remove only that
       // temporal marker, preserving any actual denial or condition later.
       const evidenceEnd = Math.max(subjectAt, locationAt, completedFinding ? findingVerb.index : -1);
       const claimText = (completedFinding || conciseFinding)
         ? affirmed.slice(0, evidenceEnd) + affirmed.slice(evidenceEnd).replace(/\bbefore\b/gi, 'prior to') : affirmed;
       const claim = claimContext(claimText, Math.min(subjectAt, locationAt), claimText.length);
-      if (subjectAt >= 0 && !REPORT_UNCERTAINTY_RE.test(findingEvidence) && !REPORT_INSTRUCTION_RE.test(affirmed)
+      if (subjectAt >= 0 && !REPORT_UNCERTAINTY_RE.test(findingEvidence)
+          && !REPORT_TRAILING_UNCERTAINTY_RE.test(trailingEvidence) && !REPORT_INSTRUCTION_RE.test(affirmed)
           && !alternativeLocation
           && (completedFinding || conciseFinding)
           && !reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb)) {
