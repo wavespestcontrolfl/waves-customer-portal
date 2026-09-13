@@ -35,6 +35,8 @@ describe('voice relay eval — shared spoken-check foundation', () => {
   test.each([
     ['I doubt it, but yes, the next visit is free.', ' yes, the next visit is free'],
     ['Talstar P was applied, and bait was placed along the foundation.', ' bait was placed along the foundation'],
+    ['Talstar P was applied indoors while bait was placed outside.', ' bait was placed outside'],
+    ['There is no problem because your next visit is free.', ' your next visit is free'],
     ['The window is 1 to 3; the technician arrives at 3.', ' the technician arrives at 3'],
     ['Quarterly is $129 — the next visit is free.', ' the next visit is free'],
   ])('clauseOf finds the coordinator/terminator/dash boundary: %j', (text, expected) => {

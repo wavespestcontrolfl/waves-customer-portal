@@ -412,7 +412,7 @@ const NEGATION_RE = /\b(?:not|never|cannot|can[\x27\u2019]?t|\w+n[\x27\u2019]t|w
 // cap can't see — and, symmetrically, drops a refusal that sits a little
 // further from its claim than the cap happens to reach. Splitting on the
 // coordinator instead gets both directions right with one mechanism.
-const CLAUSE_BOUNDARY_TOKEN_RE = /[.!?;]|[—–]|\b(?:but|and|or|though|although|however|yet|so|then|pero|sin embargo|aunque)\b/gi;
+const CLAUSE_BOUNDARY_TOKEN_RE = /[.!?;]|[—–]|\b(?:but|and|or|though|although|however|yet|so|then|while|because|pero|sin embargo|aunque)\b/gi;
 const COORDINATED_REPORT_VERBS = vocabAlt([...EPISTEMIC_REFUSAL_VERBS, 'deny']);
 const CLAUSE_FINITE_PREDICATE_RE = /\b(?:is|are|was|were|has|have|had|will|would|should|can|cannot|could|did|does|do|applied|placed|processed)\b/i;
 /** [start, end) of the clause in `text` containing character index `at`. */
