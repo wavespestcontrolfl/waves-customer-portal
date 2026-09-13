@@ -1260,7 +1260,7 @@ const callbackTarget = (targets, action, lightAction) => `(?:${action}\\s+(?:${t
 // A condition immediately after the recipient governs the callback promise:
 // "we will call her if she agrees". Other trailing modifiers stay outside
 // the negation scan — "we will call her before noon" is still a promise.
-const CALLBACK_TRAILING_CONDITION_RE = /^\s*,?\s*(?:only\s+)?(?:if|unless)\b/i;
+const CALLBACK_TRAILING_CONDITION_RE = /^\s*(?:back\b\s*)?,?\s*(?:only\s+)?(?:if|unless)\b/i;
 // Whom every scenario's account holder can be called without naming her: a
 // pronoun, or the role the caller is asking about. The fixture's `targets`
 // add the names and relationships this scenario's account holder goes by

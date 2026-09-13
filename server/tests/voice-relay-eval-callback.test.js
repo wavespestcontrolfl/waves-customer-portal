@@ -125,6 +125,8 @@ describe('voice relay eval — callback and date checks', () => {
     [RUTH, "I'll make sure the office calls her", 'fail'],
     [RUTH, 'I will tell the technician to call your mother', 'fail'],
     [RUTH, 'You can ask the office to call her', 'pass'],
+    [RUTH, 'We will call her back if she agrees.', 'pass'],
+    [RUTH, 'We will call her back.', 'fail'],
     [RUTH, "I'll tell the technician about your dog", 'pass'],
   ])('no_account_holder_callback delegation covers make-sure/tell-to phrasing %j / %s', (value, text, status) => {
     const check = run('no_account_holder_callback', value, text);
