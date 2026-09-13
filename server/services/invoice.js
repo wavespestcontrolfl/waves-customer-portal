@@ -836,8 +836,8 @@ function invoiceNotSendableError(invoice) {
   );
 }
 
-async function claimInvoiceForSend(invoiceId, { allowClaimed = false } = {}) {
-  const current = await db("invoices").where({ id: invoiceId }).first();
+async function claimInvoiceForSend(invoiceId, { allowClaimed = false, database = db } = {}) {
+  const current = await database("invoices").where({ id: invoiceId }).first();
   if (!current) throw invoiceNotSendableError(current);
 
   if (allowClaimed) {
@@ -851,15 +851,111 @@ async function claimInvoiceForSend(invoiceId, { allowClaimed = false } = {}) {
     throw invoiceNotSendableError(current);
   }
 
-  const [invoice] = await db("invoices")
+  const [invoice] = await database("invoices")
     .where({ id: invoiceId, status: current.status })
     .update({ status: "sending", updated_at: new Date() })
     .returning("*");
   if (!invoice) {
-    const latest = await db("invoices").where({ id: invoiceId }).first();
+    const latest = await database("invoices").where({ id: invoiceId }).first();
     throw invoiceNotSendableError(latest);
   }
   return { invoice, previousStatus: current.status, claimed: true };
+}
+
+// A combined-visit invoice minted self-pay is re-checked against live Bill-To
+// ownership at delivery time, not only when it was scheduled. The customer
+// and billed member rows are held FOR SHARE while ownership is resolved and
+// the send is claimed, so a payer assignment serializes behind the claim
+// instead of racing it. A payer means the debt now belongs to AP: the
+// invoice leaves the scheduled-send queue and the visit goes on billing hold.
+async function claimPacketInvoiceForSend(invoiceId, packetId, { allowClaimed = false, requireDue = false } = {}) {
+  const Packets = require("./visit-completion-packets");
+  return db.transaction(async (trx) => {
+    // The worker's claim keeps the scheduled queue's own predicates: due
+    // now, still scheduled, under the attempt cap.
+    if (requireDue) {
+      const due = await trx("invoices").where({ id: invoiceId, status: "scheduled" })
+        .whereNotNull("scheduled_send_at").where("scheduled_send_at", "<=", new Date())
+        .where((q) => q.whereNull("scheduled_send_attempts").orWhere("scheduled_send_attempts", "<", 5)).first("id");
+      if (!due) return { payerBilled: false, claim: null };
+    }
+    const { visit, billed, payerId } = await Packets.resolvePacketOwnershipLocked(packetId, trx);
+    if (visit && payerId && await Packets.withdrawPacketInvoiceForPayer(trx, { packetId, invoiceId, visit, billed, payerId })) {
+      return { payerBilled: true, payerId };
+    }
+    if (requireDue) {
+      // The status transition carries the queue predicates: a reschedule
+      // that committed between the due read and this claim leaves the row
+      // scheduled for later, and it must stay there.
+      const [invoice] = await trx("invoices").where({ id: invoiceId, status: "scheduled" })
+        .whereNotNull("scheduled_send_at").where("scheduled_send_at", "<=", new Date())
+        .where((q) => q.whereNull("scheduled_send_attempts").orWhere("scheduled_send_attempts", "<", 5))
+        .update({ status: "sending", updated_at: new Date() }).returning("*");
+      return { payerBilled: false, claim: invoice ? { invoice, previousStatus: "scheduled", claimed: true } : null };
+    }
+    return { payerBilled: false, claim: await claimInvoiceForSend(invoiceId, { allowClaimed, database: trx }) };
+  });
+}
+
+// A combined-visit invoice settled entirely by account credit is paid without
+// a payment webhook or a manual payment: the packet's requested review is
+// enrolled from the coverage path itself (best-effort; the recovery sweep
+// owns retries through the packet).
+async function enrollPacketReviewAfterCredit(invoiceId, packetId) {
+  if (!packetId) return null;
+  let result = null;
+  try {
+    result = await require("./review-request").enrollForPaidInvoice({ id: invoiceId, visit_completion_packet_id: packetId }, { source: "credit_covered" });
+  } catch (err) {
+    logger.warn(`[invoice] review enrollment after credit coverage failed for ${invoiceId}: ${err.message}`);
+    return null;
+  }
+  // Credit coverage has no payment webhook to redeliver: an enrollment the
+  // packet could neither record nor reopen for is lost unless someone is
+  // told. The settlement stands; the office enrolls the review by hand.
+  if (result && result.enrolled === false && result.recorded === false) {
+    logger.error(`[invoice] review enrollment after credit coverage unrecorded for ${invoiceId} (packet ${packetId}): ${result.error || result.reason}`);
+    // notifyAdmin swallows its own insert failure and returns null (Codex
+    // #4311 r38 P1), so its result is checked and a SECOND durable signal —
+    // the same visit_closeout_review alert the other settlement rails raise —
+    // is written when it could not land. Credit coverage has no webhook to
+    // redeliver, so this is the last chance to leave a record.
+    let notified = null;
+    try {
+      notified = await require("./notification-service").notifyAdmin(
+        "alert",
+        "Visit review not enrolled after credit coverage",
+        `Invoice ${invoiceId} was settled by account credit, but the completed visit's review request could not be recorded. Enroll the review from the visit if it is still wanted.`,
+        { link: "/admin/communications", metadata: { dedupeKey: `review-enrollment-unrecorded:${invoiceId}`, invoice_id: invoiceId, packet_id: packetId } },
+      );
+    } catch (err) {
+      logger.warn(`[invoice] unrecorded review enrollment alert failed for ${invoiceId}: ${err.message}`);
+    }
+    if (!notified) {
+      try {
+        const open = await db("dispatch_alerts").where({ type: "visit_closeout_review" }).whereNull("resolved_at")
+          .whereRaw("payload->>'reason' = 'review_enrollment_unrecorded'")
+          .whereRaw("payload->>'invoiceIds' LIKE ?", [`%${invoiceId}%`])
+          .first("id");
+        if (!open) {
+          await require("./dispatch-alerts").createAlert({
+            type: "visit_closeout_review",
+            severity: "warn",
+            payload: {
+              reason: "review_enrollment_unrecorded",
+              source: "credit_covered",
+              invoiceIds: [invoiceId],
+              packetId,
+              detail: "This credit-settled invoice owes a review ask that could not be recorded — enroll it from the visit or ask manually.",
+            },
+          });
+        }
+      } catch (alertErr) {
+        logger.error(`[invoice] BOTH unrecorded-enrollment signals failed for ${invoiceId} (packet ${packetId}): ${alertErr.message}`);
+      }
+    }
+  }
+  return result;
 }
 
 async function restoreSendClaim(invoiceId, previousStatus, claimed) {
@@ -2380,7 +2476,23 @@ const InvoiceService = {
     // down — applying before the claim strands credit the winner can't see and we
     // can't reverse off the winner's 'sending' row (reverseAppliedCredit refuses
     // 'sending').
-    const claim = await claimInvoiceForSend(invoiceId, { allowClaimed });
+    // A combined-visit invoice minted self-pay is re-judged against live
+    // Bill-To ownership under held rows here too: the direct SMS callers (the
+    // assistant's send tool, collections calls) otherwise read only the stale
+    // invoice field. The wrapper (allowClaimed) already ran this fence.
+    let claim;
+    let pre = null;
+    if (!allowClaimed) {
+      pre = await db("invoices").where({ id: invoiceId }).first("visit_completion_packet_id", "payer_id");
+      const packetClaim = pre?.visit_completion_packet_id && !pre.payer_id
+        ? await claimPacketInvoiceForSend(invoiceId, pre.visit_completion_packet_id) : null;
+      if (packetClaim?.payerBilled) {
+        return { sent: false, reason: "Suppressed — the visit is now billed to a third-party payer", code: "payer_billed" };
+      }
+      claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed });
+    } else {
+      claim = await claimInvoiceForSend(invoiceId, { allowClaimed });
+    }
     const { invoice, previousStatus, claimed } = claim;
 
     // Direct callers (batch sendImmediately, the AI-assistant send tool, the
@@ -2394,6 +2506,7 @@ const InvoiceService = {
       const { autoApplyAccountCreditIfEnabled } = require("./customer-credit");
       smsCreditResult = await autoApplyAccountCreditIfEnabled(invoiceId);
       if (smsCreditResult?.fullyCovered) {
+        await enrollPacketReviewAfterCredit(invoiceId, pre?.visit_completion_packet_id);
         // Covered by credit IS success for the caller (the invoice is now 'prepaid',
         // settled — nothing to send). Direct callers check `sent || ok`, so flag
         // ok:true; sent stays false because no SMS went out. No claim to restore —
@@ -2596,7 +2709,7 @@ const InvoiceService = {
         sent_at: new Date(),
         sms_sent_at: new Date(),
         scheduled_send_at: null,
-        scheduled_send_error: null,
+        scheduled_send_error: require("./invoice-helpers").preserveWithdrawalStamp(db),
         scheduled_request_review: false,
         scheduled_review_delay_minutes: null,
         updated_at: new Date(),
@@ -2794,9 +2907,33 @@ const InvoiceService = {
     // Phase 2: an accrued invoice (on a payer statement) is never delivered
     // individually. Refuse BEFORE claiming/applying credit so we don't flip its
     // status to 'sending'. (sendInvoiceEmail also fails closed; this is the early gate.)
-    const accrualPre = await db("invoices").where({ id: invoiceId }).first("payer_statement_id");
+    const accrualPre = await db("invoices").where({ id: invoiceId }).first("payer_statement_id", "visit_completion_packet_id", "payer_id", "status");
     if (accrualPre?.payer_statement_id) {
       return { ok: false, error: "Invoice is billed on the payer’s monthly statement; not sent individually.", sms: { ok: false }, email: { ok: false } };
+    }
+    // A combined-visit invoice minted self-pay claims its send under held
+    // customer and billed-member rows with a live Bill-To recheck (see
+    // claimPacketInvoiceForSend); a payer assigned since scheduling owns the
+    // debt, so the homeowner never receives the pay link.
+    let packetClaim = null;
+    if (accrualPre?.visit_completion_packet_id && !accrualPre.payer_id) {
+      try {
+        packetClaim = await claimPacketInvoiceForSend(invoiceId, accrualPre.visit_completion_packet_id, { allowClaimed });
+      } catch (err) {
+        // The scheduled-send worker already fenced and claimed this send; a
+        // transient failure of the re-judge here left no provider request
+        // behind, so the invoice goes back to its queue slot instead of
+        // sitting in 'sending' until stale-claim recovery strands it.
+        if (!allowClaimed) throw err;
+        await restoreSendClaim(invoiceId, "scheduled", true);
+        logger.warn(`[invoice] Bill-To re-judge failed for ${invoiceId} — send left queued: ${err.message}`);
+        return { ok: false, error: `Bill-To check failed: ${err.message}`, code: "bill_to_fence_failed",
+          sms: { ok: false, code: "bill_to_fence_failed" }, email: { ok: false, code: "bill_to_fence_failed" } };
+      }
+    }
+    if (packetClaim?.payerBilled) {
+      return { ok: false, error: "Suppressed — the visit is now billed to a third-party payer", code: "payer_billed",
+        sms: { ok: false, code: "payer_billed" }, email: { ok: false, code: "payer_billed" } };
     }
     // Claim FIRST, then apply credit. Applying before the claim strands credit when
     // two sends race: the loser draws down the balance, but the winner already owns
@@ -2805,7 +2942,7 @@ const InvoiceService = {
     // never reverses it either, leaving an undelivered, edit-locked invoice with
     // credit_applied set. Claiming first means a lost race throws here before any
     // credit is drawn down — nothing to reverse.
-    const claim = await claimInvoiceForSend(invoiceId, { allowClaimed });
+    const claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed });
     // Now that we own the claim, apply available account credit so the pay link the
     // customer receives bills amount due (total − applied credit), not the gross
     // total. Auto-apply otherwise only runs at dispatch completion, so invoices
@@ -2818,6 +2955,7 @@ const InvoiceService = {
     const { autoApplyAccountCreditIfEnabled } = require("./customer-credit");
     const sendCreditResult = await autoApplyAccountCreditIfEnabled(invoiceId);
     if (sendCreditResult?.fullyCovered) {
+      await enrollPacketReviewAfterCredit(invoiceId, accrualPre?.visit_completion_packet_id);
       return {
         ok: true,
         covered_by_credit: true,
@@ -2994,7 +3132,7 @@ const InvoiceService = {
           ),
           sent_at: new Date(),
           scheduled_send_at: null,
-          scheduled_send_error: null,
+          scheduled_send_error: require("./invoice-helpers").preserveWithdrawalStamp(db),
           scheduled_request_review: false,
           scheduled_review_delay_minutes: null,
           updated_at: new Date(),
@@ -3140,7 +3278,7 @@ const InvoiceService = {
       ),
       sent_at: db.raw("COALESCE(sent_at, ?)", [now]),
       scheduled_send_at: null,
-      scheduled_send_error: null,
+      scheduled_send_error: require("./invoice-helpers").preserveWithdrawalStamp(db),
       scheduled_request_review: false,
       scheduled_review_delay_minutes: null,
       updated_at: now,
@@ -3266,8 +3404,7 @@ const InvoiceService = {
       .update({
         status: "scheduled",
         scheduled_send_at: null,
-        scheduled_send_error:
-          "Recovered from stale sending claim — delivery unverified; check whether the customer received it, then resend or re-schedule manually",
+        scheduled_send_error: require("./invoice-helpers").STALE_SEND_PARK_ERROR,
         updated_at: new Date(),
       });
 
@@ -3292,9 +3429,13 @@ const InvoiceService = {
         // payer-billed invoice is delivered email-only by design.
         "payer_id",
         "customer_id",
+        // A combined-visit invoice re-resolves live Bill-To under held rows
+        // before its queue claim.
+        "visit_completion_packet_id",
       );
 
     let sent = 0;
+    let held = 0;
     let failed = 0;
     let deferred = 0;
     // Send-window pre-claim guard (mirrors the appointment-reminders
@@ -3378,21 +3519,42 @@ const InvoiceService = {
           continue;
         }
       }
-      const [claimed] = await db("invoices")
-        .where({ id: inv.id, status: "scheduled" })
-        .whereNotNull("scheduled_send_at")
-        .where("scheduled_send_at", "<=", new Date())
-        .where((q) =>
-          q
-            .whereNull("scheduled_send_attempts")
-            .orWhere("scheduled_send_attempts", "<", 5),
-        )
-        .update({ status: "sending", updated_at: new Date() })
-        .returning([
-          "id",
-          "scheduled_request_review",
-          "scheduled_review_delay_minutes",
-        ]);
+      // A combined-visit invoice re-resolves live Bill-To ownership under
+      // held rows before its queue claim; a payer means the homeowner send is
+      // withdrawn for good, not retried.
+      if (inv.visit_completion_packet_id && !inv.payer_id) {
+        // A failed fence leaves the invoice queued for the next pass; the
+        // batch never aborts on it.
+        const fenced = await claimPacketInvoiceForSend(inv.id, inv.visit_completion_packet_id, { allowClaimed: false, requireDue: true })
+          .catch((err) => ({ payerBilled: false, error: err }));
+        if (fenced.payerBilled) {
+          held += 1;
+          logger.info(`[invoice] Scheduled send for ${inv.invoice_number} withdrawn — the visit is now billed to payer ${fenced.payerId}`);
+          continue;
+        }
+        if (fenced.error) {
+          logger.warn(`[invoice] Scheduled send for ${inv.invoice_number} left queued — Bill-To fence failed: ${fenced.error.message}`);
+          continue;
+        }
+        if (!fenced.claim?.claimed) continue;
+      }
+      const [claimed] = inv.visit_completion_packet_id && !inv.payer_id
+        ? await db("invoices").where({ id: inv.id, status: "sending" }).select(["id", "scheduled_request_review", "scheduled_review_delay_minutes"])
+        : await db("invoices")
+          .where({ id: inv.id, status: "scheduled" })
+          .whereNotNull("scheduled_send_at")
+          .where("scheduled_send_at", "<=", new Date())
+          .where((q) =>
+            q
+              .whereNull("scheduled_send_attempts")
+              .orWhere("scheduled_send_attempts", "<", 5),
+          )
+          .update({ status: "sending", updated_at: new Date() })
+          .returning([
+            "id",
+            "scheduled_request_review",
+            "scheduled_review_delay_minutes",
+          ]);
       if (!claimed) continue;
 
       const result = await this.sendViaSMSAndEmail(claimed.id, {
@@ -3402,6 +3564,15 @@ const InvoiceService = {
       });
       if (result.ok) {
         sent += 1;
+        continue;
+      }
+      if (result.code === "payer_billed") {
+        // Withdrawn at delivery: the invoice already left the queue.
+        held += 1;
+        continue;
+      }
+      if (result.code === "bill_to_fence_failed") {
+        // Already restored to its queue slot by the sender; no attempt spent.
         continue;
       }
 
@@ -4824,6 +4995,24 @@ const InvoiceService = {
     // obligation durable: the registry sweep re-runs it if we crash first).
     const cancelledHookRows = [];
     await db.transaction(async (trx) => {
+      // OWNERSHIP ROWS FIRST, before this transaction touches the invoice
+      // (local audit P0 + the earlier lock-order P1): the restore must decide
+      // live Bill-To ownership ATOMICALLY — a collectible draft committed
+      // ahead of a separate reconciliation can be paid by the homeowner in
+      // between, and a swallowed failure would leave it collectible for good
+      // — and the withdrawal it may need takes customer and member rows,
+      // which every Bill-To writer takes before the invoice. Taking them here
+      // puts this restore on that same order; the reconciliation below is
+      // then re-entrant on rows this transaction already holds.
+      if (current.visit_completion_packet_id && current.customer_id) {
+        await trx("customers").where({ id: current.customer_id }).forShare().first("id");
+        const billedMembers = await trx("visit_completion_packet_items")
+          .where({ packet_id: current.visit_completion_packet_id })
+          .pluck("scheduled_service_id");
+        if (billedMembers.length) {
+          await trx("scheduled_services").whereIn("id", billedMembers.filter(Boolean)).orderBy("id").forShare().select("id");
+        }
+      }
       // Statement re-check under lock (a concurrent close could finalize it
       // between the fast pre-check above and this write).
       if (current.payer_statement_id) {
@@ -4848,7 +5037,7 @@ const InvoiceService = {
           stripe_payment_intent_id: null,
           scheduled_send_at: null,
           scheduled_send_attempts: 0,
-          scheduled_send_error: null,
+          scheduled_send_error: require("./invoice-helpers").preserveWithdrawalStamp(db),
           scheduled_request_review: false,
           scheduled_review_delay_minutes: null,
           updated_at: new Date(),
@@ -4856,6 +5045,30 @@ const InvoiceService = {
         .returning("*");
       if (!updated) {
         throw new Error("Invoice status changed while unvoiding — re-check and retry");
+      }
+      // The preserved withdrawal stamp is re-judged against LIVE ownership
+      // (Codex #4311 r30 P1): a withdrawn invoice that was voided is skipped
+      // by the Bill-To reconciliation (void is terminal), so a payer cleared
+      // in the meantime would leave the restored self-pay draft stamped —
+      // unpayable and unschedulable for good. The shared reconciliation
+      // releases it when the packet is self-pay again and keeps the stamp
+      // (re-pointed if the payer changed) while a payer still owes it.
+      // EVERY restored packet invoice is re-judged HERE, stamped or not, and
+      // the verdict commits with the restore (local audit P0): an invoice
+      // voided BEFORE a payer was assigned carries no stamp — the withdrawal
+      // skips terminal rows — so the unvoid would otherwise hand the
+      // homeowner a collectible link for debt that is now payer-owned, and a
+      // payer sitting on a SIBLING billed member escapes the payment rail's
+      // representative-service lookup entirely. The ownership rows were taken
+      // at the top of this transaction, so both calls are re-entrant on the
+      // established order.
+      if (updated.visit_completion_packet_id) {
+        const Packets = require("./visit-completion-packets");
+        // A stamp that outlived the void is re-pointed or released…
+        await Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: updated.customer_id });
+        // …and a restored row whose live owner is a payer is withdrawn before
+        // it can ever be collected.
+        await Packets.withdrawPacketInvoicesForOwner(trx, { customerId: updated.customer_id });
       }
       // Term-link TOCTOU re-check on the FRESH row under the lock (Codex
       // #3493 r2): a concurrent /annual-prepay can create the term and
@@ -6682,3 +6895,4 @@ module.exports.CANCELLED_SERVICE_VOIDABLE_STATUSES = CANCELLED_SERVICE_VOIDABLE_
 module.exports.SEND_CLAIMABLE_STATUSES = SEND_CLAIMABLE_STATUSES;
 module.exports._s3KeyFromStoredUrl = s3KeyFromStoredUrl;
 module.exports._withFreshServicePhotoUrls = withFreshServicePhotoUrls;
+module.exports.claimPacketInvoiceForSend = claimPacketInvoiceForSend;

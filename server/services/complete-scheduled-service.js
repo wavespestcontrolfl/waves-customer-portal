@@ -2325,6 +2325,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
       || (packetRecords && (!db?.isTransaction || !Array.isArray(packetContext.uploadedPhotoRows))))) {
     throw new TypeError('Packet completion requires its phase, item and record transaction');
   }
+  // New grouped packets freeze one server-measured visit duration and an
+  // integer allocation for each automatic member. Null is a deliberate
+  // "unknown" allocation (no trustworthy visit/member start), while zero is
+  // a real rounded observation. Old packets carry no marker and retain their
+  // original replay behavior.
+  let packetDurationAllocation = packetContext?.durationAllocation
+    && packetContext.durationAllocation.version === 1
+    && (packetContext.durationAllocation.allocatedMinutes === null
+      || (Number.isInteger(packetContext.durationAllocation.allocatedMinutes)
+        && packetContext.durationAllocation.allocatedMinutes >= 0))
+    ? packetContext.durationAllocation
+    : null;
   let completionAttempt = null;
   let legacyVisitToDissolve = null;
   let markedSucceeded = false;
@@ -2738,6 +2750,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
     let effectiveTimeOnSite = isBackfillCompletion
       ? backfillTimeOnSiteMinutes(timeOnSite)
       : livePlan.effectiveTimeOnSite;
+    // The packet coordinator, not a repeated client timer, owns automatic
+    // grouped duration. Explicit admin/backfill values are not assigned a
+    // packet allocation and continue through the existing validator above.
+    if (packetDurationAllocation && !isBackfillCompletion) {
+      effectiveTimeOnSite = packetDurationAllocation.allocatedMinutes;
+    }
     if (isBackfillCompletion && effectiveTimeOnSite == null && timeOnSite != null && timeOnSite !== '') {
       logger.warn(`[completion] backfill timeOnSite ${JSON.stringify(timeOnSite)} rejected for service ${svc.id} (not a positive duration ≤ ${BACKFILL_MAX_TIME_ON_SITE_MINUTES}min) — recorded as unknown`);
     }
@@ -3571,7 +3589,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // The guard must precede replay/resume too: a saved packet member
           // has a resumable single-service attempt, whose legacy side effects
           // would otherwise invoice and message the customer independently.
-          const member = await lockTrx('scheduled_services').where({ id: svc.id }).first('visit_id');
+          const member = await lockTrx('scheduled_services as member')
+            .leftJoin('service_visits as visit', 'visit.id', 'member.visit_id')
+            .where('member.id', svc.id).first('member.visit_id', 'visit.behavior_version');
           // Invoice-issued closeout: the grouped-stop refusal ran unlocked
           // in invoice-issued-closeout.js; a createOrJoinVisit that grouped
           // this row since would otherwise let a packet-less open group
@@ -3597,7 +3617,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               derived_idempotency_key: idempotencyKey,
             }).first('id', 'service_record_id', 'attempt_count')
             : null;
-          if (((packet || packetContext) && !ownedItem) || (packetEffects && !ownedItem.service_record_id)) {
+          if (((packet || packetContext || Number(member?.behavior_version) >= 2) && !ownedItem) || (packetEffects && !ownedItem.service_record_id)) {
             return { action: 'conflict', status: 409, payload: {
               error: 'This service is owned by a visit closeout. Resume the visit closeout.',
               code: 'visit_grouped', visitId: member?.visit_id || null,
@@ -3694,6 +3714,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         if (!parent) return { blockedBy: lockedRow.visit_id }; // orphan: fail closed
         if (ownedPacketVisitId === parent.id) return parent.status === 'closing' ? null : { blockedBy: parent.id };
         if (String(parent.status) === 'dissolved') return null;
+        if (Number(parent.behavior_version) >= 2) return { blockedBy: parent.id };
         // READ-ONLY (codex #3590 r4: later validators can still 422, and a
         // rejected completion must not have dissolved anything): an open
         // packet-less visit is allowed through and remembered — the
@@ -4737,6 +4758,16 @@ async function completeScheduledService(completionInput, packetContext = null) {
         } });
       }
       const resumedStructuredNotes = parseJsonObject(record.structured_notes);
+      // An authorized correction can land after the packet committed its
+      // records but before an effects replay. Its durable revision and notes
+      // supersede the original allocation for lifecycle/tracker handling;
+      // the frozen marker remains historical evidence for costing readers,
+      // where the correction stamp has explicit precedence.
+      if (packetDurationAllocation
+        && (resumedStructuredNotes.timeOnSiteAdjusted === true
+          || Number(svc.time_on_site_adjusted_minutes) > 0)) {
+        packetDurationAllocation = null;
+      }
       linkedLawnAssessmentId = resumedStructuredNotes.lawnAssessmentId || null;
       // The WaveGuard advisory records were committed with the record, but
       // the resume path skips the preflight and the deduction transaction —
@@ -5298,12 +5329,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
             if (Number.isFinite(stampedMinutes) && stampedMinutes > 0
               && (stampMovedMidFlight
                 || (!isBackfillCompletion && !liveAdjustedTimeOnSite
-                  && typeof effectiveTimeOnSite !== 'number'))) {
+                  && (packetRecords || typeof effectiveTimeOnSite !== 'number')))) {
               effectiveTimeOnSite = stampedMinutes;
+              packetDurationAllocation = null;
               correctionPreservedMidFlight = true;
             }
           }
-          const completionEndedAt = new Date();
+          const completionEndedAt = packetRecords
+            ? (finiteDate(packetContext.completionAt) || new Date())
+            : new Date();
           completionWallClockAt = completionEndedAt;
           // Backfill: the service happened on its scheduled day — stamp the
           // record (and everything keyed off it: activity-score dates, the
@@ -5341,7 +5375,21 @@ async function completeScheduledService(completionInput, packetContext = null) {
             ? adjustedCompletionEndInstant(svc, effectiveTimeOnSite, completionEndedAt)
             : null;
           const completionLifecycleAt = backfillEndedAt || adjustedEndedAt || completionEndedAt;
-          const lifecycleUpdates = buildCompletionLifecycleUpdates(svc, completionLifecycleAt, { elapsed: effectiveTimeOnSite });
+          // The allocation is costing metadata, not a claim that each member
+          // started at completion minus its share. Let the lifecycle helper
+          // use only real row timestamps, then overwrite duration columns.
+          const lifecycleUpdates = buildCompletionLifecycleUpdates(svc, completionLifecycleAt, {
+            elapsed: packetDurationAllocation ? null : effectiveTimeOnSite,
+          });
+          // Zero and unknown are meaningful for an allocated visit. The
+          // generic helper treats both as absent and would fall back to this
+          // member row's whole arrival→completion span, duplicating labor.
+          // Keep truthful shared timestamps, but make the integer columns
+          // carry the allocation (including zero) or explicit unknown.
+          if (packetDurationAllocation) {
+            lifecycleUpdates.service_time_minutes = packetDurationAllocation.allocatedMinutes;
+            lifecycleUpdates.actual_duration_minutes = packetDurationAllocation.allocatedMinutes;
+          }
           // Backfill: never derive a duration from the stale on-row
           // timestamps (a weeks-old check-in against today's checkout), and
           // never let a typed duration back-derive a today-dated arrival for
@@ -5424,7 +5472,29 @@ async function completeScheduledService(completionInput, packetContext = null) {
             incompleteReason,
             customerConcernText: concernText || null,
             customerRecap: effectiveCustomerRecap || null,
-            timeOnSite: effectiveTimeOnSite || null,
+            timeOnSite: packetDurationAllocation
+              ? packetDurationAllocation.allocatedMinutes
+              : (effectiveTimeOnSite || null),
+            ...(packetDurationAllocation ? {
+              visitDurationAllocation: {
+                version: 1,
+                packetId: packetContext.packetId || null,
+                source: packetDurationAllocation.source,
+                completedAtSource: packetDurationAllocation.completedAtSource,
+                visitStartedAt: packetDurationAllocation.startedAt,
+                visitCompletedAt: packetDurationAllocation.completedAt,
+                visitTotalMinutes: packetDurationAllocation.totalMinutes,
+                estimatedMinutes: packetDurationAllocation.estimatedMinutes,
+                allocatedMinutes: packetDurationAllocation.allocatedMinutes,
+              },
+            } : {}),
+            ...(packetRecords && !isBackfillCompletion && packetContext.driveCostOwnerServiceId ? {
+              visitDriveCostAllocation: {
+                version: 1,
+                packetId: packetContext.packetId,
+                ownerServiceId: packetContext.driveCostOwnerServiceId,
+              },
+            } : {}),
             customerInteraction: normalizedCustomerInteraction,
             invoiceAlreadySent: !!invoiceAlreadySent,
             // Backfill frozen on the record: a crash-resumed retry may lack
@@ -7725,8 +7795,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // completed_at comes from the backdated end-instant rule (or stays
         // NULL for the unknown-end shape); the policy's persisted values
         // survive.
-        untrustedLifecycleSpan: isBackfillCompletion,
-        completedAt: backfillTrackerCompletedAt,
+        // Allocated grouped members already persisted their duration in the
+        // record transaction. Rebuilding from their shared lifecycle span
+        // here would overwrite zero/unknown with the whole visit duration.
+        untrustedLifecycleSpan: isBackfillCompletion || !!packetDurationAllocation,
+        completedAt: packetDurationAllocation?.completedAtSource === 'packet_save'
+          ? packetDurationAllocation.completedAt
+          : backfillTrackerCompletedAt,
         // Fences the tracker writes (codex P2 #3152 rounds 13/17): this
         // instant belongs to the correction revision this request observed
         // on the (lock-reconciled) row — null when it has never been
@@ -7972,7 +8047,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // excluded: their entries are historic and the quiet-closeout posture
     // owns them.
     let completionTimerSync = { corrected: null, blocked: null };
-    if (!isBackfillCompletion && typeof effectiveTimeOnSite === 'number') {
+    if (!packetDurationAllocation && !isBackfillCompletion && typeof effectiveTimeOnSite === 'number') {
       completionTimerSync = await syncLinkedJobTimer({
         serviceId: svc.id,
         minutes: effectiveTimeOnSite,
@@ -12377,12 +12452,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
       const result = await trackTransitions.markComplete(svc.id, {
         actorType: 'admin',
         actorId: completionInput.actor.technicianId,
-        // Same backfill contract as the first markComplete above: normally
+        // Same duration contract as the first markComplete above: normally
         // idempotent by now, but when that call failed this one performs the
         // real flip — it must honor the duration policy AND the backdated
         // completed_at stamp too.
-        untrustedLifecycleSpan: isBackfillCompletion,
-        completedAt: backfillTrackerCompletedAt,
+        untrustedLifecycleSpan: isBackfillCompletion || !!packetDurationAllocation,
+        completedAt: packetDurationAllocation?.completedAtSource === 'packet_save'
+          ? packetDurationAllocation.completedAt
+          : backfillTrackerCompletedAt,
         // Same fence as the first markComplete above (codex rounds 13/17).
         expectedCorrectionSeq: svc.time_on_site_correction_seq ?? null,
       });

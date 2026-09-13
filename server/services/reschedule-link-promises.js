@@ -4,7 +4,6 @@ const { AsyncLocalStorage } = require('async_hooks');
 const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
 const { normalizePhone, phoneMatchDigits } = require('../utils/phone');
-const { etParts, addETDays } = require('../utils/datetime-et');
 const { isWithinSendWindowET, nextSendWindowOpenET } = require('./messaging/send-window');
 const { lockTriageCall } = require('../utils/triage-locks');
 const { recordAuditEvent } = require('./audit-log');
@@ -145,36 +144,10 @@ function deliveryUncertainPatch(conn, value) {
   return conn.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ [DELIVERY_UNCERTAIN_KEY]: value })]);
 }
 
-// A stated delivery time used to be read as one of two English shapes —
-// a REQUESTED time ("tomorrow morning") the customer should not expect it
-// any sooner than, versus a DEADLINE ("by Friday") only bounding how LATE
-// it may go — with the shape inferred from the agent's free-text evidence
-// quote, because call-commitments.js never persisted which one the model
-// meant (toRow keeps due_text only when due_at was NOT pinned). That
-// inference went through three Codex rounds and was wrong a third distinct
-// way each time: a deadline word qualifying something other than the send
-// ("...so you can move your appointment before Friday", r2), then fixed by
-// requiring the deadline word share a clause with the promise's own send
-// tense — only for a SECOND clause with its own send tense to turn out to
-// be about a phone call, not the link ("I'll text the reschedule link
-// tomorrow morning, and I'll call you before Friday", r3). A fourth patch
-// buys a fourth failure of the same shape: free text cannot reliably tell
-// "the customer's own requested time" apart from "the latest they'll
-// accept" without knowing which the model meant, and the model's answer to
-// that was never captured.
-//
-// So the distinction is removed rather than patched again. Every stated
-// due_at is now a FLOOR, full stop — never send before the promised
-// instant. The cost is explicit and small: a genuine "get it to me by
-// Friday" now waits until Friday instead of possibly going out sooner, and
-// it fails in the only safe direction — we never text a customer earlier
-// than we told them we would. Recovering true deadline semantics (letting
-// an early send honour a genuine deadline) needs a persisted due_type
-// ('floor' | 'deadline') set by the model at extraction time, alongside
-// due_basis — tracked as a follow-up in the PR body — so no downstream
-// reader has to re-derive intent from prose ever again.
+// Extraction persists the send's timing independently of appointment dates.
+// Older rows and human edits without an explicit type keep the safe floor.
 function isPromisedFloor(commitment) {
-  return Boolean(commitment?.due_at);
+  return Boolean(commitment?.due_at) && commitment.due_type !== 'deadline';
 }
 
 // The instant before which a promised delivery may not be sent, or null
@@ -322,7 +295,7 @@ const EXISTING_SLOT = /\b(?:new|another|different|better) (?:time|day|date|slot|
 // Wording that means a FIRST appointment. It vetoes the promise however the
 // rest of the quote reads — "a link to choose a time for your new service" is
 // a booking link, not a reschedule link.
-const NEW_BOOKING = /\b(?:new|first|initial) (?:service|customer|account|appointment|appt|visit|booking|job|treatment)\b|\bget (?:you |your )?(?:set up|started|scheduled|on the schedule|on our schedule)\b|\bsign (?:you )?up\b|\b(?:book|schedule) (?:a|an|your) (?:new|first)\b/;
+const NEW_BOOKING = /\b(?:new|first|initial) (?:service|customer|account|appointment|appt|visit|booking|job|treatment)\b|\bget (?:you |your )?(?:set up|started|scheduled|on the schedule|on our schedule)\b|\bsign (?:you )?up\b|\b(?:book|schedule) (?:a|an|your) (?:new|first) (?:service|appointment|appt|visit|booking|job|treatment)\b/;
 // The agent taking it back after promising it ("actually I can't send that
 // link, the office will call"). The caller's own refusal is handled
 // separately — this one scans the agent's LATER turns (codex #4293 r2 P1).
@@ -375,10 +348,6 @@ const TEXT_REQUEST = /\btext (?:it|that|this|me|us)\b|\b(?:send|shoot) (?:me|us)
 const SENDABLE_CHANNELS = new Set(['', 'sms', 'text', 'texts', 'text message', 'unknown']);
 const EMAIL_PROMISE = /\bemail\b|\be mail\b|\bemailing\b/;
 const TEXT_PROMISE = /\btext\b|\btexting\b|\bsms\b/;
-
-const WEEKDAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july',
-  'august', 'september', 'october', 'november', 'december'];
 
 // Who the call is with, and whether it can be read at all.
 function callerIdentityReason(call, customer) {
@@ -480,171 +449,45 @@ function callerRefusedText(ordered) {
   return refused;
 }
 
-// A subject is grounded only when it NAMES the visit — a bare quote with no
-// date/service/address binds nothing, so it cannot stand in for rescheduling
-// language.
+// Identity text and each structured date claim retain their own verbatim
+// evidence. A subject containing only date_claims needs no separate quote.
 function subjectNotGrounded(subject, call) {
-  return !!subject && (!subject.quote || !norm(call.transcription).includes(norm(subject.quote))
-    || [subject.service, subject.address].some((value) => value && !norm(subject.quote).includes(norm(value))));
+  if (!subject) return false;
+  const identity = [subject.visit_date, subject.service, subject.address].some(Boolean);
+  return (identity && (!subject.quote || !norm(call.transcription).includes(norm(subject.quote))))
+    || [subject.service, subject.address].some((value) => value && !norm(subject.quote).includes(norm(value)));
 }
 
-// Ground a stated date against an EXISTING appointment. quoteBindsConfirmedSlot
-// is the NEW-BOOKING slot validator — it demands a slot 1–6 ET days out plus a
-// weekday word and a time word, so ordinary subjects like "my September 20
-// appointment", or any visit more than a week away, were thrown out even when
-// the date matched exactly (codex #4293 r3 P2). An existing appointment has a
-// date of record instead: the candidate's own ET date must equal the stated
-// one, and nothing the quote SAYS about the date may contradict it. The check
-// itself — quoteContradictsVisit — is defined further down, alongside the
-// parsers (explicitQuoteDate, claimFitsDate) it depends on; it is the SAME
-// function narrowBySubject calls below and evidenceDateVerdict calls (for
-// its contradiction pass) for every other evidence source (codex #4293 P1
-// r11 — see that function's own doc comment for why there is only one of it
-// now, and its own doc comment for the third, 'unresolved' outcome added on
-// top of it this round).
-
-// Positive grounding for an extracted appointment date: quoteContradictsVisit
-// only rejects a quote that says something ELSE, so "my appointment tomorrow"
-// sails through unexamined and binds whatever date the model happened to pick
-// — right or wrong — the moment some candidate visit shares it. With more than
-// one open visit that is not a check, it is a coin flip (codex #4293 P1).
-//
-// An EXPLICIT claim — an absolute month+day, an ordinal-only day, or a
-// today/tomorrow/next-<weekday> token resolved against the call's own Eastern
-// date — must be checked FIRST and must match the extracted date exactly; a
-// bare weekday name is a DAY OF WEEK, not a date, and is only trusted as a
-// last resort when the quote makes no explicit claim at all. Checking the
-// weekday first — as an earlier round of this fix did — let "my appointment
-// tomorrow, Tuesday" ground Jan 15 for a Jan 7 (Tuesday) call with visits on
-// Jan 8 AND Jan 15 (also a Tuesday): the bare "Tuesday" matched before
-// "tomorrow" (which actually resolves to Jan 8) ever got a look (codex #4293
-// P1 r2).
-// A numeric date shape ("9/20", "09/20", "9-20", "9/20/26") carries no
-// month name for the loop below to find, and by the time this function
-// sees `q` it has already been through norm() — which strips the "/" or
-// "-" separator to a bare space, throwing away the very thing that marks
-// these two digits as a DATE rather than two unrelated numbers. So this
-// reads the quote's ORIGINAL, unnormalized text instead.
-//
-// Sole-candidate trust used to be quoteGroundsVisitDate's fallback for any
-// quote with no recognized date token at all — "my 9/20 appointment"
-// recognized none, so a matching sole visit went out unchecked even when
-// it was the WRONG one and the quote plainly named a different date (codex
-// #4293 P1).
-const NUMERIC_DATE_RE = /\b(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?\b/;
-// A sentinel distinct from "no explicit claim at all" (null): an ambiguous
-// numeric shape is not nothing to check the pick against — it is a claim
-// this text cannot resolve on its own (9/10 reads as September 10 under
-// M/D, October 9 under D/M, and the two conventions disagree). Guessing
-// either way risks sending the wrong visit's link, so this must fail
-// CLOSED — quoteGroundsVisitDate treats it as ungrounded outright, never
-// falling through to the no-claim/weekday/sole-candidate path an absent
-// claim gets.
-const AMBIGUOUS_DATE_CLAIM = Symbol('ambiguous_numeric_date');
-function numericQuoteDate(rawQuote) {
-  const m = String(rawQuote || '').match(NUMERIC_DATE_RE);
-  if (!m) return null;
-  const a = Number(m[1]);
-  const b = Number(m[2]);
-  if (a > 31 || b > 31 || (a > 12 && b > 12)) return null; // not a calendar date either way
-  const yearRaw = m[3] == null ? null : Number(m[3]);
-  const year = yearRaw == null ? null : (yearRaw < 100 ? 2000 + yearRaw : yearRaw);
-  if (a > 12) return { month: b, day: a, year }; // only D/M is a valid reading
-  if (b > 12) return { month: a, day: b, year }; // only M/D is a valid reading
-  if (a === b) return { month: a, day: b, year }; // both readings land on the same date
-  return AMBIGUOUS_DATE_CLAIM; // both <=12 and differ — M/D and D/M disagree
+function claimFitsDate(claim, ymd) {
+  const [year, month, day] = String(ymd).split('-').map(Number);
+  const weekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+  return Object.entries({ year, month, day, weekday }).every(([key, value]) => claim[key] == null || claim[key] === value);
 }
 
-function explicitQuoteDate(q, reference, rawQuote) {
-  const numeric = numericQuoteDate(rawQuote);
-  if (numeric) return numeric; // an object, or AMBIGUOUS_DATE_CLAIM — the caller handles both
-  for (const [index, name] of MONTH_NAMES.entries()) {
-    const spoken = q.match(new RegExp(`\\b${name}\\b\\s*(\\d{1,2})?`));
-    // "may" is an ordinary verb too — it only reads as a month with a day on it.
-    if (spoken?.[1]) return { month: index + 1, day: Number(spoken[1]) };
+function structuredDateReason(subject, call) {
+  if (!Array.isArray(subject?.date_claims)) return 'appointment_date_unresolved';
+  for (const claim of subject.date_claims) {
+    if (!claim || !['appointment', 'delivery', 'requested'].includes(claim.binding)
+      || !norm(claim.quote) || !norm(call.transcription).includes(norm(claim.quote))) return 'appointment_date_unresolved';
+    if (claim.binding !== 'appointment') continue;
+    const limits = { year: [1900, 2100], month: [1, 12], day: [1, 31], weekday: [0, 6] };
+    if (!Object.keys(limits).some((key) => claim[key] != null)) return 'appointment_date_unresolved';
+    for (const [key, [min, max]] of Object.entries(limits)) {
+      if (claim[key] != null && (!Number.isInteger(claim[key]) || claim[key] < min || claim[key] > max)) return 'appointment_date_unresolved';
+    }
   }
-  const ordinal = q.match(/\b(\d{1,2})(?:st|nd|rd|th)\b/);
-  if (ordinal) return { day: Number(ordinal[1]) }; // "the 14th" — month-agnostic.
-  if (!(reference instanceof Date) || Number.isNaN(reference.getTime())) return null;
-  const ref = etParts(reference);
-  if (/\btoday\b/.test(q)) return ref;
-  if (/\btomorrow\b/.test(q)) return etParts(addETDays(reference, 1));
-  for (const [index, name] of WEEKDAY_NAMES.entries()) {
-    if (!new RegExp(`\\bnext ${name}\\b`).test(q)) continue;
-    const aheadFromToday = (index - ref.dayOfWeek + 7) % 7;
-    return etParts(addETDays(reference, aheadFromToday === 0 ? 7 : aheadFromToday + 7));
-  }
+  // A model-selected full date cannot be its own evidence. Partial claims
+  // narrow the candidate set before visit_date is ever compared with it.
+  if (subject.visit_date && !subject.date_claims.some((claim) => claim.binding === 'appointment')) return 'date_not_grounded';
   return null;
 }
 
-function weekdayOf(ymd) {
-  const [y, m, d] = String(ymd).split('-').map(Number);
-  return new Date(Date.UTC(y, m - 1, d)).getUTCDay();
-}
-
-// A bare weekday name only grounds the pick when it could not have meant
-// anything else: exactly one of the customer's open visits falls on that
-// weekday at all, and it is the very one the model selected. Two Tuesdays
-// open ("Jan 8" and "Jan 15") leaves "Tuesday" unable to tell them apart, so
-// neither is grounded by the word alone.
-function quoteNamesWeekday(q, weekday, candidates, ymd) {
-  if (!new RegExp(`\\b${WEEKDAY_NAMES[weekday]}\\b`).test(q)) return false;
-  const onWeekday = candidates.filter((v) => weekdayOf(dateOnly(v.scheduled_date)) === weekday);
-  return onWeekday.length === 1 && dateOnly(onWeekday[0].scheduled_date) === ymd;
-}
-
-function quoteHasWeekdayToken(q) {
-  return WEEKDAY_NAMES.some((name) => new RegExp(`\\b${name}\\b`).test(q));
-}
-
-// True once the quote itself grounds the extracted date. An explicit claim
-// (absolute date, ordinal day, or today/tomorrow/next-weekday) must equal it
-// exactly, with NO exemption for a sole remaining candidate: a caller on
-// 2030-01-07 saying "tomorrow" (2030-01-08) while the model extracts
-// 2030-01-15 must still park even when 2030-01-15 is the only open visit —
-// letting a single candidate through unchecked sent the link for the wrong
-// appointment the moment the model's bad pick happened to be the one row on
-// file (codex #4293 P1 r3). Absent any explicit claim, a bare weekday name
-// must likewise match the visit it names; only when the quote gives NEITHER
-// an explicit claim NOR a weekday name at all is there nothing to check the
-// pick against, and a single open candidate is trusted.
-//
-// An explicit claim that leaves a component unsaid is NOT a wildcard for the
-// model to fill in: "my appointment on the 20th" resolves a day and nothing
-// else, and treating the missing month as "whatever the model picked" let a
-// February extraction narrow Jan 20 / Feb 20 to one and send the link for a
-// visit the quote never identified (codex #4293 P1 r3). The claim grounds
-// the pick only when the components it DID resolve single that date out
-// among the open visits — two candidates that agree on everything the quote
-// said leave the quote grounding neither.
-function claimFitsDate(claim, ymd) {
-  const [year, month, day] = String(ymd).split('-').map(Number);
-  return claim.day === day && (claim.month == null || claim.month === month) && (claim.year == null || claim.year === year);
-}
-
-function quoteGroundsVisitDate(quote, ymd, reference, candidates = []) {
-  const q = ` ${norm(quote)} `;
-  const [year, month, day] = String(ymd).split('-').map(Number);
-  if (![year, month, day].every(Number.isFinite)) return false;
-  const explicit = explicitQuoteDate(q, reference, quote);
-  if (explicit === AMBIGUOUS_DATE_CLAIM) return false; // fail closed — see numericQuoteDate
-  if (explicit) {
-    if (!claimFitsDate(explicit, ymd)) return false;
-    const fitting = new Set(candidates.map((v) => dateOnly(v.scheduled_date)).filter((date) => claimFitsDate(explicit, date)));
-    return fitting.size <= 1;
-  }
-  if (quoteHasWeekdayToken(q)) return quoteNamesWeekday(q, weekdayOf(ymd), candidates, ymd);
-  return candidates.length <= 1;
-}
-
-function narrowBySubject(candidates, subject, reference) {
-  let selected = candidates;
-  if (subject?.visit_date) {
-    selected = selected.filter((v) => dateOnly(v.scheduled_date) === subject.visit_date
-      && !quoteContradictsVisit(subject.quote, subject.visit_date, reference));
-  }
-  if (subject?.service) selected = selected.filter((v) => norm(v.service_type || v.service_name).includes(norm(subject.service)));
-  if (subject?.address) selected = selected.filter((v) => require('./estimator-engine/address-compare').sameStreetAddress(
+function narrowBySubject(candidates, subject) {
+  let selected = candidates.filter((visit) => subject.date_claims
+    .filter((claim) => claim.binding === 'appointment')
+    .every((claim) => claimFitsDate(claim, dateOnly(visit.scheduled_date))));
+  if (subject.service) selected = selected.filter((v) => norm(v.service_type || v.service_name).includes(norm(subject.service)));
+  if (subject.address) selected = selected.filter((v) => require('./estimator-engine/address-compare').sameStreetAddress(
     [v.service_address_line1 || v.property_address, v.service_address_line2 || v.property_unit].filter(Boolean).join(' '),
     subject.address, { requireExactUnit: true }));
   return selected;
@@ -669,309 +512,6 @@ function visitNotSelfServiceReason(visit, now) {
   return verdict.reason === 'past' ? 'visit_elapsed' : 'visit_not_self_service';
 }
 
-// A wrong extraction cannot be trusted on the quote's own say-so — see
-// quoteGroundsVisitDate for the full rule, including why a sole remaining
-// candidate is NOT exempt from a contradicted explicit claim.
-function extractedDateUngrounded({ subject, call, candidates, callCommitments }) {
-  return !!subject?.visit_date
-    && !quoteGroundsVisitDate(subject.quote, subject.visit_date, callCommitments.callEndedAt(call) || call.created_at, candidates);
-}
-
-// The invariant every date-grounding fix in this file keeps rediscovering,
-// made unconditional: if a claim names a date for the appointment, that date
-// must agree with the visit about to receive a link — regardless of which
-// optional extraction field the claim happened to arrive in.
-// extractedDateUngrounded (quoteGroundsVisitDate) only runs when
-// subject.visit_date is present; when the model omits it, narrowBySubject
-// applies no date filter, so "I will text you a link for your September 20
-// appointment" bound whatever visit narrowBySubject selected on service /
-// address alone (or the sole remaining candidate when it selected on
-// nothing) — sending the wrong appointment's link the moment the customer's
-// only open visit fell on a different date (codex #4293 P1 r9).
-//
-// THIS is the one place that answers "does this quote's claimed date
-// contradict this visit?", and it is the ONLY such place in the file — it
-// used to be two: quoteContradictsVisitDate (month/ordinal/bare-weekday
-// only, no numeric dates or today/tomorrow/next-<weekday>, called from
-// narrowBySubject for subject.quote alone) and an earlier version of this
-// function (explicitQuoteDate's full vocabulary — numeric dates and
-// AMBIGUOUS_DATE_CLAIM included — but no bare weekday at all, called from
-// evidenceContradictsSelectedVisit for every OTHER evidence source). Each
-// covered a shape the other did not, so a promise with subject: null whose
-// standing-promise quote named a bare weekday ("your Monday appointment")
-// sailed through ungrounded the moment the sole open visit fell on a
-// DIFFERENT weekday (codex #4293 P1 r11) — the evidence-wide check had
-// already been made unconditional (r10), but its vocabulary was still
-// missing the one shape quoteGroundsVisitDate needs a candidate list to
-// resolve responsibly (grounding a pick among several same-weekday visits)
-// and this function does not (it only has to say whether ONE already-
-// selected visit is contradicted, which needs no uniqueness reasoning at
-// all — see the weekday branch below). Consolidating removes the seam: one
-// function, one vocabulary, called from both narrowBySubject (subject.quote)
-// and evidenceDateVerdict's contradiction pass (every other source), so a
-// shape this file can recognise is checked the same way no matter which field it rode
-// in on.
-// A date claim only binds the VISIT when it is ATTACHED to the appointment
-// noun — not merely co-occurring somewhere in the same sentence. The promise
-// sentence itself is exactly where this bites: "I will text you the
-// reschedule link tomorrow morning for your appointment" used to read
-// "tomorrow" as the visit's date (any quote containing "appointment" had
-// ALL its date language read as the visit date) and reject a correctly
-// selected visit next week as ungrounded — not a delayed send but a
-// PERMANENTLY PARKED promise, since date_not_grounded never retries on its
-// own (codex #4293 P1). "Tomorrow morning" is delivery timing — when the
-// LINK goes out, already captured on its own by isPromisedFloor/
-// promisedFloorAt — and must never be read as a claim about WHICH visit.
-//
-// Attachment is checked positionally, the way a human reader tells the two
-// apart: the date sits immediately before the noun ("your September 20
-// appointment", "your Monday appointment" — nothing between the date and
-// the noun; a possessive/article ahead of the DATE plays no part in the
-// match) or immediately after it via a single connector word ("appointment
-// on September 20", "appointment this Monday"). Every date parser below
-// (explicitQuoteDate's full vocabulary, and the bare-weekday scan) only ever
-// sees these attached spans — never the full quote — so a date elsewhere in
-// the sentence cannot reach either check no matter which shape it takes.
-//
-// Where attachment is genuinely ambiguous, this resolves to NOT binding: the
-// old default (any co-occurring date grounds/contradicts) risked sending the
-// wrong visit's link, which used to be the worse failure; now that a false
-// park is known to be PERMANENT rather than merely delayed, under-binding
-// (park for human review) is the safer default, over-binding (misdirect a
-// live send) the one to avoid.
-const APPOINTMENT_NOUN_RE = /\b(?:appointment|appt|visit)\b/gi;
-// The single word allowed to link the noun to a date named AFTER it. Nothing
-// else — not even a verb like "is" — may sit between them for the after-form
-// to count as attached ("appointment is Wednesday" is not this shape; that
-// construction is validated elsewhere, via quoteGroundsVisitDate's own
-// full-text scan against subject.visit_date, which subject.quote is defined
-// to name specifically).
-const AFTER_NOUN_CONNECTOR_RE = /^\s*(?:on|this|that|for|at|in)\b\s*/i;
-function appointmentAttachedText(rawQuote) {
-  const text = String(rawQuote || '');
-  const spans = [];
-  APPOINTMENT_NOUN_RE.lastIndex = 0;
-  let m;
-  while ((m = APPOINTMENT_NOUN_RE.exec(text))) {
-    // Up to the two tokens immediately abutting the noun on the left — enough
-    // for every date shape this file recognizes (a month name + day, or
-    // "next <weekday>"), and nothing further back, so "for your" (the two
-    // tokens actually touching the noun in "...tomorrow morning for your
-    // appointment") is what gets captured, not "tomorrow".
-    const before = text.slice(0, m.index).match(/(?:\S+\s+)?\S+\s*$/);
-    if (before) spans.push(before[0]);
-    const afterAll = text.slice(m.index + m[0].length);
-    const connector = afterAll.match(AFTER_NOUN_CONNECTOR_RE);
-    if (connector) {
-      const rest = afterAll.slice(connector[0].length).match(/^\S+(?:\s+\S+)?/);
-      if (rest) spans.push(rest[0]);
-    }
-  }
-  // Joined on a non-word separator so a date shape can never assemble itself
-  // by accident out of the trailing token of one span and the leading token
-  // of the next (e.g. two different noun mentions in the same quote).
-  return spans.join(' | ');
-}
-
-function quoteContradictsVisit(quote, ymd, reference) {
-  const attached = appointmentAttachedText(quote);
-  const q = ` ${norm(attached)} `;
-  const [year, month, day] = String(ymd).split('-').map(Number);
-  if (![year, month, day].every(Number.isFinite)) return true;
-  const explicit = explicitQuoteDate(q, reference, attached);
-  if (explicit === AMBIGUOUS_DATE_CLAIM) return true; // fail closed — see numericQuoteDate
-  if (explicit) return !claimFitsDate(explicit, ymd);
-  // No explicit claim (no absolute date, ordinal, numeric shape, or
-  // today/tomorrow/next-<weekday> token) — a bare weekday name is still a
-  // claim about the date, just one explicitQuoteDate deliberately leaves
-  // unresolved (that parser reserves bare weekdays for
-  // quoteGroundsVisitDate's uniqueness-gated GROUNDING rule, which needs the
-  // full candidate list to decide whether the word could have meant more
-  // than one open visit). CONTRADICTION is a simpler question: the visit is
-  // already selected, so any weekday name in the quote that is not the one
-  // this visit actually falls on disagrees with it, full stop — no
-  // candidate list needed.
-  const weekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
-  return WEEKDAY_NAMES.some((name, index) => index !== weekday && new RegExp(`\\b${name}\\b`).test(q));
-}
-
-// Seven grounding findings have alternated between binding too loosely (a
-// delivery-timing date contradicts the visit -> promise parks permanently)
-// and binding too tightly (an appointment date the strict connector list
-// does not recognise gets silently discarded -> wrong customer gets a
-// link). Every attempt to place the boundary by regex alone has produced
-// the opposite error the next round, because a boolean attached/not-attached
-// split has no way to represent "I found language about the appointment's
-// date here, but I cannot confidently tell what it says." This is that third
-// state. "Your appointment is on September 20" is exactly the shape that
-// slips through appointmentAttachedText's own connector list unrecognised —
-// AFTER_NOUN_CONNECTOR_RE requires the connector word to sit IMMEDIATELY
-// after the noun, and "is" is not on that list — so the date sailed through
-// as if the quote had said nothing about a date at all, and a sole
-// candidate visit was sent a link for the WRONG appointment (codex #4293
-// P1, this round). "the appointment, September 20, needs moving" is the
-// same shape with a comma instead of a verb.
-//
-// Scoped the same conservative direction as appointmentAttachedText's own
-// scan: only the text AFTER the noun, only up to the next sentence boundary
-// (or a bounded run of characters, whichever comes first), and only once
-// the narrow attached capture (quoteContradictsVisit's own connector-plus-
-// two-token window) has already had a look and found no date claim of its
-// own. A delivery-timing phrase never matches this at all: every existing
-// delivery-timing shape in this file (a timing clause BEFORE "for your
-// appointment") has nothing left after the noun once the sentence ends
-// right there, so the wide scan below never even finds a claim to weigh
-// against a send verb — there is no send-verb guard here because the
-// required tests do not exercise one and adding an unverified heuristic
-// on top of an already-heuristic boundary is exactly the mistake this
-// comment is warning against.
-const WIDE_AFTER_NOUN_RE = /^[^.!?]{0,80}/;
-function unresolvedAppointmentDateClaim(rawQuote, reference) {
-  const text = String(rawQuote || '');
-  APPOINTMENT_NOUN_RE.lastIndex = 0;
-  let m;
-  while ((m = APPOINTMENT_NOUN_RE.exec(text))) {
-    const afterAll = text.slice(m.index + m[0].length);
-    const connector = afterAll.match(AFTER_NOUN_CONNECTOR_RE);
-    // The connector's own narrow capture (mirroring appointmentAttachedText)
-    // gets first refusal: if IT already resolves to a recognisable date
-    // claim, that claim is Attached — quoteContradictsVisit's own scan owns
-    // it, and this function has nothing to add for this occurrence of the
-    // noun. Only when the connector is absent, OR present but its own
-    // narrow capture names no date at all (e.g. "appointment at 100 Example
-    // Street"), does the wider, unresolved-shaped scan below run — over the
-    // WHOLE after-noun text, so a claim sitting past a connector's own
-    // two-token cap is not missed either.
-    if (connector) {
-      const restSpan = afterAll.slice(connector[0].length).match(/^\S+(?:\s+\S+)?/);
-      const restText = restSpan ? restSpan[0] : '';
-      const rq = ` ${norm(restText)} `;
-      if (explicitQuoteDate(rq, reference, restText) || quoteHasWeekdayToken(rq)) continue;
-    }
-    const wide = afterAll.match(WIDE_AFTER_NOUN_RE);
-    const span = wide ? wide[0] : '';
-    const q = ` ${norm(span)} `;
-    if (explicitQuoteDate(q, reference, span) || quoteHasWeekdayToken(q)) return true;
-  }
-  return false;
-}
-
-// Every field an AGENT utterance attached to this promise can live in,
-// gathered RAW (un-normalized) — explicitQuoteDate's numeric branch needs
-// the "/" or "-" separator norm() would otherwise strip, so this must not
-// hand back pre-normalized text as the only copy of a claim.
-//   - commitment.evidence: the extractor's own seed quotes for this
-//     commitment (schema-capped at 1-3, agent or caller — only the agent's
-//     own words are evidence FOR the worker's own promise), independent of
-//     whether any one of them reads as a STANDING PROMISE on its own —
-//     standingPromiseQuotes filters harder than that (link + send-word +
-//     tense + not-retracted), so a date named in a neighboring evidence
-//     quote that isn't itself promise-shaped was invisible to every
-//     narrower check this file has had.
-//   - commitment.subject.quote: the extractor's separate verbatim quote for
-//     the appointment subject — the field the last four rounds each
-//     widened one optionality level at a time (r3: validated only when
-//     subject.visit_date was populated; this round: subject itself can be
-//     null, so gating presence on subject?.quote skipped the check
-//     entirely rather than widening it).
-//   - promisedQuotes: the caller's own standing-promise subset of
-//     commitment.evidence, already computed once per call in
-//     selectDiscussedVisit — read directly here (not re-derived) so this
-//     stays the one place that actually reads every source, rather than an
-//     assumption that scanning commitment.evidence alone subsumes it.
-function promiseEvidenceTexts(commitment, promisedQuotes = []) {
-  const fromEvidence = (commitment.evidence || []).filter((e) => e.speaker === 'agent').map((e) => e.quote);
-  const fromSubject = commitment.subject?.quote ? [commitment.subject.quote] : [];
-  return [...new Set([...fromEvidence, ...fromSubject, ...promisedQuotes])].filter(Boolean);
-}
-
-// promisedQuotes/commitment.evidence are the PROMISE sentence itself, and a
-// promise sentence's own trailing clause is exactly where delivery-timing
-// language lives ("I'll text you the link tomorrow morning", "...by
-// Friday") — words explicitQuoteDate resolves the same way it resolves an
-// appointment date, but that means WHEN THE LINK GOES OUT, not which visit
-// it is for. isPromisedFloor/promisedFloorAt already extract that timing
-// into its own due_at floor; scanning the same sentence again for an
-// "appointment date" would read "tomorrow" as a claim about the VISIT and
-// park (or worse, silently pick) on a manufactured contradiction against
-// whatever the visit's real date happens to be. subject.quote never has
-// this ambiguity — the extraction contract defines it as naming the
-// appointment specifically — but evidence/promisedQuotes are not so scoped.
-// The two are told apart the same way a human reader would: a date claim
-// only binds the VISIT when its sentence also references the appointment
-// itself.
-const APPOINTMENT_REFERENCE = /\b(?:appointment|appt|visit)\b/;
-
-// Positive grounding, not absence of contradiction: the selected visit must
-// positively agree with EVERY explicit date claim found anywhere in the
-// promise's agent evidence (promiseEvidenceTexts) that actually names the
-// appointment — not merely fail to be contradicted by one narrow field.
-// This is what replaces gating the check on `subject?.quote` — subject is
-// optional in the extraction schema, so a promise with subject: null
-// skipped date validation entirely, even when its own standing-promise
-// quote (or another evidence entry) named an explicit date that
-// contradicted the sole visit narrowBySubject selected with no date filter
-// applied at all (codex #4293 P1 r10 — the fourth grounding gap in four
-// rounds, each accepted as "validate the quote" and each time "the quote"
-// turning out to mean a narrower thing than it sounded).
-//
-// THE OUTCOME IS THREE-WAY, not a boolean grounded/ungrounded (codex #4293
-// P1, this round):
-//   1. Attached — a date clearly bound to the appointment noun by
-//      quoteContradictsVisit's own adjacency/connector rule. Validated
-//      against the selected visit; a mismatch is a genuine contradiction —
-//      'date_not_grounded', exactly as before.
-//   2. Clearly delivery timing — a date attached to the SEND verb, not the
-//      appointment noun (isPromisedFloor/promisedFloorAt's own territory).
-//      Never scanned for a visit claim at all — a quote naming no
-//      appointment noun never reaches this function (APPOINTMENT_REFERENCE
-//      below), and a date sitting before "for your appointment" with
-//      nothing left after the noun is invisible to
-//      unresolvedAppointmentDateClaim by construction.
-//   3. Unresolved — a date claim that references the appointment (shares
-//      its sentence, per APPOINTMENT_REFERENCE) but that neither of the
-//      above can place with confidence — "your appointment is on September
-//      20" (the connector list requires the word to sit IMMEDIATELY after
-//      the noun; "is" is not on it), "the appointment, September 20, needs
-//      moving". This is evidence we cannot interpret, not evidence of
-//      nothing: it must PARK, under its own reason
-//      ('appointment_date_unresolved', distinct from a genuine
-//      contradiction), never fall through as if the quote said nothing —
-//      and it parks even when the date happens to equal the selected
-//      visit's own date, because "unresolved" describes what THIS CODE
-//      could establish about the claim, not whether the claim turned out to
-//      agree by chance.
-//
-// subject.quote is excluded from the unresolved scan (but NOT from the
-// contradiction scan, unchanged) exactly when subject.visit_date is
-// populated: that pairing already went through quoteGroundsVisitDate — a
-// full, UNSCOPED scan of the entire quote — via extractedDateUngrounded,
-// before this function ever runs. Several existing, passing fixtures state
-// the appointment date as "my appointment is <weekday>" (the identical
-// "is"-not-a-connector shape this round is fixing for evidence), and that
-// full scan already resolved them positively; re-running the narrower
-// after-noun heuristic against an already-validated quote would manufacture
-// a false 'unresolved' the moment its claim sits outside the strict
-// connector window. subject.quote rejoins the unresolved pool when
-// visit_date is ABSENT — the one case nothing else ever validates it at
-// all, the same gap this fix closes for ordinary evidence.
-function unresolvedEvidenceSources(commitment, subject, promisedQuotes) {
-  const fromEvidence = (commitment.evidence || []).filter((e) => e.speaker === 'agent').map((e) => e.quote);
-  const fromSubject = (!subject?.visit_date && commitment.subject?.quote) ? [commitment.subject.quote] : [];
-  return [...new Set([...fromEvidence, ...fromSubject, ...promisedQuotes])].filter(Boolean);
-}
-
-function evidenceDateVerdict({ commitment, subject, promisedQuotes, ymd, reference }) {
-  const texts = promiseEvidenceTexts(commitment, promisedQuotes);
-  for (const quote of texts) {
-    if (APPOINTMENT_REFERENCE.test(norm(quote)) && quoteContradictsVisit(quote, ymd, reference)) return 'contradicts';
-  }
-  for (const quote of unresolvedEvidenceSources(commitment, subject, promisedQuotes)) {
-    if (APPOINTMENT_REFERENCE.test(norm(quote)) && unresolvedAppointmentDateClaim(quote, reference)) return 'unresolved';
-  }
-  return 'ok';
-}
-
 function selectDiscussedVisit({ commitment, call, customer, candidates = [], now = new Date() }) {
   const skip = (reason) => ({ reason });
   const identity = callerIdentityReason(call, customer);
@@ -991,21 +531,12 @@ function selectDiscussedVisit({ commitment, call, customer, candidates = [], now
     && (groundedSubject || promisedQuotes.some((quote) => RESCHEDULE_WORD.test(quote) || MOVE_INTENT.test(quote) || EXISTING_SLOT.test(quote)));
   if (revoked || !promisedQuotes.length || !aboutThisAppointment
     || !Number.isFinite(Number(commitment.confidence)) || Number(commitment.confidence) < 0.9) return skip('promise_needs_review');
-  const reference = callCommitments.callEndedAt(call) || call.created_at;
-  if (extractedDateUngrounded({ subject, call, candidates, callCommitments })) return skip('date_not_grounded');
-  const selected = narrowBySubject(candidates, subject, reference);
-  if (selected.length !== 1) return skip(selected.length ? 'ambiguous_visit' : 'discussed_visit_unavailable');
-  const dateVerdict = evidenceDateVerdict({ commitment, subject, promisedQuotes, ymd: dateOnly(selected[0].scheduled_date), reference });
-  if (dateVerdict === 'contradicts') return skip('date_not_grounded');
-  // Unresolved is not a contradiction — it is a date claim about this
-  // appointment that this file cannot confidently place at all, attached or
-  // not, so there is nothing to validate against the selected visit one way
-  // or the other. It gets its OWN reason, distinct from a genuine mismatch,
-  // so the office (via the triage card) and the audit ledger can tell "we
-  // know this is wrong" apart from "we don't know what this claim means" —
-  // see parkReview and the triage card it raises, both keyed on this string
-  // exactly like every other reason here.
-  if (dateVerdict === 'unresolved') return skip('appointment_date_unresolved');
+  const dateReason = structuredDateReason(subject, call);
+  if (dateReason) return skip(dateReason);
+  const selected = narrowBySubject(candidates, subject);
+  if (selected.length !== 1) return skip(selected.length ? 'ambiguous_visit'
+    : (subject.date_claims.some((claim) => claim.binding === 'appointment') ? 'date_not_grounded' : 'discussed_visit_unavailable'));
+  if (subject.visit_date && subject.visit_date !== dateOnly(selected[0].scheduled_date)) return skip('date_not_grounded');
   const notReady = visitNotSelfServiceReason(selected[0], now);
   return notReady ? skip(notReady) : { visit: selected[0] };
 }
@@ -1588,7 +1119,7 @@ async function stagePromises(conn) {
         AND COALESCE(o.commitment_generation, -1) < COALESCE(cc.processing_generation, 0)
         AND (o.payload->>'${DELIVERY_UNCERTAIN_KEY}') = 'true'
     )`)
-    .select('cc.id', 'cc.call_log_id', 'cc.created_at', 'cc.processing_generation', 'cc.due_at', 'cc.evidence', 'cl.customer_id').limit(200);
+    .select('cc.id', 'cc.call_log_id', 'cc.created_at', 'cc.processing_generation', 'cc.due_at', 'cc.due_type', 'cc.evidence', 'cl.customer_id').limit(200);
   // commitment_created_at rides along on the outbox row itself so runOne can
   // judge pre-activation without a second call_commitments query per row —
   // the exact check the r8 activation boundary needs to run before anything
@@ -1949,7 +1480,7 @@ async function dispatch(conn, row, context, { now, send, buildLink, render, plan
     if (manual) return settleDelivery(conn, row, manual, context);
     if (result.sent && /^SM[0-9a-f]{32}$/i.test(result.providerMessageId || '')) {
       return conn('outbox_messages').where({ id: row.id, status: 'sending' }).update({ status: 'sent',
-        provider_message_id: result.providerMessageId, sent_at: new Date(), updated_at: new Date() });
+        provider_message_id: result.providerMessageId, sent_at: result.sentAt || now, updated_at: new Date() });
     }
     // The interlock was busy — nothing reached the provider, so this is a
     // retry in a few minutes, not an unknown outcome for the office (codex
@@ -2212,13 +1743,33 @@ async function sweep(conn = db, options = {}) {
 // conversation) is a duplicate, not a second message.
 async function manualDuplicateOfPromisedLink(customerId, body, started) {
   const active = await db('outbox_messages').where({ related_customer_id: customerId }).whereNotNull('commitment_id')
-    .whereIn('status', ['sending', 'sent', 'delivered']).select('status', 'sent_at', 'related_scheduled_service_id');
+    .whereIn('status', ['sending', 'sent', 'delivered']).select('status', 'sent_at', 'updated_at', 'related_scheduled_service_id');
   for (const row of active) {
-    if (row.status !== 'sending' && new Date(row.sent_at) < started) continue;
+    // Acceptance can precede a manual request that waits behind the still-
+    // running provider pipeline. Settlement/receipt bookkeeping ends that
+    // overlap; sent_at remains the earlier evidence for link-use matching.
+    if (row.status !== 'sending' && new Date(row.updated_at || row.sent_at) < started) continue;
     const visit = await db('scheduled_services').where({ id: row.related_scheduled_service_id, customer_id: customerId }).first('id', 'reschedule_token');
     if (visit && carriesVisitLink(body, await visitLinkNeedles(db, visit))) return true;
   }
   return false;
+}
+
+// Without serialization an exact visit link could race a newly claimed
+// promise even when its outbox row still looks pending. Defer all owned
+// reschedule links; ordinary operator messages can still proceed.
+async function unlockedManualSend(input, sendCore) {
+  try {
+    const visits = await db('scheduled_services').where({ customer_id: input.customerId })
+      .whereNotNull('reschedule_token').select('id', 'reschedule_token');
+    for (const visit of visits) {
+      if (carriesVisitLink(input.body, await visitLinkNeedles(db, visit))) return LOCK_BUSY;
+    }
+  } catch (err) {
+    require('./logger').warn(`[reschedule-link-promises] unlocked duplicate check unavailable (${err.code || err.name || 'error'})`);
+    return LOCK_BUSY;
+  }
+  return sendCore(input);
 }
 
 // Take the customer's advisory interlock, or say so. statement_timeout aborts
@@ -2336,7 +1887,7 @@ const LIVE_PROMISE_STATUSES = ['pending', 'shadow', 'sending'];
 // P1). One cheap pooled lookup decides; if the lookup itself fails, the send
 // goes out as it does today, because this interlock must never be the reason
 // an ordinary admin message does not send.
-async function needsSendInterlock(input, { automatic, manual }) {
+async function needsSendInterlock(input, { automatic, manual }, started) {
   if (mode() !== 'true' || !input?.customerId || (!automatic && !manual)) return false;
   if (sendContext.getStore()?.customerId === input.customerId) return false;
   if (automatic) return true;
@@ -2344,6 +1895,12 @@ async function needsSendInterlock(input, { automatic, manual }) {
     const live = await db('outbox_messages').where({ related_customer_id: input.customerId })
       .whereNotNull('commitment_id').whereIn('status', LIVE_PROMISE_STATUSES).first('id');
     if (live) return true;
+    // A send may finish while this request's initial lookup is in flight.
+    // Keep it in the overlap check even though it has left 'sending'.
+    const settled = await db('outbox_messages').where({ related_customer_id: input.customerId })
+      .whereNotNull('commitment_id').whereIn('status', ['sent', 'delivered'])
+      .where('updated_at', '>=', started).first('id');
+    if (settled) return true;
     // A promise can be OPEN and already eligible for staging with no
     // outbox row at all yet — stagePromises runs on its own sweep cadence,
     // so a manual send landing in the gap between the office's promise
@@ -2368,7 +1925,7 @@ async function needsSendInterlock(input, { automatic, manual }) {
     return !!openPromise;
   } catch (err) {
     require('./logger').warn(`[reschedule-link-promises] promise pre-check failed for ${input.customerId} (${err.code || err.name || 'error'})`);
-    return false;
+    return true;
   }
 }
 
@@ -2376,16 +1933,15 @@ async function needsSendInterlock(input, { automatic, manual }) {
 // customer. A manual message already underway wins; the automated final
 // check sees its receipt. An overlapping manual duplicate is held visibly.
 async function withSendLock(input, sendCore) {
-  const role = sendLockRole(input);
-  if (!(await needsSendInterlock(input, role))) return sendCore(input);
   const started = new Date();
+  const role = sendLockRole(input);
+  if (!(await needsSendInterlock(input, role, started))) return sendCore(input);
   // This session holds only the advisory interlock. The provider pipeline
   // needs the normal pool for consent/audit; holding a pool transaction
   // here deadlocks two simultaneous sends when that pool has two slots.
   const connection = await openInterlockConnection();
-  // No interlock available: the worker retries its own send, an operator's
-  // message goes out rather than failing on a lock it does not own.
-  if (!connection) return role.automatic ? LOCK_BUSY : sendCore(input);
+  // An unavailable lock must not bypass duplicate protection.
+  if (!connection) return role.automatic ? LOCK_BUSY : unlockedManualSend(input, sendCore);
   const held = { lost: false };
   trackInterlockLoss(connection, held);
   try {

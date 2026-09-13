@@ -3977,6 +3977,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     started_at: arrivalTime,
     ended_at: completionTime || service.ended_at,
     timeOnSite: structured.timeOnSite,
+    visitDurationAllocation: structured.visitDurationAllocation,
   });
   const linearFt = await computeLinearFt(service.id, knex).catch(() => null);
   const treatedZoneIds = new Set(applications.flatMap((app) => app.zone_ids || []));

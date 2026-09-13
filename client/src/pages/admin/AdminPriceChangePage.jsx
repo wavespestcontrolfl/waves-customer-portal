@@ -9,7 +9,7 @@
 // previewed, never the live form state. Sends NOTICES only: it never
 // touches monthly_rate.
 import { useEffect, useRef, useState } from "react";
-import { Badge, Button, Card, cn } from "../../components/ui";
+import { Badge, Button, Card, Field, Input, Select, UiSurface, Table, THead, TBody, TR, TH, TD, ActionFeedback } from "../../components/ui";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -113,12 +113,12 @@ export default function AdminPriceChangePage({ embedded = false } = {}) {
   };
 
   return (
-    <div className="bg-surface-page min-h-full font-sans text-zinc-900 max-w-[1100px] mx-auto p-6 space-y-4">
+    <UiSurface density="comfortable" className="min-h-full max-w-[1100px] mx-auto p-4 sm:p-6 space-y-4">
       <div>
         {!embedded && (
-          <h1 className="text-18 font-medium text-zinc-900">Price change notices</h1>
+          <h1 className="text-22 font-medium text-zinc-900">Price change notices</h1>
         )}
-        <p className="text-12 text-ink-secondary mt-0.5 max-w-2xl">
+        <p className="text-ui-body text-ink-secondary mt-0.5 max-w-2xl">
           Formal advance notice for recurring-service price changes — a short email + text per
           customer linking to their personal notice page (current price, new price, effective date,
           no action needed, cancel anytime). Policy: the effective date must be at least 30 days
@@ -129,55 +129,45 @@ export default function AdminPriceChangePage({ embedded = false } = {}) {
 
       <Card className="p-4 space-y-3">
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-          <div>
-            <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">Location</label>
-            <select
+          <Field label="Location">
+            <Select
               value={locationId}
               onChange={(e) => setLocationId(e.target.value)}
-              className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900"
             >
               {LOCATION_OPTIONS.map((o) => (
                 <option key={o.value} value={o.value}>{o.label}</option>
               ))}
-            </select>
-          </div>
-          <div>
-            <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">Adjustment</label>
-            <select
+            </Select>
+          </Field>
+          <Field label="Adjustment">
+            <Select
               value={incType}
               onChange={(e) => setIncType(e.target.value)}
-              className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900"
             >
               <option value="amount">Dollars / month</option>
               <option value="percent">Percent</option>
-            </select>
-          </div>
-          <div>
-            <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
-              {incType === "percent" ? "Change (%)" : "Change ($ / month)"}
-            </label>
-            <input
+            </Select>
+          </Field>
+          <Field label={incType === "percent" ? "Change (%)" : "Change ($ / month)"}>
+            <Input
               type="number"
               step={incType === "percent" ? "0.5" : "1"}
               value={incValue}
               onChange={(e) => setIncValue(e.target.value)}
               placeholder={incType === "percent" ? "e.g. 5" : "e.g. 3"}
-              className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900 font-mono"
             />
-          </div>
-          <div>
-            <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">Effective date</label>
-            <input
+          </Field>
+          <Field label="Effective date">
+            <Input
               type="date"
               value={effectiveDate}
               min={isoDatePlusDays(30)}
               onChange={(e) => setEffectiveDate(e.target.value)}
-              className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900 font-mono"
             />
-          </div>
+          </Field>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           {preview && preview.count > 0 && !preview.overCap && preview.invalidCount === 0 ? (
             <Button onClick={sendNotices} disabled={sending}>
               {sending ? "Sending…" : `Send ${preview.count} notices`}
@@ -188,18 +178,18 @@ export default function AdminPriceChangePage({ embedded = false } = {}) {
             </Button>
           )}
           {preview && preview.count === 0 && (
-            <span className="text-12 text-ink-secondary">No matching recurring customers.</span>
+            <span className="text-ui-body text-ink-secondary">No matching recurring customers.</span>
           )}
           {preview && preview.invalidCount > 0 && (
-            <span className="text-12 text-alert-fg">
+            <span className="text-ui-body text-alert-fg">
               {preview.invalidCount} customer(s) would go to $0 or below — adjust the amount.
             </span>
           )}
           {preview && preview.overCap && (
-            <span className="text-12 text-alert-fg">List exceeds the batch cap — narrow by location.</span>
+            <span className="text-ui-body text-alert-fg">List exceeds the batch cap — narrow by location.</span>
           )}
           {result && (
-            <span className={cn("text-12", result.ok ? "text-zinc-900" : "text-alert-fg")}>{result.text}</span>
+            <ActionFeedback error={!result.ok}>{result.text}</ActionFeedback>
           )}
         </div>
       </Card>
@@ -207,37 +197,42 @@ export default function AdminPriceChangePage({ embedded = false } = {}) {
       {preview && preview.rows?.length > 0 && (
         <Card className="p-0 overflow-hidden">
           <div className="px-4 py-2.5 border-b border-hairline border-zinc-200 flex items-center gap-2">
-            <span className="text-13 font-medium text-zinc-900">
+            <span className="text-ui-body font-medium text-zinc-900">
               {preview.count} customers · effective {preview.effectiveDate}
             </span>
             <Badge tone="neutral">notices only — rates unchanged</Badge>
           </div>
-          <div className="max-h-[480px] overflow-y-auto">
-            <table className="w-full text-13">
-              <thead className="bg-zinc-50 border-b border-hairline border-zinc-200 sticky top-0">
-                <tr>
-                  <th className="px-4 py-2 text-left text-11 uppercase tracking-label text-ink-tertiary font-medium">Customer</th>
-                  <th className="px-4 py-2 text-right text-11 uppercase tracking-label text-ink-tertiary font-medium">Current</th>
-                  <th className="px-4 py-2 text-right text-11 uppercase tracking-label text-ink-tertiary font-medium">New</th>
-                  <th className="px-4 py-2 text-right text-11 uppercase tracking-label text-ink-tertiary font-medium">Reach</th>
-                </tr>
-              </thead>
-              <tbody>
-                {preview.rows.map((row) => (
-                  <tr key={row.customerId} className="border-b border-hairline border-zinc-100 last:border-b-0">
-                    <td className="px-4 py-2 text-zinc-900">{row.name}</td>
-                    <td className="px-4 py-2 text-right u-nums text-ink-secondary">{row.current}/mo</td>
-                    <td className="px-4 py-2 text-right u-nums font-medium text-zinc-900">{row.next}/mo</td>
-                    <td className="px-4 py-2 text-right text-11 text-ink-tertiary">
-                      {[row.hasEmail ? "email" : null, row.hasPhone ? "text" : null].filter(Boolean).join(" + ") || "unreachable"}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          {/* The bound has to live on Table's own container: that wrapper is the
+              sticky THead's nearest overflow ancestor, so a separate outer
+              scroller would scroll the headings out of view. */}
+          <Table
+            layout="records"
+            containerClassName="max-h-[480px] overflow-y-auto"
+            aria-label="Affected customers"
+          >
+            <THead className="bg-zinc-50 border-b border-hairline border-zinc-200 sticky top-0">
+              <TR>
+                <TH className="px-4 py-2 text-left text-ui-body text-ink-tertiary font-medium">Customer</TH>
+                <TH className="px-4 py-2 text-right text-ui-body text-ink-tertiary font-medium">Current</TH>
+                <TH className="px-4 py-2 text-right text-ui-body text-ink-tertiary font-medium">New</TH>
+                <TH className="px-4 py-2 text-right text-ui-body text-ink-tertiary font-medium">Reach</TH>
+              </TR>
+            </THead>
+            <TBody>
+              {preview.rows.map((row) => (
+                <TR key={row.customerId} className="border-b border-hairline border-zinc-100 last:border-b-0">
+                  <TD data-label="Customer" className="px-4 py-2 text-zinc-900">{row.name}</TD>
+                  <TD data-label="Current" className="px-4 py-2 text-right u-nums text-ink-secondary">{row.current}/mo</TD>
+                  <TD data-label="New" className="px-4 py-2 text-right u-nums font-medium text-zinc-900">{row.next}/mo</TD>
+                  <TD data-label="Reach" className="px-4 py-2 text-right text-ui-body text-ink-tertiary">
+                    {[row.hasEmail ? "email" : null, row.hasPhone ? "text" : null].filter(Boolean).join(" + ") || "unreachable"}
+                  </TD>
+                </TR>
+              ))}
+            </TBody>
+          </Table>
         </Card>
       )}
-    </div>
+    </UiSurface>
   );
 }

@@ -17,7 +17,7 @@ const visit = { id: 'visit', customer_id: customer.id, scheduled_date: '2030-01-
   status: 'confirmed', service_type: 'WaveGuard', reschedule_token: 'token', property_address: '100 Example Street', property_unit: 'Unit 2' };
 const call = { customer_id: customer.id, direction: 'inbound', from_phone: customer.phone, created_at: now,
   v2_extraction_status: 'valid', ai_extraction_enriched: { meta: {} }, transcription: `Agent: ${quote}\nCaller: Thank you.` };
-const commitment = { confidence: 0.95, evidence: [{ quote, speaker: 'agent' }] };
+const commitment = { confidence: 0.95, evidence: [{ quote, speaker: 'agent' }], subject: { date_claims: [] } };
 const select = (extra = {}) => links.selectDiscussedVisit({ commitment, call, customer, candidates: [visit], now, ...extra });
 beforeEach(() => resolveRescheduleCards.mockClear());
 
@@ -56,22 +56,25 @@ test('outbound source variants retain full phone identity', () => {
 });
 
 test('each subject field must occur in its own source quote, and units remain distinct', () => {
-  const subject = { quote: 'The appointment at 100 Example Street Unit 2.', address: '100 Example Street Unit 2' };
+  const subject = { quote: 'The appointment at 100 Example Street Unit 2.', address: '100 Example Street Unit 2', date_claims: [] };
   const source = { ...call, transcription: `${call.transcription}\nCaller: ${subject.quote}\nCaller: WaveGuard is my other service.` };
   expect(select({ call: source, commitment: { ...commitment, subject: { ...subject, service: 'WaveGuard' } } }).reason).toBe('subject_not_grounded');
   expect(select({ call: source, commitment: { ...commitment, subject }, candidates: [visit, { ...visit, id: 'unit-3', property_unit: 'Unit 3' }] }).visit?.id).toBe('visit');
 });
 
-test('a stated current date must match the candidate visit exactly', () => {
-  const weekday = parseETDateTime('2030-01-08T09:00').toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long' });
-  const subject = { quote: `My appointment is ${weekday} at 9 AM.`, visit_date: '2030-01-08' };
-  const source = { ...call, transcription: `${call.transcription}\nCaller: ${subject.quote}` };
+test('an appointment date claim and visit_date agree with the selected visit', () => {
+  const spoken = 'My appointment is Tuesday, January 8.';
+  const subject = { quote: spoken, visit_date: '2030-01-08',
+    date_claims: [{ binding: 'appointment', quote: spoken, month: 1, day: 8, weekday: 2 }] };
+  const source = { ...call, transcription: `${call.transcription}\nCaller: ${spoken}` };
   expect(select({ call: source, commitment: { ...commitment, subject } }).visit?.id).toBe('visit');
-  // The quote names Jan 8's actual weekday; a mismatched extraction is now
-  // caught as ungrounded before narrowBySubject's own date filter ever runs
-  // — the sole-candidate exemption no longer covers a weekday the quote
-  // contradicts (codex #4293 P1 r4).
-  expect(select({ call: source, commitment: { ...commitment, subject: { ...subject, visit_date: '2030-01-09' } } }).reason).toBe('date_not_grounded');
+  expect(select({ call: source, commitment: { ...commitment,
+    subject: { ...subject, visit_date: '2030-01-09' } } }).reason).toBe('date_not_grounded');
+});
+
+test('missing date_claims is a legacy extraction requiring review', () => {
+  expect(select({ commitment: { ...commitment, subject: { quote: 'that appointment' } } }).reason)
+    .toBe('appointment_date_unresolved');
 });
 
 test('dispatch-owned pending and grouped visits stay in review', () => {
@@ -100,14 +103,12 @@ test('a missed appointment is still promised the link the page would honour', ()
   expect(select({ candidates: [{ ...visit, status: 'rescheduled' }], now: parseETDateTime('2030-01-08T11:00') }).reason).toBe('visit_elapsed');
 });
 
-test('a rescheduled visit still in the future is promised the link exactly like a pending one', () => {
-  // eligibility() already lets a customer self-serve a 'rescheduled' row from
-  // the public page — a local, narrower status allowlist here parked the
-  // promise anyway, refusing a link the customer could already get
-  // themselves (codex #4293 P1 r8).
+test('a rescheduled visit in the future can receive its promised link', () => {
   const future = { ...visit, status: 'rescheduled', scheduled_date: '2030-01-20' };
-  const subject = { quote: 'My appointment on January 20.', visit_date: '2030-01-20' };
-  const source = { ...call, transcription: `${call.transcription}\nCaller: ${subject.quote}` };
+  const spoken = 'My appointment on January 20.';
+  const subject = { quote: spoken, visit_date: '2030-01-20',
+    date_claims: [{ binding: 'appointment', quote: spoken, month: 1, day: 20 }] };
+  const source = { ...call, transcription: `${call.transcription}\nCaller: ${spoken}` };
   expect(select({ call: source, commitment: { ...commitment, subject }, candidates: [future] }).visit?.id).toBe('visit');
 });
 
@@ -128,427 +129,101 @@ test('an emailed link is office work, not a silent SMS', () => {
   }
 });
 
-test('a stated appointment date binds by exact match, not the new-booking slot rules', () => {
-  const far = { ...visit, scheduled_date: '2030-09-20', window_start: '13:00', window_end: '15:00' };
-  const subject = { quote: 'My September 20 appointment.', visit_date: '2030-09-20' };
-  // Months out, no weekday word and no time word: all three were refused by
-  // the new-booking slot validator even though the date matched exactly.
-  expect(select({ call: { ...call, transcription: `${call.transcription}\nCaller: ${subject.quote}` },
-    commitment: { ...commitment, subject }, candidates: [far] }).visit?.id).toBe('visit');
-  // A quote that contradicts the stated date still binds nothing — caught
-  // now as an ungrounded explicit claim before narrowBySubject's own
-  // exact-match filter ever runs, regardless of the single open candidate
-  // (codex #4293 P1 r4).
-  for (const spoken of ['My September 27 appointment.', 'My October 20 appointment.', 'My appointment on the 27th.']) {
-    expect(select({ call: { ...call, transcription: `${call.transcription}\nCaller: ${spoken}` },
-      commitment: { ...commitment, subject: { quote: spoken, visit_date: '2030-09-20' } }, candidates: [far] })
-      .reason).toBe('date_not_grounded');
-  }
+test('September 20 is a structured appointment claim, even without visit_date', () => {
+  const sept20 = { ...visit, id: 'sept-20', scheduled_date: '2030-09-20' };
+  const sept21 = { ...visit, id: 'sept-21', scheduled_date: '2030-09-21' };
+  const spoken = 'My September 20 appointment.';
+  const subject = { quote: spoken, date_claims: [{ binding: 'appointment', quote: spoken, month: 9, day: 20 }] };
+  const source = { ...call, transcription: `${call.transcription}\nCaller: ${spoken}` };
+  expect(select({ call: source, commitment: { ...commitment, subject }, candidates: [sept20] }).visit?.id)
+    .toBe('sept-20');
+  expect(select({ call: source, commitment: { ...commitment, subject }, candidates: [sept21] }).reason)
+    .toBe('date_not_grounded');
 });
 
-test('an extracted date needs the quote to actually name it, even against the sole open visit', () => {
-  const second = { ...visit, id: 'second', scheduled_date: '2030-01-15' };
-  // The call happened 2030-01-07 (ET). "tomorrow" means 2030-01-08 relative
-  // to THAT date — not whatever date the model happened to select.
-  const subject = { quote: 'My appointment tomorrow, please.' };
-  const source = { ...call, transcription: `${call.transcription}\nCaller: ${subject.quote}` };
-  // The model picked the OTHER visit's date; the quote never grounds that
-  // pick, so a wrong extraction cannot silently bind the wrong appointment —
-  // it parks for review instead (codex #4293 P1).
-  expect(select({ call: source, commitment: { ...commitment, subject: { ...subject, visit_date: '2030-01-15' } },
-    candidates: [visit, second] }).reason).toBe('date_not_grounded');
-  // The same "tomorrow" DOES ground the date the caller actually meant.
-  expect(select({ call: source, commitment: { ...commitment, subject: { ...subject, visit_date: '2030-01-08' } },
-    candidates: [visit, second] }).visit?.id).toBe('visit');
-  // A sole remaining candidate is NOT an exemption from a CONTRADICTED
-  // explicit claim: 2030-01-15 is the only open visit, but "tomorrow"
-  // (2030-01-08) still contradicts it, so the link for the wrong appointment
-  // must not go out just because it is the only row on file (codex #4293 P1
-  // r4 — this is the sole-candidate bug the earlier round's exemption missed).
-  expect(select({ call: source, commitment: { ...commitment, subject: { ...subject, visit_date: '2030-01-15' } },
-    candidates: [second] }).reason).toBe('date_not_grounded');
-  // The sole-candidate exemption still stands when the quote gives NOTHING
-  // to check the pick against at all (no explicit claim, no weekday name).
-  const noToken = { quote: 'My appointment, please.', visit_date: '2030-01-15' };
-  expect(select({ call: { ...call, transcription: `${call.transcription}\nCaller: ${noToken.quote}` },
-    commitment: { ...commitment, subject: noToken }, candidates: [second] }).visit?.id).toBe('second');
-});
-
-test('a bare weekday alongside an explicit relative token cannot override the relative token', () => {
-  // 2030-01-07 is a Monday, so "tomorrow" is 2030-01-08 — but 2030-01-15 is
-  // ALSO a Tuesday, like the visit the caller actually meant. Checking the
-  // bare weekday name BEFORE the explicit relative token let "Tuesday" match
-  // first and ground the wrong visit (codex #4293 P1 r2).
-  const second = { ...visit, id: 'second', scheduled_date: '2030-01-15' };
-  const subject = { quote: 'My appointment tomorrow, Tuesday, please.' };
-  const source = { ...call, transcription: `${call.transcription}\nCaller: ${subject.quote}` };
-  expect(select({ call: source, commitment: { ...commitment, subject: { ...subject, visit_date: '2030-01-15' } },
-    candidates: [visit, second] }).reason).toBe('date_not_grounded');
-  expect(select({ call: source, commitment: { ...commitment, subject: { ...subject, visit_date: '2030-01-08' } },
-    candidates: [visit, second] }).visit?.id).toBe('visit');
-});
-
-test('a bare weekday name grounds the date only when exactly one open visit shares it', () => {
-  // `visit` is 2030-01-08, a Tuesday; this candidate is the following day, a
-  // Wednesday, so the weekday word alone is unambiguous.
-  const second = { ...visit, id: 'second', scheduled_date: '2030-01-16' };
-  const weekday = parseETDateTime('2030-01-16T09:00').toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long' });
-  const uniqueSubject = { quote: `My appointment is on ${weekday}.`, visit_date: '2030-01-16' };
-  const uniqueSource = { ...call, transcription: `${call.transcription}\nCaller: ${uniqueSubject.quote}` };
-  expect(select({ call: uniqueSource, commitment: { ...commitment, subject: uniqueSubject }, candidates: [visit, second] }).visit?.id).toBe('second');
-
-  // Two open visits sharing the SAME weekday leave a bare weekday name unable
-  // to tell them apart, so it grounds neither pick.
-  const alsoTuesday = { ...visit, id: 'also-tuesday', scheduled_date: '2030-01-15' };
-  const sharedSubject = { quote: 'My appointment is on Tuesday.', visit_date: '2030-01-15' };
-  const sharedSource = { ...call, transcription: `${call.transcription}\nCaller: ${sharedSubject.quote}` };
-  expect(select({ call: sharedSource, commitment: { ...commitment, subject: sharedSubject }, candidates: [visit, alsoTuesday] })
-    .reason).toBe('date_not_grounded');
-});
-
-test('an extracted date with no naming token at all parks for review among several visits', () => {
-  const second = { ...visit, id: 'second', scheduled_date: '2030-01-15' };
-  const subject = { quote: 'My WaveGuard appointment.', visit_date: '2030-01-08', service: 'WaveGuard' };
-  const source = { ...call, transcription: `${call.transcription}\nCaller: ${subject.quote}` };
-  expect(select({ call: source, commitment: { ...commitment, subject }, candidates: [visit, second] }).reason).toBe('date_not_grounded');
-});
-
-test('a bare ordinal date names a day only, not a month — two visits sharing it stay ambiguous', () => {
-  // "on the 20th" resolves ONLY a day (explicitQuoteDate: "the 14th" is
-  // month-agnostic). Treating the missing month as a wildcard the model was
-  // free to fill in let a February extraction narrow Jan 20 / Feb 20 down to
-  // one and send the link for a visit the quote never actually identified
-  // (codex #4293 P1 r3). The claim grounds the pick only when the components
-  // it DID resolve single that date out among the open candidates.
+test('a day-only claim narrows only when it names one candidate, regardless of visit_date', () => {
   const jan20 = { ...visit, id: 'jan20', scheduled_date: '2030-01-20' };
   const feb20 = { ...visit, id: 'feb20', scheduled_date: '2030-02-20' };
-  const subject = { quote: 'My appointment on the 20th.' };
-  const source = { ...call, transcription: `${call.transcription}\nCaller: ${subject.quote}` };
-  // The model picked February; the bare "20th" cannot tell Jan 20 and Feb 20
-  // apart, so neither is grounded — this must park for review, not narrow to
-  // whichever date the model happened to extract.
-  expect(select({ call: source, commitment: { ...commitment, subject: { ...subject, visit_date: '2030-02-20' } },
-    candidates: [jan20, feb20] }).reason).toBe('date_not_grounded');
-  // The SAME bare-day quote DOES ground the pick once only one open visit
-  // falls on the 20th of any month at all.
-  expect(select({ call: source, commitment: { ...commitment, subject: { ...subject, visit_date: '2030-02-20' } },
-    candidates: [feb20] }).visit?.id).toBe('feb20');
+  const spoken = 'My appointment on the 20th.';
+  const subject = { quote: spoken, visit_date: '2030-02-20',
+    date_claims: [{ binding: 'appointment', quote: spoken, day: 20 }] };
+  const source = { ...call, transcription: `${call.transcription}\nCaller: ${spoken}` };
+  expect(select({ call: source, commitment: { ...commitment, subject }, candidates: [jan20, feb20] }).reason)
+    .toBe('ambiguous_visit');
+  expect(select({ call: source, commitment: { ...commitment, subject }, candidates: [feb20] }).visit?.id)
+    .toBe('feb20');
 });
 
-test('a numeric subject date (9/20) grounds the pick exactly like a spelled-out month, and refuses a mismatched sole candidate (codex #4293 P1)', () => {
-  // explicitQuoteDate only recognized month names, ordinals, and relative
-  // words — "my 9/20 appointment" matched none of them, fell through to the
-  // no-explicit-claim/sole-candidate path, and let a mistaken extraction
-  // send whatever visit happened to be the only one open, even when the
-  // quote plainly named a DIFFERENT date.
-  const nineTwenty = { ...visit, id: 'nine-twenty', scheduled_date: '2030-09-20' };
-  const nineTwentyOne = { ...visit, id: 'nine-twenty-one', scheduled_date: '2030-09-21' };
-  const subject = { quote: 'My 9/20 appointment.', visit_date: '2030-09-21' };
-  const source = { ...call, transcription: `${call.transcription}\nCaller: ${subject.quote}` };
-  // The model's extraction (9/21) is the customer's only open visit, but the
-  // quote names 9/20 — the sole-candidate exemption must not paper over the
-  // mismatch just because there is nothing else on file.
-  expect(select({ call: source, commitment: { ...commitment, subject }, candidates: [nineTwentyOne] }).reason).toBe('date_not_grounded');
-  // The identical quote DOES ground a visit that actually falls on 9/20 —
-  // "09/20" and "9-20" resolve the same way.
-  for (const quote of ['My 9/20 appointment.', 'My 09/20 appointment.', 'My 9-20 appointment.']) {
-    const src = { ...call, transcription: `${call.transcription}\nCaller: ${quote}` };
-    expect(select({ call: src, commitment: { ...commitment, subject: { quote, visit_date: '2030-09-20' } },
-      candidates: [nineTwenty] }).visit?.id).toBe('nine-twenty');
+test('a weekday-only claim narrows uniquely and cannot be overridden by visit_date', () => {
+  const wednesday = { ...visit, id: 'wednesday', scheduled_date: '2030-01-16' };
+  const spoken = 'My Wednesday appointment.';
+  const subject = { quote: spoken, date_claims: [{ binding: 'appointment', quote: spoken, weekday: 3 }] };
+  const source = { ...call, transcription: `${call.transcription}\nCaller: ${spoken}` };
+  expect(select({ call: source, commitment: { ...commitment, subject }, candidates: [visit, wednesday] }).visit?.id)
+    .toBe('wednesday');
+  expect(select({ call: source, commitment: { ...commitment,
+    subject: { ...subject, visit_date: '2030-01-08' } }, candidates: [visit, wednesday] }).reason)
+    .toBe('date_not_grounded');
+});
+
+test('Wednesday the 20th cannot match Friday September 20', () => {
+  const sept20 = { ...visit, id: 'sept20', scheduled_date: '2030-09-20' };
+  const spoken = 'My Wednesday the 20th appointment.';
+  const subject = { quote: spoken, visit_date: '2030-09-20',
+    date_claims: [{ binding: 'appointment', quote: spoken, weekday: 3, day: 20 }] };
+  const source = { ...call, transcription: `${call.transcription}\nCaller: ${spoken}` };
+  expect(select({ call: source, commitment: { ...commitment, subject }, candidates: [sept20] }).reason)
+    .toBe('date_not_grounded');
+});
+
+test('delivery timing does not constrain the visit, but an appointment claim does', () => {
+  const promise = `I'll text the reschedule link tomorrow morning for your September 20 appointment.`;
+  const sept20 = { ...visit, id: 'sept20', scheduled_date: '2030-09-20' };
+  const sept21 = { ...visit, id: 'sept21', scheduled_date: '2030-09-21' };
+  const subject = { date_claims: [
+    { binding: 'delivery', quote: 'tomorrow morning' },
+    { binding: 'appointment', quote: 'September 20 appointment', month: 9, day: 20 },
+  ] };
+  const source = { ...call, transcription: `Agent: ${promise}\nCaller: Thank you.` };
+  const matching = { ...commitment, evidence: [{ quote: promise, speaker: 'agent' }], subject };
+  expect(select({ call: source, commitment: matching, candidates: [sept20] }).visit?.id).toBe('sept20');
+  expect(select({ call: source, commitment: matching, candidates: [sept21] }).reason).toBe('date_not_grounded');
+});
+
+test('a delivery-only claim never binds the appointment date', () => {
+  const promise = 'I will text your reschedule link tomorrow morning for that appointment.';
+  const subject = { date_claims: [{ binding: 'delivery', quote: 'tomorrow morning' }] };
+  const source = { ...call, transcription: `Agent: ${promise}\nCaller: Thank you.` };
+  const nextWeek = { ...visit, id: 'next-week', scheduled_date: '2030-01-15' };
+  expect(select({ call: source, commitment: { ...commitment, evidence: [{ quote: promise, speaker: 'agent' }], subject },
+    candidates: [nextWeek] }).visit?.id).toBe('next-week');
+});
+
+test('a requested new Friday date does not replace the current Tuesday appointment claim', () => {
+  const spoken = 'Please move my current Tuesday appointment to Friday.';
+  const subject = { date_claims: [
+    { binding: 'appointment', quote: 'Tuesday appointment', weekday: 2 },
+    { binding: 'requested', quote: 'Friday', weekday: 5 },
+  ] };
+  const source = { ...call, transcription: `${call.transcription}\nCaller: ${spoken}` };
+  const friday = { ...visit, id: 'friday', scheduled_date: '2030-01-11' };
+  expect(select({ call: source, commitment: { ...commitment, subject }, candidates: [visit, friday] }).visit?.id)
+    .toBe('visit');
+});
+
+test('unresolved binding parks regardless of whether a candidate happens to match', () => {
+  const spoken = 'Your appointment is on September 20.';
+  const subject = { date_claims: [{ binding: 'unresolved', quote: spoken, month: 9, day: 20 }] };
+  const source = { ...call, transcription: `${call.transcription}\nAgent: ${spoken}` };
+  for (const scheduled_date of ['2030-09-20', '2030-09-21']) {
+    expect(select({ call: source, commitment: { ...commitment, subject }, candidates: [{ ...visit, scheduled_date }] }).reason)
+      .toBe('appointment_date_unresolved');
   }
 });
 
-test('a spoken date grounds the pick even when the extractor supplied no visit_date at all (codex #4293 P1 r9)', () => {
-  // Date grounding used to run ONLY inside extractedDateUngrounded, which
-  // requires subject.visit_date — so when the model's own extraction simply
-  // omitted the date, narrowBySubject applied no date filter and the quote's
-  // own explicit date went unchecked against whatever visit narrowBySubject
-  // (or the sole-candidate fallback) landed on.
-  const sept21 = { ...visit, id: 'sept-21', scheduled_date: '2030-09-21' };
-  const subject = { quote: 'My September 20 appointment.' };
-  const source = { ...call, transcription: `${call.transcription}\nCaller: ${subject.quote}` };
-  // The quote names September 20; the customer's only open visit is
-  // September 21 — the mismatch must park for review, not send.
-  expect(select({ call: source, commitment: { ...commitment, subject }, candidates: [sept21] }).reason).toBe('date_not_grounded');
-  // The identical quote DOES ground a visit that actually falls on Sept 20.
-  const sept20 = { ...visit, id: 'sept-20', scheduled_date: '2030-09-20' };
-  expect(select({ call: source, commitment: { ...commitment, subject }, candidates: [sept20] }).visit?.id).toBe('sept-20');
-  // The numeric form resolves the same way, reusing the same parser.
-  const numericSubject = { quote: 'My 9/20 appointment.' };
-  const numericSource = { ...call, transcription: `${call.transcription}\nCaller: ${numericSubject.quote}` };
-  expect(select({ call: numericSource, commitment: { ...commitment, subject: numericSubject }, candidates: [sept21] }).reason)
-    .toBe('date_not_grounded');
-  // A quote naming NO date at all has nothing to check the pick against —
-  // today's behavior (sole-candidate trust) is unchanged.
-  const noDateSubject = { quote: 'My appointment, please.' };
-  const noDateSource = { ...call, transcription: `${call.transcription}\nCaller: ${noDateSubject.quote}` };
-  expect(select({ call: noDateSource, commitment: { ...commitment, subject: noDateSubject }, candidates: [sept21] }).visit?.id)
-    .toBe('sept-21');
-  // An ambiguous numeric shape still fails closed even with no extracted
-  // date to check it against.
-  const ambiguousSubject = { quote: 'My 9/10 appointment.' };
-  const ambiguousSource = { ...call, transcription: `${call.transcription}\nCaller: ${ambiguousSubject.quote}` };
-  const sept10 = { ...visit, id: 'sept-10', scheduled_date: '2030-09-10' };
-  expect(select({ call: ambiguousSource, commitment: { ...commitment, subject: ambiguousSubject }, candidates: [sept10] }).reason)
-    .toBe('date_not_grounded');
-});
-
-test('an ambiguous numeric subject date fails closed rather than guessing M/D vs D/M (codex #4293 P1)', () => {
-  // "9/10" reads as September 10 under M/D, October 9 under D/M — the two
-  // conventions disagree on which date it names. Guessing either way risks
-  // sending the wrong visit's link, so this must never ground a pick, even
-  // against a sole open visit that happens to match one of the readings.
-  const sept10 = { ...visit, id: 'sept-10', scheduled_date: '2030-09-10' };
-  const subject = { quote: 'My 9/10 appointment.', visit_date: '2030-09-10' };
-  const source = { ...call, transcription: `${call.transcription}\nCaller: ${subject.quote}` };
-  expect(select({ call: source, commitment: { ...commitment, subject }, candidates: [sept10] }).reason).toBe('date_not_grounded');
-  // A shape where one component is out of month range (13-31) is NOT
-  // ambiguous — only one reading is a valid calendar date at all (the
-  // number over 12 can only be a day), so it resolves unambiguously even
-  // though it leads with what would be the day under M/D: "25/12" can only
-  // be December 25.
-  const dec25 = { ...visit, id: 'dec-25', scheduled_date: '2030-12-25' };
-  const dmSubject = { quote: 'My 25/12 appointment.', visit_date: '2030-12-25' };
-  const dmSource = { ...call, transcription: `${call.transcription}\nCaller: ${dmSubject.quote}` };
-  expect(select({ call: dmSource, commitment: { ...commitment, subject: dmSubject }, candidates: [dec25] }).visit?.id).toBe('dec-25');
-});
-
-test('a date claim grounds the pick even when subject itself is null, not just subject.quote (codex #4293 P1 r10)', () => {
-  // Date validation used to read subject.quote, but subject is optional in
-  // the extraction schema — with subject: null, "I will text you a
-  // reschedule link for your September 20 appointment" passed every date
-  // guard (all of them gated on subject.quote/subject.visit_date being
-  // present) and bound whatever visit narrowBySubject fell back to on
-  // sole-candidate trust. The positive-grounding check now reads the
-  // promise's own evidence directly, with no subject involved at all.
-  const promise = 'I will text you a reschedule link for your September 20 appointment.';
-  const evidence = [{ quote: promise, speaker: 'agent' }];
-  const source = { ...call, transcription: `Agent: ${promise}\nCaller: Thank you.` };
-  const sept21 = { ...visit, id: 'sept-21', scheduled_date: '2030-09-21' };
-  // The Codex repro: a sole September 21 visit must NOT receive the link
-  // promised for September 20.
-  expect(select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [sept21] }).reason)
-    .toBe('date_not_grounded');
-  // The identical evidence DOES ground a visit that actually falls on the
-  // named date.
-  const sept20 = { ...visit, id: 'sept-20', scheduled_date: '2030-09-20' };
-  expect(select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [sept20] }).visit?.id)
-    .toBe('sept-20');
-});
-
-test('a date claim grounds the pick from promisedQuotes even when subject.quote itself names no date (codex #4293 P1 r10)', () => {
-  // subject.quote grounds nothing about the date here — it just names the
-  // service. The date claim lives only in the standing-promise quote
-  // (promisedQuotes), which the old subject-only check never read at all.
-  const promise = 'I will text you a reschedule link for your September 20 appointment.';
-  const subjectQuote = 'That is for my WaveGuard service.';
-  const evidence = [{ quote: promise, speaker: 'agent' }];
-  const subject = { quote: subjectQuote, service: 'WaveGuard' };
-  const source = { ...call, transcription: `Agent: ${promise}\nCaller: ${subjectQuote}` };
-  const sept21 = { ...visit, id: 'sept-21', scheduled_date: '2030-09-21' };
-  expect(select({ call: source, commitment: { ...commitment, subject, evidence }, candidates: [sept21] }).reason)
-    .toBe('date_not_grounded');
-  const sept20 = { ...visit, id: 'sept-20', scheduled_date: '2030-09-20' };
-  expect(select({ call: source, commitment: { ...commitment, subject, evidence }, candidates: [sept20] }).visit?.id)
-    .toBe('sept-20');
-});
-
-test('evidence naming no date anywhere still trusts the sole open visit (codex #4293 P1 r10)', () => {
-  const promise = 'I will text you a reschedule link for that appointment.';
-  const evidence = [{ quote: promise, speaker: 'agent' }];
-  const source = { ...call, transcription: `Agent: ${promise}\nCaller: Thank you.` };
-  const sept21 = { ...visit, id: 'sept-21', scheduled_date: '2030-09-21' };
-  expect(select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [sept21] }).visit?.id)
-    .toBe('sept-21');
-});
-
-test('an ambiguous numeric date claim anywhere in the evidence fails closed even with subject null (codex #4293 P1 r10)', () => {
-  const promise = 'I will text you a reschedule link for my 9/10 appointment.';
-  const evidence = [{ quote: promise, speaker: 'agent' }];
-  const source = { ...call, transcription: `Agent: ${promise}\nCaller: Thank you.` };
-  const sept10 = { ...visit, id: 'sept-10', scheduled_date: '2030-09-10' };
-  expect(select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [sept10] }).reason)
-    .toBe('date_not_grounded');
-});
-
-// codex #4293 P1 r11: quoteDateContradictsSelectedVisit (the evidence-wide
-// check r10 made unconditional) only ever consulted explicitQuoteDate, which
-// deliberately leaves a BARE weekday name unresolved — that vocabulary lived
-// only in quoteGroundsVisitDate, still gated on subject.visit_date being
-// populated. With subject: null, "your Monday appointment" against a sole
-// Tuesday visit sailed through: the evidence-wide check ran (unconditional),
-// found no EXPLICIT claim to check (a bare weekday is not one), and stopped
-// looking — the check had become unconditional, but its vocabulary had not.
-// This is now consolidated into one function (quoteContradictsVisit) that
-// both narrowBySubject and evidenceContradictsSelectedVisit call, and it
-// resolves a bare weekday exactly like every other shape.
-describe('a bare weekday claim anywhere in the evidence is checked against the selected visit even with subject null (codex #4293 P1 r11)', () => {
-  const promise = 'I will text you a reschedule link for your Monday appointment.';
-  const evidence = [{ quote: promise, speaker: 'agent' }];
-  const source = { ...call, transcription: `Agent: ${promise}\nCaller: Thank you.` };
-
-  test('a sole visit on a DIFFERENT weekday parks for review, not sent', () => {
-    // The fixture `visit` is 2030-01-08, a Tuesday.
-    expect(select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [visit] }).reason)
-      .toBe('date_not_grounded');
-  });
-
-  test('the identical evidence DOES ground a sole visit that actually falls on the named weekday', () => {
-    const monday = { ...visit, id: 'monday', scheduled_date: '2030-01-14' }; // also a Monday
-    expect(select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [monday] }).visit?.id)
-      .toBe('monday');
-  });
-
-  test('two open visits both on the named weekday stay ambiguous — the reason is not overridden by the new weekday check', () => {
-    const monday1 = { ...visit, id: 'monday1', scheduled_date: '2030-01-14' };
-    const monday2 = { ...visit, id: 'monday2', scheduled_date: '2030-01-21' };
-    expect(select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [monday1, monday2] }).reason)
-      .toBe('ambiguous_visit');
-  });
-});
-
-test('an explicit month-name date claim in the evidence still parks a mismatched visit with subject null, post-consolidation (codex #4293 P1 r10/r11 regression)', () => {
-  // Same explicit-claim shape as the r10 test above (an absolute month+day),
-  // re-asserted here against the CONSOLIDATED quoteContradictsVisit to prove
-  // r11's merge did not narrow what the evidence-wide check already caught.
-  const promise = 'I will text you a reschedule link for your September 20 appointment.';
-  const evidence = [{ quote: promise, speaker: 'agent' }];
-  const source = { ...call, transcription: `Agent: ${promise}\nCaller: Thank you.` };
-  const october = { ...visit, id: 'october', scheduled_date: '2030-10-20' };
-  expect(select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [october] }).reason)
-    .toBe('date_not_grounded');
-});
-
-// codex #4293 P1 (reschedule-link-promises.js:762): a date claim that
-// references the appointment but sits outside appointmentAttachedText's own
-// narrow connector list ("is on", a bare comma) used to be silently
-// discarded — read as if the quote said nothing about a date at all — and a
-// sole open visit on a DIFFERENT date was sent the link anyway. The fix
-// makes the outcome three-way: this shape is now UNRESOLVED, and parks
-// under its own reason rather than either being validated (Attached) or
-// ignored (delivery timing).
-describe('an appointment date claim the connector rule cannot place parks as unresolved, not silently ungrounded (codex #4293 P1)', () => {
-  test('the Codex repro: "your appointment is on September 20" against a sole, DIFFERENT-dated visit parks — it does not send', () => {
-    const promise = 'I will text you a reschedule link. Your appointment is on September 20.';
-    const evidence = [{ quote: promise, speaker: 'agent' }];
-    const source = { ...call, transcription: `Agent: ${promise}\nCaller: Thank you.` };
-    const sept21 = { ...visit, id: 'sept-21', scheduled_date: '2030-09-21' };
-    const result = select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [sept21] });
-    expect(result.visit).toBeUndefined();
-    expect(result.reason).toBe('appointment_date_unresolved');
-  });
-
-  test('the identical "is on" phrasing parks even when the date happens to MATCH the selected visit — unresolved is unresolved regardless of the coincidence', () => {
-    const promise = 'I will text you a reschedule link. Your appointment is on September 20.';
-    const evidence = [{ quote: promise, speaker: 'agent' }];
-    const source = { ...call, transcription: `Agent: ${promise}\nCaller: Thank you.` };
-    const sept20 = { ...visit, id: 'sept-20', scheduled_date: '2030-09-20' };
-    const result = select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [sept20] });
-    expect(result.visit).toBeUndefined();
-    expect(result.reason).toBe('appointment_date_unresolved');
-  });
-
-  test('a comma-separated date after the noun ("the appointment, September 20, needs moving") is the same unresolved shape', () => {
-    const promise = 'I will text you a reschedule link. The appointment, September 20, needs moving.';
-    const evidence = [{ quote: promise, speaker: 'agent' }];
-    const source = { ...call, transcription: `Agent: ${promise}\nCaller: Thank you.` };
-    const sept21 = { ...visit, id: 'sept-21', scheduled_date: '2030-09-21' };
-    expect(select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [sept21] }).reason)
-      .toBe('appointment_date_unresolved');
-  });
-
-  test('genuinely attached and delivery-timing shapes keep their prior, non-unresolved outcomes', () => {
-    // "my September 20 appointment" is BEFORE the noun — strictly attached —
-    // still a contradiction, not unresolved, against a mismatched visit.
-    const attached = 'I will text you a reschedule link for your September 20 appointment.';
-    const attachedEvidence = [{ quote: attached, speaker: 'agent' }];
-    const attachedSource = { ...call, transcription: `Agent: ${attached}\nCaller: Thank you.` };
-    const sept21 = { ...visit, id: 'sept-21', scheduled_date: '2030-09-21' };
-    expect(select({ call: attachedSource, commitment: { ...commitment, subject: null, evidence: attachedEvidence }, candidates: [sept21] }).reason)
-      .toBe('date_not_grounded');
-    // A delivery-timing date with nothing left after the noun is still
-    // neither attached nor unresolved — it sends.
-    const timing = 'I will text you the reschedule link tomorrow morning for your appointment.';
-    const timingEvidence = [{ quote: timing, speaker: 'agent' }];
-    const timingSource = { ...call, transcription: `Agent: ${timing}\nCaller: Thank you.` };
-    const nextWeek = { ...visit, id: 'next-week', scheduled_date: '2030-01-15' };
-    expect(select({ call: timingSource, commitment: { ...commitment, subject: null, evidence: timingEvidence }, candidates: [nextWeek] }).visit?.id)
-      .toBe('next-week');
-  });
-
-  test('an ambiguous numeric date claim still fails closed as a contradiction, not unresolved', () => {
-    const promise = 'I will text you a reschedule link for my 9/10 appointment.';
-    const evidence = [{ quote: promise, speaker: 'agent' }];
-    const source = { ...call, transcription: `Agent: ${promise}\nCaller: Thank you.` };
-    const sept10 = { ...visit, id: 'sept-10', scheduled_date: '2030-09-10' };
-    expect(select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [sept10] }).reason)
-      .toBe('date_not_grounded');
-  });
-});
-
-// codex #4293 P1 (reschedule-link-promises.js:796): the APPOINTMENT_REFERENCE
-// keyword gate means ANY quote containing "appointment" had ALL its date
-// language read as the visit's date — so a delivery-timing phrase sharing a
-// sentence with a bare appointment reference ("I will text you the
-// reschedule link tomorrow morning for your appointment") rejected a
-// correctly selected visit as ungrounded. Worse than a delayed send: this
-// PARKS THE PROMISE PERMANENTLY (date_not_grounded never retries on its
-// own). Fixed by binding a date claim to the visit only when it is ATTACHED
-// to the appointment noun (quoteContradictsVisit / appointmentAttachedText),
-// not merely co-occurring in the same sentence.
-describe('delivery timing language sharing a sentence with the appointment reference must not be read as the visit date (codex #4293 P1)', () => {
-  test('a timing phrase attached to the send verb does not park a correctly selected visit — it sends', () => {
-    const promise = 'I will text you the reschedule link tomorrow morning for your appointment.';
-    const evidence = [{ quote: promise, speaker: 'agent' }];
-    const source = { ...call, transcription: `Agent: ${promise}\nCaller: Thank you.` };
-    // The call happened 2030-01-07; the selected visit is a week out. Before
-    // the fix, "tomorrow" was read as the appointment date and contradicted
-    // this visit outright, parking the promise for good.
-    const nextWeek = { ...visit, id: 'next-week', scheduled_date: '2030-01-15' };
-    expect(select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [nextWeek] }).visit?.id)
-      .toBe('next-week');
-  });
-
-  test('both the delivery timing and the appointment date can share one sentence — only the appointment-adjacent one binds', () => {
-    const promise = "I'll text the reschedule link tomorrow morning for your September 20 appointment.";
-    const evidence = [{ quote: promise, speaker: 'agent' }];
-    const source = { ...call, transcription: `Agent: ${promise}\nCaller: Thank you.` };
-    // Binds the visit that actually falls on September 20 — "tomorrow
-    // morning" (attached to the send verb, not the noun) plays no part.
-    const sept20 = { ...visit, id: 'sept-20', scheduled_date: '2030-09-20' };
-    expect(select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [sept20] }).visit?.id)
-      .toBe('sept-20');
-    // And still rejects a visit that does NOT fall on September 20, proving
-    // it is September 20 — not "tomorrow" — that got read as the claim.
-    const sept21 = { ...visit, id: 'sept-21', scheduled_date: '2030-09-21' };
-    expect(select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [sept21] }).reason)
-      .toBe('date_not_grounded');
-  });
-
-  // explicitQuoteDate checks shapes in a fixed order (numeric, month name,
-  // ordinal, today, tomorrow, next-<weekday>), so a "September 20" appointment
-  // date happens to be found before "tomorrow" is ever reached even on the
-  // OLD, unattached full-quote scan — that ordering accident is why the test
-  // above does not, by itself, prove the fix. "today" sits BEFORE the bare
-  // weekday fallback in that same order, so pairing a "today" delivery-timing
-  // phrase with a weekday-named appointment does isolate the bug: the old
-  // code read the unattached "today" as the appointment date and rejected the
-  // correct (weekday-matching) visit outright.
-  test('a timing token that explicitQuoteDate resolves before a bare weekday still must not bind the visit', () => {
-    const promise = "I'll text you the reschedule link today for your Monday appointment.";
-    const evidence = [{ quote: promise, speaker: 'agent' }];
-    const source = { ...call, transcription: `Agent: ${promise}\nCaller: Thank you.` };
-    // `visit` (2030-01-08) is a Tuesday — the sole open visit does not fall on
-    // the attached "Monday", so it is correctly left parked either way.
-    expect(select({ call: source, commitment: { ...commitment, subject: null, evidence } }).reason)
-      .toBe('date_not_grounded');
-    // The visit that actually falls on Monday is the one that must be
-    // selected — "today" (attached to "text you ... today", the send verb,
-    // not the noun) must play no part in grounding it.
-    const monday = { ...visit, id: 'monday', scheduled_date: '2030-01-14' }; // a Monday
-    expect(select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [monday] }).visit?.id)
-      .toBe('monday');
-  });
+test('date-claim quote must appear in the transcript', () => {
+  const subject = { date_claims: [{ binding: 'appointment', quote: 'September 20 appointment', month: 9, day: 20 }] };
+  expect(select({ commitment: { ...commitment, subject } }).reason).toBe('appointment_date_unresolved');
 });
 
 test('an inactive account cannot be promised a link the reschedule page refuses', () => {
@@ -564,11 +239,11 @@ test('a bare "I will text you a link" needs rescheduling language or a grounded 
   expect(select({ call: source, commitment: bare }).reason).toBe('promise_needs_review');
   // A subject with a grounded quote but no date/service/address names no
   // appointment, so it cannot stand in for the missing language.
-  expect(select({ call: source, commitment: { ...bare, subject: { quote: 'Thank you.' } } }).reason).toBe('promise_needs_review');
+  expect(select({ call: source, commitment: { ...bare, subject: { quote: 'Thank you.', date_claims: [] } } }).reason).toBe('promise_needs_review');
   // Either half is enough on its own.
   const subjectQuote = 'That is for my WaveGuard service.';
   expect(select({ call: { ...call, transcription: `Agent: ${generic}\nCaller: ${subjectQuote}` },
-    commitment: { ...bare, subject: { quote: subjectQuote, service: 'WaveGuard' } } }).visit?.id).toBe('visit');
+    commitment: { ...bare, subject: { quote: subjectQuote, service: 'WaveGuard', date_claims: [] } } }).visit?.id).toBe('visit');
   for (const spoken of ['I will text you a link to pick a new time for your appointment.',
     'I will send you a link to move your appointment.', 'Let me text you a link to re-schedule that visit.']) {
     expect(select({ call: { ...call, transcription: `Agent: ${spoken}` },
@@ -582,6 +257,13 @@ test('generic slot wording and first-booking wording are not a reschedule promis
     expect(select({ call: { ...call, transcription: `Agent: ${spoken}` },
       commitment: { ...commitment, evidence: [{ quote: spoken, speaker: 'agent' }] } }).reason).toBe('promise_needs_review');
   }
+});
+
+test('booking a new time for an existing appointment is a reschedule promise', () => {
+  const spoken = 'I will text you a link to book a new time for your current appointment.';
+  const source = { ...call, transcription: `Agent: ${spoken}` };
+  expect(select({ call: source, commitment: { ...commitment, evidence: [{ quote: spoken, speaker: 'agent' }] } }).visit?.id)
+    .toBe('visit');
 });
 
 test('an agent who takes the promise back later in the call stops the send', () => {
@@ -675,7 +357,8 @@ test('a genuine change of mind in a LATER clause still supersedes an earlier ref
 // shown to fall out of the result rather than merely asserting the SQL.
 // `filterStatus` makes the outbox rows honour the sweep's status allowlist
 // the way the real WHERE does.
-function fakeConn({ outbox = [], selfServe = null, selfServeVisitIds = null, cards = [], throwOn = null, smsLog = null, smsRows = null, systemSettings = {}, filterStatus = false, calls = [], commitments = [] } = {}) {
+function fakeConn({ outbox = [], selfServe = null, selfServeVisitIds = null, cards = [], throwOn = null, throwOnTable = null,
+  smsLog = null, smsRows = null, systemSettings = {}, filterStatus = false, calls = [], commitments = [], visits = [], shortCodes = [] } = {}) {
   const seen = { statusAllowlist: null, logFilters: [], visitIdFilters: [], orderByCalls: [], whereRawCalls: [], updates: [], inserts: [], resolved: [] };
   const openCards = () => cards.filter((card) => !seen.resolved.includes(card.id));
   const evidenceVisitIds = () => (selfServeVisitIds !== null ? selfServeVisitIds
@@ -685,6 +368,7 @@ function fakeConn({ outbox = [], selfServe = null, selfServeVisitIds = null, car
     const state = { eq: {}, ranges: [], whereIn: [], notNull: [], evidenceFilter: false, orPredicates: [] };
     const statusIn = (row) => state.whereIn.filter((w) => w.col === 'status').every((w) => w.values.includes(row.status));
     const rows = () => {
+      if (name === throwOnTable) throw new Error('lookup unavailable');
       if (name === 'outbox_messages') {
         return outbox.filter((row) => (!state.evidenceFilter || evidenceVisitIds().includes(row.related_scheduled_service_id))
           && (!filterStatus || statusIn(row)));
@@ -692,6 +376,9 @@ function fakeConn({ outbox = [], selfServe = null, selfServeVisitIds = null, car
       if (name === 'triage_items') return openCards();
       if (name === 'sms_log' && smsRows) return smsRows.filter((row) => statusIn(row) && state.notNull.every((col) => row[col] != null));
       if (name === 'call_log') return calls.filter((row) => Object.entries(state.eq).every(([k, v]) => row[k] === v));
+      if (name === 'scheduled_services') return visits.filter((row) => Object.entries(state.eq).every(([k, v]) => row[k] === v)
+        && state.notNull.every((col) => row[col] != null));
+      if (name === 'short_codes') return shortCodes.filter((row) => Object.entries(state.eq).every(([k, v]) => row[k] === v));
       // needsSendInterlock's pre-staging check (codex #4293 P1): an open
       // commitment with no outbox row at all yet. `orPredicates` covers the
       // human_state null-or-confirmed clause below — a query-builder
@@ -734,6 +421,7 @@ function fakeConn({ outbox = [], selfServe = null, selfServeVisitIds = null, car
       select: pass(),   // knex returns the builder; awaiting it yields the rows
       pluck: async (col) => {
         if (name === 'call_log' && col === 'id') return rows().map((row) => row.id);
+        if (name === 'short_codes' && col === 'code') return rows().map((row) => row.code);
         // A bulk pluck of reschedule_log is the unbounded shape the r3 P2
         // retired; it is recorded so a regression back to it is visible.
         if (name !== 'reschedule_log' || col !== 'scheduled_service_id') return [];
@@ -741,6 +429,7 @@ function fakeConn({ outbox = [], selfServe = null, selfServeVisitIds = null, car
         return evidenceVisitIds();
       },
       first: async () => {
+        if (name === throwOnTable) throw new Error('lookup unavailable');
         if (name === 'outbox_messages') {
           if (throwOn && state.eq.id === throwOn) throw new Error('Promised-link delivery evidence is truncated');
           if (state.eq.id !== undefined) return outbox.find((row) => row.id === state.eq.id) || null;
@@ -754,6 +443,7 @@ function fakeConn({ outbox = [], selfServe = null, selfServeVisitIds = null, car
           return key != null && systemSettings[key] !== undefined ? { value: systemSettings[key] } : null;
         }
         if (name === 'call_commitments') return rows()[0] || null;
+        if (name === 'scheduled_services') return rows()[0] || null;
         return null;
       },
       insert: (data) => {
@@ -2031,14 +1721,15 @@ test('a busy send interlock is a retryable block, and the gate off is a pass-thr
 
 // Run one send with the gate live and the module-level db answering from a
 // fake, restoring both afterwards.
-async function withLiveGate({ outbox = [], commitments = [], calls = [], client }, fn) {
+async function withLiveGate({ outbox = [], commitments = [], calls = [], visits = [], shortCodes = [], throwOnTable = null,
+  filterStatus = false, client }, fn) {
   const prior = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE, priorCommitments = gates.callCommitments;
   const priorClient = db.client;
   try {
     gates.callCommitments = true;
     process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'true';
     db.client = client;
-    db.mockImplementation(fakeConn({ outbox, commitments, calls }).conn);
+    db.mockImplementation(fakeConn({ outbox, commitments, calls, visits, shortCodes, throwOnTable, filterStatus }).conn);
     return await fn();
   } finally {
     db.mockReset();
@@ -2074,6 +1765,23 @@ test('an operator text only pays for the interlock when a promised link is live'
   expect(live.client.acquireRawConnection).toHaveBeenCalledTimes(1);
   expect(live.connection.query).toHaveBeenCalledWith(expect.stringContaining('statement_timeout'));
   expect(live.client.destroyRawConnection).toHaveBeenCalledWith(live.connection);
+});
+
+test('a link accepted before an operator starts still blocks a duplicate when its outbox settlement overlaps', async () => {
+  const core = jest.fn(async () => ({ sent: true }));
+  const live = fakeInterlock();
+  const openedAt = new Date();
+  const acceptedAt = new Date(openedAt.getTime() - 60_000);
+  const settledAt = new Date(openedAt.getTime() + 60_000);
+  const settled = promiseRow('settled', 'settled-commitment', { status: 'sent', sent_at: acceptedAt,
+    updated_at: settledAt, related_scheduled_service_id: visit.id });
+  const admin = { customerId: customer.id, body: `Use ${portalUrl('/reschedule/token')}`,
+    metadata: { adminUserId: 'admin' } };
+  const result = await withLiveGate({ outbox: [settled], visits: [visit], client: live.client,
+    filterStatus: true }, () => links.withSendLock(admin, core));
+  expect(result).toMatchObject({ sent: false, blocked: true, code: 'PROMISED_LINK_IN_PROGRESS' });
+  expect(core).not.toHaveBeenCalled();
+  expect(live.client.acquireRawConnection).toHaveBeenCalledTimes(1);
 });
 
 test('an operator text serializes against a promise not yet staged — an open call_commitments row with NO outbox row at all (codex #4293 P1)', async () => {
@@ -2185,6 +1893,38 @@ test('an interlock connection that never arrives does not block an admin send', 
   }
 });
 
+test('an unavailable interlock defers any owned visit link, including a short code, while ordinary text proceeds', async () => {
+  const core = jest.fn(async () => ({ sent: true }));
+  const client = { acquireRawConnection: jest.fn(async () => { throw new Error('connection unavailable'); }),
+    destroyRawConnection: jest.fn(async () => {}) };
+  const owned = { ...visit, id: 'other-owned-visit', customer_id: customer.id, reschedule_token: 'other-token' };
+  const target = portalUrl('/reschedule/other-token');
+  const shortCodes = [{ kind: 'reschedule', entity_type: 'scheduled_services', entity_id: owned.id,
+    target_url: target, code: 'short-code' }];
+  const options = { outbox: [promiseRow('outbox', 'commitment')], visits: [owned], shortCodes, client };
+  const manual = (body) => ({ customerId: customer.id, body, metadata: { adminUserId: 'admin' } });
+  const { baseUrl } = require('../services/short-url');
+  for (const body of [`Please use ${target}`, `Please use ${baseUrl()}/l/short-code`]) {
+    expect(await withLiveGate(options, () => links.withSendLock(manual(body), core)))
+      .toMatchObject({ sent: false, blocked: true, retryable: true, code: 'LINK_LOCK_BUSY' });
+  }
+  expect(core).not.toHaveBeenCalled();
+  const ordinary = manual('We will call you this afternoon.');
+  expect(await withLiveGate(options, () => links.withSendLock(ordinary, core))).toEqual({ sent: true });
+  expect(core).toHaveBeenCalledWith(ordinary);
+});
+
+test('an unavailable interlock fails closed when owned-link lookup fails', async () => {
+  const core = jest.fn(async () => ({ sent: true }));
+  const client = { acquireRawConnection: jest.fn(async () => { throw new Error('connection unavailable'); }),
+    destroyRawConnection: jest.fn(async () => {}) };
+  const admin = { customerId: customer.id, body: 'On our way.', metadata: { adminUserId: 'admin' } };
+  expect(await withLiveGate({ outbox: [promiseRow('outbox', 'commitment')], throwOnTable: 'scheduled_services', client },
+    () => links.withSendLock(admin, core)))
+    .toMatchObject({ sent: false, blocked: true, retryable: true, code: 'LINK_LOCK_BUSY' });
+  expect(core).not.toHaveBeenCalled();
+});
+
 test('the commitment gate and explicit shadow/true modes are required', () => {
   const prior = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE, priorCommitments = gates.callCommitments;
   try {
@@ -2198,68 +1938,29 @@ test('the commitment gate and explicit shadow/true modes are required', () => {
   }
 });
 
-// codex #4293 P1: this used to try to tell a REQUESTED time ("tomorrow
-// morning") apart from a DEADLINE ("by Friday") by reading the shape back
-// out of the agent's free-text evidence quote, because the extractor never
-// persists which one the model meant. That inference went through three
-// rounds and was wrong a third distinct way each time — round 2's stray
-// "before Friday" qualifying the appointment, not the send, then round 3's
-// SECOND clause with its own send tense that was about a phone CALL, not
-// the link ("I'll text the reschedule link tomorrow morning, and I'll call
-// you before Friday" — the second clause's "I'll" and "before Friday" are
-// about the call, but the old clause-scoped check still read it as the
-// link's own deadline and allowed an immediate send). A fourth regex patch
-// buys a fourth failure of the same shape, so the distinction is removed
-// instead: every stated due_at is now a FLOOR, full stop — never send
-// before the promised instant. Recovering true deadline semantics needs a
-// persisted due_type set by the model at extraction time (see the doc
-// comment on isPromisedFloor); until then this is a deliberate, safe-side
-// simplification, not a bug.
-describe('every stated due_at is a floor — the deadline/floor distinction is gone, not re-patched (codex #4293 P1)', () => {
+describe('persisted due_type controls whether a promised time is a floor', () => {
   const dueAt = new Date('2030-01-08T14:00:00Z');
-  const commitmentWith = (quote) => ({ due_at: dueAt.toISOString(), evidence: [{ quote, speaker: 'agent' }] });
+  const early = new Date('2030-01-07T14:00:00Z');
+  const commitmentWith = (due_type) => ({ due_at: dueAt.toISOString(), due_type,
+    evidence: [{ quote: "I'll send the link by Friday.", speaker: 'agent' }] });
 
-  test.each([
-    "I'll text you the link tomorrow morning.",
-    "I'll send that over this evening.",
-    "I'll get you that link on Monday.",
-    "I'll get that to you by Friday.",
-    "I'll send it before the weekend.",
-    "I'll have that over within a couple of days.",
-  ])('any stated delivery time (%s) is a floor — requested time and deadline wording are no longer distinguished', (quote) => {
-    expect(links.isPromisedFloor(commitmentWith(quote))).toBe(true);
+  test('deadline permits sending before due_at', () => {
+    expect(links.isPromisedFloor(commitmentWith('deadline'))).toBe(false);
+    expect(links.promisedFloorAt(commitmentWith('deadline'), early)).toBeNull();
   });
 
-  // The exact third-round failure: a second clause carries its own
-  // first-person send tense, but about a PHONE CALL rather than the link.
-  // The old clause-scoped deadline check still credited "before Friday" as
-  // the link's own deadline and waved the floor off — with the distinction
-  // gone entirely there is nothing left for that clause to mis-qualify.
-  test("a second clause about an unrelated commitment (a phone call) does not stop the link's due_at from being a floor", () => {
-    const commitment = commitmentWith("I'll text the reschedule link tomorrow morning, and I'll call you before Friday.");
-    expect(links.isPromisedFloor(commitment)).toBe(true);
-    expect(links.promisedFloorAt(commitment, new Date('2030-01-07T14:00:00Z'))).toEqual(dueAt);
+  test('floor waits until due_at, then releases', () => {
+    expect(links.isPromisedFloor(commitmentWith('floor'))).toBe(true);
+    expect(links.promisedFloorAt(commitmentWith('floor'), early)).toEqual(dueAt);
+    expect(links.promisedFloorAt(commitmentWith('floor'), new Date('2030-01-09T00:00:00Z'))).toBeNull();
   });
 
-  test('no stated due_at is never a floor, regardless of wording', () => {
-    expect(links.isPromisedFloor({ due_at: null, evidence: [{ quote: 'tomorrow morning', speaker: 'agent' }] })).toBe(false);
+  test('legacy null due_type still treats due_at as a floor', () => {
+    expect(links.isPromisedFloor(commitmentWith(null))).toBe(true);
+    expect(links.promisedFloorAt(commitmentWith(null), early)).toEqual(dueAt);
   });
 
-  test('a due_at with no evidence at all is still a floor', () => {
-    expect(links.isPromisedFloor({ due_at: dueAt.toISOString(), evidence: [] })).toBe(true);
-  });
-
-  test('promisedFloorAt is null once the floor has already passed, and equals due_at while it is still ahead', () => {
-    const commitment = commitmentWith("I'll text you the link tomorrow morning.");
-    expect(links.promisedFloorAt(commitment, new Date('2030-01-07T14:00:00Z'))).toEqual(dueAt);
-    expect(links.promisedFloorAt(commitment, new Date('2030-01-09T00:00:00Z'))).toBeNull();
-  });
-
-  // A promise phrased as a deadline now waits until due_at too — the small,
-  // deliberate cost of removing the heuristic: sending later than strictly
-  // necessary is always safe, sending earlier than promised never is.
-  test('a promise phrased as a deadline ("by Friday") is now held to due_at exactly like a requested time', () => {
-    const commitment = commitmentWith("I'll get that to you by Friday.");
-    expect(links.promisedFloorAt(commitment, new Date('2030-01-07T14:00:00Z'))).toEqual(dueAt);
+  test('without due_at there is no floor', () => {
+    expect(links.isPromisedFloor({ due_at: null, due_type: 'floor' })).toBe(false);
   });
 });

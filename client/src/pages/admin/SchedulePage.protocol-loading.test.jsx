@@ -44,6 +44,7 @@ function fixture(url, label = "Current") {
 beforeEach(() => {
   // Exercise the real panel and its HTTP error handling; no request leaves the test.
   vi.stubGlobal("fetch", vi.fn((url) => reply(fixture(url))));
+  vi.stubGlobal("scrollTo", vi.fn());
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
@@ -64,7 +65,8 @@ describe("ProtocolPanel mix previews", () => {
     fireEvent.click(opener);
     expect(within(screen.getByRole('dialog', { name: 'Service SOP' })).getByText('Read the source notes.')).toBeVisible();
     fireEvent.keyDown(document, { key: 'Escape' });
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'Service SOP' })).not.toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Service Protocol' })).toBeVisible();
     expect(opener).toHaveFocus();
     fireEvent.click(screen.getByRole('button', { name: 'View product checks and mixing amounts' }));
     expect(screen.getByText('Spray check')).toBeVisible();

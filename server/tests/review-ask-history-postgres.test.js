@@ -112,4 +112,21 @@ postgres('review ask history against migrated PostgreSQL', () => {
       to_phone: '+12025550102', status: 'sent', ...row })));
     expect(await history.lastManualAskAt(customerId, { since: at })).toEqual(manualAt);
   });
+
+  test('a resolved reservation confirmed after a newer plain manual ask sets the floor', async () => {
+    // The reservation placeholder is OLDER by created_at than the plain
+    // staff text, but its confirmation (updated_at) is the latest ask
+    // evidence. The floor must be the max effective time, not the first
+    // unmatched row in created_at-desc order.
+    const reservedAt = new Date(at.getTime() + 60000);
+    const plainAt = new Date(at.getTime() + 120000);
+    const confirmedAt = new Date(at.getTime() + 180000);
+    await trx('sms_log').insert([
+      { created_at: reservedAt, updated_at: confirmedAt, message_body: 'Please leave a Google review.',
+        metadata: JSON.stringify({ review_ask_reservation: true }) },
+      { created_at: plainAt, updated_at: plainAt, message_body: 'Please leave a Google review.' },
+    ].map(row => ({ customer_id: customerId, direction: 'outbound', from_phone: '+12025550101',
+      to_phone: '+12025550102', status: 'sent', ...row })));
+    expect(await history.lastManualAskAt(customerId, { since: at })).toEqual(confirmedAt);
+  });
 });

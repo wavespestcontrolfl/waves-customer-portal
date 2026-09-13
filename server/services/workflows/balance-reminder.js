@@ -187,7 +187,12 @@ class BalanceReminder {
     // trigger an early or incorrect balance reminder.
     const payerInvRows = await db("invoices")
       .where({ customer_id: customerId })
-      .whereNotNull("payer_id")
+      // payer_id OR the withdrawal stamp (Codex #4311 r43 P1): a combined-visit
+      // invoice withdrawn to a payer keeps payer_id NULL, so an id-only test
+      // let its failed AP payments inflate the homeowner's balance.
+      .where(function payerOwned() {
+        this.whereNotNull("payer_id").orWhere("scheduled_send_error", "like", "payer_billed:%");
+      })
       .select("id")
       .catch(() => []);
     const payerInvoiceIds = new Set(payerInvRows.map((r) => String(r.id)));
@@ -220,7 +225,12 @@ class BalanceReminder {
       .whereIn("status", ["sent", "viewed", "overdue", "unpaid"])
       // Third-party Bill-To: never surface a payer-billed invoice as the
       // homeowner's oldest unpaid invoice / pay link — AR routes to the payer.
+      // The withdrawal stamp is the same ownership move on a row whose
+      // payer_id stays NULL (Codex #4311 r43 P1).
       .whereNull("payer_id")
+      .where(function notWithdrawn() {
+        this.whereNull("scheduled_send_error").orWhereNot("scheduled_send_error", "like", "payer_billed:%");
+      })
       .orderByRaw("COALESCE(due_date::timestamp, created_at) asc")
       .first();
 
@@ -312,6 +322,13 @@ class BalanceReminder {
       invoiceId: balance.oldestInvoiceId,
       entryPoint: "balance_reminder_workflow",
       metadata: { original_message_type: "balance_reminder" },
+      // The last ownership check, run by the canonical sender immediately
+      // before provider preparation (Codex #4311 r43 P1): a Bill-To change
+      // during the balance render must not text the homeowner an AP-owned
+      // balance and pay link. Fail-closed.
+      preDispatchCheck: balance.oldestInvoiceId
+        ? require("../invoice-helpers").selfPayAtDispatch(balance.oldestInvoiceId, db)
+        : undefined,
     });
     if (sendResult.blocked || sendResult.sent === false) {
       await ContactLedger.markSendFailed(ledgerEntry, { code: sendResult.code || "blocked" });
@@ -361,6 +378,16 @@ class BalanceReminder {
     if (!config) return { ok: false, skipped: true, reason: "no_email_template_mapping" };
 
     const latestInvoice = await db("invoices").where({ id: invoice.id }).first();
+    // OWNERSHIP on the email sidecar's own fresh row (local audit on r43):
+    // the eligibility check below reads status alone, and a Bill-To change
+    // that lands after the text succeeded would still email the homeowner a
+    // payment demand for AP-owned debt.
+    if (latestInvoice
+      && (latestInvoice.payer_id
+        || require("../invoice-helpers").invoiceWithdrawnFromCustomer(latestInvoice))) {
+      logger.info(`[balance-reminder] late-payment email skipped for invoice ${invoice.id}: billed to a third-party payer`);
+      return { ok: false, skipped: true, reason: "invoice_payer_billed" };
+    }
     if (!invoiceCanReceiveLatePaymentEmail(latestInvoice)) {
       logger.info(
         `[balance-reminder] late-payment email skipped for invoice ${invoice.id}: invoice status is ${latestInvoice?.status || "missing"}`,
@@ -418,6 +445,15 @@ class BalanceReminder {
           `late_payment_${config.stageDays}d`,
         ],
         suppressionGroupKey: "transactional_required",
+        // …and again at the provider boundary, inside the library's handoff:
+        // the recipient resolution and payload render are awaited after the
+        // read above. Fail-closed, like the follow-up engine's email leg.
+        withProviderHandoff: async (dispatch) => {
+          const verdict = await require("../invoice-helpers").selfPayAtDispatch(invoice.id, db)();
+          if (verdict.ok !== true) return verdict;
+          await dispatch();
+          return { ok: true };
+        },
       });
 
       if (result.deduped) {
@@ -500,6 +536,9 @@ class BalanceReminder {
         .where({ customer_id: customer.id })
         .whereIn("status", ["sent", "viewed", "overdue", "unpaid"])
         .whereNull("payer_id")
+        .where(function notWithdrawn() {
+          this.whereNull("scheduled_send_error").orWhereNot("scheduled_send_error", "like", "payer_billed:%");
+        })
         .orderByRaw("COALESCE(due_date::timestamp, created_at) asc")
         .first();
       if (!oldestInvoice?.id || !oldestInvoice?.token) {
@@ -628,6 +667,8 @@ class BalanceReminder {
         invoiceId: oldestInvoice.id,
         entryPoint: "balance_reminder_late_payment_check",
         metadata: { original_message_type: "late_payment" },
+        // Same provider-boundary ownership guard as the balance leg.
+        preDispatchCheck: require("../invoice-helpers").selfPayAtDispatch(oldestInvoice.id, db),
       });
       if (sendResult.blocked || sendResult.sent === false) {
         await ContactLedger.markSendFailed(smsLedger, { code: sendResult.code || "blocked" });

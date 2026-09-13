@@ -14,15 +14,17 @@ import { getAdminUser } from "../../lib/adminAuth";
 import useIsMobile from "../../hooks/useIsMobile";
 
 const API = import.meta.env.VITE_API_URL || "/api";
-// V2 token pass: `teal` + `purple` fold to zinc-900. Semantic green/amber/red preserved.
+// V2 token pass: legacy color names remain to preserve the inline-style
+// architecture, but non-alert uses fold into the zinc ramp.
 const D = {
   bg: "#F4F4F5",
   card: "#FFFFFF",
   border: "#E4E4E7",
   teal: "#18181B",
-  green: "#15803D",
-  amber: "#A16207",
-  red: "#991B1B",
+  green: "#3F3F46",
+  amber: "#52525B",
+  red: "#A32D2D",
+  alertDot: "#C8312F",
   text: "#27272A",
   muted: "#71717A",
   white: "#FFFFFF",
@@ -48,7 +50,6 @@ function af(path, opts = {}) {
 const fc = (c) => "$" + (c / 100).toFixed(2);
 const fd = (d) => "$" + parseFloat(d || 0).toFixed(2);
 
-// Badge colors
 // Zinc ramp — the label carries the milestone, not a colour.
 const MILESTONE_COLORS = {
   none: D.muted,
@@ -63,7 +64,7 @@ const MILESTONE_LABELS = {
   champion: "Champion",
 };
 
-function Stat({ label, value, sub, color }) {
+function Stat({ label, value, sub }) {
   return (
     <div
       style={{
@@ -79,7 +80,7 @@ function Stat({ label, value, sub, color }) {
       <div
         style={{
           color: D.muted,
-          fontSize: 11,
+          fontSize: 14,
           textTransform: "uppercase",
           letterSpacing: 1,
           marginBottom: 6,
@@ -91,50 +92,73 @@ function Stat({ label, value, sub, color }) {
         style={{
           fontFamily: MONO,
           fontSize: 24,
-          fontWeight: 700,
-          color: color || D.heading,
+          fontWeight: 500,
+          color: D.heading,
         }}
       >
         {value}
       </div>
       {sub && (
-        <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>{sub}</div>
+        <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>{sub}</div>
       )}
     </div>
   );
 }
 
 function Badge({ status }) {
-  const c =
+  const state =
     {
-      pending: D.amber,
-      contacted: D.teal,
-      estimated: D.purple,
-      sms_failed: D.red,
-      signed_up: D.green,
-      credited: D.green,
-      rejected: D.red,
-      expired: D.muted,
-      active: D.green,
-      applied: D.green,
-      pending_service: D.amber,
-      earned: D.green,
-      paid: D.green,
-    }[status] || D.muted;
+      active: "active",
+      pending: "queued",
+      contacted: "queued",
+      estimated: "queued",
+      pending_service: "queued",
+      signed_up: "complete",
+      credited: "complete",
+      applied: "complete",
+      earned: "complete",
+      paid: "complete",
+      expired: "complete",
+      sms_failed: "alert",
+      rejected: "alert",
+    }[status] || "complete";
+  const color =
+    state === "alert"
+      ? D.red
+      : state === "active"
+        ? D.heading
+        : state === "queued"
+          ? "#52525B"
+          : D.muted;
+  const filled = state === "active" || state === "alert";
+  const dotColor = state === "alert" ? D.alertDot : color;
   return (
     <span
       style={{
-        fontSize: 10,
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        fontSize: 14,
         fontFamily: MONO,
+        fontWeight: state === "active" || state === "alert" ? 500 : 400,
         textTransform: "uppercase",
-        padding: "2px 8px",
-        borderRadius: 6,
-        background: `${c}22`,
-        color: c,
-        letterSpacing: 0.5,
+        color,
+        letterSpacing: "0.04em",
       }}
     >
-      {status?.replace("_", " ")}
+      <span
+        aria-hidden="true"
+        style={{
+          width: 5,
+          height: 5,
+          flex: "0 0 5px",
+          borderRadius: "50%",
+          boxSizing: "border-box",
+          background: filled ? dotColor : "transparent",
+          border: filled ? "none" : `1px solid ${color}`,
+        }}
+      />
+      {status?.replaceAll("_", " ")}
     </span>
   );
 }
@@ -143,15 +167,15 @@ function MilestoneBadge({ level }) {
   const c = MILESTONE_COLORS[level] || D.muted;
   const label = MILESTONE_LABELS[level] || level;
   if (level === "none")
-    return <span style={{ color: D.muted, fontSize: 11 }}>--</span>;
+    return <span style={{ color: D.muted, fontSize: 14 }}>--</span>;
   return (
     <span
       style={{
-        fontSize: 10,
-        fontWeight: 700,
+        fontSize: 14,
+        fontWeight: 500,
         padding: "2px 10px",
-        borderRadius: 10,
-        background: `${c}22`,
+        borderRadius: 3,
+        background: D.bg,
         color: c,
         textTransform: "uppercase",
         letterSpacing: 0.5,
@@ -166,7 +190,7 @@ function MilestoneBadge({ level }) {
 const thSt = {
   padding: "10px 14px",
   textAlign: "left",
-  fontSize: 11,
+  fontSize: 14,
   fontWeight: 500,
   color: D.muted,
   borderBottom: `1px solid ${D.border}`,
@@ -176,7 +200,7 @@ const thSt = {
 const thR = { ...thSt, textAlign: "right" };
 const tdSt = {
   padding: "10px 14px",
-  fontSize: 13,
+  fontSize: 14,
   color: D.text,
   borderBottom: `1px solid ${D.border}`,
 };
@@ -188,7 +212,7 @@ const inputSt = {
   border: `1px solid ${D.border}`,
   borderRadius: 8,
   color: D.heading,
-  fontSize: 13,
+  fontSize: 14,
   outline: "none",
   boxSizing: "border-box",
 };
@@ -198,18 +222,22 @@ const btnPrimary = {
   border: "none",
   background: D.teal,
   color: "#fff",
-  fontSize: 13,
+  fontSize: 14,
   fontWeight: 500,
+  textTransform: "uppercase",
+  letterSpacing: "0.06em",
   cursor: "pointer",
 };
-const btnSmall = (color) => ({
+const btnSmall = (background, color = "#fff") => ({
   padding: "3px 10px",
   borderRadius: 4,
   border: "none",
-  background: color,
-  color: D.heading,
-  fontSize: 10,
+  background,
+  color,
+  fontSize: 14,
   fontWeight: 500,
+  textTransform: "uppercase",
+  letterSpacing: "0.06em",
   cursor: "pointer",
 });
 
@@ -503,8 +531,8 @@ export default function ReferralsPageV2() {
                   height: 36,
                   padding: "0 14px",
                   borderRadius: 6,
-                  fontSize: 12,
-                  fontWeight: 700,
+                  fontSize: 14,
+                  fontWeight: 500,
                   textTransform: "uppercase",
                   letterSpacing: "0.04em",
                   cursor: "pointer",
@@ -528,7 +556,7 @@ export default function ReferralsPageV2() {
             background: msg.includes("Error") ? `${D.red}22` : D.bg,
             border: `1px solid ${msg.includes("Error") ? D.red : D.border}`,
             color: msg.includes("Error") ? D.red : D.heading,
-            fontSize: 13,
+            fontSize: 14,
             marginBottom: 16,
           }}
         >
@@ -544,23 +572,19 @@ export default function ReferralsPageV2() {
             <Stat
               label="Active Promoters"
               value={stats.activePromoters}
-              color={D.green}
             />{" "}
             <Stat
               label="Referrals"
               value={stats.totalReferrals}
               sub={`${stats.convertedReferrals} converted`}
-              color={D.teal}
             />{" "}
             <Stat
               label="Pending"
               value={stats.pendingReferrals}
-              color={D.amber}
             />{" "}
             <Stat
               label="Total Rewards"
               value={fd(stats.totalRewardsDollars)}
-              color={D.green}
             />{" "}
             <Stat
               label="Paid Out"
@@ -570,7 +594,6 @@ export default function ReferralsPageV2() {
             <Stat
               label="Program ROI"
               value={`${stats.programROI}%`}
-              color={stats.programROI > 0 ? D.green : D.red}
             />{" "}
           </div>{" "}
           <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
@@ -602,7 +625,7 @@ export default function ReferralsPageV2() {
                     color: D.muted,
                     padding: 20,
                     textAlign: "center",
-                    fontSize: 13,
+                    fontSize: 14,
                   }}
                 >
                   No referrals yet
@@ -632,7 +655,7 @@ export default function ReferralsPageV2() {
                         {r.referee_name ||
                           `${r.referral_first_name || ""} ${r.referral_last_name || ""}`.trim()}
                       </div>{" "}
-                      <div style={{ fontSize: 11, color: D.muted }}>
+                      <div style={{ fontSize: 14, color: D.muted }}>
                         from{" "}
                         {r.promoter_first
                           ? `${r.promoter_first} ${r.promoter_last}`
@@ -701,7 +724,7 @@ export default function ReferralsPageV2() {
                         >
                           {p.first_name} {p.last_name}
                         </div>{" "}
-                        <div style={{ fontSize: 11, color: D.muted }}>
+                        <div style={{ fontSize: 14, color: D.muted }}>
                           {p.total_referrals_converted} converted /{" "}
                           {p.total_referrals_sent} sent
                         </div>{" "}
@@ -714,7 +737,7 @@ export default function ReferralsPageV2() {
                       style={{
                         fontFamily: MONO,
                         fontSize: 14,
-                        fontWeight: 700,
+                        fontWeight: 500,
                         color: D.green,
                       }}
                     >
@@ -844,7 +867,7 @@ export default function ReferralsPageV2() {
                   color: D.muted,
                   padding: 20,
                   textAlign: "center",
-                  fontSize: 13,
+                  fontSize: 14,
                 }}
               >
                 No pending referrals
@@ -873,7 +896,7 @@ export default function ReferralsPageV2() {
                             {r.referee_name ||
                               `${r.referral_first_name || ""} ${r.referral_last_name || ""}`.trim()}
                           </div>{" "}
-                          <div style={{ fontSize: 11, color: D.muted }}>
+                          <div style={{ fontSize: 14, color: D.muted }}>
                             {r.referee_phone || r.referral_phone}{" "}
                             {r.referee_email || r.referral_email
                               ? `/ ${r.referee_email || r.referral_email}`
@@ -885,7 +908,7 @@ export default function ReferralsPageV2() {
                             ? `${r.promoter_first} ${r.promoter_last}`
                             : "--"}
                         </td>{" "}
-                        <td style={{ ...tdSt, fontSize: 11 }}>
+                        <td style={{ ...tdSt, fontSize: 14 }}>
                           {r.source || "portal"}
                         </td>{" "}
                         <td style={tdSt}>
@@ -939,7 +962,10 @@ export default function ReferralsPageV2() {
                                 onClick={() =>
                                   handleStatusChange(r.id, "rejected")
                                 }
-                                style={btnSmall(`${D.red}aa`)}
+                                style={{
+                                  ...btnSmall(D.card, D.red),
+                                  border: `1px solid ${D.red}`,
+                                }}
                               >
                                 Reject
                               </button>
@@ -1004,11 +1030,11 @@ export default function ReferralsPageV2() {
                         {p.first_name} {p.last_name}
                       </span>
                       <br />
-                      <span style={{ fontSize: 11, color: D.muted }}>
+                      <span style={{ fontSize: 14, color: D.muted }}>
                         {p.customer_phone}
                       </span>
                     </td>{" "}
-                    <td style={{ ...tdSt, fontFamily: MONO, fontSize: 12 }}>
+                    <td style={{ ...tdSt, fontFamily: MONO, fontSize: 14 }}>
                       {p.referral_code || "--"}
                     </td>{" "}
                     <td style={tdSt}>
@@ -1019,10 +1045,13 @@ export default function ReferralsPageV2() {
                             background: "none",
                             border: `1px solid ${D.teal}33`,
                             color: D.teal,
-                            fontSize: 10,
+                            fontSize: 14,
+                            fontWeight: 500,
                             padding: "2px 8px",
                             borderRadius: 4,
                             cursor: "pointer",
+                            textTransform: "uppercase",
+                            letterSpacing: "0.06em",
                           }}
                         >
                           Copy Link
@@ -1078,7 +1107,7 @@ export default function ReferralsPageV2() {
                 color: D.muted,
                 padding: 20,
                 textAlign: "center",
-                fontSize: 13,
+                fontSize: 14,
               }}
             >
               No payout requests
@@ -1105,7 +1134,7 @@ export default function ReferralsPageV2() {
                       <td style={tdSt}>
                         {p.first_name} {p.last_name}
                       </td>{" "}
-                      <td style={{ ...tdR, color: D.green, fontWeight: 700 }}>
+                      <td style={{ ...tdR, color: D.green, fontWeight: 500 }}>
                         {fc(p.amount_cents)}
                       </td>{" "}
                       <td style={tdSt}>
@@ -1116,7 +1145,7 @@ export default function ReferralsPageV2() {
                       </td>{" "}
                       <td style={tdSt}>
                         {p.requires_1099 ? (
-                          <span style={{ color: D.amber, fontSize: 11 }}>
+                          <span style={{ color: D.amber, fontSize: 14 }}>
                             Yes
                           </span>
                         ) : (
@@ -1339,7 +1368,7 @@ export default function ReferralsPageV2() {
                         {" "}
                         <div
                           style={{
-                            fontSize: 11,
+                            fontSize: 14,
                             color: D.muted,
                             marginBottom: 4,
                             textTransform: "uppercase",
@@ -1353,17 +1382,35 @@ export default function ReferralsPageV2() {
                             onClick={() => isEditing && upd(f.key, !s[f.key])}
                             disabled={!isEditing}
                             style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: 6,
                               padding: "6px 14px",
                               borderRadius: 6,
                               border: `1px solid ${D.border}`,
-                              background: s[f.key]
-                                ? `${D.green}33`
-                                : `${D.red}33`,
-                              color: s[f.key] ? D.green : D.red,
-                              fontSize: 12,
+                              background: D.bg,
+                              color: s[f.key] ? D.heading : D.muted,
+                              fontSize: 14,
+                              fontWeight: 500,
                               cursor: isEditing ? "pointer" : "default",
+                              textTransform: "uppercase",
+                              letterSpacing: "0.06em",
                             }}
                           >
+                            <span
+                              aria-hidden="true"
+                              style={{
+                                width: 5,
+                                height: 5,
+                                flex: "0 0 5px",
+                                borderRadius: "50%",
+                                boxSizing: "border-box",
+                                background: s[f.key] ? D.heading : "transparent",
+                                border: s[f.key]
+                                  ? "none"
+                                  : `1px solid ${D.muted}`,
+                              }}
+                            />
                             {s[f.key] ? "Enabled" : "Disabled"}
                           </button>
                         ) : f.type === "textarea" ? (
@@ -1437,29 +1484,24 @@ export default function ReferralsPageV2() {
                     label="Clicks"
                     value={analytics.funnel.clicks}
                     sub={`${analytics.funnel.uniqueClicks} unique`}
-                    color={D.purple}
                   />{" "}
                   <Stat
                     label="Referrals"
                     value={analytics.funnel.referrals}
                     sub={`${analytics.funnel.clickToReferralRate}% click-to-ref`}
-                    color={D.teal}
                   />{" "}
                   <Stat
                     label="Converted"
                     value={analytics.funnel.converted}
                     sub={`${analytics.funnel.conversionRate}% rate`}
-                    color={D.green}
                   />{" "}
                   <Stat
                     label="Lost"
                     value={analytics.funnel.lost}
-                    color={D.red}
                   />{" "}
                   <Stat
                     label="Pending"
                     value={analytics.funnel.pending}
-                    color={D.amber}
                   />{" "}
                 </div>{" "}
               </div>
@@ -1488,7 +1530,6 @@ export default function ReferralsPageV2() {
                   <Stat
                     label="Rewards Issued"
                     value={fd(analytics.financial.totalRewardsDollars)}
-                    color={D.amber}
                   />{" "}
                   <Stat
                     label="Paid Out"
@@ -1498,17 +1539,14 @@ export default function ReferralsPageV2() {
                     label="Monthly Value"
                     value={fd(analytics.financial.totalMonthlyValue)}
                     sub="from converted refs"
-                    color={D.teal}
                   />{" "}
                   <Stat
                     label="Est. Annual Rev"
                     value={fd(analytics.financial.estimatedAnnualRevenue)}
-                    color={D.green}
                   />{" "}
                   <Stat
                     label="ROI"
                     value={`${analytics.financial.roi}%`}
-                    color={analytics.financial.roi > 0 ? D.green : D.red}
                   />{" "}
                 </div>{" "}
               </div>
@@ -1533,7 +1571,7 @@ export default function ReferralsPageV2() {
                   Top Promoters
                 </div>
                 {analytics.topPromoters.length === 0 ? (
-                  <div style={{ color: D.muted, fontSize: 13 }}>
+                  <div style={{ color: D.muted, fontSize: 14 }}>
                     No conversions yet
                   </div>
                 ) : (
@@ -1551,14 +1589,14 @@ export default function ReferralsPageV2() {
                           }}
                         >
                           {" "}
-                          <span style={{ fontSize: 13, color: D.text }}>
+                          <span style={{ fontSize: 14, color: D.text }}>
                             {i + 1}. {p.name}{" "}
                             <MilestoneBadge level={p.milestone || "none"} />
                           </span>{" "}
                           <span
                             style={{
                               fontFamily: MONO,
-                              fontSize: 12,
+                              fontSize: 14,
                               color: D.green,
                             }}
                           >
@@ -1578,7 +1616,7 @@ export default function ReferralsPageV2() {
                               width: `${pct}%`,
                               height: "100%",
                               borderRadius: 4,
-                              background: `linear-gradient(90deg, ${D.teal}, ${D.green})`,
+                              background: D.heading,
                             }}
                           />{" "}
                         </div>{" "}
@@ -1635,21 +1673,21 @@ export default function ReferralsPageV2() {
             <div
               style={{
                 fontSize: 18,
-                fontWeight: 700,
+                fontWeight: 500,
                 color: D.heading,
                 marginBottom: 16,
               }}
             >
               Convert Referral
             </div>{" "}
-            <div style={{ fontSize: 13, color: D.muted, marginBottom: 16 }}>
+            <div style={{ fontSize: 14, color: D.muted, marginBottom: 16 }}>
               Converting: {convertModal.name}
             </div>{" "}
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               {" "}
               <div>
                 {" "}
-                <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
+                <div style={{ fontSize: 14, color: D.muted, marginBottom: 4 }}>
                   Customer Search
                 </div>{" "}
                 <input
@@ -1681,7 +1719,7 @@ export default function ReferralsPageV2() {
                           padding: "8px 12px",
                           cursor: "pointer",
                           borderBottom: `1px solid ${D.border}33`,
-                          fontSize: 13,
+                          fontSize: 14,
                           color: D.text,
                         }}
                       >
@@ -1694,7 +1732,7 @@ export default function ReferralsPageV2() {
               </div>{" "}
               <div>
                 {" "}
-                <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
+                <div style={{ fontSize: 14, color: D.muted, marginBottom: 4 }}>
                   WaveGuard Tier
                 </div>{" "}
                 <select
@@ -1715,7 +1753,7 @@ export default function ReferralsPageV2() {
               </div>{" "}
               <div>
                 {" "}
-                <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
+                <div style={{ fontSize: 14, color: D.muted, marginBottom: 4 }}>
                   Monthly Value ($)
                 </div>{" "}
                 <input
@@ -1800,7 +1838,7 @@ export default function ReferralsPageV2() {
             <div
               style={{
                 fontSize: 18,
-                fontWeight: 700,
+                fontWeight: 500,
                 color: D.heading,
                 marginBottom: 16,
               }}
@@ -1831,7 +1869,7 @@ export default function ReferralsPageV2() {
                       padding: "10px 14px",
                       cursor: "pointer",
                       borderBottom: `1px solid ${D.border}33`,
-                      fontSize: 13,
+                      fontSize: 14,
                       color: D.text,
                     }}
                   >

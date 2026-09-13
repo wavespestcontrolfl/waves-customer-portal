@@ -2339,3 +2339,227 @@ Widening the scan raw reports 355 violations across 59 files, which would simply
 The gate fails in both directions. Over the allowance is a regression, so a file with debt cannot accumulate more and a file with none has zero tolerance. Under it fails too: an allowance left above what the file actually carries is headroom for cleaned-up violations to return silently, so the numbers follow the code down and the line goes once the file is clean. That is what makes the list a ratchet rather than a permanent exemption list. Raising a number to go green is explicitly called out in the failure text as the wrong move. The debt is R3 and R4 work in the audit: the legacy `estimate/*` cluster, the 09-07 findings, App Store and Google Play badge artwork reproduced as inline SVG at 7.5px, and emoji the `Icon` sweep has not reached.
 
 `SecurePlanChoice`'s two 13px values — the violation the ruling names — are fixed to 14 rather than baselined. Two emoji the scanner found in doc comments rather than rendered JSX were removed from the prose.
+
+## 2026-09-11 — R2a: one customer page column (CustomerColumn)
+
+The Liquid Glass audit's G-01 (`liquid-glass-consistency-audit-2026-09-09.md` §3) found five different phone gutters (10/12/16/20/24) and several desktop column widths across the customer glass pages, because no page-column primitive existed — every page hand-authored its own wrapper, and `index.css` carried five near-duplicate classes (`.waves-customer-page`, `.waves-receipt-page`, `.waves-estimate-page`, `.waves-rate-page`, `.waves-contract-page`) on top of that. `components/brand/CustomerColumn.jsx` is now the one primitive: `boxSizing: 'border-box'`, `width: '100%'`, `margin: '0 auto'`, `padding: '28px 16px 56px'` (`PAGE_TOP` / `PAGE_GUTTER` / `PAGE_BOTTOM`, new named tokens in `theme-doc.js`), `flex: 1` (page roots use `flex: 1`, DECISIONS 2026-09-04, so the shell footer follows the content), and `maxWidth` from `column`: `"document"` (default) → `DOC_COLUMN_MAX` (760) of CONTENT, `"flow"` → `FLOW_COLUMN_MAX` (640) of content. The named widths are content widths — the audit measured card edges — so the border-box outer cap is content + both gutters (792 / 672); a 760 outer cap would have rendered 728 of content past 792px viewports, a 32px narrowing of every desktop document that the first cut of this primitive actually had. None of this is a new choice — 760/28/56 is `DOC_PAGE_MARGIN` and 640 is `FLOW_COLUMN_MAX`, both already exported by `theme-doc.js` per the PR #2527 ruling ("pay's cap is the standard"); the fix is giving every page ONE way to reach them instead of eleven-plus. `DOC_COLUMN` (theme-doc's `min(100% - 32px, 760px)` width string) stays exported for its one non-`<CustomerColumn>` consumer (the tokens dev-preview) but no longer backs any page wrapper; the parallel `FLOW_COLUMN` string had no consumer and was not kept — flow pages reach 640 only through `<CustomerColumn column="flow">`.
+
+**Migrated** (all now render `<CustomerColumn>`, dropping their own width/margin/padding recipe): document column — `ContractSignPage` (all three states), `LawnReportViewPage`, `PestReportViewPage`, `EstimateViewPage`, `ProjectReportViewPage`, `ReportViewPage` (both the legacy-PDF branch and the live `ServiceReportV1` — `.sr-shell`'s recipe moved to the primitive, its print-only zero-padding override kept as `!important` since it must beat the primitive's inline style), `PrepGuidePage`, `PriceChangeNoticePage`, `ReceiptPage` (kept `waves-print-root`, a print-only class glass-theme.css also targets for card styling; that selector now reads `.waves-print-root` instead of the retired `.waves-receipt-page` — `PayPageV2` carries `waves-print-root` too, because its inactive payment-method icon tile is a `[data-glass-clear]` descendant that matched through `.waves-receipt-page` before; `StatementPayPage` has no such descendant and carries nothing), `StatementPayPage`, `PayPageV2`, `NewsletterArchivePage` (its three stacked content wrappers folded into one `CustomerColumn`; the sticky issue-strip header stays separate — it's chrome, not the content column). Flow column — `AppointmentPage`, `TrackPage`, `ScheduleFlowPage` (both `/reschedule` and `/reservice`), `SecureAppointmentPage`.
+
+**Excluded, both by the audit's own terms**: `PortalPage`'s app-shell 10px gutter (an open owner decision, not this batch's call) and `.waves-onboarding-page` (a multi-step flow with its own grid, not a document — deferred to R4, C6 already ruled this).
+
+**Checked and left alone, not "eleven wrappers":** `RatePage` and `CardPage` render a centered, bounded card widget (their own background/border/logo header), not a full-width content column — forcing the primitive on either would restyle the card, not just consolidate a recipe. `LoginPage` is a vertically-centered two-column marketing hero, not a top-anchored content flow. `ServiceOutlinePage` already renders at 760/16px (Tailwind `max-w-[760px]` + `px-4`) across five independently full-bleed-banded sections — no drift to fix, and collapsing the bands into one column would change its alternating-background design. `ReviewPage` is dead code (unrouted since the RatePage consolidation, per the comment at `App.jsx:178`) — left as found per house rule against deleting files outside the assigned task.
+
+**Deleted from `index.css`**: `.waves-customer-page`, `.waves-receipt-page`, `.waves-estimate-page`, `.waves-rate-page`, `.waves-contract-page`, and their entries in the ≤820px responsive block (which had been giving these pages a *sixth* gutter, 24px, on top of the five G-01 measured — the new primitive needs no viewport override, matching "16px at every width"). `.waves-contract-single` / `.waves-billing-grid` / `.waves-pay-payment-panel` / `.waves-customer-help` and everything else in that block are unrelated and kept.
+
+## 2026-09-11 — R3b: weights above 700 cleared from the baseline
+
+G-04 found weights above 700 surviving on glass through shared tokens the gate
+could not see. C8 widened the gate and enumerated what it exposed; this clears
+the whole `heavy-weight` rule from `LEGACY_BASELINE` — fifteen violations across
+eight files, all snapped to 700 (the customer scale is 400 / 500 / 600 / 700,
+owner sheet 2026-09-03).
+
+`App.jsx` carried seven at **850** — every customer error-boundary heading and
+its retry button, plus "Loading your portal". `NotificationBell` spelled its two
+as `fontWeight: type === 'admin' ? 700 : 800`: the ternary existed only to give
+the customer surface the heavier weight, so with both arms at 700 it is a
+distinction without a difference and the ternary is gone. The rest were single
+literals in `GlassNewsletterCard`, `InstallPrompt`, `NewsletterSignup`,
+`StationMapCard`, `VanScene` and one `font-weight: 800` in `index.css`.
+
+`InstallPrompt` and `VanScene` were weight-only and are **delisted** — the gate
+fails on a stale entry, so a file that reaches zero has to lose its line.
+
+**Debt: 90 → 75 across 25 files.** Everything left is `banned-font-size`, `emoji`,
+`font-family-literal` or `local-palette`. No behaviour changes; 96 tests across
+the seven suites that render these components pass unchanged.
+
+## 2026-09-11 — R2b: one terminal-state card (PublicStateCard)
+
+G-02 measured the not-found / expired / error card as a different component on
+every page family: card padding 20 / 24 / 32 at 390, gutter 20 vs 16, the heading
+an `h1` on two pages, a styled `div` on five and absent on four (G-07's
+`h1Count = 0`), and a CTA set running from nothing at all, through "Try again" at
+three different heights, to a two-button Text+Call row. `PublicLoadError` covered
+the load-error branch on eight of fifteen token pages; every page hand-rolled its
+own not-found, and four flow pages hand-rolled both.
+
+`components/brand/PublicStateCard.jsx` is the one card. `state` is
+`"not-found" | "expired" | "error"`. It fixes three things BY CONSTRUCTION so a
+page cannot drift again: the card grammar comes from `BrandCard` (whose padding
+is already the single responsive `clamp(20px, 4vw, 32px)` — this file authors
+none of its own, and exposes no padding or width knob); the title is always an
+`h1` with no authored font-size, because the sheet's `h1` rule is `!important` on
+glass and an authored size would be dead style; and the contact actions are built
+from `constants/business.js`, never a retyped number.
+
+**One primary per card** (style guide §2). When the state is recoverable the
+retry owns the 48 tier and contact drops to the 44 chip; when it is not, the Call
+action is the primary and "Text Waves" the chip. The two-gold `ContactRow` that
+`/secure` and `/reschedule` each authored is what that resolves. The first cut
+gated that promotion on the two-button mode, so every `contact="call"` page —
+both report pages, the project report's not-found, the service outline's
+expired — rendered its ONLY action as the 44 chip: a regression from the solid
+buttons they had, and a contradiction of the invariant in the same file. The
+promotion depends on there being no retry, not on which contact mode is in play.
+
+**`PublicLoadError` is now a preset, not a ninth recipe** — `state="error"` plus
+the resource noun, with the copy every caller already got. Nine call sites are
+unchanged. A page with a hand-rolled terminal branch uses `PublicStateCard`
+directly; `PublicLoadError` stays for the load-error branch, where the resource
+noun is the only thing that varies.
+
+**Migrated:** `ScheduleFlowPage` (both `/reschedule` and `/reservice`), `TrackPage`,
+`AppointmentPage` (not-found + load-error), `SecureAppointmentPage`, `ReceiptPage`,
+`ContractSignPage`, `StatementPayPage`, `ReportViewPage`, `ProjectReportViewPage`,
+`LawnReportViewPage`, `PestReportViewPage`, `PriceChangeNoticePage`, `PrepGuidePage`,
+`ServiceOutlinePage`, `CardPage`, `NewsletterArchivePage`, `PayPageV2`.
+
+`NewsletterArchivePage` is the one whose terminal action is not a phone number —
+it points back at the newsletter index — so it takes `contact="none"` and keeps
+that link as the card's content. It was missed by the first pass of this PR
+because it reached the card through `PublicLoadError` for its error branch while
+hand-rolling its not-found, which is precisely the split G-02 describes.
+
+### What this did NOT decide
+
+**The wording.** Four live phrasings for the same condition survive verbatim
+("We couldn't find that X" / "This X isn't available" / "X not found" / "This X
+link has expired"). Which one Waves says is a content decision for the owner, not
+a refactor; the card makes them structurally identical without rewriting them.
+
+**The three no-CTA 404s** (estimate, pay, track) keep `contact="none"`. On those
+pages — and on receipt, contract and statement — the phone number lives *inside a
+sentence*, so replacing it with the button pair means rewriting that sentence.
+Same reason. Where the affordance was already a standalone button, unifying it
+was structural and was done: `ReportViewPage`'s lone "Call Waves" became the
+standard pair.
+
+**`EstimateViewPage` keeps its own card on purpose.** It doubles as the
+estimate-extension request flow and flips to a success headline ("You're all
+set"), so `role="alert"` would be wrong on it. It takes the `h1` G-07 asks for
+and nothing else — the heading element was the finding there, not the card.
+
+### Two things that fell out of the migration
+
+`SecureAppointmentPage`'s `unavailable` state — set whenever the payload fetch
+throws, on both the initial load and `refresh()` — **had no render branch at
+all**. It fell through every `if` to the ready render and showed the
+card-capture form for an appointment that never loaded (`data` is null there;
+only the visit summary was guarded). It now renders the error card with a retry.
+
+`ProjectReportViewPage`'s not-found lost its `<Icon name="document">` glyph: no
+other terminal card has one, and a slot for a single caller is exactly the
+speculative config rule 16 forbids. `TrackPage`'s empty 32px decorative `div`
+went the same way.
+
+### The evidence run caught a regression this PR had shipped
+
+`qa:glass` runs `r2b` / `r2b-fix` (six error scenarios x two states x two
+widths, 32 captures, 0 failed) reported `estimate-404 / load-error` at
+**`h1:2`**: that branch renders `<Header/>`, which carries an `h1`, alongside
+the card, which now carries one too. `PublicLoadError` rendered a `div` before
+this PR, so promoting it is what created the duplicate. The header was blank
+there anyway and is gone.
+
+After the fix, every terminal state at both widths: `h1:1`, no text under 14px,
+no weight over 700, no horizontal overflow. Card geometry, measured: at 390 all
+twelve cards are `x:16 w:358` — a 16px gutter on both sides; at 1440 eleven are
+`x:440 w:560`, the twelfth being the EstimateViewPage card in the 760 document
+column. G-02 measured padding 20 / 24 / 32 and gutters 20 vs 16 across these
+same pages.
+
+### Testing
+
+Six suites replace-mock `../components/brand` wholesale, so a new export is
+invisible to them. Rather than hand-stub the card — duplicating its action logic
+in six places — the mocks now spread `importOriginal()`, so `PublicStateCard` and
+`BrandCard` render for real (both are leaf presentational components) and only
+the heavier primitives stay stubbed. `PublicStateCard.test.jsx` asserts the
+invariants, not the pixels: an `h1` on every state, no authored font-size, one
+primary, actions from the shared constants, no width or padding knob.
+
+## 2026-09-11 — The brand gate was counting comments (R3a)
+
+Two of the baselined violations were never on a customer surface: `Icon.jsx`'s
+note describing how a sweep could migrate the old portal's emoji keys to
+`<Icon name="home" />`, and `GlassEstimateExtras`' "5-star reviews only" docblock.
+`check-portal-brand.js` scans line by line with no notion of comments, so prose
+ABOUT an emoji counted as a raw emoji — the gate forbade describing the very
+sweep it asks for, and `Icon.jsx` sat in `LEGACY_BASELINE` carrying debt it did
+not have.
+
+Whole-line comments are now skipped, and **which lines those are comes from the
+parser, not the line's prefix** (`commentLineSet()`). A prefix test cannot tell a
+comment from rendered JSX text that merely starts with `//` — inside a `<pre>`,
+say — and skipping such a line would hide a real violation on a visible element.
+That was a review finding on the first cut of this change, and it is the reason
+the detection is lexical.
+
+The parser is `@babel/parser` with the `jsx` and `typescript` plugins, not acorn:
+`walk()` accepts `.ts` and `.tsx`, and acorn cannot read them. A parser that
+chokes on an extension the walker advertises sends that file down the failure
+path forever — safe, since nothing is skipped, but it also means comment prose in
+it is reported as debt. One parser covers every extension accepted.
+
+Two shapes need help beyond the raw comment range. `{/* … */}` is **the** way to
+write a comment in JSX children, and the parser's range covers only the
+`/* … */`, leaving the braces as non-whitespace so the line reads as code — a
+note mentioning a banned size could fail the gate though nothing renders. When
+braces wrap a comment and nothing else, they count as part of it;
+`{/* note */ x}` is an expression and stays scanned.
+
+**Only** whole-line comments: a line counts only when blanking every comment span
+on it leaves nothing but whitespace, so anything sharing a line with code is
+scanned in full, in both directions — a trailing `// note` after code, and code
+trailing a `*/` on a block's closing line. That second direction was itself a
+masking bug in the first cut (`*/ const label = '🔒';` vanished).
+
+**The CSS side is postcss**, the parser this project's own build uses, so it
+defines what this repo's CSS means. That replaced a hand-written scanner which
+took four review findings in three rounds — a quoted `content: "/*"`, an
+unquoted `url(data:…,/*)`, an escaped `url(foo\)/*)`, an escaped `\/*` — every
+one a variant of "something that looks like a comment delimiter and is not".
+The count was rising rather than falling, which is the signal to replace a
+mechanism instead of patching it again. postcss knows strings, `url()` tokens
+and escapes by construction. Where it disagrees (`\/*`, which it reads as an
+unclosed comment) it throws, which lands on the scan-everything path — the
+conservative direction.
+
+Two grammars needed splitting apart as well. Babel's TypeScript and JSX plugins
+conflict, so a valid `.ts` construct like `const n = <number>1` parsed as JSX
+and sent the file down the failure path permanently; plugins are now chosen by
+extension. And `<style>{`…`}</style>` — the repo's embedded-CSS pattern — is
+template-string data to Babel, so its `/* … */` never reached `ast.comments`;
+those quasis get the postcss pass — but only when the template has **no
+interpolation**, because a quasi is not independently valid CSS. With
+`prefix = 'url(foo'`, the template `.a { background: ${prefix}/*); }` has its
+`/*` inside URL data once combined, while the quasi after the interpolation
+begins at `/*` and reads as a comment running to the next `*/`, masking every
+live rule between. Reconstructing lexer state across interpolations is not
+worth it; an interpolated style template simply keeps every line scanned. The
+same pass is scoped to `<style>` children for a second reason: over every
+template literal, a line of ordinary template TEXT that happens to read
+`/* … */` would be skipped, which also masks.
+
+**A parse failure skips nothing.** Scanning a comment costs a false positive;
+skipping code costs a miss, and a miss is the worse failure — so an unparseable
+file is scanned in full. That also retires a quieter hole: an unterminated `/*`
+used to swallow every line after it.
+
+The lookalike that made the prefix version subtle was CSS's universal selector —
+a bare `* {` line is code, not a docblock continuation. Parsing removes the
+question, and the case stays as a test.
+
+The gate is now importable (`module.exports = { checkFile, commentLineSet,
+LEGACY_BASELINE }`, CLI behind `require.main === module`) and has its first
+tests, in `scripts/qa/tests/check-portal-brand.test.js` (already wired into CI as
+`npm run test:qa-workflow`). It had none — on a script whose last two regressions
+were a baseline that only failed in one direction and a walker that skipped CSS,
+both caught by review rather than by CI.
+
+Debt: **two fewer, and one fewer file**. `Icon.jsx` delisted (a stale entry
+fails the gate, so the line had to go), `GlassEstimateExtras` 4 → 3. Landing
+after R3b's weight sweep, that leaves **73 across 24 files**. No customer pixel
+changes; the remaining 73 are real, and still R3/R4 work.

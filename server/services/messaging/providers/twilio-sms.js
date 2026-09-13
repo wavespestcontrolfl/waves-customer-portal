@@ -141,6 +141,11 @@ async function sendViaTwilio(input, { preSendCheck, withSmsHandoff } = {}) {
       agentDecisionId: input.metadata && input.metadata.agentDecisionId,
       parkedDecisionIds: input.metadata && input.metadata.parkedDecisionIds,
       scheduledSmsLogId: input.metadata && input.metadata.scheduled_sms_log_id,
+      // Durable linkage back to the review ask this text IS. The
+      // stranded-send reconciliation proves a send from it, so an ask
+      // whose template carries no review link (the private check-ins)
+      // is still provable — a body-fragment search can never find one.
+      reviewRequestId: input.metadata && input.metadata.review_request_id,
       agentDraft: input.metadata && input.metadata.agentDraft,
       suggestedReply: input.metadata && input.metadata.suggestedReply,
       // Preserve admin attribution. services/twilio.js writes

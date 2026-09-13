@@ -380,7 +380,7 @@ export function StationMapCard({ stationMap, sectionId = 'station-map', variant 
   return (
     <Wrapper {...wrapperProps}>
       {hideTitle ? null : plan ? (
-        <div style={{ fontSize: 15, fontWeight: 850, color: B.glassNavy, margin: '0 0 6px' }}>{programMeta.title}</div>
+        <div style={{ fontSize: 15, fontWeight: 700, color: B.glassNavy, margin: '0 0 6px' }}>{programMeta.title}</div>
       ) : (
         <h2>{programMeta.title}</h2>
       )}

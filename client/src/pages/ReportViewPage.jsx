@@ -52,6 +52,7 @@ import {
   docButton,
   docTransition,
 } from '../theme-doc';
+import { CustomerColumn, PublicStateCard } from '../components/brand';
 import ServiceReportDocument from './ServiceReportDocument';
 import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
@@ -5552,27 +5553,20 @@ function LoadingState({ glass = false }) {
   );
 }
 
-function NotFoundState({ glass = false }) {
+function NotFoundState() {
+  // `glass` is gone: PublicStateCard carries data-glass="card", so the sheet
+  // styles it on glass and BrandCard's own tokens style it off glass — the
+  // two hand-authored branches this used to switch between.
+  //
+  // The lone "Call Waves" button becomes the standard pair. That is a CTA-set
+  // change, not a copy change: no sentence is rewritten, and G-02 lists "Call
+  // Waves alone (report)" as one of the sets it exists to unify.
   return (
-    <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', background: glass ? 'transparent' : ESTIMATE_BG, padding: 20, fontFamily: FONT_BODY }}>
-      <div
-        data-glass={glass ? 'card' : undefined}
-        style={{
-          background: glass ? undefined : '#fff',
-          border: glass ? undefined : `1px solid ${ESTIMATE_BORDER}`,
-          borderRadius: 16,
-          padding: 32,
-          maxWidth: 420,
-          textAlign: 'center',
-        }}
-      >
-        <div style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, color: glass ? '#04395E' : ESTIMATE_TEXT }}>Report unavailable</div>
-        <div style={{ fontSize: 16, color: glass ? '#3F4A65' : ESTIMATE_BODY, lineHeight: 1.5, marginTop: 8 }}>
-          This link may have expired or is not valid.
-        </div>
-        <a href={`tel:${WAVES_PHONE_TEL}`} data-glass-accent={glass ? '' : undefined} style={{ ...actionButtonStyle('primary'), marginTop: 16 }}>Call Waves</a>
-      </div>
-    </div>
+    <CustomerColumn>
+      <PublicStateCard state="not-found" title="Report unavailable">
+        This link may have expired or is not valid.
+      </PublicStateCard>
+    </CustomerColumn>
   );
 }
 
@@ -5609,7 +5603,7 @@ function LegacyReport({ data, token, glass = false }) {
       </header>
       ) : null}
       {/* div, not <main> — WavesShell supplies the main landmark. */}
-      <div style={{ flex: 1, maxWidth: DOC_COLUMN_MAX, width: '100%', margin: '0 auto', padding: '32px 20px 64px', boxSizing: 'border-box' }}>
+      <CustomerColumn>
         <div style={{ padding: '8px 0 24px' }}>
           <div style={{ fontSize: 14, color: ESTIMATE_MUTED, textTransform: 'uppercase', fontWeight: 700, marginBottom: 8 }}>
             Service report{data.serviceType ? ` · ${data.serviceType}` : ''}
@@ -5643,7 +5637,7 @@ function LegacyReport({ data, token, glass = false }) {
         <div data-glass={glass ? 'card' : undefined} style={{ marginTop: 16, borderRadius: 16, overflow: 'hidden', border: glass ? undefined : `1px solid ${ESTIMATE_BORDER}`, background: glass ? undefined : '#fff' }}>
           <iframe src={pdfUrl} style={{ width: '100%', height: 620, border: 'none', background: '#fff' }} title="Service report PDF" />
         </div>
-      </div>
+      </CustomerColumn>
     </div>
   );
 }
@@ -5957,13 +5951,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           text-overflow: ellipsis;
           white-space: nowrap;
         }
-        .sr-shell {
-          max-width: ${DOC_COLUMN_MAX}px;
-          width: 100%;
-          margin: 0 auto;
-          padding: 32px 20px 64px;
-          box-sizing: border-box;
-        }
+        /* .sr-shell's width/gutter/margin recipe moved to <CustomerColumn>
+           (audit G-01, DECISIONS 2026-09-11 "R2a"). Only the print-only
+           padding override below still targets this class name. */
         .sr-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
         .report-action-bar {
           display: block;
@@ -8588,7 +8578,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           .sr-top-inner { align-items: center; flex-direction: row; }
           .sr-actions { width: 100%; justify-content: stretch; }
           .sr-actions a, .sr-actions button { flex: 1; }
-          .sr-shell { padding: 16px 16px 36px; }
           .report-action-bar { padding: 16px; }
           /* Keep the 2×2 grid on phones — four stacked full-width buttons made
              the utility bar a full screen tall (audit 2026-07-28). Slimmer
@@ -8788,7 +8777,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
              is hidden in print, so the body must go with it). */
           .companion-internal { display: none; }
           .service-report-v1 { background: #fff; }
-          .sr-shell { padding: 0; }
+          /* !important: CustomerColumn authors this padding inline, which
+             plain stylesheet specificity can't beat — print needs zero
+             padding regardless. */
+          .sr-shell { padding: 0 !important; }
           .service-status-card,
           .sr-section,
           .report-card,
@@ -8829,7 +8821,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
       {/* Page-local .sr-top bar removed — the WavesShell top bar (App.jsx
           route wrap, owner 2026-07-06) provides the standard chrome. */}
       {/* div, not <main> — WavesShell supplies the main landmark. */}
-      <div className="sr-shell">
+      <CustomerColumn className="sr-shell">
         {/* Staff-only shadow reports keep the internal notice on top. */}
         {mode === 'live' && data.internalOnly && <InternalReviewBar />}
 
@@ -9457,7 +9449,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               shot filtered out of the display payload) must not over-claim. */}
           {data.photoChain?.valid === true && (data.photos || []).length > 0 && (data.photos || []).every((p) => p?.hashSha256) ? ' Photos hash-chained and tamper-evident.' : ''}
         </footer>
-      </div>
+      </CustomerColumn>
     </div>
   );
 }
@@ -9622,12 +9614,15 @@ export default function ReportViewPage() {
   }, [data]);
 
   if (loading) return <LoadingState glass={glassActive} />;
+  // Was a full-viewport centred grid, which pushed the shell footer below the
+  // fold (G-02; DECISIONS 09-04 says page roots use flex:1 so the footer
+  // follows the content). The shared column is what every other state uses.
   if (loadError) return (
-    <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', background: glassActive ? '#F8FCFE' : '#FAF8F3' }}>
+    <CustomerColumn>
       <PublicLoadError resource="service report" onRetry={() => setLoadAttempt(a => a + 1)} />
-    </div>
+    </CustomerColumn>
   );
-  if (!data || data.error) return <NotFoundState glass={glassActive} />;
+  if (!data || data.error) return <NotFoundState />;
   if (data.reportVersion === 'service_report_v1') {
     // The PDF artifact is the work-order document (owner 2026-08-03):
     // the renderer hits ?mode=pdf, so the download, the share sheet, and

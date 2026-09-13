@@ -356,6 +356,70 @@ describe('model contract', () => {
     const migration = require('../models/migrations/20260909000092_reschedule_link_promises');
     expect(new Set(migration.COMMITMENT_KINDS)).toEqual(new Set(COMMITMENT_KINDS));
   });
+  test('the prompt and schema request a complete date-claim list and delivery timing type', () => {
+    const prompt = buildCommitmentsPrompt({ transcript: 'Agent: I will send the link tomorrow.', callStartedAt: '2026-09-01T14:00:00Z' });
+    expect(prompt).toMatch(/date_claims is a COMPLETE list/);
+    expect(prompt).toMatch(/deadline.*ONLY when the agent explicitly promises/);
+    const props = MODEL_OUTPUT_SCHEMA.properties.commitments.items.properties;
+    expect(props.due_type.enum).toEqual(['floor', 'deadline', null]);
+    expect(props.subject.required || []).not.toContain('date_claims');
+    expect(props.subject.properties.date_claims.items.properties.binding.enum).toEqual(['appointment', 'requested', 'delivery', 'unresolved']);
+  });
+});
+
+describe('structured reschedule-link dates and delivery timing', () => {
+  const transcript = [
+    'Caller: My September 20 appointment needs to move to Friday.',
+    'Agent: I will text the reschedule link tomorrow at nine, before I call on Friday.',
+  ].join('\n');
+  const base = {
+    party: 'waves', kind: 'send_reschedule_link', description: 'Text the reschedule link', confidence: 0.9,
+    evidence: [{ quote: 'I will text the reschedule link tomorrow at nine', speaker: 'agent' }],
+    due_at: '2026-09-14T09:00:00-04:00', due_text: 'tomorrow at nine', due_type: 'floor',
+  };
+  test('persists partial appointment and delivery claims independently; a callback date stays unresolved', () => {
+    const item = { ...base, subject: { date_claims: [
+      { binding: 'appointment', quote: 'My September 20 appointment needs to move to Friday', month: 9, day: 20 },
+      { binding: 'requested', quote: 'move to Friday', weekday: 5 },
+      { binding: 'delivery', quote: 'I will text the reschedule link tomorrow at nine', year: 2026, month: 9, day: 14 },
+      { binding: 'unresolved', quote: 'before I call on Friday', weekday: 5 },
+    ] } };
+    const out = groundModelCommitments([item], transcript);
+    expect(out.kept).toHaveLength(1);
+    expect(out.kept[0].subject.date_claims).toEqual(item.subject.date_claims);
+    expect(out.kept[0]).toMatchObject({ due_type: 'floor', due_basis: 'stated', due_at: '2026-09-14T13:00:00.000Z' });
+    const row = require('../services/call-commitments').toRow('call', out.kept[0], { generation: 4 });
+    expect(row.due_type).toBe('floor');
+    expect(JSON.parse(row.subject).date_claims).toEqual(item.subject.date_claims);
+  });
+  test('an explicit empty list stays distinct from omitted or ungrounded claims', () => {
+    const empty = groundModelCommitments([{ ...base, subject: { date_claims: [] } }], transcript).kept[0];
+    const missing = groundModelCommitments([{ ...base, subject: { visit_date: '2026-09-20' } }], transcript).kept[0];
+    const ungrounded = groundModelCommitments([{ ...base, subject: { date_claims: [
+      { binding: 'appointment', quote: 'my October 21 appointment', month: 10, day: 21 },
+    ] } }], transcript).kept[0];
+    expect(empty.subject.date_claims).toEqual([]);
+    expect(missing.subject.date_claims).toBeNull();
+    expect(ungrounded.subject.date_claims).toBeNull();
+  });
+  test('invalid calendar components or fabricated weekdays invalidate the whole list', () => {
+    const quote = 'My September 20 appointment needs to move to Friday';
+    for (const claim of [
+      { binding: 'appointment', quote, month: 13, day: 20 },
+      { binding: 'appointment', quote, year: 2026, month: 2, day: 30 },
+      { binding: 'appointment', quote, year: 2026, month: 9, day: 20, weekday: 1 },
+    ]) {
+      const item = groundModelCommitments([{ ...base, subject: { date_claims: [claim] } }], transcript).kept[0];
+      expect(item.subject.date_claims).toBeNull();
+    }
+  });
+  test('only a valid explicit deadline survives; missing or invalid due_at has no timing type', () => {
+    const deadline = groundModelCommitments([{ ...base, due_type: 'deadline', due_text: 'by tomorrow at nine', subject: { date_claims: [] } }], transcript).kept[0];
+    expect(deadline.due_type).toBe('deadline');
+    expect(groundModelCommitments([{ ...base, due_type: 'deadline', due_at: 'tomorrow-ish' }], transcript).kept[0].due_type).toBeNull();
+    expect(groundModelCommitments([{ ...base, due_type: 'deadline', due_at: null }], transcript).kept[0].due_type).toBeNull();
+    expect(groundModelCommitments([{ ...base, due_type: undefined }], transcript).kept[0].due_type).toBeNull();
+  });
 });
 
 describe('row conversion and drop counters (codex gh-r9 P2)', () => {
@@ -398,6 +462,9 @@ describe('recordCallCommitments keeps the deterministic seeds when the model leg
     // The INSERT is no longer necessarily the first raw call; find it
     // instead of assuming its position.
     expect(raw.mock.calls.some((call) => String(call[0]).includes('INSERT INTO call_commitments'))).toBe(true);
+    const [sql, bindings] = raw.mock.calls.find((call) => String(call[0]).includes('INSERT INTO call_commitments'));
+    expect(sql).toContain('due_type');
+    expect(sql.match(/\?/g)).toHaveLength(bindings.length);
   });
 });
 
@@ -550,6 +617,7 @@ describe('the model pass sends no sampling controls (current models reject them)
     expect(create.mock.calls[0][0].temperature).toBeUndefined();
     expect(create.mock.calls[0][1]).toMatchObject({ maxRetries: 0 });
     expect(out.items.map((i) => i.kind)).toEqual(['send_paperwork']);
+    expect(out.items[0].due_type).toBeNull();
   });
   test('callEndedAt: inbound rows end at ring + duration, bridged rows at bridge + duration, other rows at created_at', () => {
     const created = '2026-09-02T14:00:00.000Z';

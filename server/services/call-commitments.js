@@ -76,7 +76,7 @@ const CHANNELS = Object.freeze(['sms', 'email', 'call', 'in_person', 'unknown'])
 
 // Bumped when the derivation rules or the model prompt change, so a row can
 // say which extractor produced it.
-const EXTRACTOR_VERSION = 'commitments-v2';
+const EXTRACTOR_VERSION = 'commitments-v3';
 
 // Mirrors CALL_PROC_EXTRACT_TIMEOUT_MS in call-recording-processor.js; the
 // claim ceiling counts this leg at the same budget.
@@ -338,6 +338,7 @@ const MODEL_OUTPUT_SCHEMA = {
           channel: { type: ['string', 'null'], enum: [...CHANNELS, null] },
           due_text: { type: ['string', 'null'], maxLength: 80 },
           due_at: { type: ['string', 'null'] },
+          due_type: { type: ['string', 'null'], enum: ['floor', 'deadline', null] },
           confidence: { type: 'number', minimum: 0, maximum: 1 },
           subject: {
             type: ['object', 'null'], additionalProperties: false,
@@ -346,6 +347,21 @@ const MODEL_OUTPUT_SCHEMA = {
               service: { type: ['string', 'null'], maxLength: 120 },
               address: { type: ['string', 'null'], maxLength: 240 },
               quote: { type: ['string', 'null'], maxLength: 500 },
+              date_claims: {
+                type: 'array', maxItems: 12,
+                items: {
+                  type: 'object', additionalProperties: false,
+                  required: ['binding', 'quote'],
+                  properties: {
+                    binding: { type: 'string', enum: ['appointment', 'requested', 'delivery', 'unresolved'] },
+                    quote: { type: 'string', minLength: 3, maxLength: 500 },
+                    year: { type: 'integer', minimum: 1900, maximum: 2100 },
+                    month: { type: 'integer', minimum: 1, maximum: 12 },
+                    day: { type: 'integer', minimum: 1, maximum: 31 },
+                    weekday: { type: 'integer', minimum: 0, maximum: 6 },
+                  },
+                },
+              },
             },
           },
           evidence: {
@@ -369,11 +385,13 @@ const MODEL_OUTPUT_SCHEMA = {
 };
 
 let validateModelOutput = null;
+let validateDateClaims = null;
 function getValidator() {
   if (validateModelOutput) return validateModelOutput;
   const Ajv = require('ajv/dist/2020');
   const ajv = new Ajv({ allErrors: true, strict: false });
   validateModelOutput = ajv.compile(MODEL_OUTPUT_SCHEMA);
+  validateDateClaims = ajv.compile(MODEL_OUTPUT_SCHEMA.properties.commitments.items.properties.subject.properties.date_claims);
   return validateModelOutput;
 }
 
@@ -388,12 +406,13 @@ A commitment is something one party explicitly said they would do after the call
 Rules — these are strict:
 1. Only list what was actually SAID. Do not infer a promise from context, tone, or what a good agent would normally do. If nobody committed to anything, return {"commitments": []}.
 2. Every commitment needs at least one VERBATIM quote copied exactly from the transcript (same words, same spelling), with the speaker who said it. Do not paraphrase the quote.
-3. "due_text" is the timing as spoken ("by tomorrow morning", "later today", "after the inspection") or null. "due_at" is an ISO 8601 timestamp with the -04:00/-05:00 Eastern offset ONLY when the spoken timing names a specific day/time relative to the call date (${when} Eastern); otherwise null. Never invent a time.
+3. "due_text" is the timing of THIS promised action as spoken ("by tomorrow morning", "later today", "after the inspection") or null. "due_at" is an ISO 8601 timestamp with the -04:00/-05:00 Eastern offset ONLY when that timing names a specific day/time relative to the call date (${when} Eastern); otherwise null. Never use the existing or requested appointment date as the delivery time. "due_type" is "deadline" ONLY when the agent explicitly promises this action BY, BEFORE, or NO LATER THAN due_at; it is "floor" when the agent says to send it AT or AFTER due_at, and null when due_at is null or timing is unclear. A deadline on another action (such as a callback) does not make the link delivery a deadline.
 4. "confidence" is how sure you are that the quoted words constitute a real commitment (0 to 1).
 5. Use kind "other" only when none of the listed kinds fits.
-   Use send_reschedule_link ONLY when the AGENT promises to send a link for changing an existing appointment. A caller asking for one, a generic website link, a booking link for new service, or a link already sent is not this promise. Include subject: the CURRENT appointment's date (visit_date, YYYY-MM-DD), service and street address actually discussed, plus a verbatim subject.quote. Resolve relative dates against the call date. Never put the requested NEW date into visit_date. Omit unknown subject values; never guess the soonest visit. If the transcript discusses multiple possible visits, leave subject null.
+   Use send_reschedule_link ONLY when the AGENT promises to send a link for changing an existing appointment. A caller asking for one, a generic website link, a booking link for new service, or a link already sent is not this promise. For EVERY such row supply a subject object with date_claims, even if it has no visit identity. subject.visit_date is ONLY the CURRENT appointment's date (YYYY-MM-DD), never the requested NEW date. Include service, street address, and a verbatim subject.quote only when actually discussed; omit unknown values and never guess the soonest visit.
+   date_claims is a COMPLETE list of every spoken calendar claim relevant to this link and its appointment, including the agent's and caller's words. Use [] ONLY when no such calendar claim was spoken. For each claim copy a verbatim quote from the transcript and classify binding: "appointment" when the date names the EXISTING appointment, "requested" when it clearly names the desired NEW appointment date, "delivery" when it times sending the LINK, or "unresolved" when it could be current or new or its attachment is unclear. A sentence mentioning both dates needs two claims. Include ONLY calendar components the words establish: year (four digits), month (1-12), day (1-31), weekday (0=Sunday through 6=Saturday). Resolve an unambiguous relative date such as "tomorrow" using the call date; a bare weekday with no clear week gets weekday only. "September 20" gets month and day, not an invented year. A date for another action such as a callback is unresolved unless clearly irrelevant to this link. Never omit an ambiguous claim just because subject.visit_date is present.
 6. Output ONLY a JSON object, no prose:
-{"commitments":[{"party":"waves","kind":"send_estimate","description":"...","channel":"email","due_text":"...","due_at":null,"confidence":0.9,"evidence":[{"quote":"...","speaker":"agent"}]}]}
+{"commitments":[{"party":"waves","kind":"send_estimate","description":"...","channel":"email","due_text":"...","due_at":null,"due_type":null,"confidence":0.9,"evidence":[{"quote":"...","speaker":"agent"}]}]}
 
 Transcript:
 ${transcript}`;
@@ -466,6 +485,35 @@ function quoteExpressesAction(normalizedQuote, item) {
   return words.some((w) => wanted.has(w) || [...wanted].some((k) => k.length >= 4 && w.startsWith(k)));
 }
 
+// An omitted claim list is NOT an assertion that the transcript contained no
+// date. Preserve that distinction for old rows and malformed model output:
+// the link worker parks them instead of choosing an appointment by default.
+// All claims in an explicit list must be usable; dropping just one would
+// falsely make the remaining list look complete.
+function groundedDateClaims(subject, transcript) {
+  getValidator();
+  if (!subject || !validateDateClaims(subject.date_claims)) return null;
+  const flat = normalizeForMatch(transcript);
+  const turns = speakerTurns(transcript);
+  const claims = [];
+  for (const claim of subject.date_claims) {
+    const quote = String(claim?.quote || '').trim();
+    const q = normalizeForMatch(quote);
+    const grounded = turns ? turns.ordered.some((turn) => turn.text.includes(q)) : flat.includes(q);
+    if (q.length < 3 || !grounded) return null;
+    const normalized = { binding: claim.binding, quote };
+    for (const part of ['year', 'month', 'day', 'weekday']) if (claim[part] !== undefined) normalized[part] = claim[part];
+    if (claim.binding !== 'unresolved' && !['year', 'month', 'day', 'weekday'].some((part) => normalized[part] !== undefined)) return null;
+    if (normalized.year && normalized.month && normalized.day) {
+      const date = new Date(Date.UTC(normalized.year, normalized.month - 1, normalized.day));
+      if (date.getUTCMonth() !== normalized.month - 1 || date.getUTCDate() !== normalized.day) return null;
+      if (normalized.weekday !== undefined && date.getUTCDay() !== normalized.weekday) return null;
+    }
+    claims.push(normalized);
+  }
+  return claims;
+}
+
 function groundModelCommitments(items, transcript) {
   const flat = normalizeForMatch(transcript);
   const turns = speakerTurns(transcript);
@@ -490,9 +538,12 @@ function groundModelCommitments(items, transcript) {
     if (typeof item.confidence !== 'number' || item.confidence < MIN_MODEL_CONFIDENCE) { droppedLowConfidence += 1; continue; }
     const malformedDue = Number.isNaN(parseDueAt(item.due_at));
     if (malformedDue) malformedDueAt += 1;
-    // Preserve a supplied subject for the send guard to validate. Dropping
-    // an ungrounded subject would turn an explicit mismatch into no filter.
-    const subject = item.kind === 'send_reschedule_link' ? item.subject || null : null;
+    // The model may omit a subject despite the prompt, or produce one bad
+    // claim. Keep its visit fields but mark the claim list incomplete so the
+    // consumer can fail closed. An explicit [] alone means "none spoken".
+    const subject = item.kind === 'send_reschedule_link'
+      ? { ...(item.subject && typeof item.subject === 'object' ? item.subject : {}), date_claims: groundedDateClaims(item.subject, transcript) }
+      : null;
     kept.push({
       party: item.party,
       kind: COMMITMENT_KINDS.includes(item.kind) ? item.kind : 'other',
@@ -505,6 +556,7 @@ function groundModelCommitments(items, transcript) {
       // rather than persisted as "stated" with no instant (Codex r12 P2).
       due_at: malformedDue ? null : isoOrNull(item.due_at),
       due_basis: !malformedDue && item.due_at ? 'stated' : null,
+      due_type: !malformedDue && item.due_at && ['floor', 'deadline'].includes(item.due_type) ? item.due_type : null,
       due_text: item.due_text || (malformedDue ? String(item.due_at).slice(0, 80) : null),
       confidence: item.confidence,
       // With labelled turns the speaker is the one whose turn carried the
@@ -560,6 +612,7 @@ function toRow(callLogId, item, { generation, extractorVersion, recordingSid = n
     channel: CHANNELS.includes(item.channel) ? item.channel : 'unknown',
     due_at: item.due_at ? new Date(item.due_at) : null,
     due_basis: item.due_basis || null,
+    due_type: item.due_type || null,
     confidence: typeof item.confidence === 'number' ? Math.max(0, Math.min(1, item.confidence)) : null,
     evidence: JSON.stringify(item.evidence || []),
     subject: JSON.stringify(item.subject || null),
@@ -662,15 +715,16 @@ async function upsertCommitments(conn, callLogId, items, { generation = null, ex
       // generation so the UI can say "still detected" vs "not seen lately".
       const result = await trx.raw(
         `INSERT INTO call_commitments
-           (call_log_id, commitment_key, party, kind, description, channel, due_at, due_basis, confidence,
+           (call_log_id, commitment_key, party, kind, description, channel, due_at, due_basis, due_type, confidence,
             evidence, source, processing_generation, last_seen_generation, extractor_version, recording_sid, status, updated_at, subject)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)
          ON CONFLICT (call_log_id, commitment_key) DO UPDATE SET
            ${callbackDeadlineUpdate}
            description = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.description ELSE call_commitments.description END,
            channel = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.channel ELSE call_commitments.channel END,
            due_at = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.due_at ELSE call_commitments.due_at END,
            due_basis = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.due_basis ELSE call_commitments.due_basis END,
+           due_type = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.due_type ELSE call_commitments.due_type END,
            confidence = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.confidence ELSE call_commitments.confidence END,
            evidence = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.evidence ELSE call_commitments.evidence END,
            subject = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.subject ELSE call_commitments.subject END,
@@ -681,7 +735,7 @@ async function upsertCommitments(conn, callLogId, items, { generation = null, ex
            updated_at = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.updated_at ELSE call_commitments.updated_at END
          RETURNING id, (xmax = 0) AS inserted`,
         [
-          row.call_log_id, row.commitment_key, row.party, row.kind, row.description, row.channel, row.due_at, row.due_basis, row.confidence,
+          row.call_log_id, row.commitment_key, row.party, row.kind, row.description, row.channel, row.due_at, row.due_basis, row.due_type, row.confidence,
           row.evidence, row.source, row.processing_generation, row.last_seen_generation, row.extractor_version, row.recording_sid, row.status, row.updated_at, row.subject,
         ],
       );
@@ -2044,6 +2098,9 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
         if (Number.isNaN(parsed)) throw Object.assign(new Error('due_at is not a valid date'), { status: 400 });
         patch.due_at = parsed;
         patch.due_basis = parsed ? 'stated' : null;
+        // An office-entered time does not carry the model's original
+        // deadline classification. Default it to the safe send floor.
+        patch.due_type = parsed ? 'floor' : null;
       }
       // An edited obligation is a NEW obligation: the proof that kept the
       // old wording ("send estimate") is not proof for the new one ("send
@@ -2165,6 +2222,7 @@ async function addHumanCommitment(conn, callLogId, { party, kind, description, d
     channel: CHANNELS.includes(channel) ? channel : 'unknown',
     due_at: due,
     due_basis: due ? 'stated' : null,
+    due_type: due ? 'floor' : null,
     confidence: null,
     evidence: JSON.stringify([]),
     source: 'human',

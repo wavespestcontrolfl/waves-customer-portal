@@ -1,4 +1,5 @@
-/** Stored provenance for a newly created lawn visit assessment. */
+/** Lawn visit provenance, review/confirmation transactions, and delivery ownership. */
+const { randomUUID } = require('crypto');
 const { SCORE_KEYS, confirmScores } = require('./lawn-visit-scores');
 const lawnAssessment = require('./lawn-assessment');
 const { validateReview } = require('./lawn-visit-review-input');
@@ -258,11 +259,261 @@ async function confirmRun(args, knex) {
     // Match the baseline installer's order and the assess property stamper:
     // baseline advisory -> property fence/customer -> assessment -> run.
     const write = (connection) => confirmLockedRun(args, original.customer_id, connection);
-    if (args.propertyHistoryEnabled) {
+    // Protocol persistence also writes the turf profile, regardless of history.
+    if (args.propertyHistoryEnabled || args.persistChecks) {
       const { withTurfProfileFence } = require('./customer-pricing-ai');
       return withTurfProfileFence(trx, original.customer_id, write);
     }
     return write(trx);
+  });
+}
+
+const PIPELINE_STALE_MS = 15 * 60 * 1000;
+function leaseDuration(staleAfterMs) {
+  if (!Number.isSafeInteger(staleAfterMs) || staleAfterMs <= 0) throw new TypeError('Pipeline lease duration must be positive milliseconds');
+  return staleAfterMs;
+}
+
+// One conditional write elects the owner across instances. The database clock
+// defines the lease, so pod clock skew cannot reclaim an active delivery. Old
+// timestamp-only claims wait out their lease; missing DDL fails closed instead
+// of letting every caller deliver. A savepoint protects an enclosing writer.
+async function claimPipeline(assessmentId, knex, { staleAfterMs = PIPELINE_STALE_MS } = {}) {
+  leaseDuration(staleAfterMs);
+  return knex.transaction(async (trx) => {
+    const [run] = await trx('lawn_assessment_runs')
+      .where({ assessment_id: assessmentId }).whereNull('pipeline_completed_at')
+      .whereExists(trx('lawn_assessments').select(trx.raw('1'))
+        .whereColumn('lawn_assessments.id', 'lawn_assessment_runs.assessment_id').where({ confirmed_by_tech: true }))
+      .where((q) => q.whereNull('pipeline_claimed_at')
+        .orWhereRaw("pipeline_claimed_at < clock_timestamp() - (? * interval '1 millisecond')", [staleAfterMs]))
+      .update({ pipeline_owner_token: randomUUID(), pipeline_claimed_at: trx.raw('clock_timestamp()'), updated_at: trx.raw('clock_timestamp()') })
+      .returning('*');
+    return run || null;
+  });
+}
+
+function ownedPipelineQuery(assessmentId, ownerToken, knex, staleAfterMs) {
+  leaseDuration(staleAfterMs);
+  if (typeof ownerToken !== 'string' || !ownerToken) throw new TypeError('Pipeline ownership token is required');
+  return knex('lawn_assessment_runs').where({ assessment_id: assessmentId, pipeline_owner_token: ownerToken })
+    .whereNull('pipeline_completed_at')
+    .whereRaw("pipeline_claimed_at >= clock_timestamp() - (? * interval '1 millisecond')", [staleAfterMs]);
+}
+
+// Renew while external work runs, and check ownership before each next step.
+// An expired owner cannot revive itself or release its replacement's claim.
+async function renewPipeline(assessmentId, ownerToken, knex, { staleAfterMs = PIPELINE_STALE_MS } = {}) {
+  const rows = await ownedPipelineQuery(assessmentId, ownerToken, knex, staleAfterMs)
+    .update({ pipeline_claimed_at: knex.raw('clock_timestamp()'), updated_at: knex.raw('clock_timestamp()') }).returning('id');
+  return rows.length === 1;
+}
+
+async function ownsPipeline(assessmentId, ownerToken, knex, { staleAfterMs = PIPELINE_STALE_MS } = {}) {
+  return !!(await ownedPipelineQuery(assessmentId, ownerToken, knex, staleAfterMs).first('id'));
+}
+
+async function releasePipeline(assessmentId, ownerToken, knex, { staleAfterMs = PIPELINE_STALE_MS } = {}) {
+  const rows = await ownedPipelineQuery(assessmentId, ownerToken, knex, staleAfterMs)
+    .update({ pipeline_owner_token: null, pipeline_claimed_at: null, updated_at: knex.raw('clock_timestamp()') }).returning('id');
+  return rows.length === 1;
+}
+
+// An intentional wait is not a never-attempted run. Drop exclusive ownership
+// while retaining a recent attempt timestamp, so the normal lease interval is
+// its retry backoff and the sweep's NULL-first ordering cannot let a batch of
+// deferred old runs starve fresh confirmation work.
+async function deferPipeline(assessmentId, ownerToken, knex, { staleAfterMs = PIPELINE_STALE_MS } = {}) {
+  const rows = await ownedPipelineQuery(assessmentId, ownerToken, knex, staleAfterMs)
+    .update({ pipeline_owner_token: null, pipeline_claimed_at: knex.raw('clock_timestamp()'), updated_at: knex.raw('clock_timestamp()') })
+    .returning('id');
+  return rows.length === 1;
+}
+
+function notificationJournal(run) {
+  return parseObject(run?.reconciliation)?.notification;
+}
+
+function reconciliationWithoutNotification(run) {
+  const reconciliation = { ...(parseObject(run?.reconciliation) || {}) };
+  delete reconciliation.notification;
+  return reconciliation;
+}
+
+// The run table is optional during a rolling migration. Isolate its locked
+// read in a savepoint so an undefined-table error does not abort the enclosing
+// assessment transaction.
+async function lockedNotificationRun(assessmentId, trx) {
+  try {
+    return await trx.transaction((savepoint) => savepoint('lawn_assessment_runs')
+      .where({ assessment_id: assessmentId }).forUpdate().first());
+  } catch (err) {
+    if (err?.code === '42P01') return undefined;
+    throw err;
+  }
+}
+
+async function writeNotificationReconciliation(run, attemptId, reconciliation, trx) {
+  if (!run) return;
+  const updated = await trx('lawn_assessment_runs').where({ id: run.id })
+    .whereRaw("reconciliation->'notification'->>'attempt_id' = ?", [attemptId])
+    .update({ reconciliation: JSON.stringify(reconciliation), updated_at: trx.raw('clock_timestamp()') });
+  if (updated !== 1) throw Object.assign(new Error('Lawn notification attempt ownership lost'), { code: 'LAWN_NOTIFICATION_ATTEMPT_LOST' });
+}
+
+async function withNotificationAttempt(assessmentId, attemptId, knex, mutate) {
+  return knex.transaction(async (trx) => {
+    const assessment = await trx('lawn_assessments').where({ id: assessmentId }).forUpdate().first();
+    if (!assessment) return false;
+    const run = await lockedNotificationRun(assessmentId, trx);
+    if ((run && (!attemptId || notificationJournal(run)?.attempt_id !== attemptId)) || (!run && attemptId)) return false;
+    return mutate({ assessment, run, trx });
+  });
+}
+
+// The assessment claim and current-attempt UUID commit together under the
+// repository's assessment -> run lock order. Legacy rows without a run retain
+// their assessment-only claim; recovery journals exist only for run-backed work.
+async function claimNotificationAttempt(assessmentId, knex) {
+  return knex.transaction(async (trx) => {
+    const assessment = await trx('lawn_assessments').where({ id: assessmentId }).forUpdate().first();
+    if (!assessment?.confirmed_by_tech || assessment.service_id || assessment.notification_sent) return null;
+    const run = await lockedNotificationRun(assessmentId, trx);
+    const attemptId = run ? randomUUID() : null;
+    if (run) {
+      await trx('lawn_assessment_runs').where({ id: run.id }).update({
+        reconciliation: JSON.stringify({
+          ...(parseObject(run.reconciliation) || {}), notification: { attempt_id: attemptId, outcome: 'pending' },
+        }),
+        updated_at: trx.raw('clock_timestamp()'),
+      });
+    }
+    await trx('lawn_assessments').where({ id: assessmentId })
+      .update({ notification_sent: true, notification_sent_at: null, updated_at: trx.raw('clock_timestamp()') });
+    return { attemptId };
+  });
+}
+
+async function releaseNotificationAttempt(assessmentId, attemptId, knex) {
+  return withNotificationAttempt(assessmentId, attemptId, knex, async ({ assessment, run, trx }) => {
+    if (!assessment.notification_sent || assessment.notification_sent_at) return false;
+    await trx('lawn_assessments').where({ id: assessmentId })
+      .update({ notification_sent: false, notification_sent_at: null, updated_at: trx.raw('clock_timestamp()') });
+    await writeNotificationReconciliation(run, attemptId, reconciliationWithoutNotification(run), trx);
+    return true;
+  });
+}
+
+async function settleNotificationAttempt(assessmentId, attemptId, knex) {
+  return withNotificationAttempt(assessmentId, attemptId, knex, async ({ assessment, run, trx }) => {
+    if (!assessment.notification_sent || assessment.notification_sent_at) return false;
+    await trx('lawn_assessments').where({ id: assessmentId })
+      .update({ notification_sent_at: trx.raw('clock_timestamp()'), updated_at: trx.raw('clock_timestamp()') });
+    await writeNotificationReconciliation(run, attemptId, reconciliationWithoutNotification(run), trx);
+    return true;
+  });
+}
+
+// This transaction is deliberately independent of a failed assessment release.
+// Only the exact current attempt may add explicit provider non-delivery proof.
+async function recordNotificationNotSent(assessmentId, attemptId, knex) {
+  if (!attemptId) return false;
+  return withNotificationAttempt(assessmentId, attemptId, knex, async ({ assessment, run, trx }) => {
+    if (!run || !assessment.notification_sent || assessment.notification_sent_at) return false;
+    const reconciliation = parseObject(run.reconciliation) || {};
+    await writeNotificationReconciliation(run, attemptId, {
+      ...reconciliation,
+      notification: { ...notificationJournal(run), attempt_id: attemptId, outcome: 'not_sent' },
+    }, trx);
+    return true;
+  });
+}
+
+// Recovery treats only the current attempt's explicit not_sent journal as
+// authority. Unknown, accepted, uncertain, queued, and stale attempts remain
+// claimed so an ambiguous provider handoff can never be retried automatically.
+async function recoverNotificationNotSent(assessmentId, knex) {
+  return knex.transaction(async (trx) => {
+    const assessment = await trx('lawn_assessments').where({ id: assessmentId }).forUpdate().first();
+    if (!assessment) return false;
+    const run = await lockedNotificationRun(assessmentId, trx);
+    const journal = notificationJournal(run);
+    if (!run || !journal?.attempt_id || journal.outcome !== 'not_sent'
+      || !assessment.notification_sent || assessment.notification_sent_at) return false;
+    await trx('lawn_assessments').where({ id: assessmentId })
+      .update({ notification_sent: false, notification_sent_at: null, updated_at: trx.raw('clock_timestamp()') });
+    await writeNotificationReconciliation(run, journal.attempt_id, reconciliationWithoutNotification(run), trx);
+    return true;
+  });
+}
+
+function calibrationForRun(assessment, run) {
+  const snapshot = parseObject(run?.reconciliation)?.confirmation;
+  const technicianId = snapshot?.technician_id || assessment?.technician_id;
+  if (snapshot?.calibration_eligible !== true || !technicianId) return null;
+  return { aiScores: snapshot.ai_scores, finalScores: snapshot.final_scores, technicianId };
+}
+
+// A confirmation snapshot is the only record of what the technician changed. A
+// run without one cannot have its comparison reconstructed — the assessment row
+// may have been edited since — so the loss is surfaced at completion rather
+// than silently passing as a visit that owed no calibration.
+function calibrationEvidenceMissing(run) {
+  return !parseObject(run?.reconciliation)?.confirmation;
+}
+
+function completedRecommendations(value) {
+  const parsed = parseObject(value);
+  return !!parsed && (parsed._sanitizationFinal === true || parsed._groundedInApplications === true
+    || (typeof parsed.summary === 'string' && parsed.summary.trim().length > 0)
+    || (Array.isArray(parsed.recommendations) && parsed.recommendations.length > 0));
+}
+
+// Customer steps retain their canonical stamps. Only health needs a new
+// success stamp; calibration is proven by its persisted comparison row.
+async function deliveryState(assessmentId, knex) {
+  const assessment = await knex('lawn_assessments').where({ id: assessmentId }).first();
+  const run = await loadRun(assessmentId, knex);
+  if (!assessment?.confirmed_by_tech || !run) return { assessment, run, gaps: ['assessment'], calibration: null };
+  const calibration = calibrationForRun(assessment, run);
+  const gaps = [];
+  const calibrationRecorded = await knex('tech_calibration').where({ assessment_id: assessmentId }).first('id');
+  if (calibration && !calibrationRecorded) gaps.push('calibration');
+  // Reported, not owed. A run with no snapshot has no recoverable comparison —
+  // blocking on it would strand every other step behind evidence this runner
+  // cannot produce — so completion says so instead of pretending it was fine.
+  const calibrationEvidenceLost = !calibrationRecorded && calibrationEvidenceMissing(run);
+  if (!completedRecommendations(assessment.recommendations)) gaps.push('recommendations');
+  if (!run.pipeline_health_completed_at) gaps.push('health');
+  if (!assessment.service_id && !assessment.notification_sent) gaps.push('notification');
+  // A claim with no settle mark is a send whose outcome was never recorded — the
+  // release could not be written, or the worker died mid-flight. It is NOT owed
+  // (the carrier may hold the message) and it is NOT proof of delivery either,
+  // so surface it rather than letting completion read it as a delivered text.
+  const notificationUnsettled = !assessment.service_id
+    && assessment.notification_sent === true && !assessment.notification_sent_at;
+  if (!(assessment.report_auto_generated === true || assessment.report_id)) gaps.push('report');
+  return { assessment, run, gaps, calibration, notificationUnsettled, calibrationEvidenceLost };
+}
+
+async function markPipelineHealthComplete(assessmentId, ownerToken, knex, { staleAfterMs = PIPELINE_STALE_MS } = {}) {
+  const rows = await ownedPipelineQuery(assessmentId, ownerToken, knex, staleAfterMs)
+    .update({ pipeline_health_completed_at: knex.raw('clock_timestamp()'), updated_at: knex.raw('clock_timestamp()') }).returning('id');
+  return rows.length === 1;
+}
+
+async function completePipeline(assessmentId, ownerToken, knex, { staleAfterMs = PIPELINE_STALE_MS } = {}) {
+  return knex.transaction(async (trx) => {
+    await trx('lawn_assessments').where({ id: assessmentId }).forUpdate().first('id');
+    const owned = await ownedPipelineQuery(assessmentId, ownerToken, trx, staleAfterMs).forUpdate().first('id');
+    if (!owned) return { owned: false, gaps: [] };
+    const { gaps, notificationUnsettled } = await deliveryState(assessmentId, trx);
+    if (gaps.length || notificationUnsettled) {
+      return { owned: true, gaps: notificationUnsettled && !gaps.includes('notification') ? [...gaps, 'notification'] : gaps };
+    }
+    const rows = await ownedPipelineQuery(assessmentId, ownerToken, trx, staleAfterMs)
+      .update({ pipeline_completed_at: trx.raw('clock_timestamp()'), updated_at: trx.raw('clock_timestamp()') }).returning('id');
+    return { owned: rows.length === 1, gaps };
   });
 }
 
@@ -280,4 +531,9 @@ function replayContextForRun(run) {
   return { visionContext: storedContext(context), omitted, exactInputEligible: omitted.length === 0 };
 }
 
-module.exports = { billedUsage, runRowFor, recordRun, attachRunPhotos, loadRun, priorAssessmentCount, responseForRun, reviewRun, confirmRun, replayContextForRun };
+module.exports = {
+  billedUsage, runRowFor, recordRun, attachRunPhotos, loadRun, priorAssessmentCount, responseForRun,
+  reviewRun, confirmRun, replayContextForRun, PIPELINE_STALE_MS, claimPipeline, renewPipeline, ownsPipeline, releasePipeline, deferPipeline,
+  claimNotificationAttempt, releaseNotificationAttempt, settleNotificationAttempt, recordNotificationNotSent, recoverNotificationNotSent,
+  calibrationForRun, deliveryState, markPipelineHealthComplete, completePipeline,
+};

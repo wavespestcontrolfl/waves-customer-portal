@@ -37,7 +37,7 @@ const outboxCommitmentGenerationMigration = require('../models/migrations/202609
 const connection = process.env.RESCHEDULE_LINK_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
 const schema = `reschedule_link_${randomUUID().replaceAll('-', '')}`;
-const TABLES = ['customers', 'call_log', 'call_commitments', 'outbox_messages', 'system_settings', 'triage_items', 'audit_log', 'sms_templates', 'sms_log', 'scheduled_services', 'customer_properties', 'short_codes'];
+const TABLES = ['customers', 'call_log', 'call_commitments', 'outbox_messages', 'system_settings', 'triage_items', 'audit_log', 'sms_templates', 'sms_log', 'scheduled_services', 'customer_properties', 'short_codes', 'reschedule_log'];
 let admin;
 let mockPg;
 jest.setTimeout(30000);
@@ -86,6 +86,8 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
     await rescheduleLinkPromisesMigration.up(mockPg);
     await outboxLastScannedMigration.up(mockPg);
     await outboxCommitmentGenerationMigration.up(mockPg);
+    await require('../models/migrations/20260913000100_call_commitments_due_type').up(mockPg);
+    await require('../models/migrations/20260913000100_call_commitments_due_type').up(mockPg);
   });
   afterAll(async () => {
     if (mockPg) await mockPg.destroy();
@@ -945,7 +947,7 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       const [commitment] = await mockPg('call_commitments').insert({
         call_log_id: callId, commitment_key: 'send_reschedule_link:1', party: 'waves', kind: 'send_reschedule_link',
         description: 'send a reschedule link', source: 'ai', status: 'open', confidence: 0.95,
-        evidence: JSON.stringify([{ quote, speaker: 'agent' }]), last_seen_generation: 0, processing_generation: 0,
+        subject: { date_claims: [] }, evidence: JSON.stringify([{ quote, speaker: 'agent' }]), last_seen_generation: 0, processing_generation: 0,
       }).returning('id');
       const outboxId = randomUUID();
       // Never claimed yet — the row stagePromises itself would have inserted.
@@ -1238,7 +1240,7 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
         const [commitment] = await mockPg('call_commitments').insert({
           call_log_id: callId, commitment_key: 'send_reschedule_link:1', party: 'waves', kind: 'send_reschedule_link',
           description: 'send a reschedule link', source: 'ai', status: 'open', confidence: 0.95,
-          evidence: JSON.stringify([{ quote, speaker: 'agent' }]), last_seen_generation: 0, processing_generation: 0,
+          subject: { date_claims: [] }, evidence: JSON.stringify([{ quote, speaker: 'agent' }]), last_seen_generation: 0, processing_generation: 0,
         }).returning('id');
         const outboxId = randomUUID();
         // Never claimed yet — exactly what stagePromises itself would have
@@ -1434,7 +1436,7 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
         const [commitment] = await mockPg('call_commitments').insert({
           call_log_id: callId, commitment_key: 'send_reschedule_link:1', party: 'waves', kind: 'send_reschedule_link',
           description: 'send a reschedule link', source: 'ai', status: 'open', confidence: 0.95,
-          evidence: JSON.stringify([{ quote, speaker: 'agent' }]), last_seen_generation: 0, processing_generation: 0,
+          subject: { date_claims: [] }, evidence: JSON.stringify([{ quote, speaker: 'agent' }]), last_seen_generation: 0, processing_generation: 0,
         }).returning('id');
         const outboxId = randomUUID();
         // Never claimed yet — exactly what stagePromises itself would have
@@ -1606,7 +1608,7 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
         const [commitment] = await mockPg('call_commitments').insert({
           call_log_id: callId, commitment_key: 'send_reschedule_link:1', party: 'waves', kind: 'send_reschedule_link',
           description: 'send a reschedule link', source: 'ai', status: 'open', confidence: 0.95,
-          evidence: JSON.stringify([{ quote, speaker: 'agent' }]), last_seen_generation: 0, processing_generation: 0,
+          subject: { date_claims: [] }, evidence: JSON.stringify([{ quote, speaker: 'agent' }]), last_seen_generation: 0, processing_generation: 0,
         }).returning('id');
         const outboxId = randomUUID();
         // Claimed but never reached the provider — the exact "no provider
@@ -1769,28 +1771,13 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
     });
   });
 
-  /**
-   * codex #4293 P1: neither stagePromises nor runOne's own final check ever
-   * read commitment.due_at — a grounded promise like "I'll text you the
-   * link tomorrow morning" was staged with available_at = now and sent on
-   * whatever sweep found it, a day early. An earlier version of this fix
-   * tried to read a REQUESTED time ("tomorrow morning") apart from a
-   * DEADLINE ("by Friday") out of the grounding evidence quote's own
-   * wording, since the extractor never persists which shape a given due_at
-   * came from. That inference was wrong a third distinct way on its third
-   * Codex round (see the doc comment on isPromisedFloor in
-   * reschedule-link-promises.js) and was removed rather than patched
-   * again: EVERY stated due_at is now a floor, deadline wording included —
-   * these tests exercise that through the real staging and dispatch path,
-   * against genuine Postgres rows.
-   */
-  describe('a stated delivery time is honoured as a floor, deadline wording included (codex #4293 P1)', () => {
+  describe('structured delivery timing through PostgreSQL staging and dispatch', () => {
     const fakeSid = `SM${'0'.repeat(32)}`;
     const stubBuildLink = async () => ({ url: 'https://example.com/reschedule/token' });
     const stubRender = async () => 'Your reschedule link: https://example.com/reschedule/token';
     const successfulSend = async () => ({ sent: true, providerMessageId: fakeSid });
 
-    async function seedPromise({ quote, dueAt = null }) {
+    async function seedPromise({ quote, dueAt = null, dueType = null }) {
       const callId = randomUUID();
       const customerId = randomUUID();
       const visitId = randomUUID();
@@ -1804,8 +1791,8 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       const [commitment] = await mockPg('call_commitments').insert({
         call_log_id: callId, commitment_key: 'send_reschedule_link:1', party: 'waves', kind: 'send_reschedule_link',
         description: 'send a reschedule link', source: 'ai', status: 'open', confidence: 0.95,
-        evidence: JSON.stringify([{ quote, speaker: 'agent' }]), last_seen_generation: 0, processing_generation: 0,
-        due_at: dueAt, due_basis: dueAt ? 'stated' : null,
+        subject: { date_claims: [] }, evidence: JSON.stringify([{ quote, speaker: 'agent' }]), last_seen_generation: 0, processing_generation: 0,
+        due_at: dueAt, due_basis: dueAt ? 'stated' : null, due_type: dueType,
       }).returning('id');
       return commitment.id;
     }
@@ -1860,14 +1847,7 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       expect(sent.provider_message_id).toBe(fakeSid);
     });
 
-    test('"by Friday" is now held to Friday too — the deadline/floor distinction is gone, not re-patched', async () => {
-      // Before this round, "by Friday" read as a deadline and could send on
-      // the very next sweep well ahead of Friday. That heuristic produced a
-      // third distinct false positive (a second clause about an unrelated
-      // commitment misread as the link's own deadline) and was removed: the
-      // due_at this quote produces is now honoured as a floor exactly like
-      // "tomorrow morning" — the cost of never guessing wrong in the unsafe
-      // direction is a deadline promise waiting the full distance too.
+    test('legacy timing without due_type stays a floor even when prose says by Friday', async () => {
       const dueAt = new Date('2030-01-11T14:00:00Z'); // Friday
       const beforeFriday = new Date('2030-01-07T14:00:00Z'); // Monday, 9:00 AM ET — before due_at
       const onFriday = new Date('2030-01-11T15:00:00Z'); // Friday, 10:00 AM ET — after due_at
@@ -1892,6 +1872,38 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       expect(sendSpy).toHaveBeenCalledTimes(1);
       const sent = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
       expect(sent.status).toBe('sent');
+    });
+
+    test('a persisted deadline permits delivery before the deadline', async () => {
+      const now = new Date('2030-01-07T14:00:00Z');
+      const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link by Friday.',
+        dueAt: new Date('2030-01-11T14:00:00Z'), dueType: 'deadline' });
+      await links.stagePromises(mockPg);
+      const row = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
+      expect(row.available_at.getTime()).toBeLessThan(new Date('2030-01-11T14:00:00Z').getTime());
+      const send = jest.fn(successfulSend);
+      await links.sweep(mockPg, { now, send, buildLink: stubBuildLink, render: stubRender });
+      expect(send).toHaveBeenCalledTimes(1);
+      expect((await mockPg('outbox_messages').where({ id: row.id }).first()).status).toBe('sent');
+    });
+
+    test('a link used after acceptance but before outbox bookkeeping reconciles', async () => {
+      const now = new Date('2030-01-07T14:00:00Z');
+      const acceptedAt = new Date('2030-01-07T14:00:01Z');
+      const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link.' });
+      await links.stagePromises(mockPg);
+      const row = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
+      const send = async () => {
+        const current = await mockPg('outbox_messages').where({ id: row.id }).first();
+        await mockPg('reschedule_log').insert({ scheduled_service_id: current.related_scheduled_service_id,
+          initiated_by: 'customer_self_serve', created_at: new Date('2030-01-07T14:00:02Z') });
+        return { sent: true, providerMessageId: fakeSid, sentAt: acceptedAt.toISOString() };
+      };
+      await links.runOne(mockPg, row, { now, send, buildLink: stubBuildLink, render: stubRender });
+      const sent = await mockPg('outbox_messages').where({ id: row.id }).first();
+      expect(sent.sent_at).toEqual(acceptedAt);
+      expect(await links.resolveUsedLink(mockPg, sent.related_scheduled_service_id)).toBe(1);
+      expect((await mockPg('outbox_messages').where({ id: row.id }).first()).payload.link_used_reconciled_at).toBeTruthy();
     });
 
     test('no stated timing sends on the very next sweep, exactly as before this fix', async () => {

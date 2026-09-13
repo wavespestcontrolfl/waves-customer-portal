@@ -86,10 +86,12 @@ jest.mock('../services/account-membership-email', () => ({
 const db = require('../models/db');
 const {
   recheckDeferredReplay,
+  dispatchDeferredReplay,
   finalizeDeferredReplay,
   onTerminalDeferredReplay,
   requiresDurableFinalize,
   DURABLE_FINALIZE_ENTRY_POINTS,
+  _registry,
 } = require('../services/messaging/deferred-replay-registry');
 
 function firstChain(row) {
@@ -107,7 +109,52 @@ function throwChain() {
 }
 
 describe('deferred-replay registry', () => {
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => {
+    jest.clearAllMocks();
+    delete _registry.test_dispatch_deferred;
+  });
+
+  test('registered dispatch owns the replay and receives its trusted claim metadata', async () => {
+    const outcome = { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'fixture-provider-id' };
+    const dispatch = jest.fn(async () => outcome);
+    const fallback = jest.fn(async () => ({ sent: false }));
+    _registry.test_dispatch_deferred = { dispatch };
+    const meta = { scheduled_sms_log_id: 'queue-1', customer_id: 'customer-1' };
+
+    await expect(dispatchDeferredReplay('test_dispatch_deferred', meta, fallback)).resolves.toBe(outcome);
+    expect(dispatch).toHaveBeenCalledWith(meta);
+    expect(fallback).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['refusal', async () => ({ sent: false, blocked: true, code: 'COPY_INVALID', deliveryOutcome: 'not_sent' })],
+    ['throw', async () => { throw new Error('fresh preparation failed'); }],
+  ])('a registered dispatch %s never falls back to the frozen body', async (kind, dispatch) => {
+    const fallback = jest.fn(async () => ({ sent: true }));
+    _registry.test_dispatch_deferred = { dispatch };
+    const replay = dispatchDeferredReplay('test_dispatch_deferred', {}, fallback);
+    if (kind === 'throw') await expect(replay).rejects.toThrow('fresh preparation failed');
+    else await expect(replay).resolves.toMatchObject({ sent: false, code: 'COPY_INVALID' });
+    expect(fallback).not.toHaveBeenCalled();
+  });
+
+  test('unknown ordinary entries use the default dispatcher, while required entries retry without it', async () => {
+    const fallback = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
+    await expect(dispatchDeferredReplay('unknown_deferred', {}, fallback))
+      .resolves.toMatchObject({ sent: true, deliveryOutcome: 'accepted' });
+    expect(fallback).toHaveBeenCalledTimes(1);
+
+    await expect(dispatchDeferredReplay('unknown_deferred', {
+      requires_registered_dispatch: true,
+    }, fallback)).resolves.toEqual({
+      sent: false,
+      blocked: true,
+      code: 'DEFERRED_DISPATCH_UNAVAILABLE',
+      retryable: true,
+      deliveryOutcome: 'not_sent',
+    });
+    expect(fallback).toHaveBeenCalledTimes(1);
+  });
 
   test.each([
     [{ status: 'failed', retry_count: 1 }, true],
@@ -201,9 +248,26 @@ describe('deferred-replay registry', () => {
     expect(payerBilled.eligible).toBe(false);
     expect(payerBilled.reason).toBe('payer-billed');
 
+    // A WITHDRAWN combined-visit invoice keeps payer_id NULL and a collectible
+    // status — the Bill-To move lives only in its stamp — so a reminder queued
+    // before that change must suppress too.
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null, scheduled_send_error: 'payer_billed:7:hold' }));
+    const withdrawn = await recheckDeferredReplay('invoice_send_deferred', { invoice_id: 'inv-1' });
+    expect(withdrawn.eligible).toBe(false);
+    expect(withdrawn.reason).toBe('payer-billed-withdrawn');
+
     db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null }));
     const selfPay = await recheckDeferredReplay('invoice_send_deferred', { invoice_id: 'inv-1' });
     expect(selfPay.eligible).toBe(true);
+  });
+
+  test('a queued follow-up text suppresses once its invoice is withdrawn to a payer', async () => {
+    // The sequence is paused by the withdrawal, but a text queued BEFORE the
+    // Bill-To change is already claimed — this recheck is what stops it.
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'overdue', payer_id: null, scheduled_send_error: 'payer_billed:7:hold' }));
+    const withdrawn = await recheckDeferredReplay('invoice_followup_deferred', { invoice_id: 'inv-1' });
+    expect(withdrawn.eligible).toBe(false);
+    expect(withdrawn.reason).toBe('payer-billed-withdrawn');
   });
 
   test('call-booking contact confirmation (r17): dead or past visits suppress the fan-out replay', async () => {

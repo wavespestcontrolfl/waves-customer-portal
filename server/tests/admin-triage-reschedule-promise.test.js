@@ -48,11 +48,13 @@ function makeFakeDb(seed = {}) {
     const eq = {};
     const whereInClauses = [];
     const whereNotInClauses = [];
+    const rawPredicates = [];
     const orPredicates = [];
     const applyEq = (a, b) => { if (a && typeof a === 'object') Object.assign(eq, a); else eq[a] = b; };
     const matches = (row) => Object.entries(eq).every(([k, v]) => row[k] === v)
       && whereInClauses.every(({ col, vals }) => vals.includes(row[col]))
       && whereNotInClauses.every(({ col, vals }) => !vals.includes(row[col]))
+      && rawPredicates.every((fn) => fn(row))
       && (orPredicates.length === 0 || orPredicates.some((fn) => fn(row)));
     const filtered = () => rows.filter(matches);
     const api = {
@@ -67,6 +69,11 @@ function makeFakeDb(seed = {}) {
       },
       whereIn(col, vals) { whereInClauses.push({ col, vals }); return api; },
       whereNotIn(col, vals) { whereNotInClauses.push({ col, vals }); return api; },
+      whereRaw(sql) {
+        if (sql !== "payload->'reschedule_proposal' IS NULL") throw new Error(`Unsupported test query: ${sql}`);
+        rawPredicates.push((row) => row.payload?.reschedule_proposal == null);
+        return api;
+      },
       whereNull(col) { eq[col] = null; return api; },
       forUpdate() { return api; },
       forShare() { return api; },

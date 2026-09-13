@@ -512,7 +512,7 @@ html[data-glass-theme] input::placeholder, html[data-glass-theme] textarea::plac
 html[data-glass-theme] [data-glass="card"], html[data-glass-theme] [data-glass=""] {
   background: linear-gradient(135deg, rgba(255, 255, 255, 0.3), rgba(255, 255, 255, 0.08)), rgba(244, 239, 224, 0.36) !important;
 }
-html[data-glass-theme] .sr-cell, html[data-glass-theme] .applied-product-card, html[data-glass-theme] .sr-shell .sr-grid-3, html[data-glass-theme] .waves-receipt-page [data-glass-clear] {
+html[data-glass-theme] .sr-cell, html[data-glass-theme] .applied-product-card, html[data-glass-theme] .sr-shell .sr-grid-3, html[data-glass-theme] .waves-print-root [data-glass-clear] {
   background: linear-gradient(135deg, rgba(255, 255, 255, 0.38), rgba(255, 255, 255, 0.15)), rgba(244, 239, 224, 0.36) !important;
   border: 1px solid rgba(255, 255, 255, 0.62) !important;
   border-radius: 10px !important;

@@ -6,8 +6,13 @@
 // tab. The Automations tab is wired separately via
 // EmailAutomationsPanelV2 — imported directly by NewsletterPage.
 
-import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { createPortal } from "react-dom";
+import React, {
+  useState,
+  useEffect,
+  useCallback,
+  useMemo,
+  useRef,
+} from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   AlertTriangle,
@@ -26,19 +31,32 @@ import {
   Wand2,
   XCircle,
 } from "lucide-react";
-import { Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter, Badge, Button, Card, cn } from "../../components/ui";
+import {
+  Dialog,
+  DialogHeader,
+  DialogTitle,
+  DialogBody,
+  DialogFooter,
+  ActionFeedback,
+  Badge,
+  Button,
+  Card,
+  cn,
+  Field,
+  Input,
+  Checkbox,
+  Select,
+  Textarea,
+  UiSurface,
+} from "../../components/ui";
 import { NEWSLETTER_UI_COPY } from "./newsletterUiCopy";
-
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
-const INPUT_CLS =
-  "w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900";
-const TEXTAREA_CLS = `${INPUT_CLS} font-mono leading-relaxed`;
+const INPUT_CLS = "w-full";
+const TEXTAREA_CLS = "w-full leading-relaxed";
 // Mirrors the server QUIZ_TOKEN_PATTERN (newsletter-quiz.js) — matches
 // {{quiz}}, {{quiz:id}}, {{quiz-text}}, {{quiz-text:id}}. Used to detect
 // whether the body already carries a quiz (one quiz per email).
 const QUIZ_TOKEN_RE = /\{\{quiz(?:-text)?(?::[a-z0-9-]+)?\}\}/i;
-const PANEL_CLS = "bg-white border-hairline border-zinc-200 rounded-sm";
-
 function formatEtDateTime(value) {
   if (!value) return "";
   return new Date(value).toLocaleString("en-US", {
@@ -51,7 +69,6 @@ function formatEtDateTime(value) {
     timeZoneName: "short",
   });
 }
-
 function parseSubscriberCsv(text) {
   const rows = [];
   let row = [];
@@ -61,13 +78,17 @@ function parseSubscriberCsv(text) {
   for (let i = 0; i < input.length; i += 1) {
     const ch = input[i];
     if (ch === '"') {
-      if (quoted && input[i + 1] === '"') { cell += '"'; i += 1; }
-      else quoted = !quoted;
+      if (quoted && input[i + 1] === '"') {
+        cell += '"';
+        i += 1;
+      } else quoted = !quoted;
     } else if (ch === "," && !quoted) {
-      row.push(cell); cell = "";
+      row.push(cell);
+      cell = "";
     } else if ((ch === "\n" || ch === "\r") && !quoted) {
       if (ch === "\r" && input[i + 1] === "\n") i += 1;
-      row.push(cell); cell = "";
+      row.push(cell);
+      cell = "";
       if (row.some((value) => value.trim())) rows.push(row);
       row = [];
     } else {
@@ -77,31 +98,76 @@ function parseSubscriberCsv(text) {
   row.push(cell);
   if (row.some((value) => value.trim())) rows.push(row);
   if (rows.length < 2) return [];
-  const headers = rows[0].map((value) => value.trim().toLowerCase().replace(/[^a-z0-9]/g, ""));
-  const indexOf = (...keys) => headers.findIndex((header) => keys.includes(header));
+  const headers = rows[0].map((value) =>
+    value
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, ""),
+  );
+  const indexOf = (...keys) =>
+    headers.findIndex((header) => keys.includes(header));
   const emailIndex = indexOf("email", "emailaddress");
   if (emailIndex < 0) throw new Error("CSV needs an email column");
   const firstIndex = indexOf("firstname", "first");
   const lastIndex = indexOf("lastname", "last");
-  return rows.slice(1).map((values) => ({
-    email: values[emailIndex]?.trim() || "",
-    firstName: firstIndex >= 0 ? values[firstIndex]?.trim() || "" : "",
-    lastName: lastIndex >= 0 ? values[lastIndex]?.trim() || "" : "",
-  })).filter((subscriber) => subscriber.email);
+  return rows
+    .slice(1)
+    .map((values) => ({
+      email: values[emailIndex]?.trim() || "",
+      firstName: firstIndex >= 0 ? values[firstIndex]?.trim() || "" : "",
+      lastName: lastIndex >= 0 ? values[lastIndex]?.trim() || "" : "",
+    }))
+    .filter((subscriber) => subscriber.email);
 }
 const SOURCE_SEGMENTS = [
-  { value: "footer", label: "Footer" },
-  { value: "newsletter_landing", label: "Landing" },
-  { value: "newsletter_archive", label: "Archive" },
-  { value: "portal_learn", label: "Portal Learn" },
-  { value: "quote_wizard", label: "Quote Wizard" },
-  { value: "quote_wizard_deferred", label: "Quote Deferred" },
-  { value: "public_form", label: "Public Form" },
-  { value: "admin_manual", label: "Manual" },
-  { value: "beehiiv_import", label: "Admin Import" },
-  { value: "beehiiv_migration", label: "Beehiiv Migration" },
-  { value: "beehiiv_migration_orphan", label: "Beehiiv Orphans" },
-  { value: "website", label: "Website Legacy" },
+  {
+    value: "footer",
+    label: "Footer",
+  },
+  {
+    value: "newsletter_landing",
+    label: "Landing",
+  },
+  {
+    value: "newsletter_archive",
+    label: "Archive",
+  },
+  {
+    value: "portal_learn",
+    label: "Portal Learn",
+  },
+  {
+    value: "quote_wizard",
+    label: "Quote Wizard",
+  },
+  {
+    value: "quote_wizard_deferred",
+    label: "Quote Deferred",
+  },
+  {
+    value: "public_form",
+    label: "Public Form",
+  },
+  {
+    value: "admin_manual",
+    label: "Manual",
+  },
+  {
+    value: "beehiiv_import",
+    label: "Admin Import",
+  },
+  {
+    value: "beehiiv_migration",
+    label: "Beehiiv Migration",
+  },
+  {
+    value: "beehiiv_migration_orphan",
+    label: "Beehiiv Orphans",
+  },
+  {
+    value: "website",
+    label: "Website Legacy",
+  },
 ];
 
 // Cross-sell service lines — must mirror SELLABLE_LINES in
@@ -109,43 +175,102 @@ const SOURCE_SEGMENTS = [
 // customer's active recurring lines from scheduled_services and resolves these
 // to a customer-id set). Labels are client-only display copy.
 const SERVICE_LINES = [
-  { value: "pest", label: "Pest" },
-  { value: "lawn", label: "Lawn" },
-  { value: "mosquito", label: "Mosquito" },
-  { value: "tree_shrub", label: "Tree & Shrub" },
-  { value: "termite", label: "Termite" },
-  { value: "rodent", label: "Rodent" },
+  {
+    value: "pest",
+    label: "Pest",
+  },
+  {
+    value: "lawn",
+    label: "Lawn",
+  },
+  {
+    value: "mosquito",
+    label: "Mosquito",
+  },
+  {
+    value: "tree_shrub",
+    label: "Tree & Shrub",
+  },
+  {
+    value: "termite",
+    label: "Termite",
+  },
+  {
+    value: "rodent",
+    label: "Rodent",
+  },
 ];
 
 // region_zone values stored on newsletter_subscribers (see segment preview).
 const REGION_ZONES = [
-  { value: "manatee", label: "Manatee" },
-  { value: "sarasota", label: "Sarasota" },
-  { value: "south_sarasota", label: "S. Sarasota" },
-  { value: "pinellas", label: "Pinellas" },
-  { value: "tampa", label: "Tampa" },
+  {
+    value: "manatee",
+    label: "Manatee",
+  },
+  {
+    value: "sarasota",
+    label: "Sarasota",
+  },
+  {
+    value: "south_sarasota",
+    label: "S. Sarasota",
+  },
+  {
+    value: "pinellas",
+    label: "Pinellas",
+  },
+  {
+    value: "tampa",
+    label: "Tampa",
+  },
 ];
 
 // Membership / line-count buckets → min/max_line_count on the server.
 const LINE_COUNT_OPTIONS = [
-  { key: "any", label: "Any" },
-  { key: "members", label: "Members (1+)" },
-  { key: "single", label: "Single-line" },
-  { key: "multi", label: "Multi-line (2+)" },
+  {
+    key: "any",
+    label: "Any",
+  },
+  {
+    key: "members",
+    label: "Members (1+)",
+  },
+  {
+    key: "single",
+    label: "Single-line",
+  },
+  {
+    key: "multi",
+    label: "Multi-line (2+)",
+  },
 ];
 
 // One-click cross-sell segments (the "Agora play" campaigns). Each sets the
 // service-line controls below; all imply customers-only.
 const CAMPAIGN_PRESETS = [
-  { label: "Pest → Lawn", has: ["pest"], missing: ["lawn"] },
-  { label: "Pest+Lawn → Mosquito", has: ["pest", "lawn"], missing: ["mosquito"] },
-  { label: "Single-line members", lineCount: "single" },
-  { label: "Members w/o mosquito", missing: ["mosquito"], lineCount: "members" },
+  {
+    label: "Pest → Lawn",
+    has: ["pest"],
+    missing: ["lawn"],
+  },
+  {
+    label: "Pest+Lawn → Mosquito",
+    has: ["pest", "lawn"],
+    missing: ["mosquito"],
+  },
+  {
+    label: "Single-line members",
+    lineCount: "single",
+  },
+  {
+    label: "Members w/o mosquito",
+    missing: ["mosquito"],
+    lineCount: "members",
+  },
 ];
-
 function FieldLabel({ children }) {
   return (
-    <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
+    <label className="block text-ui-body uppercase tracking-label text-ink-secondary mb-1">
       {children}
     </label>
   );
@@ -158,25 +283,21 @@ function ChipRow({ options, selected, onToggle }) {
       {options.map((o) => {
         const on = selected.includes(o.value);
         return (
-          <button
+          <Button
             key={o.value}
             type="button"
             onClick={() => onToggle(o.value)}
-            className={cn(
-              "h-7 px-2.5 text-11 rounded-full border-hairline u-focus-ring",
-              on
-                ? "bg-zinc-900 text-white border-zinc-900"
-                : "bg-white text-ink-secondary border-zinc-300 hover:border-zinc-900",
-            )}
+            className="gap-1.5 rounded-full"
+                    aria-pressed={on}
+                    variant={on ? "primary" : "secondary"}
           >
             {o.label}
-          </button>
+          </Button>
         );
       })}
     </div>
   );
 }
-
 function PanelHeader({ title, hint, action }) {
   return (
     <div className="flex items-start justify-between gap-3 p-4 border-b border-hairline border-zinc-200">
@@ -184,13 +305,14 @@ function PanelHeader({ title, hint, action }) {
       <div className="min-w-0">
         {" "}
         <h3 className="text-14 font-medium text-zinc-900">{title}</h3>
-        {hint && <p className="text-12 text-ink-tertiary mt-0.5">{hint}</p>}
+        {hint && (
+          <p className="text-ui-body text-ink-tertiary mt-0.5">{hint}</p>
+        )}
       </div>
       {action}
     </div>
   );
 }
-
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     headers: {
@@ -215,8 +337,10 @@ function adminFetch(path, options = {}) {
 // Drafts persist the {{greeting-name}} substitution token (resolved per
 // recipient at send time by SendGrid). Previews have no recipient — strip
 // it so the operator never sees the literal token.
-const stripGreetingToken = (s) => String(s || "").split("{{greeting-name}}").join("");
-
+const stripGreetingToken = (s) =>
+  String(s || "")
+    .split("{{greeting-name}}")
+    .join("");
 const TEMPLATES = [
   {
     key: "blank",
@@ -303,7 +427,6 @@ function buildEventPrompt(event) {
   );
   return lines.join("\n");
 }
-
 export function ComposeView({
   pendingEvent,
   onPendingEventConsumed,
@@ -499,14 +622,13 @@ export function ComposeView({
   // (pendingEvent) — those paths set their own template.
   useEffect(() => {
     if (!draftId && !pendingEvent && !selectedTemplate) {
-      const weekend = TEMPLATES.find((t) => t.key === 'weekend');
+      const weekend = TEMPLATES.find((t) => t.key === "weekend");
       if (weekend) {
         setHtmlBody(weekend.html);
-        setSelectedTemplate('weekend');
+        setSelectedTemplate("weekend");
       }
     }
   }, []);
-
   const segmentFilter = useMemo(() => {
     const f = {};
     if (segmentMode === "customers") f.customersOnly = true;
@@ -548,7 +670,9 @@ export function ComposeView({
   // audience — e.g. retargeting the sunset win-back's
   // { tags: ['reengagement_due'] } at every active subscriber.
   const segmentDirtyRef = useRef(false);
-  const markSegmentDirty = () => { segmentDirtyRef.current = true; };
+  const markSegmentDirty = () => {
+    segmentDirtyRef.current = true;
+  };
 
   // Reflect a loaded draft's stored segment_filter into the compose controls
   // so the audience the operator SEES (and anything a dirty save writes)
@@ -556,19 +680,29 @@ export function ComposeView({
   const applySegmentFromFilter = (f) => {
     const sf = f || {};
     setSegmentMode(
-      sf.customersOnly || sf.audience === "customers" ? "customers"
-        : sf.leadsOnly || sf.audience === "leads" ? "leads"
-          : Array.isArray(sf.sources) && sf.sources.length ? "custom" : "all",
+      sf.customersOnly || sf.audience === "customers"
+        ? "customers"
+        : sf.leadsOnly || sf.audience === "leads"
+          ? "leads"
+          : Array.isArray(sf.sources) && sf.sources.length
+            ? "custom"
+            : "all",
     );
     setSegmentSources(Array.isArray(sf.sources) ? sf.sources : []);
     setSegmentTags(Array.isArray(sf.tags) ? sf.tags : []);
     setSegmentHasLines(Array.isArray(sf.has_service) ? sf.has_service : []);
-    setSegmentMissingLines(Array.isArray(sf.missing_service) ? sf.missing_service : []);
+    setSegmentMissingLines(
+      Array.isArray(sf.missing_service) ? sf.missing_service : [],
+    );
     setSegmentRegions(Array.isArray(sf.region_zone) ? sf.region_zone : []);
     setSegmentLineCount(
-      sf.min_line_count === 1 && sf.max_line_count === 1 ? "single"
-        : sf.min_line_count === 2 ? "multi"
-          : sf.min_line_count === 1 ? "members" : "any",
+      sf.min_line_count === 1 && sf.max_line_count === 1
+        ? "single"
+        : sf.min_line_count === 2
+          ? "multi"
+          : sf.min_line_count === 1
+            ? "members"
+            : "any",
     );
   };
 
@@ -582,7 +716,6 @@ export function ComposeView({
     setSegmentLineCount(p.lineCount || "any");
     setSegmentRegions([]);
   };
-
   const clearServiceLineSegment = () => {
     markSegmentDirty();
     setSegmentHasLines([]);
@@ -590,13 +723,11 @@ export function ComposeView({
     setSegmentRegions([]);
     setSegmentLineCount("any");
   };
-
   const serviceLineActive =
     segmentHasLines.length > 0 ||
     segmentMissingLines.length > 0 ||
     segmentRegions.length > 0 ||
     segmentLineCount !== "any";
-
   const hydrateSavedSend = (saved, { autopilot = false } = {}) => {
     setDraftId(saved.id);
     setSubject(saved.subject || "");
@@ -610,27 +741,44 @@ export function ComposeView({
     setAutoShareSocial(saved.auto_share_social !== false);
     const eventIds = Array.isArray(saved.event_ids)
       ? saved.event_ids
-      : (() => { try { return JSON.parse(saved.event_ids || "[]"); } catch { return []; } })();
+      : (() => {
+          try {
+            return JSON.parse(saved.event_ids || "[]");
+          } catch {
+            return [];
+          }
+        })();
     setDraftEventIds(Array.isArray(eventIds) ? eventIds : []);
     setEventIdsDirty(false);
-
     const filter = saved.segment_filter || {};
-    setSegmentMode(filter.customersOnly
-      ? "customers"
-      : filter.leadsOnly
-        ? "leads"
-        : Array.isArray(filter.sources) && filter.sources.length
-          ? "custom"
-          : "all");
+    setSegmentMode(
+      filter.customersOnly
+        ? "customers"
+        : filter.leadsOnly
+          ? "leads"
+          : Array.isArray(filter.sources) && filter.sources.length
+            ? "custom"
+            : "all",
+    );
     setSegmentSources(Array.isArray(filter.sources) ? filter.sources : []);
     setSegmentTags(Array.isArray(filter.tags) ? filter.tags : []);
-    setSegmentHasLines(Array.isArray(filter.has_service) ? filter.has_service : []);
-    setSegmentMissingLines(Array.isArray(filter.missing_service) ? filter.missing_service : []);
-    setSegmentRegions(Array.isArray(filter.region_zone) ? filter.region_zone : []);
+    setSegmentHasLines(
+      Array.isArray(filter.has_service) ? filter.has_service : [],
+    );
+    setSegmentMissingLines(
+      Array.isArray(filter.missing_service) ? filter.missing_service : [],
+    );
+    setSegmentRegions(
+      Array.isArray(filter.region_zone) ? filter.region_zone : [],
+    );
     setSegmentLineCount(
-      Number(filter.min_line_count) >= 2 ? "multi"
-        : Number(filter.min_line_count) === 1 && Number(filter.max_line_count) === 1 ? "single"
-          : Number(filter.min_line_count) === 1 ? "members"
+      Number(filter.min_line_count) >= 2
+        ? "multi"
+        : Number(filter.min_line_count) === 1 &&
+            Number(filter.max_line_count) === 1
+          ? "single"
+          : Number(filter.min_line_count) === 1
+            ? "members"
             : "any",
     );
     // Legacy pre-registry drafts carry newsletter_type NULL. Only the
@@ -641,9 +789,14 @@ export function ComposeView({
     // (the server retype guard mirrors this). An UNLINKED null draft stays
     // untyped: forcing it to flagship would wrongly impose the event-id and
     // Tuesday-cadence gates on a non-flagship row.
-    const tplForType = saved.newsletter_type == null
-      ? ((saved.flagship || autopilot) ? TEMPLATES.find((t) => t.newsletterType === "local-weekly-fresh-events") : null)
-      : TEMPLATES.find((t) => t.newsletterType === saved.newsletter_type);
+    const tplForType =
+      saved.newsletter_type == null
+        ? saved.flagship || autopilot
+          ? TEMPLATES.find(
+              (t) => t.newsletterType === "local-weekly-fresh-events",
+            )
+          : null
+        : TEMPLATES.find((t) => t.newsletterType === saved.newsletter_type);
     if (saved.newsletter_type && !tplForType) {
       // A draft whose type has no template card (e.g. 'reengagement' from
       // the sunset job): keep ITS type authoritative so saving the draft
@@ -659,7 +812,6 @@ export function ComposeView({
     segmentDirtyRef.current = false;
     setAutopilotBanner(autopilot);
   };
-
   useEffect(() => {
     adminFetch("/admin/newsletter/subscribers?status=active&limit=1")
       .then((d) => setActiveCount(d.counts?.active || 0))
@@ -690,31 +842,44 @@ export function ComposeView({
     if (editDraftIdParam) {
       adminFetch(`/admin/newsletter/sends/${encodeURIComponent(editDraftIdParam)}`)
         .then((d) => {
-          if (!cancelled && d?.send && !userHasEdited.current) hydrateSavedSend(d.send);
+          if (!cancelled && d?.send && !userHasEdited.current)
+            hydrateSavedSend(d.send);
         })
-        .catch((e) => { if (!cancelled) setStatus(`Draft load failed: ${e.message}`); });
-      return () => { cancelled = true; };
+        .catch((e) => {
+          if (!cancelled) setStatus(`Draft load failed: ${e.message}`);
+        });
+      return () => {
+        cancelled = true;
+      };
     }
     // ?autopilotType= comes from autopilot/sunset notifications (e.g. the
     // monthly Pest Insider, or the newsletter-sunset win-back bell) so the
     // click lands on THAT lane's draft instead of the weekly default.
-    const laneParam = autopilotTypeParam === "pest-insider-monthly"
-      ? "?type=pest-insider-monthly"
-      : autopilotTypeParam === "reengagement"
-        ? "?type=reengagement"
-        : "";
+    const laneParam =
+      autopilotTypeParam === "pest-insider-monthly"
+        ? "?type=pest-insider-monthly"
+        : autopilotTypeParam === "reengagement"
+          ? "?type=reengagement"
+          : "";
     adminFetch(`/admin/newsletter/sends/latest-autopilot${laneParam}`)
       .then((d) => {
-        if (cancelled || pendingEventRef.current || userHasEdited.current) return;
+        if (cancelled || pendingEventRef.current || userHasEdited.current)
+          return;
         if (!d?.draft) return;
         // Centralized hydration (hydrateSavedSend) carries the sunset rule:
         // a template-less type (e.g. 'reengagement') stays authoritative via
         // loadedNewsletterType, and a null-typed autopilot draft defaults to
         // the weekly flagship template.
-        hydrateSavedSend(d.draft, { autopilot: true });
+        hydrateSavedSend(d.draft, {
+          autopilot: true,
+        });
       })
-      .catch(() => { /* no autopilot draft — nothing to do */ });
-    return () => { cancelled = true; };
+      .catch(() => {
+        /* no autopilot draft — nothing to do */
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Recalculate segment match count when the filter changes.
@@ -734,7 +899,6 @@ export function ComposeView({
       cancelled = true;
     };
   }, [segmentFilter]);
-
   const activeNewsletterType = (() => {
     // A loaded draft whose type has no template card (e.g. 'reengagement')
     // keeps its own type until the user explicitly picks a template.
@@ -743,7 +907,6 @@ export function ComposeView({
     const t = TEMPLATES.find((x) => x.key === key);
     return t?.newsletterType || null;
   })();
-
   const applyTemplate = (key) => {
     const t = TEMPLATES.find((x) => x.key === key);
     if (!t) return;
@@ -763,7 +926,6 @@ export function ComposeView({
     setDraftEventIds([]);
     setEventIdsDirty(true);
   };
-
   const saveDraft = async () => {
     setStatus("Saving...");
     try {
@@ -782,13 +944,19 @@ export function ComposeView({
       // touched the segment controls. The PATCH route preserves the stored
       // segment when the field is omitted, so an untouched edit of a loaded
       // draft keeps its saved audience (see segmentDirtyRef above).
-      if (!draftId || segmentDirtyRef.current) body.segmentFilter = segmentFilter;
+      if (!draftId || segmentDirtyRef.current)
+        body.segmentFilter = segmentFilter;
       // Send eventIds only when the event association changed this session
       // (dirty). Omitting them lets the server preserve the stored ids on an
       // ordinary edit or when editing a loaded draft; including them on a fresh
       // AI re-draft (even of an already-saved campaign) updates them in step
       // with the new body.
-      const saveBody = eventIdsDirty ? { ...body, eventIds: draftEventIds } : body;
+      const saveBody = eventIdsDirty
+        ? {
+            ...body,
+            eventIds: draftEventIds,
+          }
+        : body;
       if (draftId) {
         await adminFetch(`/admin/newsletter/sends/${draftId}`, {
           method: "PATCH",
@@ -812,7 +980,6 @@ export function ComposeView({
       return null;
     }
   };
-
   const openPreview = async () => {
     setPreviewOpen(true);
     setPreviewLoading(true);
@@ -831,7 +998,6 @@ export function ComposeView({
       setPreviewLoading(false);
     }
   };
-
   const sendTest = async () => {
     const savedId = await saveDraft();
     if (!savedId) return;
@@ -850,7 +1016,6 @@ export function ComposeView({
   // Open the typed-confirm modal. The actual fetch happens in confirmSend
   // once the operator types SEND and clicks the button.
   const [validationResult, setValidationResult] = useState(null);
-
   const sendNow = async () => {
     const savedId = await saveDraft();
     if (!savedId) return;
@@ -870,7 +1035,6 @@ export function ComposeView({
       setStatus("Validation check failed: " + e.message);
     }
   };
-
   const confirmSend = async () => {
     setSendConfirmOpen(false);
     const id = sendConfirmId || draftId;
@@ -899,7 +1063,6 @@ export function ComposeView({
       setStatus("Send failed: " + e.message);
     }
   };
-
   const schedule = async () => {
     if (!scheduleAt) {
       setStatus("Pick a date/time first.");
@@ -921,15 +1084,12 @@ export function ComposeView({
           body: JSON.stringify({ scheduledFor: when.toISOString() }),
         },
       );
-      setStatus(
-        `Scheduled for ${formatEtDateTime(res.send.scheduled_for)}.`,
-      );
+      setStatus(`Scheduled for ${formatEtDateTime(res.send.scheduled_for)}.`);
       resetForm();
     } catch (e) {
       setStatus("Schedule failed: " + e.message);
     }
   };
-
   const resetForm = () => {
     setDraftId(null);
     setSubject("");
@@ -954,7 +1114,6 @@ export function ComposeView({
     applySegmentFromFilter(null);
     segmentDirtyRef.current = false;
   };
-
   const handleAiDraft = async ({
     prompt,
     template,
@@ -980,7 +1139,8 @@ export function ComposeView({
       }),
     });
     const d = res.draft || {};
-    if (d.subject || d.selectedSubject) setSubject(d.subject || d.selectedSubject);
+    if (d.subject || d.selectedSubject)
+      setSubject(d.subject || d.selectedSubject);
     if (d.previewText) setPreviewText(d.previewText);
     if (d.htmlBody) setHtmlBody(d.htmlBody);
     if (d.textBody) setTextBody(d.textBody);
@@ -1003,685 +1163,786 @@ export function ComposeView({
     setAiInitialPrompt("");
     setStatus("AI draft inserted. Review before saving.");
   };
-
   const audienceLabel =
     segmentCount !== null && segmentFilter
       ? `${segmentCount} of ${activeCount ?? "?"} subscribers match segment`
       : activeCount !== null
         ? `${activeCount} active subscriber${activeCount === 1 ? "" : "s"}`
         : "Loading subscribers…";
-
   return (
-    <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_360px] gap-4">
-      {autopilotBanner && (
-        <div className="col-span-full flex items-center justify-between bg-amber-50 border border-amber-200 rounded-sm px-4 py-3 text-13 text-amber-900">
-          <span>
-            <strong>Autopilot draft</strong> — This draft was auto-generated by the weekly autopilot. Review and send when ready.
-          </span>
-          <button
-            onClick={() => setAutopilotBanner(false)}
-            className="ml-3 text-amber-600 hover:text-amber-800"
-            aria-label="Dismiss banner"
-          >
-            <XCircle size={16} strokeWidth={1.75} />
-          </button>
-        </div>
-      )}
-      {" "}
-      <div className={PANEL_CLS}>
-        {" "}
-        <PanelHeader
-          title="Campaign content"
-          hint="Write the message body, subject, preview text, and sender details."
-          action={
-            <div className="flex items-center gap-2">
-              {draftId && <Badge tone="neutral">Draft saved</Badge>}
-              {/* Off-template loaded drafts (e.g. the sunset win-back) are
+    <UiSurface density="comfortable" className="space-y-4">
+      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_360px] gap-4">
+        {autopilotBanner && (
+          <div className="col-span-full flex items-center justify-between bg-warn-bg border-hairline border-warn-fg/30 rounded-sm px-4 py-3 text-ui-body text-warn-fg">
+            <span>
+              <strong>Autopilot draft</strong> — This draft was auto-generated
+              by the weekly autopilot. Review and send when ready.
+            </span>
+            <Button
+              onClick={() => setAutopilotBanner(false)}
+              className="ml-3"
+              aria-label="Dismiss banner"
+              variant="secondary"
+            >
+              <XCircle size={16} strokeWidth={1.75} />
+            </Button>
+          </div>
+        )}{" "}
+        <Card>
+          {" "}
+          <PanelHeader
+            title="Campaign content"
+            hint="Write the message body, subject, preview text, and sender details."
+            action={
+              <div className="flex items-center gap-2">
+                {draftId && <Badge tone="neutral">Draft saved</Badge>}
+                {/* Off-template loaded drafts (e.g. the sunset win-back) are
                   house-written by type contract — /draft-ai also refuses them
                   server-side, so disable the affordance rather than surface
                   the 400. */}
+                <Button
+                  onClick={() => setAiOpen(true)}
+                  variant="secondary"
+                  disabled={!!loadedNewsletterType}
+                  title={
+                    loadedNewsletterType
+                      ? "This draft's type is house-written — AI drafting is disabled for it"
+                      : undefined
+                  }
+                >
+                  {" "}
+                  <Wand2
+                    size={14}
+                    strokeWidth={1.75}
+                    className="mr-2"
+                    aria-hidden
+                  />
+                  Draft With AI
+                </Button>{" "}
+              </div>
+            }
+          />{" "}
+          <div className="p-4 space-y-4">
+            {" "}
+            <div>
+              {" "}
+              <FieldLabel>Template</FieldLabel>{" "}
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Button
+                  type="button"
+                  onClick={() => applyTemplate("weekend")}
+                  className=""
+                  variant="secondary"
+                >
+                  {NEWSLETTER_UI_COPY.name}
+                </Button>
+                <Button
+                  type="button"
+                  onClick={() => applyTemplate("blank")}
+                  className=""
+                  variant="secondary"
+                >
+                  Start from scratch
+                </Button>
+              </div>{" "}
+            </div>{" "}
+            {activeNewsletterType === "local-weekly-fresh-events" && (
+              <DigestPlanner
+                onDraftFromPlan={async ({ eventIds, prompt }) => {
+                  try {
+                    setStatus("Drafting from plan…");
+                    await handleAiDraft({
+                      prompt,
+                      template: "weekend",
+                      audience: "Waves subscribers — North Port to Tampa",
+                      tone: "Neighborly, FOMO-driven, local friend energy",
+                      includeCTA: true,
+                      eventIds,
+                    });
+                  } catch (e) {
+                    setStatus("Draft failed: " + e.message);
+                  }
+                }}
+              />
+            )}
+            <div>
+              {" "}
+              <FieldLabel>
+                Subject{" "}
+                {abEnabled && (
+                  <span className="text-ink-tertiary normal-case">(A)</span>
+                )}
+              </FieldLabel>{" "}
+              <Input
+                type="text"
+                value={subject}
+                onChange={(e) => {
+                  userHasEdited.current = true;
+                  setSubject(e.target.value);
+                }}
+                className={INPUT_CLS}
+                placeholder="e.g. Florida spring pest alert — what to watch for"
+                aria-label="Newsletter subject"
+              />{" "}
+              <label className="mt-2 inline-flex items-center gap-2 text-ui-body text-ink-secondary">
+                {" "}
+                <Checkbox
+                  checked={abEnabled}
+                  onChange={(e) => setAbEnabled(e.target.checked)}
+                  className="shrink-0"
+                />
+                A/B test a second subject (random 50/50 split)
+              </label>{" "}
+            </div>
+            {abEnabled && (
+              <div>
+                {" "}
+                <FieldLabel>Subject (B)</FieldLabel>{" "}
+                <Input
+                  type="text"
+                  value={subjectB}
+                  onChange={(e) => setSubjectB(e.target.value)}
+                  className={INPUT_CLS}
+                  placeholder="Alternative subject line"
+                  aria-label="Alternative subject line"
+                />{" "}
+              </div>
+            )}
+            <div>
+              {" "}
+              <FieldLabel>Preview text</FieldLabel>{" "}
+              <Input
+                type="text"
+                value={previewText}
+                onChange={(e) => {
+                  userHasEdited.current = true;
+                  setPreviewText(e.target.value);
+                }}
+                className={INPUT_CLS}
+                placeholder="One-line preview that renders after the subject in Gmail/Apple Mail."
+                aria-label="One-line preview that renders after the subject in Gmail/Apple Mail."
+              />{" "}
+            </div>{" "}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {" "}
+              <div>
+                {" "}
+                <FieldLabel>From name</FieldLabel>{" "}
+                <Input
+                  type="text"
+                  value={fromName}
+                  onChange={(e) => setFromName(e.target.value)}
+                  className={INPUT_CLS}
+                />{" "}
+              </div>{" "}
+              <div>
+                {" "}
+                <FieldLabel>From email</FieldLabel>{" "}
+                <Input
+                  type="text"
+                  value={fromEmail}
+                  onChange={(e) => setFromEmail(e.target.value)}
+                  className={`${INPUT_CLS} u-nums`}
+                />{" "}
+              </div>{" "}
+            </div>{" "}
+            <div>
+              {" "}
+              <div className="flex items-center justify-between gap-2 mb-1 flex-wrap">
+                <FieldLabel>HTML body</FieldLabel>{" "}
+                <div className="flex items-center gap-1.5">
+                  <Button
+                    type="button"
+                    onClick={() => setShowImageInsert((v) => !v)}
+                    className=""
+                    title="Insert a responsive image at the cursor."
+                    variant="secondary"
+                    aria-label="Insert a responsive image at the cursor."
+                  >
+                    Insert image
+                  </Button>
+                  <Select
+                    value={selectedQuizId}
+                    onChange={(e) => setSelectedQuizId(e.target.value)}
+                    disabled={
+                      QUIZ_TOKEN_RE.test(htmlBody) || quizOptions.length === 0
+                    }
+                    className=""
+                    title="Choose which quiz to insert"
+                    aria-label="Choose which quiz to insert"
+                  >
+                    {quizOptions.map((q) => (
+                      <option key={q.id} value={q.id}>
+                        {q.label}
+                      </option>
+                    ))}
+                  </Select>
+                  <Button
+                    type="button"
+                    onClick={insertQuizBlock}
+                    disabled={
+                      QUIZ_TOKEN_RE.test(htmlBody) || quizOptions.length === 0
+                    }
+                    className=""
+                    title="Insert a tap-to-answer quiz. Each recipient's answer tags them by interest for segmentation."
+                    variant="secondary"
+                    aria-label="Insert a tap-to-answer quiz. Each recipient's answer tags them by interest for segmentation."
+                  >
+                    {QUIZ_TOKEN_RE.test(htmlBody)
+                      ? "Quiz added"
+                      : "Insert quiz"}
+                  </Button>
+                </div>
+              </div>
+              {showImageInsert && (
+                <div className="flex items-end gap-2 mb-2 p-2 border-hairline border-zinc-200 rounded-sm bg-zinc-50 flex-wrap">
+                  <div className="flex-1 min-w-[180px]">
+                    <FieldLabel>Image URL</FieldLabel>
+                    <Input
+                      type="url"
+                      value={imageUrl}
+                      onChange={(e) => setImageUrl(e.target.value)}
+                      className={`${INPUT_CLS} u-nums`}
+                      placeholder="https://…/image.jpg"
+                      aria-label="https://…/image.jpg"
+                    />
+                  </div>
+                  <div className="flex-1 min-w-[140px]">
+                    <FieldLabel>Alt text</FieldLabel>
+                    <Input
+                      type="text"
+                      value={imageAlt}
+                      onChange={(e) => setImageAlt(e.target.value)}
+                      className={INPUT_CLS}
+                      placeholder="Describe the image"
+                      aria-label="Describe the image"
+                    />
+                  </div>
+                  <Button
+                    type="button"
+                    onClick={insertImage}
+                    disabled={!imageUrl.trim()}
+                    className=""
+                    variant="secondary"
+                  >
+                    Insert
+                  </Button>
+                </div>
+              )}
+              <Textarea
+                ref={htmlBodyRef}
+                value={htmlBody}
+                onChange={(e) => {
+                  userHasEdited.current = true;
+                  setHtmlBody(e.target.value);
+                }}
+                rows={16}
+                className={TEXTAREA_CLS}
+                placeholder="<h1>Subject line</h1><p>Your newsletter content here. The unsubscribe footer is appended automatically.</p>"
+                aria-label="<h1>Subject line</h1><p>Your newsletter content here. The unsubscribe footer is appended automatically.</p>"
+              />{" "}
+              <p className="text-ui-body text-ink-tertiary mt-1">
+                The unsubscribe footer + List-Unsubscribe header are added
+                automatically — do not include your own.{" "}
+                {QUIZ_TOKEN_RE.test(htmlBody) && (
+                  <span className="text-ink-secondary">
+                    The quiz token renders per-recipient tap-to-answer buttons
+                    that tag the subscriber by interest.
+                  </span>
+                )}
+              </p>{" "}
+            </div>{" "}
+            <div>
+              {" "}
+              <FieldLabel>
+                Plain-text fallback{" "}
+                <span className="text-ink-tertiary normal-case">
+                  (optional — improves deliverability)
+                </span>{" "}
+              </FieldLabel>{" "}
+              <Textarea
+                value={textBody}
+                onChange={(e) => {
+                  userHasEdited.current = true;
+                  setTextBody(e.target.value);
+                }}
+                rows={5}
+                className={INPUT_CLS}
+                placeholder="Same content in plain text for mail clients that don't render HTML."
+                aria-label="Same content in plain text for mail clients that don't render HTML."
+              />{" "}
+            </div>{" "}
+          </div>{" "}
+        </Card>{" "}
+        <aside className="space-y-4">
+          {" "}
+          <Card>
+            {" "}
+            <PanelHeader title="Audience" hint={audienceLabel} />{" "}
+            <div className="p-4 space-y-3">
+              {" "}
+              <div className="flex flex-wrap gap-1.5">
+                {[
+                  {
+                    key: "all",
+                    label: "All active",
+                  },
+                  {
+                    key: "customers",
+                    label: "Customers only",
+                  },
+                  {
+                    key: "leads",
+                    label: "Non-customers only",
+                  },
+                  {
+                    key: "custom",
+                    label: "By source…",
+                  },
+                ].map((o) => (
+                  <Button
+                    key={o.key}
+                    type="button"
+                    onClick={() => {
+                      markSegmentDirty();
+                      setSegmentMode(o.key);
+                    }}
+                    className="rounded-sm"
+                    aria-pressed={segmentMode === o.key}
+                    variant={segmentMode === o.key ? "primary" : "secondary"}
+                  >
+                    {o.label}
+                  </Button>
+                ))}
+              </div>
+              {segmentMode === "custom" && (
+                <div className="flex flex-wrap gap-1.5">
+                  {SOURCE_SEGMENTS.map((src) => {
+                    const on = segmentSources.includes(src.value);
+                    return (
+                      <Button
+                        key={src.value}
+                        type="button"
+                        onClick={() => {
+                          markSegmentDirty();
+                          setSegmentSources((cur) =>
+                            on
+                              ? cur.filter((x) => x !== src.value)
+                              : [...cur, src.value],
+                          );
+                        }}
+                        className="gap-1.5 rounded-full"
+                    aria-pressed={on}
+                    variant={on ? "primary" : "secondary"}
+                      >
+                        {src.label}
+                      </Button>
+                    );
+                  })}
+                </div>
+              )}
+              <div className="mt-3">
+                {" "}
+                <FieldLabel>
+                  Tags{" "}
+                  <span className="normal-case tracking-normal text-ink-tertiary">
+                    (optional, additive)
+                  </span>{" "}
+                </FieldLabel>{" "}
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {segmentTags.map((t) => (
+                    <Button
+                      key={t}
+                      type="button"
+                      onClick={() => {
+                        markSegmentDirty();
+                        setSegmentTags((cur) => cur.filter((x) => x !== t));
+                      }}
+                      className=""
+                      title="Click to remove"
+                      variant="secondary"
+                      aria-label="Click to remove"
+                    >
+                      {t} ×
+                    </Button>
+                  ))}
+                  <Input
+                    type="text"
+                    value={tagDraft}
+                    onChange={(e) => setTagDraft(e.target.value)}
+                    list="newsletter-tag-suggestions"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === ",") {
+                        e.preventDefault();
+                        const v = tagDraft.trim().toLowerCase();
+                        if (v && !segmentTags.includes(v)) {
+                          markSegmentDirty();
+                          setSegmentTags((cur) => [...cur, v]);
+                        }
+                        setTagDraft("");
+                      } else if (
+                        e.key === "Backspace" &&
+                        !tagDraft &&
+                        segmentTags.length
+                      ) {
+                        markSegmentDirty();
+                        setSegmentTags((cur) => cur.slice(0, -1));
+                      }
+                    }}
+                    placeholder={
+                      segmentTags.length
+                        ? "add another…"
+                        : "e.g. platinum-tier, hurricane-prep"
+                    }
+                    className="flex-1 min-w-[160px]"
+                    aria-label={
+                      segmentTags.length
+                        ? "add another…"
+                        : "e.g. platinum-tier, hurricane-prep"
+                    }
+                  />{" "}
+                  <datalist id="newsletter-tag-suggestions">
+                    {tagSuggestions
+                      .filter((t) => !segmentTags.includes(t))
+                      .map((t) => (
+                        <option key={t} value={t} />
+                      ))}
+                  </datalist>{" "}
+                </div>{" "}
+                <div className="text-ui-body text-ink-tertiary mt-1">
+                  Press Enter or comma to add. Matches subscribers tagged with
+                  ANY of the listed tags.
+                </div>{" "}
+              </div>{" "}
+              {/* Service-line cross-sell — the "Agora play". Resolves server-side
+                to the customers who hold / lack the selected recurring lines. */}
+              <div className="mt-3 pt-3 border-t border-hairline border-zinc-200">
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <FieldLabel>
+                    Service line{" "}
+                    <span className="normal-case tracking-normal text-ink-tertiary">
+                      (cross-sell, customers)
+                    </span>
+                  </FieldLabel>
+                  {serviceLineActive && (
+                    <Button
+                      type="button"
+                      onClick={clearServiceLineSegment}
+                      className=""
+                      variant="secondary"
+                    >
+                      Reset
+                    </Button>
+                  )}
+                </div>
+                <div className="flex flex-wrap gap-1.5 mb-3">
+                  {CAMPAIGN_PRESETS.map((p) => (
+                    <Button
+                      key={p.label}
+                      type="button"
+                      onClick={() => applyCampaignPreset(p)}
+                      className=""
+                      title="One-click cross-sell segment"
+                      variant="secondary"
+                    >
+                      {p.label}
+                    </Button>
+                  ))}
+                </div>
+                <div className="text-ui-body text-ink-secondary mb-1">
+                  Has all of
+                </div>
+                <ChipRow
+                  options={SERVICE_LINES}
+                  selected={segmentHasLines}
+                  onToggle={(v) => {
+                    markSegmentDirty();
+                    setSegmentHasLines((cur) =>
+                      cur.includes(v)
+                        ? cur.filter((x) => x !== v)
+                        : [...cur, v],
+                    );
+                  }}
+                />
+                <div className="text-ui-body text-ink-secondary mt-2 mb-1">
+                  Missing all of
+                </div>
+                <ChipRow
+                  options={SERVICE_LINES}
+                  selected={segmentMissingLines}
+                  onToggle={(v) => {
+                    markSegmentDirty();
+                    setSegmentMissingLines((cur) =>
+                      cur.includes(v)
+                        ? cur.filter((x) => x !== v)
+                        : [...cur, v],
+                    );
+                  }}
+                />
+                <div className="text-ui-body text-ink-secondary mt-3 mb-1">
+                  Membership
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {LINE_COUNT_OPTIONS.map((o) => (
+                    <Button
+                      key={o.key}
+                      type="button"
+                      onClick={() => {
+                        markSegmentDirty();
+                        setSegmentLineCount(o.key);
+                      }}
+                      className="rounded-sm"
+                    aria-pressed={segmentLineCount === o.key}
+                    variant={segmentLineCount === o.key ? "primary" : "secondary"}
+                    >
+                      {o.label}
+                    </Button>
+                  ))}
+                </div>
+                <div className="text-ui-body text-ink-secondary mt-3 mb-1">
+                  Region
+                </div>
+                <ChipRow
+                  options={REGION_ZONES}
+                  selected={segmentRegions}
+                  onToggle={(v) => {
+                    markSegmentDirty();
+                    setSegmentRegions((cur) =>
+                      cur.includes(v)
+                        ? cur.filter((x) => x !== v)
+                        : [...cur, v],
+                    );
+                  }}
+                />
+                <div className="text-ui-body text-ink-tertiary mt-2">
+                  Lines come from each customer&rsquo;s active recurring
+                  services. A customer must hold ALL of &ldquo;Has&rdquo;, none
+                  of &ldquo;Missing&rdquo;.
+                </div>
+              </div>{" "}
+            </div>{" "}
+          </Card>{" "}
+          <Card>
+            {" "}
+            <PanelHeader
+              title="Review + Send"
+              hint="Save before test sends, live sends, or scheduling."
+            />{" "}
+            <div className="p-4 space-y-3">
+              {" "}
               <Button
-                onClick={() => setAiOpen(true)}
+                onClick={saveDraft}
                 variant="secondary"
-                disabled={!!loadedNewsletterType}
-                title={loadedNewsletterType ? "This draft's type is house-written — AI drafting is disabled for it" : undefined}
+                disabled={!subject}
+                className="w-full"
               >
                 {" "}
-                <Wand2
+                <Save
                   size={14}
                   strokeWidth={1.75}
                   className="mr-2"
                   aria-hidden
                 />
-                Draft With AI
+                {draftId ? "Update draft" : "Save draft"}
               </Button>{" "}
-            </div>
-          }
-        />{" "}
-        <div className="p-4 space-y-4">
-          {" "}
-          <div>
-            {" "}
-            <FieldLabel>Template</FieldLabel>{" "}
-            <div className="flex flex-wrap items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() => applyTemplate('weekend')}
-                className="h-8 px-3 text-12 font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50 u-focus-ring"
+              <Button
+                onClick={openPreview}
+                variant="secondary"
+                disabled={!htmlBody}
+                className="w-full"
               >
-                {NEWSLETTER_UI_COPY.name}
-              </button>
-              <button type="button" onClick={() => applyTemplate('blank')} className="text-11 text-ink-tertiary hover:text-ink-secondary underline">Start from scratch</button>
-            </div>{" "}
-          </div>{" "}
-          {activeNewsletterType === "local-weekly-fresh-events" && (
-            <DigestPlanner
-              onDraftFromPlan={async ({ eventIds, prompt }) => {
-                try {
-                  setStatus("Drafting from plan…");
-                  await handleAiDraft({
-                    prompt,
-                    template: "weekend",
-                    audience: "Waves subscribers — North Port to Tampa",
-                    tone: "Neighborly, FOMO-driven, local friend energy",
-                    includeCTA: true,
-                    eventIds,
-                  });
-                } catch (e) {
-                  setStatus("Draft failed: " + e.message);
-                }
-              }}
-            />
-          )}
-          <div>
-            {" "}
-            <FieldLabel>
-              Subject{" "}
-              {abEnabled && (
-                <span className="text-ink-tertiary normal-case">(A)</span>
-              )}
-            </FieldLabel>{" "}
-            <input
-              type="text"
-              value={subject}
-              onChange={(e) => { userHasEdited.current = true; setSubject(e.target.value); }}
-              className={INPUT_CLS}
-              placeholder="e.g. Florida spring pest alert — what to watch for"
-            />{" "}
-            <label className="mt-2 inline-flex items-center gap-2 text-12 text-ink-secondary">
-              {" "}
-              <input
-                type="checkbox"
-                checked={abEnabled}
-                onChange={(e) => setAbEnabled(e.target.checked)}
-              />
-              A/B test a second subject (random 50/50 split)
-            </label>{" "}
-          </div>
-          {abEnabled && (
-            <div>
-              {" "}
-              <FieldLabel>Subject (B)</FieldLabel>{" "}
-              <input
-                type="text"
-                value={subjectB}
-                onChange={(e) => setSubjectB(e.target.value)}
-                className={INPUT_CLS}
-                placeholder="Alternative subject line"
-              />{" "}
-            </div>
-          )}
-          <div>
-            {" "}
-            <FieldLabel>Preview text</FieldLabel>{" "}
-            <input
-              type="text"
-              value={previewText}
-              onChange={(e) => { userHasEdited.current = true; setPreviewText(e.target.value); }}
-              className={INPUT_CLS}
-              placeholder="One-line preview that renders after the subject in Gmail/Apple Mail."
-            />{" "}
-          </div>{" "}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            {" "}
-            <div>
-              {" "}
-              <FieldLabel>From name</FieldLabel>{" "}
-              <input
-                type="text"
-                value={fromName}
-                onChange={(e) => setFromName(e.target.value)}
-                className={INPUT_CLS}
-              />{" "}
-            </div>{" "}
-            <div>
-              {" "}
-              <FieldLabel>From email</FieldLabel>{" "}
-              <input
-                type="text"
-                value={fromEmail}
-                onChange={(e) => setFromEmail(e.target.value)}
-                className={`${INPUT_CLS} font-mono`}
-              />{" "}
-            </div>{" "}
-          </div>{" "}
-          <div>
-            {" "}
-            <div className="flex items-center justify-between gap-2 mb-1 flex-wrap">
-              <FieldLabel>HTML body</FieldLabel>{" "}
-              <div className="flex items-center gap-1.5">
-                <button
-                  type="button"
-                  onClick={() => setShowImageInsert((v) => !v)}
-                  className="h-7 px-2.5 text-11 font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50 u-focus-ring"
-                  title="Insert a responsive image at the cursor."
-                >
-                  Insert image
-                </button>
-                <select
-                  value={selectedQuizId}
-                  onChange={(e) => setSelectedQuizId(e.target.value)}
-                  disabled={QUIZ_TOKEN_RE.test(htmlBody) || quizOptions.length === 0}
-                  className="h-7 px-2 text-11 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-700 disabled:opacity-40 u-focus-ring"
-                  title="Choose which quiz to insert"
-                >
-                  {quizOptions.map((q) => (
-                    <option key={q.id} value={q.id}>{q.label}</option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  onClick={insertQuizBlock}
-                  disabled={QUIZ_TOKEN_RE.test(htmlBody) || quizOptions.length === 0}
-                  className="h-7 px-2.5 text-11 font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50 disabled:opacity-40 disabled:cursor-not-allowed u-focus-ring"
-                  title="Insert a tap-to-answer quiz. Each recipient's answer tags them by interest for segmentation."
-                >
-                  {QUIZ_TOKEN_RE.test(htmlBody) ? "Quiz added" : "Insert quiz"}
-                </button>
-              </div>
-            </div>
-            {showImageInsert && (
-              <div className="flex items-end gap-2 mb-2 p-2 border-hairline border-zinc-200 rounded-sm bg-zinc-50 flex-wrap">
-                <div className="flex-1 min-w-[180px]">
-                  <FieldLabel>Image URL</FieldLabel>
-                  <input
-                    type="url"
-                    value={imageUrl}
-                    onChange={(e) => setImageUrl(e.target.value)}
-                    className={`${INPUT_CLS} font-mono`}
-                    placeholder="https://…/image.jpg"
-                  />
-                </div>
-                <div className="flex-1 min-w-[140px]">
-                  <FieldLabel>Alt text</FieldLabel>
-                  <input
-                    type="text"
-                    value={imageAlt}
-                    onChange={(e) => setImageAlt(e.target.value)}
-                    className={INPUT_CLS}
-                    placeholder="Describe the image"
-                  />
-                </div>
-                <button
-                  type="button"
-                  onClick={insertImage}
-                  disabled={!imageUrl.trim()}
-                  className="h-9 px-3 text-12 font-medium rounded-sm bg-zinc-900 text-white hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed u-focus-ring"
-                >
-                  Insert
-                </button>
-              </div>
-            )}
-            <textarea
-              ref={htmlBodyRef}
-              value={htmlBody}
-              onChange={(e) => { userHasEdited.current = true; setHtmlBody(e.target.value); }}
-              rows={16}
-              className={TEXTAREA_CLS}
-              placeholder="<h1>Subject line</h1><p>Your newsletter content here. The unsubscribe footer is appended automatically.</p>"
-            />{" "}
-            <p className="text-11 text-ink-tertiary mt-1">
-              The unsubscribe footer + List-Unsubscribe header are added
-              automatically — do not include your own.{" "}
-              {QUIZ_TOKEN_RE.test(htmlBody) && (
-                <span className="text-ink-secondary">
-                  The quiz token renders per-recipient tap-to-answer buttons that
-                  tag the subscriber by interest.
-                </span>
-              )}
-            </p>{" "}
-          </div>{" "}
-          <div>
-            {" "}
-            <FieldLabel>
-              Plain-text fallback{" "}
-              <span className="text-ink-tertiary normal-case">
-                (optional — improves deliverability)
-              </span>{" "}
-            </FieldLabel>{" "}
-            <textarea
-              value={textBody}
-              onChange={(e) => { userHasEdited.current = true; setTextBody(e.target.value); }}
-              rows={5}
-              className={INPUT_CLS}
-              placeholder="Same content in plain text for mail clients that don't render HTML."
-            />{" "}
-          </div>{" "}
-        </div>{" "}
-      </div>{" "}
-      <aside className="space-y-4">
-        {" "}
-        <div className={PANEL_CLS}>
-          {" "}
-          <PanelHeader title="Audience" hint={audienceLabel} />{" "}
-          <div className="p-4 space-y-3">
-            {" "}
-            <div className="flex flex-wrap gap-1.5">
-              {[
-                { key: "all", label: "All active" },
-                { key: "customers", label: "Customers only" },
-                { key: "leads", label: "Non-customers only" },
-                { key: "custom", label: "By source…" },
-              ].map((o) => (
-                <button
-                  key={o.key}
-                  type="button"
-                  onClick={() => { markSegmentDirty(); setSegmentMode(o.key); }}
-                  className={cn(
-                    "h-8 px-3 text-12 font-medium rounded-sm border-hairline u-focus-ring",
-                    segmentMode === o.key
-                      ? "bg-zinc-900 text-white border-zinc-900"
-                      : "bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50",
-                  )}
-                >
-                  {o.label}
-                </button>
-              ))}
-            </div>
-            {segmentMode === "custom" && (
-              <div className="flex flex-wrap gap-1.5">
-                {SOURCE_SEGMENTS.map((src) => {
-                  const on = segmentSources.includes(src.value);
-                  return (
-                    <button
-                      key={src.value}
-                      type="button"
-                      onClick={() => {
-                        markSegmentDirty();
-                        setSegmentSources((cur) =>
-                          on
-                            ? cur.filter((x) => x !== src.value)
-                            : [...cur, src.value],
-                        );
-                      }}
-                      className={cn(
-                        "h-7 px-2.5 text-11 rounded-full border-hairline u-focus-ring",
-                        on
-                          ? "bg-zinc-900 text-white border-zinc-900"
-                          : "bg-white text-ink-secondary border-zinc-300 hover:border-zinc-900",
-                      )}
-                    >
-                      {src.label}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-            <div className="mt-3">
-              {" "}
-              <FieldLabel>
-                Tags{" "}
-                <span className="normal-case tracking-normal text-ink-tertiary">
-                  (optional, additive)
-                </span>{" "}
-              </FieldLabel>{" "}
-              <div className="flex flex-wrap items-center gap-1.5">
-                {segmentTags.map((t) => (
-                  <button
-                    key={t}
-                    type="button"
-                    onClick={() => {
-                      markSegmentDirty();
-                      setSegmentTags((cur) => cur.filter((x) => x !== t));
-                    }}
-                    className="h-7 px-2.5 text-11 rounded-full bg-zinc-900 text-white border-hairline border-zinc-900 u-focus-ring"
-                    title="Click to remove"
-                  >
-                    {t} ×
-                  </button>
-                ))}
-                <input
+                {" "}
+                <Eye
+                  size={14}
+                  strokeWidth={1.75}
+                  className="mr-2"
+                  aria-hidden
+                />
+                Preview
+              </Button>{" "}
+              <div>
+                {" "}
+                <FieldLabel>Test recipient</FieldLabel>{" "}
+                <Input
                   type="text"
-                  value={tagDraft}
-                  onChange={(e) => setTagDraft(e.target.value)}
-                  list="newsletter-tag-suggestions"
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === ",") {
-                      e.preventDefault();
-                      const v = tagDraft.trim().toLowerCase();
-                      if (v && !segmentTags.includes(v)) {
-                        markSegmentDirty();
-                        setSegmentTags((cur) => [...cur, v]);
-                      }
-                      setTagDraft("");
-                    } else if (
-                      e.key === "Backspace" &&
-                      !tagDraft &&
-                      segmentTags.length
-                    ) {
-                      markSegmentDirty();
-                      setSegmentTags((cur) => cur.slice(0, -1));
-                    }
-                  }}
-                  placeholder={
-                    segmentTags.length
-                      ? "add another…"
-                      : "e.g. platinum-tier, hurricane-prep"
-                  }
-                  className="h-7 flex-1 min-w-[160px] bg-white border-hairline border-zinc-300 rounded-full px-3 text-11 text-zinc-900 placeholder:text-ink-tertiary focus:outline-none focus:border-zinc-900"
+                  value={testEmail}
+                  onChange={(e) => setTestEmail(e.target.value)}
+                  className={`${INPUT_CLS} u-nums`}
+                  placeholder="test@wavespestcontrol.com"
+                  aria-label="test@wavespestcontrol.com"
                 />{" "}
-                <datalist id="newsletter-tag-suggestions">
-                  {tagSuggestions
-                    .filter((t) => !segmentTags.includes(t))
-                    .map((t) => (
-                      <option key={t} value={t} />
-                    ))}
-                </datalist>{" "}
               </div>{" "}
-              <div className="text-11 text-ink-tertiary mt-1">
-                Press Enter or comma to add. Matches subscribers tagged with ANY
-                of the listed tags.
-              </div>{" "}
-            </div>{" "}
-            {/* Service-line cross-sell — the "Agora play". Resolves server-side
-                to the customers who hold / lack the selected recurring lines. */}
-            <div className="mt-3 pt-3 border-t border-hairline border-zinc-200">
-              <div className="flex items-center justify-between gap-2 mb-2">
-                <FieldLabel>
-                  Service line{" "}
-                  <span className="normal-case tracking-normal text-ink-tertiary">
-                    (cross-sell, customers)
-                  </span>
-                </FieldLabel>
-                {serviceLineActive && (
-                  <button
-                    type="button"
-                    onClick={clearServiceLineSegment}
-                    className="text-11 text-ink-tertiary hover:text-zinc-900 u-focus-ring"
-                  >
-                    Reset
-                  </button>
-                )}
-              </div>
-              <div className="flex flex-wrap gap-1.5 mb-3">
-                {CAMPAIGN_PRESETS.map((p) => (
-                  <button
-                    key={p.label}
-                    type="button"
-                    onClick={() => applyCampaignPreset(p)}
-                    className="h-7 px-2.5 text-11 rounded-full border-hairline border-dashed border-zinc-300 text-ink-secondary hover:border-zinc-900 hover:text-zinc-900 u-focus-ring"
-                    title="One-click cross-sell segment"
-                  >
-                    {p.label}
-                  </button>
-                ))}
-              </div>
-              <div className="text-11 text-ink-secondary mb-1">Has all of</div>
-              <ChipRow
-                options={SERVICE_LINES}
-                selected={segmentHasLines}
-                onToggle={(v) => {
-                  markSegmentDirty();
-                  setSegmentHasLines((cur) =>
-                    cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v],
-                  );
-                }}
-              />
-              <div className="text-11 text-ink-secondary mt-2 mb-1">
-                Missing all of
-              </div>
-              <ChipRow
-                options={SERVICE_LINES}
-                selected={segmentMissingLines}
-                onToggle={(v) => {
-                  markSegmentDirty();
-                  setSegmentMissingLines((cur) =>
-                    cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v],
-                  );
-                }}
-              />
-              <div className="text-11 text-ink-secondary mt-3 mb-1">
-                Membership
-              </div>
-              <div className="flex flex-wrap gap-1.5">
-                {LINE_COUNT_OPTIONS.map((o) => (
-                  <button
-                    key={o.key}
-                    type="button"
-                    onClick={() => { markSegmentDirty(); setSegmentLineCount(o.key); }}
-                    className={cn(
-                      "h-7 px-2.5 text-11 rounded-sm border-hairline u-focus-ring",
-                      segmentLineCount === o.key
-                        ? "bg-zinc-900 text-white border-zinc-900"
-                        : "bg-white text-ink-secondary border-zinc-300 hover:border-zinc-900",
+              <Button
+                onClick={sendTest}
+                variant="secondary"
+                disabled={!testEmail}
+                className="w-full"
+              >
+                {" "}
+                <MailCheck
+                  size={14}
+                  strokeWidth={1.75}
+                  className="mr-2"
+                  aria-hidden
+                />
+                Send Test
+              </Button>{" "}
+              <Button
+                onClick={sendNow}
+                disabled={!htmlBody || segmentCount === 0}
+                className="w-full"
+              >
+                {" "}
+                <Send
+                  size={14}
+                  strokeWidth={1.75}
+                  className="mr-2"
+                  aria-hidden
+                />
+                Send To Audience
+              </Button>{" "}
+              {validationResult && (
+                <div className="mt-2 space-y-1">
+                  {validationResult.errors?.map((e, i) => (
+                    <div
+                      key={`e${i}`}
+                      className="flex items-start gap-1.5 text-ui-body text-alert-fg bg-alert-bg rounded px-2 py-1"
+                    >
+                      <XCircle size={11} className="mt-0.5 shrink-0" />
+                      {e}
+                    </div>
+                  ))}
+                  {validationResult.warnings?.map((w, i) => (
+                    <div
+                      key={`w${i}`}
+                      className="flex items-start gap-1.5 text-ui-body text-warn-fg bg-warn-bg rounded px-2 py-1"
+                    >
+                      <AlertTriangle size={11} className="mt-0.5 shrink-0" />
+                      {w}
+                    </div>
+                  ))}
+                  {validationResult.valid &&
+                    !validationResult.warnings?.length && (
+                      <div className="flex items-center gap-1.5 text-ui-body text-green-700 bg-green-50 rounded px-2 py-1">
+                        <CheckCircle2 size={11} className="shrink-0" />
+                        Validation passed
+                      </div>
                     )}
-                  >
-                    {o.label}
-                  </button>
-                ))}
-              </div>
-              <div className="text-11 text-ink-secondary mt-3 mb-1">Region</div>
-              <ChipRow
-                options={REGION_ZONES}
-                selected={segmentRegions}
-                onToggle={(v) => {
-                  markSegmentDirty();
-                  setSegmentRegions((cur) =>
-                    cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v],
-                  );
-                }}
-              />
-              <div className="text-11 text-ink-tertiary mt-2">
-                Lines come from each customer&rsquo;s active recurring services.
-                A customer must hold ALL of &ldquo;Has&rdquo;, none of
-                &ldquo;Missing&rdquo;.
-              </div>
+                </div>
+              )}
             </div>{" "}
-          </div>{" "}
-        </div>{" "}
-        <div className={PANEL_CLS}>
-          {" "}
-          <PanelHeader
-            title="Review + Send"
-            hint="Save before test sends, live sends, or scheduling."
-          />{" "}
-          <div className="p-4 space-y-3">
+          </Card>{" "}
+          <Card>
             {" "}
-            <Button
-              onClick={saveDraft}
-              variant="secondary"
-              disabled={!subject}
-              className="w-full"
-            >
-              {" "}
-              <Save size={14} strokeWidth={1.75} className="mr-2" aria-hidden />
-              {draftId ? "Update draft" : "Save draft"}
-            </Button>{" "}
-            <Button
-              onClick={openPreview}
-              variant="secondary"
-              disabled={!htmlBody}
-              className="w-full"
-            >
-              {" "}
-              <Eye size={14} strokeWidth={1.75} className="mr-2" aria-hidden />
-              Preview
-            </Button>{" "}
-            <div>
-              {" "}
-              <FieldLabel>Test recipient</FieldLabel>{" "}
-              <input
-                type="text"
-                value={testEmail}
-                onChange={(e) => setTestEmail(e.target.value)}
-                className={`${INPUT_CLS} font-mono`}
-                placeholder="test@wavespestcontrol.com"
-              />{" "}
-            </div>{" "}
-            <Button
-              onClick={sendTest}
-              variant="secondary"
-              disabled={!testEmail}
-              className="w-full"
-            >
-              {" "}
-              <MailCheck
-                size={14}
-                strokeWidth={1.75}
-                className="mr-2"
-                aria-hidden
-              />
-              Send Test
-            </Button>{" "}
-            <Button
-              onClick={sendNow}
-              disabled={!htmlBody || segmentCount === 0}
-              className="w-full"
-            >
-              {" "}
-              <Send size={14} strokeWidth={1.75} className="mr-2" aria-hidden />
-              Send To Audience
-            </Button>{" "}
-            {validationResult && (
-              <div className="mt-2 space-y-1">
-                {validationResult.errors?.map((e, i) => (
-                  <div key={`e${i}`} className="flex items-start gap-1.5 text-11 text-red-700 bg-red-50 rounded px-2 py-1">
-                    <XCircle size={11} className="mt-0.5 shrink-0" />{e}
-                  </div>
-                ))}
-                {validationResult.warnings?.map((w, i) => (
-                  <div key={`w${i}`} className="flex items-start gap-1.5 text-11 text-amber-700 bg-amber-50 rounded px-2 py-1">
-                    <AlertTriangle size={11} className="mt-0.5 shrink-0" />{w}
-                  </div>
-                ))}
-                {validationResult.valid && !validationResult.warnings?.length && (
-                  <div className="flex items-center gap-1.5 text-11 text-green-700 bg-green-50 rounded px-2 py-1">
-                    <CheckCircle2 size={11} className="shrink-0" />Validation passed
-                  </div>
-                )}
-              </div>
-            )}
-          </div>{" "}
-        </div>{" "}
-        <div className={PANEL_CLS}>
-          {" "}
-          <PanelHeader
-            title="Schedule"
-            hint={activeNewsletterType === 'local-weekly-fresh-events'
-              ? NEWSLETTER_UI_COPY.scheduleHint
-              : "Queued sends fire within one minute of the target time."}
-          />{" "}
-          <div className="p-4 space-y-3">
-            {" "}
-            <input
-              type="datetime-local"
-              value={scheduleAt}
-              onChange={(e) => setScheduleAt(e.target.value)}
-              className={`${INPUT_CLS} font-mono`}
-            />{" "}
-            <Button
-              onClick={schedule}
-              variant="secondary"
-              disabled={!scheduleAt || !htmlBody}
-              className="w-full"
-            >
-              {" "}
-              <CalendarClock
-                size={14}
-                strokeWidth={1.75}
-                className="mr-2"
-                aria-hidden
-              />
-              Schedule Send
-            </Button>{" "}
-            <div className="text-11 text-ink-tertiary">
-              {scheduleAt
-                ? `Fires ${new Date(scheduleAt).toLocaleString("en-US", {
-                    timeZone: "America/New_York",
-                    month: "short",
-                    day: "numeric",
-                    hour: "numeric",
-                    minute: "2-digit",
-                  })} ET`
-                : activeNewsletterType === 'local-weekly-fresh-events'
+            <PanelHeader
+              title="Schedule"
+              hint={
+                activeNewsletterType === "local-weekly-fresh-events"
                   ? NEWSLETTER_UI_COPY.scheduleHint
-                  : "America/New_York timezone"}
+                  : "Queued sends fire within one minute of the target time."
+              }
+            />{" "}
+            <div className="p-4 space-y-3">
+              {" "}
+              <Input
+                type="datetime-local"
+                value={scheduleAt}
+                onChange={(e) => setScheduleAt(e.target.value)}
+                className={`${INPUT_CLS} u-nums`}
+              />{" "}
+              <Button
+                onClick={schedule}
+                variant="secondary"
+                disabled={!scheduleAt || !htmlBody}
+                className="w-full"
+              >
+                {" "}
+                <CalendarClock
+                  size={14}
+                  strokeWidth={1.75}
+                  className="mr-2"
+                  aria-hidden
+                />
+                Schedule Send
+              </Button>{" "}
+              <div className="text-ui-body text-ink-tertiary">
+                {scheduleAt
+                  ? `Fires ${new Date(scheduleAt).toLocaleString("en-US", {
+                      timeZone: "America/New_York",
+                      month: "short",
+                      day: "numeric",
+                      hour: "numeric",
+                      minute: "2-digit",
+                    })} ET`
+                  : activeNewsletterType === "local-weekly-fresh-events"
+                    ? NEWSLETTER_UI_COPY.scheduleHint
+                    : "America/New_York timezone"}
+              </div>{" "}
             </div>{" "}
-          </div>{" "}
-        </div>
-        <div className={PANEL_CLS}>
-          <PanelHeader title="Social" />
-          <div className="p-4 space-y-2">
-            <label className="flex items-start gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={autoShareSocial}
-                onChange={(e) => {
-                  setAutoShareSocial(e.target.checked);
-                  userHasEdited.current = true;
-                }}
-                className="mt-0.5 w-4 h-4 rounded border-hairline"
-              />
-              <span className="text-12 text-ink-secondary leading-snug">
-                Auto-post a teaser after this newsletter is sent
-              </span>
-            </label>
-            <div className="text-11 text-ink-tertiary pl-6">
-              Facebook, Instagram, LinkedIn & Google Business Profile.
-              Links to the public newsletter archive. Test sends are never posted.
+          </Card>
+          <Card>
+            <PanelHeader title="Social" />
+            <div className="p-4 space-y-2">
+              <label className="flex items-start gap-2 cursor-pointer">
+                <Checkbox
+                  checked={autoShareSocial}
+                  onChange={(e) => {
+                    setAutoShareSocial(e.target.checked);
+                    userHasEdited.current = true;
+                  }}
+                  className="mt-0.5"
+                />
+                <span className="text-ui-body text-ink-secondary leading-snug">
+                  Auto-post a teaser after this newsletter is sent
+                </span>
+              </label>
+              <div className="text-ui-body text-ink-tertiary pl-6">
+                Facebook, Instagram, LinkedIn & Google Business Profile. Links
+                to the public newsletter archive. Test sends are never posted.
+              </div>
             </div>
-          </div>
-        </div>
-        {status && (
-          <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-3 text-12 text-ink-secondary">
-            {status}
-          </div>
+          </Card>
+          {status && (
+            <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-3 text-ui-body text-ink-secondary">
+              {status}
+            </div>
+          )}
+        </aside>
+        {aiOpen && (
+          <AiDraftModal
+            initialNewsletterType={activeNewsletterType}
+            initialPrompt={aiInitialPrompt}
+            onClose={() => {
+              setAiOpen(false);
+              setAiInitialPrompt("");
+            }}
+            onDraft={handleAiDraft}
+          />
         )}
-      </aside>
-      {aiOpen && (
-        <AiDraftModal
-          initialNewsletterType={activeNewsletterType}
-          initialPrompt={aiInitialPrompt}
-          onClose={() => {
-            setAiOpen(false);
-            setAiInitialPrompt("");
-          }}
-          onDraft={handleAiDraft}
-        />
-      )}
-      {previewOpen && (
-        <PreviewDialog
-          html={previewHtml}
-          loading={previewLoading}
-          onClose={() => setPreviewOpen(false)}
-        />
-      )}
-      {sendConfirmOpen && (
-        <SendConfirmDialog
-          subject={subject}
-          subjectB={abEnabled ? subjectB : null}
-          previewText={previewText}
-          fromName={fromName}
-          fromEmail={fromEmail}
-          audience={segmentCount ?? activeCount ?? null}
-          activeCount={activeCount}
-          segmentFilter={segmentFilter}
-          htmlBody={htmlBody}
-          onCancel={() => setSendConfirmOpen(false)}
-          onConfirm={confirmSend}
-        />
-      )}
-    </div>
+        {previewOpen && (
+          <PreviewDialog
+            html={previewHtml}
+            loading={previewLoading}
+            onClose={() => setPreviewOpen(false)}
+          />
+        )}
+        {sendConfirmOpen && (
+          <SendConfirmDialog
+            subject={subject}
+            subjectB={abEnabled ? subjectB : null}
+            previewText={previewText}
+            fromName={fromName}
+            fromEmail={fromEmail}
+            audience={segmentCount ?? activeCount ?? null}
+            activeCount={activeCount}
+            segmentFilter={segmentFilter}
+            htmlBody={htmlBody}
+            onCancel={() => setSendConfirmOpen(false)}
+            onConfirm={confirmSend}
+          />
+        )}
+      </div>
+    </UiSurface>
   );
 }
 
@@ -1707,7 +1968,6 @@ function SendConfirmDialog({
 }) {
   const [typed, setTyped] = useState("");
   const ready = typed.trim().toUpperCase() === "SEND" && audience > 0;
-
   const segmentSummary = useMemo(() => {
     if (!segmentFilter) return `All active (${activeCount ?? "?"})`;
     const parts = [];
@@ -1727,109 +1987,91 @@ function SendConfirmDialog({
   // entirely in the body. Sandbox tight (no scripts, no same-origin)
   // since the operator authored the HTML and may have pasted anything.
   const srcDoc = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><base target="_blank"><style>html,body{margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:15px;line-height:1.55;color:#0F172A;}body{padding:14px;}h1,h2,h3,h4{line-height:1.25;}img{max-width:100%;height:auto;}*{box-sizing:border-box;}</style></head><body>${stripGreetingToken(htmlBody) || '<em style="color:#64748B">(empty body)</em>'}</body></html>`;
-
-  return createPortal(
-    <div
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-0 sm:p-4"
-      onClick={onCancel}
-    >
-      {" "}
-      <div
-        className="bg-white border-hairline border-zinc-300 rounded-none sm:rounded-sm shadow-xl w-full h-full sm:h-auto sm:max-h-[90vh] max-w-none sm:max-w-2xl flex flex-col box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
-        onClick={(e) => e.stopPropagation()}
-      >
+  return (
+    <Dialog open onClose={onCancel} size="lg">
+      <DialogHeader className="flex items-start justify-between gap-3">
         {" "}
-        <div className="p-5 border-b border-hairline border-zinc-200 flex items-start justify-between flex-shrink-0">
+        <div className="min-w-0">
           {" "}
-          <div className="min-w-0">
-            {" "}
-            <h3 className="text-16 font-medium text-zinc-900">
-              Send to {audience != null ? audience.toLocaleString() : "?"}{" "}
-              subscriber{audience === 1 ? "" : "s"}?
-            </h3>{" "}
-            <p className="text-12 text-ink-secondary mt-0.5">
-              This can't be undone. Each recipient is contacted at the SendGrid
-              send below.
-            </p>{" "}
-          </div>{" "}
-          <button
-            type="button"
-            onClick={onCancel}
-            className="text-ink-tertiary hover:text-zinc-900 text-14 ml-3"
-            aria-label="Close"
-          >
-            ×
-          </button>{" "}
+          <DialogTitle className="text-16 font-medium text-zinc-900">
+            Send to {audience != null ? audience.toLocaleString() : "?"}{" "}
+            subscriber{audience === 1 ? "" : "s"}?
+          </DialogTitle>{" "}
+          <p className="text-ui-body text-ink-secondary mt-0.5">
+            This can't be undone. Each recipient is contacted at the SendGrid
+            send below.
+          </p>{" "}
         </div>{" "}
-        <div className="px-5 py-4 overflow-y-auto flex-1 space-y-3">
-          {" "}
+        <Button
+          type="button"
+          onClick={onCancel}
+          className="ml-3"
+          aria-label="Close"
+          variant="secondary"
+        >
+          ×
+        </Button>{" "}
+      </DialogHeader>
+      <DialogBody className="min-h-0 space-y-3">
+        {" "}
+        <ConfirmRow
+          label="Subject"
+          value={subject || <em className="text-ink-tertiary">(missing)</em>}
+        />
+        {subjectB && (
           <ConfirmRow
-            label="Subject"
-            value={subject || <em className="text-ink-tertiary">(missing)</em>}
+            label="Subject (B)"
+            value={subjectB}
+            hint="A/B 50/50 random split"
           />
-          {subjectB && (
-            <ConfirmRow
-              label="Subject (B)"
-              value={subjectB}
-              hint="A/B 50/50 random split"
-            />
-          )}
-          {previewText && (
-            <ConfirmRow label="Preview text" value={previewText} />
-          )}
-          <ConfirmRow label="From" value={`${fromName} <${fromEmail}>`} />{" "}
-          <ConfirmRow label="Audience" value={segmentSummary} />{" "}
-          <div>
-            {" "}
-            <div className="text-11 uppercase tracking-label text-ink-secondary mb-1">
-              Body preview
-            </div>{" "}
-            <iframe
-              title="Body preview"
-              srcDoc={srcDoc}
-              sandbox=""
-              style={{
-                width: "100%",
-                height: 320,
-                border: "1px solid #E4E4E7",
-                borderRadius: 4,
-                background: "#fff",
-              }}
-            />{" "}
-            <p className="text-11 text-ink-tertiary mt-1">
-              Body only — Waves header + unsubscribe footer are added
-              server-side. Send a test if you want to see the full chrome.
-            </p>{" "}
-          </div>{" "}
-        </div>{" "}
-        <div className="px-5 py-4 border-t border-hairline border-zinc-200 flex items-center gap-3 flex-shrink-0 flex-wrap">
+        )}
+        {previewText && <ConfirmRow label="Preview text" value={previewText} />}
+        <ConfirmRow label="From" value={`${fromName} <${fromEmail}>`} />{" "}
+        <ConfirmRow label="Audience" value={segmentSummary} />{" "}
+        <div>
           {" "}
-          <label className="text-12 text-ink-secondary flex-shrink-0">
-            Type SEND to confirm:
-          </label>{" "}
-          <input
-            type="text"
-            value={typed}
-            onChange={(e) => setTyped(e.target.value)}
-            autoFocus
-            spellCheck={false}
-            autoComplete="off"
-            className="bg-white border-hairline border-zinc-300 rounded-sm py-1.5 px-2 text-13 text-zinc-900 font-mono w-32"
-            placeholder="SEND"
-          />{" "}
-          <div className="ml-auto flex items-center gap-2">
-            {" "}
-            <Button onClick={onCancel} variant="secondary">
-              Cancel
-            </Button>{" "}
-            <Button onClick={onConfirm} disabled={!ready}>
-              Send to all
-            </Button>{" "}
+          <div className="text-ui-body uppercase tracking-label text-ink-secondary mb-1">
+            Body preview
           </div>{" "}
+          <iframe
+            title="Body preview"
+            srcDoc={srcDoc}
+            sandbox=""
+            className="w-full h-[320px] border-hairline border-zinc-200 rounded-xs bg-white"
+          />{" "}
+          <p className="text-ui-body text-ink-tertiary mt-1">
+            Body only — Waves header + unsubscribe footer are added server-side.
+            Send a test if you want to see the full chrome.
+          </p>{" "}
         </div>{" "}
-      </div>{" "}
-    </div>,
-    document.body,
+      </DialogBody>
+      <DialogFooter className="flex flex-wrap items-center gap-3">
+        {" "}
+        <label className="text-ui-body text-ink-secondary flex-shrink-0">
+          Type SEND to confirm:
+        </label>{" "}
+        <Input
+          type="text"
+          value={typed}
+          onChange={(e) => setTyped(e.target.value)}
+          autoFocus
+          spellCheck={false}
+          autoComplete="off"
+          className=""
+          placeholder="SEND"
+          aria-label="Type SEND to confirm:"
+        />{" "}
+        <div className="ml-auto flex items-center gap-2">
+          {" "}
+          <Button onClick={onCancel} variant="secondary">
+            Cancel
+          </Button>{" "}
+          <Button onClick={onConfirm} disabled={!ready}>
+            Send to all
+          </Button>{" "}
+        </div>{" "}
+      </DialogFooter>
+    </Dialog>
   );
 }
 
@@ -1841,79 +2083,66 @@ function SendConfirmDialog({
 // operator-authored.
 
 function PreviewDialog({ html, loading, onClose }) {
-  return createPortal(
-    <div
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-0 sm:p-4"
-      onClick={onClose}
-    >
-      {" "}
-      <div
-        className="bg-white border-hairline border-zinc-300 rounded-none sm:rounded-sm shadow-xl w-full h-full sm:h-auto sm:max-h-[90vh] max-w-none sm:max-w-3xl flex flex-col box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
-        onClick={(e) => e.stopPropagation()}
-      >
+  return (
+    <Dialog open onClose={onClose} size="lg">
+      <DialogHeader className="flex items-start justify-between gap-3">
         {" "}
-        <div className="p-5 border-b border-hairline border-zinc-200 flex items-center justify-between flex-shrink-0">
+        <div>
           {" "}
-          <div>
-            {" "}
-            <h3 className="text-16 font-medium text-zinc-900">Preview</h3>{" "}
-            <p className="text-12 text-ink-secondary mt-0.5">
-              How the email looks with header + footer chrome. Unsubscribe link
-              is a demo token; real recipients get their own.
-            </p>{" "}
-          </div>{" "}
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-ink-tertiary hover:text-zinc-900 text-14 ml-3"
-            aria-label="Close"
-          >
-            ×
-          </button>{" "}
+          <DialogTitle className="text-16 font-medium text-zinc-900">
+            Preview
+          </DialogTitle>{" "}
+          <p className="text-ui-body text-ink-secondary mt-0.5">
+            How the email looks with header + footer chrome. Unsubscribe link is
+            a demo token; real recipients get their own.
+          </p>{" "}
         </div>{" "}
-        <div className="overflow-y-auto flex-1 bg-zinc-50 p-3">
-          {loading ? (
-            <div className="text-13 text-ink-secondary p-8 text-center">
-              Rendering…
-            </div>
-          ) : (
-            <iframe
-              title="Newsletter preview"
-              srcDoc={html}
-              sandbox=""
-              style={{
-                width: "100%",
-                minHeight: "60vh",
-                border: "1px solid #E4E4E7",
-                borderRadius: 4,
-                background: "#fff",
-              }}
-            />
-          )}
-        </div>{" "}
-        <div className="px-5 py-3 border-t border-hairline border-zinc-200 flex justify-end flex-shrink-0">
-          {" "}
-          <Button onClick={onClose} variant="secondary">
-            Close
-          </Button>{" "}
-        </div>{" "}
-      </div>{" "}
-    </div>,
-    document.body,
+        <Button
+          type="button"
+          onClick={onClose}
+          className="ml-3"
+          aria-label="Close"
+          variant="secondary"
+        >
+          ×
+        </Button>{" "}
+      </DialogHeader>
+      <DialogBody className="min-h-0 space-y-3">
+        {loading ? (
+          <div className="text-ui-body text-ink-secondary p-8 text-center">
+            Rendering…
+          </div>
+        ) : (
+          <iframe
+            title="Newsletter preview"
+            srcDoc={html}
+            sandbox=""
+            className="w-full min-h-[60vh] border-hairline border-zinc-200 rounded-xs bg-white"
+          />
+        )}
+      </DialogBody>
+      <DialogFooter className="flex flex-wrap items-center gap-3">
+        {" "}
+        <Button onClick={onClose} variant="secondary">
+          Close
+        </Button>{" "}
+      </DialogFooter>
+    </Dialog>
   );
 }
-
 function ConfirmRow({ label, value, hint }) {
   return (
     <div className="flex items-baseline gap-3">
       {" "}
-      <div className="text-11 uppercase tracking-label text-ink-secondary w-28 flex-shrink-0">
+      <div className="text-ui-body uppercase tracking-label text-ink-secondary w-28 flex-shrink-0">
         {label}
       </div>{" "}
       <div className="flex-1 min-w-0">
         {" "}
-        <div className="text-13 text-zinc-900 break-words">{value}</div>
-        {hint && <div className="text-11 text-ink-tertiary mt-0.5">{hint}</div>}
+        <div className="text-ui-body text-zinc-900 break-words">{value}</div>
+        {hint && (
+          <div className="text-ui-body text-ink-tertiary mt-0.5">{hint}</div>
+        )}
       </div>{" "}
     </div>
   );
@@ -1928,14 +2157,12 @@ const SECTION_LABELS = {
   family_or_low_key_pick: "Family / Low-Key Pick",
   road_trip_pick: "Road Trip Pick",
 };
-
 function DigestPlanner({ onDraftFromPlan }) {
   const [plan, setPlan] = useState(null);
   const [loading, setLoading] = useState(false);
   const [weekStart, setWeekStart] = useState("");
   const [homeownerTopic, setHomeownerTopic] = useState("");
   const [suppressedOpen, setSuppressedOpen] = useState(false);
-
   const generatePlan = async () => {
     setLoading(true);
     try {
@@ -1947,57 +2174,87 @@ function DigestPlanner({ onDraftFromPlan }) {
       });
       setPlan(res);
     } catch (e) {
-      setPlan({ error: e.message });
+      setPlan({
+        error: e.message,
+      });
     } finally {
       setLoading(false);
     }
   };
-
   const draftFromPlan = () => {
     if (!plan?.sections) return;
     const allEvents = Object.values(plan.sections).flat();
     const ids = allEvents.map((e) => e.id);
-    const summary = allEvents.slice(0, 8).map((e) => `${e.title} (${e.city || "SWFL"})`).join(", ");
+    const summary = allEvents
+      .slice(0, 8)
+      .map((e) => `${e.title} (${e.city || "SWFL"})`)
+      .join(", ");
     // Homeowner Minute retired from the flagship (owner 2026-07-30) —
     // the planner field no longer reaches the prompt.
     const prompt = `Build this ${NEWSLETTER_UI_COPY.name} issue with events from North Port to Tampa: ${summary}.`;
-    onDraftFromPlan({ eventIds: ids, prompt });
+    onDraftFromPlan({
+      eventIds: ids,
+      prompt,
+    });
   };
-
   const fmtDate = (d) => {
     if (!d) return "—";
     return new Date(d).toLocaleDateString("en-US", {
-      month: "short", day: "numeric", weekday: "short", timeZone: "America/New_York",
+      month: "short",
+      day: "numeric",
+      weekday: "short",
+      timeZone: "America/New_York",
     });
   };
-
   return (
     <div className="border-hairline border-zinc-200 rounded-sm bg-zinc-50 p-3 space-y-3">
       <div className="flex items-center gap-2">
-        <CalendarDays size={14} strokeWidth={1.75} className="text-ink-secondary" />
-        <span className="text-13 font-medium text-ink-primary">Digest planner</span>
+        <CalendarDays
+          size={14}
+          strokeWidth={1.75}
+          className="text-ink-secondary"
+        />
+        <span className="text-ui-body font-medium text-ink-primary">
+          Digest planner
+        </span>
       </div>
       <div className="flex items-end gap-2">
         <div className="flex-1">
-          <label className="block text-11 text-ink-tertiary mb-0.5">{NEWSLETTER_UI_COPY.weekStartLabel}</label>
-          <input type="date" value={weekStart} onChange={(e) => setWeekStart(e.target.value)}
-            className="h-8 px-2 text-12 bg-white border-hairline border-zinc-300 rounded-sm w-full" />
+          <label className="block text-ui-body text-ink-tertiary mb-0.5">
+            {NEWSLETTER_UI_COPY.weekStartLabel}
+          </label>
+          <Input
+            type="date"
+            value={weekStart}
+            onChange={(e) => setWeekStart(e.target.value)}
+            className="w-full"
+          />
         </div>
         <Button size="sm" onClick={generatePlan} disabled={loading}>
-          <Sparkles size={12} className="mr-1" />{loading ? "Planning…" : "Generate Plan"}
+          <Sparkles size={12} className="mr-1" />
+          {loading ? "Planning…" : "Generate Plan"}
         </Button>
       </div>
-      {plan?.error && <div className="text-12 text-red-600 bg-red-50 rounded p-2">{plan.error}</div>}
+      {plan?.error && (
+        <div className="text-ui-body text-alert-fg bg-alert-bg rounded p-2">
+          {plan.error}
+        </div>
+      )}
       {plan?.sections && (
         <>
-          <div className="text-11 text-ink-tertiary">
-            {plan.weekStart} — {plan.weekEnd} · {plan.stats?.totalEligible || 0} eligible · {plan.stats?.totalAssigned || 0} assigned
+          <div className="text-ui-body text-ink-tertiary">
+            {plan.weekStart} — {plan.weekEnd} · {plan.stats?.totalEligible || 0}{" "}
+            eligible · {plan.stats?.totalAssigned || 0} assigned
           </div>
           {plan.warnings?.length > 0 && (
             <div className="space-y-1">
               {plan.warnings.map((w, i) => (
-                <div key={i} className="flex items-start gap-1.5 text-11 text-amber-700 bg-amber-50 rounded px-2 py-1">
-                  <AlertTriangle size={11} className="mt-0.5 shrink-0" />{w}
+                <div
+                  key={i}
+                  className="flex items-start gap-1.5 text-ui-body text-warn-fg bg-warn-bg rounded px-2 py-1"
+                >
+                  <AlertTriangle size={11} className="mt-0.5 shrink-0" />
+                  {w}
                 </div>
               ))}
             </div>
@@ -2006,18 +2263,31 @@ function DigestPlanner({ onDraftFromPlan }) {
             const events = plan.sections[key] || [];
             return (
               <div key={key}>
-                <div className="text-11 font-medium text-ink-secondary uppercase tracking-label mb-1">{label} ({events.length})</div>
+                <div className="text-ui-body font-medium text-ink-secondary uppercase tracking-label mb-1">
+                  {label} ({events.length})
+                </div>
                 {events.length === 0 ? (
-                  <div className="text-11 text-ink-tertiary italic">None assigned</div>
+                  <div className="text-ui-body text-ink-tertiary italic">
+                    None assigned
+                  </div>
                 ) : (
                   <div className="space-y-1">
                     {events.map((ev) => (
-                      <div key={ev.id} className="flex items-center justify-between bg-white border-hairline border-zinc-200 rounded px-2 py-1.5">
+                      <div
+                        key={ev.id}
+                        className="flex items-center justify-between bg-white border-hairline border-zinc-200 rounded px-2 py-1.5"
+                      >
                         <div className="min-w-0">
-                          <div className="text-12 font-medium text-ink-primary truncate">{ev.title}</div>
-                          <div className="text-10 text-ink-tertiary">{ev.city || "—"} · {fmtDate(ev.startAt)}</div>
+                          <div className="text-ui-body font-medium text-ink-primary truncate">
+                            {ev.title}
+                          </div>
+                          <div className="text-ui-body text-ink-tertiary">
+                            {ev.city || "—"} · {fmtDate(ev.startAt)}
+                          </div>
                         </div>
-                        <span className="text-10 text-ink-tertiary u-nums ml-2 shrink-0">{ev.compositeScore}</span>
+                        <span className="text-ui-body text-ink-tertiary u-nums ml-2 shrink-0">
+                          {ev.compositeScore}
+                        </span>
                       </div>
                     ))}
                   </div>
@@ -2027,26 +2297,45 @@ function DigestPlanner({ onDraftFromPlan }) {
           })}
           {plan.suppressed?.length > 0 && (
             <div>
-              <button type="button" onClick={() => setSuppressedOpen(!suppressedOpen)} className="text-11 text-ink-tertiary hover:text-ink-secondary">
-                {suppressedOpen ? "Hide" : "Show"} suppressed ({plan.suppressed.length})
-              </button>
+              <Button
+                type="button"
+                onClick={() => setSuppressedOpen(!suppressedOpen)}
+                className=""
+                variant="secondary"
+              >
+                {suppressedOpen ? "Hide" : "Show"} suppressed (
+                {plan.suppressed.length})
+              </Button>
               {suppressedOpen && (
                 <div className="mt-1 space-y-0.5">
                   {plan.suppressed.map((s) => (
-                    <div key={s.id} className="text-11 text-ink-tertiary line-through">{s.title} — {s.reason}</div>
+                    <div
+                      key={s.id}
+                      className="text-ui-body text-ink-tertiary line-through"
+                    >
+                      {s.title} — {s.reason}
+                    </div>
                   ))}
                 </div>
               )}
             </div>
           )}
           <div>
-            <label className="block text-11 text-ink-tertiary mb-0.5">Homeowner Minute topic (optional)</label>
-            <input type="text" value={homeownerTopic} onChange={(e) => setHomeownerTopic(e.target.value)}
+            <label className="block text-ui-body text-ink-tertiary mb-0.5">
+              Homeowner Minute topic (optional)
+            </label>
+            <Input
+              type="text"
+              value={homeownerTopic}
+              onChange={(e) => setHomeownerTopic(e.target.value)}
               placeholder="e.g. Check patio planters for standing water"
-              className="h-8 px-2 text-12 bg-white border-hairline border-zinc-300 rounded-sm w-full" />
+              className="w-full"
+              aria-label="Homeowner Minute topic (optional)"
+            />
           </div>
           <Button onClick={draftFromPlan} className="w-full">
-            <Wand2 size={13} className="mr-1.5" />Draft Newsletter from Plan
+            <Wand2 size={13} className="mr-1.5" />
+            Draft Newsletter from Plan
           </Button>
         </>
       )}
@@ -2056,14 +2345,18 @@ function DigestPlanner({ onDraftFromPlan }) {
 
 // ── AI draft modal ────────────────────────────────────────────────
 
-function AiDraftModal({ initialNewsletterType, initialPrompt, onClose, onDraft }) {
+function AiDraftModal({
+  initialNewsletterType,
+  initialPrompt,
+  onClose,
+  onDraft,
+}) {
   const [prompt, setPrompt] = useState(initialPrompt || "");
   const [audience, setAudience] = useState("Existing Waves customers");
   const [tone, setTone] = useState("Neighborly, owner-operator");
   const [includeCTA, setIncludeCTA] = useState(true);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
-
   const run = async () => {
     if (prompt.trim().length < 8) {
       setErr("Describe the newsletter (at least 8 characters)");
@@ -2075,10 +2368,13 @@ function AiDraftModal({ initialNewsletterType, initialPrompt, onClose, onDraft }
       // Map the active newsletter type back to its template card so the
       // server's /draft-ai routes to the matching structured flow (a Pest
       // Insider compose must NOT fall back to the weekend/flagship path).
-      const tplForType = TEMPLATES.find((t) => t.newsletterType === initialNewsletterType);
-      const effectiveTemplate = initialNewsletterType === 'free-form'
-        ? null
-        : (tplForType?.key || 'weekend');
+      const tplForType = TEMPLATES.find(
+        (t) => t.newsletterType === initialNewsletterType,
+      );
+      const effectiveTemplate =
+        initialNewsletterType === "free-form"
+          ? null
+          : tplForType?.key || "weekend";
       await onDraft({
         prompt,
         template: effectiveTemplate,
@@ -2091,86 +2387,88 @@ function AiDraftModal({ initialNewsletterType, initialPrompt, onClose, onDraft }
       setLoading(false);
     }
   };
-
   return (
     <Dialog open onClose={onClose} layer={140}>
-        <DialogHeader className="flex items-center justify-between">
-          {" "}
-          <DialogTitle>
-            Draft with AI
-          </DialogTitle>{" "}
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close"
-            className="flex h-11 w-11 shrink-0 items-center justify-center text-ink-tertiary hover:text-zinc-900 text-18"
-          >
-            ×
-          </button>{" "}
-        </DialogHeader>
-        <DialogBody className="flex-1 space-y-3">
+      <DialogHeader className="flex items-center justify-between">
+        {" "}
+        <DialogTitle>Draft with AI</DialogTitle>{" "}
+        <Button
+          type="button"
+          onClick={onClose}
+          aria-label="Close"
+          className="shrink-0"
+          variant="secondary"
+        >
+          ×
+        </Button>{" "}
+      </DialogHeader>
+      <DialogBody className="flex-1 space-y-3">
         <div>
           {" "}
-          <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
+          <label className="block text-ui-body uppercase tracking-label text-ink-secondary mb-1">
             What's the newsletter about?
           </label>{" "}
-          <textarea
+          <Textarea
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             rows={4}
-            className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
+            className="w-full"
             placeholder="e.g. Spring uptick in no-see-ums and what homeowners can do this week. Want to mention our mosquito service as a soft CTA."
+            aria-label="What's the newsletter about?"
           />{" "}
         </div>{" "}
-        {" "}
         <div className="grid grid-cols-2 gap-3">
           {" "}
           <div>
             {" "}
-            <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
+            <label className="block text-ui-body uppercase tracking-label text-ink-secondary mb-1">
               Audience
             </label>{" "}
-            <input
+            <Input
               type="text"
               value={audience}
               onChange={(e) => setAudience(e.target.value)}
-              className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
+              className="w-full"
+              aria-label="Audience"
             />{" "}
           </div>{" "}
           <div>
             {" "}
-            <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
+            <label className="block text-ui-body uppercase tracking-label text-ink-secondary mb-1">
               Tone
             </label>{" "}
-            <input
+            <Input
               type="text"
               value={tone}
               onChange={(e) => setTone(e.target.value)}
-              className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
+              className="w-full"
+              aria-label="Tone"
             />{" "}
           </div>{" "}
         </div>{" "}
-        <label className="inline-flex items-center gap-2 text-12 text-ink-secondary">
+        <label className="inline-flex items-center gap-2 text-ui-body text-ink-secondary">
           {" "}
-          <input
-            type="checkbox"
+          <Checkbox
             checked={includeCTA}
             onChange={(e) => setIncludeCTA(e.target.checked)}
+            className="shrink-0"
           />
           Include a call to action at the end
         </label>
-
-        </DialogBody>
-        <DialogFooter className="flex-wrap">
-        {err && <div role="alert" className="basis-full text-12 text-alert-fg">{err}</div>}
-          {" "}
-          <Button onClick={onClose} variant="secondary" disabled={loading}>
-            Cancel
-          </Button>{" "}
-          <Button onClick={run} disabled={loading}>
-            {loading ? "Drafting…" : "Draft it"}
-          </Button>{" "}
-        </DialogFooter>
+      </DialogBody>
+      <DialogFooter className="flex-wrap">
+        {err && (
+          <div role="alert" className="basis-full text-ui-body text-alert-fg">
+            {err}
+          </div>
+        )}{" "}
+        <Button onClick={onClose} variant="secondary" disabled={loading}>
+          Cancel
+        </Button>{" "}
+        <Button onClick={run} disabled={loading}>
+          {loading ? "Drafting…" : "Draft it"}
+        </Button>{" "}
+      </DialogFooter>
     </Dialog>
   );
 }
@@ -2192,7 +2490,6 @@ export function HistoryView() {
   const [quizOpenId, setQuizOpenId] = useState(null);
   const [feedbackResults, setFeedbackResults] = useState({});
   const [feedbackOpenId, setFeedbackOpenId] = useState(null);
-
   const load = useCallback(() => {
     setLoading(true);
     adminFetch("/admin/newsletter/sends")
@@ -2209,7 +2506,6 @@ export function HistoryView() {
   useEffect(() => {
     load();
   }, [load]);
-
   const cancelSchedule = async (id) => {
     if (!confirm("Cancel this scheduled send and return it to draft?")) return;
     try {
@@ -2221,7 +2517,6 @@ export function HistoryView() {
       alert("Cancel failed: " + e.message);
     }
   };
-
   const editDraft = (id) => {
     const next = new URLSearchParams(searchParams);
     next.set("tab", "compose");
@@ -2229,9 +2524,13 @@ export function HistoryView() {
     next.delete("autopilotType");
     setSearchParams(next);
   };
-
   const deleteDraft = async (id) => {
-    if (!confirm("Delete this draft? A linked weekly calendar entry will be marked skipped so autopilot cannot recreate it.")) return;
+    if (
+      !confirm(
+        "Delete this draft? A linked weekly calendar entry will be marked skipped so autopilot cannot recreate it.",
+      )
+    )
+      return;
     try {
       await adminFetch(`/admin/newsletter/sends/${id}`, { method: "DELETE" });
       load();
@@ -2239,12 +2538,16 @@ export function HistoryView() {
       alert("Delete failed: " + e.message);
     }
   };
-
   const resumeSend = async (send) => {
     const recovery = send.status === "sending";
-    if (!confirm(recovery
-      ? "Recover this stalled campaign? Only recipients without a success signal will be retried."
-      : "Resume this campaign? Only failed or unfinished recipients will be retried.")) return;
+    if (
+      !confirm(
+        recovery
+          ? "Recover this stalled campaign? Only recipients without a success signal will be retried."
+          : "Resume this campaign? Only failed or unfinished recipients will be retried.",
+      )
+    )
+      return;
     try {
       await adminFetch(`/admin/newsletter/sends/${send.id}/resume`, { method: "POST" });
       load();
@@ -2266,7 +2569,10 @@ export function HistoryView() {
     try {
       const d = await adminFetch(`/admin/newsletter/sends/${id}`);
       if (d.variantStats) {
-        setVariantStats((prev) => ({ ...prev, [id]: d.variantStats }));
+        setVariantStats((prev) => ({
+          ...prev,
+          [id]: d.variantStats,
+        }));
       }
     } catch {
       /* surfaces as 'no breakdown available' below */
@@ -2285,9 +2591,19 @@ export function HistoryView() {
     if (feedbackResults[id]) return;
     try {
       const d = await adminFetch(`/admin/newsletter/sends/${id}`);
-      setFeedbackResults((prev) => ({ ...prev, [id]: { feedback: d.feedback || null } }));
+      setFeedbackResults((prev) => ({
+        ...prev,
+        [id]: {
+          feedback: d.feedback || null,
+        },
+      }));
     } catch {
-      setFeedbackResults((prev) => ({ ...prev, [id]: { error: true } }));
+      setFeedbackResults((prev) => ({
+        ...prev,
+        [id]: {
+          error: true,
+        },
+      }));
     }
   };
 
@@ -2302,219 +2618,281 @@ export function HistoryView() {
     if (quizResults[id]) return;
     try {
       const d = await adminFetch(`/admin/newsletter/sends/${id}/quiz-results`);
-      setQuizResults((prev) => ({ ...prev, [id]: d }));
+      setQuizResults((prev) => ({
+        ...prev,
+        [id]: d,
+      }));
     } catch {
-      setQuizResults((prev) => ({ ...prev, [id]: { error: true } }));
+      setQuizResults((prev) => ({
+        ...prev,
+        [id]: {
+          error: true,
+        },
+      }));
     }
   };
-
   return (
-    <Card className="p-0 overflow-hidden">
-      {" "}
-      <div className="flex items-center justify-between p-4 border-b border-hairline border-zinc-200 flex-wrap gap-2">
+    <UiSurface density="comfortable" className="space-y-4">
+      <Card className="p-0 overflow-hidden">
         {" "}
-        <div>
+        <div className="flex items-center justify-between p-4 border-b border-hairline border-zinc-200 flex-wrap gap-2">
           {" "}
-          <h3 className="text-16 font-medium text-zinc-900">Past sends</h3>{" "}
-          <p className="text-12 text-ink-tertiary mt-0.5">
-            Delivery health, scheduling, and subject-line results.
-          </p>{" "}
-        </div>{" "}
-        <span className="text-11 text-ink-tertiary u-nums">
-          {sends.length} campaign{sends.length === 1 ? "" : "s"}
-        </span>{" "}
-      </div>
-      {aggregate && aggregate.campaignCount > 0 && (
-        <div className="border-b border-hairline border-zinc-200">
-          <div className="grid grid-cols-3 sm:grid-cols-6 gap-px bg-zinc-200">
-            <AggStat label="Delivery" value={pctLabel(aggregate.rates.deliveryRate)} />
-            <AggStat label="Open" value={pctLabel(aggregate.rates.openRate)} />
-            <AggStat label="Click" value={pctLabel(aggregate.rates.clickRate)} />
-            <AggStat
-              label="Bounce"
-              value={pctLabel(aggregate.rates.bounceRate)}
-              alert={aggregate.rates.bounceRate > 0.02}
-            />
-            <AggStat label="Unsub" value={pctLabel(aggregate.rates.unsubscribeRate)} />
-            <AggStat
-              label="Complaint"
-              value={pctLabel(aggregate.rates.complaintRate)}
-              alert={aggregate.rates.complaintRate > 0.001}
-            />
+          <div>
+            {" "}
+            <h3 className="text-16 font-medium text-zinc-900">
+              Past sends
+            </h3>{" "}
+            <p className="text-ui-body text-ink-tertiary mt-0.5">
+              Delivery health, scheduling, and subject-line results.
+            </p>{" "}
+          </div>{" "}
+          <span className="text-ui-body text-ink-tertiary u-nums">
+            {sends.length} campaign{sends.length === 1 ? "" : "s"}
+          </span>{" "}
+        </div>
+        {aggregate && aggregate.campaignCount > 0 && (
+          <div className="border-b border-hairline border-zinc-200">
+            <div className="grid grid-cols-3 sm:grid-cols-6 gap-px bg-zinc-200">
+              <AggStat
+                label="Delivery"
+                value={pctLabel(aggregate.rates.deliveryRate)}
+              />
+              <AggStat
+                label="Open"
+                value={pctLabel(aggregate.rates.openRate)}
+              />
+              <AggStat
+                label="Click"
+                value={pctLabel(aggregate.rates.clickRate)}
+              />
+              <AggStat
+                label="Bounce"
+                value={pctLabel(aggregate.rates.bounceRate)}
+                alert={aggregate.rates.bounceRate > 0.02}
+              />
+              <AggStat
+                label="Unsub"
+                value={pctLabel(aggregate.rates.unsubscribeRate)}
+              />
+              <AggStat
+                label="Complaint"
+                value={pctLabel(aggregate.rates.complaintRate)}
+                alert={aggregate.rates.complaintRate > 0.001}
+              />
+            </div>
+            <p className="text-ui-body text-ink-tertiary px-4 py-1.5 u-nums">
+              Pooled across {aggregate.campaignCount} sent campaign
+              {aggregate.campaignCount === 1 ? "" : "s"} · open/click over
+              delivered, bounce over recipients
+            </p>
           </div>
-          <p className="text-11 text-ink-tertiary px-4 py-1.5 u-nums">
-            Pooled across {aggregate.campaignCount} sent campaign
-            {aggregate.campaignCount === 1 ? "" : "s"} · open/click over delivered, bounce over recipients
-          </p>
-        </div>
-      )}
-      {loading ? (
-        <div className="text-13 text-ink-secondary p-6 text-center">
-          Loading…
-        </div>
-      ) : sends.length === 0 ? (
-        <div className="text-13 text-ink-secondary p-8 text-center">
-          No campaigns yet. Compose your first newsletter in the Compose tab.
-        </div>
-      ) : (
-        <div className="space-y-0">
-          {sends.map((s) => {
-            const pct = s.recipient_count
-              ? Math.round((s.delivered_count / s.recipient_count) * 100)
-              : 0;
-            const isAb = !!s.subject_b;
-            const isOpen = expandedId === s.id;
-            const hasQuiz =
-              QUIZ_TOKEN_RE.test(s.html_body || "") ||
-              QUIZ_TOKEN_RE.test(s.text_body || "");
-            const quizIsOpen = quizOpenId === s.id;
-            return (
-              <div
-                key={s.id}
-                className="border-b border-hairline border-zinc-200"
-              >
-                {" "}
-                <div className="px-4 py-3 flex flex-col lg:flex-row lg:items-start gap-3 lg:gap-4">
+        )}
+        {loading ? (
+          <div className="text-ui-body text-ink-secondary p-6 text-center">
+            Loading…
+          </div>
+        ) : sends.length === 0 ? (
+          <div className="text-ui-body text-ink-secondary p-8 text-center">
+            No campaigns yet. Compose your first newsletter in the Compose tab.
+          </div>
+        ) : (
+          <div className="space-y-0">
+            {sends.map((s) => {
+              const pct = s.recipient_count
+                ? Math.round((s.delivered_count / s.recipient_count) * 100)
+                : 0;
+              const isAb = !!s.subject_b;
+              const isOpen = expandedId === s.id;
+              const hasQuiz =
+                QUIZ_TOKEN_RE.test(s.html_body || "") ||
+                QUIZ_TOKEN_RE.test(s.text_body || "");
+              const quizIsOpen = quizOpenId === s.id;
+              return (
+                <div
+                  key={s.id}
+                  className="border-b border-hairline border-zinc-200"
+                >
                   {" "}
-                  <div className="flex-1 min-w-0">
+                  <div className="px-4 py-3 flex flex-col lg:flex-row lg:items-start gap-3 lg:gap-4">
                     {" "}
-                    <div className="flex items-center gap-2 mb-1 flex-wrap">
+                    <div className="flex-1 min-w-0">
                       {" "}
-                      <span className="text-14 font-medium text-zinc-900 truncate">
-                        {s.subject}
-                      </span>
-                      {isAb && (
-                        <button
-                          type="button"
-                          onClick={() => toggleVariants(s.id)}
-                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-sm bg-zinc-100 text-11 font-medium text-zinc-700 hover:bg-zinc-200 u-focus-ring"
-                          title={
-                            isOpen ? "Hide A/B breakdown" : "Show A/B breakdown"
-                          }
-                        >
-                          A/B {isOpen ? "▾" : "▸"}
-                        </button>
-                      )}
-                      {hasQuiz && s.status === "sent" && (
-                        <button
-                          type="button"
-                          onClick={() => toggleQuiz(s.id)}
-                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-sm bg-zinc-100 text-11 font-medium text-zinc-700 hover:bg-zinc-200 u-focus-ring"
-                          title={quizIsOpen ? "Hide quiz results" : "Show quiz results"}
-                        >
-                          Quiz {quizIsOpen ? "▾" : "▸"}
-                        </button>
-                      )}
-                      {s.status === "sent" && (
-                        <button
-                          type="button"
-                          onClick={() => toggleFeedback(s.id)}
-                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-sm bg-zinc-100 text-11 font-medium text-zinc-700 hover:bg-zinc-200 u-focus-ring"
-                          title={feedbackOpenId === s.id ? "Hide reader feedback" : "Show reader feedback"}
-                        >
-                          Feedback {feedbackOpenId === s.id ? "▾" : "▸"}
-                        </button>
-                      )}
-                      {s.segment_filter && (
-                        <Badge tone="neutral">Segmented</Badge>
-                      )}
-                      <StatusChip status={s.status} />{" "}
-                    </div>{" "}
-                    <div className="text-11 text-ink-tertiary">
-                      {s.created_by_name || "Admin"} ·{" "}
-                      {s.status === "scheduled" && s.scheduled_for
-                        ? `scheduled for ${formatEtDateTime(s.scheduled_for)}`
-                        : s.sent_at
-                          ? formatEtDateTime(s.sent_at)
-                          : "draft (not sent)"}
-                    </div>
-                    {isAb && (
-                      <div className="text-11 text-ink-tertiary mt-0.5 truncate">
-                        B: {s.subject_b}
-                      </div>
-                    )}
-                  </div>{" "}
-                  <div className="grid grid-cols-2 sm:grid-cols-4 lg:flex lg:items-center gap-3 lg:gap-5 text-12 flex-shrink-0">
-                    {s.status === "draft" && (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => editDraft(s.id)}
-                          className="text-11 px-2 py-1 border-hairline border-zinc-300 rounded-sm text-ink-secondary hover:text-zinc-900 hover:border-zinc-900 u-focus-ring"
-                        >
-                          Edit
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => deleteDraft(s.id)}
-                          className="text-11 px-2 py-1 border-hairline border-zinc-300 rounded-sm text-ink-secondary hover:text-zinc-900 hover:border-zinc-900 u-focus-ring"
-                        >
-                          Delete
-                        </button>
-                      </>
-                    )}
-                    {(s.status === "failed" || s.sending_stale) && (
-                      <button
-                        type="button"
-                        onClick={() => resumeSend(s)}
-                        className="text-11 px-2 py-1 border-hairline border-zinc-900 rounded-sm text-zinc-900 hover:bg-zinc-100 u-focus-ring"
-                      >
-                        {s.sending_stale ? "Recover stalled send" : "Resume"}
-                      </button>
-                    )}
-                    {s.status === "scheduled" ? (
-                      <button
-                        type="button"
-                        onClick={() => cancelSchedule(s.id)}
-                        className="text-11 px-2 py-1 border-hairline border-zinc-300 rounded-sm text-ink-secondary hover:text-zinc-900 hover:border-zinc-900 u-focus-ring"
-                      >
-                        Cancel schedule
-                      </button>
-                    ) : (
-                      <>
+                      <div className="flex items-center gap-2 mb-1 flex-wrap">
                         {" "}
-                        <Stat
-                          label="Sent"
-                          value={s.recipient_count || 0}
-                        />{" "}
-                        <Stat
-                          label="Delivered"
-                          value={`${s.delivered_count || 0} (${pct}%)`}
-                        />{" "}
-                        <Stat label="Open" value={pctLabel(s.rates?.openRate)} />{" "}
-                        <Stat label="Click" value={pctLabel(s.rates?.clickRate)} />{" "}
-                        <Stat
-                          label="Bounced"
-                          value={s.bounced_count || 0}
-                          alert={s.bounced_count > 0}
-                        />{" "}
-                        <Stat
-                          label="Unsub"
-                          value={s.unsubscribed_count || 0}
-                        />{" "}
-                      </>
-                    )}
-                  </div>{" "}
+                        <span className="text-14 font-medium text-zinc-900 truncate">
+                          {s.subject}
+                        </span>
+                        {isAb && (
+                          <Button
+                            type="button"
+                            onClick={() => toggleVariants(s.id)}
+                            className=""
+                            title={
+                              isOpen
+                                ? "Hide A/B breakdown"
+                                : "Show A/B breakdown"
+                            }
+                            variant="secondary"
+                            aria-label={
+                              isOpen
+                                ? "Hide A/B breakdown"
+                                : "Show A/B breakdown"
+                            }
+                          >
+                            A/B {isOpen ? "▾" : "▸"}
+                          </Button>
+                        )}
+                        {hasQuiz && s.status === "sent" && (
+                          <Button
+                            type="button"
+                            onClick={() => toggleQuiz(s.id)}
+                            className=""
+                            title={
+                              quizIsOpen
+                                ? "Hide quiz results"
+                                : "Show quiz results"
+                            }
+                            variant="secondary"
+                            aria-label={
+                              quizIsOpen
+                                ? "Hide quiz results"
+                                : "Show quiz results"
+                            }
+                          >
+                            Quiz {quizIsOpen ? "▾" : "▸"}
+                          </Button>
+                        )}
+                        {s.status === "sent" && (
+                          <Button
+                            type="button"
+                            onClick={() => toggleFeedback(s.id)}
+                            className=""
+                            title={
+                              feedbackOpenId === s.id
+                                ? "Hide reader feedback"
+                                : "Show reader feedback"
+                            }
+                            variant="secondary"
+                            aria-label={
+                              feedbackOpenId === s.id
+                                ? "Hide reader feedback"
+                                : "Show reader feedback"
+                            }
+                          >
+                            Feedback {feedbackOpenId === s.id ? "▾" : "▸"}
+                          </Button>
+                        )}
+                        {s.segment_filter && (
+                          <Badge tone="neutral">Segmented</Badge>
+                        )}
+                        <StatusChip status={s.status} />{" "}
+                      </div>{" "}
+                      <div className="text-ui-body text-ink-tertiary">
+                        {s.created_by_name || "Admin"} ·{" "}
+                        {s.status === "scheduled" && s.scheduled_for
+                          ? `scheduled for ${formatEtDateTime(s.scheduled_for)}`
+                          : s.sent_at
+                            ? formatEtDateTime(s.sent_at)
+                            : "draft (not sent)"}
+                      </div>
+                      {isAb && (
+                        <div className="text-ui-body text-ink-tertiary mt-0.5 truncate">
+                          B: {s.subject_b}
+                        </div>
+                      )}
+                    </div>{" "}
+                    <div className="grid grid-cols-2 sm:grid-cols-4 lg:flex lg:items-center gap-3 lg:gap-5 text-ui-body flex-shrink-0">
+                      {s.status === "draft" && (
+                        <>
+                          <Button
+                            type="button"
+                            onClick={() => editDraft(s.id)}
+                            className=""
+                            variant="secondary"
+                          >
+                            Edit
+                          </Button>
+                          <Button
+                            type="button"
+                            onClick={() => deleteDraft(s.id)}
+                            className=""
+                            variant="secondary"
+                          >
+                            Delete
+                          </Button>
+                        </>
+                      )}
+                      {(s.status === "failed" || s.sending_stale) && (
+                        <Button
+                          type="button"
+                          onClick={() => resumeSend(s)}
+                          className=""
+                          variant="secondary"
+                        >
+                          {s.sending_stale ? "Recover stalled send" : "Resume"}
+                        </Button>
+                      )}
+                      {s.status === "scheduled" ? (
+                        <Button
+                          type="button"
+                          onClick={() => cancelSchedule(s.id)}
+                          className=""
+                          variant="secondary"
+                        >
+                          Cancel schedule
+                        </Button>
+                      ) : (
+                        <>
+                          {" "}
+                          <Stat
+                            label="Sent"
+                            value={s.recipient_count || 0}
+                          />{" "}
+                          <Stat
+                            label="Delivered"
+                            value={`${s.delivered_count || 0} (${pct}%)`}
+                          />{" "}
+                          <Stat
+                            label="Open"
+                            value={pctLabel(s.rates?.openRate)}
+                          />{" "}
+                          <Stat
+                            label="Click"
+                            value={pctLabel(s.rates?.clickRate)}
+                          />{" "}
+                          <Stat
+                            label="Bounced"
+                            value={s.bounced_count || 0}
+                            alert={s.bounced_count > 0}
+                          />{" "}
+                          <Stat
+                            label="Unsub"
+                            value={s.unsubscribed_count || 0}
+                          />{" "}
+                        </>
+                      )}
+                    </div>{" "}
+                  </div>
+                  {isAb && isOpen && (
+                    <VariantBreakdown
+                      stats={variantStats[s.id]}
+                      subjectA={s.subject}
+                      subjectB={s.subject_b}
+                    />
+                  )}
+                  {hasQuiz && quizIsOpen && (
+                    <QuizResultsBreakdown data={quizResults[s.id]} />
+                  )}
+                  {feedbackOpenId === s.id && (
+                    <FeedbackBreakdown data={feedbackResults[s.id]} />
+                  )}
                 </div>
-                {isAb && isOpen && (
-                  <VariantBreakdown
-                    stats={variantStats[s.id]}
-                    subjectA={s.subject}
-                    subjectB={s.subject_b}
-                  />
-                )}
-                {hasQuiz && quizIsOpen && (
-                  <QuizResultsBreakdown data={quizResults[s.id]} />
-                )}
-                {feedbackOpenId === s.id && (
-                  <FeedbackBreakdown data={feedbackResults[s.id]} />
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </Card>
+              );
+            })}
+          </div>
+        )}
+      </Card>
+    </UiSurface>
   );
 }
 
@@ -2526,21 +2904,29 @@ export function HistoryView() {
 // an alert, so no decorative color.
 function QuizResultsBreakdown({ data }) {
   if (!data) {
-    return <div className="px-5 pb-3 -mt-2 text-11 text-ink-tertiary">Loading quiz results…</div>;
+    return (
+      <div className="px-5 pb-3 -mt-2 text-ui-body text-ink-tertiary">
+        Loading quiz results…
+      </div>
+    );
   }
   if (data.error) {
-    return <div className="px-5 pb-3 -mt-2 text-11 text-ink-tertiary">Couldn't load quiz results.</div>;
+    return (
+      <div className="px-5 pb-3 -mt-2 text-ui-body text-ink-tertiary">
+        Couldn't load quiz results.
+      </div>
+    );
   }
   if (!data.totalResponses) {
     return (
-      <div className="px-5 pb-3 -mt-2 text-11 text-ink-tertiary">
+      <div className="px-5 pb-3 -mt-2 text-ui-body text-ink-tertiary">
         No quiz responses yet — they appear as recipients tap an answer.
       </div>
     );
   }
   return (
     <div className="px-5 pb-4 -mt-1 space-y-3">
-      <div className="text-11 text-ink-secondary u-nums">
+      <div className="text-ui-body text-ink-secondary u-nums">
         {data.totalResponses} response{data.totalResponses === 1 ? "" : "s"} ·{" "}
         {data.responseRate}% of {data.totalRecipients} recipient
         {data.totalRecipients === 1 ? "" : "s"} · tagged for segmentation
@@ -2552,21 +2938,28 @@ function QuizResultsBreakdown({ data }) {
             key={q.quizId}
             className="border-hairline border-zinc-200 rounded-sm p-3 bg-white"
           >
-            <div className="text-12 font-medium text-zinc-900 mb-2">{q.question}</div>
+            <div className="text-ui-body font-medium text-zinc-900 mb-2">
+              {q.question}
+            </div>
             <div className="space-y-1.5">
               {q.answers.map((a) => {
                 const share = q.responses
                   ? Math.round((a.count / q.responses) * 100)
                   : 0;
                 return (
-                  <div key={a.key} className="flex items-center gap-2 text-12">
+                  <div
+                    key={a.key}
+                    className="flex items-center gap-2 text-ui-body"
+                  >
                     <span className="w-28 shrink-0 text-ink-secondary truncate">
                       {a.label}
                     </span>
                     <span className="flex-1 h-3 bg-zinc-100 rounded-sm overflow-hidden">
                       <span
                         className="block h-full bg-zinc-900"
-                        style={{ width: `${Math.round((a.count / max) * 100)}%` }}
+                        style={{
+                          width: `${Math.round((a.count / max) * 100)}%`,
+                        }}
                       />
                     </span>
                     <span className="w-16 shrink-0 text-right u-nums text-ink-secondary">
@@ -2591,9 +2984,18 @@ function QuizResultsBreakdown({ data }) {
 // mirror the server-side allowlist in newsletter-feedback.js.
 
 const FEEDBACK_REACTION_LABELS = [
-  { key: "great", label: "👍 Great" },
-  { key: "okay", label: "😐 Okay" },
-  { key: "needs-work", label: "👎 Needs work" },
+  {
+    key: "great",
+    label: "👍 Great",
+  },
+  {
+    key: "okay",
+    label: "😐 Okay",
+  },
+  {
+    key: "needs-work",
+    label: "👎 Needs work",
+  },
 ];
 const FEEDBACK_MISSING_LABELS = {
   "closer-events": "Closer events",
@@ -2602,31 +3004,46 @@ const FEEDBACK_MISSING_LABELS = {
   "family-activities": "Family activities",
   "home-tips": "Home tips",
 };
-
 function FeedbackBreakdown({ data }) {
   if (!data) {
-    return <div className="px-5 pb-3 -mt-2 text-11 text-ink-tertiary">Loading reader feedback…</div>;
+    return (
+      <div className="px-5 pb-3 -mt-2 text-ui-body text-ink-tertiary">
+        Loading reader feedback…
+      </div>
+    );
   }
   if (data.error) {
-    return <div className="px-5 pb-3 -mt-2 text-11 text-ink-tertiary">Couldn't load reader feedback.</div>;
+    return (
+      <div className="px-5 pb-3 -mt-2 text-ui-body text-ink-tertiary">
+        Couldn't load reader feedback.
+      </div>
+    );
   }
   const reactions = data.feedback?.reactions || {};
   const missing = data.feedback?.missing || {};
   const total = Object.values(reactions).reduce((sum, n) => sum + n, 0);
   if (!total) {
     return (
-      <div className="px-5 pb-3 -mt-2 text-11 text-ink-tertiary">
-        No reactions yet — they appear as readers tap 👍 / 😐 / 👎 in the footer.
+      <div className="px-5 pb-3 -mt-2 text-ui-body text-ink-tertiary">
+        No reactions yet — they appear as readers tap 👍 / 😐 / 👎 in the
+        footer.
       </div>
     );
   }
-  const max = Math.max(1, ...FEEDBACK_REACTION_LABELS.map((r) => reactions[r.key] || 0));
+  const max = Math.max(
+    1,
+    ...FEEDBACK_REACTION_LABELS.map((r) => reactions[r.key] || 0),
+  );
   const missingEntries = Object.entries(FEEDBACK_MISSING_LABELS)
-    .map(([key, label]) => ({ key, label, count: missing[key] || 0 }))
+    .map(([key, label]) => ({
+      key,
+      label,
+      count: missing[key] || 0,
+    }))
     .filter((m) => m.count > 0);
   return (
     <div className="px-5 pb-4 -mt-1 space-y-3">
-      <div className="text-11 text-ink-secondary u-nums">
+      <div className="text-ui-body text-ink-secondary u-nums">
         {total} reaction{total === 1 ? "" : "s"}
       </div>
       <div className="border-hairline border-zinc-200 rounded-sm p-3 bg-white space-y-1.5">
@@ -2634,12 +3051,16 @@ function FeedbackBreakdown({ data }) {
           const count = reactions[r.key] || 0;
           const share = total ? Math.round((count / total) * 100) : 0;
           return (
-            <div key={r.key} className="flex items-center gap-2 text-12">
-              <span className="w-28 shrink-0 text-ink-secondary truncate">{r.label}</span>
+            <div key={r.key} className="flex items-center gap-2 text-ui-body">
+              <span className="w-28 shrink-0 text-ink-secondary truncate">
+                {r.label}
+              </span>
               <span className="flex-1 h-3 bg-zinc-100 rounded-sm overflow-hidden">
                 <span
                   className="block h-full bg-zinc-900"
-                  style={{ width: `${Math.round((count / max) * 100)}%` }}
+                  style={{
+                    width: `${Math.round((count / max) * 100)}%`,
+                  }}
                 />
               </span>
               <span className="w-16 shrink-0 text-right u-nums text-ink-secondary">
@@ -2651,10 +3072,10 @@ function FeedbackBreakdown({ data }) {
       </div>
       {missingEntries.length > 0 && (
         <div className="border-hairline border-zinc-200 rounded-sm p-3 bg-white">
-          <div className="text-12 font-medium text-zinc-900 mb-2">
+          <div className="text-ui-body font-medium text-zinc-900 mb-2">
             👎 follow-up — what was missing
           </div>
-          <div className="space-y-1 text-12 text-ink-secondary">
+          <div className="space-y-1 text-ui-body text-ink-secondary">
             {missingEntries.map((m) => (
               <div key={m.key} className="flex items-center justify-between">
                 <span>{m.label}</span>
@@ -2679,7 +3100,7 @@ function FeedbackBreakdown({ data }) {
 function VariantBreakdown({ stats, subjectA, subjectB }) {
   if (!stats) {
     return (
-      <div className="px-5 pb-3 -mt-2 text-11 text-ink-tertiary">
+      <div className="px-5 pb-3 -mt-2 text-ui-body text-ink-tertiary">
         Loading variant breakdown…
       </div>
     );
@@ -2688,7 +3109,7 @@ function VariantBreakdown({ stats, subjectA, subjectB }) {
   const b = stats.b;
   if (!a && !b) {
     return (
-      <div className="px-5 pb-3 -mt-2 text-11 text-ink-tertiary">
+      <div className="px-5 pb-3 -mt-2 text-ui-body text-ink-tertiary">
         No A/B delivery rows yet — open rates appear once SendGrid events
         arrive.
       </div>
@@ -2701,7 +3122,6 @@ function VariantBreakdown({ stats, subjectA, subjectB }) {
   if (aRate != null && bRate != null && Math.abs(aRate - bRate) >= 0.005) {
     winner = aRate > bRate ? "a" : "b";
   }
-
   return (
     <div className="px-5 pb-4 -mt-1 grid grid-cols-1 sm:grid-cols-2 gap-3">
       {" "}
@@ -2722,7 +3142,6 @@ function VariantBreakdown({ stats, subjectA, subjectB }) {
     </div>
   );
 }
-
 function VariantCell({ letter, subject, stats, rate, isWinner }) {
   return (
     <div
@@ -2734,16 +3153,18 @@ function VariantCell({ letter, subject, stats, rate, isWinner }) {
       {" "}
       <div className="flex items-center gap-2 mb-1 flex-wrap">
         {" "}
-        <span className="text-11 uppercase tracking-label text-ink-secondary">
+        <span className="text-ui-body uppercase tracking-label text-ink-secondary">
           Variant {letter}
         </span>
         {isWinner && <Badge tone="strong">Winner</Badge>}
       </div>{" "}
-      <div className="text-12 text-zinc-900 mb-2 truncate" title={subject}>
+      <div className="text-ui-body text-zinc-900 mb-2 truncate" title={subject}>
         {subject || <em className="text-ink-tertiary">(missing)</em>}
       </div>
       {!stats ? (
-        <div className="text-11 text-ink-tertiary">No deliveries recorded.</div>
+        <div className="text-ui-body text-ink-tertiary">
+          No deliveries recorded.
+        </div>
       ) : (
         <div className="grid grid-cols-4 gap-2">
           {" "}
@@ -2759,7 +3180,6 @@ function VariantCell({ letter, subject, stats, rate, isWinner }) {
     </div>
   );
 }
-
 function StatusChip({ status }) {
   if (status === "sent") return <Badge tone="strong">Sent</Badge>;
   if (status === "sending") return <Badge tone="neutral">Sending…</Badge>;
@@ -2767,7 +3187,6 @@ function StatusChip({ status }) {
   if (status === "failed") return <Badge tone="alert">Failed</Badge>;
   return <Badge tone="neutral">Draft</Badge>;
 }
-
 function Stat({ label, value, alert }) {
   return (
     <div className="text-right">
@@ -2780,7 +3199,7 @@ function Stat({ label, value, alert }) {
       >
         {value}
       </div>{" "}
-      <div className="text-11 text-ink-tertiary">{label}</div>{" "}
+      <div className="text-ui-body text-ink-tertiary">{label}</div>{" "}
     </div>
   );
 }
@@ -2804,7 +3223,7 @@ function AggStat({ label, value, alert }) {
       >
         {value}
       </div>
-      <div className="text-11 text-ink-tertiary">{label}</div>
+      <div className="text-ui-body text-ink-tertiary">{label}</div>
     </div>
   );
 }
@@ -2812,7 +3231,6 @@ function AggStat({ label, value, alert }) {
 // ── Subscribers ───────────────────────────────────────────────────
 
 const SUBSCRIBERS_PAGE_SIZE = 100;
-
 export function SubscribersView() {
   const [subs, setSubs] = useState([]);
   const [counts, setCounts] = useState({});
@@ -2823,9 +3241,44 @@ export function SubscribersView() {
   const [hasMore, setHasMore] = useState(false);
   const [offset, setOffset] = useState(0);
   const [status, setStatus] = useState("");
+  const [statusError, setStatusError] = useState(false);
   const [importPreConsented, setImportPreConsented] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
+  const [addEmail, setAddEmail] = useState("");
+  const [addError, setAddError] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [importConfirmation, setImportConfirmation] = useState(null);
+  const [importError, setImportError] = useState("");
+  const [importing, setImporting] = useState(false);
+  const [unsubscribeTarget, setUnsubscribeTarget] = useState(null);
+  const [unsubscribeError, setUnsubscribeError] = useState("");
+  const [unsubscribing, setUnsubscribing] = useState(false);
   const importInputRef = useRef(null);
   const subscribersAbortRef = useRef(null);
+  const addInFlightRef = useRef(false);
+  const importInFlightRef = useRef(false);
+  const unsubscribeInFlightRef = useRef(false);
+
+  const showStatus = (message, error = false) => {
+    setStatus(message);
+    setStatusError(error);
+  };
+  const closeAddDialog = () => {
+    if (addInFlightRef.current) return;
+    setAddOpen(false);
+    setAddEmail("");
+    setAddError("");
+  };
+  const closeImportDialog = () => {
+    if (importInFlightRef.current) return;
+    setImportConfirmation(null);
+    setImportError("");
+  };
+  const closeUnsubscribeDialog = () => {
+    if (unsubscribeInFlightRef.current) return;
+    setUnsubscribeTarget(null);
+    setUnsubscribeError("");
+  };
 
   // Initial / filter-changed fetch — resets the list. Re-runs whenever
   // the filter or search query changes (via the useEffect below).
@@ -2854,13 +3307,14 @@ export function SubscribersView() {
           setHasMore(false);
         }
       })
-      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
   }, [filter, q]);
   useEffect(() => {
     load();
     return () => subscribersAbortRef.current?.abort();
   }, [load]);
-
   const loadMore = async () => {
     setLoadingMore(true);
     const qs = new URLSearchParams();
@@ -2875,14 +3329,13 @@ export function SubscribersView() {
       setOffset((cur) => cur + next.length);
       setHasMore(next.length === SUBSCRIBERS_PAGE_SIZE);
     } catch (e) {
-      setStatus("Load more failed: " + e.message);
+      showStatus("Load more failed: " + e.message, true);
     } finally {
       setLoadingMore(false);
     }
   };
-
   const exportCsv = async () => {
-    setStatus("Building CSV…");
+    showStatus("Building CSV…");
     try {
       const qs = new URLSearchParams();
       if (filter !== "all") qs.set("status", filter);
@@ -2906,28 +3359,32 @@ export function SubscribersView() {
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      setStatus("CSV downloaded.");
+      showStatus("CSV downloaded.");
     } catch (e) {
-      setStatus("Export failed: " + e.message);
+      showStatus("Export failed: " + e.message, true);
     }
   };
-
   const addSubscriber = async () => {
-    const email = prompt("Email address to add:");
-    if (!email) return;
-    setStatus("Adding...");
+    if (!addEmail || addInFlightRef.current) return;
+    addInFlightRef.current = true;
+    setAdding(true);
+    setAddError("");
     try {
       await adminFetch("/admin/newsletter/subscribers", {
         method: "POST",
-        body: JSON.stringify({ email }),
+        body: JSON.stringify({ email: addEmail }),
       });
-      setStatus(`Added ${email}.`);
+      showStatus(`Added ${addEmail}.`);
+      setAddOpen(false);
+      setAddEmail("");
       load();
     } catch (e) {
-      setStatus("Failed: " + e.message);
+      setAddError("Failed: " + e.message);
+    } finally {
+      addInFlightRef.current = false;
+      setAdding(false);
     }
   };
-
   const importCsv = async (event) => {
     const file = event.target.files?.[0];
     event.target.value = "";
@@ -2935,223 +3392,356 @@ export function SubscribersView() {
     try {
       const subscribers = parseSubscriberCsv(await file.text());
       if (!subscribers.length) throw new Error("No subscriber rows found");
-      const destination = importPreConsented ? "active and immediately mailable" : "pending confirmation";
-      if (!confirm(`Import ${subscribers.length.toLocaleString()} subscriber rows as ${destination}?`)) return;
-      setStatus(`Importing ${subscribers.length.toLocaleString()} rows…`);
+      setImportError("");
+      setImportConfirmation({ subscribers, preConsented: importPreConsented });
+    } catch (e) {
+      showStatus("Import failed: " + e.message, true);
+    }
+  };
+  const confirmImport = async () => {
+    if (!importConfirmation || importInFlightRef.current) return;
+    importInFlightRef.current = true;
+    setImporting(true);
+    setImportError("");
+    const { subscribers, preConsented } = importConfirmation;
+    try {
       const result = await adminFetch("/admin/newsletter/subscribers/import", {
         method: "POST",
-        body: JSON.stringify({ subscribers, source: "admin_import", preConsented: importPreConsented }),
+        body: JSON.stringify({ subscribers, source: "admin_import", preConsented }),
       });
-      setStatus(`Imported ${result.inserted.toLocaleString()} subscriber${result.inserted === 1 ? "" : "s"}; ${result.skipped.toLocaleString()} skipped or already present.`);
+      showStatus(
+        `Imported ${result.inserted.toLocaleString()} subscriber${result.inserted === 1 ? "" : "s"}; ${result.skipped.toLocaleString()} skipped or already present.`,
+      );
+      setImportConfirmation(null);
       load();
     } catch (e) {
-      setStatus("Import failed: " + e.message);
+      setImportError("Import failed: " + e.message);
+    } finally {
+      importInFlightRef.current = false;
+      setImporting(false);
     }
   };
-
-  const removeSubscriber = async (id, email) => {
-    if (!confirm(`Unsubscribe ${email}?`)) return;
+  const removeSubscriber = async () => {
+    if (!unsubscribeTarget || unsubscribeInFlightRef.current) return;
+    unsubscribeInFlightRef.current = true;
+    setUnsubscribing(true);
+    setUnsubscribeError("");
     try {
-      await adminFetch(`/admin/newsletter/subscribers/${id}`, {
+      await adminFetch(`/admin/newsletter/subscribers/${unsubscribeTarget.id}`, {
         method: "DELETE",
       });
+      setUnsubscribeTarget(null);
       load();
     } catch (e) {
-      alert("Failed: " + e.message);
+      setUnsubscribeError("Failed: " + e.message);
+    } finally {
+      unsubscribeInFlightRef.current = false;
+      setUnsubscribing(false);
     }
   };
-
   return (
-    <Card className="p-0 overflow-hidden">
-      {" "}
-      <div className="flex items-start justify-between p-4 border-b border-hairline border-zinc-200 flex-wrap gap-3">
+    <UiSurface density="comfortable" className="space-y-4">
+      <Card className="p-0 overflow-hidden">
         {" "}
-        <div>
+        <div className="flex items-start justify-between p-4 border-b border-hairline border-zinc-200 flex-wrap gap-3">
           {" "}
-          <h3 className="text-16 font-medium text-zinc-900">
-            Subscribers
-          </h3>{" "}
-          <p className="text-12 text-ink-tertiary mt-0.5">
-            Search the list, export filtered contacts, and manage opt-outs.
-          </p>{" "}
-        </div>{" "}
-        <div className="flex items-center gap-2 flex-wrap">
-          <input
-            ref={importInputRef}
-            type="file"
-            accept=".csv,text/csv"
-            onChange={importCsv}
-            className="hidden"
-          />
-          <label className="inline-flex items-center gap-1.5 text-11 text-ink-secondary" title="Leave unchecked for unverified lists; they remain pending and cannot receive campaigns.">
-            <input
-              type="checkbox"
-              checked={importPreConsented}
-              onChange={(e) => setImportPreConsented(e.target.checked)}
-            />
-            Existing opt-in consent
-          </label>
-          <Button onClick={() => importInputRef.current?.click()} variant="secondary">
-            <Upload size={14} strokeWidth={1.75} className="mr-2" aria-hidden />
-            Import CSV
-          </Button>
-          {" "}
-          <Button onClick={exportCsv} variant="secondary">
+          <div>
             {" "}
-            <Download
-              size={14}
-              strokeWidth={1.75}
-              className="mr-2"
-              aria-hidden
+            <h3 className="text-16 font-medium text-zinc-900">
+              Subscribers
+            </h3>{" "}
+            <p className="text-ui-body text-ink-tertiary mt-0.5">
+              Search the list, export filtered contacts, and manage opt-outs.
+            </p>{" "}
+          </div>{" "}
+          <div className="flex items-center gap-2 flex-wrap">
+            <Input
+              ref={importInputRef}
+              type="file"
+              accept=".csv,text/csv"
+              onChange={importCsv}
+              className="hidden"
+              aria-label="Existing opt-in consent"
             />
-            Export CSV
-          </Button>{" "}
-          <Button onClick={addSubscriber} variant="secondary">
-            {" "}
-            <UserPlus
-              size={14}
-              strokeWidth={1.75}
-              className="mr-2"
-              aria-hidden
-            />
-            Add Subscriber
-          </Button>{" "}
-        </div>{" "}
-      </div>{" "}
-      <div className="p-4 border-b border-hairline border-zinc-100 flex items-center gap-2 flex-wrap">
-        {["active", "pending", "unsubscribed", "bounced", "all"].map((f) => {
-          const active = filter === f;
-          const count =
-            f === "all"
-              ? (counts.all ??
-                Object.entries(counts)
-                  .filter(([key]) => !["all", "bounced"].includes(key))
-                  .reduce((sum, [, value]) => sum + Number(value || 0), 0))
-              : counts[f] || 0;
-          return (
-            <button
-              key={f}
-              type="button"
-              onClick={() => setFilter(f)}
-              className={cn(
-                "inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-12 font-medium border-hairline u-focus-ring",
-                active
-                  ? "bg-zinc-900 text-white border-zinc-900"
-                  : "bg-white text-ink-secondary border-zinc-300 hover:border-zinc-900",
-              )}
+            <label
+              className="inline-flex items-center gap-1.5 text-ui-body text-ink-secondary"
+              title="Leave unchecked for unverified lists; they remain pending and cannot receive campaigns."
             >
-              {f.charAt(0).toUpperCase() + f.slice(1)}
-              <span
-                className={cn(
-                  "u-nums text-11",
-                  active ? "text-zinc-300" : "text-ink-tertiary",
-                )}
-              >
-                {count}
-              </span>{" "}
-            </button>
-          );
-        })}
-        <div className="relative w-full sm:w-72 sm:ml-auto">
-          {" "}
-          <Search
-            size={14}
-            strokeWidth={1.75}
-            className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-tertiary"
-            aria-hidden
-          />{" "}
-          <input
-            type="text"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="Search email…"
-            className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 pl-8 pr-2 text-12 text-zinc-900"
-          />{" "}
-        </div>{" "}
-      </div>
-      {status && (
-        <div className="mx-4 mt-3 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-3 text-12 text-ink-secondary">
-          {status}
-        </div>
-      )}
-      {loading ? (
-        <div className="text-13 text-ink-secondary p-6 text-center">
-          Loading…
-        </div>
-      ) : subs.length === 0 ? (
-        <div className="text-13 text-ink-secondary p-8 text-center">
-          No subscribers in this filter.
-        </div>
-      ) : (
-        <div>
-          {subs.map((s) => (
-            <div
-              key={s.id}
-              className="px-4 py-3 border-b border-hairline border-zinc-200 flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-4"
+              <Checkbox
+                checked={importPreConsented}
+                onChange={(e) => setImportPreConsented(e.target.checked)}
+                className="shrink-0"
+              />
+              Existing opt-in consent
+            </label>
+            <Button
+              onClick={(event) => {
+                event.currentTarget.focus({ preventScroll: true });
+                importInputRef.current?.click();
+              }}
+              variant="secondary"
+            >
+              <Upload
+                size={14}
+                strokeWidth={1.75}
+                className="mr-2"
+                aria-hidden
+              />
+              Import CSV
+            </Button>{" "}
+            <Button onClick={exportCsv} variant="secondary">
+              {" "}
+              <Download
+                size={14}
+                strokeWidth={1.75}
+                className="mr-2"
+                aria-hidden
+              />
+              Export CSV
+            </Button>{" "}
+            <Button
+              onClick={(event) => {
+                event.currentTarget.focus({ preventScroll: true });
+                setAddError("");
+                setAddOpen(true);
+              }}
+              variant="secondary"
             >
               {" "}
-              <div className="flex-1 min-w-0">
-                {" "}
-                <div className="flex items-center gap-2">
-                  {" "}
-                  <span className="text-13 text-zinc-900 font-mono truncate">
-                    {s.email}
-                  </span>
-                  {s.status === "unsubscribed" && (
-                    <Badge tone="neutral">Unsubscribed</Badge>
-                  )}
-                  {s.status === "pending" && (
-                    <Badge tone="neutral">Pending confirmation</Badge>
-                  )}
-                  {s.bounce_count > 0 && (
-                    <Badge tone="alert">Bounced</Badge>
-                  )}
-                  {s.customer_id && <Badge tone="neutral">Customer</Badge>}
-                </div>{" "}
-                <div className="text-11 text-ink-tertiary">
-                  {s.first_name || s.last_name
-                    ? `${s.first_name || ""} ${s.last_name || ""}`.trim() +
-                      " · "
-                    : ""}
-                  Source: {s.source || "unknown"} · Joined{" "}
-                  {new Date(s.subscribed_at).toLocaleDateString()}
-                  {s.bounce_count > 0 &&
-                    ` · ${s.bounce_count} bounce${s.bounce_count === 1 ? "" : "s"}`}
-                </div>{" "}
-              </div>
-              {s.status === "active" && (
-                <button
-                  type="button"
-                  onClick={() => removeSubscriber(s.id, s.email)}
-                  className="text-11 px-2 py-1 border-hairline border-zinc-300 rounded-sm text-ink-secondary hover:text-zinc-900 hover:border-zinc-900 u-focus-ring self-start sm:self-center"
-                >
-                  Unsubscribe
-                </button>
-              )}
-            </div>
-          ))}
-          {hasMore && (
-            <div className="px-5 py-4 text-center">
-              {" "}
+              <UserPlus
+                size={14}
+                strokeWidth={1.75}
+                className="mr-2"
+                aria-hidden
+              />
+              Add Subscriber
+            </Button>{" "}
+          </div>{" "}
+        </div>{" "}
+        <div className="p-4 border-b border-hairline border-zinc-100 flex items-center gap-2 flex-wrap">
+          {["active", "pending", "unsubscribed", "bounced", "all"].map((f) => {
+            const active = filter === f;
+            const count =
+              f === "all"
+                ? (counts.all ??
+                  Object.entries(counts)
+                    .filter(([key]) => !["all", "bounced"].includes(key))
+                    .reduce((sum, [, value]) => sum + Number(value || 0), 0))
+                : counts[f] || 0;
+            return (
               <Button
-                onClick={loadMore}
-                variant="secondary"
-                disabled={loadingMore}
+                key={f}
+                type="button"
+                onClick={() => setFilter(f)}
+                className="gap-1.5 rounded-full"
+                    aria-pressed={active}
+                    variant={active ? "primary" : "secondary"}
               >
-                {loadingMore
-                  ? "Loading…"
-                  : `Load ${SUBSCRIBERS_PAGE_SIZE} more`}
-              </Button>{" "}
-            </div>
-          )}
-          {!hasMore && subs.length > SUBSCRIBERS_PAGE_SIZE && (
-            <div className="px-5 py-4 text-center text-11 text-ink-tertiary">
-              Showing all {subs.length} subscriber{subs.length === 1 ? "" : "s"}{" "}
-              in this filter.
-            </div>
-          )}
+                {f.charAt(0).toUpperCase() + f.slice(1)}
+                <span
+                  className={cn(
+                    "u-nums text-ui-body",
+                    active ? "text-zinc-300" : "text-ink-tertiary",
+                  )}
+                >
+                  {count}
+                </span>{" "}
+              </Button>
+            );
+          })}
+          <div className="relative w-full sm:w-72 sm:ml-auto">
+            {" "}
+            <Search
+              size={14}
+              strokeWidth={1.75}
+              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-tertiary"
+              aria-hidden
+            />{" "}
+            <Input
+              type="text"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Search email…"
+              className="w-full pl-8"
+              aria-label="Search email…"
+            />{" "}
+          </div>{" "}
         </div>
-      )}
-    </Card>
+        {status && (
+          <ActionFeedback error={statusError} className="mx-4 mt-3">
+            {status}
+          </ActionFeedback>
+        )}
+        {loading ? (
+          <div className="text-ui-body text-ink-secondary p-6 text-center">
+            Loading…
+          </div>
+        ) : subs.length === 0 ? (
+          <div className="text-ui-body text-ink-secondary p-8 text-center">
+            No subscribers in this filter.
+          </div>
+        ) : (
+          <div>
+            {subs.map((s) => (
+              <div
+                key={s.id}
+                className="px-4 py-3 border-b border-hairline border-zinc-200 flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-4"
+              >
+                {" "}
+                <div className="flex-1 min-w-0">
+                  {" "}
+                  <div className="flex items-center gap-2">
+                    {" "}
+                    <span className="text-ui-body text-zinc-900 u-nums truncate">
+                      {s.email}
+                    </span>
+                    {s.status === "unsubscribed" && (
+                      <Badge tone="neutral">Unsubscribed</Badge>
+                    )}
+                    {s.status === "pending" && (
+                      <Badge tone="neutral">Pending confirmation</Badge>
+                    )}
+                    {s.bounce_count > 0 && <Badge tone="alert">Bounced</Badge>}
+                    {s.customer_id && <Badge tone="neutral">Customer</Badge>}
+                  </div>{" "}
+                  <div className="text-ui-body text-ink-tertiary">
+                    {s.first_name || s.last_name
+                      ? `${s.first_name || ""} ${s.last_name || ""}`.trim() +
+                        " · "
+                      : ""}
+                    Source: {s.source || "unknown"} · Joined{" "}
+                    {new Date(s.subscribed_at).toLocaleDateString()}
+                    {s.bounce_count > 0 &&
+                      ` · ${s.bounce_count} bounce${s.bounce_count === 1 ? "" : "s"}`}
+                  </div>{" "}
+                </div>
+                {s.status === "active" && (
+                  <Button
+                    type="button"
+                    onClick={(event) => {
+                      event.currentTarget.focus({ preventScroll: true });
+                      setUnsubscribeError("");
+                      setUnsubscribeTarget({ id: s.id, email: s.email });
+                    }}
+                    className=""
+                    variant="secondary"
+                  >
+                    Unsubscribe
+                  </Button>
+                )}
+              </div>
+            ))}
+            {hasMore && (
+              <div className="px-5 py-4 text-center">
+                {" "}
+                <Button
+                  onClick={loadMore}
+                  variant="secondary"
+                  disabled={loadingMore}
+                >
+                  {loadingMore
+                    ? "Loading…"
+                    : `Load ${SUBSCRIBERS_PAGE_SIZE} more`}
+                </Button>{" "}
+              </div>
+            )}
+            {!hasMore && subs.length > SUBSCRIBERS_PAGE_SIZE && (
+              <div className="px-5 py-4 text-center text-ui-body text-ink-tertiary">
+                Showing all {subs.length} subscriber
+                {subs.length === 1 ? "" : "s"} in this filter.
+              </div>
+            )}
+          </div>
+        )}
+      </Card>
+      <Dialog
+        open={addOpen}
+        onClose={closeAddDialog}
+        size="sm"
+      >
+        <DialogHeader>
+          <DialogTitle>Add subscriber</DialogTitle>
+        </DialogHeader>
+        <form onSubmit={(event) => { event.preventDefault(); addSubscriber(); }}>
+          <DialogBody className="space-y-3">
+            <Field label="Email address" required>
+              <Input
+                autoFocus
+                type="text"
+                inputMode="email"
+                value={addEmail}
+                onChange={(event) => setAddEmail(event.target.value)}
+              />
+            </Field>
+            {addError && <ActionFeedback error>{addError}</ActionFeedback>}
+          </DialogBody>
+          <DialogFooter>
+            <Button variant="secondary" onClick={closeAddDialog} disabled={adding}>
+              Cancel
+            </Button>
+            <Button type="submit" loading={adding} disabled={!addEmail}>
+              Add subscriber
+            </Button>
+          </DialogFooter>
+        </form>
+      </Dialog>
+      <Dialog
+        open={Boolean(importConfirmation)}
+        onClose={closeImportDialog}
+        size="sm"
+      >
+        <DialogHeader>
+          <DialogTitle>Import subscribers?</DialogTitle>
+        </DialogHeader>
+        <form onSubmit={(event) => { event.preventDefault(); confirmImport(); }}>
+          <DialogBody className="space-y-3">
+            {importConfirmation && (
+              <p className="text-ui-body text-ink-secondary">
+                Import {importConfirmation.subscribers.length.toLocaleString()} subscriber rows as{" "}
+                {importConfirmation.preConsented
+                  ? "active and immediately mailable"
+                  : "pending confirmation"}?
+              </p>
+            )}
+            {importError && <ActionFeedback error>{importError}</ActionFeedback>}
+          </DialogBody>
+          <DialogFooter>
+            <Button variant="secondary" onClick={closeImportDialog} disabled={importing}>
+              Cancel
+            </Button>
+            <Button type="submit" loading={importing} autoFocus>
+              Import subscribers
+            </Button>
+          </DialogFooter>
+        </form>
+      </Dialog>
+      <Dialog
+        open={Boolean(unsubscribeTarget)}
+        onClose={closeUnsubscribeDialog}
+        size="sm"
+      >
+        <DialogHeader>
+          <DialogTitle>Unsubscribe subscriber?</DialogTitle>
+        </DialogHeader>
+        <form onSubmit={(event) => { event.preventDefault(); removeSubscriber(); }}>
+          <DialogBody className="space-y-3">
+            {unsubscribeTarget && (
+              <p className="text-ui-body text-ink-secondary u-nums">
+                Unsubscribe {unsubscribeTarget.email}?
+              </p>
+            )}
+            {unsubscribeError && <ActionFeedback error>{unsubscribeError}</ActionFeedback>}
+          </DialogBody>
+          <DialogFooter>
+            <Button variant="secondary" onClick={closeUnsubscribeDialog} disabled={unsubscribing}>
+              Cancel
+            </Button>
+            <Button type="submit" variant="danger" loading={unsubscribing} autoFocus>
+              Unsubscribe
+            </Button>
+          </DialogFooter>
+        </form>
+      </Dialog>
+    </UiSurface>
   );
 }

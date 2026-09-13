@@ -12,7 +12,7 @@ vi.mock('../components/AddressAutocomplete', () => ({
     <input aria-label="Service address" value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} />
   ),
 }));
-vi.mock('../components/brand', () => ({ WavesShell: ({ children }) => <div>{children}</div> }));
+vi.mock('../components/brand', async (importOriginal) => ({ ...(await importOriginal()), WavesShell: ({ children }) => <div>{children}</div> }));
 vi.mock('../components/BrandFooter', () => ({ default: () => null }));
 vi.mock('../components/booking/WavesAIScheduleSearch', () => ({ default: () => null }));
 vi.mock('../glass/glass-engine', () => ({ fireGlassConfetti: vi.fn(), useGlassSurface: () => {} }));
