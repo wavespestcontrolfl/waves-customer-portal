@@ -1545,7 +1545,8 @@ function report_readback_confirms(value, record, { spoken }) {
           findingVerb ? findingVerb.index + findingVerb[0].length : -1,
         );
         const findingEvidence = affirmed.slice(0, findingEvidenceEnd);
-        const trailingEvidence = affirmed.slice(findingEvidenceEnd);
+        const trailingEvidence = affirmed.slice(findingEvidenceEnd)
+          .replace(/^\s*(?:perimeter|area|wall|walls|zone|edge)\b/i, '');
         // A trailing "before" dates completed evidence. Remove only that
         // temporal marker, preserving any actual denial or condition later.
         const evidenceEnd = Math.max(subjectAt, locationAt, completedFinding ? findingVerb.index : -1);

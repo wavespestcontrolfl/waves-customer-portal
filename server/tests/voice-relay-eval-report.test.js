@@ -208,6 +208,9 @@ test('zero-width subjects finish without confirming an absent location', () => {
 test.each([
   ['Talstar P is on the exterior perimeter, and bait is along the foundation.', 'pass'],
   ['Talstar P is on the exterior perimeter is an option.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, maybe.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, I think.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter.', 'pass'],
 ])('concise report with partial location match: %s', (text, status) => {
   expect(checks.report_readback_confirms({ subject: '\\btalstar\\b', location: '\\b(?:exterior|perimeter)\\b' }, {}, { spoken: [text] })[0]).toBe(status);
 });
