@@ -19,7 +19,7 @@ async function connectPreview(url) {
   throw lastError;
 }
 const campaign = {
-  id: 1, campaign_name: 'Bradenton Pest Control', platform: 'google_ads', campaign_type: 'SEARCH',
+  id: 1, campaign_name: 'Bradenton Pest Control', platform: 'google_ads', campaign_type: '2',
   service_category: 'Pest Control', target_area: 'Bradenton', status: 'active',
   daily_budget_current: 100, recommended_daily_budget: 110,
   last7d: { spend: 500, conversionValue: 2500, conversions: 20, clicks: 100, impressions: 2500 },
@@ -27,10 +27,10 @@ const campaign = {
 };
 const campaigns = [
   campaign,
-  // The dashboard's existing platform split recognizes these legacy/manual
-  // campaign_type keys. Keep the synced Google Ads SEARCH row above as well:
-  // this visual QA must not hide the production-sync normalization mismatch.
-  { ...campaign, id: 2, campaign_name: 'Venice Pest Control', platform: 'manual', campaign_type: 'google_search', target_area: 'Venice' },
+  // Google client parses SEARCH to enum 2; the DB string column returns "2".
+  // Mix that real synced channel value with an existing manually managed row.
+  // The Search card must include both, without changing stored campaign types.
+  { ...campaign, id: 2, campaign_name: 'Venice Pest Control', platform: 'google_ads', campaign_type: 'google_search', target_area: 'Venice' },
   {
     ...campaign,
     id: 3,
@@ -89,6 +89,19 @@ async function main() {
     await locator.waitFor();
     assert.equal((await locator.textContent()).trim(), text);
     assert.equal(await locator.evaluate((element) => getComputedStyle(element).color), color);
+  }
+
+  async function assertPlatformAttribution(page) {
+    for (const [type, values] of [
+      ['google_search', ['$4,000.00', '$18,000.00', '150', '4.5x']],
+      ['google_lsa', ['$750.00', '$3,200.00', '26', '4.3x']],
+    ]) {
+      const card = page.locator(`[data-qa="platform-${type}"]`);
+      for (const value of values) await card.getByText(value, { exact: true }).waitFor();
+    }
+    const file = path.join(output, `ppc-platform-attribution-${page.viewportSize().width}.png`);
+    await page.locator('.ppc-platform-grid').screenshot({ path: file });
+    report.screenshots.push(path.relative(root, file));
   }
 
   async function openPage(width, fixtureOptions = {}) {
@@ -240,6 +253,7 @@ async function main() {
     await desktop.goto(`${server.baseUrl}/admin/ppc`);
     await desktop.getByRole('heading', { name: 'PPC', level: 1 }).waitFor();
     await desktop.getByRole('heading', { name: 'Waves PPC command center', level: 2 }).waitFor();
+    await assertPlatformAttribution(desktop);
     for (const view of ['Overview', 'Campaigns', 'Funnel & Attribution']) {
       console.log(`Checking dashboard view: ${view}`);
       const button = desktop.locator('#admin-main').getByRole('button', { name: view, exact: true }).last();
@@ -266,6 +280,7 @@ async function main() {
     await mobile.goto(`${server.baseUrl}/admin/ppc`);
     await mobile.getByRole('heading', { name: 'PPC', level: 1 }).waitFor();
     await mobile.getByRole('heading', { name: 'Waves PPC command center', level: 2 }).waitFor();
+    await assertPlatformAttribution(mobile);
     await verify(mobile, 'ppc-dashboard-390');
     const mobileNav = mobile.getByRole('navigation', { name: 'PPC section' });
     for (const section of ['Overview', 'Call Bridge', 'Service Lines', 'AI Advisor', 'Capacity']) {
