@@ -14,6 +14,7 @@ import {
   UiSurface,
   cn,
 } from "../../components/ui";
+import lawnScores from "@lawn-scores";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -224,7 +225,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
       // Seed from the server's season-adjusted scores so the review
       // tiles match what will be persisted if the tech makes no changes.
       const initialScores = r.adjustedScores || r.displayScores;
-      setTechScores(initialScores ? { ...initialScores } : null);
+      setTechScores({ ...initialScores });
       setProtocolChecks({
         irrigation_inches_per_week: "",
         protocol_field_notes: "",
@@ -268,8 +269,13 @@ export default function LawnAssessmentPanel({ embedded = false }) {
         ...prev,
         assessment: response.assessment || prev.assessment,
       }));
-      setAssessmentConfirmed(true);
-      alert("Assessment confirmed.");
+      if (response.confirmed === false) {
+        setAssessmentConfirmed(false);
+        alert("Scores saved. Complete the missing scores before confirming.");
+      } else {
+        setAssessmentConfirmed(true);
+        alert("Assessment confirmed.");
+      }
     } catch (e) {
       alert("Confirm failed: " + e.message);
     }
@@ -680,10 +686,9 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                 { key: "fungus_control", label: "Fungus Control" },
                 { key: "thatch_level", label: "Thatch Level" },
               ].map((m) => {
-                const aiVal =
-                  result.adjustedScores?.[m.key] ??
-                  result.displayScores?.[m.key] ??
-                  0;
+                const aiVal = lawnScores.lawnScoreValue(
+                  (result.adjustedScores || result.displayScores)?.[m.key],
+                );
                 const techVal = techScores?.[m.key] ?? aiVal;
                 const flag = (result.divergenceFlags || []).find(
                   (f) => f.metric === m.key,
@@ -702,12 +707,15 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                       AI
                     </div>{" "}
                     <div
-                      style={{
-                        color: scoreColor(aiVal),
-                      }}
-                      className="u-nums text-22 font-medium"
+                      style={
+                        aiVal == null ? undefined : { color: scoreColor(aiVal) }
+                      }
+                      className={cn(
+                        "u-nums text-22 font-medium",
+                        aiVal == null && "text-ink-secondary",
+                      )}
                     >
-                      {aiVal}%
+                      {aiVal == null ? "—" : `${aiVal}%`}
                     </div>{" "}
                     <div className="mt-0.5 text-ui-body font-medium text-zinc-900">
                       {m.label}
@@ -745,10 +753,17 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                           −
                         </Button>{" "}
                         <div
-                          style={{ color: scoreColor(techVal) }}
-                          className="min-w-14 u-nums text-20 font-medium"
+                          style={
+                            techVal == null
+                              ? undefined
+                              : { color: scoreColor(techVal) }
+                          }
+                          className={cn(
+                            "min-w-14 u-nums text-20 font-medium",
+                            techVal == null && "text-ink-secondary",
+                          )}
                         >
-                          {techVal}%
+                          {techVal == null ? "—" : `${techVal}%`}
                         </div>{" "}
                         <Button
                           type="button"
