@@ -1281,7 +1281,7 @@ const REPORT_CONCISE_NONCOMPLETION_RE = /^\s*(?:(?:(?:is|are|was|were|has|have|h
 const REPORT_CONCISE_COMPLETION_RE = new RegExp(`^(?:(?:(?:was|were|is|are|has been|have been|had been)\\s+)?(?:(?:already|actually|just)\\s+)*completed(?:\\s+${REPORT_COMPLETION_TIME})?|as\\s+(?:noted|documented|recorded|shown)\\s+in\\s+the\\s+report)?\\s*$`, 'i');
 const REPORT_ASSERTION_START = `(?:(?:the|a|an)\\s+)?(?:[\\w'\u2019-]+\\s+){1,4}(?:(?:(?:was|were|is|are|has|have|had|got)\\s+(?:\\w+ly\\s+)?)?(?:${REPORT_FINDING_VERB_RE.source}|\\b(?:receiving|getting)\\b))`;
 const REPORT_VERBLESS_PRODUCT_LOCATION_START = `(?:(?:the|a|an)\\s+)?(?:(?:granular|gel|liquid|residual)\\s+)?(?:bait|dust|foam|granules?|product|treatment)\\s+${REPORT_TREATMENT_LOCATION_LINK_RE.source}`;
-const REPORT_ASSERTION_BOUNDARY_RE = new RegExp(`(?:,\\s*|\\b(?:with|and)\\s+)(?=${REPORT_ASSERTION_START})|\\bwith\\s+(?=${REPORT_VERBLESS_PRODUCT_LOCATION_START})`, 'gi');
+const REPORT_ASSERTION_BOUNDARY_RE = new RegExp(`(?:,\\s*|\\b(?:with|and|before|after)\\s+)(?=${REPORT_ASSERTION_START})|\\bwith\\s+(?=${REPORT_VERBLESS_PRODUCT_LOCATION_START})`, 'gi');
 const REPORT_UNRELATED_OR_CLAUSE_RE = /^or\s+(?:(?:the|our|your|their)\s+)?(?:technician|tech|crew|team|office|report|i|we|you|he|she|they|it)\s+(?:is|are|was|were|has|have|had|will|would|should|can|could|did|does|do)\b/i;
 const REPORT_SHARED_LIST_CONDITION_RE = new RegExp(
   `(?:^|[.!?;])\\s*(?:only\\s+)?(?:if|unless)\\b[^,]*,`
@@ -1301,14 +1301,14 @@ function reportAssertionOf(clause, subjectAt) {
   for (const boundary of clause.matchAll(REPORT_ASSERTION_BOUNDARY_RE)) {
     if (!REPORT_FINDING_VERB_RE.test(clause.slice(start, boundary.index))
       || REPORT_TRAILING_UNCERTAINTY_RE.test(clause.slice(boundary.index))) continue;
-    if (boundary.index >= subjectAt) return clause.slice(start, boundary.index);
+    if (boundary.index >= subjectAt) return { text: clause.slice(start, boundary.index), start };
     // Keep a conditional introduction that governs the matched assertion.
     // An ordinary prior treatment still opens a separate assertion here.
     if (!boundary[0].includes(',') || governingStart > boundary.index) {
       start = boundary.index + boundary[0].length;
     }
   }
-  return clause.slice(start);
+  return { text: clause.slice(start), start };
 }
 
 // Inspect "or" after the matched location whether clauseOf retains a nominal
@@ -1487,14 +1487,16 @@ function report_readback_confirms(value, record, { spoken }) {
       const sharedLocation = reportSharedLocationContinuation(text, clauseEnd, value.location);
       if (text[clauseEnd] === '?' || interrogative || alternativeQuestion || sharedLocation.question) continue;
       const reportClause = clauseOf(text, m.index) + sharedLocation.text;
-      const clause = reportAssertionOf(reportClause, m.index - clauseStart);
+      const assertion = reportAssertionOf(reportClause, m.index - clauseStart);
+      const clause = assertion.text;
       // A contrast excludes its following alternative, not the location
       // affirmed before it: "exterior rather than indoors" and "exterior,
       // not indoors" still confirm exterior. Require both halves in the
       // affirmative portion.
-      const affirmed = clause.replace(/^\s*(?:rather than|instead of)\b[^,]*,\s*/i, '')
-        .split(/\b(?:rather than|instead of)\b|,\s*\bnot\b/i)[0];
-      const subjectAt = affirmed.search(new RegExp(value.subject, 'i'));
+      const affirmativeClause = clause.replace(/^\s*(?:rather than|instead of)\b[^,]*,\s*/i, '');
+      const affirmativeStart = clause.length - affirmativeClause.length;
+      const affirmed = affirmativeClause.split(/\b(?:rather than|instead of)\b|,\s*\bnot\b/i)[0];
+      const subjectAt = m.index - clauseStart - assertion.start - affirmativeStart;
       for (const locationMatch of affirmed.matchAll(locationRe)) {
         const locationAt = locationMatch.index;
         const orTail = text.slice(clauseEnd);
@@ -1527,7 +1529,8 @@ function report_readback_confirms(value, record, { spoken }) {
         const claimText = (completedFinding || conciseFinding)
           ? affirmed.slice(0, evidenceEnd) + affirmed.slice(evidenceEnd).replace(/\bbefore\b/gi, 'prior to') : affirmed;
         const claim = claimContext(claimText, Math.min(subjectAt, locationAt), claimText.length);
-        if (subjectAt >= 0 && !REPORT_UNCERTAINTY_RE.test(findingEvidence)
+        if (affirmed.slice(subjectAt, subjectAt + m[0].length).toLowerCase() === m[0].toLowerCase()
+            && !REPORT_UNCERTAINTY_RE.test(findingEvidence)
             && !REPORT_TRAILING_UNCERTAINTY_RE.test(trailingEvidence)
             && !REPORT_CONCISE_NONCOMPLETION_RE.test(trailingEvidence) && !REPORT_INSTRUCTION_RE.test(affirmed)
             && !alternativeLocation
