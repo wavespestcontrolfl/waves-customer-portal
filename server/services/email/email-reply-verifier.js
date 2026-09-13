@@ -180,11 +180,11 @@ function factByKey(context, key) {
 function factsMatchingClaims(sentence, key, context) {
   let candidates = presentFacts(context).filter((fact) => fact.key === key);
   const amounts = sentence.match(MONEY_RE) || [];
-  if (amounts.length && semanticFactKeys(sentence).includes(key)) {
+  if (amounts.length) {
     candidates = candidates.filter((fact) => amounts.every((amount) => amountsForClaim(fact, amount, sentence).includes(cents(amount))));
   }
   const dates = temporalClaims(sentence);
-  if (dates.length && dateSemanticKeys(sentence).includes(key)) {
+  if (dates.length) {
     const entries = dateFacts(context).filter((entry) => entry.key === key && candidates.includes(entry.fact));
     candidates = candidates.filter((fact) => dates.every((raw) => {
       const normalized = normalizeTemporal(raw);
@@ -201,27 +201,33 @@ function factsMatchingClaims(sentence, key, context) {
 function hasSameFactBinding(sentence, context) {
   const amounts = sentence.match(MONEY_RE) || [];
   const dates = temporalClaims(sentence);
-  if (amounts.length + dates.length < 2) return true;
+  if (amounts.length + dates.length < 2 && !timeRanges(sentence).length) return true;
   const amountKeys = amounts.length ? semanticFactKeys(sentence) : null;
   const dateKeys = dates.length ? dateSemanticKeys(sentence) : null;
   const keys = (amountKeys || dateKeys || []).filter((key) => !amountKeys || !dateKeys || dateKeys.includes(key));
   return keys.some((key) => factsMatchingClaims(sentence, key, context).length > 0);
 }
 
+function statusSupported(sentence, key, context, predicate) {
+  const candidates = factsMatchingClaims(sentence, key, context);
+  return candidates.length > 0 && candidates.every(predicate);
+}
+
 function statusViolations(text, context) {
   const violations = [];
   for (const sentence of sentences(text)) {
-    if (/\b(?:payment (?:went through|was successful|was received)|paid in full|(?:received|processed)\b[^.!?]{0,35}\bpayment)\b/i.test(sentence)
-      && !factsMatchingClaims(sentence, 'recent_payment', context)
-        .some((fact) => SUCCESS_STATUS_RE.test(String(fact.value?.status || '')))) violations.push('payment_status_unsupported');
+    if (/\b(?:payment|paid)\b/i.test(sentence)
+      && /\b(?:received|processed|successful|succeeded|paid|went through)\b/i.test(sentence)
+      && !statusSupported(sentence, 'recent_payment', context,
+        (fact) => SUCCESS_STATUS_RE.test(String(fact.value?.status || '')))) violations.push('payment_status_unsupported');
 
     if (/\b(?:visit|service|appointment)\b[^.!?]{0,60}\b(?:confirmed|booked|all set)\b|\b(?:confirmed|booked)\b[^.!?]{0,60}\b(?:visit|service|appointment)\b/i.test(sentence)
-      && !factsMatchingClaims(sentence, 'upcoming_visit', context)
-        .some((fact) => String(fact.value?.status).toLowerCase() === 'confirmed')) violations.push('visit_status_unsupported');
+      && !statusSupported(sentence, 'upcoming_visit', context,
+        (fact) => String(fact.value?.status).toLowerCase() === 'confirmed')) violations.push('visit_status_unsupported');
 
     if (/\bestimate\b[^.!?]{0,40}\b(?:sent|emailed)\b|\b(?:sent|emailed)\b[^.!?]{0,40}\bestimate\b/i.test(sentence)
-      && !factsMatchingClaims(sentence, 'pending_estimate', context)
-        .some((fact) => /^(?:sent|viewed)$/i.test(String(fact.value?.status || '')) && fact.value?.sentAt)) violations.push('estimate_status_unsupported');
+      && !statusSupported(sentence, 'pending_estimate', context,
+        (fact) => /^(?:sent|viewed)$/i.test(String(fact.value?.status || '')) && fact.value?.sentAt)) violations.push('estimate_status_unsupported');
   }
 
   const balance = factByKey(context, 'outstanding_balance');

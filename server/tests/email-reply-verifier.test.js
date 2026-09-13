@@ -68,8 +68,31 @@ describe('email reply verifier', () => {
     expect(verdict('Hi Casey, your September 15 appointment is at 1 PM.', { context: { facts } }).violations).toContain('fact_binding_unsupported');
     expect(verdict('Hi Casey, your September 15 appointment is from 8–11 AM.').violations)
       .toEqual(expect.arrayContaining(['date_unsupported:8 AM', 'fact_binding_unsupported']));
+    expect(verdict('Hi Casey, your appointment is from 11 AM to 11 AM.').violations)
+      .toContain('fact_binding_unsupported');
     expect(verdict('Hi Casey, your September 15 appointment is from 11 AM to 9 AM.').violations)
       .toContain('fact_binding_unsupported');
+  });
+
+  test('status checks bind amounts even when another fact category is named', () => {
+    const facts = contextWith().facts.concat({ key: 'recent_payment', status: 'present',
+      value: { amount: 25, paymentDate: '2026-09-11', status: 'succeeded' } });
+    expect(verdict('Hi Casey, we received your $75 balance payment.', { context: { facts } }).violations)
+      .toContain('payment_status_unsupported');
+  });
+
+  test('ambiguous matching records cannot borrow the successful or confirmed status', () => {
+    const facts = contextWith().facts.concat([
+      { key: 'recent_payment', status: 'present', value: { amount: 50, paymentDate: '2026-09-11', status: 'succeeded' } },
+      { key: 'upcoming_visit', status: 'present', value: { date: '2026-09-15', window: '1–3 PM', status: 'confirmed' } },
+    ]);
+    expect(verdict('Hi Casey, your payment of $50 has been received.', { context: { facts } }).violations)
+      .toContain('payment_status_unsupported');
+    expect(verdict('Hi Casey, your $50 payment went through.', { context: { facts } }).violations)
+      .toContain('payment_status_unsupported');
+    expect(verdict('Hi Casey, your September 15 appointment is confirmed.', { context: { facts } }).violations)
+      .toContain('visit_status_unsupported');
+    expect(verdict('Hi Casey, your $50 payment on September 11 went through.', { context: { facts } }).ok).toBe(true);
   });
 
   test('binds monthly dues amounts to total, base, or surcharge semantics', () => {

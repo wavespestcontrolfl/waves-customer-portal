@@ -8,7 +8,9 @@ The caller supplies the assembled context and a word budget for the complete
 visible reply. Only present authoritative fact fields can support amounts,
 dates, time windows and status claims; source observation timestamps and
 free-text history are not evidence. Payment amount/date and appointment
-date/window claims must match one record. Billing dues, surcharge and collected
+date/window claims must match one record. Matching records must agree on
+claimed status. Multiple amounts require separate sentences, and time-window
+endpoints must match in order. Billing dues, surcharge and collected
 total keep their separate meanings. Viewed estimates retain sent evidence.
 
 The verifier also checks plain-text structure, greeting, unsupported signatures,
