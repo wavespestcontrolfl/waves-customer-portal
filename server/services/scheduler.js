@@ -3794,6 +3794,10 @@ function initScheduledJobs() {
             }
             // 'sms_fallback' — fall through to the normal replay send below.
           }
+          // The review spacing guard may durably strip a bundled ask before
+          // invoking this callback. Build both replay arguments at that point
+          // so the provider receives the rewritten completion body/linkage.
+          const sendReplay = () => {
           const replayDispatchMeta = {
             ...claimMeta,
             scheduled_sms_log_id: msg.id,
@@ -3909,9 +3913,10 @@ function initScheduledJobs() {
                 : undefined,
             },
           };
-          const smsResult = await dispatchScheduledSms(msg, claimMeta, () =>
-            require('./messaging/deferred-replay-registry')
-              .dispatchDeferredReplay(claimMeta.entry_point, replayDispatchMeta, () => sendCustomerMessage(replayInput)),
+          return require('./messaging/deferred-replay-registry')
+            .dispatchDeferredReplay(claimMeta.entry_point, replayDispatchMeta, () => sendCustomerMessage(replayInput));
+          };
+          const smsResult = await dispatchScheduledSms(msg, claimMeta, sendReplay,
           purpose, SCHEDULED_SMS_MAX_ATTEMPTS);
           if (smsResult.scheduledHold) continue;
           const completedAt = new Date();
