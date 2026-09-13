@@ -9,6 +9,9 @@ jest.mock('../services/dispatch-alerts', () => ({
   createAlert: jest.fn(),
 }));
 
+jest.mock('../services/no-show-detector', () => ({ enabled: jest.fn(() => false), sweep: jest.fn(), cleanupAfterDisable: jest.fn(async () => ({ resolved: 0, dismissed: 0 })) }));
+jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(), recordJobStart: jest.fn(async () => {}), recordJobEnd: jest.fn(async () => {}) }));
+
 const db = require('../models/db');
 const { createAlert } = require('../services/dispatch-alerts');
 const detector = require('../services/tech-late-detector');
@@ -16,6 +19,7 @@ const detector = require('../services/tech-late-detector');
 describe('tech-late detector tuning', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    require('../services/no-show-detector').enabled.mockReturnValue(false);
   });
 
   test('query waits until promised arrival due time plus grace and suppresses stale or already-acknowledged windows', async () => {
@@ -95,4 +99,40 @@ describe('tech-late detector tuning', () => {
     expect(detector._test.normalizeDateOnly('2026-05-05T00:00:00.000Z')).toBe('2026-05-05');
     expect(detector._test.normalizeDateOnly('2026-05-05')).toBe('2026-05-05');
   });
+  test('enabled tracking replaces both legacy scans and preserves skipped-job health', async () => {
+    const tracking = require('../services/no-show-detector');
+    const locks = require('../utils/cron-lock');
+    tracking.enabled.mockReturnValue(true);
+    tracking.sweep.mockResolvedValue({ alerted: 1 });
+    locks.runExclusive.mockImplementationOnce((_key, work) => work());
+    expect(await detector.runTechLateCheck()).toEqual({ alerted: 1 });
+    expect(tracking.sweep).toHaveBeenCalledWith(db);
+    expect(db.raw).not.toHaveBeenCalled();
+    expect(await require('../services/unassigned-overdue-detector').runUnassignedOverdueCheck()).toMatchObject({ skipped: true });
+    expect(db.raw).not.toHaveBeenCalled();
+    // A skipped tick surfaces as a throw, but health recording belongs to
+    // cron-lock: every no_connection path (no lock slot, a lease taken past
+    // the deadline, a deadline crossed before the body) already wrote that
+    // failed occurrence itself, so recording it again here overwrote the
+    // original timing/error and counted ONE skipped tick as TWO consecutive
+    // failures (codex P2 round 5).
+    locks.runExclusive.mockResolvedValueOnce({ skipped: true, reason: 'no_connection' });
+    await expect(detector.runTechLateCheck()).rejects.toThrow('no_connection');
+    expect(locks.recordJobStart).not.toHaveBeenCalled();
+    expect(locks.recordJobEnd).not.toHaveBeenCalled();
+    // Another instance holding the lease is normal, not a failed tick.
+    locks.runExclusive.mockResolvedValueOnce({ skipped: true, reason: 'lease_held' });
+    await detector.runTechLateCheck();
+    expect(locks.recordJobEnd).not.toHaveBeenCalled();
+    // Gate OFF: the legacy branch clears whatever the detector left behind
+    // first — sweep() is the only pass that resolves a detector office alert
+    // or dismisses a tracking notice, and an unresolved detector row would
+    // suppress the very legacy alert this branch then raises (codex P1 round
+    // 10).
+    tracking.enabled.mockReturnValue(false);
+    tracking.cleanupAfterDisable.mockClear();
+    await detector.runTechLateCheck();
+    expect(tracking.cleanupAfterDisable).toHaveBeenCalledTimes(1);
+  });
+
 });

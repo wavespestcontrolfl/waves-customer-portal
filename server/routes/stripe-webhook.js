@@ -30,7 +30,7 @@ const {
 } = require('../services/stripe-invoice-state');
 const { computeChargeAmount } = require('../services/stripe-pricing');
 const { isEnabled } = require('../config/feature-gates');
-const { INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue } = require('../services/invoice-helpers');
+const { INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, invoiceWithdrawnFromCustomer } = require('../services/invoice-helpers');
 const { publicPortalUrl } = require('../utils/portal-url');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
@@ -597,14 +597,23 @@ async function maybeAutoClearBillingPauseForIntent(paymentIntent, eventCreated) 
   }
 }
 
-async function recordOrphanSucceededPaymentIntent(paymentIntent, amount, reason) {
+// Sentinel: the succeeded-PI fallback transaction quarantined this charge, so
+// the rest of the handler (invoice-paid update, settlement effects) is skipped.
+const QUARANTINED = Symbol('quarantined');
+
+async function recordOrphanSucceededPaymentIntent(paymentIntent, amount, reason, { database = db } = {}) {
   const latestCharge = paymentIntent.latest_charge;
   const stripeChargeId = typeof latestCharge === 'string'
     ? latestCharge
     : latestCharge?.id || null;
 
   try {
-    await db('stripe_orphan_charges')
+    // Written through the CALLER'S transaction when it holds one (local audit
+    // P1): stripe_orphan_charges.invoice_id is a foreign key, so inserting on
+    // the root connection while that same invoice row is held FOR UPDATE here
+    // waits on this transaction's own lock and the quarantine can never
+    // commit.
+    await database('stripe_orphan_charges')
       .insert({
         stripe_payment_intent_id: paymentIntent.id,
         stripe_charge_id: stripeChargeId,
@@ -1100,6 +1109,7 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType, event
     // Returns true ONLY when this PI left the statement `paid` (a fresh settle or
     // an idempotent already-paid) — every anomaly path returns false so the
     // post-txn dunning-stop never fires on a still-unpaid statement.
+    let settledPacketInvoiceIds = [];
     const settledNow = await db.transaction(async (trx) => {
       // Same per-statement money lock as disputes/refunds — serialize settlement
       // against any concurrent/out-of-order clawback on this statement.
@@ -1118,7 +1128,19 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType, event
         logger.warn(`[stripe-webhook] statement S-${statementId} non-active-PI success ${piId} (active ${stmt.stripe_payment_intent_id || 'none'})`);
         return false;
       }
-      if (stmt.status === 'paid') return true; // idempotent — THIS PI already settled (dunning may stop)
+      if (stmt.status === 'paid') {
+        // Idempotent — THIS PI already settled (dunning may stop). The packet
+        // children are still reported (Codex #4311 r30 P1): if the first
+        // delivery settled but its review enrollment and recovery marker both
+        // failed, this redelivery is the only path back, and an empty list
+        // would acknowledge the event with those reviews still missing.
+        settledPacketInvoiceIds = await trx('invoices')
+          .where({ payer_statement_id: statementId })
+          .whereNotNull('visit_completion_packet_id')
+          .whereNot({ status: 'void' })
+          .pluck('id');
+        return true;
+      }
 
       // Fail closed on UNVERIFIED card funding: surcharge must derive from the
       // ACTUAL confirmed funding, but paymentDetailsFromIntent swallows Stripe
@@ -1146,7 +1168,7 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType, event
         return false;
       }
 
-      await Settle.settleStatementPaid(statementId, {
+      const settleResult = await Settle.settleStatementPaid(statementId, {
         paymentMethod,
         processor: 'stripe',
         stripePaymentIntentId: piId,
@@ -1164,6 +1186,10 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType, event
         settledAt: eventCreated ? new Date(eventCreated * 1000) : null,
         source: 'stripe_webhook',
       }, { database: trx }); // trx is the THIRD arg — same txn re-locks the row (no self-deadlock)
+      settledPacketInvoiceIds = settleResult?.packetInvoiceIds || [];
+      // An already-paid statement still reports its packet children, so a
+      // redelivery re-runs the post-commit enrollment (idempotent) instead of
+      // finishing with nothing to do.
       return true;
     });
     // Only when this PI actually left the statement paid — never on an anomaly
@@ -1174,11 +1200,25 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType, event
       // Every linked child invoice is paid now: close out their open visits,
       // outside the money txn (GitHub r9 P1 #4127). Best-effort by contract.
       await require('../services/invoice-issued-closeout').closeOutVisitsForStatement(statementId, { trigger: 'paid' });
+      // The packet-owned children's deferred review asks, enrolled after the
+      // money transaction committed (that closeout refuses packet-owned
+      // visits, so nothing else enrolls them on this rail).
+      // An enrollment whose recovery marker ALSO failed is not something this
+      // rail can drop (Codex #4311 r30 P1): completing the handler marks the
+      // event processed and the requested reviews are gone for good. Throwing
+      // leaves the event unacknowledged, and the redelivery re-enters the
+      // idempotent already-paid path, which reports the same children.
+      const unrecorded = await Settle.enrollSettledPacketReviews(settledPacketInvoiceIds, { source: 'payer_statement_webhook' });
       // Stop any statement-level dunning now that it's paid (best-effort, outside
       // the money txn — the eligibility filter already excludes `paid`, so this is
-      // just hygiene and never gates settlement).
+      // just hygiene and never gates settlement). Runs BEFORE the retry throw so
+      // a redelivery is not the first thing that stops dunning on a paid
+      // statement.
       await require('../services/payer-statement-followups').stopOnStatementSettled(statementId)
         .catch((e) => logger.warn(`[payer-statement-followups] stopOnStatementSettled failed: ${e.message}`));
+      if (unrecorded.length) {
+        throw new Error(`statement S-${statementId} settled but ${unrecorded.length} packet review enrollment(s) are unrecorded — retrying on redelivery`);
+      }
     }
   } else if (eventType === 'processing') {
     // Re-read the CURRENT PI status before marking processing — a stale/retried
@@ -1424,9 +1464,18 @@ async function handleCombinedPaymentIntentSucceeded(paymentIntent, eventCreated 
   // intent — the combined early-return must not cost customers their
   // review invitation.
   if (combinedSettleOutcome?.paymentStatus === 'paid') {
+    // Every settled invoice gets its attempt before an unrecorded review
+    // hands the event back to Stripe for redelivery.
+    let reviewNotRecorded = null;
     for (const settledId of combinedSettleOutcome.invoiceIds || []) {
-      await scheduleReviewAfterPaidInvoice(piId, { invoiceId: settledId });
+      try {
+        await scheduleReviewAfterPaidInvoice(piId, { invoiceId: settledId });
+      } catch (err) {
+        if (!err.reviewNotRecorded) throw err;
+        reviewNotRecorded = reviewNotRecorded || err;
+      }
     }
+    if (reviewNotRecorded) throw reviewNotRecorded;
     // A settled invoice may be gating a payment-held WDO report — nudge
     // the release sweep like the single-invoice path does (codex r22 P3);
     // the 60s interval remains the fallback.
@@ -1527,6 +1576,44 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
     hasMatchingSavedCardAttempt: !!savedCardAttemptForTenderGuard,
   })) {
     const reason = `Late saved-card PI ${piId} succeeded after invoice ${invoiceForTenderGuard.id} was already ${invoiceForTenderGuardStatus}`;
+    logger.error(`[stripe-webhook] Quarantining ${reason}`);
+    await recordOrphanSucceededPaymentIntent(
+      paymentIntent,
+      chargedTotal ?? centsToDollars(paymentIntent.amount),
+      reason,
+    );
+    return;
+  }
+  // A PaymentIntent the customer minted BEFORE Bill-To moved is confirmed
+  // client-side at Stripe and never re-enters our routes, so no server-side
+  // route guard can refuse it — this webhook is the first place we see the
+  // money (pre-push P0). Settling it would mark an invoice now owned by
+  // third-party AP as paid with the homeowner's funds, so the charge is
+  // quarantined for manual refund/review the same way every other
+  // must-not-settle success is. Only a CUSTOMER-initiated intent: an
+  // office-initiated saved-card charge that was already in flight when the
+  // withdrawal committed is the office's own collection and settles normally.
+  // …unless a payments row for this PI is already sitting in `processing`
+  // (audit P0): that ACH was accepted server-side while the invoice was still
+  // self-pay, the funds are captured, and quarantining here would return
+  // before the settle path below and leave the row stuck in `processing`
+  // forever. Those settle with the durable alert instead.
+  const processingPaymentForIntent = invoiceForTenderGuard && !savedCardAttemptForTenderGuard
+    && invoiceWithdrawnFromCustomer(invoiceForTenderGuard)
+    // No catch: a failed read cannot tell "nothing in flight" from "cannot
+    // see it", and both wrong answers move or strand money. Let it throw so
+    // Stripe redelivers, the way the statement rail handles an unresolved
+    // lookup.
+    // `paid` counts too (local audit P0): the settle path flips the payments
+    // row before the invoice, so a replay after a failed invoice write finds
+    // this PI already `paid`. Reading only `processing` there would quarantine
+    // a charge WE already own and leave the invoice stuck `processing`
+    // forever. Either status means this settlement is ours to finish.
+    ? await db('payments').where({ stripe_payment_intent_id: piId }).whereIn('status', ['processing', 'paid']).first('id')
+    : null;
+  if (invoiceForTenderGuard && !savedCardAttemptForTenderGuard && !processingPaymentForIntent
+    && invoiceWithdrawnFromCustomer(invoiceForTenderGuard)) {
+    const reason = `PI ${piId} succeeded on invoice ${invoiceForTenderGuard.id} after its Bill-To moved to a third-party payer — customer funds must not settle payer-owned debt`;
     logger.error(`[stripe-webhook] Quarantining ${reason}`);
     await recordOrphanSucceededPaymentIntent(
       paymentIntent,
@@ -1740,14 +1827,50 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   if (details.cardBrand) paymentUpdates.card_brand = details.cardBrand;
   if (details.cardLastFour) paymentUpdates.card_last_four = details.cardLastFour;
   let fallbackLinkedInvoiceId = null;
-  const updated = await db('payments')
-    .where({ stripe_payment_intent_id: piId, status: 'processing' })
-    .update(paymentUpdates);
+  // The processing → paid flip and its withdrawal check commit together: a
+  // payment already sitting in `processing` was accepted server-side while
+  // the invoice was still self-pay — our own guards would have refused it
+  // otherwise — so a withdrawal that committed during the ACH wait cannot be
+  // quarantined: the money is captured and the payments row exists. Settling
+  // is right, but the office has to act (refund the homeowner or re-bill AP),
+  // so the anomaly gets a durable alert instead of a silent paid invoice
+  // (audit P0). The re-read happens at settle time — the pre-lock check
+  // earlier in this handler ran before the withdrawal could commit — and it
+  // is deliberately uncaught, as is the alert insert: a failure rolls the
+  // flip back so Stripe's redelivery repeats the whole check, instead of a
+  // swallowed read leaving the invoice paid with no alert (audit P1).
+  const updated = await db.transaction(async (trx) => {
+    const flipped = await trx('payments')
+      .where({ stripe_payment_intent_id: piId, status: 'processing' })
+      .update(paymentUpdates);
+    if (flipped > 0 && invoiceForTenderGuard?.id) {
+      // FOR UPDATE, not a plain read (fallback audit P1): an unlocked SELECT
+      // under READ COMMITTED sees a racing withdrawal only once it has
+      // committed, so a withdrawal still in flight here would read as absent
+      // and the anomaly alert would be skipped on a payment that settles
+      // against payer-owned debt. The lock waits for that transaction to
+      // finish and then reads its outcome.
+      const settledInvoice = await trx('invoices').where({ id: invoiceForTenderGuard.id })
+        .forUpdate().first('id', 'invoice_number', 'customer_id', 'scheduled_send_error');
+      if (invoiceWithdrawnFromCustomer(settledInvoice)) {
+        logger.error(`[stripe-webhook] PI ${piId} settled on invoice ${settledInvoice.id} whose Bill-To moved to a third-party payer mid-payment`);
+        await trx('customer_health_alerts').insert({
+          customer_id: settledInvoice.customer_id || paymentIntent.metadata?.waves_customer_id || null,
+          alert_type: 'wh_payer_billed_settled',
+          severity: 'high',
+          title: 'Customer payment settled on payer-billed debt',
+          description: "This invoice's Bill-To moved to a third-party payer while the payment was in flight. The funds are captured and the invoice is paid — refund the customer or re-bill AP.",
+          trigger_data: JSON.stringify({ stripe_payment_intent_id: paymentIntent.id, invoice_number: settledInvoice.invoice_number }),
+        });
+      }
+    }
+    return flipped;
+  });
 
   if (updated > 0) {
     logger.info(`[stripe-webhook] Updated ${updated} payment(s) to paid for PI: ${piId}`);
   } else {
-    await db.transaction(async (trx) => {
+    const fallbackOutcome = await db.transaction(async (trx) => {
       await lockPaymentIntentPaymentRow(trx, piId);
       const existingPayment = await trx('payments')
         .where({ stripe_payment_intent_id: piId })
@@ -1769,8 +1892,9 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
           paymentIntent,
           chargedTotal ?? centsToDollars(paymentIntent.amount),
           `No locally collectible invoice matched succeeded PI ${piId}`,
+          { database: trx },
         );
-        return;
+        return QUARANTINED;
       }
 
       const lockedInvoice = await trx('invoices')
@@ -1788,6 +1912,26 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
         paymentIntent,
         { lock: true },
       );
+      // The withdrawal read UNDER THE ROW LOCK (audit P0): the pre-lock check
+      // earlier in this handler can be overtaken by a Bill-To transaction that
+      // commits while this webhook waits here, and this branch is the one that
+      // CREATES the payment row. An office-initiated saved-card charge still
+      // settles — that is the office's own collection, not the customer's.
+      if (!matchingAmbiguousAttempt && invoiceWithdrawnFromCustomer(lockedInvoice)) {
+        const reason = `PI ${piId} succeeded on invoice ${lockedInvoice.id} after its Bill-To moved to a third-party payer — customer funds must not settle payer-owned debt`;
+        logger.error(`[stripe-webhook] Quarantining ${reason}`);
+        await recordOrphanSucceededPaymentIntent(
+          paymentIntent,
+          chargedTotal ?? centsToDollars(paymentIntent.amount),
+          reason,
+          { database: trx },
+        );
+        // The OUTER handler must stop too (local audit P0): this `return` only
+        // leaves the transaction callback, and everything after it marks the
+        // invoice paid and runs the settlement effects — on a quarantined
+        // charge with no payments row.
+        return QUARANTINED;
+      }
       if (invoicePaymentIntentBlocksFallback({
         invoiceStatus: lockedInvoice.status,
         activePaymentIntentId: activePi,
@@ -1933,7 +2077,11 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
         logger.info(`[stripe-webhook] Bound ambiguous saved-card attempt ${matchingAmbiguousAttempt.id} to succeeded PI ${piId}`);
       }
       logger.info(`[stripe-webhook] Inserted missing paid payment row for PI: ${piId}`);
+      return null;
     });
+    // Quarantined: no payments row exists for this PI on purpose, so the
+    // invoice-paid update and the settlement effects below must not run.
+    if (fallbackOutcome === QUARANTINED) return;
   }
 
   // A disputed chargeback owns this PI now — a late or reclaimed
@@ -2328,7 +2476,8 @@ async function mirrorSavedMethodForSucceededIntent(paymentIntent) {
         } catch (lookupErr) {
           logger.warn(`[stripe-webhook] consent-time lookup failed for pm ${stripePmId}: ${lookupErr.message}`);
         }
-        if (!(await ConsentService.hasConsentFor(wavesCustomerId, stripePmId))) {
+        const mirrorNeedsConsentRow = !(await ConsentService.hasConsentFor(wavesCustomerId, stripePmId));
+        if (mirrorNeedsConsentRow) {
           // Record the consent snapshot SERVER-SIDE — same recipe as the
           // covered_capture webhook (Codex #2507 round-7 P1): for an ACH
           // micro-deposit signup, confirmPayment returned requires_action
@@ -2342,13 +2491,7 @@ async function mirrorSavedMethodForSucceededIntent(paymentIntent) {
           // + setup_future_usage written together by the controlled /setup
           // and /update-amount paths, and the customer confirmed that PI),
           // never inferred at charge time.
-          await ConsentService.recordConsent({
-            customerId: wavesCustomerId,
-            paymentMethodId: saved.id,
-            stripePaymentMethodId: stripePmId,
-            source: 'pay_page',
-            methodType: saved.method_type || 'card',
-          });
+          // (written inside the ownership transaction below)
         }
         const { enrollConsentedMethod } = require('../services/autopay-enrollment');
         // Invoice visit scope for the in-lock payer check (#3395 r14 P1):
@@ -2356,22 +2499,73 @@ async function mirrorSavedMethodForSucceededIntent(paymentIntent) {
         // payer-billed account must still enroll. Best-effort: a lookup
         // miss falls to the account scope (toward refusing — fail closed).
         let mirrorScopeSsId = null;
+        let mirrorInvoiceId = null;
         try {
           const piInvoice = await db('invoices')
             .where({ stripe_payment_intent_id: piId })
-            .first('scheduled_service_id');
+            .first('id', 'scheduled_service_id');
           mirrorScopeSsId = piInvoice?.scheduled_service_id || null;
+          // The INVOICE too (Codex #4311 r45 P1): the enrollment re-judges the
+          // withdrawal stamp and the packet's live owner under its own lock,
+          // which is the only way a payer on a SIBLING billed member is seen.
+          // Without it this mirror could enroll the homeowner for Auto Pay on
+          // debt that moved to AP while the payment was in flight.
+          mirrorInvoiceId = piInvoice?.id || null;
         } catch (scopeErr) {
-          logger.warn(`[stripe-webhook] invoice scope lookup failed for PI ${piId}: ${scopeErr.message}`);
+          // FAIL CLOSED (Codex #4311 r47 P1): without the invoice id the
+          // transaction below skips invoicePayerOwnedNow and the enrollment
+          // has no invoice to judge, so a withdrawal caused by a payer on a
+          // SIBLING packet member would be invisible and the homeowner could
+          // be enrolled for AP-owned debt. Throwing leaves the event
+          // unacknowledged; Stripe redelivers and the lookup is retried.
+          logger.error(`[stripe-webhook] invoice scope lookup failed for PI ${piId} — not enrolling without the ownership fence: ${scopeErr.message}`);
+          throw scopeErr;
         }
-        await enrollConsentedMethod({
-          customerId: wavesCustomerId,
-          paymentMethodId: saved.id,
-          source: 'save_card_consent',
-          details: { billing_mode: signupBillingMode },
-          authorizedAt,
-          scheduledServiceId: mirrorScopeSsId,
-        });
+        // ONE TRANSACTION for the authorization and the enrollment (local
+        // audit on r46, the rule every other save-a-method path now follows):
+        // committing consent first left it recorded when a Bill-To withdrawal
+        // landed before the enrollment refused. This rail has no request to
+        // answer, so a refusal simply leaves nothing behind.
+        const MIRROR_PAYER_BILLED_ROLLBACK = Symbol('mirror_payer_billed_rollback');
+        let mirrorEnrollment = null;
+        try {
+          await db.transaction(async (trx) => {
+            // Customer FOR UPDATE before the SHARE-taking ownership check.
+            await trx('customers').where({ id: wavesCustomerId }).forUpdate().first('id');
+            if (mirrorInvoiceId
+              && await require('../services/visit-completion-packets').invoicePayerOwnedNow(mirrorInvoiceId, trx)) {
+              throw MIRROR_PAYER_BILLED_ROLLBACK;
+            }
+            if (mirrorNeedsConsentRow) {
+              await ConsentService.recordConsent({
+                customerId: wavesCustomerId,
+                paymentMethodId: saved.id,
+                stripePaymentMethodId: stripePmId,
+                source: 'pay_page',
+                methodType: saved.method_type || 'card',
+                database: trx,
+              });
+            }
+            mirrorEnrollment = await enrollConsentedMethod({
+              customerId: wavesCustomerId,
+              paymentMethodId: saved.id,
+              source: 'save_card_consent',
+              details: { billing_mode: signupBillingMode },
+              authorizedAt,
+              scheduledServiceId: mirrorScopeSsId,
+              invoiceId: mirrorInvoiceId,
+              dbh: trx,
+            });
+            if (mirrorEnrollment?.reason === 'payer_billed') throw MIRROR_PAYER_BILLED_ROLLBACK;
+          });
+          // Savepoint mode hands the confirmation email back for after commit.
+          if (typeof mirrorEnrollment?.sendEnrollmentConfirmation === 'function') {
+            await mirrorEnrollment.sendEnrollmentConfirmation();
+          }
+        } catch (mirrorErr) {
+          if (mirrorErr !== MIRROR_PAYER_BILLED_ROLLBACK) throw mirrorErr;
+          logger.warn(`[stripe-webhook] save-card mirror for PI ${piId} — invoice ${mirrorInvoiceId} is billed to a third-party payer; no consent recorded, no enrollment`);
+        }
       }
       if (!existing) {
         PaymentLifecycleEmail.sendPaymentMethodUpdated({
@@ -2417,8 +2611,20 @@ async function scheduleReviewAfterPaidInvoice(piId, { invoiceId = null } = {}) {
     const outcome = await ReviewService.enrollForPaidInvoice(paidInvoice, { source: 'stripe_webhook' });
     if (outcome.enrolled) {
       logger.info(`[stripe-webhook] Queued review outreach after invoice ${paidInvoice.invoice_number || paidInvoice.id} payment`);
+    } else if (outcome.retryable && outcome.recorded === false) {
+      // Nothing durable holds the packet's review for recovery (the reopen
+      // itself failed): this paid event is the only signal, so it goes back
+      // to Stripe for redelivery. The settle above is status-guarded and the
+      // enrollment idempotent, so the retry re-runs safely.
+      const lost = new Error(`review enrollment for invoice ${paidInvoice.id} was not recorded for recovery: ${outcome.error}`);
+      lost.reviewNotRecorded = true;
+      throw lost;
     }
   } catch (err) {
+    if (err.reviewNotRecorded) {
+      logger.error(`[stripe-webhook] ${err.message} — rethrowing for Stripe retry (PI ${piId})`);
+      throw err;
+    }
     logger.error(`[stripe-webhook] Paid-invoice review request schedule failed for PI ${piId}: ${err.message}`);
   }
 }
@@ -4907,6 +5113,25 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
     try {
       const StripeService = require('../services/stripe');
       const ConsentService = require('../services/payment-method-consents');
+      // THE WITHDRAWAL, RE-READ HERE (Codex #4311 r36 P1): this completion can
+      // land days after /capture-setup returned (a dead browser, ACH
+      // micro-deposits), so the route's request-time guard cannot speak for
+      // it. A Bill-To move since then leaves the invoice collectible with a
+      // NULL payer_id — the stamp is the only record — and enrolling now
+      // would put the homeowner's method on Auto Pay for debt owed by AP.
+      // The settle refuses the invoice afterwards either way; the enrollment
+      // is what has to be stopped.
+      const coveredInvoiceId = setupIntent.metadata?.invoice_id || null;
+      if (coveredInvoiceId) {
+        const coveredInvoice = await db('invoices').where({ id: coveredInvoiceId })
+          .first('id', 'payer_id', 'scheduled_send_error');
+        if (!coveredInvoice
+          || coveredInvoice.payer_id
+          || require('../services/invoice-helpers').invoiceWithdrawnFromCustomer(coveredInvoice)) {
+          logger.warn(`[stripe-webhook] covered-capture SI ${setupIntent.id} skipped — invoice ${coveredInvoiceId} is billed to a third-party payer`);
+          return;
+        }
+      }
       let saved = await db('payment_methods').where({ stripe_payment_method_id: stripePmId }).first();
       if (saved && saved.customer_id !== wavesCustomerId) {
         logger.warn(`[stripe-webhook] covered-capture pm ${stripePmId} belongs to ${saved.customer_id}, SI customer ${wavesCustomerId} — skipping`);
@@ -4918,15 +5143,11 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
           makeDefault: false,
         });
       }
-      if (!(await ConsentService.hasConsentFor(wavesCustomerId, stripePmId))) {
-        await ConsentService.recordConsent({
-          customerId: wavesCustomerId,
-          paymentMethodId: saved.id,
-          stripePaymentMethodId: stripePmId,
-          source: 'pay_page',
-          methodType: saved.method_type || 'card',
-        });
-      }
+      // The authorization row, the ownership judgement and the enrollment all
+      // commit together below (local audit on r39 and r46): the checks above
+      // ran before a Stripe round-trip, and a Bill-To change during it would
+      // otherwise leave consent recorded for a withdrawn invoice.
+      const coveredNeedsConsentRow = !(await ConsentService.hasConsentFor(wavesCustomerId, stripePmId));
       await ConsentService.linkPaymentMethodId(stripePmId, saved.id);
       const { enrollConsentedMethod } = require('../services/autopay-enrollment');
       // authorizedAt: this webhook can complete DAYS after the customer
@@ -4948,14 +5169,63 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
       } catch (scopeErr) {
         logger.warn(`[stripe-webhook] covered-capture invoice scope lookup failed for SI ${setupIntent.id}: ${scopeErr.message}`);
       }
-      const enrollment = await enrollConsentedMethod({
-        customerId: wavesCustomerId,
-        paymentMethodId: saved.id,
-        source: 'save_card_consent',
-        details: { via: 'covered_capture_webhook', setup_intent_id: setupIntent.id },
-        authorizedAt: setupIntent.created ? new Date(setupIntent.created * 1000) : null,
-        scheduledServiceId: coveredScopeSsId,
-      });
+      // CONSENT *AND* ENROLLMENT UNDER ONE OWNERSHIP JUDGEMENT (local audit
+      // on r46, matching /consent and /setup-complete): committing the
+      // authorization first left it recorded when a Bill-To assignment landed
+      // before the enrollment refused.
+      const COVERED_PAYER_BILLED_ROLLBACK = Symbol('covered_payer_billed_rollback');
+      let coveredRefusedForPayer = false;
+      let enrollment = null;
+      try {
+        await db.transaction(async (trx) => {
+          // Customer FOR UPDATE before the SHARE-taking ownership check, so
+          // the enrollment's upgrade of the same row cannot deadlock against
+          // a concurrent consent/enrollment transaction.
+          await trx('customers').where({ id: wavesCustomerId }).forUpdate().first('id');
+          if (coveredInvoiceId
+            && await require('../services/visit-completion-packets').invoicePayerOwnedNow(coveredInvoiceId, trx)) {
+            throw COVERED_PAYER_BILLED_ROLLBACK;
+          }
+          if (coveredNeedsConsentRow) {
+            await ConsentService.recordConsent({
+              customerId: wavesCustomerId,
+              paymentMethodId: saved.id,
+              stripePaymentMethodId: stripePmId,
+              source: 'pay_page',
+              methodType: saved.method_type || 'card',
+              database: trx,
+            });
+          }
+          enrollment = await enrollConsentedMethodInTrx(trx);
+          if (enrollment?.reason === 'payer_billed') throw COVERED_PAYER_BILLED_ROLLBACK;
+        });
+      } catch (txErr) {
+        if (txErr !== COVERED_PAYER_BILLED_ROLLBACK) throw txErr;
+        coveredRefusedForPayer = true;
+      }
+      if (coveredRefusedForPayer) {
+        logger.warn(`[stripe-webhook] covered-capture SI ${setupIntent.id} — invoice ${coveredInvoiceId} moved to a third-party payer during the save; no consent recorded, no enrollment`);
+        return;
+      }
+      // Savepoint mode hands the confirmation email back for after the commit.
+      if (typeof enrollment?.sendEnrollmentConfirmation === 'function') {
+        await enrollment.sendEnrollmentConfirmation();
+      }
+      function enrollConsentedMethodInTrx(trx) {
+        return enrollConsentedMethod({
+          customerId: wavesCustomerId,
+          paymentMethodId: saved.id,
+          source: 'save_card_consent',
+          details: { via: 'covered_capture_webhook', setup_intent_id: setupIntent.id },
+          authorizedAt: setupIntent.created ? new Date(setupIntent.created * 1000) : null,
+          scheduledServiceId: coveredScopeSsId,
+          // The withdrawal and the packet's live owner, re-judged inside the
+          // enrollment (Codex #4311 r38 P1) — this completion can land days
+          // after the pre-check above.
+          invoiceId: coveredInvoiceId,
+          dbh: trx,
+        });
+      }
       // Capture done → apply the HELD credit coverage (Codex #2507
       // round-7 P1): under the hold flow the invoice stayed collectible
       // until this point, and when the browser never returns this webhook

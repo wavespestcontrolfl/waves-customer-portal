@@ -110,18 +110,26 @@ export default function PushSettingsV2() {
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState("");
   const [pushError, setPushError] = useState("");
+  const [prefsLoading, setPrefsLoading] = useState(true);
+  const [prefsFailed, setPrefsFailed] = useState(false);
+
+  const loadPreferences = async () => {
+    setPrefsLoading(true);
+    setPrefsFailed(false);
+    try {
+      const r = await adminFetch("/admin/push/preferences");
+      setPrefs(r.preferences || []);
+      setCatPrefs(r.bellCategories || []);
+    } catch {
+      setPrefsFailed(true);
+    } finally {
+      setPrefsLoading(false);
+    }
+  };
 
   useEffect(() => {
     isPushEnabled({ apiBase: API_BASE, verifyServer: true }).then(setPushOn);
-    adminFetch("/admin/push/preferences")
-      .then((r) => {
-        setPrefs(r.preferences || []);
-        setCatPrefs(r.bellCategories || []);
-      })
-      .catch(() => {
-        setPrefs([]);
-        setCatPrefs([]);
-      });
+    void loadPreferences();
   }, []);
 
   const showToast = (msg) => {
@@ -156,6 +164,7 @@ export default function PushSettingsV2() {
   };
 
   const save = async () => {
+    if (prefsLoading || prefsFailed) return;
     setSaving(true);
     try {
       await adminFetch("/admin/push/preferences", {
@@ -213,7 +222,7 @@ export default function PushSettingsV2() {
               variant="primary"
               size="sm"
               onClick={save}
-              disabled={saving}
+              disabled={saving || prefsLoading || prefsFailed}
             >
               {saving ? "Saving…" : "Save"}
             </Button>{" "}
@@ -258,6 +267,14 @@ export default function PushSettingsV2() {
             >
               ×
             </button>{" "}
+          </div>
+        )}
+
+        {prefsLoading && <p role="status" className="mb-4 text-14 text-ink-secondary">Loading preferences…</p>}
+        {prefsFailed && (
+          <div role="alert" className="p-3 mb-4 bg-alert-bg border-hairline border-alert-fg rounded-md text-14 text-alert-fg">
+            <p className="mb-2">Notification preferences couldn&apos;t be loaded. Try again before saving.</p>
+            <Button variant="secondary" size="sm" onClick={loadPreferences}>Try again</Button>
           </div>
         )}
 

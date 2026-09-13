@@ -612,10 +612,10 @@ ${lines}`;
  * Fail-safe: any error (or the kill switch, or no intent) → [] so drafting is
  * never blocked on the corpus.
  */
-async function fetchVoiceExemplars({ intent, limit = FEWSHOT_COUNT, dbi = db } = {}) {
+async function fetchVoiceExemplars({ intent, limit = FEWSHOT_COUNT, dbi = db, excludeCustomerIds = [], throwOnError = false } = {}) {
   if (!FEWSHOT_ENABLED || !intent || limit <= 0) return [];
   try {
-    return await dbi('voice_corpus_examples')
+    const query = dbi('voice_corpus_examples')
       .where({ source: 'sms_human_reply', intent })
       .whereNotNull('inbound_text')
       .whereNotNull('reply_text')
@@ -632,7 +632,10 @@ async function fetchVoiceExemplars({ intent, limit = FEWSHOT_COUNT, dbi = db } =
       .orderBy('occurred_at', 'desc')
       .limit(limit)
       .select('inbound_text', 'reply_text');
+    if (excludeCustomerIds.length) query.whereNotIn('customer_id', excludeCustomerIds);
+    return await query;
   } catch (err) {
+    if (throwOnError) throw err;
     logger.warn(`[sms-shadow] voice exemplar fetch failed (${intent}): ${err.message}`);
     return [];
   }
@@ -1242,6 +1245,7 @@ module.exports = {
   buildUserPromptFromFacts,
   buildFactsBlock,
   formatExemplarBlock,
+  exemplarLooksClean,
   fetchVoiceExemplars,
   fetchVoiceProfileForDrafter,
   resolveEffectiveVoiceProfile,

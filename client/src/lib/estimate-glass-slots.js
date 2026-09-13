@@ -56,7 +56,7 @@ export function glassSlotIsStale(slot, now = new Date()) {
 }
 
 /**
- * Slot-aware CTA metadata for a selected slot: "Approve — Tue 9:00 AM ✓".
+ * Slot-aware CTA metadata for a selected slot: "Approve — Tue 9:00 AM".
  */
 export function glassSlotMeta(slot) {
   if (!slot?.date || !slot.windowStart) return null;

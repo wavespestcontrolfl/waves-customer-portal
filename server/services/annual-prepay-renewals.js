@@ -1629,7 +1629,35 @@ async function attachScheduledServices(term, conn = db) {
   }
 }
 
-async function applyPrepaidCoverageForTerm(term, conn = db) {
+// `quietTransientExceptions` silences ONE bell — `stamp_raced_completion` —
+// for the series generators (booking/estimate seeding and the completion-time
+// auto-extend), which call this to stamp the row they just inserted. Those
+// runs legitimately catch rows mid-flight, and that race IS self-healing:
+// reconcilePendingWindowCompletions settles the completed visit's invoice or
+// returns its slice as credit, so a bell per generated visit would bury the
+// real exceptions without adding information.
+//
+// It deliberately does NOT silence `stamp_raced_cancel`. That one reports a
+// PAID slot cancelled out from under the stamp, and nothing re-seeds it —
+// reconcileCoveredTermsSweep only reconciles COMPLETED visits, so no sweep
+// will ever notice. An operator has to schedule the replacement, and if this
+// bell is suppressed the customer's paid schedule is permanently short and
+// invisible to the office. Never widen this flag to cover it.
+//
+// Nothing about the STAMPING changes either way, and the warn-level log
+// records every race.
+// `notifyConn` is the transaction scope the operator exceptions wait on. It
+// defaults to `conn`, and only differs for the series generators: they run
+// their coverage QUERIES inside a SAVEPOINT (so a failure cannot poison the
+// caller), but fileCoverageExceptionAfterCommit keys off the connection's
+// executionPromise — and a savepoint's resolves on RELEASE, before the outer
+// transaction commits. Filing against the savepoint would let a later
+// rollback leave a false alert that then dedupes the retry's real one for
+// seven days, which is the exact hazard the deferral exists to prevent.
+async function applyPrepaidCoverageForTerm(
+  term, conn = db, { quietTransientExceptions = false, notifyConn = null } = {},
+) {
+  const notifyScope = notifyConn || conn;
   const coverageServiceType = normalizeCoverageServiceType(term?.coverage_service_type);
   const coverageVisitCount = normalizeCoverageVisitCount(term?.coverage_visit_count);
   const totalAmount = Number(term?.prepay_amount);
@@ -1712,7 +1740,7 @@ async function applyPrepaidCoverageForTerm(term, conn = db) {
   }
   if (completedRaceIds.length > 0) {
     logger.warn(`[annual-prepay] term ${term.id}: ${completedRaceIds.length} covered visit(s) completed while the prepaid stamp ran (${completedRaceIds.join(', ')}) — left unstamped for pending-window reconciliation`);
-    await fileCoverageExceptionAfterCommit(conn, term, 'stamp_raced_completion',
+    if (!quietTransientExceptions) await fileCoverageExceptionAfterCommit(notifyScope, term, 'stamp_raced_completion',
       `${completedRaceIds.length} paid visit(s) completed while the annual prepay was being applied and are not yet marked as covered. If a completion invoice was issued for that visit, it bills the customer separately until the coverage sweep settles it — check the invoice and settle it as covered or void it.`);
   }
   if (racedRowIds.length > 0) {
@@ -1723,7 +1751,7 @@ async function applyPrepaidCoverageForTerm(term, conn = db) {
     // Filed after the caller's transaction commits (hook P1): a rollback must
     // not leave a false alert that also dedupes the retry's real one for 7d.
     logger.warn(`[annual-prepay] term ${term.id}: ${racedRowIds.length} covered visit(s) were cancelled while the prepaid stamp ran (${racedRowIds.join(', ')}) — ${stampedCount} of ${coverageVisitCount} sold visits stamped; needs replacement scheduling`);
-    await fileCoverageExceptionAfterCommit(conn, term, 'stamp_raced_cancel',
+    await fileCoverageExceptionAfterCommit(notifyScope, term, 'stamp_raced_cancel',
       `${racedRowIds.length} paid visit(s) were cancelled while the annual prepay was being applied, so only ${stampedCount} of ${coverageVisitCount} sold visits are covered on the calendar. Schedule the replacement visit(s) or adjust the term.`);
   }
 
@@ -5648,6 +5676,7 @@ module.exports = {
     ensureCoverageRowsForTerm,
     coverageRowsForTerm,
     detachCallbacksFromTerm,
+    fileCoverageExceptionAfterCommit,
     resetCachesForTests,
   },
 };

@@ -1,4 +1,4 @@
-/** Real catalog row-lock proofs in a synthetic, private schema. */
+/** Real catalog table-lock proofs in a synthetic, private schema (services SHARE lock, scheduling/catalog-lock.js). */
 let mockPg;
 jest.mock('../models/db', () => {
   const db = (...args) => mockPg(...args);
@@ -84,7 +84,7 @@ describeDb('scheduling catalog locks on PostgreSQL', () => {
       if (result.rows.length) return;
       await new Promise(resolve => setTimeout(resolve, 20));
     }
-    throw new Error('Catalog update never waited for the shared row lock');
+    throw new Error('Catalog write never waited for the services SHARE lock');
   }
 
   test.each(branches)('%s lock survives its savepoint until outer commit', async (_label, key, profile) => {
@@ -134,7 +134,10 @@ describeDb('scheduling catalog locks on PostgreSQL', () => {
     const editor = await mockPg.transaction();
     const scheduling = await mockPg.transaction();
     try {
-      await editor('services').where({ id: ids[key] }).forUpdate().first();
+      // An in-flight catalog WRITE holds ROW EXCLUSIVE on the table; the
+      // reader's SHARE request must wait for it and time out recoverably.
+      // (A bare FOR UPDATE no longer blocks readers: they take no row lock.)
+      await editor('services').where({ id: ids[key] }).update({ default_duration_minutes: 31 });
       await scheduling.raw("SET LOCAL lock_timeout = '100ms'");
 
       await expect(resolveCatalogSlotProfile(
@@ -157,33 +160,58 @@ describeDb('scheduling catalog locks on PostgreSQL', () => {
     else if (key === 'cadence') await mockPg('services').where({ id: ids[key] }).update({ is_active: false });
     else await mockPg('services').where({ id: ids[key] }).update({ engine_keys: JSON.stringify([]) });
     delete process.env.GATE_SCHEDULING_CAPACITY;
+    const policy = { version: 1, default_duration_minutes: 90, min_duration_minutes: 30, max_duration_minutes: 120 };
     const scheduling = await mockPg.transaction();
+    let writer;
+    let profile;
     try {
-      const profile = await resolveCatalogSlotProfile(estimate, { ...profileOptions, preserveCapacity: true }, scheduling);
+      const { rows: [{ pid }] } = await scheduling.raw('SELECT pg_backend_pid()::int AS pid');
+      profile = await resolveCatalogSlotProfile(estimate, { ...profileOptions, preserveCapacity: true }, scheduling);
       expect(profile.durationMinutes).toBe(60);
       // An unchanged missing identity still permits the intentional fallback.
       expect(await catalogLinkForProfile(scheduling, profile, {
         preserveCapacity: true, validateAllowance: true,
       })).toBeNull();
-      // A separate connection commits activation/mapping/insertion AFTER the
-      // absent read; unlike a positive match, no row lock could block it.
-      const policy = { version: 1, default_duration_minutes: 90, min_duration_minutes: 30, max_duration_minutes: 120 };
-      if (key === 'exact') await mockPg('services').insert({ ...original, scheduling_duration_policy: policy });
-      else await mockPg('services').where({ id: ids[key] }).update({
-        is_active: true, engine_keys: JSON.stringify(original.engine_keys), scheduling_duration_policy: policy,
-      });
-      await expect(catalogLinkForProfile(scheduling, profile, {
+      // A separate connection tries to activate/map/insert the identity AFTER
+      // the absent read. No row exists to lock, so only the services SHARE
+      // lock can hold it back — and it must, until this transaction ends
+      // (codex #4344 P1). Started concurrently: awaiting it here would
+      // deadlock the test itself (codex #4369 r2).
+      writer = (key === 'exact'
+        ? mockPg('services').insert({ ...original, scheduling_duration_policy: policy })
+        : mockPg('services').where({ id: ids[key] }).update({
+          is_active: true, engine_keys: JSON.stringify(original.engine_keys), scheduling_duration_policy: policy,
+        })).then(value => value);
+      await waitForBlockedBy(pid);
+      let settled = false;
+      writer.then(() => { settled = true; }, () => { settled = true; });
+      await new Promise(resolve => setTimeout(resolve, 50));
+      expect(settled).toBe(false);
+      // The fallback allowance keeps validating while the write is held back.
+      expect(await catalogLinkForProfile(scheduling, profile, {
+        preserveCapacity: true, validateAllowance: true,
+      })).toBeNull();
+    } finally {
+      if (!scheduling.isCompleted()) await scheduling.rollback();
+    }
+    // Released with the transaction: the write lands only afterwards.
+    expect(await writer).toEqual(key === 'exact' ? expect.anything() : 1);
+
+    // A LATER transaction sees the new identity: the fallback allowance can
+    // no longer graduate, a deliberately larger allowance still can — never
+    // shrink it to the catalog default or compare a combined total to one member.
+    const later = await mockPg.transaction();
+    try {
+      await expect(catalogLinkForProfile(later, profile, {
         preserveCapacity: true, validateAllowance: true,
       })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'service_duration_changed', status: 409 });
-      // A deliberately larger work allowance remains valid; never shrink it
-      // to the catalog default or compare a combined total to one member.
       const larger = { ...profile, durationMinutes: 120,
         services: profile.services.map(service => ({ ...service, durationMinutes: 120 })) };
-      expect(await catalogLinkForProfile(scheduling, larger, {
+      expect(await catalogLinkForProfile(later, larger, {
         preserveCapacity: true, validateAllowance: true,
       })).toMatchObject({ id: ids[key] });
     } finally {
-      if (!scheduling.isCompleted()) await scheduling.rollback();
+      if (!later.isCompleted()) await later.rollback();
     }
   });
 
@@ -194,18 +222,23 @@ describeDb('scheduling catalog locks on PostgreSQL', () => {
       engine_keys: JSON.stringify([]), scheduling_duration_policy: policy,
     });
     delete process.env.GATE_SCHEDULING_CAPACITY;
+    // Neither row matched the allowance read of the transaction that
+    // produced this profile (under the SHARE lock no mapping can land
+    // mid-transaction any more — see 'cannot stamp' above).
+    const profile = await mockPg.transaction(trx => resolveCatalogSlotProfile(
+      estimate, { ...profileOptions, preserveCapacity: true }, trx,
+    ));
+    expect(profile.durationMinutes).toBe(60);
+    // Both mappings then become visible, each requiring more work than the
+    // original fallback covered.
+    const original = await mockPg('services').where({ id: ids.containment }).first();
+    await mockPg.transaction(async editor => {
+      await editor('services').where({ id: ids.containment }).update({ engine_keys: JSON.stringify(['fixture_specialty']) });
+      await editor('services').insert({ ...original, id: randomUUID(), service_key: 'fixture_specialty_duplicate',
+        engine_keys: JSON.stringify(['fixture_specialty']) });
+    });
     const scheduling = await mockPg.transaction();
     try {
-      const profile = await resolveCatalogSlotProfile(estimate, { ...profileOptions, preserveCapacity: true }, scheduling);
-      expect(profile.durationMinutes).toBe(60);
-      // Neither row matched the allowance read. Both mappings then become
-      // visible, each requiring more work than the original fallback covered.
-      const original = await mockPg('services').where({ id: ids.containment }).first();
-      await mockPg.transaction(async editor => {
-        await editor('services').where({ id: ids.containment }).update({ engine_keys: JSON.stringify(['fixture_specialty']) });
-        await editor('services').insert({ ...original, id: randomUUID(), service_key: 'fixture_specialty_duplicate',
-          engine_keys: JSON.stringify(['fixture_specialty']) });
-      });
       const protectedRead = phase === 'strict resolution'
         ? resolveCatalogSlotProfile(estimate, { ...profileOptions, preserveCapacity: true }, scheduling)
         : catalogLinkForProfile(scheduling, profile, { preserveCapacity: true, validateAllowance: true });

@@ -179,12 +179,14 @@ describe('accept-path wiring (source pins)', () => {
 describe('adoptedAppointmentCatalogStamp', () => {
   // Fake conn modeling the savepoint contract of catalogServiceIdForProfile
   // (pattern: accept-path-service-identity.test.js).
+  // The resolver awaits `.select(...)` directly — the services table SHARE
+  // lock replaced the per-row FOR SHARE `.modify` hook (#4369) — so the fake
+  // resolves at select and keeps `modify` only as a legacy chain.
+  const selectable = (read) => ({ modify: async () => read(), then: (resolve, reject) => Promise.resolve().then(read).then(resolve, reject) });
   const makeCatalogConn = (onQuery) => {
     const builder = () => ({
       whereRaw: (_sql, b) => ({
-        andWhere: (w) => ({ limit: () => ({ select: () => ({
-          modify: () => Promise.resolve().then(() => onQuery(b, w)),
-        }) }) }),
+        andWhere: (w) => ({ limit: () => ({ select: () => selectable(() => onQuery(b, w)) }) }),
       }),
     });
     builder.transaction = async (cb) => cb(builder);

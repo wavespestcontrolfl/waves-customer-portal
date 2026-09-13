@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Link, Navigate, useSearchParams } from "react-router-dom";
 import {
   Activity,
@@ -16,6 +16,7 @@ import {
   Settings as SettingsIcon,
   Target,
   ToggleLeft,
+  X,
 } from "lucide-react";
 import useIsMobile from "../../hooks/useIsMobile";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
@@ -26,24 +27,31 @@ import {
   DEFAULT_KPI_TARGETS,
   KPI_METRIC_LABELS,
 } from "./dashboard/kpi-targets";
+import {
+  ActionFeedback,
+  Badge,
+  Button,
+  Card,
+  CardBody,
+  CardHeader,
+  CardTitle,
+  Field,
+  Input,
+  Select,
+  Switch,
+  Table,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TR,
+  Textarea,
+  UiSurface,
+  buttonStyles,
+  cn,
+} from "../../components/ui";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
-// V2 token pass: teal folded to zinc-900. Semantic green/amber/red preserved.
-const D = {
-  bg: "#F4F4F5",
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  teal: "#18181B",
-  green: "#15803D",
-  amber: "#A16207",
-  red: "#991B1B",
-  text: "#27272A",
-  muted: "#71717A",
-  white: "#FFFFFF",
-  heading: "#09090B",
-  inputBorder: "#D4D4D8",
-};
-const MONO = "'JetBrains Mono', monospace";
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -68,81 +76,14 @@ function adminFetch(path, options = {}) {
   });
 }
 
-function Card({ children, style }) {
-  return (
-    <div
-      style={{
-        background: D.card,
-        border: `1px solid ${D.border}`,
-        borderRadius: 12,
-        padding: 24,
-        ...style,
-      }}
-    >
-      {children}
-    </div>
-  );
-}
-
 function Toggle({ checked, onChange, label, description }) {
   return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        padding: "14px 0",
-        borderBottom: `1px solid ${D.border}`,
-      }}
-    >
-      {" "}
-      <div>
-        {" "}
-        <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>
-          {label}
-        </div>
-        {description && (
-          <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
-            {description}
-          </div>
-        )}
-      </div>{" "}
-      <div
-        role="switch"
-        aria-checked={checked}
-        aria-label={label}
-        tabIndex={0}
-        className="u-focus-ring"
-        onClick={() => onChange(!checked)}
-        onKeyDown={(e) => {
-          if (e.key === " " || e.key === "Enter") {
-            e.preventDefault();
-            onChange(!checked);
-          }
-        }}
-        style={{
-          width: 44,
-          height: 24,
-          borderRadius: 12,
-          padding: 2,
-          cursor: "pointer",
-          background: checked ? D.teal : D.border,
-          transition: "background 0.2s",
-        }}
-      >
-        {" "}
-        <div
-          style={{
-            width: 20,
-            height: 20,
-            borderRadius: 10,
-            background: D.white,
-            transform: checked ? "translateX(20px)" : "translateX(0)",
-            transition: "transform 0.2s",
-            boxShadow: "0 1px 3px rgba(0,0,0,0.3)",
-          }}
-        />{" "}
-      </div>{" "}
+    <div className="flex min-h-14 items-center justify-between gap-4 border-b border-hairline border-zinc-200 py-3 last:border-b-0">
+      <div className="min-w-0">
+        <div className="font-medium text-zinc-900">{label}</div>
+        {description && <div className="mt-1 text-ui-caption text-ink-secondary">{description}</div>}
+      </div>
+      <Switch checked={checked} onChange={onChange} aria-label={label} />
     </div>
   );
 }
@@ -293,12 +234,14 @@ export default function SettingsPage() {
   // Deep links with ?tab= still render the leaf below.
   if (isMobile && !searchParams.get("tab")) return <Navigate to="/admin/more" replace />;
 
-  if (loading)
+  if (loading) {
     return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
-        Loading settings...
-      </div>
+      <UiSurface density="comfortable" className="mx-auto max-w-[1300px] text-ui-body text-ink-primary">
+        <AdminCommandHeader variant="workspace" title="Settings" icon={SettingsIcon} />
+        <ActionFeedback className="min-h-20">Loading settings...</ActionFeedback>
+      </UiSurface>
     );
+  }
 
   const gates = health?.gates || {};
 
@@ -323,9 +266,9 @@ export default function SettingsPage() {
     visibleGroups.find((g) => g.tabs.includes(tab)) || visibleGroups[0];
 
   return (
-    <div>
-      {" "}
+    <UiSurface density="comfortable" className="mx-auto max-w-[1300px] text-ui-body text-ink-primary">
       <AdminCommandHeader
+        variant="workspace"
         title="Settings"
         icon={SettingsIcon}
         sections={visibleGroups}
@@ -349,488 +292,181 @@ export default function SettingsPage() {
         secondaryAriaLabel="Settings page"
         secondaryNavGridClassName="grid-cols-2 md:grid-cols-4"
       />
-      {/* ── GENERAL ── */}
       {tab === "general" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        <div className="space-y-5">
           {searchParams.get("passwordChanged") === "1" && (
-            <div
-              role="status"
-              style={{
-                padding: "12px 14px",
-                borderRadius: 8,
-                background: "#DCFCE7",
-                color: D.green,
-                fontSize: 14,
-                fontWeight: 500,
-              }}
-            >
+            <ActionFeedback>
               Password updated. Older staff sessions have been signed out.
-            </div>
+            </ActionFeedback>
           )}
-          {" "}
           <Card>
-            {" "}
-            <div
-              style={{
-                fontSize: 16,
-                fontWeight: 500,
-                color: D.heading,
-                marginBottom: 16,
-              }}
-            >
-              Company Info
-            </div>{" "}
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "1fr 1fr",
-                gap: 12,
-              }}
-            >
-              {[
-                { label: "Company", value: "Waves Pest Control" },
-                { label: "Main Phone", value: "(941) 318-7612" },
-                { label: "Website", value: "wavespestcontrol.com" },
-                {
-                  label: "Service Area",
-                  value:
-                    "Bradenton, Sarasota, Venice, Parrish, LWR, North Port, Port Charlotte",
-                },
-              ].map((f, i) => (
-                <div
-                  key={i}
-                  style={{
-                    padding: "10px 14px",
-                    background: D.bg,
-                    borderRadius: 8,
-                  }}
-                >
-                  {" "}
-                  <div
-                    style={{
-                      fontSize: 11,
-                      color: D.muted,
-                      textTransform: "uppercase",
-                      letterSpacing: 0.5,
-                      marginBottom: 4,
-                    }}
-                  >
-                    {f.label}
-                  </div>{" "}
-                  <div
-                    style={{ fontSize: 13, color: D.heading, fontWeight: 500 }}
-                  >
-                    {f.value}
-                  </div>{" "}
-                </div>
-              ))}
-            </div>{" "}
-          </Card>{" "}
-          <Card>
-            {" "}
-            <div
-              style={{
-                fontSize: 16,
-                fontWeight: 500,
-                color: D.heading,
-                marginBottom: 16,
-              }}
-            >
-              Logged In As
-            </div>{" "}
-            <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-              {" "}
-              <div
-                style={{
-                  width: 48,
-                  height: 48,
-                  borderRadius: 12,
-                  background: `linear-gradient(135deg, ${D.teal}, ${D.green})`,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  color: D.heading,
-                  fontSize: 20,
-                  fontWeight: 700,
-                }}
-              >
-                {(user?.name || "A")[0]}
-              </div>{" "}
-              <div>
-                {" "}
-                <div
-                  style={{ fontSize: 15, fontWeight: 500, color: D.heading }}
-                >
-                  {user?.name || "Unknown"}
-                </div>{" "}
-                <div style={{ fontSize: 12, color: D.muted }}>
-                  {user?.email} · {user?.role}
-                </div>{" "}
-              </div>{" "}
-            </div>{" "}
-            <Link
-              to="/admin/change-password"
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: 8,
-                minHeight: 44,
-                marginTop: 18,
-                padding: "0 16px",
-                border: `1px solid ${D.inputBorder}`,
-                borderRadius: 8,
-                color: D.heading,
-                fontSize: 14,
-                fontWeight: 500,
-                textDecoration: "none",
-              }}
-            >
-              <KeyRound size={16} aria-hidden />
-              Change password
-            </Link>
-          </Card>{" "}
-          <Card>
-            {" "}
-            <div
-              style={{
-                fontSize: 16,
-                fontWeight: 500,
-                color: D.heading,
-                marginBottom: 16,
-              }}
-            >
-              WaveGuard Tiers
-            </div>{" "}
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(4, 1fr)",
-                gap: 10,
-              }}
-            >
-              {[
-                { tier: "Bronze", discount: "0%", color: "#CD7F32" },
-                { tier: "Silver", discount: "10%", color: "#90CAF9" },
-                { tier: "Gold", discount: "15%", color: "#FDD835" },
-                { tier: "Platinum", discount: "20%", color: "#E5E4E2" },
-              ].map((t) => (
-                <div
-                  key={t.tier}
-                  style={{
-                    padding: 14,
-                    background: D.bg,
-                    borderRadius: 10,
-                    textAlign: "center",
-                    borderTop: `3px solid ${t.color}`,
-                  }}
-                >
-                  {" "}
-                  <div
-                    style={{ fontSize: 14, fontWeight: 700, color: t.color }}
-                  >
-                    {t.tier}
-                  </div>{" "}
-                  <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
-                    {t.discount} discount
-                  </div>{" "}
-                </div>
-              ))}
-            </div>{" "}
-          </Card>{" "}
-          {/* Pest Pressure config is owner-only (/admin/settings/pest-pressure
-              is an OWNER_ONLY_NESTED_PATH — the deep-link guard bounces
-              non-admins), so don't render a dead card for them. */}
-          {user?.role === "admin" && (
-          <Card>
-            <Link
-              to="/admin/settings/pest-pressure"
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: 12,
-                textDecoration: "none",
-                color: "inherit",
-              }}
-            >
-              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                <div
-                  style={{
-                    width: 36, height: 36, borderRadius: 8,
-                    background: D.bg, display: "flex",
-                    alignItems: "center", justifyContent: "center",
-                  }}
-                >
-                  <Activity size={18} color={D.heading} />
-                </div>
-                <div>
-                  <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>Pest Pressure</div>
-                  <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
-                    Configure the 0–5 score on customer service reports — service-line scope, weights, labels, trend thresholds, overrides, audit log.
+            <CardHeader><CardTitle>Company info</CardTitle></CardHeader>
+            <CardBody>
+              <dl className="grid gap-3 sm:grid-cols-2">
+                {[
+                  { label: "Company", value: "Waves Pest Control" },
+                  { label: "Main phone", value: "(941) 318-7612" },
+                  { label: "Website", value: "wavespestcontrol.com" },
+                  { label: "Service area", value: "Bradenton, Sarasota, Venice, Parrish, LWR, North Port, Port Charlotte" },
+                ].map((field) => (
+                  <div key={field.label} className="rounded-md bg-zinc-50 p-3">
+                    <dt className="text-ui-caption text-ink-secondary">{field.label}</dt>
+                    <dd className="mt-1 font-medium text-zinc-900">{field.value}</dd>
                   </div>
+                ))}
+              </dl>
+            </CardBody>
+          </Card>
+          <Card>
+            <CardHeader><CardTitle>Logged In As</CardTitle></CardHeader>
+            <CardBody>
+              <div className="flex items-center gap-3">
+                <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-md bg-zinc-900 text-20 font-medium text-white">
+                  {(user?.name || "A")[0]}
+                </div>
+                <div className="min-w-0">
+                  <div className="font-medium text-zinc-900">{user?.name || "Unknown"}</div>
+                  <div className="break-words text-ui-caption text-ink-secondary">{user?.email} · {user?.role}</div>
                 </div>
               </div>
-              <ChevronRight size={18} color={D.muted} />
-            </Link>
+              <Link to="/admin/change-password" className={buttonStyles({ variant: "secondary", density: "comfortable", className: "mt-4 gap-2" })}>
+                <KeyRound size={16} aria-hidden /> Change password
+              </Link>
+            </CardBody>
           </Card>
+          <Card>
+            <CardHeader><CardTitle>WaveGuard tiers</CardTitle></CardHeader>
+            <CardBody className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+              {[
+                { tier: "Bronze", discount: "0%" },
+                { tier: "Silver", discount: "10%" },
+                { tier: "Gold", discount: "15%" },
+                { tier: "Platinum", discount: "20%" },
+              ].map((t) => (
+                <div key={t.tier} className="rounded-md border-hairline border-zinc-200 bg-zinc-50 p-3 text-center">
+                  <div className="font-medium text-zinc-900">{t.tier}</div>
+                  <div className="mt-1 text-ui-caption text-ink-secondary">{t.discount} discount</div>
+                </div>
+              ))}
+            </CardBody>
+          </Card>
+          {user?.role === "admin" && (
+            <Card>
+              <CardBody>
+                <Link to="/admin/settings/pest-pressure" className="flex min-h-11 items-center justify-between gap-3 rounded-sm u-focus-ring">
+                  <div className="flex min-w-0 items-center gap-3">
+                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm bg-zinc-100 text-zinc-900">
+                      <Activity size={18} aria-hidden />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="font-medium text-zinc-900">Pest pressure</div>
+                      <div className="mt-1 text-ui-caption text-ink-secondary">
+                        Configure the 0–5 score on customer service reports — service-line scope, weights, labels, trend thresholds, overrides, audit log.
+                      </div>
+                    </div>
+                  </div>
+                  <ChevronRight size={18} aria-hidden className="shrink-0 text-ink-secondary" />
+                </Link>
+              </CardBody>
+            </Card>
           )}
         </div>
       )}
-      {/* ── INTEGRATIONS ── */}
       {tab === "link-library" && <LinkLibraryTab />}
       {tab === "integrations" && <IntegrationsTab canAdmin={user?.role === "admin"} />}
-      {/* ── FEATURE GATES ── */}
       {tab === "gates" && (
         <Card>
-          {" "}
-          <div
-            style={{
-              fontSize: 16,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 4,
-            }}
-          >
-            Feature Gates
-          </div>{" "}
-          <div style={{ fontSize: 12, color: D.muted, marginBottom: 16 }}>
-            Control which integrations are active. Set via Railway environment
-            variables.
-          </div>
-          {Object.entries(gates).map(([key, enabled]) => (
-            <div
-              key={key}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                padding: "12px 0",
-                borderBottom: `1px solid ${D.border}`,
-              }}
-            >
-              {" "}
-              <div>
-                {" "}
-                <div
-                  style={{ fontSize: 13, fontWeight: 500, color: D.heading }}
-                >
-                  {key}
-                </div>{" "}
-                <div style={{ fontSize: 11, fontFamily: MONO, color: D.muted }}>
-                  GATE_{key.replace(/([A-Z])/g, "_$1").toUpperCase()}
-                </div>{" "}
-              </div>{" "}
-              <span
-                style={{
-                  padding: "4px 12px",
-                  borderRadius: 20,
-                  fontSize: 11,
-                  fontWeight: 700,
-                  background: enabled ? D.green + "22" : D.border + "44",
-                  color: enabled ? D.green : D.muted,
-                }}
-              >
-                {enabled ? "ENABLED" : "DISABLED"}
-              </span>{" "}
-            </div>
-          ))}
-          <div
-            style={{
-              marginTop: 16,
-              fontSize: 12,
-              color: D.muted,
-              padding: "10px 14px",
-              background: D.bg,
-              borderRadius: 8,
-              borderLeft: `3px solid ${D.border}`,
-            }}
-          >
-            Gates are controlled via Railway environment variables. To change:
-            Railway Dashboard → Variables → set GATE_NAME=true or remove the
-            variable.
-          </div>{" "}
+          <CardHeader>
+            <CardTitle>Feature gates</CardTitle>
+            <p className="mt-1 text-ui-body text-ink-secondary">
+              Control which integrations are active. Set via Railway environment variables.
+            </p>
+          </CardHeader>
+          <CardBody>
+            {Object.keys(gates).length === 0 ? null : (
+              <div className="divide-y divide-zinc-200">
+                {Object.entries(gates).map(([key, enabled]) => (
+                  <div key={key} className="flex min-h-14 flex-wrap items-center justify-between gap-3 py-3">
+                    <div className="min-w-0">
+                      <div className="break-words font-medium text-zinc-900">{key}</div>
+                      <div className="break-all text-ui-caption text-ink-secondary u-nums">
+                        GATE_{key.replace(/([A-Z])/g, "_$1").toUpperCase()}
+                      </div>
+                    </div>
+                    <Badge tone={enabled ? "strong" : "neutral"} dot>{enabled ? "Enabled" : "Disabled"}</Badge>
+                  </div>
+                ))}
+              </div>
+            )}
+            <p className="mt-4 rounded-md bg-zinc-50 p-3 text-ui-body text-ink-secondary">
+              Gates are controlled via Railway environment variables. To change:
+              Railway Dashboard → Variables → set GATE_NAME=true or remove the variable.
+            </p>
+          </CardBody>
         </Card>
       )}
       {tab === "service-reports" && <ServiceCoverageSettingsTab />}
       {tab === "blackout-days" && <BlackoutDaysTab />}
-      {tab === "kpi-targets" && (
-        <KpiTargetsSettingsTab canAdmin={user?.role === "admin"} />
-      )}
-      {tab === "operating-costs" && (
-        <OperatingCostsSettingsTab canAdmin={user?.role === "admin"} />
-      )}
-      {/* ── SYSTEM ── */}
+      {tab === "kpi-targets" && <KpiTargetsSettingsTab canAdmin={user?.role === "admin"} />}
+      {tab === "operating-costs" && <OperatingCostsSettingsTab canAdmin={user?.role === "admin"} />}
       {tab === "system" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          {" "}
+        <div className="space-y-5">
           <Card>
-            {" "}
-            <div
-              style={{
-                fontSize: 16,
-                fontWeight: 500,
-                color: D.heading,
-                marginBottom: 16,
-              }}
-            >
-              System Info
-            </div>{" "}
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "1fr 1fr",
-                gap: 10,
-              }}
-            >
+            <CardHeader><CardTitle>System info</CardTitle></CardHeader>
+            <CardBody>
+              <dl className="grid gap-3 sm:grid-cols-2">
+                {[
+                  { label: "Environment", value: health?.environment || "—" },
+                  { label: "Status", value: health?.status || "—" },
+                  { label: "Server time", value: health?.timestamp ? new Date(health.timestamp).toLocaleString() : "—" },
+                  { label: "Database", value: "PostgreSQL (Railway)" },
+                  { label: "Frontend", value: "React (Vite)" },
+                  { label: "Backend", value: "Express.js" },
+                  { label: "AI model", value: "Claude Sonnet 4" },
+                  { label: "Migrations", value: "50 migrations" },
+                ].map((field) => (
+                  <div key={field.label} className="rounded-md bg-zinc-50 p-3">
+                    <dt className="text-ui-caption text-ink-secondary">{field.label}</dt>
+                    <dd className="mt-1 break-words font-medium text-zinc-900 u-nums">{field.value}</dd>
+                  </div>
+                ))}
+              </dl>
+            </CardBody>
+          </Card>
+          <Card>
+            <CardHeader className="flex flex-wrap items-center justify-between gap-2">
+              <CardTitle>Cron jobs</CardTitle>
+              <Badge tone={gates.cronJobs ? "strong" : "alert"} dot>
+                {gates.cronJobs ? "Enabled" : "Disabled"}
+              </Badge>
+            </CardHeader>
+            <CardBody className="divide-y divide-zinc-200">
               {[
-                { label: "Environment", value: health?.environment || "—" },
-                { label: "Status", value: health?.status || "—" },
-                {
-                  label: "Server Time",
-                  value: health?.timestamp
-                    ? new Date(health.timestamp).toLocaleString()
-                    : "—",
-                },
-                { label: "Database", value: "PostgreSQL (Railway)" },
-                { label: "Frontend", value: "React (Vite)" },
-                { label: "Backend", value: "Express.js" },
-                { label: "AI Model", value: "Claude Sonnet 4" },
-                { label: "Migrations", value: "50 migrations" },
-              ].map((f, i) => (
-                <div
-                  key={i}
-                  style={{
-                    padding: "10px 14px",
-                    background: D.bg,
-                    borderRadius: 8,
-                  }}
-                >
-                  {" "}
-                  <div
-                    style={{
-                      fontSize: 11,
-                      color: D.muted,
-                      textTransform: "uppercase",
-                      letterSpacing: 0.5,
-                      marginBottom: 4,
-                    }}
-                  >
-                    {f.label}
-                  </div>{" "}
-                  <div
-                    style={{ fontSize: 13, color: D.heading, fontFamily: MONO }}
-                  >
-                    {f.value}
-                  </div>{" "}
+                { time: "1:30 AM Mon", job: "Site audit", gate: "seoIntelligence" },
+                { time: "2:00 AM", job: "Rank tracking", gate: "seoIntelligence" },
+                { time: "2:30 AM", job: "AI Overview check", gate: "seoIntelligence" },
+                { time: "3:00 AM", job: "Customer intelligence", gate: "cronJobs" },
+                { time: "3:30 AM Sun", job: "Backlink scan", gate: "seoIntelligence" },
+                { time: "5:00 AM", job: "Blog auto-generate", gate: "cronJobs" },
+                { time: "5:30 AM Mon", job: "Content decay check", gate: "seoIntelligence" },
+                { time: "6:00 AM", job: "GSC data sync", gate: "cronJobs" },
+                { time: "8:00 AM", job: "Campaign advisor", gate: "cronJobs" },
+                { time: "8:00 AM Fri", job: "CSR weekly rec", gate: "cronJobs" },
+                { time: "Every 2hr", job: "Ad budget adjust", gate: "cronJobs" },
+                { time: ":30 past hr", job: "Follow-up verify", gate: "cronJobs" },
+              ].map((cron) => (
+                <div key={`${cron.time}-${cron.job}`} className="grid grid-cols-[110px_minmax(0,1fr)_auto] items-center gap-3 py-3">
+                  <span className="text-ui-caption text-ink-secondary u-nums">{cron.time}</span>
+                  <span className="text-zinc-700">{cron.job}</span>
+                  <Badge tone={gates[cron.gate] ? "strong" : "neutral"}>{gates[cron.gate] ? "On" : "Off"}</Badge>
                 </div>
               ))}
-            </div>{" "}
-          </Card>{" "}
-          <Card>
-            {" "}
-            <div
-              style={{
-                fontSize: 16,
-                fontWeight: 500,
-                color: D.heading,
-                marginBottom: 12,
-              }}
-            >
-              Cron Jobs
-            </div>{" "}
-            <div
-              style={{
-                fontSize: 12,
-                color: gates.cronJobs ? D.green : D.red,
-                fontWeight: 500,
-                marginBottom: 12,
-              }}
-            >
-              Cron jobs {gates.cronJobs ? "ENABLED" : "DISABLED"}
-            </div>
-            {[
-              {
-                time: "1:30 AM Mon",
-                job: "Site audit",
-                gate: "seoIntelligence",
-              },
-              {
-                time: "2:00 AM",
-                job: "Rank tracking",
-                gate: "seoIntelligence",
-              },
-              {
-                time: "2:30 AM",
-                job: "AI Overview check",
-                gate: "seoIntelligence",
-              },
-              {
-                time: "3:00 AM",
-                job: "Customer intelligence",
-                gate: "cronJobs",
-              },
-              {
-                time: "3:30 AM Sun",
-                job: "Backlink scan",
-                gate: "seoIntelligence",
-              },
-              { time: "5:00 AM", job: "Blog auto-generate", gate: "cronJobs" },
-              {
-                time: "5:30 AM Mon",
-                job: "Content decay check",
-                gate: "seoIntelligence",
-              },
-              { time: "6:00 AM", job: "GSC data sync", gate: "cronJobs" },
-              { time: "8:00 AM", job: "Campaign advisor", gate: "cronJobs" },
-              { time: "8:00 AM Fri", job: "CSR weekly rec", gate: "cronJobs" },
-              { time: "Every 2hr", job: "Ad budget adjust", gate: "cronJobs" },
-              {
-                time: ":30 past hr",
-                job: "Follow-up verify",
-                gate: "cronJobs",
-              },
-            ].map((c, i) => (
-              <div
-                key={i}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 10,
-                  padding: "6px 0",
-                  borderBottom: `1px solid ${D.border}22`,
-                }}
-              >
-                {" "}
-                <span
-                  style={{
-                    width: 8,
-                    height: 8,
-                    borderRadius: 4,
-                    background: gates[c.gate] ? D.green : D.muted,
-                    flexShrink: 0,
-                  }}
-                />{" "}
-                <span
-                  style={{
-                    fontSize: 12,
-                    color: D.muted,
-                    fontFamily: MONO,
-                    width: 100,
-                  }}
-                >
-                  {c.time}
-                </span>{" "}
-                <span style={{ fontSize: 12, color: D.text }}>
-                  {c.job}
-                </span>{" "}
-              </div>
-            ))}
-          </Card>{" "}
+            </CardBody>
+          </Card>
         </div>
       )}
       {tab === "usage" && <PortalUsageTab canAdmin={user?.role === "admin"} />}
-    </div>
+    </UiSurface>
   );
 }
 
@@ -856,21 +492,6 @@ const SERVICE_COVERAGE_STATUS_KEYS = [
   "skipped",
   "not_serviced",
 ];
-
-function settingsInputStyle(extra = {}) {
-  return {
-    width: "100%",
-    border: `1px solid ${D.inputBorder}`,
-    borderRadius: 8,
-    padding: "9px 10px",
-    color: D.heading,
-    background: D.white,
-    fontSize: 13,
-    lineHeight: 1.35,
-    boxSizing: "border-box",
-    ...extra,
-  };
-}
 
 function deepMergeConfig(base = {}, override = {}) {
   const merged = { ...base };
@@ -937,65 +558,60 @@ function VisitTimelineSettingsCard() {
   };
 
   if (!config) {
-    return <Card><div style={{ color: D.muted, fontSize: 13 }}>Loading Visit Timeline settings...</div></Card>;
+    return <ActionFeedback className="min-h-20">Loading Visit Timeline settings...</ActionFeedback>;
   }
 
   return (
     <Card>
-      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16 }}>
-        <div>
-          <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>Visit Timeline</div>
-          <div style={{ marginTop: 4, fontSize: 12, color: D.muted, lineHeight: 1.45 }}>
+      <CardHeader className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <CardTitle>Visit Timeline</CardTitle>
+          <p className="mt-1 text-ui-body text-ink-secondary">
             Configure the customer-facing timeline that uses Bouncie for movement and Waves report finalization for service completion.
-          </div>
+          </p>
         </div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
-          <button type="button" onClick={reset} disabled={saving} style={{ ...settingsButtonStyle("secondary"), opacity: saving ? 0.6 : 1 }}>
-            <RotateCcw size={15} /> Restore defaults
-          </button>
-          <button type="button" onClick={save} disabled={saving} style={{ ...settingsButtonStyle("primary"), opacity: saving ? 0.6 : 1 }}>
-            <Save size={15} /> {saving ? "Saving..." : "Save settings"}
-          </button>
+        <div className="ui-record-actions">
+          <Button variant="secondary" onClick={reset} disabled={saving}>
+            <RotateCcw size={15} aria-hidden /> Restore defaults
+          </Button>
+          <Button onClick={save} loading={saving}>
+            <Save size={15} aria-hidden /> {saving ? "Saving..." : "Save settings"}
+          </Button>
         </div>
-      </div>
-
-      <div style={{ display: "grid", gap: 12, marginTop: 14 }}>
+      </CardHeader>
+      <CardBody>
         <Toggle checked={config.enabled !== false} onChange={(value) => update({ enabled: value })} label="Enable Visit Timeline" description="Show one unified customer-facing visit timeline on service reports." />
         <Toggle checked={config.showOnCustomerReports !== false} onChange={(value) => update({ showOnCustomerReports: value })} label="Show on customer reports" />
         <Toggle checked={config.showTechnicianEnRoute !== false} onChange={(value) => update({ showTechnicianEnRoute: value })} label="Show technician en route" description="Source: Bouncie." />
         <Toggle checked={config.showTechnicianOnSite !== false} onChange={(value) => update({ showTechnicianOnSite: value })} label="Show technician on site" description="Source: Bouncie." />
-        <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, background: "#FAFAFA" }}>
-          <div style={{ fontSize: 13, color: D.heading, fontWeight: 700 }}>Service completed is required</div>
-          <div style={{ fontSize: 12, color: D.muted, marginTop: 3, lineHeight: 1.4 }}>
+        <div className="my-3 rounded-md border-hairline border-zinc-200 bg-zinc-50 p-3">
+          <div className="font-medium text-zinc-900">Service completed is required</div>
+          <div className="mt-1 text-ui-caption text-ink-secondary">
             Completed reports always show Service completed from Waves report finalization.
           </div>
         </div>
         <Toggle checked={config.showCustomerContact !== false} onChange={(value) => update({ showCustomerContact: value })} label="Show customer contact detail" description="Shown inside Visit Timeline, not as a primary milestone." />
         <Toggle checked={config.showReportGenerated === true} onChange={(value) => update({ showReportGenerated: value })} label="Show report generated detail" description="Secondary detail only. Hidden by default." />
         <Toggle checked={config.showDuration === true} onChange={(value) => update({ showDuration: value })} label="Show duration when reliable" />
-        <label style={settingsLabelStyle}>
-          Minimum reliable duration
-          <input
+        <Field label="Minimum reliable duration" className="my-3 max-w-xs">
+          <Input
             type="number"
             min="1"
             value={config.minimumDurationMinutes || 5}
             onChange={(event) => update({ minimumDurationMinutes: Number(event.target.value) || 5 })}
-            style={settingsInputStyle()}
           />
-        </label>
+        </Field>
         <Toggle checked={config.showTimingNoteWhenDurationUnavailable !== false} onChange={(value) => update({ showTimingNoteWhenDurationUnavailable: value })} label="Show timing note when duration is unavailable" />
         <Toggle checked={config.showDataSourceNote !== false} onChange={(value) => update({ showDataSourceNote: value })} label="Show data source note" />
-        <label style={settingsLabelStyle}>
-          Data source note
-          <textarea
+        <Field label="Data source note" className="mt-3">
+          <Textarea
             rows={2}
             value={config.dataSourceNote || ""}
             onChange={(event) => update({ dataSourceNote: event.target.value })}
-            style={settingsInputStyle({ resize: "vertical" })}
           />
-        </label>
-      </div>
-      {message && <div style={{ marginTop: 12, fontSize: 12, color: message.includes("Could not") ? D.red : D.green }}>{message}</div>}
+        </Field>
+        {message && <ActionFeedback error={message.includes("Could not")} className="mt-3">{message}</ActionFeedback>}
+      </CardBody>
     </Card>
   );
 }
@@ -1072,13 +688,7 @@ function OperatingCostsSettingsTab({ canAdmin }) {
   // Fail closed — no inputs until the latest row actually loaded (editing on
   // top of a failed load could clobber entered figures with blanks).
   if (!row) {
-    return (
-      <Card>
-        <div style={{ color: message?.error ? D.red : D.muted, fontSize: 13 }}>
-          {message?.text || "Loading operating costs..."}
-        </div>
-      </Card>
-    );
+    return <ActionFeedback error={message?.error} className="min-h-20">{message?.text || "Loading operating costs..."}</ActionFeedback>;
   }
 
   const monthlyTotal = OVH_FIELDS_UI.reduce((t, f) => {
@@ -1088,53 +698,38 @@ function OperatingCostsSettingsTab({ canAdmin }) {
   const enteredAt = row.overhead_entered_at ? String(row.overhead_entered_at).slice(0, 10) : null;
 
   return (
-    <div style={{ display: "grid", gap: 16 }}>
+    <div className="space-y-5">
       <Card>
-        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16 }}>
-          <div>
-            <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>Operating Costs</div>
-            <div style={{ marginTop: 4, fontSize: 12, color: D.muted, lineHeight: 1.45 }}>
+        <CardHeader className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <CardTitle>Operating costs</CardTitle>
+            <p className="mt-1 text-ui-body text-ink-secondary">
               Real monthly overhead for the dashboard's adjusted-EBITDA bridge. Separate from the
               pricing assumptions on purpose — job pricing and the company P&amp;L must not rewrite
               each other. Until these are entered, the bridge approximates from pricing settings
               and labels itself accordingly.
-            </div>
-            <div style={{ marginTop: 6, fontSize: 12, color: D.muted }}>
+            </p>
+            <p className="mt-2 text-ui-caption text-ink-secondary">
               {enteredAt ? `Last entered ${enteredAt}.` : "Never entered — the bridge is running on pricing assumptions."}
-            </div>
+            </p>
           </div>
           {canAdmin && (
-            <button
-              type="button"
-              onClick={save}
-              disabled={saving || Object.keys(dirty).length === 0}
-              style={{ ...settingsButtonStyle("primary"), opacity: saving || Object.keys(dirty).length === 0 ? 0.6 : 1 }}
-            >
-              <Save size={15} /> {saving ? "Saving..." : "Save costs"}
-            </button>
+            <Button onClick={save} loading={saving} disabled={Object.keys(dirty).length === 0}>
+              <Save size={15} aria-hidden /> {saving ? "Saving..." : "Save costs"}
+            </Button>
           )}
-        </div>
+        </CardHeader>
         {message && (
-          <div style={{ marginTop: 12, fontSize: 12, color: message.error ? D.red : D.green }}>
-            {message.text}
-          </div>
+          <CardBody><ActionFeedback error={message.error}>{message.text}</ActionFeedback></CardBody>
         )}
       </Card>
 
       <Card>
-        <div style={{ display: "grid", gap: 12 }}>
+        <CardBody className="divide-y divide-zinc-200">
           {OVH_FIELDS_UI.map((f) => (
-            <div key={f.key} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, borderTop: `1px solid ${D.border}`, paddingTop: 12 }}>
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 13, color: D.text }}>
-                  {f.label}
-                  {dirty[f.key] !== undefined && <span style={{ color: D.amber, marginLeft: 6 }}>•</span>}
-                </div>
-                <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>{f.hint}</div>
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
-                <span style={{ fontSize: 13, color: D.muted }}>$</span>
-                <input
+            <div key={f.key} className="flex flex-col gap-3 py-3 first:pt-0 last:pb-0 sm:flex-row sm:items-end sm:justify-between">
+              <Field label={f.label} help={f.hint} className="min-w-0 flex-1 sm:max-w-md">
+                <Input
                   type="number"
                   step="any"
                   min="0"
@@ -1142,19 +737,22 @@ function OperatingCostsSettingsTab({ canAdmin }) {
                   placeholder="0"
                   disabled={!canAdmin}
                   onChange={(ev) => setDirty((d) => ({ ...d, [f.key]: ev.target.value }))}
-                  style={{ width: 110, padding: "6px 8px", fontSize: 13, fontFamily: MONO, border: `1px solid ${D.inputBorder}`, borderRadius: 6, background: D.white, color: D.text }}
+                  className="u-nums"
                 />
-                <span style={{ fontSize: 12, color: D.muted }}>/mo</span>
+              </Field>
+              <div className="flex items-center gap-2 sm:pb-3">
+                {dirty[f.key] !== undefined && <Badge tone="neutral">Unsaved</Badge>}
+                <span className="text-ui-caption text-ink-secondary">$ / month</span>
               </div>
             </div>
           ))}
-          <div style={{ display: "flex", justifyContent: "space-between", borderTop: `1px solid ${D.border}`, paddingTop: 12, fontSize: 13 }}>
-            <span style={{ color: D.muted }}>Monthly overhead total</span>
-            <span style={{ fontFamily: MONO, color: D.heading, fontWeight: 700 }}>
+          <div className="flex justify-between gap-3 pt-4">
+            <span className="text-ink-secondary">Monthly overhead total</span>
+            <span className="font-medium text-zinc-900 u-nums">
               ${monthlyTotal.toLocaleString("en-US", { maximumFractionDigits: 2 })}
             </span>
           </div>
-        </div>
+        </CardBody>
       </Card>
     </div>
   );
@@ -1262,123 +860,102 @@ function KpiTargetsSettingsTab({ canAdmin }) {
   // fallback defaults are for the dashboard tiles, not for editing, and a
   // save on top of them could clobber owner-set targets that failed to load.
   if (!rows) {
-    return (
-      <Card>
-        <div style={{ color: message?.error ? D.red : D.muted, fontSize: 13 }}>
-          {message?.text || "Loading KPI targets..."}
-        </div>
-      </Card>
-    );
+    return <ActionFeedback error={message?.error} className="min-h-20">{message?.text || "Loading KPI targets..."}</ActionFeedback>;
   }
 
-  const inputStyle = {
-    width: 90,
-    padding: "6px 8px",
-    fontSize: 13,
-    fontFamily: MONO,
-    border: `1px solid ${D.inputBorder}`,
-    borderRadius: 6,
-    background: D.white,
-    color: D.text,
-  };
-
   return (
-    <div style={{ display: "grid", gap: 16 }}>
+    <div className="space-y-5">
       <Card>
-        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16 }}>
-          <div>
-            <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>KPI Targets</div>
-            <div style={{ marginTop: 4, fontSize: 12, color: D.muted, lineHeight: 1.45 }}>
+        <CardHeader className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <CardTitle>KPI targets</CardTitle>
+            <p className="mt-1 text-ui-body text-ink-secondary">
               Dashboard tiles color against these: green at/above target, amber within the band, red beyond it.
               "Lower is better" flips the comparison (callback rate, AR days, response speed).
-            </div>
+            </p>
           </div>
           {canAdmin && (
-            <button
-              type="button"
-              onClick={save}
-              disabled={saving || Object.keys(dirty).length === 0}
-              style={{ ...settingsButtonStyle("primary"), opacity: saving || Object.keys(dirty).length === 0 ? 0.6 : 1 }}
-            >
-              <Save size={15} /> {saving ? "Saving..." : "Save targets"}
-            </button>
+            <Button onClick={save} loading={saving} disabled={Object.keys(dirty).length === 0}>
+              <Save size={15} aria-hidden /> {saving ? "Saving..." : "Save targets"}
+            </Button>
           )}
-        </div>
+        </CardHeader>
         {message && (
-          <div style={{ marginTop: 12, fontSize: 12, color: message.error ? D.red : D.green }}>
-            {message.text}
-          </div>
+          <CardBody><ActionFeedback error={message.error}>{message.text}</ActionFeedback></CardBody>
         )}
       </Card>
 
       <Card>
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-            <thead>
-              <tr style={{ textAlign: "left", color: D.muted, fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5 }}>
-                <th style={{ padding: "6px 10px 10px 0" }}>Metric</th>
-                <th style={{ padding: "6px 10px 10px 0" }}>Target</th>
-                <th style={{ padding: "6px 10px 10px 0" }}>Direction</th>
-                <th style={{ padding: "6px 10px 10px 0" }}>Amber band %</th>
-                <th style={{ padding: "6px 0 10px 0" }}>Last updated</th>
-              </tr>
-            </thead>
-            <tbody>
+        <CardBody className="p-0">
+          <Table className="min-w-[760px]" aria-label="KPI targets">
+            <THead>
+              <TR>
+                <TH>Metric</TH>
+                <TH>Target</TH>
+                <TH>Direction</TH>
+                <TH>Amber band %</TH>
+                <TH>Last updated</TH>
+              </TR>
+            </THead>
+            <TBody>
               {Object.keys(KPI_METRIC_LABELS).map((metric) => {
                 const e = effective(metric);
                 const stored = rows?.[metric];
                 const isDirty = !!dirty[metric];
                 return (
-                  <tr key={metric} style={{ borderTop: `1px solid ${D.border}` }}>
-                    <td style={{ padding: "10px 10px 10px 0", color: D.text }}>
+                  <TR key={metric}>
+                    <TD>
                       {KPI_METRIC_LABELS[metric]}
-                      {isDirty && <span style={{ color: D.amber, marginLeft: 6 }}>•</span>}
-                    </td>
-                    <td style={{ padding: "10px 10px 10px 0" }}>
-                      <input
+                      {isDirty && <Badge tone="neutral" className="ml-2">Unsaved</Badge>}
+                    </TD>
+                    <TD>
+                      <Input
                         type="number"
                         step="any"
                         value={e.target ?? ""}
                         placeholder="—"
                         disabled={!canAdmin}
+                        aria-label={`${KPI_METRIC_LABELS[metric]} target`}
                         onChange={(ev) => edit(metric, { target: ev.target.value })}
-                        style={inputStyle}
+                        className="w-28 u-nums"
                       />
-                    </td>
-                    <td style={{ padding: "10px 10px 10px 0" }}>
-                      <select
+                    </TD>
+                    <TD>
+                      <Select
                         value={e.lowerIsBetter ? "lower" : "higher"}
                         disabled={!canAdmin}
+                        aria-label={`${KPI_METRIC_LABELS[metric]} direction`}
                         onChange={(ev) => edit(metric, { lowerIsBetter: ev.target.value === "lower" })}
-                        style={{ ...inputStyle, width: 130, fontFamily: "inherit" }}
+                        className="w-40"
                       >
                         <option value="higher">Higher is better</option>
                         <option value="lower">Lower is better</option>
-                      </select>
-                    </td>
-                    <td style={{ padding: "10px 10px 10px 0" }}>
-                      <input
+                      </Select>
+                    </TD>
+                    <TD>
+                      <Input
                         type="number"
                         min="0"
                         max="100"
                         step="any"
                         value={e.amberBandPct ?? 10}
                         disabled={!canAdmin}
+                        aria-label={`${KPI_METRIC_LABELS[metric]} amber band percent`}
                         onChange={(ev) => edit(metric, { amberBandPct: ev.target.value })}
-                        style={inputStyle}
+                        className="w-28 u-nums"
                       />
-                    </td>
-                    <td style={{ padding: "10px 0", color: D.muted, fontSize: 12 }}>
+                    </TD>
+                    <TD className="text-ink-secondary">
                       {stored?.updatedAt
                         ? `${new Date(stored.updatedAt).toLocaleDateString("en-US", { timeZone: "America/New_York" })}${stored.updatedBy ? ` · ${stored.updatedBy}` : ""}`
                         : stored ? "seeded" : "no target set"}
-                    </td>
-                  </tr>
+                    </TD>
+                  </TR>
                 );
               })}
-            </tbody>
-          </table>
-        </div>
+            </TBody>
+          </Table>
+        </CardBody>
       </Card>
     </div>
   );
@@ -1499,215 +1076,99 @@ function LinkLibraryTab() {
   // office + manual rows always list.
   const visible = all.filter((l) => (q ? matches(l) : l.source !== "sitemap"));
 
-  const inputStyle = {
-    width: "100%",
-    padding: "10px 12px",
-    borderRadius: 8,
-    border: `1px solid ${D.inputBorder}`,
-    fontSize: 14,
-    color: D.text,
-    background: D.white,
-    boxSizing: "border-box",
-  };
-  const chipStyle = (synced) => ({
-    fontSize: 11,
-    fontWeight: 600,
-    letterSpacing: "0.04em",
-    textTransform: "uppercase",
-    padding: "3px 8px",
-    borderRadius: 6,
-    background: synced ? "#E8F4FC" : D.bg,
-    color: synced ? "#065A8C" : D.muted,
-    whiteSpace: "nowrap",
-  });
-
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+    <div className="space-y-5">
       <Card>
-        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
-          <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>Link Library</div>
-          <button
-            type="button"
-            onClick={() => handleSync()}
-            disabled={syncing}
-            style={{
-              padding: "8px 14px",
-              borderRadius: 8,
-              border: `1px solid ${D.inputBorder}`,
-              background: D.white,
-              color: D.heading,
-              fontSize: 13,
-              fontWeight: 500,
-              cursor: syncing ? "default" : "pointer",
-              opacity: syncing ? 0.6 : 1,
-            }}
-          >
+        <CardHeader className="flex flex-wrap items-center justify-between gap-3">
+          <CardTitle>Link library</CardTitle>
+          <Button variant="secondary" onClick={() => handleSync()} loading={syncing}>
             {syncing ? "Syncing…" : "Sync website pages now"}
-          </button>
-        </div>
-        <div style={{ fontSize: 13, color: D.muted, marginTop: 6, lineHeight: 1.5 }}>
+          </Button>
+        </CardHeader>
+        <CardBody className="space-y-3">
+        <p className="text-ui-body text-ink-secondary">
           Everything here is searchable from the Messages composer's Insert Link button. Synced rows
           maintain themselves — website pages come from the wavespestcontrol.com sitemap nightly and
           the Google review links from the office list. Add anything else below.
-        </div>
-        <div style={{ fontSize: 12, color: D.muted, marginTop: 8 }}>
+        </p>
+        <p className="text-ui-caption text-ink-secondary u-nums">
           {links === null && !loadErr ? "Loading…" : `${all.length} links (${sitemapCount} website pages)`}
           {lastSyncedAt && ` · website pages last synced ${new Date(lastSyncedAt).toLocaleString()}`}
-        </div>
-        {loadErr && (
-          <div style={{ fontSize: 13, color: D.red, marginTop: 8 }}>
-            {loadErr}{" "}
-            <button
-              type="button"
-              onClick={load}
-              style={{ border: 0, background: "none", color: D.heading, textDecoration: "underline", cursor: "pointer", fontSize: 13, padding: 0 }}
-            >
-              Retry
-            </button>
-          </div>
-        )}
+        </p>
+        {loadErr && <ActionFeedback error onRetry={load}>{loadErr}</ActionFeedback>}
         {notice && (
-          <div style={{ fontSize: 13, color: notice.ok ? D.green : D.red, marginTop: 8 }}>
-            {notice.text}
+          <ActionFeedback error={!notice.ok}>
+            <span>{notice.text}</span>
             {notice.shrinkage && (
-              <button
-                type="button"
-                onClick={() => handleSync(true)}
-                disabled={syncing}
-                style={{
-                  marginLeft: 10,
-                  padding: "4px 10px",
-                  borderRadius: 6,
-                  border: `1px solid ${D.inputBorder}`,
-                  background: D.white,
-                  color: D.red,
-                  fontSize: 13,
-                  fontWeight: 500,
-                  cursor: syncing ? "default" : "pointer",
-                }}
-              >
+              <Button variant="danger" onClick={() => handleSync(true)} loading={syncing}>
                 Force full reconcile…
-              </button>
+              </Button>
             )}
-          </div>
+          </ActionFeedback>
         )}
+        </CardBody>
       </Card>
 
       <Card>
-        <input
-          type="search"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder={`Search all ${all.length || ""} links — try 'termite', 'review', 'app'…`}
-          aria-label="Search links"
-          style={{ ...inputStyle, marginBottom: 12 }}
-        />
+        <CardHeader><CardTitle>Saved links</CardTitle></CardHeader>
+        <CardBody>
+        <Field label="Search links" className="mb-3">
+          <Input type="search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder={`Search all ${all.length || ""} links — try 'termite', 'review', 'app'…`} />
+        </Field>
         {!q && sitemapCount > 0 && (
-          <div style={{ fontSize: 12, color: D.muted, marginBottom: 8 }}>
+          <p className="mb-2 text-ui-caption text-ink-secondary">
             Plus {sitemapCount} website pages synced from the sitemap — search to find one.
-          </div>
+          </p>
         )}
-        <div>
+        <div className="divide-y divide-zinc-200">
           {visible.map((row) => {
             const synced = row.source !== "manual";
             return (
-              <div
-                key={row.key || row.id}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 10,
-                  padding: "10px 0",
-                  borderBottom: `1px solid ${D.border}`,
-                }}
-              >
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>{row.name}</div>
-                  <div style={{ fontSize: 12, color: D.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <div key={row.key || row.id} className="flex min-h-14 items-center gap-3 py-3">
+                <div className="min-w-0 flex-1">
+                  <div className="font-medium text-zinc-900">{row.name}</div>
+                  <div className="truncate text-ui-caption text-ink-secondary">
                     {String(row.url).replace(/^https?:\/\//, "")}
                   </div>
                 </div>
-                <span style={chipStyle(synced)}>
+                <Badge tone={synced ? "strong" : "neutral"} className="shrink-0">
                   {synced ? "Synced" : LINK_LIBRARY_CATEGORY_LABELS[row.category] || row.category}
-                </span>
+                </Badge>
                 {!synced && (
-                  <button
-                    type="button"
+                  <Button
+                    variant="ghost"
                     onClick={() => handleRemove(row)}
                     aria-label={`Remove ${row.name}`}
-                    style={{ border: 0, background: "none", color: D.muted, cursor: "pointer", fontSize: 14, padding: 4 }}
+                    className="shrink-0 px-3"
                   >
-                    ✕
-                  </button>
+                    <X size={16} aria-hidden />
+                  </Button>
                 )}
               </div>
             );
           })}
           {links !== null && !visible.length && (
-            <div style={{ fontSize: 13, color: D.muted, padding: "10px 0" }}>
+            <div className="py-6 text-center text-ink-secondary">
               No links match &ldquo;{search.trim()}&rdquo;.
             </div>
           )}
         </div>
+        </CardBody>
       </Card>
 
       <Card>
-        <div style={{ fontSize: 16, fontWeight: 500, color: D.heading, marginBottom: 10 }}>Add a link</div>
-        <form onSubmit={handleAdd} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <input
-            type="text"
-            value={form.name}
-            onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-            placeholder="Name — e.g. Termite inspection video"
-            aria-label="Link name"
-            required
-            style={inputStyle}
-          />
-          <input
-            type="url"
-            value={form.url}
-            onChange={(e) => setForm((f) => ({ ...f, url: e.target.value }))}
-            placeholder="https://…"
-            aria-label="Link URL"
-            required
-            style={inputStyle}
-          />
-          <select
-            value={form.category}
-            onChange={(e) => setForm((f) => ({ ...f, category: e.target.value }))}
-            aria-label="Category"
-            style={inputStyle}
-          >
-            {LINK_LIBRARY_CATEGORIES.map(([value, label]) => (
-              <option key={value} value={value}>{label}</option>
-            ))}
-          </select>
-          <input
-            type="text"
-            value={form.clause}
-            onChange={(e) => setForm((f) => ({ ...f, clause: e.target.value }))}
-            placeholder="Text before the link (optional) — e.g. Watch our termite video here"
-            aria-label="Message text before the link"
-            style={inputStyle}
-          />
-          <button
-            type="submit"
-            disabled={saving}
-            style={{
-              padding: "10px 14px",
-              borderRadius: 8,
-              border: 0,
-              background: D.teal,
-              color: D.white,
-              fontSize: 14,
-              fontWeight: 500,
-              cursor: saving ? "default" : "pointer",
-              opacity: saving ? 0.6 : 1,
-            }}
-          >
+        <CardHeader><CardTitle>Add a link</CardTitle></CardHeader>
+        <CardBody>
+        <form onSubmit={handleAdd} className="grid gap-3">
+          <Field label="Link name" required><Input value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} placeholder="Name — e.g. Termite inspection video" /></Field>
+          <Field label="Link URL" required><Input type="url" value={form.url} onChange={(e) => setForm((f) => ({ ...f, url: e.target.value }))} placeholder="https://…" /></Field>
+          <Field label="Category"><Select value={form.category} onChange={(e) => setForm((f) => ({ ...f, category: e.target.value }))}>{LINK_LIBRARY_CATEGORIES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</Select></Field>
+          <Field label="Message text before the link"><Input value={form.clause} onChange={(e) => setForm((f) => ({ ...f, clause: e.target.value }))} placeholder="Text before the link (optional) — e.g. Watch our termite video here" /></Field>
+          <Button type="submit" loading={saving} className="sm:justify-self-start">
             {saving ? "Adding…" : "Add link"}
-          </button>
+          </Button>
         </form>
+        </CardBody>
       </Card>
     </div>
   );
@@ -1804,128 +1265,69 @@ function BlackoutDaysTab() {
 
   return (
     <Card>
-      <div style={{ fontSize: 16, fontWeight: 500, color: D.heading, marginBottom: 4 }}>
-        Blackout Days
-      </div>
-      <div style={{ fontSize: 12, color: D.muted, marginBottom: 16 }}>
+      <CardHeader>
+        <CardTitle>Blackout days</CardTitle>
+        <p className="mt-1 text-ui-body text-ink-secondary">
         Days off. Customers can't book, reschedule into, or be offered these
         dates anywhere — booking funnel, reschedule links, estimate slots, and
         Waves AI searches all skip them. You can still schedule manually from
         dispatch if you choose to.
-      </div>
-
-      <div style={{ fontSize: 13, fontWeight: 500, color: D.heading, marginBottom: 4 }}>
-        Weekly days off
-      </div>
-      <div style={{ fontSize: 12, color: D.muted, marginBottom: 10 }}>
+        </p>
+      </CardHeader>
+      <CardBody>
+      <h4 className="text-ui-body font-medium text-zinc-900">Weekly days off</h4>
+      <p className="mt-1 text-ui-body text-ink-secondary">
         Highlighted days are closed every week — removed from all the same
         customer-facing surfaces as the one-off dates below.
-      </div>
-      <div style={{ display: "flex", gap: 6, marginBottom: 20, flexWrap: "wrap" }}>
+      </p>
+      <div className="my-4 flex flex-wrap gap-2">
         {WEEKDAY_CHIP_LABELS.map((label, dow) => {
           const off = weeklyDaysOff.includes(dow);
           return (
-            <button
+            <Button
               key={label}
-              type="button"
+              variant={off ? "primary" : "secondary"}
               onClick={() => toggleWeeklyDay(dow)}
               disabled={weeklySaving}
               aria-pressed={off}
               aria-label={`${label} ${off ? "closed" : "open"} weekly`}
-              style={{
-                background: off ? D.teal : "transparent",
-                border: `1px solid ${off ? D.teal : D.border}`,
-                borderRadius: 8, color: off ? "#fff" : D.muted,
-                fontWeight: 700, fontSize: 13, padding: "8px 14px",
-                cursor: weeklySaving ? "default" : "pointer",
-                opacity: weeklySaving ? 0.6 : 1,
-              }}
             >
               {label}
-            </button>
+            </Button>
           );
         })}
       </div>
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
-        <input
-          type="date"
-          value={date}
-          onChange={(e) => setDate(e.target.value)}
-          aria-label="Blackout date"
-          style={{
-            background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8,
-            color: D.text, padding: "9px 12px", fontSize: 13, colorScheme: "dark",
-          }}
-        />
-        <input
-          type="text"
-          value={reason}
-          onChange={(e) => setReason(e.target.value)}
-          placeholder="Reason (optional — e.g. Vacation)"
-          maxLength={200}
-          aria-label="Blackout reason"
-          style={{
-            flex: 1, minWidth: 180, background: D.bg, border: `1px solid ${D.border}`,
-            borderRadius: 8, color: D.text, padding: "9px 12px", fontSize: 13,
-          }}
-        />
-        <button
-          type="button"
-          onClick={add}
-          disabled={!date || saving}
-          style={{
-            background: D.teal, border: "none", borderRadius: 8, color: "#fff",
-            fontWeight: 700, fontSize: 13, padding: "9px 18px",
-            cursor: !date || saving ? "default" : "pointer",
-            opacity: !date || saving ? 0.5 : 1,
-          }}
-        >
+      <div className="mb-4 grid items-end gap-3 md:grid-cols-[minmax(180px,0.6fr)_minmax(240px,1fr)_auto]">
+        <Field label="Blackout date"><Input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+        <Field label="Reason"><Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Optional — e.g. Vacation" maxLength={200} /></Field>
+        <Button onClick={add} loading={saving} disabled={!date}>
           {saving ? "Saving…" : "Block day"}
-        </button>
+        </Button>
       </div>
 
-      {error && (
-        <div style={{ fontSize: 12, color: D.red, marginBottom: 12 }}>{error}</div>
-      )}
+      {error && <ActionFeedback error className="mb-3">{error}</ActionFeedback>}
 
       {loading ? (
-        <div style={{ fontSize: 13, color: D.muted }}>Loading…</div>
+        <ActionFeedback className="min-h-16">Loading…</ActionFeedback>
       ) : blackouts.length === 0 ? (
-        <div style={{ fontSize: 13, color: D.muted }}>
+        <div className="py-6 text-center text-ink-secondary">
           No blackout days set — every working day is offered.
         </div>
       ) : (
-        blackouts.map((b) => (
-          <div
-            key={b.id}
-            style={{
-              display: "flex", alignItems: "center", justifyContent: "space-between",
-              padding: "10px 0", borderBottom: `1px solid ${D.border}`,
-            }}
-          >
-            <div>
-              <div style={{ fontSize: 13, fontWeight: 500, color: D.heading }}>
-                {fmtDay(b.date)}
+        <div className="divide-y divide-zinc-200">
+          {blackouts.map((b) => (
+            <div key={b.id} className="flex min-h-14 flex-wrap items-center justify-between gap-3 py-3">
+              <div>
+                <div className="font-medium text-zinc-900 u-nums">{fmtDay(b.date)}</div>
+                {b.reason && <div className="text-ui-caption text-ink-secondary">{b.reason}</div>}
               </div>
-              {b.reason && (
-                <div style={{ fontSize: 12, color: D.muted }}>{b.reason}</div>
-              )}
+              <Button variant="secondary" onClick={() => remove(b.id)}>Unblock</Button>
             </div>
-            <button
-              type="button"
-              onClick={() => remove(b.id)}
-              style={{
-                background: "transparent", border: `1px solid ${D.border}`,
-                borderRadius: 8, color: D.muted, fontSize: 12, fontWeight: 500,
-                padding: "6px 12px", cursor: "pointer",
-              }}
-            >
-              Unblock
-            </button>
-          </div>
-        ))
+          ))}
+        </div>
       )}
+      </CardBody>
     </Card>
   );
 }
@@ -1985,37 +1387,38 @@ function ServiceCoverageSettingsTab() {
   };
 
   if (!config) {
-    return <Card><div style={{ color: D.muted, fontSize: 13 }}>Loading Service Coverage settings...</div></Card>;
+    return <ActionFeedback className="min-h-20">Loading Service Coverage settings...</ActionFeedback>;
   }
 
   return (
-    <div style={{ display: "grid", gap: 16 }}>
+    <div className="space-y-5">
       <VisitTimelineSettingsCard />
 
       <Card>
-        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16 }}>
-          <div>
-            <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>Service Coverage</div>
-            <div style={{ marginTop: 4, fontSize: 12, color: D.muted, lineHeight: 1.45 }}>
+        <CardHeader className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <CardTitle>Service coverage</CardTitle>
+            <p className="mt-1 text-ui-body text-ink-secondary">
               Configure the unified customer-facing report card that combines serviced areas, technician-marked coverage, map display, and status wording.
-            </div>
+            </p>
           </div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
-            <button type="button" onClick={reset} disabled={saving} style={{ ...settingsButtonStyle("secondary"), opacity: saving ? 0.6 : 1 }}>
-              <RotateCcw size={15} /> Restore defaults
-            </button>
-            <button type="button" onClick={save} disabled={saving} style={{ ...settingsButtonStyle("primary"), opacity: saving ? 0.6 : 1 }}>
-              <Save size={15} /> {saving ? "Saving..." : "Save settings"}
-            </button>
+          <div className="ui-record-actions">
+            <Button variant="secondary" onClick={reset} disabled={saving}>
+              <RotateCcw size={15} aria-hidden /> Restore defaults
+            </Button>
+            <Button onClick={save} loading={saving}>
+              <Save size={15} aria-hidden /> {saving ? "Saving..." : "Save settings"}
+            </Button>
           </div>
-        </div>
-        {message && <div style={{ marginTop: 12, fontSize: 12, color: message.includes("Could not") ? D.red : D.green }}>{message}</div>}
+        </CardHeader>
+        {message && <CardBody><ActionFeedback error={message.includes("Could not")}>{message}</ActionFeedback></CardBody>}
       </Card>
 
-      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(320px, .8fr)", gap: 16, alignItems: "start" }}>
-        <div style={{ display: "grid", gap: 16 }}>
+      <div className="grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(320px,0.8fr)]">
+        <div className="space-y-5">
           <Card>
-            <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 10 }}>Visibility</div>
+            <CardHeader><CardTitle>Visibility</CardTitle></CardHeader>
+            <CardBody>
             <Toggle checked={!!config.enabled} onChange={(value) => update({ enabled: value })} label="Enable Service Coverage" description="Build the normalized coverage object for service reports." />
             <Toggle checked={!!config.showOnCustomerReports} onChange={(value) => update({ showOnCustomerReports: value })} label="Show on customer reports" description="Hide this when coverage data should remain internal." />
             <Toggle checked={config.showSummaryCounts !== false} onChange={(value) => update({ showSummaryCounts: value })} label="Show summary counts" description="Completed, inspected, inaccessible, and needs attention chips." />
@@ -2023,101 +1426,87 @@ function ServiceCoverageSettingsTab() {
             <Toggle checked={config.showList !== false} onChange={(value) => update({ showList: value })} label="Show list" description="Show customer-friendly area, station, plant group, or lawn section rows." />
             <Toggle checked={config.showAddress !== false} onChange={(value) => update({ showAddress: value })} label="Show address" />
             <Toggle checked={config.showServiceDate !== false} onChange={(value) => update({ showServiceDate: value })} label="Show service date" />
+            </CardBody>
           </Card>
 
           <Card>
-            <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 12 }}>Copy by Service Line</div>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
+            <CardHeader><CardTitle>Copy by service line</CardTitle></CardHeader>
+            <CardBody className="space-y-3">
+            <div className="flex flex-wrap gap-2" aria-label="Service line">
               {SERVICE_COVERAGE_SERVICE_LINES.map((line) => (
-                <button
-                  type="button"
+                <Button
                   key={line.key}
+                  variant={serviceLine === line.key ? "primary" : "secondary"}
+                  aria-pressed={serviceLine === line.key}
                   onClick={() => setServiceLine(line.key)}
-                  style={{
-                    border: `1px solid ${serviceLine === line.key ? D.teal : D.border}`,
-                    background: serviceLine === line.key ? D.teal : D.white,
-                    color: serviceLine === line.key ? D.white : D.text,
-                    borderRadius: 999,
-                    padding: "7px 10px",
-                    fontSize: 12,
-                    fontWeight: 700,
-                    cursor: "pointer",
-                  }}
                 >
                   {line.label}
-                </button>
+                </Button>
               ))}
             </div>
-            <label style={settingsLabelStyle}>
-              Title
-              <input
+            <Field label="Title">
+              <Input
                 value={serviceLine === "default" ? config.defaultTitle : config.titleByServiceLine?.[serviceLine] || ""}
                 onChange={(event) => {
                   if (serviceLine === "default") update({ defaultTitle: event.target.value });
                   else update({ titleByServiceLine: { [serviceLine]: event.target.value } });
                 }}
-                style={settingsInputStyle()}
               />
-            </label>
-            <label style={{ ...settingsLabelStyle, marginTop: 12 }}>
-              Intro text
-              <textarea
+            </Field>
+            <Field label="Intro text">
+              <Textarea
                 value={config.introByServiceLine?.[currentIntroKey] || ""}
                 onChange={(event) => update({ introByServiceLine: { [currentIntroKey]: event.target.value } })}
                 rows={3}
-                style={settingsInputStyle({ resize: "vertical" })}
               />
-            </label>
-            <label style={{ ...settingsLabelStyle, marginTop: 12 }}>
-              Disclaimer
-              <textarea
+            </Field>
+            <Field label="Disclaimer">
+              <Textarea
                 value={config.disclaimerText || ""}
                 onChange={(event) => update({ disclaimerText: event.target.value })}
                 rows={2}
-                style={settingsInputStyle({ resize: "vertical" })}
               />
-            </label>
+            </Field>
+            </CardBody>
           </Card>
 
           <Card>
-            <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 12 }}>Map Privacy and Notes</div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-              <label style={settingsLabelStyle}>
-                Default layout
-                <select value={config.defaultLayout || "split"} onChange={(event) => update({ defaultLayout: event.target.value })} style={settingsInputStyle()}>
+            <CardHeader><CardTitle>Map privacy and notes</CardTitle></CardHeader>
+            <CardBody>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field label="Default layout">
+                <Select value={config.defaultLayout || "split"} onChange={(event) => update({ defaultLayout: event.target.value })}>
                   <option value="split">Map right / list left</option>
                   <option value="map_top">Map top / list below</option>
                   <option value="list_only">List only</option>
                   <option value="map_only">Map only</option>
-                </select>
-              </label>
-              <label style={settingsLabelStyle}>
-                Map precision
-                <select value={config.mapPrecisionMode || "exact"} onChange={(event) => update({ mapPrecisionMode: event.target.value })} style={settingsInputStyle()}>
+                </Select>
+              </Field>
+              <Field label="Map precision">
+                <Select value={config.mapPrecisionMode || "exact"} onChange={(event) => update({ mapPrecisionMode: event.target.value })}>
                   <option value="exact">Exact pins</option>
                   <option value="approximate">Approximate zones</option>
                   <option value="hidden">Hide map</option>
-                </select>
-              </label>
+                </Select>
+              </Field>
             </div>
             <Toggle checked={config.showInaccessibleReasonsToCustomer !== false} onChange={(value) => update({ showInaccessibleReasonsToCustomer: value })} label="Show inaccessible reasons" />
             <Toggle checked={!!config.showTechnicianNotesToCustomer} onChange={(value) => update({ showTechnicianNotesToCustomer: value })} label="Show technician notes" description="Default should stay off for internal-only notes." />
+            </CardBody>
           </Card>
 
           <Card>
-            <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 12 }}>Customer Status Labels</div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10 }}>
+            <CardHeader><CardTitle>Customer status labels</CardTitle></CardHeader>
+            <CardBody className="grid gap-3 sm:grid-cols-2">
               {SERVICE_COVERAGE_STATUS_KEYS.map((key) => (
-                <label key={key} style={settingsLabelStyle}>
-                  {key.replace(/_/g, " ")}
-                  <input
+                <Field key={key} label={key.replace(/_/g, " ")}>
+                  <Input
                     value={config.statusLabels?.[key] || ""}
                     onChange={(event) => update({ statusLabels: { [key]: event.target.value } })}
-                    style={settingsInputStyle()}
                   />
-                </label>
+                </Field>
               ))}
-            </div>
+            </CardBody>
           </Card>
         </div>
 
@@ -2134,31 +1523,6 @@ function ServiceCoverageSettingsTab() {
       </div>
     </div>
   );
-}
-
-const settingsLabelStyle = {
-  display: "grid",
-  gap: 6,
-  color: D.muted,
-  fontSize: 12,
-  fontWeight: 700,
-  textTransform: "capitalize",
-};
-
-function settingsButtonStyle(tone) {
-  return {
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 7,
-    border: `1px solid ${tone === "primary" ? D.teal : D.border}`,
-    borderRadius: 8,
-    background: tone === "primary" ? D.teal : D.white,
-    color: tone === "primary" ? D.white : D.text,
-    padding: "8px 11px",
-    fontSize: 12,
-    fontWeight: 700,
-    cursor: "pointer",
-  };
 }
 
 function ServiceCoverageAdminPreview({ title, intro, disclaimer, showMap, showList, showSummary, statusLabels, serviceLine }) {
@@ -2178,44 +1542,32 @@ function ServiceCoverageAdminPreview({ title, intro, disclaimer, showMap, showLi
       ];
 
   return (
-    <Card style={{ position: "sticky", top: 16 }}>
-      <div style={{ fontSize: 12, color: D.muted, fontWeight: 700, textTransform: "uppercase", marginBottom: 10 }}>Preview</div>
-      <div style={{ border: `1px solid ${D.border}`, borderRadius: 10, padding: 16, background: "#FAFAFA" }}>
-        <h2 style={{ margin: "0 0 6px", color: D.heading, fontSize: 24, lineHeight: 1.2 }}>{title || "Service Coverage"}</h2>
-        <p style={{ margin: 0, color: D.muted, fontSize: 13, lineHeight: 1.45 }}>{intro}</p>
-        <div style={{ marginTop: 10, color: D.muted, fontSize: 12, lineHeight: 1.45 }}>
+    <Card className="lg:sticky lg:top-4">
+      <CardHeader><CardTitle>Preview</CardTitle></CardHeader>
+      <CardBody>
+      <div className="rounded-md border-hairline border-zinc-200 bg-zinc-50 p-4">
+        <h4 className="text-22 leading-[1.3] font-medium text-zinc-900">{title || "Service Coverage"}</h4>
+        <p className="mt-1 text-ui-body text-ink-secondary">{intro}</p>
+        <div className="mt-3 text-ui-caption text-ink-secondary u-nums">
           <div>12312 Cedar Pass Trl, Parrish, FL 34219</div>
           <div>Sunday, May 17, 2026</div>
         </div>
         {showSummary && (
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 12 }}>
+          <div className="mt-3 flex flex-wrap gap-2">
             {["Completed: 2", "Inspected: 0", "Inaccessible: 0", "Needs Attention: 0"].map((chip) => (
-              <span key={chip} style={{ border: "1px solid #BBF7D0", background: "#DCFCE7", color: "#14532D", borderRadius: 999, padding: "6px 8px", fontSize: 11, fontWeight: 700 }}>
-                {chip}
-              </span>
+              <Badge key={chip} tone="neutral">{chip}</Badge>
             ))}
           </div>
         )}
         {showMap && (
-          <div style={{ marginTop: 12, height: 150, border: `1px solid ${D.border}`, borderRadius: 8, background: "#EAF2F5", position: "relative", overflow: "hidden" }}>
+          <div className="relative mt-3 h-[150px] overflow-hidden rounded-md border-hairline border-zinc-200 bg-zinc-100">
             {sampleItems.map((item, index) => (
               <span
                 key={item.label}
-                style={{
-                  position: "absolute",
-                  left: `${28 + index * 32}%`,
-                  top: `${42 + index * 12}%`,
-                  width: 28,
-                  height: 28,
-                  borderRadius: 999,
-                  background: D.teal,
-                  color: D.white,
-                  display: "inline-flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  fontSize: 12,
-                  fontWeight: 700,
-                }}
+                className={cn(
+                  "absolute flex h-8 w-8 items-center justify-center rounded-full bg-zinc-900 font-medium text-white",
+                  index === 0 ? "left-[28%] top-[42%]" : "left-[60%] top-[54%]",
+                )}
               >
                 {item.label}
               </span>
@@ -2223,27 +1575,26 @@ function ServiceCoverageAdminPreview({ title, intro, disclaimer, showMap, showLi
           </div>
         )}
         {showList && (
-          <div style={{ display: "grid", gap: 8, marginTop: 12 }}>
+          <div className="mt-3 grid gap-2">
             {sampleItems.map((item) => (
-              <div key={item.label} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, background: D.white }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
-                  <span style={{ width: 28, height: 28, borderRadius: 999, background: D.teal, color: D.white, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, flex: "0 0 auto" }}>
+              <div key={item.label} className="flex flex-wrap items-center justify-between gap-3 rounded-md border-hairline border-zinc-200 bg-white p-3">
+                <div className="flex min-w-0 items-center gap-3">
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-zinc-900 font-medium text-white">
                     {item.label}
                   </span>
-                  <div>
-                    <div style={{ color: D.heading, fontSize: 13, fontWeight: 700 }}>{item.area}</div>
-                    <div style={{ color: D.muted, fontSize: 12, lineHeight: 1.35 }}>{item.description}</div>
+                  <div className="min-w-0">
+                    <div className="font-medium text-zinc-900">{item.area}</div>
+                    <div className="text-ui-caption text-ink-secondary">{item.description}</div>
                   </div>
                 </div>
-                <span style={{ border: "1px solid #BBF7D0", background: "#DCFCE7", color: "#14532D", borderRadius: 999, padding: "6px 8px", fontSize: 11, fontWeight: 700 }}>
-                  {statusLabels[item.status] || "Completed"}
-                </span>
+                <Badge tone="strong">{statusLabels[item.status] || "Completed"}</Badge>
               </div>
             ))}
           </div>
         )}
-        <p style={{ margin: "12px 0 0", color: D.muted, fontSize: 12, lineHeight: 1.45 }}>{disclaimer}</p>
+        <p className="mt-3 text-ui-caption text-ink-secondary">{disclaimer}</p>
       </div>
+      </CardBody>
     </Card>
   );
 }
@@ -2289,85 +1640,41 @@ function GbpConnectSection() {
   };
 
   return (
-    <Card style={{ marginBottom: 20 }}>
-      <div style={{ fontSize: 16, fontWeight: 500, color: D.heading, marginBottom: 4 }}>
-        Google Business Profile — per-location connection
-      </div>
-      <div style={{ fontSize: 12, color: D.muted, marginBottom: 16 }}>
+    <Card>
+      <CardHeader>
+        <CardTitle>Google Business Profile — per-location connection</CardTitle>
+        <p className="mt-1 text-ui-body text-ink-secondary">
         Each location authorizes its own Google account. Connect a location to
         enable auto-posting (newsletters, updates) and review replies for that
         profile. Sign in as the Google account that manages that location.
-      </div>
+        </p>
+      </CardHeader>
+      <CardBody>
       {justConnected && (
-        <div
-          style={{
-            fontSize: 12,
-            color: D.green,
-            background: D.green + "18",
-            padding: "8px 12px",
-            borderRadius: 8,
-            marginBottom: 12,
-          }}
-        >
-          ✓ Connected {justConnected}. Status below may take a moment to refresh.
-        </div>
+        <ActionFeedback className="mb-3">Connected {justConnected}. Status below may take a moment to refresh.</ActionFeedback>
       )}
       {loading ? (
-        <div style={{ fontSize: 13, color: D.muted }}>Loading…</div>
+        <ActionFeedback className="min-h-16">Loading…</ActionFeedback>
       ) : (
-        locations.map((loc) => (
-          <div
-            key={loc.id}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 12,
-              padding: "10px 0",
-              borderBottom: `1px solid ${D.border}`,
-            }}
-          >
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>
-                {loc.name}
+        <div className="divide-y divide-zinc-200">
+          {locations.map((loc) => (
+            <div key={loc.id} className="flex min-h-16 flex-wrap items-center gap-3 py-3">
+              <div className="min-w-0 flex-1">
+                <div className="font-medium text-zinc-900">{loc.name}</div>
+                <div className="mt-1" title={loc.authError || ""}>
+                  <Badge tone={loc.authError ? "alert" : loc.hasCredentials ? "strong" : "neutral"} dot>
+                    {loc.hasCredentials ? "Connected" : loc.authError ? "Auth error — reconnect" : "Not connected"}
+                  </Badge>
+                </div>
               </div>
-              <div
-                style={{
-                  fontSize: 11,
-                  color: loc.hasCredentials ? D.green : loc.authError ? D.red : D.muted,
-                }}
-                title={loc.authError || ""}
-              >
-                {loc.hasCredentials
-                  ? "● Connected"
-                  : loc.authError
-                    ? "● Auth error — reconnect"
-                    : "○ Not connected"}
-              </div>
+              <Button variant={loc.hasCredentials ? "secondary" : "primary"} onClick={() => connect(loc.id)} loading={busy === loc.id}>
+                {busy === loc.id ? "Opening…" : loc.hasCredentials ? "Reconnect" : "Connect"}
+              </Button>
             </div>
-            <button
-              onClick={() => connect(loc.id)}
-              disabled={busy === loc.id}
-              style={{
-                padding: "6px 14px",
-                borderRadius: 8,
-                fontSize: 12,
-                fontWeight: 500,
-                cursor: busy === loc.id ? "default" : "pointer",
-                border: `1px solid ${D.teal}`,
-                background: loc.hasCredentials ? "transparent" : D.teal,
-                color: loc.hasCredentials ? D.teal : D.white,
-                opacity: busy === loc.id ? 0.5 : 1,
-              }}
-            >
-              {busy === loc.id
-                ? "Opening…"
-                : loc.hasCredentials
-                  ? "Reconnect"
-                  : "Connect"}
-            </button>
-          </div>
-        ))
+          ))}
+        </div>
       )}
+      </CardBody>
     </Card>
   );
 }
@@ -2414,61 +1721,40 @@ function LinkedInConnectSection() {
   // company page — every company-page post will 403, so flag it instead of green.
   const orgMismatch = connected && status?.orgVerified === false;
   return (
-    <Card style={{ marginBottom: 20 }}>
-      <div style={{ fontSize: 16, fontWeight: 500, color: D.heading, marginBottom: 4 }}>
-        LinkedIn — company page connection
-      </div>
-      <div style={{ fontSize: 12, color: D.muted, marginBottom: 16 }}>
+    <Card>
+      <CardHeader>
+        <CardTitle>LinkedIn — company page connection</CardTitle>
+        <p className="mt-1 text-ui-body text-ink-secondary">
         Authorize the Waves LinkedIn Company Page to enable posting (blog shares,
         updates) from the marketing tools. Sign in as an admin of the page.
-      </div>
+        </p>
+      </CardHeader>
+      <CardBody>
       {justConnected && (
-        <div
-          style={{
-            fontSize: 12,
-            color: D.green,
-            background: D.green + "18",
-            padding: "8px 12px",
-            borderRadius: 8,
-            marginBottom: 12,
-          }}
-        >
-          ✓ LinkedIn connected. Status below may take a moment to refresh.
-        </div>
+        <ActionFeedback className="mb-3">LinkedIn connected. Status below may take a moment to refresh.</ActionFeedback>
       )}
       {oauthFailed && (
-        <div
-          style={{
-            fontSize: 12,
-            color: D.red,
-            background: D.red + "14",
-            padding: "8px 12px",
-            borderRadius: 8,
-            marginBottom: 12,
-          }}
-        >
-          ✕ LinkedIn connection didn't complete. Please try again — sign in as an
+        <ActionFeedback error className="mb-3">
+          LinkedIn connection didn't complete. Please try again — sign in as an
           admin of the Waves company page.
-        </div>
+        </ActionFeedback>
       )}
       {loading ? (
-        <div style={{ fontSize: 13, color: D.muted }}>Loading…</div>
+        <ActionFeedback className="min-h-16">Loading…</ActionFeedback>
       ) : !status?.configured ? (
-        <div style={{ fontSize: 12, color: D.muted }}>
+        <p className="text-ui-body text-ink-secondary">
           Not configured — set LINKEDIN_CLIENT_ID and LINKEDIN_CLIENT_SECRET in Railway.
-        </div>
+        </p>
       ) : (
-        <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 0" }}>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>
-              Waves Pest Control
-            </div>
-            <div style={{ fontSize: 11, color: orgMismatch ? D.amber : connected ? D.green : D.muted }}>
+        <div className="flex min-h-16 flex-wrap items-center gap-3 py-2">
+          <div className="min-w-0 flex-1">
+            <div className="font-medium text-zinc-900">Waves Pest Control</div>
+            <div className={cn("mt-1 text-ui-caption", orgMismatch ? "text-alert-fg" : "text-ink-secondary")}>
               {orgMismatch
-                ? "⚠ Connected, but this account doesn't administer the configured company page — Reconnect as a page admin"
+                ? "Connected, but this account doesn't administer the configured company page — Reconnect as a page admin"
                 : connected
-                ? "● Connected"
-                : "○ Not connected"}
+                  ? "Connected"
+                  : "Not connected"}
               {connected && !orgMismatch && status?.tokenExpiresAt
                 ? ` · token expires ${new Date(status.tokenExpiresAt).toLocaleDateString()}`
                 : ""}
@@ -2477,25 +1763,12 @@ function LinkedInConnectSection() {
                 : ""}
             </div>
           </div>
-          <button
-            onClick={connect}
-            disabled={busy}
-            style={{
-              padding: "6px 14px",
-              borderRadius: 8,
-              fontSize: 12,
-              fontWeight: 500,
-              cursor: busy ? "default" : "pointer",
-              border: `1px solid ${D.teal}`,
-              background: connected ? "transparent" : D.teal,
-              color: connected ? D.teal : D.white,
-              opacity: busy ? 0.5 : 1,
-            }}
-          >
+          <Button variant={connected ? "secondary" : "primary"} onClick={connect} loading={busy}>
             {busy ? "Opening…" : connected ? "Reconnect" : "Connect"}
-          </button>
+          </Button>
         </div>
       )}
+      </CardBody>
     </Card>
   );
 }
@@ -2504,21 +1777,19 @@ function IntegrationsTab({ canAdmin }) {
   if (!canAdmin) {
     return (
       <Card>
-        <div style={{ fontSize: 16, fontWeight: 500, color: D.heading, marginBottom: 4 }}>
-          Admin access required
-        </div>
-        <div style={{ fontSize: 12, color: D.muted }}>
+        <CardHeader><CardTitle>Admin access required</CardTitle></CardHeader>
+        <CardBody className="text-ink-secondary">
           Integration configuration is limited to admin users.
-        </div>
+        </CardBody>
       </Card>
     );
   }
 
   return (
-    <>
+    <div className="space-y-5">
       <GbpConnectSection />
       <LinkedInConnectSection />
       <IntegrationHealthSection />
-    </>
+    </div>
   );
 }

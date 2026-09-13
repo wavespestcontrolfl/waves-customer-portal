@@ -552,6 +552,9 @@ async function loadUnansweredThreads(cutoff = new Date()) {
     -- Closers the webhook already resolved on arrival (context-aware
     -- isCourtesyOnly, sms_log.metadata.courtesyOnly) are retired too.
     WHERE COALESCE(l.metadata->>'courtesyOnly', '') <> 'true'
+      -- An enforced pitch retires the thread only when it is the latest
+      -- inbound. A later genuine message must become actionable again.
+      AND COALESCE(l.metadata->'spam_verdict'->>'enforced', '') <> 'true'
       AND TRIM(COALESCE(l.message_body, '')) !~* '^(thanks\\?( you| u)\\?|thank you( so much| very much)\\?|ty|tysm|got it|perfect|great|awesome|ok(ay)\\?|k|sounds good|will do|no problem|you too|understood|10-4|roger)[.! ]*$'
     -- Answered = a HUMAN outbound after the last inbound. Automated
     -- broadcasts (reminders, receipts, review asks) must not clear a

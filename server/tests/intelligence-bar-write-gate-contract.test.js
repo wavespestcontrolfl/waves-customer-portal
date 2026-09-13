@@ -37,6 +37,9 @@ jest.mock('../services/route-optimizer', () => ({
   HQ: { lat: 27.4, lng: -82.5 },
   haversine: jest.requireActual('../services/route-optimizer').haversine,
   milesToDriveMinutes: jest.requireActual('../services/route-optimizer').milesToDriveMinutes,
+  // The route tools now run the shared window-safety guard, which scores
+  // orders with the same in-house leg model the nightly pass uses.
+  fallbackLegMetrics: jest.requireActual('../services/route-optimizer').fallbackLegMetrics,
   optimizeRoute: jest.fn(async (stops) => ({
     orderedStops: stops,
     totalDistanceMeters: 10000,
@@ -63,8 +66,10 @@ beforeAll(() => {
   delete process.env.GATE_DRIVE_TIME_CALIBRATION;
   process.env.GATE_CANCEL_FLOW_V2 = 'true';
   process.env.GATE_IB_PLATFORM = 'true';
+  process.env.GATE_IB_MERGE_CUSTOMERS = 'true';
 });
 afterAll(() => {
+  delete process.env.GATE_IB_MERGE_CUSTOMERS;
   if (ORIGINAL_PLATFORM_GATE === undefined) delete process.env.GATE_IB_PLATFORM;
   else process.env.GATE_IB_PLATFORM = ORIGINAL_PLATFORM_GATE;
   if (ORIGINAL_DRIVE_GATE === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
@@ -137,6 +142,7 @@ const WRITE_TWO_STEP = [
   'create_restock_request',
   'update_restock_request',
   'cancel_plan',
+  'merge_customers',
 ];
 
 // Writes blocked in the /query tool loop and executable only via /execute
@@ -541,6 +547,18 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     ['procurement-tools', 'executeProcurementTool', 'adjust_stock', { product_name: 'Bifen', movement_type: 'restock', quantity: 32 }],
     ['procurement-tools', 'executeProcurementTool', 'create_restock_request', { product_name: 'Bifen', quantity: 128, unit: 'fl_oz' }],
     ['procurement-tools', 'executeProcurementTool', 'update_restock_request', { request_id: 'req-1', action: 'receive' }],
+    // merge_customers carries its own `customers` seed (the shared SEED
+    // deliberately leaves `customers` unseeded for create_customer's
+    // duplicate-miss check).
+    ['customer-lifecycle-tools', 'executeCustomerLifecycleTool', 'merge_customers', {
+      winner_customer_id: '00000000-0000-0000-0000-00000000a001',
+      loser_customer_id: '00000000-0000-0000-0000-00000000a002',
+    }, {
+      customers: [
+        { id: '00000000-0000-0000-0000-00000000a001', first_name: 'Real', last_name: 'Winner', phone: '9415550100', email: 'winner@example.com', deleted_at: null },
+        { id: '00000000-0000-0000-0000-00000000a002', first_name: 'Unknown', last_name: '', phone: '9415550100', email: null, deleted_at: null },
+      ],
+    }],
     // cancel_plan's preview needs the customer to EXIST (create_customer's
     // duplicate check needs it to be missing), so it carries its own seed —
     // merged on top of SEED for this call only.
@@ -573,13 +591,23 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     dbMock.transaction.mockImplementation(db.transaction);
     dbMock.schema = db.schema;
 
+    // The two route optimizers refuse BEFORE their confirmation gate while
+    // drive-time calibration is off — they may not certify an arrival window
+    // on the uncalibrated model (that refusal has its own coverage in
+    // admin-schedule-optimize-window-guard). This contract is about the gate,
+    // so give them the calibrated model and let them reach it.
+    const needsCalibration = String(toolName).startsWith('optimize_');
+    if (needsCalibration) process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
     const executor = require(path.join(TOOLS_DIR, mod))[exec];
     // This recorder has no pricing_config rows. Live sync success is a
     // controlled prerequisite here; the real-DB estimate suite tests outages.
     const pricingSync = toolName === 'save_customer_estimate'
       ? jest.spyOn(require('../services/pricing-engine'), 'syncConstantsFromDB').mockResolvedValue(true) : null;
     let result;
-    try { result = await executor(toolName, input); } finally { pricingSync?.mockRestore(); }
+    try { result = await executor(toolName, input); } finally {
+      pricingSync?.mockRestore();
+      if (needsCalibration) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
+    }
 
     // The executor must have reached its confirmation gate — not an error or
     // "not found" early return — and answered with a preview/proposal.
@@ -651,6 +679,13 @@ describe('confirmed-endpoint writes are inert without server-derived context.con
     dbMock.transaction.mockImplementation(db.transaction);
     dbMock.schema = db.schema;
 
+    // The two route optimizers refuse BEFORE their confirmation gate while
+    // drive-time calibration is off — they may not certify an arrival window
+    // on the uncalibrated model (that refusal has its own coverage in
+    // admin-schedule-optimize-window-guard). This contract is about the gate,
+    // so give them the calibrated model and let them reach it.
+    const needsCalibration = String(toolName).startsWith('optimize_');
+    if (needsCalibration) process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
     const executor = require(path.join(TOOLS_DIR, mod))[exec];
     const result = await executor(toolName, input, context);
 
