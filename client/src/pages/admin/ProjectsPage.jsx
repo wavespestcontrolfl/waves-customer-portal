@@ -1562,6 +1562,7 @@ export function ProjectDetail({
   const [editTitle, setEditTitle] = useState("");
   const [editProjectDate, setEditProjectDate] = useState("");
   const [dirty, setDirty] = useState(false);
+  const editRevisionRef = useRef(0);
   const [dirtyPhotoIds, setDirtyPhotoIds] = useState(() => new Set());
   const [sentLink, setSentLink] = useState("");
   const [aiWriting, setAiWriting] = useState(false);
@@ -1574,6 +1575,11 @@ export function ProjectDetail({
   // "Pay before you get the report" — default ON when the server offers the
   // option (WDO + gate enabled + not yet delivered).
   const [holdReportUntilPaid, setHoldReportUntilPaid] = useState(true);
+
+  function markDirty() {
+    editRevisionRef.current += 1;
+    setDirty(true);
+  }
 
   async function load(options = {}) {
     const { preserveEdits = false, background = false } = options;
@@ -1722,11 +1728,12 @@ export function ProjectDetail({
       ...(hasEpaField && epaRegistration ? { epa_registration: epaRegistration } : {}),
       ...(hasActiveIngredientField && activeIngredient ? { active_ingredient: activeIngredient } : {}),
     }));
-    setDirty(true);
+    markDirty();
   }
 
   async function saveDirtyProjectEdits(fallbackMessage) {
     if (!dirty) return;
+    const savedRevision = editRevisionRef.current;
     const saveRes = await adminFetch(`/admin/projects/${projectId}`, {
       method: "PUT",
       body: {
@@ -1737,10 +1744,11 @@ export function ProjectDetail({
       },
     });
     await readJsonResponse(saveRes, fallbackMessage);
-    setDirty(false);
+    if (editRevisionRef.current === savedRevision) setDirty(false);
   }
 
   async function saveEdits() {
+    const savedRevision = editRevisionRef.current;
     setSaving(true);
     setError("");
     setNotice("");
@@ -1755,8 +1763,8 @@ export function ProjectDetail({
         },
       });
       await readJsonResponse(r, "Could not save project changes");
-      setDirty(false);
-      await load({ background: true });
+      if (editRevisionRef.current === savedRevision) setDirty(false);
+      await load({ preserveEdits: true, background: true });
       onChanged?.();
       setNotice("Changes saved.");
     } catch (e) {
@@ -1868,7 +1876,7 @@ export function ProjectDetail({
       } else {
         setNotice(`Report delivered. ${deliverySummary(d.channels)}`.trim());
       }
-      await load({ background: true });
+      await load({ preserveEdits: true, background: true });
       onChanged?.();
     } catch (e) {
       setError(e.message || "Could not send report");
@@ -2022,7 +2030,7 @@ export function ProjectDetail({
           `Report + invoice ${d.invoice?.invoice_number || ""} delivered. ${deliverySummary(d.channels)}`.trim(),
         );
       }
-      await load({ background: true });
+      await load({ preserveEdits: true, background: true });
       onChanged?.();
     } catch (e) {
       setError(e.message || "Could not send report + invoice");
@@ -2102,6 +2110,7 @@ export function ProjectDetail({
       ))
     )
       return;
+    const savedRevision = editRevisionRef.current;
     setAiWriting(true);
     setError("");
     setNotice("");
@@ -2137,12 +2146,12 @@ export function ProjectDetail({
             saveRes,
             "AI draft created but autosave failed",
           );
-          setDirty(false);
-          await load({ background: true });
+          if (editRevisionRef.current === savedRevision) setDirty(false);
+          await load({ preserveEdits: true, background: true });
           setNotice("AI draft saved.");
         } catch {
           // Autosave failed — leave it marked dirty so manual Save still works.
-          setDirty(true);
+          markDirty();
           setNotice("AI draft created. Save changes to keep it.");
         }
       }
@@ -2243,7 +2252,7 @@ export function ProjectDetail({
       // just-completed visit (Codex r10 P1). Consumers that take no args
       // (loadProjects) are unaffected by the earlier emission.
       onChanged?.({ visitCompleted: !!d.serviceCompleted });
-      await load({ background: true });
+      await load({ preserveEdits: true, background: true });
     } catch (e) {
       if (e.payload?.code === "project_completion_billing_required") {
         setError(
@@ -2340,31 +2349,31 @@ export function ProjectDetail({
     setEditRecs((prev) =>
       prev.trim() ? `${prev.trimEnd()}\n\n${text}` : text,
     );
-    setDirty(true);
+    markDirty();
   }
 
   function fillWdoAddressFromCustomer() {
     const address = formatProjectCustomerAddress(project);
     if (!address) return;
     setEditFindings((f) => ({ ...f, property_address: address }));
-    setDirty(true);
+    markDirty();
   }
 
   function applyWdoSuggestions(suggestions, options = {}) {
     setEditFindings((f) =>
       mergeWdoSuggestions(f, suggestions, options.overwrite),
     );
-    setDirty(true);
+    markDirty();
   }
 
   function applyWdoProfile(profile) {
     setEditFindings((f) => applyProfileToWdoFindings(f, profile, { overwrite: true }));
-    setDirty(true);
+    markDirty();
   }
 
   function applyWdoHistory(history) {
     setEditFindings((f) => applyHistoryToWdoFindings(f, history, { overwrite: true }));
-    setDirty(true);
+    markDirty();
   }
 
   if (loading || !project) {
@@ -2622,7 +2631,7 @@ export function ProjectDetail({
             value={editTitle}
             onChange={(e) => {
               setEditTitle(e.target.value);
-              setDirty(true);
+              markDirty();
             }}
             placeholder={typeCfg?.label || "Project"}
             style={inputStyle}
@@ -2642,7 +2651,7 @@ export function ProjectDetail({
             value={editProjectDate}
             onChange={(e) => {
               setEditProjectDate(e.target.value);
-              setDirty(true);
+              markDirty();
             }}
             // iOS WebKit gives date inputs an intrinsic shadow-DOM width that
             // can exceed width:100% — clamp it and drop the native appearance
@@ -2757,7 +2766,7 @@ export function ProjectDetail({
                   ...f,
                   [field.key]: value,
                 }));
-                setDirty(true);
+                markDirty();
               }}
               inputStyle={inputStyle}
               products={productCatalog}
@@ -2856,7 +2865,7 @@ export function ProjectDetail({
             value={editRecs}
             onChange={(e) => {
               setEditRecs(e.target.value);
-              setDirty(true);
+              markDirty();
             }}
             rows={8}
             placeholder={`Write freely, or tap "Write with AI" to draft the customer-facing report sections from findings, communication context, tech notes, and photos.`}

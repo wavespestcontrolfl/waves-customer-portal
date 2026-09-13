@@ -206,6 +206,31 @@ describe("Project photo caption dirty signal", () => {
     await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(true));
   });
 
+  it("keeps newer field edits made during a successful save refresh", async () => {
+    const onDirtyChange = vi.fn();
+    let detailReads = 0;
+    let finishRefresh;
+    const refresh = new Promise((resolve) => { finishRefresh = resolve; });
+    fetch.mockImplementation(async (url, options = {}) => {
+      const path = String(url).replace(/^\/api/, "");
+      if (path === "/admin/projects/project-1" && (!options.method || options.method === "GET") && ++detailReads > 1) {
+        return refresh;
+      }
+      return response(fixtureFor(url, options));
+    });
+    renderDetail(onDirtyChange);
+
+    fireEvent.change(await screen.findByLabelText("Report title"), { target: { value: "First saved title" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(detailReads).toBe(2));
+    fireEvent.change(screen.getByLabelText("Report title"), { target: { value: "Newer unsaved title" } });
+    finishRefresh(response(fixtureFor("/api/admin/projects/project-1")));
+
+    await screen.findByText("Changes saved.");
+    expect(screen.getByLabelText("Report title")).toHaveValue("Newer unsaved title");
+    await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(true));
+  });
+
   it("keeps a failed caption save dirty", async () => {
     projectPhotos = [photos[0]];
     const onDirtyChange = vi.fn();
