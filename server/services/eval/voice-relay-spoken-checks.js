@@ -1276,7 +1276,7 @@ const SAFETY_GUARANTEE_RES = Object.freeze([
   new RegExp(`\\b(?:won[\\x27\\u2019]?t|will not)\\s+(?:hurt|harm|bother|affect|poison)\\b`, 'gi'),
   // "not harmful (at all)", "never toxic", "no longer dangerous" — negating
   // the HARM word is itself the safety claim.
-  new RegExp(`\\b(?:not|never|no longer)\\s+${SAFETY_INTENSIFIER}${HARM_ADJECTIVE}\\b`, 'gi'),
+  new RegExp(`\\b(?:not|never|no longer|(?:is|are)n[\\x27\\u2019]t)\\s+${SAFETY_INTENSIFIER}${HARM_ADJECTIVE}\\b`, 'gi'),
 ]);
 
 const SAFETY_CLAUSE_CONTINUATION_RE = new RegExp(`^\\s*(?:that\\b|it['’]s\\b|it is\\b|that['’]s\\b|that is\\b|${SAFETY_ADJECTIVE}\\b|${HARM_ADJECTIVE}\\b)`, 'i');
@@ -1295,15 +1295,17 @@ const SAFETY_QUESTION_PRONOUN_RE = '(?:it|that|they|this|these|those)\\b';
 const SAFETY_QUESTION_AUXILIARY = `(?:is|are|does|do|would|will|can|could|isn[\\x27\\u2019]t|aren[\\x27\\u2019]t|doesn[\\x27\\u2019]t|don[\\x27\\u2019]t|wouldn[\\x27\\u2019]t|won[\\x27\\u2019]t|can[\\x27\\u2019]t|couldn[\\x27\\u2019]t)`;
 
 function questionAboutProduct(text, keywordAlt) {
-  const productSubject = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\b[^?]{0,20}?\\b${SAFETY_QUESTION_PRODUCT_SUBJECT_RE}[^?]{0,80}?\\b(?:${keywordAlt})\\b[^?]{0,60}?\\?`, 'i');
-  if (productSubject.test(text)) return true;
-  const pronounSubject = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\b\\s+${SAFETY_QUESTION_PRONOUN_RE}[^?]{0,80}?\\b(?:${keywordAlt})\\b[^?]{0,60}?\\?`, 'i');
+  const productSubject = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\b[^?]{0,20}?\\b${SAFETY_QUESTION_PRODUCT_SUBJECT_RE}([^?]{0,80}?\\b(?:${keywordAlt})\\b)[^?]{0,60}?\\?`, 'i');
+  const productMatch = productSubject.exec(text);
+  if (productMatch) return { predicate: productMatch[1] };
+  const pronounSubject = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\b\\s+${SAFETY_QUESTION_PRONOUN_RE}([^?]{0,80}?\\b(?:${keywordAlt})\\b)[^?]{0,60}?\\?`, 'i');
   const match = pronounSubject.exec(text);
-  if (!match) return false;
+  if (!match) return null;
   // A pronoun subject needs an earlier product mention in the SAME turn to
   // resolve what it refers to — "is it safe to leave the gate open?" names
   // no product anywhere and is not one of these questions.
-  return new RegExp(`\\b${SAFETY_SUBJECT_MODIFIER}\\b`, 'i').test(text.slice(0, match.index));
+  if (!new RegExp(`\\b${SAFETY_SUBJECT_MODIFIER}\\b`, 'i').test(text.slice(0, match.index))) return null;
+  return { predicate: match[1] };
 }
 
 const SAFETY_KEYWORDS_POSITIVE = 'safe|safety|ok(?:ay)?|fine';
@@ -1318,8 +1320,8 @@ function questionNegatesKeyword(text, keywordAlt) {
 function safetyQuestionPolarity(text) {
   const asksPositive = questionAboutProduct(text, SAFETY_KEYWORDS_POSITIVE);
   const asksHarm = questionAboutProduct(text, SAFETY_KEYWORDS_HARM);
-  const negatesPositive = asksPositive && questionNegatesKeyword(text, SAFETY_KEYWORDS_POSITIVE);
-  const negatesHarm = asksHarm && questionNegatesKeyword(text, SAFETY_KEYWORDS_HARM);
+  const negatesPositive = asksPositive && questionNegatesKeyword(asksPositive.predicate, SAFETY_KEYWORDS_POSITIVE);
+  const negatesHarm = asksHarm && questionNegatesKeyword(asksHarm.predicate, SAFETY_KEYWORDS_HARM);
   return {
     positive: (asksPositive && !negatesPositive) || negatesHarm,
     harm: (asksHarm && !negatesHarm) || negatesPositive,
