@@ -55,13 +55,30 @@ skips email mining. The summary reports counts and reasons, never raw bodies.
 Existing SMS examples and shared voice-profile inputs stay source-filtered;
 email rows cannot trigger a shared profile refresh.
 
-This slice adds no email exemplar reader. The later email reader must check
-the gate and current reviewed selection/holdouts again when fetching examples.
-Removing an ID stops further mining but does not erase an existing corpus row;
-that row must not be reused after revocation or reassignment to a holdout.
+`email/email-reply-style.js` provides the shared drafter's style reader. It
+checks the source gate and current reviewed selection on every fetch, excludes
+the current customer's examples and held-out identities/threads, and returns
+at most four clean email pairs for the inbound intent. Removing an ID withdraws
+it immediately even though the existing corpus row remains. Missing examples
+fall back to the existing SMS reader, including its sealed-evaluation exclusion.
+Examples are untrusted USER-channel style data, never customer facts.
+
+`GATE_EMAIL_VOICE_PROFILE=false` is a separate, strict opt-in. When enabled,
+the reader loads only the current approved shared profile, strips factual and
+prompt-control lines through the existing profile sanitizer, and returns its
+ID/version. Revocation takes effect on the next read. Optional reads use
+savepoints so a schema failure does not abort a caller's transaction.
+
+The reader adds no runtime caller or Gmail side effect. Both drafting entry
+points retain their existing behavior until the separate shared-generator
+integration lands.
 
 Verification uses fictional records in an isolated development PostgreSQL
 database, with transaction rollback. Run `tests/email-voice-corpus-db.test.js`
 through Jest from `server/` with that test database selected. Unit coverage is
 in `tests/email-voice-corpus-miner.test.js`; existing SMS miner and voice-profile
 tests protect their unchanged behavior.
+
+Reader coverage is in `tests/email-reply-style-db.test.js`: current-selection
+revocation, customer/thread holdouts, SMS fallback, schema failure, injection,
+and approved-profile gating/revocation, using synthetic transaction fixtures.
