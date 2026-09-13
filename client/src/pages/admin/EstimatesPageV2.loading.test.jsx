@@ -10,6 +10,14 @@ import {
   useIntelligenceBarActions,
 } from "../../hooks/useIntelligenceBarPageData";
 
+const appointmentModalState = vi.hoisted(() => ({ props: null }));
+vi.mock("../../components/schedule/CreateAppointmentModal", () => ({
+  default: (props) => {
+    appointmentModalState.props = props;
+    return <div role="dialog">Schedule appointment</div>;
+  },
+}));
+
 function SavedAction() {
   const { notifyMutation } = useIntelligenceBarActions();
   return (
@@ -186,6 +194,30 @@ describe("estimate filter request recovery", () => {
     await screen.findByText("Synthetic Archived");
     expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
   });
+});
+
+it("keeps a reopened estimate booking draft while a cancelled booking refreshes", async () => {
+  const refresh = deferred();
+  mount(1440);
+  await screen.findByText("Synthetic Active");
+  fireEvent.click(screen.getByRole("button", { name: "Schedule", exact: true }));
+  const firstOnChange = appointmentModalState.props.onChange;
+  act(() => appointmentModalState.props.onClose());
+  fireEvent.click(screen.getByRole("button", { name: "Schedule", exact: true }));
+  expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+  loadActive.mockReturnValueOnce(refresh.promise);
+  act(() => firstOnChange({ id: "appointment-1" }, { background: true }));
+  expect(screen.getByRole("dialog")).toBeInTheDocument();
+  expect(screen.getByText("Synthetic Active")).toBeInTheDocument();
+  expect(screen.queryByText("Loading estimates…")).not.toBeInTheDocument();
+  await act(async () => {
+    refresh.resolve(response({
+      estimates: [{ ...active, customerName: "Background estimate refresh" }],
+    }));
+  });
+  expect(await screen.findByText("Background estimate refresh")).toBeInTheDocument();
+  expect(screen.getByRole("dialog")).toBeInTheDocument();
 });
 
 it.each([1440, 390])(

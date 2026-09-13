@@ -1618,10 +1618,12 @@ function EstimatePipelineViewV2({
   const activeFilterRef = useRef(filter);
   activeFilterRef.current = filter;
   const estimatesRequestRef = useRef(0);
-  const refreshEstimates = useCallback(() => {
+  const refreshEstimates = useCallback(({ silent = false } = {}) => {
     const requestId = ++estimatesRequestRef.current;
-    setLoading(true);
-    setError(null);
+    if (!silent) {
+      setLoading(true);
+      setError(null);
+    }
     const currentFilter = activeFilterRef.current;
     const fetches = [fetchEstimatePipelineRows(currentFilter)];
     if (currentFilter !== "archived") {
@@ -1646,7 +1648,7 @@ function EstimatePipelineViewV2({
       })
       .catch((err) => {
         if (requestId !== estimatesRequestRef.current) return;
-        setError(err);
+        if (!silent) setError(err);
         setLoading(false);
       });
   }, []);
@@ -1969,9 +1971,9 @@ function EstimatePipelineViewV2({
         <CreateAppointmentModal
           open
           onClose={() => setScheduleEstimate(null)}
-          onChange={() => {
-            setScheduleEstimate(null);
-            refreshEstimates();
+          onChange={(appointment, outcome = {}) => {
+            if (!outcome.background) setScheduleEstimate(null);
+            refreshEstimates({ silent: !!outcome.background });
           }}
           defaultCustomer={{
             id: scheduleEstimate.customerId,
