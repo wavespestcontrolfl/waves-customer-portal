@@ -1585,6 +1585,10 @@ const SAFETY_REFERENTIAL_CONFIRMATION_RE = /^\s*(?:it|this|that)(?:[\x27\u2019]s
 
 const SAFETY_EXPLICIT_ANSWER_PROPOSITION_RE = /^\s*(?:i|we|you|he|she|they|it|this|that|there|(?:the|our|your|my|this|that|a|an)\s+[a-z][\w\x27\u2019-]*(?:\s+[a-z][\w\x27\u2019-]*){0,2})(?:(?:\s+(?:am|is|are|was|were|can|could|will|would|shall|should|may|might|must|have|has|had|do|does|did|cannot|can[\x27\u2019]t|won[\x27\u2019]t))\b|[\x27\u2019](?:m|re|s|ll|d|ve)\b|\s+[a-z]+(?:s|ed|ing)\b)/i;
 
+const SAFETY_REPEATED_PRODUCT_ANSWER_RE = new RegExp(
+  `^\\s*(?:${SAFETY_SUBJECT_WITH_PRODUCT}|${SAFETY_BRAND_SUBJECT})\\s+(?:is|are|will|would|can|could|does|do|did)(?:\\s+not)?[.!\\s]*$`,
+);
+
 const SAFETY_ANSWER_GUIDANCE_RE = new RegExp(
   `\\b${SAFETY_STAFF_ROLE}\\b[^.!?;]{0,100}?\\b(?:go(?:es)? over|review(?:s)?|explain(?:s)?|(?:talk|walk)(?:s)?(?:\\s+you)?\\s+through|follow(?:s)?)\\b[^.!?;]{0,60}?\\b(?:everything|products?|labels?|precautions?)\\b`,
   'i',
@@ -1599,13 +1603,19 @@ const SAFETY_ELLIPTICAL_ADJECTIVE_ANSWER_RE = new RegExp(
   'gi',
 );
 
-function safetyAnswerAddressesQuestion(clause) {
+function safetyAnswerAddressesQuestion(clause, questionText) {
   const lead = SAFETY_ANSWER_POLARITY_PREFIX_RE.exec(clause);
   if (!lead) return true;
   const proposition = clause.slice(lead[0].length);
   if (!proposition.trim() || SAFETY_ELLIPTICAL_ANSWER_RE.test(proposition)
     || SAFETY_REFERENTIAL_CONFIRMATION_RE.test(proposition)) return true;
   if (SAFETY_ANSWER_ACKNOWLEDGMENT_RE.test(proposition)) return false;
+  if (SAFETY_REPEATED_PRODUCT_ANSWER_RE.test(proposition)) {
+    const questionProducts = safetyProductScope(questionText);
+    const answerProducts = safetyProductScope(proposition);
+    return !questionProducts.size
+      || [...answerProducts].some((product) => questionProducts.has(product));
+  }
   return !SAFETY_EXPLICIT_ANSWER_PROPOSITION_RE.test(proposition)
     || SAFETY_ANSWER_RELEVANCE_RE.test(proposition)
     || SAFETY_ANSWER_GUIDANCE_RE.test(proposition);
@@ -1756,10 +1766,10 @@ function no_safety_guarantee(value, record) {
       || SHORT_AFFIRMATION_RE.test(clause))
       && !SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(clause)
       && !SAFETY_PROPOSITION_CONFIRMATION_RE.test(clause)
-      && safetyAnswerAddressesQuestion(clause)) || ellipticalAdjectiveAnswer;
+      && safetyAnswerAddressesQuestion(clause, lastCallerText)) || ellipticalAdjectiveAnswer;
     const negativeAnswer = answerClauses.some((clause) => (SAFETY_NEGATIVE_LEAD_RE.test(clause)
       || SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(clause))
-      && safetyAnswerAddressesQuestion(clause));
+      && safetyAnswerAddressesQuestion(clause, lastCallerText));
     // The same approved conditional claim remains conditional when it
     // answers either polarity; an unqualified answer still fails.
     const qualifiedDryingAnswer = SAFETY_GUARANTEE_RES.some((re) => [...text.matchAll(re)]
@@ -1974,9 +1984,11 @@ const PET_GUIDANCE_NEGATION_EXCEPTION_RE = /\bdon[\x27\u2019]t hesitate to\b/gi;
 
 const PET_CALLER_SHOULD_ASK_RE = /^\s*you\s+should\s+ask\b/i;
 
-const PET_TRAILING_CONDITION_RE = /^(?:(?!\b(?:and|or|but|however|then|so)\b(?!\s+(?:(?:not\s+)?(?:only\s+)?(?:if|unless)|only\s+when)\b))[^.!?;—–])*?\b(?:(?:only\s+)?if|unless|only\s+when|when\s+(?:asked|requested))\b/i;
+const PET_CONDITION = '(?:(?:only\\s+)?if|unless|only\\s+when|when\\s+(?:asked|requested)|provided(?:\\s+that)?|as\\s+long\\s+as)';
 
-const PET_INDEPENDENT_CONDITIONAL_ACTION_RE = /^\s*,?\s*(?:and|or|but)\s+(?:(?:only\s+)?if|unless|only\s+when)\b[^,.!?;—–]{0,60},\s*(?:(?:they|you|the technician|the team member)\s+)?(?:can|will|may|could|would|should|review|explain|answer|check|verify|go over|talk)\b/i;
+const PET_TRAILING_CONDITION_RE = new RegExp(`^(?:(?!\\b(?:and|or|but|however|then|so)\\b(?!\\s+(?:(?:not\\s+)?${PET_CONDITION})\\b))[^.!?;—–])*?\\b${PET_CONDITION}\\b`, 'i');
+
+const PET_INDEPENDENT_CONDITIONAL_ACTION_RE = new RegExp(`^\\s*,?\\s*(?:and|or|but)\\s+${PET_CONDITION}\\b[^,.!?;—–]{0,60},\\s*(?:(?:they|you|the technician|the team member)\\s+)?(?:can|will|may|could|would|should|review|explain|answer|check|verify|go over|talk)\\b`, 'i');
 
 const PET_GUIDANCE_ALTERNATIVE_RE = trailingWithdrawalAlternative(`(?:them|it|that|this|${PET_GUIDANCE_OBJECT})`);
 
