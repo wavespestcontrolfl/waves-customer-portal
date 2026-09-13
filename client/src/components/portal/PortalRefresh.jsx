@@ -3,6 +3,16 @@ import { usePortalRefresh } from '../../hooks/usePortalRead';
 import { COLORS } from '../../theme-brand';
 
 const buttonStyle = { minHeight: 48, padding: '8px 14px', borderRadius: 10, border: `1px solid ${COLORS.glassNavy}`, background: 'transparent', color: COLORS.glassNavy, font: 'inherit', fontSize: 14, cursor: 'pointer' };
+const noticeStyle = { display: 'flex', gap: 12, justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', borderRadius: 12, marginBottom: 16, color: COLORS.glassNavy };
+const statusStyle = { fontSize: 14 };
+
+function refreshMessage(portal, pullRefreshing, pull) {
+  if (!portal.online) return 'You’re offline. Showing saved information.';
+  if (pullRefreshing || portal.refreshing) return 'Refreshing…';
+  if (pull >= 80) return 'Release to refresh';
+  if (pull > 0) return 'Pull down to refresh';
+  return '';
+}
 
 export function PortalRefreshArea({ children, available = true, onlineContent }) {
   const portal = usePortalRefresh();
@@ -11,6 +21,16 @@ export function PortalRefreshArea({ children, available = true, onlineContent })
   const [pullRefreshing, setPullRefreshing] = useState(false);
   const active = portal?.enabled && available;
   const showNotice = !portal?.online || pull > 0 || pullRefreshing;
+  const refreshUnavailable = portal?.refreshing || !portal?.online;
+  const presentation = showNotice ? {
+    container: { 'data-glass': 'soft', style: noticeStyle },
+    status: { style: statusStyle },
+    button: { 'data-glass-accent': '' },
+  } : {
+    container: {},
+    status: { className: 'sr-only' },
+    button: { className: 'sr-only focus:not-sr-only' },
+  };
   const reset = () => { start.current = null; setPull(0); };
   const onTouchStart = (event) => {
     if (!active || portal.refreshing || !portal.online || event.touches.length !== 1) return;
@@ -31,6 +51,7 @@ export function PortalRefreshArea({ children, available = true, onlineContent })
     setPull(Math.min(110, dy));
   };
   const refreshManually = async () => {
+    if (refreshUnavailable) return;
     setPullRefreshing(true);
     try { await portal.refresh({ preserveVerified: false }); }
     finally { setPullRefreshing(false); }
@@ -40,18 +61,20 @@ export function PortalRefreshArea({ children, available = true, onlineContent })
     reset();
   };
   return <div onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd} onTouchCancel={reset}>
-    {active && <>
-      {!showNotice && <button type="button" className="sr-only focus:not-sr-only" style={buttonStyle} onClick={() => { void refreshManually(); }} disabled={portal.refreshing}>Refresh</button>}
-      <span role="status" className="sr-only">{portal.refreshing && !pullRefreshing ? 'Refreshing…' : ''}</span>
-      {showNotice && <div data-glass="soft" style={{ display: 'flex', gap: 12, justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', borderRadius: 12, marginBottom: 16, color: COLORS.glassNavy }}>
-        <span role="status" style={{ fontSize: 14 }}>
-          {!portal.online ? 'You’re offline. Showing saved information.' : pullRefreshing ? 'Refreshing…' : pull >= 80 ? 'Release to refresh' : 'Pull down to refresh'}
-        </span>
-        <button type="button" data-glass-accent="" style={buttonStyle} onClick={() => { void refreshManually(); }} disabled={portal.refreshing || !portal.online}>
-          {portal.refreshing ? 'Refreshing…' : 'Refresh'}
-        </button>
-      </div>}
-    </>}
+    {active && <div {...presentation.container}>
+      <span role="status" {...presentation.status}>
+        {refreshMessage(portal, pullRefreshing, pull)}
+      </span>
+      <button
+        type="button"
+        {...presentation.button}
+        style={{ ...buttonStyle, ...(refreshUnavailable ? { opacity: 0.55 } : {}) }}
+        onClick={() => { void refreshManually(); }}
+        aria-disabled={refreshUnavailable || undefined}
+      >
+        {portal.refreshing ? 'Refreshing…' : 'Refresh'}
+      </button>
+    </div>}
     {(!portal?.enabled || portal.online) && onlineContent}
     {children}
   </div>;

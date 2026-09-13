@@ -288,6 +288,39 @@ describe('customer portal reads', () => {
     expect(load).toHaveBeenCalledTimes(2);
   });
 
+  it('keeps the keyboard refresh control mounted and focused while a manual refresh is pending', async () => {
+    const pending = deferred();
+    const load = vi.fn().mockResolvedValueOnce({ title: 'Visit' }).mockReturnValueOnce(pending.promise);
+    render(<App load={load} />);
+    await screen.findByText('Visit');
+    const refresh = screen.getByRole('button', { name: 'Refresh', exact: true });
+    refresh.focus();
+    expect(refresh).toHaveFocus();
+
+    fireEvent.click(refresh);
+    expect(screen.getByRole('button', { name: 'Refreshing…', exact: true })).toBe(refresh);
+    expect(refresh).toHaveFocus();
+    expect(refresh).not.toBeDisabled();
+    expect(refresh).toHaveAttribute('aria-disabled', 'true');
+    expect(screen.getByText('Refreshing…', { selector: '[role="status"]' })).toBeVisible();
+    fireEvent.click(refresh);
+    expect(load).toHaveBeenCalledTimes(2);
+
+    await act(async () => pending.resolve({ title: 'Fresh visit' }));
+    expect(screen.getByRole('button', { name: 'Refresh', exact: true })).toBe(refresh);
+    expect(refresh).toHaveFocus();
+    expect(refresh).not.toHaveAttribute('aria-disabled');
+    expect(refresh).toHaveClass('sr-only', 'focus:not-sr-only');
+
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+    fireEvent(window, new Event('offline'));
+    expect(screen.getByRole('button', { name: 'Refresh', exact: true })).toBe(refresh);
+    expect(refresh).toHaveFocus();
+    expect(refresh).not.toBeDisabled();
+    expect(refresh).toHaveAttribute('aria-disabled', 'true');
+    expect(screen.getByText('You’re offline. Showing saved information.')).toBeVisible();
+  });
+
   it('keeps the rollout off without adding refresh controls or resume reads', async () => {
     const load = vi.fn().mockResolvedValue({ title: 'Visit' });
     render(<App enabled={false} load={load} />);
