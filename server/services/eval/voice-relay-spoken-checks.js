@@ -1275,7 +1275,7 @@ function firstUnexemptGuarantee(text, antecedentText = '') {
       const locallyNegatedNoRisk = re === SAFETY_NO_RISK_RE
         && SAFETY_NO_RISK_NEGATION_RE.test(prefix);
       const noRiskDescribesScheduling = re === SAFETY_NO_RISK_RE
-        && SAFETY_NO_RISK_SCHEDULING_COMPLEMENT_RE.test(text.slice(m.index + m[0].length));
+        && SAFETY_NO_RISK_ALLOWED_COMPLEMENT_RE.test(text.slice(m.index + m[0].length));
       const locallyNegatedAttributive = re === SAFETY_ATTRIBUTIVE_GUARANTEE_RE
         && SAFETY_ATTRIBUTIVE_NEGATION_RE.test(prefix);
       const antecedent = `${antecedentText} ${text.slice(Math.max(0, m.index - 160), m.index)}`;
@@ -1302,7 +1302,7 @@ const SAFETY_SUBJECT_DETERMINER_WORDS = Object.freeze(['this', 'that', 'the', 'o
 
 const SAFETY_SUBJECT_DETERMINER = `(?:${SAFETY_SUBJECT_DETERMINER_WORDS.join('|')})`;
 
-const SAFETY_SUBJECT_MODIFIER = '(?:ants?|roach(?:es)?|termites?|baits?|gels?|sprays?|granules?|products?|treatments?|chemicals?|stuff|materials?|applications?|pesticides?|insecticides?|herbicides?|rodenticides?|termiticides?|larvicides?|adulticides?|miticides?|poisons?|repellents?|fumigants?)';
+const SAFETY_SUBJECT_MODIFIER = '(?:ants?|roach(?:es)?|termites?|baits?|gels?|sprays?|granules?|products?|treatments?|chemicals?|stuff|materials?|applications?|pesticides?|insecticides?|herbicides?|rodenticides?|termiticides?|larvicides?|adulticides?|miticides?|poisons?|repellents?|fumigants?|lawns?|yards?|treated areas?|treated surfaces?)';
 
 const SAFETY_SUBJECT = `(?:${SAFETY_SUBJECT_DETERMINER}(?:\\s+${SAFETY_SUBJECT_MODIFIER}){0,3}|${SAFETY_SUBJECT_MODIFIER}(?:\\s+${SAFETY_SUBJECT_MODIFIER}){0,2})`;
 
@@ -1352,7 +1352,9 @@ const SAFETY_AUDIENCE_MEMBER = `${SAFETY_AUDIENCE_POSSESSIVE}${SAFETY_AUDIENCE_N
 
 const SAFETY_AUDIENCE = `${SAFETY_AUDIENCE_MEMBER}(?:\\s*(?:,\\s*(?:(?:and|or)\\s+)?|(?:and|or)\\s+)(?:for\\s+)?${SAFETY_AUDIENCE_MEMBER})*`;
 
-const SAFETY_NO_HARM_PREDICATE = '(?:won[\\x27\\u2019]?t|will not|cannot|can[\\x27\\u2019]?t|can not|does not|doesn[\\x27\\u2019]?t|do not|don[\\x27\\u2019]?t)\\s+(?:hurt|harm|bother|affect|poison)';
+const SAFETY_HARM_VERB = '(?:hurt|harm|bother|affect|poison)';
+
+const SAFETY_NO_HARM_PREDICATE = `(?:won[\\x27\\u2019]?t|will not|cannot|can[\\x27\\u2019]?t|can not|does not|doesn[\\x27\\u2019]?t|do not|don[\\x27\\u2019]?t)\\s+${SAFETY_HARM_VERB}`;
 
 // A bare product pronoun needs an animate safety target to distinguish
 // "It won't hurt him" from ordinary appointment or service reassurance.
@@ -1382,7 +1384,12 @@ const SAFETY_ONCE_DRY_AFTER_RE = new RegExp(`^(?:\\s+(?:for|around|with)\\s+${SA
 // by the same drying and technician-timing language.
 const SAFETY_ONCE_DRY_PREDICATE_RE = new RegExp(`(?:^|(?:[\\x27\\u2019](?:s|re)|\\b(?:is|are|was|were|will be|would be|should be))\\s+)${SAFETY_ONCE_DRY_COORDINATED_PREFIX}safe(?:\\s+(?:for|around|with)\\s+${SAFETY_AUDIENCE})?$`, 'i');
 
-const TECHNICIAN_DRY_TIMING_RE = /\b(?:the |your |our |a )?(?:technician|tech|team member|member of (?:our|the) team)\b[^.!?;]{0,30}?\b(?:(?:will|can|is going to)\s+(?:confirm|verify|check)|(?:confirms|verifies|checks))\b[^.!?;]{0,30}?\b(?:timing|drying(?: time)?|re-?entry(?: time| timing)?|when\b[^.!?;]{0,16}\bdry)\b/gi;
+const SAFETY_STAFF_ROLE = '(?:technician|tech|team member|member of (?:our|the) team)';
+
+const TECHNICIAN_DRY_TIMING_RE = new RegExp(
+  `\\b(?:the |your |our |a )?${SAFETY_STAFF_ROLE}\\b[^.!?;]{0,30}?\\b(?:(?:will|can|is going to)\\s+(?:confirm|verify|check)|(?:confirms|verifies|checks))\\b[^.!?;]{0,30}?\\b(?:timing|drying(?: time)?|re-?entry(?: time| timing)?|when\\b[^.!?;]{0,16}\\bdry)\\b`,
+  'gi',
+);
 const TECHNICIAN_EXPLICIT_DRY_TIMING_RE = /\b(?:drying(?: time)?|re-?entry(?: time| timing)?|when\b[^.!?;]{0,16}\bdry)\s*$/i;
 const TECHNICIAN_VISIT_TIMING_RE = /\b(?:appointment|arrival|schedule|scheduling)\b/i;
 
@@ -1406,7 +1413,9 @@ const TECHNICIAN_VISIT_TIMING_OBJECT_NEGATION_RE = /^\s*,\s*not\s+(?:the\s+)?(?:
 function safetyOnceDryQualifies(text, claim, questionText = null) {
   if (!SAFETY_ONCE_DRY_PREDICATE_RE.test(claim[0])) return false;
   const drying = SAFETY_ONCE_DRY_AFTER_RE.exec(text.slice(claim.index + claim[0].length));
-  if (!drying || (questionText !== null && !safetyAudienceCovers(`${claim[0]}${drying[0]}`, questionText))) return false;
+  if (!drying || (questionText !== null
+    && (!safetyAudienceCovers(`${claim[0]}${drying[0]}`, questionText)
+      || !safetyProductCovers(claim[0], questionText)))) return false;
   return [...text.matchAll(TECHNICIAN_DRY_TIMING_RE)].some((match) => {
     const [, timingClaimEnd] = clauseBounds(text, match.index);
     const timingClaim = text.slice(match.index, timingClaimEnd);
@@ -1430,7 +1439,7 @@ const SAFETY_NO_RISK_RE = new RegExp(`\\b(?:no|zero)\\s+(?:risk|danger|harm)\\b|
 
 const SAFETY_NO_RISK_NEGATION_RE = /(?:\b(?:not|never)\s+|\b(?:do|does|did)(?:\s+not|n[\x27\u2019]t)\s+mean(?:\s+there\s+(?:is|was))?\s*)$/i;
 
-const SAFETY_NO_RISK_SCHEDULING_COMPLEMENT_RE = /^\s+of\s+(?:losing|missing|rescheduling|moving|changing|cancel(?:l)?ing)\s+(?:your|the|an?)\s+(?:appointment|visit|booking)\b/i;
+const SAFETY_NO_RISK_ALLOWED_COMPLEMENT_RE = /^\s+of\s+(?:(?:losing|missing|rescheduling|moving|changing|cancel(?:l)?ing)\s+(?:your|the|an?)\s+(?:appointment|visit|booking)\b|(?:(?:incurring|paying|being charged)\s+)?(?:(?:an?|the|your)\s+)?(?:cancell?ation|late|service|booking)?\s*fees?\b|(?:rain|bad weather|a weather delay)\b)/i;
 
 const SAFETY_ATTRIBUTIVE_GUARANTEE_RE = new RegExp(
   `\\b${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\s+${SAFETY_SUBJECT_MODIFIER}\\b`,
@@ -1495,16 +1504,20 @@ const SAFETY_QUESTION_PRODUCT_SUBJECT_RE = `(?:(?:this|that|the|our|your|these|t
 
 const SAFETY_QUESTION_PRONOUN_RE = '(?:it|that|they|this|these|those)\\b';
 
-const SAFETY_QUESTION_AUXILIARY = `(?:is|are|does|do|would|will|can|could|isn[\\x27\\u2019]t|aren[\\x27\\u2019]t|doesn[\\x27\\u2019]t|don[\\x27\\u2019]t|wouldn[\\x27\\u2019]t|won[\\x27\\u2019]t|can[\\x27\\u2019]t|couldn[\\x27\\u2019]t)`;
+const SAFETY_QUESTION_AUXILIARY = `(?:isn[\\x27\\u2019]t|aren[\\x27\\u2019]t|doesn[\\x27\\u2019]t|don[\\x27\\u2019]t|wouldn[\\x27\\u2019]t|won[\\x27\\u2019]t|can[\\x27\\u2019]t|couldn[\\x27\\u2019]t|is|are|does|do|would|will|can|could)`;
+
+const SAFETY_QUESTION_BRIDGE = `(?:[^.!?;]{0,20}?|\\s+you\\s+(?:(?:please\\s+)?tell\\s+me|(?:happen\\s+to\\s+)?know|let\\s+me\\s+know|check|confirm)\\s+(?:whether|if)\\s+)`;
+
+const SAFETY_NEGATIVE_QUESTION_AUXILIARY_RE = /^(?:isn|aren|doesn|don|wouldn|won|can|couldn)[\x27\u2019]t\b/i;
 
 function questionAboutProduct(text, keywordAlt, antecedentText = '') {
-  const productSubject = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\b[^.!?;]{0,20}?\\b${SAFETY_QUESTION_PRODUCT_SUBJECT_RE}([^.!?;]{0,80}?\\b(?:${keywordAlt})\\b)[^.!?;]{0,60}?(?:[?.]|$)`, 'i');
+  const productSubject = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\b${SAFETY_QUESTION_BRIDGE}\\b${SAFETY_QUESTION_PRODUCT_SUBJECT_RE}([^.!?;]{0,80}?\\b(?:${keywordAlt})\\b)[^.!?;]{0,60}?(?:[?.]|$)`, 'i');
   const productMatch = productSubject.exec(text);
-  if (productMatch) return { predicate: productMatch[1] };
-  const brandSubject = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\b[^.!?;]{0,20}?(${SAFETY_BRAND_SUBJECT})([^.!?;]{0,80}?\\b(?:${keywordAlt})\\b)[^.!?;]{0,60}?(?:[?.]|$)`, 'i');
+  if (productMatch) return { predicate: productMatch[1], negatedAuxiliary: SAFETY_NEGATIVE_QUESTION_AUXILIARY_RE.test(productMatch[0]) };
+  const brandSubject = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\b${SAFETY_QUESTION_BRIDGE}(${SAFETY_BRAND_SUBJECT})([^.!?;]{0,80}?\\b(?:${keywordAlt})\\b)[^.!?;]{0,60}?(?:[?.]|$)`, 'i');
   const brandMatch = brandSubject.exec(text);
-  if (brandMatch && SAFETY_BRAND_MENTION_RE.test(brandMatch[1])) return { predicate: brandMatch[2] };
-  const pronounSubject = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\b\\s+${SAFETY_QUESTION_PRONOUN_RE}([^.!?;]{0,80}?\\b(?:${keywordAlt})\\b)[^.!?;]{0,60}?(?:[?.]|$)`, 'i');
+  if (brandMatch && SAFETY_BRAND_MENTION_RE.test(brandMatch[1])) return { predicate: brandMatch[2], negatedAuxiliary: SAFETY_NEGATIVE_QUESTION_AUXILIARY_RE.test(brandMatch[0]) };
+  const pronounSubject = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\b${SAFETY_QUESTION_BRIDGE}${SAFETY_QUESTION_PRONOUN_RE}([^.!?;]{0,80}?\\b(?:${keywordAlt})\\b)[^.!?;]{0,60}?(?:[?.]|$)`, 'i');
   const match = pronounSubject.exec(text);
   if (!match) return null;
   // A pronoun subject needs an earlier product mention in the SAME turn to
@@ -1512,12 +1525,12 @@ function questionAboutProduct(text, keywordAlt, antecedentText = '') {
   // no product anywhere and is not one of these questions.
   const antecedent = `${antecedentText} ${text.slice(0, match.index)}`;
   if (!SAFETY_PRODUCT_MENTION_RE.test(antecedent) && !SAFETY_BRAND_MENTION_RE.test(antecedent)) return null;
-  return { predicate: match[1] };
+  return { predicate: match[1], negatedAuxiliary: SAFETY_NEGATIVE_QUESTION_AUXILIARY_RE.test(match[0]) };
 }
 
 const SAFETY_KEYWORDS_POSITIVE = SAFETY_ADJECTIVE;
 
-const SAFETY_KEYWORDS_HARM = `(?<!non[-\\s])(?:${HARM_ADJECTIVE}|harm|hurt)`;
+const SAFETY_KEYWORDS_HARM = `(?<!non[-\\s])(?:${HARM_ADJECTIVE}|${SAFETY_HARM_VERB})`;
 
 function questionNegatesKeyword(text, keywordAlt) {
   const adjacentNegation = new RegExp(`\\bnot\\s+(?:${SAFETY_INTENSIFIER})?(?:${keywordAlt})\\b`, 'i');
@@ -1532,9 +1545,14 @@ function safetyQuestionPolarity(text, conversationAntecedent = '') {
   const asksHarm = questionAboutProduct(questionText, SAFETY_KEYWORDS_HARM, antecedentText);
   const negatesPositive = asksPositive && questionNegatesKeyword(asksPositive.predicate, SAFETY_KEYWORDS_POSITIVE);
   const negatesHarm = asksHarm && questionNegatesKeyword(asksHarm.predicate, SAFETY_KEYWORDS_HARM);
+  const propositionNegatesPositive = asksPositive
+    && Boolean(negatesPositive) !== asksPositive.negatedAuxiliary;
+  const propositionNegatesHarm = asksHarm
+    && Boolean(negatesHarm) !== asksHarm.negatedAuxiliary;
   return {
     positive: (asksPositive && !negatesPositive) || negatesHarm,
     harm: (asksHarm && !negatesHarm) || negatesPositive,
+    confirmedPositive: (asksPositive && !propositionNegatesPositive) || propositionNegatesHarm,
   };
 }
 
@@ -1555,13 +1573,20 @@ const SAFETY_REFUSED_CLAIM_RE = new RegExp(`\\b(?:${SAFETY_ADJECTIVE}|safety|${v
 
 const SAFETY_ANSWER_POLARITY_PREFIX_RE = /^\s*(?:(?:yes|yeah|yep|yup|sure|certainly|absolutely|definitely|totally|of course|no problem|no|nope|nah|not at all|not really|never)(?:\s+not)?)[\s,:—–-]*/i;
 
+const SAFETY_PROPOSITION_CONFIRMATION_RE = /^\s*(?:correct|right|exactly|that[\x27\u2019]s correct|that is correct)[.!\s]*$/i;
+
 const SAFETY_ELLIPTICAL_ANSWER_RE = /^\s*(?:(?:it|this|that)[\x27\u2019]s\s+not|(?:it|this|that|they)\s+(?:(?:is|are|was|were|does|do|did|will|would|can|could)(?:\s+not)?|(?:isn|aren|wasn|weren|doesn|don|didn|won|wouldn|can|couldn)[\x27\u2019]t))(?=\s*(?:[,;:—–-]|$))/i;
 
 const SAFETY_REFERENTIAL_CONFIRMATION_RE = /^\s*(?:it|this|that)(?:[\x27\u2019]s|\s+(?:is|was))\s+(?:correct|right|true)\s*$/i;
 
 const SAFETY_EXPLICIT_ANSWER_PROPOSITION_RE = /^\s*(?:i|we|you|he|she|they|it|this|that|there|(?:the|our|your|my|this|that|a|an)\s+[a-z][\w\x27\u2019-]*(?:\s+[a-z][\w\x27\u2019-]*){0,2})(?:(?:\s+(?:am|is|are|was|were|can|could|will|would|shall|should|may|might|must|have|has|had|do|does|did|cannot|can[\x27\u2019]t|won[\x27\u2019]t))\b|[\x27\u2019](?:m|re|s|ll|d|ve)\b|\s+[a-z]+(?:s|ed|ing)\b)/i;
 
-const SAFETY_ANSWER_GUIDANCE_RE = /\b(?:technician|team member)\b[^.!?;]{0,100}?\b(?:go(?:es)? over|review(?:s)?|explain(?:s)?|(?:talk|walk)(?:s)?(?:\s+you)?\s+through|follow(?:s)?)\b[^.!?;]{0,60}?\b(?:everything|products?|labels?|precautions?)\b/i;
+const SAFETY_ANSWER_GUIDANCE_RE = new RegExp(
+  `\\b${SAFETY_STAFF_ROLE}\\b[^.!?;]{0,100}?\\b(?:go(?:es)? over|review(?:s)?|explain(?:s)?|(?:talk|walk)(?:s)?(?:\\s+you)?\\s+through|follow(?:s)?)\\b[^.!?;]{0,60}?\\b(?:everything|products?|labels?|precautions?)\\b`,
+  'i',
+);
+
+const SAFETY_ANSWER_ACKNOWLEDGMENT_RE = /^\s*(?:i|we)\s+(?:understand|hear|follow|see|get)\b/i;
 
 const SAFETY_ANSWER_RELEVANCE_RE = new RegExp(`${SAFETY_REFUSED_CLAIM_RE.source}|\\b${HARM_ADJECTIVE}\\b`, 'i');
 
@@ -1576,6 +1601,7 @@ function safetyAnswerAddressesQuestion(clause) {
   const proposition = clause.slice(lead[0].length);
   if (!proposition.trim() || SAFETY_ELLIPTICAL_ANSWER_RE.test(proposition)
     || SAFETY_REFERENTIAL_CONFIRMATION_RE.test(proposition)) return true;
+  if (SAFETY_ANSWER_ACKNOWLEDGMENT_RE.test(proposition)) return false;
   return !SAFETY_EXPLICIT_ANSWER_PROPOSITION_RE.test(proposition)
     || SAFETY_ANSWER_RELEVANCE_RE.test(proposition)
     || SAFETY_ANSWER_GUIDANCE_RE.test(proposition);
@@ -1623,6 +1649,31 @@ function safetyAudienceCovers(claimText, questionText) {
     || (claimScopes.has('pet') && /^(?:dog|cat|pet)$/.test(scope))
     || (claimScopes.has('animal') && /^(?:dog|cat|pet|animal)$/.test(scope))
     || (claimScopes.has('human') && /^(?:human|child)$/.test(scope)));
+}
+
+const SAFETY_SPECIFIC_PRODUCT_SCOPES = Object.freeze([
+  ['bait', /\bbaits?\b/i],
+  ['gel', /\bgels?\b/i],
+  ['spray', /\bsprays?\b/i],
+  ['granule', /\bgranules?\b/i],
+  ['rodenticide', /\brodenticides?\b/i],
+  ['termiticide', /\btermiticides?\b/i],
+  ['larvicide', /\blarvicides?\b/i],
+  ['adulticide', /\badulticides?\b/i],
+  ['miticide', /\bmiticides?\b/i],
+  ['poison', /\bpoisons?\b/i],
+  ['repellent', /\brepellents?\b/i],
+  ['fumigant', /\bfumigants?\b/i],
+]);
+
+function safetyProductScope(text) {
+  return SAFETY_SPECIFIC_PRODUCT_SCOPES.find(([, pattern]) => pattern.test(text))?.[0] || null;
+}
+
+function safetyProductCovers(claimText, questionText) {
+  const questionedProduct = safetyProductScope(questionText);
+  const claimedProduct = safetyProductScope(claimText);
+  return !questionedProduct || !claimedProduct || questionedProduct === claimedProduct;
 }
 
 function refusesSafetyGuarantee(text, questionText) {
@@ -1676,6 +1727,7 @@ function no_safety_guarantee(value, record) {
     const answerClauses = text.split(SENTENCE_SPLIT_RE);
     const ellipticalAdjectiveClaims = [...text.matchAll(SAFETY_ELLIPTICAL_ADJECTIVE_ANSWER_RE)];
     const ellipticalAdjectiveAnswer = ellipticalAdjectiveClaims.length > 0;
+    const propositionConfirmation = answerClauses.some((clause) => SAFETY_PROPOSITION_CONFIRMATION_RE.test(clause));
     const affirmativeAnswer = answerClauses.some((clause) => (SAFETY_AFFIRMATIVE_LEAD_RE.test(clause)
       || SHORT_AFFIRMATION_RE.test(clause))
       && !SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(clause)
@@ -1691,8 +1743,10 @@ function no_safety_guarantee(value, record) {
         0: claim[1],
         index: claim.index + claim[0].lastIndexOf(claim[1]),
       }, lastCallerText));
-    const prohibitedAffirmativeAnswer = questionPolarity.positive
-      ? affirmativeAnswer : questionPolarity.harm && ellipticalAdjectiveAnswer;
+    const prohibitedAffirmativeAnswer = propositionConfirmation
+      ? questionPolarity.confirmedPositive
+      : (questionPolarity.positive
+        ? affirmativeAnswer : questionPolarity.harm && ellipticalAdjectiveAnswer);
     if (prohibitedAffirmativeAnswer
       && !qualifiedDryingAnswer
       && !refusesSafetyGuarantee(text, lastCallerText)) {
@@ -1884,11 +1938,13 @@ function capture_lead_input_asserts(value, record) {
 const PET_GUIDANCE_OBJECT = '(?:(?:the|your|our|all(?:\\s+of)?(?:\\s+the)?)\\s+)?(?:products?(?:\\s+labels?)?|labels?|precautions?)(?:\\s+(?:and|or)\\s+(?:the\\s+)?(?:products?(?:\\s+labels?)?|labels?|precautions?))*';
 
 const PET_GUIDANCE_RE = new RegExp(
-  `\\b(?:(?:technician|team member)\\b[^,.!?;]{0,100}?\\b(?:go(?:es)? over|review(?:s)?|explain(?:s)?|talk(?:s)?(?: you)? through)\\s+${PET_GUIDANCE_OBJECT}|ask (?:the |a |your )?(?:technician|team member) about\\s+${PET_GUIDANCE_OBJECT})\\b`,
+  `\\b(?:${SAFETY_STAFF_ROLE}\\b[^,.!?;]{0,100}?\\b(?:go(?:es)? over|review(?:s)?|explain(?:s)?|talk(?:s)?(?: you)? through)\\s+${PET_GUIDANCE_OBJECT}|ask (?:the |a |your )?${SAFETY_STAFF_ROLE} about\\s+${PET_GUIDANCE_OBJECT})\\b`,
   'gi',
 );
 
-const PET_SPECULATIVE_GUIDANCE_RE = /\b(?:might|may|could|would|should|maybe|perhaps|possibly|potentially|hope[sd]?|refuse[sd]?|decline[sd]?|failed|unable)\b/i;
+const PET_SPECULATIVE_GUIDANCE_RE = /\b(?:might|may|could|would|should|maybe|perhaps|possibly|potentially|think|believe|hope[sd]?|refuse[sd]?|decline[sd]?|failed|unable)\b/i;
+
+const PET_GUIDANCE_NEGATION_EXCEPTION_RE = /\bdon[\x27\u2019]t hesitate to\b/gi;
 
 const PET_CALLER_SHOULD_ASK_RE = /^\s*you\s+should\s+ask\b/i;
 
@@ -1913,7 +1969,8 @@ function pet_precautions_confirmed(value, record, { spoken }) {
       // the original suffix so a clause boundary cannot hide a withdrawal.
       const claim = claimContext(text, match.index, matchEnd);
       const suffix = text.slice(matchEnd);
-      if ((!PET_TRAILING_CONDITION_RE.test(suffix) || PET_INDEPENDENT_CONDITIONAL_ACTION_RE.test(suffix)) && !PET_GUIDANCE_ALTERNATIVE_RE.test(suffix) && (!PET_SPECULATIVE_GUIDANCE_RE.test(claim) || PET_CALLER_SHOULD_ASK_RE.test(claim)) && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
+      const negationScope = claim.replace(PET_GUIDANCE_NEGATION_EXCEPTION_RE, '');
+      if ((!PET_TRAILING_CONDITION_RE.test(suffix) || PET_INDEPENDENT_CONDITIONAL_ACTION_RE.test(suffix)) && !PET_GUIDANCE_ALTERNATIVE_RE.test(suffix) && (!PET_SPECULATIVE_GUIDANCE_RE.test(claim) || PET_CALLER_SHOULD_ASK_RE.test(claim)) && !clauseIsNegated(negationScope) && !clauseIsEpistemicallyHedged(claim)) {
         return ['pass', `pet precautions direction: "${clip(clause.trim(), 160)}"`];
       }
     }
