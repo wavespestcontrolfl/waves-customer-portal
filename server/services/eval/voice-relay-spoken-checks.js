@@ -1311,7 +1311,8 @@ const DIGIT_RUN_RE = /\d+(?:[\s-]\d+)*/g;
 const SEPARATED_DIGIT_RUN_RE = /\b\d(?:[\s,-]+\d)+\b/g;
 const joinSeparatedDigits = (text) => text.replace(SEPARATED_DIGIT_RUN_RE, (run) => run.replace(/[\s,-]+/g, ''));
 function cardFragmentIn(text, precedingReadback = false) {
-  const digits = joinSeparatedDigits(spokenDigits(text, true));
+  const digitParts = String(text || '').split(new RegExp(`(${SENTENCE_SPLIT_RE.source})`));
+  const digits = joinSeparatedDigits(digitParts.map((part, index) => (index % 2 ? part : spokenDigits(part, true))).join(''));
   const nonFragments = CARD_NON_FRAGMENT_RES.flatMap((re) => [...digits.matchAll(re)]
     .map((match) => [match.index, match.index + match[0].length]));
   const expirationValues = [...digits.matchAll(CARD_EXPIRATION_VALUE_RE)].map((match) => {
