@@ -45,10 +45,12 @@ not infer them again from subsequently edited rows.
 For new packets, one stable service owns the configured drive cost for the stop.
 Keep it on already-recorded same-stop work when present; otherwise use the
 lexicographically first submitted non-backfill service ID. Freeze that owner in
-every new live member's record, including explicit-duration members. Ordinary
+every live member's record, including explicit-duration and already-recorded
+same-stop members. Ordinary
 cost recalculation assigns the configured stop charge only to its owner and
-zero to the other members. Retained records and legacy packets are not rewritten;
-historical backfills retain their separate accounting.
+zero to the other members. Already-recorded same-stop members are recalculated in the packet transaction
+so prior duplicate drive charges collapse to one. Other historical records and
+legacy packets are not rewritten; backfills retain their separate accounting.
 
 Explicit administrator duration corrections and quiet backfill durations retain
 their existing authorization and semantics. Automatic allocation must not widen

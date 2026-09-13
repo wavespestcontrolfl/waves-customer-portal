@@ -519,8 +519,8 @@ async function calculateJobCost(scheduledServiceId, db, {
   // A versioned combined-closeout marker freezes one drive-cost owner for the
   // physical stop. The owner carries exactly one configured stop cost and all
   // other marked members carry zero on completion and every later recalculation.
-  // Unmarked records retain the legacy one-cost-per-visit behavior, including a
-  // retained same-stop owner whose historical record is deliberately untouched.
+  // Unmarked records outside a new packet retain the legacy one-cost-per-visit
+  // behavior; same-stop retained reports receive the packet marker at save.
   const driveAllocation = recordNotes.visitDriveCostAllocation;
   const driveCost = driveAllocation?.version === 1
     ? (svc.id === driveAllocation.ownerServiceId ? driveCostPerStop : 0)

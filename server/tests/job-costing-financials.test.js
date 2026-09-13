@@ -491,14 +491,17 @@ describe('calculateJobCost — durable backfill labor guard (Codex P1)', () => {
     });
   });
 
-  test('a stale reportless calculation cannot overwrite a packet non-owner after resuming last', async () => {
+  test.each([
+    { label: 'reportless', initialRecord: null },
+    { label: 'retained legacy record', initialRecord: NORMAL_RECORD },
+  ])('a stale $label calculation cannot overwrite a packet non-owner after resuming last', async ({ initialRecord }) => {
     let signalStaleAtFence;
     let releaseStale;
     const staleAtFence = new Promise((resolve) => { signalStaleAtFence = resolve; });
     const staleCanResume = new Promise((resolve) => { releaseStale = resolve; });
     const db = fakeCostingDb({
       svc: NORMAL_SVC,
-      record: null,
+      record: initialRecord,
       financials: { loaded_labor_rate: 35, drive_cost_per_stop: 6 },
       transactionHook: async (transactionNumber) => {
         if (transactionNumber !== 1) return;
