@@ -67,6 +67,10 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [moreFailed, setMoreFailed] = useState(false);
   const [tab, setTab] = useState('account'); // 'account' | 'whats_new'
   // Web Push enable state — only relevant for admin bell. The strip
   // shows when the current device hasn't subscribed to push yet, and
@@ -275,15 +279,41 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     const seq = ++loadSeqRef.current;
     setLoading(true);
     setLoadFailed(false);
+    setLoadingMore(false);
+    setMoreFailed(false);
     try {
       const d = await requestJson(`${basePath}?limit=30`);
       if (seq !== loadSeqRef.current) return;
       setNotifications(d.notifications || []);
+      setPage(1);
+      setHasMore(type === 'admin' && d.hasMore === true);
     } catch {
       if (seq !== loadSeqRef.current) return;
       setLoadFailed(true);
     }
     setLoading(false);
+  };
+
+  const loadMore = async () => {
+    const seq = ++loadSeqRef.current;
+    setLoadingMore(true);
+    setMoreFailed(false);
+    try {
+      const d = await requestJson(`${basePath}?limit=30&page=${page + 1}`);
+      if (seq !== loadSeqRef.current) return;
+      // New alerts can shift offset pages between requests. Keep each row
+      // once while preserving the read state already confirmed in this panel.
+      setNotifications(current => {
+        const ids = new Set(current.map(n => n.id));
+        return [...current, ...(d.notifications || []).filter(n => !ids.has(n.id))];
+      });
+      setPage(page + 1);
+      setHasMore(d.hasMore === true);
+    } catch {
+      if (seq !== loadSeqRef.current) return;
+      setMoreFailed(true);
+    }
+    setLoadingMore(false);
   };
 
   const handleOpen = () => {
@@ -366,6 +396,17 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     // Customer palette = glass tokens (#04395E ink, #0A7EC2 accent) — the
     // old marketing navy/#009CDE rendered inside the glassed portal panel.
     : { bg: '#FFFFFF', border: 'rgba(4,57,94,0.14)', text: '#04395E', muted: '#64748B', teal: '#0A7EC2', unreadBg: 'rgba(10,126,194,0.10)', white: '#FFFFFF', badge: '#C8102E' };
+
+  const moreControl = type === 'admin' && !loading && !loadFailed && hasMore && (
+    <div style={{ padding: '16px 20px', textAlign: 'center' }}>
+      {moreFailed && <div role="alert" style={{ marginBottom: 8, fontSize: 14, color: colors.text }}>Older notifications couldn&apos;t be loaded.</div>}
+      <button type="button" onClick={loadMore} disabled={loadingMore} style={{
+        padding: '8px 14px', minHeight: 44, borderRadius: 8,
+        border: `1px solid ${colors.border}`, background: '#FFFFFF',
+        color: colors.text, fontSize: 14, fontWeight: 500, cursor: loadingMore ? 'wait' : 'pointer',
+      }}>{loadingMore ? 'Loading…' : moreFailed ? 'Try again' : 'Load more'}</button>
+    </div>
+  );
 
   return (
     <div ref={bellRef} style={{ position: 'relative' }}>
@@ -553,6 +594,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                   )}
                 </div>
               ))}
+              {tab === 'account' && moreControl}
             </div>
           </div>
         ) : (
@@ -681,6 +723,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                   ))}
                 </div>
               ))}
+              {moreControl}
             </div>
           </div>
         ),
