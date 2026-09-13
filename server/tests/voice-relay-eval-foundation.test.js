@@ -56,6 +56,8 @@ describe('voice relay eval — shared spoken-check foundation', () => {
   test.each([
     ["I can't say it's safe for your dog.", true],
     ["I doubt it's safe for your dog.", true],
+    ["I'm doubtful it's safe for your dog.", true],
+    ["I'm doubtless it's safe for your dog.", false],
     ["I'm unsure it's safe for your dog.", true],
     ["It's safe for your dog.", false],
     ['The office will call her.', false],
@@ -160,6 +162,15 @@ test.each([
   ['Customer denied scheduling and safety concerns for her dog.', false],
   ['Customer did not book and asked about safety for her dog.', true],
   ['Customer did not book, she asked about safety for her dog.', true],
+  ["Customer couldn't identify a safety concern for her dog.", false],
+  ["Customer can't identify a safety concern for her dog.", false],
+  ["Customer wouldn't identify a safety concern for her dog.", false],
+  ["Customer won't identify a safety concern for her dog.", false],
+  ['Customer cannot identify a safety concern for her dog.', false],
+  ['No appointment booked: customer asked about safety for her dog.', true],
+  ['No appointment booked — customer asked about safety for her dog.', true],
+  ['No appointment booked – customer asked about safety for her dog.', true],
+  ['No appointment booked - customer asked about safety for her dog.', true],
 ])('capture denial keeps parenthetical and object continuations: %s', (text, asserted) => {
   const { assertedMatch } = require('../services/eval/voice-relay-spoken-checks')._internals;
   expect(Boolean(assertedMatch(text, /safety[^.]*dog/i))).toBe(asserted);
@@ -223,7 +234,14 @@ test.each([
   ['If you ask me, your refund was processed.', 'fail'],
   ['I cannot confirm the appointment details and the office processed your refund.', 'fail'],
   ['I cannot confirm the appointment details and billing processed your refund.', 'fail'],
+  ['I cannot confirm the appointment details and a refund was issued.', 'fail'],
+  ['I cannot verify the booking and the credit was processed.', 'fail'],
+  ['I cannot confirm whether a cancellation or a refund was processed.', 'pass'],
   ['Before leaving, your refund was processed.', 'fail'],
+  ['If eligible, then your refund was processed.', 'pass'],
+  ['I am doubtful, your refund was processed.', 'pass'],
+  ['Doubtless your refund was processed.', 'fail'],
+  ['Not only was your refund processed, it was expedited.', 'fail'],
 ])('refund claims use the shared refusal context: %s', (text, status) => {
   const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
   expect(checks.no_refund_claim(true, {}, { spoken: [text] })[0]).toBe(status);
