@@ -423,7 +423,7 @@ describe('the shared send claim (claimInvoiceForSend) under interleaving', () =>
       const q = original(table);
       if (table === 'sms_log') {
         q.update = jest.fn((values) => {
-          cancels.push({ values, where: q.where.mock.calls[q.where.mock.calls.length - 1][0], raw: q.whereRaw.mock.calls.map((c) => c[0]) });
+          cancels.push({ values, raw: q.whereRaw.mock.calls.map((c) => c[0]) });
           return { returning: jest.fn(async () => (workerOwnsRow ? [] : [{ id: 'sms-held-leg' }])) };
         });
         q.first = jest.fn(async () => {
@@ -440,9 +440,12 @@ describe('the shared send claim (claimInvoiceForSend) under interleaving', () =>
       const claim = await claimInvoiceForSend('inv-1', { adoptsQueuedInvoiceSend: true });
       expect(claim).toMatchObject({ previousStatus: 'draft', claimed: true });
       expect(cancels).toHaveLength(1);
-      expect(cancels[0].where).toEqual({ status: 'scheduled' });
       expect(cancels[0].values.status).toBe('cancelled');
-      expect(cancels[0].raw).toEqual(expect.arrayContaining(["metadata->>'entry_point' = ?", "metadata->>'invoice_id' = ?"]));
+      expect(cancels[0].raw).toEqual(expect.arrayContaining([
+        "metadata->>'entry_point' = ?",
+        "metadata->>'invoice_id' = ?",
+        "(status = 'scheduled' OR (status = 'cancelled' AND metadata->>'invoice_send_adoption_pending' = 'true'))",
+      ]));
       expect(strictReads).toBe(1);
       // Race: the worker flipped the row to 'sending' first — nothing to cancel,
       // the strict re-check sees the live row, the claim is refused AND released.
@@ -558,7 +561,7 @@ describe('the shared send claim (claimInvoiceForSend) under interleaving', () =>
       // sendViaSMS and sendViaSMSAndEmail thread operatorInitiated through to
       // the claim — the two callers an admin resend route actually uses.
       const invoiceSource = require('fs').readFileSync(require('path').join(__dirname, '../services/invoice.js'), 'utf8');
-      expect(invoiceSource).toMatch(/claimInvoiceForSend\(invoiceId, \{ allowClaimed, adoptsQueuedInvoiceSend: true, operatorInitiated \}\)/);
+      expect(invoiceSource).toMatch(/claimInvoiceForSend\(invoiceId, \{ allowClaimed, adoptsQueuedInvoiceSend, operatorInitiated \}\)/);
       expect(invoiceSource).toMatch(/claimInvoiceForSend\(invoiceId, \{ allowClaimed, firstDeliveryOnly, adoptsQueuedInvoiceSend: true, operatorInitiated \}\)/);
     } finally {
       db.mockImplementation(original);
