@@ -1274,7 +1274,7 @@ const CALLBACK_LIGHT_ACTION_FINITE = `(?:(?:\\w+\\s+){0,2}?${CALLBACK_LIGHT_VERB
 const CALLBACK_TIMING_ADVERB = '(?:soon|shortly|immediately|promptly|right away|as soon as possible|at once)';
 const CALLBACK_TRAILING_MODIFIER = `(?:\\w+ly|again|back|now|then|too|instead|anyway|today|tomorrow|tonight|later|${CALLBACK_TIMING_ADVERB}|${WEEKDAYS}|next\\s+(?:week|${WEEKDAYS}))`;
 const CALLBACK_CONCESSION = '(?:even\\s+(?:if|though)|whether|(?:regardless|irrespective)(?:\\s+of)?)';
-const CALLBACK_TRAILING_LINK = `(?:and|but|so|in|at|on|by|from|before|after|if|unless|when|once|provided|because|to|about|regarding|with|for|as|${CALLBACK_CONCESSION})`;
+const CALLBACK_TRAILING_LINK = `(?:and|or|but|so|in|at|on|by|from|before|after|if|unless|when|once|provided|because|to|about|regarding|with|for|as|${CALLBACK_CONCESSION})`;
 // A complete person/actor phrase can end before punctuation, a clause link,
 // or an adverbial modifier. A following bare noun remains part of a possessive
 // phrase ("her landlord", "the technician's supplier") and is not accepted.
