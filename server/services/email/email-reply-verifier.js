@@ -216,6 +216,8 @@ function statusSupported(sentence, key, context, predicate) {
 function statusViolations(text, context) {
   const violations = [];
   for (const sentence of sentences(text)) {
+    if (/\b(?:not|never|no longer|isn['’]t|wasn['’]t|hasn['’]t|haven['’]t|didn['’]t|cannot|can['’]t)\b/i.test(sentence)
+      && /\b(?:payment|paid|visit|service|appointment|estimate)\b/i.test(sentence)) violations.push('negated_status_unsupported');
     if (/\b(?:payment|paid)\b/i.test(sentence)
       && /\b(?:received|processed|successful|succeeded|paid|went through)\b/i.test(sentence)
       && !statusSupported(sentence, 'recent_payment', context,

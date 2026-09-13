@@ -95,6 +95,17 @@ describe('email reply verifier', () => {
     expect(verdict('Hi Casey, your $50 payment on September 11 went through.', { context: { facts } }).ok).toBe(true);
   });
 
+  test('negated status claims require review even when positive status evidence exists', () => {
+    const facts = [
+      { key: 'recent_payment', status: 'present', value: { amount: 50, status: 'succeeded' } },
+      { key: 'upcoming_visit', status: 'present', value: { date: '2026-09-15', status: 'confirmed' } },
+    ];
+    expect(verdict('Hi Casey, your $50 payment has not been received.', { context: { facts } }).violations)
+      .toContain('negated_status_unsupported');
+    expect(verdict('Hi Casey, your appointment is not confirmed.', { context: { facts } }).violations)
+      .toContain('negated_status_unsupported');
+  });
+
   test('binds monthly dues amounts to total, base, or surcharge semantics', () => {
     expect(verdict('Hi Casey, your base monthly dues are $98. The card surcharge is $2.84. Your total monthly charge is $100.84.').ok).toBe(true);
     expect(verdict('Hi Casey, your base monthly dues are $98 and the surcharge is $2.84.').violations)
