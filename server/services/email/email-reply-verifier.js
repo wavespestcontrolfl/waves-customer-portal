@@ -225,6 +225,15 @@ function statusViolations(text, context) {
       && !statusSupported(sentence, 'recent_payment', context,
         (fact) => SUCCESS_STATUS_RE.test(String(fact.value?.status || '')))) violations.push('payment_status_unsupported');
 
+    if (/\bpayments?\b/i.test(sentence)) {
+      const claims = sentence.match(/\b(?:failed|declined|pending|processing|refunded|reversed|cancelled|canceled|voided)\b/gi) || [];
+      for (const claim of claims) {
+        const expected = claim.toLowerCase().replace('cancelled', 'canceled');
+        if (!statusSupported(sentence, 'recent_payment', context,
+          (fact) => String(fact.value?.status || '').toLowerCase().replace('cancelled', 'canceled') === expected)) violations.push('payment_status_unsupported');
+      }
+    }
+
     if (/\b(?:visit|service|appointment)\b[^.!?]{0,60}\b(?:confirmed|booked|all set)\b|\b(?:confirmed|booked)\b[^.!?]{0,60}\b(?:visit|service|appointment)\b/i.test(sentence)
       && !statusSupported(sentence, 'upcoming_visit', context,
         (fact) => String(fact.value?.status).toLowerCase() === 'confirmed')) violations.push('visit_status_unsupported');
@@ -279,7 +288,7 @@ function exemplarLeak(text, exemplars, context) {
 function forgedSignature(text) {
   const lines = text.trim().split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const tail = lines.slice(-2).join('\n');
-  return /^(?:best|best regards|kind regards|regards|sincerely|thanks|thank you)[,.]?(?:\n.+)?$/i.test(tail)
+  return lines.slice(1).some((line) => /^(?:best|best regards|kind regards|regards|sincerely|thanks|thank you)[,.]?$/i.test(line))
     || /(?:^|\n)\s*(?:[-–—]\s*)?(?:adam|virginia|the waves pest control team|waves team)\s*$/i.test(tail);
 }
 
@@ -294,14 +303,15 @@ function structuralViolations(draft, context, wordBudget) {
   if (!Number.isInteger(wordBudget) || wordBudget < 1 || wordCount(draft) > wordBudget) violations.push('word_budget_exceeded');
   if (/<\/?[a-z][^>]*>/i.test(draft)) violations.push('html_not_allowed');
   if (/^\s*(?:[-*•]|\d+[.)])\s+/m.test(draft)) violations.push('bullets_not_allowed');
+  if (/\b\d{1,2}:\d{2}\b/.test(draft.replace(TIME_RE, ''))) violations.push('clock_format_unsupported');
   if (BOILERPLATE_RE.test(draft)) violations.push('boilerplate_not_allowed');
   if (!exemplarLooksClean('', draft)) violations.push('untrusted_instruction');
   if (forgedSignature(draft)) violations.push('signature_unsupported');
   if (containsReportAccessCode(draft)) violations.push('access_code');
   if (findBannedCustomerCopy(draft).length || reentrySafetyClaimFinding(draft)) violations.push('customer_copy_compliance');
 
-  const firstName = String(context?.customer?.firstName || '').trim();
-  if (firstName && !new RegExp(`^(?:hi|hello|hey)\\s+${firstName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(draft)) violations.push('greeting_mismatch');
+  const firstName = String(context?.customer?.firstName || '').normalize('NFC').trim();
+  if (firstName && !new RegExp(`^(?:hi|hello|hey)\\s+${firstName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=$|[\\s,!.:;—–-])`, 'i').test(draft.normalize('NFC'))) violations.push('greeting_mismatch');
   return violations;
 }
 

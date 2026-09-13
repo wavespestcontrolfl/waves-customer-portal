@@ -109,6 +109,25 @@ describe('email reply verifier', () => {
       .toContain('negated_status_unsupported');
   });
 
+  test('non-success payment wording must match the recorded status', () => {
+    const facts = [{ key: 'recent_payment', status: 'present', value: { amount: 50, status: 'succeeded' } }];
+    for (const status of ['failed', 'declined', 'pending']) {
+      expect(verdict(`Hi Casey, your $50 payment is ${status}.`, { context: { facts } }).violations)
+        .toContain('payment_status_unsupported');
+    }
+    expect(verdict('Hi Casey, your $50 payment failed.').ok).toBe(true);
+  });
+  test('bare times and extended signatures require review', () => {
+    expect(verdict('Hi Casey, your appointment is September 15 at 8:30.').violations).toContain('clock_format_unsupported');
+    expect(verdict('Hi Casey, your visit is pending.\n\nBest,\nAdam\nWaves Pest Control').violations).toContain('signature_unsupported');
+  });
+  test('greetings support Unicode names and canonically equivalent spelling', () => {
+    const context = { customer: { id: 'customer-1', firstName: 'José' } };
+    expect(verdict('Hi José, I will check and follow up.', { context }).ok).toBe(true);
+    expect(verdict('Hi Jose\u0301, I will check and follow up.', { context }).ok).toBe(true);
+    expect(verdict('Hi Joséphine, I will check.', { context }).violations).toContain('greeting_mismatch');
+  });
+
   test('binds monthly dues amounts to total, base, or surcharge semantics', () => {
     expect(verdict('Hi Casey, your base monthly dues are $98. The card surcharge is $2.84. Your total monthly charge is $100.84.').ok).toBe(true);
     expect(verdict('Hi Casey, your base monthly dues are $98 and the surcharge is $2.84.').violations)

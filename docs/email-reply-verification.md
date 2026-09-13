@@ -10,7 +10,9 @@ dates, time windows and status claims; source observation timestamps and
 free-text history are not evidence. Payment amount/date and appointment
 date/window claims must match one record. Matching records must agree on
 claimed status. Multiple amounts require separate sentences, and time-window
-endpoints must match in order. Billing dues, surcharge and collected
+endpoints must match in order. Bare clock times without AM/PM require review.
+Independent fact categories also use separate sentences: the verifier does
+not infer subject relationships across coordinated billing/service clauses. Billing dues, surcharge and collected
 total keep their separate meanings. Viewed estimates retain sent evidence.
 
 The verifier also checks plain-text structure, greeting, unsupported signatures,
