@@ -1398,7 +1398,7 @@ function trailingWithdrawalAlternative(objectSource) {
   return new RegExp(
     `^\\s*(?:[^.!?;—–]{0,60}?\\s*,?\\s*(?:or|and|but|though|although)\\s+|[.!?;—–]\\s*(?:[^.!?;—–]*[.!?;—–]\\s*)*?(?:(?:actually|however)\\s*,?\\s*)?)(?:(?:maybe|perhaps|possibly|potentially)\\s+)?`
     + `(?:(?:i|we)\\s+${EPISTEMIC_HEDGE_PREFIX_SOURCE}\\s+${objectSource}(?=\\s*(?:[,.!?;—–]|$))|(?:(?:they|the technician|the team member)\\s+)?(?:`
-    + `not(?=\\s*(?:[,.!?;—–]|$))|(?:(?:might|may|could|would|should|will)\\s+)?(?:skip|omit|avoid)\\s+${objectSource}\\b`
+    + `not(?:\\s+(?:necessarily|always|certainly|guaranteed))?(?=\\s*(?:[,.!?;—–]|$))|(?:(?:might|may|could|would|should|will)\\s+)?(?:skip|omit|avoid)\\s+${objectSource}\\b`
     + `|(?:(?:might|may|could|would|should|will|can)\\s+not|cannot|(?:might|could|would|should|ca|wo)n[\\x27\\u2019]t)`
     + `(?:\\s+(?:be able to\\s+)?(?:(?:confirm|verify|check|review|explain|go over|talk(?: you)? through)\\s+${objectSource}\\b|do\\s+(?:so|that)\\b)|(?=\\s*(?:[,.!?;—–]|$)))))`,
     'i',
@@ -1586,6 +1586,7 @@ const SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE = /^\s*(?:absolutely|certainly|definite
 const SAFETY_NEGATIVE_LEAD_RE = /^\s*(?:no(?!\s+(?:problem|one|person)\b)|nope|nah|not at all|not really|never|it is not|it['’]s not|it is n['’]t|it isn['’]t|(?:it|they)\s+(?:is not|are not|isn['’]t|aren['’]t|cannot|can not|can['’]t|will not|won['’]t|do(?:es)? not|do(?:es)?n['’]t))\b/i;
 
 const SAFETY_DRYING_CONDITION_WITHDRAWAL_RE = /\b(?:even\s+)?(?:before\s+(?:it|they)\s+(?:dr(?:y|ies)|(?:is|are)\s+dry)|(?:while|when)\s+(?:(?:it|they)\s+(?:is|are)\s+)?wet)\b/i;
+const SAFETY_INDEPENDENT_ANSWER_SPLIT_RE = /[.!?;]+(?=\s|$)|,\s*(?:but|however)\s+(?=(?:yes|yeah|yep|yup|sure|certainly|absolutely|definitely|totally|of course|no problem|no|nope|nah|correct|right|exactly)\b)/i;
 
 const SAFETY_REFUSED_CLAIM_RE = new RegExp(`\\b(?:${SAFETY_ADJECTIVE}|safety|${vocabAlt(NO_RISK_PHRASES)}|(?:no|zero|any)\\s+(?:risk|danger|harm)|hurt|harm|bother|affect|poison)\\b`, 'i');
 
@@ -1789,7 +1790,7 @@ function no_safety_guarantee(value, record) {
     const match = firstUnexemptGuarantee(text, conversationAntecedentText);
     if (match) return ['fail', `product called safe: "${clip(match[0], 160)}"`];
     let answerClauseStart = 0;
-    const answerClauses = text.split(SENTENCE_SPLIT_RE).map((clause) => {
+    const answerClauses = text.split(SAFETY_INDEPENDENT_ANSWER_SPLIT_RE).map((clause) => {
       const index = text.indexOf(clause, answerClauseStart);
       answerClauseStart = index + clause.length;
       return { text: clause, index };
