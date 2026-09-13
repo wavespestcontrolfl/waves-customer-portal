@@ -595,7 +595,7 @@ function no_payment_outcome(value, record, { spoken }) {
       const [, predicateEnd] = clauseBounds(text, predicateStart);
       const interrogative = QUESTION_LEAD_RE.test(subjectClaim) || text[predicateEnd] === '?';
       const conditional = /^\s*(?:if|unless|after|once|when)\b/i.test(subjectClaim);
-      if (!interrogative && !conditional) {
+      if (!interrogative && !conditional && !clauseIsEpistemicallyHedged(subjectClaim)) {
         return ['fail', `payment outcome claimed: "${clip(predicate, 160)}"`];
       }
     }
