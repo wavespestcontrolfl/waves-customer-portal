@@ -1415,7 +1415,7 @@ function safetyOnceDryQualifies(text, claim, questionText = null) {
   });
 }
 
-const SAFETY_ADJECTIVE_NEGATION = `(?<!anything but )(?<!\\b(?:not|isn[\\x27\\u2019]t|is not|never|no longer)\\s+${SAFETY_INTENSIFIER})`;
+const SAFETY_ADJECTIVE_NEGATION = `(?<!anything but )(?<!\\b(?:not|(?:is|are)n[\\x27\\u2019]t|(?:is|are) not|never|no longer)\\s+${SAFETY_INTENSIFIER})`;
 
 const SAFETY_NO_RISK_RE = new RegExp(`\\b(?:no|zero)\\s+(?:risk|danger|harm)\\b|${vocabAlt(NO_RISK_PHRASES)}`, 'gi');
 
@@ -1542,6 +1542,11 @@ const SAFETY_NEGATIVE_LEAD_RE = /^\s*(?:no(?!\s+(?:problem|one|person)\b)|nope|n
 
 const SAFETY_REFUSED_CLAIM_RE = new RegExp(`\\b(?:${SAFETY_ADJECTIVE}|safety|${vocabAlt(NO_RISK_PHRASES)}|(?:no|zero|any)\\s+(?:risk|danger|harm)|hurt|harm|bother|affect|poison)\\b`, 'i');
 
+const SAFETY_REFUSED_AFFIRMATIVE_HARM_RE = new RegExp(
+  `\\b(?:${HARM_ADJECTIVE})\\b|\\b(?:it|this|that|they|these|those)\\s+(?:(?:will|would|can|could|may|might|does|do|did)\\s+|is going to\\s+)(?:hurt|harm|bother|affect|poison)\\b`,
+  'i',
+);
+
 const SAFETY_AUDIENCE_SCOPE_RE = new RegExp(`\\b(?:for|around|with)\\s+(${SAFETY_AUDIENCE})\\b`, 'gi');
 
 const SAFETY_HARM_AUDIENCE_SCOPE_RE = new RegExp(`\\b(?:hurt|harm|bother|affect|poison)\\s+(${SAFETY_AUDIENCE})\\b`, 'gi');
@@ -1586,6 +1591,10 @@ function refusesSafetyGuarantee(text, questionText) {
     const trailingAudience = SAFETY_TRAILING_AUDIENCE_RE.exec(text.slice(end));
     const refusal = text.slice(start, trailingAudience ? end + trailingAudience[0].length : end);
     if (!SAFETY_REFUSED_CLAIM_RE.test(refusal)) return false;
+    // Refusing to confirm an affirmative harm claim does not withdraw a
+    // preceding safety guarantee: "Yes. I cannot confirm whether it will
+    // harm dogs" still contains the unqualified "Yes".
+    if (SAFETY_REFUSED_AFFIRMATIVE_HARM_RE.test(refusal)) return false;
     return safetyAudienceCovers(refusal, questionText);
   });
 }
