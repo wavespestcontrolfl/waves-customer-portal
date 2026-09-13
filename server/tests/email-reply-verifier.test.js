@@ -261,6 +261,21 @@ describe('email reply verifier', () => {
     expect(verdict('Hi Casey, your outstanding balance is $75.').ok).toBe(true);
   });
 
+  test('invoice mentions cannot suppress a failed payment status', () => {
+    const facts = contextWith().facts.map((fact) => (fact.key === 'recent_payment'
+      ? { ...fact, value: { ...fact.value, amount: 120, status: 'failed' } }
+      : fact));
+    for (const wording of [
+      'your $120 payment for the invoice was received',
+      'your invoice has a $120 payment that was received',
+    ]) {
+      const result = verdict(`Hi Casey, ${wording}.`, { context: { facts } });
+      expect(result.violations).toContain('payment_status_unsupported');
+      expect(result.violations).toContain('mixed_fact_categories_unsupported');
+    }
+    expect(verdict('Hi Casey, your $120 invoice payment failed.', { context: { facts } }).ok).toBe(true);
+  });
+
   test('plural nouns retain status checks', () => {
     for (const noun of ['appointments', 'visits', 'services']) {
       for (const status of ['confirmed', 'cancelled']) {

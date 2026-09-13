@@ -83,7 +83,8 @@ function factLanguage(sentence) {
   const paymentDue = /\bpayments?\s+(?:(?:is|are|was|were|will be|has been|becomes?|remains?)\s+)?(?:now\s+)?due\b/i.test(sentence);
   return {
     invoice: paymentDue || (!invoicePayment && (invoiceNoun || /\bamount due\b/i.test(sentence))),
-    payment: !paymentDue && (!invoiceNoun || invoicePayment) && /\b(?:payments?|paid|went through)\b/i.test(sentence),
+    payment: !paymentDue && (/\bpayments?\b/i.test(sentence)
+      || ((!invoiceNoun || invoicePayment) && /\b(?:paid|went through)\b/i.test(sentence))),
   };
 }
 
