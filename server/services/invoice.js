@@ -1171,6 +1171,17 @@ const InvoiceService = {
     } else if (packetWrite) {
       throw new Error('Visit invoice requires a billed member');
     }
+    // A stamped writer may have waited behind acceptance adoption. Its
+    // missing visit link must not bypass the saved packet's billing owner.
+    if (!linkedScheduledServiceId && stampedEstimateIdInNotes) {
+      const packetOwner = await database('invoices').where({ customer_id: customerId })
+        .where('notes', 'like', `%accepted estimate #${stampedEstimateIdInNotes}%`)
+        .whereNotNull('visit_completion_packet_id').first('visit_completion_packet_id');
+      if (packetOwner?.visit_completion_packet_id) {
+        throw Object.assign(new Error('This estimate is billed by its saved visit closeout. Resume that closeout.'),
+          { status: 409, code: 'VISIT_PACKET_OWNS_BILLING' });
+      }
+    }
     const customer = await database("customers").where({ id: customerId }).first();
     if (!customer) throw new Error("Customer not found");
     const trustedStoredSources = new Set(trustedStoredDiscountSources);
