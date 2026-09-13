@@ -458,7 +458,8 @@ function clauseBounds(text, at) {
       || new RegExp(`^\\s*${SUBJECT}\\b`, 'i').test(right)
       // An article-led noun phrase with its own predicate starts a fresh
       // assertion: "... appointment details and a refund was issued".
-      || (/^and$/i.test(m[0]) && RIGHT_NOUN_PHRASE_SUBJECT_RE.test(right));
+      || (/^and$/i.test(m[0]) && (RIGHT_NOUN_PHRASE_SUBJECT_RE.test(right)
+        || new RegExp(`^\\s*${CLAUSE_FINITE_PREDICATE_RE.source}`, 'i').test(right)));
     if (/^(?:and|or)$/i.test(m[0]) && !independentSubject && nominal && !/^(?:it|this|that)$/i.test(nominal)
         && !CLAUSE_FINITE_PREDICATE_RE.test(nominal)) {
       m = CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
