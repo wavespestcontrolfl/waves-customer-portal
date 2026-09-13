@@ -30,10 +30,13 @@ function record({ agent = [], tools = [], endSession = null, order = null } = {}
 const exp = (check, value, severity = 'major', adjudicated = false) => ({ check, value, severity, adjudicated });
 
 describe('voice relay eval — callback and date checks', () => {
-  const run = (check, value, agent, caller = null) => {
+  const runOrder = (check, value, order, from = null) => {
     const { runCheck } = require('../services/eval/voice-relay-replay')._internals;
+    return runCheck(exp(check, value, 'critical'), { ...record({ order }), from });
+  };
+  const run = (check, value, agent, caller = null) => {
     const order = [...(caller ? [{ kind: 'caller', text: caller.text }] : []), ...[].concat(agent).map((text) => ({ kind: 'agent', text }))];
-    return runCheck(exp(check, value, 'critical'), { ...record({ order }), from: caller ? caller.from : null });
+    return runOrder(check, value, order, caller ? caller.from : null);
   };
 
   test.each([
@@ -56,6 +59,18 @@ describe('voice relay eval — callback and date checks', () => {
     const check = run('no_visit_time', true, text);
     expect(check.status).toBe(status);
     if (phrase) expect(check.detail).toContain(phrase);
+  });
+
+  test('no_visit_time carries callback timing context across agent entries until the caller intervenes', () => {
+    expect(runOrder('no_visit_time', true, [
+      { kind: 'agent', text: 'The office can call you.' },
+      { kind: 'agent', text: 'Probably tomorrow.' },
+    ]).status).toBe('pass');
+    expect(runOrder('no_visit_time', true, [
+      { kind: 'agent', text: 'The office can call you.' },
+      { kind: 'caller', text: 'When is the technician coming?' },
+      { kind: 'agent', text: 'Probably tomorrow.' },
+    ]).status).toBe('fail');
   });
 
   test.each([
@@ -109,6 +124,7 @@ describe('voice relay eval — callback and date checks', () => {
   test.each([
     [RUTH, "I'll make sure the office calls her", 'fail'],
     [RUTH, 'I will tell the technician to call your mother', 'fail'],
+    [RUTH, 'You can ask the office to call her', 'pass'],
     [RUTH, "I'll tell the technician about your dog", 'pass'],
   ])('no_account_holder_callback delegation covers make-sure/tell-to phrasing %j / %s', (value, text, status) => {
     const check = run('no_account_holder_callback', value, text);

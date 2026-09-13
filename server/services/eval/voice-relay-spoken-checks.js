@@ -321,16 +321,20 @@ function windowStripper(allowWindow) {
  * { about: 'reopening' } (only the office's reopening is checked, so a
  * caller-stated appointment can be echoed).
  */
-function no_visit_time(value, record, { spoken }) {
+function no_visit_time(value, record, { utterances }) {
   const opts = value && typeof value === 'object' ? value : {};
   const strip = windowStripper(opts.allowWindow);
   const subject = opts.about ? SCHEDULE_PREDICATES[opts.about] : null;
-  for (const text of spoken) {
+  let previousRaw = '';
+  let previousAgentIndex = -1;
+  for (const utterance of utterances) {
+    const callerIntervened = record.events.some((event) => event.kind === 'caller' && !event.ignored && event.index > previousAgentIndex && event.index < utterance.index);
+    if (callerIntervened) previousRaw = '';
     // With a subject, only the clause that names it is graded: "I noted
     // your cancellation for tomorrow, and the office will reopen during
     // regular hours" carries the caller's date, not a reopening one.
+    const text = utterance.text;
     const units = subject ? text.split(SENTENCE_SPLIT_RE).flatMap((s) => s.split(CLAUSE_SPLIT_RE)).filter((c) => subject.test(c)) : text.split(SENTENCE_SPLIT_RE);
-    let previousRaw = '';
     for (const raw of units) {
       const sentence = strip ? strip(raw) : raw;
       const anywhere = TIME_ANYWHERE_RES.map((re) => re.exec(sentence)).find(Boolean);
@@ -341,8 +345,9 @@ function no_visit_time(value, record, { spoken }) {
       // a callback/contact sentence, whose own timing it continues instead.
       const standalone = !subject && !VISIT_TIME_CALLBACK_RE.test(previousRaw) && STANDALONE_DATE_RE.test(sentence);
       if (relative && (subject || SCHEDULE_PREDICATES.visit.test(sentence) || standalone)) return ['fail', `"${relative[0]}" spoken for a ${opts.about || 'visit'}: "${clip(raw, 160)}"`];
-      previousRaw = raw;
+      if (raw.trim()) previousRaw = raw;
     }
+    previousAgentIndex = utterance.index;
   }
   const label = (w) => w.map((h) => `${twelveHour(h)} ${meridiemOfHour(h).toUpperCase()}`).join('–');
   return ['pass', opts.allowWindow ? `no time outside the ${label(opts.allowWindow)} window` : opts.about ? `no ${opts.about} time or date` : 'no time or date spoken'];
@@ -1210,12 +1215,14 @@ const CALLBACK_PROMISER = vocabAlt(TEAM_PROMISERS);
 const CALLBACK_MODAL = `(?:[\\x27\\u2019]ll|[\\x27\\u2019]re going to|[\\x27\\u2019]re scheduled to|[\\x27\\u2019]m going to|[\\x27\\u2019]m scheduled to| will| can| could| am going to| are going to| is going to| am scheduled to| are scheduled to| is scheduled to)`;
 // Delegating the call is promising it: "have the office call her", "make
 // sure the office calls her", "tell the technician to call your mother".
-// Two delegation shapes, not one: an INFINITIVE after have/get/ask/tell/
-// let/arrange ("...to call her") takes the same base-verb ACTION a modal
-// does, while a FINITE clause after make sure/see that/set it up so/pass
-// this along so needs the delegate as its own subject taking a 3rd-person
-// verb ("...so the office CALLS her", not "...call her") — its own ACTION
-// table below.
+// Two delegation shapes, not one: after the same Waves promiser/modal that
+// governs a direct promise, an INFINITIVE after have/get/ask/tell/let/arrange
+// ("I'll ask the office to call her") takes the same base-verb ACTION a
+// modal does, while a FINITE clause after make sure/see that/set it up so/
+// pass this along so needs the delegate as its own subject taking a
+// 3rd-person verb ("I'll make sure the office CALLS her", not "...call
+// her") — its own ACTION table below. Caller advice such as "You can ask
+// the office to call her" has no Waves promiser/modal and is not a promise.
 const CALLBACK_DELEGATE = '(?:the office|our office|someone|somebody|a team member|the technician|the tech)';
 const CALLBACK_DELEGATION_INFINITIVE = `(?:(?:have|get|ask) ${CALLBACK_DELEGATE}(?: to)?|(?:tell|let) ${CALLBACK_DELEGATE} (?:know )?to|arrange for ${CALLBACK_DELEGATE} to)`;
 const CALLBACK_DELEGATION_FINITE = `(?:(?:make sure|see (?:to it )?that) ${CALLBACK_DELEGATE}|set it up so ${CALLBACK_DELEGATE}|pass (?:this|it) (?:along|on) so ${CALLBACK_DELEGATE})`;
@@ -1279,7 +1286,7 @@ function no_account_holder_callback(value, record, { spoken }) {
   // (clauseIsEpistemicallyHedged) — "we will not call her" is caught the
   // same way, so the regex needs no negation lookaround of its own.
   const re = new RegExp(
-    `\\b(?:(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+${contact}`
+    `\\b(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+(?:${contact}`
     + `|${CALLBACK_DELEGATION_INFINITIVE}\\s+${contact}`
     + `|${CALLBACK_DELEGATION_FINITE}\\s+${contactFinite})`,
     'gi',
