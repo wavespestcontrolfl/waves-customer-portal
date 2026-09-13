@@ -127,7 +127,7 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
     expect(await mockPg('call_commitments').where({ call_log_id: callId }).count('* as n').first()).toMatchObject({ n: '2' });
   });
 
-  test('richer equivalent date claims preserve a subject-keyed office dismissal on reprocess', async () => {
+  test.each([{}, { service: 'WaveGuard' }, { address: '100 Example Street' }])('richer equivalent subject %j preserves a subject-keyed office dismissal on reprocess', async (identityEnrichment) => {
     const callId = randomUUID();
     const quote = 'I will text you a reschedule link.';
     await mockPg('call_log').insert({ id: callId, direction: 'inbound', processing_generation: 0 });
@@ -137,12 +137,32 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
     await upsertCommitments(mockPg, callId, [item], { generation: 0, procGeneration: 0 });
     const before = await mockPg('call_commitments').where({ call_log_id: callId }).first();
     await applyHumanUpdate(mockPg, before.id, { action: 'dismiss', reviewedBy: randomUUID() });
-    const richer = { ...item, subject: { ...item.subject,
+    const richer = { ...item, subject: { ...item.subject, ...identityEnrichment,
       date_claims: [{ ...item.subject.date_claims[0], year: 2030, weekday: 5 }] } };
     await upsertCommitments(mockPg, callId, [richer], { generation: 1, procGeneration: 0 });
     const after = await mockPg('call_commitments').where({ call_log_id: callId });
     expect(after).toHaveLength(1);
     expect(after[0]).toMatchObject({ id: before.id, human_state: 'dismissed', status: 'dismissed' });
+  });
+
+  test('repeated extraction cannot clear an unresolved historical promise identity', async () => {
+    const callId = randomUUID();
+    const quote = 'I will text you a reschedule link.';
+    await mockPg('call_log').insert({ id: callId, direction: 'inbound', processing_generation: 0 });
+    const base = { party: 'waves', kind: 'send_reschedule_link', description: 'Send the link', confidence: 0.95,
+      evidence: [{ quote, speaker: 'agent' }], subject: { visit_date: '2030-09-20',
+        date_claims: [{ binding: 'appointment', month: 9, day: 20, quote: 'The September 20 appointment.' }] } };
+    const { commitmentKey } = require('../services/call-commitments');
+    await mockPg('call_commitments').insert({ call_log_id: callId, commitment_key: commitmentKey(base),
+      party: 'waves', kind: 'send_reschedule_link', description: base.description, source: 'ai',
+      status: 'dismissed', human_state: 'dismissed', subject: base.subject, processing_generation: 0, last_seen_generation: 0 });
+    const items = ['Pest', 'Lawn'].map((service) => ({ ...base, subject: { ...base.subject, service } }));
+    for (const generation of [1, 2]) {
+      await upsertCommitments(mockPg, callId, items, { generation, procGeneration: 0 });
+      const siblings = await mockPg('call_commitments').where({ call_log_id: callId, status: 'open' });
+      expect(siblings).toHaveLength(2);
+      expect(siblings.every((row) => row.subject.date_claims === null && row.subject.identity_unresolved === true)).toBe(true);
+    }
   });
 
   test('the persisted activation boundary uses the DATABASE transaction clock, not a JS wall-clock sample — a commitment written in the SAME transaction is never before its own boundary (codex #4293 P1)', async () => {

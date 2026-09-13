@@ -386,6 +386,8 @@ describe('model contract', () => {
     const props = MODEL_OUTPUT_SCHEMA.properties.commitments.items.properties;
     expect(props.due_type.enum).toEqual(['floor', 'deadline', null]);
     expect(props.subject.required || []).not.toContain('date_claims');
+    expect(props.subject.additionalProperties).toBe(false);
+    expect(props.subject.properties.identity_unresolved).toBeUndefined();
     expect(props.subject.properties.date_claims.items.properties.binding.enum).toEqual(['appointment', 'requested', 'delivery', 'unresolved']);
   });
 });
@@ -453,10 +455,13 @@ describe('reschedule-link upsert identity across quote-only rows', () => {
       { binding: 'appointment', year: 2026, month: 9, day: Number(visitDate.slice(-2)), quote: `the ${visitDate} visit` },
     ] } });
   const write = async (oldSubject, items = [item('2026-09-20'), item('2026-09-27')]) => {
+    const oldRows = oldSubject === undefined ? [] : (Array.isArray(oldSubject) ? oldSubject : [
+      { commitment_key: commitmentKey({ ...item('2026-09-20'), subject: null }), subject: oldSubject },
+    ]);
     const raw = jest.fn(async (sql) => ({ rows: String(sql).includes('INSERT INTO call_commitments') ? [{ id: 'row' }] : [] }));
     const trx = Object.assign(jest.fn((table) => {
       if (table !== 'call_commitments') throw new Error(`unexpected table ${table}`);
-      return { where: () => ({ forUpdate: () => ({ first: async () => oldSubject === undefined ? null : { subject: oldSubject } }) }) };
+      return { where: () => ({ whereRaw: () => ({ orderBy: () => ({ forUpdate: () => ({ select: async () => oldRows }) }) }) }) };
     }), { raw });
     const activation = jest.spyOn(require('../services/reschedule-link-promises'), 'recordLiveActivation').mockResolvedValue();
     try {
@@ -476,12 +481,12 @@ describe('reschedule-link upsert identity across quote-only rows', () => {
     expect(JSON.parse(legacy.inserts[1].at(-1)).date_claims).toHaveLength(1);
   });
   test('an unidentifiable legacy row leaves all new obligations visible but parked', async () => {
-    for (const oldSubject of [null, { visit_date: '2026-10-04' }]) {
-      const ambiguous = await write(oldSubject);
-      expect(ambiguous.result.written).toBe(2);
-      expect(new Set(ambiguous.inserts.map((values) => values[1])).size).toBe(2);
-      for (const values of ambiguous.inserts) expect(JSON.parse(values.at(-1)).date_claims).toBeNull();
-    }
+    const ambiguous = await write(null);
+    expect(ambiguous.result.written).toBe(2);
+    expect(new Set(ambiguous.inserts.map((values) => values[1])).size).toBe(2);
+    for (const values of ambiguous.inserts) expect(JSON.parse(values.at(-1)).date_claims).toBeNull();
+    const distinct = await write({ visit_date: '2026-10-04' });
+    for (const values of distinct.inserts) expect(JSON.parse(values.at(-1)).date_claims).toHaveLength(1);
   });
   test('a dismissed row keeps its conflict identity when reprocessed with a richer equivalent date claim', async () => {
     const partial = item('2026-09-20');
@@ -494,6 +499,55 @@ describe('reschedule-link upsert identity across quote-only rows', () => {
     // replace its reviewed subject; those fields are guarded in SQL.
     expect(reprocessed.insertSql).toMatch(/subject = CASE WHEN call_commitments\.human_state IS NULL/);
     expect(reprocessed.insertSql).not.toMatch(/status = EXCLUDED\.status/);
+  });
+  test('adding spoken service and address reuses a dismissed subject-suffixed key', async () => {
+    const prior = item('2026-09-20');
+    const richer = { ...prior, subject: { ...prior.subject, service: 'Pest Service', address: '123 Main St' } };
+    expect(commitmentKey(richer)).not.toBe(commitmentKey(prior));
+    const oldRows = [{ commitment_key: commitmentKey(prior), subject: prior.subject, status: 'dismissed', human_state: 'dismissed' }];
+    const reprocessed = await write(oldRows, [richer]);
+    expect(reprocessed.inserts[0][1]).toBe(oldRows[0].commitment_key);
+    expect(reprocessed.insertSql).toMatch(/subject = CASE WHEN call_commitments\.human_state IS NULL/);
+    expect(reprocessed.insertSql).not.toMatch(/status = EXCLUDED\.status/);
+  });
+  test('an exact existing subject key wins even when another prior row overlaps it', async () => {
+    const sparse = item('2026-09-20');
+    const richer = { ...sparse, subject: { ...sparse.subject, service: 'Pest Service' } };
+    const oldRows = [
+      { commitment_key: commitmentKey(sparse), subject: sparse.subject },
+      { commitment_key: commitmentKey(richer), subject: richer.subject, status: 'dismissed', human_state: 'dismissed' },
+    ];
+    const result = await write(oldRows, [richer]);
+    expect(result.inserts[0][1]).toBe(commitmentKey(richer));
+    expect(JSON.parse(result.inserts[0].at(-1)).date_claims).toHaveLength(1);
+  });
+  test('one sparse old subject matching two new same-date visits parks both', async () => {
+    const prior = item('2026-09-20');
+    const pest = { ...prior, subject: { ...prior.subject, service: 'Pest Service' } };
+    const lawn = { ...prior, subject: { ...prior.subject, service: 'Lawn Service' } };
+    const oldRows = [{ commitment_key: commitmentKey(prior), subject: prior.subject }];
+    const result = await write(oldRows, [pest, lawn]);
+    expect(result.result.written).toBe(2);
+    expect(new Set(result.inserts.map((values) => values[1])).size).toBe(2);
+    for (const values of result.inserts) expect(JSON.parse(values.at(-1))).toMatchObject({ date_claims: null, identity_unresolved: true });
+    const secondPassRows = oldRows.concat(result.inserts.map((values) => ({ commitment_key: values[1], subject: JSON.parse(values.at(-1)) })));
+    const second = await write(secondPassRows, [pest, lawn]);
+    for (const values of second.inserts) expect(JSON.parse(values.at(-1))).toMatchObject({ date_claims: null, identity_unresolved: true });
+  });
+  test('an internally parked alias remains parked when a later extraction adds optional detail', async () => {
+    const prior = item('2026-09-20');
+    const enriched = { ...prior, subject: { ...prior.subject, service: 'Pest Service' } };
+    const oldRows = [{ commitment_key: commitmentKey(prior), subject: { ...prior.subject, date_claims: null, identity_unresolved: true } }];
+    const second = await write(oldRows, [enriched]);
+    expect(second.inserts[0][1]).toBe(oldRows[0].commitment_key);
+    expect(JSON.parse(second.inserts[0].at(-1))).toMatchObject({ date_claims: null, identity_unresolved: true });
+  });
+  test('a generic missing claim list is not an identity marker and can be completed on reprocess', async () => {
+    const prior = item('2026-09-20');
+    const oldRows = [{ commitment_key: commitmentKey(prior), subject: { ...prior.subject, date_claims: null } }];
+    const second = await write(oldRows, [prior]);
+    expect(JSON.parse(second.inserts[0].at(-1)).date_claims).toHaveLength(1);
+    expect(JSON.parse(second.inserts[0].at(-1)).identity_unresolved).toBeUndefined();
   });
 });
 

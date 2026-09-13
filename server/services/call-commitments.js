@@ -111,18 +111,25 @@ function slug(text) {
 // own row, even when the agent used one sentence for two visits.
 const REPEATABLE_KINDS = new Set(['send_report', 'send_paperwork', 'provide_info', 'send_reschedule_link', 'other']);
 
-function rescheduleSubjectFingerprint(subject) {
-  if (!subject || typeof subject !== 'object') return null;
+function currentVisitDate(subject) {
+  if (!subject || typeof subject !== 'object') return '';
   const appointmentClaims = (Array.isArray(subject.date_claims) ? subject.date_claims : [])
     .filter((claim) => claim?.binding === 'appointment');
   const fullDates = [...new Set(appointmentClaims
     .filter((claim) => claim.year && claim.month && claim.day)
     .map((claim) => `${claim.year}-${String(claim.month).padStart(2, '0')}-${String(claim.day).padStart(2, '0')}`))];
   const statedDate = String(subject.visit_date || '').trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(statedDate) ? statedDate : (fullDates.length === 1 ? fullDates[0] : '');
+}
+
+function rescheduleSubjectFingerprint(subject) {
+  if (!subject || typeof subject !== 'object') return null;
+  const visitDate = currentVisitDate(subject);
   // Once the current visit has a full date, a partial/full claim about that
   // same visit adds evidence, not identity. Likewise one full appointment
   // claim without visit_date identifies the same absolute date.
-  const visitDate = /^\d{4}-\d{2}-\d{2}$/.test(statedDate) ? statedDate : (fullDates.length === 1 ? fullDates[0] : '');
+  const appointmentClaims = (Array.isArray(subject.date_claims) ? subject.date_claims : [])
+    .filter((claim) => claim?.binding === 'appointment');
   const claims = visitDate ? [] : [...new Set(appointmentClaims
     .map((claim) => [claim.year ?? '', claim.month ?? '', claim.day ?? '', claim.weekday ?? ''].join('-')))]
     .sort();
@@ -648,19 +655,72 @@ function toRow(callLogId, item, { generation, extractorVersion, recordingSid = n
   };
 }
 
-// A quote-only reschedule key may already hold delivery/office history from
-// an earlier extractor. Reuse it only when its known CURRENT-visit fields
-// identify exactly one new subject. New date_claims may be richer than the
-// old row, so compare the old fields it actually recorded rather than
-// requiring byte-identical JSON across extractor versions.
+function parseRescheduleSubject(value) {
+  try { return typeof value === 'string' ? JSON.parse(value) : value; } catch { return null; }
+}
+
+// A prior quote-family key may hold delivery/office history. Compare the
+// known CURRENT-visit fields rather than requiring byte-identical JSON:
+// a reprocess may add a service/address or a richer date claim.
 function legacyRescheduleMatches(oldSubject, newSubject) {
-  const old = typeof oldSubject === 'string' ? JSON.parse(oldSubject) : oldSubject;
+  const old = parseRescheduleSubject(oldSubject);
   if (!old || !newSubject) return false;
-  const oldFields = [String(old.visit_date || '').trim(), normalizeForMatch(old.service), normalizeForMatch(old.address)];
-  const newFields = [String(newSubject.visit_date || '').trim(), normalizeForMatch(newSubject.service), normalizeForMatch(newSubject.address)];
+  const oldFields = [currentVisitDate(old), normalizeForMatch(old.service), normalizeForMatch(old.address)];
+  const newFields = [currentVisitDate(newSubject), normalizeForMatch(newSubject.service), normalizeForMatch(newSubject.address)];
   if (oldFields.some(Boolean)) return oldFields.every((value, index) => !value || value === newFields[index]);
   const oldClaims = rescheduleSubjectFingerprint(old);
   return Boolean(oldClaims) && oldClaims === rescheduleSubjectFingerprint(newSubject);
+}
+
+// Full current dates that disagree prove distinct visits. An unknown date,
+// or the same date with a changed service/address, is not proof of either
+// identity, so a new row in that case is parked below for office review.
+function distinctCurrentVisit(oldSubject, newSubject) {
+  const oldDate = currentVisitDate(parseRescheduleSubject(oldSubject));
+  const newDate = currentVisitDate(newSubject);
+  return Boolean(oldDate && newDate && oldDate !== newDate);
+}
+
+// This marker is written by reconciliation only; the model schema rejects
+// it. A routine second extraction must not turn a parked identity back into
+// an auto-send merely because its newly generated key now exists exactly.
+function parkUnresolvedIdentity(row) {
+  row.subject = JSON.stringify({ ...parseRescheduleSubject(row.subject), date_claims: null, identity_unresolved: true });
+}
+
+async function reconcileRescheduleKeys(trx, callLogId, rows) {
+  const families = new Map();
+  for (const row of rows.filter((candidate) => candidate.kind === 'send_reschedule_link')) {
+    const base = row.commitment_key.replace(/:s[0-9a-f]{12}$/, '');
+    if (!families.has(base)) families.set(base, []);
+    families.get(base).push(row);
+  }
+  for (const [base, siblings] of families) {
+    const existing = await trx('call_commitments')
+      .where({ call_log_id: callLogId, party: 'waves', kind: 'send_reschedule_link', source: 'ai' })
+      .whereRaw('left(commitment_key, ?) = ?', [base.length, base])
+      .orderBy('commitment_key')
+      .forUpdate()
+      .select('commitment_key', 'subject');
+    if (!existing.length) continue;
+    const exactKeys = new Set(siblings.map((row) => row.commitment_key));
+    for (const row of siblings) {
+      const exact = existing.find((old) => old.commitment_key === row.commitment_key);
+      if (parseRescheduleSubject(exact?.subject)?.identity_unresolved === true) parkUnresolvedIdentity(row);
+    }
+    const unmatched = siblings.filter((row) => !existing.some((old) => old.commitment_key === row.commitment_key));
+    for (const row of unmatched) {
+      const subject = parseRescheduleSubject(row.subject);
+      const matches = existing.filter((old) => legacyRescheduleMatches(old.subject, subject));
+      const old = matches.length === 1 && !exactKeys.has(matches[0].commitment_key) ? matches[0] : null;
+      if (old && siblings.filter((candidate) => legacyRescheduleMatches(old.subject, parseRescheduleSubject(candidate.subject))).length === 1) {
+        row.commitment_key = old.commitment_key;
+        if (parseRescheduleSubject(old.subject)?.identity_unresolved === true) parkUnresolvedIdentity(row);
+      } else if (!subject || existing.some((prior) => !distinctCurrentVisit(prior.subject, subject))) {
+        parkUnresolvedIdentity(row);
+      }
+    }
+  }
 }
 
 // Upsert the AI's view of this pass. The whole write runs in one
@@ -739,30 +799,10 @@ async function upsertCommitments(conn, callLogId, items, { generation = null, ex
         [callLogId, recordingSid],
       );
     }
-    // A deployed quote-only row can be fulfilled or already staged. Before
-    // inserting subject-keyed siblings, resolve which one (if any) owns
-    // that old identity. If the old subject is too sparse or matches more
-    // than one, keep every sibling visible but park it via the existing
-    // incomplete-date guard; never mint a second auto-send for an identity
-    // that may already have been delivered.
-    const legacyGroups = new Map();
-    for (const row of rows.filter((candidate) => candidate.kind === 'send_reschedule_link')) {
-      const base = row.commitment_key.replace(/:s[0-9a-f]{12}$/, '');
-      if (base === row.commitment_key) continue;
-      if (!legacyGroups.has(base)) legacyGroups.set(base, []);
-      legacyGroups.get(base).push(row);
-    }
-    for (const [base, siblings] of legacyGroups) {
-      const old = await trx('call_commitments').where({ call_log_id: callLogId, commitment_key: base }).forUpdate().first('subject');
-      if (!old) continue;
-      let matches = [];
-      try { matches = siblings.filter((row) => legacyRescheduleMatches(old.subject, JSON.parse(row.subject))); } catch { /* malformed legacy subject is ambiguous */ }
-      if (matches.length === 1 && !rows.some((row) => row.commitment_key === base)) {
-        matches[0].commitment_key = base;
-      } else {
-        for (const row of siblings) row.subject = JSON.stringify({ ...JSON.parse(row.subject), date_claims: null });
-      }
-    }
+    // Reuse quote-family identities before the insert so a re-extraction
+    // that adds an optional subject field cannot bypass a prior dismissal,
+    // fulfillment, or uncertain delivery tied to an older suffixed key.
+    await reconcileRescheduleKeys(trx, callLogId, rows);
     // Recompute unreviewed callback fallbacks after extraction, including
     // source-call timing corrections. Gate-off never references the new column.
     const callbackDeadlineUpdate = require('./callback-cards').enabled()
