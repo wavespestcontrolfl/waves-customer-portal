@@ -209,3 +209,29 @@ it('keeps the mobile board Day and Week switches available', async () => {
   expect(await screen.findByRole('button', { name: 'Week', exact: true })).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Day', exact: true })).toBeInTheDocument();
 });
+
+
+it('recovers a failed day load when a late booking refresh succeeds', async () => {
+  let nextDayLoads = 0;
+  vi.mocked(adminFetch).mockImplementation((url) => {
+    if (url === '/admin/dispatch/products/catalog') return Promise.resolve({ products: [] });
+    if (url === '/admin/schedule?date=2026-10-01' && ++nextDayLoads === 1) {
+      return Promise.reject(new Error('Day unavailable'));
+    }
+    return Promise.resolve(schedulePayload('2026-10-01', 'Recovered schedule'));
+  });
+  const setOpenCreateHandler = vi.fn();
+  render(<MemoryRouter initialEntries={['/admin/dispatch?date=2026-09-30']}>
+    <DispatchPageV2 activeTab="board" setOpenCreateHandler={setOpenCreateHandler} />
+  </MemoryRouter>);
+  await screen.findByText(/Recovered schedule/);
+  await waitFor(() => expect(setOpenCreateHandler).toHaveBeenCalled());
+  act(() => setOpenCreateHandler.mock.calls.at(-1)[0]());
+  const lateRefresh = appointmentModalState.props.onCreated;
+  act(() => appointmentModalState.props.onClose());
+  fireEvent.click(screen.getByRole('button', { name: 'Next', exact: true }));
+  await screen.findByText(/Failed to load schedule: Day unavailable/);
+  act(() => lateRefresh({}, { background: true }));
+  expect(await screen.findByText(/Recovered schedule/)).toBeInTheDocument();
+  expect(screen.queryByText(/Failed to load schedule/)).not.toBeInTheDocument();
+});

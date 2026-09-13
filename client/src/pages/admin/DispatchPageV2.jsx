@@ -689,6 +689,7 @@ export default function DispatchPageV2({
       if (updateState && isDisplayedDate()) {
         setData(scheduleData);
         setProducts(catalogData.products || []);
+        setError(null);
       }
       if (!silent && isDisplayedDate()) setLoading(false);
       return scheduleData;

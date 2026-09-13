@@ -243,3 +243,18 @@ it.each([1440, 390])(
     expect(screen.queryByText("Synthetic Active")).not.toBeInTheDocument();
   },
 );
+
+
+it("recovers a failed filter when a late booking refresh succeeds", async () => {
+  mount(1440);
+  await screen.findByText("Synthetic Active");
+  fireEvent.click(screen.getByRole("button", { name: "Schedule", exact: true }));
+  const lateRefresh = appointmentModalState.props.onChange;
+  act(() => appointmentModalState.props.onClose());
+  loadArchive.mockResolvedValueOnce(response({ error: "Archive unavailable" }, 503));
+  fireEvent.click(screen.getByRole("button", { name: "Archived", exact: true }));
+  await screen.findByText("Failed to load estimates");
+  act(() => lateRefresh({}, { background: true }));
+  expect(await screen.findByText("Synthetic Archived")).toBeInTheDocument();
+  expect(screen.queryByText("Failed to load estimates")).not.toBeInTheDocument();
+});

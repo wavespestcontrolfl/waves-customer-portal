@@ -1644,6 +1644,7 @@ function EstimatePipelineViewV2({
           mergeEstimateRows(pipeline.rows, archived.estimates || []),
         );
         setEstimatesTruncated(!!pipeline.truncated || !!archived.truncated);
+        setError(null);
         setLoading(false);
       })
       .catch((err) => {
