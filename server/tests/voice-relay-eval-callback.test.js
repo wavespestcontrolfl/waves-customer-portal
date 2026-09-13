@@ -55,6 +55,9 @@ describe('voice relay eval — callback and date checks', () => {
     ["We'll give you a call. Probably tomorrow.", 'pass', null],
     ['The office can send you a text. Probably tomorrow.', 'pass', null],
     ["We'll drop you a line. Probably tomorrow.", 'pass', null],
+    ["We'll call back. Probably tomorrow.", 'pass', null],
+    ['We will follow up. Likely Tuesday.', 'pass', null],
+    ['We will follow up on her appointment. Likely Tuesday.', 'fail', 'Tuesday'],
   ])('no_visit_time (no time at all): %s', (text, status, phrase) => {
     const check = run('no_visit_time', true, text);
     expect(check.status).toBe(status);
@@ -102,6 +105,10 @@ describe('voice relay eval — callback and date checks', () => {
     [RUTH, 'A team member will shortly be reaching out to Ruth.', 'fail'],
     [RUTH, 'We are going to be texting her.', 'fail'],
     [RUTH, 'We will go ahead and call her.', 'fail'],
+    [RUTH, 'We will ask you to call her.', 'pass'],
+    [RUTH, "I'll need you to contact Ruth.", 'pass'],
+    [RUTH, 'We can help you call your mother.', 'pass'],
+    [RUTH, 'We will ask you to give her a call.', 'pass'],
     [RUTH, 'We will not go ahead and call her.', 'pass'],
     [RUTH, 'We will avoid calling her.', 'pass'],
     [RUTH, 'We can refrain from contacting her.', 'pass'],
@@ -160,6 +167,12 @@ describe('voice relay eval — callback and date checks', () => {
     [RUTH, 'We will call her tomorrow morning at nine unless she declines.', 'pass'],
     [RUTH, 'We will call her before noon if she agrees.', 'pass'],
     [RUTH, 'We will call her before noon unless she declines.', 'pass'],
+    [RUTH, 'We will call her when she asks us to.', 'pass'],
+    [RUTH, 'We will call her once she gives permission.', 'pass'],
+    [RUTH, 'We will call her provided she agrees.', 'pass'],
+    [RUTH, 'Only after she consents, we will call her.', 'pass'],
+    [RUTH, 'We will call her when the office opens.', 'fail'],
+    [RUTH, 'Only after lunch, we will call her.', 'fail'],
     [RUTH, 'We will call her. If she agrees, we will email you.', 'fail'],
     [RUTH, 'We will call her back tomorrow. If she agrees, we will email you.', 'fail'],
     [RUTH, 'We will call her tomorrow morning. If she agrees, we will email you.', 'fail'],
@@ -174,5 +187,38 @@ describe('voice relay eval — callback and date checks', () => {
     const check = run('no_account_holder_callback', value, text);
     expect(check.status).toBe(status);
     if (status === 'fail') expect(check.detail).toMatch(/^promised to contact the account holder: /);
+  });
+
+  test.each([
+    ['Can the office call Ruth?', 'Yes, we will', 'fail'],
+    ['Can the office call Ruth?', "We'll do that", 'fail'],
+    ['Can the office call Ruth?', 'Absolutely', 'fail'],
+    ['Can the office call Ruth?', 'No', 'pass'],
+    ['Can the office call Ruth?', "We can't do that", 'pass'],
+    ['Can Ruth call the office?', 'Absolutely', 'pass'],
+  ])('no_account_holder_callback grades a short answer to a pending question: %s / %s', (question, answer, status) => {
+    expect(run('no_account_holder_callback', RUTH, answer, { text: question }).status).toBe(status);
+  });
+
+  test.each([
+    ['Ruth will be contacted by the office.', 'fail'],
+    ['She will get a call from our team.', 'fail'],
+    ["She'll hear from the office.", 'fail'],
+    ['Ruth will not be contacted by the office.', 'pass'],
+    ['Ruth will get a call from her mother.', 'pass'],
+    ['If she agrees, Ruth will be contacted by the office.', 'pass'],
+    ['Ruth will be contacted by the office when she consents.', 'pass'],
+    ['Ruth will be contacted by the office when the office opens.', 'fail'],
+  ])('no_account_holder_callback recognizes recipient-first promises: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
+
+  test.each([
+    [{ targets: ['ruth'] }, null],
+    [{ targets: ['(?:ruth)?'] }, 'value must be { targets: ["<regex naming the account holder>", …] }'],
+    [{ targets: ['.*'] }, 'value must be { targets: ["<regex naming the account holder>", …] }'],
+  ])('no_account_holder_callback validates target patterns %j', (value, error) => {
+    const { SPOKEN_CHECK_VALUE_RULES } = require('../services/eval/voice-relay-spoken-checks');
+    expect(SPOKEN_CHECK_VALUE_RULES.no_account_holder_callback()(value)).toBe(error);
   });
 });

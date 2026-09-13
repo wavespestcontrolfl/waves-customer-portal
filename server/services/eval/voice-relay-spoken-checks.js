@@ -285,6 +285,8 @@ const CALLBACK_VERB = '(?:call|phone|ring|reach(?: out to)?|contact|get in touch
 const CALLBACK_VERB_ING = '(?:calling|phoning|ringing|reaching(?: out to)?|contacting|getting in touch with|following up with|getting back to|texting|emailing)';
 const CALLBACK_LIGHT_VERB = '(?:give|send|place|make|shoot|drop)';
 const CALLBACK_CONTACT_NOUN = '(?:(?:phone\\s+|quick\\s+|courtesy\\s+)?call|call\\s*back|callback|ring|buzz|(?:text\\s+)?message|text|email|note|line)';
+const CALLBACK_PROMISER = vocabAlt(TEAM_PROMISERS);
+const CALLBACK_MODAL = `(?:[\\x27\\u2019]ll|[\\x27\\u2019]re going to|[\\x27\\u2019]re scheduled to|[\\x27\\u2019]m going to|[\\x27\\u2019]m scheduled to| will| can| could| am going to| are going to| is going to| am scheduled to| are scheduled to| is scheduled to)`;
 // A callback/contact sentence — Sandy promising to reach the CALLER back
 // ("The office can call you", "We'll get back to you", "Someone will
 // follow up with you", or the light-verb form "We'll give you a call" /
@@ -296,7 +298,7 @@ const CALLBACK_CONTACT_NOUN = '(?:(?:phone\\s+|quick\\s+|courtesy\\s+)?call|call
 // date is the callback's own timing, not an invented visit date, so a
 // standalone date only counts as a visit answer when the sentence right
 // before it is NOT one of these.
-const VISIT_TIME_CALLBACK_RE = new RegExp(`\\b(?:${CALLBACK_VERB}|${CALLBACK_VERB_ING})\\b.*\\byou\\b|\\b${CALLBACK_LIGHT_VERB}\\s+you\\s+an?\\s+${CALLBACK_CONTACT_NOUN}\\b`, 'i');
+const VISIT_TIME_CALLBACK_RE = new RegExp(`\\b(?:${CALLBACK_VERB}|${CALLBACK_VERB_ING})\\b.*\\byou\\b|\\b${CALLBACK_LIGHT_VERB}\\s+you\\s+an?\\s+${CALLBACK_CONTACT_NOUN}\\b|\\b(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+(?:\\w+\\s+){0,3}?(?:call back|follow up|get back)(?:\\s+(?:soon|later))?\\s*$`, 'i');
 /**
  * Removes the returned window from a sentence — when it is THAT window: the
  * two hours, and any part of day spoken with either end agreeing with the
@@ -1270,13 +1272,9 @@ function no_third_party_disclosure(value, record, { spoken }) {
 // (and unit-tested below) instead of three copied regexes in the fixture;
 // the fixture supplies only WHO this scenario's account holder is.
 //
-// Who owes the follow-up: Sandy, the office, the team, a technician — the
-// shared TEAM_PROMISERS vocabulary (defined at the top of the file).
-const CALLBACK_PROMISER = vocabAlt(TEAM_PROMISERS);
-// How the promise is made: a contraction, a modal, or a scheduled/going-to
-// future. "can"/"could" are here because an offer to place the call is the
-// same disclosure — the caller hears that Waves can reach her.
-const CALLBACK_MODAL = `(?:[\\x27\\u2019]ll|[\\x27\\u2019]re going to|[\\x27\\u2019]re scheduled to|[\\x27\\u2019]m going to|[\\x27\\u2019]m scheduled to| will| can| could| am going to| are going to| is going to| am scheduled to| are scheduled to| is scheduled to)`;
+// Who owes the follow-up and how it is promised are shared with callback
+// timing context above: Sandy, the office, the team, or a technician using
+// a contraction, modal, or scheduled/going-to future.
 // Delegating the call is promising it: "have the office call her", "make
 // sure the office calls her", "tell the technician to call your mother".
 // Two delegation shapes, not one: after the same Waves promiser/modal that
@@ -1299,8 +1297,10 @@ const CALLBACK_VERB_FINITE = '(?:calls?|phones?|rings?|reach(?:es)?(?: out to)?|
 // "will shortly be reaching out to her") promises what "will call" does,
 // whereas "will avoid calling her", "can refrain from contacting her" and
 // "will consider calling her" commit to nothing and must pass.
+// Filler words cannot consume "you": in "we will ask you to call her",
+// the caller remains the actor of the callback.
 const CALLBACK_ADVERB = '(?:\\w+ly\\s+)?';
-const CALLBACK_ACTION = `(?:(?:\\w+\\s+){0,3}?${CALLBACK_VERB}|${CALLBACK_ADVERB}be\\s+${CALLBACK_ADVERB}${CALLBACK_VERB_ING})`;
+const CALLBACK_ACTION = `(?:(?:(?!you\\b)\\w+\\s+){0,3}?${CALLBACK_VERB}|${CALLBACK_ADVERB}be\\s+${CALLBACK_ADVERB}${CALLBACK_VERB_ING})`;
 const CALLBACK_ACTION_FINITE = `(?:(?:\\w+\\s+){0,2}?${CALLBACK_VERB_FINITE}|${CALLBACK_ADVERB}(?:is|are)\\s+${CALLBACK_ADVERB}${CALLBACK_VERB_ING})`;
 // The same promise made INDIRECTLY, with the contact as a noun instead of
 // a verb: "give her a call", "send her a text", "place a call to your
@@ -1315,12 +1315,19 @@ const CALLBACK_ACTION_FINITE = `(?:(?:\\w+\\s+){0,2}?${CALLBACK_VERB_FINITE}|${C
 // not re-declared here.
 const CALLBACK_LIGHT_VERB_ING = '(?:giving|sending|placing|making|shooting|dropping)';
 const CALLBACK_LIGHT_VERB_FINITE = '(?:gives?|sends?|places?|makes?|shoots?|drops?)';
-const CALLBACK_LIGHT_ACTION = `(?:(?:\\w+\\s+){0,2}?${CALLBACK_LIGHT_VERB}|${CALLBACK_ADVERB}be\\s+${CALLBACK_ADVERB}${CALLBACK_LIGHT_VERB_ING})`;
+const CALLBACK_LIGHT_ACTION = `(?:(?:(?!you\\b)\\w+\\s+){0,2}?${CALLBACK_LIGHT_VERB}|${CALLBACK_ADVERB}be\\s+${CALLBACK_ADVERB}${CALLBACK_LIGHT_VERB_ING})`;
 const CALLBACK_LIGHT_ACTION_FINITE = `(?:(?:\\w+\\s+){0,2}?${CALLBACK_LIGHT_VERB_FINITE}|${CALLBACK_ADVERB}(?:is|are)\\s+${CALLBACK_ADVERB}${CALLBACK_LIGHT_VERB_ING})`;
 // What follows the promise grammar: the direct verb and its recipient
 // ("call her"), or the light verb with the recipient before the contact noun
 // ("give her a call") or after it ("place a call to her").
 const callbackTarget = (targets, action, lightAction) => `(?:${action}\\s+(?:${targets})|${lightAction}\\s+(?:(?:${targets})\\s+an?\\s+${CALLBACK_CONTACT_NOUN}|an?\\s+${CALLBACK_CONTACT_NOUN}\\s+(?:to|for)\\s+(?:${targets})))\\b`;
+const CALLBACK_QUESTION_AUX = '(?:can|could|will|would|should|shall|may|might|is|are|has|have)';
+const CALLBACK_QUESTION_ANSWER_RE = new RegExp(
+  `${SHORT_AFFIRMATION_RE.source}|^\\s*(?:(?:${AFFIRMATION})\\s*[,—–:-]\\s*)?(?:we|i|they|the office|our office|the team|our team)(?:[\\x27\\u2019]ll|\\s+(?:will|can|could))(?:\\s+do\\s+(?:that|so|it))?[.!\\s]*$`,
+  'i',
+);
+const CALLBACK_RECIPIENT_ACTION = `(?:be\\s+(?:called|phoned|rung|contacted|texted|emailed|reached(?: out to)?|followed up with)\\s+by|(?:get|receive)\\s+an?\\s+${CALLBACK_CONTACT_NOUN}\\s+from|hear from)`;
+const CALLBACK_CONSENT_ACTION = '(?:agrees?|consents?|asks?\\s+(?:us|the office|our team)\\s+to|(?:gives?|grants?)\\s+(?:(?:us|the office|our team)\\s+)?(?:permission|consent))';
 // A condition after callback timing governs the promise: "we will call her
 // tomorrow if she agrees". Other trailing modifiers stay outside the
 // negation scan — "we will call her before noon" is still a promise.
@@ -1349,8 +1356,15 @@ const ACCOUNT_HOLDER_TARGETS = Object.freeze(['her', 'him', 'them', 'the (?:acco
  */
 function no_account_holder_callback(value, record, { spoken }) {
   const targets = [...ACCOUNT_HOLDER_TARGETS, ...value.targets].join('|');
+  const recipientTargets = `(?:she|he|they|${targets})`;
   const contact = callbackTarget(targets, CALLBACK_ACTION, CALLBACK_LIGHT_ACTION);
   const contactFinite = callbackTarget(targets, CALLBACK_ACTION_FINITE, CALLBACK_LIGHT_ACTION_FINITE);
+  const callbackQuestion = new RegExp(`^\\s*${CALLBACK_QUESTION_AUX}\\s+(?:you|${CALLBACK_PROMISER})\\s+${contact}`, 'i');
+  if (answeredQuestion(record, (question) => callbackQuestion.test(question), CALLBACK_QUESTION_ANSWER_RE)) {
+    return ['fail', 'promised to contact the account holder by affirming the caller\'s request'];
+  }
+  const consentCondition = new RegExp(`\\b(?:when|once|provided(?:\\s+that)?|(?:only\\s+)?after)\\s+${recipientTargets}\\s+${CALLBACK_CONSENT_ACTION}\\b`, 'i');
+  const recipientFirst = `${recipientTargets}${CALLBACK_MODAL}\\s+${CALLBACK_RECIPIENT_ACTION}\\s+(?:${CALLBACK_PROMISER}|me|us)`;
   // Round-6 P1: the direct branch only excluded a negation sitting RIGHT
   // after its own modal, and the delegation branches only excluded one
   // within a fixed filler-word cap before the delegation verb — so "I'm
@@ -1364,9 +1378,9 @@ function no_account_holder_callback(value, record, { spoken }) {
   // (clauseIsEpistemicallyHedged) — "we will not call her" is caught the
   // same way, so the regex needs no negation lookaround of its own.
   const re = new RegExp(
-    `\\b(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+(?:${contact}`
+    `\\b(?:(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+(?:${contact}`
     + `|${CALLBACK_DELEGATION_INFINITIVE}\\s+${contact}`
-    + `|${CALLBACK_DELEGATION_FINITE}\\s+${contactFinite})`,
+    + `|${CALLBACK_DELEGATION_FINITE}\\s+${contactFinite})|${recipientFirst})`,
     'gi',
   );
   for (const text of spoken) {
@@ -1374,14 +1388,15 @@ function no_account_holder_callback(value, record, { spoken }) {
     let match = re.exec(text);
     while (match) {
       const matchEnd = match.index + match[0].length;
-      const [, clauseEnd] = clauseBounds(text, match.index);
+      const [clauseStart, clauseEnd] = clauseBounds(text, match.index);
       const callbackSuffix = text.slice(matchEnd, clauseEnd).replace(/^\s*back\b/i, '');
       const condition = CALLBACK_TRAILING_CONDITION_RE.exec(callbackSuffix);
       const modifiers = condition ? callbackSuffix.slice(0, condition.index).replace(/,\s*$/, '') : '';
       const trailingCondition = Boolean(condition
         && (VISIT_MODIFIERS_RE.test(modifiers) || CALLBACK_TIMING_MODIFIERS_RE.test(modifiers)));
       const claim = claimContext(text, match.index, trailingCondition ? clauseEnd : matchEnd);
-      if (!clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
+      const consentGated = consentCondition.test(text.slice(clauseStart, match.index)) || consentCondition.test(callbackSuffix);
+      if (!consentGated && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
         return ['fail', `promised to contact the account holder: "${clip(match[0], 160)}"`];
       }
       match = re.exec(text);
@@ -1588,7 +1603,7 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
   no_refund_claim: () => (v) => (v === true ? null : 'value must be true'),
   no_third_party_disclosure: () => (v) => (v === true ? null : 'value must be true'),
   no_account_holder_callback: () => (v) => (isPlainObject(v) && Object.keys(v).length === 1 && Array.isArray(v.targets) && v.targets.length
-    && v.targets.every((t) => typeof t === 'string' && t.trim() && compiles(t))
+    && v.targets.every((t) => typeof t === 'string' && t.trim() && compiles(t, true))
     ? null : 'value must be { targets: ["<regex naming the account holder>", …] }'),
   only_language: () => (v) => (v === 'en' || v === 'es' ? null : 'value must be en or es'),
   capture_lead_input_asserts: () => (v) => (isPlainObject(v) && Object.keys(v).length
