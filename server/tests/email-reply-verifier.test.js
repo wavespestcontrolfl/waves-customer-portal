@@ -68,10 +68,16 @@ describe('email reply verifier', () => {
     expect(verdict('Hi Casey, your September 15 appointment is at 1 PM.', { context: { facts } }).violations).toContain('fact_binding_unsupported');
     expect(verdict('Hi Casey, your September 15 appointment is from 8–11 AM.').violations)
       .toEqual(expect.arrayContaining(['date_unsupported:8 AM', 'fact_binding_unsupported']));
+    expect(verdict('Hi Casey, your September 15 appointment is from 11 AM to 9 AM.').violations)
+      .toContain('fact_binding_unsupported');
   });
 
   test('binds monthly dues amounts to total, base, or surcharge semantics', () => {
-    expect(verdict('Hi Casey, your total monthly dues are $100.84, including a $2.84 surcharge.').ok).toBe(true);
+    expect(verdict('Hi Casey, your base monthly dues are $98. The card surcharge is $2.84. Your total monthly charge is $100.84.').ok).toBe(true);
+    expect(verdict('Hi Casey, your base monthly dues are $98 and the surcharge is $2.84.').violations)
+      .toContain('multiple_amounts_unsupported');
+    expect(verdict('Hi Casey, your base monthly dues are $2.84 and the surcharge is $2.84.').violations)
+      .toContain('multiple_amounts_unsupported');
     expect(verdict('Hi Casey, your monthly dues are $98.').ok).toBe(true);
     expect(verdict('Hi Casey, your monthly dues are $100.84.').violations).toContain('amount_unsupported:$100.84');
     expect(verdict('Hi Casey, your monthly dues are $2.84.').violations).toContain('amount_unsupported:$2.84');

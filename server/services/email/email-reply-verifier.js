@@ -9,7 +9,7 @@ const LINK_RE = /(?:https?:\/\/|www\.)[^\s<>()]+|\b(?:[a-z0-9-]+\.)+[a-z]{2,63}(
 const MONEY_RE = /\$\s*\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?\s+(?:dollars?|bucks?)\b/gi;
 const DATE_RE = /\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b|\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:,?\s+\d{4})?\b|\b(?:sun|mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|sat)(?:day)?\b|\b(?:today|tomorrow)\b/gi;
 const TIME_RE = /\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)\b/gi;
-const TIME_RANGE_RE = /\b(\d{1,2})(?::(\d{2}))?\s*(?:[-–—]|to)\s*(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)\b/gi;
+const TIME_RANGE_RE = /\b(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?\s*(?:[-–—]|to)\s*(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)\b/gi;
 const BOILERPLATE_RE = /\bthank you for (?:reaching out|contacting us)\b|\bhope this (?:email )?finds you well\b|\bplease (?:do not|don't) hesitate to (?:reach out|contact us)\b|\blet us know if you have any (?:other |further )?questions\b/i;
 const SUCCESS_STATUS_RE = /^(?:paid|succeeded|successful|completed|processed|received)$/i;
 
@@ -112,6 +112,7 @@ function dateFacts(context) {
   const result = [];
   for (const fact of presentFacts(context)) {
     const aliases = new Set();
+    const ranges = [];
     const values = {
       open_invoice: [fact.value?.dueDate],
       recent_payment: [fact.value?.paymentDate],
@@ -123,8 +124,9 @@ function dateFacts(context) {
       const day = calendarDay(value);
       if (day) dateAliases(day, context?.metadata?.assembledAt).forEach((alias) => aliases.add(alias));
       temporalClaims(value).forEach((claim) => aliases.add(normalizeTemporal(claim)));
+      ranges.push(...timeRanges(value));
     }
-    if (aliases.size) result.push({ key: fact.key, aliases, fact });
+    if (aliases.size) result.push({ key: fact.key, aliases, ranges, fact });
   }
   return result;
 }
@@ -137,11 +139,22 @@ function normalizeTemporal(value) {
 function temporalClaims(value) {
   const raw = String(value || '');
   const claims = [...(raw.match(DATE_RE) || []), ...(raw.match(TIME_RE) || [])];
-  for (const range of raw.matchAll(TIME_RANGE_RE)) {
-    claims.push(`${range[1]}${range[2] ? `:${range[2]}` : ''} ${range[5]}`);
-    claims.push(`${range[3]}${range[4] ? `:${range[4]}` : ''} ${range[5]}`);
+  for (const range of timeRanges(raw)) {
+    claims.push(...range.map((clock) => clock.replace(/\b(am|pm)\b/g, (meridiem) => meridiem.toUpperCase())));
   }
   return [...new Map(claims.map((claim) => [normalizeTemporal(claim), claim])).values()];
+}
+
+function timeRanges(value) {
+  const ranges = [];
+  for (const match of String(value || '').matchAll(TIME_RANGE_RE)) {
+    const firstMeridiem = match[3] || match[6];
+    ranges.push([
+      normalizeTemporal(`${match[1]}${match[2] ? `:${match[2]}` : ''} ${firstMeridiem}`),
+      normalizeTemporal(`${match[4]}${match[5] ? `:${match[5]}` : ''} ${match[6]}`),
+    ]);
+  }
+  return ranges;
 }
 
 function dateSemanticKeys(sentence) {
@@ -178,6 +191,9 @@ function factsMatchingClaims(sentence, key, context) {
       return entries.some((entry) => entry.fact === fact && [...entry.aliases]
         .some((alias) => normalizeTemporal(alias) === normalized));
     }));
+    const ranges = timeRanges(sentence);
+    candidates = candidates.filter((fact) => ranges.every((range) => entries.some((entry) => entry.fact === fact
+      && entry.ranges.some((sourceRange) => sourceRange[0] === range[0] && sourceRange[1] === range[1]))));
   }
   return candidates;
 }
@@ -283,7 +299,9 @@ function groundingViolations(draft, context, exemplars) {
   const facts = presentFacts(context);
   const availableDates = dateFacts(context);
   for (const sentence of sentences(draft)) {
-    for (const amount of sentence.match(MONEY_RE) || []) {
+    const amounts = sentence.match(MONEY_RE) || [];
+    if (amounts.length > 1) violations.push('multiple_amounts_unsupported');
+    for (const amount of amounts) {
       if (!amountSupported(amount, sentence, facts)) violations.push(`amount_unsupported:${amount}`);
     }
     for (const date of temporalClaims(sentence)) {
