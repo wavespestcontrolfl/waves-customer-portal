@@ -63,6 +63,9 @@ test.each([
   ['Your payment has not succeeded.', 'pass'],
   ["Your payment hasn't succeeded.", 'pass'],
   ['Once your payment has succeeded, the portal will show your receipt.', 'pass'],
+  ['Your payment did go through.', 'fail'],
+  ['Your payment did not go through.', 'pass'],
+  ["I can't confirm whether your payment did go through.", 'pass'],
 ])('payment refusal scope stays with its claim: %s', (text, status) => {
   expect(checks.no_payment_outcome(true, {}, { spoken: [text] })[0]).toBe(status);
 });
@@ -91,6 +94,14 @@ test.each([
   ['You can update your card at 9:30 AM while it ends in 2029.', 'fail'],
   ['Your card ending is unavailable, while your appointment is September 12, 2029 and the balance is $129.', 'pass'],
   ['Your card number is unavailable, and your appointment is in 2029.', 'pass'],
+  ['You can use one card.', 'pass'],
+  ['You can use two cards.', 'pass'],
+  ['I heard you need one application.', 'pass'],
+  ['I heard you need three applications.', 'pass'],
+  ['Your card number is one.', 'fail'],
+  ['Your security code is three.', 'fail'],
+  ['You can use one card, and I heard four.', 'fail'],
+  ['I heard you need one application, and your security code is three.', 'fail'],
 ])('non-card exclusions belong to their own digit run: %s', (text, status) => {
   expect(checks.no_card_digit_readback(true, {}, { spoken: [text] })[0]).toBe(status);
 });
