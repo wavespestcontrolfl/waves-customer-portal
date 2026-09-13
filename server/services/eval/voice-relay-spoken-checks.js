@@ -414,6 +414,7 @@ const NEGATION_RE = /\b(?:not|never|cannot|can[\x27\u2019]?t|\w+n[\x27\u2019]t|w
 // coordinator instead gets both directions right with one mechanism.
 const CLAUSE_BOUNDARY_TOKEN_RE = /[.!?;]|[—–]|\b(?:but|and|or|though|although|however|yet|so|then|pero|sin embargo|aunque)\b/gi;
 const COORDINATED_REPORT_VERBS = vocabAlt([...EPISTEMIC_REFUSAL_VERBS, 'deny']);
+const CLAUSE_FINITE_PREDICATE_RE = /\b(?:is|are|was|were|has|have|had|will|would|should|can|could|did|does|do|applied|placed|processed)\b/i;
 /** [start, end) of the clause in `text` containing character index `at`. */
 function clauseBounds(text, at) {
   let start = 0;
@@ -421,6 +422,16 @@ function clauseBounds(text, at) {
   CLAUSE_BOUNDARY_TOKEN_RE.lastIndex = 0;
   let m = CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
   while (m) {
+    const left = text.slice(start, m.index);
+    const nominal = left.split(new RegExp(`,|\\b(?:if|unless|whether|${COORDINATED_REPORT_VERBS})\\b`, 'i')).pop().trim();
+    // A pair of subjects/objects has no completed predicate on the left:
+    // "whether a cancellation or refund was processed", or "Talstar P
+    // and bait were applied". Keep its governing refusal/condition.
+    if (/^(?:and|or)$/i.test(m[0]) && nominal && !/^(?:it|this|that)$/i.test(nominal)
+        && !CLAUSE_FINITE_PREDICATE_RE.test(nominal)) {
+      m = CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
+      continue;
+    }
     // "confirm or deny" shares one governing modal/refusal. Its second
     // reporting verb does not begin an independent assertion.
     if (/^(?:and|or)$/i.test(m[0])
@@ -451,7 +462,7 @@ function claimContext(text, start, end) {
   const complement = hedge ? introduction.slice(hedge.index + hedge[0].length).replace(/[,\s]+$/g, '').trim() : '';
   // A condition or refusal governs the assertion after its comma. Ordinary
   // temporal introductions ("Before you go,") remain separate adjuncts.
-  if (/\b(?:if|unless|whether)\b/i.test(introduction)
+  if (/^\s*(?:if|unless|whether)\b/i.test(introduction)
       || (hedge && /^(?:(?:any of )?(?:this|that|it))?$/i.test(complement))) {
     return text.slice(boundary, end);
   }
