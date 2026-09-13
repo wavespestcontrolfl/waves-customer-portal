@@ -145,6 +145,20 @@ describe('shared candidate and eligibility helpers', () => {
     expect(calls.find(([kind]) => kind === 'select')).toContain('scheduled_services.service_address_state');
   });
 
+  test('candidate loading counts prior days by the ET calendar across fall DST', async () => {
+    const calls = [];
+    const query = {
+      where(...args) { calls.push(['where', ...args]); return query; },
+      whereIn() { return query; },
+      orderBy() { return query; },
+      leftJoin() { return query; },
+      select() { return query; },
+    };
+    const afterFallBack = new Date('2026-11-01T23:30:00-05:00');
+    await loadCandidates(() => query, CUSTOMER_ID, afterFallBack, { includePast: true });
+    expect(calls).toContainEqual(['where', 'scheduled_services.scheduled_date', '>=', '2026-09-02']);
+  });
+
   test('human-handled lookup excludes the proposal being reviewed', async () => {
     const calls = [];
     const query = {

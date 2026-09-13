@@ -64,7 +64,7 @@
  * callRescheduleApply); the processor never blocks on this step.
  */
 
-const { etParts, etDateString, etCalendarDayOf, deriveWindowEnd, windowDurationMinutes } = require('../utils/datetime-et');
+const { etParts, etDateString, addETDays, etCalendarDayOf, deriveWindowEnd, windowDurationMinutes } = require('../utils/datetime-et');
 const { lockTriageCall } = require('../utils/triage-locks');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
 const { hasAgentCommittedEvidence, confirmedStartOnTheHour, etWallClockOfConfirmedStart, statesNewAddress } = require('./call-triage-flags');
@@ -320,7 +320,7 @@ async function loadCandidates(conn, customerId, now = new Date(), { includePast 
   return conn('scheduled_services')
     .where({ 'scheduled_services.customer_id': customerId })
     .whereIn('scheduled_services.status', LIVE_STATUSES)
-    .where('scheduled_services.scheduled_date', '>=', includePast ? etDateString(new Date(now.getTime() - 60 * 86400000)) : etDateString(now))
+    .where('scheduled_services.scheduled_date', '>=', includePast ? etDateString(addETDays(now, -60)) : etDateString(now))
     .orderBy('scheduled_services.scheduled_date', 'asc')
     // The catalog row is joined because a repoint leaves scheduled_services
     // .service_type stale: matching the label alone can move a DIFFERENT
