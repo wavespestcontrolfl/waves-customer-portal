@@ -511,6 +511,64 @@ describe('CreateAppointmentModal submit cancellation', () => {
     expect(schedulePosts(state.fetcher)).toHaveLength(1);
   });
 
+  it('releases a failed attempt and retries only its unsaved group', async () => {
+    const secondScheduleRequest = deferred();
+    const state = await beginBooking({ secondScheduleRequest });
+    vi.spyOn(window, 'alert').mockImplementation(() => {});
+    await waitFor(() => expect(schedulePosts(state.fetcher)).toHaveLength(2));
+    await act(async () => {
+      secondScheduleRequest.resolve(jsonResponse({ error: 'retry this group' }, { ok: false, status: 500 }));
+      await secondScheduleRequest.promise;
+    });
+    await waitFor(() => expect(state.onCreated).toHaveBeenCalledTimes(1));
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    expect(submit.disabled).toBe(false);
+    fireEvent.click(submit);
+    await waitFor(() => expect(schedulePosts(state.fetcher)).toHaveLength(3));
+    expect(schedulePosts(state.fetcher).map(([, options]) => JSON.parse(options.body).serviceId))
+      .toEqual(['service-first', 'service-second', 'service-second']);
+    await waitFor(() => expect(state.onCreated).toHaveBeenCalledTimes(2), { timeout: 2000 });
+    expect(state.onCreated).toHaveBeenLastCalledWith({
+      id: 'unexpected-later-appointment', scheduledDate: state.scheduledDate,
+    });
+  });
+
+  it('surfaces a prepay preview failure while completing the committed booking', async () => {
+    const freshPrepayRequest = deferred();
+    const state = await beginPrepayBooking({ freshPrepayRequest });
+    const alertMock = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    await waitFor(() => expect(state.getPrepayPreviewCount()).toBe(2));
+    await act(async () => {
+      freshPrepayRequest.reject(new Error('preview unavailable'));
+      try { await freshPrepayRequest.promise; } catch { /* expected */ }
+    });
+    expect(alertMock).toHaveBeenCalledWith(expect.stringContaining('preview unavailable'));
+    expect(prepayInvoicePosts(state.fetcher)).toHaveLength(0);
+    await waitFor(() => expect(state.onCreated).toHaveBeenCalledTimes(1), { timeout: 2000 });
+    expect(state.onCreated).toHaveBeenCalledWith({
+      id: 'appointment-committed', scheduledDate: state.scheduledDate,
+    });
+    expect(schedulePosts(state.fetcher)).toHaveLength(1);
+  });
+
+  it.each([true, false])('preserves prepay delivery feedback when delivery.ok is %s', async (ok) => {
+    const prepayInvoiceRequest = deferred();
+    const state = await beginPrepayBooking({ prepayInvoiceRequest });
+    const alertMock = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    await waitFor(() => expect(prepayInvoicePosts(state.fetcher)).toHaveLength(1));
+    await act(async () => {
+      prepayInvoiceRequest.resolve(jsonResponse({ invoice: {}, delivery: { ok } }));
+      await prepayInvoiceRequest.promise;
+    });
+    if (ok) expect(alertMock).not.toHaveBeenCalled();
+    else expect(alertMock).toHaveBeenCalledWith(expect.stringContaining('SENDING IT FAILED'));
+    await waitFor(() => expect(state.onCreated).toHaveBeenCalledTimes(1), { timeout: 2000 });
+    expect(state.onCreated).toHaveBeenCalledWith({
+      id: 'appointment-committed', scheduledDate: state.scheduledDate,
+    });
+    expect(prepayInvoicePosts(state.fetcher)).toHaveLength(1);
+  });
+
   it('turns the delayed success callback into a background refresh after close', async () => {
     const secondScheduleRequest = deferred();
     const state = await beginBooking({ secondScheduleRequest });
