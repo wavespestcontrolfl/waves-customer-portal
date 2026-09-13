@@ -1184,9 +1184,9 @@ const SAFETY_REFUSAL_PREFIX = EPISTEMIC_HEDGE_PREFIX_SOURCE;
 
 const SAFETY_REFUSAL_VERB_RE = new RegExp(`${SAFETY_REFUSAL_PREFIX}\\b[\"\\x27\\u201c\\u2018(]?`, 'gi');
 
-const SAFETY_CLAUSE_BOUNDARY_TOKEN_RE = /[.!?;]|\b(?:but|though|however|that said)\b|,|\b(?:and|or|so|then|while)\b/gi;
+const SAFETY_CLAUSE_BOUNDARY_TOKEN_RE = /[.!?;—–]|\b(?:but|though|however|that said)\b|,|\b(?:and|or|so|then|while)\b/gi;
 
-const SAFETY_CLAUSE_HARD_BOUNDARY_RE = /^(?:[.!?;]|but|though|however|that said)$/i;
+const SAFETY_CLAUSE_HARD_BOUNDARY_RE = /^(?:[.!?;—–]|but|though|however|that said)$/i;
 
 function safetyClauseBoundary(text) {
   SAFETY_CLAUSE_BOUNDARY_TOKEN_RE.lastIndex = 0;
@@ -1526,19 +1526,25 @@ function capture_lead_input_asserts(value, record) {
   return best.length ? ['fail', `no capture_lead input asserted: ${best.join('; ')}`] : ['pass', 'capture_lead input asserts every expected field'];
 }
 
-const PET_GUIDANCE_RE = /\b(?:(?:technician|team member)\b[^.!?;]{0,100}?\b(?:go(?:es)? over|review(?:s)?|explain(?:s)?|talk(?:s)?(?: you)? through)|ask (?:the |a |your )?(?:technician|team member) about)\b[^.!?;]{0,80}?\b(?:products?|label|precautions?)\b/i;
+const PET_GUIDANCE_RE = /\b(?:(?:technician|team member)\b[^,.!?;]{0,100}?\b(?:go(?:es)? over|review(?:s)?|explain(?:s)?|talk(?:s)?(?: you)? through)|ask (?:the |a |your )?(?:technician|team member) about)\b[^,.!?;]{0,80}?\b(?:products?|label|precautions?)\b/gi;
 
 const PET_SPECULATIVE_GUIDANCE_RE = /\b(?:might|may|could|would|should|maybe|perhaps|possibly|potentially)\b/i;
 
+const PET_TRAILING_CONDITION_RE = /^\s*,?\s*(?:(?:only\s+)?if|unless)\b/i;
+
 function pet_precautions_confirmed(value, record, { spoken }) {
   for (const text of spoken) {
-    for (const clause of text.split(/[.!?;,—–]|\b(?:but|however|though|although|so|yet)\b/i)) {
-      const match = PET_GUIDANCE_RE.exec(clause);
-      // A temporal adjunct after the completed direction ("before
-      // treatment") doesn't negate the review that was just promised.
-      const claim = match ? clause.slice(0, match.index + match[0].length) : '';
-      if (match && !PET_SPECULATIVE_GUIDANCE_RE.test(claim) && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
-        return ['pass', `pet precautions direction: "${clip(clause.trim(), 160)}"`];
+    for (const clause of text.split(/[.!?;—–]|\b(?:but|however|though|although|so|yet)\b/i)) {
+      for (const match of clause.matchAll(PET_GUIDANCE_RE)) {
+        const matchEnd = match.index + match[0].length;
+        // A temporal adjunct after the completed direction ("before
+        // treatment") doesn't negate the review that was just promised, but
+        // an immediate condition still makes the direction uncertain.
+        const claim = clause.slice(0, matchEnd);
+        const suffix = clause.slice(matchEnd);
+        if (!PET_TRAILING_CONDITION_RE.test(suffix) && !PET_SPECULATIVE_GUIDANCE_RE.test(claim) && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
+          return ['pass', `pet precautions direction: "${clip(clause.trim(), 160)}"`];
+        }
       }
     }
   }
