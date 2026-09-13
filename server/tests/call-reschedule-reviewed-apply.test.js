@@ -48,19 +48,32 @@ function visit(overrides = {}) {
   };
 }
 
-function makeConn({ lockedVisit = visit(), offers = [], portalRequest = null } = {}) {
+function makeConn({ lockedVisit = visit(), lockedVisits = null, offers = [], portalRequest = null } = {}) {
   const events = [];
   const inserts = [];
   const updates = [];
+  const lockedSets = [];
+  const availableVisits = lockedVisits || [lockedVisit];
   const builder = (table) => {
-    const state = { update: null, excludedStatuses: [] };
+    const state = { update: null, excludedStatuses: [], visitIds: null, targetVisitId: null };
     const query = {
-      where() { return query; },
+      where(...args) {
+        if (args.length === 1 && args[0]?.scheduled_service_id) state.targetVisitId = String(args[0].scheduled_service_id);
+        if (args[0] === 'description' && args[1] === 'like') {
+          state.targetVisitId = String(args[2]).match(/^Appointment ([^:]+):%$/)?.[1] || null;
+        }
+        return query;
+      },
+      whereIn(column, values) {
+        if (table === 'scheduled_services' && column === 'id') state.visitIds = values.map(String);
+        return query;
+      },
       whereNotIn(column, values) {
         if (table === 'service_requests' && column === 'status') state.excludedStatuses = values;
         return query;
       },
       whereNull() { return query; },
+      orderBy() { return query; },
       forShare() { events.push(`${table}:share`); return query; },
       forUpdate() { events.push(`${table}:update-lock`); return query; },
       select() { if (table === 'reschedule_log') events.push('reschedule_log:select'); return query; },
@@ -70,7 +83,8 @@ function makeConn({ lockedVisit = visit(), offers = [], portalRequest = null } =
         if (table === 'scheduled_services') return Promise.resolve(lockedVisit);
         if (table === 'service_requests') {
           events.push('service_requests:select');
-          return Promise.resolve(portalRequest && !state.excludedStatuses.includes(portalRequest.status)
+          return Promise.resolve(portalRequest && String(portalRequest.scheduled_service_id || VISIT_ID) === state.targetVisitId
+            && !state.excludedStatuses.includes(portalRequest.status)
             ? portalRequest : undefined);
         }
         return Promise.resolve(undefined);
@@ -78,7 +92,12 @@ function makeConn({ lockedVisit = visit(), offers = [], portalRequest = null } =
       update(arg) { state.update = arg; updates.push({ table, arg }); return query; },
       insert(row) { inserts.push({ table, row }); events.push(`${table}:insert`); return Promise.resolve([row]); },
       then(resolve, reject) {
-        if (table === 'reschedule_log') return Promise.resolve(offers).then(resolve, reject);
+        if (table === 'scheduled_services' && state.visitIds) {
+          lockedSets.push(state.visitIds);
+          return Promise.resolve(availableVisits.filter((row) => state.visitIds.includes(String(row.id)))).then(resolve, reject);
+        }
+        if (table === 'reschedule_log') return Promise.resolve(offers.filter((row) =>
+          String(row.scheduled_service_id || VISIT_ID) === state.targetVisitId)).then(resolve, reject);
         if (state.update) return Promise.resolve(1).then(resolve, reject);
         return Promise.resolve([]).then(resolve, reject);
       },
@@ -91,6 +110,7 @@ function makeConn({ lockedVisit = visit(), offers = [], portalRequest = null } =
   conn.events = events;
   conn.inserts = inserts;
   conn.updates = updates;
+  conn.lockedSets = lockedSets;
   return conn;
 }
 
@@ -187,6 +207,21 @@ describe('applyReviewedCallReschedule', () => {
     expect(conn.inserts).toHaveLength(0);
   });
 
+  test('an actionable SMS offer on a reviewed recurring sibling rejects the whole proposal', async () => {
+    const sibling = visit({ id: 'visit-sibling', scheduled_date: '2026-10-14' });
+    const offer = { id: 'offer-sibling', scheduled_service_id: sibling.id,
+      notes: JSON.stringify({ option1: { date: '2026-10-16', window: { start: '08:00', end: '09:00' } } }) };
+    const conn = makeConn({ lockedVisits: [visit(), sibling], offers: [offer] });
+    const rebooker = mover(conn);
+    const guard = jest.fn();
+
+    await expect(applyReviewedCallReschedule({ ...applyArgs(conn, rebooker, guard),
+      occurrenceIds: [VISIT_ID, sibling.id] })).rejects.toThrow('text-message reschedule offer');
+    expect(conn.lockedSets).toEqual([[VISIT_ID, sibling.id].sort()]);
+    expect(guard).not.toHaveBeenCalled();
+    expect(conn.inserts).toHaveLength(0);
+  });
+
   test('an open portal request is refused under the selected visit lock before proposal mutation', async () => {
     const conn = makeConn({ portalRequest: { id: 'request-1', status: 'new' } });
     const rebooker = mover(conn);
@@ -197,6 +232,23 @@ describe('applyReviewedCallReschedule', () => {
       message: expect.stringContaining('portal reschedule request'),
     });
     expect(conn.events.indexOf('scheduled_services:update-lock')).toBeLessThan(conn.events.indexOf('service_requests:select'));
+    expect(guard).not.toHaveBeenCalled();
+    expect(conn.inserts).toHaveLength(0);
+  });
+
+  test('an open portal request on a reviewed recurring sibling rejects the whole proposal', async () => {
+    const sibling = visit({ id: 'visit-sibling', scheduled_date: '2026-10-14' });
+    const conn = makeConn({ lockedVisits: [visit(), sibling],
+      portalRequest: { id: 'request-sibling', status: 'new', scheduled_service_id: sibling.id } });
+    const rebooker = mover(conn);
+    const guard = jest.fn();
+
+    await expect(applyReviewedCallReschedule({ ...applyArgs(conn, rebooker, guard),
+      occurrenceIds: [VISIT_ID, sibling.id] })).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining('portal reschedule request'),
+    });
+    expect(conn.lockedSets).toEqual([[VISIT_ID, sibling.id].sort()]);
     expect(guard).not.toHaveBeenCalled();
     expect(conn.inserts).toHaveLength(0);
   });

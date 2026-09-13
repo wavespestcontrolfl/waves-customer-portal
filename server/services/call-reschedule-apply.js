@@ -348,6 +348,12 @@ async function applyReviewedCallReschedule({ conn, call, v2, customer, candidate
   const plan = planRescheduleFromCall({ call, v2, customer, candidates, now, humanOverride: { visitId } });
   if (plan.action === 'skip') return { outcome: 'skipped', reason: plan.reason };
   const visit = candidates.find((row) => String(row.id) === String(plan.visitId));
+  // A date move can sweep the exact recurring set the operator previewed.
+  // Lock every affected appointment before checking any competing workflow:
+  // the portal request producer holds the same appointment lock through its
+  // insert, so each request is either visible here or starts after this move.
+  const affectedVisitIds = [...new Set(plan.dateMove && occurrenceIds.length
+    ? [visit.id, ...occurrenceIds].map(String) : [String(visit.id)])].sort();
   const beforeMove = async (trx) => {
     await trx('customers').where({ id: customer.id }).forShare().first('id');
     await trx('customer_properties').where({ customer_id: customer.id, active: true }).forShare().select('id');
@@ -359,16 +365,21 @@ async function applyReviewedCallReschedule({ conn, call, v2, customer, candidate
       'is_recurring', 'source_action', 'customer_confirmed', 'self_booking_id', 'window_start', 'window_end',
       'estimated_duration_minutes', 'service_address_line1', 'service_address_line2', 'service_address_city',
       'service_address_zip'];
-    const lockedService = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first();
-    if (!lockedService || dateOnly(lockedService.scheduled_date) !== dateOnly(visit.scheduled_date)
+    const lockedServices = await trx('scheduled_services').whereIn('id', affectedVisitIds)
+      .orderBy('id').forUpdate().select();
+    const lockedService = lockedServices.find((row) => String(row.id) === String(visit.id));
+    if (lockedServices.length !== affectedVisitIds.length || !lockedService
+      || dateOnly(lockedService.scheduled_date) !== dateOnly(visit.scheduled_date)
       || snapshotColumns.some((key) => (lockedService[key] ?? null) !== (visit[key] ?? null))) {
       throw Object.assign(new Error('The visit changed. Refresh the proposal.'), { status: 409 });
     }
-    if (await openPortalRequest(trx, customer.id, visit.id)) {
-      throw Object.assign(new Error('A customer portal reschedule request is still open. Use the schedule editor.'), { status: 409 });
-    }
-    if (await pendingSmsOffer(trx, customer.id, visit.id, now)) {
-      throw Object.assign(new Error('A text-message reschedule offer is still open. Use the schedule editor.'), { status: 409 });
+    for (const affectedVisitId of affectedVisitIds) {
+      if (await openPortalRequest(trx, customer.id, affectedVisitId)) {
+        throw Object.assign(new Error('A customer portal reschedule request is still open. Use the schedule editor.'), { status: 409 });
+      }
+      if (await pendingSmsOffer(trx, customer.id, affectedVisitId, now)) {
+        throw Object.assign(new Error('A text-message reschedule offer is still open. Use the schedule editor.'), { status: 409 });
+      }
     }
     await guard(trx);
     if (plan.interiorNote) {
@@ -396,8 +407,7 @@ async function applyReviewedCallReschedule({ conn, call, v2, customer, candidate
   if (plan.action === 'already_at_requested_time') {
     await conn.transaction(async (trx) => {
       await beforeMove(trx);
-      const current = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first();
-      await writeReview({ trx, service: current });
+      await writeReview({ trx });
     });
     return { outcome: 'noop', visitId: visit.id };
   }
