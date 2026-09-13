@@ -45,32 +45,11 @@ describe('fixture export shape', () => {
     expect(c.confirmed).toEqual({ turf_density: 75, weed_suppression: 85, color_health: 80, fungus_control: 75, thatch_level: 60, stress_damage: 55 });
     expect(c.legacyAi.turf_density).toBe(70);
     expect(c.photos).toEqual([{ id: 'p1', s3Key: 'k1', mimeType: 'image/png', zone: 'front' }, { id: 'p2', s3Key: 'k2', mimeType: 'image/jpeg', zone: null }]); // ordered
-    expect(c.context.priorSummary).toHaveLength(500); // the whole scrubbed value — the live route passes it all
+    expect(c.context.priorSummary).toBeNull();
     // No names, phones, addresses — and no legacy observation text (it can echo technician context).
     expect(JSON.stringify(c)).not.toMatch(/MUST NOT LEAK|\+1555|Private Way|LOCKBOX|Smith|legacy obs/);
     expect(c.legacyObservations).toBeUndefined();
-    // The prior summary was written with the customer's name in the prompt: names, phones and addresses are scrubbed before export.
-    const named = evalLib.fixtureCase(row(), [], { priorSummary: "Mrs. Smith's lawn at 12 Private Way improved; Jane Smith asked us to call 941-555-0100.", customerNames: ['Jane', 'Smith'] });
-    expect(named.context.priorSummary).not.toMatch(/Smith|Jane|Private Way|941/);
-    expect(named.context.priorSummary).toMatch(/^the customer's lawn at the property improved; the customer asked us to call/);
-    expect(named.context.priorSummary).not.toMatch(/the customer the customer/);
-    expect(evalLib.scrubPriorSummary('  ', ['x'])).toBeNull();
-    expect(evalLib.scrubPriorSummary(null)).toBeNull();
-    expect(evalLib.scrubPriorSummary('Fine lawn.', [null, 'A'])).toBe('Fine lawn.');
-    // PII only: product names and confirmed language are agronomic evidence the live call received — they stay.
-    expect(evalLib.scrubPriorSummary('Confirmed chinch bugs; Celsius applied. Call 941-555-0100 or see https://x.test at 12 Private Way.', ['Jane']))
-      .toBe('Confirmed chinch bugs; Celsius applied. Call or see at the property');
-    expect(evalLib.scrubPii('mail me@x.test today')).toBe('mail today');
-    // A summary that repeats an access credential is omitted whole — the scrubber does not know codes.
-    for (const text of ['Lawn improved; gate code 4471 for the side gate.', 'The lockbox is 2288, treat the back first.']) expect(evalLib.scrubPriorSummary(text, ['Jane'])).toBeNull();
-    expect(evalLib.fixtureCase(row(), [], { priorSummary: 'Use gate code 4471.' }).context.priorSummary).toBeNull();
-    // A customer name that is lawn vocabulary cannot be scrubbed without rewriting evidence: the summary is omitted, and said so.
-    expect(evalLib.nameCollidesWithVocabulary('Brown patches along the drive improved.', ['Pat', 'Brown'])).toBe(true);
-    expect(evalLib.nameCollidesWithVocabulary('Turf thinned along the drive.', ['Pat', 'Brown'])).toBe(false);
-    expect(evalLib.scrubPriorSummary('Brown patches along the drive improved.', ['Pat', 'Brown'])).toBeNull();
-    const collided = evalLib.fixtureCase(row(), [], { priorSummary: 'Brown patches along the drive improved.', customerNames: ['Pat', 'Brown'] });
-    expect(collided.context.priorSummary).toBeNull();
-    expect(collided.context.omitted).toEqual([{ field: 'priorSummary', reason: 'customer_name_is_lawn_vocabulary' }]);
+    expect(evalLib.contextFor({ ...c, context: { priorSummary: 'Unproven customer narrative' } })).not.toHaveProperty('priorSummary');
     // The exporter's own omissions ride along, and an unproven field is never silently absent.
     expect(evalLib.fixtureCase(row(), [], { omitted: [{ field: 'grassType', reason: 'profile_touched_since_visit' }] }).context.omitted).toEqual([{ field: 'grassType', reason: 'profile_touched_since_visit' }]);
     expect(evalLib.fixtureCase(row(), [], {}).context.omitted).toEqual([]);
@@ -83,12 +62,6 @@ describe('fixture export shape', () => {
     expect(evalLib.fixtureCase(row({ photos: JSON.stringify([{ filename: 'a' }, { filename: 'b' }]) }), photos, {})).toMatchObject({ incompletePhotos: false });
     expect(evalLib.fixtureCase(row(), photos, {}).photos).toHaveLength(2);
     expect(evalLib.fixtureCase(row({ scheduled_date: null, composite_scores: null }), []).visitDate).toBe('2026-09-01');
-  });
-
-  test('a compound or accented name is scrubbed word by word — "Mary" of a "Mary Jane", "Jose" of a "José" — while an initial or a longer word containing the name is left alone', () => {
-    const scrubbed = evalLib.scrubPriorSummary("Mary's lawn improved; Jane asked about Mary Jane's side yard. José-Luis Núñez's back lawn is thin; Jose asked twice, Nunez once.", ['Mary Jane', 'José-Luis Núñez']);
-    expect(scrubbed).toBe("the customer's lawn improved; the customer asked about the customer's side yard. the customer's back lawn is thin; the customer asked twice, the customer once.");
-    expect(evalLib.scrubPriorSummary('The Janeway hedge by the Al fence.', ['Jane', 'A', 'L'])).toBe('The Janeway hedge by the Al fence.');
   });
 
   test('pg DATE values arrive as Date objects or strings; both become the ISO calendar day, never String(Date)', () => {
@@ -118,7 +91,7 @@ describe('fixture export shape', () => {
   test('the replay context is the visit-dated season plus what was on file — the gauge reading included — no products, no notes', () => {
     const c = evalLib.fixtureCase(row({ scheduled_date: '2026-01-15' }), [], { grassType: 'Zoysia', irrigation: 'well, 0.5 in/wk', priorSummary: 'Prior.', turfHeightIn: '3.50' });
     expect(c.context.turfHeightIn).toBe(3.5);
-    expect(evalLib.contextFor(c)).toEqual({ region: 'Southwest Florida', month: 1, season: 'dormant', grassType: 'Zoysia', turfHeightIn: 3.5, irrigation: 'well, 0.5 in/wk', priorSummary: 'Prior.' });
+    expect(evalLib.contextFor(c)).toEqual({ region: 'Southwest Florida', month: 1, season: 'dormant', grassType: 'Zoysia', turfHeightIn: 3.5, irrigation: 'well, 0.5 in/wk' });
     expect(evalLib.contextFor({ month: 7, context: {} })).toEqual({ region: 'Southwest Florida', month: 7, season: 'peak' });
     // The season is the route's classifier, never a parallel month map.
     const { getSeason } = require('../services/lawn-assessment');
@@ -444,6 +417,33 @@ test('real provider logger keeps warning and error output out of the JSON docume
 });
 
 describe('runner', () => {
+  test('invalid legacy photos do not abort valid cases or discard earlier paid repetitions', async () => {
+    const { analyzeVisit } = require('../services/lawn-visit-assessment');
+    const { dispatchWithFallback } = require('../services/llm/call');
+    const { answer } = require('./helpers/lawn-visit-fixtures');
+    const valid = evalLib.fixtureCase(row({ id: 'valid' }), [photos[0]]);
+    const tooMany = evalLib.fixtureCase(row({ id: 'too-many' }), Array.from({ length: 7 }, (_, i) => ({ id: `p${i}`, s3_key: `many-${i}` })));
+    const wrongType = evalLib.fixtureCase(row({ id: 'wrong-type' }), [{ id: 'bad', s3_key: 'gif' }]);
+    const last = evalLib.fixtureCase(row({ id: 'last' }), [photos[0]]);
+    dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, provider: 'gemini', model: 'gemini-3.8-flash', json: answer(), usage: { input_tokens: 100, output_tokens: 50 } });
+    const out = await evalLib.runEval([valid, tooMany, wrongType, last], {
+      analyzeVisit,
+      loadPhoto: async key => ({ data: 'YQ==', mimeType: key === 'gif' ? 'image/gif' : 'image/jpeg' }),
+    }, { concurrency: 2 });
+    expect(out.results.map(r => r.assessmentId)).toEqual(['last', 'valid']);
+    expect(out.skipped.map(r => r.assessmentId).sort()).toEqual(['too-many', 'wrong-type']);
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(2);
+    expect(out.summary.tokens.input).toBe(200);
+
+    const analyze = jest.fn().mockResolvedValueOnce(analysis()).mockRejectedValueOnce(new Error('synthetic failure'));
+    const repeated = await evalLib.runEval([valid], { analyzeVisit: analyze, loadPhoto: async () => ({ data: 'YQ==' }) }, { repeat: 3 });
+    expect(repeated.results).toHaveLength(1);
+    expect(repeated.summary.tokens.input).toBe(9000);
+    expect(repeated.skipped).toEqual([{ assessmentId: 'valid', repeatIndex: 1, reason: 'analysis failed: synthetic failure' }]);
+    expect(analyze).toHaveBeenCalledTimes(2);
+    dispatchWithFallback.mockReset();
+  });
+
   test('replays through the replacement service with matching prompt hashes and unknown-score handling', async () => {
     const { analyzeVisit } = require('../services/lawn-visit-assessment');
     const { dispatchWithFallback } = require('../services/llm/call');

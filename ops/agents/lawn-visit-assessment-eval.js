@@ -66,6 +66,12 @@ const oneOf = (flag, values) => (raw) => {
   if (!values.includes(v)) { console.error(`${flag} must be ${values.slice(0, -1).join(', ')} or ${values.at(-1)}, got ${JSON.stringify(raw ?? null)}`); process.exit(2); }
   return v;
 };
+const idsList = (raw) => {
+  const value = String(raw ?? '').trim();
+  const ids = value.split(',').map((id) => id.trim()).filter(Boolean);
+  if (!value || value.startsWith('--') || !ids.length) { console.error(`--ids needs at least one comma-separated id, got ${JSON.stringify(raw ?? null)}`); process.exit(2); }
+  return ids;
+};
 
 // One row per flag: the args key, whether it takes a value, and how that
 // value is read. Boolean flags take none.
@@ -75,7 +81,7 @@ const ARG_SPECS = {
   '--json': { key: 'json' },
   '--force-fallback': { key: 'forceFallback' },
   '--run': { key: 'run', value: true, parse: (v) => v },
-  '--ids': { key: 'ids', value: true, parse: (v) => String(v || '').split(',').map((s) => s.trim()).filter(Boolean) },
+  '--ids': { key: 'ids', value: true, parse: idsList },
   '--sample': { key: 'sample', value: true, parse: positiveInt('--sample') },
   '--limit': { key: 'limit', value: true, parse: positiveInt('--limit') },
   '--thinking': { key: 'thinking', value: true, parse: oneOf('--thinking', ['LOW', 'MEDIUM', 'HIGH']) },

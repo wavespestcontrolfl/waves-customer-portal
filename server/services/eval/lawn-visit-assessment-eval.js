@@ -28,8 +28,7 @@
 const { applySeasonalAdjustment, getSeason } = require('../lawn-assessment');
 const { deriveLegacyScores, adjustAvailableScores } = require('../lawn-visit-scores');
 const { contextHash, normalizePhotoZone } = require('../lawn-visit-input');
-const { SUMMARY_CAUSE_RE, CUSTOMER_TEXT_URL, CUSTOMER_TEXT_EMAIL, CUSTOMER_TEXT_PHONE, STREET_ADDRESS } = require('../lawn-diagnostic-report');
-const { containsReportAccessCode } = require('../service-report/technician-report-copy');
+const { SUMMARY_CAUSE_RE } = require('../lawn-diagnostic-report');
 const { CAUSE_PATTERNS } = require('./lawn-diagnostic-naming-gate');
 
 // USD per 1M tokens, standard tier, checked 2026-09-08. Thinking is billed at
@@ -79,7 +78,7 @@ const parseJson = (value, fallback) => {
  * no names, addresses, phones or notes ever enter the fixture file.
  *   row      lawn_assessments row (confirmed), with `scheduled_date` joined
  *   photos   lawn_assessment_photos rows for it, prompt order
- *   context  { grassType, irrigation, priorSummary } resolved by the exporter
+ *   context  omitted visit-time fields named by the exporter
  */
 function fixtureCase(row, photos = [], context = {}) {
   const composite = parseJson(row.composite_scores, {}) || {};
@@ -113,92 +112,19 @@ function fixtureCase(row, photos = [], context = {}) {
     context: {
       grassType: context.grassType || null,
       irrigation: context.irrigation || null,
-      // Every context field the exporter could NOT prove visit-time is
-      // omitted AND named here with its reason, so a replay that ran without
-      // it is never silent about it (Codex #4153 r13/r14): the report counts
-      // them. Also a prior summary this module itself withheld.
-      omitted: [
-        ...(Array.isArray(context.omitted) ? context.omitted : []),
-        ...(context.priorSummary && nameCollidesWithVocabulary(context.priorSummary, context.customerNames) ? [{ field: 'priorSummary', reason: 'customer_name_is_lawn_vocabulary' }] : []),
-      ],
+      // Exporter omissions remain visible in both report formats.
+      omitted: Array.isArray(context.omitted) ? context.omitted : [],
       // Only a captured analysis-time reading can reproduce the prompt.
       // Legacy exports omit it; completion readings may have changed since
       // Analyze. Retain the route's accepted 0.5–8 in range for supplied context.
       turfHeightIn: turfHeightInRange(context.turfHeightIn),
-      priorSummary: scrubPriorSummary(context.priorSummary, context.customerNames),
+      priorSummary: null,
     },
   };
 }
 function turfHeightInRange(value) {
   const n = numberOrNull(value);
   return n != null && n >= 0.5 && n <= 8 ? n : null;
-}
-
-// The previous visit's ai_summary was written by a model that was given the
-// customer's full name (knowledge-bridge), so the fixture copy goes through
-// PII removal (phones, emails, URLs, street addresses), preserving products
-// and diagnoses, then loses every known customer-name token —
-// the stored first and last name, each in full AND word by word, with and
-// without diacritics, so a summary that says only "Mary" of a "Mary Jane",
-// or "Jose" of a "José", is scrubbed too (Codex #4153 r5) — before it is
-// replayed. Word boundaries are Unicode-aware (JS `\b` knows ASCII letters
-// only, so "José" never matched at the end of a word). Null when nothing
-// is left.
-const NAME_TOKEN_MIN_LENGTH = 2; // an initial is not a name
-const withoutDiacritics = (value) => value.normalize('NFD').replace(/\p{M}+/gu, '');
-function customerNameTokens(customerNames) {
-  const tokens = new Set();
-  for (const value of customerNames || []) {
-    const full = String(value || '').trim();
-    for (const token of [full, ...full.split(/[^\p{L}\p{N}]+/u)]) {
-      if (token.length >= NAME_TOKEN_MIN_LENGTH) { tokens.add(token); tokens.add(withoutDiacritics(token)); }
-    }
-  }
-  return [...tokens].sort((a, b) => b.length - a.length);
-}
-// A customer name that is also lawn vocabulary ("Brown", "Green", "Moss",
-// "Fields") cannot be scrubbed without rewriting agronomic evidence ("brown
-// patches" → "the customer patches"), and cannot be left in: the summary is
-// omitted whole (Codex #4153 r14).
-const LAWN_VOCABULARY = new Set(('brown green gray grey white black yellow patch patches moss rose bush field fields lawn lawns grass hill hills wood woods stone rock sand marsh dew rain storm frost weed weeds '
-  + 'spring summer fall winter shade sun sunny root roots leaf leaves bloom flower flowers plant garden gardener meadow grove park lake brook river ash oak pine palm cypress maple hedge thorn berry '
-  + 'bug bugs worm worms moth chinch grub sedge clover spurge drought water sprinkler mow edge turf blade blades soil clay').split(/\s+/));
-function nameCollidesWithVocabulary(text, customerNames = []) {
-  const summary = String(text || '').toLowerCase();
-  return [...customerNameTokens(customerNames)].some((token) => {
-    const lower = token.toLowerCase();
-    return (LAWN_VOCABULARY.has(lower) || SUMMARY_CAUSE_RE.test(lower)) && new RegExp(`(?<![\\p{L}\\p{N}])${lower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}])`, 'iu').test(summary);
-  });
-}
-// PII only — the report lane's scrubCustomerText also softens confirmed
-// language and replaces product names, which would hand the replay weaker
-// agronomic evidence than the live call received (Codex #4153 r15): here
-// only URLs, emails, phones and street addresses go, then the customer's
-// name tokens and any access code.
-function scrubPii(text) {
-  return String(text)
-    .replace(CUSTOMER_TEXT_URL, '')
-    .replace(CUSTOMER_TEXT_EMAIL, '')
-    .replace(CUSTOMER_TEXT_PHONE, '')
-    .replace(STREET_ADDRESS, 'the property')
-    .replace(/\s{2,}/g, ' ')
-    .trim();
-}
-function scrubPriorSummary(text, customerNames = []) {
-  if (!text) return null;
-  if (nameCollidesWithVocabulary(text, customerNames)) return null;
-  let out = scrubPii(text);
-  for (const token of customerNameTokens(customerNames)) {
-    out = out.replace(new RegExp(`(?<![\\p{L}\\p{N}])${token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}])`, 'giu'), 'the customer');
-  }
-  out = out.replace(/\b(?:Mr|Mrs|Ms|Miss|Dr)\.?\s+the customer\b/g, 'the customer').replace(/\bthe customer(?:\s+the customer)+\b/g, 'the customer').trim();
-  // The scrubber does not know access codes; a summary that repeats a gate /
-  // garage / lockbox credential (the report's detector) is omitted whole —
-  // no credential ever enters a fixture file (Codex #4153 r8).
-  if (containsReportAccessCode(out)) return null;
-  // The whole scrubbed value: the live route passes the entire summary, so a
-  // cap here would replay a different prompt (Codex #4153 r13).
-  return out || null;
 }
 
 // Deterministic selection, in the population's order: the explicit ids plus
@@ -220,8 +146,8 @@ function hashKey(value) {
 
 // The known-visit context the route would build for this visit — season and
 // month from the VISIT date, grass / irrigation on file, the visit's gauge
-// reading, the previous visit's summary. No technician notes (not stored)
-// and never the planned products.
+// reading when provided. Prior summaries and technician notes are omitted;
+// planned products never enter perception.
 function contextFor(testCase) {
   const context = { region: 'Southwest Florida' };
   // The season is the route's own classifier (lawn-assessment.getSeason) — the
@@ -231,7 +157,6 @@ function contextFor(testCase) {
   if (testCase.context?.grassType) context.grassType = testCase.context.grassType;
   if (testCase.context?.turfHeightIn != null) context.turfHeightIn = testCase.context.turfHeightIn;
   if (testCase.context?.irrigation) context.irrigation = testCase.context.irrigation;
-  if (testCase.context?.priorSummary) context.priorSummary = testCase.context.priorSummary;
   return context;
 }
 
@@ -504,7 +429,14 @@ async function runEval(cases, deps, { repeat = 1, concurrency = 2, thinkingLevel
       const photoZones = photos.map((photo) => normalizePhotoZone(photo.zone));
       const visionContext = contextFor(testCase);
       for (let i = 0; i < repeat; i += 1) {
-        const analysis = await deps.analyzeVisit({ photos, visionContext, thinkingLevel });
+        let analysis;
+        try {
+          analysis = await deps.analyzeVisit({ photos, visionContext, thinkingLevel });
+        } catch (err) {
+          skipped.push({ assessmentId: testCase.assessmentId, repeatIndex: i, reason: `analysis failed: ${err.message}` });
+          log(`skip ${testCase.assessmentId} run ${i + 1}/${repeat}: ${err.message}`);
+          break;
+        }
         results.push({ ...scoreResult(testCase, analysis), repeatIndex: i, inputHash: contextHash({ photos, photoZones, visionContext }), contextOmitted: Array.isArray(testCase.context?.omitted) ? testCase.context.omitted : [] });
         log(`${testCase.assessmentId} run ${i + 1}/${repeat}: ${analysis.status}${analysis.status === 'complete' ? ` via ${analysis.provider}${analysis.fallbackUsed ? ' (fallback)' : ''}` : ` (${analysis.reason})`} ${analysis.latencyMs} ms`);
       }
@@ -523,10 +455,7 @@ module.exports = {
   selectCases,
   contextFor,
   costUsd,
-  scrubPriorSummary,
-  scrubPii,
   provenanceLine,
-  nameCollidesWithVocabulary,
   contextOmissions,
   billedLegs,
   sumUsage,
