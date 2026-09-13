@@ -289,3 +289,25 @@ test.each(['should', 'shall', 'may', 'might', 'must'])('reported %s questions pr
   expect(assertedMatch(`Customer asked, ${auxiliary} the bait not be used around her dog?`, /bait[^.]*dog/i)).not.toBeNull();
   expect(assertedMatch(`Customer did not ask, ${auxiliary} the bait not be used around her dog?`, /bait[^.]*dog/i)).toBeNull();
 });
+
+test.each([
+  ['Customer said nothing about safety for her dog.', false],
+  ['Customer mentioned nothing about safety for her dog.', false],
+  ['Customer mentioned nothing but safety for her dog.', true],
+  ['Customer mentioned nothing except safety for her dog.', true],
+  ['Customer mentioned nothing other than safety for her dog.', true],
+])('zero-report wording differs from exclusive affirmative wording: %s', (text, asserted) => {
+  const { assertedMatch } = require('../services/eval/voice-relay-spoken-checks')._internals;
+  expect(Boolean(assertedMatch(text, /safety[^.]*dog/i))).toBe(asserted);
+});
+
+test.each([
+  "don't you have safety concerns for your dog",
+  'don’t you have safety concerns for your dog',
+  "isn't there a safety concern for your dog",
+  "wouldn't you have safety concerns for your dog",
+])('reported contracted %s questions preserve concern and reporter denial', (question) => {
+  const { assertedMatch } = require('../services/eval/voice-relay-spoken-checks')._internals;
+  expect(assertedMatch(`Customer asked, ${question}?`, /safety[^.]*dog/i)).not.toBeNull();
+  expect(assertedMatch(`Customer did not ask, ${question}?`, /safety[^.]*dog/i)).toBeNull();
+});
