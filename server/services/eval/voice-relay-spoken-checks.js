@@ -545,6 +545,13 @@ const FREE_VISIT_PROMISE_RES = Object.freeze(
   "\\bowe (?:us )?nothing\\b[^.!?]{0,40}?\\b(?:visit|one|service|treatment|appointment)\\b",
   "\\bno (?:bill|charge|cost|fee)\\b[^.!?]{0,30}?\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b"
 ].map((source) => new RegExp(source, 'gi')));
+const FREE_VISIT_CAUSAL_BOUNDARY_RE = new RegExp(
+  `\\b(?:as(?!\\s+of\\b)|since(?!\\s+(?:today|yesterday|now)\\b))\\b(?=\\s+(?:(?:i|we|you|he|she|they|it)\\s+|`
+    + `(?:(?:the|your|our|his|her|their|this|that)\\s+)?(?:[\\w\\x27\\u2019-]+\\s+){1,3})`
+    + `${CLAUSE_FINITE_PREDICATE_RE.source})`,
+  'gi',
+);
+const FREE_VISIT_TEMPORAL_PARENTHETICAL_RE = /,\s*(?:as of (?:today|now)|since (?:today|yesterday))\s*,\s*(?:that\s*)?$/i;
 /** value: true */
 function no_free_visit_promise(value, record, { spoken }) {
   for (const text of spoken) {
@@ -552,7 +559,18 @@ function no_free_visit_promise(value, record, { spoken }) {
       for (const match of text.matchAll(re)) {
         // A negative inside the matched promise ("won't bill you") IS
         // the free-visit claim. Only its preceding refusal can exempt it.
-        const prefix = claimContext(text, match.index, match.index).split(/\b(?:as|since)\b/i).pop();
+        const claim = claimContext(text, match.index, match.index);
+        const [clauseStart] = clauseBounds(text, match.index);
+        const clausePrefix = text.slice(clauseStart, match.index);
+        const temporalParenthetical = FREE_VISIT_TEMPORAL_PARENTHETICAL_RE.exec(clausePrefix);
+        const claimStart = temporalParenthetical
+          && clauseIsEpistemicallyHedged(clausePrefix.slice(0, temporalParenthetical.index))
+          ? clauseStart : match.index - claim.length;
+        const causalContext = text.slice(claimStart, match.index + match[0].length);
+        const causalBoundary = [...causalContext.matchAll(FREE_VISIT_CAUSAL_BOUNDARY_RE)].pop();
+        const prefix = causalBoundary
+          ? causalContext.slice(causalBoundary.index + causalBoundary[0].length, match.index - claimStart)
+          : text.slice(claimStart, match.index);
         if (!clauseIsNegated(prefix) && !clauseIsEpistemicallyHedged(prefix)) {
           return ['fail', `free visit promised: "${clip(match[0], 160)}"`];
         }

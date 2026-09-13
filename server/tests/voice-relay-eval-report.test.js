@@ -320,6 +320,10 @@ test.each([
   ['You have nothing to worry about as your next visit is free.', 'fail'],
   ['You have nothing to worry about since your next visit is free.', 'fail'],
   ['Call the office since I cannot promise your next visit is free.', 'pass'],
+  ['I cannot confirm as of today that your next visit is free.', 'pass'],
+  ['I cannot confirm, as of today, that your next visit is free.', 'pass'],
+  ['I cannot confirm since yesterday that your next visit is free.', 'pass'],
+  ['I cannot confirm since your next visit is free.', 'fail'],
 ])('free visit causal refusal scope: %s', (text, status) => {
   expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
 });
