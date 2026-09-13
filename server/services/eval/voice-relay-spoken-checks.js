@@ -1445,11 +1445,12 @@ function only_language(value, record, { spoken }) {
 // clause (DENIAL_CLAUSE_END_RE), so "did not raise a safety concern" denies
 // the concern, while "did not book, but asked if the bait is safe for her
 // dog" asserts it — the "but" ends the denial's clause before the concern.
-const DENIAL_WORD_RE = /\b(?:(?:not|cannot|(?:is|are|do|did|does|was|were|has|have|had|ca|could|would|wo)n[\x27\u2019]t)(?!\s+only\b)|never|denied|denies|without|no(?![-\u2010-\u2015])|neither|none|zero)\b/gi;
+const DENIAL_WORD_RE = /\b(?:(?:not|cannot|(?:is|are|do|did|does|was|were|has|have|had|ca|could|would|wo)n[\x27\u2019]t)(?!\s+only\b)|never|denied|denies|without|nothing(?!\s+(?:but|except|other than)\b)|no(?![-\u2010-\u2015])|neither|none|zero)\b/gi;
 // Commas may enclose an aside and "and" may coordinate denied objects.
 // End their scope only when the next phrase starts a fresh assertion.
 const CAPTURE_NOUN_ASSERTION_START_SOURCE = `(?:[\\w\\x27\\u2019-]+\\s+){1,5}${CLAUSE_FINITE_PREDICATE_RE.source}`;
 const CAPTURE_ASSERTION_START_SOURCE = `(?:(?:(?:the )?(?:caller|customer)|she|he|they)\\s+\\w+|(?:never\\s+)?(?:asked|asks|raised|raises|expressed|expresses|mentioned|mentions|reported|reports|voiced|voices|denied|denies|noting|noted|adding|added|did|does|do|is|are|was|were|has|have|had)\\b|${CAPTURE_NOUN_ASSERTION_START_SOURCE})`;
+const REPORTED_QUESTION_AUX_SOURCE = `(?:${QUESTION_AUX_RE_SOURCE}|\\w+n[\\x27\\u2019]t)`;
 const DENIAL_CLAUSE_END_RE = new RegExp(`[.;!?—–]|\\s-\\s|\\b(?:but|because|however|although|though|so|while|yet)\\b|(?::|,|\\band\\b)\\s*(?:(?:then|also)\\s+)*(?=${CAPTURE_ASSERTION_START_SOURCE})`, 'gi');
 /** [[start, end), …) — the ranges of `text` a denial word governs. */
 function deniedSpans(text) {
@@ -1476,7 +1477,7 @@ function deniedSpans(text) {
     }
     const assertionPrefix = prefix.slice(assertionStart);
     const indirectQuestion = /\b(?:asked|asks|asking|wondered|wonders)\b[^.;!?]*\b(?:if|whether)\b/i.test(assertionPrefix);
-    const directQuestion = prefix.match(new RegExp(`\\b(?:asked|asks|asking|wondered|wonders)\\b\\s*,\\s*${QUESTION_AUX_RE_SOURCE}\\b[^.;!?]*$`, 'i'));
+    const directQuestion = text.slice(0, m.index + m[0].length).match(new RegExp(`\\b(?:asked|asks|asking|wondered|wonders)\\b\\s*,\\s*${REPORTED_QUESTION_AUX_SOURCE}\\b[^.;!?]*$`, 'i'));
     let directQuestionExempt = false;
     if (directQuestion) {
       let reporterStart = 0;
@@ -1507,7 +1508,7 @@ function deniedSpans(text) {
     // assertion when the reporting verb itself is denied: "did not ask,
     // is it safe?". The question mark still closes that denied complement.
     while (end && /^,/.test(end[0])
-      && QUESTION_LEAD_RE.test(text.slice(end.index + end[0].length))
+      && new RegExp(`^\\s*${REPORTED_QUESTION_AUX_SOURCE}\\b`, 'i').test(text.slice(end.index + end[0].length))
       && /\b(?:ask|asked|asks|asking|wonder|wondered|wonders|wondering)\s*$/i.test(text.slice(m.index + m[0].length, end.index))) {
       end = DENIAL_CLAUSE_END_RE.exec(text);
     }
