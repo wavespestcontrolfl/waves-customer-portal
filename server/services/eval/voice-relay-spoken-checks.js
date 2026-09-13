@@ -1237,6 +1237,7 @@ const REPORT_UNCERTAINTY_RE = /\b(?:can|must|may|might|could|would|should|will|s
 const REPORT_INSTRUCTION_RE = /(?:^|,\s*)(?:please\s+)?(?:apply|use|put|treat|spray|place)\b|\b(?:please|make sure|ensure|remember to)\b/i;
 const REPORT_FINDING_VERB_RE = /\b(?:applied|placed|used|treated|sprayed|put|went|got|received)\b/i;
 const REPORT_PARTICIPLE_RE = /^(?:applied|placed|used|treated|sprayed|put|received)$/i;
+const REPORT_LOCATION_RECIPIENT_VERB_RE = /^(?:got|received)$/i;
 const REPORT_COMPLETED_PASSIVE_RE = /\b(?:(?:was|were|got)|(?:has|have|had)(?:\s+(?:\w+ly|already|just|now))*\s+been)\s+(?:(?:\w+ly|already|just|now)\s+)*$/i;
 const REPORT_NONCOMPLETION_GOVERNOR_RE = /(?:\b(?:supposed|expected|required|meant|scheduled|instructed|asked|told|directed|ordered|needed|intended|planned|ought)\s+to(?:\s+(?:\w+ly|already|just|now))*(?:\s+have(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?)?(?:\s+(?:\w+ly|already|just|now))*|\bplan(?:s|ned|ning)?\s+on\s+having(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?(?:\s+(?:\w+ly|already|just|now))*)\s*$/i;
 const REPORT_NONCOMPLETION_MODIFIER_RE = /\b(?:almost|nearly)(?:\s+(?:has|have|had|was|were|got|been)){0,2}\s*$/i;
@@ -1284,8 +1285,11 @@ function reportHasAlternativeLocation(affirmed, locationAt, orTail) {
 // Talstar", and "Talstar was nearly applied" do not establish completion.
 // Otherwise, an active past treatment places its predicate before the matched
 // product, while a participle after it needs a completed passive auxiliary.
-function reportHasCompletedFinding(affirmed, subjectAt, subjectLength, findingVerb) {
+function reportHasCompletedFinding(affirmed, subjectAt, subjectLength, locationAt, findingVerb) {
   if (subjectAt < 0 || !findingVerb) return false;
+  // "The perimeter received Talstar" describes treatment at the location;
+  // "the technician received Talstar for the perimeter" describes custody.
+  if (REPORT_LOCATION_RECIPIENT_VERB_RE.test(findingVerb[0]) && locationAt > findingVerb.index) return false;
   const predicateIntroduction = affirmed.slice(0, findingVerb.index);
   if (REPORT_NONCOMPLETION_GOVERNOR_RE.test(predicateIntroduction)
       || REPORT_NONCOMPLETION_MODIFIER_RE.test(predicateIntroduction)) return false;
@@ -1345,7 +1349,7 @@ function report_readback_confirms(value, record, { spoken }) {
       // start with a finding term and connect it to its location; a caller
       // question or a list of terms is not such a summary.
       const findingVerb = REPORT_FINDING_VERB_RE.exec(affirmed);
-      const completedFinding = reportHasCompletedFinding(affirmed, subjectAt, m[0].length, findingVerb);
+      const completedFinding = reportHasCompletedFinding(affirmed, subjectAt, m[0].length, locationAt, findingVerb);
       const conciseFinding = reportHasConciseFinding(affirmed, subjectAt, locationAt, findingVerb);
       // Modals and uncertainty govern the treatment only through its matched
       // evidence. A later explanatory clause ("which you can see" or "as the
