@@ -119,6 +119,12 @@ describe('voice relay eval — capture_lead_input_asserts', () => {
     ['Customer did not ask, customer raised a safety concern for her dog.', 'pass'],
     ['Customer did not ask, is the bait safe for her dog? Customer later raised a safety concern for her dog.', 'pass'],
     ['Customer asked if an appointment was available and did not raise safety concerns for her dog.', 'fail'],
+    ['Customer asked whether slots were available and denied safety concerns for her dog.', 'fail'],
+    ['Customer asked, are slots available, and denied safety concerns for her dog.', 'fail'],
+    ['Customer asked, are slots available and never raised safety concerns for her dog.', 'fail'],
+    ['Customer asked whether slots were available and never raised safety concerns for her dog.', 'fail'],
+    ['Customer asked whether the bait was safe and never mentioned a safety concern for her dog.', 'fail'],
+    ['Customer asked whether the bait was safe for ants and not safe for her dog.', 'pass'],
     ['Customer asked whether an appointment was available, noting there were no safety concerns for her dog.', 'fail'],
   ])('capture_lead_input_asserts grades the concern as asserted, not merely mentioned — %s', (summary, status) => {
     const check = runCheck(exp('capture_lead_input_asserts', PET_CONCERN, 'critical'), captured(summary));
