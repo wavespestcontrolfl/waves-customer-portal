@@ -76,6 +76,7 @@ describe('voice relay eval — callback commitment core', () => {
     [RUTH, 'We will call her shortly if she agrees.', 'pass'],
     [RUTH, 'We will contact her next week.', 'fail'],
     [RUTH, 'We will contact her next Tuesday.', 'fail'],
+    [RUTH, 'We will contact her Monday.', 'fail'],
     [RUTH, 'We will call her and email you.', 'fail'],
     [RUTH, 'The office will contact Ruth so she can confirm.', 'fail'],
     [RUTH, 'We will call her but cannot email you.', 'fail'],
@@ -171,6 +172,7 @@ describe('voice relay eval — callback commitment core', () => {
     ['Ruth will be contacted by the office irrespective of whether she agrees or not.', 'fail'],
     ['We will not call her even if she refuses.', 'pass'],
     ['We will not call her regardless of consent.', 'pass'],
+    ['I cannot promise we will call her regardless of consent.', 'pass'],
   ])('no_account_holder_callback preserves callback ownership and complete participants: %s', (text, status) => {
     expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
   });

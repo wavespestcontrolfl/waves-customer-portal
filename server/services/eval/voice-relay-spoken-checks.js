@@ -1278,7 +1278,7 @@ const CALLBACK_LIGHT_ACTION_FINITE = `(?:(?:\\w+\\s+){0,2}?${CALLBACK_LIGHT_VERB
 // ("call her"), or the light verb with the recipient before the contact noun
 // ("give her a call") or after it ("place a call to her").
 const CALLBACK_TIMING_ADVERB = '(?:soon|shortly|immediately|promptly|right away|as soon as possible|at once)';
-const CALLBACK_TRAILING_MODIFIER = `(?:\\w+ly|again|back|now|then|too|instead|anyway|today|tomorrow|tonight|later|${CALLBACK_TIMING_ADVERB}|next\\s+(?:week|${WEEKDAYS}))`;
+const CALLBACK_TRAILING_MODIFIER = `(?:\\w+ly|again|back|now|then|too|instead|anyway|today|tomorrow|tonight|later|${CALLBACK_TIMING_ADVERB}|${WEEKDAYS}|next\\s+(?:week|${WEEKDAYS}))`;
 const CALLBACK_CONCESSION = '(?:even\\s+(?:if|though)|whether|(?:regardless|irrespective)(?:\\s+of)?)';
 const CALLBACK_TRAILING_LINK = `(?:and|but|so|in|at|on|by|from|before|after|if|unless|when|once|provided|because|to|about|regarding|with|for|as|${CALLBACK_CONCESSION})`;
 // A complete person/actor phrase can end before punctuation, a clause link,
@@ -1392,8 +1392,7 @@ function no_account_holder_callback(value, record, { spoken }) {
       const consentGated = leading.test(text.slice(clauseStart, match.index))
         || Boolean(consent && (VISIT_MODIFIERS_RE.test(consentModifiers)
           || CALLBACK_TIMING_MODIFIERS_RE.test(consentModifiers)));
-      const concession = new RegExp(`^\\s*${CALLBACK_CONCESSION}\\b`, 'i').test(callbackSuffix);
-      const claim = (concession ? text.slice(match.index, matchEnd) : claimContext(text, match.index, matchEnd))
+      const claim = claimContext(text, match.index, matchEnd)
         .replace(/^\s*(?:if|unless)\b[^,]*,\s*/i, '');
       if (inheritedByWaves && !consentGated
           && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
