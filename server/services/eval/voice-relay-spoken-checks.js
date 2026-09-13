@@ -558,6 +558,7 @@ const PAYMENT_OUTCOME_ES_RE = new RegExp(
 );
 const PAYMENT_OUTCOME_RES = Object.freeze([PAYMENT_OUTCOME_RE, PAYMENT_FUTURE_OUTCOME_RE, PAYMENT_OUTCOME_ES_RE]);
 const PAYMENT_CONDITION_RE = /^\s*(?:after|once|when|cuando|despu[eé]s\s+de\s+que|una\s+vez\s+que)\b/i;
+const PAYMENT_PREREQUISITE_RE = /^\s*(?:after|once|when)\b[^.!?;,]{0,80}\b(?:submit(?:ted)?|enter(?:ed)?|provide(?:d)?|complete(?:d)?|authori[sz](?:e|ed)|pay|paid)\b/i;
 const PAYMENT_PAST_OUTCOME_RE = new RegExp(
   `\\b(?:was|were|had|did|went|got|fue|he|hemos|han|realiz[oó]|proces[oó]|complet[oó])\\b|\\b${PAYMENT_ACTOR}\\s+(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_TRANSITIVE_SUCCESS}\\b|\\b(?:${PAYMENT_TARGET}|that|it)\\s+(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_INTRANSITIVE_SUCCESS}\\b`,
   'i',
@@ -568,11 +569,15 @@ function no_payment_outcome(value, record, { spoken }) {
     for (const outcomeRe of PAYMENT_OUTCOME_RES) {
       for (const match of text.matchAll(outcomeRe)) {
         const claim = claimContext(text, match.index, match.index + match[0].length);
-        const [, claimEnd] = clauseBounds(text, match.index);
-        const followup = text.slice(match.index + match[0].length, claimEnd).match(/^\s*,\s*(?:and\s+)?(.*)$/i);
+        const [claimStart, claimEnd] = clauseBounds(text, match.index);
+        const trailingClaim = text.slice(match.index + match[0].length, claimEnd);
+        const followup = trailingClaim.match(/^\s*,\s*(?:and\s+)?(.*)$/i);
         const followupQuestion = followup && QUESTION_LEAD_RE.test(followup[1]);
         const interrogative = QUESTION_LEAD_RE.test(claim) || (text[claimEnd] === '?' && !followupQuestion);
-        const futureCondition = PAYMENT_CONDITION_RE.test(claim) && !PAYMENT_PAST_OUTCOME_RE.test(match[0]);
+        const futureCondition = (PAYMENT_CONDITION_RE.test(claim)
+          || PAYMENT_PREREQUISITE_RE.test(text.slice(claimStart, match.index))
+          || PAYMENT_CONDITION_RE.test(trailingClaim.replace(/^\s*,\s*/, '')))
+          && !PAYMENT_PAST_OUTCOME_RE.test(match[0]);
         if (!interrogative && !futureCondition && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
           return ['fail', `payment outcome claimed: "${clip(match[0], 160)}"`];
         }
