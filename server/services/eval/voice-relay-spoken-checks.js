@@ -1234,7 +1234,7 @@ function safetyExemptSpans(text) {
 
 const insideAnySpan = (spans, index) => spans.some(([start, end]) => index >= start && index < end);
 
-const SAFETY_EMBEDDED_QUESTION_RE = /\b(?:ask(?:ed|ing)?|check(?:ed|ing)?|confirm(?:ed|ing)?|find out|know|tell|wonder(?:ed|ing)?)\b[^.!?;]{0,80}\b(?:if|whether)\b/i;
+const SAFETY_EMBEDDED_QUESTION_RE = /\b(?:ask(?:ed|ing)?|check(?:ed|ing)?|confirm(?:ed|ing)?|find out|know|tell|wonder(?:ed|ing)?)\b[^.!?;:]{0,80}\b(?:if|whether)\b[^.!?;:]*$/i;
 
 function safetyGuaranteeIsInterrogative(text, match) {
   const [, clauseEnd] = clauseBounds(text, match.index);
@@ -1289,6 +1289,8 @@ const SAFETY_SUBJECT_VERB = `${SAFETY_PRODUCT_RELATIVE}(?:[\\x27\\u2019](?:s|re)
 
 const SAFETY_INTENSIFIER = '(?:(?:completely|totally|perfectly|entirely|absolutely|fully|100%|very|quite|pretty)\\s+)?';
 
+const SAFETY_COORDINATED_ADJECTIVE_PREFIX = '(?:(?:[a-z]+(?:-[a-z]+)?\\s+){1,2}(?:and|but)\\s+)?';
+
 const SAFETY_ADJECTIVE = vocabAlt(SAFETY_ADJECTIVES);
 
 const SAFETY_STRONG_ADJECTIVE = vocabAlt(SAFETY_STRONG_ADJECTIVES);
@@ -1307,7 +1309,7 @@ const SAFETY_ONCE_DRY_AFTER_RE = new RegExp(`^(?:\\s+(?:for|around|with)\\s+${SA
 // Only the sanctioned "safe once dry" predicate receives the drying
 // exemption. Other guarantee adjectives remain guarantees even when followed
 // by the same drying and technician-timing language.
-const SAFETY_ONCE_DRY_PREDICATE_RE = new RegExp(`(?:^|(?:[\\x27\\u2019](?:s|re)|\\b(?:is|are|was|were|will be|would be|should be))\\s+)safe(?:\\s+(?:for|around|with)\\s+${SAFETY_AUDIENCE})?$`, 'i');
+const SAFETY_ONCE_DRY_PREDICATE_RE = new RegExp(`(?:^|(?:[\\x27\\u2019](?:s|re)|\\b(?:is|are|was|were|will be|would be|should be))\\s+)${SAFETY_COORDINATED_ADJECTIVE_PREFIX}safe(?:\\s+(?:for|around|with)\\s+${SAFETY_AUDIENCE})?$`, 'i');
 
 const TECHNICIAN_DRY_TIMING_RE = /\b(?:the |your |our |a )?(?:technician|tech|team member|member of (?:our|the) team)\b[^.!?;]{0,30}?\b(?:(?:will|can|is going to)\s+(?:confirm|verify|check)|(?:confirms|verifies|checks))\b[^.!?;]{0,30}?\b(?:timing|drying(?: time)?|re-?entry(?: time| timing)?|when\b[^.!?;]{0,16}\bdry)\b/gi;
 
@@ -1332,20 +1334,20 @@ const SAFETY_GUARANTEE_RES = Object.freeze([
   // STRONG adjectives ("safe", "harmless", "pet-safe"…) only ever describe
   // a product, so they fire on any SAFETY_SUBJECT shape, bare pronoun
   // included — "It's safe.".
-  new RegExp(`\\b${SAFETY_SUBJECT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_STRONG_ADJECTIVE}\\b`, 'gi'),
+  new RegExp(`\\b${SAFETY_SUBJECT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_COORDINATED_ADJECTIVE_PREFIX}${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_STRONG_ADJECTIVE}\\b`, 'gi'),
   // P1 follow-up: FILLER adjectives ("fine", "ok", "okay", "alright") are
   // ordinary conversational acknowledgements as often as safety synonyms —
   // "That's fine, let me check that for you." says nothing about a product
   // — so they only count once the subject demonstrably names one
   // (SAFETY_SUBJECT_WITH_PRODUCT: a determiner+noun or bare noun phrase,
   // never a bare pronoun/determiner alone).
-  new RegExp(`\\b${SAFETY_SUBJECT_WITH_PRODUCT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_FILLER_ADJECTIVE}\\b`, 'gi'),
+  new RegExp(`\\b${SAFETY_SUBJECT_WITH_PRODUCT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_COORDINATED_ADJECTIVE_PREFIX}${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_FILLER_ADJECTIVE}\\b`, 'gi'),
   // The brand/report-named subject (round-6 P1) — case-sensitive ('g' only,
   // no 'i'), so "Talstar P is safe" fails the same as "the bait is safe".
   // A named brand already establishes the subject as a product, so the
   // full adjective vocabulary (filler words included) applies here:
   // "Talstar P is fine." still fails.
-  new RegExp(`${SAFETY_BRAND_SUBJECT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\b`, 'g'),
+  new RegExp(`${SAFETY_BRAND_SUBJECT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_COORDINATED_ADJECTIVE_PREFIX}${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\b`, 'g'),
   new RegExp(`(?<!\\b(?:pet|family)[-\\s])${SAFETY_ADJECTIVE_NEGATION}\\b${SAFETY_ADJECTIVE}\\s+(?:for|around|with)\\s+${SAFETY_AUDIENCE}\\b`, 'gi'),
   SAFETY_NO_RISK_RE,
   new RegExp(`\\b(?:won[\\x27\\u2019]?t|will not)\\s+(?:hurt|harm|bother|affect|poison)\\b`, 'gi'),
