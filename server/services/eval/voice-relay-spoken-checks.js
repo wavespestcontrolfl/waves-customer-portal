@@ -543,7 +543,7 @@ const PAYMENT_INTRANSITIVE_SUCCESS = '(?:cleared|posted)';
 const PAYMENT_FUTURE_ACTION = '(?:process|charge|accept|approve|complete|receive|clear|post)';
 const PAYMENT_FUTURE_ACTOR_AUX = `(?:(?:\\s+(?:will|should)|[\\x27\\u2019]ll)\\s+|(?:\\s+(?:am|is|are)|[\\x27\\u2019]m)\\s+going\\s+to\\s+)`;
 const PAYMENT_OUTCOME_RE = new RegExp(
-  `\\b(?:${PAYMENT_ACTOR}(?:(?:\\s+(?:have|has|had)(?:n[\\x27\\u2019]t)?|[\\x27\\u2019](?:ve|d))\\s+|\\s+)(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_TRANSITIVE_SUCCESS}\\s+(?:(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET}|${PAYMENT_AMOUNT}\\s+to\\s+(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET})|(?:${PAYMENT_TARGET}|that|it)(?:(?:\\s+(?:has|had|did)(?:n[\\x27\\u2019]t)?|[\\x27\\u2019](?:s|d))\\s+|\\s+)(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:go|goes|went|gone) through|(?:${PAYMENT_TARGET}|that|it)[\\x27\\u2019]s\\s+(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:been\\s+${PAYMENT_SUCCESS_ADVERBS})?${PAYMENT_RESULT_STATE}|(?:${PAYMENT_TARGET}|that|it) (?:(?:(?:is|was|got|went) (?:not )?|(?:has|had) (?:not )?${PAYMENT_SUCCESS_ADVERBS}been ))${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_RESULT_STATE}|(?:${PAYMENT_TARGET}|that|it)(?:(?:\\s+(?:has|had)(?:n[\\x27\\u2019]t)?|[\\x27\\u2019]s)\\s+|\\s+)(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}succeeded|(?:${PAYMENT_TARGET}|that|it)\\s+(?:(?:has|had)\\s+)?(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_INTRANSITIVE_SUCCESS}(?:\\s+successfully)?|(?:${PAYMENT_TARGET})\\s+(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_RESULT_STATE}|you[\\x27\\u2019]re all paid)\\b`,
+  `\\b(?:${PAYMENT_ACTOR}(?:(?:\\s+(?:have|has|had)(?:n[\\x27\\u2019]t)?|[\\x27\\u2019](?:ve|d))\\s+|\\s+)(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_TRANSITIVE_SUCCESS}\\s+(?:(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET}|${PAYMENT_AMOUNT}\\s+to\\s+(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET})|(?:${PAYMENT_TARGET}|that|it)(?:(?:\\s+(?:has|had|did)(?:n[\\x27\\u2019]t)?|[\\x27\\u2019](?:s|d))\\s+|\\s+)(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:go|goes|went|gone) through|(?:${PAYMENT_TARGET}|that|it)[\\x27\\u2019]s\\s+(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:been\\s+${PAYMENT_SUCCESS_ADVERBS})?${PAYMENT_RESULT_STATE}|(?:${PAYMENT_TARGET}|that|it) (?:(?:(?:is|was|got|went) (?:not(?: only)? )?|(?:has|had) (?:not )?${PAYMENT_SUCCESS_ADVERBS}been ))${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_RESULT_STATE}|(?:${PAYMENT_TARGET}|that|it)(?:(?:\\s+(?:has|had)(?:n[\\x27\\u2019]t)?|[\\x27\\u2019]s)\\s+|\\s+)(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}succeeded|(?:${PAYMENT_TARGET}|that|it)\\s+(?:(?:has|had)\\s+)?(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_INTRANSITIVE_SUCCESS}(?:\\s+successfully)?|(?:${PAYMENT_TARGET})\\s+(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_RESULT_STATE}|you[\\x27\\u2019]re all paid)\\b`,
   'gi',
 );
 const PAYMENT_FUTURE_OUTCOME_RE = new RegExp(
@@ -570,7 +570,8 @@ const PAYMENT_PAST_OUTCOME_RE = new RegExp(
   'i',
 );
 function paymentOutcomeIsNegated(claim, match) {
-  if (/\b(?:not|never)\b|\b\w+n[\x27\u2019]t\b/i.test(match[0])) return true;
+  const matchedClaim = match[0].replace(/\bnot only\b/gi, '');
+  if (/\b(?:not|never)\b|\b\w+n[\x27\u2019]t\b/i.test(matchedClaim)) return true;
   const matchOffset = claim.toLowerCase().lastIndexOf(match[0].toLowerCase());
   if (matchOffset < 0) return false;
   const prefix = claim.slice(0, matchOffset);
@@ -584,6 +585,18 @@ function paymentOutcomeIsConditional(claim, match) {
   return /^\s*(?:if|unless|whether(?:\s+or\s+not)?)\b/i.test(claim)
     || /\b(?:if|unless|whether(?:\s+or\s+not)?)\s+(?:(?:your|the|that|this|a)\s+)?$/i.test(prefix);
 }
+function paymentOutcomeIsInterrogative(text, claim, matchEnd, claimEnd) {
+  const trailingClaim = text.slice(matchEnd, claimEnd);
+  const followup = trailingClaim.match(/^\s*,\s*(?:and\s+)?(.*)$/i);
+  const followupQuestion = followup && QUESTION_LEAD_RE.test(followup[1]);
+  return QUESTION_LEAD_RE.test(claim) || (text[claimEnd] === '?' && !followupQuestion);
+}
+function paymentOutcomeHasTemporalCondition(text, claim, claimStart, match, trailingClaim) {
+  return (PAYMENT_CONDITION_RE.test(claim)
+    || PAYMENT_PREREQUISITE_RE.test(text.slice(claimStart, match.index))
+    || PAYMENT_CONDITION_RE.test(trailingClaim.replace(/^\s*,\s*/, '')))
+    && !PAYMENT_PAST_OUTCOME_RE.test(match[0]);
+}
 /** value: true */
 function no_payment_outcome(value, record, { spoken }) {
   for (const text of spoken) {
@@ -591,14 +604,10 @@ function no_payment_outcome(value, record, { spoken }) {
       for (const match of text.matchAll(outcomeRe)) {
         const claim = claimContext(text, match.index, match.index + match[0].length);
         const [claimStart, claimEnd] = clauseBounds(text, match.index);
-        const trailingClaim = text.slice(match.index + match[0].length, claimEnd);
-        const followup = trailingClaim.match(/^\s*,\s*(?:and\s+)?(.*)$/i);
-        const followupQuestion = followup && QUESTION_LEAD_RE.test(followup[1]);
-        const interrogative = QUESTION_LEAD_RE.test(claim) || (text[claimEnd] === '?' && !followupQuestion);
-        const futureCondition = (PAYMENT_CONDITION_RE.test(claim)
-          || PAYMENT_PREREQUISITE_RE.test(text.slice(claimStart, match.index))
-          || PAYMENT_CONDITION_RE.test(trailingClaim.replace(/^\s*,\s*/, '')))
-          && !PAYMENT_PAST_OUTCOME_RE.test(match[0]);
+        const matchEnd = match.index + match[0].length;
+        const trailingClaim = text.slice(matchEnd, claimEnd);
+        const interrogative = paymentOutcomeIsInterrogative(text, claim, matchEnd, claimEnd);
+        const futureCondition = paymentOutcomeHasTemporalCondition(text, claim, claimStart, match, trailingClaim);
         const exempt = [interrogative, futureCondition, paymentOutcomeIsConditional(claim, match),
           paymentOutcomeIsNegated(claim, match), clauseIsEpistemicallyHedged(claim)].some(Boolean);
         if (!exempt) {
@@ -611,9 +620,12 @@ function no_payment_outcome(value, record, { spoken }) {
       if (PAYMENT_INTERVENING_SUBJECT_RE.test(bridge)) continue;
       const predicateStart = match.index + match[0].lastIndexOf(predicate);
       const subjectClaim = claimContext(text, match.index, predicateStart + predicate.length);
-      const [, predicateEnd] = clauseBounds(text, predicateStart);
-      const interrogative = QUESTION_LEAD_RE.test(subjectClaim) || text[predicateEnd] === '?';
-      const conditional = /^\s*(?:if|unless|after|once|when)\b/i.test(subjectClaim);
+      const [claimStart, predicateEnd] = clauseBounds(text, predicateStart);
+      const matchEnd = predicateStart + predicate.length;
+      const trailingClaim = text.slice(matchEnd, predicateEnd);
+      const interrogative = paymentOutcomeIsInterrogative(text, subjectClaim, matchEnd, predicateEnd);
+      const conditional = paymentOutcomeIsConditional(subjectClaim, match)
+        || paymentOutcomeHasTemporalCondition(text, subjectClaim, claimStart, match, trailingClaim);
       if (!interrogative && !conditional && !clauseIsEpistemicallyHedged(subjectClaim)) {
         return ['fail', `payment outcome claimed: "${clip(predicate, 160)}"`];
       }

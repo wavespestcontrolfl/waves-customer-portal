@@ -187,6 +187,11 @@ describe('voice relay eval — payment outcomes', () => {
     ['I need to determine whether your payment was processed.', 'pass'],
     ['If you need anything, call us. Your payment was processed.', 'fail'],
     ['I checked whether anything changed, and your payment was processed.', 'fail'],
+    ['When your payment failed yesterday but was approved, we sent a receipt.', 'fail'],
+    ['Your payment was declined but is now approved, would you like a receipt?', 'fail'],
+    ['Your payment is not only approved but complete.', 'fail'],
+    ['Your payment is not approved.', 'pass'],
+    ['Is your payment not only approved but complete?', 'pass'],
   ])('round-five payment regressions: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
   });
