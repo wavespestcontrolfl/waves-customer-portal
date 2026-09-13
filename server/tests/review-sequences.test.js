@@ -1761,6 +1761,23 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(request.sendOutcome).toEqual({ sent: false, failed: 'request_not_sendable', nextAllowedAt: null });
     });
 
+    test('a reconciliation-only send is reported as uncertain, never as an automatic retry', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'unc-tech', first_name: 'Ona', phone: '+19410000168', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-unc-tech', customer_id: 'unc-tech', service_record_id: 'sr-unc-tech', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'unc-tech-token', location_id: 'venice', triggered_by: 'tech', created_at: new Date() }],
+      });
+      db.mockImplementation(mock);
+      mockSendCustomerMessage.mockImplementationOnce(async () => {
+        mock.__state.rows.review_requests[0].status = 'sending';
+        return { sent: false, code: 'PROVIDER_FAILURE', retryable: true };
+      });
+
+      const request = await ReviewService.create({ customerId: 'unc-tech', serviceRecordId: 'sr-unc-tech', triggeredBy: 'tech' });
+
+      expect(request.sendOutcome).toEqual({ sent: false, uncertain: true, nextAllowedAt: null });
+      expect(mock.__state.rows.review_requests[0].status).toBe('sending');
+    });
+
     test('a repaired already-delivered ask is reported DELIVERED to /tech-trigger, not as an unsent failure', async () => {
       // The opposite error from the unsent-outcome rule above: the earlier
       // attempt WAS accepted, so the customer holds this ask. Reporting it
