@@ -374,6 +374,18 @@ describe('voice relay eval — payment outcomes', () => {
     ["Jamás hemos procesado su pago.", 'pass'],
     ["Nunca hemos recibido su pago, pero su tarjeta fue cargada.", 'fail'],
     ["Nunca le hemos cobrado su tarjeta.", 'pass'],
+    ["Ya procesé su pago.", 'fail'],
+    ["Ya cobré su tarjeta.", 'fail'],
+    ["Su pago se procesó.", 'fail'],
+    ["No procesé su pago.", 'pass'],
+    ["Nunca cobré su tarjeta.", 'pass'],
+    ["No puedo confirmar que procesé su pago.", 'pass'],
+    ["¿Procesé su pago?", 'pass'],
+    ["Su pago no se procesó.", 'pass'],
+    ["¿Su pago se procesó?", 'pass'],
+    ["Cuando procesé su pago ayer, enviamos el recibo.", 'fail'],
+    ["Recibimos su pago.", 'fail'],
+    ["Cargué su tarjeta.", 'fail'],
   ])('current-head review regressions: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
   });
