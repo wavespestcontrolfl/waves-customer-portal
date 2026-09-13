@@ -534,9 +534,14 @@ function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)
 // it anchored to the matched assertion so a denial about another proposition
 // cannot exempt a later promise or erase a later report readback.
 const EXPLICIT_PROPOSITION_DENIAL_RE = /\b(?:it|this|that)\s+(?:is|was)\s+(?:false|not\s+true|untrue)\s+that\s*$/i;
-function propositionIsExplicitlyDenied(text, at) {
+function propositionIsExplicitlyDenied(text, at, findingVerb) {
   const [start] = clauseBounds(text, at);
-  return EXPLICIT_PROPOSITION_DENIAL_RE.test(text.slice(start, at));
+  const prefix = text.slice(start, at);
+  if (EXPLICIT_PROPOSITION_DENIAL_RE.test(prefix)) return true;
+  if (!findingVerb || findingVerb.index >= at) return false;
+  const actorPrefix = text.slice(start, findingVerb.index);
+  const actor = /\b(?:(?:i|we|he|she|they)|(?:(?:the|our|a)\s+)?(?:technician|tech|crew|team))(?:\s+(?:has|have|had|already|just|actually))*\s*$/i.exec(actorPrefix);
+  return Boolean(actor && EXPLICIT_PROPOSITION_DENIAL_RE.test(actorPrefix.slice(0, actor.index)));
 }
 
 // Free-visit claims retain their existing vocabulary, but refusal scope is
@@ -1495,7 +1500,7 @@ function reportHasConciseFinding(affirmed, subjectAt, subjectLength, locationAt,
 // governs it, so a later independent affirmative assertion remains usable.
 function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb, precedingText) {
   if (REPORT_SHARED_LIST_CONDITION_RE.test(precedingText)) return true;
-  if (propositionIsExplicitlyDenied(affirmed, Math.min(subjectAt, locationAt))) return true;
+  if (propositionIsExplicitlyDenied(affirmed, Math.min(subjectAt, locationAt), findingVerb)) return true;
   if (clauseIsNegated(claim) || clauseIsEpistemicallyHedged(claim)) return true;
   const precedingClause = precedingText.split(/[.!?;]/).pop();
   const sharedFindingVerb = [...precedingClause.matchAll(new RegExp(REPORT_FINDING_VERB_RE.source, 'gi'))].pop();

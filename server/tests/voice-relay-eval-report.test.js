@@ -3,6 +3,10 @@ const report = { subject: 'talstar p', location: 'exterior perimeter' };
 
 test.each([
   ['Talstar P was applied to the exterior perimeter.', 'pass'],
+  ['It is false that we applied Talstar P to the exterior perimeter.', 'fail'],
+  ['It is not true that the technician applied Talstar P to the exterior perimeter.', 'fail'],
+  ['It is false that we applied bait indoors, but we applied Talstar P to the exterior perimeter.', 'pass'],
+  ['It is false that we forgot the report. We applied Talstar P to the exterior perimeter.', 'pass'],
   ['Talstar P, according to the report, was applied to the exterior perimeter.', 'pass'],
   ['The technician applied Talstar P to the exterior perimeter.', 'pass'],
   ['The technician used Talstar P to treat the exterior perimeter.', 'pass'],
