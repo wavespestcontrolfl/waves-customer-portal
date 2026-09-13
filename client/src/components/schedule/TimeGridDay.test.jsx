@@ -213,6 +213,27 @@ describe('TimeGridDay closeout-owed chip', () => {
   });
 });
 
+describe('TimeGridDay protocol opener', () => {
+  it('focuses the trigger before opening the protocol panel', () => {
+    let focusedAtOpen = null;
+    const onProtocol = vi.fn(() => { focusedAtOpen = document.activeElement; });
+    render(
+      <TimeGridDay
+        date="2026-07-15"
+        services={[SERVICES[0]]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+        onProtocol={onProtocol}
+      />,
+    );
+
+    const trigger = screen.getByRole('button', { name: 'Open protocol' });
+    fireEvent.click(trigger);
+
+    expect(onProtocol).toHaveBeenCalledWith(SERVICES[0]);
+    expect(focusedAtOpen).toBe(trigger);
+  });
+});
+
 describe('TimeGridDay all-day closeout-owed chip', () => {
   it('routes the all-day chip through onEdit even though the stop button opens the customer profile', () => {
     const onEdit = vi.fn();

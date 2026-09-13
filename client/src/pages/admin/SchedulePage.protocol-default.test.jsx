@@ -1,10 +1,73 @@
 // @vitest-environment jsdom
 import React from 'react';
-import { afterEach, expect, it, vi } from 'vitest';
-import { cleanup, render, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { ProtocolPanel } from './SchedulePage';
 
+beforeEach(() => { vi.stubGlobal('scrollTo', vi.fn()); });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+function ProtocolHarness() {
+  const [open, setOpen] = React.useState(false);
+  return <>
+    <button
+      type="button"
+      onClick={(event) => {
+        event.currentTarget.focus({ preventScroll: true });
+        setOpen(true);
+      }}
+    >
+      Open protocol
+    </button>
+    {open && (
+      <ProtocolPanel
+        service={{ id: 'test-visit', serviceType: 'Pest Control', customerName: 'Test Customer' }}
+        onClose={() => setOpen(false)}
+      />
+    )}
+  </>;
+}
+
+it('traps focus, closes on Escape, restores the opener, and locks background scrolling', () => {
+  vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+  render(<ProtocolHarness />);
+
+  const opener = screen.getByRole('button', { name: 'Open protocol' });
+  fireEvent.click(opener);
+
+  const dialog = screen.getByRole('dialog', { name: 'Service Protocol' });
+  expect(dialog.getAttribute('aria-modal')).toBe('true');
+  expect(document.activeElement).toBe(dialog);
+  expect(document.body.style.position).toBe('fixed');
+
+  const buttons = within(dialog).getAllByRole('button');
+  const first = buttons[0];
+  const last = buttons[buttons.length - 1];
+  last.focus();
+  fireEvent.keyDown(last, { key: 'Tab' });
+  expect(document.activeElement).toBe(first);
+  first.focus();
+  fireEvent.keyDown(first, { key: 'Tab', shiftKey: true });
+  expect(document.activeElement).toBe(last);
+
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  expect(screen.queryByRole('dialog', { name: 'Service Protocol' })).toBeNull();
+  expect(document.activeElement).toBe(opener);
+  expect(document.body.style.position).toBe('');
+});
+
+it('closes from the backdrop and restores the opener', () => {
+  vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+  render(<ProtocolHarness />);
+
+  const opener = screen.getByRole('button', { name: 'Open protocol' });
+  fireEvent.click(opener);
+  const dialog = screen.getByRole('dialog', { name: 'Service Protocol' });
+  fireEvent.click(dialog.parentElement);
+
+  expect(screen.queryByRole('dialog', { name: 'Service Protocol' })).toBeNull();
+  expect(document.activeElement).toBe(opener);
+});
 
 it.each([
   [null, undefined, 'st_augustine'],
