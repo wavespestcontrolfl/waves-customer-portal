@@ -74,4 +74,24 @@ describe('notify-only extension claim (GH codex P1 r5 on #4309)', () => {
     expect(fixedBidBlocksExtension).not.toHaveBeenCalled();
     expect(b.update).not.toHaveBeenCalled();
   });
+  test('an ungrouped proposal that gains a fixed hold while waiting for the row lock cannot burn the claim', async () => {
+    const peeked = { id: 'e1', estimate_group_id: null, estimate_data: {} };
+    const fresh = { ...peeked, estimate_data: { proposal: { enabled: true, validThrough: '2099-12-31' } } };
+    const b = tableWithReread(peeked, fresh);
+    db.mockReturnValue(b);
+    fixedBidBlocksExtension.mockImplementation(async (_conn, row) => Boolean(row.estimate_data.proposal?.validThrough));
+    await expect(claimNotifyOnlyExtensionRequest('e1', dedupe)).resolves.toEqual({ claimed: 0, blocked: true });
+    expect(b.forUpdate).toHaveBeenCalledTimes(1);
+    expect(fixedBidBlocksExtension).toHaveBeenCalledWith(db, fresh);
+    expect(b.update).not.toHaveBeenCalled();
+  });
+  test('an initially ungrouped row moved into a group while waiting refuses before checking or claiming', async () => {
+    const peeked = { id: 'e1', estimate_group_id: null, estimate_data: {} };
+    const b = tableWithReread(peeked, { ...peeked, estimate_group_id: 'new-group' });
+    db.mockReturnValue(b);
+    await expect(claimNotifyOnlyExtensionRequest('e1', dedupe)).resolves.toEqual({ claimed: 0, blocked: true });
+    expect(fixedBidBlocksExtension).not.toHaveBeenCalled();
+    expect(b.update).not.toHaveBeenCalled();
+  });
+
 });
