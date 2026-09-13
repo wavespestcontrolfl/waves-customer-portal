@@ -51,6 +51,7 @@ const PREVIEW = {
   selected: SECOND,
   customer: { id: 'customer-1', first_name: 'Synthetic', last_name: 'Caller' },
   quote: ROW.proposal.quote,
+  overlap: { count: 0, appointments: [] },
   series: {
     collective: true,
     movableCount: 2,
@@ -119,6 +120,32 @@ describe('reschedule proposal review', () => {
     }));
     expect(await screen.findByRole('status')).toHaveTextContent('No immediate message was sent; normal reminders continue.');
     expect(screen.getByRole('status')).toHaveTextContent('Heads up: this booking overlaps another appointment.');
+    expect(screen.queryByRole('button', { name: 'Apply change' })).not.toBeInTheDocument();
+  });
+
+  it.each([false, true])('discloses actual selected-appointment overlaps before Apply (collective=%s)', async (collective) => {
+    const reviewed = { ...PREVIEW, series: { ...PREVIEW.series, collective }, overlap: { count: 1, appointments: [{
+      id: 'conflict-1', service_name: 'Lawn care', status: 'confirmed', scheduled_date: '2026-10-15',
+      current_window: { start_at: '2026-10-15T17:30:00Z', end_at: '2026-10-15T18:30:00Z' },
+    }] } };
+    adminFetch.mockImplementation(async (url) => url.endsWith('/preview') ? reviewed : FEED);
+    render(<RescheduleProposalCards ui={ui} />);
+    await screen.findByLabelText('Appointment discussed for Synthetic Caller');
+    selectSecond();
+    fireEvent.click(screen.getByRole('button', { name: 'Preview change' }));
+    expect(await screen.findByText('Selected appointment overlaps 1 existing appointment:')).toBeInTheDocument();
+    expect(screen.getByText(/Lawn care.*1:30 PM–2:30 PM ET.*confirmed/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Apply change' })).toBeEnabled();
+    expect(adminFetch.mock.calls.some(([url]) => url.endsWith('/apply'))).toBe(false);
+  });
+
+  it('requires a complete overlap check before enabling Apply', async () => {
+    adminFetch.mockImplementation(async (url) => url.endsWith('/preview') ? { ...PREVIEW, overlap: undefined } : FEED);
+    render(<RescheduleProposalCards ui={ui} />);
+    await screen.findByLabelText('Appointment discussed for Synthetic Caller');
+    selectSecond();
+    fireEvent.click(screen.getByRole('button', { name: 'Preview change' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('The preview was incomplete.');
     expect(screen.queryByRole('button', { name: 'Apply change' })).not.toBeInTheDocument();
   });
 

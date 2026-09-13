@@ -80,8 +80,8 @@ function skipMessage(reason) {
 
 function validPreview(result, visitId) {
   if (!result) return false;
-  const { selected, customer, series, new_window: target } = result;
-  if ([selected, customer, series, target].some((value) => !value)) return false;
+  const { selected, customer, series, overlap, new_window: target } = result;
+  if ([selected, customer, series, overlap, target].some((value) => !value)) return false;
   const current = selected.current_window;
   return [
     result.visit_id === visitId, selected.id === visitId,
@@ -92,6 +92,8 @@ function validPreview(result, visitId) {
     current === null || (current?.start_at && current?.end_at),
     typeof series.collective === 'boolean',
     series.collective !== true || (Array.isArray(series.occurrenceIds) && Array.isArray(series.occurrences)),
+    Number.isInteger(overlap.count) && overlap.count >= 0,
+    Array.isArray(overlap.appointments) && overlap.appointments.length === overlap.count,
   ].every(Boolean);
 }
 
@@ -136,6 +138,12 @@ function PreviewReview({ preview, who, Text }) {
     <Text>New arrival window: {arrivalWindow(preview.new_date, preview.new_window?.start)}</Text>
     {preview.from && <Text tone="muted">Staff booking: {staffWindow(preview.from.date, preview.from.start, preview.from.end)} → {staffWindow(preview.new_date, preview.new_window?.start, preview.new_window?.end)}</Text>}
     <SeriesReview series={preview.series} Text={Text} />
+    {preview.overlap.count > 0 && <div className="space-y-1">
+      <Text tone="alert">Selected appointment overlaps {preview.overlap.count} existing appointment{preview.overlap.count === 1 ? '' : 's'}:</Text>
+      {preview.overlap.appointments.map((appointment) => <Text key={appointment.id} tone="alert">
+        {appointment.service_name} · {instantWindow(appointment.current_window?.start_at, appointment.current_window?.end_at)} · {humanize(appointment.status)}
+      </Text>)}
+    </div>}
     <Text tone="muted">Schedule overlaps are advisory; both appointments remain on the calendar.</Text>
   </div>;
 }
@@ -228,24 +236,18 @@ export default function RescheduleProposalCards({ ui, pollMs = DEFAULT_POLL_MS }
     if (page == null && invalidate) replacePreviews({});
     try {
       let next;
-      let rows;
-      if (page != null) {
-        next = await fetchPage(page);
+      const firstPage = page ?? 0;
+      const endPage = page == null ? count : firstPage + 1;
+      const rows = page > 0 ? [...dataRef.current.proposals] : [];
+      let fetchedThrough = firstPage;
+      for (let index = firstPage; index < endPage; index += 1) {
+        next = await fetchPage(index);
         if (!mounted.current || seq !== request.current) return;
-        pages.current = page + 1;
-        rows = page && dataRef.current ? [...(dataRef.current.proposals || []), ...(next.proposals || [])] : (next.proposals || []);
-      } else {
-        rows = [];
-        let fetchedPages = 0;
-        for (let index = 0; index < count; index += 1) {
-          next = await fetchPage(index);
-          if (!mounted.current || seq !== request.current) return;
-          fetchedPages += 1;
-          rows.push(...(next.proposals || []));
-          if (!next.has_more) break;
-        }
-        pages.current = Math.max(1, fetchedPages);
+        fetchedThrough = index + 1;
+        rows.push(...next.proposals);
+        if (!next.has_more) break;
       }
+      pages.current = Math.max(1, fetchedThrough);
       const merged = { ...next, proposals: rows };
       dataRef.current = merged;
       setData(merged);
