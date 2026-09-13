@@ -192,6 +192,20 @@ test('an authored proposal is quote-required by design and keeps its proposal bl
   expect(shaped.page.pricing.withheld).toBe('quote_required');
 });
 
+test('floor-clamped lawn tiers retained for stale accept requests are not reported as offered prices', async () => {
+  mockCompose.mockResolvedValue({
+    ...PAGE_PAYLOAD,
+    pricing: {
+      frequencies: [{ key: 'enhanced', serviceCategory: 'lawn_care', monthly: 75, annual: 900 }],
+      hiddenLawnFrequencies: [{ key: 'standard', serviceCategory: 'lawn_care', monthly: 50, annual: 600, floorApplied: true }],
+    },
+  });
+  const shaped = await shapeEstimate(estimateRow());
+  expect(shaped.page.pricing.frequencies).toEqual([{ key: 'enhanced', serviceCategory: 'lawn_care', monthly: 75, annual: 900 }]);
+  expect(shaped.page.pricing.hiddenLawnFrequencies).toBeUndefined();
+  expect(JSON.stringify(shaped.page.pricing)).not.toMatch(/standard|600/);
+});
+
 test('sibling estimates report only the one-time figure the switcher displays, never their stored recurring totals', async () => {
   const shaped = await shapeEstimate(estimateRow());
   expect(shaped.page.propertyGroup).toEqual([

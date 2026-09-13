@@ -192,6 +192,9 @@ function stripPayload(payload) {
   if (Array.isArray(out.propertyGroup)) out.propertyGroup = out.propertyGroup.map(siblingEntry);
   if (out.pricing) {
     out.pricing = sanitizeRanges(out.pricing);
+    // Retained by the server only to honor stale clients' accept requests;
+    // the current customer page does not offer these floor-clamped tiers.
+    delete out.pricing.hiddenLawnFrequencies;
     // The page renders the stamped service cards; its aggregate fallback
     // frequencies retain exact, unstamped prices in the same payload.
     if (out.pricing.combinedRecurring?.ranged) {
