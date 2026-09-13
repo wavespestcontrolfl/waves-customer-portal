@@ -16,6 +16,11 @@ test.each([
   ['Talstar P was applied to the exterior perimeter, right?', 'fail'],
   ['Was Talstar P applied indoors? Talstar P was applied to the exterior perimeter.', 'pass'],
   ['Talstar P was applied to the exterior perimeter. Do you have any questions?', 'pass'],
+  ['Talstar P was applied to the exterior perimeter, but was it effective?', 'pass'],
+  ['Talstar P will be applied to the exterior perimeter.', 'fail'],
+  ['Please apply Talstar P to the exterior perimeter.', 'fail'],
+  ['Apply Talstar P to the exterior perimeter.', 'fail'],
+  ['Talstar P is going to be applied to the exterior perimeter.', 'fail'],
 ])('report findings preserve their affirmative location: %s', (text, status) => {
   expect(checks.report_readback_confirms(report, {}, { spoken: [text] })[0]).toBe(status);
 });
