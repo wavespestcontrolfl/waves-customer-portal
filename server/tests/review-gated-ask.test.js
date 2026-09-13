@@ -88,7 +88,9 @@ function installMock(initial = {}, { onUpdate = null } = {}) {
       orWhere(c, op, v) { return sub.where(c, op, v); },
       orWhereNull(c) { return sub.whereNull(c); },
       orWhereNotNull(c) { return sub.whereNotNull(c); },
+      whereNotIn(c, vals) { branches.push((r) => cmp(val(r, c), 'notIn', vals)); return sub; },
       orWhereNotIn(c, vals) { branches.push((r) => cmp(val(r, c), 'notIn', vals)); return sub; },
+      orWhereRaw() { branches.push(r => r.metadata?.finalize_only === true); return sub; },
     };
     fn.call(sub, sub);
     return (r) => branches.some((b) => b(r));
