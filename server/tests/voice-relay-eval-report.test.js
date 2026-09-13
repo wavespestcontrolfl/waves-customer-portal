@@ -356,3 +356,13 @@ test.each([
 ])('report event retractions stay tied to the finding: %s', (text, status) => {
   expect(checks.report_readback_confirms({ subject: 'Talstar P', location: 'exterior' }, {}, { spoken: [text] })[0]).toBe(status);
 });
+
+
+test.each([
+  ['Talstar P was applied to the exterior perimeter, but it was not applied.', 'fail'],
+  ["Talstar P was applied to the exterior perimeter — it wasn't actually applied.", 'fail'],
+  ['Talstar P was applied to the exterior perimeter, but it had not been applied.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, but it was not applied indoors.', 'pass'],
+])('report retractions preserve their treatment predicate: %s', (text, status) => {
+  expect(checks.report_readback_confirms({ subject: 'Talstar P', location: 'exterior perimeter' }, {}, { spoken: [text] })[0]).toBe(status);
+});
