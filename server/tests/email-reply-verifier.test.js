@@ -117,6 +117,20 @@ describe('email reply verifier', () => {
       .toContain('fact_binding_unsupported');
   });
 
+  test('requires a complete ordered appointment window instead of lending either endpoint', () => {
+    expect(verdict('Hi Casey, your appointment is at 9 AM.').violations).toContain('date_unsupported:9 AM');
+    expect(verdict('Hi Casey, your appointment is at 11 AM.').violations).toContain('date_unsupported:11 AM');
+    expect(verdict('Hi Casey, your appointment is from 9 AM to 11 AM.').ok).toBe(true);
+    expect(verdict('Hi Casey, your window is from 9 AM to 11 AM, and your appointment is at 9 AM.').violations)
+      .toContain('date_unsupported:9 AM');
+    const facts = [{ key: 'upcoming_visit', status: 'present', value: { window: '9:00 AM–11:00 AM', status: 'pending' } }];
+    expect(verdict('Hi Casey, your appointment is from 9 AM to 11 AM.', { context: { facts } }).ok).toBe(true);
+    const exemplars = [{ reply_text: 'Your appointment is from 9 AM to 11 AM.' }];
+    expect(verdict('Hi Casey, your appointment is from 9 AM to 11 AM.', { context: { facts }, exemplars }).ok).toBe(true);
+    expect(verdict('Hi Casey, your appointment is at 9 AM.', { context: { facts }, exemplars }).violations)
+      .toEqual(expect.arrayContaining(['date_unsupported:9 AM', 'few_shot_leak']));
+  });
+
   test('between-and appointment windows preserve ordered endpoints', () => {
     expect(verdict('Hi Casey, your pending appointment is September 15 between 9 AM and 11 AM.').ok).toBe(true);
     expect(verdict('Hi Casey, your pending appointment is September 15 between 9 and 11 AM.').ok).toBe(true);
@@ -166,6 +180,20 @@ describe('email reply verifier', () => {
     }
     expect(verdict('Hi Casey, your $50 payment failed.').ok).toBe(true);
   });
+
+  test.each([
+    ['draft', 'draft'], ['scheduled', 'scheduled'], ['sending', 'sending'], ['send_failed', 'send failed'],
+    ['viewed', 'viewed'], ['accepted', 'accepted'], ['declined', 'declined'], ['expired', 'expired'],
+  ])('estimate state claims match the recorded %s state', (status, wording) => {
+    const facts = contextWith().facts.map((fact) => (fact.key === 'pending_estimate'
+      ? { ...fact, value: { status, sentAt: '2026-09-09T16:00:00Z' } }
+      : fact));
+    expect(verdict(`Hi Casey, your estimate was ${wording}.`, { context: { facts } }).ok).toBe(true);
+    const mismatch = status === 'accepted' ? 'declined' : 'accepted';
+    expect(verdict(`Hi Casey, your estimate was ${mismatch}.`, { context: { facts } }).violations)
+      .toContain('estimate_status_unsupported');
+  });
+
   test('appointment state claims must match their visit record', () => {
     const facts = contextWith().facts.filter((fact) => fact.key !== 'upcoming_visit').concat({
       key: 'upcoming_visit', status: 'present', value: { date: '2026-09-15', status: 'confirmed' },
@@ -181,6 +209,33 @@ describe('email reply verifier', () => {
     expect(verdict('Hi Casey, your appointment is September 15 at 8:30.').violations).toContain('clock_format_unsupported');
     expect(verdict('Hi Casey, your visit is pending.\n\nBest,\nAdam\nWaves Pest Control').violations).toContain('signature_unsupported');
   });
+
+  test('rejects ordinal dates and preserves the recognized cardinal form', () => {
+    expect(verdict('Hi Casey, your pending appointment is September 15.').ok).toBe(true);
+    expect(verdict('Hi Casey, your pending appointment is September 15th.').violations)
+      .toContain('date_unsupported:September 15th');
+    expect(verdict('Hi Casey, your pending appointment is September 16th.').violations)
+      .toContain('date_unsupported:September 16th');
+    expect(verdict('Hi Casey, your pending appointment is on the 16th.').violations)
+      .toContain('date_unsupported:16th');
+    expect(verdict('Hi Casey, your pending appointment is the 16th.').violations)
+      .toContain('date_unsupported:16th');
+  });
+
+  test('rejects unrecognized written currency while preserving numeric grounding', () => {
+    expect(verdict('Hi Casey, your outstanding balance is fifty dollars.').violations)
+      .toContain('amount_unsupported:fifty dollars');
+    expect(verdict('Hi Casey, your outstanding balance is $75.').ok).toBe(true);
+  });
+
+  test('requires payment context before treating received as a payment claim', () => {
+    expect(verdict('Hi Casey, we received your email about your appointment.').ok).toBe(true);
+    const facts = contextWith().facts.map((fact) => (fact.key === 'recent_payment'
+      ? { ...fact, value: { ...fact.value, status: 'succeeded' } }
+      : fact));
+    expect(verdict('Hi Casey, we received your $50 payment.', { context: { facts } }).ok).toBe(true);
+  });
+
   test('dotted meridiems cannot detach an unsupported appointment status', () => {
     for (const window of ['9 a.m. to 11 a.m.', '9 A.M. to 11 A.M.']) {
       expect(verdict(`Hi Casey, your pending appointment is September 15 from ${window} and is confirmed.`).violations)
@@ -266,6 +321,17 @@ describe('email reply verifier', () => {
     ['Hi Casey, pay at billing.example.info/payment.', 'link_unsupported'],
   ])('rejects unsafe structure: %s', (text, expected) => {
     expect(verdict(text).violations).toContain(expected);
+  });
+
+  test('rejects retired pricing units and company copy', () => {
+    for (const unit of ['per visit', 'per-visit', 'per  visit']) {
+      expect(verdict(`Hi Casey, your price is $98 ${unit}.`).violations).toContain('customer_copy_compliance');
+    }
+    expect(verdict('Hi Casey, your monthly dues are $98, billed per application.').ok).toBe(true);
+    for (const company of ['Waves Lawn & Pest', 'Waves Lawn and Pest', 'Waves  Lawn & Pest']) {
+      expect(verdict(`Hi Casey, you contacted ${company}.`).violations).toContain('customer_copy_compliance');
+    }
+    expect(verdict('Hi Casey, you contacted Waves Pest Control.').ok).toBe(true);
   });
 
   test('enforces the full visible reply word budget', () => {

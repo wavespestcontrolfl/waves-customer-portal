@@ -7,7 +7,8 @@ const { etParts, addETDays } = require('../../utils/datetime-et');
 const PLACEHOLDER_RE = /\[([a-z][a-z0-9_ -]{0,30})\]|\{\{?([a-z][a-z0-9_ -]{0,30})\}?\}/gi;
 const LINK_RE = /(?:https?:\/\/|www\.)[^\s<>()]+|\b(?:[a-z0-9-]+\.)+[a-z]{2,63}(?:\/[^\s<>()]*)?/gi;
 const MONEY_RE = /\$\s*\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?\s+(?:dollars?|bucks?)\b/gi;
-const DATE_RE = /\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b|\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:,?\s+\d{4})?\b|\b(?:sun|mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|sat(?:ur)?)(?:day)?\b|\b(?:today|tomorrow)\b/gi;
+const WRITTEN_MONEY_RE = /\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)\s+(?:dollars?|bucks?)\b/gi;
+const DATE_RE = /\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b|\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?\b|\b\d{1,2}(?:st|nd|rd|th)\b|\b(?:sun|mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|sat(?:ur)?)(?:day)?\b|\b(?:today|tomorrow)\b/gi;
 const TIME_RE = /\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)\b/gi;
 const TIME_RANGE_RE = /\b(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?\s*(?:[-–—]|to|and)\s*(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)\b/gi;
 const BOILERPLATE_RE = /\bthank you for (?:reaching out|contacting us)\b|\bhope this (?:email )?finds you well\b|\bplease (?:do not|don't) hesitate to (?:reach out|contact us)\b|\blet us know if you have any (?:other |further )?questions\b/i;
@@ -58,7 +59,7 @@ function amountsForClaim(fact, sentence) {
 function semanticFactKeys(sentence) {
   const text = sentence.toLowerCase();
   if (/\b(?:balance|outstanding|account current)\b/.test(text)) return ['outstanding_balance'];
-  if (/\b(?:payment|paid|went through|received)\b/.test(text)) return ['recent_payment'];
+  if (/\b(?:payment|paid|went through)\b/.test(text)) return ['recent_payment'];
   if (/\b(?:invoice|amount due)\b/.test(text)) return ['open_invoice'];
   if (/\b(?:monthly|dues|surcharge|card fee)\b/.test(text)) return ['billing_lane'];
   return [];
@@ -67,11 +68,12 @@ function semanticFactKeys(sentence) {
 function mentionedFactKeys(sentence) {
   const keys = [];
   if (/\b(?:balance|outstanding|account current)\b/i.test(sentence)) keys.push('outstanding_balance');
-  if (/\b(?:payment|paid|went through|received)\b/i.test(sentence)) keys.push('recent_payment');
+  if (/\b(?:payment|paid|went through)\b/i.test(sentence)) keys.push('recent_payment');
   if (/\b(?:invoice|amount due)\b/i.test(sentence)) keys.push('open_invoice');
   if (/\b(?:dues|surcharge|card fee|monthly (?:charge|cost|price|rate))\b/i.test(sentence)) keys.push('billing_lane');
   if (/\bestimate\b/i.test(sentence)) keys.push('pending_estimate');
-  if (/\b(?:visit|service|appointment|scheduled|coming|arriv)\w*\b/i.test(sentence)) {
+  if (/\b(?:visit|service|appointment)\w*\b/i.test(sentence)
+    || (!/\bestimate\b/i.test(sentence) && /\b(?:scheduled|coming|arriv)\w*\b/i.test(sentence))) {
     keys.push(/\b(?:last|previous|completed|was serviced|came out)\b/i.test(sentence)
       ? 'last_completed_visit' : 'upcoming_visit');
   }
@@ -133,10 +135,15 @@ function dateFacts(context) {
     for (const value of values) {
       const day = calendarDay(value);
       if (day) dateAliases(day, context?.metadata?.assembledAt).forEach((alias) => aliases.add(alias));
-      temporalClaims(value).forEach((claim) => aliases.add(normalizeTemporal(claim)));
-      ranges.push(...timeRanges(value));
+      const valueRanges = timeRanges(value);
+      const rangeEndpoints = new Set(valueRanges.flat());
+      temporalClaims(value).forEach((claim) => {
+        const normalized = normalizeTemporal(claim);
+        if (!rangeEndpoints.has(normalized)) aliases.add(normalized);
+      });
+      ranges.push(...valueRanges);
     }
-    if (aliases.size) result.push({ key: fact.key, aliases, ranges, fact });
+    if (aliases.size || ranges.length) result.push({ key: fact.key, aliases, ranges, fact });
   }
   return result;
 }
@@ -180,10 +187,18 @@ function dateSemanticKeys(sentence) {
 }
 
 function dateSupported(raw, sentence, available) {
-  const normalized = normalizeTemporal(raw);
   const keys = dateSemanticKeys(sentence);
   return keys.length > 0 && available.some((entry) => keys.includes(entry.key)
-    && [...entry.aliases].some((alias) => normalizeTemporal(alias) === normalized));
+    && temporalSupportedByEntry(raw, sentence, entry));
+}
+
+function temporalSupportedByEntry(raw, sentence, entry) {
+  const normalized = normalizeTemporal(raw);
+  if ([...entry.aliases].some((alias) => normalizeTemporal(alias) === normalized)) return true;
+  const standaloneClocks = String(sentence).replace(TIME_RANGE_RE, '').match(TIME_RE) || [];
+  if (standaloneClocks.some((clock) => normalizeTemporal(clock) === normalized)) return false;
+  return timeRanges(sentence).some((range) => range.includes(normalized)
+    && entry.ranges.some((sourceRange) => sourceRange[0] === range[0] && sourceRange[1] === range[1]));
 }
 
 function factByKey(context, key) {
@@ -199,11 +214,8 @@ function factsMatchingClaims(sentence, key, context) {
   const dates = temporalClaims(sentence);
   if (dates.length) {
     const entries = dateFacts(context).filter((entry) => entry.key === key && candidates.includes(entry.fact));
-    candidates = candidates.filter((fact) => dates.every((raw) => {
-      const normalized = normalizeTemporal(raw);
-      return entries.some((entry) => entry.fact === fact && [...entry.aliases]
-        .some((alias) => normalizeTemporal(alias) === normalized));
-    }));
+    candidates = candidates.filter((fact) => dates.every((raw) => entries.some((entry) => entry.fact === fact
+      && temporalSupportedByEntry(raw, sentence, entry))));
     const ranges = timeRanges(sentence);
     candidates = candidates.filter((fact) => ranges.every((range) => entries.some((entry) => entry.fact === fact
       && entry.ranges.some((sourceRange) => sourceRange[0] === range[0] && sourceRange[1] === range[1]))));
@@ -238,10 +250,17 @@ function statusViolations(text, context) {
     if (/\b(?:not|never|no longer|isn['’]t|wasn['’]t|hasn['’]t|haven['’]t|didn['’]t|cannot|can['’]t)\b/i.test(sentence)
       && /\b(?:payment|paid|visit|service|appointment|estimate)\b/i.test(sentence)) violations.push('negated_status_unsupported');
 
-    if (/\bpayments?\b/i.test(sentence) && !stateWordsSupported(sentence, 'recent_payment', context,
-      /\b(?:failed|declined|pending|processing|refunded|reversed|cancelled|canceled|voided)\b/gi)) violations.push('payment_status_unsupported');
-    if (/\b(?:visit|service|appointment)\b/i.test(sentence) && !stateWordsSupported(sentence, 'upcoming_visit', context,
-      /\b(?:pending|rescheduled|cancelled|canceled|skipped|en route|on site)\b/gi)) violations.push('visit_status_unsupported');
+    const stateRules = [
+      { matches: /\bpayments?\b/i.test(sentence), key: 'recent_payment', violation: 'payment_status_unsupported',
+        pattern: /\b(?:failed|declined|pending|processing|refunded|reversed|cancelled|canceled|voided)\b/gi },
+      { matches: /\bestimate\b/i.test(sentence), key: 'pending_estimate', violation: 'estimate_status_unsupported',
+        pattern: /\b(?:draft|scheduled|sending|send failed|viewed|accepted|declined|expired)\b/gi },
+      { matches: /\b(?:visit|service|appointment)\b/i.test(sentence), key: 'upcoming_visit', violation: 'visit_status_unsupported',
+        pattern: /\b(?:pending|rescheduled|cancelled|canceled|skipped|en route|on site)\b/gi },
+    ];
+    for (const rule of stateRules) {
+      if (rule.matches && !stateWordsSupported(sentence, rule.key, context, rule.pattern)) violations.push(rule.violation);
+    }
     if (/\b(?:visit|service|appointment)\b/i.test(sentence) && /\bcompleted\b/i.test(sentence)
       && (/\b(?:next|upcoming)\b/i.test(sentence) || !statusSupported(sentence, 'last_completed_visit', context, () => true))) violations.push('visit_status_unsupported');
 
@@ -305,8 +324,7 @@ function exemplarLeak(text, exemplars, context) {
       if (!text.toLowerCase().includes(value.toLowerCase())) return false;
       if (value.trim().startsWith('$') && facts.some((fact) => amountsForFact(fact).includes(cents(value)))) return false;
       const normalized = normalizeTemporal(value);
-      return !dates.some((entry) => [...entry.aliases]
-        .some((alias) => normalizeTemporal(alias) === normalized));
+      return !dates.some((entry) => temporalSupportedByEntry(normalized, text, entry));
     }));
 }
 
@@ -335,7 +353,8 @@ function structuralViolations(draft, context, wordBudget) {
   if (!exemplarLooksClean('', draft)) violations.push('untrusted_instruction');
   if (forgedSignature(draft)) violations.push('signature_unsupported');
   if (containsReportAccessCode(draft)) violations.push('access_code');
-  if (findBannedCustomerCopy(draft).length || reentrySafetyClaimFinding(draft)) violations.push('customer_copy_compliance');
+  if (findBannedCustomerCopy(draft).length || /\bper[\s-]+visit\b|\bWaves\s+Lawn\s*(?:&|and)\s*Pest\b/i.test(draft)
+    || reentrySafetyClaimFinding(draft)) violations.push('customer_copy_compliance');
 
   const firstName = String(context?.customer?.firstName || '').normalize('NFC').trim();
   if (firstName && !new RegExp(`^(?:hi|hello|hey)\\s+${firstName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=$|[\\s,!.:;—–-])`, 'i').test(draft.normalize('NFC'))) violations.push('greeting_mismatch');
@@ -349,10 +368,12 @@ function groundingViolations(draft, context, exemplars) {
   for (const sentence of sentences(draft)) {
     if (mentionedFactKeys(sentence).length > 1) violations.push('mixed_fact_categories_unsupported');
     const amounts = sentence.match(MONEY_RE) || [];
+    const writtenAmounts = sentence.match(WRITTEN_MONEY_RE) || [];
     if (amounts.length > 1) violations.push('multiple_amounts_unsupported');
     for (const amount of amounts) {
       if (!amountSupported(amount, sentence, facts)) violations.push(`amount_unsupported:${amount}`);
     }
+    for (const amount of writtenAmounts) violations.push(`amount_unsupported:${amount}`);
     for (const date of temporalClaims(sentence)) {
       if (!dateSupported(date, sentence, availableDates)) violations.push(`date_unsupported:${date}`);
     }

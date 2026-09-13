@@ -10,16 +10,19 @@ dates, time windows and status claims; source observation timestamps and
 free-text history are not evidence. Payment amount/date and appointment
 date/window claims must match one record. Matching records must agree on
 claimed status. Multiple amounts require separate sentences, and time-window
-endpoints must match in order. Bare clock times and contextual hours without AM/PM require review. Dotted
+endpoints must match in order. A window does not authorize an exact-time
+promise at either endpoint. Bare clock times and contextual hours without AM/PM require review. Dotted
 AM/PM abbreviations stay intact during sentence checks; use a newline when
 an abbreviation ends a sentence to avoid ambiguous fact grouping.
 Independent fact categories also use separate sentences: the verifier does
 not infer subject relationships across coordinated billing/service clauses. Billing dues, surcharge and collected
-total keep their separate meanings. Viewed estimates retain sent evidence.
+total keep their separate meanings; ambiguous billing-field wording requires
+review. Written-out currency amounts and ordinal dates require review; numeric dollar
+figures and calendar dates without ordinal suffixes remain the supported forms. Viewed estimates retain sent evidence.
 
 The verifier also checks plain-text structure, greeting, unsupported signatures,
 boilerplate, links, access codes, existing customer-copy compliance, copied
-example facts, and placeholders. Placeholders require an explicitly absent
+example facts, canonical company and per-application wording, and placeholders. Placeholders require an explicitly absent
 fact; an unavailable source is not absence. It returns `{ok, violations}`.
 
 These checks cover recognized claim forms; deterministic pattern matching does
