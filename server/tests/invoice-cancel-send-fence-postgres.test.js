@@ -45,7 +45,9 @@ describe('cancellation/send fence — source contracts', () => {
     expect(source.match(/CASE WHEN status IN \('draft', 'scheduled', 'sending'\) THEN 'sent' ELSE status END/g)).toHaveLength(3);
     // The claim give-back and the 10-minute stale-claim recovery both key on
     // 'sending', so a voided claim is never re-armed or restored.
-    expect(source).toMatch(/async function restoreSendClaim[\s\S]{0,300}?\.where\(\{ id: invoiceId, status: "sending" \}\)/);
+    const restoreStart = source.indexOf('async function restoreSendClaim(');
+    const restoreClaim = source.slice(restoreStart, source.indexOf('\n}', restoreStart) + 2);
+    expect(restoreClaim).toMatch(/\.where\(\{ id: invoiceId, status: "sending" \}\)/);
     expect(source).toMatch(/await db\("invoices"\)\s*\n\s*\.where\(\{ status: "sending" \}\)\s*\n\s*\.where\("updated_at", "<", db\.raw\("NOW\(\) - INTERVAL '10 minutes'"\)\)/);
   });
 });
@@ -89,7 +91,8 @@ postgres('a cancellation and a live send claim contend on the invoice row (migra
 
   beforeAll(() => {
     const url = new URL(process.env.DATABASE_URL);
-    if (!['localhost', '127.0.0.1'].includes(url.hostname)) throw new Error('Use a disposable local/CI database');
+    const privateQa = /^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname);
+    if (!privateQa && !['localhost', '127.0.0.1'].includes(url.hostname)) throw new Error('Use a verified task-private QA database or disposable local/CI database');
     database = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 2 } });
     require('../models/db').connection = database;
   });
