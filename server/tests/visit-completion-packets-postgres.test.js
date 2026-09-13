@@ -2398,6 +2398,37 @@ postgres('visit completion packet records on PostgreSQL', () => {
   });
 
   test.each([
+    ['void', 'application-only', 'First service application', false],
+    ['canceled', 'application-only', 'First service application', false],
+    ['cancelled', 'application-only', 'First service application', false],
+    ['refunded', 'application-only', 'First service application', true],
+    ['canceled', 'combined setup and application', 'WaveGuard Membership — $99 setup fee plus first application', true],
+    ['cancelled', 'combined setup and application', 'WaveGuard Membership — $99 setup fee plus first application', true],
+    ['void', 'combined setup and application', 'WaveGuard Membership — $99 setup fee plus first application', false],
+    ['canceled', 'setup-only', 'WaveGuard Membership — one-time setup fee', true],
+    ['refunded', 'setup-only', 'WaveGuard Membership — one-time setup fee', true],
+  ])('a %s %s unlinked acceptance invoice follows canonical packet ownership',
+    async (status, _kind, description, blocksPacket) => {
+      const estimateId = await linkFixtureEstimate();
+      const invoice = await InvoiceService.create({
+        customerId: fixture.customerId, serviceDate: etDateString(),
+        lineItems: [{ description, quantity: 1, unit_price: 120 }],
+        notes: `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application.`,
+      });
+      await mockPg('invoices').where({ id: invoice.id }).update({ status });
+
+      const saved = await saveVisitCompletionPacket(submission());
+      if (blocksPacket) {
+        expect(saved.body.billing).toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
+        expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+      } else {
+        expect(saved.body.billing).toMatchObject({ state: 'invoice_ready', total: 240 });
+        expect(saved.body.billing.invoiceId).not.toBe(invoice.id);
+        expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(2);
+      }
+    });
+
+  test.each([
     ['same-date', etDateString(), 'First service application'],
     ['missing-date', null, 'First service application'],
     ['same-date combined setup and application', etDateString(), 'WaveGuard Membership — $99 setup fee plus first application'],

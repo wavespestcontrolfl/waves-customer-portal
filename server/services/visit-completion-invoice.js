@@ -88,9 +88,14 @@ async function mintPacketInvoice({ packet, visit, members, customer, trx }) {
       .where('notes', 'ilike', `%accepted estimate #${estimateId}%`)
       .where(function relevantApplication() {
         this.where('service_date', dateOnly(visit.scheduled_date)).orWhereNull('service_date');
-      }).forUpdate().noWait().select('line_items');
-    const { invoiceContainsOnlySetupFeeCharges } = require('./estimate-first-application-invoice');
-    if (unlinked.some((invoice) => !invoiceContainsOnlySetupFeeCharges(invoice))) return office('existing_member_invoice');
+      }).forUpdate().noWait().select('status', 'line_items', 'notes');
+    const { invoiceContainsOnlySetupFeeCharges, invoiceContainsSetupFeeLine } = require('./estimate-first-application-invoice');
+    if (unlinked.some((invoice) => {
+      if (invoice.status === 'void') return false;
+      if (invoice.status === 'refunded') return true;
+      if (['canceled', 'cancelled'].includes(invoice.status)) return invoiceContainsSetupFeeLine(invoice);
+      return !invoiceContainsOnlySetupFeeCharges(invoice);
+    })) return office('existing_member_invoice');
   }
   const existing = await trx('invoices').where(function linkedMember() {
     this.whereIn('scheduled_service_id', members.map((member) => member.id))
