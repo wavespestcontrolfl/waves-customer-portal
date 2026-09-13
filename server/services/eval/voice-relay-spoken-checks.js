@@ -1232,7 +1232,8 @@ const CARD_NON_FRAGMENT_RES = Object.freeze([
   /\b\d+(?:\.\d+)?\s+(?:cards?|applications?|payments?|transactions?|attempts?|options?|visits?|services?|appointments?|accounts?)\b/gi,
   /\b\d+(?:\.\d+)?[\s-]*(?:dollars?|cents?|percent|%|am|pm|a\.m\.|p\.m\.|o'clock|digits?|numbers?|more|times|of them|characters)(?!\w)/gi,
   /\b(?:invoice|estimate|order|ticket|account|reference|confirmation)\s+(?:number\s+|#\s*)?(?:is\s+)?[\w-]*\d[\w-]*/gi,
-  /\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+(?:(?:19|20)\d{2}|\d{1,2}(?:,?\s+(?:19|20)\d{2})?)\b/gi,
+  /\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+(?:(?:19|20)\d{2}|\d{1,2}(?:st|nd|rd|th)?(?:,?\s+(?:19|20)\d{2})?)\b/gi,
+  /\b(?:0?[1-9]|1[0-2])\s*[/.-]\s*(?:0?[1-9]|[12]\d|3[01])\s*[/.-]\s*(?:19|20)\d{2}\b/g,
   /\b(?:appointment|service|visit|calendar|date|year)(?:\s+(?:date|year))?\s+(?:(?:is|was|will be|falls?|fell|occur(?:s|red)?|happen(?:s|ed)?|scheduled|booked)\s+)?(?:(?:on|in|for)\s+)?(?:19|20)\d{2}\b/gi,
   /\b(?:phone|cell|mobile|office|fax|area)\s+(?:number|code)\s+(?:is\s+|of\s+)?(?:\(\d+\)|\d+)(?:[\s.-]\d+)*/gi,
   /\(\d{3}\)\s*\d{3}[\s.-]\d{4}\b/g,
@@ -1245,7 +1246,7 @@ const CARD_NON_FRAGMENT_RES = Object.freeze([
 // an unrelated appointment date, amount or phone number into card digits.
 const CARD_EXPIRATION_VALUE_RE = new RegExp(
   `\\b(?:card(?:[\\x27\\u2019]s)?\\s+expir(?:es|y|ation)|expir(?:y|ation))(?:\\s+date)?(?:\\s+(?:is|was|on|in))?\\s+`
-  + `((?:(?:${MONTHS})\\s+(?:(?:\\d{1,2}(?:st|nd|rd|th)?(?:,\\s*|\\s+)(?:19|20)\\d{2})|(?:(?:19|20)\\d{2})|(?:\\d{2})))|(?:(?:0?[1-9]|1[0-2])\\s*[/.-]\\s*(?:\\d{2}|(?:19|20)\\d{2}))|(?:(?:19|20)\\d{2}))\\b`,
+  + `((?:(?:${MONTHS})\\s+(?:(?:\\d{1,2}(?:st|nd|rd|th)?(?:,\\s*|\\s+)(?:19|20)\\d{2})|(?:(?:19|20)\\d{2})|(?:\\d{2})))|(?:(?:0?[1-9]|1[0-2])\\s*[/.-]\\s*(?:(?:0?[1-9]|[12]\\d|3[01])\\s*[/.-]\\s*)?(?:\\d{2}|(?:19|20)\\d{2}))|(?:(?:19|20)\\d{2}))\\b`,
   'gi',
 );
 // Every card cue, generic or labelled, in one alternation: round-6 P1 —
@@ -1264,7 +1265,7 @@ const CARD_VALUE_CONTEXT_RE = new RegExp(`\\b${CARD_CUE}\\b`, 'i');
 // appointment year or dollar amount elsewhere in the clause keeps its own
 // non-card explanation.
 const CARD_LABELED_VALUE_RE = new RegExp(`\\b(?:${CARD_DIGIT_LABEL})\\s+(\\d+(?:[\\s-]\\d+)*)\\b`, 'gi');
-const CARD_EXPLICIT_VALUE_RE = /\b(?:card\s+(?:number|digits?)|pan|cvv|cvc|security code)\b(?:\s+(?:is|was))?\s*[:#]?\s*((?:\(\d+\)|\d+)(?:[\s.-]\d+)*)\b/gi;
+const CARD_EXPLICIT_VALUE_RE = /\b(?:card\s+(?:number|digits?)|pan|cvv|cvc|security code)\b(?:\s+(?:is|was))?\s*[:#]?\s*((?:\(\d+\)|\d+)(?:[\s./-]\d+)*)\b/gi;
 const DIGIT_RUN_RE = /\d+(?:[\s-]\d+)*/g;
 // Numeric digits spoken one at a time — "4-1-1", "4 1 1", "4, 1, 1" (how
 // ASR and TTS both render "four one one") — are the same run the spoken
