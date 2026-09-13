@@ -2479,3 +2479,87 @@ in six places — the mocks now spread `importOriginal()`, so `PublicStateCard` 
 the heavier primitives stay stubbed. `PublicStateCard.test.jsx` asserts the
 invariants, not the pixels: an `h1` on every state, no authored font-size, one
 primary, actions from the shared constants, no width or padding knob.
+
+## 2026-09-11 — The brand gate was counting comments (R3a)
+
+Two of the baselined violations were never on a customer surface: `Icon.jsx`'s
+note describing how a sweep could migrate the old portal's emoji keys to
+`<Icon name="home" />`, and `GlassEstimateExtras`' "5-star reviews only" docblock.
+`check-portal-brand.js` scans line by line with no notion of comments, so prose
+ABOUT an emoji counted as a raw emoji — the gate forbade describing the very
+sweep it asks for, and `Icon.jsx` sat in `LEGACY_BASELINE` carrying debt it did
+not have.
+
+Whole-line comments are now skipped, and **which lines those are comes from the
+parser, not the line's prefix** (`commentLineSet()`). A prefix test cannot tell a
+comment from rendered JSX text that merely starts with `//` — inside a `<pre>`,
+say — and skipping such a line would hide a real violation on a visible element.
+That was a review finding on the first cut of this change, and it is the reason
+the detection is lexical.
+
+The parser is `@babel/parser` with the `jsx` and `typescript` plugins, not acorn:
+`walk()` accepts `.ts` and `.tsx`, and acorn cannot read them. A parser that
+chokes on an extension the walker advertises sends that file down the failure
+path forever — safe, since nothing is skipped, but it also means comment prose in
+it is reported as debt. One parser covers every extension accepted.
+
+Two shapes need help beyond the raw comment range. `{/* … */}` is **the** way to
+write a comment in JSX children, and the parser's range covers only the
+`/* … */`, leaving the braces as non-whitespace so the line reads as code — a
+note mentioning a banned size could fail the gate though nothing renders. When
+braces wrap a comment and nothing else, they count as part of it;
+`{/* note */ x}` is an expression and stays scanned.
+
+**Only** whole-line comments: a line counts only when blanking every comment span
+on it leaves nothing but whitespace, so anything sharing a line with code is
+scanned in full, in both directions — a trailing `// note` after code, and code
+trailing a `*/` on a block's closing line. That second direction was itself a
+masking bug in the first cut (`*/ const label = '🔒';` vanished).
+
+**The CSS side is postcss**, the parser this project's own build uses, so it
+defines what this repo's CSS means. That replaced a hand-written scanner which
+took four review findings in three rounds — a quoted `content: "/*"`, an
+unquoted `url(data:…,/*)`, an escaped `url(foo\)/*)`, an escaped `\/*` — every
+one a variant of "something that looks like a comment delimiter and is not".
+The count was rising rather than falling, which is the signal to replace a
+mechanism instead of patching it again. postcss knows strings, `url()` tokens
+and escapes by construction. Where it disagrees (`\/*`, which it reads as an
+unclosed comment) it throws, which lands on the scan-everything path — the
+conservative direction.
+
+Two grammars needed splitting apart as well. Babel's TypeScript and JSX plugins
+conflict, so a valid `.ts` construct like `const n = <number>1` parsed as JSX
+and sent the file down the failure path permanently; plugins are now chosen by
+extension. And `<style>{`…`}</style>` — the repo's embedded-CSS pattern — is
+template-string data to Babel, so its `/* … */` never reached `ast.comments`;
+those quasis get the postcss pass — but only when the template has **no
+interpolation**, because a quasi is not independently valid CSS. With
+`prefix = 'url(foo'`, the template `.a { background: ${prefix}/*); }` has its
+`/*` inside URL data once combined, while the quasi after the interpolation
+begins at `/*` and reads as a comment running to the next `*/`, masking every
+live rule between. Reconstructing lexer state across interpolations is not
+worth it; an interpolated style template simply keeps every line scanned. The
+same pass is scoped to `<style>` children for a second reason: over every
+template literal, a line of ordinary template TEXT that happens to read
+`/* … */` would be skipped, which also masks.
+
+**A parse failure skips nothing.** Scanning a comment costs a false positive;
+skipping code costs a miss, and a miss is the worse failure — so an unparseable
+file is scanned in full. That also retires a quieter hole: an unterminated `/*`
+used to swallow every line after it.
+
+The lookalike that made the prefix version subtle was CSS's universal selector —
+a bare `* {` line is code, not a docblock continuation. Parsing removes the
+question, and the case stays as a test.
+
+The gate is now importable (`module.exports = { checkFile, commentLineSet,
+LEGACY_BASELINE }`, CLI behind `require.main === module`) and has its first
+tests, in `scripts/qa/tests/check-portal-brand.test.js` (already wired into CI as
+`npm run test:qa-workflow`). It had none — on a script whose last two regressions
+were a baseline that only failed in one direction and a walker that skipped CSS,
+both caught by review rather than by CI.
+
+Debt: **two fewer, and one fewer file**. `Icon.jsx` delisted (a stale entry
+fails the gate, so the line had to go), `GlassEstimateExtras` 4 → 3. Landing
+after R3b's weight sweep, that leaves **73 across 24 files**. No customer pixel
+changes; the remaining 73 are real, and still R3/R4 work.
