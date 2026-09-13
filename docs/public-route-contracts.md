@@ -55,6 +55,16 @@ fallback until an approved manual primary-property change freezes it. Contact
 recipients, third-party Bill-To authority, amounts, and permanent receipt tokens
 are unchanged; snapshots remain authoritative when the rollout gate is off.
 
+Invoice line-item ownership metadata: `/api/pay/:token` and
+`/api/receipt/:token` return the invoice's persisted `line_items` as `lineItems`.
+On itemized accepted-plan invoices, each base-application row intentionally may
+include `client_id` (`scheduled_<scheduled-service UUID>_primary`),
+`accepted_service_type`, and `accepted_service_id` (the catalog service UUID).
+These values freeze the billed row's service ownership for combined-visit
+closeout. They are opaque, non-bearer references that grant no read or write
+access; no sibling invoice, report, receipt, or other bearer token rides a line
+item. Legacy and unrelated invoice rows may omit the ownership fields.
+
 `/api/pay/:token`
 (+ `/setup`, `/quote`, `/finalize`, `/confirm`, `/consent`,
 `/capture-setup`, `/setup-complete`, `/update-amount`, `/error`,
