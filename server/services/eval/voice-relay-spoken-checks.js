@@ -275,6 +275,7 @@ const CALLBACK_VERB_ING = '(?:calling|phoning|ringing|reaching(?: out to)?|conta
 const CALLBACK_LIGHT_VERB = '(?:give|send|place|make|shoot|drop|leave|return)';
 const CALLBACK_CONTACT_NOUN = '(?:(?:(?:phone|telephone|quick|courtesy|follow[ -]?up)\\s+)?call|call\\s*back|callback|ring|buzz|(?:text\\s+)?message|text|email|note|line)';
 const CALLBACK_PROMISER = vocabAlt(TEAM_PROMISERS);
+const CALLBACK_QUESTION_PROMISER = vocabAlt(TEAM_PROMISERS.filter((promiser) => promiser !== 'I'));
 const CALLBACK_MODAL = `(?:[\\x27\\u2019]ll|[\\x27\\u2019]re going to|[\\x27\\u2019]re scheduled to|[\\x27\\u2019]m going to|[\\x27\\u2019]m scheduled to| promise(?:s|d)? to| will| can| could| am going to| are going to| is going to| am scheduled to| are scheduled to| is scheduled to)`;
 const CALLBACK_COORDINATED_MODAL = '(?:will|can|could|promise(?:s|d)? to|(?:am|are|is) going to|(?:am|are|is) scheduled to)';
 // Two branches, deliberately not one: a BASE verb may sit up to three filler
@@ -647,13 +648,14 @@ function latestInterrogativeSegment(text) {
 // same helper for every caller, so a question form recognized for one kind
 // of answer is recognized for every kind. An optional isNonAnswer predicate
 // excludes an apparent match that is really a refusal or a courtesy filler,
-// not a factual answer.
+// not a factual answer. An optional retiresQuestion expression clears an
+// explicitly resolved request before a later courtesy phrase can answer it.
 // A caller who names the visit in one utterance ("I'm calling about her
 // appointment.") and then asks about "it" in the next ("Is it tomorrow?")
 // is still asking about that visit — VISIT_ANTECEDENT_RE (declared beside
 // THIRD_PARTY_MARK, its only real dependency) is the noun phrase a bare "it"
 // resolves to when the caller's own question doesn't otherwise carry one.
-function answeredQuestion(record, isPendingQuestion, answerRe, isNonAnswer) {
+function answeredQuestion(record, isPendingQuestion, answerRe, isNonAnswer, retiresQuestion) {
   let question = '';
   let antecedent = '';
   for (const event of record.events) {
@@ -670,6 +672,10 @@ function answeredQuestion(record, isPendingQuestion, answerRe, isNonAnswer) {
       // pending BEFORE the sentence's own trailing "?" replaces it — "Yes,
       // could she call the office?" answers the prior question first; only
       // a sentence with no such leading clause is purely the new question.
+      if (isPendingQuestion(question) && retiresQuestion && retiresQuestion.test(parts[i])) {
+        question = '';
+        continue;
+      }
       if (isPendingQuestion(question) && answerRe.test(parts[i]) && !(isNonAnswer && isNonAnswer(parts[i]))) return true;
       // An agent question supersedes the pending one whether or not it
       // keeps its own "?" — caller questions get the same ASR-dropped-mark
@@ -1280,7 +1286,20 @@ const CALLBACK_TRAILING_LINK = `(?:and|but|so|in|at|on|by|from|before|after|if|u
 // phrase ("her landlord", "the technician's supplier") and is not accepted.
 const CALLBACK_PHRASE_END = `(?=\\s*(?:[.!?,;:—–]|$|${CALLBACK_TRAILING_MODIFIER}\\b|${CALLBACK_TRAILING_LINK}\\b|(?:the|an?|this|that|these|those|some)\\b))`;
 const callbackTarget = (targets, action, lightAction) => `(?:${action}\\s+(?:${targets})\\b${CALLBACK_PHRASE_END}|${lightAction}\\s+(?:(?:${targets})\\s+(?:an?\\s+)?${CALLBACK_CONTACT_NOUN}|an?\\s+${CALLBACK_CONTACT_NOUN}\\s+(?:to|for)\\s+(?:${targets})\\b${CALLBACK_PHRASE_END}))`;
+const CALLBACK_QUESTION_AUX = '(?:can|could|will|would|should|shall|may|might|is|are|has|have)';
+const CALLBACK_QUESTION_AFFIRMATIVE = `(?:(?:${AFFIRMATION}|${BARE_CONFIRMATION})(?:[\\s,]+(?:${AFFIRMATION}|${BARE_CONFIRMATION}))*|(?:(?:${AFFIRMATION})\\s*[,—–:-]\\s*)?(?:we|i|they|the office|our office|the team|our team)(?:[\\x27\\u2019]ll|\\s+(?:will|can|could))(?:\\s+do\\s+(?:that|so|it))?)`;
+const CALLBACK_QUESTION_ANSWER_RE = new RegExp(`^\\s*(?:[^.!?;]*\\b(?:but|however)\\b\\s*)?${CALLBACK_QUESTION_AFFIRMATIVE}[.!\\s]*$`, 'i');
+const CALLBACK_QUESTION_DENIAL_RE = new RegExp(
+  `^\\s*(?:(?:no|nope)|(?:(?:no|nope)[,\\s]+)?(?:we|i|they|the office|our office|the team|our team)\\s+(?:cannot|can[\\x27\\u2019]t|could not|couldn[\\x27\\u2019]t|will not|won[\\x27\\u2019]t)\\s+(?:do\\s+(?:that|so|it)|arrange\\s+(?:that|it)|make\\s+(?:that|it)\\s+happen|${CALLBACK_VERB}\\b)(?:(?!\\b(?:but|however)\\b)[^.!?;])*)[.!\\s]*$`,
+  'i',
+);
 const CALLBACK_RECIPIENT_ACTION = `(?:be\\s+(?:called|phoned|rung|contacted|texted|emailed|reached(?: out to)?|followed up with)\\s+by|(?:get|receive)\\s+an?\\s+${CALLBACK_CONTACT_NOUN}\\s+from|hear from)`;
+const CALLBACK_DECLINE_ACTION = '(?:declines?|refuses?)';
+const CALLBACK_TIMING_COMPONENT = `(?:${VISIT_TIME_RE.source}|${CALLBACK_TIMING_ADVERB}|morning|afternoon|evening|night|(?:before|after|until|till)\\s+(?:noon|midday|midnight))`;
+const CALLBACK_TIMING_MODIFIERS_RE = new RegExp(
+  `^(?:\\s*(?:(?:for|on|at|by|from|between|around|about)\\s+)?${CALLBACK_TIMING_COMPONENT})*(?:\\s+or\\s+not)?\\s*$`,
+  'i',
+);
 // Whom every scenario's account holder can be called without naming her: a
 // pronoun, or the role the caller is asking about. The fixture's `targets`
 // add the names and relationships this scenario's account holder goes by
@@ -1304,6 +1323,23 @@ function callbackConditionTarget(targets, valueTargets, matchedContact) {
   return `(?:${conditionTargets.join('|')})`;
 }
 
+function callbackConsentCondition(targets, valueTargets, matchedContact, contact) {
+  const conditionTarget = callbackConditionTarget(targets, valueTargets, matchedContact);
+  const consentBoundary = '(?=\\s*(?:[,.;!?]|$))';
+  const receivedContact = `(?:be\\s+(?:called|contacted|phoned|texted|emailed)|(?:receive|get)\\s+an?\\s+${CALLBACK_CONTACT_NOUN}|(?:an?|the)\\s+${CALLBACK_CONTACT_NOUN})`;
+  const agreementComplement = `(?:to\\s+${receivedContact}|that\\s+(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+${contact})`;
+  const agreementAction = `(?:agrees?|consents?)(?:\\s+${agreementComplement})?${consentBoundary}`;
+  const requestedContact = `asks?\\s+(?:us|the office|our team)\\s+to(?:\\s+${contact})?${consentBoundary}`;
+  const grantedContact = `(?:gives?|grants?)\\s+(?:(?:us|the office|our team)\\s+)?(?:permission|consent)(?:\\s+(?:to|for\\s+(?:us|the office|our team)\\s+to)\\s+${contact})?${consentBoundary}`;
+  const declineAction = `${CALLBACK_DECLINE_ACTION}(?:\\s+to\\s+${receivedContact})?${consentBoundary}`;
+  const consentAction = `(?:${agreementAction}|${requestedContact}|${grantedContact})`;
+  const source = `(?:(?:if|when|once|provided(?:\\s+that)?|(?:only\\s+)?after)\\s+${conditionTarget}\\s+${consentAction}|unless\\s+${conditionTarget}\\s+${declineAction})`;
+  return {
+    condition: new RegExp(`\\b${source}\\b`, 'i'),
+    leading: new RegExp(`^\\s*${source}\\s*,?\\s*$`, 'i'),
+  };
+}
+
 /**
  * value: { targets: ["ruth", "(?:my |your |her )?(?:mother|mom)"] } — the
  * regex sources naming THIS scenario's account holder, added to the pronouns
@@ -1318,6 +1354,20 @@ function no_account_holder_callback(value, record, { spoken }) {
   const inheritedContact = `(?:and|but|so|then)\\s+${CALLBACK_COORDINATED_MODAL}\\s+${promisedContact}`;
   const wavesActor = `(?:${CALLBACK_PROMISER}|me|us)\\b(?![\\x27\\u2019]s\\b)${CALLBACK_PHRASE_END}`;
   const recipientFirst = `${recipientTargets}${CALLBACK_MODAL}\\s+${CALLBACK_ADVERB}${CALLBACK_RECIPIENT_ACTION}\\s+${wavesActor}`;
+  const callbackQuestion = new RegExp(`^\\s*${CALLBACK_QUESTION_AUX}\\s+(?:you|${CALLBACK_QUESTION_PROMISER})\\s+${contact}`, 'i');
+  if (answeredQuestion(record, (question) => {
+    const questionMatch = callbackQuestion.exec(question);
+    if (!questionMatch
+        || clauseIsNegated(question.slice(questionMatch.index, questionMatch.index + questionMatch[0].length))) return false;
+    const questionSuffix = question.slice(questionMatch.index + questionMatch[0].length);
+    const { condition } = callbackConsentCondition(targets, value.targets, questionMatch[0], contact);
+    const consent = condition.exec(questionSuffix);
+    const modifiers = consent ? questionSuffix.slice(0, consent.index).replace(/,\s*$/, '') : '';
+    return !consent
+      || !(VISIT_MODIFIERS_RE.test(modifiers) || CALLBACK_TIMING_MODIFIERS_RE.test(modifiers));
+  }, CALLBACK_QUESTION_ANSWER_RE, null, CALLBACK_QUESTION_DENIAL_RE)) {
+    return ['fail', 'promised to contact the account holder by affirming the caller\'s request'];
+  }
   const re = new RegExp(
     `\\b(?:(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+${promisedContact}|${inheritedContact}|${recipientFirst})`,
     'gi',
@@ -1333,14 +1383,15 @@ function no_account_holder_callback(value, record, { spoken }) {
       const inheritedByWaves = !inherited
         || new RegExp(`^\\s*${CALLBACK_PROMISER}\\b`, 'i').test(sentencePrefix);
       const callbackSuffix = text.slice(matchEnd, clauseEnd).replace(/^\s*back\b/i, '');
-      const conditionTarget = callbackConditionTarget(targets, value.targets, match[0]);
-      const consentCondition = new RegExp(
-        `\\b(?:(?:if|when|once|provided(?:\\s+that)?|(?:only\\s+)?after)\\s+${conditionTarget}\\s+(?:agrees?|consents?)|unless\\s+${conditionTarget}\\s+(?:declines?|refuses?))\\b`,
-        'i',
+      const { condition, leading } = callbackConsentCondition(
+        targets, value.targets, match[0], contact,
       );
-      const leadingConsent = new RegExp(`^\\s*${consentCondition.source}\\s*,?\\s*$`, 'i');
-      const consentGated = leadingConsent.test(text.slice(clauseStart, match.index))
-        || consentCondition.test(callbackSuffix);
+      const consent = condition.exec(callbackSuffix);
+      const consentModifiers = consent
+        ? callbackSuffix.slice(0, consent.index).replace(/,\s*$/, '') : '';
+      const consentGated = leading.test(text.slice(clauseStart, match.index))
+        || Boolean(consent && (VISIT_MODIFIERS_RE.test(consentModifiers)
+          || CALLBACK_TIMING_MODIFIERS_RE.test(consentModifiers)));
       const concession = new RegExp(`^\\s*${CALLBACK_CONCESSION}\\b`, 'i').test(callbackSuffix);
       const claim = (concession ? text.slice(match.index, matchEnd) : claimContext(text, match.index, matchEnd))
         .replace(/^\s*(?:if|unless)\b[^,]*,\s*/i, '');
