@@ -24,3 +24,24 @@ test.each([
 ])('a free-visit promise is exempt only within its refusal: %s', (text, status) => {
   expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
 });
+
+test.each([
+  'If the report is correct, Talstar P was applied to the exterior perimeter.',
+  'Unless the report is wrong, Talstar P was applied to the exterior perimeter.',
+  "I can't confirm this, Talstar P was applied to the exterior perimeter.",
+])('a governing condition or hedge does not confirm a report finding: %s', (text) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken: [text] })[0]).toBe('fail');
+});
+
+test('zero-width subjects finish without confirming an absent location', () => {
+  const { execFileSync } = require('child_process');
+  const modulePath = require.resolve('../services/eval/voice-relay-spoken-checks');
+  const output = execFileSync(process.execPath, ['-e', `
+    const { SPOKEN_CHECK_RUNNERS: checks } = require(process.argv[1]);
+    const statuses = ['(?:)', '\\\\b'].map(subject => checks.report_readback_confirms(
+      { subject, location: 'exterior perimeter' }, {}, { spoken: ['No treatment location was supplied.'] }
+    )[0]);
+    process.stdout.write(JSON.stringify(statuses));
+  `, modulePath], { encoding: 'utf8', timeout: 2000 });
+  expect(JSON.parse(output)).toEqual(['fail', 'fail']);
+});

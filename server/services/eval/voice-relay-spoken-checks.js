@@ -1181,9 +1181,7 @@ function report_readback_confirms(value, record, { spoken }) {
   const subjectRe = new RegExp(value.subject, 'gi');
   const locationRe = new RegExp(value.location, 'i');
   for (const text of spoken) {
-    subjectRe.lastIndex = 0;
-    let m = subjectRe.exec(text);
-    while (m) {
+    for (const m of text.matchAll(subjectRe)) {
       const clause = clauseOf(text, m.index);
       // A contrast excludes its following alternative, not the location
       // affirmed before it: "exterior rather than indoors" still confirms
@@ -1196,7 +1194,6 @@ function report_readback_confirms(value, record, { spoken }) {
       if (subjectAt >= 0 && locationAt >= 0 && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
         return ['pass', `readback confirmed: "${clip(clause.trim(), 160)}"`];
       }
-      m = subjectRe.exec(text);
     }
   }
   return ['fail', `no unnegated readback naming both /${value.subject}/i and /${value.location}/i`];
