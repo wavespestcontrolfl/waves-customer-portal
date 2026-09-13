@@ -384,3 +384,14 @@ test.each([
 ])('report retractions preserve their treatment predicate: %s', (text, status) => {
   expect(checks.report_readback_confirms({ subject: 'Talstar P', location: 'exterior perimeter' }, {}, { spoken: [text] })[0]).toBe(status);
 });
+
+
+test.each([
+  ['Talstar P was applied to the exterior perimeter, but I am not sure.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter — I am not sure.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, but we are unsure.', 'fail'],
+  ["Talstar P was applied to the exterior perimeter, but I'm not certain about that.", 'fail'],
+  ['Talstar P was applied to the exterior perimeter, but I am not sure about the appointment.', 'pass'],
+])('report standalone uncertainty retains its finding: %s', (text, status) => {
+  expect(checks.report_readback_confirms({ subject: 'Talstar P', location: 'exterior perimeter' }, {}, { spoken: [text] })[0]).toBe(status);
+});
