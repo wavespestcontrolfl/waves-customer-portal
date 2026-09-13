@@ -803,6 +803,7 @@ const gates = {
   // Reviewed human-email pairs only; strict opt-in in every environment.
   // The miner re-reads the gate at call time and requires a reviewed selection.
   voiceCorpusEmailSource: gateEnvValue('GATE_VOICE_CORPUS_EMAIL_SOURCE'),
+  emailVoiceProfile: gateEnvValue('GATE_EMAIL_VOICE_PROFILE'),
 
   // Call-Research Miner (voice-of-customer corpus) — nightly extraction of
   // verbatim double-redacted quote chunks from call transcripts into

@@ -652,6 +652,8 @@ async function mineVoiceCorpus({ sinceDays = 3 } = {}) {
 module.exports = {
   mineVoiceCorpus,
   mineEmailPairs,
+  parseEmailSelection,
+  emailTopText,
   eligibleCallTranscriptsQuery,
   SCHEMA_VERSION,
   // Production contract shared with the re-transcription backfill: a
