@@ -117,23 +117,34 @@ function parseEstimateData(estimateData) {
 
 // A delivery witness must describe this annual offer, not merely an earlier
 // handoff of the same estimate row (which can be revised from quarterly).
-// Hash the authoritative priced result and the recipient/property/totals;
-// operational send metadata changes do not mint a new contract.
+// Hash the complete customer-facing offer identity, including recipient,
+// notes, billing mode and the priced result. Operational delivery metadata
+// is excluded by estimateOfferVersion, so a real handoff remains verifiable.
 function annualPlanOfferFingerprint(estimate) {
   const data = parseEstimateData(estimate?.estimate_data || estimate?.estimateData);
   if (!data || !selectedTermiteAnnualPlanRows(data).length) return null;
-  const priced = data.result && typeof data.result === 'object'
-    ? data.result : data.engineResult;
-  if (!priced || typeof priced !== 'object') return null;
-  return crypto.createHash('sha256').update(JSON.stringify([
-    estimate.customer_id || null,
-    estimate.property_id || null,
-    estimate.address || null,
-    estimate.monthly_total ?? null,
-    estimate.annual_total ?? null,
-    estimate.onetime_total ?? null,
-    priced,
-  ])).digest('hex');
+  if (!data.result && !data.engineResult) return null;
+  // These keys are written by publication, after the provider handoff.
+  // Group identity itself remains in the row fields of estimateOfferVersion.
+  const offerData = { ...data };
+  for (const key of ['groupPublishedByEstimateId', 'proposalDelivery', 'leadServiceHandoffAt', 'leadServiceHandoffParkId']) {
+    delete offerData[key];
+  }
+  return estimateOfferVersion({ ...estimate, estimate_data: offerData });
+}
+
+function publishedSiblingDeliveryPatch(sibling, anchorDeliveryState, deliveredAt) {
+  const prior = parseEstimateData(sibling.estimate_data);
+  const fingerprint = annualPlanOfferFingerprint(sibling);
+  return {
+    deliveryState: {
+      ...anchorDeliveryState,
+      firstDeliveredAt: prior?.deliveryState?.firstDeliveredAt || deliveredAt,
+      lastDeliveredAt: deliveredAt,
+      deliveredAt: [deliveredAt],
+      annualPlanOfferFingerprint: fingerprint || null,
+    },
+  };
 }
 
 // Operational delivery stamps may change while the claim is taken. Contact,
@@ -145,6 +156,9 @@ function estimateOfferVersion(row) {
     data.estimatorEngine = { ...data.estimatorEngine };
     delete data.estimatorEngine.delivering_at;
     delete data.estimatorEngine.delivering_token;
+    // A send claim on an admin-authored quote may create this object solely
+    // for the claim. Cleanup leaves {}, which is the same offer as absence.
+    if (!Object.keys(data.estimatorEngine).length) delete data.estimatorEngine;
   }
   const fields = ['customer_id', 'property_id', 'estimate_group_id', 'customer_name', 'customer_phone', 'customer_email', 'address', 'notes', 'monthly_total', 'annual_total', 'onetime_total', 'show_one_time_option', 'bill_by_invoice'];
   return crypto.createHash('sha256').update(JSON.stringify([fields.map((key) => row[key]), data])).digest('hex');
@@ -3047,6 +3061,13 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             throw new Error(`sibling send snapshot did not freeze pricing${snapshot?.sendSnapshot?.pricingBundleError ? `: ${snapshot.sendSnapshot.pricingBundleError}` : ''}`);
           }
           siblingSnapshotPatch = { ...siblingSnapshotPatch, sendSnapshot: snapshot.sendSnapshot };
+          // The anchor's provider handoff publishes this sibling's own offer.
+          // A gate-off resend must verify the sibling's fingerprint, not the
+          // anchor's, and must have a real-handoff timestamp on that row.
+          const siblingDeliveryStatePatch = stampChannels.length > 0
+            ? publishedSiblingDeliveryPatch(sibling, deliveryStatePatch.deliveryState, lastDeliveredAt)
+            : {};
+          siblingSnapshotPatch = { ...siblingSnapshotPatch, ...siblingDeliveryStatePatch };
           const updated = await db('estimates')
             .where({ id: sibling.id, status: 'sending' })
             .whereNull('price_locked_at')
@@ -3095,7 +3116,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // the same (GH codex P2 r3).
           shadowLogFallbackDelivery(sibling, { handoff: stampChannels.length > 0 });
           if (!updated) {
-            await recordTerminalSiblingDelivery(sibling, snapshot, { delivered: stampChannels.length > 0, sendMethod, deliveryStatePatch });
+            await recordTerminalSiblingDelivery(sibling, snapshot, { delivered: stampChannels.length > 0, sendMethod, deliveryStatePatch: siblingDeliveryStatePatch });
           } else {
             await snapshotPublishedSibling(sibling, siblingSnapshotPatch, { now, nextExpiresAt, sendMethod });
           }
@@ -5164,6 +5185,7 @@ router._internals = {
   clearStaleProposalDelivery,
   assertEstimateSendable,
   annualPlanOfferFingerprint,
+  publishedSiblingDeliveryPatch,
   sendRequiresServerPricingFor,
   isAuthoredProposalRow,
   PROPOSAL_PROVENANCE_SOURCE,
