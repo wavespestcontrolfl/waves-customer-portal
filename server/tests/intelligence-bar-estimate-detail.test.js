@@ -95,6 +95,7 @@ const PAGE_PAYLOAD = {
 
 beforeEach(() => {
   calls.length = 0;
+  db.__queries.length = 0;
   mockCompose.mockReset();
   mockCompose.mockResolvedValue(JSON.parse(JSON.stringify(PAGE_PAYLOAD)));
   mockReconcile.mockReset();
@@ -104,16 +105,17 @@ beforeEach(() => {
   db.__rows = () => [];
 });
 
-test('tool definition requires an estimate id and describes the page projection', () => {
+test('tool definition accepts exact or history selectors and describes the page projection', () => {
   expect(GET_ESTIMATE_DETAIL_TOOL.name).toBe('get_estimate_detail');
-  expect(GET_ESTIMATE_DETAIL_TOOL.description).toMatch(/as the customer's own estimate page prices it/);
+  expect(GET_ESTIMATE_DETAIL_TOOL.description).toMatch(/as the customer's own estimate page prices them/);
   expect(GET_ESTIMATE_DETAIL_TOOL.description).toMatch(/page\.pricing/);
   expect(GET_ESTIMATE_DETAIL_TOOL.description).toMatch(/Quote-required pricing/);
   expect(GET_ESTIMATE_DETAIL_TOOL.description).toMatch(/page_unavailable/);
   expect(GET_ESTIMATE_DETAIL_TOOL.description).toMatch(/Provenance blocks withhold/);
   expect(GET_ESTIMATE_DETAIL_TOOL.input_schema.properties.estimate_id.format).toBe('uuid');
-  expect(GET_ESTIMATE_DETAIL_TOOL.input_schema.required).toEqual(['estimate_id']);
-  expect(GET_ESTIMATE_DETAIL_TOOL.input_schema.properties.customer_id).toBeUndefined();
+  expect(GET_ESTIMATE_DETAIL_TOOL.input_schema.required).toBeUndefined();
+  expect(GET_ESTIMATE_DETAIL_TOOL.input_schema.properties.customer_id.format).toBe('uuid');
+  expect(GET_ESTIMATE_DETAIL_TOOL.input_schema.properties.limit.type).toBe('number');
 });
 
 // ── Composer projection ─────────────────────────────────────────────
@@ -556,23 +558,140 @@ test('a composer that returns nothing usable is reported, not treated as an empt
   expect(shaped.page_unavailable).toMatch(/composed no payload/);
 });
 
-test('one estimate by id returns its page projection without follow-up DB reads', async () => {
+test('one estimate by id returns its page projection and a verified empty deposit ledger', async () => {
   db.__queries.length = 0;
   db.__rows = (q) => /from "estimates"/.test(q.sql) ? [estimateRow()] : [];
   const out = await getEstimateDetail({ estimate_id: 'est-1' });
   expect(out.count).toBe(1);
   expect(out.estimates[0].page.pricing).toEqual(PAGE_PAYLOAD.pricing);
   expect(out.estimates[0]).toMatchObject({ customer: 'Avery Example', tier: 'silver', view_count: 2 });
-  expect(out.estimates[0].deposits).toBeUndefined();
+  expect(out.estimates[0].deposits).toEqual([]);
   expect(out.estimates[0].committed_totals).toBeUndefined();
-  expect(db.__queries[0].sql).toMatch(/where "id" = \$\d+ limit \$\d+/);
+  expect(db.__queries[0].sql).toMatch(/where "id" = \$\d+ order by "created_at" desc limit \$\d+/);
   expect(db.__queries[0].bindings).toEqual(['est-1', 1]);
+  expect(db.__queries.some((q) => /estimate_deposits/.test(q.sql))).toBe(true);
+});
+
+test('estimate id takes precedence over customer history, even when archived', async () => {
+  db.__rows = (q) => /from "estimates"/.test(q.sql) ? [estimateRow({ archived_at: '2026-09-06T00:00:00Z' })] : [];
+  const out = await getEstimateDetail({ estimate_id: 'est-1', customer_id: 'other-customer', limit: 10 });
+  expect(out.count).toBe(1);
+  expect(db.__queries[0].sql).toMatch(/where "id" = \$\d+/);
+  expect(db.__queries[0].sql).not.toMatch(/"customer_id"|"archived_at"/);
+  expect(db.__queries[0].bindings).toEqual(['est-1', 1]);
+});
+
+test('customer history defaults to three, caps at ten, and excludes archived estimates newest first', async () => {
+  db.__rows = (q) => /from "estimates"/.test(q.sql) ? [estimateRow()] : [];
+  await getEstimateDetail({ customer_id: 'cust-1' });
+  expect(db.__queries[0].sql).toMatch(/"customer_id" = \$\d+ and "archived_at" is null order by "created_at" desc limit \$\d+/);
+  expect(db.__queries[0].bindings).toEqual(['cust-1', 3]);
+  db.__queries.length = 0;
+  await getEstimateDetail({ customer_id: 'cust-1', limit: 99 });
+  expect(db.__queries[0].bindings).toEqual(['cust-1', 10]);
+});
+
+test('exact id lookup requires a selector and returns an empty result for an unknown id', async () => {
+  expect(await getEstimateDetail({})).toEqual({ error: 'Provide estimate_id or customer_id' });
+  db.__rows = () => [];
+  expect(await getEstimateDetail({ estimate_id: 'missing' })).toMatchObject({ count: 0, estimates: [], error: 'No estimate matches that id' });
+  expect(await getEstimateDetail({ customer_id: 'cust-1' })).toMatchObject({ count: 0, estimates: [], error: 'No estimates on file for that customer' });
+});
+
+test('deposit statuses distinguish captured cash from abandoned or unknown intents', async () => {
+  const statuses = ['received', 'credited', 'refunding', 'refunded', 'pending', 'failed', 'other'];
+  db.__rows = (q) => /from "estimates"/.test(q.sql) ? [estimateRow()] : statuses.map((status) => ({
+    estimate_id: 'est-1', amount: '49.00', card_surcharge: '1.42', credited_amount: '10.00',
+    refunded_amount: '5.00', refunded_surcharge: '0.22', status, received_at: '2026-09-06T00:00:00Z',
+  }));
+  const out = await getEstimateDetail({ estimate_id: 'est-1' });
+  expect(out.estimates[0].deposits).toHaveLength(statuses.length);
+  for (const [index, deposit] of out.estimates[0].deposits.entries()) {
+    expect(deposit).toMatchObject({ amount: 49, card_surcharge: 1.42, credited: 10, refunded: 5, refunded_surcharge: 0.22,
+      status: statuses[index], collected: index < 4, total_paid: index < 4 ? 50.42 : null });
+    expect(deposit).not.toHaveProperty('stripe_payment_intent_id');
+  }
+});
+
+test('a failed deposit query reports unavailable, not a falsely empty ledger', async () => {
+  db.__rows = (q) => {
+    if (/estimate_deposits/.test(q.sql)) throw new Error('deposit table unavailable');
+    return [estimateRow()];
+  };
+  const out = await getEstimateDetail({ estimate_id: 'est-1' });
+  expect(out.estimates[0]).toMatchObject({ deposits: null, deposits_unavailable: expect.stringMatching(/could not be read/) });
+});
+
+test('provenance-blocked rows have no deposit query or deposit output', async () => {
+  mockCallSideBlock.mockResolvedValue({ reason: 'hold' });
+  db.__queries.length = 0;
+  db.__rows = (q) => /from "estimates"/.test(q.sql) ? [estimateRow()] : [];
+  const out = await getEstimateDetail({ estimate_id: 'est-1' });
+  expect(out.estimates[0].withheld).toBe('provenance_blocked');
+  expect(out.estimates[0]).not.toHaveProperty('deposits');
   expect(db.__queries.some((q) => /estimate_deposits/.test(q.sql))).toBe(false);
 });
 
-test('exact id lookup requires the selector and returns an empty result for an unknown id', async () => {
-  expect(await getEstimateDetail({})).toEqual({ error: 'Provide estimate_id' });
-  expect(await getEstimateDetail({ customer_id: 'cust-1', limit: 10 })).toEqual({ error: 'Provide estimate_id' });
-  db.__rows = () => [];
-  expect(await getEstimateDetail({ estimate_id: 'missing' })).toMatchObject({ count: 0, estimates: [], error: 'No estimate matches that id' });
+test('verified property siblings include only persisted identity and canonical links, no tokens or stored totals', async () => {
+  const current = estimateRow({ estimate_group_id: 'group-1' });
+  const sibling = estimateRow({ id: 'est-2', token: 'sib-b', address: '200 Test St', estimate_group_id: 'group-1' });
+  db.__rows = (q) => /from "estimates"/.test(q.sql) ? [sibling] : [];
+  mockCompose.mockResolvedValue({ ...PAGE_PAYLOAD, propertyGroup: [
+    { token: current.token, isCurrent: true, address: 'payload spoof', monthlyTotal: 9999 },
+    { token: sibling.token, isCurrent: false, address: 'payload spoof', monthlyTotal: 8888, waveguardTier: 'secret', lowConfidenceFraction: 0.2 },
+  ] });
+  const { page } = await shapeEstimate(current);
+  expect(page.propertyGroup).toEqual([
+    { id: 'est-1', address: '100 Test St', status: 'sent', isCurrent: true,
+      customer_link: 'https://portal.wavespestcontrol.com/estimate/xydejpzuxx',
+      staff_preview_link: 'https://portal.wavespestcontrol.com/estimate/xydejpzuxx?adminPreview=1' },
+    { id: 'est-2', address: '200 Test St', status: 'sent', isCurrent: false,
+      customer_link: 'https://portal.wavespestcontrol.com/estimate/sib-b',
+      staff_preview_link: 'https://portal.wavespestcontrol.com/estimate/sib-b?adminPreview=1' },
+  ]);
+  expect(JSON.stringify(page.propertyGroup)).not.toMatch(/8888|9999|waveguardTier|lowConfidenceFraction|"token"/);
+  expect(db.__queries.find((q) => /where "token" in/.test(q.sql)).sql).toContain('select *');
+});
+
+test.each([
+  { customer_id: 'other-customer' }, { estimate_group_id: 'other-group' }, { archived_at: '2026-09-06T00:00:00Z' },
+])('property group withholds untrusted sibling scope or link state: %o', async (changes) => {
+  const current = estimateRow({ estimate_group_id: 'group-1' });
+  db.__rows = () => [estimateRow({ id: 'est-2', token: 'sib-b', estimate_group_id: 'group-1', ...changes })];
+  mockCompose.mockResolvedValue({ ...PAGE_PAYLOAD, propertyGroup: [
+    { token: current.token, isCurrent: true }, { token: 'sib-b', isCurrent: false },
+  ] });
+  const shaped = await shapeEstimate(current);
+  expect(shaped.page).not.toHaveProperty('propertyGroup');
+  expect(JSON.stringify(shaped)).not.toContain('sib-b');
+});
+
+test('a failed sibling lookup or provenance check withholds the group without losing the verified current page', async () => {
+  const current = estimateRow({ estimate_group_id: 'group-1' });
+  mockCompose.mockResolvedValue({ ...PAGE_PAYLOAD, propertyGroup: [
+    { token: current.token, isCurrent: true }, { token: 'sib-b', isCurrent: false },
+  ] });
+  db.__rows = (q) => {
+    if (/where "token" in/.test(q.sql)) throw new Error('sibling lookup failed');
+    return [];
+  };
+  const lookupFailure = await shapeEstimate(current);
+  expect(lookupFailure.page.pricing).toEqual(PAGE_PAYLOAD.pricing);
+  expect(lookupFailure.page).not.toHaveProperty('propertyGroup');
+  mockCallSideBlock.mockImplementation(async (_db, data) => data.siblingBlocked ? { reason: 'hold' } : null);
+  db.__rows = () => [estimateRow({ id: 'est-2', token: 'sib-b', estimate_group_id: 'group-1',
+    estimate_data: JSON.stringify({ siblingBlocked: true }) })];
+  const held = await shapeEstimate(current);
+  expect(held.page).not.toHaveProperty('propertyGroup');
+});
+
+test('acceptance exposes the locked basis and selection without stored aggregate totals', async () => {
+  const row = estimateRow({ status: 'accepted', price_locked_at: '2026-09-07T09:00:00Z',
+    accepted_at: '2026-09-07T09:00:00Z', accepted_service_mode: 'recurring', accepted_frequency_key: 'quarterly',
+    monthly_total: '99999.00', annual_total: '88888.00', onetime_total: '77777.00' });
+  const shaped = await shapeEstimate(row);
+  expect(shaped).toMatchObject({ price_locked: true, price_locked_at: row.price_locked_at,
+    accepted: { at: row.accepted_at, service_mode: 'recurring', frequency: 'quarterly' } });
+  expect(shaped).not.toHaveProperty('committed_totals');
+  expect(JSON.stringify(shaped)).not.toMatch(/99999|88888|77777/);
 });
