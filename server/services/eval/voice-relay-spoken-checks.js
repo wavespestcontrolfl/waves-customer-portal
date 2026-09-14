@@ -1617,18 +1617,20 @@ function reportSharedLocationContinuation(text, clauseEnd, location) {
   if (!locationTail) return { text: '', unconfirmed: false };
   const qualifier = remainder.slice(locationTail[0].length).trim()
     .replace(/^(?:perimeter|area|wall|walls|zone|edge)\b\s*/i, '');
+  const scopedQualifier = qualifier.replace(/^[,—–]\s*(?:(?:but|however)\s*,?\s*)?/i, '')
+    .replace(/[.!?;].*$/, '');
   // A shared list ends the location noun or adds an adjunct, not a new predicate.
   if (!/^(?:$|[.!?;]|(?:,\s*)?(?:and|or|before|after|with|as|according|which|(?:only\s+)?if|unless)\b)/i.test(qualifier)
-      && !REPORT_TRAILING_UNCERTAINTY_RE.test(qualifier.replace(/[.!?;].*$/, ''))
-      && !REPORT_TRAILING_DENIAL_RE.test(qualifier.replace(/^[,—–]\s*|[.!?;].*$/g, ''))) {
+      && !REPORT_TRAILING_UNCERTAINTY_RE.test(scopedQualifier)
+      && !REPORT_TRAILING_DENIAL_RE.test(scopedQualifier)) {
     return { text: '', unconfirmed: false };
   }
   const end = remainder.search(/[.!?;]/);
   return {
     text: remainder.slice(0, end >= 0 ? end : undefined),
     unconfirmed: (end >= 0 && remainder[end] === '?')
-      || REPORT_TRAILING_UNCERTAINTY_RE.test(qualifier.replace(/[.!?;].*$/, ''))
-      || REPORT_TRAILING_DENIAL_RE.test(qualifier.replace(/^[,—–]\s*|[.!?;].*$/g, '')),
+      || REPORT_TRAILING_UNCERTAINTY_RE.test(scopedQualifier)
+      || REPORT_TRAILING_DENIAL_RE.test(scopedQualifier),
   };
 }
 

@@ -277,8 +277,16 @@ test.each([
   'Talstar P was applied to the garage and to the exterior perimeter.',
   'Talstar P was applied around the garage and around the exterior perimeter.',
   'Talstar P was applied to the garage and the full exterior perimeter.',
+  'Talstar P was applied to the exterior perimeter and garage, but the appointment date was wrong.',
 ])('a location list shares its preceding treatment predicate: %s', (spoken) => {
   expect(checks.report_readback_confirms(report, {}, { spoken: [spoken] })[0]).toBe('pass');
+});
+
+test.each([
+  'Talstar P was applied to the exterior perimeter and garage, but that never happened.',
+  'Talstar P was applied to the exterior perimeter and garage, but I cannot confirm that.',
+])('a retraction after a shared location list denies the finding: %s', (spoken) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken: [spoken] })[0]).toBe('fail');
 });
 
 test.each([
