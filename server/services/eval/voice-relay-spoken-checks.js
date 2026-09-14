@@ -1242,7 +1242,7 @@ const CARD_MEASUREMENT_UNIT = '(?:sq(?:uare)?\\.?\\s*(?:ft|feet|foot)|acres?)';
 // Preserve a comma that introduces a separately explained numeric value or a
 // reverse card-position label before spokenDigits can join the digit words.
 const CARD_COMMA_VALUE_BOUNDARY_RE = new RegExp(
-  `,\\s*(?=(?:\\d+|${DIGIT_TOKEN}|${CARD_DIGIT_TOKEN_ES})\\s+(?:(?:${CARD_COUNT_MODIFIERS}${CARD_COUNT_NOUN}|${CARD_MEASUREMENT_UNIT}|${CARD_SCALAR_UNIT})(?!\\w)|`
+  `(?:(?<!\\d),|,(?!\\d{3}(?:\\D|$)))\\s*(?=(?:${DIGITS}|${NUMBER_RUN_EN_STRICT}|${CARD_DIGIT_TOKEN_ES})\\s+(?:(?:${CARD_COUNT_MODIFIERS}${CARD_COUNT_NOUN}|${CARD_MEASUREMENT_UNIT}|${CARD_SCALAR_UNIT})(?!\\w)|`
     + `(?:is|was)\\s+(?:the\\s+)?(?:first|last|next|middle)\\s+(?:digit|number|one)\\s+(?:of|on)\\s+`
     + `(?:(?:your|the|my|this|that)\\s+)?(?:card|pan|cvv|cvc|security code)\\b))`,
   'gi',
@@ -1261,7 +1261,7 @@ const CARD_NAMED_EXPIRATION_VALUE_RE = new RegExp(
 );
 const CARD_NUMERIC_EXPIRATION_VALUE_RE = /^(\d{1,2})\s*[/.-]\s*(?:(\d{1,2})\s*[/.-]\s*)?((?:19|20)\d{2}|\d{2})$/;
 const CARD_NON_FRAGMENT_RES = Object.freeze([
-  new RegExp(`\\b(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})(?:[\\s-]+(?:and\\s+)?(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})){0,6}\\s+(?:dollars?|cents?|bucks)\\b`, 'gi'),
+  new RegExp(`\\b(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})(?:[\\s-]+(?:and\\s+)?(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})){0,6}\\s+(?:bucks|${CARD_SCALAR_UNIT}|${CARD_MEASUREMENT_UNIT}|${CARD_COUNT_MODIFIERS}${CARD_COUNT_NOUN})\\b`, 'gi'),
   new RegExp(`\\$\\s*${DIGITS}`, 'gi'),
   new RegExp(`\\b${PRICE_NUMBER}\\s*(?:per|an?|each|every|for each|for every)\\s+(?:applications?|treatments?|services?|visits?)\\b`, 'gi'),
   new RegExp(`\\b\\d[\\d,]*(?:\\.\\d+)?\\s*${CARD_MEASUREMENT_UNIT}\\b`, 'gi'),
