@@ -460,6 +460,13 @@ async function appendMessage(opts) {
 
   return await db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`message:${opts.channel}:${opts.twilioSid}`]);
+    if (opts.channel === 'sms' && opts.direction === 'inbound' && opts.contactPhone) {
+      // The inbox read-clear holds this same phone lock. Take it before
+      // committing the unified inbound row so a READ COMMITTED clear cannot
+      // take its statement snapshot while this message is being inserted.
+      // This transaction ends before the webhook's AI or bell dispatch.
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`inbound_sms_bell_retarget:${opts.contactPhone}`]);
+    }
 
     const existing = await trx('messages')
       .where({ channel: opts.channel, twilio_sid: opts.twilioSid })

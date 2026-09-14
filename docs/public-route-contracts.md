@@ -299,7 +299,15 @@ notifications, with no additional response fields or customer sends;
 unknown domain/van-tracking SMS stays unlinked in the inbox and does not
 create customer/account rows or guess a customer name from message prose.
 Substantive messages ring a per-message `new_lead` bell/push linking to the
-inbox; reactions, empty messages and courtesy-only replies do not;
+inbox; reactions, empty messages and courtesy-only replies do not.
+Unknown location-line senders ring the same SID-scoped SMS bell as known
+customers. The AI line skips that fallback only after a non-escalated reply
+is sent; no-answer outcomes remain eligible. The unknown-sender four-hour
+throttle counts only persisted successful bell/push receipts in SMS metadata.
+Reading an unlinked thread retargets its SID-scoped bell to the sender's
+next still-unread message and clears the bell only when nothing of theirs
+remains unread, so a partial read of a multi-message unknown-sender thread
+keeps a bell;
 ordinary inbound SMS is persisted before reschedule or lead-intake consumption,
 including replies that return early. STOP/HELP/START handling (opt-out
 suppression + the `<Message>` confirmation TwiML) applies only to a sender

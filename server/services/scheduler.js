@@ -652,10 +652,33 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Unknown-sender alert recovery registers BEFORE the master gate (codex
+  // #4210 round-4 P1), alongside handoff alert recovery. This is not an
+  // optional scheduled feature: it is the ONLY process-independent recovery
+  // for a claim whose winner crashed or whose dispatch failed with no later
+  // message to reclaim the lease. Behind the gate, turning cron off would
+  // silently reintroduce the permanently-unread first-contact thread this
+  // sweep exists to prevent.
+  const smsReplyAlertSweepTick = async () => {
+    try {
+      await runExclusive('sms-reply-alert-sweep', async () => {
+        const { sweepUnknownSenderAlertClaims } = require('./sms-reply-alert-sweep');
+        const result = await sweepUnknownSenderAlertClaims();
+        if (result.dispatched > 0) {
+          logger.warn(`[sms-reply-alert-sweep] recovered ${result.dispatched} of ${result.checked} lapsed claim(s)`);
+        }
+      });
+    } catch (err) {
+      logger.error('[sms-reply-alert-sweep] tick failed', { code: err.code || 'unknown' });
+    }
+  };
+  cron.scheduleTimeout(smsReplyAlertSweepTick, 30 * 1000);
+  cron.schedule('*/2 * * * *', smsReplyAlertSweepTick, { timezone: 'America/New_York' });
+
   // Boundary maintenance runs BEFORE this early return (codex r40):
   // disabling scheduled tasks must not preserve a stale feature interval.
   if (!isEnabled('cronJobs')) {
-    logger.info('[feature-gates] Cron jobs DISABLED — retaining handoff alert recovery only');
+    logger.info('[feature-gates] Cron jobs DISABLED — retaining handoff + SMS alert recovery only');
     return;
   }
 
@@ -721,6 +744,17 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // BOOT (+30s, then EVERY 2 MIN) — unknown-sender sms_reply alert claim
+  // recovery sweep (codex #4210 round-8 P1). A claim winner can crash (or
+  // simply never reach its own confirm/release branch) after taking the
+  // short lease that gates the throttled bell, and any message that LOST
+  // that claim race already returned "handled" without verifying anything
+  // actually rang — leaving nobody alive to retry. This is the recovery
+  // path that does not depend on either side still being alive: reclaim
+  // every lapsed claim and, for any phone that still has an unread
+  // unknown-sender message with no live bell, re-dispatch. A tight
+  // interval matches the short (couple-minute) lease this recovers —
+  // runExclusive so a deploy overlap doesn't double-sweep.
   // HOURLY :20 — geocode backstop. Several customer-create paths never call
   // ensureCustomerGeocoded (and the ones that do swallow transient Google
   // failures), leaving latitude/longitude NULL — which silently drops those

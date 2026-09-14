@@ -43,6 +43,7 @@ function mockDb(table) {
     query.merge = async () => query.rows;
     return query;
   };
+  query.update = (row) => { mockWrites.push({ table, row, op: 'update' }); return Promise.resolve(1); };
   query.first = async () => {
     if (table === 'messages' && query.usedJoin) {
       mockOutboundHistoryCalls.push(table);
@@ -64,7 +65,11 @@ function mockDb(table) {
   query.catch = (reject) => Promise.resolve(query.rows).catch(reject);
   return query;
 }
-mockDb.raw = jest.fn((sql, bindings) => ({ rows: [], sql, bindings }));
+// The unknown-sender alert-window claim (INSERT ... RETURNING) needs a
+// non-empty row back to read as "claimed" — every other raw() call here
+// (advisory locks, etc.) ignores .rows, so a generic non-empty result is
+// a safe default across the file.
+mockDb.raw = jest.fn((sql, bindings) => ({ rows: [{ phone: bindings?.[0] }], sql, bindings }));
 mockDb.transaction = async (fn) => fn(mockDb);
 jest.mock('../models/db', () => mockDb);
 jest.mock('../config/feature-gates', () => ({
@@ -108,6 +113,7 @@ jest.mock('../services/estimate-clarify-asks', () => ({ handleClarifyReply: jest
 jest.mock('../services/estimator-engine/sms-thread', () => ({ smsThreadDraftsEnabled: () => true, startSmsThreadDraft: jest.fn(async () => ({})) }));
 jest.mock('../services/estimate-conversion-agent', () => ({ processInboundSms: jest.fn(async () => ({})) }));
 jest.mock('../services/tech-line', () => ({ notifyTechLineText: jest.fn(async () => ({})) }));
+jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({ bellWritten: true, push: { sent: 1 } })) }));
 
 const { EventEmitter } = require('node:events');
 const { dispatchWithFallback } = require('../services/llm/call');
@@ -119,6 +125,7 @@ const { processInboundSms } = require('../services/estimate-conversion-agent');
 const { sendSMS } = require('../services/twilio');
 const { uploadTwilioMedia } = require('../services/sms-media');
 const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
+const { triggerNotification } = require('../services/notification-triggers');
 const numbers = require('../config/twilio-numbers');
 const router = require('../routes/twilio-webhook');
 const handler = router.stack.find((layer) => layer.route?.path === '/sms').route.stack[0].handle;
@@ -154,6 +161,7 @@ beforeEach(() => {
   process.env.ADAM_PHONE = '+12025550199';
   dispatchWithFallback.mockResolvedValue({ ok: true, json: { solicitation: false, confidence: 0.97 } });
   findKnownCallerCustomer.mockResolvedValue(null);
+  triggerNotification.mockResolvedValue({ bellWritten: true, push: { sent: 1 } });
 });
 afterAll(() => {
   if (savedGate === undefined) delete process.env.GATE_SMS_SPAM_CLASSIFIER;
@@ -173,14 +181,18 @@ test('a shadow pitch stays unread, records its verdict, and follows ordinary est
   expect(JSON.parse(updateByTwilioSid.mock.calls[0][1].metadata.bindings[0]).spam_verdict)
     .toMatchObject({ solicitation: true, mode: 'shadow' });
   expect(updateByTwilioSid.mock.calls[0][1].is_read).toBeUndefined();
-  const writes = mockWrites.filter(({ table }) => table === 'sms_log');
+  // Inserts only — the sms_reply bell adds receipt UPDATEs on the same table.
+  const writes = mockWrites.filter(({ table, op }) => table === 'sms_log' && op !== 'update');
   expect(writes).toHaveLength(1);
   expect(writes[0].row.is_read).not.toBe(true);
   expect(JSON.parse(writes[0].row.metadata).spam_verdict).toMatchObject({ solicitation: true, mode: 'shadow', method: 'regex' });
   expect(handleClarifyReply).toHaveBeenCalledTimes(1);
   expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
   expect(processInboundSms).toHaveBeenCalledTimes(1);
-  expect(sendSMS).toHaveBeenCalledTimes(1);
+  // Ordinary alert handling for an unknown sender is the sms_reply bell (#4210).
+  // The legacy owner SMS forward it replaced is retired and must not come back.
+  expect(triggerNotification).toHaveBeenCalledWith('sms_reply', expect.objectContaining({ fromPhone: '+12025550101' }), expect.any(Object));
+  expect(sendSMS).not.toHaveBeenCalled();
 });
 
 // Codex round 3 design fix, 2026-09-11: consent (opt-out) handling now runs
@@ -240,7 +252,10 @@ test('known service contacts keep ordinary handling without a verdict', async ()
   expect(recordTouchpoint.mock.calls[0][0].metadata.spam_verdict).toBeUndefined();
   expect(recordTouchpoint.mock.calls[0][0].isRead).toBe(false);
   expect(dispatchWithFallback).not.toHaveBeenCalled();
-  expect(sendSMS).toHaveBeenCalledTimes(1);
+  // Ordinary alert handling for an unknown sender is the sms_reply bell (#4210).
+  // The legacy owner SMS forward it replaced is retired and must not come back.
+  expect(triggerNotification).toHaveBeenCalledWith('sms_reply', expect.objectContaining({ fromPhone: '+12025550101' }), expect.any(Object));
+  expect(sendSMS).not.toHaveBeenCalled();
 });
 
 // Codex P1, 2026-09-11: restored the pre-round-2 `||` short-circuit — the
@@ -323,7 +338,10 @@ test.each(['missing', 'error'])('failed verdict attachment (%s) leaves the messa
   expect(row.is_read).not.toBe(true);
   expect(JSON.parse(row.metadata).spam_verdict.enforced).toBe(false);
   expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
-  expect(sendSMS).toHaveBeenCalledTimes(1);
+  // Ordinary alert handling for an unknown sender is the sms_reply bell (#4210).
+  // The legacy owner SMS forward it replaced is retired and must not come back.
+  expect(triggerNotification).toHaveBeenCalledWith('sms_reply', expect.objectContaining({ fromPhone: '+12025550101' }), expect.any(Object));
+  expect(sendSMS).not.toHaveBeenCalled();
 });
 
 test.each([
@@ -395,7 +413,10 @@ test('a regex-strength pitch never enforces when the model is unavailable', asyn
   expect(row.is_read).not.toBe(true);
   expect(JSON.parse(row.metadata).spam_verdict).toMatchObject({ solicitation: false, method: 'model_failed', enforced: false });
   expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
-  expect(sendSMS).toHaveBeenCalledTimes(1);
+  // Ordinary alert handling for an unknown sender is the sms_reply bell (#4210).
+  // The legacy owner SMS forward it replaced is retired and must not come back.
+  expect(triggerNotification).toHaveBeenCalledWith('sms_reply', expect.objectContaining({ fromPhone: '+12025550101' }), expect.any(Object));
+  expect(sendSMS).not.toHaveBeenCalled();
 });
 
 // Codex P1 chokepoint fix, 2026-09-11 (pre-push): the screen only ever
@@ -414,7 +435,10 @@ test('an MMS with a regex-strength caption is never screened — media content w
   expect(row.is_read).not.toBe(true);
   expect(JSON.parse(row.metadata).spam_verdict).toBeUndefined();
   expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
-  expect(sendSMS).toHaveBeenCalledTimes(1);
+  // Ordinary alert handling for an unknown sender is the sms_reply bell (#4210).
+  // The legacy owner SMS forward it replaced is retired and must not come back.
+  expect(triggerNotification).toHaveBeenCalledWith('sms_reply', expect.objectContaining({ fromPhone: '+12025550101' }), expect.any(Object));
+  expect(sendSMS).not.toHaveBeenCalled();
 });
 
 // Codex round 3 design fix, 2026-09-11: this used to exercise a
@@ -450,7 +474,10 @@ test('a rental-service request remains actionable with enforcement enabled', asy
   expect(recordTouchpoint.mock.calls[0][0].isRead).toBe(false);
   expect(JSON.parse(updateByTwilioSid.mock.calls[0][1].metadata.bindings[0]).spam_verdict.enforced).toBe(false);
   expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
-  expect(sendSMS).toHaveBeenCalledTimes(1);
+  // Ordinary alert handling for an unknown sender is the sms_reply bell (#4210).
+  // The legacy owner SMS forward it replaced is retired and must not come back.
+  expect(triggerNotification).toHaveBeenCalledWith('sms_reply', expect.objectContaining({ fromPhone: '+12025550101' }), expect.any(Object));
+  expect(sendSMS).not.toHaveBeenCalled();
 });
 
 test.each([
@@ -473,7 +500,10 @@ test.each([
   expect(JSON.parse(row.metadata).spam_verdict).toMatchObject({ solicitation: false, method: 'model', enforced: false });
   expect(recordSuppression).not.toHaveBeenCalled();
   expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
-  expect(sendSMS).toHaveBeenCalledTimes(1);
+  // Ordinary alert handling for an unknown sender is the sms_reply bell (#4210).
+  // The legacy owner SMS forward it replaced is retired and must not come back.
+  expect(triggerNotification).toHaveBeenCalledWith('sms_reply', expect.objectContaining({ fromPhone: '+12025550101' }), expect.any(Object));
+  expect(sendSMS).not.toHaveBeenCalled();
 });
 
 // Codex round 3 design fix, 2026-09-11: footer-stripping (the previous
@@ -519,32 +549,40 @@ test('a relationship-lookup failure fails OPEN — the sender is honored as elig
   expect(dispatchWithFallback).not.toHaveBeenCalled();
 });
 
-// Codex P1, 2026-09-11: an enforced pitch's own sms_log row was counted as a
-// "prior inbound" by the repeat-unknown-sender alert-quota check, so a
-// genuine request from the same unknown number within the 4h window lost its
-// owner alert to a text that had already been silently screened out.
-test('the repeat-sender alert-quota check excludes enforced solicitation rows from its window', async () => {
-  // An enforced pitch (like PITCH) returns before this check ever runs for
-  // ITS OWN message — the bug, and this exclusion, only matter for the next
-  // genuine message from the same unknown sender, which is what this covers.
+// Codex P1 on #4244, 2026-09-11: an enforced pitch's own sms_log row used to
+// be counted as a "prior inbound" by the repeat-unknown-sender alert-quota
+// check, so a genuine request from the same unknown number within the 4h
+// window lost its owner alert to a text that had already been silently
+// screened out. #4210 replaced that row-count check with the claim +
+// receipt throttle in dispatchUnknownSenderAlert; an enforced pitch returns
+// before that path ever runs, so it can never claim the window or stamp a
+// receipt — the next genuine message from the same number starts clean.
+test('an enforced pitch never claims the unknown-sender alert window or stamps a receipt', async () => {
   process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
-  await receive('Can we schedule for Tuesday?');
-  const call = mockWhereRawCalls.find(({ table, args }) => table === 'sms_log' && /spam_verdict/.test(args[0]));
-  expect(call).toBeDefined();
-  expect(call.args[0]).toMatch(/enforced/);
+  dispatchWithFallback.mockResolvedValue({ ok: true, json: { solicitation: true, confidence: 0.95 } });
+  await receive(PITCH);
+  expect(triggerNotification).not.toHaveBeenCalledWith('sms_reply', expect.anything(), expect.anything());
+  const stamps = mockWrites.filter(({ table, op, row }) => table === 'sms_log' && op === 'update'
+    && /sms_reply_(eligible|alerted)/.test(String(row.metadata?.bindings?.[0] || '')));
+  expect(stamps).toHaveLength(0);
+  expect(mockDb.raw.mock.calls.some(([sql]) => /sms_reply_alert_claims/.test(String(sql)))).toBe(false);
 });
 
-test('a genuine prior inbound (not an enforced verdict) still suppresses the repeat owner alert', async () => {
-  mockSmsLogFirstQueue.push({ id: 'prior-row' });
+test('a live receipt from a genuine prior inbound still throttles the repeat alert', async () => {
+  // hasRecentUnknownSenderReceipt's own sms_log first() — a row back means a
+  // delivery inside the window already rang for this sender.
+  mockSmsLogFirstQueue.push({ id: 'receipt-row' });
   const res = await receive('Can we schedule for Tuesday?');
   expect(res.body).toBe('<Response></Response>');
+  expect(triggerNotification).not.toHaveBeenCalledWith('sms_reply', expect.anything(), expect.anything());
   expect(sendSMS).not.toHaveBeenCalledWith(process.env.ADAM_PHONE, expect.stringContaining('📩 New SMS'), expect.anything());
 });
 
-test('a first-contact unknown sender with no prior row still gets the owner alert', async () => {
+test('a first-contact unknown sender with no receipt in the window still gets the sms_reply bell', async () => {
   const res = await receive('Can we schedule for Tuesday?');
   expect(res.body).toBe('<Response></Response>');
-  expect(sendSMS).toHaveBeenCalledWith(process.env.ADAM_PHONE, expect.stringContaining('📩 New SMS'), expect.anything());
+  expect(triggerNotification).toHaveBeenCalledWith('sms_reply', expect.objectContaining({ fromPhone: '+12025550101' }), expect.any(Object));
+  expect(sendSMS).not.toHaveBeenCalledWith(process.env.ADAM_PHONE, expect.stringContaining('📩 New SMS'), expect.anything());
 });
 
 // Codex P1, 2026-09-11: the unified copy was marked read at classification

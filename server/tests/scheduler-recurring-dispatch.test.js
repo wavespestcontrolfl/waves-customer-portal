@@ -63,11 +63,35 @@ test('the existing IB retention tick purges tasks and threads while their write 
 test.each([false, true])('handoff alerts stay registered with cronJobs off and autoDispatch=%s', async (autoDispatch) => {
   isEnabled.mockImplementation((name) => name === 'autoDispatch' && autoDispatch);
   await tick();
-  // Only the handoff tick and the job_health dead-running settle (ledger
-  // maintenance, registered above the cronJobs early return) survive.
-  expect(cron.schedule.mock.calls.map(([expression]) => expression).sort()).toEqual(['10 4 * * *', '3,18,33,48 * * * *']);
+  // Only correctness recovery registered above the cronJobs early return
+  // survives: the handoff tick, the job_health dead-running settle (ledger
+  // maintenance) and — since codex #4210 round 4 — the unknown-sender SMS
+  // alert sweep. That sweep is the ONLY process-independent recovery for a
+  // claim whose winner crashed, so leaving it below the gate meant turning
+  // cron off silently removed it. Ordinary scheduled FEATURES must still
+  // stay below the gate; this list is the guard against them leaking above
+  // it, so add to it only for recovery a correctness bug depends on.
+  expect(cron.schedule.mock.calls.map(([expression]) => expression).sort()).toEqual(['*/2 * * * *', '10 4 * * *', '3,18,33,48 * * * *']);
   expect(flagUnplacedVisits).toHaveBeenCalledTimes(1);
   expect(runAutoDispatch).not.toHaveBeenCalled();
+});
+
+test.each([false, true])('the unknown-sender SMS alert sweep still RUNS with cronJobs off (cronJobs=%s) — codex #4210 round-4 P1', async (cronJobs) => {
+  isEnabled.mockImplementation((name) => name === 'cronJobs' && cronJobs);
+  jest.doMock('../services/sms-reply-alert-sweep', () => ({
+    sweepUnknownSenderAlertClaims: jest.fn(async () => ({ dispatched: 0, checked: 0 })),
+  }), { virtual: false });
+  initScheduledJobs();
+  const registration = cron.schedule.mock.calls.find(([expression]) => expression === '*/2 * * * *');
+  expect(registration).toBeDefined();
+  expect(registration[2]).toEqual({ timezone: 'America/New_York' });
+  // Registered is not the same as working: run the tick and prove it reaches
+  // the sweep through its cron lock. Behind the master gate this recovery
+  // simply did not exist, which silently reinstated the permanently-unread
+  // first-contact thread the claim design was built to prevent.
+  await registration[1]();
+  expect(runExclusive).toHaveBeenCalledWith('sms-reply-alert-sweep', expect.any(Function));
+  expect(require('../services/sms-reply-alert-sweep').sweepUnknownSenderAlertClaims).toHaveBeenCalledTimes(1);
 });
 
 test('an enabled optimizer uses its existing in-run alert audit', async () => {
