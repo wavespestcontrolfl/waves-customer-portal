@@ -625,7 +625,9 @@ function paymentOutcomeIsInterrogative(text, claim, matchEnd, claimEnd) {
 function paymentOutcomeHasTemporalCondition(text, claim, claimStart, outcome, outcomeStart, trailingClaim) {
   if (PAYMENT_HISTORICAL_PREREQUISITE_RE.test(text.slice(claimStart, outcomeStart))
     || PAYMENT_HISTORICAL_PREREQUISITE_RE.test(trailingClaim)) return false;
-  const outcomeCondition = PAYMENT_CONDITION_RE.test(claim);
+  const beforeOutcome = claim.slice(0, claim.toLowerCase().lastIndexOf(outcome.toLowerCase()));
+  const outcomeCondition = PAYMENT_CONDITION_RE.test(claim)
+    || /\b(?:after|before|once|when|until|as\s+soon\s+as|cuando|despu[eé]s\s+de\s+que|una\s+vez\s+que)\s+(?:(?:your|the|that|this|a|su|el|la|este|esta)\s+)?$/i.test(beforeOutcome);
   const introduction = text.slice(claimStart, outcomeStart);
   const futureOutcome = /\b(?:will|should|going\s+to)\b|[\x27\u2019]ll\b/i.test(outcome)
     || new RegExp(`\\b(?:ser[aá]|${PAYMENT_ACTIVE_FUTURE_ES})(?![a-záéíóúñ])`, 'i').test(outcome);
