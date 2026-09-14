@@ -6,6 +6,7 @@
  */
 jest.mock('../models/db', () => {
   const fn = jest.fn();
+  fn.transaction = jest.fn(async (run) => run(fn));
   fn.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
   return fn;
 });
@@ -23,7 +24,7 @@ function makeQuery(updateResult) {
   const q = {};
   const updates = [];
   const chain = () => q;
-  ['where', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull', 'orWhere', 'orWhereRaw', 'modify']
+  ['where', 'whereRaw', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull', 'orWhere', 'orWhereRaw', 'modify']
     .forEach((m) => { q[m] = jest.fn(chain); });
   q.update = jest.fn((payload, returning) => { updates.push({ payload, returning }); return Promise.resolve(updateResult); });
   return { q, updates };
@@ -67,7 +68,7 @@ describe('extension revival', () => {
       calls.push([name, ...args]);
       return name === 'update' ? Promise.resolve(1) : q;
     };
-    ['where', 'whereNull', 'whereRaw', 'orWhere', 'update', 'first', 'whereIn', 'whereNot', 'select'].forEach((m) => { q[m] = chain(m); });
+    ['where', 'whereNull', 'whereRaw', 'orWhere', 'update', 'first', 'whereIn', 'whereNot', 'select', 'forUpdate'].forEach((m) => { q[m] = chain(m); });
     db.mockImplementation(() => q);
     db.fn = { now: () => 'NOW' };
 
