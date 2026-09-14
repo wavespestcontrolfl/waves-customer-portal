@@ -1,0 +1,93 @@
+const { verifyEmailReplyCustomerCopy } = require('../services/email/email-reply-copy-verifier');
+
+const verdict = (text) => verifyEmailReplyCustomerCopy({ text });
+const rejected = (text) => expect(verdict(text).violations).toContain('customer_copy_compliance');
+
+describe('email reply customer-copy policy', () => {
+  test('exposes only a copy policy; no customer or account context is required', () => {
+    expect(verdict('')).toEqual({ ok: true, violations: [] });
+    expect(verdict('The next visit is scheduled.')).toEqual({ ok: true, violations: [] });
+    expect(verdict('Your $75 payment is scheduled.')).toEqual({ ok: true, violations: [] });
+  });
+
+  test.each([
+    '$98 per visit', '$98 per-visit', '$98 per  visit', '$98 per‑visit', '$98 per–visit',
+    '$98 for each visit', '$98 for every visit', '$98 for each scheduled visit',
+    '$98 for each completed visit', '$98 for each scheduled pest-control visit',
+    '$98\nfor each visit', '$98/visit', '98 dollars for each visit',
+    '$98 a visit', '$98 each visit', '$98 per routine visit',
+    '$98 per scheduled quarterly pest control visit',
+    'the price for every visit is $98', 'each visit costs $98',
+    'each visit costs 98 dollars', 'each scheduled visit is priced at $98',
+    'each scheduled visit is priced at 98 dollars', 'each visit will cost $98',
+    'each scheduled routine quarterly residential exterior preventive ongoing planned visit costs $98',
+    '$98 per scheduled routine quarterly residential exterior preventive ongoing planned visit',
+    'every scheduled visit is billed at $98', 'the rate per routine visit is $98',
+    'Visits cost $98 each', 'Your scheduled visits are $98 each',
+    'Visits will be billed at 98 dollars each', 'Visits cost $98 apiece',
+    'Visits are billed $98 each', 'Visits are charged $98 apiece',
+    'Visits are priced $98 each', 'Each visit is billed $98',
+    'Each scheduled visit is priced $98',
+    'Visits are **billed** $98 each',
+    'The rate is per visit', 'Billing is per visit', 'You will be billed per visit',
+    'Payments are per visit', 'You pay per visit', 'The fee will be per routine visit',
+    'The $98 fee is per visit', 'Each visit has a $98 charge', 'We charge $98 on each visit',
+  ])('rejects a visit-based pricing construction: %s', rejected);
+
+  test.each([
+    'Waves Lawn & Pest', 'Waves Lawn and Pest', 'Waves  Lawn & Pest',
+    'Waves Lawn-Pest', 'Waves Lawn + Pest', 'Waves Lawn/Pest',
+    'Waves Pest & Lawn', 'Waves Pest Control and Lawn', 'Waves Pest / Lawn',
+    'Waves Pest Control & Lawn Care',
+    'Waves Pest Control LLC', 'Waves Pest Control Group', 'Waves Pest Control Florida',
+    'Waves Pest Control Pest Services',
+    'Waves Lawn Care', 'Waves Pest Services', 'Waves **Lawn Care**',
+    'Waves Lawn Services', 'Waves Pest', 'Waves Lawn',
+  ])('rejects a retired brand name: %s', (brand) => rejected(`You contacted ${brand}.`));
+
+  test.each([
+    'Your home is pest-free.', 'Your home is pest‑free.',
+    'Your home is pest-***free***.', 'No ___infestation___ remains.',
+    'Your home is pest-**free**.', 'Your home is pest-*free*.',
+    'No **infestation** remains.', 'No __infestation__ remains.',
+    'The product is EPA-**approved**.',
+    'Your home is now clear.', 'The problem is resolved.',
+    'The treatment is pet-safe.', 'The product is EPA-approved.',
+    'The treatment is EPA-certified.', 'The treatment is EPA certified.',
+    'The treatment is EPAcertified.',
+    'The treatment is certified by the EPA.',
+    'This treatment has certification from the EPA.', 'This carries certification by EPA.',
+    'The EPA has certified this treatment.', 'This product carries EPA certification.',
+    'The EPA granted approval for this treatment.',
+    'You can return to the treated area after 30 minutes.',
+  ])('rejects canonical and EPA customer-copy claims: %s', rejected);
+
+  test.each([
+    'Waves Pest Control charges $98 per application.',
+    'The product is EPA-registered.',
+    'The product is EPA-exempt.',
+    'The technician will confirm when the application is dry.',
+    'We review access for each visit.',
+    'Your $98 payment is pending, and we will arrange a visit once it clears.',
+    'Your price is $98 per application, and we review access for each visit.',
+    'The price is $98 for each application and includes a visit.',
+    'As per our last visit, the technician will check the side yard.',
+    'We send one reminder per visit.', 'Your scheduled visits are pending.',
+    'Visits include one reminder each.',
+    'The Waves Pest Control lawn team will follow up.',
+    'The ocean waves are calm today.',
+    'There is no **new** infestation claim in this scheduling note.',
+    'The notes contain an unmatched * character.',
+  ])('accepts a non-violating copy construction: %s', (copy) => {
+    expect(verdict(copy)).toEqual({ ok: true, violations: [] });
+  });
+
+  test('applies only the explicit commercial-proposal price-unit exemption', () => {
+    const text = 'Service is $250 per visit under the commercial agreement.';
+    rejected(text);
+    expect(verifyEmailReplyCustomerCopy({ text, commercialProposal: true })).toEqual({ ok: true, violations: [] });
+    expect(verifyEmailReplyCustomerCopy({ text, commercialProposal: 'true' }).ok).toBe(false);
+    expect(verifyEmailReplyCustomerCopy({ text: 'The treatment is certified by the EPA.', commercialProposal: true }).ok)
+      .toBe(false);
+  });
+});
