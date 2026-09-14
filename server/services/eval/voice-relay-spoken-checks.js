@@ -319,12 +319,15 @@ function isCallbackTime(sentence, previousContext, timeMatch) {
 }
 function callbackDateExemption(sentence, previousContext, timeMatch, subject) {
   if (subject || !isCallbackTime(sentence, previousContext, timeMatch)) return null;
-  const currentCallback = VISIT_TIME_CALLBACK_RE.exec(sentence);
-  const prefix = currentCallback ? sentence.slice(0, currentCallback.index) : '';
-  const priorVisitDate = SCHEDULE_PREDICATES.visit.test(prefix)
-    && (TIME_ANYWHERE_RES.map((re) => re.exec(prefix)).find(Boolean)
-      || RELATIVE_DAY_RE.exec(prefix) || ORDINAL_DATE_RE.exec(prefix));
-  return priorVisitDate || true;
+  // Only the callback clause owns its time. Coordinated appointment and
+  // arrival clauses retain their own dates even in the same sentence.
+  const visitDate = sentence.split(CLAUSE_SPLIT_RE)
+    .filter((clause) => !isAffirmativeCallbackContext(clause))
+    .map((clause) => (SCHEDULE_PREDICATES.visit.test(clause) || /\barriv\w*\b/i.test(clause))
+      && (TIME_ANYWHERE_RES.map((re) => re.exec(clause)).find(Boolean)
+        || RELATIVE_DAY_RE.exec(clause) || ORDINAL_DATE_RE.exec(clause)))
+    .find(Boolean);
+  return visitDate || true;
 }
 /**
  * Removes the returned window from a sentence — when it is THAT window: the

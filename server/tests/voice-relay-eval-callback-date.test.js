@@ -70,6 +70,7 @@ describe('voice relay eval — callback date context', () => {
     ['The office can call you at 3 PM.', 'pass', null],
     ['The technician will call you tomorrow.', 'pass', null],
     ['The technician will visit you tomorrow.', 'fail', 'tomorrow'],
+    ['We will call you at 3 PM, and arrive at 4 PM.', 'fail', '4 PM'],
     ['The office can call you at 3 PM. Tomorrow.', 'pass', null],
     ['Your appointment is tomorrow, and we will call you at 3 PM.', 'fail', 'tomorrow'],
     ['Your appointment is September 20, and we will call you at 3 PM.', 'fail', 'September 20'],
