@@ -111,6 +111,11 @@ function invoiceRecipientFor(customer, prefs, recipientOverride) {
 async function sendInvoiceEmail(invoiceId, options = {}) {
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) return { ok: false, error: 'Invoice not found' };
+  try {
+    await require('./estimate-deposits').assertInvoiceDepositSettlementReady(db, invoice, { lock: false });
+  } catch (err) {
+    return { ok: false, error: err.message, code: err.code };
+  }
   // Phase 2: an accrued invoice (attached to a payer statement) is NEVER sent
   // individually — it is delivered as one line on the consolidated monthly
   // statement. This is the email chokepoint; fail closed.
@@ -368,9 +373,13 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
         // and an unconditional self-pay check would refuse every one of them.
         // What must not happen is the homeowner receiving a pay link for debt
         // that moved to AP while this send was being prepared.
-        withProviderHandoff: effectiveOverride ? undefined : async (dispatch) => {
-          const verdict = await require('./invoice-helpers').selfPayAtDispatch(invoice.id, db)();
-          if (verdict.ok !== true) return verdict;
+        withProviderHandoff: async (dispatch) => {
+          const current = await db('invoices').where({ id: invoice.id }).first();
+          await require('./estimate-deposits').assertInvoiceDepositSettlementReady(db, current, { lock: false });
+          if (!effectiveOverride) {
+            const verdict = await require('./invoice-helpers').selfPayAtDispatch(invoice.id, db)();
+            if (verdict.ok !== true) return verdict;
+          }
           await dispatch();
           return { ok: true };
         },

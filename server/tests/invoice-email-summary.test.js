@@ -94,6 +94,22 @@ describe('sendInvoiceEmail service summary', () => {
     expect(args.payload.invoice_summary).toBe(invoice.notes);
   });
 
+  test('does not render or dispatch an invoice email while its deposit is held', async () => {
+    mockDb(invoiceRow());
+    const fence = jest.spyOn(require('../services/estimate-deposits'), 'assertInvoiceDepositSettlementReady')
+      .mockRejectedValue(Object.assign(new Error('Deposit awaiting reconciliation'), {
+        code: 'DEPOSIT_RECONCILIATION_REQUIRED',
+      }));
+    try {
+      expect(await sendInvoiceEmail('inv-1')).toEqual({
+        ok: false, error: 'Deposit awaiting reconciliation', code: 'DEPOSIT_RECONCILIATION_REQUIRED',
+      });
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    } finally {
+      fence.mockRestore();
+    }
+  });
+
   test('sends an empty summary variable when the invoice has no notes', async () => {
     mockDb(invoiceRow({ notes: null }));
 

@@ -839,6 +839,7 @@ function invoiceNotSendableError(invoice) {
 async function claimInvoiceForSend(invoiceId, { allowClaimed = false, database = db } = {}) {
   const current = await database("invoices").where({ id: invoiceId }).first();
   if (!current) throw invoiceNotSendableError(current);
+  await require("./estimate-deposits").assertInvoiceDepositSettlementReady(database, current, { lock: false });
 
   if (allowClaimed) {
     if (!SEND_FINALIZABLE_STATUSES.includes(current.status)) {
@@ -2220,8 +2221,8 @@ const InvoiceService = {
     // Same atomic discipline as the converter: credit line exists IFF the
     // ledger consumed exactly that amount in the same transaction; a
     // mismatch rolls back and one retry re-reads the fresh balance. Deposit
-    // machinery failures NEVER block visit invoicing — fall back to the
-    // plain create and alert for manual reconciliation.
+    // machinery failures leave invoicing on hold for manual reconciliation;
+    // an unknown deposit balance must never become a full-balance pay link.
     //
     // skipDepositCredit (Codex P1, PR #2897 fix round): callers whose
     // contract is an UNTOUCHED invoice for operator review — the backdated
@@ -2276,18 +2277,12 @@ const InvoiceService = {
     }
     if (sourceEstimateId) {
       const {
+        acquireEstimateDepositLedgerLock,
         pendingDepositCredit,
         consumeDepositCredit,
       } = require("./estimate-deposits");
+      let depositError;
       for (let attempt = 0; attempt < 2; attempt += 1) {
-        let depositCredit = null;
-        try {
-          depositCredit = await pendingDepositCredit(sourceEstimateId);
-        } catch {
-          break; // ledger unreadable — invoice proceeds uncredited
-        }
-        const requested = depositCredit ? depositCredit.amount : 0;
-        if (!(requested > 0)) break;
         try {
           return await runMintTransaction(async (trx) => {
             // EVERY linked mint holds the shared advisory lock (Codex PR
@@ -2306,14 +2301,17 @@ const InvoiceService = {
             // that actually created the invoice.
             const adopted = await adoptUnderMintLock(trx);
             if (adopted) return adopted;
+            const createParams = await buildParams(trx);
+            await acquireEstimateDepositLedgerLock(trx, sourceEstimateId);
+            const depositCredit = await pendingDepositCredit(sourceEstimateId, trx);
             // Request the full unapplied balance; create() caps it against
             // its own post-discount, after-tax total (a pre-discount cap
             // here consumed ledger dollars the discounted invoice never
             // reflected) and reports the effective amount back.
             const created = await this.create({
-              ...(await buildParams(trx)),
+              ...createParams,
               database: trx,
-              depositCredit: { amount: requested, estimateId: sourceEstimateId },
+              depositCredit: depositCredit ? { amount: depositCredit.amount, estimateId: sourceEstimateId } : null,
             });
             await settleRetention(created, trx);
             const effective = Number(created?.applied_deposit_credit) || 0;
@@ -2333,6 +2331,7 @@ const InvoiceService = {
             return created;
           });
         } catch (err) {
+          depositError = err;
           // Stale-price/authorization refusals are terminal — retrying the
           // same stale params can't fix them (mirrors the shared mint
           // helper's contract).
@@ -2354,6 +2353,7 @@ const InvoiceService = {
           }
         }
       }
+      throw depositError;
     }
 
     if (replayFromScheduled) {
@@ -2731,6 +2731,8 @@ const InvoiceService = {
       const {
         sendCustomerMessage,
       } = require("./messaging/send-customer-message");
+      const sendInvoice = await db("invoices").where({ id: invoiceId }).first();
+      await require("./estimate-deposits").assertInvoiceDepositSettlementReady(db, sendInvoice, { lock: false });
       const sendResult = await sendCustomerMessage({
         to: customer.phone,
         body,

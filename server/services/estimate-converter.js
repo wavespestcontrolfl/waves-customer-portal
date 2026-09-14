@@ -6719,20 +6719,16 @@ const EstimateConverter = {
           // a real deposit, so a read error must abort the accept
           // (retryable) rather than mint the year with the credit silently
           // dropped. A clean null read is the legitimate no-deposit path
-          // (legacy/manual conversions). Ledger read and consumption both
-          // ride `database` (the accept transaction when called from
-          // accept): the credit line exists IFF the ledger consumed exactly
-          // that amount, or the whole accept rolls back — never an accepted
-          // prepay beside an unconsumed deposit row.
+          // (legacy/manual conversions). The ledger read, invoice insert,
+          // and exact consumption share a transaction even when the exported
+          // converter receives the bare DB; for public accepts this is a
+          // savepoint inside the caller's transaction.
           let appliedPrepayDepositCredit = 0;
-          const { pendingDepositCredit, consumeDepositCredit } = require('./estimate-deposits');
-          let prepayDepositCredit;
-          try {
-            prepayDepositCredit = await pendingDepositCredit(estimateId, database);
-          } catch (ledgerErr) {
-            throw new Error(`deposit ledger read failed for annual prepay invoice (estimate ${estimateId}): ${ledgerErr.message}`);
-          }
-          const requestedPrepayDepositCredit = prepayDepositCredit ? Number(prepayDepositCredit.amount) : 0;
+          const {
+            acquireEstimateDepositLedgerLock,
+            pendingDepositCredit,
+            consumeDepositCredit,
+          } = require('./estimate-deposits');
           // Labeled manual discount on the prepay invoice (owner 2026-07-11):
           // DESCRIPTION-level only — the prepay line stays at the NET
           // annualAmount because annual-prepay-renewals seeds each covered
@@ -6755,46 +6751,65 @@ const EstimateConverter = {
           // setup lines before dividing by visits (setup is not per-visit
           // coverage money).
           const prepayRodentSetupAmount = frozenRodentBaitSetupAmount(estimateData);
-          const inv = await InvoiceService.create({
-            database,
-            customerId,
-            title: `${prepayPlanPrefix} — Annual Prepay (12 months)`,
-            lineItems: [{
-              description: prepayManualLabel
-                ? `${prepayLineDescription} — ${prepayManualLabel} applied`
-                : prepayLineDescription,
-              quantity: 1,
-              unit_price: annualAmount,
-            },
-            ...(prepayRodentSetupAmount > 0 ? [{
-              description: 'Bait Station Setup — one-time setup fee',
-              quantity: 1,
-              unit_price: prepayRodentSetupAmount,
-            }] : [])],
-            notes: prepayNotes,
-            dueDate: etDateString(),
-            ...(prepayTaxRate !== undefined ? { taxRate: prepayTaxRate } : {}),
-            ...(requestedPrepayDepositCredit > 0
-              ? { depositCredit: { amount: requestedPrepayDepositCredit, estimateId } }
-              : {}),
-          });
-          // Assign the id BEFORE consuming the credit: an allocation-mismatch
-          // throw below must leave draftInvoiceId set so the outer cleanup can
-          // void the just-created invoice on a no-caller-transaction run
-          // (accept-path runs ride the caller trx and roll back wholesale).
-          draftInvoiceId = inv?.id || null;
-          appliedPrepayDepositCredit = Number(inv?.applied_deposit_credit) || 0;
-          if (inv?.id && appliedPrepayDepositCredit > 0) {
-            const allocated = await consumeDepositCredit({
-              estimateId,
-              amount: appliedPrepayDepositCredit,
-              invoiceId: inv.id,
-              trx: database,
-            });
-            if (Math.round(allocated * 100) !== Math.round(appliedPrepayDepositCredit * 100)) {
-              throw new Error(`deposit allocation mismatch on annual prepay invoice (applied ${appliedPrepayDepositCredit}, allocated ${allocated})`);
+          const inv = await database.transaction(async (invoiceTrx) => {
+            // InvoiceService.create takes this accepted-estimate mint lock
+            // before it inserts. Acquire it first here too, then the deposit
+            // ledger lock: other mint paths take the same order. create()
+            // re-acquires it in this transaction without waiting.
+            await invoiceTrx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [
+              `unminted_setup_fee_manual_billing:${estimateId}`,
+            ]);
+            // Hoist the invoice insert's customer FK lock before the ledger:
+            // collectors can already hold the customer while awaiting it.
+            await invoiceTrx.raw('SELECT id FROM customers WHERE id = ? FOR KEY SHARE', [customerId]);
+            await acquireEstimateDepositLedgerLock(invoiceTrx, estimateId);
+            let prepayDepositCredit;
+            try {
+              prepayDepositCredit = await pendingDepositCredit(estimateId, invoiceTrx);
+            } catch (ledgerErr) {
+              throw new Error(`deposit ledger read failed for annual prepay invoice (estimate ${estimateId}): ${ledgerErr.message}`);
             }
-          }
+            const requestedPrepayDepositCredit = prepayDepositCredit ? Number(prepayDepositCredit.amount) : 0;
+            const created = await InvoiceService.create({
+              database: invoiceTrx,
+              customerId,
+              title: `${prepayPlanPrefix} — Annual Prepay (12 months)`,
+              lineItems: [{
+                description: prepayManualLabel
+                  ? `${prepayLineDescription} — ${prepayManualLabel} applied`
+                  : prepayLineDescription,
+                quantity: 1,
+                unit_price: annualAmount,
+              },
+              ...(prepayRodentSetupAmount > 0 ? [{
+                description: 'Bait Station Setup — one-time setup fee',
+                quantity: 1,
+                unit_price: prepayRodentSetupAmount,
+              }] : [])],
+              notes: prepayNotes,
+              dueDate: etDateString(),
+              ...(prepayTaxRate !== undefined ? { taxRate: prepayTaxRate } : {}),
+              ...(requestedPrepayDepositCredit > 0
+                ? { depositCredit: { amount: requestedPrepayDepositCredit, estimateId } }
+                : {}),
+            });
+            appliedPrepayDepositCredit = Number(created?.applied_deposit_credit) || 0;
+            if (created?.id && appliedPrepayDepositCredit > 0) {
+              const allocated = await consumeDepositCredit({
+                estimateId,
+                amount: appliedPrepayDepositCredit,
+                invoiceId: created.id,
+                trx: invoiceTrx,
+              });
+              if (Math.round(allocated * 100) !== Math.round(appliedPrepayDepositCredit * 100)) {
+                throw new Error(`deposit allocation mismatch on annual prepay invoice (applied ${appliedPrepayDepositCredit}, allocated ${allocated})`);
+              }
+            }
+            return created;
+          });
+          // A mismatch rolled back the invoice with its ledger writes. Once
+          // committed, keep the id for the existing term-failure void path.
+          draftInvoiceId = inv?.id || null;
           // Quote the amount actually invoiced/charged (tax-inclusive, net of
           // the deposit credit) so the customer/admin messaging matches what
           // the pay link collects. For residential (untaxed, no deposit)

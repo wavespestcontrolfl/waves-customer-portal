@@ -128,6 +128,9 @@ describe('StripeService.createInvoicePaymentIntent', () => {
   });
 
   test('rechecks the saved-card fence while holding the invoice lock', async () => {
+    // A committed claim can still have no Stripe PI; the null stamp must
+    // never make the invoice collectible through a second rail.
+    invoiceRow.stripe_payment_intent_id = null;
     savedCardAttempt = {
       id: 'attempt-active',
       status: 'claimed',
@@ -144,6 +147,49 @@ describe('StripeService.createInvoicePaymentIntent', () => {
         savedCardPending: true,
       });
     expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+  });
+
+  test('a deposit awaiting reconciliation blocks setup before a PaymentIntent is created', async () => {
+    const guard = jest.fn().mockRejectedValue(Object.assign(new Error('A received deposit is awaiting invoice reconciliation'), {
+        code: 'DEPOSIT_RECONCILIATION_REQUIRED', statusCode: 409,
+      }));
+    jest.doMock('../services/estimate-deposits', () => ({ assertInvoiceDepositSettlementReady: guard }));
+    try {
+      const StripeService = require('../services/stripe');
+      await expect(StripeService.createInvoicePaymentIntent(invoiceRow.id))
+        .rejects.toMatchObject({ code: 'DEPOSIT_RECONCILIATION_REQUIRED', statusCode: 409 });
+      expect(guard).toHaveBeenCalledWith(trxMock, invoiceRow, { lock: false });
+      expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+      expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
+    } finally {
+      jest.dontMock('../services/estimate-deposits');
+    }
+  });
+
+  test('a late deposit blocks full account-credit coverage before the prepaid return', async () => {
+    customerAccountCredits = '75.00';
+    invoiceRow.stripe_payment_intent_id = null;
+    applyCreditSideEffect = () => {
+      invoiceRow.credit_applied = '75.00';
+      invoiceRow.status = 'prepaid';
+    };
+    const guard = jest.fn(async (_trx, row, options) => {
+      if (options?.lock === false) return; // receipt lands after preflight
+      expect(row.status).toBe('viewed'); // original locked row, before credit
+      throw Object.assign(new Error('A received deposit is awaiting invoice reconciliation'), {
+        code: 'DEPOSIT_RECONCILIATION_REQUIRED', statusCode: 409,
+      });
+    });
+    jest.doMock('../services/estimate-deposits', () => ({ assertInvoiceDepositSettlementReady: guard }));
+    try {
+      const StripeService = require('../services/stripe');
+      await expect(StripeService.createInvoicePaymentIntent(invoiceRow.id))
+        .rejects.toMatchObject({ code: 'DEPOSIT_RECONCILIATION_REQUIRED', statusCode: 409 });
+      expect(guard).toHaveBeenCalledTimes(2);
+      expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+    } finally {
+      jest.dontMock('../services/estimate-deposits');
+    }
   });
 
   test('parks an ambiguity discovered by the locked saved-card recheck', async () => {
