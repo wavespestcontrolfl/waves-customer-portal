@@ -1191,9 +1191,9 @@ const InvoiceService = {
           .where({ 'i.customer_id': customerId })
           .whereRaw('s.source_estimate_id::text = ?', [stampedEstimateIdInNotes])
           .whereNotNull('i.visit_completion_packet_id').orderBy('i.id')
-          .forUpdate('i').noWait().select('i.line_items', 'i.notes');
+          .forUpdate('i').noWait().select('i.id', 'i.status', 'i.line_items', 'i.notes');
       } catch (error) { contention(error); }
-      const { invoiceContainsOnlySetupFeeCharges, invoiceContainsSetupFeeLine, sumPositiveSetupFeeCents } = require('./estimate-first-application-invoice');
+      const { invoiceContainsOnlySetupFeeCharges, sumPositiveSetupFeeCents } = require('./estimate-first-application-invoice');
       // Compare the calculated invoice amounts, not caller-supplied amount.
       const normalizedSetupLines = normalizeInvoiceLineItems(lineItems || []);
       let separateSetupFee = invoiceContainsOnlySetupFeeCharges({ line_items: normalizedSetupLines })
@@ -1201,22 +1201,29 @@ const InvoiceService = {
           .every((line) => /^WaveGuard Membership — one-time setup fee$/i.test(String(line.description || '').trim()))
         && packetOwners.every((owner) => {
           const lines = parseInvoiceLineItems(owner.line_items);
-          return lines.length > 0 && lines.every((line) => line && Number.isFinite(Number(line.amount)))
-            && !invoiceContainsSetupFeeLine(owner);
+          return lines.length > 0 && lines.every((line) => line && Number.isFinite(Number(line.amount)));
         });
       if (packetOwners.length && separateSetupFee) {
         // The estimate advisory lock serializes concurrent replacement writers.
         // Lock their fee coverage too, failing operationally on a busy row.
+        let stampedCoverage;
         try {
-          await database('invoices').where({ customer_id: customerId })
+          stampedCoverage = await database('invoices').where({ customer_id: customerId })
             .where('notes', 'ilike', `%accepted estimate #${stampedEstimateIdInNotes}%`)
             .orderBy('id').forUpdate().noWait().select('id');
         } catch (error) { contention(error); }
         const obligation = await require('./setup-fee-obligation').findUnmintedSetupFeeObligation({
           sourceEstimateId: stampedEstimateIdInNotes, customerId,
         }, database);
+        // The obligation reader counts stamped rows. Packet ownership also
+        // survives edited notes; count each unstamped owner once, and retain
+        // refunded cents as covered so deliberately refunded fees are not rebilled.
+        const stampedIds = new Set(stampedCoverage.map((row) => String(row.id)));
+        const unstampedOwners = [...new Map(packetOwners.map((row) => [String(row.id), row])).values()]
+          .filter((row) => !stampedIds.has(String(row.id)) && !['void', 'canceled', 'cancelled'].includes(row.status));
+        const packetFeeCents = unstampedOwners.reduce((sum, row) => sum + sumPositiveSetupFeeCents(row), 0);
         separateSetupFee = obligation.owed && Number.isSafeInteger(obligation.setupFeeRemainingCents)
-          && sumPositiveSetupFeeCents({ line_items: normalizedSetupLines }) <= obligation.setupFeeRemainingCents;
+          && sumPositiveSetupFeeCents({ line_items: normalizedSetupLines }) <= obligation.setupFeeRemainingCents - packetFeeCents;
       }
       if (packetOwners.length && !separateSetupFee) throw packetConflict();
     }

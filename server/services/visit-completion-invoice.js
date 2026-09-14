@@ -32,17 +32,11 @@ async function buildMemberLines(member, customer, trx) {
     database: trx, customerId: customer.id, customer, scheduledServiceId: member.id, throwOnError: true,
   });
   if (payer.payerId) return office('payer_billed_member', member.id);
-  const prior = await require('./estimate-first-application-invoice')
-    .findFirstApplicationInvoiceForEstimateService(member, trx);
-  if ([prior.invoice, prior.liveBeside, prior.canceledSetupFee].some(Boolean)) return office('existing_estimate_invoice', member.id);
-  const obligation = await require('./setup-fee-obligation').findUnmintedSetupFeeObligation({
-    sourceEstimateId: member.source_estimate_id, customerId: customer.id,
-    excludeScheduledServiceId: member.id, visitPlanRow: member,
-  }, trx);
-  if (obligation.owed) return office('setup_fee_requires_review', member.id);
+  const feeReviewOnly = Boolean(member.source_estimate_id && member.is_recurring
+    && !member.is_callback && !isAlwaysFreeServiceType(member.service_type));
   // The canonical review freezes an intentional zero after its discount.
   // Customer-level dues must not replace that performed application's price.
-  if (price === 0 && notes.completionPricing?.amountCents === 0) return { lineItems: [] };
+  if (price === 0 && notes.completionPricing?.amountCents === 0) return { lineItems: [], feeReviewOnly };
   const amount = completionInvoiceAmount({
     estimatedPrice: member.estimated_price, isCallback: member.is_callback,
     perApplicationBilling: customer.billing_mode === 'per_application',
@@ -64,7 +58,7 @@ async function buildMemberLines(member, customer, trx) {
   if (!Number.isFinite(price)) {
     return office('member_price_missing', member.id);
   }
-  if (price === 0 && amount === 0) return { lineItems: [] };
+  if (price === 0 && amount === 0) return { lineItems: [], feeReviewOnly };
   if (!(price > 0)) return office('member_price_ambiguous', member.id);
   if (!eligible) return office('member_billing_not_enabled', member.id);
   const built = await InvoiceService.buildLineItemsForScheduledService(member.id, {
@@ -75,16 +69,35 @@ async function buildMemberLines(member, customer, trx) {
 }
 
 async function mintPacketInvoice({ packet, visit, members, customer, trx }) {
-  // Unlinked accepted-estimate writers take the same lock. Try while holding
-  // the visit rows; contention rolls this entire closeout attempt back.
-  const estimateIds = [...new Set(members.map((member) => member.source_estimate_id).filter(Boolean))].sort();
-  for (const estimateId of estimateIds) {
+  const existing = await trx('invoices').where(function linkedMember() {
+    this.whereIn('scheduled_service_id', members.map((member) => member.id))
+      .orWhereIn('service_record_id', members.map((member) => member.record_id));
+  }).first('id');
+  if (existing) return office('existing_member_invoice');
+  const billed = [];
+  const feeReviewCandidates = [];
+  for (const member of members) {
+    const built = await buildMemberLines(member, customer, trx);
+    if (built.state === 'office_required') return built;
+    if (built.lineItems.length) billed.push({ member, lineItems: built.lineItems });
+    else if (built.feeReviewOnly) feeReviewCandidates.push(member);
+  }
+  if (!billed.length && !feeReviewCandidates.length) return { state: 'no_charge', invoiceId: null };
+  const sourceIds = [...new Set(billed.map(({ member }) => member.source_estimate_id || null))];
+  if (sourceIds.length > 1) return office('mixed_estimate_billing');
+  // A performed plan application discounted to zero can still owe its
+  // accepted setup fee. Lock its fee authority, but only billed estimates
+  // inspect unlinked application invoices before this packet can mint.
+  const billedEstimateIds = new Set(sourceIds.filter(Boolean));
+  const feeEstimateIds = feeReviewCandidates.map((member) => member.source_estimate_id);
+  for (const estimateId of [...new Set([...billedEstimateIds, ...feeEstimateIds])].sort()) {
     const lock = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?)) AS locked',
       [`unminted_setup_fee_manual_billing:${estimateId}`]);
     if (!lock.rows[0].locked) {
       throw Object.assign(new Error('Estimate billing is being updated. Retry the closeout in a moment.'),
         { code: 'visit_busy', status: 409, statusCode: 409, isOperational: true });
     }
+    if (!billedEstimateIds.has(estimateId)) continue;
     let unlinked;
     try {
       unlinked = await trx('invoices').where({ customer_id: customer.id })
@@ -106,20 +119,26 @@ async function mintPacketInvoice({ packet, visit, members, customer, trx }) {
       return !invoiceContainsOnlySetupFeeCharges(invoice);
     })) return office('existing_member_invoice');
   }
-  const existing = await trx('invoices').where(function linkedMember() {
-    this.whereIn('scheduled_service_id', members.map((member) => member.id))
-      .orWhereIn('service_record_id', members.map((member) => member.record_id));
-  }).first('id');
-  if (existing) return office('existing_member_invoice');
-  const billed = [];
-  for (const member of members) {
-    const built = await buildMemberLines(member, customer, trx);
-    if (built.state === 'office_required') return built;
-    if (built.lineItems.length) billed.push({ member, lineItems: built.lineItems });
+  // These financial reads see coverage under each applicable estimate lock.
+  for (const { member } of billed) {
+    const prior = await require('./estimate-first-application-invoice')
+      .findFirstApplicationInvoiceForEstimateService(member, trx);
+    if ([prior.invoice, prior.liveBeside, prior.canceledSetupFee].some(Boolean)) {
+      return office('existing_estimate_invoice', member.id);
+    }
+  }
+  for (const member of [...billed.map((entry) => entry.member), ...feeReviewCandidates]) {
+    // A canceled fee is treated as covered with completing-visit context only
+    // because the billed application's prior-invoice lane parks that case.
+    // A zero-price member skips that lane, so its canceled fee remains owed.
+    const obligation = await require('./setup-fee-obligation').findUnmintedSetupFeeObligation({
+      sourceEstimateId: member.source_estimate_id, customerId: customer.id,
+      ...(feeReviewCandidates.includes(member) ? {} : { excludeScheduledServiceId: member.id }),
+      visitPlanRow: member,
+    }, trx);
+    if (obligation.owed) return office('setup_fee_requires_review', member.id);
   }
   if (!billed.length) return { state: 'no_charge', invoiceId: null };
-  const sourceIds = [...new Set(billed.map(({ member }) => member.source_estimate_id || null))];
-  if (sourceIds.length > 1) return office('mixed_estimate_billing');
   // create() owns county tax. Its service-level authority can represent the
   // group only when every positive line has the same tax treatment.
   if (['commercial', 'business'].includes(customer.property_type)) {

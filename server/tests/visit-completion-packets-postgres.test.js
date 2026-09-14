@@ -278,6 +278,120 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
   });
 
+  test.each([
+    ['inspection only', false], ['inspection only', true], ['callback', true], ['always-free follow-up', true],
+  ])('nonbillable estimate members (%s) leave unrelated acceptance invoices outside packet billing (lock=%s)', async (kind, heldLock) => {
+    const billableEstimateId = await linkFixtureEstimate();
+    const nonbillableEstimateId = randomUUID();
+    fixture.estimateIds.push(nonbillableEstimateId);
+    await mockPg('estimates').insert({ id: nonbillableEstimateId, customer_id: fixture.customerId, status: 'accepted' });
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ source_estimate_id: nonbillableEstimateId });
+    const acceptance = await InvoiceService.create({ customerId: fixture.customerId, serviceDate: etDateString(),
+      lineItems: [{ description: 'First service application', quantity: 1, unit_price: 120 }],
+      notes: `Auto-generated from accepted estimate #${nonbillableEstimateId}. First application.`,
+    });
+    const input = submission();
+    if (kind === 'inspection only') input.items[1].body.visitOutcome = 'inspection_only';
+    if (kind === 'callback') await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ is_callback: true });
+    if (kind === 'always-free follow-up') {
+      await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ service_type: 'Fixture Follow-up Service' });
+    }
+    const holder = heldLock ? await mockPg.transaction() : null;
+    try {
+      if (holder) await holder.raw('SELECT pg_advisory_xact_lock(hashtext(?))',
+        [`unminted_setup_fee_manual_billing:${nonbillableEstimateId}`]);
+      const saved = await saveVisitCompletionPacket(input);
+      expect(saved.body.billing).toMatchObject({ state: 'invoice_ready', total: 120 });
+      const packetInvoice = await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).first();
+      expect(packetInvoice.id).not.toBe(acceptance.id);
+      expect(packetInvoice.scheduled_service_id).toBe(fixture.serviceIds[0]);
+      expect(packetInvoice.visit_completion_packet_id).toBe(saved.body.packetId);
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(2);
+      expect((await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).first()).source_estimate_id)
+        .toBe(billableEstimateId);
+    } finally {
+      if (holder && !holder.isCompleted()) await holder.rollback();
+    }
+  });
+
+  test.each(['uncovered', 'paid', 'canceled sibling'])('a performed recurring application adjusted to zero still reviews its accepted setup fee (%s)', async (coverage) => {
+    const covered = coverage === 'paid';
+    const estimateId = await linkFixtureEstimateWithSetupObligation();
+    const key = `fixture_${fixture.catalogId}`;
+    const accepted = await mockPg('estimates').where({ id: estimateId }).first('estimate_data');
+    await mockPg('estimates').where({ id: estimateId }).update({
+      address: '100 Synthetic Test Lane, Bradenton, FL 34201',
+      estimate_data: JSON.stringify({ sendSnapshot: accepted.estimate_data.sendSnapshot, result: { recurring: { services: [{
+        service: 'pest_control', serviceKey: key, name: 'Fixture General Pest Control',
+        perTreatment: 120, priceAfterDiscount: 102, visitsPerYear: 4, frequency: 'quarterly',
+        discount: { effectiveDiscount: 0.15 },
+      }] } } }),
+    });
+    await mockPg('customers').where({ id: fixture.customerId }).update({ per_application_fee: 120 });
+    await mockPg('services').where({ id: fixture.catalogId }).update({
+      frequency: 'quarterly', billing_type: 'recurring', visits_per_year: 4,
+    });
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({
+      service_address_line1: '100 Synthetic Test Lane', service_address_city: 'Bradenton', service_address_zip: '34201',
+    });
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({
+      recurring_pattern: 'quarterly', primary_line_price: 120, estimated_price: 18,
+    });
+    fixture.discountId = randomUUID();
+    await mockPg('discounts').insert({ id: fixture.discountId, discount_key: `fixture_${fixture.discountId}`,
+      name: 'Synthetic fixed adjustment', discount_type: 'fixed_amount', amount: 102, is_stackable: true });
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({
+      discount_id: fixture.discountId, discount_name: 'Synthetic fixed adjustment',
+      discount_type: 'fixed_amount', discount_amount: 102, discount_dollars: 102,
+    });
+    if (covered) await createPaidSetupFee(estimateId);
+    const { gates } = require('../config/feature-gates');
+    const priorGates = [gates.completionServicePricing, gates.editApptPriceServiceScope];
+    gates.completionServicePricing = true;
+    gates.editApptPriceServiceScope = true;
+    let siblingId;
+    let siblingInvoiceId;
+    try {
+      if (coverage === 'canceled sibling') {
+        siblingId = randomUUID();
+        await mockPg('scheduled_services').insert({ id: siblingId, customer_id: fixture.customerId,
+          technician_id: fixture.techId, service_id: fixture.catalogId,
+          source_estimate_id: estimateId, service_type: 'Fixture General Pest Control',
+          scheduled_date: etDateString(), window_start: '12:00', window_end: '13:00',
+          status: 'on_site', estimated_price: 99, is_recurring: true });
+        const fee = await InvoiceService.create({ customerId: fixture.customerId,
+          scheduledServiceId: siblingId, serviceDate: etDateString(),
+          lineItems: [{ description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99 }],
+          notes: `Auto-generated from accepted estimate #${estimateId}. $99 setup fee only.`,
+        });
+        siblingInvoiceId = fee.id;
+        await mockPg('invoices').where({ id: fee.id }).update({ status: 'canceled' });
+        await mockPg('scheduled_services').where({ id: siblingId }).update({ status: 'cancelled' });
+      }
+      const plan = await require('../services/completion-pricing')
+        .loadCompletionPricing(fixture.serviceIds[0], { database: mockPg, role: 'admin' });
+      expect(plan.view).toMatchObject({ canApply: true, proposedAmount: 0 });
+      const input = submission({ actor: { techRole: 'admin', technicianId: fixture.techId } });
+      input.items[0].body.pricingReview = { witness: plan.view.witness, applyDiscounts: true };
+      input.items[1].body.visitOutcome = 'inspection_only';
+      const saved = await saveVisitCompletionPacket(input);
+      expect(saved.body.billing).toMatchObject(covered
+        ? { state: 'no_charge', invoiceId: null }
+        : { state: 'office_required', reason: 'setup_fee_requires_review', serviceId: fixture.serviceIds[0] });
+      const record = await mockPg('service_records').where({ scheduled_service_id: fixture.serviceIds[0] }).first();
+      expect(record.structured_notes.completionPricing.amountCents).toBe(0);
+      expect((await saveVisitCompletionPacket(input)).body.billing).toMatchObject(covered
+        ? { state: 'no_charge', invoiceId: null }
+        : { state: 'office_required', reason: 'setup_fee_requires_review' });
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(
+        coverage === 'uncovered' ? 0 : 1);
+    } finally {
+      [gates.completionServicePricing, gates.editApptPriceServiceScope] = priorGates;
+      if (siblingInvoiceId) await mockPg('invoices').where({ id: siblingInvoiceId }).del();
+      if (siblingId) await mockPg('scheduled_services').where({ id: siblingId }).del();
+    }
+  });
+
   test('freezes one server-measured visit duration and replays its proportional allocation', async () => {
     const arrivedAt = new Date(Date.now() - 59 * 60000);
     await mockPg('service_visits').where({ id: fixture.visitId }).update({ arrived_at: arrivedAt });
@@ -2310,6 +2424,33 @@ postgres('visit completion packet records on PostgreSQL', () => {
       notes: `Auto-generated from accepted estimate #${estimateId}. Setup fee plus first application.`,
     })).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 });
     expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(2);
+  });
+
+  test.each([
+    ['paid', 40, false, 59], ['paid', 40, true, 59],
+    ['refunded', 40, false, 59], ['refunded', 99, false, 0],
+    ['void', 99, false, 99], ['canceled', 99, false, 99],
+  ])('packet-carried fee coverage caps replacements: %s $%s stamped=%s remainder=$%s', async (status, fee, stamped, remainder) => {
+    const estimateId = await linkFixtureEstimateWithSetupObligation();
+    const prior = await createPaidSetupFee(estimateId);
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('invoices').where({ id: prior.id }).update({ status: 'void' });
+    const packetInvoice = await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).first();
+    await mockPg('invoices').where({ id: packetInvoice.id }).update({ status,
+      notes: stamped ? `accepted estimate #${estimateId}` : 'Office edited packet notes',
+      line_items: JSON.stringify([...packetInvoice.line_items,
+        { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: fee, amount: fee }]),
+    });
+    const create = (amount) => InvoiceService.create({ customerId: fixture.customerId,
+      lineItems: [{ description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: amount }],
+      notes: `accepted estimate #${estimateId}. Remaining setup fee only.`,
+    });
+    await expect(create(remainder + 1)).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 });
+    if (remainder > 0) {
+      expect(Number((await create(remainder)).total)).toBe(remainder);
+      await expect(create(1)).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 });
+    }
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(remainder > 0 ? 3 : 2);
   });
 
   test('a packet invoice that already carries the setup fee owns a later setup-only mint', async () => {
