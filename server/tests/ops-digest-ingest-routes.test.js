@@ -247,16 +247,14 @@ describe('bell write', () => {
     expect(mockLockCalls).toEqual([['admin:ops-crons:e22-schedule-integrity:overlaps-2026-09-11']]);
   });
 
-  test('a DELAYED re-post from an earlier run cannot lower the stored observation', async () => {
+  test('a DELAYED re-post cannot replace newer content or re-bell it', async () => {
     // A recurrence already raised the standing row to 14:00.
     mockStanding.row = { created_at: new Date('2026-09-11T10:00:00Z'), observed_at: '2026-09-11T14:00:00.000Z' };
-    mockNotifyAdmin.mockResolvedValue({ id: 'n-old', deduped: true });
-    await post({ ...good(), observedAt: '2026-09-11T12:00:00Z' });
-    const opts = mockNotifyAdmin.mock.calls[0][3];
-    // The stored 14:00 wins, so nothing regresses and the version is
-    // unchanged — a plain dedupe, no rewrite, no re-bell.
-    expect(opts.metadata.observedAt).toBe('2026-09-11T14:00:00.000Z');
-    expect(opts.dedupeVersion).toBe('2026-09-11T14:00:00.000Z');
+    const result = await post({ ...good(), subject: 'older finding', body: 'old body', link: '/admin/old', observedAt: '2026-09-11T12:00:00Z' });
+    expect(result).toEqual({ status: 200, json: { ok: true, stale: true } });
+    // notifyAdmin refreshes a deduped row when CONTENT differs even if the
+    // version is clamped. Skipping it protects the 14:00 row's body/read state.
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 
   test('a LATER run raises the observation and so rewrites the standing row', async () => {

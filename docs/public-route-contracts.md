@@ -1768,7 +1768,8 @@ latest clean observation returns 200 `{ ok: true, stale: true }` without a
 bell or email fallback. `/resolve` shares the 404 → limiter → 401
 → 400 layers but deliberately has NO 409: retiring history must never
 depend on the ingest lane being on. Under the same per-key advisory lock
-as ingest, it atomically retires rows and advances a durable clean watermark
+as ingest, it atomically retires rows by observation time (using created_at
+only when no observation stamp exists) and advances a durable clean watermark
 even when no rows stand; success answers 200 `{ resolved: N }` (N may be 0),
 and a DB failure answers retryable 503, never false success. Writes exactly
 one admin `ops_digest` row

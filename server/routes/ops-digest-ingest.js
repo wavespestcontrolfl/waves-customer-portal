@@ -199,21 +199,15 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
       // still suppresses an older failure even when no bell row ever stood.
       const cleanAt = await readCleanWatermark(trx, dedupeKey);
       if (cleanAt && Date.parse(observedAt) <= Date.parse(cleanAt)) return { stale: true };
-      // MONOTONIC observation, decided BEFORE the write. notifyAdmin's
-      // refresh merge takes the incoming metadata verbatim (pinned by
-      // notification-dedupe-refresh-semantics.test.js), so a delayed
-      // re-post from an EARLIER run would otherwise lower observedAt below
-      // a recurrence that already raised it — and a clean run landing in
-      // between would retire a live finding. Clamping AFTER the write
-      // cannot help: read-your-own-write makes it compare the value
-      // against itself (pre-push P1 ×3). The standing probe mirrors
-      // notification-service's own dedupe probe so it reads the row that
-      // call will find.
+      // An older report must not reach notifyAdmin at all: its refresh path
+      // also compares title/body/link, so clamping only dedupeVersion could
+      // replace a newer finding's content and re-bell it. The standing
+      // probe mirrors notifyAdmin's dedupe probe under this same lock.
       const standing = await standingObservation(trx, dedupeKey);
+      if (standing && Date.parse(observedAt) < Date.parse(standing)) return { stale: true };
       const effectiveObservedAt = laterOf(standing, observedAt);
-      // dedupeVersion = the EFFECTIVE observation: an older re-post leaves
-      // it unchanged (plain dedupe, no rewrite), a later run's recurrence
-      // changes it and so rewrites the standing row and re-bells it.
+      // A later run's recurrence changes dedupeVersion and refreshes the
+      // standing row. A repeat of the same observation remains deduped.
       const row = await NotificationService.notifyAdmin(CATEGORY, title, text, {
         link,
         bell: true,

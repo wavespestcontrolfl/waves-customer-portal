@@ -172,15 +172,10 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
 // observation is not newer than it retire — the advisory lock serializes
 // requests, not observations, so a later failure whose ingest won the lock
 // first must survive an earlier clean run's resolve (codex P1 r7 on #4392).
-// The row's observation is GREATEST(metadata.observedAt, created_at).
-// observedAt is kept MONOTONIC by the ingest route: under the same advisory
-// lock, it reads the standing observation BEFORE writing and stores the
-// later of the two — necessary because notifyAdmin's refreshOnDedupe merge
-// takes the INCOMING metadata verbatim (pinned by
-// notification-dedupe-refresh-semantics.test.js), so a delayed re-post from
-// an earlier run would otherwise lower it. created_at stays in the
-// comparison as a floor for rows written by any other path, so the cutoff
-// fails safe (a bell stays up) rather than clearing a live failure.
+// A stamped observedAt is the finding's event time; created_at is used only
+// for legacy rows without one. A delayed 10:00 failure inserted at 10:20
+// must clear under a 10:10 clean observation. The ingest route rejects
+// older re-posts under the same advisory lock, keeping this stamp monotonic.
 async function resolveOpsDigest({ key, source = null, resolvedBy = 'ops-crons', lockKey = null, notAfter = null, throwOnError = false } = {}) {
   const opsKey = String(key || '').trim();
   if (!opsKey) return 0;
@@ -192,7 +187,7 @@ async function resolveOpsDigest({ key, source = null, resolvedBy = 'ops-crons', 
       .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
       .whereRaw("metadata->>'opsKey' = ?", [opsKey]);
     if (source) q = q.whereRaw("metadata->>'source' = ?", [String(source)]);
-    if (notAfter) q = q.whereRaw("GREATEST(COALESCE(NULLIF(metadata->>'observedAt', '')::timestamptz, created_at), created_at) <= ?::timestamptz", [notAfter]);
+    if (notAfter) q = q.whereRaw("COALESCE(NULLIF(metadata->>'observedAt', '')::timestamptz, created_at) <= ?::timestamptz", [notAfter]);
     return q.update({
       read_at: conn.raw('COALESCE(read_at, NOW())'),
       // Drop the dedupeKey with the resolve stamp: a resolved row must never
