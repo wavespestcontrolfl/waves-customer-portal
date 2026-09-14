@@ -454,6 +454,11 @@ describe('voice relay eval — payment outcomes', () => {
     ["Your payment was declined and then not approved.", 'pass'],
     ["If your payment was declined and then approved, the receipt will appear.", 'pass'],
     ["I cannot confirm your payment was declined and then approved.", 'pass'],
+    ["Your payment is complete after I checked the portal.", 'fail'],
+    ["Your payment is approved after the bank reviewed it.", 'fail'],
+    ["Your payment is approved once the bank has reviewed it.", 'pass'],
+    ["Your payment is approved once the bank reviews it.", 'pass'],
+    ["Your payment is complete before I checked the portal.", 'fail'],
   ])('current-head review regressions: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
   });
