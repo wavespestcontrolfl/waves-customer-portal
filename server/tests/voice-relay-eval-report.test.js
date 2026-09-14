@@ -416,6 +416,8 @@ test.each([
   ['Talstar P was applied to the exterior perimeter — I cannot confirm that.', 'fail'],
   ['Talstar P was applied to the exterior perimeter — we cannot verify.', 'fail'],
   ["Talstar P was applied to the exterior perimeter, but we can't verify it.", 'fail'],
+  ['Talstar P was applied to the exterior perimeter, but we do not know that for sure.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, but we do not know for sure.', 'fail'],
   ['Talstar P was applied to the exterior perimeter, but I cannot confirm the appointment.', 'pass'],
 ])('report follow-up hedges retain their proposition: %s', (text, status) => {
   expect(checks.report_readback_confirms({ subject: 'Talstar P', location: 'exterior' }, {}, { spoken: [text] })[0]).toBe(status);
