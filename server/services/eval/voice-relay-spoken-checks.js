@@ -1262,7 +1262,7 @@ const CARD_NAMED_EXPIRATION_VALUE_RE = new RegExp(
 );
 const CARD_NUMERIC_EXPIRATION_VALUE_RE = /^(\d{1,2})\s*[/.-]\s*(?:(\d{1,2})\s*[/.-]\s*)?((?:19|20)\d{2}|\d{2})$/;
 const CARD_NON_FRAGMENT_RES = Object.freeze([
-  new RegExp(`\\b(?:${BILLING_AMOUNT_NOUN})(?:\\s+(?:on|for)\\s+(?:(?:your|the|my|this|that)\\s+)?(?:card|account))?\\s+(?:(?:is|was|of|es)\\s+)?(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})(?:[\\s-]+(?:and\\s+)?(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})){0,6}\\b`, 'gi'),
+  new RegExp(`\\b(?:${BILLING_AMOUNT_NOUN})(?:\\s+(?:on|for)\\s+(?:(?:your|the|my|this|that)\\s+)?(?:card|account))?\\s+(?:(?:is|was|of|es)\\s+)?(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})(?:[\\s-]+(?!(?:and\\s+)?(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})\\s+(?:is|are|was|were)\\b)(?:and\\s+)?(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})){0,6}\\b`, 'gi'),
   new RegExp(`\\b(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})(?:[\\s-]+(?:and\\s+)?(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})){0,6}\\s+(?:bucks|${CARD_SCALAR_UNIT}|${CARD_MEASUREMENT_UNIT}|${CARD_COUNT_MODIFIERS}${CARD_COUNT_NOUN})\\b`, 'gi'),
   new RegExp(`\\$\\s*${DIGITS}`, 'gi'),
   new RegExp(`\\b${PRICE_NUMBER}\\s*(?:per|an?|each|every|for each|for every)\\s+(?:applications?|treatments?|services?|visits?)\\b`, 'gi'),

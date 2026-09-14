@@ -290,6 +290,9 @@ test.each([
 
 test.each([
   ['The balance on your card is 129.', 'pass'],
+  ['The balance on your card is one hundred and twenty-nine.', 'pass'],
+  ['The balance on your card is 129 and four is the first digit on your card.', 'fail'],
+  ['The balance on your card is 129 and 4242 is the last four digits.', 'fail'],
   ['The balance on your card is one hundred twenty-nine.', 'pass'],
   ['The balance on your card is 129, and your card ends in 4242.', 'fail'],
   ['The balance on your card is 129, and I heard four.', 'fail'],
