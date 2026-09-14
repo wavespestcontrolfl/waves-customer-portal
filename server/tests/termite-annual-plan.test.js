@@ -29,6 +29,12 @@ const replay = require('../services/estimate-tree-shrub-knob-replay');
 const HOME = (homeSqFt, extra = {}) => ({ homeSqFt, lotSqFt: 8000, propertyType: 'single_family', ...extra });
 const termiteLine = (r) => r.lineItems.find((l) => l.service === 'termite_bait');
 const snapshot = JSON.parse(JSON.stringify(constants.TERMITE.annualPlan));
+const priorCancellationGate = process.env.GATE_CANCEL_FLOW_V2;
+beforeAll(() => { process.env.GATE_CANCEL_FLOW_V2 = 'true'; });
+afterAll(() => {
+  if (priorCancellationGate === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
+  else process.env.GATE_CANCEL_FLOW_V2 = priorCancellationGate;
+});
 afterEach(() => { Object.assign(constants.TERMITE.annualPlan, JSON.parse(JSON.stringify(snapshot))); });
 
 describe('annual plan — gate', () => {
@@ -40,6 +46,18 @@ describe('annual plan — gate', () => {
     expect(li.visitsPerYear).toBe(4);
     expect(li.annual).toBe(288);
     expect(li.setup).toBeUndefined();
+  });
+
+  test('annual gate alone cannot price a fresh plan while term-aware cancellation is disabled', () => {
+    process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
+    delete process.env.GATE_CANCEL_FLOW_V2;
+    try {
+      const line = termiteLine(generateEstimate(HOME(2000, { services: { termite: { plan: 'annual_protection' } } })));
+      expect(line).toMatchObject({ plan: 'quarterly', visitsPerYear: 4 });
+    } finally {
+      delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      process.env.GATE_CANCEL_FLOW_V2 = 'true';
+    }
   });
 });
 

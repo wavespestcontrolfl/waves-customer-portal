@@ -1,7 +1,7 @@
 const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
 const express = require('express');
 const crypto = require('crypto');
-const { gateEnvValue } = require('../config/feature-gates');
+const { gateEnvValue, termiteAnnualPlanSelectionEnabled } = require('../config/feature-gates');
 const router = express.Router();
 const db = require('../models/db');
 const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData, REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
@@ -127,7 +127,7 @@ function annualPlanOfferFingerprint(estimate) {
   // These keys are written by publication, after the provider handoff.
   // Group identity itself remains in the row fields of estimateOfferVersion.
   const offerData = { ...data };
-  for (const key of ['groupPublishedByEstimateId', 'proposalDelivery', 'leadServiceHandoffAt', 'leadServiceHandoffParkId']) {
+  for (const key of ['groupPublishedByEstimateId', 'proposalDelivery', 'leadServiceHandoffAt', 'leadServiceHandoffParkId', 'viewedMonthlyTotal']) {
     delete offerData[key];
   }
   return estimateOfferVersion({ ...estimate, estimate_data: offerData });
@@ -610,7 +610,7 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
     }
   }
   // Termite annual protection plan (ruling A-1) is dark behind
-  // GATE_TERMITE_ANNUAL_PLAN. The engine lets an ISSUED plan keep pricing
+  // GATE_TERMITE_ANNUAL_PLAN and GATE_CANCEL_FLOW_V2. The engine lets an ISSUED plan keep pricing
   // after the kill switch is off, on the evidence of the stored replay stamp
   // — but that stamp is written at PRICING time, not publication time, so a
   // draft priced while the gate was on would otherwise still be deliverable
@@ -619,8 +619,7 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
   // of the annual offer actually sent. An earlier quarterly handoff, or a
   // revision of a delivered annual offer, cannot authorize a new annual
   // contract after the gate is switched off.
-  const annualPlanGateOn = ['1', 'true', 'on']
-    .includes(String(process.env.GATE_TERMITE_ANNUAL_PLAN || '').toLowerCase());
+  const annualPlanGateOn = termiteAnnualPlanSelectionEnabled();
   const estimateData = parseEstimateData(estimate.estimate_data || estimate.estimateData);
   const annualFingerprint = annualPlanOfferFingerprint(estimate);
   const annualPlanDelivered = !!estimateData?.deliveryState?.firstDeliveredAt
@@ -628,7 +627,7 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
     && estimateData.deliveryState.annualPlanOfferFingerprint === annualFingerprint;
   if (!annualPlanGateOn && !annualPlanDelivered
     && selectedTermiteAnnualPlanRows(estimateData).length > 0) {
-    const err = new Error('The termite annual protection plan is disabled (GATE_TERMITE_ANNUAL_PLAN) — reopen the estimate in the estimate tool and save it on the quarterly program before sending.');
+    const err = new Error('The termite annual protection plan is disabled until the annual and cancellation gates are enabled — reopen the estimate in the estimate tool and save it on the quarterly program before sending.');
     err.statusCode = 422;
     err.code = 'TERMITE_ANNUAL_PLAN_DISABLED';
     throw err;
