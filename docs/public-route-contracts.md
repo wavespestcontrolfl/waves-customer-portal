@@ -992,6 +992,17 @@ preferences ride estimateToggleLimiter, data/pdf ride dataLimiter).
 Authored commercial proposals expose reviewed four-decimal quantities and unit
 rates, explicit unit labels and cent-rounded line amounts through the existing
 normalized proposal and document output. These additions do not widen draft access.
+Termite annual protection is selectable only while both
+`GATE_TERMITE_ANNUAL_PLAN` and `GATE_CANCEL_FLOW_V2` are enabled. When either
+switch is off, an unaccepted row whose current priced result selects annual
+protection is public-viewable and accept-active only if `deliveryState` records
+a real first handoff and an annual-offer fingerprint matching its current
+customer, scope, terms, and price. An unsent or revised annual offer cannot
+reuse an earlier quarterly handoff or a stored pricing stamp: the legacy view
+and `/data` refuse it as ineligible, and `/accept` returns its inactive 409.
+Already accepted or declined rows remain available for their existing terminal
+views, subject to the other customer-viewability guards; no new acceptance is
+possible from either terminal status.
 The `/estimate/:token?website=1` SPA uses the website's compact pricing →
 scheduling → Auto Pay presentation over these same APIs. `embed=1` permits
 framing only while `GATE_WEBSITE_QUOTE_BOOKING` is on and only from the

@@ -207,6 +207,9 @@ describe('assertEstimateSendable — GATE_TERMITE_ANNUAL_PLAN at delivery', () =
       deliveryState: { firstDeliveredAt: '2026-09-12T00:00:00.000Z', annualPlanOfferFingerprint: fingerprint },
     } };
     expect(caught(delivered)).toBeNull();
+    delivered.estimate_data.followupOwnershipFrom = 'other-group-member';
+    expect(annualPlanOfferFingerprint(delivered)).toBe(fingerprint);
+    expect(caught(delivered)).toBeNull();
   });
 
   test('gate OFF: an earlier quarterly handoff does not authorize a revised annual quote', () => {
