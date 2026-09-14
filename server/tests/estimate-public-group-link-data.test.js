@@ -27,10 +27,14 @@ jest.mock('../services/estimate-deposits', () => ({
   refundUnconsumedDeposits: jest.fn(),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/estimate-group-navigation', () => ({
+  refreshExpiredGroupNavigation: jest.fn().mockResolvedValue(null),
+}));
 
 const express = require('express');
 const db = require('../models/db');
 const estimatePublicRouter = require('../routes/estimate-public');
+const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
 
 let dbRows = {};
 function chainFor(result) {
@@ -112,7 +116,7 @@ describe('GET /:token/data — navigation after the anchor offer expires', () =>
       viewed_at: past, sent_at: past,
       estimate_data: { ...base.estimate_data, groupLinkViewableThrough: future }, ...overrides };
   }
-  beforeEach(() => { dbRows = {}; });
+  beforeEach(() => { dbRows = {}; refreshExpiredGroupNavigation.mockReset().mockResolvedValue(null); });
 
   test.each(['sent', 'viewed', 'expired'])('serves the %s anchor and live sibling while leaving the anchor offer expired', async (status) => {
     const row = anchor({ status });
@@ -168,6 +172,71 @@ describe('GET /:token/data — navigation after the anchor offer expires', () =>
       dbRows.estimates = expiredByDate;
       const siblingRes = await fetch(`${baseUrl}/estimates/${expiredByDate.token}/data?refresh=1`);
       expect(siblingRes.status).toBe(404);
+    });
+  });
+
+  test('an active published anchor includes expired siblings without a stored navigation floor', async () => {
+    const row = estimateRow({ estimate_group_id: 'group-bid', sent_at: past, expires_at: future });
+    const expired = estimateRow({ id: 'expired-sibling', token: 'expiredsiblingtoken', estimate_group_id: row.estimate_group_id,
+      status: 'expired', sent_at: past, expires_at: past });
+    dbRows = { estimates: row, siblings: [row, expired] };
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/${row.token}/data?refresh=1`);
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.propertyGroup).toHaveLength(2);
+      expect(body.propertyGroup[0]).toMatchObject({ token: row.token, isCurrent: true });
+      expect(body.propertyGroup[1]).toMatchObject({ status: 'expired', isCurrent: false });
+      expect(body.propertyGroup[1]).not.toHaveProperty('token');
+      expect(body.cta.terminalState).toBeNull();
+    });
+  });
+
+  test.each(['accepted', 'declined'].flatMap((status) => [
+    [status, 'absent', undefined], [status, 'elapsed', past],
+  ]))('a %s anchor with an expired offer and %s navigation floor cannot reveal expired siblings', async (status, _label, floor) => {
+    const base = estimateRow();
+    const row = estimateRow({ status, estimate_group_id: 'group-bid', sent_at: past, expires_at: past,
+      estimate_data: { ...base.estimate_data, ...(floor ? { groupLinkViewableThrough: floor } : {}) } });
+    const expired = estimateRow({ id: 'expired-sibling', token: 'expiredsiblingtoken', estimate_group_id: row.estimate_group_id,
+      status: 'expired', sent_at: past, expires_at: past });
+    dbRows = { estimates: row, siblings: [row, expired] };
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/${row.token}/data?refresh=1`);
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.propertyGroup).toBeUndefined();
+      expect(body.cta.terminalState).toBe(status);
+      expect(refreshExpiredGroupNavigation).not.toHaveBeenCalled();
+    });
+  });
+
+  test('an expired anchor recovers a durable group window after a held sibling clears', async () => {
+    const row = anchor({ estimate_data: estimateRow().estimate_data });
+    const sibling = estimateRow({ id: 'fixed-sibling', token: 'fixedsiblingtoken', estimate_group_id: row.estimate_group_id,
+      sent_at: past, expires_at: future });
+    dbRows = { estimates: row, siblings: [row, sibling] };
+    refreshExpiredGroupNavigation.mockImplementationOnce(async (_database, stale) => ({
+      ...stale, estimate_data: { ...stale.estimate_data, groupLinkViewableThrough: future },
+    }));
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/${row.token}/data?refresh=1`);
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.propertyGroup.map((member) => member.token)).toEqual([row.token, sibling.token]);
+      expect(body.cta).toMatchObject({ canAccept: false, terminalState: 'expired' });
+      expect(refreshExpiredGroupNavigation).toHaveBeenCalledWith(db, expect.objectContaining({ id: row.id }));
+    });
+  });
+
+  test('a rejected group refresh keeps an expired anchor private', async () => {
+    const row = anchor({ estimate_data: estimateRow().estimate_data });
+    dbRows = { estimates: row };
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/${row.token}/data?refresh=1`);
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: 'Estimate not found' });
+      expect(refreshExpiredGroupNavigation).toHaveBeenCalledTimes(1);
     });
   });
 

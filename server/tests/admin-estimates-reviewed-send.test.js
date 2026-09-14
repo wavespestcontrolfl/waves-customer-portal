@@ -88,6 +88,7 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const { shortenOrPassthrough } = require('../services/short-url');
 const { computeProposalTotals, normalizeProposal } = require('../services/estimate-proposal');
 const { gateEnvValue } = require('../config/feature-gates');
+const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
 const { buildPricingBundle } = require('../routes/estimate-public');
 jest.mock('../services/pricing-authority-gate', () => {
   const actual = jest.requireActual('../services/pricing-authority-gate');
@@ -631,6 +632,51 @@ describe('group publication navigation', () => {
     });
   }
 
+  test('an expired entry gains a durable floor only after a published sibling’s call settles cleanly', async () => {
+    Object.assign(row, { status: 'expired', estimate_group_id: 'synthetic-group',
+      sent_at: new Date('2026-01-01T12:00:00.000Z'), expires_at: new Date('2026-01-08T12:00:00.000Z') });
+    const sibling = savedEstimate({ id: 'published-long-sibling', status: 'sent', estimate_group_id: 'synthetic-group',
+      sent_at: new Date('2026-01-02T12:00:00.000Z'), expires_at: new Date('2100-01-01T12:00:00.000Z'),
+      estimate_data: { estimatorEngine: { callLogId: 'reprocessing-call' } } });
+    groupRows.push(sibling);
+    const call = { id: 'reprocessing-call', processing_status: 'processing', processing_token: 'synthetic-live-token', metadata: {} };
+    callRows.push(call);
+    db.mockImplementation(groupDatabase);
+
+    const blockedRead = await refreshExpiredGroupNavigation(db, structuredClone(row));
+    expect(blockedRead.id).toBe(row.id);
+    expect(dataOf().groupLinkViewableThrough).toBeUndefined();
+    expect(dataOf(sibling).groupLinkViewableThrough).toBeUndefined();
+
+    call.processing_status = 'processed';
+    call.processing_token = null;
+    const recovered = await refreshExpiredGroupNavigation(db, structuredClone(row));
+    expect(dataOf(recovered).groupLinkViewableThrough).toBe('2100-01-01T12:00:00.000Z');
+    expect(dataOf().groupLinkViewableThrough).toBe('2100-01-01T12:00:00.000Z');
+    expect(dataOf(sibling).groupLinkViewableThrough).toBe('2100-01-01T12:00:00.000Z');
+
+    // Later shortening changes only the sibling's offer; the recovered
+    // delivered-link promise remains on the entry token.
+    sibling.expires_at = new Date('2026-01-08T12:00:00.000Z');
+    await refreshExpiredGroupNavigation(db, structuredClone(row));
+    expect(dataOf().groupLinkViewableThrough).toBe('2100-01-01T12:00:00.000Z');
+  });
+
+  test('recovery refuses a moved token or an entry whose own call remains blocked', async () => {
+    Object.assign(row, { status: 'expired', estimate_group_id: 'synthetic-group',
+      sent_at: new Date('2026-01-01T12:00:00.000Z'), expires_at: new Date('2026-01-08T12:00:00.000Z'),
+      estimate_data: { estimatorEngine: { callLogId: 'blocked-anchor-call' } } });
+    groupRows.push(savedEstimate({ id: 'published-long-sibling', status: 'sent', estimate_group_id: 'synthetic-group',
+      sent_at: new Date('2026-01-02T12:00:00.000Z'), expires_at: new Date('2100-01-01T12:00:00.000Z') }));
+    callRows.push({ id: 'blocked-anchor-call', processing_status: 'processing', processing_token: 'synthetic-live-token', metadata: {} });
+    db.mockImplementation(groupDatabase);
+
+    expect(await refreshExpiredGroupNavigation(db, structuredClone(row))).toBeNull();
+    expect(dataOf().groupLinkViewableThrough).toBeUndefined();
+    expect(await refreshExpiredGroupNavigation(db, { ...structuredClone(row), token: 'former-token' })).toBeNull();
+    expect(dataOf().groupLinkViewableThrough).toBeUndefined();
+  });
+
   test('A to B resend leaves both delivered links eligible after reconciliation fails', async () => {
     const { older, sibling } = prepareGroup();
     failReconciliation();
@@ -656,6 +702,32 @@ describe('group publication navigation', () => {
     expect(dataOf(row).groupLinkViewableThrough).toBe('2100-01-01T04:59:59.999Z');
     expect(row.expires_at.toISOString()).toBe('2100-01-01T04:59:59.999Z');
     expect(dataOf(sibling).groupLinkViewableThrough).toBeUndefined();
+  });
+
+  test('the longest anchor keeps its own delivered floor when reconciliation fails and its hold is later shortened', async () => {
+    const { older, sibling } = prepareGroup();
+    const authoredProposal = { enabled: true, validThrough: '2099-12-31', buildings: [{ name: 'Synthetic building',
+      lineItems: [{ id: 'synthetic-line', quantity: 1, unitPrice: 100, frequency: 'one_time' }] }] };
+    row.estimate_data.proposal = authoredProposal;
+    failReconciliation();
+    buildPricingBundle.mockImplementation(async (estimate) => {
+      if (estimate.id === sibling.id) throw new Error('Synthetic snapshot failure');
+      return { services: [] };
+    });
+
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(result.sent).toBe(true);
+    expect(sibling.status).toBe('draft');
+    expect(row.expires_at.toISOString()).toBe('2100-01-01T04:59:59.999Z');
+    expect(dataOf(row).groupLinkViewableThrough).toBe('2100-01-01T04:59:59.999Z');
+    expect(dataOf(older).groupLinkViewableThrough).toBeUndefined();
+    expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('live-sibling group reconciliation failed'));
+
+    gateEnvValue.mockImplementation((key) => key === 'GATE_COMMERCIAL_BID_BUILDER');
+    const shortened = await invoke('/:id/proposal', 'put', { proposal: { ...authoredProposal, validThrough: '2099-12-21' } });
+    expect(shortened.statusCode).toBe(200);
+    expect(row.expires_at.toISOString()).toBe('2099-12-22T04:59:59.999Z');
+    expect(dataOf(row).groupLinkViewableThrough).toBe('2100-01-01T04:59:59.999Z');
   });
 
   test('successful sibling publication extends both delivered links with its own offer expiry', async () => {

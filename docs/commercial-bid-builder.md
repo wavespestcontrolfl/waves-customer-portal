@@ -35,7 +35,13 @@ visible as nonclickable summaries. New navigation grants come only from confirme
 published offers. Successful sibling publication and its required link extensions
 commit together; failed publication does not create a longer navigation promise.
 Every eligible delivered link in the current group receives extensions, because
-a publication marker can predate a resend from another member.
+a publication marker can predate a resend from another member. The anchor's
+own window is stored with successful delivery, even if later reconciliation fails.
+If a temporary call-side block prevented a grant, the next expired-anchor HTML or
+`/data` read can recover it after the call becomes eligible. Recovery uses the same
+published-offer policy under the group lock, persists the monotonic window, and
+changes neither offer dates nor statuses. Blocked calls cannot source or receive
+a grant; moving the anchor to another group invalidates a stale recovery read.
 
 Do not fold one into the other. Widening `expires_at` to carry reachability makes
 every reader that means "offer deadline" wrong by default, and it cannot be undone

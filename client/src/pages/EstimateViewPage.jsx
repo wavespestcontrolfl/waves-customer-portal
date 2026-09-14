@@ -5695,8 +5695,11 @@ function EstimateViewPageInner({ websiteMode = false }) {
       <button type="button" onClick={() => window.print()} style={{ minHeight: 44, padding: "10px 16px", fontSize: 16 }}>Print preview</button>
     </div>
   ) : (
+    // /data may serve an expired group anchor for navigation, while /pdf
+    // still withholds its expired offer. Keep the other document tools.
     <DocumentActionBar
-      pdfUrl={`${API_BASE}/estimates/${token}/pdf`}
+      pdfUrl={data?.cta?.terminalState === 'expired' ? null : `${API_BASE}/estimates/${token}/pdf`}
+      printFallbackDownload={data?.cta?.terminalState !== 'expired'}
       pdfFileName="Waves_Estimate.pdf"
       shareTitle="Your Waves estimate"
     />

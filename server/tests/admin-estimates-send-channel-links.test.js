@@ -339,11 +339,12 @@ describe('sendEstimateNow — durable first-delivery witness (#3391 round)', () 
     try {
       const result = await router.sendEstimateNow(anchor, 'email', { callerPreClaimed: true, now: () => sendAt });
       expect(result.sent).toBe(true);
-      const promised = navigationPatches().find((data) => data.groupLinkViewableThrough)?.groupLinkViewableThrough;
+      const promised = navigationPatches().at(-1)?.groupLinkViewableThrough;
       const publishedSibling = updates.find((patch) => patch.sent_at && patch.expires_at && patch.followup_expiring_sent);
       expect(promised).toBeTruthy();
       expect(publishedSibling.expires_at.toISOString()).toBe(promised);
-      expect(deliveryPatches().find((data) => data.groupLinkViewableThrough)).toBeUndefined();
+      expect(deliveryPatches().find((data) => data.groupLinkViewableThrough)?.groupLinkViewableThrough)
+        .toBe(proposalExpiry(anchor).toISOString());
       expect(updates.find((patch) => patch.sent_at && patch.expires_at && !patch.followup_expiring_sent).expires_at.toISOString())
         .toBe(proposalExpiry(anchor).toISOString());
     } finally {

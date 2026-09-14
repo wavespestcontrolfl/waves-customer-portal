@@ -1010,6 +1010,14 @@ the call-side block still overrides navigation access. During an admitted group
 navigation window, eligible published expired members remain in `propertyGroup`
 with `status: expired`; a member whose own link is no longer viewable omits
 `token` and renders as a nonclickable expired summary.
+An active anchor's own unexpired deadline also permits these summaries; receipt
+visibility alone after acceptance or decline does not extend this window. Expired
+navigation-only pages hide the unavailable PDF download. Legacy token redirects
+retain no-store privacy headers. An expired anchor without a live window can
+recover a missed grant on HTML or `/data` access after a temporary call block
+clears: the shared transaction pins its id, token and group, requires current
+published/call-clear eligibility, and updates only navigation metadata from
+eligible actual offer deadlines.
 The `/estimate/:token?website=1` SPA uses the website's compact pricing →
 scheduling → Auto Pay presentation over these same APIs. `embed=1` permits
 framing only while `GATE_WEBSITE_QUOTE_BOOKING` is on and only from the
