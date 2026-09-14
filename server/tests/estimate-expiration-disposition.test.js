@@ -68,7 +68,7 @@ describe('extension revival', () => {
       calls.push([name, ...args]);
       return name === 'update' ? Promise.resolve(1) : q;
     };
-    ['where', 'whereNull', 'whereRaw', 'orWhere', 'update', 'first', 'whereIn', 'whereNot', 'select'].forEach((m) => { q[m] = chain(m); });
+    ['where', 'whereNull', 'whereRaw', 'orWhere', 'update', 'first', 'whereIn', 'whereNot', 'select', 'forUpdate'].forEach((m) => { q[m] = chain(m); });
     db.mockImplementation(() => q);
     db.fn = { now: () => 'NOW' };
 

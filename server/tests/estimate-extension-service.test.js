@@ -12,9 +12,10 @@ jest.mock('../models/db', () => {
   const mockRaws = [];
   const dbFn = jest.fn((table) => {
     const b = { _table: table, _whereIn: null, _whereRaw: [] };
-    for (const m of ['where', 'whereNull', 'whereNotNull']) b[m] = jest.fn(() => b);
+    for (const m of ['where', 'whereNull', 'whereNotNull', 'forUpdate']) b[m] = jest.fn(() => b);
     b.whereRaw = jest.fn((sql) => { b._whereRaw.push(sql); mockRaws.push({ table, sql }); return b; });
     b.whereIn = jest.fn((...args) => { b._whereIn = args; return b; });
+    b.first = jest.fn(async () => ({ estimate_data: {} }));
     b.update = jest.fn(() => Promise.resolve(1));
     b.del = jest.fn(() => {
       mockDeletes.push({ table: b._table, whereIn: b._whereIn });
@@ -156,6 +157,20 @@ describe('extendEstimate validation (pre-write throws)', () => {
       .rejects.toMatchObject({ code: 'FIXED_BID_VALIDITY' });
     expect(locked).toBe(true);
     expect(update).not.toHaveBeenCalled();
+  });
+
+  it('classifies a fixed hold added to an ungrouped row after preflight before any extension write', async () => {
+    const estimate = { id: 'ordinary', status: 'viewed', sent_at: PAST, expires_at: PAST, estimate_data: {} };
+    const query = { update: jest.fn(), first: jest.fn(async () => ({
+      estimate_data: { proposal: { enabled: true, validThrough: '2099-12-21' } },
+    })) };
+    for (const method of ['where', 'whereNull', 'forUpdate']) query[method] = jest.fn(() => query);
+    const trx = jest.fn(() => query);
+    db.transaction.mockImplementationOnce(async (run) => run(trx));
+    await expect(extendEstimate({ estimate, days: 7, silent: true }))
+      .rejects.toMatchObject({ statusCode: 400, code: 'FIXED_BID_VALIDITY' });
+    expect(query.forUpdate).toHaveBeenCalledTimes(1);
+    expect(query.update).not.toHaveBeenCalled();
   });
 
   it('refuses a LIVE sending claim — in-flight finalization owns status and expiry', async () => {
