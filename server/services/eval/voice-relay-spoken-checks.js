@@ -329,13 +329,16 @@ function callbackClauseArrivalDate(clause) {
 }
 function callbackDateExemption(sentence, previousContext, timeMatch, subject) {
   if (subject || !isCallbackTime(sentence, previousContext, timeMatch)) return null;
-  if (!VISIT_TIME_CALLBACK_RE.test(sentence)) return true;
+  const callback = VISIT_TIME_CALLBACK_RE.exec(sentence);
+  if (!callback) return true;
   // Only the callback clause owns its time. Coordinated appointment and
   // arrival clauses retain their own dates even in the same sentence.
-  const clauses = sentence.split(CLAUSE_SPLIT_RE);
-  const arrivalDate = clauses.map(callbackClauseArrivalDate).find(Boolean);
+  const tailClauses = sentence.slice(callback.index + callback[0].length).split(CLAUSE_SPLIT_RE);
+  const clauses = [sentence.slice(0, callback.index), ...tailClauses.slice(1)];
+  const arrivalDate = callbackClauseArrivalDate(sentence);
   const visitDate = clauses
-    .filter((clause) => !isAffirmativeCallbackContext(clause))
+    .filter((clause) => !isAffirmativeCallbackContext(clause)
+      && !VISIT_TIME_ANSWER_RE.test(clause.replace(/^\s*(?:again|also)\s+/i, '')))
     .map((clause) => TIME_ANYWHERE_RES.map((re) => re.exec(clause)).find(Boolean)
       || ((SCHEDULE_PREDICATES.visit.test(clause)
           || /\b(?:arriv\w*|com(?:e|ing)|show(?:ing)? up|head(?:ing)? (?:over|out))\b/i.test(clause))
