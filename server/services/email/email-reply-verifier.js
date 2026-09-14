@@ -42,7 +42,7 @@ function forgedSignature(text) {
   const lines = text.trim().split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const tail = lines.slice(-2).join('\n');
   const closing = /^(?:best|best regards|kind regards|warm regards|regards|sincerely|thanks|thank you|cheers|warmly|take care|best wishes)[,.!?]?$/i;
-  const dashedName = /(?:^|\n)\s*[-–—]\s*\p{Lu}[\p{L}\p{M}'’.-]*(?:\s+\p{Lu}[\p{L}\p{M}'’.-]*){0,2}[,.]?\s*$/u;
+  const dashedName = /(?:^|\n)\s*[-–—]\s*\p{L}[\p{L}\p{M}'’.-]*(?:\s+\p{L}[\p{L}\p{M}'’.-]*){0,2}[,.]?\s*$/u;
   const [signOffLine, nameLine] = tail.split('\n');
   const namedSignOff = /^(?:all (?:the|my) best|with (?:sincere )?(?:appreciation|gratitude)|yours (?:faithfully|sincerely)|kindest regards|many thanks|warmest wishes|best wishes|take care)[,.!?]?$/i.test(signOffLine)
     && /^\p{L}[\p{L}\p{M}'’.-]*(?: \p{L}[\p{L}\p{M}'’.-]*){0,3}$/u.test(nameLine || '');
@@ -78,7 +78,7 @@ function verifyEmailReplyStructure({ text, customer, wordBudget } = {}) {
 
   if (!draft) violations.push('empty_reply');
   if (!Number.isInteger(wordBudget) || wordBudget < 1 || wordCount(draft) > wordBudget) violations.push('word_budget_exceeded');
-  if (/<!--|<![^>]*>|<\/?[a-z][^>]*>/i.test(draft)) violations.push('html_not_allowed');
+  if (/<!--|<![^>]*>|<\/?[a-z][^>]*>|<\/?[a-z][^>\n]*$/im.test(draft)) violations.push('html_not_allowed');
   if (/^\s*(?:(?:[-+*]|\d+[.)])\s+|•)/m.test(normalizedCopy)) violations.push('bullets_not_allowed');
   if (BOILERPLATE_RE.test(normalizedCopy.replace(/\s+/g, ' '))) violations.push('boilerplate_not_allowed');
   if (OUTPUT_INSTRUCTION_RE.test(normalizedCopy)) violations.push('untrusted_instruction');
@@ -88,7 +88,11 @@ function verifyEmailReplyStructure({ text, customer, wordBudget } = {}) {
   const screenedAccessCopy = accessCopy.replace(NON_ACCESS_CODE_RE, (match, offset) => {
     const sentenceBefore = accessCopy.slice(0, offset).split(/[.!?\n]/).at(-1);
     const sentenceAfter = accessCopy.slice(offset + match.length).split(/[.!?\n]/)[0];
-    return ACCESS_CONTEXT_RE.test(`${sentenceBefore} ${sentenceAfter}`) ? match : ' ';
+    // Account/portal/system access is not entry to the property. Retain any
+    // separate physical-access noun in the same sentence before exempting.
+    const physicalContext = `${sentenceBefore} ${sentenceAfter}`
+      .replace(/\b(?:account|portal|system)\s+access\b/gi, '');
+    return ACCESS_CONTEXT_RE.test(physicalContext) ? match : ' ';
   });
   if (containsReportAccessCode(screenedAccessCopy)) violations.push('access_code');
   if (!greetingMatches(draft, customer)) violations.push('greeting_mismatch');

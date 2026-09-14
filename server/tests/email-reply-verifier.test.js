@@ -74,6 +74,7 @@ describe('email reply structure verifier', () => {
     ['Hi Casey, <!-- internal note --> your visit is pending.', 'html_not_allowed'],
     ['Hi Casey, <!-- internal note', 'html_not_allowed'],
     ['Hi Casey, <!DOCTYPE html> your visit is pending.', 'html_not_allowed'],
+    ['Hi Casey, <b your visit is pending', 'html_not_allowed'],
     ['Hi Casey,\n- Your visit is pending.', 'bullets_not_allowed'],
     ['Hi Casey,\n+ Your visit is pending.', 'bullets_not_allowed'],
     ['Hi Casey,\n– Your visit is pending.', 'bullets_not_allowed'],
@@ -95,6 +96,7 @@ describe('email reply structure verifier', () => {
     expect(verdict('Hi Casey—your visit is pending.').ok).toBe(true);
     expect(verdict('Hi Casey, the • symbol is in the note.').ok).toBe(true);
     expect(verdict('Hi Casey, note: your visit is pending.').ok).toBe(true);
+    expect(verdict('Hi Casey, the reading is < 3.').ok).toBe(true);
   });
 
   test('allows customer preparation corrections while rejecting prompt control', () => {
@@ -165,7 +167,16 @@ describe('email reply structure verifier', () => {
     expect(verdict('Hi Casey, the payment error code is E42; the gate code is 1234.').violations)
       .toContain('access_code');
     expect(verdict('Hi Casey, the gate is closed. The payment error code is E42.').ok).toBe(true);
+    expect(verdict('Hi Casey, account access is unavailable because the payment error code is E42.').ok)
+      .toBe(true);
+    expect(verdict('Hi Casey, portal access is unavailable because the payment error code is E42.').ok)
+      .toBe(true);
+    expect(verdict('Hi Casey, system access is unavailable because the payment error code is E42.').ok)
+      .toBe(true);
     expect(verdict('Hi Casey, the lockbox code is E42.').violations).toContain('access_code');
+    expect(verdict('Hi Casey, property access uses the gate code E42.').violations).toContain('access_code');
+    expect(verdict('Hi Casey, account access is unavailable; the gate code is 1234.').violations)
+      .toContain('access_code');
     expect(verdict('Hi Casey, the gate service code is 1234.').violations).toContain('access_code');
     expect(verdict('Hi Casey, the service code is 1234 to open the gate.').violations)
       .toContain('access_code');
@@ -177,6 +188,7 @@ describe('email reply structure verifier', () => {
     expect(verdict('Hi Casey, thanks for the details.').ok).toBe(true);
     for (const signature of [
       'Warm regards,\nAlex', 'Cheers,\nAlex', 'Warmly,\nAlex', '— Alex', '– José Álvarez',
+      '— alex', '– josé álvarez',
       'All the best,\nAlex', 'Yours faithfully,\nAlex Morgan', 'With appreciation,\nJordan',
       'All the Best,\nAlex', 'With Appreciation,\nAlex', 'Yours sincerely,\nAlex',
       'All the best,\nalex',
