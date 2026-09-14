@@ -167,13 +167,23 @@ describe('assertEstimateSendable — GATE_TERMITE_ANNUAL_PLAN at delivery', () =
   });
 
   test('an annual group sibling gets its own handoff witness and can resend through the group link', () => {
-    const sibling = planDraft({ id: 'sibling', estimate_group_id: 'group-1' });
+    const previous = '2026-09-11T00:00:00.000Z';
+    const sibling = planDraft({ id: 'sibling', estimate_group_id: 'group-1',
+      estimate_data: { result: { lineItems: [PLAN_LINE] },
+        deliveryState: { firstDeliveredAt: previous, deliveredAt: [previous] } },
+    });
     const deliveredAt = '2026-09-12T00:00:00.000Z';
     const patch = publishedSiblingDeliveryPatch(sibling, {
       firstDeliveredAt: '2026-09-11T00:00:00.000Z',
       annualPlanOfferFingerprint: 'anchor-offer',
     }, deliveredAt);
-    expect(patch.deliveryState.firstDeliveredAt).toBe(deliveredAt);
+    expect(patch.deliveryState.firstDeliveredAt).toBe(previous);
+    expect(patch.deliveryState.deliveredAt).toEqual([previous, deliveredAt]);
+    const history = Array.from({ length: 26 }, (_, index) => `2026-09-11T00:00:${String(index).padStart(2, '0')}.000Z`);
+    const capped = publishedSiblingDeliveryPatch({ ...sibling, estimate_data: {
+      ...sibling.estimate_data, deliveryState: { deliveredAt: history },
+    } }, {}, deliveredAt);
+    expect(capped.deliveryState.deliveredAt).toEqual([...history.slice(-24), deliveredAt]);
     expect(patch.deliveryState.annualPlanOfferFingerprint).not.toBe('anchor-offer');
     const published = { ...sibling, status: 'sent',
       estimate_data: { ...sibling.estimate_data, ...patch, groupPublishedByEstimateId: 'anchor' } };
