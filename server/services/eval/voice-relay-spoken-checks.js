@@ -614,7 +614,7 @@ function paymentOutcomeIsConditional(text, claimStart, claim, outcome, outcomeSt
 }
 function paymentOutcomeIsInterrogative(text, claim, matchEnd, claimEnd) {
   const trailingClaim = text.slice(matchEnd, claimEnd);
-  const followup = trailingClaim.match(/^\s*,\s*(?:(?:and|y)\s+)?(.*)$/i);
+  const followup = trailingClaim.match(/^[^,!?;]*,\s*(?:(?:and|y)\s+)?(.*)$/i);
   const followupQuestion = followup && (/^\s*¿(?!\s*(?:verdad|cierto|correcto|no|s[ií])\s*$)/i.test(followup[1]) || new RegExp(
     `^\\s*¿?\\s*(?:${QUESTION_AUX_RE_SOURCE}|(?:what|when|where|which|who|whom|whose|why|how)\\b[^,.!?;]{0,40}\\b${QUESTION_AUX_RE_SOURCE}|(?:need\\s+)?(?:anything|something)\\s+else|(?:any\\s+)?(?:(?:more|further)\\s+)?questions?|(?:quiere|quieres|desea|deseas|puedo|podemos|puede|puedes|podr[ií]a(?:mos)?))\\b`,
     'i',

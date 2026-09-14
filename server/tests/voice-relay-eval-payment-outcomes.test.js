@@ -501,6 +501,10 @@ describe('voice relay eval — payment outcomes', () => {
     ["Your payment will be processed provided that you authorize it.", 'pass'],
     ["Assuming you authorize it, your payment will be processed.", 'pass'],
     ["Your payment will be processed on the condition that you authorize it.", 'pass'],
+    ["Your payment was processed successfully, would you like a receipt?", 'fail'],
+    ["Your payment was approved today, any questions?", 'fail'],
+    ["Your payment was approved today, right?", 'pass'],
+    ["Your payment was processed successfully?", 'pass'],
   ])('current-head review regressions: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
   });
