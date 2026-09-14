@@ -10,12 +10,12 @@ const MARKDOWN_LINK_DEFINITION_RE = /^\s*\[[^\]\n]+\]:\s*\S+/im;
 const BOILERPLATE_RE = /\bthank you for (?:reaching out|contacting us)\b|\bhope this (?:email )?finds you well\b|\bplease (?:do not|don't) hesitate to (?:reach out|contact us)\b|\blet us know if you have any (?:other |further )?questions\b/i;
 // Outbound corrections can legitimately supersede preparation instructions.
 // Screen prompt-control language rather than using the stricter exemplar gate.
-const OUTPUT_INSTRUCTION_RE = /\b(?:system|developer)\s+(?:prompt|instructions?)\b|(?:^|\n)\s*(?:assistant|system|user)\s*:|\b(?:ignore|disregard|forget|override)\s+(?:(?:all|the|any)\s+)?(?:previous|prior|above|earlier)\s+instructions?\b|\b(?:ignore|disregard|forget|override)\s+(?:(?:all|any|these|those)\s+)?instructions?\b|\b(?:ignore|disregard|forget|override)\b[^.!?]{0,80}\b(?:prompt|system|developer)\b|```/i;
+const OUTPUT_INSTRUCTION_RE = /\b(?:system|developer)\s+(?:prompt|instructions?)\b|(?:^|\n)\s*(?:assistant|system|user)\s*:|\b(?:ignore|disregard|forget|override)\s+(?:(?:all|the|any)\s+)?(?:previous|prior|above|earlier)\s+instructions?\b|\b(?:ignore|disregard|forget|override)\s+(?:(?:all|any|these|those)\s+)?instructions?\b|\b(?:do\s+not|don't|never)\s+follow\s+(?:(?:all|any|the)\s+)?(?:previous|prior|above|earlier)\s+instructions?\b|\b(?:ignore|disregard|forget|override)\b[^.!?]{0,80}\b(?:prompt|system|developer)\b|```/i;
 // A payment or postal error identifier is not a property-access credential.
 // Remove only the explicitly labeled code/value span; the shared detector
 // still sees an actual gate or lockbox code elsewhere in the reply.
 const NON_ACCESS_CODE_RE = /\b(?:payment|billing|invoice|transaction|postal|zip|service|error)\s+(?:error\s+)?code\b\s*(?:(?:is|was|reads?)\s+|[:=]\s*|\s+)(?=[a-z0-9]*\d)[a-z0-9]{2,12}\b|\b(?=[a-z0-9]*\d)[a-z0-9]{2,12}\b\s+(?:is|was)\s+(?:the\s+)?(?:payment|billing|invoice|transaction|postal|zip|service|error)\s+(?:error\s+)?code\b/gi;
-const ACCESS_CONTEXT_RE = /\b(?:gate|door|garage|keypad|lock\s?box|entry|alarm|access|(?:enter(?:ing)?|open(?:ing)?|unlock(?:ing)?)\s+(?:the\s+|your\s+)?(?:property|premises))\b/i;
+const ACCESS_CONTEXT_RE = /\b(?:gate|door|garage|keypad|lock\s?box|entry|alarm|access|(?:enter(?:ing)?|open(?:ing)?|unlock(?:ing)?)\s+(?:the\s+|your\s+)?(?:property|premises|home|house|building))\b/i;
 function normalizeCopy(text) {
   return text.normalize('NFKC').replace(/[\u2010-\u2015\u2212]/g, '-').replace(/[‘’]/g, "'");
 }
@@ -29,7 +29,7 @@ function containsUnsupportedLink(text) {
   return EXPLICIT_LINK_RE.test(text)
     || [...text.matchAll(BARE_HOST_RE)].some((match) => {
       const host = match[0].toLowerCase();
-      if (isIP(host) === 4 && text[match.index + match[0].length] === '/') return true;
+      if (isIP(host) === 4 && /^(?::\d{1,5})?\//.test(text.slice(match.index + match[0].length))) return true;
       if (!psl.isValid(host)) return false;
       // .zip is both a public suffix and an archive extension. Exempt only
       // a simple filename explicitly presented as an attachment or file.
@@ -51,10 +51,12 @@ function forgedSignature(text) {
   const closingAndName = closing.test(lines.at(-2) || '')
     && (/^\p{Lu}[\p{L}\p{M}'’.-]*(?: \p{Lu}[\p{L}\p{M}'’.-]*){0,3}$/u.test(lines.at(-1) || '')
       || /^\p{L}[\p{L}\p{M}'’-]*(?: \p{L}[\p{L}\p{M}'’-]*){0,3}$/u.test(lines.at(-1) || ''));
+  const inlineTerminalSignOff = /(?:^|[.!?]\s+|[,;]\s+|\n)(?:best|best regards|kind regards|warm regards|regards|sincerely|thanks|cheers|warmly),\s+(\p{L}[\p{L}\p{M}'’-]{1,31}(?:\s+\p{L}[\p{L}\p{M}'’-]{1,31}){0,2})[,.]?\s*$/iu.exec(text);
   return (lines.length > 1 && (closing.test(lines.at(-1)) || closingAndName))
     || /(?:^|\n)\s*(?:[-–—]\s*)?(?:adam|virginia|the waves pest control team|waves team)\s*$/i.test(tail)
     || dashedName.test(tail)
-    || (lines.length > 2 && namedSignOff);
+    || (lines.length > 2 && namedSignOff)
+    || (inlineTerminalSignOff && inlineTerminalSignOff[1].split(/\s+/).every((name) => /^\p{Lu}/u.test(name)));
 }
 
 function greetingMatches(draft, customer) {

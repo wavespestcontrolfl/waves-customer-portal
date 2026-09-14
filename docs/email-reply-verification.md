@@ -20,6 +20,8 @@ The plain-output screen rejects plus bullets, HTML comments and tag openers
 (including unterminated ones), relative/fragment/reference Markdown links,
 and terminal closing/name structures including lowercase dashed names.
 Standalone thanks followed by substantive reply prose remains valid.
+An inline terminal `Regards, Alex` is a signature; `Thanks, I will check.`
+and `Thanks, We will check soon.` are ordinary reply prose.
 Mathematical comparisons such as `< 3` remain plain prose. Boilerplate
 screening folds whitespace and smart
 apostrophes. Bullet glyphs count at the start of a line even without a space.
@@ -27,7 +29,8 @@ Bare hostname checks use the repository's public-suffix-list dependency, so
 common attachment filenames such as `invoice.pdf` do not count as domains;
 `.zip` is treated as a filename only in explicit attachment/file prose.
 An ambiguous bare `logs.zip` and explicit URLs remain links. An IPv4 address
-followed by a path also counts as a link; ordinary version numbers and bare
+followed by an optional numeric port and path also counts as a link; ordinary
+version numbers and bare
 addresses do not. The canonical report access-code helper receives compatibility
 letters/digits with mixed fractions preserved, so a gate width does not become
 a credential. Explicitly labeled payment, postal, and service code/value
@@ -35,10 +38,12 @@ phrases are excluded from that screen unless nearby text identifies a physical
 access point in the same sentence; account, portal, and system access alone
 do not identify physical entry. Gate and lockbox codes elsewhere remain
 subject to it. A code used to enter or unlock a property also remains
-screened. Alphanumeric error identifiers such as `ERR42` and `3DS2`
+screened, including a home, house, or building. Alphanumeric error identifiers
+such as `ERR42` and `3DS2`
 are recognized as non-access codes only when labeled that way.
 Output-specific prompt-control checks permit ordinary customer
-preparation corrections and operational colon labels.
+preparation corrections and operational colon labels; generic directions
+not to follow previous instructions are rejected.
 
 These are recognized lexical and structural checks, not a comprehensive
 natural-language or HTML parser. Success does not establish customer-copy
