@@ -311,7 +311,14 @@ async function markDepositReceived({ paymentIntentId, estimateId, amountDollars,
 
   // The ledger is durable before the invoice attempt. Receipt delivery
   // follows it so a failed invoice rewrite still leaves a recorded payment.
-  await reconcileReceivedDepositSafely(estimateId, paymentIntentId);
+  let reconciliationError = null;
+  try {
+    await reconcileReceivedDepositSafely(estimateId, paymentIntentId);
+  } catch (err) {
+    // A retryable close must leave the webhook unprocessed, but the first
+    // received transition still owns this one-time receipt attempt.
+    reconciliationError = err;
+  }
 
   // Exactly one caller wins the not-yet-received → received transition
   // (webhook vs the accept flow's live verification) — that winner sends the
@@ -322,6 +329,7 @@ async function markDepositReceived({ paymentIntentId, estimateId, amountDollars,
       logger.warn(`[estimate-deposits] deposit receipt failed for estimate ${estimateId}: ${err.message}`);
     });
   }
+  if (reconciliationError) throw reconciliationError;
 }
 
 // One receipt per received deposit — the deposit intent is customerless and
@@ -1167,6 +1175,32 @@ async function sweepTerminalEstimateDeposits() {
 // receipt is already committed before this runs; any failure leaves the
 // dollars visible for manual reconciliation. Invoice row -> ledger lock is
 // the same order used by void and payment writers.
+function retryableDepositSettlementError(invoiceId, reason, cause = null) {
+  const err = new Error(`Deposit-covered invoice ${invoiceId} could not close (${reason}); retry webhook`);
+  err.code = 'DEPOSIT_SETTLEMENT_RETRYABLE';
+  err.retryable = true;
+  err.invoiceId = invoiceId;
+  if (cause) err.cause = cause;
+  return err;
+}
+
+async function settleDepositCoveredInvoice(invoiceId) {
+  try {
+    const result = await require('./invoice').settleZeroBalance(invoiceId);
+    if (result.retryable) throw retryableDepositSettlementError(invoiceId, result.reason);
+    return result;
+  } catch (err) {
+    if (err.code === 'DEPOSIT_SETTLEMENT_RETRYABLE') throw err;
+    // An ambiguous or active Stripe charge is a manual ownership hold.
+    if (['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME'].includes(err.code)) {
+      return { settled: false, reason: err.code };
+    }
+    // Database/transport failures after the ledger and invoice commit must
+    // not acknowledge the only webhook event that can retry this close.
+    throw retryableDepositSettlementError(invoiceId, 'settlement_error', err);
+  }
+}
+
 async function reconcileReceivedDepositToInvoice(estimateId) {
   const prefix = `Auto-generated from accepted estimate #${estimateId}`;
   const candidates = await db('invoices as i')
@@ -1272,7 +1306,9 @@ async function reconcileReceivedDepositToInvoice(estimateId) {
       // payment path settles. settleZeroBalance deliberately refuses that
       // term anchor, so consuming its entire balance here would leave a $0
       // invoice and a permanently pending term with no replayable credit.
-      if (invoice.annual_prepay_term_id && appliedCents === dueCents) {
+      const annualTermInvoice = appliedCents === dueCents && (invoice.annual_prepay_term_id
+        || (await trx('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('id'))?.id);
+      if (annualTermInvoice) {
         return { state: 'park', invoiceId: invoice.id, reason: 'annual_prepay_full_coverage' };
       }
       const nextLines = [...lines, {
@@ -1295,7 +1331,7 @@ async function reconcileReceivedDepositToInvoice(estimateId) {
       return { state: 'applied', invoiceId: invoice.id, amount: allocated, remainingCents: dueCents - appliedCents };
     });
     if (result.state === 'settle') {
-      const settled = await require('./invoice').settleZeroBalance(result.invoiceId);
+      const settled = await settleDepositCoveredInvoice(result.invoiceId);
       if (!settled.settled && settled.reason !== 'already_settled') {
         return { state: 'park', invoiceId: result.invoiceId, reason: settled.reason };
       }
@@ -1309,7 +1345,7 @@ async function reconcileReceivedDepositToInvoice(estimateId) {
       appliedTotal += result.amount;
       lastAppliedInvoiceId = result.invoiceId;
       if (!result.remainingCents) {
-        const settled = await require('./invoice').settleZeroBalance(result.invoiceId);
+        const settled = await settleDepositCoveredInvoice(result.invoiceId);
         if (!settled.settled && settled.reason !== 'already_settled') {
           return { state: 'park', invoiceId: result.invoiceId, reason: settled.reason };
         }
@@ -1342,6 +1378,7 @@ async function reconcileReceivedDepositSafely(estimateId, paymentIntentId = null
     logger.error('[estimate-deposits] late deposit reconciliation failed; received ledger retained', {
       estimateId, error: err.message,
     });
+    if (err.code === 'DEPOSIT_SETTLEMENT_RETRYABLE') throw err;
   }
   try {
     const { triggerNotification } = require('./notification-triggers');
@@ -1395,16 +1432,22 @@ async function handleDepositIntentSucceeded(paymentIntent, eventCreated = null) 
     return { handled: true, refunded: true };
   }
 
-  await markDepositReceived({
-    paymentIntentId: paymentIntent.id,
-    estimateId,
-    // Face value, not amount_received — see ensureDepositSatisfied.
-    amountDollars: depositFaceValueDollars(paymentIntent),
-    cardSurcharge: depositSurchargeDollars(paymentIntent),
-    // Stripe's succeeded-event timestamp (threaded from the webhook) — the
-    // settlement moment, not this handler's delivery time.
-    receivedAt: eventCreated ? new Date(eventCreated * 1000) : null,
-  });
+  let settlementRetryError = null;
+  try {
+    await markDepositReceived({
+      paymentIntentId: paymentIntent.id,
+      estimateId,
+      // Face value, not amount_received — see ensureDepositSatisfied.
+      amountDollars: depositFaceValueDollars(paymentIntent),
+      cardSurcharge: depositSurchargeDollars(paymentIntent),
+      // Stripe's succeeded-event timestamp (threaded from the webhook) — the
+      // settlement moment, not this handler's delivery time.
+      receivedAt: eventCreated ? new Date(eventCreated * 1000) : null,
+    });
+  } catch (err) {
+    if (err.code !== 'DEPOSIT_SETTLEMENT_RETRYABLE') throw err;
+    settlementRetryError = err;
+  }
   logger.info('[estimate-deposits] deposit received', { estimateId });
 
   await auditDepositSurchargeBypass(paymentIntent, estimateId);
@@ -1422,6 +1465,7 @@ async function handleDepositIntentSucceeded(paymentIntent, eventCreated = null) 
     logger.warn(`[estimate-deposits] lead conversion on deposit failed (${estimateId}): ${leadErr.message}`);
   }
 
+  if (settlementRetryError) throw settlementRetryError;
   return { handled: true };
 }
 

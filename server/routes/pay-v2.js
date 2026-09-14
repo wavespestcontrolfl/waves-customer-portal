@@ -289,7 +289,13 @@ async function invoiceCreditWouldFullyCover(invoice) {
 
 router.get('/:token', async (req, res, next) => {
   try {
-    const data = await InvoiceService.getByToken(req.params.token);
+    const firstRead = await InvoiceService.getByToken(req.params.token);
+    if (!firstRead) return res.status(404).json({ error: 'Invoice not found' });
+    await require('../services/estimate-deposits').assertInvoiceDepositSettlementReady(db, firstRead, { lock: false });
+    // The guard may have waited for an in-flight deposit reconciliation to
+    // commit. Reload every enriched field before showing totals or offering
+    // an off-Stripe transfer amount; the first snapshot can still be gross.
+    const data = await InvoiceService.getByToken(req.params.token, { recordView: false });
     if (!data) return res.status(404).json({ error: 'Invoice not found' });
     await require('../services/estimate-deposits').assertInvoiceDepositSettlementReady(db, data, { lock: false });
     // Phase 2: an accrued invoice is not individually viewable/payable — it

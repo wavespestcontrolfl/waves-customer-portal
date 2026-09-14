@@ -20,6 +20,7 @@ jest.mock('../models/db', () => {
   return dbFn;
 });
 jest.mock('../services/invoice', () => ({ getByToken: jest.fn() }));
+jest.mock('../services/estimate-deposits', () => ({ assertInvoiceDepositSettlementReady: jest.fn(async () => {}) }));
 jest.mock('../services/invoice-attachments', () => ({ list: jest.fn(async () => []) }));
 jest.mock('../services/stripe', () => ({
   isAvailable: () => true,
@@ -80,8 +81,10 @@ function invoiceData(overrides = {}) {
   };
 }
 
-async function getPayPage(data, { customerRow } = {}) {
-  InvoiceService.getByToken.mockResolvedValue(data);
+async function getPayPage(data, { customerRow, refreshedData = data } = {}) {
+  InvoiceService.getByToken.mockReset()
+    .mockResolvedValueOnce(data)
+    .mockResolvedValueOnce(refreshedData);
   db.mockImplementation((table) => {
     if (table === 'customers') return chain({ first: customerRow || { billing_mode: null, monthly_rate: null } });
     return chain({ first: null });
@@ -90,11 +93,12 @@ async function getPayPage(data, { customerRow } = {}) {
   const handler = layer.route.stack[layer.route.stack.length - 1].handle;
   const req = { params: { token: data.token } };
   let body = null;
-  const res = { json: (payload) => { body = payload; }, status: () => res };
+  let status = 200;
+  const res = { json: (payload) => { body = payload; }, status: (code) => { status = code; return res; } };
   let error = null;
   await handler(req, res, (err) => { error = err; });
   if (error) throw error;
-  return { body };
+  return { body, status };
 }
 
 const ENV_KEYS = ['ZELLE_RECIPIENT', 'VENMO_HANDLE', 'PAYPAL_ME_HANDLE']; // legacy keys cleared so a stale Railway var can't leak in
@@ -130,6 +134,35 @@ describe('manualPayOptionsFromEnv', () => {
 });
 
 describe('GET /pay/:token manualPayOptions', () => {
+  test('uses the reconciled invoice for the displayed balance and Zelle amount', async () => {
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    const before = invoiceData({
+      updated_at: '2026-09-13T12:00:00Z',
+      line_items: [{ type: 'service', amount: 150 }],
+    });
+    const after = invoiceData({
+      updated_at: '2026-09-13T12:01:00Z',
+      total: '101.00',
+      line_items: [
+        { type: 'service', amount: 150 },
+        { type: 'deposit_credit', amount: -49 },
+      ],
+    });
+    const { body, status } = await getPayPage(before, { refreshedData: after });
+    expect(status).toBe(200);
+    expect(InvoiceService.getByToken).toHaveBeenNthCalledWith(1, before.token);
+    expect(InvoiceService.getByToken).toHaveBeenNthCalledWith(2, before.token, { recordView: false });
+    expect(body.invoice).toMatchObject({ total: 101, amountDue: 101, lineItems: after.line_items });
+    expect(body.invoice.version).toBe(new Date(after.updated_at).getTime());
+    expect(body.manualPayOptions).toMatchObject({ amountDue: 101, version: new Date(after.updated_at).getTime() });
+  });
+
+  test('keeps the missing-invoice response when the follow-up read is gone', async () => {
+    const { body, status } = await getPayPage(invoiceData(), { refreshedData: null });
+    expect(status).toBe(404);
+    expect(body).toEqual({ error: 'Invoice not found' });
+  });
+
   test('env unset ⇒ key absent (not null) on a collectible invoice', async () => {
     const { body } = await getPayPage(invoiceData());
     expect(Object.prototype.hasOwnProperty.call(body, 'manualPayOptions')).toBe(false);

@@ -88,11 +88,8 @@ jest.mock('../services/stripe', () => ({
     'STRIPE_CHARGED_DB_FAILED',
     'STRIPE_AMBIGUOUS_OUTCOME',
   ].includes(err?.code),
-  savedCardChargeSuppressesAlternateCollection: (err) => [
-    'STRIPE_CHARGED_DB_FAILED',
-    'STRIPE_AMBIGUOUS_OUTCOME',
-    'STRIPE_CHARGE_IN_PROGRESS',
-  ].includes(err?.code),
+  savedCardChargeSuppressesAlternateCollection: (err) => jest.requireActual('../services/stripe')
+    .savedCardChargeSuppressesAlternateCollection(err),
 }));
 
 // The db mock itself (a jest.fn taking the table name) — lets the freeze
@@ -229,10 +226,11 @@ describe('completion charge reconciliation outcomes', () => {
     ]));
   });
 
-  test('restores a fresh concurrent claim collision for retry without exposing another rail', async () => {
+  test.each(['STRIPE_CHARGE_IN_PROGRESS', 'DEPOSIT_RECONCILIATION_REQUIRED'])(
+    'restores a %s refusal for retry without exposing another rail', async (code) => {
     stubDb([hold, invoice, paymentMethod]);
     mockChargeInvoiceWithSavedCard.mockRejectedValue(Object.assign(new Error('first attempt declined'), {
-      code: 'STRIPE_CHARGE_IN_PROGRESS',
+      code,
     }));
 
     await expect(chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-1', invoiceId: 'inv-1' }))

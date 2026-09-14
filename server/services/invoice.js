@@ -2393,21 +2393,29 @@ const InvoiceService = {
 
   /**
    * Get invoice by public token — for the /pay page.
-   * Also records view and updates status.
+   * Also records view and updates status unless this is a follow-up read.
    */
-  async getByToken(token) {
-    const invoice = await db("invoices").where({ token }).first();
+  async getByToken(token, { recordView = true } = {}) {
+    let invoice = await db("invoices").where({ token }).first();
     if (!invoice) return null;
     // NOTE: do NOT block payer_statement_id here — getByToken also backs the
     // PERMANENT receipt endpoints (receipt-v2), which must never 404 (AGENTS.md).
     // The accrued-invoice "statement-only" block lives in the PAY + invoice-PDF
     // routes instead (the collection surfaces), not this shared loader.
 
-    // Record view
-    const updates = { view_count: (invoice.view_count || 0) + 1 };
-    if (!invoice.viewed_at) updates.viewed_at = new Date();
-    if (invoice.status === "sent") updates.status = "viewed";
-    await db("invoices").where({ id: invoice.id }).update(updates);
+    // The pay page rereads after its deposit fence. That read must not count
+    // as another view. Keep the write conditional on the LIVE status: a
+    // settlement between the first SELECT and this UPDATE must stay prepaid.
+    const seenAt = new Date();
+    if (recordView) {
+      await db("invoices").where({ id: invoice.id }).update({
+        view_count: db.raw("COALESCE(view_count, 0) + 1"),
+        viewed_at: db.raw("COALESCE(viewed_at, ?)", [seenAt]),
+        status: db.raw("CASE WHEN status = 'sent' THEN 'viewed' ELSE status END"),
+      });
+      invoice = await db("invoices").where({ id: invoice.id }).first();
+      if (!invoice) return null;
+    }
 
     // Enrich with customer info
     const customer = await db("customers")
@@ -2439,7 +2447,6 @@ const InvoiceService = {
 
     return {
       ...invoice,
-      ...updates,
       customer: require('./invoice-address').invoiceCustomerAddress(invoice, customer),
       annual_prepay,
       // Amount the customer actually pays = total − applied account credit. The

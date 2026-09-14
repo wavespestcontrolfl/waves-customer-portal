@@ -93,7 +93,8 @@ function savedCardChargeNeedsReconciliation(err) {
 }
 
 function savedCardChargeSuppressesAlternateCollection(err) {
-  return savedCardChargeNeedsReconciliation(err) || err?.code === 'STRIPE_CHARGE_IN_PROGRESS';
+  return savedCardChargeNeedsReconciliation(err) || err?.code === 'STRIPE_CHARGE_IN_PROGRESS'
+    || err?.code === 'DEPOSIT_RECONCILIATION_REQUIRED';
 }
 
 function shouldTreatSavedCardFailureAsAmbiguous({ chargeSubmitted, error }) {
@@ -4977,6 +4978,7 @@ const StripeService = {
         funding,
       };
     } catch (err) {
+      if (err.code === 'DEPOSIT_RECONCILIATION_REQUIRED') throw err;
       if (savedCardChargeSuppressesAlternateCollection(err)) {
         if (savedCardChargeNeedsReconciliation(err)) {
           const parked = await parkInvoiceForSavedCardReconciliation({
@@ -4990,7 +4992,6 @@ const StripeService = {
         err.savedCardPending = true;
         throw err;
       }
-      if (err.code === 'DEPOSIT_RECONCILIATION_REQUIRED') throw err;
       logger.error(`[stripe] Finalize failed for PI ${invoice.stripe_payment_intent_id}: ${err.message}`);
       throw new Error(`Failed to finalize payment: ${err.message}`);
     }
