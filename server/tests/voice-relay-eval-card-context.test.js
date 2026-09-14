@@ -315,6 +315,8 @@ test.each([
   [['My card number is...', '4242.'], '4242.', 'fail'],
   [['My card number is...', '4242.'], '4243.', 'pass'],
   [['My billing ZIP for the card is...', '34285.'], '34285.', 'pass'],
+  [['My card number is unavailable. My billing ZIP is... 34285.'], '34285, correct?', 'pass'],
+  [['My card number is unavailable.', 'My billing ZIP is...', '34285.'], '34285, correct?', 'pass'],
 ])('a caller label can precede its value across a pause or event: %s', (answers, reply, expected) => {
   expect(cardStatus([
     ...answers.map((text) => ({ kind: 'caller', text })),
