@@ -117,7 +117,11 @@ async function lastManualAskAt(customerId, { since, includeReservations = true, 
   // excluding it here is exactly the excludeRequestId pattern lastDeliveredAskAt
   // already uses for a caller's own claimed review_requests row.
   const outbound = excludeReservationId ? rows.filter(row => row.id !== excludeReservationId) : rows;
-  const isReviewReservation = row => row.metadata?.review_ask_reservation === true;
+  const metadata = row => {
+    try { return typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata || {}; }
+    catch { return {}; }
+  };
+  const isReviewReservation = row => metadata(row).review_ask_reservation === true;
   // An unresolved provider attempt conservatively holds the same 72-hour
   // window only when the caller includes reservations. A confirmed marker
   // belongs in candidates below: it is durable delivery evidence even when

@@ -751,6 +751,23 @@ function retryAtForDeferredSend(result) {
   return new Date(Date.now() + 5 * 60 * 1000);
 }
 
+const REVIEW_SEND_UNCERTAIN_REASON =
+  "SMS delivery may have occurred, but no automatic retry was queued. Check the SMS delivery log before sending another review request.";
+
+async function persistedReviewRetryAt(requestId) {
+  if (!requestId) return null;
+  try {
+    const row = await db("review_requests")
+      .where({ id: requestId, status: "pending" })
+      .whereNotNull("scheduled_for")
+      .first("scheduled_for");
+    if (!row?.scheduled_for || Number.isNaN(new Date(row.scheduled_for).getTime())) return null;
+    return row.scheduled_for;
+  } catch {
+    return null;
+  }
+}
+
 async function reserveReviewSms({ request, to, body, conn = db }) {
   const reservedAt = new Date();
   const [reservation] = await conn("sms_log").insert({
@@ -2034,6 +2051,16 @@ const ReviewService = {
     const spacingHold = await this._askSpacingHold(request);
     if (spacingHold) return spacingHold;
 
+    // A never-sent ask may have waited through a long history outage. Renew
+    // its expired token before dispatch, so the queued retry cannot text a
+    // link that /rate already rejects. A changed/claimed row cannot renew.
+    if (request.expires_at && new Date(request.expires_at).getTime() <= Date.now()) {
+      const expiresAt = new Date(Date.now() + 14 * 86400000);
+      const renewed = await db("review_requests").where({ id: request.id, status: "pending" })
+        .whereNull("sms_sent_at").update({ expires_at: expiresAt });
+      if (!renewed) return { refused: "request_changed" };
+      request.expires_at = expiresAt;
+    }
     const reviewUrl = await buildReviewUrl(request, customer.id);
     const techName = request.tech_name || "Our team";
     // Outreach-template renders (custom_body / template_key) resolve the tech
@@ -4495,10 +4522,36 @@ const ReviewService = {
       review_url: reviewUrl,
     };
 
+    const dispatch = () => actualChannel === "email"
+      ? this._sendOutreachEmail({ request, customer, contact: emailContact, reviewUrl, techName, manageRetryVia, introParagraph: persistedBody })
+      : this._sendOutreachSms({ request, customer, contact, vars, templateId: smsTemplateId, customBody: persistedBody ?? customBody, manageRetryVia });
+    // The runner owns the sequence lock. Private check-ins are not asks.
+    if (sequenceId != null || noLinkSend) return dispatch();
+    const result = await require("./review-ask-dispatch").dispatchReviewAsk(customer.id, dispatch);
+    if (!result?.code?.startsWith("REVIEW_")) return result;
+    const nextAllowedAt = result.nextAllowedAt || new Date(Date.now() + 15 * 60000).toISOString();
     if (actualChannel === "email") {
-      return this._sendOutreachEmail({ request, customer, contact: emailContact, reviewUrl, techName, manageRetryVia, introParagraph: persistedBody });
+      // No provider was called and no worker owns an email retry. Remove the
+      // fresh attempt so it cannot inflate email-touch/sent reporting. The
+      // hold itself must survive a cleanup failure: a REVIEW_HISTORY_UNAVAILABLE
+      // caused by the database makes this delete fail for the same reason,
+      // and a throw here would turn the 503 into a generic 500 (or, for the
+      // satisfaction page, an ordinary error that exposes the bare fallback)
+      // (Codex #4332 P2). A leftover pending row is harmless: it carries no
+      // send and the next attempt re-runs the same guard.
+      try {
+        await db.transaction(async (trx) => {
+          const removed = await trx("review_requests").where({ id: request.id, status: "pending" }).del();
+          if (removed) await trx("short_codes").where({ kind: "review", entity_type: "review_requests", entity_id: String(request.id) }).del();
+        });
+      } catch (cleanupErr) {
+        logger.warn(`[review] blocked email ask cleanup failed (requestId=${request.id} code=${result.code} errType=${cleanupErr?.name || "Error"})`);
+      }
+      return { ok: false, blocked: true, channel: "email",
+        code: result.code, reason: result.reason, nextAllowedAt, httpStatus: result.httpStatus };
     }
-    return this._sendOutreachSms({ request, customer, contact, vars, templateId: smsTemplateId, customBody: persistedBody ?? customBody, manageRetryVia });
+    return this._applyOutreachSendResult(request,
+      { ...result, deliveryOutcome: "not_sent", deferred: true, nextAllowedAt }, manageRetryVia, "sms");
   },
 
   async _sendOutreachSms({ request, customer, contact, vars, templateId, customBody, manageRetryVia }) {
@@ -4562,16 +4615,18 @@ const ReviewService = {
       }
     } catch { /* observability only */ }
 
-    // ONLY the send attempt is in the retry-on-throw path. sendCustomerMessage
-    // itself throwing used to mean network/provider failure — safe to retry,
-    // Twilio never accepted it. That is no longer the whole story: it can now
-    // ALSO throw AFTER the provider handoff (an audit-persistence failure),
-    // attaching err.providerOutcome with what actually happened on the wire
-    // (the composer's convention — see tech-line.js's textFromLine). A sent
-    // or explicitly-uncertain outcome must never fall into the blind retry
-    // below, or the customer risks a duplicate text (codex #4338 P1).
+    // Reserve asks before the provider boundary. A transport timeout/reset can
+    // happen after Twilio accepted, so only an explicit not_sent result releases
+    // this evidence. No-link check-ins retain their ordinary retry semantics.
     let result;
+    let reservation = null;
+    let providerStarted = false;
+    let deliveryOutcome = null;
     try {
+      if (OUTREACH.isAskTemplate(request.template_key)) {
+        reservation = await reserveReviewSms({ request, to: contact.phone, body });
+      }
+      providerStarted = true;
       result = await sendCustomerMessage({
         to: contact.phone,
         body,
@@ -4589,21 +4644,29 @@ const ReviewService = {
         preDispatchCheck: () => this._visitSummaryPreDispatch(request.service_record_id),
         withSmsHandoff: (dispatch) => require("./visit-completion-summary").reviewSendThroughSummaryHandoff(request.service_record_id, dispatch, undefined, { requestId: request.id, claimRef: sendClaim }),
       });
+      deliveryOutcome = result?.deliveryOutcome;
     } catch (err) {
       const providerOutcome = err?.providerOutcome || null;
+      const uncertain = providerStarted && !!reservation && providerOutcome?.deliveryOutcome !== "not_sent";
       const applyKnownOutcome = async () => {
         try {
-          return await this._applyOutreachSendResult(request, providerOutcome, manageRetryVia, "sms");
+          const applied = await this._applyOutreachSendResult(request, providerOutcome, manageRetryVia, "sms", sendClaim);
+          if (providerOutcome?.deliveryOutcome === "accepted" || providerOutcome?.deliveryOutcome === "not_sent") {
+            await releaseReviewSmsReservation(reservation);
+          }
+          return applied;
         } catch (bookErr) {
           logger.error(`[review] outreach SMS post-handoff bookkeeping failed after a throw (requestId=${request.id} errType=${bookErr?.name || "Error"})`);
-          return providerOutcome.sent === true
-            ? { ok: true, sent: true, channel: "sms", requestId: request.id, auditLogId: providerOutcome.auditLogId }
-            : { ok: false, deferred: true, uncertain: true, channel: "sms", requestId: request.id, code: providerOutcome.code };
+          if (providerOutcome?.deliveryOutcome === "accepted") {
+            await promoteReviewSmsReservation(reservation);
+            return { ok: true, sent: true, channel: "sms", requestId: request.id, auditLogId: providerOutcome.auditLogId };
+          }
+          return { ok: false, deferred: true, uncertain: true, channel: "sms", requestId: request.id, code: providerOutcome?.code };
         }
       };
       // A provider ACCEPT that surfaced as a throw is definitive: stamp it
       // sent rather than leaving the row for reconciliation.
-      if (providerOutcome?.sent === true) return applyKnownOutcome();
+      if (providerOutcome?.deliveryOutcome === "accepted") return applyKnownOutcome();
       // A row the handoff left `sending` had its provider request made and
       // the response lost: it stays marked for the stranded-send
       // reconciliation (which proves or releases it), never reset here into
@@ -4613,29 +4676,35 @@ const ReviewService = {
       if (await this._providerOutcomeUnknown(request.id)) {
         logger.error(`[review] outreach SMS outcome unknown after dispatch (requestId=${request.id} errType=${err?.name || "Error"})`);
         return { ok: false, retryable: false, uncertain: true, reason: "provider_uncertain", channel: "sms", requestId: request.id };
+
       }
       if (isExplicitlyUncertainOutcome(providerOutcome)) return applyKnownOutcome();
+      if (!uncertain) await releaseReviewSmsReservation(reservation);
       if (manageRetryVia === "cron") {
         await db("review_requests")
           .where({ id: request.id }).whereNot({ status: "sending" })
-          .update({ status: "pending", scheduled_for: new Date(Date.now() + 5 * 60 * 1000) })
+          .update({ status: "pending", scheduled_for: new Date(Date.now() + (uncertain ? ASK_SPACING_MS : 5 * 60 * 1000)) })
+
           .catch(() => {});
       } else {
         await db("review_requests").where({ id: request.id }).whereNot({ status: "sending" }).update({ status: "failed" }).catch(() => {});
       }
       logger.error(`[review] outreach SMS send threw (requestId=${request.id} errType=${err?.name || "Error"})`);
-      return { ok: false, retryable: true, channel: "sms", requestId: request.id };
+      return { ok: false, retryable: true, deferred: uncertain, channel: "sms", requestId: request.id,
+        ...(uncertain ? { reason: "provider_uncertain", nextAllowedAt: new Date(reservation.reservedAt.getTime() + ASK_SPACING_MS) } : {}) };
     }
 
     // The claim belongs to another sender (Codex #4311 r29 P1): report it and
     // write nothing — every branch below would mark a row this send does not
     // own, including the park, which deletes it outright.
     if (result?.code === "REVIEW_CLAIM_LOST") {
+      await releaseReviewSmsReservation(reservation);
       logger.warn(`[review] outreach SMS handoff found the claim taken by another sender (requestId=${request.id})`);
       return { ok: false, retryable: false, claimLost: true, channel: "sms", requestId: request.id, reason: "review_claim_lost" };
     }
     const summaryVerdict = this._visitSummaryVerdictOutcome(result, request);
     if (summaryVerdict) {
+      await releaseReviewSmsReservation(reservation);
       // Parked: the parking operation removed or will remove the durable
       // row; unreadable: keep the ask pending for a later pass.
       if (summaryVerdict.reason === "summary_state_unavailable") {
@@ -4665,7 +4734,11 @@ const ReviewService = {
     // `sending`, a no-link check-in has no SMS log for _inlineSendEvidence to
     // read, so the reconciliation would call it unavailable forever and the
     // ask — and its sequence — would never move again.
-    const provenNotSent = result?.sent === false && result?.deliveryOutcome === "not_sent";
+    const provenNotSent = result?.deliveryOutcome === "not_sent";
+    if (provenNotSent) {
+      await releaseReviewSmsReservation(reservation);
+      reservation = null;
+    }
     if (provenNotSent && sendClaim.marked) {
       // Scoped to the claim THIS attempt took: a `not_sent` decided by a
       // validator before the handoff ran owns no claim, and the `sending` row
@@ -4679,28 +4752,57 @@ const ReviewService = {
       // suppress that replacement's live `sending` claim.
       sendClaim.marked = false;
     }
+    const sentinel = require("./sms-auto-send").suppressedSendSentinel(result);
+    if (sentinel) {
+      await db("review_requests").where({ id: request.id }).whereNot("status", "sending")
+        .update({ status: "suppressed" });
+      return { ok: false, blocked: true, terminal: true, channel: "sms",
+        requestId: request.id, code: result.code || sentinel };
+    }
     if (!provenNotSent && result?.sent === false && await this._providerOutcomeUnknown(request.id)) {
       logger.error(`[review] outreach SMS outcome unknown after a returned provider failure (requestId=${request.id} code=${result.code || "none"})`);
       return { ok: false, retryable: false, uncertain: true, reason: "provider_uncertain", channel: "sms", requestId: request.id };
     }
     try {
-      return await this._applyOutreachSendResult(request, result, manageRetryVia, "sms", sendClaim);
+      const applied = await this._applyOutreachSendResult(request, result, manageRetryVia, "sms", sendClaim);
+      if (deliveryOutcome === "accepted") await releaseReviewSmsReservation(reservation);
+      return applied;
+
     } catch (bookErr) {
       // The send already happened — do NOT requeue. Report based on what the
       // provider did; the audit log holds the full record for reconciliation.
       logger.error(
         `[review] post-send bookkeeping failed (requestId=${request.id} sent=${!!result?.sent} errType=${bookErr?.name || "Error"})`,
       );
-      // A SENT or explicitly-UNCERTAIN result must avoid retry (would risk a
-      // duplicate text) even when the bookkeeping write itself failed — the
-      // known provider outcome does not depend on whether the DB update
-      // landed (codex #4338 P1, round 3). Only a genuinely not-sent result
-      // (never crossed the wire) has NO duplicate-send risk, so it alone
-      // stays retryable — don't drop the manual retry or stop the cadence
-      // over an ordinary bookkeeping blip.
-      if (result?.sent) {
+      // Accepted avoids retry. Uncertainty retains its reservation and waits
+      // for the full ask-spacing window. Definitive non-delivery stays on the
+      // ordinary retry rail.
+      if (reservation && deliveryOutcome !== "accepted" && deliveryOutcome !== "not_sent") {
+        const nextAllowedAt = new Date(reservation.reservedAt.getTime() + ASK_SPACING_MS);
+        // Direct/portal/admin asks promise an automatic retry to their caller.
+        // Only make that promise after confirming processScheduled can see the
+        // row. The reservation remains either way: the provider may have
+        // accepted the SMS, so another ask must stay held for reconciliation.
+        if (manageRetryVia === "cron") {
+          const persistedRetryAt = await persistedReviewRetryAt(request.id);
+          if (!persistedRetryAt) {
+            return { ok: false, blocked: true, channel: "sms", requestId: request.id,
+              code: "SMS_DELIVERY_UNCERTAIN", reason: REVIEW_SEND_UNCERTAIN_REASON, nextAllowedAt };
+          }
+          return { ok: false, retryable: true, deferred: true, channel: "sms", requestId: request.id,
+            reason: "provider_uncertain", nextAllowedAt: persistedRetryAt };
+        }
+        return { ok: false, retryable: true, deferred: true, channel: "sms", requestId: request.id,
+          reason: "provider_uncertain", nextAllowedAt };
+      }
+      if (deliveryOutcome === "accepted") {
+        await promoteReviewSmsReservation(reservation);
         return { ok: true, sent: true, channel: "sms", requestId: request.id, auditLogId: result.auditLogId };
       }
+      // A no-link check-in takes no reservation, but an explicitly-uncertain
+      // handoff still means the customer may hold the text — it must not
+      // fall back to the retryable rail over a bookkeeping blip (codex #4338
+      // P1, round 3). Only a genuinely not-sent result stays retryable.
       if (isExplicitlyUncertainOutcome(result)) {
         return { ok: false, deferred: true, uncertain: true, channel: "sms", requestId: request.id, code: result?.code };
       }
@@ -4709,6 +4811,7 @@ const ReviewService = {
   },
 
   async _applyOutreachSendResult(request, result, manageRetryVia, channel, sendClaim = null) {
+    const deliveryOutcome = result?.deliveryOutcome;
     // When this attempt took NO claim of its own — a refusal decided by a
     // validator BEFORE the handoff ran — a `sending` row is another sender's
     // live claim, and its provider request may be in flight (Codex #4311 r33
@@ -4719,13 +4822,28 @@ const ReviewService = {
       const q = db("review_requests").where({ id: request.id });
       return unclaimed ? q.whereNot("status", "sending") : q;
     };
-    if (result && result.sent) {
-      await db("review_requests").where({ id: request.id }).update({
-        sms_sent_at: new Date(),
-        sent_at: new Date(),
-        status: "sent",
-      });
+    if (deliveryOutcome === "accepted") {
+      const stamped = await stampWithRetry(
+        () => ownRow().update({ sms_sent_at: new Date(), sent_at: new Date(), status: "sent" }),
+        `outreach SMS sent stamp (requestId=${request.id})`,
+      );
+      if (!stamped) throw new Error(`Accepted SMS delivery stamp failed (requestId=${request.id})`);
+
       return { ok: true, sent: true, channel, requestId: request.id, auditLogId: result.auditLogId };
+    }
+    if (deliveryOutcome !== "accepted" && deliveryOutcome !== "not_sent" && OUTREACH.isAskTemplate(request.template_key)) {
+      const retryAt = new Date(Date.now() + ASK_SPACING_MS);
+      if (manageRetryVia === "cron") {
+        await ownRow().update({ status: "pending", scheduled_for: retryAt });
+      } else {
+        await ownRow().update({ status: "failed" });
+      }
+      // No `uncertain` marker here on purpose: the sms_log reservation is the
+      // durable evidence, so the sequence runner may retry THIS step after the
+      // full ask-spacing window (nextAllowedAt) instead of holding the whole
+      // sequence — the hold is for no-link check-ins, which take no reservation.
+      return { ok: false, retryable: true, deferred: true, nextAllowedAt: retryAt,
+        reason: "provider_uncertain", channel, requestId: request.id, code: result?.code };
     }
     if (isExplicitlyUncertainOutcome(result)) {
       // The provider handoff crossed the SDK boundary with no definitive
@@ -4739,6 +4857,7 @@ const ReviewService = {
       // again in 30 minutes, which would re-run sendOutreachTouch and send
       // a second text (codex #4338 P1, round 2).
       await ownRow().update({ status: "deferred" });
+
       return { ok: false, deferred: true, uncertain: true, channel, requestId: request.id, code: result?.code };
     }
     const deferredRetryAt = retryAtForDeferredSend(result);
@@ -5208,10 +5327,29 @@ const ReviewService = {
         };
       }
       if (touch.deferred) {
+        // A cron-owned deferred result is caller-visible as "queued". Verify
+        // the worker can really select it before suppressing the caller's
+        // fallback or promising an automatic retry. Provider uncertainty is
+        // different from an ordinary unqueued failure: its reservation stays
+        // live, and the caller must be told to inspect delivery before retrying.
+        if (manageRetryVia === "cron") {
+          const persistedRetryAt = await persistedReviewRetryAt(touch.requestId);
+          if (!persistedRetryAt) {
+            if (touch.reason === "provider_uncertain") {
+              return { outcome: "blocked", code: "SMS_DELIVERY_UNCERTAIN", reason: REVIEW_SEND_UNCERTAIN_REASON,
+                nextAllowedAt: touch.nextAllowedAt || null, requestId: touch.requestId };
+            }
+            return { outcome: "error", code: touch.code || null, reason: touch.reason || null,
+              requestId: touch.requestId };
+          }
+          return { outcome: "deferred", nextAllowedAt: persistedRetryAt, requestId: touch.requestId };
+        }
         return { outcome: "deferred", nextAllowedAt: touch.nextAllowedAt, requestId: touch.requestId };
       }
       if (touch.blocked || touch.terminal) {
-        return { outcome: "blocked", code: touch.code || null, reason: touch.reason || null };
+        return { outcome: "blocked", code: touch.code || null, reason: touch.reason || null, nextAllowedAt: touch.nextAllowedAt || null,
+          ...(touch.requestId ? { requestId: touch.requestId } : {}),
+          ...(touch.httpStatus ? { httpStatus: touch.httpStatus } : {}) };
       }
       // 'send_failed' is a QUEUED outcome to callers (the satisfaction route
       // hides its fallback link on it), so only report it when a durable
