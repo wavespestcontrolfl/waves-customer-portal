@@ -768,9 +768,9 @@ async function persistedReviewRetryAt(requestId) {
   }
 }
 
-async function reserveReviewSms({ request, to, body }) {
+async function reserveReviewSms({ request, to, body, conn = db }) {
   const reservedAt = new Date();
-  const [reservation] = await db("sms_log").insert({
+  const [reservation] = await conn("sms_log").insert({
     customer_id: request.customer_id,
     direction: "outbound",
     from_phone: TWILIO_NUMBERS.getOutboundNumber(request.location_id),
@@ -787,6 +787,15 @@ async function reserveReviewSms({ request, to, body }) {
   }).returning("id");
   if (!reservation?.id) throw new Error(`Could not reserve review ask before sending (requestId=${request.id})`);
   return { id: reservation.id, reservedAt, requestId: request.id };
+}
+
+async function reserveSendableReviewSms({ request, to, body }) {
+  return db.transaction(async (trx) => {
+    const stillSendable = await trx("review_requests")
+      .where({ id: request.id, status: "pending" }).update({ status: "pending" });
+    if (!stillSendable) return null;
+    return reserveReviewSms({ request, to, body, conn: trx });
+  });
 }
 
 // Queued asks an enrollment replaces. Exported for the PostgreSQL test: the
@@ -2174,17 +2183,17 @@ const ReviewService = {
       } = require("./messaging/send-customer-message");
       if (OUTREACH.isAskTemplate(request.template_key)) {
         // Enrollment may supersede this ask after the earlier row read.
-        let stillSendable = 0;
+        // The row lock from this conditional update must remain held until
+        // the reservation insert commits. Otherwise supersedeQueuedAsks can
+        // run between the check and insert, suppress this row, and the
+        // provider call below still sends the now-superseded ask.
         try {
-          stillSendable = await db("review_requests")
-            .where({ id: requestId, status: "pending" }).update({ status: "pending" });
+          reservation = await reserveSendableReviewSms({ request, to: contact.phone, body });
         } catch (stateErr) {
-          logger.warn(`[review] send-state recheck failed (requestId=${requestId} errType=${stateErr?.name || "Error"})`);
+          logger.warn(`[review] send-state reservation failed (requestId=${requestId} errType=${stateErr?.name || "Error"})`);
           return { refused: "send_state_unverified" };
         }
-        if (!stillSendable) return { refused: "request_not_sendable" };
-        // The SMS reservation holds spacing across the other send paths.
-        reservation = await reserveReviewSms({ request, to: contact.phone, body });
+        if (!reservation) return { refused: "request_not_sendable" };
       }
       providerStarted = true;
       try {
@@ -7184,5 +7193,6 @@ ReviewService.unshortenedReviewUrl = unshortenedReviewUrl;
 ReviewService.REVIEW_TOKEN_RE = REVIEW_TOKEN_RE;
 ReviewService.LEGACY_REVIEW_DELAY_MINUTES = LEGACY_REVIEW_DELAY_MINUTES;
 ReviewService.supersedeQueuedAsks = supersedeQueuedAsks;
+ReviewService.reserveSendableReviewSms = reserveSendableReviewSms;
 
 module.exports = ReviewService;
