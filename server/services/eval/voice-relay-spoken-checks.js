@@ -1297,7 +1297,7 @@ const NON_CARD_EXPIRATION_SUBJECT_RE = new RegExp(`\\b${NON_CARD_EXPIRATION_SUBJ
 const CARD_EXPIRATION_CUE = `(?:${CARD_PAYMENT_LABEL}(?:[\\x27\\u2019]s)?\\s+(?:that\\s+)?(?:(?:will|does|did)\\s+)?expir(?:e|es|ed|y|ation)|expir(?:y|ation)|${CARD_PAYMENT_LABEL}(?:[\\x27\\u2019]s)?\\s+(?:is|was)\\s+(?:valid|good)\\s+through|(?:fecha\\s+de\\s+)?vencimiento(?:\\s+de\\s+(?:la\\s+)?tarjeta)?)`;
 const CARD_EXPIRATION_VALUE_RE = new RegExp(
   `\\b${CARD_EXPIRATION_CUE}(?:\\s+date)?(?:\\s+on\\s+(?:(?:your|the|my|this|that)\\s+)?${CARD_PAYMENT_LABEL})?`
-  + `(?:\\s+(?:(?:is|was|es|era)(?:\\s+(?:on|in))?|on|in|of|at\\s+(?:the\\s+)?end\\s+of))?(?:\\s+|\\s*[:—–,-]\\s*)`
+  + `(?:\\s+(?:(?:is|was|es|era)(?:\\s+(?:on|in|(?:listed|shown|recorded)\\s+as|set\\s+(?:to|for)))?|on|in|of|(?:listed|shown|recorded)\\s+as|set\\s+(?:to|for)|at\\s+(?:the\\s+)?end\\s+of))?(?:\\s+(?:next|this))?(?:\\s+|\\s*[:—–,-]\\s*)`
   + `((?:(?:${MONTHS})\\s+(?:(?:\\d{1,2}(?:st|nd|rd|th)?(?:,\\s*|\\s+)(?:19|20)\\d{2})|(?:(?:19|20)\\d{2})|(?:\\d{2})))|(?:(?:0?[1-9]|1[0-2])\\s*[/.-]\\s*(?:(?:0?[1-9]|[12]\\d|3[01])\\s*[/.-]\\s*)?(?:\\d{2}|(?:19|20)\\d{2}))|(?:(?:19|20)\\d{2}))\\b`,
   'gi',
 );
