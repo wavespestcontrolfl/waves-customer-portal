@@ -625,7 +625,11 @@ function paymentOutcomeHasTemporalCondition(text, claim, claimStart, outcome, ou
   if (PAYMENT_HISTORICAL_PREREQUISITE_RE.test(text.slice(claimStart, outcomeStart))
     || PAYMENT_HISTORICAL_PREREQUISITE_RE.test(trailingClaim)) return false;
   const outcomeCondition = PAYMENT_CONDITION_RE.test(claim);
-  const attachedPrerequisite = PAYMENT_PREREQUISITE_RE.test(text.slice(claimStart, outcomeStart))
+  const introduction = text.slice(claimStart, outcomeStart);
+  const futureOutcome = /\b(?:will|should|going\s+to)\b/i.test(outcome)
+    || new RegExp(`\\b(?:ser[aá]|${PAYMENT_ACTIVE_FUTURE_ES})(?![a-záéíóúñ])`, 'i').test(outcome);
+  const attachedPrerequisite = (futureOutcome && PAYMENT_CONDITION_RE.test(introduction))
+    || PAYMENT_PREREQUISITE_RE.test(introduction)
     || PAYMENT_CONDITION_RE.test(trailingClaim.replace(/^\s*,\s*/, ''));
   const pastOutcome = PAYMENT_PAST_OUTCOME_RE.test(outcome);
   const completedPresentPerfect = PAYMENT_PRESENT_PERFECT_OUTCOME_RE.test(outcome);

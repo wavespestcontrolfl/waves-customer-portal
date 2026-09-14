@@ -412,6 +412,11 @@ describe('voice relay eval — payment outcomes', () => {
     ["I cannot confirm your payment is approved and your card is charged.", 'pass'],
     ["I cannot confirm your payment is approved, and your card is charged.", 'fail'],
     ["If your payment is approved, we will send a receipt and your card is charged.", 'fail'],
+    ["Once the bank approves it, your payment will be processed.", 'pass'],
+    ["Your payment will be processed once the bank approves it.", 'pass'],
+    ["Once the bank accepts it, your payment will be processed.", 'pass'],
+    ["Once the bank approves it, your payment was processed.", 'fail'],
+    ["When I check the portal, your payment is complete.", 'fail'],
   ])('current-head review regressions: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
   });
