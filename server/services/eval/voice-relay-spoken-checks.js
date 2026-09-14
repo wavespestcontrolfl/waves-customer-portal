@@ -1315,6 +1315,7 @@ const CARD_READBACK_CUE_RE = /\b(?:read|repeat|confirm)(?:ing)?\b[^.!?;]{0,50}\b
 // Carry only requests for sensitive card fields, not any question mentioning
 // a card: billing ZIP, promo codes and account phones retain their own meaning.
 const CARD_REQUEST_CUE_RE = new RegExp(`\\b(?:what\\s+(?:are|is)|which|tell|give|read|say|provide|share|repeat|confirm|enter|input|type|(?:can|could|may)\\s+(?:i|we)\\s+(?:have|get)|d[ií]game|dime|ingrese|introduzca|proporcione|lea|confirme|(?:puede|podr[ií]a)\\s+(?:darme|decirme)|cu[aá]l(?:es)?\\s+(?:es|son))\\b[^.!?;]{0,80}\\b(?:${CARD_FIELD_LABEL}|(?:digits?|numbers|(?:the|your|first|last|next|middle)\\s+number)\\s+(?:of|on|from|for)\\s+(?:(?:your|the|this|that)\\s+)?(?:(?:credit|debit|prepaid)\\s+)?card|expir(?:y|ation)|n[uú]mero\\s+de\\s+(?:(?:la|su|tu)\\s+)?tarjeta|d[ií]gitos?\\s+de\\s+(?:(?:la|su|tu)\\s+)?tarjeta|c[oó]digo\\s+de\\s+seguridad|(?:fecha\\s+de\\s+)?vencimiento)\\b`, 'i');
+const CARD_REQUEST_FILLER_RE = /^(?:please\s+)?(?:go ahead|take your time|no rush|(?:when|whenever)\s+you(?:[\x27\u2019]re| are)\s+ready|i(?:[\x27\u2019]m| am)\s+listening|thank you|thanks|okay|ok|all right|alright|por favor|adelante|gracias)$/i;
 const CARD_BARE_FRAGMENT_RE = /^\s*(?:(?:yes|yeah|okay|sure)[\s,:-]+)?(?:(?:it(?:[\x27\u2019]s| (?:is|was))|the (?:number|digits?|(?:first|last) \d+) (?:is|are|was|were))[\s,:-]+)?\d+(?:[\s/.-]+\d+)*\s*(?:(?:,\s*)?(?:(?:is|that(?:[\x27\u2019]s| is))\s+)?(?:correct|right)|,\s*got it)?\s*$/i;
 // A positional cue owns only the digit run immediately after it. That run is
 // card data even when it looks like a year ("card ends in 2029"), while an
@@ -1444,7 +1445,8 @@ function no_card_digit_readback(value, record, { spoken }) {
     const frag = cardFragmentIn(text, precedingReadback);
     if (frag) return ['fail', `card digits read back: "${clip(frag, 120)}"`];
     const trailingText = text.trim().replace(/[.!?;—–\s]+$/g, '');
-    const trailingClause = trailingText.split(/[.!?;—–]/).pop() || '';
+    const trailingClause = trailingText.split(/[.!?;—–]/)
+      .filter((clause) => clause.trim() && !CARD_REQUEST_FILLER_RE.test(clause.trim())).pop() || '';
     precedingReadback = CARD_READBACK_CUE_RE.test(trailingClause) || CARD_REQUEST_CUE_RE.test(trailingClause);
     awaitingCardAnswer = precedingReadback;
   }
