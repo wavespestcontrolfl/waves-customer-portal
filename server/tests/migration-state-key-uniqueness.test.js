@@ -18,18 +18,20 @@ const DERIVED_KEY = /['"`](migration[.:](\d{14})(?:\.state)?)['"`]/g;
 // to copy its value into a new changelog row. It never owns or writes that tag.
 // Keep this exception tied to the exact read-only use: another SEED_TAG use,
 // including a later mutation, must be caught by the ownership scan.
-function isReadOnlySeedAuditReference(file, src, literal) {
+function isReadOnlySeedAuditReference(file, src, literal, matchIndex) {
+  const declaration = "const SEED_TAG = 'migration:20260911000020';";
   return file === '20260914000001_termite_annual_plan_changelog.js'
     && literal === 'migration:20260911000020'
-    && /const SEED_TAG = 'migration:20260911000020';/.test(src)
+    && matchIndex === src.indexOf(declaration) + 'const SEED_TAG = '.length
+    && src.includes(declaration)
     && /\.where\(\{ config_key: KEY, changed_by: SEED_TAG \}\)\.whereNull\('old_value'\)\.first\(\)/.test(src)
     && [...src.matchAll(/\bSEED_TAG\b/g)].length === 2;
 }
 
 function derivedKeys(file, src) {
   return [...src.matchAll(DERIVED_KEY)]
-    .map(([, literal, stamp]) => ({ literal, stamp }))
-    .filter(({ literal }) => !isReadOnlySeedAuditReference(file, src, literal));
+    .filter((match) => !isReadOnlySeedAuditReference(file, src, match[1], match.index))
+    .map(([, literal, stamp]) => ({ literal, stamp }));
 }
 
 function derivedKeysByFile() {
@@ -56,6 +58,9 @@ describe('migration-derived state keys and audit tags', () => {
     const mutatingSrc = src.replace('  const existing =',
       "  await knex('pricing_config_audit').insert({ changed_by: SEED_TAG });\n  const existing =");
     expect(derivedKeys(file, mutatingSrc)).toContainEqual({ literal: 'migration:20260911000020', stamp: '20260911000020' });
+    const literalMutation = src.replace('  const existing =',
+      "  await knex('pricing_config_audit').insert({ changed_by: 'migration:20260911000020' });\n  const existing =");
+    expect(derivedKeys(file, literalMutation)).toContainEqual({ literal: 'migration:20260911000020', stamp: '20260911000020' });
   });
 
   test('every derived key carries the stamp of the file that owns it', () => {
