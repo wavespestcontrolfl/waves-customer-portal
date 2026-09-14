@@ -2098,6 +2098,14 @@ function petGuidanceCoversCaller(guidanceScope, callerAudienceText) {
     || safetyAudienceCovers(guidanceScope, callerAudienceText);
 }
 
+const PET_CALLER_OWNERSHIP_RE = /\b(?:i|we)\s+(?:have|own)\s+(?:(?:a|an|my|our)\s+)?(dogs?|puppy|cats?|kittens?|pets?|animals?)\b/i;
+
+function petCallerAudienceText(text, previous) {
+  if (safetyAudienceScopes(text).size) return text;
+  const ownedPet = PET_CALLER_OWNERSHIP_RE.exec(text);
+  return ownedPet ? `for ${ownedPet[1]}` : previous;
+}
+
 function pet_precautions_confirmed(value, record, { spoken }) {
   const events = safetySpeechGroups(record.events || []);
   const speechEvents = events.some((event) => event.kind === 'agent')
@@ -2105,7 +2113,7 @@ function pet_precautions_confirmed(value, record, { spoken }) {
   let callerAudienceText = '';
   for (const event of speechEvents) {
     if (event.kind === 'caller') {
-      if (safetyAudienceScopes(event.text || '').size) callerAudienceText = event.text;
+      callerAudienceText = petCallerAudienceText(event.text || '', callerAudienceText);
       continue;
     }
     if (event.kind !== 'agent') continue;
