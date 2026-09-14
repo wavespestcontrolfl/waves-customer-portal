@@ -21,11 +21,15 @@ closing/name structures. Boilerplate screening folds whitespace and smart
 apostrophes. Bullet glyphs count at the start of a line even without a space.
 Bare hostname checks use the repository's public-suffix-list dependency, so
 common attachment filenames such as `invoice.pdf` do not count as domains;
-explicit URLs with a PDF path still do. The canonical report access-code helper receives compatibility
+`.zip` is treated as a filename only in explicit attachment/file prose.
+An ambiguous bare `logs.zip` and explicit URLs remain links. The canonical
+report access-code helper receives compatibility
 letters/digits with mixed fractions preserved, so a gate width does not become
 a credential. Explicitly labeled payment, postal, and service code/value
 phrases are excluded from that screen unless nearby text identifies a physical
-access point; gate and lockbox codes elsewhere remain subject to it.
+access point in the same sentence; gate and lockbox codes elsewhere remain
+subject to it. Alphanumeric error identifiers such as `ERR42` and `3DS2`
+are recognized as non-access codes only when labeled that way.
 Output-specific prompt-control checks permit ordinary customer
 preparation corrections and operational colon labels.
 

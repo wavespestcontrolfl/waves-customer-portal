@@ -9,11 +9,11 @@ const MARKDOWN_LINK_DEFINITION_RE = /^\s*\[[^\]\n]+\]:\s*\S+/im;
 const BOILERPLATE_RE = /\bthank you for (?:reaching out|contacting us)\b|\bhope this (?:email )?finds you well\b|\bplease (?:do not|don't) hesitate to (?:reach out|contact us)\b|\blet us know if you have any (?:other |further )?questions\b/i;
 // Outbound corrections can legitimately supersede preparation instructions.
 // Screen prompt-control language rather than using the stricter exemplar gate.
-const OUTPUT_INSTRUCTION_RE = /\b(?:system|developer)\s+(?:prompt|instructions?)\b|(?:^|\n)\s*(?:assistant|system|user)\s*:|\b(?:ignore|disregard|forget|override)\s+(?:(?:all|the|any)\s+)?(?:previous|prior|above|earlier)\s+instructions?\b|\b(?:ignore|disregard|forget|override)\s+(?:all|any)\s+instructions?\b|\b(?:ignore|disregard|forget|override)\b[^.!?]{0,80}\b(?:prompt|system|developer)\b|```/i;
+const OUTPUT_INSTRUCTION_RE = /\b(?:system|developer)\s+(?:prompt|instructions?)\b|(?:^|\n)\s*(?:assistant|system|user)\s*:|\b(?:ignore|disregard|forget|override)\s+(?:(?:all|the|any)\s+)?(?:previous|prior|above|earlier)\s+instructions?\b|\b(?:ignore|disregard|forget|override)\s+(?:(?:all|any|these|those)\s+)?instructions?\b|\b(?:ignore|disregard|forget|override)\b[^.!?]{0,80}\b(?:prompt|system|developer)\b|```/i;
 // A payment or postal error identifier is not a property-access credential.
 // Remove only the explicitly labeled code/value span; the shared detector
 // still sees an actual gate or lockbox code elsewhere in the reply.
-const NON_ACCESS_CODE_RE = /\b(?:payment|billing|invoice|transaction|postal|zip|service|error)\s+(?:error\s+)?code\b\s*(?:(?:is|was|reads?)\s+|[:=]\s*|\s+)[a-z]?\d{2,8}\b|\b[a-z]?\d{2,8}\b\s+(?:is|was)\s+(?:the\s+)?(?:payment|billing|invoice|transaction|postal|zip|service|error)\s+(?:error\s+)?code\b/gi;
+const NON_ACCESS_CODE_RE = /\b(?:payment|billing|invoice|transaction|postal|zip|service|error)\s+(?:error\s+)?code\b\s*(?:(?:is|was|reads?)\s+|[:=]\s*|\s+)(?=[a-z0-9]*\d)[a-z0-9]{2,12}\b|\b(?=[a-z0-9]*\d)[a-z0-9]{2,12}\b\s+(?:is|was)\s+(?:the\s+)?(?:payment|billing|invoice|transaction|postal|zip|service|error)\s+(?:error\s+)?code\b/gi;
 const ACCESS_CONTEXT_RE = /\b(?:gate|door|garage|keypad|lock\s?box|entry|alarm|access)\b/i;
 function normalizeCopy(text) {
   return text.normalize('NFKC').replace(/[\u2010-\u2015\u2212]/g, '-').replace(/[‘’]/g, "'");
@@ -26,7 +26,16 @@ function wordCount(text) {
 
 function containsUnsupportedLink(text) {
   return EXPLICIT_LINK_RE.test(text)
-    || [...text.matchAll(BARE_HOST_RE)].some((match) => psl.isValid(match[0].toLowerCase()));
+    || [...text.matchAll(BARE_HOST_RE)].some((match) => {
+      const host = match[0].toLowerCase();
+      if (!psl.isValid(host)) return false;
+      // .zip is both a public suffix and an archive extension. Exempt only
+      // a simple filename explicitly presented as an attachment or file.
+      if (/^[a-z0-9-]+\.zip$/.test(host)
+        && !/^[\/:?#]/.test(text.slice(match.index + match[0].length))
+        && /\b(?:attach(?:ed)?\s+(?:the\s+)?|(?:attachment|file(?:name)?)(?:\s+(?:is|was|named))?\s+)$/i.test(text.slice(0, match.index))) return false;
+      return true;
+    });
 }
 
 function forgedSignature(text) {
@@ -36,7 +45,7 @@ function forgedSignature(text) {
   const dashedName = /(?:^|\n)\s*[-–—]\s*\p{Lu}[\p{L}\p{M}'’.-]*(?:\s+\p{Lu}[\p{L}\p{M}'’.-]*){0,2}[,.]?\s*$/u;
   const [signOffLine, nameLine] = tail.split('\n');
   const namedSignOff = /^(?:all (?:the|my) best|with (?:sincere )?(?:appreciation|gratitude)|yours (?:faithfully|sincerely)|kindest regards|many thanks|warmest wishes|best wishes|take care)[,.!?]?$/i.test(signOffLine)
-    && /^\p{Lu}[\p{L}\p{M}'’.-]*(?: \p{Lu}[\p{L}\p{M}'’.-]*){0,3}$/u.test(nameLine || '');
+    && /^\p{L}[\p{L}\p{M}'’.-]*(?: \p{L}[\p{L}\p{M}'’.-]*){0,3}$/u.test(nameLine || '');
   return lines.slice(1).some((line) => closing.test(line))
     || /(?:^|\n)\s*(?:[-–—]\s*)?(?:adam|virginia|the waves pest control team|waves team)\s*$/i.test(tail)
     || dashedName.test(tail)
@@ -77,8 +86,9 @@ function verifyEmailReplyStructure({ text, customer, wordBudget } = {}) {
   if (containsUnsupportedLink(draft) || PHONE_URI_RE.test(draft) || MARKDOWN_LINK_RE.test(draft)
     || MARKDOWN_LINK_DEFINITION_RE.test(draft)) violations.push('link_unsupported');
   const screenedAccessCopy = accessCopy.replace(NON_ACCESS_CODE_RE, (match, offset) => {
-    const vicinity = accessCopy.slice(Math.max(0, offset - 30), offset + match.length + 30);
-    return ACCESS_CONTEXT_RE.test(vicinity) ? match : ' ';
+    const sentenceBefore = accessCopy.slice(0, offset).split(/[.!?\n]/).at(-1);
+    const sentenceAfter = accessCopy.slice(offset + match.length).split(/[.!?\n]/)[0];
+    return ACCESS_CONTEXT_RE.test(`${sentenceBefore} ${sentenceAfter}`) ? match : ' ';
   });
   if (containsReportAccessCode(screenedAccessCopy)) violations.push('access_code');
   if (!greetingMatches(draft, customer)) violations.push('greeting_mismatch');
