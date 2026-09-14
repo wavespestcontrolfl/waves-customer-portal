@@ -91,7 +91,9 @@ function validPreview(result, visitId) {
     selected.display_address?.address_line1, customer.id, String(result.quote || '').trim(),
     current === null || (current?.start_at && current?.end_at),
     typeof series.collective === 'boolean',
-    series.collective !== true || (Array.isArray(series.occurrenceIds) && Array.isArray(series.occurrences)),
+    series.collective !== true || (Array.isArray(series.occurrenceIds) && Array.isArray(series.occurrences)
+      && Array.isArray(series.conflicts) && series.conflicts.length === series.conflictCount
+      && series.conflicts.every((conflict) => conflict.occurrenceId && conflict.date && conflict.appointments?.length > 0)),
     Number.isInteger(overlap.count) && overlap.count >= 0,
     Array.isArray(overlap.appointments) && overlap.appointments.length === overlap.count,
   ].every(Boolean);
@@ -128,6 +130,12 @@ function SeriesReview({ series, Text }) {
     {skipped > 0 && <Text tone="muted">{skipped} in-progress or skipped visit{skipped === 1 ? '' : 's'} will stay put.</Text>}
     {exceptions > 0 && <Text tone="muted">{exceptions} date exception{exceptions === 1 ? '' : 's'} will move with the plan.</Text>}
     {conflicts > 0 && <Text tone="alert">{conflicts} landing date{conflicts === 1 ? '' : 's'} overlap another appointment.</Text>}
+    {(series.conflicts || []).map((conflict) => <div key={conflict.occurrenceId} className="space-y-1">
+      <Text tone="alert">Recurring overlap on {dateLabel(conflict.date)}:</Text>
+      {conflict.appointments.map((appointment) => <Text key={appointment.id} tone="alert">
+        {appointment.service_name} · {staffWindow(conflict.date, appointment.window_start, appointment.window_end)} · {humanize(appointment.status)}
+      </Text>)}
+    </div>)}
   </>;
 }
 
@@ -183,6 +191,7 @@ export default function RescheduleProposalCards({ ui, pollMs = DEFAULT_POLL_MS }
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(null);
+  const [loading, setLoading] = useState(false);
   const [selections, setSelections] = useState({});
   const [previews, setPreviews] = useState({});
   const request = useRef(0);
@@ -225,14 +234,16 @@ export default function RescheduleProposalCards({ ui, pollMs = DEFAULT_POLL_MS }
   }, [replacePreviews]);
 
   const fetchPage = useCallback((page) => adminFetch(`${API}?offset=${page * PAGE}`), []);
-  const load = useCallback(async ({ page = null, count = 1, invalidate = true } = {}) => {
+  const load = useCallback(async ({ page = 0, count = 1, invalidate = true } = {}) => {
+    if (page > 0 && reading.current) return;
     const seq = ++request.current;
     reading.current = true;
-    if (page == null && invalidate) replacePreviews({});
+    setLoading(true);
+    if (invalidate) replacePreviews({});
     try {
       let next;
-      const firstPage = page ?? 0;
-      const endPage = page == null ? count : firstPage + 1;
+      const firstPage = page;
+      const endPage = page + count;
       const rows = page > 0 ? [...dataRef.current.proposals] : [];
       let fetchedThrough = firstPage;
       for (let index = firstPage; index < endPage; index += 1) {
@@ -246,12 +257,15 @@ export default function RescheduleProposalCards({ ui, pollMs = DEFAULT_POLL_MS }
       const merged = { ...next, proposals: rows };
       dataRef.current = merged;
       setData(merged);
-      reconcile(rows, { invalidate: page == null && invalidate });
+      reconcile(rows, { invalidate });
       setError('');
     } catch (err) {
       if (mounted.current && seq === request.current) setError(err.message || 'Could not load reschedule proposals.');
     } finally {
-      if (seq === request.current) reading.current = false;
+      if (seq === request.current) {
+        reading.current = false;
+        if (mounted.current) setLoading(false);
+      }
     }
   }, [fetchPage, reconcile, replacePreviews]);
 
@@ -382,6 +396,6 @@ export default function RescheduleProposalCards({ ui, pollMs = DEFAULT_POLL_MS }
       onDismiss={dismiss}
     />)}
     {enabled && !proposals.length && <Text tone="muted">No reschedule proposals need review.</Text>}
-    {data?.has_more && <Button secondary disabled={!!busy} onClick={() => load({ page: pages.current, invalidate: false })}>Load more proposals</Button>}
+    {data?.has_more && <Button secondary disabled={!!busy || loading} onClick={() => load({ page: pages.current, invalidate: false })}>Load more proposals</Button>}
   </section>;
 }

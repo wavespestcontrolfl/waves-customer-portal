@@ -63,6 +63,7 @@ const PREVIEW = {
     skippedCount: 1,
     exceptionCount: 1,
     conflictCount: 1,
+    conflicts: [{ occurrenceId: 'visit-future', date: '2026-11-15', appointments: [{ id: 'sibling-clash', service_name: 'Conflicting lawn visit', status: 'confirmed', window_start: '10:30', window_end: '11:30' }] }],
   },
 };
 
@@ -114,6 +115,8 @@ describe('reschedule proposal review', () => {
     expect(screen.getAllByText(/Oct 12, 2026 at 2:00 PM–3:00 PM ET → Thu, Oct 15, 2026 at 1:00 PM–2:00 PM ET/)).toHaveLength(2);
     expect(screen.getByText(/Nov 12, 2026 at 10:00 AM–11:30 AM ET → Sun, Nov 15, 2026 at 10:00 AM–11:30 AM ET/)).toBeInTheDocument();
     expect(screen.getByText(/landing date.*overlap.*another appointment/)).toBeInTheDocument();
+    expect(screen.getByText(/Recurring overlap on/)).toHaveTextContent('Nov 15, 2026');
+    expect(screen.getByText(/Conflicting lawn visit/)).toHaveTextContent('confirmed');
 
     fireEvent.click(screen.getByRole('button', { name: 'Apply change' }));
     await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/call-recordings/proposals/proposal-1/apply', {
@@ -337,5 +340,40 @@ it('requires an address to preview an appointment', async () => {
   fireEvent.change(await screen.findByLabelText('Appointment discussed for Synthetic Caller'), { target: { value: FIRST.id } });
   await screen.findByText('The appointment address needs review. Use the schedule editor.');
   expect(screen.getByRole('button', { name: 'Preview change' })).toBeDisabled();
+  expect(screen.queryByRole('button', { name: 'Apply change' })).not.toBeInTheDocument();
+});
+
+
+it('blocks append while a multi-page replacement refresh is in flight', async () => {
+  let release;
+  let refreshing = false;
+  const nextRow = { ...ROW, id: 'proposal-2', first_name: 'Second' };
+  adminFetch.mockImplementation(async (url) => {
+    if (refreshing && url === LIST) return new Promise((resolve) => { release = resolve; });
+    return { ...FEED, proposals: url.endsWith('offset=100') ? [nextRow] : [ROW], has_more: true };
+  });
+  render(<RescheduleProposalCards ui={ui} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Load more proposals' }));
+  await screen.findByText('Reschedule request · Second Caller');
+  refreshing = true;
+  adminFetch.mockClear();
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+  const more = screen.getByRole('button', { name: 'Load more proposals' });
+  expect(more).toBeDisabled();
+  fireEvent.click(more);
+  expect(adminFetch.mock.calls.map(([url]) => url)).toEqual([LIST]);
+  release({ ...FEED, proposals: [nextRow], has_more: false });
+  await waitFor(() => expect(screen.queryByText('Reschedule request · Synthetic Caller')).not.toBeInTheDocument());
+  expect(screen.queryByRole('button', { name: 'Load more proposals' })).not.toBeInTheDocument();
+});
+
+it('requires recurring conflict details before allowing Apply', async () => {
+  adminFetch.mockImplementation(async (url) => url.endsWith('/preview')
+    ? { ...PREVIEW, series: { ...PREVIEW.series, conflicts: undefined } } : FEED);
+  render(<RescheduleProposalCards ui={ui} />);
+  await screen.findByLabelText('Appointment discussed for Synthetic Caller');
+  selectSecond();
+  fireEvent.click(screen.getByRole('button', { name: 'Preview change' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent('The preview was incomplete.');
   expect(screen.queryByRole('button', { name: 'Apply change' })).not.toBeInTheDocument();
 });
