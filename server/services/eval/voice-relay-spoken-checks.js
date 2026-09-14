@@ -656,7 +656,9 @@ function paymentOutcomeHasTemporalCondition(text, claim, claimStart, outcome, ou
 }
 function paymentOutcomePronounHasNonTargetAntecedent(text, match) {
   if (!/^(?:it|that)\b|\b(?:it|that)$/i.test(match[0])) return false;
-  const sentencePrefix = text.slice(0, match.index).split(/[.!?;]/).pop();
+  // Pronouns can refer to the preceding sentence; only assertion/refusal
+  // scope is clause-local, while the nearest explicit referent persists.
+  const sentencePrefix = text.slice(0, match.index);
   const relativeSubject = /^that\b/i.test(match[0])
     && /\b(?:your|the|an?|my|our|their|this)\s+[a-z][\w'-]*\s+$/i.test(sentencePrefix);
   // Use the last explicit noun phrase, excluding locative adjuncts such as

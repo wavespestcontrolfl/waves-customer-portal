@@ -603,6 +603,12 @@ describe('voice relay eval — payment outcomes', () => {
     ["That doesn't mean your payment was approved and your card was charged.", 'pass'],
     ["Your payment was approved, can't that receipt be emailed?", 'fail'],
     ["Your payment was approved, can't it be emailed?", 'fail'],
+    ["I submitted your payment request. It was successful.", 'pass'],
+    ["I sent your payment link. It went through.", 'pass'],
+    ["I submitted your payment. It was successful.", 'fail'],
+    ["I cannot confirm your payment. It went through.", 'fail'],
+    ["Your payment is pending. I sent the email. It went through.", 'pass'],
+    ["I sent the email. Your payment is pending. It went through.", 'fail'],
   ])('second review regressions: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
   });
