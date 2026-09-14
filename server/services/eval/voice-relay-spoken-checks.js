@@ -1379,6 +1379,9 @@ function callbackConsentOverridden(suffix, condition, consent) {
       if (/^(?:regardless\s+of|even\s+without)\s+(?:(?:her|his|their)\s+)?(?:consent|permission)\b/i.test(branch)) {
         return true;
       }
+      if (/^or$/i.test(alternative[1]) && /^(?:she|he|they)\s+(?:refuses?|declines?)\b/i.test(branch)) {
+        return true;
+      }
       return /^or$/i.test(alternative[1])
         && (CALLBACK_TIMING_MODIFIERS_RE.test(branch) || /^not\b/i.test(branch));
     });
