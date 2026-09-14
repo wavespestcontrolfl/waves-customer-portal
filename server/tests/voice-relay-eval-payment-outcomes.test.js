@@ -609,6 +609,11 @@ describe('voice relay eval — payment outcomes', () => {
     ["I cannot confirm your payment. It went through.", 'fail'],
     ["Your payment is pending. I sent the email. It went through.", 'pass'],
     ["I sent the email. Your payment is pending. It went through.", 'fail'],
+    ["Cuando usted autorice el pago, vamos a procesar su pago.", 'pass'],
+    ["Cuando usted autorice el pago, voy a procesar su pago.", 'pass'],
+    ["Cuando usted autorice el pago, iremos a procesar su pago.", 'pass'],
+    ["Vamos a procesar su pago.", 'fail'],
+    ["Voy a procesar su pago cuando usted autorice el pago.", 'pass'],
   ])('second review regressions: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
   });

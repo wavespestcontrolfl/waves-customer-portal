@@ -645,7 +645,7 @@ function paymentOutcomeHasTemporalCondition(text, claim, claimStart, outcome, ou
     || /\b(?:after|before|once|when|until|as\s+soon\s+as|cuando|despu[eé]s\s+de\s+que|una\s+vez\s+que)\s+(?:(?:your|the|that|this|a|su|el|la|este|esta)\s+)?$/i.test(beforeOutcome);
   const introduction = text.slice(claimStart, outcomeStart);
   const futureOutcome = /\b(?:will|should|going\s+to)\b|[\x27\u2019]ll\b/i.test(outcome)
-    || new RegExp(`\\b(?:ser[aá]|${PAYMENT_ACTIVE_FUTURE_ES})(?![a-záéíóúñ])`, 'i').test(outcome);
+    || new RegExp(`\\b(?:ser[aá]|(?:voy|vamos|iremos)\\s+a|${PAYMENT_ACTIVE_FUTURE_ES})(?![a-záéíóúñ])`, 'i').test(outcome);
   const attachedPrerequisite = (futureOutcome && PAYMENT_CONDITION_RE.test(introduction))
     || PAYMENT_PREREQUISITE_RE.test(introduction)
     || PAYMENT_CONDITION_RE.test(trailingClaim.replace(/^\s*,\s*/, ''));
