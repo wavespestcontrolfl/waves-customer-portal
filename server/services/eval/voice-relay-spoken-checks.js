@@ -1302,9 +1302,16 @@ function callbackConditionTarget(targets, valueTargets, matchedContact) {
   const matches = [...matchedContact.matchAll(new RegExp(`\\b(?:she|he|they|${targets})\\b`, 'gi'))];
   const recipient = matches[matches.length - 1]?.[0] || '';
   if (!recipient) return '(?!)';
-  const conditionTargets = [escapeRegexLiteral(recipient), ...valueTargets];
+  const conditionTargets = [escapeRegexLiteral(recipient)];
   const explicitPronoun = { her: 'she', him: 'he', them: 'they' }[recipient.toLowerCase()];
-  if (explicitPronoun) return `(?:${[...conditionTargets, explicitPronoun].join('|')})`;
+  if (explicitPronoun) {
+    const hints = valueTargets.join(' ');
+    const female = /\b(?:mother|mom|daughter|wife|sister|aunt|grandmother|ms|mrs)\b/i.test(hints);
+    const male = /\b(?:father|dad|son|husband|brother|uncle|grandfather|mr)\b/i.test(hints);
+    const compatible = (explicitPronoun === 'she' && female && !male) || (explicitPronoun === 'he' && male && !female);
+    return `(?:${[...conditionTargets, explicitPronoun, ...(compatible ? valueTargets : [])].join('|')})`;
+  }
+  conditionTargets.push(...valueTargets);
   const identityHints = `${recipient} ${valueTargets.join(' ')}`;
   const unambiguousNamedRecipient = valueTargets.some((target) => new RegExp(`^(?:${target})$`, 'i').test(recipient));
   if (/^(?:her)$/i.test(recipient) || /\b(?:mother|mom|daughter|wife|sister|aunt|grandmother)\b/i.test(identityHints)) {
@@ -1331,6 +1338,12 @@ function callbackAgreementAction(additionalComplement = '') {
     ? `(?:to\\s+${CALLBACK_RECEIVED_CONTACT}|${additionalComplement})`
     : `to\\s+${CALLBACK_RECEIVED_CONTACT}`;
   return `(?:agrees?|consents?)(?:\\s+${complement})?${CALLBACK_CONSENT_BOUNDARY}`;
+}
+
+function callbackConsentOverridden(text, matchEnd, consentCondition, conditionTarget) {
+  const rawConsent = consentCondition.exec(text.slice(matchEnd));
+  return rawConsent && new RegExp(`^\\s*,?\\s*(?:or|and|but)\\s+(?:even\\s+)?(?:if|when)\\s+${conditionTarget}\\s+(?:does(?:\\s+not|n[\\x27\\u2019]t)|declines?|refuses?)\\b`, 'i')
+    .test(text.slice(matchEnd + rawConsent.index + rawConsent[0].length));
 }
 
 function callbackConsentSuffix(text, matchEnd) {
@@ -1396,10 +1409,11 @@ function no_account_holder_callback(value, record, { spoken }) {
         ? callbackSuffix.slice(0, trailingConsent.index).replace(/,\s*$/, '') : '';
       const concessiveConsent = trailingConsent
         && /\beven\s*$/i.test(callbackSuffix.slice(0, trailingConsent.index));
-      const consentGated = leadingConsent.test(text.slice(clauseStart, match.index))
+      const consentOverridden = callbackConsentOverridden(text, matchEnd, consentCondition, conditionTarget);
+      const consentGated = !consentOverridden && (leadingConsent.test(text.slice(clauseStart, match.index))
         || Boolean(trailingConsent && !concessiveConsent
           && (VISIT_MODIFIERS_RE.test(consentModifiers)
-            || CALLBACK_TIMING_MODIFIERS_RE.test(consentModifiers)));
+            || CALLBACK_TIMING_MODIFIERS_RE.test(consentModifiers))));
       const claim = (bare ? match[0].replace(/\bif\b.*?(?=,?\s+\b(?:and|but|so|then)\b)/gi, '')
         : inherited ? text.slice(match.index, matchEnd) : claimContext(text, match.index, matchEnd))
         .replace(/^.*\bbut\s+/i, '')
