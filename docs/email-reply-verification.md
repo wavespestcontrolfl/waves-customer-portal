@@ -10,16 +10,23 @@ and recognized prompt-control language. It makes no model request, database
 write, Gmail call, or draft/send decision. No runtime caller is added.
 
 Whitespace and word-separating dashes count toward the budget; true hyphenated
-compounds remain one word. Name comparison accepts Unicode and punctuation
+compounds remain one word, and a standalone dash is not a word. Name comparison accepts Unicode and punctuation
 equivalents inside the expected name, while preserving the difference between
-an em-dash greeting separator and a hyphen continuing a longer name.
+an em-dash greeting separator and a hyphen continuing a longer name. An
+unsupplied second name after the expected name fails the greeting delimiter.
 
 The plain-output screen rejects plus bullets, HTML comments (including an
 unterminated opener), relative/fragment/reference Markdown links, and common
 closing/name structures. Boilerplate screening folds whitespace and smart
-apostrophes. The canonical report access-code helper receives compatibility
+apostrophes. Bullet glyphs count at the start of a line even without a space.
+Bare hostname checks use the repository's public-suffix-list dependency, so
+common attachment filenames such as `invoice.pdf` do not count as domains;
+explicit URLs with a PDF path still do. The canonical report access-code helper receives compatibility
 letters/digits with mixed fractions preserved, so a gate width does not become
-a credential. Output-specific prompt-control checks permit ordinary customer
+a credential. Explicitly labeled payment, postal, and service code/value
+phrases are excluded from that screen unless nearby text identifies a physical
+access point; gate and lockbox codes elsewhere remain subject to it.
+Output-specific prompt-control checks permit ordinary customer
 preparation corrections and operational colon labels.
 
 These are recognized lexical and structural checks, not a comprehensive
