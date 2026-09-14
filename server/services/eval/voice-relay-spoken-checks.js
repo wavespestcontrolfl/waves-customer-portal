@@ -1393,7 +1393,7 @@ function cardFragmentsIn(text, precedingReadback = false, callerAnswer = false) 
     const valueSpan = [expirationSpan, slashedSpan, calendarSpan].find(Boolean);
     const candidateValue = valueSpan ? digits.slice(...valueSpan) : m[0];
     const precedingValueMatches = Array.isArray(precedingReadback)
-      && precedingReadback.some((value) => cardValuesMatch(value, candidateValue));
+      && precedingReadback.concat(precedingReadback.join(' ')).some((value) => cardValuesMatch(value, candidateValue));
     const carriedValue = cardValueInheritsReadback(precedingReadback, calendarSpan, precedingValueMatches);
     // A bare calendar-shaped value is still a card echo when it matches the
     // caller's expiration or answers an explicit card request. Explicit

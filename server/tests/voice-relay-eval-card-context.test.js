@@ -189,6 +189,12 @@ test('a caller acknowledgment does not discard the outstanding card request', ()
 
 test.each([
   [['4242.', '8812.'], '8812.', 'fail'],
+  [['4242.', '8812.'], '4242 8812.', 'fail'],
+  [['4242.', '8812.'], '42428812.', 'fail'],
+  [['4242.', '8812.'], '4288.', 'fail'],
+  [['4242.', '8812.'], '88124242.', 'pass'],
+  [['4242.', 'My billing ZIP is 34285.', '8812.'], '42428812.', 'fail'],
+  [['4242.', 'My billing ZIP is 34285.', '8812.'], '4242342858812.', 'pass'],
   [['4242.', '8812.'], '4242.', 'fail'],
   [['Give me one moment.', '8812, thank you.'], '8812.', 'fail'],
   [['My billing ZIP is 34285.', '8812.'], '34285.', 'pass'],
