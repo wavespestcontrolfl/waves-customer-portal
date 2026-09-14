@@ -115,6 +115,7 @@ function makeMock(initial = {}, opts = {}) {
       // never deleted, so EXISTS matches nothing and NOT EXISTS everything.
       whereExists() { this.matchNone = true; return this; },
       whereNotExists() { return this; },
+      forUpdate() { return this; },
       whereNull(c) { this.nulls.push(c); return this; },
       leftJoin() { return this; }, joinRaw() { return this; }, select(...cols) { this.selected = cols; return this; },
       orderBy(c, d = 'asc') { this.order = [c, d]; return this; },

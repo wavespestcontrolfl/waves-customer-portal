@@ -207,6 +207,12 @@ postgres('review ask history against migrated PostgreSQL', () => {
       expect(waitingInsert).toBeDefined();
 
       supersedePromise = ReviewService.supersedeQueuedAsks(concurrentCustomerId);
+      let waitingSupersede;
+      do {
+        ({ rows: [waitingSupersede] } = await database.raw("SELECT pid FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE '%review_requests%' AND query ILIKE '%for update%' LIMIT 1"));
+        if (!waitingSupersede) await new Promise(resolve => setTimeout(resolve, 10));
+      } while (!waitingSupersede && Date.now() < deadline);
+      expect(waitingSupersede).toBeDefined();
       await blocker.commit();
       blocker = null;
       expect(await reservePromise).toMatchObject({ requestId: row.id });

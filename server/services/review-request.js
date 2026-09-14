@@ -785,18 +785,32 @@ async function reserveSendableReviewSms({ request, to, body }) {
 // in-flight carve-out is a correlated NOT EXISTS on JSON metadata, which the
 // unit suite's query mock cannot evaluate.
 function supersedeQueuedAsks(customerId) {
-  return db("review_requests")
-    .where({ customer_id: customerId, status: "pending" })
-    .whereNull("sms_sent_at")
-    .whereNotNull("scheduled_for")
-    .whereRaw(ASK_TOUCH_SQL)
-    .whereNotExists(function () {
-      this.select(1).from("sms_log")
-        .whereRaw("sms_log.metadata->>'review_request_id' = review_requests.id::text")
-        .whereRaw("sms_log.metadata->>'review_ask_reservation' = 'true'")
-        .where("sms_log.status", "sending");
-    })
-    .update({ status: "suppressed" });
+  return db.transaction(async (trx) => {
+    // Lock candidate requests FIRST, then check reservations in a separate
+    // READ COMMITTED statement. An UPDATE started while reserveSendableReviewSms
+    // holds a row lock can otherwise retain a pre-reservation snapshot for
+    // its NOT EXISTS subquery even after it waits for the row to commit.
+    const candidates = await trx("review_requests")
+      .where({ customer_id: customerId, status: "pending" })
+      .whereNull("sms_sent_at")
+      .whereNotNull("scheduled_for")
+      .whereRaw(ASK_TOUCH_SQL)
+      .orderBy("id")
+      .select("id")
+      .forUpdate();
+    if (!candidates.length) return 0;
+    return trx("review_requests")
+      .whereIn("id", candidates.map((row) => row.id))
+      .where({ status: "pending" })
+      .whereNull("sms_sent_at")
+      .whereNotExists(function () {
+        this.select(1).from("sms_log")
+          .whereRaw("sms_log.metadata->>'review_request_id' = review_requests.id::text")
+          .whereRaw("sms_log.metadata->>'review_ask_reservation' = 'true'")
+          .where("sms_log.status", "sending");
+      })
+      .update({ status: "suppressed" });
+  });
 }
 
 // A resolved review-ask reservation for THIS request is proof the provider
