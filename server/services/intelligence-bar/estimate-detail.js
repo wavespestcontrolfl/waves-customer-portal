@@ -34,7 +34,7 @@ const DROPPED_ESTIMATE_KEYS = new Set([
 
 // PriceCard renders a range for low-confidence cadences, never the exact
 // monthly, annual, or per-treatment amounts still present in the payload.
-const RANGED_METADATA_FIELDS = ['key', 'label', 'selection', 'lowConfidenceRangePct', 'lowConfidenceFraction', 'quoteRequired', 'quoteRequiredReason'];
+const RANGED_METADATA_FIELDS = ['key', 'label', 'selection', 'lowConfidenceRangePct', 'quoteRequired', 'quoteRequiredReason'];
 
 function sanitizeRangedNode(node) {
   // Keep only cadence/range metadata. Base amounts, discount amounts and
@@ -188,7 +188,7 @@ async function estimateLinks(row, data) {
   if (!row.token) return { customer_link: null, staff_preview_link: null, link_state: 'no_token' };
   const publicRoute = lazy.publicRoute();
   if (publicRoute.isEstimateCustomerViewable(row)) {
-    return { customer_link: estimateLink(row.token), staff_preview_link: null, link_state: 'customer_viewable' };
+    return { customer_link: estimateLink(row.token), staff_preview_link: estimateLink(row.token, '?adminPreview=1'), link_state: 'customer_viewable' };
   }
   if (publicRoute.adminDraftPreviewEligible(row, '1')) {
     return { customer_link: null, staff_preview_link: estimateLink(row.token, '?adminPreview=1'), link_state: 'staff_preview_only' };
@@ -281,7 +281,7 @@ async function getEstimateDetail({ estimate_id } = {}) {
 
 const GET_ESTIMATE_DETAIL_TOOL = {
   name: 'get_estimate_detail',
-  description: `Read one estimate by estimate_id as the customer's own estimate page prices it. Returns status, timestamps, customer or staff preview link state, and the composed page under \`page\`. \`page.pricing\` includes plan cadences, per-application prices, selectable additions, and one-time breakdowns; an authored commercial quote is in \`page.proposal\`. Quote-required pricing is withheld with a reason; low-confidence cadences are marked ranged without exact figures. Residential combined plan totals are withheld while itemized application prices remain; commercial and monthly-billed totals remain where displayed. A failed live membership verification sets \`page\` to null with page_unavailable. Provenance blocks withhold the entire record. Use for questions about amounts inside a specific sent estimate; first identify its estimate_id.`,
+  description: `Read one estimate by estimate_id as the customer's own estimate page prices it. Returns status, timestamps, customer or staff preview link state, and the composed page under \`page\`. \`page.pricing\` includes plan cadences, per-application prices, selectable additions, and one-time breakdowns; an authored commercial quote is in \`page.proposal\`. Quote-required pricing is withheld with a reason; low-confidence cadences are marked ranged without exact figures. Residential combined plan totals are withheld while itemized application prices remain; commercial and monthly-billed totals remain where displayed. A failed live membership verification sets \`page\` to null with page_unavailable. Provenance blocks withhold the entire record. Use staff_preview_link for staff inspection so it does not register customer engagement; customer_link is the shareable customer URL. Never reconstruct hidden totals or infer final invoice amounts. Use for questions about amounts inside a specific sent estimate; first identify its estimate_id.`,
   input_schema: {
     type: 'object',
     properties: {

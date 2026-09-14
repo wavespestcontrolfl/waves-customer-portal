@@ -225,8 +225,9 @@ test('a RANGED cadence loses its exact figures at whatever depth it sits — the
   });
   const shaped = await shapeEstimate(estimateRow());
   const ranged = shaped.page.pricing.frequencies[0];
-  expect(ranged).toMatchObject({ key: 'quarterly', label: 'Quarterly', ranged: 'low_confidence_confirmed_on_site', lowConfidenceRangePct: 0.2, lowConfidenceFraction: 1 });
+  expect(ranged).toMatchObject({ key: 'quarterly', label: 'Quarterly', ranged: 'low_confidence_confirmed_on_site', lowConfidenceRangePct: 0.2 });
   expect(ranged.monthly).toBeUndefined();
+  expect(JSON.stringify(shaped.page.pricing)).not.toContain('lowConfidenceFraction');
   expect(ranged.annual).toBeUndefined();
   expect(ranged.perTreatment).toBeUndefined();
   // Aggregate fallback cadences contain the ranged combined amount too.
@@ -263,6 +264,25 @@ test('real commercial range contracts withhold aggregate and base amounts while 
   expect(shaped.page.pricing.serviceCadenceCombos[0]).toMatchObject({ selection: { commercial_lawn: 'monthly' }, ranged: 'low_confidence_confirmed_on_site' });
   expect(shaped.page.pricing.manualDiscount).toEqual({ label: 'Courtesy discount' });
   expect(JSON.stringify(shaped.page.pricing)).not.toMatch(/400|4800/);
+});
+
+test('mixed commercial range metadata cannot reconstruct totals from an exact sibling', async () => {
+  const { attachPublicPricingContract } = jest.requireActual('../routes/estimate-public');
+  const pricing = attachPublicPricingContract({
+    frequencies: [{ key: 'monthly', label: 'Monthly', monthly: 447, annual: 5364 }],
+  }, {}, { result: { recurring: { services: [
+    { service: 'commercial_lawn', name: 'Commercial Turf Treatment Program', pricingConfidence: 'LOW', mo: 400, annual: 4800, estimatedPricing: true },
+    { service: 'pest_control', name: 'Pest Control', mo: 47, annual: 564 },
+  ] } } });
+  expect(pricing.combinedRecurring.lowConfidenceFraction).toBeCloseTo(400 / 447);
+  // The exact sibling remains available, so no fractional aggregate share may survive.
+  const exact = { key: 'pest_control', frequencies: [{ key: 'quarterly', monthly: 47, annual: 564 }] };
+  pricing.services.push(exact);
+  mockCompose.mockResolvedValue({ ...PAGE_PAYLOAD, pricing, cta: { commercialAutoPriced: true } });
+  const { page } = await shapeEstimate(estimateRow());
+  expect(page.pricing.services.at(-1)).toEqual(exact);
+  expect(page.pricing.combinedRecurring.ranged).toBe('low_confidence_confirmed_on_site');
+  expect(JSON.stringify(page.pricing)).not.toMatch(/lowConfidenceFraction|lowConfidenceMonthly|447|5364/);
 });
 
 const combinedPricingFixture = () => {
@@ -505,6 +525,7 @@ test('links come from the canonical portal-origin helper, so a preview deploymen
   try {
     const sent = await shapeEstimate(estimateRow());
     expect(sent.customer_link).toBe('https://preview-123.up.railway.app/estimate/xydejpzuxx');
+    expect(sent.staff_preview_link).toBe('https://preview-123.up.railway.app/estimate/xydejpzuxx?adminPreview=1');
     const draft = await shapeEstimate(estimateRow({ status: 'draft' }));
     expect(draft.staff_preview_link).toBe('https://preview-123.up.railway.app/estimate/xydejpzuxx?adminPreview=1');
   } finally {
@@ -517,6 +538,7 @@ test('a sent estimate gets the customer\'s own projection, not the staff one', a
   const shaped = await shapeEstimate(estimateRow());
   expect(shaped.link_state).toBe('customer_viewable');
   expect(shaped.customer_link).toBe('https://portal.wavespestcontrol.com/estimate/xydejpzuxx');
+  expect(shaped.staff_preview_link).toBe('https://portal.wavespestcontrol.com/estimate/xydejpzuxx?adminPreview=1');
   expect(mockCompose.mock.calls[0][1].adminDraftPreview).toBe(false);
 });
 
