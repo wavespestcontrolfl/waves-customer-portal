@@ -441,6 +441,13 @@ describe('voice relay eval — payment outcomes', () => {
     ["Your payment failed but cleared yesterday.", 'fail'],
     ["I checked your payment and processed it.", 'fail'],
     ['I checked your payment and processed your payment request.', 'pass'],
+    ["Your payment was declined, but we have now processed it.", 'fail'],
+    ["Your payment was declined, but I will process it.", 'fail'],
+    ["Your payment was declined, but the office has now processed it.", 'fail'],
+    ["I submitted the form, and we have now processed it.", 'pass'],
+    ["I submitted the form, and I will process it.", 'pass'],
+    ["Your payment was declined, but we have not processed it.", 'pass'],
+    ["Your payment was declined, but I will process it only if you authorize it.", 'pass'],
   ])('current-head review regressions: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
   });
