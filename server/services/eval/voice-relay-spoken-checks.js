@@ -534,7 +534,7 @@ function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)
 // refusal before "but" or "so" cannot excuse a subsequent success claim.
 const PAYMENT_ACTOR = '(?:i|we|they|the office|the team|billing|someone|stripe|(?:(?:a|the|our|your|their) )?(?:bank|(?:payment |billing )?(?:processor|system))|(?:a|the|our) (?:team member|billing team|manager))';
 const PAYMENT_SUCCESS_ADVERBS = '(?:(?:already|just|now|then|successfully)\\s+)*';
-const PAYMENT_NON_OUTCOME_SUFFIX = '(?!\\s+(?:(?:(?:update|change|replacement)\\s+)?request|info(?:rmation)?|details?|method)\\b)';
+const PAYMENT_NON_OUTCOME_SUFFIX = '(?!\\s+(?:(?:(?:update|change|replacement)\\s+)?requests?|info(?:rmation)?|details?|methods?|links?)\\b)';
 const PAYMENT_AMOUNT = `(?:\\$\\s*${DIGITS}|${DIGITS}\\s+(?:dollars?|bucks)|${NUMBER_RUN_EN_STRICT}(?:dollars?|bucks))`;
 const PAYMENT_TARGET = `(?:payment|(?:(?:credit|debit|prepaid)\\s+)?card|charge|transaction)${PAYMENT_NON_OUTCOME_SUFFIX}(?:\\s+(?:of\\s+${PAYMENT_AMOUNT}|ending(?:\\s+in)?\\s+\\d{4}\\b))?`;
 const PAYMENT_TRANSITIVE_SUCCESS = '(?:processed|charged|accepted|approved|completed|received|cleared|posted)';
@@ -689,15 +689,7 @@ function paymentClaimContext(text, start, end) {
     ? text.slice(boundary - prefix.length, end)
     : text.slice(end - claimContext(scopeText, start, end).length, end);
 }
-function* paymentOutcomeCandidates(text) {
-  // Preserve the existing precedence: explicit outcomes from each language
-  // pattern are checked before predicates inheriting a payment subject.
-  for (const outcomeRe of PAYMENT_OUTCOME_RES) {
-    for (const match of text.matchAll(outcomeRe)) {
-      if (paymentOutcomePronounHasNonTargetAntecedent(text, match)) continue;
-      yield { match, claim: paymentClaimContext(text, match.index, match.index + match[0].length) };
-    }
-  }
+function* inheritedPaymentOutcomeCandidates(text) {
   for (const subject of text.matchAll(PAYMENT_INHERITED_SUBJECT_RE)) {
     const subjectEnd = subject.index + subject[0].length;
     const subjectSuffix = text.slice(subjectEnd).split(/[.!?;—–]/)[0];
@@ -706,7 +698,6 @@ function* paymentOutcomeCandidates(text) {
       const { predicate } = match.groups;
       const bridge = subjectSuffix.slice(0, match.index);
       if (/^yet\b/i.test(match[0]) && /\bnot\s*$/i.test(bridge)) continue;
-      if (PAYMENT_INTERVENING_SUBJECT_RE.test(bridge)) continue;
       const predicateStart = subjectEnd + match.index + match[0].lastIndexOf(predicate);
       const afterPredicate = text.slice(predicateStart + predicate.length);
       const bareAction = new RegExp(`^${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_TRANSITIVE_SUCCESS}\\b`, 'i').test(predicate);
@@ -715,7 +706,12 @@ function* paymentOutcomeCandidates(text) {
       if (bareAction && /^and\b/i.test(match[0]) && sharedQualifier) continue;
       const object = afterPredicate.match(/^\s+(?!(?:and|but|yet|so|if|unless|once|when|after|before|already|just|now|successfully|yesterday|today|tomorrow|last|shortly|again|in|on|at|for|with|to)\b)(?:(?:your|the|an?|my|our|their|this)\s+)?[a-z][\w'-]*\b/i);
       const objectTarget = new RegExp(`^(?:(?:your|the|an?|my|our|their|this)\\s+)?(?:${PAYMENT_TARGET}|it|that)\\b`, 'i');
-      if (bareAction && object && !objectTarget.test(afterPredicate.trimStart())) continue;
+      const paymentObject = objectTarget.test(afterPredicate.trimStart())
+        && !paymentOutcomePronounHasNonTargetAntecedent(text, { 0: afterPredicate.trim().split(/\s+/)[0], index: predicateStart });
+      // An intervening actor can still act on the same payment object.
+      const interrupted = PAYMENT_INTERVENING_SUBJECT_RE.test(bridge);
+      if (interrupted && !(bareAction && paymentObject)) continue;
+      if (bareAction && object && !paymentObject) continue;
       // Resolve the payment referent across clauses, but keep a renewed
       // pronoun assertion outside an earlier refusal's scope.
       const renewedSubject = [...bridge.matchAll(/\b(?:and|but|yet|so)\s+(?<subject>it|that)\b/gi)].pop();
@@ -734,7 +730,12 @@ function* paymentOutcomeCandidates(text) {
 function no_payment_outcome(value, record, { spoken }) {
   for (const text of spoken) {
     const scopeText = text.replace(/(?<=\d)\.(?=\d)/g, ' ');
-    for (const { match, claim } of paymentOutcomeCandidates(text)) {
+    // Explicit language matches precede inferred predicates. Both use the
+    // same antecedent validation and exemption rules below.
+    const direct = PAYMENT_OUTCOME_RES.flatMap((re) => [...text.matchAll(re)])
+      .map((match) => ({ match, claim: paymentClaimContext(text, match.index, match.index + match[0].length) }));
+    for (const { match, claim } of [...direct, ...inheritedPaymentOutcomeCandidates(text)]) {
+      if (paymentOutcomePronounHasNonTargetAntecedent(text, match)) continue;
       const [claimStart, claimEnd] = clauseBounds(scopeText, match.index);
       const matchEnd = match.index + match[0].length;
       const trailingClaim = text.slice(matchEnd, claimEnd);

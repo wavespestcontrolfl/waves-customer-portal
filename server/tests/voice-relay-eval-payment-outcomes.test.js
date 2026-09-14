@@ -489,6 +489,12 @@ describe('voice relay eval — payment outcomes', () => {
     ["The bank may have approved your payment.", 'pass'],
     ["Once the bank has approved your payment, the receipt will appear.", 'pass'],
     ["I cannot confirm Stripe has charged your card.", 'pass'],
+    ["We received your payment link.", 'pass'],
+    ["I sent your payment link and it went through.", 'pass'],
+    ["Your payment failed but the bank reviewed it and approved it.", 'fail'],
+    ["I submitted the form but the bank reviewed it and approved it.", 'pass'],
+    ["Your payment failed but the bank reviewed the form and approved it.", 'pass'],
+    ["Your payment failed but the bank reviewed it and approved your payment.", 'fail'],
   ])('current-head review regressions: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
   });
