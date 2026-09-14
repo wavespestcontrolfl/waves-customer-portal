@@ -1358,9 +1358,13 @@ function no_account_holder_callback(value, record, { spoken }) {
   for (const text of spoken) {
     // Scan inherited actions independently: the first contact can be consent
     // gated while a later bare action still reuses its subject and modal.
+    const inheritedEnd = new RegExp(`${inheritedBareContact}$`, 'i');
+    const inheritedMatches = [...text.matchAll(new RegExp(barePromisedContact, 'gi'))]
+      .map((contactMatch) => inheritedEnd.exec(text.slice(0, contactMatch.index + contactMatch[0].length)))
+      .filter(Boolean);
     const matches = [
       ...[...text.matchAll(re)].map((match) => ({ match, bare: false })),
-      ...[...text.matchAll(new RegExp(inheritedBareContact, 'gi'))].map((match) => ({ match, bare: true })),
+      ...inheritedMatches.map((match) => ({ match, bare: true })),
     ];
     for (const { match, bare } of matches) {
       const matchEnd = match.index + match[0].length;
@@ -1388,7 +1392,7 @@ function no_account_holder_callback(value, record, { spoken }) {
         || Boolean(trailingConsent && !concessiveConsent
           && (VISIT_MODIFIERS_RE.test(consentModifiers)
             || CALLBACK_TIMING_MODIFIERS_RE.test(consentModifiers)));
-      const claim = (bare ? match[0].replace(/\bif\b.*?(?=,?\s+\b(?:and|but|so|then)\b)/i, '')
+      const claim = (bare ? match[0].replace(/\bif\b.*?(?=,?\s+\b(?:and|but|so|then)\b)/gi, '')
         : inherited ? text.slice(match.index, matchEnd) : claimContext(text, match.index, matchEnd))
         .replace(/^.*\bbut\s+/i, '')
         .replace(/^\s*(?:if|unless)\b[^,]*,\s*/i, '');
