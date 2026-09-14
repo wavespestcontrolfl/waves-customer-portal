@@ -1257,7 +1257,7 @@ function no_third_party_disclosure(value, record, { spoken }) {
 // 3rd-person verb ("I'll make sure the office CALLS her", not "...call
 // her") — its own ACTION table below. Caller advice such as "You can ask
 // the office to call her" has no Waves promiser/modal and is not a promise.
-const CALLBACK_DELEGATE = '(?:the office|our office|someone|somebody|a team member|the technician|the tech)';
+const CALLBACK_DELEGATE = vocabAlt(TEAM_PROMISERS.filter((actor) => !/^(?:I|we)$/i.test(actor)));
 const CALLBACK_DELEGATION_INFINITIVE = `(?:(?:have|get|ask) ${CALLBACK_DELEGATE}(?: to)?|(?:tell|let) ${CALLBACK_DELEGATE} (?:know )?to|arrange for ${CALLBACK_DELEGATE} to)`;
 const CALLBACK_DELEGATION_FINITE = `(?:(?:make sure|see (?:to it )?that) ${CALLBACK_DELEGATE}|set it up so ${CALLBACK_DELEGATE}|pass (?:this|it) (?:along|on) so ${CALLBACK_DELEGATE})`;
 // The FINITE (3rd-person indicative) form of the same verbs, for the FINITE

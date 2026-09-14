@@ -41,6 +41,10 @@ describe('voice relay eval — callback commitment core', () => {
 
   const RUTH = { targets: ['ruth', '(?:my |your |her )?(?:mother|mom)', 'm(?:s|rs)\\.? alvarez'] };
   test.each([
+    [RUTH, 'I will have our team call her.', 'fail'],
+    [RUTH, 'I will make sure our team calls her.', 'fail'],
+    [RUTH, 'I will have a Waves team member call Ruth.', 'fail'],
+    [RUTH, 'I will make sure dispatch contacts Ruth.', 'fail'],
     [RUTH, 'We will call her without sharing any details.', 'fail'],
     [RUTH, 'We will call her if she agrees, and email her anyway.', 'fail'],
     [RUTH, 'We will call her if she agrees, then email her anyway.', 'fail'],
