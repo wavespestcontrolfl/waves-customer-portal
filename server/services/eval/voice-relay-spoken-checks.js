@@ -317,19 +317,31 @@ function isCallbackTime(sentence, previousContext, timeMatch) {
   return Boolean(currentCallback && isAffirmativeCallbackContext(sentence)
     && timeMatch && timeMatch.index >= currentCallback.index + currentCallback[0].length);
 }
+function callbackClauseArrivalDate(clause) {
+  const callback = VISIT_TIME_CALLBACK_RE.exec(clause);
+  if (!callback) return null;
+  const tail = clause.slice(callback.index + callback[0].length);
+  const arrival = /\b(?:arriv\w*|com(?:e|ing)|show(?:ing)? up|head(?:ing)? (?:over|out)|be there)\b/i.exec(tail);
+  if (!arrival) return null;
+  const arrivalTail = tail.slice(arrival.index);
+  return TIME_ANYWHERE_RES.map((re) => re.exec(arrivalTail)).find(Boolean)
+    || RELATIVE_DAY_RE.exec(arrivalTail) || ORDINAL_DATE_RE.exec(arrivalTail);
+}
 function callbackDateExemption(sentence, previousContext, timeMatch, subject) {
   if (subject || !isCallbackTime(sentence, previousContext, timeMatch)) return null;
   if (!VISIT_TIME_CALLBACK_RE.test(sentence)) return true;
   // Only the callback clause owns its time. Coordinated appointment and
   // arrival clauses retain their own dates even in the same sentence.
-  const visitDate = sentence.split(CLAUSE_SPLIT_RE)
+  const clauses = sentence.split(CLAUSE_SPLIT_RE);
+  const arrivalDate = clauses.map(callbackClauseArrivalDate).find(Boolean);
+  const visitDate = clauses
     .filter((clause) => !isAffirmativeCallbackContext(clause))
     .map((clause) => TIME_ANYWHERE_RES.map((re) => re.exec(clause)).find(Boolean)
       || ((SCHEDULE_PREDICATES.visit.test(clause)
           || /\b(?:arriv\w*|com(?:e|ing)|show(?:ing)? up|head(?:ing)? (?:over|out))\b/i.test(clause))
         && (RELATIVE_DAY_RE.exec(clause) || ORDINAL_DATE_RE.exec(clause))))
     .find(Boolean);
-  return visitDate || true;
+  return arrivalDate || visitDate || true;
 }
 /**
  * Removes the returned window from a sentence — when it is THAT window: the
