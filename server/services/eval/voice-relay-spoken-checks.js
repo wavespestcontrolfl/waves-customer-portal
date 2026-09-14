@@ -1649,8 +1649,12 @@ function report_readback_confirms(value, record, { spoken }) {
       ).test(text.slice(clauseEnd));
       const sharedLocation = reportSharedLocationContinuation(text, clauseEnd, value.location);
       const asrTagQuestion = /(?:,\s*(?:right|correct)|\b(?:wasn['’]t\s+it|isn['’]t\s+it|aren['’]t\s+they|didn['’]t\s+(?:we|they)))\s*$/i
-        .test(text.slice(clauseStart, clauseEnd));
-      if (text[clauseEnd] === '?' || interrogative || coordinatedQuestion || sharedLocation.unconfirmed || asrTagQuestion) continue;
+        .test(text.slice(clauseStart, clauseEnd))
+        || /,\s*(?:(?:is|was)\s+(?:that|this|it)\s+(?:right|correct|true)|(?:did|do)\s+(?:we|they))\s*$/i
+          .test(text.slice(clauseStart, clauseEnd));
+      const independentFollowupQuestion = FREE_VISIT_FOLLOWUP_QUESTION_RE.test(text.slice(m.index + m[0].length, clauseEnd));
+      if ((text[clauseEnd] === '?' && !independentFollowupQuestion)
+          || interrogative || coordinatedQuestion || sharedLocation.unconfirmed || asrTagQuestion) continue;
       const reportClause = text.slice(clauseStart, clauseEnd) + sharedLocation.text;
       if (REPORT_TRAILING_DENIAL_RE.test(reportClause.slice(reportClause.lastIndexOf(',') + 1).trim())) continue;
       const assertion = reportAssertionOf(reportClause, m.index - clauseStart);

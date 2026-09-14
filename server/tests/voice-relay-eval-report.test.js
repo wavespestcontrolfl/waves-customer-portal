@@ -36,6 +36,9 @@ test.each([
   ['Suppose Talstar P was applied to the exterior perimeter.', 'fail'],
   ['Assuming Talstar P was applied to the exterior perimeter, the report would list it.', 'fail'],
   ['Talstar P was applied to the exterior perimeter only in theory.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, do you have any questions?', 'pass'],
+  ['Talstar P was applied to the exterior perimeter, is that correct?', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, did we?', 'fail'],
   ['Talstar P was applied, according to the exterior perimeter technician.', 'fail'],
 ])('reviewed report proposition: %s', (text, status) => {
   expect(checks.report_readback_confirms(report, {}, { spoken: [text] })[0]).toBe(status);
