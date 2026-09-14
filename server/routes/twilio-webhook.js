@@ -930,6 +930,13 @@ router.post('/sms', async (req, res) => {
     // it would sit unread forever (no later mirror can find it — hook P1).
     const unifiedAlreadyRead = await db('messages').where({ channel: 'sms', twilio_sid: MessageSid }).first('is_read')
       .then((r) => r?.is_read === true).catch(() => false);
+    // Ordinary unknown texts need a durable recovery candidate before the
+    // Twilio ACK. The later AI send can narrow this to false when it really
+    // answered; until then a worker crash must leave a sweep-visible row.
+    const ordinaryUnknownRecoveryCandidate = !customer && !isTrackingLeadInbound
+      && !courtesyOnly && !solicitationEnforced && !unifiedAlreadyRead
+      && Boolean(Body || inboundMedia.length)
+      && !(process.env.ADAM_PHONE && From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE);
     const [smsLogEntry] = await db('sms_log').insert({
       customer_id: customer?.id || null,
       direction: 'inbound', from_phone: From, to_phone: To,
@@ -945,6 +952,7 @@ router.post('/sms', async (req, res) => {
         domain: numberConfig.domain,
         media: inboundMedia,
         ...(courtesyOnly ? { courtesyOnly: true } : {}),
+        ...(ordinaryUnknownRecoveryCandidate ? { sms_reply_eligible: true } : {}),
       }),
     }).returning(['id', 'created_at']).catch(() => {
       sourcePersistenceFailed = true;
@@ -1348,7 +1356,7 @@ router.post('/sms', async (req, res) => {
               conversationalContext: true,
               metadata: { fromNumber: To },
             });
-            aiAnswered = sendResult.sent === true;
+            aiAnswered = sendResult.sent === true && sendResult.deliveryOutcome !== 'not_sent';
             if (!sendResult.sent) {
               // PII rule: never log full phone in plaintext. Mask to last 4
               // digits — enough for operator debugging via audit log
@@ -1404,6 +1412,16 @@ router.post('/sms', async (req, res) => {
       logger.info('[sms-intent] SMS reaction detected; skipping auto-reply');
     } else if (courtesyOnly && aiAutoReplyOn) {
       logger.info('[sms-intent] courtesy-only closer; skipping auto-reply');
+    }
+
+    if (ordinaryUnknownRecoveryCandidate && aiAnswered) {
+      // Only an accepted AI answer retires the conservative pre-ACK stamp.
+      // A failed write leaves at worst one recoverable human bell, never an
+      // invisible first contact. Retry once for a transient DB failure.
+      const narrow = () => db('sms_log').where({ direction: 'inbound', twilio_sid: MessageSid })
+        .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ sms_reply_eligible: false, sms_reply_ai_answered: true })]) });
+      await narrow().catch(() => narrow()).catch((err) =>
+        logger.warn('[twilio-webhook] AI answer eligibility narrowing failed', { code: err.code || 'unknown' }));
     }
 
     // Unknown senders (and a known customer whose bell above did not land)

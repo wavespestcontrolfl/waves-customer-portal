@@ -230,6 +230,22 @@ test('a delivered non-escalated AI reply does not ring or consume the alert wind
   expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
   expect(triggerNotification).not.toHaveBeenCalled();
   expect((await storedMetadata()).sms_reply_alerted).toBeUndefined();
+  expect(JSON.parse(mockState.smsLogInsertPayloads[0].metadata).sms_reply_eligible).toBe(true);
+  expect((await storedMetadata()).sms_reply_eligible).toBe(false);
+});
+
+test('ordinary unknown text is recoverable from its pre-ACK insert when AI does not answer', async () => {
+  processMessage.mockResolvedValue({ reply: '', escalated: true });
+  await receive();
+  expect(JSON.parse(mockState.smsLogInsertPayloads[0].metadata).sms_reply_eligible).toBe(true);
+  expect((await storedMetadata()).sms_reply_eligible).toBe(true);
+});
+
+test('a suppressed AI send cannot retire the human-alert candidate', async () => {
+  sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'not_sent', providerMessageId: 'template-disabled' });
+  await receive();
+  expect(triggerNotification).toHaveBeenCalledWith('sms_reply', expect.any(Object), expect.any(Object));
+  expect((await storedMetadata()).sms_reply_eligible).toBe(true);
 });
 
 test.each(['escalated', 'no reply', 'model failure', 'blocked send', 'send failure'])('rings when the AI produces %s', async (outcome) => {
