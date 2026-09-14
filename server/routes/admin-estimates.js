@@ -413,10 +413,19 @@ async function publishedGroupLinks(database, estimate, { lock = false } = {}) {
     .whereIn('status', ['sent', 'viewed', 'expired']);
   if (lock) query = query.forUpdate();
   const rows = await query.select();
-  return (Array.isArray(rows) ? rows : []).filter((candidate) => (candidate.sent_at || candidate.viewed_at)
-    && candidate.disposition !== 'expired_unsent'
-    && !candidate.price_locked_at
-    && !estimateOffCustomerSurface(candidate));
+  const published = [];
+  for (const candidate of Array.isArray(rows) ? rows : []) {
+    if (!(candidate.sent_at || candidate.viewed_at)
+      || candidate.disposition === 'expired_unsent'
+      || candidate.price_locked_at
+      || estimateOffCustomerSurface(candidate)) continue;
+    // The public /data view applies this same durable call-side verdict. An
+    // estimate-side marker can be absent when a call quarantine write fails;
+    // that row must neither lengthen a delivered link nor receive a grant.
+    if (await callSideBlockForEstimateData(database, parseEstimateData(candidate.estimate_data))) continue;
+    published.push(candidate);
+  }
+  return published;
 }
 
 function publishedOfferExpiry(row) {
@@ -434,8 +443,10 @@ async function extendPublishedGroupLinks(trx, estimate) {
     .filter(Boolean).reduce((latest, at) => (!latest || at > latest ? at : latest), null);
   for (const link of links) {
     const promised = groupLinkViewableThrough(link);
-    const ownExpiry = publishedOfferExpiry(link);
-    if (through && (!ownExpiry || through > ownExpiry) && (!promised || through > promised)) {
+    // Persist the floor even when this link currently owns the longest offer:
+    // a later edit can shorten that offer without shortening its delivered
+    // token's earlier navigation promise.
+    if (through && (!promised || through > promised)) {
       await trx('estimates').where({ id: link.id, estimate_group_id: estimate.estimate_group_id }).update({
         estimate_data: trx.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ groupLinkViewableThrough: through.toISOString() })]),
         updated_at: trx.fn.now(),
