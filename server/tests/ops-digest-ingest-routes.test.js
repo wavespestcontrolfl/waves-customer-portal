@@ -8,6 +8,7 @@
 const mockNotifyAdmin = jest.fn();
 const mockResolve = jest.fn();
 const mockLockCalls = [];
+const mockObservationUpdates = [];
 const mockStanding = { row: null };
 const mockClean = { row: null, error: null };
 jest.mock('../models/db', () => {
@@ -21,7 +22,7 @@ jest.mock('../models/db', () => {
       }
       return mockStanding.row;
     });
-    b.update = jest.fn(async () => 1);
+    b.update = jest.fn(async (changes) => { if (table === 'notifications') mockObservationUpdates.push(changes); return 1; });
     return b;
   };
   const trx = jest.fn((table) => builder(table));
@@ -75,6 +76,7 @@ beforeEach(() => {
   mockNotifyAdmin.mockReset();
   mockResolve.mockReset();
   mockLockCalls.length = 0;
+  mockObservationUpdates.length = 0;
   mockStanding.row = null;
   mockClean.row = null;
   mockClean.error = null;
@@ -265,6 +267,9 @@ describe('bell write', () => {
     mockNotifyAdmin.mockResolvedValue({ id: 'n-read', deduped: true });
     await post(payload);
     expect(mockNotifyAdmin.mock.calls[0][3].dedupeVersion).toBeUndefined();
+    expect(mockObservationUpdates).toHaveLength(1);
+    expect(Object.keys(mockObservationUpdates[0])).toEqual(['metadata']);
+    expect(Date.parse(mockObservationUpdates[0].metadata.bindings[0])).toBeGreaterThan(Date.parse(stamp));
   });
 
   test('a LATER run raises the observation and so rewrites the standing row', async () => {
