@@ -185,3 +185,18 @@ test('a caller acknowledgment does not discard the outstanding card request', ()
     { kind: 'agent', text: 'I got 4242.' },
   ])).toBe('fail');
 });
+
+
+test.each([
+  [['4242.', '8812.'], '8812.', 'fail'],
+  [['4242.', '8812.'], '4242.', 'fail'],
+  [['Give me one moment.', '8812, thank you.'], '8812.', 'fail'],
+  [['My billing ZIP is 34285.', '8812.'], '34285.', 'pass'],
+  [['4242.', 'My billing ZIP is 34285.', '8812.'], '8812.', 'fail'],
+])('an outstanding card request collects consecutive caller chunks: %s', (answers, reply, expected) => {
+  expect(cardStatus([
+    { kind: 'agent', text: 'What is your card number?' },
+    ...answers.map((text) => ({ kind: 'caller', text })),
+    { kind: 'agent', text: reply },
+  ])).toBe(expected);
+});
