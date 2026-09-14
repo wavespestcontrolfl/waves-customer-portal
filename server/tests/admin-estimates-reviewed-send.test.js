@@ -738,3 +738,38 @@ describe('fixed bid deadline at the provider handoff (GH codex P2 r4 on #4309)',
     expect(email.sendTemplate).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('grouped send claim uses the locked anchor offer', () => {
+  beforeEach(() => {
+    row.estimate_group_id = 'synthetic-group';
+    row.estimate_data = { proposal: { enabled: true, validThrough: '2099-12-21', buildings: [] } };
+    // Knex's unresolved query builder is awaited for sibling enumeration.
+    db.mockImplementation((table) => {
+      const builder = estimateDatabase(table);
+      builder.orWhereIn = jest.fn(() => builder);
+      builder.then = (resolve, reject) => builder.select().then(resolve, reject);
+      return builder;
+    });
+  });
+
+  test.each(['2099-12-31', '2099-12-11'])('a proposal save to %s before the group lock rejects a stale unversioned send', async (validThrough) => {
+    const preSaveRead = structuredClone(row);
+    db.transaction.mockImplementationOnce(async (callback) => {
+      // The authoring write commits after the caller read and before the
+      // group advisory lock. Legacy direct sends have no edit-version pin.
+      dataOf().proposal.validThrough = validThrough;
+      return callback(db);
+    });
+    await expect(router.sendEstimateNow(preSaveRead, 'email', { callerPreClaimed: true }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'ESTIMATE_REVIEW_STALE' });
+    expect(email.sendTemplate).not.toHaveBeenCalled();
+    expect(row.expires_at).toBeUndefined();
+    expect(dataOf().proposal.validThrough).toBe(validThrough);
+  });
+
+  test('an unchanged unversioned grouped send still publishes its authored deadline', async () => {
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(result.channels.email.ok).toBe(true);
+    expect(row.expires_at.toISOString()).toBe('2099-12-22T04:59:59.999Z');
+  });
+});
