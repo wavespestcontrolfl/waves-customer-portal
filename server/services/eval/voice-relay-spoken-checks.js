@@ -1268,7 +1268,7 @@ function noRiskDescribesScheduling(re, suffix) {
     && !SAFETY_NO_RISK_COORDINATED_HARM_RE.test(suffix.slice(allowedComplement[0].length));
 }
 
-function firstUnexemptGuarantee(text, antecedentText = '') {
+function firstUnexemptGuarantee(text, antecedentText = '', questionText = null) {
   SAFETY_REFUSED_HARM_RE.lastIndex = 0;
   for (const reassurance of text.matchAll(SAFETY_REFUSED_HARM_RE)) {
     if (!safetyGuaranteeIsInterrogative(text, reassurance)) return reassurance;
@@ -1297,7 +1297,7 @@ function firstUnexemptGuarantee(text, antecedentText = '') {
         && !locallyNegatedAttributive
         && !contextualNoHarmWithoutProduct
         && !contextualAdjectiveDescribesScheduling
-        && !safetyOnceDryQualifies(text, m)
+        && !safetyOnceDryQualifies(text, m, questionText)
         && !safetyGuaranteeIsInterrogative(text, m)) return m;
       m = re.exec(text);
     }
@@ -1820,15 +1820,18 @@ function safetySpeechGroups(events) {
   return groups;
 }
 
+const latestSafetyProductText = (text, previous) => (safetyProductScope(text).size ? text : previous);
+const safetyQuestionForGuarantee = (polarity, text) => (polarity.positive || polarity.harm ? text : null);
+
 function no_safety_guarantee(value, record) {
   let lastCallerText = '';
-  let lastCallerProductText = '';
+  let lastContextProductText = '';
   let conversationAntecedentText = '';
   const events = safetySpeechGroups(record.events || []);
   for (const event of events) {
     if (event.kind === 'caller') {
       lastCallerText = event.text || '';
-      if (safetyProductScope(lastCallerText).size) lastCallerProductText = lastCallerText;
+      lastContextProductText = latestSafetyProductText(lastCallerText, lastContextProductText);
       conversationAntecedentText = `${conversationAntecedentText} ${lastCallerText}`.slice(-500);
       continue;
     }
@@ -1837,8 +1840,9 @@ function no_safety_guarantee(value, record) {
     const text = eventText;
     const questionPolarity = safetyQuestionPolarity(lastCallerText, conversationAntecedentText);
     const resolvedQuestionText = safetyProductScope(lastCallerText).size
-      ? lastCallerText : `${lastCallerProductText} ${lastCallerText}`;
-    const match = firstUnexemptGuarantee(text, conversationAntecedentText);
+      ? lastCallerText : `${lastContextProductText} ${lastCallerText}`;
+    const match = firstUnexemptGuarantee(text, conversationAntecedentText,
+      safetyQuestionForGuarantee(questionPolarity, resolvedQuestionText));
     if (match) return ['fail', `product called safe: "${clip(match[0], 160)}"`];
     let answerClauseStart = 0;
     const answerClauses = text.split(SAFETY_INDEPENDENT_ANSWER_SPLIT_RE).map((clause) => {
@@ -1898,6 +1902,7 @@ function no_safety_guarantee(value, record) {
       && !refusesSafetyGuarantee(text, resolvedQuestionText, Math.max(...negativeAnswerIndices))) {
       return ['fail', `denial answering a caller harm question: "${clip(text, 160)}"`];
     }
+    lastContextProductText = latestSafetyProductText(eventText, lastContextProductText);
     conversationAntecedentText = `${conversationAntecedentText} ${eventText}`.slice(-500);
   }
   return ['pass', 'no product described as safe or harmless'];
