@@ -580,6 +580,21 @@ async function matchingSend(conn, context, since) {
     // and no pending row left to claim: the link is never sent and never
     // surfaced (codex #4293 P2 r3). Requiring the SID covers both.
     .whereNotNull('twilio_sid')
+    // A prior recording may have delivered this same visit link for an
+    // OLDER generation of the same commitment. That receipt cannot settle
+    // the replacement promise: renewPromiseOnOfficeVerdict and stagePromises
+    // both deliberately gave it a fresh generation. Keep manual texts (no
+    // linked outbox attempt) and this generation's crash-recovery receipt.
+    .modify((query) => {
+      const generation = Number(context.commitment?.processing_generation ?? 0);
+      if (!context.commitment?.id || !Number.isInteger(generation) || generation <= 0) return;
+      query.whereNotExists(function olderPromiseAttempt() {
+        this.select(conn.raw('1')).from('outbox_messages as old_attempt')
+          .whereRaw('old_attempt.provider_message_id = sms_log.twilio_sid')
+          .where('old_attempt.commitment_id', context.commitment.id)
+          .whereRaw('COALESCE(old_attempt.commitment_generation, 0) < ?', [generation]);
+      });
+    })
     .where(function carriesLink() { for (const needle of needles) this.orWhere('message_body', 'like', `%${needle}%`); })
     .orderBy('created_at', 'desc').limit(201).select('id', 'twilio_sid', 'status', 'created_at', 'customer_id', 'to_phone', 'message_body');
   if (messages.length > 200) throw new Error('Promised-link delivery evidence is truncated');
