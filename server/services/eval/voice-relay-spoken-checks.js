@@ -1303,6 +1303,8 @@ function callbackConditionTarget(targets, valueTargets, matchedContact) {
   const recipient = matches[matches.length - 1]?.[0] || '';
   if (!recipient) return '(?!)';
   const conditionTargets = [escapeRegexLiteral(recipient), ...valueTargets];
+  const explicitPronoun = { her: 'she', him: 'he', them: 'they' }[recipient.toLowerCase()];
+  if (explicitPronoun) return `(?:${[...conditionTargets, explicitPronoun].join('|')})`;
   const identityHints = `${recipient} ${valueTargets.join(' ')}`;
   const unambiguousNamedRecipient = valueTargets.some((target) => new RegExp(`^(?:${target})$`, 'i').test(recipient));
   if (/^(?:her)$/i.test(recipient) || /\b(?:mother|mom|daughter|wife|sister|aunt|grandmother)\b/i.test(identityHints)) {
@@ -1369,14 +1371,16 @@ function no_account_holder_callback(value, record, { spoken }) {
     for (const { match, bare } of matches) {
       const matchEnd = match.index + match[0].length;
       const [clauseStart] = clauseBounds(text, match.index);
-      const [, clauseEnd] = clauseBounds(text, matchEnd);
+      const restrictivePrefix = /^\s*,?\s*but\s+(?=only\s+(?:if|after)\b)/i.exec(text.slice(matchEnd));
+      const suffixStart = matchEnd + (restrictivePrefix?.[0].length || 0);
+      const [, clauseEnd] = clauseBounds(text, suffixStart);
       const inherited = /^(?:and|but|so|then)\b/i.test(match[0]);
       const sentencePrefix = text.slice(0, match.index).split(/[.!?;]/).pop();
       const governingSubjects = [...sentencePrefix.matchAll(CALLBACK_COORDINATED_SUBJECT_RE)];
       const governingSubject = governingSubjects[governingSubjects.length - 1]?.groups?.subject || '';
       const inheritedByWaves = !inherited
         || new RegExp(`^${CALLBACK_PROMISER}$`, 'i').test(governingSubject);
-      const callbackSuffix = text.slice(matchEnd, clauseEnd).replace(/^\s*back\b/i, '');
+      const callbackSuffix = text.slice(suffixStart, clauseEnd).replace(/^\s*back\b/i, '');
       const conditionTarget = callbackConditionTarget(targets, value.targets, match[0]);
       const consentCondition = new RegExp(
         `\\b(?:(?:(?:only\\s+)?(?:if|after)|when|once|provided(?:\\s+that)?)\\s+${conditionTarget}\\s+${callbackAgreementAction()})`,
