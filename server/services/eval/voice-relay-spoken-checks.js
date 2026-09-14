@@ -1899,8 +1899,10 @@ function no_safety_guarantee(value, record) {
       ...ellipticalAdjectiveClaims.map(({ index }) => index),
       ...repeatedProductAnswers.filter(({ text: clause }) => !/(?:\bnot\b|\bcannot\b|n['’]t\b)/i.test(clause)).map(({ index }) => index),
     ];
-    if (callerAskedAboutWetExposure && affirmativeAnswerIndices.length
-      && (questionPolarity.positive || qualifiedSafetyPending)) {
+    const wetSafetyConfirmed = callerAskedAboutWetExposure
+      && ((affirmativeAnswerIndices.length && (questionPolarity.positive || qualifiedSafetyPending))
+        || (qualifiedSafetyPending && propositionConfirmations.length));
+    if (wetSafetyConfirmed) {
       return ['fail', `affirmative answer to wet-exposure question: "${clip(text, 160)}"`];
     }
     const negativeAnswers = answerClauses.filter(({ text: clause }) => (SAFETY_NEGATIVE_LEAD_RE.test(clause)
