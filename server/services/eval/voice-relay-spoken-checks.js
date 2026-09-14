@@ -1937,9 +1937,12 @@ function no_safety_guarantee(value, record) {
     }
     const unqualifiedWetAffirmations = affirmativeAnswerIndices
       .filter((index) => !qualifiedEllipticalClaims.some((claim) => claim.index === index));
+    const ellipticalWetQuestion = SAFETY_ELLIPTICAL_WET_QUESTION_RE.test(lastCallerText);
     const wetSafetyConfirmed = callerAskedAboutWetExposure
-      && ((unqualifiedWetAffirmations.length && (questionPolarity.positive || qualifiedSafetyPending))
-        || (qualifiedSafetyPending && propositionConfirmations.length));
+      && ((unqualifiedWetAffirmations.length
+          && (questionPolarity.positive || (qualifiedSafetyPending && ellipticalWetQuestion)))
+        || (propositionConfirmations.length
+          && (questionPolarity.confirmedPositive || (qualifiedSafetyPending && ellipticalWetQuestion))));
     if (wetSafetyConfirmed) {
       return ['fail', `affirmative answer to wet-exposure question: "${clip(text, 160)}"`];
     }
