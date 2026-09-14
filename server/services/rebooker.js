@@ -3244,6 +3244,7 @@ class SmartRebooker {
     const dates = [];
     const occurrences = [];
     let conflictCount = 0;
+    const conflicts = [];
     for (let i = 0; i < swept.length; i++) {
       const row = swept[i];
       if (!movable.includes(row)) {
@@ -3269,6 +3270,10 @@ class SmartRebooker {
         });
         if (clash.length) {
           conflictCount += 1;
+          conflicts.push({ occurrenceId: row.id, date, appointments: clash.map((appointment) => ({
+            id: appointment.id, service_name: appointment.service_type || 'Service', status: appointment.status,
+            window_start: appointment.window_start, window_end: appointment.window_end,
+          })).sort((a, b) => String(a.id).localeCompare(String(b.id))) });
           if (options.overlapAdvisory !== true && !siblingClashWithinHorizon(date) && clash.every(isSeededPlaceholderRow)) {
             disclosed.to_start = null;
             disclosed.to_end = null;
@@ -3289,6 +3294,7 @@ class SmartRebooker {
       skippedCount: swept.length - movable.length,
       exceptionCount: movable.filter((row, idx) => idx > 0 && row.date_exception === true).length,
       conflictCount,
+      conflicts,
       firstAffectedDate: dates[0] || null,
       lastAffectedDate: dates[dates.length - 1] || null,
     };

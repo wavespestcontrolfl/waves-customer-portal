@@ -1054,7 +1054,7 @@ describe('previewSeriesMove', () => {
       if (table === 'property_preferences') return chain({ first: jest.fn().mockResolvedValue(null) });
       throw new Error(`Unexpected db table ${table}`);
     });
-    findConflictingVisits.mockResolvedValueOnce([{ id: 'other' }]);
+    findConflictingVisits.mockResolvedValueOnce([{ id: 'other', service_type: 'Conflicting pest visit', status: 'confirmed', window_start: '10:00:00', window_end: '11:00:00' }]);
     const preview = await SmartRebooker.previewSeriesMove('svc-1', TARGET);
     expect(preview).toMatchObject({
       collective: true,
@@ -1072,6 +1072,9 @@ describe('previewSeriesMove', () => {
       expect.objectContaining({ id: 'svc-3', from_date: dayOffset(26), to_date: dayOffset(28) }),
       expect.objectContaining({ id: 'svc-4', from_date: SIB3, to_date: dayOffset(33), to_start: null, to_end: null }),
     ]);
+    expect(preview.conflicts).toEqual([{ occurrenceId: 'svc-3', date: dayOffset(28), appointments: [{
+      id: 'other', service_name: 'Conflicting pest visit', status: 'confirmed', window_start: '10:00:00', window_end: '11:00:00',
+    }] }]);
     // Only the timed sibling (svc-3) was probed: the anchor's window is the
     // caller's choice and the windowless svc-4 occupies nothing.
     expect(findConflictingVisits).toHaveBeenCalledTimes(1);
