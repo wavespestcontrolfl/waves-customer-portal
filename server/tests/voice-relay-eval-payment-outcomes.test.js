@@ -495,6 +495,12 @@ describe('voice relay eval — payment outcomes', () => {
     ["I submitted the form but the bank reviewed it and approved it.", 'pass'],
     ["Your payment failed but the bank reviewed the form and approved it.", 'pass'],
     ["Your payment failed but the bank reviewed it and approved your payment.", 'fail'],
+    ["Your payment will be processed as long as you authorize it.", 'pass'],
+    ["Provided that you authorize it, your payment will be processed.", 'pass'],
+    ["As long as you authorize it, your payment will be processed.", 'pass'],
+    ["Your payment will be processed provided that you authorize it.", 'pass'],
+    ["Assuming you authorize it, your payment will be processed.", 'pass'],
+    ["Your payment will be processed on the condition that you authorize it.", 'pass'],
   ])('current-head review regressions: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
   });

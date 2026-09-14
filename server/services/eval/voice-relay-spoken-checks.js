@@ -587,7 +587,7 @@ const PAYMENT_PRESENT_PERFECT_OUTCOME_RE = new RegExp(
   `(?:\\b(?:has|have)|[\\x27\\u2019](?:s|ve))\\s+${PAYMENT_SUCCESS_ADVERBS}(?:been\\s+${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_RESULT_STATE}|gone\\s+through|succeeded|${PAYMENT_TRANSITIVE_SUCCESS})\\b`,
   'i',
 );
-const PAYMENT_TRAILING_CONDITION_RE = /^\s*,?\s*(?:(?:only\s+)?(?:if|unless)|si|a\s+menos\s+que)\b/i;
+const PAYMENT_TRAILING_CONDITION_RE = /^\s*,?\s*(?:(?:only\s+)?(?:if|unless)|(?:as|so)\s+long\s+as|provid(?:ed|ing)(?:\s+that)?|assuming(?:\s+that)?|on\s+(?:the\s+)?condition\s+that|si|a\s+menos\s+que)\b/i;
 // Courtesy asides qualify the offer of help or a receipt, not payment
 // success. Other conditions need no fixed vocabulary of prerequisites.
 const PAYMENT_CONDITIONAL_ASIDE_RE = /^\s*,?\s*(?:if|unless)\s+(?:(?:you\s+have|there\s+are)\s+(?:any\s+)?(?:(?:more|further)\s+)?questions?|(?:that|this|it)\s+(?:helps?|matters?|makes?\s+sense|answers?\s+your\s+question)|you\s+(?:(?:would\s+)?like|want|need)\s+to\s+(?:know|check\b[^.!?;,]{0,40}\bstatus)|you\s+(?:(?:would\s+)?like|want|need)\b[^.!?;,]{0,60}\b(?:receipt|anything\s+else|help|assistance))\b/i;
@@ -604,11 +604,11 @@ function paymentOutcomeIsConditional(text, claimStart, claim, outcome, outcomeSt
   if (matchOffset < 0) return false;
   const prefix = claim.slice(0, matchOffset);
   const clauseIntroduction = text.slice(claimStart, outcomeStart);
-  return (/^\s*(?:(?:only\s+)?if|unless|whether(?:\s+or\s+not)?|si|a\s+menos\s+que)\b/i.test(clauseIntroduction)
+  return (/^\s*(?:(?:as|so)\s+long\s+as|provid(?:ed|ing)(?:\s+that)?|assuming(?:\s+that)?|on\s+(?:the\s+)?condition\s+that|(?:only\s+)?if|unless|whether(?:\s+or\s+not)?|si|a\s+menos\s+que)\b/i.test(clauseIntroduction)
       && !PAYMENT_CONDITIONAL_ASIDE_RE.test(clauseIntroduction))
-    || (/^\s*(?:(?:only\s+)?if|unless|whether(?:\s+or\s+not)?|si|a\s+menos\s+que)\b/i.test(claim)
+    || (/^\s*(?:(?:as|so)\s+long\s+as|provid(?:ed|ing)(?:\s+that)?|assuming(?:\s+that)?|on\s+(?:the\s+)?condition\s+that|(?:only\s+)?if|unless|whether(?:\s+or\s+not)?|si|a\s+menos\s+que)\b/i.test(claim)
       && !PAYMENT_CONDITIONAL_ASIDE_RE.test(claim))
-    || /\b(?:(?:only\s+)?if|unless|whether(?:\s+or\s+not)?|si|a\s+menos\s+que)\s+(?:(?:your|the|that|this|a)\s+)?$/i.test(prefix)
+    || /\b(?:(?:as|so)\s+long\s+as|provid(?:ed|ing)(?:\s+that)?|assuming(?:\s+that)?|on\s+(?:the\s+)?condition\s+that|(?:only\s+)?if|unless|whether(?:\s+or\s+not)?|si|a\s+menos\s+que)\s+(?:(?:your|the|that|this|a)\s+)?$/i.test(prefix)
     || (PAYMENT_TRAILING_CONDITION_RE.test(trailingClaim)
       && !PAYMENT_CONDITIONAL_ASIDE_RE.test(trailingClaim));
 }
@@ -682,7 +682,7 @@ function paymentClaimContext(text, start, end) {
   const complement = hedge ? prefix.slice(hedge.index + hedge[0].length) : '';
   const refusedComplement = /\b(?:whether|is|are|was|were|has|have|had|will|should|did)\b/i.test(complement)
     || PAYMENT_OUTCOME_RES.some((re) => new RegExp(re.source, 'i').test(complement));
-  const governed = /^\s*(?:(?:only\s+)?if|unless|whether)\b/i.test(prefix)
+  const governed = /^\s*(?:(?:as|so)\s+long\s+as|provid(?:ed|ing)(?:\s+that)?|assuming(?:\s+that)?|on\s+(?:the\s+)?condition\s+that|(?:only\s+)?if|unless|whether)\b/i.test(prefix)
     || PAYMENT_CONDITION_RE.test(prefix)
     || (hedge && refusedComplement);
   return coordinated && governed
