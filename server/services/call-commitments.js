@@ -659,26 +659,49 @@ function parseRescheduleSubject(value) {
   try { return typeof value === 'string' ? JSON.parse(value) : value; } catch { return null; }
 }
 
+function appointmentConstraints(subject) {
+  const parts = { year: new Set(), month: new Set(), day: new Set(), weekday: new Set() };
+  const date = currentVisitDate(subject);
+  if (date) {
+    const [year, month, day] = date.split('-').map(Number);
+    parts.year.add(year);
+    parts.month.add(month);
+    parts.day.add(day);
+    parts.weekday.add(new Date(Date.UTC(year, month - 1, day)).getUTCDay());
+  }
+  for (const claim of Array.isArray(subject?.date_claims) ? subject.date_claims : []) {
+    if (claim?.binding !== 'appointment') continue;
+    for (const part of Object.keys(parts)) if (Number.isInteger(claim[part])) parts[part].add(claim[part]);
+  }
+  return parts;
+}
+
 // A prior quote-family key may hold delivery/office history. Compare the
 // known CURRENT-visit fields rather than requiring byte-identical JSON:
 // a reprocess may add a service/address or a richer date claim.
 function legacyRescheduleMatches(oldSubject, newSubject) {
   const old = parseRescheduleSubject(oldSubject);
   if (!old || !newSubject) return false;
-  const oldFields = [currentVisitDate(old), normalizeForMatch(old.service), normalizeForMatch(old.address)];
-  const newFields = [currentVisitDate(newSubject), normalizeForMatch(newSubject.service), normalizeForMatch(newSubject.address)];
-  if (oldFields.some(Boolean)) return oldFields.every((value, index) => !value || value === newFields[index]);
-  const oldClaims = rescheduleSubjectFingerprint(old);
-  return Boolean(oldClaims) && oldClaims === rescheduleSubjectFingerprint(newSubject);
+  const oldDates = appointmentConstraints(old);
+  const newDates = appointmentConstraints(newSubject);
+  for (const part of Object.keys(oldDates)) {
+    if (oldDates[part].size > 1 || newDates[part].size > 1) return false;
+    if (oldDates[part].size && !newDates[part].has([...oldDates[part]][0])) return false;
+  }
+  const oldFields = [normalizeForMatch(old.service), normalizeForMatch(old.address)];
+  const newFields = [normalizeForMatch(newSubject.service), normalizeForMatch(newSubject.address)];
+  const covered = oldFields.every((value, index) => !value || value === newFields[index]);
+  return covered && (oldFields.some(Boolean) || Object.values(oldDates).some((values) => values.size));
 }
 
-// Full current dates that disagree prove distinct visits. An unknown date,
-// or the same date with a changed service/address, is not proof of either
-// identity, so a new row in that case is parked below for office review.
+// Disjoint spoken/current appointment components prove different visits,
+// even when neither side has a full year. Missing components, or the same
+// date with changed service/address, prove neither identity and park below.
 function distinctCurrentVisit(oldSubject, newSubject) {
-  const oldDate = currentVisitDate(parseRescheduleSubject(oldSubject));
-  const newDate = currentVisitDate(newSubject);
-  return Boolean(oldDate && newDate && oldDate !== newDate);
+  const oldDates = appointmentConstraints(parseRescheduleSubject(oldSubject));
+  const newDates = appointmentConstraints(newSubject);
+  return Object.keys(oldDates).some((part) => oldDates[part].size && newDates[part].size
+    && ![...oldDates[part]].some((value) => newDates[part].has(value)));
 }
 
 // This marker is written by reconciliation only; the model schema rejects

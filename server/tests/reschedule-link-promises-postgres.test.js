@@ -165,6 +165,25 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
     }
   });
 
+  test('conflicting partial appointment dates cannot inherit another promise dismissal', async () => {
+    const callId = randomUUID();
+    const quote = 'I will text you a reschedule link.';
+    await mockPg('call_log').insert({ id: callId, direction: 'inbound', processing_generation: 0 });
+    const make = (day) => ({ party: 'waves', kind: 'send_reschedule_link', description: 'Send the link', confidence: 0.95,
+      evidence: [{ quote, speaker: 'agent' }], subject: { service: 'Pest',
+        date_claims: [{ binding: 'appointment', month: 9, day, quote: `The Pest September ${day} appointment.` }] } });
+    await upsertCommitments(mockPg, callId, [make(20)], { generation: 0, procGeneration: 0 });
+    const old = await mockPg('call_commitments').where({ call_log_id: callId }).first();
+    await applyHumanUpdate(mockPg, old.id, { action: 'dismiss', reviewedBy: randomUUID() });
+    await upsertCommitments(mockPg, callId, [make(27)], { generation: 1, procGeneration: 0 });
+    const rows = await mockPg('call_commitments').where({ call_log_id: callId });
+    expect(rows).toHaveLength(2);
+    expect(rows.find((row) => row.id === old.id)).toMatchObject({ status: 'dismissed' });
+    const next = rows.find((row) => row.id !== old.id);
+    expect(next).toMatchObject({ status: 'open', human_state: null });
+    expect(next.subject.date_claims[0]).toMatchObject({ month: 9, day: 27 });
+  });
+
   test('the persisted activation boundary uses the DATABASE transaction clock, not a JS wall-clock sample — a commitment written in the SAME transaction is never before its own boundary (codex #4293 P1)', async () => {
     const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
     const priorActivatedAt = process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT;

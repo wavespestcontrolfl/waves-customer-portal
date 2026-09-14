@@ -510,6 +510,27 @@ describe('reschedule-link upsert identity across quote-only rows', () => {
     expect(reprocessed.insertSql).toMatch(/subject = CASE WHEN call_commitments\.human_state IS NULL/);
     expect(reprocessed.insertSql).not.toMatch(/status = EXCLUDED\.status/);
   });
+  test('different partial appointment days do not borrow a dismissed same-service key', async () => {
+    const prior = { ...item('2026-09-20'), subject: { service: 'Pest Service',
+      date_claims: [{ binding: 'appointment', month: 9, day: 20, quote: 'September 20' }] } };
+    const next = { ...prior, subject: { service: 'Pest Service',
+      date_claims: [{ binding: 'appointment', month: 9, day: 27, quote: 'September 27' }] } };
+    const oldRows = [{ commitment_key: commitmentKey(prior), subject: prior.subject, status: 'dismissed', human_state: 'dismissed' }];
+    const result = await write(oldRows, [next]);
+    expect(result.inserts[0][1]).toBe(commitmentKey(next));
+    expect(result.inserts[0][1]).not.toBe(oldRows[0].commitment_key);
+    expect(JSON.parse(result.inserts[0].at(-1)).date_claims).toEqual(next.subject.date_claims);
+  });
+  test('missing an old partial appointment component parks instead of aliasing', async () => {
+    const prior = { ...item('2026-09-20'), subject: { service: 'Pest Service',
+      date_claims: [{ binding: 'appointment', month: 9, day: 20, quote: 'September 20' }] } };
+    const lessSpecific = { ...prior, subject: { service: 'Pest Service',
+      date_claims: [{ binding: 'appointment', month: 9, quote: 'September' }] } };
+    const oldRows = [{ commitment_key: commitmentKey(prior), subject: prior.subject, status: 'dismissed', human_state: 'dismissed' }];
+    const result = await write(oldRows, [lessSpecific]);
+    expect(result.inserts[0][1]).not.toBe(oldRows[0].commitment_key);
+    expect(JSON.parse(result.inserts[0].at(-1))).toMatchObject({ date_claims: null, identity_unresolved: true });
+  });
   test('an exact existing subject key wins even when another prior row overlaps it', async () => {
     const sparse = item('2026-09-20');
     const richer = { ...sparse, subject: { ...sparse.subject, service: 'Pest Service' } };
