@@ -1767,6 +1767,7 @@ function safetyProductDetailCovers(claimText, detailText) {
   if ([...detailText.matchAll(SAFETY_PRODUCT_EXCLUSION_RE)]
     .some((exclusion) => SAFETY_GENERIC_PRODUCT_RE.test(exclusion[0]))) return false;
   if (!mentionedProducts.size) return true;
+  if (!claimedProducts.size && SAFETY_GENERIC_PRODUCT_RE.test(claimText)) return false;
   for (const exclusion of detailText.matchAll(SAFETY_PRODUCT_EXCLUSION_RE)) {
     for (const product of safetyProductScope(exclusion[0])) mentionedProducts.delete(product);
   }
@@ -1927,6 +1928,11 @@ function no_safety_guarantee(value, record) {
       !unqualifiedEllipticalAnswer,
       !dryingConditionWithdrawn,
     ].every(Boolean);
+    if (unqualifiedEllipticalAnswer
+      && (SAFETY_PRODUCT_MENTION_RE.test(`${conversationAntecedentText} ${text}`)
+        || SAFETY_BRAND_MENTION_RE.test(`${conversationAntecedentText} ${text}`))) {
+      return ['fail', `product called safe: "${clip(text, 160)}"`];
+    }
     const unqualifiedWetAffirmations = affirmativeAnswerIndices
       .filter((index) => !qualifiedEllipticalClaims.some((claim) => claim.index === index));
     const wetSafetyConfirmed = callerAskedAboutWetExposure
