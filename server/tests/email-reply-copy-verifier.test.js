@@ -23,6 +23,7 @@ describe('email reply customer-copy policy', () => {
     'each scheduled routine quarterly residential exterior preventive ongoing planned visit costs $98',
     '$98 per scheduled routine quarterly residential exterior preventive ongoing planned visit',
     'every scheduled visit is billed at $98', 'the rate per routine visit is $98',
+    'The $98 fee is per visit', 'Each visit has a $98 charge', 'We charge $98 on each visit',
   ])('rejects a visit-based pricing construction: %s', rejected);
 
   test.each([
@@ -30,6 +31,8 @@ describe('email reply customer-copy policy', () => {
     'Waves Lawn-Pest', 'Waves Lawn + Pest', 'Waves Lawn/Pest',
     'Waves Pest & Lawn', 'Waves Pest Control and Lawn', 'Waves Pest / Lawn',
     'Waves Pest Control & Lawn Care',
+    'Waves Pest Control LLC', 'Waves Pest Control Group', 'Waves Pest Control Florida',
+    'Waves Pest Control Pest Services',
   ])('rejects a retired brand name: %s', (brand) => rejected(`You contacted ${brand}.`));
 
   test.each([
@@ -39,6 +42,7 @@ describe('email reply customer-copy policy', () => {
     'The treatment is EPA-certified.', 'The treatment is EPA certified.',
     'The treatment is EPAcertified.',
     'The treatment is certified by the EPA.',
+    'The EPA has certified this treatment.', 'This product carries EPA certification.',
     'The EPA granted approval for this treatment.',
     'You can return to the treated area after 30 minutes.',
   ])('rejects canonical and EPA customer-copy claims: %s', rejected);
@@ -57,5 +61,14 @@ describe('email reply customer-copy policy', () => {
     'The Waves Pest Control lawn team will follow up.',
   ])('accepts a non-violating copy construction: %s', (copy) => {
     expect(verdict(copy)).toEqual({ ok: true, violations: [] });
+  });
+
+  test('applies only the explicit commercial-proposal price-unit exemption', () => {
+    const text = 'Service is $250 per visit under the commercial agreement.';
+    rejected(text);
+    expect(verifyEmailReplyCustomerCopy({ text, commercialProposal: true })).toEqual({ ok: true, violations: [] });
+    expect(verifyEmailReplyCustomerCopy({ text, commercialProposal: 'true' }).ok).toBe(false);
+    expect(verifyEmailReplyCustomerCopy({ text: 'The treatment is certified by the EPA.', commercialProposal: true }).ok)
+      .toBe(false);
   });
 });

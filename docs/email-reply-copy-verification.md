@@ -1,9 +1,15 @@
 # Email reply customer-copy policy
 
 `server/services/email/email-reply-copy-verifier.js` exports
-`verifyEmailReplyCustomerCopy({ text })`, returning `{ ok, violations }`.
+`verifyEmailReplyCustomerCopy({ text, commercialProposal = false })`, returning
+`{ ok, violations }`. Only explicit boolean `commercialProposal: true` exempts
+visit-price wording, matching the existing communications policy. A future
+caller must supply that context from verified proposal data, not draft text.
+Regulatory and company-name checks still apply to commercial proposals.
 It checks visit-based price units, retired company names, and existing
-report/customer regulatory copy. It reuses `findBannedCustomerCopy` and
+report/customer regulatory copy. It shares the existing previsit company-name
+patterns through `server/services/customer-company-name.js`; previsit matching
+is unchanged by that extraction. It reuses `findBannedCustomerCopy` and
 `reentrySafetyClaimFinding` rather than maintaining another list of their
 claims. Unicode dashes are folded before matching, so pasted punctuation
 does not change the outcome. A price per application and an unrelated
@@ -20,4 +26,4 @@ links, access codes, or prompt instructions. No runtime caller, model call,
 database write, or send authorization is included in this slice.
 
 Run the dedicated synthetic regressions from the repository root with Node
-20 and UTC: `TZ=UTC /opt/homebrew/opt/node@20/bin/node node_modules/jest/bin/jest.js --runInBand --no-coverage server/tests/email-reply-copy-verifier.test.js`.
+20 and UTC: `TZ=UTC node node_modules/jest/bin/jest.js --runInBand --no-coverage server/tests/email-reply-copy-verifier.test.js`.
