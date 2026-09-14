@@ -1255,6 +1255,13 @@ async function reconcileReceivedDepositToInvoice(estimateId) {
       }
 
       const appliedCents = Math.min(dueCents, cents(credit.amount));
+      // This invoice activates an annual-prepay term only when its normal
+      // payment path settles. settleZeroBalance deliberately refuses that
+      // term anchor, so consuming its entire balance here would leave a $0
+      // invoice and a permanently pending term with no replayable credit.
+      if (invoice.annual_prepay_term_id && appliedCents === dueCents) {
+        return { state: 'park', invoiceId: invoice.id, reason: 'annual_prepay_full_coverage' };
+      }
       const nextLines = [...lines, {
         description: 'Deposit credit (paid at acceptance)',
         quantity: 1,

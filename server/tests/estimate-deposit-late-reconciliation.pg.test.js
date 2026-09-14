@@ -251,6 +251,31 @@ async function addReceived(amount = 49) {
     expect(sentSnapshots).toEqual([{ status: 'prepaid', total: 0 }]);
   });
 
+  test('exact deposit coverage of an annual-prepay invoice parks before consuming the pending term credit', async () => {
+    const invoiceId = await insertInvoice({ total: 49 });
+    const termId = randomUUID();
+    await mockPg('annual_prepay_terms').insert({
+      id: termId, customer_id: f.customerId, source_estimate_id: f.estimateId,
+      prepay_invoice_id: invoiceId, term_start: '2099-01-01', term_end: '2099-12-31',
+      status: 'payment_pending',
+    });
+    await mockPg('invoices').where({ id: invoiceId }).update({ annual_prepay_term_id: termId });
+    await addReceived(49);
+
+    const first = await reconcileReceivedDepositToInvoice(f.estimateId);
+    const replay = await reconcileReceivedDepositToInvoice(f.estimateId);
+    expect(first).toMatchObject({ state: 'park', invoiceId, reason: 'annual_prepay_full_coverage' });
+    expect(replay).toMatchObject({ state: 'park', invoiceId, reason: 'annual_prepay_full_coverage' });
+    const invoice = await mockPg('invoices').where({ id: invoiceId }).first();
+    const term = await mockPg('annual_prepay_terms').where({ id: termId }).first();
+    const ledger = await mockPg('estimate_deposits').where({ estimate_id: f.estimateId }).first();
+    expect(invoice.status).toBe('sent');
+    expect(Number(invoice.total)).toBe(49);
+    expect(invoice.line_items.some((line) => line.category === 'deposit_credit')).toBe(false);
+    expect(term.status).toBe('payment_pending');
+    expect(Number(ledger.credited_amount)).toBe(0);
+  });
+
   test('a paid first invoice parks; a payer-billed invoice never takes homeowner credit', async () => {
     const id = await insertInvoice({ status: 'paid' });
     await addReceived();
