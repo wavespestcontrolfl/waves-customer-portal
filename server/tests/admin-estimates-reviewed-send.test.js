@@ -355,23 +355,58 @@ describe('commercial bid authoring', () => {
     expect(dataOf(anchor).groupLinkViewableThrough).toBe('2099-01-09T12:00:00.000Z');
     expect(anchor.expires_at.toISOString()).toBe('2099-01-03T12:00:00.000Z');
   });
-  test('a stale publication marker never extends an anchor from another group', async () => {
+  test('a proposal save preserves its locked publication marker and longer promised link window', async () => {
+    Object.assign(row, { status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'),
+      estimate_group_id: 'synthetic-group',
+      estimate_data: { proposal: proposal(), groupPublishedByEstimateId: row.id,
+        groupLinkViewableThrough: '2100-02-01T12:00:00.000Z' } });
+    const result = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-31' } });
+    expect(result.statusCode).toBe(200);
+    expect(dataOf().groupPublishedByEstimateId).toBe(row.id);
+    expect(dataOf().groupLinkViewableThrough).toBe('2100-02-01T12:00:00.000Z');
+    expect(row.expires_at.toISOString()).toBe('2100-01-01T04:59:59.999Z');
+  });
+  test.each([
+    ['missing', null],
+    ['stale', 'former-anchor'],
+  ])('a %s publication marker extends eligible delivered links in the current group only', async (_case, marker) => {
     const formerAnchor = savedEstimate({
       id: 'former-anchor', status: 'sent', estimate_group_id: 'former-group',
       sent_at: new Date('2026-01-02T12:00:00.000Z'),
       expires_at: new Date('2099-01-08T12:00:00.000Z'),
     });
-    groupRows.push(formerAnchor);
+    const currentAnchor = savedEstimate({ id: 'current-anchor', status: 'sent', estimate_group_id: 'current-group',
+      sent_at: new Date('2026-01-02T12:00:00.000Z'), expires_at: new Date('2099-01-08T12:00:00.000Z') });
+    const viewedOnlyAnchor = savedEstimate({ id: 'viewed-anchor', status: 'expired', estimate_group_id: 'current-group',
+      viewed_at: new Date('2026-01-02T12:00:00.000Z'), expires_at: new Date('2099-01-08T12:00:00.000Z') });
+    const withheld = ['draft', 'send_failed'].map((status) => savedEstimate({ id: `${status}-member`, status,
+      estimate_group_id: 'current-group', sent_at: new Date('2026-01-02T12:00:00.000Z') }));
+    const expiredUnsent = savedEstimate({ id: 'expired-unsent-member', status: 'expired', disposition: 'expired_unsent',
+      estimate_group_id: 'current-group', sent_at: new Date('2026-01-02T12:00:00.000Z') });
+    const held = savedEstimate({ id: 'held-member', status: 'sent', estimate_group_id: 'current-group',
+      sent_at: new Date('2026-01-02T12:00:00.000Z'),
+      estimate_data: { estimatorEngine: { reprice_pending_at: '2026-01-02T12:00:00.000Z' } } });
+    const archived = savedEstimate({ id: 'archived-member', status: 'sent', estimate_group_id: 'current-group',
+      sent_at: new Date('2026-01-02T12:00:00.000Z'), archived_at: new Date('2026-01-03T12:00:00.000Z') });
+    const invalidated = savedEstimate({ id: 'invalidated-member', status: 'sent', estimate_group_id: 'current-group',
+      sent_at: new Date('2026-01-02T12:00:00.000Z'),
+      estimate_data: { estimatorEngine: { linkage_invalidated_at: '2026-01-02T12:00:00.000Z' } } });
+    groupRows.push(formerAnchor, currentAnchor, viewedOnlyAnchor, ...withheld, expiredUnsent, held, archived, invalidated);
     Object.assign(row, {
       status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'),
       estimate_group_id: 'current-group',
-      estimate_data: { groupPublishedByEstimateId: formerAnchor.id, proposal: proposal() },
+      estimate_data: { ...(marker ? { groupPublishedByEstimateId: marker } : {}), proposal: proposal() },
     });
     const result = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-31' } });
     expect(result.statusCode).toBe(200);
     expect(row.expires_at.toISOString()).toBe('2100-01-01T04:59:59.999Z');
+    expect(dataOf(currentAnchor).groupLinkViewableThrough).toBe('2100-01-01T04:59:59.999Z');
+    expect(dataOf(viewedOnlyAnchor).groupLinkViewableThrough).toBe('2100-01-01T04:59:59.999Z');
     expect(dataOf(formerAnchor).groupLinkViewableThrough).toBeUndefined();
     expect(formerAnchor.expires_at.toISOString()).toBe('2099-01-08T12:00:00.000Z');
+    for (const candidate of [...withheld, expiredUnsent, held, archived, invalidated]) {
+      expect(dataOf(candidate).groupLinkViewableThrough).toBeUndefined();
+    }
   });
   test('shortening a fixed hold rewrites only the anchor, because no sibling was ever widened (owner ruling on #4309 r7)', async () => {
     const sibling = { ...row, id: 'sibling-1', status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'), estimate_group_id: 'synthetic-group' };
