@@ -322,7 +322,8 @@ function callbackDateExemption(sentence, previousContext, timeMatch, subject) {
   const currentCallback = VISIT_TIME_CALLBACK_RE.exec(sentence);
   const prefix = currentCallback ? sentence.slice(0, currentCallback.index) : '';
   const priorVisitDate = SCHEDULE_PREDICATES.visit.test(prefix)
-    && (RELATIVE_DAY_RE.exec(prefix) || ORDINAL_DATE_RE.exec(prefix));
+    && (TIME_ANYWHERE_RES.map((re) => re.exec(prefix)).find(Boolean)
+      || RELATIVE_DAY_RE.exec(prefix) || ORDINAL_DATE_RE.exec(prefix));
   return priorVisitDate || true;
 }
 /**
