@@ -70,6 +70,24 @@ const ESTIMATE_MOUNT = '/estimate/tok-ssr-gate'; // app.get('/estimate/:token') 
 const API_MOUNT = '/tok-ssr-gate'; // app.use('/api/estimates') — no SPA fallthrough
 
 describe('handleEstimateView — SSR viewability gate', () => {
+  test('a revised annual offer without a matching handoff never renders through the legacy token', async () => {
+    const priorAnnual = process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const priorCancel = process.env.GATE_CANCEL_FLOW_V2;
+    delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    delete process.env.GATE_CANCEL_FLOW_V2;
+    try {
+      const { res } = await runView({ status: 'sent', expires_at: FUTURE, use_v2_view: false,
+        estimate_data: { result: { lineItems: [{ service: 'termite_bait', plan: 'annual_protection' }] } },
+      }, API_MOUNT);
+      expect(res.statusCode).toBe(404);
+      expect(res.body).not.toContain(PII.customer_email);
+    } finally {
+      if (priorAnnual === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      else process.env.GATE_TERMITE_ANNUAL_PLAN = priorAnnual;
+      if (priorCancel === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
+      else process.env.GATE_CANCEL_FLOW_V2 = priorCancel;
+    }
+  });
   test.each([
     ['draft', { status: 'draft', expires_at: null }],
     ['scheduled', { status: 'scheduled', expires_at: FUTURE }],

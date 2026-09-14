@@ -247,9 +247,9 @@ describe('termite station cost replay (plan §A1 replay rule)', () => {
   test('the mapped admin envelope carries the stamp and the signal prefers it over a stale raw engineResult', () => {
     const estimate = generateEstimate({ homeSqFt: 2000, lotSqFt: 8000, propertyType: 'single_family', services: { termite: { system: 'trelona' } } });
     const mapped = mapV1ToLegacyShape(estimate);
-    expect(mapped.results.tmBait.pricingKnobs).toMatchObject({ system: 'trelona', stationCost: 24, stationCostSource: 'config' });
+    expect(mapped.results.tmBait.pricingKnobs).toMatchObject({ system: 'trelona', plan: 'quarterly', stationCost: 24, stationCostSource: 'config' });
     expect(mapped.results.tmBait.materialCostSource).toEqual({ station: 'config', cartridge: 'config' });
-    expect(replay.termiteKnobSignalForReplay({ result: mapped })).toEqual({ system: 'trelona', stationCost: 24, laborMaterial: 5.25, misc: 0.75, installMultiplier: 1.45, minStations: 8 });
+    expect(replay.termiteKnobSignalForReplay({ result: mapped })).toEqual({ system: 'trelona', plan: 'quarterly', stationCost: 24, laborMaterial: 5.25, misc: 0.75, installMultiplier: 1.45, minStations: 8 });
     // Mapped envelope with no stamp (saved before A1) → pre-stamp constant.
     expect(replay.termiteKnobSignalForReplay({ result: { results: { tmBait: { selectedSystem: 'trelona', ti: 610 } } } })).toEqual({ system: 'trelona', stationCost: 22.05, laborMaterial: 5.25, misc: 0.75, installMultiplier: 1.45, minStations: 8 });
     // Mapped stamp wins over an older raw line.
