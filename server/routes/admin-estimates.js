@@ -1921,11 +1921,15 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
       ['estimate-group-send', String(estimate.estimate_group_id)],
     );
     await assertReviewedEstimateGroup(trx, estimate, reviewedGroupVersions);
-    if (reviewedEditVersion) {
-      const anchor = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
-      if (estimateEditVersion(anchor) !== reviewedEditVersion) {
-        throw Object.assign(new Error('The saved estimate changed before its send claim. Review it again.'), { statusCode: 409, code: 'ESTIMATE_REVIEW_STALE' });
-      }
+    // The caller can have read the anchor before a proposal save committed.
+    // Even legacy sends without a reviewed edit version must use the offer
+    // that is current under this lock, before deriving the delivery deadline.
+    const anchor = await trx('estimates')
+      .where({ id: estimate.id, estimate_group_id: estimate.estimate_group_id })
+      .forUpdate().first();
+    if (!anchor || estimateOfferVersion(anchor) !== estimateOfferVersion(estimate)
+      || (reviewedEditVersion && estimateEditVersion(anchor) !== reviewedEditVersion)) {
+      throw Object.assign(new Error('The saved estimate changed before its send claim. Review it again.'), { statusCode: 409, code: 'ESTIMATE_REVIEW_STALE' });
     }
     // A sibling already mid-send is a concurrent publisher (another pod's
     // scheduled batch, or a parallel operator click): its send will publish
@@ -1996,7 +2000,7 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
       // this lock (codex #3248 r6: a second compare-and-set here required
       // the stale pre-claim status and 409'd every grouped resend whose
       // siblings were already published/terminal).
-      return { claimed: [], anchorClaimedInLock };
+      return { claimed: [], anchorClaimedInLock, anchor };
     }
   for (const sibling of siblings) {
     try {
@@ -2058,7 +2062,7 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
       err.statusCode = 409;
       throw err;
     }
-    return { claimed, anchorClaimedInLock };
+    return { claimed, anchorClaimedInLock, anchor };
   });
 }
 
@@ -2472,6 +2476,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       reviewedGroupVersions: options.reviewedGroupVersions,
     });
     claimedGroupSiblings = groupClaim.claimed;
+    estimate = groupClaim.anchor;
     // Signal claim ownership to the caller AFTER the claim transaction
     // committed. Ownership = this send claimed in-lock, or its CALLER
     // pre-claimed (scheduled cron / lead auto-send) — a bare 'sending'
