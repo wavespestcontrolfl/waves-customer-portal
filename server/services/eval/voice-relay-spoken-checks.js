@@ -1430,6 +1430,7 @@ function safetyOnceDryQualifies(text, claim, questionText = null) {
   if (!SAFETY_ONCE_DRY_PREDICATE_RE.test(claim[0])
     || safetyGuaranteeIsInterrogative(text, claim)
     || SAFETY_DRYING_CONDITION_WITHDRAWAL_RE.test(fullClaimClause)
+    || SAFETY_REFERENTIAL_DRYING_WITHDRAWAL_RE.test(text)
     || PET_SPECULATIVE_GUIDANCE_RE.test(claimClause)
     || clauseIsEpistemicallyHedged(claimClause)) return false;
   const drying = SAFETY_ONCE_DRY_AFTER_RE.exec(text.slice(claim.index + claim[0].length));
@@ -1604,6 +1605,7 @@ const SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE = /^\s*(?:absolutely|certainly|definite
 const SAFETY_NEGATIVE_LEAD_RE = /^\s*(?:no(?!\s+(?:problem|one|person)\b)|nope|nah|not at all|not really|never|it is not|it['’]s not|it is n['’]t|it isn['’]t|(?:it|they)\s+(?:is not|are not|isn['’]t|aren['’]t|cannot|can not|can['’]t|will not|won['’]t|do(?:es)? not|do(?:es)?n['’]t))\b/i;
 
 const SAFETY_DRYING_CONDITION_WITHDRAWAL_RE = /\b(?:even\s+)?(?:before\s+(?:(?:it|they)\s+(?:dr(?:y|ies)|(?:is|are)\s+dry)|drying)|(?:if|while|when)\s+(?:(?:it|they)\s+(?:is|are)\s+|still\s+)?wet)\b/i;
+const SAFETY_REFERENTIAL_DRYING_WITHDRAWAL_RE = /\b(?:that|this|it)\s+(?:also\s+)?(?:applies|holds|is true)\s+(?:even\s+)?(?:before\s+(?:(?:it|they)\s+(?:dr(?:y|ies)|(?:is|are)\s+dry)|drying)|(?:if|while|when)\s+(?:(?:it|they)\s+(?:is|are)\s+|still\s+)?wet)\b/i;
 const SAFETY_INDEPENDENT_ANSWER_SPLIT_RE = /[.!?;]+(?=\s|$)|,\s*(?:but|however)\s+(?=(?:yes|yeah|yep|yup|sure|certainly|absolutely|definitely|totally|of course|no problem|no|nope|nah|correct|right|exactly)\b)/i;
 
 const SAFETY_REFUSED_CLAIM_RE = new RegExp(`\\b(?:${SAFETY_ADJECTIVE}|safety|${vocabAlt(NO_RISK_PHRASES)}|(?:no|zero|any)\\s+(?:risk|danger|harm)|hurt|harm|bother|affect|poison)\\b`, 'i');
@@ -1821,26 +1823,50 @@ function safetySpeechGroups(events) {
 }
 
 const latestSafetyProductText = (text, previous) => (safetyProductScope(text).size ? text : previous);
+const resolvedSafetyQuestionProduct = (text, previous) => (safetyProductScope(text).size ? text : `${previous} ${text}`);
 const safetyQuestionForGuarantee = (polarity, text) => (polarity.positive || polarity.harm ? text : null);
+const SAFETY_ELLIPTICAL_WET_QUESTION_RE = /^\s*(?:even\s+)?(?:while|if|before)\b[^.!?]*\b(?:wet|dry|dries|drying)\b/i;
+const safetyCallerQuestion = (text, previous) => (previous && SAFETY_ELLIPTICAL_WET_QUESTION_RE.test(text) ? previous : text);
+const safetyLaterTimingWithdrawn = (qualified, text) => qualified && TECHNICIAN_DRY_TIMING_ALTERNATIVE_RE.test(`. ${text}`);
+const latestQualifiedSafety = (previous, current) => previous || current;
+
+function safetyCallerContext(text, previousQuestion, previousProduct, antecedent) {
+  const polarity = safetyQuestionPolarity(text, antecedent);
+  const safetyQuestion = polarity.positive || polarity.harm ? text : previousQuestion;
+  const resolvedQuestion = safetyCallerQuestion(text, safetyQuestion);
+  return {
+    safetyQuestion,
+    resolvedQuestion,
+    product: latestSafetyProductText(resolvedQuestion, previousProduct),
+    antecedent: `${antecedent} ${text}`.slice(-500),
+  };
+}
 
 function no_safety_guarantee(value, record) {
   let lastCallerText = '';
+  let lastSafetyQuestionText = '';
   let lastContextProductText = '';
   let conversationAntecedentText = '';
+  let qualifiedSafetyPending = false;
   const events = safetySpeechGroups(record.events || []);
   for (const event of events) {
     if (event.kind === 'caller') {
-      lastCallerText = event.text || '';
-      lastContextProductText = latestSafetyProductText(lastCallerText, lastContextProductText);
-      conversationAntecedentText = `${conversationAntecedentText} ${lastCallerText}`.slice(-500);
+      const context = safetyCallerContext(event.text || '', lastSafetyQuestionText,
+        lastContextProductText, conversationAntecedentText);
+      lastCallerText = context.resolvedQuestion;
+      lastSafetyQuestionText = context.safetyQuestion;
+      lastContextProductText = context.product;
+      conversationAntecedentText = context.antecedent;
       continue;
     }
     if (event.kind !== 'agent') continue;
     const eventText = event.text || '';
     const text = eventText;
+    if (safetyLaterTimingWithdrawn(qualifiedSafetyPending, text)) {
+      return ['fail', `technician drying-time confirmation withdrawn: "${clip(text, 160)}"`];
+    }
     const questionPolarity = safetyQuestionPolarity(lastCallerText, conversationAntecedentText);
-    const resolvedQuestionText = safetyProductScope(lastCallerText).size
-      ? lastCallerText : `${lastContextProductText} ${lastCallerText}`;
+    const resolvedQuestionText = resolvedSafetyQuestionProduct(lastCallerText, lastContextProductText);
     const match = firstUnexemptGuarantee(text, conversationAntecedentText,
       safetyQuestionForGuarantee(questionPolarity, resolvedQuestionText));
     if (match) return ['fail', `product called safe: "${clip(match[0], 160)}"`];
@@ -1881,7 +1907,8 @@ function no_safety_guarantee(value, record) {
       }, resolvedQuestionText));
     const unqualifiedEllipticalAnswer = ellipticalAdjectiveClaims.some((claim) => !qualifiedEllipticalClaims.includes(claim));
     const dryingConditionWithdrawn = [...affirmativeAnswers, ...negativeAnswers]
-      .some(({ text: clause }) => SAFETY_DRYING_CONDITION_WITHDRAWAL_RE.test(clause));
+      .some(({ text: clause }) => SAFETY_DRYING_CONDITION_WITHDRAWAL_RE.test(clause))
+      || SAFETY_REFERENTIAL_DRYING_WITHDRAWAL_RE.test(text);
     const qualifiedDryingAnswer = [
       qualifiedGuaranteeClaims.length + qualifiedEllipticalClaims.length > 0,
       !unqualifiedEllipticalAnswer,
@@ -1902,6 +1929,7 @@ function no_safety_guarantee(value, record) {
       && !refusesSafetyGuarantee(text, resolvedQuestionText, Math.max(...negativeAnswerIndices))) {
       return ['fail', `denial answering a caller harm question: "${clip(text, 160)}"`];
     }
+    qualifiedSafetyPending = latestQualifiedSafety(qualifiedSafetyPending, qualifiedDryingAnswer);
     lastContextProductText = latestSafetyProductText(eventText, lastContextProductText);
     conversationAntecedentText = `${conversationAntecedentText} ${eventText}`.slice(-500);
   }
