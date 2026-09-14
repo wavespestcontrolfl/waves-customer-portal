@@ -1237,11 +1237,12 @@ const CARD_PHONE_VALUE = '(?:(?:\\(\\d{3}\\)|\\b\\d{3})[\\s.-]\\d{3}[\\s.-]\\d{4
 const CARD_MENU_OPTION_RE = /\b(?:option|choice|key)\s+(?:number\s+)?\d+\b|\bpress\s+\d+\b/gi;
 const CARD_COUNT_MODIFIERS = '(?:(?:pending|failed|successful|declined|completed|remaining|active|saved)\\s+)*';
 const CARD_COUNT_NOUN = '(?:applications?|treatments?|services?|visits?|appointments?|accounts?|payments?|transactions?|attempts?|options?|cards?|rooms?|bedrooms?|bathrooms?|properties|homes?|lawns?|yards?|dogs?|cats?|pets?|animals?|children|kids?|bab(?:y|ies)|adults?|people|men|women|mice|geese|feet|fish|sheep)';
+const CARD_SCALAR_UNIT = "(?:seconds?|minutes?|mins?|moments?|hours?|hrs?|days?|weeks?|months?|years?|dollars?|cents?|percent|%|am|pm|a\\.m\\.|p\\.m\\.|o'clock|digits?|numbers?|more|times|of them|characters|(?:(?:[uú]ltimos?|primeros?)\\s+)?(?:d[ií]gitos?|n[uú]meros?))";
 const CARD_MEASUREMENT_UNIT = '(?:sq(?:uare)?\\.?\\s*(?:ft|feet|foot)|acres?)';
 // Preserve a comma that introduces a separately explained numeric value or a
 // reverse card-position label before spokenDigits can join the digit words.
 const CARD_COMMA_VALUE_BOUNDARY_RE = new RegExp(
-  `,\\s*(?=(?:\\d+|${DIGIT_TOKEN})\\s+(?:(?:${CARD_COUNT_MODIFIERS}${CARD_COUNT_NOUN}|${CARD_MEASUREMENT_UNIT})\\b|`
+  `,\\s*(?=(?:\\d+|${DIGIT_TOKEN}|${CARD_DIGIT_TOKEN_ES})\\s+(?:(?:${CARD_COUNT_MODIFIERS}${CARD_COUNT_NOUN}|${CARD_MEASUREMENT_UNIT}|${CARD_SCALAR_UNIT})(?!\\w)|`
     + `(?:is|was)\\s+(?:the\\s+)?(?:first|last|next|middle)\\s+(?:digit|number|one)\\s+(?:of|on)\\s+`
     + `(?:(?:your|the|my|this|that)\\s+)?(?:card|pan|cvv|cvc|security code)\\b))`,
   'gi',
@@ -1265,7 +1266,6 @@ const CARD_NON_FRAGMENT_RES = Object.freeze([
   new RegExp(`\\b${PRICE_NUMBER}\\s*(?:per|an?|each|every|for each|for every)\\s+(?:applications?|treatments?|services?|visits?)\\b`, 'gi'),
   new RegExp(`\\b\\d[\\d,]*(?:\\.\\d+)?\\s*${CARD_MEASUREMENT_UNIT}\\b`, 'gi'),
   /\b(?:[01]?\d|2[0-3]):[0-5]\d(?:\s*(?:a\.?\s*m\.?|p\.?\s*m\.?))?(?![\da-z])/gi,
-  /\b\d+(?:\.\d+)?\s*(?:seconds?|minutes?|mins?|moments?|hours?|hrs?|days?|weeks?|months?|years?)\b/gi,
   new RegExp(`\\b\\d+(?:\\.\\d+)?\\s+${CARD_COUNT_MODIFIERS}(?:cards?|applications?|payments?|transactions?|attempts?|options?|visits?|services?|appointments?|accounts?)\\b`, 'gi'),
   new RegExp(`\\b\\d+(?:\\.\\d+)?\\s+(?!(?:card\\s+(?:number|digits?)|pan|cvv|cvc|security\\s+(?:code|digits?)|digits?|numbers?|codes?)\\b)${CARD_COUNT_NOUN}(?=\\s+(?:is|are|was|were)\\b|[.!?,;:]|$)`, 'gi'),
   /\b\d+(?:\.\d+)?[\s-]+(?:rooms?|bedrooms?)\b/gi,
@@ -1273,8 +1273,7 @@ const CARD_NON_FRAGMENT_RES = Object.freeze([
   new RegExp(`\\b(?:have|has|had|need(?:s|ed)?|include[sd]?|cover(?:s|ed)?)\\s+\\d+(?:\\.\\d+)?\\s+${CARD_COUNT_NOUN}\\b`, 'gi'),
   new RegExp(`\\b(?:number|count)\\s+of\\s+${CARD_COUNT_NOUN}\\s+(?:is|was|are|were)\\s+\\d+(?:\\.\\d+)?\\b`, 'gi'),
   new RegExp(`\\b(?:your|the|our|my)\\s+(?!(?:card|${CARD_BRAND}|payment|credit|debit|prepaid|security|pan|cvv|cvc)\\b)[A-Za-z][\\w'-]*\\s+(?:number|code)\\s+(?:is|was)\\s+\\d+\\b`, 'gi'),
-  /\b\d+(?:\.\d+)?[\s-]*(?:dollars?|cents?|percent|%|am|pm|a\.m\.|p\.m\.|o'clock|digits?|numbers?|more|times|of them|characters)(?!\w)/gi,
-  /\b\d+(?:\.\d+)?[\s-]*(?:(?:[uú]ltimos?|primeros?)\s+)?(?:d[ií]gitos?|n[uú]meros?)\b/gi,
+  new RegExp(`\\b\\d+(?:\\.\\d+)?[\\s-]*${CARD_SCALAR_UNIT}(?!\\w)`, 'gi'),
   /\b(?:invoice|estimate|order|ticket|account|reference|confirmation)\s+(?:number\s+|#\s*)?(?:is\s+)?[\w-]*\d[\w-]*/gi,
   new RegExp(`\\b(?:appointment|service|visit|calendar|date|year)(?:\\s+(?:date|year))?\\s+`
     + `(?:(?:is|was|will be|falls?|fell|occur(?:s|red)?|happen(?:s|ed)?|scheduled|booked)\\s+)?`
