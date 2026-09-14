@@ -47,7 +47,7 @@ function groupLinkStillViewable(estimate, at = new Date()) {
 function hasFixedBidValidity(estimate) { return Boolean(dataOf(estimate).proposal?.validThrough); }
 function assertBidSendDate(estimate, at = new Date()) {
   const expiry = proposalExpiry(estimate);
-  if (expiry && expiry < at) throw Object.assign(new Error('The bid validity date has passed. Update Valid through in the proposal builder before sending.'), { statusCode: 409 });
+  if (expiry && expiry < at) throw Object.assign(new Error('The bid validity date has passed. Update Valid through in the proposal builder before sending.'), { statusCode: 409, code: 'BID_VALIDITY_EXPIRED' });
 }
 // The scheduled-send worker claims due rows on five-minute wall-clock ticks
 // (scheduler.js `*/5 * * * *`), so a 23:58 ET schedule is first claimed at
