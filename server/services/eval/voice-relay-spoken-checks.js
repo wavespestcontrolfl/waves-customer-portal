@@ -1289,14 +1289,14 @@ function firstUnexemptGuarantee(text, antecedentText = '', questionText = null) 
       const contextualNoHarmWithoutProduct = re === SAFETY_CONTEXTUAL_NO_HARM_RE
         && !SAFETY_PRODUCT_MENTION_RE.test(antecedent)
         && !SAFETY_BRAND_MENTION_RE.test(antecedent);
-      const contextualAdjectiveDescribesScheduling = re === SAFETY_CONTEXTUAL_STRONG_GUARANTEE_RE
-        && /^\s+to\s+(?:reschedule|schedule|move|change|cancel|book)\b/i.test(text.slice(m.index + m[0].length));
+      const contextualAdjectiveDescribesOtherAction = re === SAFETY_CONTEXTUAL_STRONG_GUARANTEE_RE
+        && /^\s+to\s+(?:reschedule|schedule|move|change|cancel|book|pay)\b/i.test(text.slice(m.index + m[0].length));
       if (!insideAnySpan(spans, m.index)
         && !locallyNegatedNoRisk
         && !schedulingNoRisk
         && !locallyNegatedAttributive
         && !contextualNoHarmWithoutProduct
-        && !contextualAdjectiveDescribesScheduling
+        && !contextualAdjectiveDescribesOtherAction
         && !safetyOnceDryQualifies(text, m, questionText)
         && !safetyGuaranteeIsInterrogative(text, m)) return m;
       m = re.exec(text);
@@ -1885,7 +1885,7 @@ function no_safety_guarantee(value, record) {
     const answerClauses = text.split(SAFETY_INDEPENDENT_ANSWER_SPLIT_RE).map((clause) => {
       const index = text.indexOf(clause, answerClauseStart);
       answerClauseStart = index + clause.length;
-      return { text: clause.replace(/^\s*(?:but|however)\b\s*,?\s*/i, ''), index };
+      return { text: clause.replace(/^\s*(?:but|however|actually)\b\s*,?\s*/i, ''), index };
     });
     const ellipticalAdjectiveClaims = [...text.matchAll(SAFETY_ELLIPTICAL_ADJECTIVE_ANSWER_RE)];
     const propositionConfirmations = answerClauses.filter(({ text: clause }) => SAFETY_PROPOSITION_CONFIRMATION_RE.test(clause));
