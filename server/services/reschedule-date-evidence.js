@@ -44,7 +44,8 @@ function components(text, reference) {
 
 const appointment = '(?:my|your|the|our) (?:current )?';
 const delivery = '(?:i will|ill|we will|well) (?:text|send|email or text) (?:you )?(?:the|your|a) reschedule link';
-const clock = '(?: (?:morning|afternoon|evening|at (?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|noon|midnight|[0-9:]+)(?: ?(?:am|pm))?))?';
+const HOURS = 'one two three four five six seven eight nine ten eleven twelve'.split(' ');
+const clock = `(?: (?:morning|afternoon|evening|at (?:${HOURS.join('|')}|noon|midnight|[0-9:]+)(?: ?(?:am|pm))?))?`;
 // Anchored whole-clause forms prove roles without trusting the model's label.
 // Corrections, negations, conditionals, ranges and unrecognised mixed clauses
 // deliberately have no matching production and remain office work.
@@ -53,8 +54,8 @@ const ROLES = [
   [new RegExp(`^${appointment}appointment (?:is |is on |on )?@$`), ['appointment']],
   [new RegExp(`^(?:please )?move ${appointment}@ appointment to @$`), ['appointment', 'requested']],
   [new RegExp(`^${appointment}@ appointment needs to move to @$`), ['appointment', 'requested']],
-  [new RegExp(`^${delivery} (?:on |by )?@${clock}(?: for that appointment)?$`), ['delivery']],
-  [new RegExp(`^${delivery} (?:on |by )?@${clock} for ${appointment}@ appointment$`), ['delivery', 'appointment']],
+  [new RegExp(`^${delivery} (?:on |by |before |no later than )?@${clock}(?: for that appointment)?$`), ['delivery']],
+  [new RegExp(`^${delivery} (?:on |by |before |no later than )?@${clock} for ${appointment}@ appointment$`), ['delivery', 'appointment']],
 ];
 
 // Absence of a calendar keyword is NOT evidence that a clause has no date.
@@ -136,7 +137,7 @@ function verifyRescheduleDateClaims(claims, transcript, reference, timing = {}) 
 // extracted due_at/type might still say today, deadline, or nothing at all.
 // Validate those proposals against the same complete delivery clause.
 function deliveryTimingMatches(date, timing, reference) {
-  const deadline = /\bby $/.test(date.before);
+  const deadline = /\b(?:by|before|no later than) $/.test(date.before);
   // Untyped persisted rows retain their legacy conservative floor. New model
   // output is checked as an explicit floor when it omits the type, so it
   // cannot introduce a new untyped 'by' promise through this compatibility.
@@ -145,7 +146,8 @@ function deliveryTimingMatches(date, timing, reference) {
   if (Number.isNaN(due.getTime())) return false;
   const tail = date.after.split(' for ')[0].trim();
   if (tail.startsWith('at ')) {
-    const proved = parseQuotedETDeadline(`${date.text} ${tail}`, reference);
+    const numericClock = tail.replace(new RegExp(`^at (${HOURS.join('|')})(?= ?(?:am|pm)$)`), (_, word) => `at ${HOURS.indexOf(word) + 1}`);
+    const proved = parseQuotedETDeadline(`${date.text} ${numericClock}`, reference);
     return !!proved && due.getTime() === proved.getTime();
   }
   // A bare day permits a proposed clock on that day; 'morning' additionally
