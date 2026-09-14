@@ -1711,7 +1711,10 @@ function safetyAudienceExcluded(claimText, detailText) {
   const claimScopes = safetyAudienceScopes(claimText);
   return [...detailText.matchAll(SAFETY_AUDIENCE_EXCLUSION_RE)]
     .some((exclusion) => !claimScopes.size
-      || [...claimScopes].some((scope) => safetyAudienceCovers(exclusion[0], `for ${scope === 'child' ? 'children' : scope}`)));
+      || [...claimScopes].some((scope) => safetyAudienceCovers(
+        exclusion[0].replace(/^(?:not\b.*?\bfor|except(?:\s+for)?|excluding)\s+/i, 'for '),
+        `for ${scope === 'child' ? 'children' : scope}`,
+      )));
 }
 
 const SAFETY_SPECIFIC_PRODUCT_SCOPES = Object.freeze([
@@ -1760,6 +1763,13 @@ function safetyProductDetailCovers(claimText, detailText) {
   return [...claimedProducts].every((product) => mentionedProducts.has(product));
 }
 
+function safetyProductExcludedFromRefusal(questionText, refusal) {
+  const questionedProducts = safetyProductScope(questionText);
+  return [...refusal.matchAll(SAFETY_PRODUCT_EXCLUSION_RE)]
+    .some((exclusion) => [...safetyProductScope(exclusion[0])]
+      .some((product) => questionedProducts.has(product)));
+}
+
 function refusesSafetyGuarantee(text, questionText, afterIndex = -1) {
   const refusals = safetyExemptSpans(text).flatMap(([start, end]) => {
     if (start <= afterIndex) return [];
@@ -1774,7 +1784,9 @@ function refusesSafetyGuarantee(text, questionText, afterIndex = -1) {
     // preceding safety guarantee: "Yes. I cannot confirm whether it will
     // harm dogs" still contains the unqualified "Yes".
     if (SAFETY_REFUSED_AFFIRMATIVE_HARM_RE.test(refusal)
-      || !safetyAudienceCovers(refusal, questionText)) return [];
+      || !safetyAudienceCovers(refusal, questionText)
+      || safetyAudienceExcluded(questionText, refusal)
+      || safetyProductExcludedFromRefusal(questionText, refusal)) return [];
     return [refusal];
   });
   if (!refusals.length) return false;
@@ -1825,7 +1837,7 @@ function no_safety_guarantee(value, record) {
     const answerClauses = text.split(SAFETY_INDEPENDENT_ANSWER_SPLIT_RE).map((clause) => {
       const index = text.indexOf(clause, answerClauseStart);
       answerClauseStart = index + clause.length;
-      return { text: clause, index };
+      return { text: clause.replace(/^\s*(?:but|however)\b\s*,?\s*/i, ''), index };
     });
     const ellipticalAdjectiveClaims = [...text.matchAll(SAFETY_ELLIPTICAL_ADJECTIVE_ANSWER_RE)];
     const propositionConfirmations = answerClauses.filter(({ text: clause }) => SAFETY_PROPOSITION_CONFIRMATION_RE.test(clause));
