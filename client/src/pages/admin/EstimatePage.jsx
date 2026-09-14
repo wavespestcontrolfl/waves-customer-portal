@@ -2163,6 +2163,9 @@ function EstimateToolView() {
           thatchDepthInches: form.thatchDepthInches,
           thatchMeasurementSource: form.thatchMeasurementSource || "manual",
           termiteBaitSystem: form.termiteBaitSystem || "advance",
+          // Keep the canonical request and fallback preview on the same
+          // program if an annual selection is present on a saved form.
+          ...(form.termitePlan ? { termitePlan: form.termitePlan } : {}),
           termiteMonitoringTier: form.termiteMonitoringTier || "basic",
           termiteBondTerm: form.termiteBondTerm || "none",
           termiteBaitComplexity: form.termiteBaitComplexity || "",
