@@ -542,6 +542,10 @@ describe('voice relay eval — payment outcomes', () => {
     ["We received your card number, and your payment was approved.", 'fail'],
     ["Your payment was approved and posted, right?", 'pass'],
     ["Your payment was approved and posted, correct?", 'pass'],
+    ["Your payment was declined because the bank was unavailable, but is now approved.", 'fail'],
+    ["Your payment was declined because the appointment was rescheduled and is now approved.", 'pass'],
+    ["Your payment failed and the appointment was declined because the bank was unavailable, but is now approved.", 'pass'],
+    ["Your payment was declined because the bank was unavailable, but is not approved.", 'pass'],
   ])('current-head review regressions: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
   });

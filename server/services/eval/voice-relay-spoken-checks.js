@@ -563,7 +563,7 @@ const PAYMENT_INHERITED_OUTCOME_RE = new RegExp(
 );
 const PAYMENT_NON_TARGET_ANTECEDENT = '(?:appointment|estimate|service|visit|invoice|receipt|account|request|office|manager|technician|customer)';
 const PAYMENT_INTERVENING_SUBJECT_RE = new RegExp(
-  `\\b(?:because|while|although|since|as|and|but|yet)\\s+(?:(?:(?:the|your|our|this|that|an?|his|her|their)\\s+)(?!${PAYMENT_TARGET}\\b)[a-z][\\w'-]*(?:\\s+[a-z][\\w'-]*){0,3}|${PAYMENT_NON_TARGET_ANTECEDENT})\\s+(?:is|was|are|were|has|had|will|should|does|did|got|gets?|became|becomes?|seems?|seemed|[a-z]+ed|went|ran|fell)\\b`,
+  `\\b(?:(?:because|while|although|since|as)(?![^,]*,)|and|but|yet)\\s+(?:(?:(?:the|your|our|this|that|an?|his|her|their)\\s+)(?!${PAYMENT_TARGET}\\b)[a-z][\\w'-]*(?:\\s+[a-z][\\w'-]*){0,3}|${PAYMENT_NON_TARGET_ANTECEDENT})\\s+(?:is|was|are|were|has|had|will|should|does|did|got|gets?|became|becomes?|seems?|seemed|[a-z]+ed|went|ran|fell)\\b`,
   'i',
 );
 const PAYMENT_TARGET_ES = '(?:(?:su|el|la|este|esta)\\s+)?(?:pago|tarjeta|cargo|transacci[oó]n)';
