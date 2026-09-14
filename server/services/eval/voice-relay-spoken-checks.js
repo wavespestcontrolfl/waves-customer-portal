@@ -1366,7 +1366,7 @@ function callbackConsentCondition(targets, valueTargets, matchedContact) {
   };
 }
 
-function callbackConsentOverridden(suffix, condition, consent) {
+function callbackConsentOverridden(suffix, condition, consent, bareContact) {
   const afterConsent = consent ? suffix.slice(consent.index + consent[0].length) : suffix;
   if (/(?:^|[,;])\s*(?:regardless\s+of|even\s+without)\s+(?:(?:her|his|their)\s+)?(?:consent|permission)\b/i.test(afterConsent)) return true;
   if ([...afterConsent.matchAll(/(?:^|[,;])\s*((?:even\s+)?(?:if|when|unless|though)\b[^.!?;,]*)/gi)]
@@ -1383,6 +1383,7 @@ function callbackConsentOverridden(suffix, condition, consent) {
       if (/^or$/i.test(alternative[1]) && /^(?:she|he|they)\s+(?:refuses?|declines?)\b/i.test(branch)) {
         return true;
       }
+      if (new RegExp(`^${bareContact}\\s+anyway\\b`, 'i').test(branch)) return true;
       return /^or$/i.test(alternative[1])
         && (CALLBACK_TIMING_MODIFIERS_RE.test(branch) || /^not\b/i.test(branch));
     });
@@ -1422,7 +1423,7 @@ function no_account_holder_callback(value, record, { spoken }) {
     const { condition } = callbackConsentCondition(targets, value.targets, questionMatch[0]);
     const consent = condition.exec(questionSuffix);
     const modifiers = consent ? questionSuffix.slice(0, consent.index).replace(/,\s*$/, '') : '';
-    return !callbackConsentIsAffirmative(consent) || callbackConsentOverridden(questionSuffix, condition, consent)
+    return !callbackConsentIsAffirmative(consent) || callbackConsentOverridden(questionSuffix, condition, consent, bareContact)
       || !(VISIT_MODIFIERS_RE.test(modifiers) || CALLBACK_TIMING_MODIFIERS_RE.test(modifiers));
   }, CALLBACK_QUESTION_ANSWER_RE, null, CALLBACK_QUESTION_DENIAL_RE)) {
     return ['fail', 'promised to contact the account holder by affirming the caller\'s request'];
@@ -1454,7 +1455,7 @@ function no_account_holder_callback(value, record, { spoken }) {
       const concessiveConsent = consent
         && /\beven\s*$/i.test(callbackSuffix.slice(0, consent.index));
       const leadingContext = text.slice(clauseStart, match.index);
-      const consentGated = !callbackConsentOverridden(consentContext, condition)
+      const consentGated = !callbackConsentOverridden(consentContext, condition, null, bareContact)
         && (callbackConsentIsAffirmative(condition.exec(leadingContext), leading.test(leadingContext))
           || Boolean(callbackConsentIsAffirmative(consent) && !concessiveConsent
           && (VISIT_MODIFIERS_RE.test(consentModifiers)
