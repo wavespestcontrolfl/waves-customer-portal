@@ -4,6 +4,7 @@
 // into a complete customer estimate
 // ============================================================
 const { GLOBAL, WAVEGUARD, URGENCY, TREE_SHRUB, PEST, LAWN_PRICING_V2, TERMITE } = require('./constants');
+const { termiteAnnualPlanSelectionEnabled } = require('../../config/feature-gates');
 
 // Optional logger — the engine must stay requireable from CLI/test harnesses
 // that don't carry the server logger, so binding events log best-effort.
@@ -1059,11 +1060,11 @@ function generateEstimate(input) {
       // ignored and the program prices as outright purchase, exactly as it
       // did before this lane. Kill = unset the var.
       const rentalGateOn = ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_STATION_RENTAL || '').toLowerCase());
-      // Annual protection plan (ruling A-1 = P1) is dark-shipped the same
-      // way: with GATE_TERMITE_ANNUAL_PLAN off a plan request is ignored and
-      // the program prices as today's quarterly program. Kill = unset the
-      // var. On the plan, rental and the bond rider are retired (plan §A2).
-      const planGateOn = ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_ANNUAL_PLAN || '').toLowerCase());
+      // Annual protection plan (ruling A-1 = P1) requires both its own gate
+      // and the online term-aware cancellation gate. Otherwise a fresh plan
+      // request prices as today's quarterly program. On the plan, rental
+      // and the bond rider are retired (plan §A2).
+      const planGateOn = termiteAnnualPlanSelectionEnabled();
       // An ALREADY-ISSUED plan keeps replaying as the plan after the gate is
       // unset: the stamped snapshot (server-derived replay signal, never a
       // browser value) is the evidence; the gate governs FRESH selections

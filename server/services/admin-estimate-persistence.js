@@ -1504,6 +1504,10 @@ async function assertGroupAssignmentAllowed(dbc, groupId, identity = {}, selfId 
 
 function buildEstimatePersistenceFields(body, context = {}) {
   const estimateData = normalizeEstimateDethatchingManagerApproval(body.estimateData, context);
+  if (estimateData) {
+    delete estimateData.manualSendAttempts;
+    delete estimateData.deliveryState;
+  }
   const quoteRequired = estimateDataHasQuoteRequirement(estimateData) ||
     estimateDataHasUnresolvedManagerApproval(estimateData);
   const totals = resolveBillableTotals(body, estimateData, quoteRequired);
@@ -1782,7 +1786,10 @@ async function resolveEstimateWritePayload({
   });
   // Delivery receipts are authored only under the send claim. A browser
   // cannot forge a completed attempt or clear the retry guard on revision.
-  if (trustedEstimateData) delete trustedEstimateData.manualSendAttempts;
+  if (trustedEstimateData) {
+    delete trustedEstimateData.manualSendAttempts;
+    delete trustedEstimateData.deliveryState;
+  }
   // Before anything downstream derives from the payload (quoteRequired reads
   // proposal.enabled through buildPricingBundle): the browser's proposal is
   // discarded, the row's own is restored.
@@ -3034,6 +3041,7 @@ async function reviseAdminEstimate({
           for (const key of REVISE_PRESERVED_ESTIMATE_DATA_KEYS) {
             if (lockedData[key] !== undefined) pendingData[key] = lockedData[key];
           }
+          if (lockedData.deliveryState === undefined) delete pendingData.deliveryState;
           preserveClickMintMarkersAcrossRevise(pendingData, lockedData);
           // The server-owned proposal is carried from the LOCKED row, never
           // from the pre-read copy stripClientProposal restored earlier

@@ -364,7 +364,11 @@ describe('reviseAdminEstimate', () => {
     const preRead = { ...sentEstimate, estimate_data: JSON.stringify({ ...priorData, deliveryState: earlier }) };
     const locked = { ...sentEstimate, estimate_data: JSON.stringify({ ...priorData, deliveryState: latest }) };
     const { database, updates } = makeReviseDatabase({ estimate: preRead, lockedEstimate: locked });
-    await reviseAdminEstimate({ database, estimateId: 'est-1', body: reviseBody,
+    await reviseAdminEstimate({ database, estimateId: 'est-1', body: { ...reviseBody,
+      estimateData: { ...reviseBody.estimateData,
+        deliveryState: { firstDeliveredAt: '2099-01-01T00:00:00Z', annualPlanOfferFingerprint: 'forged' },
+      },
+    },
       technicianId: 'tech-2', recompute: noRecompute, now: fixedNow });
     expect(JSON.parse(updates[0].estimate_data).deliveryState).toEqual(latest);
   });

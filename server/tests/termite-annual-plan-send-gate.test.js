@@ -129,12 +129,18 @@ describe('selectedTermiteAnnualPlanRows — every shape a stored plan can take',
 });
 
 describe('assertEstimateSendable — GATE_TERMITE_ANNUAL_PLAN at delivery', () => {
+  const priorCancellationGate = process.env.GATE_CANCEL_FLOW_V2;
   beforeEach(() => {
     jest.clearAllMocks();
     mockGateState.sendRequiresServerPricing = false;
     delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    process.env.GATE_CANCEL_FLOW_V2 = 'true';
   });
-  afterAll(() => { delete process.env.GATE_TERMITE_ANNUAL_PLAN; });
+  afterAll(() => {
+    delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    if (priorCancellationGate === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
+    else process.env.GATE_CANCEL_FLOW_V2 = priorCancellationGate;
+  });
 
   test('gate OFF: a never-delivered plan draft is refused with its own code', () => {
     const err = caught(planDraft());
@@ -153,6 +159,10 @@ describe('assertEstimateSendable — GATE_TERMITE_ANNUAL_PLAN at delivery', () =
       firstDeliveredAt: '2026-09-12T00:00:00.000Z',
       annualPlanOfferFingerprint: annualPlanOfferFingerprint(delivered),
     };
+    expect(caught(delivered)).toBeNull();
+    // The first public view writes a display-only total into estimate_data.
+    delivered.estimate_data.viewedMonthlyTotal = 299;
+    delete process.env.GATE_CANCEL_FLOW_V2;
     expect(caught(delivered)).toBeNull();
   });
 
@@ -236,6 +246,12 @@ describe('assertEstimateSendable — GATE_TERMITE_ANNUAL_PLAN at delivery', () =
   test('gate ON: the same draft sends', () => {
     process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
     expect(caught(planDraft())).toBeNull();
+  });
+
+  test('annual gate ON with cancellation gate OFF refuses a fresh annual draft', () => {
+    process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
+    delete process.env.GATE_CANCEL_FLOW_V2;
+    expect(caught(planDraft())?.code).toBe('TERMITE_ANNUAL_PLAN_DISABLED');
   });
 
   test('gate OFF: a quarterly termite draft is untouched by this gate', () => {
