@@ -417,6 +417,13 @@ describe('voice relay eval — payment outcomes', () => {
     ["Once the bank accepts it, your payment will be processed.", 'pass'],
     ["Once the bank approves it, your payment was processed.", 'fail'],
     ["When I check the portal, your payment is complete.", 'fail'],
+    ["Your payment was declined but now is approved.", 'fail'],
+    ["Your payment was declined but cleared.", 'fail'],
+    ["Your payment was declined but succeeded.", 'fail'],
+    ["Your payment was declined but not cleared.", 'pass'],
+    ["I cannot confirm your payment status and your payment was approved.", 'fail'],
+    ["I cannot confirm your payment was declined and your card was charged.", 'pass'],
+    ["I was unable to confirm your payment status and your payment was approved.", 'fail'],
   ])('current-head review regressions: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
   });

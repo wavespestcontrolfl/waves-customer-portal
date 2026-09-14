@@ -551,7 +551,7 @@ const PAYMENT_FUTURE_OUTCOME_RE = new RegExp(
   `\\b(?:${PAYMENT_ACTOR}${PAYMENT_FUTURE_ACTOR_AUX}${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_FUTURE_ACTION}\\s+(?:(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET}|${PAYMENT_AMOUNT}(?:\\s+to\\s+(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET})?)|(?:${PAYMENT_TARGET}|that|it)\\s+(?:(?:(?:will|should)\\s+|(?:is|are)\\s+going\\s+to\\s+)${PAYMENT_SUCCESS_ADVERBS}(?:go\\s+through|succeed|clear|post)|(?:(?:will|should)\\s+|(?:is|are)\\s+going\\s+to\\s+)${PAYMENT_SUCCESS_ADVERBS}be\\s+${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_RESULT_STATE}))\\b`,
   'gi',
 );
-const PAYMENT_INHERITED_PREDICATE = `(?:(?:(?:is|was)|(?:has|had)\\s+${PAYMENT_SUCCESS_ADVERBS}been|(?:will|should)\\s+be|(?:is|are)\\s+going\\s+to\\s+be)\\s+${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_RESULT_STATE}|(?:has|had)\\s+${PAYMENT_SUCCESS_ADVERBS}(?:gone\\s+through|succeeded|${PAYMENT_INTRANSITIVE_SUCCESS})|(?:will|should)\\s+${PAYMENT_SUCCESS_ADVERBS}(?:go\\s+through|succeed|clear|post))`;
+const PAYMENT_INHERITED_PREDICATE = `${PAYMENT_SUCCESS_ADVERBS}(?:(?:(?:is|was)|(?:has|had)\\s+${PAYMENT_SUCCESS_ADVERBS}been|(?:will|should)\\s+be|(?:is|are)\\s+going\\s+to\\s+be)\\s+${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_RESULT_STATE}|(?:has|had)\\s+${PAYMENT_SUCCESS_ADVERBS}(?:gone\\s+through|succeeded|${PAYMENT_INTRANSITIVE_SUCCESS})|(?:will|should)\\s+${PAYMENT_SUCCESS_ADVERBS}(?:go\\s+through|succeed|clear|post)|${PAYMENT_TRANSITIVE_SUCCESS}|succeeded|went\\s+through)`;
 const PAYMENT_INHERITED_SUBJECT_RE = new RegExp(
   `\\b(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET}\\b`,
   'gi',
@@ -675,8 +675,12 @@ function paymentClaimContext(text, start, end) {
   // Unpunctuated "and" can coordinate two complements of the same
   // condition/refusal. Commas and adversatives introduce separate claims.
   const coordinated = /\band\s*$/i.test(prefix) && !/[,—–]|\b(?:but|yet|so)\b/i.test(prefix);
+  const hedge = EPISTEMIC_HEDGE_RE.exec(prefix);
+  const complement = hedge ? prefix.slice(hedge.index + hedge[0].length) : '';
+  const refusedComplement = /\b(?:whether|is|are|was|were|has|have|had|will|should|did)\b/i.test(complement)
+    || PAYMENT_OUTCOME_RES.some((re) => new RegExp(re.source, 'i').test(complement));
   const governed = /^\s*(?:if|unless|whether|once|when|after|before)\b/i.test(prefix)
-    || clauseIsEpistemicallyHedged(prefix);
+    || (hedge && refusedComplement);
   return coordinated && governed
     ? text.slice(boundary - prefix.length, end)
     : claimContext(text, start, end);
