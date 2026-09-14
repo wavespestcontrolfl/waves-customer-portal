@@ -1910,6 +1910,9 @@ function no_safety_guarantee(value, record) {
       ...negativeAnswers.map(({ index }) => index),
       ...repeatedProductAnswers.filter(({ text: clause }) => /(?:\bnot\b|\bcannot\b|n['’]t\b)/i.test(clause)).map(({ index }) => index),
     ];
+    if (callerAskedAboutWetExposure && questionPolarity.harm && negativeAnswerIndices.length) {
+      return ['fail', `denial of harm during wet exposure: "${clip(text, 160)}"`];
+    }
     // The same approved conditional claim remains conditional when it
     // answers either polarity; an unqualified answer still fails.
     const qualifiedGuaranteeClaims = SAFETY_GUARANTEE_RES.flatMap((re) => [...text.matchAll(re)])
