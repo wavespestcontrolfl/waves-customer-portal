@@ -2051,6 +2051,16 @@ const ReviewService = {
     const spacingHold = await this._askSpacingHold(request);
     if (spacingHold) return spacingHold;
 
+    // A never-sent ask may have waited through a long history outage. Renew
+    // its expired token before dispatch, so the queued retry cannot text a
+    // link that /rate already rejects. A changed/claimed row cannot renew.
+    if (request.expires_at && new Date(request.expires_at).getTime() <= Date.now()) {
+      const expiresAt = new Date(Date.now() + 14 * 86400000);
+      const renewed = await db("review_requests").where({ id: request.id, status: "pending" })
+        .whereNull("sms_sent_at").update({ expires_at: expiresAt });
+      if (!renewed) return { refused: "request_changed" };
+      request.expires_at = expiresAt;
+    }
     const reviewUrl = await buildReviewUrl(request, customer.id);
     const techName = request.tech_name || "Our team";
     // Outreach-template renders (custom_body / template_key) resolve the tech
@@ -4530,7 +4540,10 @@ const ReviewService = {
       // (Codex #4332 P2). A leftover pending row is harmless: it carries no
       // send and the next attempt re-runs the same guard.
       try {
-        await db("review_requests").where({ id: request.id, status: "pending" }).del();
+        await db.transaction(async (trx) => {
+          const removed = await trx("review_requests").where({ id: request.id, status: "pending" }).del();
+          if (removed) await trx("short_codes").where({ kind: "review", entity_type: "review_requests", entity_id: String(request.id) }).del();
+        });
       } catch (cleanupErr) {
         logger.warn(`[review] blocked email ask cleanup failed (requestId=${request.id} code=${result.code} errType=${cleanupErr?.name || "Error"})`);
       }

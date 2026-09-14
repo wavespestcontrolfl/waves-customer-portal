@@ -41,7 +41,7 @@ jest.mock('../utils/cron-lock', () => {
 });
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSendCustomerMessage(...a) }));
 jest.mock('../services/email-template-library', () => ({ sendTemplate: (...a) => mockEmailSendTemplate(...a) }));
-jest.mock('../services/short-url', () => ({ shortenOrPassthrough: async (url) => url }));
+jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async (url) => url) }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal.test' }));
 jest.mock('../services/customer-contact', () => ({
   // Honor explicit null/'' so tests can model a customer missing a channel.
@@ -5784,4 +5784,39 @@ test('failed spacing-retry persistence never deletes an existing queued request'
     .rejects.toMatchObject({ code: 'review_retry_persistence_failed' });
   expect(mock.__state.rows.review_requests).toEqual([queued]);
   expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+});
+
+
+test('a held email deletes its minted short code together with the pending request', async () => {
+  const customer = { id: 'held-email-code', first_name: 'Synthetic', phone: '+12025550101', email: 'synthetic@example.test' };
+  const mock = makeMock({ customers: [customer], short_codes: [],
+    notification_prefs: [{ customer_id: customer.id, email_enabled: true, review_request: true }] },
+  { throwSelectWhen: q => q.table === 'sms_log' });
+  db.mockImplementation(mock);
+  require('../services/short-url').shortenOrPassthrough.mockImplementationOnce(async (url, options) => {
+    mock.__state.rows.short_codes.push({ kind: options.kind, entity_type: options.entityType, entity_id: String(options.entityId), code: 'held-code' });
+    return 'https://portal.test/l/held-code';
+  });
+  const result = await ReviewService.sendOutreachTouch({ customer, channel: 'email' });
+  expect(result).toMatchObject({ blocked: true, code: 'REVIEW_HISTORY_UNAVAILABLE' });
+  expect(mock.__state.rows.review_requests).toEqual([]);
+  expect(mock.__state.rows.short_codes).toEqual([]);
+  expect(mockEmailSendTemplate).not.toHaveBeenCalled();
+});
+
+test('a queued SMS retry renews its expired unsent review link before provider handoff', async () => {
+  const customer = { id: 'expired-retry', first_name: 'Synthetic', phone: '+12025550101', nearest_location_id: 'venice' };
+  const expired = new Date(Date.now() - 86400000);
+  const mock = makeMock({ customers: [customer], review_requests: [{ id: 'expired-ask', customer_id: customer.id,
+    status: 'pending', channel: 'sms', template_key: 'friendly_ask', location_id: 'venice', token: 'expired-token', expires_at: expired,
+    scheduled_for: new Date(Date.now() - 60000), created_at: new Date(Date.now() - 15 * 86400000) }] });
+  db.mockImplementation(mock);
+  const before = Date.now();
+  mockSendCustomerMessage.mockImplementationOnce(async () => {
+    expect(new Date(mock.__state.rows.review_requests[0].expires_at).getTime()).toBeGreaterThanOrEqual(before + 14 * 86400000);
+    return { sent: true, deliveryOutcome: 'accepted' };
+  });
+  await ReviewService.sendSMS('expired-ask');
+  expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+  expect(mock.__state.rows.review_requests[0].sms_sent_at).toBeTruthy();
 });

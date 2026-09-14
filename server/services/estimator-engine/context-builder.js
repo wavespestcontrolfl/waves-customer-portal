@@ -12,6 +12,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-reservation');
 const { firstExternalPhone, last10 } = require('../external-phone');
 
 function parseMaybeJson(value) {
@@ -318,7 +319,7 @@ async function loadSmsThread(phone, { limit = 20, before = null, since = null } 
   const digits = last10(phone);
   if (!digits) return [];
   try {
-    let q = db('sms_log')
+    let q = excludeUnresolvedSendReservations(db('sms_log'))
       .select('from_phone', 'to_phone', 'message_body', 'created_at')
       .where(function whereEitherDirection() {
         this.whereRaw("regexp_replace(coalesce(from_phone, ''), '\\D', '', 'g') LIKE ?", [`%${digits}`])
