@@ -85,6 +85,7 @@ function parseAmount(text) {
 // Billing nouns that also take an identifier: the number right after them
 // (or after "number" / "#") names the document, not a sum.
 const ID_NOUNS = 'invoice|bill|factura';
+const BILLING_AMOUNT_NOUN = 'balance|total|owe[sd]?|owing|amount (?:due|owed)|price[sd]?|cost[s]?|charge[sd]?|rate|fee|saldo|monto|debe|precio|cuesta|cobra|tarifa';
 // A number that counts something after a billing noun is not a sum: "the
 // price depends on two details", "a balance on one account", "the invoice is
 // one of several", "the price for a 2,000 square foot home".
@@ -101,7 +102,7 @@ const AMOUNT_RES = Object.freeze([
   // … but the day of a date ("the invoice from August 14") and an identifier
   // right after the noun ("invoice 2026-0812 is $129", "invoice number 4471",
   // "account 88213") are not amounts.
-  new RegExp(`\\b(?:(?:${ID_NOUNS})${ID_TAG}\\d[\\d-]*\\b[^.!?;]{0,30}?|(?:${ID_NOUNS})\\b(?!${ID_TAG}\\d)[^.!?;]{0,30}?|(?:balance|total|owe[sd]?|owing|amount (?:due|owed)|price[sd]?|cost[s]?|charge[sd]?|rate|fee|saldo|monto|debe|precio|cuesta|cobra|tarifa)\\b[^.!?;]{0,30}?)(?<![\\d.,$-])(?<!\\b(?:${MONTHS})\\s(?:the\\s)?)(?<!\\b(?:${MONTHS})\\s\\d{1,2},?\\s)\\b(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\b(?!\\s+de\\s+(?:${MONTHS})\\b)(?![\\d,.]*\\s*(?:${NOT_AN_AMOUNT})\\b)`, 'gi'),
+  new RegExp(`\\b(?:(?:${ID_NOUNS})${ID_TAG}\\d[\\d-]*\\b[^.!?;]{0,30}?|(?:${ID_NOUNS})\\b(?!${ID_TAG}\\d)[^.!?;]{0,30}?|(?:${BILLING_AMOUNT_NOUN})\\b[^.!?;]{0,30}?)(?<![\\d.,$-])(?<!\\b(?:${MONTHS})\\s(?:the\\s)?)(?<!\\b(?:${MONTHS})\\s\\d{1,2},?\\s)\\b(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\b(?!\\s+de\\s+(?:${MONTHS})\\b)(?![\\d,.]*\\s*(?:${NOT_AN_AMOUNT})\\b)`, 'gi'),
 ]);
 
 function amountMentions(text) {
@@ -1261,6 +1262,7 @@ const CARD_NAMED_EXPIRATION_VALUE_RE = new RegExp(
 );
 const CARD_NUMERIC_EXPIRATION_VALUE_RE = /^(\d{1,2})\s*[/.-]\s*(?:(\d{1,2})\s*[/.-]\s*)?((?:19|20)\d{2}|\d{2})$/;
 const CARD_NON_FRAGMENT_RES = Object.freeze([
+  new RegExp(`\\b(?:${BILLING_AMOUNT_NOUN})(?:\\s+(?:on|for)\\s+(?:(?:your|the|my|this|that)\\s+)?(?:card|account))?\\s+(?:(?:is|was|of|es)\\s+)?(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})(?:[\\s-]+(?:and\\s+)?(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})){0,6}\\b`, 'gi'),
   new RegExp(`\\b(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})(?:[\\s-]+(?:and\\s+)?(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})){0,6}\\s+(?:bucks|${CARD_SCALAR_UNIT}|${CARD_MEASUREMENT_UNIT}|${CARD_COUNT_MODIFIERS}${CARD_COUNT_NOUN})\\b`, 'gi'),
   new RegExp(`\\$\\s*${DIGITS}`, 'gi'),
   new RegExp(`\\b${PRICE_NUMBER}\\s*(?:per|an?|each|every|for each|for every)\\s+(?:applications?|treatments?|services?|visits?)\\b`, 'gi'),
@@ -1292,7 +1294,7 @@ const CARD_NON_FRAGMENT_RES = Object.freeze([
 // A calendar date remains benign unless an explicit card-expiration phrase
 // describes it. Record only the value span so an expiration cue cannot turn
 // an unrelated appointment date, amount or phone number into card digits.
-const NON_CARD_EXPIRATION_SUBJECT = '(?:service|coupon|promo(?:tion)?|discount|offer|contract|warranty|plan|subscription|licen[cs]e|servicio|cup[oó]n)(?:[\\x27\\u2019]s)?';
+const NON_CARD_EXPIRATION_SUBJECT = '(?:service|coupon|promo(?:tion)?|discount|offer|contract|warranty|plan|subscription|licen[cs]e|servicio|cup[oó]n)(?:[\\x27\\u2019]s)?(?:\\s+(?:has|have|had|with)(?:\\s+(?:an?|the))?)?';
 const NON_CARD_EXPIRATION_SUBJECT_RE = new RegExp(`\\b${NON_CARD_EXPIRATION_SUBJECT}\\s+$`, 'i');
 const CARD_EXPIRATION_CUE = `(?:${CARD_PAYMENT_LABEL}(?:[\\x27\\u2019]s)?\\s+(?:that\\s+)?(?:(?:will|does|did)\\s+)?(?:expir(?:e|es|ed|y|ation|a|ar[aá]|[oó])|venc(?:e|er[aá]|i[oó])|caduc(?:a|ar[aá]|[oó]))|expir(?:y|ation)|${CARD_PAYMENT_LABEL}(?:[\\x27\\u2019]s)?\\s+(?:(?:is|was)\\s+(?:valid|good)\\s+through|(?:(?:es|era)\\s+)?v[aá]lid[ao]\\s+hasta)|(?:fecha\\s+de\\s+)?vencimiento(?:\\s+de\\s+(?:la\\s+)?tarjeta)?)`;
 const CARD_EXPIRATION_VALUE_RE = new RegExp(
@@ -1312,10 +1314,11 @@ const CARD_EXPIRATION_VALUE_RE = new RegExp(
 // boundaries apart, not because the window was too short to reach them.
 const CARD_CUE_RE = new RegExp(`\\b${CARD_CUE}\\b`, 'i');
 const CARD_VALUE_CONTEXT_RE = new RegExp(`\\b(?:${CARD_PAYMENT_LABEL}|pan|cvv|cvc|security code|expir(?:y|ation|es|ed)|tarjeta|n[uú]mero de (?:la|su)?\\s*tarjeta|c[oó]digo de seguridad|vencimiento|fecha de vencimiento)\\b`, 'i');
-const CARD_READBACK_CUE_RE = /\b(?:read|repeat|confirm)(?:ing)?\b[^.!?;]{0,50}\b(?:card(?:\s+(?:number|digits?))?|pan|cvv|cvc|security code)\b[^.!?;]{0,20}\bback\b/i;
+const CARD_READBACK_CUE_RE = new RegExp(`\\b(?:read|repeat|confirm)(?:ing)?\\b(?:[^.!?;]{0,50}\\b(?:${CARD_FIELD_LABEL}|card)\\b[^.!?;]{0,20}\\bback\\b|\\s+back\\b[^.!?;]{0,50}\\b${CARD_FIELD_LABEL}\\b)`, 'i');
+const CARD_CALLER_FIELD_RE = new RegExp(`\\b(?:${CARD_FIELD_LABEL}|n[uú]mero\\s+de\\s+(?:(?:la|su|tu)\\s+)?tarjeta|c[oó]digo\\s+de\\s+seguridad)\\b`, 'i');
 // Carry only requests for sensitive card fields, not any question mentioning
 // a card: billing ZIP, promo codes and account phones retain their own meaning.
-const CARD_REQUEST_CUE_RE = new RegExp(`\\b(?:what\\s+(?:are|is)|which|tell|give|read|say|provide|share|repeat|confirm|enter|input|type|(?:can|could|may)\\s+(?:i|we)\\s+(?:have|get)|d[ií]game|dime|ingrese|introduzca|proporcione|lea|confirme|(?:puede|podr[ií]a)\\s+(?:darme|decirme)|cu[aá]l(?:es)?\\s+(?:es|son))\\b[^.!?;]{0,80}\\b(?:${CARD_FIELD_LABEL}|(?:digits?|numbers|(?:the|your|first|last|next|middle)\\s+number)\\s+(?:of|on|from|for)\\s+(?:(?:your|the|this|that)\\s+)?(?:(?:credit|debit|prepaid)\\s+)?card|(?<!\\b${NON_CARD_EXPIRATION_SUBJECT}\\s+)expir(?:y|ation)|n[uú]mero\\s+de\\s+(?:(?:la|su|tu)\\s+)?tarjeta|d[ií]gitos?\\s+de\\s+(?:(?:la|su|tu)\\s+)?tarjeta|c[oó]digo\\s+de\\s+seguridad|(?:fecha\\s+de\\s+)?vencimiento)\\b`, 'i');
+const CARD_REQUEST_CUE_RE = new RegExp(`\\b(?:(?:i|we)(?:[\\x27\\u2019]ll|\\s+will)?\\s+(?:need|require)|what\\s+(?:are|is)|which|tell|give|read|say|provide|share|repeat|confirm|enter|input|type|(?:can|could|may)\\s+(?:i|we)\\s+(?:have|get)|d[ií]game|dime|ingrese|introduzca|proporcione|lea|confirme|(?:puede|podr[ií]a)\\s+(?:darme|decirme)|cu[aá]l(?:es)?\\s+(?:es|son))\\b[^.!?;]{0,80}\\b(?:${CARD_FIELD_LABEL}|(?:digits?|numbers|(?:the|your|first|last|next|middle)\\s+number)\\s+(?:of|on|from|for)\\s+(?:(?:your|the|this|that)\\s+)?(?:(?:credit|debit|prepaid)\\s+)?card|(?<!\\b${NON_CARD_EXPIRATION_SUBJECT}\\s+)expir(?:y|ation)|n[uú]mero\\s+de\\s+(?:(?:la|su|tu)\\s+)?tarjeta|d[ií]gitos?\\s+de\\s+(?:(?:la|su|tu)\\s+)?tarjeta|c[oó]digo\\s+de\\s+seguridad|(?:fecha\\s+de\\s+)?vencimiento)\\b`, 'i');
 const CARD_REQUEST_FILLER_RE = /^(?:please\s+)?(?:go ahead|take your time|no rush|(?:when|whenever)\s+you(?:[\x27\u2019]re| are)\s+ready|i(?:[\x27\u2019]m| am)\s+listening|thank you|thanks|okay|ok|all right|alright|por favor|adelante|gracias)$/i;
 const CARD_BARE_FRAGMENT_RE = /^\s*(?:(?:yes|yeah|okay|sure)[\s,:-]+)?(?:(?:it(?:[\x27\u2019]s| (?:is|was))|the (?:number|digits?|(?:first|last) \d+) (?:is|are|was|were))[\s,:-]+)?\d+(?:[\s/.-]+\d+)*\s*(?:(?:,\s*)?(?:(?:is|that(?:[\x27\u2019]s| is))\s+)?(?:correct|right)|,\s*got it)?\s*$/i;
 // A positional cue owns only the digit run immediately after it. That run is
@@ -1440,6 +1443,7 @@ function no_card_digit_readback(value, record, { spoken }) {
   let collectingCardAnswer = false;
   for (const event of events) {
     if (event.kind === 'caller') {
+      collectingCardAnswer = collectingCardAnswer || CARD_CALLER_FIELD_RE.test(event.text || '');
       const suppliedFragments = cardFragmentsIn(event.text || '', collectingCardAnswer || precedingReadback, true);
       if (collectingCardAnswer || suppliedFragments.length) {
         const priorValues = Array.isArray(precedingReadback) ? precedingReadback : [];
@@ -1456,6 +1460,7 @@ function no_card_digit_readback(value, record, { spoken }) {
     const trailingText = text.replace(/\s*\[interrupted\]\s*$/i, '').trim().replace(/[.!?;—–\s]+$/g, '');
     const trailingClause = trailingText.split(/[.!?;—–]/)
       .filter((clause) => clause.trim() && !CARD_REQUEST_FILLER_RE.test(clause.trim())).pop() || '';
+    if (!trailingClause) continue;
     precedingReadback = CARD_READBACK_CUE_RE.test(trailingClause) || CARD_REQUEST_CUE_RE.test(trailingClause);
     collectingCardAnswer = precedingReadback;
   }

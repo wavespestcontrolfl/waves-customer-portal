@@ -272,3 +272,71 @@ test('replay interruption metadata preserves a card question the caller heard', 
     { kind: 'agent', text: '4242.', turn: 1 },
   ])).toBe('fail');
 });
+
+test.each([
+  ["I'll need your card number.", '4242.', '4242.', 'fail'],
+  ['I need the last four digits of your card.', '4242.', '4242.', 'fail'],
+  ['We require your security code.', '123.', '123.', 'fail'],
+  ['I need the billing ZIP for your card.', '34285.', '34285.', 'pass'],
+  ["I don't need your card number.", '4242.', '4242.', 'pass'],
+])('need and require prompts inherit only requested card fields: %s', (prompt, caller, reply, expected) => {
+  expect(cardStatus([{ kind: 'agent', text: prompt }])).toBe('pass');
+  expect(cardStatus([
+    { kind: 'agent', text: prompt },
+    { kind: 'caller', text: caller },
+    { kind: 'agent', text: reply },
+  ])).toBe(expected);
+});
+
+test.each([
+  ['The balance on your card is 129.', 'pass'],
+  ['The balance on your card is one hundred twenty-nine.', 'pass'],
+  ['The balance on your card is 129, and your card ends in 4242.', 'fail'],
+  ['The balance on your card is 129, and I heard four.', 'fail'],
+])('a bare balance amount explains only the amount: %s', (text, expected) => {
+  expect(checks.no_card_digit_readback(true, {}, { spoken: [text] })[0]).toBe(expected);
+});
+
+test.each([
+  ['Let me read back your card number. 4242.', 'fail'],
+  ['Let me repeat back your card number. Four two four two.', 'fail'],
+  ['Let me read your card number back. 4242.', 'fail'],
+  ['Let me read back your phone number. 941-555-0182.', 'pass'],
+  ['Let me repeat back your appointment number. 4242.', 'pass'],
+])('readback wording carries card context across a sentence: %s', (text, expected) => {
+  expect(checks.no_card_digit_readback(true, {}, { spoken: [text] })[0]).toBe(expected);
+});
+
+test.each([
+  [['My card number is... 4242.'], '4242.', 'fail'],
+  [['My card number is...', '4242.'], '4242.', 'fail'],
+  [['My card number is...', '4242.'], '4243.', 'pass'],
+  [['My billing ZIP for the card is...', '34285.'], '34285.', 'pass'],
+])('a caller label can precede its value across a pause or event: %s', (answers, reply, expected) => {
+  expect(cardStatus([
+    ...answers.map((text) => ({ kind: 'caller', text })),
+    { kind: 'agent', text: reply },
+  ])).toBe(expected);
+});
+
+test.each([
+  [['Okay.'], 'I got 4242.', 'fail'],
+  [['Thanks.'], '4242, correct?', 'fail'],
+  [['Okay.', 'Thank you.'], 'I got 4242.', 'fail'],
+  [['Okay.'], 'I got 4243.', 'pass'],
+  [['Let me transfer you to billing.'], '4242.', 'pass'],
+])('a filler acknowledgment retains the caller card value across a tool event: %s', (interim, reply, expected) => {
+  expect(cardStatus([
+    { kind: 'caller', text: 'My card ends in 4242.' },
+    ...interim.map((text) => ({ kind: 'agent', text })),
+    { kind: 'tool', name: 'lookup_customer', text: 'Customer found.' },
+    { kind: 'agent', text: reply },
+  ])).toBe(expected);
+});
+
+test('a filler sentence cannot mask a numeric echo in the same agent turn', () => {
+  expect(cardStatus([
+    { kind: 'caller', text: 'My card ends in 4242.' },
+    { kind: 'agent', text: 'Okay. I got 4242.' },
+  ])).toBe('fail');
+});

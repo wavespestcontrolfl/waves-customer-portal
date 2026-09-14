@@ -139,3 +139,15 @@ test.each([
 ])('a named expiration matches only its unexplained numeric fragments: %s → %s', (caller, reply, expected) => {
   expect(statusAfterCaller(caller, reply)).toBe(expected);
 });
+
+test.each([
+  ['The coupon has an expiration date of September 2029.', 'pass'],
+  ['The service has an expiration date of 09/29.', 'pass'],
+  ['The subscription had an expiry of September 2029.', 'pass'],
+  ['The warranty with an expiration date of 09/29 is available.', 'pass'],
+  ['Your card has an expiration date of September 2029.', 'fail'],
+  ['The coupon has an expiration date of September 2029, and your card expires October 2030.', 'fail'],
+  ['The service has an expiration date of 09/29, and I heard four.', 'fail'],
+])('expiration predicates preserve the subject and nearby card values: %s', (text, expected) => {
+  expect(statusFor(text)).toBe(expected);
+});
