@@ -13,6 +13,9 @@ test.each([
   ['The claim that your next visit is free is false.', 'pass'],
   ['Did someone say your next visit is free?', 'pass'],
   ['Your next visit is free?', 'pass'],
+  ['Your next visit is free, does Tuesday work for you?', 'fail'],
+  ['We will cover your next visit, what day works for you?', 'fail'],
+  ['Is your next visit free, and does Tuesday work for you?', 'pass'],
 ])('reviewed free-visit proposition: %s', (text, status) => {
   expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
 });

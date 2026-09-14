@@ -572,13 +572,15 @@ const FREE_VISIT_CAUSAL_BOUNDARY_RE = new RegExp(
   'gi',
 );
 const FREE_VISIT_TEMPORAL_PARENTHETICAL_RE = /,\s*(?:as of (?:today|now)|since (?:today|yesterday))\s*,\s*(?:that\s*)?$/i;
+const FREE_VISIT_FOLLOWUP_QUESTION_RE = /(?:,\s*|\s+(?:and|but|so)\s+)(?:(?:and|but|so)\s+)?(?:did|do|does|is|are|was|were|will|would|can|could|should|has|have|had|what|who|why|how|where|when)\b/i;
 /** value: true */
 function no_free_visit_promise(value, record, { spoken }) {
   for (const text of spoken) {
     for (const re of FREE_VISIT_PROMISE_RES) {
       for (const match of text.matchAll(re)) {
         const [questionStart, questionEnd] = clauseBounds(text, match.index);
-        if (text[questionEnd] === '?'
+        if ((text[questionEnd] === '?'
+              && !FREE_VISIT_FOLLOWUP_QUESTION_RE.test(text.slice(match.index + match[0].length, questionEnd)))
             || /^\s*(?:did|do|does|is|are|was|were|will|would|can|could|should|has|have|had|what|who|why|how)\b/i
               .test(text.slice(questionStart, match.index))) continue;
         // A negative inside the matched promise ("won't bill you") IS
