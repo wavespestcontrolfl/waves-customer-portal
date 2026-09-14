@@ -604,11 +604,11 @@ function paymentOutcomeIsConditional(text, claimStart, claim, outcome, outcomeSt
   if (matchOffset < 0) return false;
   const prefix = claim.slice(0, matchOffset);
   const clauseIntroduction = text.slice(claimStart, outcomeStart);
-  return (/^\s*(?:if|unless|whether(?:\s+or\s+not)?|si|a\s+menos\s+que)\b/i.test(clauseIntroduction)
+  return (/^\s*(?:(?:only\s+)?if|unless|whether(?:\s+or\s+not)?|si|a\s+menos\s+que)\b/i.test(clauseIntroduction)
       && !PAYMENT_CONDITIONAL_ASIDE_RE.test(clauseIntroduction))
-    || (/^\s*(?:if|unless|whether(?:\s+or\s+not)?|si|a\s+menos\s+que)\b/i.test(claim)
+    || (/^\s*(?:(?:only\s+)?if|unless|whether(?:\s+or\s+not)?|si|a\s+menos\s+que)\b/i.test(claim)
       && !PAYMENT_CONDITIONAL_ASIDE_RE.test(claim))
-    || /\b(?:if|unless|whether(?:\s+or\s+not)?|si|a\s+menos\s+que)\s+(?:(?:your|the|that|this|a)\s+)?$/i.test(prefix)
+    || /\b(?:(?:only\s+)?if|unless|whether(?:\s+or\s+not)?|si|a\s+menos\s+que)\s+(?:(?:your|the|that|this|a)\s+)?$/i.test(prefix)
     || (PAYMENT_TRAILING_CONDITION_RE.test(trailingClaim)
       && !PAYMENT_CONDITIONAL_ASIDE_RE.test(trailingClaim));
 }
@@ -682,7 +682,7 @@ function paymentClaimContext(text, start, end) {
   const complement = hedge ? prefix.slice(hedge.index + hedge[0].length) : '';
   const refusedComplement = /\b(?:whether|is|are|was|were|has|have|had|will|should|did)\b/i.test(complement)
     || PAYMENT_OUTCOME_RES.some((re) => new RegExp(re.source, 'i').test(complement));
-  const governed = /^\s*(?:if|unless|whether|once|when|after|before)\b/i.test(prefix)
+  const governed = /^\s*(?:(?:only\s+)?if|unless|whether|once|when|after|before)\b/i.test(prefix)
     || (hedge && refusedComplement);
   return coordinated && governed
     ? text.slice(boundary - prefix.length, end)

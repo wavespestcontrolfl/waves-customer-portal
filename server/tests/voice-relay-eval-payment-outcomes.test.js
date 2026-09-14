@@ -464,6 +464,9 @@ describe('voice relay eval — payment outcomes', () => {
     ["Your payment of $129.00 was approved.", 'fail'],
     ["I cannot confirm whether your payment of $129.00 was approved.", 'pass'],
     ["Your payment of $129.00 was approved, any questions?", 'fail'],
+    ["Only if you authorize it, your payment will be processed.", 'pass'],
+    ["Only if your payment is approved and your card is charged, we will send a receipt.", 'pass'],
+    ["Only if you authorize it will your payment be processed.", 'pass'],
   ])('current-head review regressions: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
   });
