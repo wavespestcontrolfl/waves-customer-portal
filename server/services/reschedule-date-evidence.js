@@ -1,4 +1,4 @@
-const { etParts, addETDays, validCalendarDate } = require('../utils/datetime-et');
+const { etParts, addETDays, validCalendarDate, parseETDateTime, parseQuotedETDeadline } = require('../utils/datetime-et');
 
 const MONTHS = 'january february march april may june july august september october november december'.split(' ');
 const WEEKDAYS = 'sunday monday tuesday wednesday thursday friday saturday'.split(' ');
@@ -88,7 +88,8 @@ function transcriptDates(transcript, reference) {
     for (let i = 0; i < matches.length; i++) {
       const parts = components(matches[i][0], reference);
       if (!parts) return null;
-      dates.push({ text: matches[i][0], clause, binding: roles[i], parts });
+      dates.push({ text: matches[i][0], clause, binding: roles[i], parts,
+        before: clause.slice(0, matches[i].index), after: clause.slice(matches[i].index + matches[i][0].length) });
     }
   }
   return dates;
@@ -96,7 +97,7 @@ function transcriptDates(transcript, reference) {
 
 // The transcript, not the model's list, establishes both coverage and roles.
 // Called on extraction AND on persisted rows immediately before selection.
-function verifyRescheduleDateClaims(claims, transcript, reference) {
+function verifyRescheduleDateClaims(claims, transcript, reference, timing = {}) {
   if (!Array.isArray(claims)) return false;
   const dates = transcriptDates(transcript, reference);
   if (!dates) return false;
@@ -105,8 +106,34 @@ function verifyRescheduleDateClaims(claims, transcript, reference) {
     if (!quote || !date.clause.includes(quote) || !quote.includes(date.text) || claim.binding !== date.binding) return false;
     return ['year', 'month', 'day', 'weekday'].every(key => claim[key] === date.parts[key]);
   };
-  return dates.every(date => claims.some(claim => covers(claim, date)))
+  return dates.filter(date => date.binding === 'delivery').every(date => deliveryTimingMatches(date, timing, reference))
+    && dates.every(date => claims.some(claim => covers(claim, date)))
     && claims.every(claim => dates.some(date => covers(claim, date)));
+}
+
+// Calendar claims alone cannot prove a delivery floor: the independently
+// extracted due_at/type might still say today, deadline, or nothing at all.
+// Validate those proposals against the same complete delivery clause.
+function deliveryTimingMatches(date, timing, reference) {
+  if (!timing.due_at || (timing.due_type === 'deadline' && !/\bby $/.test(date.before))) return false;
+  const due = parseETDateTime(timing.due_at);
+  if (Number.isNaN(due.getTime())) return false;
+  const tail = date.after.split(' for ')[0].trim();
+  if (tail.startsWith('at ')) {
+    const proved = parseQuotedETDeadline(`${date.text} ${tail}`, reference);
+    return !!proved && due.getTime() === proved.getTime();
+  }
+  // A bare day permits a proposed clock on that day; 'morning' additionally
+  // uses the existing booking morning band, 08:00–12:00 (triage-auto-resolve).
+  // Other dayparts are unsupported by this delivery verifier and remain
+  // in review. No default clock is invented for missing due_at.
+  if (tail && tail !== 'morning') return false;
+  const provedDay = parseQuotedETDeadline(`${date.text} at 11:59 pm`, reference);
+  if (!provedDay) return false;
+  const actual = etParts(due);
+  const expected = etParts(provedDay);
+  return ['year', 'month', 'day'].every(key => actual[key] === expected[key])
+    && (tail !== 'morning' || (actual.hour >= 8 && actual.hour < 12));
 }
 
 module.exports = { verifyRescheduleDateClaims };

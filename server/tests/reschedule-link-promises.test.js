@@ -203,7 +203,7 @@ test('delivery timing does not constrain the visit, but an appointment claim doe
     { binding: 'appointment', quote: 'September 20 appointment', month: 9, day: 20 },
   ] };
   const source = { ...call, transcription: `Agent: ${promise}\nCaller: Thank you.` };
-  const matching = { ...commitment, evidence: [{ quote: promise, speaker: 'agent' }], subject };
+  const matching = { ...commitment, due_at: '2030-01-08T09:00:00-05:00', due_type: 'floor', evidence: [{ quote: promise, speaker: 'agent' }], subject };
   expect(select({ call: source, commitment: matching, candidates: [sept20] }).visit?.id).toBe('sept20');
   expect(select({ call: source, commitment: matching, candidates: [sept21] }).reason).toBe('date_not_grounded');
 });
@@ -213,7 +213,7 @@ test('a delivery-only claim never binds the appointment date', () => {
   const subject = { date_claims: [{ binding: 'delivery', quote: 'tomorrow morning', year: 2030, month: 1, day: 8 }] };
   const source = { ...call, transcription: `Agent: ${promise}\nCaller: Thank you.` };
   const nextWeek = { ...visit, id: 'next-week', scheduled_date: '2030-01-15' };
-  expect(select({ call: source, commitment: { ...commitment, evidence: [{ quote: promise, speaker: 'agent' }], subject },
+  expect(select({ call: source, commitment: { ...commitment, due_at: '2030-01-08T09:00:00-05:00', due_type: 'floor', evidence: [{ quote: promise, speaker: 'agent' }], subject },
     candidates: [nextWeek] }).visit?.id).toBe('next-week');
 });
 

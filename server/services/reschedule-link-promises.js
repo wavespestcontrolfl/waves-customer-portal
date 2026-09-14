@@ -464,9 +464,9 @@ function claimFitsDate(claim, ymd) {
   return Object.entries({ year, month, day, weekday }).every(([key, value]) => claim[key] == null || claim[key] === value);
 }
 
-function structuredDateReason(subject, call) {
+function structuredDateReason(subject, call, commitment) {
   const reference = call.created_at ? new Date(call.created_at) : null;
-  if (!require('./reschedule-date-evidence').verifyRescheduleDateClaims(subject?.date_claims, call.transcription, reference)) {
+  if (!require('./reschedule-date-evidence').verifyRescheduleDateClaims(subject?.date_claims, call.transcription, reference, commitment)) {
     return 'appointment_date_unresolved';
   }
   // A model-selected full date cannot be its own evidence. Partial claims
@@ -524,7 +524,7 @@ function selectDiscussedVisit({ commitment, call, customer, candidates = [], now
     && (groundedSubject || promisedQuotes.some((quote) => RESCHEDULE_WORD.test(quote) || MOVE_INTENT.test(quote) || EXISTING_SLOT.test(quote)));
   if (revoked || !promisedQuotes.length || !aboutThisAppointment
     || !Number.isFinite(Number(commitment.confidence)) || Number(commitment.confidence) < 0.9) return skip('promise_needs_review');
-  const dateReason = structuredDateReason(subject, call);
+  const dateReason = structuredDateReason(subject, call, commitment);
   if (dateReason) return skip(dateReason);
   const selected = narrowBySubject(candidates, subject);
   if (selected.length !== 1) return skip(selected.length ? 'ambiguous_visit'

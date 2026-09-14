@@ -2127,6 +2127,20 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       expect((await mockPg('outbox_messages').where({ id: row.id }).first()).status).toBe('sent');
     });
 
+    test.each([
+      [new Date('2030-01-08T14:00:00Z'), 'deadline'],
+      [new Date('2030-01-07T14:00:00Z'), 'floor'],
+      [null, null],
+    ])('inconsistent persisted delivery timing parks before provider handoff (%s, %s)', async (dueAt, dueType) => {
+      const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link tomorrow morning.', dueAt, dueType,
+        dateClaims: [{ binding: 'delivery', quote: 'tomorrow morning', year: 2030, month: 1, day: 8 }] });
+      await links.stagePromises(mockPg);
+      const send = jest.fn(successfulSend);
+      await links.sweep(mockPg, { now: new Date('2030-01-07T14:00:00Z'), send, buildLink: stubBuildLink, render: stubRender });
+      expect(send).not.toHaveBeenCalled();
+      expect((await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first()).status).toBe('review');
+    });
+
     test('a link used after acceptance but before outbox bookkeeping reconciles', async () => {
       const now = new Date('2030-01-07T14:00:00Z');
       const acceptedAt = new Date('2030-01-07T14:00:01Z');
