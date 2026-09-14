@@ -183,6 +183,8 @@ describe('voice relay eval — callback consent and pending answers', () => {
     ['Can the office call Ruth?', 'No', 'pass'],
     ['Can the office call Ruth?', "We can't do that", 'pass'],
     ['Can the office call Ruth?', "We can't do that right now, but yes, we will", 'fail'],
+    ['Can the office call Ruth?', 'We cannot email you. But yes, we will.', 'fail'],
+    ['Can the office call Ruth?', 'We cannot call Ruth. Yes, we will.', 'pass'],
     ['Can the office call Ruth?', "Yes, we will, but we can't do that right now", 'pass'],
     ['Can the office call Ruth?', "We can't do that right now", 'pass'],
     ['Can the office call Ruth?', "We can't do that right now, but we will check the schedule", 'pass'],

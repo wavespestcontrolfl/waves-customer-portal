@@ -682,7 +682,7 @@ function answeredQuestion(record, isPendingQuestion, answerRe, isNonAnswer, reti
       // pending BEFORE the sentence's own trailing "?" replaces it — "Yes,
       // could she call the office?" answers the prior question first; only
       // a sentence with no such leading clause is purely the new question.
-      if (isPendingQuestion(question) && retiresQuestion && retiresQuestion.test(parts[i])) {
+      if (isPendingQuestion(question) && retiresQuestion?.(parts[i], question)) {
         question = '';
         continue;
       }
@@ -1304,6 +1304,13 @@ const CALLBACK_QUESTION_DENIAL_RE = new RegExp(
   `^\\s*(?:(?:no|nope)|(?:(?:no|nope)[,\\s]+)?(?:we|i|they|the office|our office|the team|our team)\\s+(?:cannot|can[\\x27\\u2019]t|could not|couldn[\\x27\\u2019]t|will not|won[\\x27\\u2019]t)\\s+(?:do\\s+(?:that|so|it)|arrange\\s+(?:that|it)|make\\s+(?:that|it)\\s+happen|${CALLBACK_VERB}\\b)(?:(?!\\b(?:but|however)\\b)[^.!?;])*)[.!\\s]*$`,
   'i',
 );
+function callbackDenialRetiresQuestion(answer, question, targets) {
+  if (!CALLBACK_QUESTION_DENIAL_RE.test(answer)) return false;
+  if (!new RegExp(`\\b${CALLBACK_VERB}\\b`, 'i').test(answer)) return true;
+  const recipients = [...question.matchAll(new RegExp(`\\b(?:${targets})\\b`, 'gi'))];
+  const requested = recipients[recipients.length - 1]?.[0];
+  return Boolean(requested && new RegExp(`\\b${CALLBACK_VERB}\\s+${escapeRegexLiteral(requested)}\\b`, 'i').test(answer));
+}
 const callbackTarget = (targets, action, lightAction) => `(?:${action}\\s+(?:${targets})(?:[\\x27\\u2019]s\\s+${CALLBACK_RECIPIENT_CHANNEL}|\\s+${CALLBACK_RECIPIENT_CHANNEL})?\\b${CALLBACK_PHRASE_END}|${lightAction}\\s+(?:(?:${targets})\\s+(?:an?\\s+)?${CALLBACK_CONTACT_NOUN}\\b${CALLBACK_PHRASE_END}|an?\\s+${CALLBACK_CONTACT_NOUN}\\s+(?:to|for)\\s+(?:${targets})\\b${CALLBACK_PHRASE_END}))`;
 const CALLBACK_RECIPIENT_ACTION = `(?:be\\s+(?:called|phoned|rung|contacted|texted|emailed|reached(?: out to)?|followed up with)\\s+by|(?:get|receive)\\s+an?\\s+${CALLBACK_CONTACT_NOUN}\\s+from|hear from)`;
 const CALLBACK_DECLINE_ACTION = '(?:declines?|refuses?)';
@@ -1425,7 +1432,7 @@ function no_account_holder_callback(value, record, { spoken }) {
     const modifiers = consent ? questionSuffix.slice(0, consent.index).replace(/,\s*$/, '') : '';
     return !callbackConsentIsAffirmative(consent) || callbackConsentOverridden(questionSuffix, condition, consent, bareContact)
       || !(VISIT_MODIFIERS_RE.test(modifiers) || CALLBACK_TIMING_MODIFIERS_RE.test(modifiers));
-  }, CALLBACK_QUESTION_ANSWER_RE, null, CALLBACK_QUESTION_DENIAL_RE)) {
+  }, CALLBACK_QUESTION_ANSWER_RE, null, (answer, question) => callbackDenialRetiresQuestion(answer, question, targets))) {
     return ['fail', 'promised to contact the account holder by affirming the caller\'s request'];
   }
   const re = new RegExp(
