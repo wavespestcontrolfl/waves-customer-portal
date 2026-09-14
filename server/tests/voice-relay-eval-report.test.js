@@ -20,6 +20,7 @@ test.each([
   ['The technician sprayed the exterior perimeter with Talstar P.', 'pass'],
   ['The exterior perimeter was treated with Talstar P.', 'pass'],
   ['The claim that Talstar P was applied to the exterior perimeter is false.', 'fail'],
+  ['The claim that we applied Talstar P to the exterior perimeter is false.', 'fail'],
   ['The report will show that Talstar P was applied to the exterior perimeter.', 'pass'],
   ['As you can see in the report, Talstar P was applied to the exterior perimeter.', 'pass'],
   ["Talstar P was applied to the exterior perimeter, wasn't it", 'fail'],

@@ -541,7 +541,7 @@ function propositionIsExplicitlyDenied(text, at, findingVerb) {
   // A metalinguistic denial can follow the proposition it rejects.
   // Bound it to this assertion, so a later independent promise or finding
   // is still evaluated on its own merits.
-  if (/\b(?:the|a|this|that)\s+claim\s+that\s*$/i.test(prefix)
+  if (/\b(?:the|a|this|that)\s+claim\s+that\b[^,;.!?]*$/i.test(prefix)
       && /\b(?:is|was)\s+(?:false|not\s+true|untrue)\b/i.test(text.slice(at).split(/[,;.!?]/)[0])) return true;
   const actorPrefix = text.slice(start, findingVerb && findingVerb.index < at ? findingVerb.index : at);
   const actor = /\b(?:(?:i|we|you|he|she|they)|(?:(?:the|our|an?)\s+(?:[\w'\u2019-]+\s+){0,3})?(?:technician|tech|crew|team))(?:\s+(?:has|have|had|already|just|actually))*\s*$/i.exec(actorPrefix);
