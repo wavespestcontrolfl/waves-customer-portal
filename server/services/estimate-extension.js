@@ -276,6 +276,7 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
   // concurrent sweep flip (status guard). Zero rows → 409, callers surface
   // retry/failure.
   await db.transaction(async (trx) => {
+    let anchor;
     if (estimate.estimate_group_id) {
       // Proposal saves and grouped sends take this lock before row locks.
       // Hold it through both writes so a new fixed hold cannot split the offer.
@@ -283,17 +284,23 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
         ['estimate-group-send', String(estimate.estimate_group_id)]);
       const locked = await trx('estimates').where({ estimate_group_id: estimate.estimate_group_id })
         .orderBy('id').forUpdate().select('id', 'estimate_data');
-      const anchor = locked.find((row) => row.id === estimate.id);
-      if (!anchor) {
-        const err = new Error('Estimate changed groups while extending — retry.');
-        err.statusCode = 409;
-        throw err;
-      }
-      if (await fixedBidBlocksExtension(trx, { ...estimate, estimate_data: anchor.estimate_data })) {
-        const err = validationError('This bid or a grouped property has a fixed validity date. Contact the office to revise the proposal.');
-        err.code = 'FIXED_BID_VALIDITY';
-        throw err;
-      }
+      anchor = locked.find((row) => row.id === estimate.id);
+    } else {
+      // A generic proposal save can add a fixed hold after public preflight.
+      // Judge the locked row before the write so refusal keeps its public
+      // FIXED_BID_VALIDITY / generic-404 classification.
+      anchor = await trx('estimates').where({ id: estimate.id }).whereNull('estimate_group_id')
+        .forUpdate().first('estimate_data');
+    }
+    if (!anchor) {
+      const err = new Error('Estimate changed groups while extending — retry.');
+      err.statusCode = 409;
+      throw err;
+    }
+    if (await fixedBidBlocksExtension(trx, { ...estimate, estimate_data: anchor.estimate_data })) {
+      const err = validationError('This bid or a grouped property has a fixed validity date. Contact the office to revise the proposal.');
+      err.code = 'FIXED_BID_VALIDITY';
+      throw err;
     }
     const updated = await trx('estimates')
       .where({ id: estimate.id, status: estimate.status, estimate_group_id: estimate.estimate_group_id || null })
