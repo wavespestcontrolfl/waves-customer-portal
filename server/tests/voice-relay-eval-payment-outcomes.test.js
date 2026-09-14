@@ -424,6 +424,15 @@ describe('voice relay eval — payment outcomes', () => {
     ["I cannot confirm your payment status and your payment was approved.", 'fail'],
     ["I cannot confirm your payment was declined and your card was charged.", 'pass'],
     ["I was unable to confirm your payment status and your payment was approved.", 'fail'],
+    ["Your payment of $129 was approved.", 'fail'],
+    ["Your card ending in 4242 was charged.", 'fail'],
+    ["Your payment of one hundred twenty-nine dollars was approved.", 'fail'],
+    ["Your payment of $129 was not approved.", 'pass'],
+    ["Your card ending in 4242 was not charged.", 'pass'],
+    ["Your payment of $129 was approved?", 'pass'],
+    ["Your payment method of choice was approved.", 'pass'],
+    ["Your card ending in 4242 was charged once you authorized it.", 'fail'],
+    ["Once your card ending in 4242 has been charged, we will send a receipt.", 'pass'],
   ])('current-head review regressions: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
   });

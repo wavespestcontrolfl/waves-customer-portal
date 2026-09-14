@@ -535,8 +535,8 @@ function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)
 const PAYMENT_ACTOR = '(?:i|we|they|the office|the team|billing|someone|(?:a|the|our) (?:team member|billing team|manager))';
 const PAYMENT_SUCCESS_ADVERBS = '(?:(?:already|just|now|successfully)\\s+)*';
 const PAYMENT_NON_OUTCOME_SUFFIX = '(?!\\s+(?:(?:(?:update|change|replacement)\\s+)?request|info(?:rmation)?|details?|method)\\b)';
-const PAYMENT_TARGET = `(?:payment|(?:(?:credit|debit|prepaid)\\s+)?card|charge|transaction)${PAYMENT_NON_OUTCOME_SUFFIX}`;
 const PAYMENT_AMOUNT = `(?:\\$\\s*${DIGITS}|${DIGITS}\\s+(?:dollars?|bucks)|${NUMBER_RUN_EN_STRICT}(?:dollars?|bucks))`;
+const PAYMENT_TARGET = `(?:payment|(?:(?:credit|debit|prepaid)\\s+)?card|charge|transaction)${PAYMENT_NON_OUTCOME_SUFFIX}(?:\\s+(?:of\\s+${PAYMENT_AMOUNT}|ending(?:\\s+in)?\\s+\\d{4}\\b))?`;
 const PAYMENT_TRANSITIVE_SUCCESS = '(?:processed|charged|accepted|approved|completed|received|cleared|posted)';
 const PAYMENT_RESULT_STATE = '(?:processed|charged|accepted|approved|complete|completed|successful|received|cleared|posted)';
 const PAYMENT_INTRANSITIVE_SUCCESS = '(?:cleared|posted)';
