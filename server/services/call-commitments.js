@@ -519,31 +519,14 @@ function quoteExpressesAction(normalizedQuote, item) {
 // the link worker parks them instead of choosing an appointment by default.
 // All claims in an explicit list must be usable; dropping just one would
 // falsely make the remaining list look complete.
-function groundedDateClaims(subject, transcript) {
+function groundedDateClaims(subject, transcript, reference) {
   getValidator();
-  if (!subject || !validateDateClaims(subject.date_claims)) return null;
-  const flat = normalizeForMatch(transcript);
-  const turns = speakerTurns(transcript);
-  const claims = [];
-  for (const claim of subject.date_claims) {
-    const quote = String(claim?.quote || '').trim();
-    const q = normalizeForMatch(quote);
-    const grounded = turns ? turns.ordered.some((turn) => turn.text.includes(q)) : flat.includes(q);
-    if (q.length < 3 || !grounded) return null;
-    const normalized = { binding: claim.binding, quote };
-    for (const part of ['year', 'month', 'day', 'weekday']) if (claim[part] !== undefined) normalized[part] = claim[part];
-    if (claim.binding !== 'unresolved' && !['year', 'month', 'day', 'weekday'].some((part) => normalized[part] !== undefined)) return null;
-    if (normalized.year && normalized.month && normalized.day) {
-      const date = new Date(Date.UTC(normalized.year, normalized.month - 1, normalized.day));
-      if (date.getUTCMonth() !== normalized.month - 1 || date.getUTCDate() !== normalized.day) return null;
-      if (normalized.weekday !== undefined && date.getUTCDay() !== normalized.weekday) return null;
-    }
-    claims.push(normalized);
-  }
-  return claims;
+  if (!subject || !validateDateClaims(subject.date_claims)
+    || !require('./reschedule-date-evidence').verifyRescheduleDateClaims(subject.date_claims, transcript, reference)) return null;
+  return subject.date_claims.map(claim => ({ ...claim, quote: claim.quote.trim() }));
 }
 
-function groundModelCommitments(items, transcript) {
+function groundModelCommitments(items, transcript, reference = null) {
   const flat = normalizeForMatch(transcript);
   const turns = speakerTurns(transcript);
   const kept = [];
@@ -571,7 +554,7 @@ function groundModelCommitments(items, transcript) {
     // claim. Keep its visit fields but mark the claim list incomplete so the
     // consumer can fail closed. An explicit [] alone means "none spoken".
     const subject = item.kind === 'send_reschedule_link'
-      ? { ...(item.subject && typeof item.subject === 'object' ? item.subject : {}), date_claims: groundedDateClaims(item.subject, transcript) }
+      ? { ...(item.subject && typeof item.subject === 'object' ? item.subject : {}), date_claims: groundedDateClaims(item.subject, transcript, reference) }
       : null;
     kept.push({
       party: item.party,
@@ -622,7 +605,7 @@ async function extractCommitmentsWithModel(transcript, { callStartedAt = null, c
   if (!validate(parsed)) {
     return { items: [], skipped: 'schema_failed', errors: validate.errors, model: MODELS.FLAGSHIP, ms: Date.now() - startedAt };
   }
-  const grounded = groundModelCommitments(parsed.commitments, transcript);
+  const grounded = groundModelCommitments(parsed.commitments, transcript, callStartedAt ? new Date(callStartedAt) : null);
   return { items: grounded.kept, droppedUngrounded: grounded.droppedUngrounded, droppedLowConfidence: grounded.droppedLowConfidence, droppedMismatched: grounded.droppedMismatched, malformedDueAt: grounded.malformedDueAt, model: MODELS.FLAGSHIP, ms: Date.now() - startedAt };
 }
 

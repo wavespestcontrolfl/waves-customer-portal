@@ -1,0 +1,65 @@
+const { verifyRescheduleDateClaims: verify } = require('../services/reschedule-date-evidence');
+const reference = new Date('2026-09-14T02:00:00Z'); // September 13 in Eastern.
+const claim = (quote, parts, binding = 'appointment') => ({ quote, binding, ...parts });
+const current = 'Caller: My September 20 appointment.';
+const september20 = claim('September 20', { month: 9, day: 20 });
+
+test('calendar evidence proves components and coverage independently of the model', () => {
+  expect(verify([september20], current, reference)).toBe(true);
+  expect(verify([], current, reference)).toBe(false);
+  expect(verify([{ ...september20, day: 21 }], current, reference)).toBe(false);
+  expect(verify([{ ...september20, month: 10 }], current, reference)).toBe(false);
+  expect(verify([{ ...september20, year: 2026 }], current, reference)).toBe(false);
+  expect(verify([claim('September 20', { month: 9 })], current, reference)).toBe(false);
+  expect(verify([september20], `${current}\nCaller: My October 1 appointment.`, reference)).toBe(false);
+  expect(verify([], 'Agent: I will text you a reschedule link for that appointment.', reference)).toBe(true);
+});
+
+test.each([
+  ['Sep. 20th', { month: 9, day: 20 }],
+  ['September 20, 2026', { year: 2026, month: 9, day: 20 }],
+  ['9/20/2026', { year: 2026, month: 9, day: 20 }],
+  ['2026-09-20', { year: 2026, month: 9, day: 20 }],
+  ['Sunday, September 20', { weekday: 0, month: 9, day: 20 }],
+  ['Wed the 20th', { weekday: 3, day: 20 }],
+  ['the 20th', { day: 20 }],
+  ['tomorrow', { year: 2026, month: 9, day: 14 }],
+])('proves supported partial/calendar wording %s', (text, parts) => {
+  expect(verify([claim(text, parts)], `Caller: My appointment is ${text}.`, reference)).toBe(true);
+});
+
+test.each(['February 30', 'next Friday', 'September twenty first', 'a week from now', 'Christmas', 'the following day', '20', '9-20'])('unproven wording %s cannot pass as an empty list', text => {
+  expect(verify([], `Caller: My appointment is ${text}.`, reference)).toBe(false);
+});
+
+test('date roles come from complete clauses, including current versus requested', () => {
+  const transcript = 'Caller: Please move my current Tuesday appointment to Friday.\nAgent: I will text the reschedule link tomorrow morning.';
+  const claims = [claim('Tuesday', { weekday: 2 }), claim('Friday', { weekday: 5 }, 'requested'),
+    claim('tomorrow', { year: 2026, month: 9, day: 14 }, 'delivery')];
+  expect(verify(claims, transcript, reference)).toBe(true);
+  for (let i = 0; i < claims.length; i++) {
+    const swapped = claims.map((c, j) => i === j ? { ...c, binding: c.binding === 'appointment' ? 'delivery' : 'appointment' } : c);
+    expect(verify(swapped, transcript, reference)).toBe(false);
+    expect(verify(claims.filter((_, j) => i !== j), transcript, reference)).toBe(false);
+  }
+});
+
+test.each([
+  'My appointment is not September 20.',
+  'Can my appointment be September 20?',
+  'My appointment was September 20.',
+  'My appointment is September 20?',
+  'I want September 20 for my appointment.',
+  'My September 20 appointment needs to move, perhaps Friday.',
+  'Before I call on September 20, send the link.',
+])('unsupported or ambiguous role parks: %s', text => {
+  expect(verify([september20], `Caller: ${text}`, reference)).toBe(false);
+});
+
+test('relative dates need the call reference and use Eastern calendar rollover', () => {
+  const transcript = 'Caller: My appointment is tomorrow.';
+  const nextDay = claim('tomorrow', { year: 2026, month: 9, day: 14 });
+  expect(verify([nextDay], transcript, reference)).toBe(true);
+  expect(verify([nextDay], transcript, null)).toBe(false);
+  expect(verify([{ ...nextDay, day: 15 }], transcript, reference)).toBe(false);
+});

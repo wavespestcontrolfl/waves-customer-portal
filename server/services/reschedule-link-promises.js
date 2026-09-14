@@ -465,16 +465,9 @@ function claimFitsDate(claim, ymd) {
 }
 
 function structuredDateReason(subject, call) {
-  if (!Array.isArray(subject?.date_claims)) return 'appointment_date_unresolved';
-  for (const claim of subject.date_claims) {
-    if (!claim || !['appointment', 'delivery', 'requested'].includes(claim.binding)
-      || !norm(claim.quote) || !norm(call.transcription).includes(norm(claim.quote))) return 'appointment_date_unresolved';
-    if (claim.binding !== 'appointment') continue;
-    const limits = { year: [1900, 2100], month: [1, 12], day: [1, 31], weekday: [0, 6] };
-    if (!Object.keys(limits).some((key) => claim[key] != null)) return 'appointment_date_unresolved';
-    for (const [key, [min, max]] of Object.entries(limits)) {
-      if (claim[key] != null && (!Number.isInteger(claim[key]) || claim[key] < min || claim[key] > max)) return 'appointment_date_unresolved';
-    }
+  const reference = call.created_at ? new Date(call.created_at) : null;
+  if (!require('./reschedule-date-evidence').verifyRescheduleDateClaims(subject?.date_claims, call.transcription, reference)) {
+    return 'appointment_date_unresolved';
   }
   // A model-selected full date cannot be its own evidence. Partial claims
   // narrow the candidate set before visit_date is ever compared with it.

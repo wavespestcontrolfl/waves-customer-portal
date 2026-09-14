@@ -402,7 +402,20 @@ describe('structured reschedule-link dates and delivery timing', () => {
     evidence: [{ quote: 'I will text the reschedule link tomorrow at nine', speaker: 'agent' }],
     due_at: '2026-09-14T09:00:00-04:00', due_text: 'tomorrow at nine', due_type: 'floor',
   };
-  test('persists partial appointment and delivery claims independently; a callback date stays unresolved', () => {
+  test('persists proven appointment and ET-relative delivery components', () => {
+    const spoken = 'Caller: My September 20 appointment.\nAgent: I will text the reschedule link tomorrow at nine.';
+    const claims = [
+      { binding: 'appointment', quote: 'September 20', month: 9, day: 20 },
+      { binding: 'delivery', quote: 'tomorrow', year: 2026, month: 9, day: 14 },
+    ];
+    const out = groundModelCommitments([{ ...base, subject: { date_claims: claims } }], spoken, new Date('2026-09-14T02:00:00Z'));
+    expect(out.kept[0].subject.date_claims).toEqual(claims);
+    expect(groundModelCommitments([{ ...base, subject: { date_claims: [] } }], spoken).kept[0].subject.date_claims).toBeNull();
+    const generic = 'Agent: I will text you a reschedule link for that appointment.';
+    const simple = { ...base, evidence: [{ quote: generic.slice(7), speaker: 'agent' }], subject: { date_claims: [] } };
+    expect(groundModelCommitments([simple], generic).kept[0].subject.date_claims).toEqual([]);
+  });
+  test('an unresolved callback date invalidates the complete list while preserving the promise', () => {
     const item = { ...base, subject: { date_claims: [
       { binding: 'appointment', quote: 'My September 20 appointment needs to move to Friday', month: 9, day: 20 },
       { binding: 'requested', quote: 'move to Friday', weekday: 5 },
@@ -411,19 +424,19 @@ describe('structured reschedule-link dates and delivery timing', () => {
     ] } };
     const out = groundModelCommitments([item], transcript);
     expect(out.kept).toHaveLength(1);
-    expect(out.kept[0].subject.date_claims).toEqual(item.subject.date_claims);
+    expect(out.kept[0].subject.date_claims).toBeNull();
     expect(out.kept[0]).toMatchObject({ due_type: 'floor', due_basis: 'stated', due_at: '2026-09-14T13:00:00.000Z' });
     const row = require('../services/call-commitments').toRow('call', out.kept[0], { generation: 4 });
     expect(row.due_type).toBe('floor');
-    expect(JSON.parse(row.subject).date_claims).toEqual(item.subject.date_claims);
+    expect(JSON.parse(row.subject).date_claims).toBeNull();
   });
-  test('an explicit empty list stays distinct from omitted or ungrounded claims', () => {
+  test('an explicit empty list cannot hide dates spoken in the transcript', () => {
     const empty = groundModelCommitments([{ ...base, subject: { date_claims: [] } }], transcript).kept[0];
     const missing = groundModelCommitments([{ ...base, subject: { visit_date: '2026-09-20' } }], transcript).kept[0];
     const ungrounded = groundModelCommitments([{ ...base, subject: { date_claims: [
       { binding: 'appointment', quote: 'my October 21 appointment', month: 10, day: 21 },
     ] } }], transcript).kept[0];
-    expect(empty.subject.date_claims).toEqual([]);
+    expect(empty.subject.date_claims).toBeNull();
     expect(missing.subject.date_claims).toBeNull();
     expect(ungrounded.subject.date_claims).toBeNull();
   });

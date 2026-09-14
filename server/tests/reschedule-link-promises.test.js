@@ -60,11 +60,11 @@ test('outbound source variants retain full phone identity', () => {
   expect(select({ customer: { ...customer, phone: '+445555550100' } }).reason).toBe('customer_identity');
 });
 
-test('each subject field must occur in its own source quote, and units remain distinct', () => {
+test('each subject field needs its own quote; unsupported identity prose needs date review', () => {
   const subject = { quote: 'The appointment at 100 Example Street Unit 2.', address: '100 Example Street Unit 2', date_claims: [] };
   const source = { ...call, transcription: `${call.transcription}\nCaller: ${subject.quote}\nCaller: WaveGuard is my other service.` };
   expect(select({ call: source, commitment: { ...commitment, subject: { ...subject, service: 'WaveGuard' } } }).reason).toBe('subject_not_grounded');
-  expect(select({ call: source, commitment: { ...commitment, subject }, candidates: [visit, { ...visit, id: 'unit-3', property_unit: 'Unit 3' }] }).visit?.id).toBe('visit');
+  expect(select({ call: source, commitment: { ...commitment, subject }, candidates: [visit, { ...visit, id: 'unit-3', property_unit: 'Unit 3' }] }).reason).toBe('appointment_date_unresolved');
 });
 
 test('an appointment date claim and visit_date agree with the selected visit', () => {
@@ -79,6 +79,19 @@ test('an appointment date claim and visit_date agree with the selected visit', (
 
 test('missing date_claims is a legacy extraction requiring review', () => {
   expect(select({ commitment: { ...commitment, subject: { quote: 'that appointment' } } }).reason)
+    .toBe('appointment_date_unresolved');
+});
+
+test.each([
+  ['My September 20 appointment.', []],
+  ['My September 20 appointment.', [{ binding: 'appointment', quote: 'September 20', month: 9, day: 21 }]],
+  ['My September 20 appointment.', [{ binding: 'delivery', quote: 'September 20', month: 9, day: 20 }]],
+  ['My appointment is this afternoon.', []],
+  ['About the appointment. This afternoon.', []],
+  ['My appointment is at noon.', []],
+])('persisted model claims cannot bypass date proof: %s', (spoken, dateClaims) => {
+  const source = { ...call, transcription: `Caller: ${spoken}\n${call.transcription}` };
+  expect(select({ call: source, commitment: { ...commitment, subject: { date_claims: dateClaims } } }).reason)
     .toBe('appointment_date_unresolved');
 });
 
@@ -186,7 +199,7 @@ test('delivery timing does not constrain the visit, but an appointment claim doe
   const sept20 = { ...visit, id: 'sept20', scheduled_date: '2030-09-20' };
   const sept21 = { ...visit, id: 'sept21', scheduled_date: '2030-09-21' };
   const subject = { date_claims: [
-    { binding: 'delivery', quote: 'tomorrow morning' },
+    { binding: 'delivery', quote: 'tomorrow morning', year: 2030, month: 1, day: 8 },
     { binding: 'appointment', quote: 'September 20 appointment', month: 9, day: 20 },
   ] };
   const source = { ...call, transcription: `Agent: ${promise}\nCaller: Thank you.` };
@@ -197,7 +210,7 @@ test('delivery timing does not constrain the visit, but an appointment claim doe
 
 test('a delivery-only claim never binds the appointment date', () => {
   const promise = 'I will text your reschedule link tomorrow morning for that appointment.';
-  const subject = { date_claims: [{ binding: 'delivery', quote: 'tomorrow morning' }] };
+  const subject = { date_claims: [{ binding: 'delivery', quote: 'tomorrow morning', year: 2030, month: 1, day: 8 }] };
   const source = { ...call, transcription: `Agent: ${promise}\nCaller: Thank you.` };
   const nextWeek = { ...visit, id: 'next-week', scheduled_date: '2030-01-15' };
   expect(select({ call: source, commitment: { ...commitment, evidence: [{ quote: promise, speaker: 'agent' }], subject },
@@ -245,10 +258,10 @@ test('a bare "I will text you a link" needs rescheduling language or a grounded 
   // A subject with a grounded quote but no date/service/address names no
   // appointment, so it cannot stand in for the missing language.
   expect(select({ call: source, commitment: { ...bare, subject: { quote: 'Thank you.', date_claims: [] } } }).reason).toBe('promise_needs_review');
-  // Either half is enough on its own.
+  // Identity prose outside the date-evidence grammar also needs review.
   const subjectQuote = 'That is for my WaveGuard service.';
   expect(select({ call: { ...call, transcription: `Agent: ${generic}\nCaller: ${subjectQuote}` },
-    commitment: { ...bare, subject: { quote: subjectQuote, service: 'WaveGuard', date_claims: [] } } }).visit?.id).toBe('visit');
+    commitment: { ...bare, subject: { quote: subjectQuote, service: 'WaveGuard', date_claims: [] } } }).reason).toBe('appointment_date_unresolved');
   for (const spoken of ['I will text you a link to pick a new time for your appointment.',
     'I will send you a link to move your appointment.', 'Let me text you a link to re-schedule that visit.']) {
     expect(select({ call: { ...call, transcription: `Agent: ${spoken}` },

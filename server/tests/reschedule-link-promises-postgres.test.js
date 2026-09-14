@@ -1885,7 +1885,7 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
     const stubRender = async () => 'Your reschedule link: https://example.com/reschedule/token';
     const successfulSend = async () => ({ sent: true, providerMessageId: fakeSid });
 
-    async function seedPromise({ quote, dueAt = null, dueType = null }) {
+    async function seedPromise({ quote, dueAt = null, dueType = null, dateClaims = [] }) {
       const callId = randomUUID();
       const customerId = randomUUID();
       const visitId = randomUUID();
@@ -1895,11 +1895,11 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       await mockPg('scheduled_services').insert({ id: visitId, customer_id: customerId, scheduled_date: '2030-01-20',
         window_start: '09:00', window_end: '10:30', service_type: 'WaveGuard', status: 'confirmed', reschedule_token: 'token' });
       await mockPg('call_log').insert({ id: callId, customer_id: customerId, direction: 'inbound', from_phone: phone,
-        v2_extraction_status: 'valid', processing_generation: 0, transcription: `Agent: ${quote}\nCaller: Thank you.` });
+        created_at: new Date('2030-01-07T12:00:00Z'), v2_extraction_status: 'valid', processing_generation: 0, transcription: `Agent: ${quote}\nCaller: Thank you.` });
       const [commitment] = await mockPg('call_commitments').insert({
         call_log_id: callId, commitment_key: 'send_reschedule_link:1', party: 'waves', kind: 'send_reschedule_link',
         description: 'send a reschedule link', source: 'ai', status: 'open', confidence: 0.95,
-        subject: { date_claims: [] }, evidence: JSON.stringify([{ quote, speaker: 'agent' }]), last_seen_generation: 0, processing_generation: 0,
+        subject: { date_claims: dateClaims }, evidence: JSON.stringify([{ quote, speaker: 'agent' }]), last_seen_generation: 0, processing_generation: 0,
         due_at: dueAt, due_basis: dueAt ? 'stated' : null, due_type: dueType,
       }).returning('id');
       return commitment.id;
@@ -1931,7 +1931,7 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       const todayNow = new Date('2030-01-07T14:00:00Z'); // 9:00 AM ET, Jan 7 — before due_at, inside the send window
       const tomorrowNow = new Date('2030-01-08T15:00:00Z'); // 10:00 AM ET, Jan 8 — after due_at, inside the send window
 
-      const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link tomorrow morning.', dueAt });
+      const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link tomorrow morning.', dateClaims: [{ binding: 'delivery', quote: 'tomorrow morning', year: 2030, month: 1, day: 8 }], dueAt });
 
       // Staging: the row's available_at is the promised floor, not now.
       const staged = await links.stagePromises(mockPg);
@@ -1960,7 +1960,7 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       const beforeFriday = new Date('2030-01-07T14:00:00Z'); // Monday, 9:00 AM ET — before due_at
       const onFriday = new Date('2030-01-11T15:00:00Z'); // Friday, 10:00 AM ET — after due_at
 
-      const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link by Friday.', dueAt });
+      const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link by Friday.', dateClaims: [{ binding: 'delivery', quote: 'Friday', weekday: 5 }], dueAt });
 
       // Staging: the row's available_at is the promised floor, not now.
       const staged = await links.stagePromises(mockPg);
@@ -2116,7 +2116,7 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
 
     test('a persisted deadline permits delivery before the deadline', async () => {
       const now = new Date('2030-01-07T14:00:00Z');
-      const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link by Friday.',
+      const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link by Friday.', dateClaims: [{ binding: 'delivery', quote: 'Friday', weekday: 5 }],
         dueAt: new Date('2030-01-11T14:00:00Z'), dueType: 'deadline' });
       await links.stagePromises(mockPg);
       const row = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
@@ -2167,7 +2167,7 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       const dueAt = new Date('2030-01-08T14:00:00Z');
       const beforeDue = new Date('2030-01-07T14:00:00Z');
       const afterDue = new Date('2030-01-08T15:00:00Z');
-      const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link tomorrow morning.', dueAt });
+      const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link tomorrow morning.', dateClaims: [{ binding: 'delivery', quote: 'tomorrow morning', year: 2030, month: 1, day: 8 }], dueAt });
 
       const staged = await links.stagePromises(mockPg);
       expect(staged).toBe(1);
