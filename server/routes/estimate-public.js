@@ -25442,24 +25442,48 @@ async function composeEstimateDataPayload(estimate, {
     // hero always lists email/phone/address when Waves has them on file.
     const contact = await resolveEstimateContactFields(estimate);
 
-    // Multi-property group: the customer's ONE link renders every property in
-    // the group, each independently acceptable via its own token. Siblings are
-    // filtered through the same customer-viewability gate as the requested
-    // token, so an unpublished draft/archived sibling never leaks. Key is only
-    // present for grouped estimates — ungrouped responses stay byte-identical.
+    // Multi-property group: the customer's ONE link renders every published
+    // property in the group. Live siblings keep their own accept links.
+    // During the delivered anchor's navigation window, published
+    // expired siblings remain as summaries; their dead tokens cannot open a
+    // quote or accept an offer. Key is only present for grouped estimates.
     let propertyGroup = null;
     if (estimate.estimate_group_id) {
       try {
+        const groupViewNow = new Date();
+        const anchorNavigationOpen = groupLinkStillViewable(estimate, groupViewNow);
         const siblingRows = await db('estimates')
           .where({ estimate_group_id: estimate.estimate_group_id })
           .whereNull('archived_at')
           .orderBy('created_at', 'asc');
-        const viewable = siblingRows.filter((s) => s.id === estimate.id || isEstimateCustomerViewable(s));
+        const viewable = [];
+        for (const sibling of siblingRows) {
+          if (sibling.id === estimate.id) {
+            viewable.push(sibling);
+            continue;
+          }
+          const ordinaryViewable = isEstimateCustomerViewable(sibling, groupViewNow);
+          const expiredPublished = anchorNavigationOpen
+            && ['sent', 'viewed', 'expired'].includes(sibling.status)
+            && (sibling.sent_at || sibling.viewed_at)
+            && (sibling.status === 'expired' || (sibling.expires_at && new Date(sibling.expires_at) < groupViewNow))
+            && sibling.disposition !== 'expired_unsent'
+            && !sibling.price_locked_at
+            && !sibling.archived_at
+            && !estimateOffCustomerSurface(sibling);
+          if ((ordinaryViewable || expiredPublished)
+            && !(await callSideBlockForEstimateData(db, parseEstimateDataSafe(sibling)))) {
+            viewable.push(sibling);
+          }
+        }
         if (viewable.length > 1) {
           propertyGroup = viewable.map((s) => ({
-            token: s.token,
+            // Only a reachable estimate gets a navigation target. Expired
+            // siblings without their own window are display-only summaries.
+            ...((isEstimateCustomerViewable(s, groupViewNow) || groupLinkStillViewable(s, groupViewNow)) ? { token: s.token } : {}),
             address: s.address || null,
-            status: s.status,
+            status: ['accepted', 'declined'].includes(s.status) ? s.status
+              : (s.status === 'expired' || (s.expires_at && new Date(s.expires_at) < groupViewNow) ? 'expired' : s.status),
             monthlyTotal: s.monthly_total != null ? Number(s.monthly_total) : null,
             annualTotal: s.annual_total != null ? Number(s.annual_total) : null,
             onetimeTotal: s.onetime_total != null ? Number(s.onetime_total) : null,

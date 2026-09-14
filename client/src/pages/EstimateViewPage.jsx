@@ -4066,11 +4066,11 @@ export function DraftPreviewBanner({ draft = true, estimateId = null }) {
 
 // Multi-property group switcher — rendered when /data carries propertyGroup
 // (sibling estimates published together under one link, one per service
-// address). Each property keeps its own estimate and accept flow; this strip
-// lets the customer hop between them, and shows which are already accepted.
+// address). Live properties keep their own estimate and accept flow; expired
+// ones without a reachable link stay as summaries in the strip.
 // Plain anchors (not router navigation): /estimate/:token remounts per token
 // and the server-side handoff covers a full load.
-function PropertyGroupSwitcher({ group, preview = false }) {
+export function PropertyGroupSwitcher({ group, preview = false }) {
   if (!Array.isArray(group) || group.length < 2) return null;
   // Pricing-copy contract: estimate surfaces show per-application pricing,
   // never combined monthly/annual plan totals (codex #3244 r1). The switcher
@@ -4084,6 +4084,7 @@ function PropertyGroupSwitcher({ group, preview = false }) {
   const statusLabel = (p) => {
     if (p.status === 'accepted') return 'Accepted';
     if (p.status === 'declined') return 'Declined';
+    if (p.status === 'expired') return 'Expired';
     return null;
   };
   const rowBase = {
@@ -4096,11 +4097,12 @@ function PropertyGroupSwitcher({ group, preview = false }) {
         This estimate covers {group.length} properties
       </div>
       <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginBottom: 10 }}>
-        Each property has its own plan and is approved separately — switch
-        between them here.
+        Each property has its own plan — switch between available estimates
+        here.
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {group.map((p) => {
+        {group.map((p, index) => {
+          const key = p.token || `${p.address || 'property'}-${index}`;
           const inner = (
             <>
               <span style={{ minWidth: 0 }}>
@@ -4112,7 +4114,7 @@ function PropertyGroupSwitcher({ group, preview = false }) {
                     .filter(Boolean).join(' · ') || (p.isCurrent ? 'Viewing now' : 'View estimate')}
                 </span>
               </span>
-              {!p.isCurrent && (
+              {!p.isCurrent && p.token && (
                 <span style={{ fontSize: 14, fontWeight: 600, color: COLORS.navy, flexShrink: 0 }}>
                   View
                 </span>
@@ -4120,11 +4122,15 @@ function PropertyGroupSwitcher({ group, preview = false }) {
             </>
           );
           return p.isCurrent ? (
-            <div key={p.token} style={{ ...rowBase, border: `2px solid ${COLORS.navy}`, background: 'rgba(4, 57, 94, 0.06)' }}>
+            <div key={key} style={{ ...rowBase, border: `2px solid ${COLORS.navy}`, background: 'rgba(4, 57, 94, 0.06)' }}>
+              {inner}
+            </div>
+          ) : !p.token ? (
+            <div key={key} style={{ ...rowBase, border: '1px solid rgba(4, 57, 94, 0.25)', background: COLORS.white }}>
               {inner}
             </div>
           ) : (
-            <a key={p.token} href={`/estimate/${p.token}${preview ? "?adminPreview=1" : ""}`} style={{ ...rowBase, border: '1px solid rgba(4, 57, 94, 0.25)', background: COLORS.white }}>
+            <a key={key} href={`/estimate/${p.token}${preview ? "?adminPreview=1" : ""}`} style={{ ...rowBase, border: '1px solid rgba(4, 57, 94, 0.25)', background: COLORS.white }}>
               {inner}
             </a>
           );

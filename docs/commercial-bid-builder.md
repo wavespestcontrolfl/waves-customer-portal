@@ -42,11 +42,17 @@ because the delivered link is the anchor's token: an ordinary anchor's offer end
 after seven days, and without a separate window the customer could no longer reach
 a fixed sibling valid for months. Conversely, an ordinary sibling keeps its full
 seven-day window even when the fixed anchor ends sooner. Whole-quote revisions
-preserve the server-owned navigation window and publication-anchor metadata.
+preserve the locked server-owned navigation window and publication-anchor metadata
+only while the quote remains in the same group; a group move or removal clears them.
 It is monotonic — a link already promised a date
 keeps it even if a hold is later shortened, because what closes is the offer, not
 the route to it. A reachable group of expired cards still renders every card as
-expired and refuses acceptance.
+expired and refuses acceptance. Expired members without a viewable link remain
+visible as nonclickable summaries. New navigation grants come only from confirmed
+published offers. Successful sibling publication and its required link extensions
+commit together; failed publication does not create a longer navigation promise.
+Every eligible delivered link in the current group receives extensions, because
+a publication marker can predate a resend from another member.
 
 Do not fold one into the other. Widening `expires_at` to carry reachability makes
 every reader that means "offer deadline" wrong by default, and it cannot be undone

@@ -130,6 +130,47 @@ describe('GET /:token/data — navigation after the anchor offer expires', () =>
     });
   });
 
+  test('shows only published expired siblings as nonactionable summaries', async () => {
+    const row = anchor();
+    const expiredByDate = estimateRow({ id: 'expired-date', token: 'expireddatetoken', estimate_group_id: row.estimate_group_id,
+      status: 'sent', sent_at: past, expires_at: past });
+    const expiredBySweep = estimateRow({ id: 'expired-sweep', token: 'expiredsweeptoken', estimate_group_id: row.estimate_group_id,
+      status: 'expired', sent_at: past, expires_at: past });
+    const withheld = [
+      { id: 'never-published', status: 'expired', expires_at: past },
+      { id: 'draft', status: 'draft', sent_at: past, expires_at: past },
+      { id: 'send-failed', status: 'send_failed', sent_at: past, expires_at: past },
+      { id: 'expired-unsent', status: 'expired', disposition: 'expired_unsent', sent_at: past, expires_at: past },
+      { id: 'price-locked', status: 'expired', sent_at: past, expires_at: past, price_locked_at: past },
+      { id: 'archived', status: 'expired', sent_at: past, expires_at: past, archived_at: past },
+      { id: 'held', status: 'expired', sent_at: past, expires_at: past,
+        estimate_data: { estimatorEngine: { reprice_pending_at: past } } },
+      { id: 'invalidated', status: 'expired', sent_at: past, expires_at: past,
+        estimate_data: { estimatorEngine: { linkage_invalidated_at: past } } },
+      { id: 'call-blocked', status: 'expired', sent_at: past, expires_at: past,
+        estimate_data: { estimatorEngine: { callLogId: 'missing-call' } } },
+    ].map((item) => estimateRow({ token: `${item.id.replace(/-/g, '')}token`, estimate_group_id: row.estimate_group_id, ...item }));
+    dbRows = { estimates: row, siblings: [row, expiredByDate, expiredBySweep, ...withheld] };
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/${row.token}/data?refresh=1`);
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.propertyGroup).toHaveLength(3);
+      expect(body.propertyGroup[0]).toMatchObject({ token: row.token, status: 'expired', isCurrent: true });
+      expect(body.propertyGroup.slice(1)).toEqual([
+        expect.objectContaining({ status: 'expired', isCurrent: false }),
+        expect.objectContaining({ status: 'expired', isCurrent: false }),
+      ]);
+      expect(body.propertyGroup.slice(1).every((member) => !Object.hasOwn(member, 'token'))).toBe(true);
+      expect(body.cta).toMatchObject({ canAccept: false, terminalState: 'expired' });
+
+      // A summary does not turn the expired sibling's own bearer link back on.
+      dbRows.estimates = expiredByDate;
+      const siblingRes = await fetch(`${baseUrl}/estimates/${expiredByDate.token}/data?refresh=1`);
+      expect(siblingRes.status).toBe(404);
+    });
+  });
+
   test.each([
     { status: 'draft' }, { status: 'scheduled' }, { status: 'send_failed' },
     { archived_at: past }, { estimate_group_id: null },
