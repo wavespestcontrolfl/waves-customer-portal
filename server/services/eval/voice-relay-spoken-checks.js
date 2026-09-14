@@ -620,7 +620,10 @@ function paymentOutcomeIsInterrogative(text, claim, matchEnd, claimEnd) {
     `^\\s*¿?\\s*(?:${QUESTION_AUX_RE_SOURCE}|(?:what|when|where|which|who|whom|whose|why|how)\\b[^,.!?;]{0,40}\\b${QUESTION_AUX_RE_SOURCE}|(?:need\\s+)?(?:anything|something)\\s+else|(?:any\\s+)?(?:(?:more|further)\\s+)?questions?|(?:quiere|quieres|desea|deseas|puedo|podemos|puede|puedes|podr[ií]a(?:mos)?))\\b`,
     'i',
   ).test(followup[1]));
-  return QUESTION_LEAD_RE.test(claim) || (text[claimEnd] === '?' && !followupQuestion);
+  const coordinatedQuestion = new RegExp(
+    `^\\s*(?:(?:and|but|yet|then)\\s+${PAYMENT_INHERITED_PREDICATE}\\s*)+\\?`, 'i',
+  ).test(text.slice(claimEnd).replace(/\bnot(?:\s+only)?\s+/gi, ''));
+  return QUESTION_LEAD_RE.test(claim) || coordinatedQuestion || (text[claimEnd] === '?' && !followupQuestion);
 }
 function paymentOutcomeHasTemporalCondition(text, claim, claimStart, outcome, outcomeStart, trailingClaim) {
   if (PAYMENT_HISTORICAL_PREREQUISITE_RE.test(text.slice(claimStart, outcomeStart))
@@ -677,6 +680,8 @@ function paymentClaimContext(text, start, end) {
   // and returning the original amount spelling to the outcome classifier.
   const scopeText = text.replace(/(?<=\d)\.(?=\d)/g, ' ');
   const [boundary] = clauseBounds(scopeText, start);
+  const causal = [...scopeText.slice(boundary, start).matchAll(/\bnow\s+that\s+/gi)].pop();
+  if (causal) return text.slice(boundary + causal.index + causal[0].length, end);
   const prefix = scopeText.slice(0, boundary).split(/[.!?;]/).pop();
   // Unpunctuated "and" can coordinate two complements of the same
   // condition/refusal. Commas and adversatives introduce separate claims.
