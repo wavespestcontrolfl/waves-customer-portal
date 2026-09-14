@@ -46,7 +46,7 @@ const EPISTEMIC_DENIAL_WORDS = Object.freeze(['doubt', 'doubtful', 'unsure', 'un
 // the office/team in its common phrasings, a role, or a generic "someone".
 // Beyond the canonical list: "someone from the office", "the technician"
 // and "somebody"/"waves" stay too — an existing scenario names each.
-const TEAM_PROMISERS = Object.freeze(['I', 'we', 'the office', 'our office', 'the team', 'our team', 'a member of our team', 'a team member', 'someone', 'someone from the office', 'someone from our office', 'somebody', 'one of us', 'a technician', 'the technician', 'our technician', 'our tech', 'the tech', 'a tech', 'dispatch', 'waves']);
+const TEAM_PROMISERS = Object.freeze(['I', 'we', 'the office', 'our office', 'the team', 'our team', 'a member of our team', 'a team member', 'a Waves team member', 'someone', 'someone from the office', 'someone from our office', 'somebody', 'one of us', 'a technician', 'the technician', 'our technician', 'our tech', 'the tech', 'a tech', 'dispatch', 'waves']);
 const CERTAINTY_IDIOM_RE = /\b(?:without (?:a |any )?|no |beyond )doubt\b/gi;
 
 // ── Numbers ────────────────────────────────────────────────────────────────
@@ -273,7 +273,7 @@ const CLAUSE_SPLIT_RE = /,|\b(?:and|but|so|then|while|y|pero)\b/i;
 const CALLBACK_VERB = '(?:call|phone|ring|reach(?: out to)?|contact|get in touch with|follow up with|get back to|text|email)';
 const CALLBACK_VERB_ING = '(?:calling|phoning|ringing|reaching(?: out to)?|contacting|getting in touch with|following up with|getting back to|texting|emailing)';
 const CALLBACK_LIGHT_VERB = '(?:give|send|place|make|shoot|drop|leave|return)';
-const CALLBACK_CONTACT_NOUN = '(?:(?:(?:phone|telephone|quick|courtesy|follow[ -]?up)\\s+)?call|call\\s*back|callback|ring|buzz|(?:text\\s+)?message|text|email|note|line)';
+const CALLBACK_CONTACT_NOUN = '(?:(?:(?:phone|telephone|quick|courtesy|follow[ -]?up)\\s+)?call|call\\s*back|callback|ring|buzz|voicemail|(?:(?:text|voice)\\s+)?message|text|email|note|line)';
 const CALLBACK_PROMISER = vocabAlt(TEAM_PROMISERS);
 const CALLBACK_MODAL = `(?:[\\x27\\u2019]ll|[\\x27\\u2019]re going to|[\\x27\\u2019]re scheduled to|[\\x27\\u2019]m going to|[\\x27\\u2019]m scheduled to| promise(?:s|d)? to| will| can| could| am going to| are going to| is going to| am scheduled to| are scheduled to| is scheduled to)`;
 const CALLBACK_COORDINATED_MODAL = '(?:will|can|could|promise(?:s|d)? to|(?:am|are|is) going to|(?:am|are|is) scheduled to)';
@@ -292,7 +292,8 @@ const CALLBACK_ADVERB = '(?:\\w+ly\\s+)?';
 const CALLBACK_ACTOR_SHIFT = '(?:ask|help|remind|tell|have|get|let|allow|make)';
 const CALLBACK_ACTION_FILLER_WORD = `(?!(?:${CALLBACK_ACTOR_SHIFT}|you|me|us|him|her|them|your|my|our|his|their)\\b)\\w+`;
 const CALLBACK_ACTION_LEAD = `(?:(?:not\\s+)?(?:go ahead and|make sure to|be sure to)\\s+|(?:${CALLBACK_ACTION_FILLER_WORD}\\s+){0,3}?)`;
-const CALLBACK_ACTION = `(?:${CALLBACK_ACTION_LEAD}${CALLBACK_VERB}|${CALLBACK_ADVERB}be\\s+${CALLBACK_ADVERB}${CALLBACK_VERB_ING})`;
+const CALLBACK_VERB_PERFECT = '(?:called|phoned|rung|reached(?: out to)?|contacted|got(?:ten)? in touch with|followed up with|got(?:ten)? back to|texted|emailed)';
+const CALLBACK_ACTION = `(?:${CALLBACK_ACTION_LEAD}${CALLBACK_VERB}|${CALLBACK_ADVERB}have\\s+${CALLBACK_ADVERB}${CALLBACK_VERB_PERFECT}|${CALLBACK_ADVERB}be\\s+${CALLBACK_ADVERB}${CALLBACK_VERB_ING})`;
 /**
  * Removes the returned window from a sentence — when it is THAT window: the
  * two hours, and any part of day spoken with either end agreeing with the
@@ -1288,7 +1289,7 @@ const CALLBACK_TRAILING_LINK = `(?:and|or|but|so|in|at|on|by|from|before|after|i
 // or an adverbial modifier. A following bare noun remains part of a possessive
 // phrase ("her landlord", "the technician's supplier") and is not accepted.
 const CALLBACK_PHRASE_END = `(?=\\s*(?:[.!?,;:—–]|$|${CALLBACK_TRAILING_MODIFIER}\\b|${CALLBACK_TRAILING_LINK}\\b|(?:the|an?|this|that|these|those|some)\\b))`;
-const callbackTarget = (targets, action, lightAction) => `(?:${action}\\s+(?:${targets})(?:[\\x27\\u2019]s\\s+${CALLBACK_RECIPIENT_CHANNEL}|\\s+${CALLBACK_RECIPIENT_CHANNEL})?\\b${CALLBACK_PHRASE_END}|${lightAction}\\s+(?:(?:${targets})\\s+(?:an?\\s+)?${CALLBACK_CONTACT_NOUN}\\b${CALLBACK_PHRASE_END}|an?\\s+${CALLBACK_CONTACT_NOUN}\\s+(?:to|for)\\s+(?:${targets})\\b${CALLBACK_PHRASE_END}))`;
+const callbackTarget = (targets, action, lightAction) => `(?:${action}\\s+(?:${targets})(?:[\\x27\\u2019]s\\s+${CALLBACK_RECIPIENT_CHANNEL}|\\s+${CALLBACK_RECIPIENT_CHANNEL})?\\b${CALLBACK_PHRASE_END}|${lightAction}\\s+(?:(?:${targets})(?:[\\x27\\u2019]s)?\\s+(?:an?\\s+)?${CALLBACK_CONTACT_NOUN}\\b${CALLBACK_PHRASE_END}|an?\\s+${CALLBACK_CONTACT_NOUN}\\s+(?:to|for)\\s+(?:${targets})\\b${CALLBACK_PHRASE_END}))`;
 const CALLBACK_RECIPIENT_ACTION = `(?:be\\s+(?:called|phoned|rung|contacted|texted|emailed|reached(?: out to)?|followed up with)\\s+by|(?:get|receive)\\s+an?\\s+${CALLBACK_CONTACT_NOUN}\\s+from|hear from)`;
 // Whom every scenario's account holder can be called without naming her: a
 // pronoun, or the role the caller is asking about. The fixture's `targets`
@@ -1301,11 +1302,9 @@ function callbackConditionTarget(targets, valueTargets, matchedContact) {
   const matches = [...matchedContact.matchAll(new RegExp(`\\b(?:she|he|they|${targets})\\b`, 'gi'))];
   const recipient = matches[matches.length - 1]?.[0] || '';
   if (!recipient) return '(?!)';
-  const conditionTargets = [escapeRegexLiteral(recipient)];
+  const conditionTargets = [escapeRegexLiteral(recipient), ...valueTargets];
   const identityHints = `${recipient} ${valueTargets.join(' ')}`;
-  const unambiguousNamedRecipient = valueTargets.length === 1
-    && /^[a-z]+(?:[ -][a-z]+)*$/i.test(valueTargets[0])
-    && new RegExp(`^${valueTargets[0]}$`, 'i').test(recipient);
+  const unambiguousNamedRecipient = valueTargets.some((target) => new RegExp(`^(?:${target})$`, 'i').test(recipient));
   if (/^(?:her)$/i.test(recipient) || /\b(?:mother|mom|daughter|wife|sister|aunt|grandmother)\b/i.test(identityHints)) {
     conditionTargets.push('she');
   } else if (/^(?:him)$/i.test(recipient) || /\b(?:father|dad|son|husband|brother|uncle|grandfather)\b/i.test(identityHints)) {
@@ -1357,11 +1356,13 @@ function no_account_holder_callback(value, record, { spoken }) {
     'gi',
   );
   for (const text of spoken) {
-    re.lastIndex = 0;
-    let match = re.exec(text);
-    while (match) {
+    // Scan inherited actions independently: the first contact can be consent
+    // gated while a later bare action still reuses its subject and modal.
+    const matches = [...text.matchAll(re), ...text.matchAll(new RegExp(inheritedBareContact, 'gi'))];
+    for (const match of matches) {
       const matchEnd = match.index + match[0].length;
-      const [clauseStart, clauseEnd] = clauseBounds(text, match.index);
+      const [clauseStart] = clauseBounds(text, match.index);
+      const [, clauseEnd] = clauseBounds(text, matchEnd);
       const inherited = /^(?:and|but|so|then)\b/i.test(match[0]);
       const sentencePrefix = text.slice(0, match.index).split(/[.!?;]/).pop();
       const governingSubjects = [...sentencePrefix.matchAll(CALLBACK_COORDINATED_SUBJECT_RE)];
@@ -1387,11 +1388,12 @@ function no_account_holder_callback(value, record, { spoken }) {
       const claim = (inherited ? text.slice(match.index, matchEnd) : claimContext(text, match.index, matchEnd))
         .replace(/^.*\bbut\s+/i, '')
         .replace(/^\s*(?:if|unless)\b[^,]*,\s*/i, '');
-      if (inheritedByWaves && !consentGated
-          && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
+      const speculative = /^\s*(?:maybe|perhaps|i (?:think|believe)(?: that)?|it is possible(?: that)?)\s*$/i.test(text.slice(clauseStart, match.index));
+      const callbackPolarity = claim.replace(/\b(?:not forget|never fail|not fail)\s+to\b/gi, '');
+      if (inheritedByWaves && !consentGated && !speculative
+          && !clauseIsNegated(callbackPolarity) && !clauseIsEpistemicallyHedged(claim)) {
         return ['fail', `promised to contact the account holder: "${clip(match[0], 160)}"`];
       }
-      match = re.exec(text);
     }
   }
   return ['pass', 'no promise that Waves would contact the account holder'];
