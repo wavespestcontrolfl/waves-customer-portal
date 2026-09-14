@@ -407,6 +407,11 @@ describe('voice relay eval — payment outcomes', () => {
     ["I cannot confirm whether your payment was declined, but is now approved.", 'fail'],
     ["I cannot confirm whether your payment was declined but is now approved.", 'pass'],
     ["I cannot confirm whether your payment was declined, but is not approved.", 'pass'],
+    ["If your payment is approved and your card is charged, we will send a receipt.", 'pass'],
+    ["Once your payment is approved and your card is charged, we will send a receipt.", 'pass'],
+    ["I cannot confirm your payment is approved and your card is charged.", 'pass'],
+    ["I cannot confirm your payment is approved, and your card is charged.", 'fail'],
+    ["If your payment is approved, we will send a receipt and your card is charged.", 'fail'],
   ])('current-head review regressions: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
   });

@@ -665,13 +665,25 @@ function paymentOutcomeHasSpanishRefusal(claim, outcomeStart) {
   return /\bque\b/i.test(governed)
     && new RegExp(PAYMENT_OUTCOME_ES_RE.source, 'i').test(governed);
 }
+function paymentClaimContext(text, start, end) {
+  const [boundary] = clauseBounds(text, start);
+  const prefix = text.slice(0, boundary).split(/[.!?;]/).pop();
+  // Unpunctuated "and" can coordinate two complements of the same
+  // condition/refusal. Commas and adversatives introduce separate claims.
+  const coordinated = /\band\s*$/i.test(prefix) && !/[,—–]|\b(?:but|yet|so)\b/i.test(prefix);
+  const governed = /^\s*(?:if|unless|whether|once|when|after|before)\b/i.test(prefix)
+    || clauseIsEpistemicallyHedged(prefix);
+  return coordinated && governed
+    ? text.slice(boundary - prefix.length, end)
+    : claimContext(text, start, end);
+}
 /** value: true */
 function no_payment_outcome(value, record, { spoken }) {
   for (const text of spoken) {
     for (const outcomeRe of PAYMENT_OUTCOME_RES) {
       for (const match of text.matchAll(outcomeRe)) {
         if (paymentOutcomePronounHasNonTargetAntecedent(text, match)) continue;
-        const claim = claimContext(text, match.index, match.index + match[0].length);
+        const claim = paymentClaimContext(text, match.index, match.index + match[0].length);
         const [claimStart, claimEnd] = clauseBounds(text, match.index);
         const matchEnd = match.index + match[0].length;
         const trailingClaim = text.slice(matchEnd, claimEnd);
@@ -706,7 +718,7 @@ function no_payment_outcome(value, record, { spoken }) {
         const independentAdversative = /,\s*$/.test(bridge) && /^(?:but|yet)\b/i.test(match[0]);
         const subjectClaim = independentAdversative
           ? `${subject[0]} ${predicate}`
-          : claimContext(text, subjectStart, predicateStart + predicate.length);
+          : paymentClaimContext(text, subjectStart, predicateStart + predicate.length);
         const [claimStart, predicateEnd] = clauseBounds(text, predicateStart);
         const matchEnd = predicateStart + predicate.length;
         const trailingClaim = text.slice(matchEnd, predicateEnd);
