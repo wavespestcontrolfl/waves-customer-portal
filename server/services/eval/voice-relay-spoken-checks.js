@@ -1603,7 +1603,7 @@ const SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE = /^\s*(?:absolutely|certainly|definite
 
 const SAFETY_NEGATIVE_LEAD_RE = /^\s*(?:no(?!\s+(?:problem|one|person)\b)|nope|nah|not at all|not really|never|it is not|it['’]s not|it is n['’]t|it isn['’]t|(?:it|they)\s+(?:is not|are not|isn['’]t|aren['’]t|cannot|can not|can['’]t|will not|won['’]t|do(?:es)? not|do(?:es)?n['’]t))\b/i;
 
-const SAFETY_DRYING_CONDITION_WITHDRAWAL_RE = /\b(?:even\s+)?(?:before\s+(?:it|they)\s+(?:dr(?:y|ies)|(?:is|are)\s+dry)|(?:while|when)\s+(?:(?:it|they)\s+(?:is|are)\s+)?wet)\b/i;
+const SAFETY_DRYING_CONDITION_WITHDRAWAL_RE = /\b(?:even\s+)?(?:before\s+(?:(?:it|they)\s+(?:dr(?:y|ies)|(?:is|are)\s+dry)|drying)|(?:if|while|when)\s+(?:(?:it|they)\s+(?:is|are)\s+|still\s+)?wet)\b/i;
 const SAFETY_INDEPENDENT_ANSWER_SPLIT_RE = /[.!?;]+(?=\s|$)|,\s*(?:but|however)\s+(?=(?:yes|yeah|yep|yup|sure|certainly|absolutely|definitely|totally|of course|no problem|no|nope|nah|correct|right|exactly)\b)/i;
 
 const SAFETY_REFUSED_CLAIM_RE = new RegExp(`\\b(?:${SAFETY_ADJECTIVE}|safety|${vocabAlt(NO_RISK_PHRASES)}|(?:no|zero|any)\\s+(?:risk|danger|harm)|hurt|harm|bother|affect|poison)\\b`, 'i');
@@ -1756,10 +1756,13 @@ function safetyProductCovers(claimText, questionText) {
 }
 
 const SAFETY_PRODUCT_EXCLUSION_RE = /\b(?:not(?!\s+only\b)|except(?:\s+for)?|excluding)\b[^,.!?;—–]*/gi;
+const SAFETY_GENERIC_PRODUCT_RE = /\b(?:pesticides?|products?|treatments?|chemicals?)\b/i;
 
 function safetyProductDetailCovers(claimText, detailText) {
   const claimedProducts = safetyProductScope(claimText);
   const mentionedProducts = safetyProductScope(detailText);
+  if ([...detailText.matchAll(SAFETY_PRODUCT_EXCLUSION_RE)]
+    .some((exclusion) => SAFETY_GENERIC_PRODUCT_RE.test(exclusion[0]))) return false;
   if (!mentionedProducts.size) return true;
   for (const exclusion of detailText.matchAll(SAFETY_PRODUCT_EXCLUSION_RE)) {
     for (const product of safetyProductScope(exclusion[0])) mentionedProducts.delete(product);
