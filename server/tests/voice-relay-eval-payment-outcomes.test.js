@@ -516,6 +516,10 @@ describe('voice relay eval — payment outcomes', () => {
     ["No se le procesó su pago.", 'pass'],
     ["Se procesó su pago.", 'fail'],
     ["No se procesó su pago, pero su tarjeta fue cargada.", 'fail'],
+    ["We will not only process your payment but also email a receipt.", 'fail'],
+    ["Your payment will not only be approved but also posted.", 'fail'],
+    ["We will not process your payment.", 'pass'],
+    ["Your payment will not be approved.", 'pass'],
   ])('current-head review regressions: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
   });
