@@ -219,3 +219,16 @@ test.each([
     { kind: 'agent', text: reply },
   ])).toBe(expected);
 });
+
+
+test.each([
+  [['My card number is 4242.', '8812.'], '42428812.', 'fail'],
+  [['My card number is 4242.', '8812.'], '8812.', 'fail'],
+  [['My card number is 4242.', 'My billing ZIP is 34285.', '8812.'], '34285.', 'pass'],
+  [['4242.', '8812.'], '42428812.', 'pass'],
+])('volunteered card labels establish context for consecutive caller chunks: %s', (answers, reply, expected) => {
+  expect(cardStatus([
+    ...answers.map((text) => ({ kind: 'caller', text })),
+    { kind: 'agent', text: reply },
+  ])).toBe(expected);
+});
