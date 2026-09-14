@@ -1292,7 +1292,8 @@ const CARD_NON_FRAGMENT_RES = Object.freeze([
 // A calendar date remains benign unless an explicit card-expiration phrase
 // describes it. Record only the value span so an expiration cue cannot turn
 // an unrelated appointment date, amount or phone number into card digits.
-const NON_CARD_EXPIRATION_SUBJECT_RE = /\b(?:service|coupon|promo(?:tion)?|discount|offer|contract|warranty|plan|subscription|licen[cs]e|servicio|cup[oó]n)(?:[\x27\u2019]s)?\s+$/i;
+const NON_CARD_EXPIRATION_SUBJECT = '(?:service|coupon|promo(?:tion)?|discount|offer|contract|warranty|plan|subscription|licen[cs]e|servicio|cup[oó]n)(?:[\\x27\\u2019]s)?';
+const NON_CARD_EXPIRATION_SUBJECT_RE = new RegExp(`\\b${NON_CARD_EXPIRATION_SUBJECT}\\s+$`, 'i');
 const CARD_EXPIRATION_CUE = `(?:${CARD_PAYMENT_LABEL}(?:[\\x27\\u2019]s)?\\s+(?:that\\s+)?(?:(?:will|does|did)\\s+)?expir(?:e|es|ed|y|ation)|expir(?:y|ation)|${CARD_PAYMENT_LABEL}(?:[\\x27\\u2019]s)?\\s+(?:is|was)\\s+(?:valid|good)\\s+through|(?:fecha\\s+de\\s+)?vencimiento(?:\\s+de\\s+(?:la\\s+)?tarjeta)?)`;
 const CARD_EXPIRATION_VALUE_RE = new RegExp(
   `\\b${CARD_EXPIRATION_CUE}(?:\\s+date)?(?:\\s+on\\s+(?:(?:your|the|my|this|that)\\s+)?${CARD_PAYMENT_LABEL})?`
@@ -1314,15 +1315,15 @@ const CARD_VALUE_CONTEXT_RE = new RegExp(`\\b(?:${CARD_PAYMENT_LABEL}|pan|cvv|cv
 const CARD_READBACK_CUE_RE = /\b(?:read|repeat|confirm)(?:ing)?\b[^.!?;]{0,50}\b(?:card(?:\s+(?:number|digits?))?|pan|cvv|cvc|security code)\b[^.!?;]{0,20}\bback\b/i;
 // Carry only requests for sensitive card fields, not any question mentioning
 // a card: billing ZIP, promo codes and account phones retain their own meaning.
-const CARD_REQUEST_CUE_RE = new RegExp(`\\b(?:what\\s+(?:are|is)|which|tell|give|read|say|provide|share|repeat|confirm|enter|input|type|(?:can|could|may)\\s+(?:i|we)\\s+(?:have|get)|d[ií]game|dime|ingrese|introduzca|proporcione|lea|confirme|(?:puede|podr[ií]a)\\s+(?:darme|decirme)|cu[aá]l(?:es)?\\s+(?:es|son))\\b[^.!?;]{0,80}\\b(?:${CARD_FIELD_LABEL}|(?:digits?|numbers|(?:the|your|first|last|next|middle)\\s+number)\\s+(?:of|on|from|for)\\s+(?:(?:your|the|this|that)\\s+)?(?:(?:credit|debit|prepaid)\\s+)?card|expir(?:y|ation)|n[uú]mero\\s+de\\s+(?:(?:la|su|tu)\\s+)?tarjeta|d[ií]gitos?\\s+de\\s+(?:(?:la|su|tu)\\s+)?tarjeta|c[oó]digo\\s+de\\s+seguridad|(?:fecha\\s+de\\s+)?vencimiento)\\b`, 'i');
+const CARD_REQUEST_CUE_RE = new RegExp(`\\b(?:what\\s+(?:are|is)|which|tell|give|read|say|provide|share|repeat|confirm|enter|input|type|(?:can|could|may)\\s+(?:i|we)\\s+(?:have|get)|d[ií]game|dime|ingrese|introduzca|proporcione|lea|confirme|(?:puede|podr[ií]a)\\s+(?:darme|decirme)|cu[aá]l(?:es)?\\s+(?:es|son))\\b[^.!?;]{0,80}\\b(?:${CARD_FIELD_LABEL}|(?:digits?|numbers|(?:the|your|first|last|next|middle)\\s+number)\\s+(?:of|on|from|for)\\s+(?:(?:your|the|this|that)\\s+)?(?:(?:credit|debit|prepaid)\\s+)?card|(?<!\\b${NON_CARD_EXPIRATION_SUBJECT}\\s+)expir(?:y|ation)|n[uú]mero\\s+de\\s+(?:(?:la|su|tu)\\s+)?tarjeta|d[ií]gitos?\\s+de\\s+(?:(?:la|su|tu)\\s+)?tarjeta|c[oó]digo\\s+de\\s+seguridad|(?:fecha\\s+de\\s+)?vencimiento)\\b`, 'i');
 const CARD_REQUEST_FILLER_RE = /^(?:please\s+)?(?:go ahead|take your time|no rush|(?:when|whenever)\s+you(?:[\x27\u2019]re| are)\s+ready|i(?:[\x27\u2019]m| am)\s+listening|thank you|thanks|okay|ok|all right|alright|por favor|adelante|gracias)$/i;
 const CARD_BARE_FRAGMENT_RE = /^\s*(?:(?:yes|yeah|okay|sure)[\s,:-]+)?(?:(?:it(?:[\x27\u2019]s| (?:is|was))|the (?:number|digits?|(?:first|last) \d+) (?:is|are|was|were))[\s,:-]+)?\d+(?:[\s/.-]+\d+)*\s*(?:(?:,\s*)?(?:(?:is|that(?:[\x27\u2019]s| is))\s+)?(?:correct|right)|,\s*got it)?\s*$/i;
 // A positional cue owns only the digit run immediately after it. That run is
 // card data even when it looks like a year ("card ends in 2029"), while an
 // appointment year or dollar amount elsewhere in the clause keeps its own
 // non-card explanation.
-const CARD_LABELED_VALUE_RE = new RegExp(`\\b(?:${CARD_DIGIT_LABEL})\\s+(\\d+(?:[\\s-]\\d+)*)\\b`, 'gi');
-const CARD_EXPLICIT_VALUE_RE = new RegExp(`\\b${CARD_FIELD_LABEL}\\b(?:\\s+(?:is|was))?\\s*[:#]?\\s*((?:\\(\\d+\\)|\\d+)(?:[\\s./-]\\d+)*)\\b`, 'gi');
+const CARD_LABELED_VALUE_RE = new RegExp(`\\b(?:${CARD_DIGIT_LABEL})\\s*(?:[—–-]\\s*)?(\\d+(?:[\\s-]\\d+)*)\\b`, 'gi');
+const CARD_EXPLICIT_VALUE_RE = new RegExp(`\\b${CARD_FIELD_LABEL}\\b(?:\\s+(?:is|was))?\\s*[:#—–-]?\\s*((?:\\(\\d+\\)|\\d+)(?:[\\s./-]\\d+)*)\\b`, 'gi');
 const CARD_SLASHED_VALUE_RE = /\b\d+(?:[/.]\d+)+\b/g;
 const DIGIT_RUN_RE = /\d+(?:[\s-]\d+)*/g;
 // Numeric digits spoken one at a time — "4-1-1", "4 1 1", "4, 1, 1" (how
@@ -1376,7 +1377,11 @@ function cardFragmentsIn(text, precedingReadback = false, callerAnswer = false) 
   }).filter(Boolean);
   const labeledValues = [...digits.matchAll(CARD_LABELED_VALUE_RE)].map((match) => {
     const start = match.index + match[0].lastIndexOf(match[1]);
-    return [start, start + match[1].length];
+    const [labelStart, labelEnd] = clauseBounds(digits, match.index);
+    const labelClause = digits.slice(labelStart, labelEnd);
+    const priorLabelClause = digits.slice(0, labelStart).replace(/[.!?;—–\s]+$/g, '').split(/[.!?;—–]/).pop() || '';
+    const labelContext = labelClause.replace(/^\s*it\b/i, `${priorLabelClause} it`);
+    return [start, start + match[1].length, CARD_VALUE_CONTEXT_RE.test(labelContext.trim())];
   });
   nonFragments.push(...labeledValues);
   const explicitCardValues = [...digits.matchAll(CARD_EXPLICIT_VALUE_RE)].map((match) => {
@@ -1393,7 +1398,6 @@ function cardFragmentsIn(text, precedingReadback = false, callerAnswer = false) 
     const clause = digits.slice(clauseStart, clauseEnd);
     const priorText = digits.slice(0, clauseStart).replace(/[.!?;—–\s]+$/g, '');
     const priorClause = priorText.split(/[.!?;—–]/).pop() || '';
-    const labeledContext = clause.replace(/^\s*it\b/i, `${priorClause} it`);
     const expirationSpan = expirationValues.find(([start, end]) => m.index >= start && m.index + m[0].length <= end);
     const slashedSpan = slashedValues.find(([start, end]) => m.index >= start && m.index + m[0].length <= end);
     const calendarSpan = calendarValues.find(([start, end]) => m.index >= start && m.index + m[0].length <= end);
@@ -1416,10 +1420,10 @@ function cardFragmentsIn(text, precedingReadback = false, callerAnswer = false) 
       || ((callerAnswer || CARD_BARE_FRAGMENT_RE.test(clause))
         && (precedingReadback === true || CARD_READBACK_CUE_RE.test(priorClause)));
     const explicitExpiration = Boolean(expirationSpan);
-    const labeledValue = labeledValues.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
+    const labeledValue = labeledValues.some(([start, end, cardContext]) => cardContext && m.index >= start && m.index + m[0].length <= end);
     const explicitCardValue = explicitCardValues.some(([start, end]) => m.index >= start && m.index + m[0].length <= end)
       && !/^\s*(?:digits?|numbers?)\b/i.test(digits.slice(m.index + m[0].length));
-    if (explicitExpiration || explicitCardValue || (labeledValue && CARD_VALUE_CONTEXT_RE.test(labeledContext.trim())) || ((CARD_CUE_RE.test(clause) || inheritedReadback) && !explained)) {
+    if (explicitExpiration || explicitCardValue || labeledValue || ((CARD_CUE_RE.test(clause) || inheritedReadback) && !explained)) {
       fragments.add(candidateValue);
     }
     m = DIGIT_RUN_RE.exec(digits);
