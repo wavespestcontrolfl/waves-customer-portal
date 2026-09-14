@@ -94,6 +94,7 @@ async function addReceived(amount = 49) {
   });
   afterEach(async () => {
     await mockPg('invoices').where({ customer_id: f.customerId }).del();
+    await mockPg('service_records').where({ customer_id: f.customerId }).del();
     await mockPg('scheduled_services').where({ id: f.serviceId }).del();
     await mockPg('estimate_deposits').where({ estimate_id: f.estimateId }).del();
     await mockPg('estimates').where({ id: f.estimateId }).del();
@@ -297,6 +298,29 @@ async function addReceived(amount = 49) {
     expect((await reconcileReceivedDepositToInvoice(f.estimateId)).state).toBe('done');
     expect((await mockPg('invoices').where({ id: coveredId }).first()).status).toBe('prepaid');
     expect(Number((await mockPg('estimate_deposits').where({ estimate_id: f.estimateId }).first()).credited_amount)).toBe(49);
+  });
+
+  test('a backfill review invoice preserves its face value and deposit for manual allocation', async () => {
+    const invoiceId = await insertInvoice({ total: 49, status: 'draft' });
+    const recordId = randomUUID();
+    await mockPg('service_records').insert({
+      id: recordId, customer_id: f.customerId, scheduled_service_id: f.serviceId,
+      service_date: '2099-01-01', service_type: 'Pest control',
+      structured_notes: JSON.stringify({ backfill: true }),
+    });
+    await mockPg('invoices').where({ id: invoiceId }).update({ service_record_id: recordId });
+    await addReceived(49);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await expect(reconcileReceivedDepositToInvoice(f.estimateId)).resolves.toMatchObject({
+        state: 'park', invoiceId, reason: 'backfill_review',
+      });
+    }
+    const invoice = await mockPg('invoices').where({ id: invoiceId }).first();
+    expect(invoice.status).toBe('draft');
+    expect(Number(invoice.total)).toBe(49);
+    expect(invoice.line_items.some((line) => line.category === 'deposit_credit')).toBe(false);
+    const ledger = await mockPg('estimate_deposits').where({ estimate_id: f.estimateId }).first();
+    expect(Number(ledger.credited_amount)).toBe(0);
   });
 
   test('exact deposit coverage of an annual-prepay invoice parks before consuming the pending term credit', async () => {

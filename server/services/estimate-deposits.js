@@ -1209,6 +1209,12 @@ async function reconcileReceivedDepositToInvoice(estimateId) {
         database: trx, customerId: invoice.customer_id, scheduledServiceId, throwOnError: true,
       });
       if (livePayer.payerId) return { state: 'payer', invoiceId: invoice.id };
+      // Quiet backfill invoices leave deposit allocation to the reviewer.
+      // The completion record freezes that ownership beyond the mint call.
+      const reviewOnly = invoice.service_record_id && await trx('service_records')
+        .where({ id: invoice.service_record_id })
+        .whereRaw("structured_notes ->> 'backfill' = 'true'").first('id');
+      if (reviewOnly) return { state: 'park', invoiceId: invoice.id, reason: 'backfill_review' };
       await acquireEstimateDepositLedgerLock(trx, estimateId);
       const lines = invoice.line_items == null ? []
         : typeof invoice.line_items === 'string' ? JSON.parse(invoice.line_items) : invoice.line_items;

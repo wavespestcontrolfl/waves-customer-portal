@@ -7063,7 +7063,11 @@ const EstimateConverter = {
           // and consume) rolls the invoice back, and one retry re-reads the
           // fresh, possibly shrunken balance. Never a discounted invoice
           // beside an unconsumed deposit row.
-          const { pendingDepositCredit, consumeDepositCredit } = require('./estimate-deposits');
+          const {
+            acquireEstimateDepositLedgerLock,
+            pendingDepositCredit,
+            consumeDepositCredit,
+          } = require('./estimate-deposits');
           const invoiceSubtotal = (setupFeeApplies ? setupFeeAmount : 0) + firstApplicationAmount;
           const invoiceTitle = setupFeeApplies && includesFirstApplicationLine
             ? 'WaveGuard Membership Setup + First Application'
@@ -7076,10 +7080,35 @@ const EstimateConverter = {
           let inv = null;
           let appliedDepositCredit = 0;
           for (let attempt = 0; attempt < 2 && !inv; attempt += 1) {
-            const depositCredit = await pendingDepositCredit(estimateId).catch(() => null);
-            const requestedDepositCredit = depositCredit ? Number(depositCredit.amount) : 0;
+            let requestedDepositCredit = 0;
+            let depositLedgerReadFailed = false;
             try {
-              inv = await db.transaction(async (trx) => {
+              inv = await database.transaction(async (trx) => {
+                // create() acquires the visit mint lock before the setup lock.
+                // Match that order, then hoist its customer and scheduled-row
+                // FK locks before the deposit ledger lock. The read, invoice
+                // insert and exact allocation now commit together even if
+                // the caller supplied a transaction (this is its savepoint).
+                if (scheduledServiceId) {
+                  await require('./scheduled-invoice-mint')
+                    .acquireScheduledInvoiceMintLock(trx, scheduledServiceId);
+                }
+                await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [
+                  `unminted_setup_fee_manual_billing:${estimateId}`,
+                ]);
+                await trx.raw('SELECT id FROM customers WHERE id = ? FOR KEY SHARE', [customerId]);
+                if (scheduledServiceId) {
+                  await trx('scheduled_services').where({ id: scheduledServiceId }).forUpdate().first('id');
+                }
+                await acquireEstimateDepositLedgerLock(trx, estimateId);
+                let depositCredit;
+                try {
+                  depositCredit = await pendingDepositCredit(estimateId, trx);
+                } catch (ledgerErr) {
+                  depositLedgerReadFailed = true;
+                  throw new Error(`deposit ledger read failed for standard invoice (estimate ${estimateId}): ${ledgerErr.message}`);
+                }
+                requestedDepositCredit = depositCredit ? Number(depositCredit.amount) : 0;
                 const created = await InvoiceService.create({
                   database: trx,
                   customerId,
@@ -7124,7 +7153,7 @@ const EstimateConverter = {
                 // balance (not the applied amount — create() may have thrown
                 // before reporting one) and raise an explicit reconciliation
                 // hold for a human before this throw is swallowed.
-                if (requestedDepositCredit > 0) {
+                if (requestedDepositCredit > 0 || depositLedgerReadFailed) {
                   try {
                     const { triggerNotification } = require('./notification-triggers');
                     await triggerNotification('estimate_deposit_reconcile_needed', { estimateId });

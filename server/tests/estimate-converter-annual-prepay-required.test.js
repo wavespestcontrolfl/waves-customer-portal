@@ -235,6 +235,127 @@ describe('estimate converter annual prepay orchestration', () => {
     expect(invoiceService.voidInvoice).not.toHaveBeenCalled();
   });
 
+  test('standard invoice locks and checks the deposit ledger inside its mint transaction even when no credit exists', async () => {
+    const deposits = {
+      acquireEstimateDepositLedgerLock: jest.fn().mockResolvedValue(undefined),
+      pendingDepositCredit: jest.fn().mockResolvedValue(null),
+    };
+    const { EstimateConverter, invoiceService, db, invoiceTrx } = setup(
+      [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly', visitsPerYear: 4 }],
+      undefined,
+      { deposits },
+    );
+
+    await EstimateConverter.convertEstimate('estimate-1', {
+      billingTerm: 'standard', skipAutoSchedule: true, autoSendInvoice: false,
+      skipWelcomeSms: true, skipMembershipEmail: true,
+    });
+
+    expect(db.transaction).toHaveBeenCalled();
+    expect(invoiceTrx.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', [
+      'unminted_setup_fee_manual_billing:estimate-1',
+    ]);
+    expect(invoiceTrx.raw).toHaveBeenCalledWith(
+      'SELECT id FROM customers WHERE id = ? FOR KEY SHARE', ['customer-1'],
+    );
+    expect(deposits.acquireEstimateDepositLedgerLock).toHaveBeenCalledWith(invoiceTrx, 'estimate-1');
+    expect(deposits.pendingDepositCredit).toHaveBeenCalledWith('estimate-1', invoiceTrx);
+    expect(deposits.acquireEstimateDepositLedgerLock.mock.invocationCallOrder[0]).toBeLessThan(
+      deposits.pendingDepositCredit.mock.invocationCallOrder[0],
+    );
+    expect(deposits.pendingDepositCredit.mock.invocationCallOrder[0]).toBeLessThan(
+      invoiceService.create.mock.invocationCallOrder[0],
+    );
+    expect(invoiceService.create).toHaveBeenCalledWith(expect.objectContaining({ database: invoiceTrx }));
+    expect(invoiceService.create.mock.calls[0][0]).not.toHaveProperty('depositCredit');
+  });
+
+  test('standard invoice applies and consumes exactly one credit atomically; mismatch rolls its mint back', async () => {
+    const deposits = {
+      pendingDepositCredit: jest.fn().mockResolvedValue({ amount: 49 }),
+      consumeDepositCredit: jest.fn().mockResolvedValue(20),
+    };
+    const { EstimateConverter, invoiceService, db, invoiceTrx, warn } = setup(
+      [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly', visitsPerYear: 4 }],
+      undefined,
+      { deposits, invoiceCreateResult: { id: 'invoice-1', total: 116, applied_deposit_credit: 49 } },
+    );
+    let depositMintRollbacks = 0;
+    db.transaction.mockImplementation(async (callback) => {
+      try {
+        return await callback(invoiceTrx);
+      } catch (err) {
+        if (err.message.includes('deposit allocation mismatch')) depositMintRollbacks += 1;
+        throw err;
+      }
+    });
+
+    await EstimateConverter.convertEstimate('estimate-1', {
+      billingTerm: 'standard', skipAutoSchedule: true, autoSendInvoice: false,
+      skipWelcomeSms: true, skipMembershipEmail: true,
+    });
+
+    expect(depositMintRollbacks).toBe(2);
+    expect(invoiceService.create).toHaveBeenCalledTimes(2);
+    expect(invoiceService.create).toHaveBeenCalledWith(expect.objectContaining({
+      database: invoiceTrx,
+      depositCredit: { amount: 49, estimateId: 'estimate-1' },
+    }));
+    expect(deposits.consumeDepositCredit).toHaveBeenCalledWith(expect.objectContaining({
+      estimateId: 'estimate-1', amount: 49, invoiceId: 'invoice-1', trx: invoiceTrx,
+    }));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('retrying with a fresh ledger read'));
+  });
+
+  test('standard invoice commits the exact deposit allocation and reports the credited balance', async () => {
+    const deposits = {
+      pendingDepositCredit: jest.fn().mockResolvedValue({ amount: 49 }),
+      consumeDepositCredit: jest.fn().mockResolvedValue(49),
+    };
+    const { EstimateConverter, invoiceService, invoiceTrx } = setup(
+      [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly', visitsPerYear: 4 }],
+      undefined,
+      { deposits, invoiceCreateResult: { id: 'invoice-1', token: 'pay-1', total: 116, applied_deposit_credit: 49 } },
+    );
+
+    const result = await EstimateConverter.convertEstimate('estimate-1', {
+      billingTerm: 'standard', skipAutoSchedule: true, autoSendInvoice: false,
+      skipWelcomeSms: true, skipMembershipEmail: true,
+    });
+
+    expect(invoiceService.create).toHaveBeenCalledTimes(1);
+    expect(invoiceService.create).toHaveBeenCalledWith(expect.objectContaining({
+      database: invoiceTrx, depositCredit: { amount: 49, estimateId: 'estimate-1' },
+    }));
+    expect(deposits.consumeDepositCredit).toHaveBeenCalledWith(expect.objectContaining({
+      estimateId: 'estimate-1', amount: 49, invoiceId: 'invoice-1', trx: invoiceTrx,
+    }));
+    expect(result).toEqual(expect.objectContaining({
+      draftInvoiceId: 'invoice-1', draftInvoiceAmount: 116,
+    }));
+  });
+
+  test('standard invoice uses the caller database transaction for its deposit mint', async () => {
+    const deposits = { pendingDepositCredit: jest.fn().mockResolvedValue(null) };
+    const { EstimateConverter, invoiceService, db, invoiceTrx } = setup(
+      [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly', visitsPerYear: 4 }],
+      undefined,
+      { deposits },
+    );
+    const callerDb = jest.fn((table) => db(table));
+    callerDb.transaction = jest.fn(async (callback) => callback(invoiceTrx));
+
+    await EstimateConverter.convertEstimate('estimate-1', {
+      billingTerm: 'standard', skipAutoSchedule: true, autoSendInvoice: false,
+      skipWelcomeSms: true, skipMembershipEmail: true, database: callerDb,
+    });
+
+    expect(callerDb.transaction).toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(deposits.pendingDepositCredit).toHaveBeenCalledWith('estimate-1', invoiceTrx);
+    expect(invoiceService.create).toHaveBeenCalledWith(expect.objectContaining({ database: invoiceTrx }));
+  });
+
   test('single quarterly service with explicit visitsPerYear: coverage count comes from the line', async () => {
     const { EstimateConverter, renewals } = setup([
       { service: 'pest_control', name: 'Quarterly Pest Control', frequency: 'quarterly', visitsPerYear: 4 },
