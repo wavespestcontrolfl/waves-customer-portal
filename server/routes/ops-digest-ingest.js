@@ -214,7 +214,9 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
         dedupeKey,
         dedupeWindowMs: DEDUPE_WINDOW_MS,
         refreshOnDedupe: true,
-        dedupeVersion: effectiveObservedAt,
+        // Without a caller timestamp, identical content has no new event
+        // identity. Let content changes refresh; retries keep their read state.
+        dedupeVersion: req.body.observedAt == null ? undefined : effectiveObservedAt,
         metadata: { ...metadata, opsKey: key, subject: title, kind, source: SOURCE, observedAt: effectiveObservedAt },
         trx,
       });
