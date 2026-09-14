@@ -12,7 +12,11 @@ patterns through `server/services/customer-company-name.js`; previsit matching
 is unchanged by that extraction. It reuses `findBannedCustomerCopy` and
 `reentrySafetyClaimFinding` rather than maintaining another list of their
 claims. Unicode dashes are folded before matching, so pasted punctuation
-does not change the outcome. A price per application and an unrelated
+does not change the outcome. Paired inline Markdown emphasis delimiters are
+removed before copy screening, so formatting cannot hide a rendered banned
+phrase; stray unmatched punctuation is left in place. Explicit truncated
+company forms `Waves Lawn Care` and `Waves Pest Services` are screened here
+without changing the shared previsit name rules. A price per application and an unrelated
 reference to a visit remain valid.
 
 The canonical report-copy policy rejects `resolved` without a subject check.
