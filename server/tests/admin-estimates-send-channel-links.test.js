@@ -151,6 +151,10 @@ describe('sendEstimateNow — durable first-delivery witness (#3391 round)', () 
     .filter(([sql, bindings]) => /jsonb/.test(String(sql)) && Array.isArray(bindings))
     .map(([, bindings]) => { try { return JSON.parse(bindings[0]); } catch { return null; } })
     .filter((patch) => patch && patch.deliveryState);
+  const navigationPatches = () => db.raw.mock.calls
+    .filter(([sql, bindings]) => /jsonb/.test(String(sql)) && Array.isArray(bindings))
+    .map(([, bindings]) => { try { return JSON.parse(bindings[0]); } catch { return null; } })
+    .filter((patch) => patch && patch.groupLinkViewableThrough);
 
   test('a real delivery stamps firstDeliveredAt', async () => {
     const result = await router.sendEstimateNow(estimateRow(), 'email');
@@ -219,19 +223,19 @@ describe('sendEstimateNow — durable first-delivery witness (#3391 round)', () 
     ['an ordinary', {}],
     // A near-today hold, derived so the case never lapses (AGENTS.md test-date rule).
     ['a shorter-fixed', { estimate_data: JSON.stringify({ proposal: { enabled: true, validThrough: new Date(Date.now() + 14 * 86400000).toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) } }) }],
-  ])('%s group anchor keeps its own offer expiry despite a longer fixed sibling', async (_name, anchorOverrides) => {
+  ])('%s group anchor records the sibling hold as link viewability WITHOUT widening its own expiry (owner ruling on #4309 r7)', async (_name, anchorOverrides) => {
     const anchor = estimateRow({ estimate_group_id: 'synthetic-fixed-group', ...anchorOverrides });
     const sibling = { id: 'synthetic-fixed-sibling', status: 'sent', pricing_authority: 'SERVER',
+      sent_at: new Date('2026-01-01T12:00:00.000Z'), estimate_group_id: anchor.estimate_group_id,
       estimate_data: { proposal: { enabled: true, validThrough: '2099-12-21' } } };
     const updates = [];
     db.mockImplementation(() => {
       const b = makeBuilder(anchor);
-      let groupProbe = false; let fixedRead = false;
+      let groupProbe = false;
       b.where = jest.fn(clause => { if (clause?.estimate_group_id && !clause.id) groupProbe = true; return b; });
       b.whereNot = jest.fn(() => b);
-      b.whereRaw = jest.fn((sql) => { if (/validThrough/.test(String(sql))) fixedRead = true; return b; });
       b.first = jest.fn(async () => groupProbe ? null : anchor);
-      b.select = jest.fn(async () => fixedRead ? [sibling] : []);
+      b.select = jest.fn(async () => groupProbe ? [sibling] : []);
       b.update = jest.fn(async (patch) => { updates.push(patch); return 1; });
       return b;
     });
@@ -242,13 +246,17 @@ describe('sendEstimateNow — durable first-delivery witness (#3391 round)', () 
     // shorter fixed date. Never the sibling's 2099 hold.
     expect(new Date(published.expires_at).toISOString()).not.toBe('2099-12-22T04:59:59.999Z');
     expect(new Date(published.expires_at).getFullYear()).toBeLessThan(2030);
-
+    // The sibling hold is recorded as the delivered link's viewability window,
+    // committed in the same finalization write.
+    const patch = deliveryPatches().find((d) => d.groupLinkViewableThrough);
+    expect(patch).toBeTruthy();
+    expect(new Date(patch.groupLinkViewableThrough).toISOString()).toBe('2099-12-22T04:59:59.999Z');
   });
 
   test.each([
     ['a fresh seven-day window', 3],
     ['a prior operator extension', 21],
-  ])('a short fixed anchor preserves ordinary reconciliation with %s', async (_case, oldExpiryDays) => {
+  ])('a short fixed anchor keeps its group link open for an ordinary sibling with %s', async (_case, oldExpiryDays) => {
     const sendAt = new Date();
     const oldSiblingExpiry = new Date(sendAt.getTime() + oldExpiryDays * 86400000);
     const expiryForSend = require('../services/admin-estimate-persistence').estimateExpiresAt;
@@ -261,16 +269,16 @@ describe('sendEstimateNow — durable first-delivery witness (#3391 round)', () 
       estimate_data: JSON.stringify({ proposal: { enabled: true, validThrough: new Date(sendAt.getTime() + 86400000).toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) } }),
     });
     const sibling = { id: 'ordinary-sibling', status: 'sent', estimate_group_id: anchor.estimate_group_id,
+      sent_at: new Date('2026-01-01T12:00:00.000Z'),
       expires_at: oldSiblingExpiry, estimate_data: '{}' };
     const updates = [];
     db.mockImplementation(() => {
       const b = makeBuilder(anchor);
-      let groupProbe = false; let ordinaryRead = false;
+      let groupProbe = false;
       b.where = jest.fn((clause) => { if (clause?.estimate_group_id && !clause.id) groupProbe = true; return b; });
       b.whereNot = jest.fn(() => b);
-      b.whereRaw = jest.fn((sql) => { if (String(sql).startsWith("COALESCE(estimate_data->'proposal'")) ordinaryRead = true; return b; });
       b.first = jest.fn(async () => groupProbe ? null : anchor);
-      b.select = jest.fn(async () => ordinaryRead ? [sibling] : []);
+      b.select = jest.fn(async () => groupProbe ? [sibling] : []);
       b.update = jest.fn(async (patch) => { updates.push(patch); return 1; });
       return b;
     });
@@ -280,8 +288,11 @@ describe('sendEstimateNow — durable first-delivery witness (#3391 round)', () 
       const published = updates.find((patch) => patch.sent_at && patch.expires_at);
       expect(new Date(published.expires_at).toISOString()).toBe(proposalExpiry(anchor).toISOString());
       expect(sibling.expires_at.toISOString()).toBe(oldSiblingExpiry.toISOString());
-      const patch = deliveryPatches().find((data) => data.deliveryState);
-      const handoffExpiry = new Date(new Date(patch.deliveryState.lastDeliveredAt).getTime() + 7 * 86400000);
+      const handoffExpiry = new Date(new Date(deliveryPatches()[0].deliveryState.lastDeliveredAt).getTime() + 7 * 86400000);
+      const patch = navigationPatches()[0];
+      // The finalization can promise the already-published expiry. Its fresh
+      // seven-day extension waits for the sibling reconciliation transaction.
+      expect(patch.groupLinkViewableThrough).toBe(oldSiblingExpiry.toISOString());
       const expiryReconciliation = db.raw.mock.calls.find(([sql]) => /GREATEST\(COALESCE\(expires_at/.test(String(sql)));
       expect(expiryReconciliation[1]).toEqual([handoffExpiry, handoffExpiry]);
     } finally {
@@ -289,7 +300,7 @@ describe('sendEstimateNow — durable first-delivery witness (#3391 round)', () 
     }
   });
 
-  test('a newly published ordinary sibling gets seven days independently of a short fixed anchor', async () => {
+  test('a newly published ordinary sibling gets the exact seven-day expiry promised by a short fixed anchor link', async () => {
     const sendAt = new Date();
     const expiryForSend = require('../services/admin-estimate-persistence').estimateExpiresAt;
     const { proposalExpiry } = require('../services/proposal-bid');
@@ -301,22 +312,39 @@ describe('sendEstimateNow — durable first-delivery witness (#3391 round)', () 
     const updates = [];
     db.mockImplementation(() => {
       const b = makeBuilder(anchor);
-      let groupProbe = false; let claimable = false;
+      let groupProbe = false; let claimable = false; let published = false;
       b.where = jest.fn((clause) => { if (clause?.estimate_group_id && !clause.id) groupProbe = true; return b; });
       b.whereNot = jest.fn(() => b);
-      b.whereIn = jest.fn((column, statuses) => { if (column === 'status' && statuses.includes('draft')) claimable = true; return b; });
+      b.whereIn = jest.fn((column, statuses) => {
+        if (column === 'status' && statuses.includes('draft')) claimable = true;
+        if (column === 'status' && statuses.includes('expired')) published = true;
+        return b;
+      });
       b.modify = jest.fn((callback) => { callback(b); return b; });
       b.first = jest.fn(async () => groupProbe ? null : anchor);
-      b.select = jest.fn(async () => claimable ? [sibling] : []);
+      b.select = jest.fn(async () => claimable ? [sibling] : published && sibling.status === 'sent' ? [anchor, sibling] : []);
       b.then = (resolve, reject) => Promise.resolve(claimable ? [sibling] : []).then(resolve, reject);
-      b.update = jest.fn(async (patch) => { updates.push(patch); return 1; });
+      b.update = jest.fn(async (patch) => {
+        updates.push(patch);
+        if (patch.status === 'sending') sibling.status = 'sending';
+        if (patch.sent_at && patch.expires_at && patch.followup_expiring_sent) {
+          sibling.status = 'sent'; sibling.sent_at = sendAt; sibling.expires_at = patch.expires_at;
+        } else if (patch.sent_at && patch.expires_at) {
+          anchor.status = 'sent'; anchor.sent_at = sendAt; anchor.expires_at = patch.expires_at;
+        }
+        return 1;
+      });
       return b;
     });
     try {
       const result = await router.sendEstimateNow(anchor, 'email', { callerPreClaimed: true, now: () => sendAt });
       expect(result.sent).toBe(true);
+      const promised = navigationPatches().at(-1)?.groupLinkViewableThrough;
       const publishedSibling = updates.find((patch) => patch.sent_at && patch.expires_at && patch.followup_expiring_sent);
-      expect(publishedSibling.expires_at.toISOString()).toBe(new Date(sendAt.getTime() + 7 * 86400000).toISOString());
+      expect(promised).toBeTruthy();
+      expect(publishedSibling.expires_at.toISOString()).toBe(promised);
+      expect(deliveryPatches().find((data) => data.groupLinkViewableThrough)?.groupLinkViewableThrough)
+        .toBe(proposalExpiry(anchor).toISOString());
       expect(updates.find((patch) => patch.sent_at && patch.expires_at && !patch.followup_expiring_sent).expires_at.toISOString())
         .toBe(proposalExpiry(anchor).toISOString());
     } finally {

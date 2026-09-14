@@ -18,9 +18,35 @@ date, or the standard seven-day window — and no grouped sibling ever widens it
 Acceptance, voice quoting, reminder eligibility, reminder copy, the CTA and every
 displayed deadline read it directly.
 
-This fixed-offer core is a review-only intermediate branch. Group-navigation
-integration is required before deployment so a shorter-lived anchor continues
-to reach its longer-lived published siblings.
+The window during which the delivered group entry link keeps resolving is
+**group-link viewability**, held in `estimate_data.groupLinkViewableThrough` on the
+anchor whose token was delivered, and read by nothing but the token path. It exists
+because the delivered link is the anchor's token: an ordinary anchor's offer ends
+after seven days, and without a separate window the customer could no longer reach
+a fixed sibling valid for months. Conversely, an ordinary sibling keeps its full
+seven-day window even when the fixed anchor ends sooner. Whole-quote revisions
+preserve the locked server-owned navigation window and publication-anchor metadata
+only while the quote remains in the same group; a group move or removal clears them.
+It is monotonic — a link already promised a date
+keeps it even if a hold is later shortened, because what closes is the offer, not
+the route to it. A reachable group of expired cards still renders every card as
+expired and refuses acceptance. Expired members without a viewable link remain
+visible as nonclickable summaries. New navigation grants come only from confirmed
+published offers. Successful sibling publication and its required link extensions
+commit together; failed publication does not create a longer navigation promise.
+Every eligible delivered link in the current group receives extensions, because
+a publication marker can predate a resend from another member. The anchor's
+own window is stored with successful delivery, even if later reconciliation fails.
+If a temporary call-side block prevented a grant, the next expired-anchor HTML or
+`/data` read can recover it after the call becomes eligible. Recovery uses the same
+published-offer policy under the group lock, persists the monotonic window, and
+changes neither offer dates nor statuses. Blocked calls cannot source or receive
+a grant; moving the anchor to another group invalidates a stale recovery read.
+
+Do not fold one into the other. Widening `expires_at` to carry reachability makes
+every reader that means "offer deadline" wrong by default, and it cannot be undone
+downstream: an ordinary row stores no authored date to recover.
+
 
 Quantities are operator-reviewed inputs. Building coverage, gross floor area and treated slab area are different measurements. Application rates must come from the reviewed scope and business inputs.
 

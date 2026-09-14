@@ -88,6 +88,8 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const { shortenOrPassthrough } = require('../services/short-url');
 const { computeProposalTotals, normalizeProposal } = require('../services/estimate-proposal');
 const { gateEnvValue } = require('../config/feature-gates');
+const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
+const { buildPricingBundle } = require('../routes/estimate-public');
 jest.mock('../services/pricing-authority-gate', () => {
   const actual = jest.requireActual('../services/pricing-authority-gate');
   return { ...actual, gatedSendAuthorityPredicateApplies: jest.fn(() => false) };
@@ -95,6 +97,7 @@ jest.mock('../services/pricing-authority-gate', () => {
 
 let row;
 let groupRows;
+let callRows;
 let mutations;
 
 function savedEstimate(overrides = {}) {
@@ -118,7 +121,8 @@ function dataOf(estimate = row) {
 function estimateDatabase(table) {
   const filters = [];
   const builder = {};
-  const matches = () => table === 'estimates' ? [row, ...groupRows].filter((candidate) => filters.every((filter) => filter(candidate))) : [];
+  const matches = () => (table === 'estimates' ? [row, ...groupRows] : table === 'call_log' ? callRows : [])
+    .filter((candidate) => filters.every((filter) => filter(candidate)));
   builder.where = jest.fn((key, value) => {
     if (typeof key === 'function') { key(builder); return builder; }
     for (const [field, expected] of Object.entries(typeof key === 'object' ? key : { [key]: value })) {
@@ -184,6 +188,7 @@ beforeEach(() => {
   gateEnvValue.mockReturnValue(false);
   row = savedEstimate();
   groupRows = [];
+  callRows = [];
   mutations = [];
   db.mockImplementation(estimateDatabase);
   sendgrid.isConfigured.mockReturnValue(true);
@@ -193,6 +198,7 @@ beforeEach(() => {
     return { sent: true, message: { provider_message_id: 'synthetic-email-accepted' } };
   });
   email.loadTemplateByKey.mockImplementation(async (key) => ({ template: { template_key: key }, activeVersion: { id: 'synthetic-email-version' } }));
+  buildPricingBundle.mockResolvedValue({ services: [] });
 });
 
 describe('commercial bid authoring', () => {
@@ -262,7 +268,6 @@ describe('commercial bid authoring', () => {
       expect(row).toEqual(before);
     }
   });
-
   test('saving a longer anchor hold changes only its own offer deadline (owner ruling on #4309 r7)', async () => {
     Object.assign(row, { status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'), estimate_group_id: 'synthetic-group', estimate_data: { proposal: { ...proposal(), validThrough: '2099-12-21' } } });
     const res = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-31' } });
@@ -270,11 +275,203 @@ describe('commercial bid authoring', () => {
     // The anchor's own authored deadline — and nothing else — is its expiry.
     expect(row.expires_at.toISOString()).toBe('2100-01-01T04:59:59.999Z');
     // No sibling is widened and none is revived: a sibling's offer is its own,
-    // so nothing about this save can change it.
+    // so nothing about this save can change it. Group reachability is carried
+    // by groupLinkViewableThrough on this row instead.
     const siblingExtension = mutations.find(({ patch }) => patch.status && patch.expires_at);
     expect(siblingExtension).toBeUndefined();
     const anchorData = row.estimate_data || {};
     expect(Object.prototype.hasOwnProperty.call(anchorData, 'groupWidenFloorExpiresAt')).toBe(false);
+    expect(anchorData.groupLinkViewableThrough).toBe('2100-01-01T04:59:59.999Z');
+  });
+  test('the longest published anchor records its own floor before its hold is shortened', async () => {
+    Object.assign(row, { status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'),
+      estimate_group_id: 'synthetic-group',
+      estimate_data: { proposal: { ...proposal(), validThrough: '2099-12-31' } } });
+    const shorterSibling = savedEstimate({ id: 'shorter-sibling', status: 'sent', estimate_group_id: 'synthetic-group',
+      sent_at: new Date('2026-01-02T12:00:00.000Z'), expires_at: new Date('2099-01-08T12:00:00.000Z') });
+    groupRows.push(shorterSibling);
+    const first = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-31' } });
+    expect(first.statusCode).toBe(200);
+    expect(dataOf().groupLinkViewableThrough).toBe('2100-01-01T04:59:59.999Z');
+    expect(dataOf(shorterSibling).groupLinkViewableThrough).toBe('2100-01-01T04:59:59.999Z');
+
+    const shorter = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-21' } });
+    expect(shorter.statusCode).toBe(200);
+    expect(row.expires_at.toISOString()).toBe('2099-12-22T04:59:59.999Z');
+    expect(dataOf().groupLinkViewableThrough).toBe('2100-01-01T04:59:59.999Z');
+  });
+  test.each([
+    ['newly authored', null],
+    ['lengthened', '2099-12-21'],
+  ])('a %s sibling hold extends the delivered anchor link while offers keep their own deadlines', async (_label, oldDate) => {
+    const anchor = savedEstimate({
+      id: 'published-anchor', status: 'sent', estimate_group_id: 'synthetic-group',
+      sent_at: new Date('2026-01-02T12:00:00.000Z'),
+      expires_at: new Date('2099-01-08T12:00:00.000Z'),
+      estimate_data: { deliveryState: { lastDeliveredAt: '2026-01-02T12:00:00.000Z' } },
+    });
+    groupRows.push(anchor);
+    Object.assign(row, {
+      status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'),
+      estimate_group_id: 'synthetic-group',
+      estimate_data: { groupPublishedByEstimateId: anchor.id, proposal: { ...proposal(), validThrough: oldDate } },
+    });
+    const result = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-31' } });
+    expect(result.statusCode).toBe(200);
+    expect(row.expires_at.toISOString()).toBe('2100-01-01T04:59:59.999Z');
+    expect(anchor.expires_at.toISOString()).toBe('2099-01-08T12:00:00.000Z');
+    expect(dataOf(anchor).groupLinkViewableThrough).toBe('2100-01-01T04:59:59.999Z');
+    expect(dataOf().groupLinkViewableThrough).toBe('2100-01-01T04:59:59.999Z');
+
+    // A later shortening closes only this property's offer. The already
+    // delivered group link keeps its promised navigation lifetime.
+    const shorter = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-21' } });
+    expect(shorter.statusCode).toBe(200);
+    expect(row.expires_at.toISOString()).toBe('2099-12-22T04:59:59.999Z');
+    expect(dataOf(anchor).groupLinkViewableThrough).toBe('2100-01-01T04:59:59.999Z');
+    expect(dataOf().groupLinkViewableThrough).toBe('2100-01-01T04:59:59.999Z');
+    expect(anchor.expires_at.toISOString()).toBe('2099-01-08T12:00:00.000Z');
+  });
+  test('saving a fixed sibling keeps the delivered link open through a longer published ordinary offer', async () => {
+    const anchor = savedEstimate({ id: 'published-anchor', status: 'sent', estimate_group_id: 'synthetic-group',
+      sent_at: new Date('2026-01-02T12:00:00.000Z'), expires_at: new Date('2099-01-08T12:00:00.000Z') });
+    const ordinarySibling = savedEstimate({ id: 'ordinary-sibling', status: 'sent', estimate_group_id: 'synthetic-group',
+      sent_at: new Date('2026-01-02T12:00:00.000Z'), expires_at: new Date('2100-02-01T12:00:00.000Z') });
+    groupRows.push(anchor, ordinarySibling);
+    Object.assign(row, { status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'),
+      estimate_group_id: 'synthetic-group',
+      estimate_data: { groupPublishedByEstimateId: anchor.id, proposal: { ...proposal(), validThrough: '2099-12-11' } } });
+    const result = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-21' } });
+    expect(result.statusCode).toBe(200);
+    expect(row.expires_at.toISOString()).toBe('2099-12-22T04:59:59.999Z');
+    expect(dataOf(anchor).groupLinkViewableThrough).toBe('2100-02-01T12:00:00.000Z');
+    expect(anchor.expires_at.toISOString()).toBe('2099-01-08T12:00:00.000Z');
+    expect(ordinarySibling.expires_at.toISOString()).toBe('2100-02-01T12:00:00.000Z');
+  });
+  test('clearing a sibling fixed hold keeps the delivered link open through its restored ordinary expiry', async () => {
+    const anchor = savedEstimate({ id: 'short-anchor', status: 'sent', estimate_group_id: 'synthetic-group',
+      sent_at: new Date('2099-01-02T12:00:00.000Z'), expires_at: new Date('2099-01-03T12:00:00.000Z'),
+      estimate_data: { groupLinkViewableThrough: '2099-01-04T12:00:00.000Z' } });
+    groupRows.push(anchor);
+    Object.assign(row, { status: 'sent', sent_at: new Date('2099-01-02T12:00:00.000Z'),
+      estimate_group_id: 'synthetic-group',
+      estimate_data: { groupPublishedByEstimateId: anchor.id, proposal: { ...proposal(), validThrough: '2099-01-04' } } });
+    const result = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '' } });
+    expect(result.statusCode).toBe(200);
+    expect(row.expires_at.toISOString()).toBe('2099-01-09T12:00:00.000Z');
+    expect(dataOf(anchor).groupLinkViewableThrough).toBe('2099-01-09T12:00:00.000Z');
+    expect(anchor.expires_at.toISOString()).toBe('2099-01-03T12:00:00.000Z');
+  });
+  test('a proposal save preserves its locked publication marker and longer promised link window', async () => {
+    Object.assign(row, { status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'),
+      estimate_group_id: 'synthetic-group',
+      estimate_data: { proposal: proposal(), groupPublishedByEstimateId: row.id,
+        groupLinkViewableThrough: '2100-02-01T12:00:00.000Z' } });
+    const result = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-31' } });
+    expect(result.statusCode).toBe(200);
+    expect(dataOf().groupPublishedByEstimateId).toBe(row.id);
+    expect(dataOf().groupLinkViewableThrough).toBe('2100-02-01T12:00:00.000Z');
+    expect(row.expires_at.toISOString()).toBe('2100-01-01T04:59:59.999Z');
+  });
+  test.each([
+    ['missing', null],
+    ['stale', 'former-anchor'],
+    ['older same-group sender after a resend', 'current-anchor'],
+  ])('a %s publication marker extends eligible delivered links in the current group only', async (_case, marker) => {
+    const formerAnchor = savedEstimate({
+      id: 'former-anchor', status: 'sent', estimate_group_id: 'former-group',
+      sent_at: new Date('2026-01-02T12:00:00.000Z'),
+      expires_at: new Date('2099-01-08T12:00:00.000Z'),
+    });
+    const currentAnchor = savedEstimate({ id: 'current-anchor', status: 'sent', estimate_group_id: 'current-group',
+      sent_at: new Date('2026-01-02T12:00:00.000Z'), expires_at: new Date('2099-01-08T12:00:00.000Z') });
+    const viewedOnlyAnchor = savedEstimate({ id: 'viewed-anchor', status: 'expired', estimate_group_id: 'current-group',
+      viewed_at: new Date('2026-01-02T12:00:00.000Z'), expires_at: new Date('2099-01-08T12:00:00.000Z') });
+    const withheld = ['draft', 'send_failed'].map((status) => savedEstimate({ id: `${status}-member`, status,
+      estimate_group_id: 'current-group', sent_at: new Date('2026-01-02T12:00:00.000Z') }));
+    const expiredUnsent = savedEstimate({ id: 'expired-unsent-member', status: 'expired', disposition: 'expired_unsent',
+      estimate_group_id: 'current-group', sent_at: new Date('2026-01-02T12:00:00.000Z') });
+    const held = savedEstimate({ id: 'held-member', status: 'sent', estimate_group_id: 'current-group',
+      sent_at: new Date('2026-01-02T12:00:00.000Z'),
+      estimate_data: { estimatorEngine: { reprice_pending_at: '2026-01-02T12:00:00.000Z' } } });
+    const archived = savedEstimate({ id: 'archived-member', status: 'sent', estimate_group_id: 'current-group',
+      sent_at: new Date('2026-01-02T12:00:00.000Z'), archived_at: new Date('2026-01-03T12:00:00.000Z') });
+    const invalidated = savedEstimate({ id: 'invalidated-member', status: 'sent', estimate_group_id: 'current-group',
+      sent_at: new Date('2026-01-02T12:00:00.000Z'),
+      estimate_data: { estimatorEngine: { linkage_invalidated_at: '2026-01-02T12:00:00.000Z' } } });
+    groupRows.push(formerAnchor, currentAnchor, viewedOnlyAnchor, ...withheld, expiredUnsent, held, archived, invalidated);
+    Object.assign(row, {
+      status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'),
+      estimate_group_id: 'current-group',
+      estimate_data: { ...(marker ? { groupPublishedByEstimateId: marker } : {}), proposal: proposal() },
+    });
+    const result = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-31' } });
+    expect(result.statusCode).toBe(200);
+    expect(row.expires_at.toISOString()).toBe('2100-01-01T04:59:59.999Z');
+    expect(dataOf(currentAnchor).groupLinkViewableThrough).toBe('2100-01-01T04:59:59.999Z');
+    expect(dataOf(viewedOnlyAnchor).groupLinkViewableThrough).toBe('2100-01-01T04:59:59.999Z');
+    expect(dataOf(formerAnchor).groupLinkViewableThrough).toBeUndefined();
+    expect(formerAnchor.expires_at.toISOString()).toBe('2099-01-08T12:00:00.000Z');
+    for (const candidate of [...withheld, expiredUnsent, held, archived, invalidated]) {
+      expect(dataOf(candidate).groupLinkViewableThrough).toBeUndefined();
+    }
+  });
+  test('saving an unpublished fixed sibling records only the anchor’s existing offer floor', async () => {
+    const anchor = savedEstimate({ id: 'delivered-anchor', status: 'sent', estimate_group_id: 'synthetic-group',
+      sent_at: new Date('2026-01-02T12:00:00.000Z'), expires_at: new Date('2099-01-08T12:00:00.000Z') });
+    groupRows.push(anchor);
+    Object.assign(row, { status: 'draft', estimate_group_id: 'synthetic-group',
+      estimate_data: { groupPublishedByEstimateId: anchor.id } });
+    const response = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-31' } });
+    expect(response.statusCode).toBe(200);
+    expect(row.expires_at.toISOString()).toBe('2100-01-01T04:59:59.999Z');
+    expect(dataOf(anchor).groupLinkViewableThrough).toBe('2099-01-08T12:00:00.000Z');
+  });
+  test('saving a published property ignores a longer fixed hold still in draft', async () => {
+    const anchor = savedEstimate({ id: 'delivered-anchor', status: 'sent', estimate_group_id: 'synthetic-group',
+      sent_at: new Date('2026-01-02T12:00:00.000Z'), expires_at: new Date('2099-01-08T12:00:00.000Z') });
+    const unpublished = savedEstimate({ id: 'draft-with-long-hold', status: 'draft',
+      estimate_group_id: 'synthetic-group', estimate_data: { proposal: { enabled: true, validThrough: '2101-12-31' } } });
+    groupRows.push(anchor, unpublished);
+    Object.assign(row, { status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'),
+      estimate_group_id: 'synthetic-group',
+      estimate_data: { groupPublishedByEstimateId: anchor.id, proposal: proposal() } });
+    const response = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-31' } });
+    expect(response.statusCode).toBe(200);
+    expect(dataOf(anchor).groupLinkViewableThrough).toBe('2100-01-01T04:59:59.999Z');
+    expect(dataOf(unpublished).groupLinkViewableThrough).toBeUndefined();
+  });
+  test('a durable call-side block cannot source or receive a group navigation grant', async () => {
+    const blocked = savedEstimate({ id: 'call-blocked-sibling', status: 'sent', estimate_group_id: 'synthetic-group',
+      sent_at: new Date('2026-01-02T12:00:00.000Z'), expires_at: new Date('2101-01-01T12:00:00.000Z'),
+      estimate_data: { estimatorEngine: { callLogId: 'blocked-call' } } });
+    callRows.push({ id: 'blocked-call', metadata: { estimator_draft_block: { reason: 'linkage_changed' } } });
+    groupRows.push(blocked);
+    Object.assign(row, { status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'),
+      estimate_group_id: 'synthetic-group', estimate_data: { proposal: proposal() } });
+
+    const result = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-31' } });
+    expect(result.statusCode).toBe(200);
+    expect(row.expires_at.toISOString()).toBe('2100-01-01T04:59:59.999Z');
+    expect(dataOf().groupLinkViewableThrough).toBe('2100-01-01T04:59:59.999Z');
+    expect(dataOf(blocked).groupLinkViewableThrough).toBeUndefined();
+  });
+  test('an authored save lifts an observed reprice hold and extends the delivered link atomically', async () => {
+    const anchor = savedEstimate({ id: 'delivered-anchor', status: 'sent', estimate_group_id: 'synthetic-group',
+      sent_at: new Date('2026-01-02T12:00:00.000Z'), expires_at: new Date('2099-01-08T12:00:00.000Z') });
+    groupRows.push(anchor);
+    Object.assign(row, { status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'),
+      estimate_group_id: 'synthetic-group', estimate_data: {
+        groupPublishedByEstimateId: anchor.id,
+        estimatorEngine: { reprice_pending_at: '2026-01-02T12:00:00.000Z', reprice_attempt: 'synthetic-attempt' },
+        proposal: { ...proposal(), validThrough: '2099-01-04' },
+      } });
+    const result = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-31' } });
+    expect(result.statusCode).toBe(200);
+    expect(dataOf().estimatorEngine.reprice_pending_at).toBeUndefined();
+    expect(anchor.expires_at.toISOString()).toBe('2099-01-08T12:00:00.000Z');
+    expect(dataOf(anchor).groupLinkViewableThrough).toBe('2100-01-01T04:59:59.999Z');
+    expect(result.body.editVersion).toBe(persistence.estimateEditVersion(row));
   });
   test('shortening a fixed hold rewrites only the anchor, because no sibling was ever widened (owner ruling on #4309 r7)', async () => {
     const sibling = { ...row, id: 'sibling-1', status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'), estimate_group_id: 'synthetic-group' };
@@ -351,6 +548,246 @@ describe('commercial bid authoring', () => {
     const res = await invoke('/:id/proposal', 'put', { proposal: proposal() });
     expect(res.statusCode).toBe(200);
     expect(row.status).toBe('sent'); expect(row.disposition).toBeNull();
+  });
+});
+
+describe('group publication navigation', () => {
+  function groupDatabase(table) {
+    const builder = estimateDatabase(table);
+    const originalWhere = builder.where.getMockImplementation();
+    // This fake cannot evaluate Knex's nested OR predicates; real predicates
+    // remain enforced by the status and id filters on each write.
+    builder.where.mockImplementation((key, value) => {
+      if (typeof key === 'function') {
+        if (String(key).includes("status: 'sending'") && String(key).includes('DELIVERY_CLAIM_NOT_LIVE_SQL')) {
+          builder.whereIn('status', ['sending']);
+        }
+        return builder;
+      }
+      if (key?.updated_at instanceof Date) {
+        const { updated_at: _ignored, ...fields } = key;
+        originalWhere(fields);
+        // Claim reads clone the Date, whereas SQL compares its value.
+        return builder;
+      }
+      return originalWhere(key, value);
+    });
+    builder.orWhere.mockImplementation(() => builder);
+    builder.then = (resolve, reject) => builder.select().then(resolve, reject);
+    const originalUpdate = builder.update.getMockImplementation();
+    builder.update.mockImplementation((patch) => {
+      if (patch.status === 'sending' && groupRows.some((candidate) => candidate.status === 'draft')) {
+        groupRows.find((candidate) => candidate.status === 'draft').status = 'sending';
+        return Promise.resolve(1);
+      }
+      if (patch.expires_at?.sql?.includes('GREATEST(COALESCE(expires_at')) {
+        const ordinaryExpiry = patch.expires_at.bindings[0];
+        const older = groupRows.find((candidate) => candidate.status === 'sent');
+        return originalUpdate({ ...patch, expires_at: older?.expires_at > ordinaryExpiry ? older.expires_at : ordinaryExpiry });
+      }
+      return originalUpdate(patch);
+    });
+    return builder;
+  }
+
+  function fixedSibling() {
+    return savedEstimate({ id: 'fixed-sibling', status: 'draft', estimate_group_id: 'synthetic-group',
+      estimate_data: { proposal: { enabled: true, validThrough: '2099-12-31' } } });
+  }
+
+  function prepareGroup() {
+    Object.assign(row, { status: 'sending', estimate_group_id: 'synthetic-group',
+      sent_at: new Date('2026-01-02T12:00:00.000Z'),
+      expires_at: new Date('2099-01-08T12:00:00.000Z'),
+      estimate_data: { groupPublishedByEstimateId: 'older-delivered-link' } });
+    const older = savedEstimate({ id: 'older-delivered-link', status: 'sent', estimate_group_id: 'synthetic-group',
+      sent_at: new Date('2026-01-01T12:00:00.000Z'), expires_at: new Date('2099-01-08T12:00:00.000Z') });
+    const sibling = fixedSibling();
+    groupRows.push(older, sibling);
+    db.mockImplementation(groupDatabase);
+    return { older, sibling };
+  }
+
+  function failReconciliation() {
+    db.mockImplementation((table) => {
+      const builder = groupDatabase(table);
+      const oldWhereNot = builder.whereNot.getMockImplementation();
+      const oldWhereIn = builder.whereIn.getMockImplementation();
+      const oldUpdate = builder.update.getMockImplementation();
+      let excludesAnchor = false;
+      let reconcilesLive = false;
+      builder.whereNot.mockImplementation((fields) => {
+        if (fields.id === row.id) excludesAnchor = true;
+        return oldWhereNot(fields);
+      });
+      builder.whereIn.mockImplementation((field, statuses) => {
+        if (field === 'status' && statuses.length === 2 && statuses.includes('sent') && statuses.includes('viewed')) reconcilesLive = true;
+        return oldWhereIn(field, statuses);
+      });
+      builder.update.mockImplementation((patch) => {
+        if (excludesAnchor && reconcilesLive && patch.followup_unviewed_sent) throw new Error('Synthetic reconciliation failure');
+        return oldUpdate(patch);
+      });
+      return builder;
+    });
+  }
+
+  test('an expired entry gains a durable floor only after a published sibling’s call settles cleanly', async () => {
+    Object.assign(row, { status: 'expired', estimate_group_id: 'synthetic-group',
+      sent_at: new Date('2026-01-01T12:00:00.000Z'), expires_at: new Date('2026-01-08T12:00:00.000Z') });
+    const sibling = savedEstimate({ id: 'published-long-sibling', status: 'sent', estimate_group_id: 'synthetic-group',
+      sent_at: new Date('2026-01-02T12:00:00.000Z'), expires_at: new Date('2100-01-01T12:00:00.000Z'),
+      estimate_data: { estimatorEngine: { callLogId: 'reprocessing-call' } } });
+    groupRows.push(sibling);
+    const call = { id: 'reprocessing-call', processing_status: 'processing', processing_token: 'synthetic-live-token', metadata: {} };
+    callRows.push(call);
+    db.mockImplementation(groupDatabase);
+
+    const blockedRead = await refreshExpiredGroupNavigation(db, structuredClone(row));
+    expect(blockedRead.id).toBe(row.id);
+    expect(dataOf().groupLinkViewableThrough).toBeUndefined();
+    expect(dataOf(sibling).groupLinkViewableThrough).toBeUndefined();
+
+    call.processing_status = 'processed';
+    call.processing_token = null;
+    const recovered = await refreshExpiredGroupNavigation(db, structuredClone(row));
+    expect(dataOf(recovered).groupLinkViewableThrough).toBe('2100-01-01T12:00:00.000Z');
+    expect(dataOf().groupLinkViewableThrough).toBe('2100-01-01T12:00:00.000Z');
+    expect(dataOf(sibling).groupLinkViewableThrough).toBe('2100-01-01T12:00:00.000Z');
+
+    // Later shortening changes only the sibling's offer; the recovered
+    // delivered-link promise remains on the entry token.
+    sibling.expires_at = new Date('2026-01-08T12:00:00.000Z');
+    await refreshExpiredGroupNavigation(db, structuredClone(row));
+    expect(dataOf().groupLinkViewableThrough).toBe('2100-01-01T12:00:00.000Z');
+  });
+
+  test('recovery refuses a moved token or an entry whose own call remains blocked', async () => {
+    Object.assign(row, { status: 'expired', estimate_group_id: 'synthetic-group',
+      sent_at: new Date('2026-01-01T12:00:00.000Z'), expires_at: new Date('2026-01-08T12:00:00.000Z'),
+      estimate_data: { estimatorEngine: { callLogId: 'blocked-anchor-call' } } });
+    groupRows.push(savedEstimate({ id: 'published-long-sibling', status: 'sent', estimate_group_id: 'synthetic-group',
+      sent_at: new Date('2026-01-02T12:00:00.000Z'), expires_at: new Date('2100-01-01T12:00:00.000Z') }));
+    callRows.push({ id: 'blocked-anchor-call', processing_status: 'processing', processing_token: 'synthetic-live-token', metadata: {} });
+    db.mockImplementation(groupDatabase);
+
+    expect(await refreshExpiredGroupNavigation(db, structuredClone(row))).toBeNull();
+    expect(dataOf().groupLinkViewableThrough).toBeUndefined();
+    expect(await refreshExpiredGroupNavigation(db, { ...structuredClone(row), token: 'former-token' })).toBeNull();
+    expect(dataOf().groupLinkViewableThrough).toBeUndefined();
+  });
+
+  test('A to B resend leaves both delivered links eligible after reconciliation fails', async () => {
+    const { older, sibling } = prepareGroup();
+    failReconciliation();
+    buildPricingBundle.mockImplementation(async (estimate) => {
+      if (estimate.id === sibling.id) throw new Error('Synthetic snapshot failure');
+      return { services: [] };
+    });
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(result.sent).toBe(true);
+    expect(sibling.status).toBe('draft');
+    expect(dataOf(row).groupLinkViewableThrough).toBe('2099-01-08T12:00:00.000Z');
+    expect(dataOf(older).groupLinkViewableThrough).toBeUndefined();
+    expect(buildPricingBundle.mock.calls.filter(([estimate]) => estimate.id === sibling.id)).toHaveLength(3);
+    expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('live-sibling group reconciliation failed'));
+
+    gateEnvValue.mockImplementation((key) => key === 'GATE_COMMERCIAL_BID_BUILDER');
+    const saved = await invoke('/:id/proposal', 'put', { proposal: {
+      enabled: true, validThrough: '2099-12-31', buildings: [{ name: 'Synthetic building',
+        lineItems: [{ id: 'synthetic-line', quantity: 1, unitPrice: 100, frequency: 'one_time' }] }],
+    } });
+    expect(saved.statusCode).toBe(200);
+    expect(dataOf(older).groupLinkViewableThrough).toBe('2100-01-01T04:59:59.999Z');
+    expect(dataOf(row).groupLinkViewableThrough).toBe('2100-01-01T04:59:59.999Z');
+    expect(row.expires_at.toISOString()).toBe('2100-01-01T04:59:59.999Z');
+    expect(dataOf(sibling).groupLinkViewableThrough).toBeUndefined();
+  });
+
+  test('the longest anchor keeps its own delivered floor when reconciliation fails and its hold is later shortened', async () => {
+    const { older, sibling } = prepareGroup();
+    const authoredProposal = { enabled: true, validThrough: '2099-12-31', buildings: [{ name: 'Synthetic building',
+      lineItems: [{ id: 'synthetic-line', quantity: 1, unitPrice: 100, frequency: 'one_time' }] }] };
+    row.estimate_data.proposal = authoredProposal;
+    failReconciliation();
+    buildPricingBundle.mockImplementation(async (estimate) => {
+      if (estimate.id === sibling.id) throw new Error('Synthetic snapshot failure');
+      return { services: [] };
+    });
+
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(result.sent).toBe(true);
+    expect(sibling.status).toBe('draft');
+    expect(row.expires_at.toISOString()).toBe('2100-01-01T04:59:59.999Z');
+    expect(dataOf(row).groupLinkViewableThrough).toBe('2100-01-01T04:59:59.999Z');
+    expect(dataOf(older).groupLinkViewableThrough).toBeUndefined();
+    expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('live-sibling group reconciliation failed'));
+
+    gateEnvValue.mockImplementation((key) => key === 'GATE_COMMERCIAL_BID_BUILDER');
+    const shortened = await invoke('/:id/proposal', 'put', { proposal: { ...authoredProposal, validThrough: '2099-12-21' } });
+    expect(shortened.statusCode).toBe(200);
+    expect(row.expires_at.toISOString()).toBe('2099-12-22T04:59:59.999Z');
+    expect(dataOf(row).groupLinkViewableThrough).toBe('2100-01-01T04:59:59.999Z');
+  });
+
+  test('successful sibling publication extends both delivered links with its own offer expiry', async () => {
+    const { older, sibling } = prepareGroup();
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(result.sent).toBe(true);
+    expect(sibling.status).toBe('sent');
+    expect(sibling.expires_at.toISOString()).toBe('2100-01-01T04:59:59.999Z');
+    expect(dataOf(older).groupLinkViewableThrough).toBe('2100-01-01T04:59:59.999Z');
+    expect(dataOf(row).groupLinkViewableThrough).toBe('2100-01-01T04:59:59.999Z');
+    expect(row.expires_at.getTime()).toBeLessThan(sibling.expires_at.getTime());
+  });
+
+  test('a prior longer promise stays on its own token without spreading to a new sender', async () => {
+    const { older, sibling } = prepareGroup();
+    older.estimate_data = { groupLinkViewableThrough: '2101-01-01T12:00:00.000Z' };
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(result.sent).toBe(true);
+    expect(sibling.status).toBe('sent');
+    expect(dataOf(older).groupLinkViewableThrough).toBe('2101-01-01T12:00:00.000Z');
+    expect(dataOf(row).groupLinkViewableThrough).toBe('2100-01-01T04:59:59.999Z');
+  });
+
+  test('a navigation-write failure rolls back sibling publication on each retry', async () => {
+    const { older, sibling } = prepareGroup();
+    db.transaction.mockImplementation(async (callback) => {
+      const before = [row, ...groupRows].map((candidate) => structuredClone(candidate));
+      try { return await callback(db); } catch (error) {
+        [row, ...groupRows].forEach((candidate, index) => {
+          for (const key of Object.keys(candidate)) if (!Object.hasOwn(before[index], key)) delete candidate[key];
+          Object.assign(candidate, before[index]);
+        });
+        throw error;
+      }
+    });
+    db.mockImplementation((table) => {
+      const builder = groupDatabase(table);
+      const originalWhere = builder.where.getMockImplementation();
+      const originalUpdate = builder.update.getMockImplementation();
+      let anchor = false;
+      builder.where.mockImplementation((fields, value) => {
+        if (fields?.id === row.id) anchor = true;
+        return originalWhere(fields, value);
+      });
+      builder.update.mockImplementation((patch) => {
+        if (anchor && row.status === 'sent' && patch.estimate_data?.bindings?.[0]?.includes('groupLinkViewableThrough')) {
+          throw new Error('Synthetic navigation write failure');
+        }
+        return originalUpdate(patch);
+      });
+      return builder;
+    });
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(result.sent).toBe(true);
+    expect(sibling.status).toBe('draft');
+    expect(sibling.sent_at).toBeUndefined();
+    expect(dataOf(sibling).sendSnapshot).toBeUndefined();
+    expect(dataOf(row).groupLinkViewableThrough).toBe('2099-01-08T12:00:00.000Z');
+    expect(dataOf(older).groupLinkViewableThrough).toBe('2099-01-08T12:00:00.000Z');
+    expect(require('../services/logger').error).toHaveBeenCalledWith(expect.stringContaining('publication attempt 3 failed'));
   });
 });
 

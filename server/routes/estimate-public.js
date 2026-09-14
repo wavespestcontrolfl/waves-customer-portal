@@ -20,6 +20,8 @@ const { formatAddress } = require('../utils/address-normalizer');
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
+const { groupLinkStillViewable } = require('../services/proposal-bid');
+const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
 
 // Gate pass for the accepted-estimate /book links (GATE_BOOKING_CUSTOMERS_ONLY):
 // the links carry only the correlation estimate_id, so under the customers-only
@@ -8367,7 +8369,7 @@ async function reconcileFrozenMembershipSnapshot(estimate, { strictMembership = 
 
 async function handleEstimateView(req, res, next) {
   try {
-    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    let estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate) {
       return res.status(404).set('Content-Type', 'text/html').send(renderEstimateNotFoundPage());
     }
@@ -8403,6 +8405,33 @@ async function handleEstimateView(req, res, next) {
       || await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
       if (req.path.startsWith('/estimate/')) return next();
       return res.status(404).set('Content-Type', 'text/html').send(renderEstimateNotFoundPage());
+    }
+
+    // A call reprocess may have held a published sibling during the original
+    // send/save. Once that durable verdict clears, refresh the promised group
+    // window under the group's lock before deciding this expired entry link.
+    if (needsExpiredGroupNavigationRefresh(estimate)) {
+      const fresh = await refreshExpiredGroupNavigation(db, estimate);
+      if (!fresh) {
+        if (req.path.startsWith('/estimate/')) return next();
+        return res.status(404).set('Content-Type', 'text/html').send(renderEstimateNotFoundPage());
+      }
+      estimate = fresh;
+    }
+
+    // Only React renders property-group navigation. A legacy link whose
+    // offer expired must reach that view to expose its still-valid siblings.
+    if (estimate.estimate_group_id
+      && ['sent', 'viewed', 'expired'].includes(estimate.status)
+      && (estimate.status === 'expired' || new Date(estimate.expires_at) < new Date())
+      && groupLinkStillViewable(estimate)) {
+      if (req.path.startsWith('/estimate/')) return next();
+      const originalUrl = req.originalUrl || '';
+      const qs = originalUrl.includes('?') ? originalUrl.slice(originalUrl.indexOf('?')) : '';
+      res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.set('Pragma', 'no-cache');
+      res.set('Expires', '0');
+      return res.redirect(302, `/estimate/${encodeURIComponent(estimate.token)}${qs}`);
     }
 
     await reconcileFrozenMembershipSnapshot(estimate);
@@ -18376,6 +18405,13 @@ function isEstimateCustomerViewable(estimate = {}, now = new Date()) {
   return true;
 }
 
+function needsExpiredGroupNavigationRefresh(estimate, at = new Date()) {
+  return Boolean(estimate?.estimate_group_id
+    && ['sent', 'viewed', 'expired'].includes(estimate.status)
+    && (estimate.status === 'expired' || (estimate.expires_at && new Date(estimate.expires_at) < at))
+    && !groupLinkStillViewable(estimate, at));
+}
+
 // Whether this estimate may receive a customer "extension request" from the
 // React expired/not-found screen. Deliberately the complement of the narrow
 // expired slice of isEstimateCustomerViewable: a real, PUBLISHED estimate the
@@ -25303,7 +25339,12 @@ async function composeEstimateDataPayload(estimate, {
 
     const terminalState = (() => {
       if (['accepted', 'declined', 'expired'].includes(estimate.status)) return estimate.status;
-      if (estimate.expires_at && new Date(estimate.expires_at) < new Date()) return 'expired';
+      // The CTA/activity state follows THIS property's own offer deadline,
+      // which is exactly what expires_at now holds (#4309 round 7). Group-link
+      // viewability never softens it: a reachable group of expired cards still
+      // renders every card expired.
+      const shownExpiry = estimate.expires_at;
+      if (shownExpiry && new Date(shownExpiry) < new Date()) return 'expired';
       return null;
     })();
     const ctaTerminalState = terminalState || (quoteRequirement.quoteRequired ? 'quote_required' : null);
@@ -25424,24 +25465,54 @@ async function composeEstimateDataPayload(estimate, {
     // hero always lists email/phone/address when Waves has them on file.
     const contact = await resolveEstimateContactFields(estimate);
 
-    // Multi-property group: the customer's ONE link renders every property in
-    // the group, each independently acceptable via its own token. Siblings are
-    // filtered through the same customer-viewability gate as the requested
-    // token, so an unpublished draft/archived sibling never leaks. Key is only
-    // present for grouped estimates — ungrouped responses stay byte-identical.
+    // Multi-property group: the customer's ONE link renders every published
+    // property in the group. Live siblings keep their own accept links.
+    // During the delivered anchor's navigation window, published
+    // expired siblings remain as summaries; their dead tokens cannot open a
+    // quote or accept an offer. Key is only present for grouped estimates.
     let propertyGroup = null;
     if (estimate.estimate_group_id) {
       try {
+        const groupViewNow = new Date();
+        const ownOfferExpiry = estimate.expires_at ? new Date(estimate.expires_at).getTime() : NaN;
+        const anchorNavigationOpen = (Number.isFinite(ownOfferExpiry)
+          && ownOfferExpiry > groupViewNow.getTime()
+          && isEstimateCustomerViewable(estimate, groupViewNow))
+          || groupLinkStillViewable(estimate, groupViewNow);
         const siblingRows = await db('estimates')
           .where({ estimate_group_id: estimate.estimate_group_id })
           .whereNull('archived_at')
           .orderBy('created_at', 'asc');
-        const viewable = siblingRows.filter((s) => s.id === estimate.id || isEstimateCustomerViewable(s));
+        const viewable = [];
+        for (const sibling of siblingRows) {
+          if (sibling.id === estimate.id) {
+            // The entry row may have been refreshed under the group lock
+            // earlier in this request; use that authoritative copy.
+            viewable.push(estimate);
+            continue;
+          }
+          const ordinaryViewable = isEstimateCustomerViewable(sibling, groupViewNow);
+          const expiredPublished = anchorNavigationOpen
+            && ['sent', 'viewed', 'expired'].includes(sibling.status)
+            && (sibling.sent_at || sibling.viewed_at)
+            && (sibling.status === 'expired' || (sibling.expires_at && new Date(sibling.expires_at) < groupViewNow))
+            && sibling.disposition !== 'expired_unsent'
+            && !sibling.price_locked_at
+            && !sibling.archived_at
+            && !estimateOffCustomerSurface(sibling);
+          if ((ordinaryViewable || expiredPublished)
+            && !(await callSideBlockForEstimateData(db, parseEstimateDataSafe(sibling)))) {
+            viewable.push(sibling);
+          }
+        }
         if (viewable.length > 1) {
           propertyGroup = viewable.map((s) => ({
-            token: s.token,
+            // Only a reachable estimate gets a navigation target. Expired
+            // siblings without their own window are display-only summaries.
+            ...((isEstimateCustomerViewable(s, groupViewNow) || groupLinkStillViewable(s, groupViewNow)) ? { token: s.token } : {}),
             address: s.address || null,
-            status: s.status,
+            status: ['accepted', 'declined'].includes(s.status) ? s.status
+              : (s.status === 'expired' || (s.expires_at && new Date(s.expires_at) < groupViewNow) ? 'expired' : s.status),
             monthlyTotal: s.monthly_total != null ? Number(s.monthly_total) : null,
             annualTotal: s.annual_total != null ? Number(s.annual_total) : null,
             onetimeTotal: s.onetime_total != null ? Number(s.onetime_total) : null,
@@ -26007,7 +26078,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     res.set('Pragma', 'no-cache');
     res.set('Referrer-Policy', 'no-referrer');
 
-    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    let estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     await reconcileFrozenMembershipSnapshot(estimate);
 
@@ -26068,7 +26139,19 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     if (callSideBlock) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
-    if (!isEstimateCustomerViewable(estimate) && !adminDraftPreview && !docPinViewBypass) {
+    if (needsExpiredGroupNavigationRefresh(estimate)) {
+      const fresh = await refreshExpiredGroupNavigation(db, estimate);
+      if (!fresh) return res.status(404).json({ error: 'Estimate not found' });
+      estimate = fresh;
+    }
+    // Navigation only: the delivered group link can outlive its own offer.
+    // Withholding still applies; acceptance and CTA state use expires_at.
+    const groupLinkViewBypass = Boolean(estimate.estimate_group_id)
+      && ['sent', 'viewed', 'expired'].includes(estimate.status)
+      && !estimate.archived_at
+      && !estimateOffCustomerSurface(estimate)
+      && groupLinkStillViewable(estimate);
+    if (!isEstimateCustomerViewable(estimate) && !adminDraftPreview && !docPinViewBypass && !groupLinkViewBypass) {
       // Carries exactly one extra bit beyond the bare 404: this token maps to
       // a real, published estimate that died of expiry (never a draft), so the
       // SPA's not-found screen may offer the "Request an extension" button.
