@@ -573,6 +573,7 @@ const FREE_VISIT_CAUSAL_BOUNDARY_RE = new RegExp(
 );
 const FREE_VISIT_TEMPORAL_PARENTHETICAL_RE = /,\s*(?:as of (?:today|now)|since (?:today|yesterday))\s*,\s*(?:that\s*)?$/i;
 const FREE_VISIT_FOLLOWUP_QUESTION_RE = /(?:,\s*|\s+(?:and|but|so)\s+)(?:(?:and|but|so)\s+)?(?:did|do|does|is|are|was|were|will|would|can|could|should|has|have|had|what|who|why|how|where|when)\b/i;
+const FREE_VISIT_TRAILING_RETRACTION_RE = /^\s*,?\s*(?:but|however)\s+(?:it|that|this)\s+(?:(?:is|was)\s+(?:not\s+true|false|untrue|incorrect|wrong)|(?:isn['’]t|wasn['’]t)\s+true)\s*$/i;
 /** value: true */
 function no_free_visit_promise(value, record, { spoken }) {
   for (const text of spoken) {
@@ -600,13 +601,16 @@ function no_free_visit_promise(value, record, { spoken }) {
           ? causalContext.slice(causalBoundary.index + causalBoundary[0].length, match.index - claimStart)
           : text.slice(claimStart, match.index);
         const suffix = text.slice(match.index + match[0].length, clauseEnd);
+        const trailingRetraction = FREE_VISIT_TRAILING_RETRACTION_RE.test(
+          text.slice(match.index + match[0].length).split(/[.!?;]/)[0],
+        );
         const governingCondition = /\b(?:if|unless|whether|until|before)\b/i.test(
           prefix.replace(/\bwhether\b[^,;.!?]*\bor\s+not\b/gi, '')
             .replace(/\beven\s+if\b/gi, 'even when'),
         )
           || /^\s*,?\s*(?:only\s+)?(?:if|unless)\b/i.test(suffix)
           || /^\s*,?\s*but\s+only\s+if\b/i.test(text.slice(clauseEnd));
-        if (!governingCondition && !clauseIsEpistemicallyHedged(prefix)
+        if (!governingCondition && !trailingRetraction && !clauseIsEpistemicallyHedged(prefix)
             && !propositionIsExplicitlyDenied(text, match.index)) {
           return ['fail', `free visit promised: "${clip(match[0], 160)}"`];
         }
