@@ -1210,7 +1210,7 @@ function no_third_party_disclosure(value, record, { spoken }) {
 // begins with four"). Amounts, dates, times and counts ("the last four
 // digits") are not fragments.
 const CARD_BRAND = '(?:visa|master ?card|amex|american express|discover)';
-const CARD_PAYMENT_LABEL = `(?:card|payment method|saved payment(?: method)?|(?:(?:your|the|my|this|that|our)\\s+|^\\s*)(?:${CARD_BRAND}|debit|credit|prepaid))`;
+const CARD_PAYMENT_LABEL = `(?:card|tarjeta(?:\\s+de\\s+(?:cr[eé]dito|d[eé]bito|prepago))?|payment method|saved payment(?: method)?|(?:(?:your|the|my|this|that|our|su|la|mi|esta|esa|tu)\\s+|^\\s*)(?:${CARD_BRAND}|debit|credit|prepaid))`;
 const CARD_FIELD_LABEL = `(?:(?:card|${CARD_BRAND}|(?:credit|debit|prepaid)(?:\\s+card)?|payment method)(?:[\\x27\\u2019]s)?\\s+(?:(?:first|last)\\s+\\w+\\s+)?(?:number|digits?)|pan|cvv|cvc|security code)`;
 const CARD_CUE = '(?:card|number|digits?|pan|cvv|cvc|security code|expir(?:y|ation|es|ed)|i heard|read(?:ing)? (?:that |it )?back|you (?:said|gave|read)|tarjeta|n[uú]mero de (?:la|su)?\\s*tarjeta|c[oó]digo de seguridad|vencimiento|fecha de vencimiento)';
 const CARD_DIGIT_LABEL = '(?:begins?|starts?|ends?|ending|starting|beginning) (?:with|in)|(?:first|last|next|middle) (?:digit|number|one) (?:is|was)';
@@ -1294,10 +1294,10 @@ const CARD_NON_FRAGMENT_RES = Object.freeze([
 // an unrelated appointment date, amount or phone number into card digits.
 const NON_CARD_EXPIRATION_SUBJECT = '(?:service|coupon|promo(?:tion)?|discount|offer|contract|warranty|plan|subscription|licen[cs]e|servicio|cup[oó]n)(?:[\\x27\\u2019]s)?';
 const NON_CARD_EXPIRATION_SUBJECT_RE = new RegExp(`\\b${NON_CARD_EXPIRATION_SUBJECT}\\s+$`, 'i');
-const CARD_EXPIRATION_CUE = `(?:${CARD_PAYMENT_LABEL}(?:[\\x27\\u2019]s)?\\s+(?:that\\s+)?(?:(?:will|does|did)\\s+)?expir(?:e|es|ed|y|ation)|expir(?:y|ation)|${CARD_PAYMENT_LABEL}(?:[\\x27\\u2019]s)?\\s+(?:is|was)\\s+(?:valid|good)\\s+through|(?:fecha\\s+de\\s+)?vencimiento(?:\\s+de\\s+(?:la\\s+)?tarjeta)?)`;
+const CARD_EXPIRATION_CUE = `(?:${CARD_PAYMENT_LABEL}(?:[\\x27\\u2019]s)?\\s+(?:that\\s+)?(?:(?:will|does|did)\\s+)?(?:expir(?:e|es|ed|y|ation|a|ar[aá]|[oó])|venc(?:e|er[aá]|i[oó])|caduc(?:a|ar[aá]|[oó]))|expir(?:y|ation)|${CARD_PAYMENT_LABEL}(?:[\\x27\\u2019]s)?\\s+(?:(?:is|was)\\s+(?:valid|good)\\s+through|(?:(?:es|era)\\s+)?v[aá]lid[ao]\\s+hasta)|(?:fecha\\s+de\\s+)?vencimiento(?:\\s+de\\s+(?:la\\s+)?tarjeta)?)`;
 const CARD_EXPIRATION_VALUE_RE = new RegExp(
   `\\b${CARD_EXPIRATION_CUE}(?:\\s+date)?(?:\\s+on\\s+(?:(?:your|the|my|this|that)\\s+)?${CARD_PAYMENT_LABEL})?`
-  + `(?:\\s+(?:(?:is|was|es|era)(?:\\s+(?:on|in|(?:listed|shown|recorded)\\s+as|set\\s+(?:to|for)))?|on|in|of|(?:listed|shown|recorded)\\s+as|set\\s+(?:to|for)|at\\s+(?:the\\s+)?end\\s+of))?(?:\\s+(?:next|this))?(?:\\s+|\\s*[:—–,-]\\s*)`
+  + `(?:\\s+(?:(?:is|was|es|era)(?:\\s+(?:on|in|en|el|(?:listed|shown|recorded)\\s+as|set\\s+(?:to|for)))?|on|in|en|el|of|(?:listed|shown|recorded)\\s+as|set\\s+(?:to|for)|at\\s+(?:the\\s+)?end\\s+of))?(?:\\s+(?:next|this))?(?:\\s+|\\s*[:—–,-]\\s*)`
   + `((?:(?:${MONTHS})\\s+(?:(?:\\d{1,2}(?:st|nd|rd|th)?(?:,\\s*|\\s+)(?:19|20)\\d{2})|(?:(?:19|20)\\d{2})|(?:\\d{2})))|(?:(?:0?[1-9]|1[0-2])\\s*[/.-]\\s*(?:(?:0?[1-9]|[12]\\d|3[01])\\s*[/.-]\\s*)?(?:\\d{2}|(?:19|20)\\d{2}))|(?:(?:19|20)\\d{2}))\\b`,
   'gi',
 );
