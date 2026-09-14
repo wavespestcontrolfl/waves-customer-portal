@@ -1148,7 +1148,8 @@ const InvoiceService = {
     // (the best-effort tax/discount catches then abort with it — accepted
     // for linked money writes; plain unlinked creates keep the
     // untransacted path).
-    const stampedEstimateIdInNotes = (String(notes || "").match(/accepted estimate #([0-9a-fA-F-]{8,})/) || [])[1] || null;
+    const stampedEstimateIdInNotes = (String(notes || "")
+      .match(/accepted estimate #([0-9a-f-]{8,})/i) || [])[1]?.toLowerCase() || null;
     if (linkedScheduledServiceId || stampedEstimateIdInNotes) {
       if (database && database.isTransaction) {
         if (linkedScheduledServiceId) {
@@ -1170,6 +1171,54 @@ const InvoiceService = {
       await assertScheduledInvoiceNotPacketOwned(database, linkedScheduledServiceId, packetWrite?.packetId);
     } else if (packetWrite) {
       throw new Error('Visit invoice requires a billed member');
+    }
+    // A stamped writer may have waited behind packet adoption. Recheck its
+    // owner inside the mint transaction, before creating another charge.
+    if (!linkedScheduledServiceId && stampedEstimateIdInNotes) {
+      const packetConflict = () => Object.assign(
+        new Error('This estimate is billed by its saved visit closeout. Resume that closeout.'),
+        { status: 409, statusCode: 409, isOperational: true, code: 'VISIT_PACKET_OWNS_BILLING' });
+      const contention = (error) => {
+        if (error?.code !== '55P03') throw error;
+        throw Object.assign(new Error('Estimate billing is being updated. Retry in a moment.'),
+          { status: 409, statusCode: 409, isOperational: true, code: 'VISIT_PACKET_OWNS_BILLING' });
+      };
+      let packetOwners;
+      try {
+        packetOwners = await database('invoices as i')
+          .join('visit_completion_packet_items as p', 'p.invoice_id', 'i.id')
+          .join('scheduled_services as s', 's.id', 'p.scheduled_service_id')
+          .where({ 'i.customer_id': customerId })
+          .whereRaw('s.source_estimate_id::text = ?', [stampedEstimateIdInNotes])
+          .whereNotNull('i.visit_completion_packet_id').orderBy('i.id')
+          .forUpdate('i').noWait().select('i.line_items', 'i.notes');
+      } catch (error) { contention(error); }
+      const { invoiceContainsOnlySetupFeeCharges, invoiceContainsSetupFeeLine, sumPositiveSetupFeeCents } = require('./estimate-first-application-invoice');
+      // Compare the calculated invoice amounts, not caller-supplied amount.
+      const normalizedSetupLines = normalizeInvoiceLineItems(lineItems || []);
+      let separateSetupFee = invoiceContainsOnlySetupFeeCharges({ line_items: normalizedSetupLines })
+        && normalizedSetupLines.filter((line) => line.amount > 0)
+          .every((line) => /^WaveGuard Membership — one-time setup fee$/i.test(String(line.description || '').trim()))
+        && packetOwners.every((owner) => {
+          const lines = parseInvoiceLineItems(owner.line_items);
+          return lines.length > 0 && lines.every((line) => line && Number.isFinite(Number(line.amount)))
+            && !invoiceContainsSetupFeeLine(owner);
+        });
+      if (packetOwners.length && separateSetupFee) {
+        // The estimate advisory lock serializes concurrent replacement writers.
+        // Lock their fee coverage too, failing operationally on a busy row.
+        try {
+          await database('invoices').where({ customer_id: customerId })
+            .where('notes', 'ilike', `%accepted estimate #${stampedEstimateIdInNotes}%`)
+            .orderBy('id').forUpdate().noWait().select('id');
+        } catch (error) { contention(error); }
+        const obligation = await require('./setup-fee-obligation').findUnmintedSetupFeeObligation({
+          sourceEstimateId: stampedEstimateIdInNotes, customerId,
+        }, database);
+        separateSetupFee = obligation.owed && Number.isSafeInteger(obligation.setupFeeRemainingCents)
+          && sumPositiveSetupFeeCents({ line_items: normalizedSetupLines }) <= obligation.setupFeeRemainingCents;
+      }
+      if (packetOwners.length && !separateSetupFee) throw packetConflict();
     }
     const customer = await database("customers").where({ id: customerId }).first();
     if (!customer) throw new Error("Customer not found");

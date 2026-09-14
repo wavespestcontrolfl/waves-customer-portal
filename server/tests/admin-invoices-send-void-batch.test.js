@@ -55,6 +55,19 @@ const post = (baseUrl, path, body) => fetch(`${baseUrl}/admin/invoices${path}`, 
   body: JSON.stringify(body || {}),
 });
 
+test('packet ownership refusal is an operator-visible 409 with a code', async () => {
+  InvoiceService.create.mockRejectedValueOnce(Object.assign(new Error('Resume that closeout.'), {
+    status: 409, statusCode: 409, isOperational: true, code: 'VISIT_PACKET_OWNS_BILLING',
+  }));
+  await withServer(async (baseUrl) => {
+    const response = await post(baseUrl, '/', { customerId: 'cust-1', title: 'Setup fee',
+      lineItems: [{ description: 'WaveGuard Membership — one-time setup fee', amount: 99 }],
+      notes: 'Ordinary manual invoice' });
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({ error: 'Resume that closeout.', code: 'VISIT_PACKET_OWNS_BILLING' });
+  });
+});
+
 // Chainable stub for the batch-dedupe lookup:
 // db('invoices').where(...).whereNotIn(...).whereNull(...).where(...).first(...)
 function makeDupChain(result, { updateResult = 1 } = {}) {

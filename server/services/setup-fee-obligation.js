@@ -271,7 +271,7 @@ async function findUnmintedSetupFeeObligation({
   const expectedFeeCents = Math.round(Number(authoritativeFee) * 100);
   const stampedRows = await conn('invoices')
     .where({ customer_id: estimate.customer_id })
-    .where('notes', 'like', `%accepted estimate #${estimate.id}%`)
+    .where('notes', 'ilike', `%accepted estimate #${estimate.id}%`)
     .select('id', 'invoice_number', 'status', 'scheduled_service_id', 'service_record_id', 'line_items', 'notes');
   // Every clearing path requires the invoice to have ACTUALLY BILLED the
   // fee (Codex P0, pre-push round 5): the converter legitimately mints
