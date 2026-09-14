@@ -13,25 +13,29 @@ Whitespace and word-separating dashes count toward the budget; true hyphenated
 compounds remain one word, and a standalone dash is not a word. Name comparison accepts Unicode and punctuation
 equivalents inside the expected name, while preserving the difference between
 an em-dash greeting separator and a hyphen continuing a longer name. An
-unsupplied second name after the expected name fails the greeting delimiter.
+unsupplied second name after the expected name fails the greeting delimiter;
+a newline after the exact name is a valid separator.
 
 The plain-output screen rejects plus bullets, HTML comments and tag openers
 (including unterminated ones), relative/fragment/reference Markdown links,
-and common closing/name structures including lowercase dashed names.
+and terminal closing/name structures including lowercase dashed names.
+Standalone thanks followed by substantive reply prose remains valid.
 Mathematical comparisons such as `< 3` remain plain prose. Boilerplate
 screening folds whitespace and smart
 apostrophes. Bullet glyphs count at the start of a line even without a space.
 Bare hostname checks use the repository's public-suffix-list dependency, so
 common attachment filenames such as `invoice.pdf` do not count as domains;
 `.zip` is treated as a filename only in explicit attachment/file prose.
-An ambiguous bare `logs.zip` and explicit URLs remain links. The canonical
-report access-code helper receives compatibility
+An ambiguous bare `logs.zip` and explicit URLs remain links. An IPv4 address
+followed by a path also counts as a link; ordinary version numbers and bare
+addresses do not. The canonical report access-code helper receives compatibility
 letters/digits with mixed fractions preserved, so a gate width does not become
 a credential. Explicitly labeled payment, postal, and service code/value
 phrases are excluded from that screen unless nearby text identifies a physical
 access point in the same sentence; account, portal, and system access alone
 do not identify physical entry. Gate and lockbox codes elsewhere remain
-subject to it. Alphanumeric error identifiers such as `ERR42` and `3DS2`
+subject to it. A code used to enter or unlock a property also remains
+screened. Alphanumeric error identifiers such as `ERR42` and `3DS2`
 are recognized as non-access codes only when labeled that way.
 Output-specific prompt-control checks permit ordinary customer
 preparation corrections and operational colon labels.

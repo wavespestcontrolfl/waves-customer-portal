@@ -1,4 +1,5 @@
 const { containsReportAccessCode } = require('../service-report/technician-report-copy');
+const { isIP } = require('node:net');
 const psl = require('psl');
 
 const EXPLICIT_LINK_RE = /(?:https?:\/\/|www\.)[^\s<>()]+/i;
@@ -14,7 +15,7 @@ const OUTPUT_INSTRUCTION_RE = /\b(?:system|developer)\s+(?:prompt|instructions?)
 // Remove only the explicitly labeled code/value span; the shared detector
 // still sees an actual gate or lockbox code elsewhere in the reply.
 const NON_ACCESS_CODE_RE = /\b(?:payment|billing|invoice|transaction|postal|zip|service|error)\s+(?:error\s+)?code\b\s*(?:(?:is|was|reads?)\s+|[:=]\s*|\s+)(?=[a-z0-9]*\d)[a-z0-9]{2,12}\b|\b(?=[a-z0-9]*\d)[a-z0-9]{2,12}\b\s+(?:is|was)\s+(?:the\s+)?(?:payment|billing|invoice|transaction|postal|zip|service|error)\s+(?:error\s+)?code\b/gi;
-const ACCESS_CONTEXT_RE = /\b(?:gate|door|garage|keypad|lock\s?box|entry|alarm|access)\b/i;
+const ACCESS_CONTEXT_RE = /\b(?:gate|door|garage|keypad|lock\s?box|entry|alarm|access|(?:enter(?:ing)?|open(?:ing)?|unlock(?:ing)?)\s+(?:the\s+|your\s+)?(?:property|premises))\b/i;
 function normalizeCopy(text) {
   return text.normalize('NFKC').replace(/[\u2010-\u2015\u2212]/g, '-').replace(/[‘’]/g, "'");
 }
@@ -28,6 +29,7 @@ function containsUnsupportedLink(text) {
   return EXPLICIT_LINK_RE.test(text)
     || [...text.matchAll(BARE_HOST_RE)].some((match) => {
       const host = match[0].toLowerCase();
+      if (isIP(host) === 4 && text[match.index + match[0].length] === '/') return true;
       if (!psl.isValid(host)) return false;
       // .zip is both a public suffix and an archive extension. Exempt only
       // a simple filename explicitly presented as an attachment or file.
@@ -46,7 +48,10 @@ function forgedSignature(text) {
   const [signOffLine, nameLine] = tail.split('\n');
   const namedSignOff = /^(?:all (?:the|my) best|with (?:sincere )?(?:appreciation|gratitude)|yours (?:faithfully|sincerely)|kindest regards|many thanks|warmest wishes|best wishes|take care)[,.!?]?$/i.test(signOffLine)
     && /^\p{L}[\p{L}\p{M}'’.-]*(?: \p{L}[\p{L}\p{M}'’.-]*){0,3}$/u.test(nameLine || '');
-  return lines.slice(1).some((line) => closing.test(line))
+  const closingAndName = closing.test(lines.at(-2) || '')
+    && (/^\p{Lu}[\p{L}\p{M}'’.-]*(?: \p{Lu}[\p{L}\p{M}'’.-]*){0,3}$/u.test(lines.at(-1) || '')
+      || /^\p{L}[\p{L}\p{M}'’-]*(?: \p{L}[\p{L}\p{M}'’-]*){0,3}$/u.test(lines.at(-1) || ''));
+  return (lines.length > 1 && (closing.test(lines.at(-1)) || closingAndName))
     || /(?:^|\n)\s*(?:[-–—]\s*)?(?:adam|virginia|the waves pest control team|waves team)\s*$/i.test(tail)
     || dashedName.test(tail)
     || (lines.length > 2 && namedSignOff);
@@ -60,7 +65,7 @@ function greetingMatches(draft, customer) {
   // Preserve the draft's word-separating dashes at the name boundary. A
   // hyphen followed by letters continues a name (Casey-Ann), not a greeting.
   const greeting = draft.normalize('NFKC').replace(/[‘’]/g, "'");
-  return new RegExp(`^(?:hi|hello|hey)\\s+${escapedName}(?=$|[,!.:;\\u2012-\\u2015]|\\s+[-\\u2010-\\u2015]\\s+|[-\\u2010\\u2011](?=\\s|$))`, 'i').test(greeting);
+  return new RegExp(`^(?:hi|hello|hey)\\s+${escapedName}(?=$|\\r?\\n|[,!.:;\\u2012-\\u2015]|\\s+[-\\u2010-\\u2015]\\s+|[-\\u2010\\u2011](?=\\s|$))`, 'i').test(greeting);
 }
 
 // Presentation checks only: success does not establish factual accuracy,

@@ -63,6 +63,8 @@ describe('email reply structure verifier', () => {
   test('requires a delimiter after the entire supplied greeting name', () => {
     expect(verdict('Hi Casey Smith, your visit is pending.').violations).toContain('greeting_mismatch');
     expect(verdict('Hi Casey, your visit is pending.').ok).toBe(true);
+    expect(verdict('Hi Casey\nYour visit is pending.').ok).toBe(true);
+    expect(verdict('Hi Casey\r\nYour visit is pending.').ok).toBe(true);
     expect(verdict('Hi Casey Smith, your visit is pending.', { customer: { firstName: 'Casey Smith' } }).ok)
       .toBe(true);
     expect(verdict('Hi Casey—your visit is pending.').ok).toBe(true);
@@ -127,6 +129,8 @@ describe('email reply structure verifier', () => {
     'logs.zip',
     'https://example.com/logs.zip',
     'logs.zip/download',
+    '192.0.2.1/portal',
+    'https://192.0.2.1/portal',
     'tel:+15551234567',
     'tel://15551234567',
     'sms:5551234567',
@@ -147,6 +151,8 @@ describe('email reply structure verifier', () => {
     expect(verdict('Hi Casey, the attachment is logs.zip.').ok).toBe(true);
     expect(verdict('Hi Casey, please attach https://logs.zip.').violations).toContain('link_unsupported');
     expect(verdict('Hi Casey, download the attachment at logs.zip.').violations).toContain('link_unsupported');
+    expect(verdict('Hi Casey, the version is v1.2.3.4.').ok).toBe(true);
+    expect(verdict('Hi Casey, the server address is 192.0.2.1.').ok).toBe(true);
   });
 
   test('rejects access credentials but allows non-secret access prose', () => {
@@ -180,15 +186,24 @@ describe('email reply structure verifier', () => {
     expect(verdict('Hi Casey, the gate service code is 1234.').violations).toContain('access_code');
     expect(verdict('Hi Casey, the service code is 1234 to open the gate.').violations)
       .toContain('access_code');
+    expect(verdict('Hi Casey, the service code is 1234 to enter the property.').violations)
+      .toContain('access_code');
+    expect(verdict('Hi Casey, the service code is 1234 to unlock your property.').violations)
+      .toContain('access_code');
   });
 
   test('rejects signatures while allowing ordinary thanks in the sentence', () => {
     expect(verdict('Hi Casey, your visit is pending.\n\nRegards,\nWaves Team').violations)
       .toContain('signature_unsupported');
     expect(verdict('Hi Casey, thanks for the details.').ok).toBe(true);
+    expect(verdict('Hi Casey,\nThanks!\nYour visit is pending.').ok).toBe(true);
+    expect(verdict('Hi Casey, your visit is pending.\nThanks!').violations)
+      .toContain('signature_unsupported');
+    expect(verdict('Hi Casey, your visit is pending.\nThanks!\nAlex').violations)
+      .toContain('signature_unsupported');
     for (const signature of [
       'Warm regards,\nAlex', 'Cheers,\nAlex', 'Warmly,\nAlex', '— Alex', '– José Álvarez',
-      '— alex', '– josé álvarez',
+      '— alex', '– josé álvarez', 'Thanks!\nalex', 'Regards,\nalex',
       'All the best,\nAlex', 'Yours faithfully,\nAlex Morgan', 'With appreciation,\nJordan',
       'All the Best,\nAlex', 'With Appreciation,\nAlex', 'Yours sincerely,\nAlex',
       'All the best,\nalex',
