@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const { gateEnvValue } = require('../config/feature-gates');
 const router = express.Router();
 const db = require('../models/db');
-const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData, estimateOffCustomerSurface, REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
+const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData, REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
@@ -61,6 +61,7 @@ const {
 const { normalizeProposal, computeProposalTotals, isCommercialProposalData } = require('../services/estimate-proposal');
 const { programRevenueIssue } = require('../../shared/proposal-bid.cjs');
 const { proposalExpiry, groupLinkViewableThrough, hasFixedBidValidity, assertBidSendDate, assertBidScheduleDate, earliestScheduledDelivery, latestReachableSchedule, validateBidFields, normalizeProjectCosting, FIXED_BID_VALIDITY_ABSENT_SQL } = require('../services/proposal-bid');
+const { publishedGroupLinks, publishedOfferExpiry, extendPublishedGroupLinks } = require('../services/estimate-group-navigation');
 const { generateEstimateProposalPDF } = require('../services/pdf/estimate-pdf');
 const {
   acceptanceServiceLists,
@@ -399,61 +400,7 @@ function assertAutoSendPricingAuthority(row = {}) {
 // `forUpdate`: lock the sibling rows for the caller's transaction (the
 // schedule route), so a concurrent revision of a sibling serializes against
 // the scheduling write instead of slipping between this read and it.
-// The delivered entry token must stay reachable through offers actually
-// published beside it. Draft, scheduled, sending and failed fixed holds are
-// still checked by findGroupSiblingBlockingSend, but promise no navigation
-// until their publication succeeds. A marker names only the most recent
-// publisher; older delivered tokens in this group remain valid entry links.
 const GROUP_FIXED_HOLD_STATUSES = ['draft', 'scheduled', 'sending', 'send_failed', 'sent', 'viewed', 'expired'];
-async function publishedGroupLinks(database, estimate, { lock = false } = {}) {
-  if (!estimate?.estimate_group_id) return [];
-  let query = database('estimates')
-    .where({ estimate_group_id: estimate.estimate_group_id })
-    .whereNull('archived_at')
-    .whereIn('status', ['sent', 'viewed', 'expired']);
-  if (lock) query = query.forUpdate();
-  const rows = await query.select();
-  const published = [];
-  for (const candidate of Array.isArray(rows) ? rows : []) {
-    if (!(candidate.sent_at || candidate.viewed_at)
-      || candidate.disposition === 'expired_unsent'
-      || candidate.price_locked_at
-      || estimateOffCustomerSurface(candidate)) continue;
-    // The public /data view applies this same durable call-side verdict. An
-    // estimate-side marker can be absent when a call quarantine write fails;
-    // that row must neither lengthen a delivered link nor receive a grant.
-    if (await callSideBlockForEstimateData(database, parseEstimateData(candidate.estimate_data))) continue;
-    published.push(candidate);
-  }
-  return published;
-}
-
-function publishedOfferExpiry(row) {
-  const fixed = proposalExpiry(row);
-  if (fixed) return fixed;
-  const expiry = row.expires_at ? new Date(row.expires_at) : null;
-  return expiry && !Number.isNaN(expiry.getTime()) ? expiry : null;
-}
-
-// Called inside the SAME transaction as a successful sibling publication or
-// live-sibling expiry reconciliation. If either write fails, both roll back.
-async function extendPublishedGroupLinks(trx, estimate) {
-  const links = await publishedGroupLinks(trx, estimate, { lock: true });
-  const through = links.map(publishedOfferExpiry)
-    .filter(Boolean).reduce((latest, at) => (!latest || at > latest ? at : latest), null);
-  for (const link of links) {
-    const promised = groupLinkViewableThrough(link);
-    // Persist the floor even when this link currently owns the longest offer:
-    // a later edit can shorten that offer without shortening its delivered
-    // token's earlier navigation promise.
-    if (through && (!promised || through > promised)) {
-      await trx('estimates').where({ id: link.id, estimate_group_id: estimate.estimate_group_id }).update({
-        estimate_data: trx.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ groupLinkViewableThrough: through.toISOString() })]),
-        updated_at: trx.fn.now(),
-      });
-    }
-  }
-}
 
 async function publishClaimedGroupSibling(estimate, sibling, siblingExpiry, snapshotPatch) {
   return db.transaction(async (trx) => {
@@ -2616,9 +2563,11 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     const publishedSiblings = (await publishedGroupLinks(db, estimate))
       .filter((sibling) => String(sibling.id) !== String(estimate.id));
     const promised = groupLinkViewableThrough(estimate);
-    const widest = [...publishedSiblings.map(publishedOfferExpiry), promised].filter(Boolean)
+    const widest = [nextExpiresAt, ...publishedSiblings.map(publishedOfferExpiry), promised].filter(Boolean)
       .reduce((latest, at) => (!latest || at > latest ? at : latest), null);
-    if (widest && widest > nextExpiresAt) nextGroupLinkViewableThrough = widest;
+    // Record this delivered anchor's own hold too. A later edit may shorten
+    // it, while a best-effort sibling reconciliation may never have run.
+    if (widest) nextGroupLinkViewableThrough = widest;
   }
   const requestedChannels = sendMethod === 'both' ? ['sms', 'email'] : [sendMethod];
   const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;

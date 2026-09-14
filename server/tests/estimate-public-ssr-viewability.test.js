@@ -16,8 +16,12 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 const mockDb = jest.fn();
 mockDb.schema = { hasTable: jest.fn(async () => true) };
 jest.mock('../models/db', () => mockDb);
+jest.mock('../services/estimate-group-navigation', () => ({
+  refreshExpiredGroupNavigation: jest.fn().mockResolvedValue(null),
+}));
 
 const { handleEstimateView } = require('../routes/estimate-public');
+const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
 
 const FUTURE = new Date(Date.now() + 86400000).toISOString();
 const PAST = new Date(Date.now() - 86400000).toISOString();
@@ -50,8 +54,9 @@ function makeRes() {
     statusCode: 200,
     body: null,
     sent: false,
+    headers: {},
     status(code) { this.statusCode = code; return this; },
-    set() { return this; },
+    set(name, value) { this.headers[name] = value; return this; },
     redirect(code, url) { this.statusCode = code; this.redirectUrl = url; return this; },
     send(body) { this.body = body; this.sent = true; return this; },
   };
@@ -161,6 +166,32 @@ describe('handleEstimateView — SSR viewability gate', () => {
     expect(api.res.statusCode).toBe(302);
     expect(api.res.redirectUrl).toBe('/estimate/groupanchorvalidtoken');
     expect(api.res.sent).toBe(false);
+    expect(api.res.headers).toMatchObject({
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      Pragma: 'no-cache',
+      Expires: '0',
+    });
+  });
+  test('an expired legacy anchor redirects after a newly recovered group window', async () => {
+    refreshExpiredGroupNavigation.mockImplementationOnce(async (_database, stale) => ({
+      ...stale, estimate_data: { groupLinkViewableThrough: FUTURE },
+    }));
+    const row = { status: 'expired', token: 'groupanchorvalidtoken', expires_at: PAST,
+      sent_at: PAST, estimate_group_id: 'group-bid', estimate_data: {} };
+    const { res } = await runView(row, API_MOUNT);
+    expect(refreshExpiredGroupNavigation).toHaveBeenCalledWith(mockDb, expect.objectContaining({ token: row.token }));
+    expect(res.statusCode).toBe(302);
+    expect(res.redirectUrl).toBe('/estimate/groupanchorvalidtoken');
+    expect(res.headers['Cache-Control']).toBe('no-cache, no-store, must-revalidate');
+  });
+  test('a rejected recovery cannot redirect a stale group anchor', async () => {
+    refreshExpiredGroupNavigation.mockResolvedValueOnce(null);
+    const row = { status: 'expired', token: 'groupanchorvalidtoken', expires_at: PAST,
+      sent_at: PAST, estimate_group_id: 'group-bid', estimate_data: {} };
+    const { res } = await runView(row, API_MOUNT);
+    expect(res.statusCode).toBe(404);
+    expect(res.redirectUrl).toBeUndefined();
+    expect(res.body).not.toContain(PII.customer_name);
   });
   test('an archived group anchor cannot use its navigation window to escape the legacy withholding gate', async () => {
     const { res } = await runView({ status: 'expired', archived_at: PAST, expires_at: PAST,
