@@ -703,7 +703,10 @@ function no_payment_outcome(value, record, { spoken }) {
         const subjectStart = renewedSubject
           ? subjectEnd + renewedSubject.index + renewedSubject[0].lastIndexOf(renewedSubject.groups.subject)
           : subject.index;
-        const subjectClaim = claimContext(text, subjectStart, predicateStart + predicate.length);
+        const independentAdversative = /,\s*$/.test(bridge) && /^(?:but|yet)\b/i.test(match[0]);
+        const subjectClaim = independentAdversative
+          ? `${subject[0]} ${predicate}`
+          : claimContext(text, subjectStart, predicateStart + predicate.length);
         const [claimStart, predicateEnd] = clauseBounds(text, predicateStart);
         const matchEnd = predicateStart + predicate.length;
         const trailingClaim = text.slice(matchEnd, predicateEnd);
