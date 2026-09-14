@@ -224,7 +224,11 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
     // legacy clients); checked under the lock.
     if (beforeTransition) await beforeTransition(trx);
     const live = await trx('triage_items').where({ id }).first('updated_at', 'payload');
-    if (item.reason_code === 'property_role_confirm' || requireVersion || live?.payload?.reschedule_proposal) {
+    // Promise cards can gain another commitment while this action waits for
+    // the call lock. The operator must review that newer payload before a
+    // Resolve/Dismiss settles every commitment now attached to the card.
+    if (item.reason_code === 'property_role_confirm' || item.reason_code === 'reschedule_link_promise'
+      || requireVersion || live?.payload?.reschedule_proposal) {
       if (!live || !expectedUpdatedAt
         || new Date(expectedUpdatedAt).getTime() !== new Date(live.updated_at).getTime()) {
         return { outcome: 'stale_version' };
@@ -363,7 +367,7 @@ function sendTransitionResult(res, result, id, nextStatus) {
     case 'not_found': return res.status(404).json({ error: 'Triage item not found' });
     case 'already': return res.status(409).json({ error: `Item already ${result.current}` });
     case 'conflict': return res.status(409).json({ error: 'Item was just actioned by someone else' });
-    case 'stale_version': return res.status(409).json({ error: 'Card proposals changed since they were displayed — reload and review the latest' });
+    case 'stale_version': return res.status(409).json({ error: 'Card changed since it was displayed — reload and review the latest' });
     default: return res.json({ ok: true, id, status: nextStatus });
   }
 }

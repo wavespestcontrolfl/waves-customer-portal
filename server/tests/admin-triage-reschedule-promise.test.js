@@ -156,6 +156,8 @@ function post(baseUrl, path, body = {}) {
 
 const CALL_ID = 'call-1';
 const CARD_ID = 'card-1';
+const CARD_VERSION = '2030-01-07T12:00:00.000Z';
+const NEW_CARD_VERSION = '2030-01-07T12:01:00.000Z';
 const COMMITMENT_ID = 'commitment-1';
 const OUTBOX_ID = 'outbox-1';
 
@@ -163,6 +165,7 @@ function fixture(extra = {}) {
   return makeFakeDb({
     triage_items: [{
       id: CARD_ID, call_log_id: CALL_ID, reason_code: 'reschedule_link_promise', status: 'open',
+      updated_at: CARD_VERSION,
       category: 'customer_followup', severity: 'advisory',
       payload: { reschedule_link_promise: { commitment_id: COMMITMENT_ID, commitment_ids: [COMMITMENT_ID], reason: 'promise_needs_review' } },
     }],
@@ -185,7 +188,7 @@ describe('PUT /admin/triage/:id/resolve on a reschedule_link_promise card', () =
     const { conn, tables } = fixture();
     wireDb(db, { conn });
     await withServer(async (baseUrl) => {
-      const res = await put(baseUrl, `/${CARD_ID}/resolve`, { note: 'Called the customer directly.' });
+      const res = await put(baseUrl, `/${CARD_ID}/resolve`, { note: 'Called the customer directly.', expected_updated_at: CARD_VERSION });
       expect(res.status).toBe(200);
     });
     expect(tables.triage_items[0].status).toBe('resolved');
@@ -196,7 +199,7 @@ describe('PUT /admin/triage/:id/resolve on a reschedule_link_promise card', () =
 });
 
 describe('a promise parks between the pre-lock read and the lock (codex #4293 P1)', () => {
-  test('resolving the card settles the commitment that parked WHILE the route was acquiring the call lock, not only the ones it saw before', async () => {
+  test('the stale action is refused and a refreshed action settles both commitments', async () => {
     // Two commitments and their outbox rows are seeded as already parked
     // against the same call, but the CARD only names the first one — the
     // second's append is what a concurrent parkReview would have done in
@@ -231,12 +234,17 @@ describe('a promise parks between the pre-lock read and the lock (codex #4293 P1
       const idx = tables.triage_items.findIndex((c) => c.id === CARD_ID);
       const card = tables.triage_items[idx];
       const parked = card.payload.reschedule_link_promise.commitment_ids;
-      tables.triage_items[idx] = { ...card, payload: { ...card.payload,
+      tables.triage_items[idx] = { ...card, updated_at: NEW_CARD_VERSION, payload: { ...card.payload,
         reschedule_link_promise: { ...card.payload.reschedule_link_promise, commitment_ids: [...parked, COMMITMENT_ID_2] } } };
     });
     await withServer(async (baseUrl) => {
-      const res = await put(baseUrl, `/${CARD_ID}/resolve`, { note: 'Called the customer directly.' });
-      expect(res.status).toBe(200);
+      const stale = await put(baseUrl, `/${CARD_ID}/resolve`, { note: 'Called the customer directly.', expected_updated_at: CARD_VERSION });
+      expect(stale.status).toBe(409);
+      expect(tables.triage_items[0].status).toBe('open');
+      expect(tables.call_commitments.map((c) => c.status)).toEqual(['open', 'open']);
+      expect(tables.outbox_messages.map((o) => o.status)).toEqual(['review', 'review']);
+      const refreshed = await put(baseUrl, `/${CARD_ID}/resolve`, { note: 'Called the customer directly.', expected_updated_at: NEW_CARD_VERSION });
+      expect(refreshed.status).toBe(200);
     });
     expect(tables.triage_items[0].status).toBe('resolved');
     // Both commitments settle — not only the one the route's stale pre-lock
@@ -253,7 +261,7 @@ describe('PUT /admin/triage/:id/dismiss on a reschedule_link_promise card', () =
     const { conn, tables } = fixture();
     wireDb(db, { conn });
     await withServer(async (baseUrl) => {
-      const res = await put(baseUrl, `/${CARD_ID}/dismiss`, {});
+      const res = await put(baseUrl, `/${CARD_ID}/dismiss`, { expected_updated_at: CARD_VERSION });
       expect(res.status).toBe(200);
     });
     expect(tables.triage_items[0].status).toBe('dismissed');
@@ -274,7 +282,7 @@ describe('PUT /admin/triage/:id/dismiss on a reschedule_link_promise card', () =
     });
     wireDb(db, { conn });
     await withServer(async (baseUrl) => {
-      const res = await put(baseUrl, `/${CARD_ID}/dismiss`, {});
+      const res = await put(baseUrl, `/${CARD_ID}/dismiss`, { expected_updated_at: CARD_VERSION });
       expect(res.status).toBe(200);
     });
     expect(tables.triage_items[0].status).toBe('dismissed');
@@ -282,6 +290,20 @@ describe('PUT /admin/triage/:id/dismiss on a reschedule_link_promise card', () =
     expect(tables.call_commitments[0]).toMatchObject({ status: 'fulfilled', human_state: 'confirmed' });
     expect(tables.outbox_messages[0]).toMatchObject({ status: 'delivered' });
   });
+});
+
+test.each(['resolve', 'dismiss'])('%s requires the card version and leaves the promise parked on a stale action', async (action) => {
+  const { conn, tables } = fixture();
+  wireDb(db, { conn });
+  await withServer(async (baseUrl) => {
+    for (const expected_updated_at of [undefined, '2030-01-07T11:59:00.000Z']) {
+      const res = await put(baseUrl, `/${CARD_ID}/${action}`, { expected_updated_at });
+      expect(res.status).toBe(409);
+    }
+  });
+  expect(tables.triage_items[0].status).toBe('open');
+  expect(tables.call_commitments[0].status).toBe('open');
+  expect(tables.outbox_messages[0].status).toBe('review');
 });
 
 describe('POST /admin/triage/:id/verdict', () => {

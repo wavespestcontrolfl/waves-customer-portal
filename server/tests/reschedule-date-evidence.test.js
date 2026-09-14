@@ -63,3 +63,10 @@ test('relative dates need the call reference and use Eastern calendar rollover',
   expect(verify([nextDay], transcript, null)).toBe(false);
   expect(verify([{ ...nextDay, day: 15 }], transcript, reference)).toBe(false);
 });
+
+test.each([
+  "I'll text the reschedule link after the office confirms the appointment.",
+  'I will text the reschedule link when the technician confirms the visit.',
+])('unresolved prerequisites cannot become permission to send: %s', promise => {
+  expect(verify([], `Agent: ${promise}\nCaller: Thank you.`, reference)).toBe(false);
+});
