@@ -120,7 +120,8 @@ function anchorRow(overrides = {}) {
 // sibling SELECT, the same SELECT again under the locks (lockedSiblings =
 // what that read returns; defaults to the same rows), same-series clash
 // probe, then one UPDATE chain per sibling in order.
-function wireSeriesMocks(siblings, { anchor = anchorRow(), priorMove = null, updateResults = null, freshAnchor = null, lockedSiblings = null, lockedParent = null } = {}) {
+function wireSeriesMocks(siblings, { anchor = anchorRow(), priorMove = null, updateResults = null, freshAnchor = null,
+  lockedSiblings = null, lockedParent = null, reviewedMaintenanceLocked = true } = {}) {
   const anchorLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
   const parentLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
   const siblingsQuery = chain({ select: jest.fn().mockResolvedValue(siblings) });
@@ -144,7 +145,10 @@ function wireSeriesMocks(siblings, { anchor = anchorRow(), priorMove = null, upd
     if (table === 'series_moves') return seriesMovesInsert;
     throw new Error(`Unexpected trx table ${table}`);
   });
-  trx.raw = rawFactory('trx.raw');
+  const ordinaryRaw = rawFactory('trx.raw');
+  trx.raw = jest.fn((sql, bindings) => String(sql).includes('pg_try_advisory_xact_lock')
+    ? Promise.resolve({ rows: [{ locked: reviewedMaintenanceLocked }] })
+    : ordinaryRaw(sql, bindings));
   trx.fn = { now: jest.fn(() => 'NOW()') };
   db.transaction = jest.fn(async (callback) => callback(trx));
 
@@ -901,6 +905,44 @@ describe('rescheduleSeries — one recorded operation', () => {
     expect(lockedRead).toBeLessThan(updates[0].update.mock.invocationCallOrder[0]);
   });
 
+  test('reviewed Apply preflights maintenance before its callback and visit-stop locks', async () => {
+    const rows = [sib('svc-1', BASE)];
+    const { trx } = wireSeriesMocks(rows);
+    const disclosed = [{ id: 'svc-1', from_date: BASE, status: 'confirmed', customer_confirmed: null, from_start: '09:00:00', from_end: '11:00:00',
+      duration: null, property_id: null, date_exception: false, cadence_date: null,
+      to_date: TARGET, to_start: '09:00', to_end: '11:00' }];
+    const beforeMove = jest.fn(async (moveTrx) => moveTrx.raw('SELECT 1', ['reviewed-before-move']));
+    await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
+      ...ADMIN_OPTS, beforeMove, expectOccurrenceIds: ['svc-1'], expectOccurrences: disclosed,
+    });
+    const order = (predicate) => {
+      const index = trx.raw.mock.calls.findIndex(predicate);
+      expect(index).toBeGreaterThan(-1);
+      return trx.raw.mock.invocationCallOrder[index];
+    };
+    const occupancy = Math.max(...trx.raw.mock.calls.map((call, index) =>
+      String(call[1]?.[1] || '').startsWith('occupancy:') ? trx.raw.mock.invocationCallOrder[index] : -1));
+    const preflight = order(([sql]) => String(sql).includes('pg_try_advisory_xact_lock'));
+    const callback = order(([, bindings]) => bindings?.[0] === 'reviewed-before-move');
+    const stop = order(([, bindings]) => bindings?.[0] === 'visit.stop');
+    const maintenance = order(([sql, bindings]) => !String(sql).includes('pg_try') && bindings?.[0] === 'recurring-series-maintenance');
+    expect(occupancy).toBeLessThan(preflight);
+    expect(preflight).toBeLessThan(callback);
+    expect(callback).toBeLessThan(stop);
+    expect(stop).toBeLessThan(maintenance);
+    expect(beforeMove).toHaveBeenCalledTimes(1);
+  });
+
+  test('a single preview that became recurring still preflights maintenance from its empty expected-id pin', async () => {
+    const { updates } = wireSeriesMocks([sib('svc-1', BASE)], { reviewedMaintenanceLocked: false });
+    const beforeMove = jest.fn();
+    await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
+      ...ADMIN_OPTS, beforeMove, expectOccurrenceIds: [],
+    })).rejects.toMatchObject({ statusCode: 409, code: 'VISIT_CHANGED_RETRY', message: expect.stringContaining('reload') });
+    expect(beforeMove).not.toHaveBeenCalled();
+    expect(updates[0].update).not.toHaveBeenCalled();
+  });
+
   test('a series that changed between the unlocked read and the locked re-read (an auto-extend child landed) aborts 409 SERIES_CHANGED — nothing written, failure recorded', async () => {
     const before = [sib('svc-1', BASE), sib('svc-2', SIB1)];
     const { updates, seriesMovesInsert, seriesMovesDb } = wireSeriesMocks(before, {
@@ -1012,7 +1054,7 @@ describe('previewSeriesMove', () => {
       if (table === 'property_preferences') return chain({ first: jest.fn().mockResolvedValue(null) });
       throw new Error(`Unexpected db table ${table}`);
     });
-    findConflictingVisits.mockResolvedValueOnce([{ id: 'other' }]);
+    findConflictingVisits.mockResolvedValueOnce([{ id: 'other', service_type: 'Conflicting pest visit', status: 'confirmed', window_start: '10:00:00', window_end: '11:00:00' }]);
     const preview = await SmartRebooker.previewSeriesMove('svc-1', TARGET);
     expect(preview).toMatchObject({
       collective: true,
@@ -1030,6 +1072,9 @@ describe('previewSeriesMove', () => {
       expect.objectContaining({ id: 'svc-3', from_date: dayOffset(26), to_date: dayOffset(28) }),
       expect.objectContaining({ id: 'svc-4', from_date: SIB3, to_date: dayOffset(33), to_start: null, to_end: null }),
     ]);
+    expect(preview.conflicts).toEqual([{ occurrenceId: 'svc-3', date: dayOffset(28), appointments: [{
+      id: 'other', service_name: 'Conflicting pest visit', status: 'confirmed', window_start: '10:00:00', window_end: '11:00:00',
+    }] }]);
     // Only the timed sibling (svc-3) was probed: the anchor's window is the
     // caller's choice and the windowless svc-4 occupies nothing.
     expect(findConflictingVisits).toHaveBeenCalledTimes(1);
@@ -1097,6 +1142,34 @@ describe('previewSeriesMove', () => {
         expectOccurrenceIds: preview.occurrenceIds, expectOccurrences: preview.occurrences,
       });
       expect(updates[1].update.mock.calls[0][0]).toMatchObject({ window_start: null, window_end: null });
+    } finally {
+      preclose.mockRestore();
+    }
+  });
+
+  test('reviewed staff moves preserve disclosed sibling windows across far placeholder clashes', async () => {
+    const anchor = anchorRow({ recurring_pattern: 'custom', recurring_interval_days: 90 });
+    const rows = [{ ...anchor }, { id: 'svc-2', status: 'pending', scheduled_date: dayOffset(100),
+      window_start: '09:00:00', window_end: '11:00:00', technician_id: null,
+      is_recurring: true, recurring_parent_id: 'svc-1' }];
+    const placeholder = { id: 'other-plan-placeholder', is_recurring: true, recurring_parent_id: 'plan-2',
+      status: 'pending', customer_confirmed: false, reservation_expires_at: null };
+    const queries = [chain({ first: jest.fn().mockResolvedValue(anchor) }),
+      chain({ first: jest.fn().mockResolvedValue(anchor) }), chain({ select: jest.fn().mockResolvedValue(rows) })];
+    db.mockImplementation((table) => table === 'scheduled_services' ? queries.shift() : chain({ first: jest.fn().mockResolvedValue(null) }));
+    findConflictingVisits.mockResolvedValueOnce([placeholder]);
+    const preview = await SmartRebooker.previewSeriesMove('svc-1', TARGET, { start: '09:00', end: '11:00' }, ADMIN_OPTS);
+    expect(preview.occurrences[1]).toMatchObject({ to_start: '09:00:00', to_end: '11:00:00' });
+
+    const { updates } = wireSeriesMocks(rows, { anchor });
+    const AppointmentReminders = require('../services/appointment-reminders');
+    const preclose = jest.spyOn(AppointmentReminders, 'precloseWindowlessReminderInTx').mockResolvedValue(undefined);
+    findConflictingVisits.mockResolvedValueOnce([placeholder]).mockResolvedValueOnce([]).mockResolvedValueOnce([placeholder]);
+    try {
+      await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
+        ...ADMIN_OPTS, expectOccurrenceIds: preview.occurrenceIds, expectOccurrences: preview.occurrences,
+      });
+      expect(updates[1].update.mock.calls[0][0]).toMatchObject({ window_start: '09:00:00', window_end: '11:00:00' });
     } finally {
       preclose.mockRestore();
     }
