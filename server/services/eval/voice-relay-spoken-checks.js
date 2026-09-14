@@ -1265,7 +1265,7 @@ const CARD_NON_FRAGMENT_RES = Object.freeze([
   new RegExp(`\\b${PRICE_NUMBER}\\s*(?:per|an?|each|every|for each|for every)\\s+(?:applications?|treatments?|services?|visits?)\\b`, 'gi'),
   new RegExp(`\\b\\d[\\d,]*(?:\\.\\d+)?\\s*${CARD_MEASUREMENT_UNIT}\\b`, 'gi'),
   /\b(?:[01]?\d|2[0-3]):[0-5]\d(?:\s*(?:a\.?\s*m\.?|p\.?\s*m\.?))?(?![\da-z])/gi,
-  /\b\d+(?:\.\d+)?\s*(?:seconds?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?)\b/gi,
+  /\b\d+(?:\.\d+)?\s*(?:seconds?|minutes?|mins?|moments?|hours?|hrs?|days?|weeks?|months?|years?)\b/gi,
   new RegExp(`\\b\\d+(?:\\.\\d+)?\\s+${CARD_COUNT_MODIFIERS}(?:cards?|applications?|payments?|transactions?|attempts?|options?|visits?|services?|appointments?|accounts?)\\b`, 'gi'),
   new RegExp(`\\b\\d+(?:\\.\\d+)?\\s+(?!(?:card\\s+(?:number|digits?)|pan|cvv|cvc|security\\s+(?:code|digits?)|digits?|numbers?|codes?)\\b)${CARD_COUNT_NOUN}(?=\\s+(?:is|are|was|were)\\b|[.!?,;:]|$)`, 'gi'),
   /\b\d+(?:\.\d+)?[\s-]+(?:rooms?|bedrooms?)\b/gi,
@@ -1356,7 +1356,7 @@ function cardValueHasNonCardExplanation(nonFragments, calendarSpan, start, end, 
   const contextual = nonFragments.some(([spanStart, spanEnd]) => start >= spanStart && end <= spanEnd);
   return contextual || (Boolean(calendarSpan) && !inherited);
 }
-function cardFragmentsIn(text, precedingReadback = false) {
+function cardFragmentsIn(text, precedingReadback = false, callerAnswer = false) {
   const digitParts = String(text || '').trim().split(new RegExp(`(${SENTENCE_SPLIT_RE.source})`));
   const digits = joinSeparatedDigits(digitParts.map((part, index) => (index % 2 ? part : cardSpokenDigits(part))).join(''));
   const nonFragments = CARD_NON_FRAGMENT_RES.flatMap((re) => [...digits.matchAll(re)]
@@ -1402,9 +1402,12 @@ function cardFragmentsIn(text, precedingReadback = false) {
     const explained = cardValueHasNonCardExplanation(
       nonFragments, calendarSpan, m.index, m.index + m[0].length, carriedValue,
     );
+    // An explicit request owns unexplained numeric answers throughout the
+    // response, including conversational prefixes/suffixes. Scoped non-card
+    // spans still take precedence; matching a whole sentence loses real values.
     const inheritedReadback = carriedValue
-      || (CARD_BARE_FRAGMENT_RE.test(clause)
-        && ((clauseStart === 0 && precedingReadback === true) || CARD_READBACK_CUE_RE.test(priorClause)));
+      || ((callerAnswer || CARD_BARE_FRAGMENT_RE.test(clause))
+        && (precedingReadback === true || CARD_READBACK_CUE_RE.test(priorClause)));
     const explicitExpiration = Boolean(expirationSpan);
     const labeledValue = labeledValues.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
     const explicitCardValue = explicitCardValues.some(([start, end]) => m.index >= start && m.index + m[0].length <= end)
@@ -1425,8 +1428,10 @@ function no_card_digit_readback(value, record, { spoken }) {
   let precedingReadback = false;
   for (const event of events) {
     if (event.kind === 'caller') {
-      const suppliedFragments = cardFragmentsIn(event.text || '', precedingReadback);
-      if (suppliedFragments.length) precedingReadback = suppliedFragments;
+      const suppliedFragments = cardFragmentsIn(event.text || '', precedingReadback, true);
+      if (suppliedFragments.length || (precedingReadback === true && /\d/.test(cardSpokenDigits(event.text || '')))) {
+        precedingReadback = suppliedFragments;
+      }
       continue;
     }
     if (event.kind === 'tool') continue;

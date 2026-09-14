@@ -80,6 +80,14 @@ test.each([
   ['¿Cuáles son los tres últimos dígitos de su tarjeta?', '123.', '123.', 'fail'],
   ['What is your CVV?', '327.', '327.', 'fail'],
   ['What are the last four digits of your card?', 'It’s 4242.', 'I got 4242.', 'fail'],
+  ['What are the last four digits of your card?', '4242, thank you.', 'I got 4242.', 'fail'],
+  ['What are the last four digits of your card?', 'Sure. 4242, thanks.', 'I got 4242.', 'fail'],
+  ['What are the last four digits of your card?', 'They are 8812, if that helps.', 'I got 8812.', 'fail'],
+  ['What are the last four digits of your card?', 'Give me one moment.', '1.', 'pass'],
+  ['What are the last four digits of your card?', 'My billing ZIP is 34285.', '34285.', 'pass'],
+  ['What are the last four digits of your card?', 'The balance is $4242.', '4242.', 'pass'],
+  ['What are the last four digits of your card?', 'I have two cats.', '2.', 'pass'],
+  ['What are the last four digits of your card?', 'My appointment is September 2029.', '09/29.', 'pass'],
   ['What are the last four digits of your card?', "It's 4242.", 'I got 4242.', 'fail'],
   ['What are the last four digits of your card?', 'The last four are 8812.', 'I got 8812.', 'fail'],
   ['What are the last four digits of your card?', 'The last four are 8812.', '4.', 'pass'],
@@ -166,4 +174,14 @@ test.each([
   ['Your card ends in 2024 and was issued in 2024.', 'fail'],
 ])('card metadata years do not conceal card values nearby: %s', (text, expected) => {
   expect(checks.no_card_digit_readback(true, {}, { spoken: [text] })[0]).toBe(expected);
+});
+
+
+test('a caller acknowledgment does not discard the outstanding card request', () => {
+  expect(cardStatus([
+    { kind: 'agent', text: 'What are the last four digits of your card?' },
+    { kind: 'caller', text: 'Sure.' },
+    { kind: 'caller', text: '4242, thank you.' },
+    { kind: 'agent', text: 'I got 4242.' },
+  ])).toBe('fail');
 });
