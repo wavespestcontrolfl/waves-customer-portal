@@ -27,7 +27,7 @@ const lazy = {
 //   satelliteUrl / licenseNumber — page chrome.
 //   notes     — already reported as customer_notes at the top level.
 // Other priced sections pass through so the reader tracks the page composer.
-const DROPPED_PAYLOAD_KEYS = new Set(['intelligence', 'showYourWork']);
+const DROPPED_PAYLOAD_KEYS = new Set(['intelligence', 'showYourWork', 'propertyGroup']);
 const DROPPED_ESTIMATE_KEYS = new Set([
   'askToken', 'token', 'intelligence', 'satelliteUrl', 'licenseNumber', 'notes',
 ]);
@@ -101,7 +101,7 @@ function suppressResidentialCombinedTotals(pricing, cta = {}) {
 function stripPayload(payload) {
   const out = {};
   for (const [key, value] of Object.entries(payload || {})) {
-    if (DROPPED_PAYLOAD_KEYS.has(key) || key === 'propertyGroup') continue;
+    if (DROPPED_PAYLOAD_KEYS.has(key)) continue;
     if (key === 'estimate' && value && typeof value === 'object') {
       const estimateBlock = {};
       for (const [k, v] of Object.entries(value)) {
@@ -122,6 +122,8 @@ function stripPayload(payload) {
     // The page renders the stamped service cards; its aggregate fallback
     // frequencies retain exact, unstamped prices in the same payload.
     if (out.pricing.combinedRecurring?.ranged) {
+      // A whole-plan percentage discount also reveals the exact range base.
+      if (out.pricing.manualDiscount) out.pricing.manualDiscount = { label: out.pricing.manualDiscount.label || 'Discount' };
       for (const key of ['frequencies', 'serviceCadenceCombos']) {
         if (Array.isArray(out.pricing[key])) out.pricing[key] = out.pricing[key].map(sanitizeRangedNode);
       }

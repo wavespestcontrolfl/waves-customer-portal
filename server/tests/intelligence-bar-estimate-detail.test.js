@@ -253,13 +253,15 @@ test('real commercial range contracts withhold aggregate and base amounts while 
   }, {}, estimateData);
   expect(pricing.services[0].frequencies[0].lowConfidenceRangePct).toBeGreaterThan(0);
   expect(pricing.frequencies[0].monthly).toBe(400);
+  pricing.manualDiscount = { label: 'Courtesy discount', type: 'PERCENT', value: 10, amount: 480, recurringAmount: 480, monthlyAmount: 40 };
   pricing.serviceCadenceCombos = [{ selection: { commercial_lawn: 'monthly' }, monthly: 400, annual: 4800 }];
   pricing.services.push({ key: 'pest_control', frequencies: [{ key: 'quarterly', monthly: 47, annual: 564 }] });
-  mockCompose.mockResolvedValue({ ...PAGE_PAYLOAD, pricing });
+  mockCompose.mockResolvedValue({ ...PAGE_PAYLOAD, pricing, cta: { commercialAutoPriced: true } });
   const shaped = await shapeEstimate(estimateRow());
   expect(shaped.page.pricing.services[1].frequencies[0]).toMatchObject({ monthly: 47, annual: 564 });
   expect(shaped.page.pricing.frequencies[0].ranged).toBe('low_confidence_confirmed_on_site');
   expect(shaped.page.pricing.serviceCadenceCombos[0]).toMatchObject({ selection: { commercial_lawn: 'monthly' }, ranged: 'low_confidence_confirmed_on_site' });
+  expect(shaped.page.pricing.manualDiscount).toEqual({ label: 'Courtesy discount' });
   expect(JSON.stringify(shaped.page.pricing)).not.toMatch(/400|4800/);
 });
 
