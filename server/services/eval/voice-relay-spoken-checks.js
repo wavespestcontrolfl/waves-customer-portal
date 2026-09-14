@@ -1304,12 +1304,23 @@ const CALLBACK_QUESTION_DENIAL_RE = new RegExp(
   `^\\s*(?:(?:no|nope)|(?:(?:no|nope)[,\\s]+)?(?:we|i|they|the office|our office|the team|our team)\\s+(?:cannot|can[\\x27\\u2019]t|could not|couldn[\\x27\\u2019]t|will not|won[\\x27\\u2019]t)\\s+(?:do\\s+(?:that|so|it)|arrange\\s+(?:that|it)|make\\s+(?:that|it)\\s+happen|${CALLBACK_VERB}\\b)(?:(?!\\b(?:but|however)\\b)[^.!?;])*)[.!\\s]*$`,
   'i',
 );
+function callbackContactChannel(text) {
+  const action = new RegExp(`\\b${CALLBACK_VERB}\\b`, 'i').exec(text)?.[0] || '';
+  if (/^(?:call|phone|ring)$/i.test(action)) return 'call';
+  if (/^text$/i.test(action)) return 'text';
+  if (/^email$/i.test(action)) return 'email';
+  return action ? 'contact' : '';
+}
+
 function callbackDenialRetiresQuestion(answer, question, targets) {
   if (!CALLBACK_QUESTION_DENIAL_RE.test(answer)) return false;
-  if (!new RegExp(`\\b${CALLBACK_VERB}\\b`, 'i').test(answer)) return true;
+  const deniedChannel = callbackContactChannel(answer);
+  if (!deniedChannel) return true;
   const recipients = [...question.matchAll(new RegExp(`\\b(?:${targets})\\b`, 'gi'))];
   const requested = recipients[recipients.length - 1]?.[0];
-  return Boolean(requested && new RegExp(`\\b${CALLBACK_VERB}\\s+${escapeRegexLiteral(requested)}\\b`, 'i').test(answer));
+  return Boolean(requested
+    && new RegExp(`\\b${CALLBACK_VERB}\\s+${escapeRegexLiteral(requested)}\\b`, 'i').test(answer)
+    && (deniedChannel === 'contact' || deniedChannel === callbackContactChannel(question)));
 }
 const callbackTarget = (targets, action, lightAction) => `(?:${action}\\s+(?:${targets})(?:[\\x27\\u2019]s\\s+${CALLBACK_RECIPIENT_CHANNEL}|\\s+${CALLBACK_RECIPIENT_CHANNEL})?\\b${CALLBACK_PHRASE_END}|${lightAction}\\s+(?:(?:${targets})\\s+(?:an?\\s+)?${CALLBACK_CONTACT_NOUN}\\b${CALLBACK_PHRASE_END}|an?\\s+${CALLBACK_CONTACT_NOUN}\\s+(?:to|for)\\s+(?:${targets})\\b${CALLBACK_PHRASE_END}))`;
 const CALLBACK_RECIPIENT_ACTION = `(?:be\\s+(?:called|phoned|rung|contacted|texted|emailed|reached(?: out to)?|followed up with)\\s+by|(?:get|receive)\\s+an?\\s+${CALLBACK_CONTACT_NOUN}\\s+from|hear from)`;
