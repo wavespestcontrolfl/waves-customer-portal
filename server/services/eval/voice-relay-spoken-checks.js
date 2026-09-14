@@ -1710,11 +1710,15 @@ function safetyAudienceCovers(claimText, questionText) {
 function safetyAudienceExcluded(claimText, detailText) {
   const claimScopes = safetyAudienceScopes(claimText);
   return [...detailText.matchAll(SAFETY_AUDIENCE_EXCLUSION_RE)]
-    .some((exclusion) => !claimScopes.size
-      || [...claimScopes].some((scope) => safetyAudienceCovers(
-        exclusion[0].replace(/^(?:not\b.*?\bfor|except(?:\s+for)?|excluding)\s+/i, 'for '),
-        `for ${scope === 'child' ? 'children' : scope}`,
-      )));
+    .some((exclusion) => {
+      if (!claimScopes.size) return true;
+      const excludedText = exclusion[0].replace(/^(?:not\b.*?\bfor|except(?:\s+for)?|excluding)\s+/i, 'for ');
+      return [...claimScopes].some((scope) => {
+        const claimedText = `for ${scope === 'child' ? 'children' : scope}`;
+        return safetyAudienceCovers(excludedText, claimedText)
+          || safetyAudienceCovers(claimedText, excludedText);
+      });
+    });
 }
 
 const SAFETY_SPECIFIC_PRODUCT_SCOPES = Object.freeze([
