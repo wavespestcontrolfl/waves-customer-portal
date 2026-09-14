@@ -2137,30 +2137,31 @@ function petGuidanceCoversCaller(guidanceScope, callerAudienceText) {
 }
 
 const PET_CALLER_NOUN = '(?:dogs?|puppy|cats?|kittens?|pets?|animals?)';
-const PET_CALLER_OWNERSHIP_RE = new RegExp(`\\b(?:i|we)\\s+(?:have|own)\\s+((?:(?:a|an|my|our|one|two|three|four|five|\\d+)\\s+)?${PET_CALLER_NOUN}\\b[^.!?;]*)`, 'i');
+const PET_CALLER_OWNERSHIP_RE = new RegExp(`\\b(?:i|we)\\s+(?:also\\s+)?(?:have|own)\\s+((?:(?:a|an|my|our|one|two|three|four|five|\\d+)\\s+)?${PET_CALLER_NOUN}\\b[^.!?;]*)`, 'i');
 const PET_CALLER_NOUN_RE = new RegExp(`\\b${PET_CALLER_NOUN}\\b`, 'gi');
 const PET_CALLER_POSSESSIVE_RE = new RegExp(`\\b(?:my|our)\\s+(${PET_CALLER_NOUN})\\b`, 'gi');
 
 function petCallerAudienceText(text, previous) {
-  if (safetyAudienceScopes(text).size) return text;
+  if (safetyAudienceScopes(text).size) return `${previous} ${text}`;
   const ownedPet = PET_CALLER_OWNERSHIP_RE.exec(text);
   const pets = new Set([
     ...(ownedPet ? [...ownedPet[1].matchAll(PET_CALLER_NOUN_RE)].map((match) => match[0]) : []),
     ...[...text.matchAll(PET_CALLER_POSSESSIVE_RE)].map((match) => match[1]),
   ]);
-  return pets.size ? `for ${[...pets].join(' and ')}` : previous;
+  return pets.size ? `${previous} for ${[...pets].join(' and ')}` : previous;
 }
 
 function pet_precautions_confirmed(value, record, { spoken }) {
   const events = safetySpeechGroups(record.events || []);
   const speechEvents = events.some((event) => event.kind === 'agent')
     ? events : spoken.map((text) => ({ kind: 'agent', text }));
-  let callerAudienceText = '';
+  // A later caller turn can add another animal before the exchange ends.
+  // Grade each proposed direction against the completed audience instead of
+  // accepting the first dog-only promise before a cat is mentioned.
+  const callerAudienceText = speechEvents.filter((event) => event.kind === 'caller')
+    .reduce((audience, event) => petCallerAudienceText(event.text || '', audience), '');
   for (const [eventIndex, event] of speechEvents.entries()) {
-    if (event.kind === 'caller') {
-      callerAudienceText = petCallerAudienceText(event.text || '', callerAudienceText);
-      continue;
-    }
+    if (event.kind === 'caller') continue;
     if (event.kind !== 'agent') continue;
     const text = event.text;
     for (const match of text.matchAll(PET_GUIDANCE_RE)) {

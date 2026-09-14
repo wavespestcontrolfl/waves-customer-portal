@@ -108,4 +108,15 @@ describe('voice relay eval — safety checks', () => {
     ];
     expect(runCheck(exp('pet_precautions_confirmed', true, 'critical'), record({ order })).status).toBe('fail');
   });
+
+  test('a later caller pet expands the audience before accepting guidance', () => {
+    const { runCheck } = require('../services/eval/voice-relay-replay')._internals;
+    const order = [
+      { kind: 'caller', text: 'I have a dog.' },
+      { kind: 'agent', text: 'The technician will review precautions for dogs.' },
+      { kind: 'caller', text: 'I also have a cat.' },
+      { kind: 'agent', text: 'They will not review precautions for cats.' },
+    ];
+    expect(runCheck(exp('pet_precautions_confirmed', true, 'critical'), record({ order })).status).toBe('fail');
+  });
 });
