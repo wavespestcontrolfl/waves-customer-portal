@@ -373,7 +373,10 @@ function no_visit_time(value, record, { utterances }) {
         .pop();
       const callbackDate = callbackDateExemption(sentence, previousContext, anywhere || standaloneDate, subject);
       if (callbackDate && callbackDate !== true) return ['fail', `"${callbackDate[0]}" spoken for a visit: "${clip(raw, 160)}"`];
-      if (callbackDate) continue;
+      if (callbackDate) {
+        if (VISIT_TIME_CALLBACK_RE.test(sentence)) previousRaw = raw;
+        continue;
+      }
       previousRaw = raw;
       if (anywhere) return ['fail', `"${anywhere[0]}" spoken: "${clip(raw, 160)}"`];
       const relative = RELATIVE_DAY_RE.exec(sentence) || ORDINAL_DATE_RE.exec(sentence) || standaloneDate;
