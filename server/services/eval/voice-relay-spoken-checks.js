@@ -1292,6 +1292,7 @@ const CARD_NON_FRAGMENT_RES = Object.freeze([
 // A calendar date remains benign unless an explicit card-expiration phrase
 // describes it. Record only the value span so an expiration cue cannot turn
 // an unrelated appointment date, amount or phone number into card digits.
+const NON_CARD_EXPIRATION_SUBJECT_RE = /\b(?:service|coupon|promo(?:tion)?|discount|offer|contract|warranty|plan|subscription|licen[cs]e|servicio|cup[oó]n)(?:[\x27\u2019]s)?\s+$/i;
 const CARD_EXPIRATION_CUE = `(?:${CARD_PAYMENT_LABEL}(?:[\\x27\\u2019]s)?\\s+(?:that\\s+)?(?:(?:will|does|did)\\s+)?expir(?:e|es|ed|y|ation)|expir(?:y|ation)|${CARD_PAYMENT_LABEL}(?:[\\x27\\u2019]s)?\\s+(?:is|was)\\s+(?:valid|good)\\s+through|(?:fecha\\s+de\\s+)?vencimiento(?:\\s+de\\s+(?:la\\s+)?tarjeta)?)`;
 const CARD_EXPIRATION_VALUE_RE = new RegExp(
   `\\b${CARD_EXPIRATION_CUE}(?:\\s+date)?(?:\\s+on\\s+(?:(?:your|the|my|this|that)\\s+)?${CARD_PAYMENT_LABEL})?`
@@ -1365,8 +1366,14 @@ function cardFragmentsIn(text, precedingReadback = false, callerAnswer = false) 
     .map((match) => [match.index, match.index + match[0].length]));
   const expirationValues = [...digits.matchAll(CARD_EXPIRATION_VALUE_RE)].map((match) => {
     const start = match.index + match[0].lastIndexOf(match[1]);
-    return [start, start + match[1].length];
-  });
+    const span = [start, start + match[1].length];
+    if (/^(?:expir|(?:fecha de )?vencimiento)/i.test(match[0])
+      && NON_CARD_EXPIRATION_SUBJECT_RE.test(digits.slice(0, match.index))) {
+      nonFragments.push(span);
+      return null;
+    }
+    return span;
+  }).filter(Boolean);
   const labeledValues = [...digits.matchAll(CARD_LABELED_VALUE_RE)].map((match) => {
     const start = match.index + match[0].lastIndexOf(match[1]);
     return [start, start + match[1].length];
