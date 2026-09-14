@@ -18,6 +18,7 @@ jest.mock('../middleware/admin-auth', () => ({
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false), gateEnvValue: jest.fn(() => false),
+  termiteAnnualPlanSelectionEnabled: jest.fn(() => false),
 }));
 jest.mock('../services/email-fallback-gate', () => ({ smtpFallbackAllowed: jest.fn(() => false) }));
 jest.mock('../services/sendgrid-mail', () => ({

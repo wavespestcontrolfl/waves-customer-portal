@@ -20,6 +20,7 @@ const { formatAddress } = require('../utils/address-normalizer');
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
+const { annualPlanPublicReplayBlocked } = require('../services/estimate-offer-version');
 
 // Gate pass for the accepted-estimate /book links (GATE_BOOKING_CUSTOMERS_ONLY):
 // the links carry only the correlation estimate_id, so under the customers-only
@@ -8395,6 +8396,7 @@ async function handleEstimateView(req, res, next) {
       // 'sending' row would otherwise render the stale whole-building
       // quote (codex r4 P1 on #3804).
       || estimateOffCustomerSurface(estimate)
+      || annualPlanPublicReplayBlocked(estimate)
       // The DURABLE call-side verdict too (codex P1, PR #3304 GH r9):
       // when the estimate-side marker could not be written, the block
       // lives on the CALL — and this page would otherwise keep serving a
@@ -18279,6 +18281,7 @@ function isEstimateAcceptActive(estimate = {}, now = new Date()) {
   // otherwise erase the marker (pre-push codex P0 on #3804). Accept refuses
   // it again under its locked read.
   if (estimateOffCustomerSurface(estimate)) return false;
+  if (annualPlanPublicReplayBlocked(estimate)) return false;
   if (['accepted', 'declined', 'expired', 'send_failed'].includes(estimate.status)) return false;
   // An unpublished estimate (draft / scheduled-but-not-yet-sent) must never be
   // acceptable through the public link. The legacy server-HTML page short-
@@ -18325,6 +18328,7 @@ function isEstimateCustomerViewable(estimate = {}, now = new Date()) {
   // renders, and a held row staff flip to 'declined' must not render again
   // (codex r5 P0 on #3804).
   if (estimateOffCustomerSurface(estimate)) return false;
+  if (annualPlanPublicReplayBlocked(estimate)) return false;
   if (['accepted', 'declined'].includes(estimate.status)) return true;
   if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) return false;
   if (['expired', 'send_failed'].includes(estimate.status)) return false;

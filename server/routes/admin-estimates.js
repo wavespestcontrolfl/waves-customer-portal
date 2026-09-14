@@ -54,6 +54,7 @@ const {
   takePendingInvalidation,
 } = require('../services/admin-estimate-persistence');
 const { selectedTermiteAnnualPlanRows } = require('../services/estimate-termite-program-rows');
+const { estimateOfferVersion, annualPlanOfferFingerprint, annualPlanHasDeliveredOffer } = require('../services/estimate-offer-version');
 const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
 const {
   inferEstimateServiceInterest,
@@ -115,24 +116,6 @@ function parseEstimateData(estimateData) {
   return typeof estimateData === 'object' ? estimateData : null;
 }
 
-// A delivery witness must describe this annual offer, not merely an earlier
-// handoff of the same estimate row (which can be revised from quarterly).
-// Hash the complete customer-facing offer identity, including recipient,
-// notes, billing mode and the priced result. Operational delivery metadata
-// is excluded by estimateOfferVersion, so a real handoff remains verifiable.
-function annualPlanOfferFingerprint(estimate) {
-  const data = parseEstimateData(estimate?.estimate_data || estimate?.estimateData);
-  if (!data || !selectedTermiteAnnualPlanRows(data).length) return null;
-  if (!data.result && !data.engineResult) return null;
-  // These keys are written by publication, after the provider handoff.
-  // Group identity itself remains in the row fields of estimateOfferVersion.
-  const offerData = { ...data };
-  for (const key of ['groupPublishedByEstimateId', 'proposalDelivery', 'leadServiceHandoffAt', 'leadServiceHandoffParkId', 'viewedMonthlyTotal']) {
-    delete offerData[key];
-  }
-  return estimateOfferVersion({ ...estimate, estimate_data: offerData });
-}
-
 function publishedSiblingDeliveryPatch(sibling, anchorDeliveryState, deliveredAt) {
   const prior = parseEstimateData(sibling.estimate_data);
   const fingerprint = annualPlanOfferFingerprint(sibling);
@@ -148,23 +131,6 @@ function publishedSiblingDeliveryPatch(sibling, anchorDeliveryState, deliveredAt
       annualPlanOfferFingerprint: fingerprint || null,
     },
   };
-}
-
-// Operational delivery stamps may change while the claim is taken. Contact,
-// property, scope, terms and dollars must still be the offer that was reviewed.
-function estimateOfferVersion(row) {
-  const data = { ...(parseEstimateData(row.estimate_data) || {}) };
-  for (const key of ['sendSnapshot', 'deliveryState', 'manualSendAttempts']) delete data[key];
-  if (data.estimatorEngine) {
-    data.estimatorEngine = { ...data.estimatorEngine };
-    delete data.estimatorEngine.delivering_at;
-    delete data.estimatorEngine.delivering_token;
-    // A send claim on an admin-authored quote may create this object solely
-    // for the claim. Cleanup leaves {}, which is the same offer as absence.
-    if (!Object.keys(data.estimatorEngine).length) delete data.estimatorEngine;
-  }
-  const fields = ['customer_id', 'property_id', 'estimate_group_id', 'customer_name', 'customer_phone', 'customer_email', 'address', 'notes', 'monthly_total', 'annual_total', 'onetime_total', 'show_one_time_option', 'bill_by_invoice'];
-  return crypto.createHash('sha256').update(JSON.stringify([fields.map((key) => row[key]), data])).digest('hex');
 }
 
 // When an operator authors a commercial proposal, their line items ARE the
@@ -624,10 +590,7 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
   // contract after the gate is switched off.
   const annualPlanGateOn = termiteAnnualPlanSelectionEnabled();
   const estimateData = parseEstimateData(estimate.estimate_data || estimate.estimateData);
-  const annualFingerprint = annualPlanOfferFingerprint(estimate);
-  const annualPlanDelivered = !!estimateData?.deliveryState?.firstDeliveredAt
-    && !!annualFingerprint
-    && estimateData.deliveryState.annualPlanOfferFingerprint === annualFingerprint;
+  const annualPlanDelivered = annualPlanHasDeliveredOffer(estimate);
   if (!annualPlanGateOn && !annualPlanDelivered
     && selectedTermiteAnnualPlanRows(estimateData).length > 0) {
     const err = new Error('The termite annual protection plan is disabled until the annual and cancellation gates are enabled — reopen the estimate in the estimate tool and save it on the quarterly program before sending.');
