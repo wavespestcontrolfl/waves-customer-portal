@@ -670,8 +670,11 @@ function paymentOutcomeHasSpanishRefusal(claim, outcomeStart) {
     && new RegExp(PAYMENT_OUTCOME_ES_RE.source, 'i').test(governed);
 }
 function paymentClaimContext(text, start, end) {
-  const [boundary] = clauseBounds(text, start);
-  const prefix = text.slice(0, boundary).split(/[.!?;]/).pop();
+  // Mask decimal punctuation only for scope detection, preserving offsets
+  // and returning the original amount spelling to the outcome classifier.
+  const scopeText = text.replace(/(?<=\d)\.(?=\d)/g, ' ');
+  const [boundary] = clauseBounds(scopeText, start);
+  const prefix = scopeText.slice(0, boundary).split(/[.!?;]/).pop();
   // Unpunctuated "and" can coordinate two complements of the same
   // condition/refusal. Commas and adversatives introduce separate claims.
   const coordinated = /\band\s*$/i.test(prefix) && !/[,—–]|\b(?:but|yet|so)\b/i.test(prefix);
@@ -683,7 +686,7 @@ function paymentClaimContext(text, start, end) {
     || (hedge && refusedComplement);
   return coordinated && governed
     ? text.slice(boundary - prefix.length, end)
-    : claimContext(text, start, end);
+    : text.slice(end - claimContext(scopeText, start, end).length, end);
 }
 function* paymentOutcomeCandidates(text) {
   // Preserve the existing precedence: explicit outcomes from each language
@@ -726,8 +729,9 @@ function* paymentOutcomeCandidates(text) {
 /** value: true */
 function no_payment_outcome(value, record, { spoken }) {
   for (const text of spoken) {
+    const scopeText = text.replace(/(?<=\d)\.(?=\d)/g, ' ');
     for (const { match, claim } of paymentOutcomeCandidates(text)) {
-      const [claimStart, claimEnd] = clauseBounds(text, match.index);
+      const [claimStart, claimEnd] = clauseBounds(scopeText, match.index);
       const matchEnd = match.index + match[0].length;
       const trailingClaim = text.slice(matchEnd, claimEnd);
       const exempt = [
