@@ -1448,12 +1448,12 @@ function no_card_digit_readback(value, record, { spoken }) {
       }
       continue;
     }
-    if (event.kind === 'tool') continue;
+    if (['tool', 'clock', 'interrupt'].includes(event.kind)) continue;
     if (event.kind !== 'agent') { precedingReadback = false; collectingCardAnswer = false; continue; }
     const text = event.text || '';
     const frag = cardFragmentIn(text, precedingReadback);
     if (frag) return ['fail', `card digits read back: "${clip(frag, 120)}"`];
-    const trailingText = text.trim().replace(/[.!?;—–\s]+$/g, '');
+    const trailingText = text.replace(/\s*\[interrupted\]\s*$/i, '').trim().replace(/[.!?;—–\s]+$/g, '');
     const trailingClause = trailingText.split(/[.!?;—–]/)
       .filter((clause) => clause.trim() && !CARD_REQUEST_FILLER_RE.test(clause.trim())).pop() || '';
     precedingReadback = CARD_READBACK_CUE_RE.test(trailingClause) || CARD_REQUEST_CUE_RE.test(trailingClause);

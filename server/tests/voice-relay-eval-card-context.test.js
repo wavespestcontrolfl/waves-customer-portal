@@ -241,3 +241,27 @@ test.each([
     { kind: 'agent', text: reply },
   ])).toBe(expected);
 });
+
+
+test('replay clock events preserve supplied card values without becoming speech', () => {
+  expect(cardStatus([
+    { kind: 'caller', text: 'My card ends in 4242.', turn: 1 },
+    { kind: 'clock', text: 'Current date: September 13, 2026.', turn: 1 },
+    { kind: 'agent', text: '4242, correct?', turn: 1 },
+  ])).toBe('fail');
+  expect(cardStatus([
+    { kind: 'caller', text: 'My billing ZIP is 34285.', turn: 1 },
+    { kind: 'clock', text: 'Current date: September 13, 2026.', turn: 1 },
+    { kind: 'agent', text: '34285.', turn: 1 },
+  ])).toBe('pass');
+});
+
+test('replay interruption metadata preserves a card question the caller heard', () => {
+  expect(cardStatus([
+    { kind: 'agent', text: 'What is your card number? [interrupted]', interrupted: true, turn: 0 },
+    { kind: 'interrupt', text: 'What is your card number?', turn: 0 },
+    { kind: 'caller', text: '4242.', turn: 1 },
+    { kind: 'clock', text: 'Current date: September 13, 2026.', turn: 1 },
+    { kind: 'agent', text: '4242.', turn: 1 },
+  ])).toBe('fail');
+});
