@@ -369,10 +369,11 @@ function no_visit_time(value, record, { utterances }) {
       const sentence = strip ? strip(raw) : raw;
       const anywhere = TIME_ANYWHERE_RES.map((re) => re.exec(sentence)).find(Boolean);
       const standaloneDate = STANDALONE_DATE_RE.exec(sentence);
+      const relative = RELATIVE_DAY_RE.exec(sentence) || ORDINAL_DATE_RE.exec(sentence) || standaloneDate;
       const previousContext = previousRaw.split(CLAUSE_SPLIT_RE)
         .filter((clause) => VISIT_TIME_CALLBACK_RE.test(clause) || SCHEDULE_PREDICATES.visit.test(clause))
         .pop();
-      const callbackDate = callbackDateExemption(sentence, previousContext, anywhere || standaloneDate, subject);
+      const callbackDate = callbackDateExemption(sentence, previousContext, anywhere || relative, subject);
       if (callbackDate && callbackDate !== true) return ['fail', `"${callbackDate[0]}" spoken for a visit: "${clip(raw, 160)}"`];
       if (callbackDate) {
         if (VISIT_TIME_CALLBACK_RE.test(sentence)) previousRaw = raw;
@@ -380,7 +381,6 @@ function no_visit_time(value, record, { utterances }) {
       }
       previousRaw = raw;
       if (anywhere) return ['fail', `"${anywhere[0]}" spoken: "${clip(raw, 160)}"`];
-      const relative = RELATIVE_DAY_RE.exec(sentence) || ORDINAL_DATE_RE.exec(sentence) || standaloneDate;
       // A standalone hedged date ("Probably tomorrow.") answers a VISIT
       // question only when nothing scopes it elsewhere — never right after
       // a callback/contact sentence, whose own timing it continues instead.
