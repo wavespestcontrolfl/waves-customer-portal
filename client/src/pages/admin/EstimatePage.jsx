@@ -6189,7 +6189,7 @@ function EstimateToolView() {
                             >
                               {" "}
                               <span>
-                                {`Termite bait install (${termiteBaitSystemLabel(
+                                {R.tmBait?.plan === 'annual_protection' ? 'Station Setup' : `Termite bait install (${termiteBaitSystemLabel(
                                   R.tmBait?.selectedSystem ||
                                     R.tmBait?.system ||
                                     form.termiteBaitSystem,
