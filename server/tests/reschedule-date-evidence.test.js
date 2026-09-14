@@ -36,11 +36,12 @@ test('date roles come from complete clauses, including current versus requested'
   const transcript = 'Caller: Please move my current Tuesday appointment to Friday.\nAgent: I will text the reschedule link tomorrow morning.';
   const claims = [claim('Tuesday', { weekday: 2 }), claim('Friday', { weekday: 5 }, 'requested'),
     claim('tomorrow', { year: 2026, month: 9, day: 14 }, 'delivery')];
-  expect(verify(claims, transcript, reference)).toBe(true);
+  const timing = { due_at: '2026-09-14T09:00:00-04:00', due_type: 'floor' };
+  expect(verify(claims, transcript, reference, timing)).toBe(true);
   for (let i = 0; i < claims.length; i++) {
     const swapped = claims.map((c, j) => i === j ? { ...c, binding: c.binding === 'appointment' ? 'delivery' : 'appointment' } : c);
-    expect(verify(swapped, transcript, reference)).toBe(false);
-    expect(verify(claims.filter((_, j) => i !== j), transcript, reference)).toBe(false);
+    expect(verify(swapped, transcript, reference, timing)).toBe(false);
+    expect(verify(claims.filter((_, j) => i !== j), transcript, reference, timing)).toBe(false);
   }
 });
 
@@ -69,4 +70,25 @@ test.each([
   'I will text the reschedule link when the technician confirms the visit.',
 ])('unresolved prerequisites cannot become permission to send: %s', promise => {
   expect(verify([], `Agent: ${promise}\nCaller: Thank you.`, reference)).toBe(false);
+});
+
+test.each([
+  { due_at: '2026-09-14T09:00:00-04:00', due_type: 'deadline' },
+  { due_at: '2026-09-13T09:00:00-04:00', due_type: 'floor' },
+  { due_at: null, due_type: null },
+  { due_at: '2026-09-14T15:00:00-04:00', due_type: 'floor' },
+])('delivery components cannot conceal contradictory timing: %j', timing => {
+  const transcript = 'Agent: I will text the reschedule link tomorrow morning.';
+  expect(verify([claim('tomorrow', { year: 2026, month: 9, day: 14 }, 'delivery')], transcript, reference, timing)).toBe(false);
+});
+
+test('explicit clocks and deadline wording must agree with the proposed timestamp', () => {
+  const claims = [claim('tomorrow', { year: 2026, month: 9, day: 14 }, 'delivery')];
+  const due_at = '2026-09-14T09:00:00-04:00';
+  expect(verify(claims, 'Agent: I will text the reschedule link tomorrow at 9am.', reference, { due_at, due_type: 'floor' })).toBe(true);
+  expect(verify(claims, 'Agent: I will text the reschedule link tomorrow at 10am.', reference, { due_at, due_type: 'floor' })).toBe(false);
+  expect(verify(claims, 'Agent: I will text the reschedule link by tomorrow at 9am.', reference, { due_at, due_type: 'deadline' })).toBe(true);
+  const friday = [claim('Friday', { weekday: 5 }, 'delivery')];
+  expect(verify(friday, 'Agent: I will text the reschedule link by Friday.', reference,
+    { due_at: '2026-09-11T09:00:00-04:00', due_type: 'deadline' })).toBe(false);
 });

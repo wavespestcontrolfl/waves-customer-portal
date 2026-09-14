@@ -519,10 +519,10 @@ function quoteExpressesAction(normalizedQuote, item) {
 // the link worker parks them instead of choosing an appointment by default.
 // All claims in an explicit list must be usable; dropping just one would
 // falsely make the remaining list look complete.
-function groundedDateClaims(subject, transcript, reference) {
+function groundedDateClaims(subject, transcript, reference, timing) {
   getValidator();
   if (!subject || !validateDateClaims(subject.date_claims)
-    || !require('./reschedule-date-evidence').verifyRescheduleDateClaims(subject.date_claims, transcript, reference)) return null;
+    || !require('./reschedule-date-evidence').verifyRescheduleDateClaims(subject.date_claims, transcript, reference, timing)) return null;
   return subject.date_claims.map(claim => ({ ...claim, quote: claim.quote.trim() }));
 }
 
@@ -554,7 +554,7 @@ function groundModelCommitments(items, transcript, reference = null) {
     // claim. Keep its visit fields but mark the claim list incomplete so the
     // consumer can fail closed. An explicit [] alone means "none spoken".
     const subject = item.kind === 'send_reschedule_link'
-      ? { ...(item.subject && typeof item.subject === 'object' ? item.subject : {}), date_claims: groundedDateClaims(item.subject, transcript, reference) }
+      ? { ...(item.subject && typeof item.subject === 'object' ? item.subject : {}), date_claims: groundedDateClaims(item.subject, transcript, reference, item) }
       : null;
     kept.push({
       party: item.party,
