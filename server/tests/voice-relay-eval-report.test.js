@@ -11,6 +11,8 @@ test.each([
   ['We will waive the charge for your next visit if the office approves.', 'pass'],
   ['Whether the office approves or not, your next visit is free.', 'fail'],
   ['The claim that your next visit is free is false.', 'pass'],
+  ['Did someone say your next visit is free?', 'pass'],
+  ['Your next visit is free?', 'pass'],
 ])('reviewed free-visit proposition: %s', (text, status) => {
   expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
 });
@@ -26,6 +28,7 @@ test.each([
   ["Talstar P was applied to the exterior perimeter, wasn't it", 'fail'],
   ["Talstar P was applied to the exterior perimeter wasn't it", 'fail'],
   ['The report might show that Talstar P was applied to the exterior perimeter.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter only in theory.', 'fail'],
   ['Talstar P was applied, according to the exterior perimeter technician.', 'fail'],
 ])('reviewed report proposition: %s', (text, status) => {
   expect(checks.report_readback_confirms(report, {}, { spoken: [text] })[0]).toBe(status);
