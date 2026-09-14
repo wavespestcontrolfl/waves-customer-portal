@@ -317,6 +317,14 @@ function isCallbackTime(sentence, previousContext, timeMatch) {
   return Boolean(currentCallback && isAffirmativeCallbackContext(sentence)
     && timeMatch && timeMatch.index >= currentCallback.index + currentCallback[0].length);
 }
+function callbackDateExemption(sentence, previousContext, timeMatch, subject) {
+  if (subject || !isCallbackTime(sentence, previousContext, timeMatch)) return null;
+  const currentCallback = VISIT_TIME_CALLBACK_RE.exec(sentence);
+  const prefix = currentCallback ? sentence.slice(0, currentCallback.index) : '';
+  const priorVisitDate = SCHEDULE_PREDICATES.visit.test(prefix)
+    && (RELATIVE_DAY_RE.exec(prefix) || ORDINAL_DATE_RE.exec(prefix));
+  return priorVisitDate || true;
+}
 /**
  * Removes the returned window from a sentence — when it is THAT window: the
  * two hours, and any part of day spoken with either end agreeing with the
@@ -363,9 +371,10 @@ function no_visit_time(value, record, { utterances }) {
       const previousContext = previousRaw.split(CLAUSE_SPLIT_RE)
         .filter((clause) => VISIT_TIME_CALLBACK_RE.test(clause) || SCHEDULE_PREDICATES.visit.test(clause))
         .pop();
-      const callbackTime = !subject && isCallbackTime(sentence, previousContext, anywhere || standaloneDate);
-      if (!callbackTime) previousRaw = raw;
-      if (callbackTime) continue;
+      const callbackDate = callbackDateExemption(sentence, previousContext, anywhere || standaloneDate, subject);
+      if (callbackDate && callbackDate !== true) return ['fail', `"${callbackDate[0]}" spoken for a visit: "${clip(raw, 160)}"`];
+      if (callbackDate) continue;
+      previousRaw = raw;
       if (anywhere) return ['fail', `"${anywhere[0]}" spoken: "${clip(raw, 160)}"`];
       const relative = RELATIVE_DAY_RE.exec(sentence) || ORDINAL_DATE_RE.exec(sentence) || standaloneDate;
       // A standalone hedged date ("Probably tomorrow.") answers a VISIT
