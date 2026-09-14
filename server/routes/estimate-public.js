@@ -15120,9 +15120,12 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
 
     // Provenance the prune would erase (the pest curve stamp above all) —
     // captured BEFORE the inputs change, re-planted on restore.
-    const provenance = included === false
+    let provenance = included === false
       ? OptOut.captureServiceOptOutProvenance(parsedData, serviceKey)
       : ((optOutState?.events || []).filter((e) => e.serviceKey === serviceKey && e.included === false).pop()?.provenance || null);
+    if (mode === 'restore' && serviceKey === 'termite_bait') {
+      provenance = OptOut.termiteRestoreProvenance(parsedData, provenance);
+    }
     const restoreInputs = mode === 'restore'
       ? OptOut.readRemovedInputs(
         (optOutState?.events || []).filter((e) => e.serviceKey === serviceKey && e.included === false).pop(),

@@ -365,12 +365,14 @@ describe('replay-stamp provenance (pre-push audit #4424)', () => {
   });
 
   test.each([
-    ['OFF to ON', undefined, 'annual_protection', 'true'],
-    ['ON to OFF', 'true', 'quarterly', undefined],
-  ])('remove/reprice/restore preserves the issued quarterly program and knobs %s', async (_label, initialGate, requestedPlan, restoredGate) => {
+    ['OFF to ON (captured)', undefined, 'annual_protection', 'true', false],
+    ['ON to OFF (captured)', 'true', 'quarterly', undefined, false],
+    ['OFF to ON (legacy baseline)', undefined, 'annual_protection', 'true', true],
+    ['ON to OFF (legacy baseline)', 'true', 'quarterly', undefined, true],
+  ])('remove/reprice/restore preserves the issued quarterly program and knobs %s', async (_label, initialGate, requestedPlan, restoredGate, legacy) => {
     const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
     const { extractEngineInputs } = require('../routes/estimate-public');
-    const { captureServiceOptOutProvenance, applyServiceOptOutToEstimateData } = require('../services/estimate-service-opt-out');
+    const { captureServiceOptOutProvenance, termiteRestoreProvenance, applyServiceOptOutToEstimateData } = require('../services/estimate-service-opt-out');
     const priorGate = process.env.GATE_TERMITE_ANNUAL_PLAN;
     const stationCost = constants.TERMITE.systems.trelona.stationCost;
     try {
@@ -391,7 +393,8 @@ describe('replay-stamp provenance (pre-push audit #4424)', () => {
         inputs: JSON.parse(JSON.stringify(engineInputs)),
         result: mapV1ToLegacyShape(issuedRaw),
       };
-      const provenance = captureServiceOptOutProvenance(data, 'termite_bait');
+      const baseline = JSON.stringify(data);
+      let provenance = captureServiceOptOutProvenance(data, 'termite_bait');
       expect(provenance).toMatchObject({ termiteProgram: 'quarterly', termitePricingKnobs: { plan: 'quarterly' } });
       const removed = applyServiceOptOutToEstimateData(data, { serviceKey: 'termite_bait', included: false });
       expect(removed.ok).toBe(true);
@@ -399,6 +402,11 @@ describe('replay-stamp provenance (pre-push audit #4424)', () => {
       expect(withoutTermite.recomputed).toBe(true);
       expect(withoutTermite.serverResult.results.tmBait).toBeUndefined();
       data.result = withoutTermite.serverResult;
+      if (legacy) {
+        data.serviceOptOut = { baseline };
+        provenance = termiteRestoreProvenance(data, null);
+        expect(provenance).toMatchObject({ termiteProgram: 'quarterly', termitePricingKnobs: { plan: 'quarterly' } });
+      }
 
       // A live config/gate change between removal and restore must not move
       // the sold station install or turn the ignored request into annual.

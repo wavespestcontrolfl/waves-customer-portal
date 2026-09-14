@@ -2002,7 +2002,13 @@ call-side linkage verdict; `isEstimateAcceptActive` + an explicit
 PRESENCE (not `proposal.enabled`) — the same refusal applies to RESTORES
 and suppresses the add-back projection, because an itemization added after
 a removal is the authoritative billed quote — plus the last remaining
-recurring line, `tree_shrub` and every `commercial_*` key; a fail-CLOSED 409 when the
+recurring line, `tree_shrub`, every `commercial_*` key, and an annual-protection
+termite line (removal would erase its priced-program replay provenance).
+Quarterly termite remains removable; a pre-provenance restore recovers the
+sold program and station pricing knobs from the original opt-out baseline
+when present, while an annual sale or an unproven annual request remains
+blocked;
+a fail-CLOSED 409 when the
 recompute cannot run; and a 400 refusal when the removal would turn a
 bundled-free one-time item into a charge (owner ruling — that one goes to
 the office; the before-state resolves through `result` OR the mapped raw

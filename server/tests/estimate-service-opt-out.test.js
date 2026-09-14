@@ -11,6 +11,7 @@ const {
   serviceIsPresentInInputs,
   applyServiceOptOutToEstimateData,
   captureServiceOptOutProvenance,
+  termiteRestoreProvenance,
   recordServiceOptOutEvent,
   currentlyOptedOutKeys,
   SERVICE_OPT_OUT_KEYS,
@@ -212,6 +213,50 @@ describe('applyServiceOptOutToEstimateData — the restore', () => {
     })).toEqual({ ok: false, reason: 'service_not_removable' });
     expect(data.engineInputs.services.termite_bait).toBeUndefined();
     expect(data.engineRequest.selectedServices).toEqual(['PEST']);
+  });
+
+  it('recovers a legacy quarterly sale from the original baseline before restoring an ignored annual request', () => {
+    const baseline = {
+      engineInputs: { services: { termite_bait: { stations: 12 } } },
+      engineRequest: { profile: { homeSqFt: 2000 }, selectedServices: ['TERMITE_BAIT'], options: { termitePlan: 'annual_protection' } },
+      result: { results: { tmBait: { plan: 'quarterly', sta: 12, pricingKnobs: { system: 'trelona', stationCost: 24 } } } },
+    };
+    const data = {
+      engineInputs: { services: { pest: { apps: 4 } } },
+      engineRequest: { profile: { homeSqFt: 2000 }, selectedServices: ['PEST'], options: { termitePlan: 'annual_protection' } },
+      serviceOptOut: { baseline: JSON.stringify(baseline) },
+    };
+    const removedInputs = { engineInputs: { termite_bait: { stations: 12 } }, selected: ['TERMITE_BAIT'] };
+    const provenance = termiteRestoreProvenance(data, null);
+    expect(provenance).toMatchObject({ termiteProgram: 'quarterly', termitePricingKnobs: { stationCost: 24 } });
+    expect(applyServiceOptOutToEstimateData(data, {
+      serviceKey: 'termite_bait', included: true, removedInputs,
+    })).toEqual({ ok: true, removedInputs: null });
+    expect(data.engineRequest.options.termitePlan).toBe('quarterly');
+    expect(data.engineInputs.services.termite_bait.plan).toBe('quarterly');
+  });
+
+  it('keeps a legacy annual sale blocked when its baseline proves annual terms', () => {
+    const data = {
+      engineInputs: { services: { pest: { apps: 4 } } },
+      engineRequest: { profile: { homeSqFt: 2000 }, selectedServices: ['PEST'], options: { termitePlan: 'annual_protection' } },
+      serviceOptOut: { baseline: JSON.stringify({ result: { results: { tmBait: { plan: 'annual_protection' } } } }) },
+    };
+    expect(applyServiceOptOutToEstimateData(data, {
+      serviceKey: 'termite_bait', included: true,
+      removedInputs: { engineInputs: { termite_bait: { stations: 12 } }, selected: ['TERMITE_BAIT'] },
+    })).toEqual({ ok: false, reason: 'service_not_removable' });
+  });
+
+  it('captures sold program and station knobs from a raw-only published engine result', () => {
+    const data = {
+      engineInputs: { services: { termite_bait: { stations: 12 } } },
+      engineResult: { lineItems: [{ service: 'termite_bait', plan: 'quarterly', stations: 12,
+        pricingKnobs: { system: 'trelona', stationCost: 24, installMultiplier: 1.45 } }] },
+    };
+    expect(captureServiceOptOutProvenance(data, 'termite_bait')).toMatchObject({
+      termiteProgram: 'quarterly', termitePricingKnobs: { stationCost: 24, installMultiplier: 1.45 },
+    });
   });
 
   it('restores a priced quarterly termite line when an ignored annual request remains', () => {

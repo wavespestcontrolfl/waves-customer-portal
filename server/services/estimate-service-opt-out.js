@@ -53,7 +53,7 @@ const SERVICE_OPT_OUT_KEYS = {
 const NON_REMOVABLE_BY_POLICY = ['tree_shrub'];
 
 const {
-  authoritativeMappedTermiteEnvelope,
+  pricedTermiteProgram,
   selectedTermiteAnnualPlanRows,
 } = require('./estimate-termite-program-rows');
 
@@ -75,8 +75,8 @@ function inputCarriers(parsedData) {
 // its captured input would therefore price against today's gate/config and
 // can silently turn the sold annual plan into quarterly service or a new
 // annual price. Treat it like Tree & Shrub's result-derived knobs: never offer
-// the removal, and refuse restores from legacy events written before this
-// guard. Quarterly termite remains removable.
+// the removal. Older events can recover the sold program from their baseline.
+// Quarterly termite remains removable.
 function termiteAnnualPlanServiceChangeBlocked(parsedData = {}, {
   serviceKey,
   included,
@@ -99,9 +99,8 @@ function termiteAnnualPlanServiceChangeBlocked(parsedData = {}, {
 
   // A gate-off annual request prices as quarterly, and the ignored request
   // remains in engineRequest.options. New removals capture the authoritative
-  // mapped program before deleting the result row, so that server-derived
-  // identity wins on restore. Legacy events have no stamp and continue into
-  // the conservative input checks below.
+  // priced program before deleting the result row, so that server-derived
+  // identity wins on restore. Older events recover it from their baseline.
   const pricedProgram = String(provenance?.termiteProgram || '').toLowerCase();
   if (pricedProgram === 'quarterly') return false;
   if (pricedProgram === 'annual_protection') return true;
@@ -284,8 +283,7 @@ function captureServiceOptOutProvenance(parsedData = {}, sectionKey) {
     } catch (_) { /* provenance is best-effort; never block the opt-out */ }
   }
   if (sectionKey === 'termite_bait') {
-    const mapped = authoritativeMappedTermiteEnvelope(parsedData);
-    const program = String(mapped?.plan || '').toLowerCase();
+    const program = pricedTermiteProgram(parsedData);
     if (program === 'quarterly' || program === 'annual_protection') {
       provenance.termiteProgram = program;
       const knobs = require('./estimate-tree-shrub-knob-replay').termiteKnobSignalForReplay(parsedData);
@@ -297,6 +295,26 @@ function captureServiceOptOutProvenance(parsedData = {}, sectionKey) {
     if (signals && Object.keys(signals).length) provenance.floorSignals = signals;
   } catch (_) { /* same */ }
   return provenance;
+}
+
+// Pre-provenance opt-out events retained the original priced result in their
+// opaque baseline. Recover the sold program and station knobs from that result;
+// the request alone is not evidence because gate-off annual requests price
+// quarterly. A missing or malformed baseline leaves the conservative guard.
+function termiteRestoreProvenance(parsedData, provenance) {
+  if (['quarterly', 'annual_protection'].includes(String(provenance?.termiteProgram || '').toLowerCase())) {
+    return provenance;
+  }
+  const rawBaseline = parsedData?.serviceOptOut?.baseline;
+  let baseline = null;
+  if (typeof rawBaseline === 'string') {
+    try { baseline = JSON.parse(rawBaseline); } catch (_) { /* malformed legacy snapshot */ }
+  } else if (isPlainObject(rawBaseline)) {
+    baseline = rawBaseline;
+  }
+  if (!isPlainObject(baseline)) return provenance;
+  const recovered = captureServiceOptOutProvenance(baseline, 'termite_bait');
+  return recovered.termiteProgram ? { ...(provenance || {}), ...recovered } : provenance;
 }
 
 /**
@@ -323,6 +341,9 @@ function applyServiceOptOutToEstimateData(parsedData = {}, {
   const spec = SERVICE_OPT_OUT_KEYS[serviceKey];
   if (!spec) return { ok: false, reason: 'service_not_removable' };
   if (!isPlainObject(parsedData)) return { ok: false, reason: 'service_not_removable' };
+  if (serviceKey === 'termite_bait' && included === true) {
+    provenance = termiteRestoreProvenance(parsedData, provenance);
+  }
   if (termiteAnnualPlanServiceChangeBlocked(parsedData, {
     serviceKey, included, removedInputs, provenance,
   })) {
@@ -644,6 +665,7 @@ module.exports = {
   serviceOptOutRemovableKeys,
   serviceIsPresentInInputs,
   captureServiceOptOutProvenance,
+  termiteRestoreProvenance,
   applyServiceOptOutToEstimateData,
   recordServiceOptOutEvent,
   readRemovedInputs,
