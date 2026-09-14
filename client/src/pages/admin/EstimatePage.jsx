@@ -1391,6 +1391,9 @@ function EstimateToolView() {
   // failed server sync (effective absent) must block the quote rather than
   // price and stamp it on stale module state (codex #4313 r3 P1).
   const termiteConfigOkRef = useRef(false);
+  // A failed/404 annual-plan lookup cannot prove the gate is off. Only an
+  // affirmative row response can authorize a fallback annual request.
+  const termiteAnnualConfigKnownRef = useRef(false);
   const refreshPricingConfig = useCallback(() => {
     const run = (async () => {
       const fetchConfigRow = async (key) => {
@@ -1459,8 +1462,9 @@ function EstimateToolView() {
       // fallback ignores a plan request exactly as the engine does. Not part
       // of readiness (new key).
       // Applied on EVERY refresh, failure included: a timed-out or errored
-      // lookup resets the plan to unavailable (fail closed) so a page that
-      // once saw the gate on cannot keep pricing the plan after it goes off.
+      // lookup resets the plan to unavailable. Such a response is UNKNOWN,
+      // not proof that the server gate is off; annual requests block below.
+      termiteAnnualConfigKnownRef.current = annualPlanRow.ok && annualPlanRow.data != null;
       applyServerTermiteAnnualPlanPricingConfig(annualPlanRow.ok ? annualPlanRow.data : null, annualPlanRow.ok && annualPlanRow.featureAvailable === true);
       // Rodent bait ladder + setup fee: live-rates posture, not part of the
       // readiness return (new rows — codex #3591 r10 P1). A missing row
@@ -2407,6 +2411,11 @@ function EstimateToolView() {
     }
     if (form.svcTermiteBait && !termiteConfigOkRef.current) {
       alert("Live termite station pricing (catalog-linked station cost) could not be loaded — retry in a moment. (Termite quotes are blocked rather than priced on a possibly-stale station cost.)");
+      return;
+    }
+    if (form.svcTermiteBait && String(form.termitePlan || '').toLowerCase() === 'annual_protection'
+      && !termiteAnnualConfigKnownRef.current) {
+      alert("Annual termite plan availability could not be verified — retry in a moment. (The quote is blocked rather than priced as quarterly on an unknown gate state.)");
       return;
     }
     // EVERY quote for a MATCHED account waits for the canonical
