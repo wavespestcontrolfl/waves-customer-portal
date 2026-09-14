@@ -23,6 +23,8 @@ describe('email reply customer-copy policy', () => {
     'each scheduled routine quarterly residential exterior preventive ongoing planned visit costs $98',
     '$98 per scheduled routine quarterly residential exterior preventive ongoing planned visit',
     'every scheduled visit is billed at $98', 'the rate per routine visit is $98',
+    'Visits cost $98 each', 'Your scheduled visits are $98 each',
+    'Visits will be billed at 98 dollars each', 'Visits cost $98 apiece',
     'The rate is per visit', 'Billing is per visit', 'You will be billed per visit',
     'Payments are per visit', 'You pay per visit', 'The fee will be per routine visit',
     'The $98 fee is per visit', 'Each visit has a $98 charge', 'We charge $98 on each visit',
@@ -60,7 +62,8 @@ describe('email reply customer-copy policy', () => {
     'Your price is $98 per application, and we review access for each visit.',
     'The price is $98 for each application and includes a visit.',
     'As per our last visit, the technician will check the side yard.',
-    'We send one reminder per visit.',
+    'We send one reminder per visit.', 'Your scheduled visits are pending.',
+    'Visits include one reminder each.',
     'The Waves Pest Control lawn team will follow up.',
   ])('accepts a non-violating copy construction: %s', (copy) => {
     expect(verdict(copy)).toEqual({ ok: true, violations: [] });

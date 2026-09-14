@@ -12,7 +12,7 @@ function normalizeCopy(text) {
 
 // Keep a visit's adjectives local to the unit. In particular, a correct
 // "per application" price must not absorb a separate reference to a visit.
-const VISIT_SRC = '(?:(?!applications?\\b)[a-z]+(?:-[a-z]+)*\\s+)*visit\\b';
+const VISIT_SRC = '(?:(?!applications?\\b)[a-z]+(?:-[a-z]+)*\\s+)*visits?\\b';
 const VISIT_UNIT_SRC = `(?:each|every|a)\\s+${VISIT_SRC}`;
 const PRICE_UNIT_SRC = `(?:(?:(?:for|on)\\s+)?${VISIT_UNIT_SRC}|per[\\s-]+${VISIT_SRC}|/\\s*${VISIT_SRC})`;
 const AMOUNT_SRC = '(?:\\$\\s*\\d[\\d,.]*|\\b\\d[\\d,.]*\\s+dollars?)';
@@ -22,6 +22,7 @@ const VISIT_PRICE_RE = new RegExp([
   `\\b(?:${PRICE_NOUN_SRC}|billing|billed|bills?|charging|charged|charges?|pricing|priced|payments?|pay|paid)(?:\\s+(?:is|are|was|were|will\\s+be))?\\s+${PRICE_UNIT_SRC}`,
   `\\b${VISIT_UNIT_SRC}\\s+(?:(?:is|was|will\\s+be)\\s+(?:(?:priced|billed|charged)\\s+at\\s+)?|(?:costs?|runs?|will\\s+cost)\\s+)${AMOUNT_SRC}`,
   `\\b${VISIT_UNIT_SRC}\\s+has\\s+(?:a\\s+)?${AMOUNT_SRC}\\s+${PRICE_NOUN_SRC}\\b`,
+  `\\bvisits\\s+(?:(?:are|were|will\\s+be)\\s+(?:(?:priced|billed|charged)\\s+at\\s+)?|(?:cost|run|will\\s+cost)\\s+)${AMOUNT_SRC}\\s+(?:each|apiece)\\b`,
 ].join('|'), 'i');
 
 const EPA_CERTIFIED_RE = /\bEPA[\s-]*(?:(?:has|have|had)\s+)?(?:officially\s+)?certif(?:ied|ies|ication)\b|\bcertif(?:ied|ication)\b[^.!?]{0,20}\b(?:by|from)\s+(?:the\s+)?EPA\b/i;
