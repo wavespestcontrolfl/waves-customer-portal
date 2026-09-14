@@ -587,6 +587,21 @@ async function matchingSend(conn, context, since) {
     // and no pending row left to claim: the link is never sent and never
     // surfaced (codex #4293 P2 r3). Requiring the SID covers both.
     .whereNotNull('twilio_sid')
+    // A prior recording may have delivered this same visit link for an
+    // OLDER generation of the same commitment. That receipt cannot settle
+    // the replacement promise: renewPromiseOnOfficeVerdict and stagePromises
+    // both deliberately gave it a fresh generation. Keep manual texts (no
+    // linked outbox attempt) and this generation's crash-recovery receipt.
+    .modify((query) => {
+      const generation = Number(context.commitment?.processing_generation ?? 0);
+      if (!context.commitment?.id || !Number.isInteger(generation) || generation <= 0) return;
+      query.whereNotExists(function olderPromiseAttempt() {
+        this.select(conn.raw('1')).from('outbox_messages as old_attempt')
+          .whereRaw('old_attempt.provider_message_id = sms_log.twilio_sid')
+          .where('old_attempt.commitment_id', context.commitment.id)
+          .whereRaw('COALESCE(old_attempt.commitment_generation, 0) < ?', [generation]);
+      });
+    })
     .where(function carriesLink() { for (const needle of needles) this.orWhere('message_body', 'like', `%${needle}%`); })
     .orderBy('created_at', 'desc').limit(201).select('id', 'twilio_sid', 'status', 'created_at', 'customer_id', 'to_phone', 'message_body');
   if (messages.length > 200) throw new Error('Promised-link delivery evidence is truncated');
@@ -829,14 +844,14 @@ async function settleParkedPromiseCard(trx, item, { action, reviewedBy = null, n
 // the ONE place any office verdict may renew or settle this ledger, so a
 // future transition cannot silently skip the decision this function embodies.
 //
-// Delivery dedup decision: a delivered attempt is not undone by an office
+// Delivery dedup decision: a delivered attempt in the CURRENT generation is not undone by an office
 // closing and reopening the promise around it. Rather than bump the
 // generation and let a fresh outbox row run the gauntlet down to
 // matchingSend's body-content scan (which is scoped to the CALL's own
 // timing, not this verdict, and would still catch it — but only after
 // claiming a provider slot and re-deriving the visit), this checks the one
-// fact that actually matters — has ANY outbox row for this exact
-// commitment_id ever reached 'delivered' — directly and restores
+// fact that actually matters — has this generation's outbox row reached
+// 'delivered' — directly and restores
 // 'fulfilled' immediately: no fresh generation, no new attempt ever staged,
 // zero risk of a second text. This is deliberately narrower than a
 // content/time-window scan: an ambiguous 'sent' receipt, a stale
@@ -846,7 +861,9 @@ async function settleParkedPromiseCard(trx, item, { action, reviewedBy = null, n
 // verdict"-grade fact this function trusts, matching this file's own rule
 // that delivery, and only delivery, keeps the promise.
 async function renewPromiseOnOfficeVerdict(conn, commitmentId, { reviewedBy = null, trigger = 'reopen' } = {}) {
-  const delivered = await conn('outbox_messages').where({ commitment_id: commitmentId, status: 'delivered' })
+  const current = await conn('call_commitments').where({ id: commitmentId }).first('processing_generation');
+  const delivered = await conn('outbox_messages').where({ commitment_id: commitmentId, status: 'delivered',
+    commitment_generation: current?.processing_generation ?? 0 })
     .orderBy('created_at', 'desc').first('id', 'sent_at', 'provider_message_id');
   if (delivered) {
     await conn('call_commitments').where({ id: commitmentId }).update({
@@ -859,7 +876,7 @@ async function renewPromiseOnOfficeVerdict(conn, commitmentId, { reviewedBy = nu
       metadata: { outbox_id: delivered.id }, critical: true, trx: conn });
     return;
   }
-  // No delivered attempt on record for this commitment, ever: this is a
+  // No delivered attempt in this generation: this is a
   // genuine renewal. Bumping under the row's own lock (a bare increment,
   // not a read-then-write) is what keeps a concurrent writer from clobbering
   // this against a stale in-hand value — the same shape call_log's own
@@ -1433,13 +1450,13 @@ async function dispatch(conn, row, context, { now, clock, send, buildLink, rende
   // follow-up round) — see its own doc comment in send-customer-message.js
   // for the full outcome-vocabulary table this reads.
   const { classifyDeliveryCertainty } = require('./messaging/send-customer-message');
-  const check = async () => {
+  const check = async (database = conn) => {
     if (mode() !== 'true') return { ok: false, code: 'LINK_GATE_OFF', reason: 'Reschedule link automation is off' };
     // Rendering and lock acquisition can cross the send-window boundary.
     // Read the handoff clock afresh; tests may inject their own clock.
     const checkedAt = clock();
     if (!isWithinSendWindowET(checkedAt)) return { ok: false, code: 'LINK_QUIET_HOURS', reason: 'Waiting for the next send window' };
-    const live = await contextFor(conn, commitment.id, checkedAt);
+    const live = await contextFor(database, commitment.id, checkedAt);
     if (live.reason || !sameVisitSnapshot(snapshot(live.visit), planned)) return { ok: false, code: 'LINK_SOURCE_CHANGED', reason: 'The discussed visit changed' };
     // holdBeforeSend rechecks the floor immediately before THIS call into
     // dispatch(), but this check runs again — twice, at preDispatchCheck AND
@@ -1456,12 +1473,13 @@ async function dispatch(conn, row, context, { now, clock, send, buildLink, rende
       deferredUntil = floor;
       return { ok: false, code: 'LINK_FLOOR_NOT_REACHED', reason: 'The promised delivery time moved out', retryable: true };
     }
-    manual = await matchingSend(conn, live, evidenceSince);
+    manual = await matchingSend(database, live, evidenceSince);
     // Staff can dismiss/reopen while this send waits for the customer lock.
     // A still-open commitment is insufficient: this exact claimed attempt
     // must remain active at the same generation immediately before handoff.
-    const activeAttempt = await conn('outbox_messages').where({ id: row.id, status: 'sending',
-      commitment_id: commitment.id, commitment_generation: live.commitment.processing_generation ?? 0 }).first('id');
+    const activeAttempt = await database('outbox_messages').where({ id: row.id, status: 'sending',
+      commitment_id: commitment.id, commitment_generation: live.commitment.processing_generation ?? 0 })
+      .modify((query) => { if (database.isTransaction) query.forShare(); }).first('id');
     if (!activeAttempt) return { ok: false, code: 'LINK_SOURCE_CHANGED', reason: 'The promised-link attempt was superseded' };
 
     if (!isWithinSendWindowET(clock())) return { ok: false, code: 'LINK_QUIET_HOURS', reason: 'Waiting for the next send window' };
@@ -1472,7 +1490,22 @@ async function dispatch(conn, row, context, { now, clock, send, buildLink, rende
       to: customer.phone, body, channel: 'sms', audience: 'customer', purpose: 'appointment', customerId: customer.id,
       appointmentId: visit.id, entryPoint: 'reschedule-link-promise', identityTrustLevel: 'phone_matches_customer',
       metadata: { original_message_type: 'reschedule_link_promise', followThroughCommitmentId: commitment.id, outbox_id: row.id },
-      preDispatchCheck: check, preProviderCheck: check,
+      preDispatchCheck: () => check(), preProviderCheck: () => check(),
+      // The ordinary provider check is only a snapshot. The shared sender
+      // invokes this at the actual SMS SDK boundary; hold the call and
+      // attempt fences until that request returns, so an office verdict or
+      // replacement recording cannot cancel a checked attempt mid-handoff.
+      withSmsHandoff: (handoff) => conn.transaction(async (trx) => {
+        await lockTriageCall(trx, row.related_call_log_id);
+        // The recording processor may advance call_log without this advisory
+        // lock. Its generation/transcript must stay fixed while the source
+        // check and provider request run, so hold that row as well.
+        await trx('call_log').where({ id: row.related_call_log_id }).forShare().first('id');
+        await trx('call_commitments').where({ id: commitment.id }).forShare().first('id');
+        const verdict = await check(trx);
+        if (!verdict.ok) return verdict;
+        return handoff(trx);
+      }),
     });
     if (manual) return settleDelivery(conn, row, manual, context);
     if (result.sent && /^SM[0-9a-f]{32}$/i.test(result.providerMessageId || '')) {
@@ -1944,11 +1977,26 @@ async function withSendLock(input, sendCore) {
   try {
     if (!(await acquireSendLock(connection, input.customerId, held))) return LOCK_BUSY;
     if (role.manual && !role.automatic && await manualDuplicateOfPromisedLink(input.customerId, input.body, started)) return LINK_IN_PROGRESS;
+    const lostVerdict = () => ({ ok: false, code: 'LINK_LOCK_LOST', reason: 'The send interlock was lost. Refresh before retrying.' });
+    const assertHeld = () => {
+      if (held.lost) throw Object.assign(new Error(lostVerdict().reason), { code: 'LINK_LOCK_LOST' });
+    };
     const lockedInput = { ...input, preProviderCheck: async (args) => {
       const verdict = typeof input.preProviderCheck === 'function' ? await input.preProviderCheck(args) : { ok: true };
-      if (held.lost) return { ok: false, code: 'LINK_LOCK_LOST', reason: 'The send interlock was lost. Refresh before retrying.' };
+      if (held.lost) return lostVerdict();
       return verdict;
-    } };
+    }, ...(typeof input.withSmsHandoff === 'function' ? { withSmsHandoff: (handoff) => input.withSmsHandoff(async (trx, onProviderStart) => {
+      if (held.lost) return lostVerdict();
+      // The sender awaits this immediately before messages.create, after
+      // consent and suppression rechecks that may have outlived the raw
+      // advisory connection. Throwing here is a definite non-send; the
+      // provider wrapper knows dispatch has not started yet.
+      return handoff(trx, async () => {
+        assertHeld();
+        if (onProviderStart) await onProviderStart();
+        assertHeld();
+      });
+    }) } : {}) };
     return await sendContext.run({ customerId: input.customerId }, () => sendCore(lockedInput));
   } finally {
     held.lost = true;

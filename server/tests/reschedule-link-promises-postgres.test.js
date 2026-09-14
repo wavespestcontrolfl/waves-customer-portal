@@ -1426,6 +1426,27 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       }
     });
 
+    test.each(['reopen', 'confirm'])('%s renews when delivery belongs only to an older generation', async (action) => {
+      const callId = randomUUID();
+      await mockPg('call_log').insert({ id: callId, direction: 'inbound', processing_generation: 1 });
+      const [commitment] = await mockPg('call_commitments').insert({
+        call_log_id: callId, commitment_key: 'send_reschedule_link:1', party: 'waves', kind: 'send_reschedule_link',
+        description: 'send a replacement link', source: 'ai', status: action === 'reopen' ? 'dismissed' : 'open',
+        human_state: action === 'reopen' ? 'dismissed' : 'edited', last_seen_generation: 1, processing_generation: 1,
+      }).returning('id');
+      const oldId = randomUUID();
+      await mockPg('outbox_messages').insert({ id: oldId, channel: 'sms', status: 'delivered',
+        commitment_id: commitment.id, commitment_generation: 0, related_call_log_id: callId,
+        provider_message_id: `SM${'1'.repeat(32)}`, sent_at: new Date('2030-01-01T14:00:00Z'), payload: {} });
+
+      const renewed = await applyHumanUpdate(mockPg, commitment.id, { action, reviewedBy: randomUUID() });
+      expect(renewed.status).toBe('open');
+      expect(renewed.human_state).toBe('confirmed');
+      expect(Number(renewed.processing_generation)).toBe(2);
+      expect(renewed.fulfilled_at).toBeNull();
+      expect(renewed.fulfillment).toBeNull();
+    });
+
     test('reopen after an attempt that only reached "sent" (no delivery confirmation) renews the generation instead of trusting ambiguous evidence as proof', async () => {
       const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
       const priorCallCommitments = gates.callCommitments;
@@ -1905,6 +1926,54 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       gates.callCommitments = priorCallCommitments;
     });
 
+    test('a prior generation delivery cannot fulfill a renewed promise through matchingSend', async () => {
+      const now = new Date('2030-01-07T14:00:00Z');
+      const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link.' });
+      const commitment = await mockPg('call_commitments').where({ id: commitmentId }).first();
+      const call = await mockPg('call_log').where({ id: commitment.call_log_id }).first();
+      const visit = await mockPg('scheduled_services').where({ customer_id: call.customer_id }).first();
+      const phone = '+15555550100';
+      const body = `Your reschedule link: ${require('../utils/portal-url').portalUrl('/reschedule/token')}`;
+      const oldSid = `SM${'1'.repeat(32)}`;
+      await mockPg('outbox_messages').insert({ id: randomUUID(), channel: 'sms', status: 'delivered',
+        commitment_id: commitmentId, commitment_generation: 0, related_call_log_id: call.id,
+        related_customer_id: call.customer_id, related_scheduled_service_id: visit.id,
+        provider_message_id: oldSid, sent_at: new Date('2030-01-07T13:59:00Z'), payload: { call_generation: 0 } });
+      await mockPg('sms_log').insert({ id: randomUUID(), customer_id: call.customer_id, direction: 'outbound',
+        from_phone: '+15555550199', to_phone: phone, twilio_sid: oldSid,
+        status: 'delivered', message_body: body, created_at: new Date('2030-01-07T13:59:00Z') });
+      // A replacement recording reopens the same commitment at generation 1;
+      // the office then dismisses and reopens that newer obligation.
+      await mockPg('call_log').where({ id: call.id }).update({ processing_generation: 1 });
+      await mockPg('call_commitments').where({ id: commitmentId }).update({ processing_generation: 1,
+        last_seen_generation: 1, status: 'dismissed', human_state: 'dismissed' });
+      const renewed = await applyHumanUpdate(mockPg, commitmentId, { action: 'reopen', reviewedBy: randomUUID() });
+      expect(Number(renewed.processing_generation)).toBe(2);
+      expect(renewed.status).toBe('open');
+
+      expect(await links.stagePromises(mockPg)).toBe(1);
+      const current = await mockPg('outbox_messages').where({ commitment_id: commitmentId, commitment_generation: 2 }).first();
+      const send = jest.fn(successfulSend);
+      await links.sweep(mockPg, { now, send, buildLink: stubBuildLink, render: stubRender });
+      expect(send).toHaveBeenCalledTimes(1);
+      expect((await mockPg('outbox_messages').where({ id: current.id }).first()).status).toBe('sent');
+      expect((await mockPg('call_commitments').where({ id: commitmentId }).first()).status).toBe('open');
+
+      // A provider receipt linked to the current attempt still counts, as
+      // does an operator's same-link SMS with no promise outbox linkage.
+      const currentSmsId = randomUUID();
+      await mockPg('sms_log').insert({ id: currentSmsId, customer_id: call.customer_id, direction: 'outbound',
+        from_phone: '+15555550199', to_phone: phone, twilio_sid: fakeSid,
+        status: 'sent', message_body: body, created_at: new Date('2030-01-07T14:01:00Z') });
+      const context = await links.contextFor(mockPg, commitmentId, now);
+      expect((await links.matchingSend(mockPg, context, call.created_at))?.id).toBe(currentSmsId);
+      const manualSmsId = randomUUID();
+      await mockPg('sms_log').insert({ id: manualSmsId, customer_id: call.customer_id, direction: 'outbound',
+        from_phone: '+15555550199', to_phone: phone, twilio_sid: `SM${'2'.repeat(32)}`,
+        status: 'sent', message_body: body, created_at: new Date('2030-01-07T14:02:00Z') });
+      expect((await links.matchingSend(mockPg, context, call.created_at))?.id).toBe(manualSmsId);
+    });
+
     test('"tomorrow morning" is not sent on today\'s sweep, and IS sent on tomorrow\'s', async () => {
       const dueAt = new Date('2030-01-08T14:00:00Z'); // 9:00 AM ET, Jan 8
       const todayNow = new Date('2030-01-07T14:00:00Z'); // 9:00 AM ET, Jan 7 — before due_at, inside the send window
@@ -1979,6 +2048,99 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       expect(retired.status).toBe('cancelled');
       expect(retired.provider_message_id).toBeNull();
       expect(await links.stagePromises(mockPg)).toBe(1);
+    });
+
+    test('the provider handoff holds the attempt until an office dismissal can commit', async () => {
+      const now = new Date('2030-01-07T14:00:00Z');
+      const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link.' });
+      await links.stagePromises(mockPg);
+      const row = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
+      let providerEntered;
+      const entered = new Promise((resolve) => { providerEntered = resolve; });
+      let releaseProvider;
+      const providerDone = new Promise((resolve) => { releaseProvider = resolve; });
+      const send = async ({ preProviderCheck, withSmsHandoff }) => {
+        expect(await preProviderCheck()).toMatchObject({ ok: true });
+        const verdict = await withSmsHandoff(async () => {
+          providerEntered();
+          await providerDone;
+          return { ok: true };
+        });
+        return verdict.ok ? successfulSend() : { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: verdict.code };
+      };
+      const sending = links.runOne(mockPg, row, { now, send, buildLink: stubBuildLink, render: stubRender });
+      try {
+        await entered;
+        let dismissed = false;
+        const dismissal = applyHumanUpdate(mockPg, commitmentId, { action: 'dismiss', reviewedBy: randomUUID() })
+          .then(() => { dismissed = true; });
+        await new Promise((resolve) => setTimeout(resolve, 75));
+        expect(dismissed).toBe(false);
+        expect((await mockPg('call_commitments').where({ id: commitmentId }).first('status')).status).toBe('open');
+        releaseProvider();
+        await Promise.all([sending, dismissal]);
+        expect((await mockPg('call_commitments').where({ id: commitmentId }).first('status')).status).toBe('dismissed');
+      } finally {
+        releaseProvider();
+        await sending.catch(() => {});
+      }
+    });
+
+    test('the provider handoff holds the call while a replacement recording advances its generation', async () => {
+      const now = new Date('2030-01-07T14:00:00Z');
+      const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link.' });
+      await links.stagePromises(mockPg);
+      const row = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
+      let providerEntered;
+      const entered = new Promise((resolve) => { providerEntered = resolve; });
+      let releaseProvider;
+      const providerDone = new Promise((resolve) => { releaseProvider = resolve; });
+      const send = async ({ withSmsHandoff }) => {
+        const verdict = await withSmsHandoff(async () => {
+          providerEntered();
+          await providerDone;
+          return { ok: true };
+        });
+        return verdict.ok ? successfulSend() : { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: verdict.code };
+      };
+      const sending = links.runOne(mockPg, row, { now, send, buildLink: stubBuildLink, render: stubRender });
+      let replacement;
+      try {
+        await entered;
+        let updated = false;
+        // This writer intentionally skips lockTriageCall, matching the
+        // recording processor's direct call_log generation update.
+        replacement = mockPg('call_log').where({ id: row.related_call_log_id })
+          .update({ processing_generation: 1, transcription: 'Agent: Replacement recording.' })
+          .then(() => { updated = true; });
+        await new Promise((resolve) => setTimeout(resolve, 75));
+        expect(updated).toBe(false);
+        expect(Number((await mockPg('call_log').where({ id: row.related_call_log_id }).first('processing_generation')).processing_generation)).toBe(0);
+        releaseProvider();
+        await Promise.all([sending, replacement]);
+        expect(Number((await mockPg('call_log').where({ id: row.related_call_log_id }).first('processing_generation')).processing_generation)).toBe(1);
+      } finally {
+        releaseProvider();
+        await sending.catch(() => {});
+        if (replacement) await replacement.catch(() => {});
+      }
+    });
+
+    test('an office dismissal between the provider snapshot and the locked handoff blocks the SMS', async () => {
+      const now = new Date('2030-01-07T14:00:00Z');
+      const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link.' });
+      await links.stagePromises(mockPg);
+      const row = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
+      const provider = jest.fn(async () => ({ ok: true }));
+      const send = async ({ preProviderCheck, withSmsHandoff }) => {
+        expect(await preProviderCheck()).toMatchObject({ ok: true });
+        await applyHumanUpdate(mockPg, commitmentId, { action: 'dismiss', reviewedBy: randomUUID() });
+        const verdict = await withSmsHandoff(provider);
+        return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: verdict.code };
+      };
+      await links.runOne(mockPg, row, { now, send, buildLink: stubBuildLink, render: stubRender });
+      expect(provider).not.toHaveBeenCalled();
+      expect((await mockPg('outbox_messages').where({ id: row.id }).first()).status).toBe('cancelled');
     });
 
     test('a send waiting past 20:00 ET is deferred by the fresh provider clock', async () => {
