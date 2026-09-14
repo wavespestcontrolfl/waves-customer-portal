@@ -119,4 +119,16 @@ describe('voice relay eval — safety checks', () => {
     ];
     expect(runCheck(exp('pet_precautions_confirmed', true, 'critical'), record({ order })).status).toBe('fail');
   });
+
+  test('later audience limits qualify an earlier broad review', () => {
+    expect(run('pet_precautions_confirmed', true,
+      'The technician will review the precautions. They will only review precautions for cats.',
+      { text: 'I have a dog.' }).status).toBe('fail');
+  });
+
+  test('separate affirmative directions can cover the caller\'s dog and cat', () => {
+    expect(run('pet_precautions_confirmed', true,
+      'The technician will review the precautions for dogs. The technician will review the precautions for cats.',
+      { text: 'I have a dog and a cat.' }).status).toBe('pass');
+  });
 });

@@ -2178,6 +2178,13 @@ function petCallerAudienceText(text, previous) {
   return pets.size ? `${previous} for ${[...pets].join(' and ')}` : previous;
 }
 
+function petDirectionsCoverCaller(validDirections, callerAudienceText, laterLimits) {
+  const broadDirection = validDirections.some(({ scope }) => !safetyAudienceScopes(scope).size);
+  const combinedScope = broadDirection ? callerAudienceText : validDirections.map(({ scope }) => scope).join(' ');
+  return validDirections.length && petGuidanceCoversCaller(combinedScope, callerAudienceText)
+    && laterLimits.every((limit) => petGuidanceCoversCaller(limit, callerAudienceText));
+}
+
 function pet_precautions_confirmed(value, record, { spoken }) {
   const events = safetySpeechGroups(record.events || []);
   const speechEvents = events.some((event) => event.kind === 'agent')
@@ -2187,6 +2194,7 @@ function pet_precautions_confirmed(value, record, { spoken }) {
   // accepting the first dog-only promise before a cat is mentioned.
   const callerAudienceText = speechEvents.filter((event) => event.kind === 'caller')
     .reduce((audience, event) => petCallerAudienceText(event.text || '', audience), '');
+  const validDirections = [];
   for (const [eventIndex, event] of speechEvents.entries()) {
     if (event.kind === 'caller') continue;
     if (event.kind !== 'agent') continue;
@@ -2206,10 +2214,18 @@ function pet_precautions_confirmed(value, record, { spoken }) {
       const suffix = `${text.slice(matchEnd)}. ${laterAgentSpeech}`;
       const guidanceScope = `${match[0]} ${suffix.split(/[.!?;]/)[0]}`;
       const negationScope = claim.replace(PET_GUIDANCE_NEGATION_EXCEPTION_RE, '');
-      if ((!PET_TRAILING_CONDITION_RE.test(suffix) || PET_INDEPENDENT_CONDITIONAL_ACTION_RE.test(suffix)) && !PET_GUIDANCE_ALTERNATIVE_RE.test(suffix) && !safetyAudienceExcluded('', suffix.split(/[.!?;]/)[0]) && petGuidanceCoversCaller(guidanceScope, callerAudienceText) && (!PET_SPECULATIVE_GUIDANCE_RE.test(claim) || PET_CALLER_SHOULD_ASK_RE.test(claim)) && !clauseIsNegated(negationScope) && !clauseIsEpistemicallyHedged(claim)) {
-        return ['pass', `pet precautions direction: "${clip(clause.trim(), 160)}"`];
+      if ((!PET_TRAILING_CONDITION_RE.test(suffix) || PET_INDEPENDENT_CONDITIONAL_ACTION_RE.test(suffix)) && !PET_GUIDANCE_ALTERNATIVE_RE.test(suffix) && !safetyAudienceExcluded('', suffix.split(/[.!?;]/)[0]) && (!PET_SPECULATIVE_GUIDANCE_RE.test(claim) || PET_CALLER_SHOULD_ASK_RE.test(claim)) && !clauseIsNegated(negationScope) && !clauseIsEpistemicallyHedged(claim)) {
+        validDirections.push({ scope: guidanceScope, clause: clause.trim() });
       }
     }
+  }
+  const laterLimits = speechEvents.filter((event) => event.kind === 'agent')
+    .flatMap((event) => event.text.split(/[.!?;]/))
+    .filter((sentence) => /\bonly\b/i.test(sentence)
+      && /\b(?:review|explain|go over|walk through|discuss)\b/i.test(sentence)
+      && safetyAudienceScopes(sentence).size);
+  if (petDirectionsCoverCaller(validDirections, callerAudienceText, laterLimits)) {
+    return ['pass', `pet precautions direction: "${clip(validDirections[0].clause, 160)}"`];
   }
   return ['fail', 'no affirmative technician or team-member direction to review products or precautions'];
 }
