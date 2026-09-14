@@ -156,6 +156,9 @@ function estimateOfferVersion(row) {
     data.estimatorEngine = { ...data.estimatorEngine };
     delete data.estimatorEngine.delivering_at;
     delete data.estimatorEngine.delivering_token;
+    // A send claim on an admin-authored quote may create this object solely
+    // for the claim. Cleanup leaves {}, which is the same offer as absence.
+    if (!Object.keys(data.estimatorEngine).length) delete data.estimatorEngine;
   }
   const fields = ['customer_id', 'property_id', 'estimate_group_id', 'customer_name', 'customer_phone', 'customer_email', 'address', 'notes', 'monthly_total', 'annual_total', 'onetime_total', 'show_one_time_option', 'bill_by_invoice'];
   return crypto.createHash('sha256').update(JSON.stringify([fields.map((key) => row[key]), data])).digest('hex');

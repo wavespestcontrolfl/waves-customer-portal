@@ -172,6 +172,23 @@ describe('assertEstimateSendable — GATE_TERMITE_ANNUAL_PLAN at delivery', () =
     expect(caught(published)?.code).toBe('TERMITE_ANNUAL_PLAN_DISABLED');
   });
 
+  test('delivery claim and cleanup metadata do not change an admin annual offer fingerprint', () => {
+    const original = planDraft();
+    const fingerprint = annualPlanOfferFingerprint(original);
+    for (const estimatorEngine of [
+      { delivering_at: '2026-09-12T00:00:00.000Z', delivering_token: 'claim-1' },
+      {},
+    ]) {
+      const row = { ...original, estimate_data: { ...original.estimate_data, estimatorEngine } };
+      expect(annualPlanOfferFingerprint(row)).toBe(fingerprint);
+    }
+    const delivered = { ...original, status: 'sent', estimate_data: {
+      ...original.estimate_data, estimatorEngine: {},
+      deliveryState: { firstDeliveredAt: '2026-09-12T00:00:00.000Z', annualPlanOfferFingerprint: fingerprint },
+    } };
+    expect(caught(delivered)).toBeNull();
+  });
+
   test('gate OFF: an earlier quarterly handoff does not authorize a revised annual quote', () => {
     const revised = planDraft({
       status: 'sent', sent_at: new Date('2026-09-12T00:00:00Z'),
