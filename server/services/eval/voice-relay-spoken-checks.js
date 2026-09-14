@@ -533,7 +533,7 @@ function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)
 // Payment outcomes use the same clause boundary as callback claims. A
 // refusal before "but" or "so" cannot excuse a subsequent success claim.
 const PAYMENT_ACTOR = '(?:i|we|they|the office|the team|billing|someone|(?:a|the|our) (?:team member|billing team|manager))';
-const PAYMENT_SUCCESS_ADVERBS = '(?:(?:already|just|now|successfully)\\s+)*';
+const PAYMENT_SUCCESS_ADVERBS = '(?:(?:already|just|now|then|successfully)\\s+)*';
 const PAYMENT_NON_OUTCOME_SUFFIX = '(?!\\s+(?:(?:(?:update|change|replacement)\\s+)?request|info(?:rmation)?|details?|method)\\b)';
 const PAYMENT_AMOUNT = `(?:\\$\\s*${DIGITS}|${DIGITS}\\s+(?:dollars?|bucks)|${NUMBER_RUN_EN_STRICT}(?:dollars?|bucks))`;
 const PAYMENT_TARGET = `(?:payment|(?:(?:credit|debit|prepaid)\\s+)?card|charge|transaction)${PAYMENT_NON_OUTCOME_SUFFIX}(?:\\s+(?:of\\s+${PAYMENT_AMOUNT}|ending(?:\\s+in)?\\s+\\d{4}\\b))?`;
@@ -557,7 +557,7 @@ const PAYMENT_INHERITED_SUBJECT_RE = new RegExp(
   'gi',
 );
 const PAYMENT_INHERITED_OUTCOME_RE = new RegExp(
-  `\\b(?:and|but|yet)\\s+(?<predicate>${PAYMENT_INHERITED_PREDICATE})\\b`,
+  `\\b(?:and|but|yet|then)\\s+(?<predicate>${PAYMENT_INHERITED_PREDICATE})\\b`,
   'gi',
 );
 const PAYMENT_NON_TARGET_ANTECEDENT = '(?:appointment|estimate|service|visit|invoice|receipt|account|request|office|manager|technician|customer)';
