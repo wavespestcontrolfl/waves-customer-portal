@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const { gateEnvValue } = require('../config/feature-gates');
 const router = express.Router();
 const db = require('../models/db');
-const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData, REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
+const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData, estimateOffCustomerSurface, REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
@@ -4217,6 +4217,14 @@ router.put('/:id/proposal', async (req, res, next) => {
       || (req.body?.expectedEditVersion && req.body.expectedEditVersion !== estimateEditVersion(locked))) {
       throw retry('The saved proposal changed while you were editing. Reload and review the current proposal before saving.');
     }
+    // These server-owned keys may be advanced by a group handoff or earlier
+    // save. The whole-blob proposal write must carry the LOCKED row's values
+    // even when this edit does not need to extend its own link again.
+    const lockedData = parseEstimateData(locked.estimate_data) || {};
+    for (const key of ['groupLinkViewableThrough', 'groupPublishedByEstimateId']) {
+      if (Object.hasOwn(lockedData, key)) nextData[key] = lockedData[key];
+      else delete nextData[key];
+    }
     // A pending send is judged at the first scheduler tick it can reach,
     // exactly as scheduling judged it (pre-push codex P1 on #4309): a 23:58
     // ET send whose hold is shortened to that day would otherwise save, then
@@ -4297,29 +4305,41 @@ router.put('/:id/proposal', async (req, res, next) => {
     // and this UPDATE must not persist a term no billing path enforces
     // (codex #3297 r4c).
     if (savingPaymentTerm) updateQuery.where({ bill_by_invoice: true });
-    // A published sibling carries the ID of the anchor whose token was
-    // delivered. Extend THAT link when its fixed hold changes; writing a
-    // navigation window to the sibling alone leaves the customer's group
-    // entry link expired. The group lock serializes this with publication.
-    let groupAnchor = null;
-    let savedGroupLinkViewableThrough = null;
+    // Newer published siblings name the delivered anchor. Older rows may
+    // lack that marker, or carry one from a prior group. In those cases each
+    // eligible published token in THIS group may be an already-delivered
+    // entry link, so extend all of them rather than guessing this edited row
+    // is the anchor. This is navigation-only; unpublished, failed, archived,
+    // expired-unsent and off-surface rows get no new viewability. The group
+    // lock serializes this with publication; row locks preserve each promise.
+    const groupLinkExtensions = [];
     if (groupId && (authoredExpiry || hadFixedValidity)) {
-      const publishedBy = parseEstimateData(locked.estimate_data)?.groupPublishedByEstimateId;
-      groupAnchor = publishedBy && String(publishedBy) !== String(locked.id)
-        ? await trx('estimates').where({ id: publishedBy, estimate_group_id: groupId })
-          .whereNull('archived_at').forUpdate().first()
-        : locked;
-      if (groupAnchor?.sent_at && !groupAnchor.archived_at) {
+      const publishedBy = lockedData.groupPublishedByEstimateId;
+      const publishedRows = await trx('estimates')
+        .where({ estimate_group_id: groupId })
+        .whereNull('archived_at')
+        .whereIn('status', ['sent', 'viewed', 'expired'])
+        .forUpdate().select();
+      const eligibleAnchors = publishedRows.filter((candidate) => (candidate.sent_at || candidate.viewed_at)
+        && candidate.disposition !== 'expired_unsent'
+        && !candidate.price_locked_at
+        && !estimateOffCustomerSurface(candidate));
+      const markedAnchor = eligibleAnchors.find((candidate) => String(candidate.id) === String(publishedBy));
+      const anchors = markedAnchor ? [markedAnchor] : eligibleAnchors;
+      if (anchors.length) {
         const groupHold = await longestGroupFixedValidity(trx, locked);
         const ordinaryPublished = await publishedOrdinarySiblingExpiries(trx, locked);
-        const promised = groupLinkViewableThrough(groupAnchor);
         // The current row is excluded from longestGroupFixedValidity. Its
         // new fixed date or restored ordinary expiry must participate before the save commits.
-        const widest = [groupHold, ...ordinaryPublished, expiryUpdate, promised].filter(Boolean)
+        const widest = [groupHold, ...ordinaryPublished, expiryUpdate].filter(Boolean)
           .reduce((latest, at) => (!latest || at > latest ? at : latest), null);
-        const anchorOfferExpiry = groupAnchor.id === locked.id ? expiryUpdate || locked.expires_at : groupAnchor.expires_at;
-        if (widest && (!anchorOfferExpiry || widest > new Date(anchorOfferExpiry))) {
-          savedGroupLinkViewableThrough = widest;
+        for (const anchor of anchors) {
+          const promised = groupLinkViewableThrough(anchor);
+          const anchorOfferExpiry = anchor.id === locked.id ? expiryUpdate || locked.expires_at : anchor.expires_at;
+          if (widest && (!anchorOfferExpiry || widest > new Date(anchorOfferExpiry))
+            && (!promised || widest > promised)) {
+            groupLinkExtensions.push({ id: anchor.id, through: widest });
+          }
         }
       }
     }
@@ -4331,9 +4351,8 @@ router.put('/:id/proposal', async (req, res, next) => {
     // refuses acceptance), so there is nothing to reconstruct when a hold
     // moves — which is why the old shrink-reconstruction pass and its
     // groupWidenFloorExpiresAt floor are deleted rather than repaired.
-    if (savedGroupLinkViewableThrough && groupAnchor.id === locked.id) {
-      nextData.groupLinkViewableThrough = savedGroupLinkViewableThrough.toISOString();
-    }
+    const ownLinkExtension = groupLinkExtensions.find((extension) => extension.id === locked.id);
+    if (ownLinkExtension) nextData.groupLinkViewableThrough = ownLinkExtension.through.toISOString();
     const count = await updateQuery.update({
       estimate_data: JSON.stringify(nextData),
       category: 'COMMERCIAL',
@@ -4353,20 +4372,18 @@ router.put('/:id/proposal', async (req, res, next) => {
       updated_at: db.fn.now(),
     });
     if (!count) return { updatedCount: 0 };
-    if (savedGroupLinkViewableThrough && groupAnchor.id !== locked.id) {
+    for (const extension of groupLinkExtensions.filter((candidate) => candidate.id !== locked.id)) {
       await trx('estimates')
-        .where({ id: groupAnchor.id, estimate_group_id: groupId })
-        .whereNull('archived_at')
-        .whereNotNull('sent_at')
+        .where({ id: extension.id, estimate_group_id: groupId })
         .update({
           estimate_data: db.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
-            groupLinkViewableThrough: savedGroupLinkViewableThrough.toISOString(),
+            groupLinkViewableThrough: extension.through.toISOString(),
           })]),
           updated_at: db.fn.now(),
         });
     }
     // Each property's expires_at remains its own offer deadline. A sibling
-    // edit only extends navigation on the delivered anchor above.
+    // edit only extends navigation on eligible delivered links above.
     // The version THIS write committed, read under the same lock: the editor
     // keys its next save and its delivery review on it, so a save that lands
     // in the window before the editor's reload cannot be adopted as if it
