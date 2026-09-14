@@ -12,6 +12,7 @@ const {
   applyServiceOptOutToEstimateData,
   captureServiceOptOutProvenance,
   termiteRestoreProvenance,
+  serviceOptOutRestoreBlockedKeys,
   recordServiceOptOutEvent,
   currentlyOptedOutKeys,
   SERVICE_OPT_OUT_KEYS,
@@ -245,6 +246,41 @@ describe('applyServiceOptOutToEstimateData — the restore', () => {
     expect(applyServiceOptOutToEstimateData(data, {
       serviceKey: 'termite_bait', included: true,
       removedInputs: { engineInputs: { termite_bait: { stations: 12 } }, selected: ['TERMITE_BAIT'] },
+    })).toEqual({ ok: false, reason: 'service_not_removable' });
+  });
+
+  it('hides a baseline-proven annual add-back while preserving another valid restore and staff compensation', () => {
+    const removedInputs = { engineInputs: { termite_bait: { stations: 12 } }, selected: ['TERMITE_BAIT'] };
+    const baseline = { result: { results: { tmBait: { plan: 'annual_protection', pricingKnobs: {
+      plan: 'annual_protection', system: 'trelona', stationCost: 24,
+    } } } } };
+    const parked = {
+      engineInputs: { services: {} },
+      engineRequest: { profile: { homeSqFt: 2000 }, selectedServices: [], options: {} },
+      serviceOptOut: { baseline: JSON.stringify(baseline), events: [
+        { serviceKey: 'termite_bait', included: false, actor: 'staff', removedInputs: JSON.stringify(removedInputs) },
+        { serviceKey: 'lawn_care', included: false, actor: 'customer', removedInputs: '{}' },
+      ] },
+    };
+    expect(serviceOptOutRestoreBlockedKeys(parked)).toEqual(['termite_bait']);
+    const missingCapture = JSON.parse(JSON.stringify(parked));
+    delete missingCapture.serviceOptOut.events[0].removedInputs;
+    expect(serviceOptOutRestoreBlockedKeys(missingCapture)).toEqual(['termite_bait']);
+    const customerData = JSON.parse(JSON.stringify(parked));
+    expect(applyServiceOptOutToEstimateData(customerData, {
+      serviceKey: 'termite_bait', included: true, removedInputs,
+    })).toEqual({ ok: false, reason: 'service_not_removable' });
+    const staffData = JSON.parse(JSON.stringify(parked));
+    expect(applyServiceOptOutToEstimateData(staffData, {
+      serviceKey: 'termite_bait', included: true, removedInputs, actor: 'staff',
+    })).toEqual({ ok: true, removedInputs: null });
+    expect(staffData.engineInputs.services.termite_bait.plan).toBe('annual_protection');
+    expect(staffData.engineRequest.options.termitePlan).toBe('annual_protection');
+    expect(staffData.engineRequest.selectedServices).toContain('TERMITE_BAIT');
+    const customerPark = JSON.parse(JSON.stringify(parked));
+    customerPark.serviceOptOut.events[0].actor = 'customer';
+    expect(applyServiceOptOutToEstimateData(customerPark, {
+      serviceKey: 'termite_bait', included: true, removedInputs, actor: 'staff',
     })).toEqual({ ok: false, reason: 'service_not_removable' });
   });
 

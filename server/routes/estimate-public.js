@@ -15140,7 +15140,7 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     }
 
     const applied = OptOut.applyServiceOptOutToEstimateData(parsedData, {
-      serviceKey, included, removedInputs: restoreInputs, provenance,
+      serviceKey, included, removedInputs: restoreInputs, provenance, actor,
     });
     if (!applied.ok) return { status: 400, body: ({ error: applied.reason }) };
 
@@ -25657,6 +25657,7 @@ async function composeEstimateDataPayload(estimate, {
         const {
           currentlyOptedOutKeys, serviceOptOutLabel, serviceOptOutBlockedByProposal,
           serviceOptOutTierSelectionActive, serviceOptOutAddableKeys, staffOfferedKeys,
+          serviceOptOutRestoreBlockedKeys,
         } = require('../services/estimate-service-opt-out');
         const projected = parseEstimateDataSafe(estimate);
         // Staff-parked offers (lead-service send) belong to the add lane: with
@@ -25670,6 +25671,8 @@ async function composeEstimateDataPayload(estimate, {
         const staffOffersAllowed = serviceAddGateOn() && !addStampBlockedByMembership;
         const removedKeys = currentlyOptedOutKeys(projected)
           .filter((k) => staffOffersAllowed || !staffParked.includes(k));
+        const restoreBlockedKeys = serviceOptOutRestoreBlockedKeys(projected)
+          .filter((key) => removedKeys.includes(key));
         // Priced adds (GATE_ESTIMATE_SERVICE_ADD): same resolver as the PUT,
         // live accept-active rows only, never a staff draft preview.
         const addableKeys = serviceAddGateOn() && !adminDraftPreview && !addStampBlockedByMembership
@@ -25697,6 +25700,7 @@ async function composeEstimateDataPayload(estimate, {
             removedKeys,
             removedLabels: removedKeys.map((key) => serviceOptOutLabel(key)),
             ...(restoreBlocked ? { restoreBlocked: true } : {}),
+            ...(restoreBlockedKeys.length ? { restoreBlockedKeys } : {}),
             ...(staffOffered.length ? { staffOfferedKeys: staffOffered } : {}),
             ...(addableKeys.length && !restoreBlocked
               ? { addable: addableKeys.map((key) => ({ key, label: serviceOptOutLabel(key) })) }

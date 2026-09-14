@@ -2007,7 +2007,12 @@ termite line (removal would erase its priced-program replay provenance).
 Quarterly termite remains removable; a pre-provenance restore recovers the
 sold program and station pricing knobs from the original opt-out baseline
 when present, while an annual sale or an unproven annual request remains
-blocked;
+blocked for customer restores. `/data` keeps such keys in `removedKeys` to
+suppress a duplicate add-service offer, but lists them in
+`restoreBlockedKeys` so the customer page omits their unusable add-back
+control. A server-initiated compensation for a preexisting staff-parked
+annual line may restore its captured annual terms after a failed send;
+customer restores remain refused;
 a fail-CLOSED 409 when the
 recompute cannot run; and a 400 refusal when the removal would turn a
 bundled-free one-time item into a charge (owner ruling — that one goes to

@@ -8042,14 +8042,17 @@ function EstimateViewPageInner({ websiteMode = false }) {
           {/* Services this customer removed, with the way back. Sits directly
               under the remaining service boxes so the reversal is where the
               removal happened. */}
-          {/* restoreBlocked: the server still ships removedKeys (they suppress
+          {/* restoreBlocked / restoreBlockedKeys: the server still ships removedKeys (they suppress
               the mirror add-service offer above) but the write refuses
-              restores — an itemized proposal or a standing tier selection —
+              restores — an itemized proposal, a standing tier selection, or
+              an annual termite plan whose priced baseline forbids removal —
               so the "Add it back" control must not render. */}
           {!readOnly && !restartQuote && data?.serviceOptOut?.restoreBlocked !== true
-            && (data?.serviceOptOut?.removedKeys || []).length ? (
+            && (data?.serviceOptOut?.removedKeys || []).some((key) =>
+              !(data?.serviceOptOut?.restoreBlockedKeys || []).includes(key)) ? (
             <div style={{ marginTop: 12 }}>
               {data.serviceOptOut.removedKeys.map((key, i) => {
+                if ((data.serviceOptOut.restoreBlockedKeys || []).includes(key)) return null;
                 const label = data.serviceOptOut.removedLabels?.[i] || key;
                 const active = optOut.sectionKey === key;
                 // A line Waves parked at send time (GATE_ESTIMATE_LEAD_SERVICE_SEND)

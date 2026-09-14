@@ -106,13 +106,11 @@ function termiteAnnualPlanServiceChangeBlocked(parsedData = {}, {
   included,
   removedInputs = null,
   provenance = null,
+  actor = 'customer',
 } = {}) {
   if (serviceKey !== 'termite_bait') return false;
   if (included === false) return selectedTermiteAnnualPlanRows(parsedData).length > 0;
   if (included !== true) return false;
-
-  const captured = capturedTermiteRemoval(parsedData, serviceKey, removedInputs);
-  if (!isPlainObject(captured)) return false;
 
   // A gate-off annual request prices as quarterly, and the ignored request
   // remains in engineRequest.options. New removals capture the authoritative
@@ -120,8 +118,14 @@ function termiteAnnualPlanServiceChangeBlocked(parsedData = {}, {
   // identity wins on restore. Older events recover it from their baseline.
   const pricedProgram = String(provenance?.termiteProgram || '').toLowerCase();
   if (pricedProgram === 'quarterly') return false;
-  if (pricedProgram === 'annual_protection') return true;
+  // A failed send must compensate a PREEXISTING staff park, restoring the
+  // server-proven annual result it removed. Customers cannot self-restore it.
+  if (pricedProgram === 'annual_protection') {
+    return !(actor === 'staff' && latestOptOutEventIsStaff(parsedData, serviceKey));
+  }
 
+  const captured = capturedTermiteRemoval(parsedData, serviceKey, removedInputs);
+  if (!isPlainObject(captured)) return false;
   return capturedAnnualTermiteRequest(parsedData, captured);
 }
 
@@ -322,6 +326,21 @@ function termiteRestoreProvenance(parsedData, provenance) {
   return recovered.termiteProgram ? { ...(provenance || {}), ...recovered } : provenance;
 }
 
+// Keep removedKeys in /data to suppress the mirror add-service offer, but
+// identify the individual restores that the write rail will refuse. The
+// baseline recovery is identical to the commit path for older opt-out rows.
+function serviceOptOutRestoreBlockedKeys(parsedData = {}) {
+  const events = Array.isArray(parsedData?.serviceOptOut?.events) ? parsedData.serviceOptOut.events : [];
+  return currentlyOptedOutKeys(parsedData).filter((serviceKey) => {
+    if (serviceKey !== 'termite_bait') return false;
+    const removal = events.filter((event) => event?.serviceKey === serviceKey && event.included === false).pop();
+    const provenance = termiteRestoreProvenance(parsedData, removal?.provenance || null);
+    return termiteAnnualPlanServiceChangeBlocked(parsedData, {
+      serviceKey, included: true, removedInputs: readRemovedInputs(removal), provenance,
+    });
+  });
+}
+
 /**
  * Prune (or restore) one service across every replayable input carrier.
  *
@@ -342,6 +361,7 @@ function applyServiceOptOutToEstimateData(parsedData = {}, {
   included,
   removedInputs = null,
   provenance = null,
+  actor = 'customer',
 } = {}) {
   const spec = SERVICE_OPT_OUT_KEYS[serviceKey];
   if (!spec) return { ok: false, reason: 'service_not_removable' };
@@ -350,7 +370,7 @@ function applyServiceOptOutToEstimateData(parsedData = {}, {
     provenance = termiteRestoreProvenance(parsedData, provenance);
   }
   if (termiteAnnualPlanServiceChangeBlocked(parsedData, {
-    serviceKey, included, removedInputs, provenance,
+    serviceKey, included, removedInputs, provenance, actor,
   })) {
     return { ok: false, reason: 'service_not_removable' };
   }
@@ -671,6 +691,7 @@ module.exports = {
   serviceIsPresentInInputs,
   captureServiceOptOutProvenance,
   termiteRestoreProvenance,
+  serviceOptOutRestoreBlockedKeys,
   applyServiceOptOutToEstimateData,
   recordServiceOptOutEvent,
   readRemovedInputs,
