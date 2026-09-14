@@ -290,7 +290,7 @@ const CALLBACK_COORDINATED_SUBJECT_RE = new RegExp(
 // "we will ask you to call her" keeps the caller as the callback actor.
 const CALLBACK_ADVERB = '(?:\\w+ly\\s+)?';
 const CALLBACK_ACTOR_SHIFT = '(?:ask|help|remind|tell|have|get|let|allow|make)';
-const CALLBACK_ACTION_FILLER_WORD = `(?!(?:${CALLBACK_ACTOR_SHIFT}|you|me|us|him|her|them|your|my|our|his|their)\\b)\\w+`;
+const CALLBACK_ACTION_FILLER_WORD = `(?!(?:${CALLBACK_ACTOR_SHIFT}|refuse|decline|you|me|us|him|her|them|your|my|our|his|their)\\b)\\w+`;
 const CALLBACK_ACTION_LEAD = `(?:(?:not\\s+)?(?:go ahead and|make sure to|be sure to)\\s+|(?:${CALLBACK_ACTION_FILLER_WORD}\\s+){0,3}?)`;
 const CALLBACK_VERB_PERFECT = '(?:called|phoned|rung|reached(?: out to)?|contacted|got(?:ten)? in touch with|followed up with|got(?:ten)? back to|texted|emailed)';
 const CALLBACK_ACTION = `(?:${CALLBACK_ACTION_LEAD}${CALLBACK_VERB}|${CALLBACK_ADVERB}have\\s+${CALLBACK_ADVERB}${CALLBACK_VERB_PERFECT}|${CALLBACK_ADVERB}be\\s+${CALLBACK_ADVERB}${CALLBACK_VERB_ING})`;
