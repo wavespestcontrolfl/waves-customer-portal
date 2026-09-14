@@ -15122,9 +15122,12 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
 
     // Provenance the prune would erase (the pest curve stamp above all) —
     // captured BEFORE the inputs change, re-planted on restore.
-    const provenance = included === false
+    let provenance = included === false
       ? OptOut.captureServiceOptOutProvenance(parsedData, serviceKey)
       : ((optOutState?.events || []).filter((e) => e.serviceKey === serviceKey && e.included === false).pop()?.provenance || null);
+    if (mode === 'restore' && serviceKey === 'termite_bait') {
+      provenance = OptOut.termiteRestoreProvenance(parsedData, provenance);
+    }
     const restoreInputs = mode === 'restore'
       ? OptOut.readRemovedInputs(
         (optOutState?.events || []).filter((e) => e.serviceKey === serviceKey && e.included === false).pop(),
@@ -15139,7 +15142,7 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     }
 
     const applied = OptOut.applyServiceOptOutToEstimateData(parsedData, {
-      serviceKey, included, removedInputs: restoreInputs, provenance,
+      serviceKey, included, removedInputs: restoreInputs, provenance, actor,
     });
     if (!applied.ok) return { status: 400, body: ({ error: applied.reason }) };
 
@@ -15199,6 +15202,8 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
     const reprice = await serverRecomputeFromEstimateData(parsedData, {
       replaySavedPricingKnobs: true,
+      termitePricingKnobsForRestore: mode === 'restore' && serviceKey === 'termite_bait'
+        ? provenance?.termitePricingKnobs : null,
       priorQualifyingServices: priors,
       // computeMembershipContext persists a snapshot even for a linked NEW
       // customer (isExistingCustomer: false) — snapshot presence alone must not
@@ -25656,6 +25661,7 @@ async function composeEstimateDataPayload(estimate, {
         const {
           currentlyOptedOutKeys, serviceOptOutLabel, serviceOptOutBlockedByProposal,
           serviceOptOutTierSelectionActive, serviceOptOutAddableKeys, staffOfferedKeys,
+          serviceOptOutRestoreBlockedKeys,
         } = require('../services/estimate-service-opt-out');
         const projected = parseEstimateDataSafe(estimate);
         // Staff-parked offers (lead-service send) belong to the add lane: with
@@ -25669,6 +25675,8 @@ async function composeEstimateDataPayload(estimate, {
         const staffOffersAllowed = serviceAddGateOn() && !addStampBlockedByMembership;
         const removedKeys = currentlyOptedOutKeys(projected)
           .filter((k) => staffOffersAllowed || !staffParked.includes(k));
+        const restoreBlockedKeys = serviceOptOutRestoreBlockedKeys(projected)
+          .filter((key) => removedKeys.includes(key));
         // Priced adds (GATE_ESTIMATE_SERVICE_ADD): same resolver as the PUT,
         // live accept-active rows only, never a staff draft preview.
         const addableKeys = serviceAddGateOn() && !adminDraftPreview && !addStampBlockedByMembership
@@ -25696,6 +25704,7 @@ async function composeEstimateDataPayload(estimate, {
             removedKeys,
             removedLabels: removedKeys.map((key) => serviceOptOutLabel(key)),
             ...(restoreBlocked ? { restoreBlocked: true } : {}),
+            ...(restoreBlockedKeys.length ? { restoreBlockedKeys } : {}),
             ...(staffOffered.length ? { staffOfferedKeys: staffOffered } : {}),
             ...(addableKeys.length && !restoreBlocked
               ? { addable: addableKeys.map((key) => ({ key, label: serviceOptOutLabel(key) })) }

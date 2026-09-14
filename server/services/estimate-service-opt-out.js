@@ -52,6 +52,11 @@ const SERVICE_OPT_OUT_KEYS = {
 //   problem, but the policy stands independently of it.
 const NON_REMOVABLE_BY_POLICY = ['tree_shrub'];
 
+const {
+  pricedTermiteProgram,
+  selectedTermiteAnnualPlanRows,
+} = require('./estimate-termite-program-rows');
+
 function isPlainObject(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
@@ -63,6 +68,65 @@ function isPlainObject(value) {
 // reduced price while accept locks and bills the full one.
 function inputCarriers(parsedData) {
   return [parsedData?.engineInputs, parsedData?.inputs].filter(isPlainObject);
+}
+
+// The annual termite program's replay stamp lives on the priced RESULT, not
+// in a durable input field. Removing the line deletes that stamp; restoring
+// its captured input would therefore price against today's gate/config and
+// can silently turn the sold annual plan into quarterly service or a new
+// annual price. Treat it like Tree & Shrub's result-derived knobs: never offer
+// the removal. Older events can recover the sold program from their baseline.
+// Quarterly termite remains removable.
+function capturedTermiteRemoval(parsedData, serviceKey, removedInputs) {
+  if (isPlainObject(removedInputs)) return removedInputs;
+  const events = Array.isArray(parsedData?.serviceOptOut?.events)
+    ? parsedData.serviceOptOut.events
+    : [];
+  const removal = events.filter((event) => event?.serviceKey === serviceKey && event.included === false).pop();
+  return readRemovedInputs(removal);
+}
+
+function capturedAnnualTermiteRequest(parsedData, captured) {
+  const serviceInputs = ['engineInputs', 'inputs'].flatMap((carrier) => {
+    const services = captured?.[carrier];
+    if (!isPlainObject(services)) return [];
+    return ['termite', 'termiteBait', 'termite_bait'].map((key) => services[key]).filter(isPlainObject);
+  });
+  if (serviceInputs.some((input) => String(input.plan || input.pricingKnobs?.plan || '').toLowerCase() === 'annual_protection')) {
+    return true;
+  }
+  const restoresTermiteToken = Array.isArray(captured.selected)
+    && captured.selected.some((token) => String(token).toUpperCase() === 'TERMITE_BAIT');
+  return restoresTermiteToken
+    && String(parsedData?.engineRequest?.options?.termitePlan || '').toLowerCase() === 'annual_protection';
+}
+
+function termiteAnnualPlanServiceChangeBlocked(parsedData = {}, {
+  serviceKey,
+  included,
+  removedInputs = null,
+  provenance = null,
+  actor = 'customer',
+} = {}) {
+  if (serviceKey !== 'termite_bait') return false;
+  if (included === false) return selectedTermiteAnnualPlanRows(parsedData).length > 0;
+  if (included !== true) return false;
+
+  // A gate-off annual request prices as quarterly, and the ignored request
+  // remains in engineRequest.options. New removals capture the authoritative
+  // priced program before deleting the result row, so that server-derived
+  // identity wins on restore. Older events recover it from their baseline.
+  const pricedProgram = String(provenance?.termiteProgram || '').toLowerCase();
+  if (pricedProgram === 'quarterly') return false;
+  // A failed send must compensate a PREEXISTING staff park, restoring the
+  // server-proven annual result it removed. Customers cannot self-restore it.
+  if (pricedProgram === 'annual_protection') {
+    return !(actor === 'staff' && latestOptOutEventIsStaff(parsedData, serviceKey));
+  }
+
+  const captured = capturedTermiteRemoval(parsedData, serviceKey, removedInputs);
+  if (!isPlainObject(captured)) return false;
+  return capturedAnnualTermiteRequest(parsedData, captured);
 }
 
 /**
@@ -166,6 +230,7 @@ function serviceOptOutRemovableKeys(estData = {}, sections = [], rowTier = null)
     // Also what excludes the synthetic `bundle` card the server emits when the
     // ladder cannot be split, and every commercial_* and tree_shrub key.
     if (!SERVICE_OPT_OUT_KEYS[key]) continue;
+    if (termiteAnnualPlanServiceChangeBlocked(estData, { serviceKey: key, included: false })) continue;
     // A real key that still fronts several services (memberKeys) is one card
     // for many lines — there is no single service to point the control at.
     if (Array.isArray(section.memberKeys) && section.memberKeys.length > 1) continue;
@@ -226,11 +291,54 @@ function captureServiceOptOutProvenance(parsedData = {}, sectionKey) {
       if (version) provenance.pestPricingVersion = version;
     } catch (_) { /* provenance is best-effort; never block the opt-out */ }
   }
+  if (sectionKey === 'termite_bait') {
+    const program = pricedTermiteProgram(parsedData);
+    if (program === 'quarterly' || program === 'annual_protection') {
+      provenance.termiteProgram = program;
+      const knobs = require('./estimate-tree-shrub-knob-replay').termiteKnobSignalForReplay(parsedData);
+      if (knobs) provenance.termitePricingKnobs = knobs;
+    }
+  }
   try {
     const signals = require('./estimate-floor-signal-replay').savedFloorReplaySignals(parsedData);
     if (signals && Object.keys(signals).length) provenance.floorSignals = signals;
   } catch (_) { /* same */ }
   return provenance;
+}
+
+// Pre-provenance opt-out events retained the original priced result in their
+// opaque baseline. Recover the sold program and station knobs from that result;
+// the request alone is not evidence because gate-off annual requests price
+// quarterly. A missing or malformed baseline leaves the conservative guard.
+function termiteRestoreProvenance(parsedData, provenance) {
+  if (['quarterly', 'annual_protection'].includes(String(provenance?.termiteProgram || '').toLowerCase())) {
+    return provenance;
+  }
+  const rawBaseline = parsedData?.serviceOptOut?.baseline;
+  let baseline = null;
+  if (typeof rawBaseline === 'string') {
+    try { baseline = JSON.parse(rawBaseline); } catch (_) { /* malformed legacy snapshot */ }
+  } else if (isPlainObject(rawBaseline)) {
+    baseline = rawBaseline;
+  }
+  if (!isPlainObject(baseline)) return provenance;
+  const recovered = captureServiceOptOutProvenance(baseline, 'termite_bait');
+  return recovered.termiteProgram ? { ...(provenance || {}), ...recovered } : provenance;
+}
+
+// Keep removedKeys in /data to suppress the mirror add-service offer, but
+// identify the individual restores that the write rail will refuse. The
+// baseline recovery is identical to the commit path for older opt-out rows.
+function serviceOptOutRestoreBlockedKeys(parsedData = {}) {
+  const events = Array.isArray(parsedData?.serviceOptOut?.events) ? parsedData.serviceOptOut.events : [];
+  return currentlyOptedOutKeys(parsedData).filter((serviceKey) => {
+    if (serviceKey !== 'termite_bait') return false;
+    const removal = events.filter((event) => event?.serviceKey === serviceKey && event.included === false).pop();
+    const provenance = termiteRestoreProvenance(parsedData, removal?.provenance || null);
+    return termiteAnnualPlanServiceChangeBlocked(parsedData, {
+      serviceKey, included: true, removedInputs: readRemovedInputs(removal), provenance,
+    });
+  });
 }
 
 /**
@@ -253,10 +361,19 @@ function applyServiceOptOutToEstimateData(parsedData = {}, {
   included,
   removedInputs = null,
   provenance = null,
+  actor = 'customer',
 } = {}) {
   const spec = SERVICE_OPT_OUT_KEYS[serviceKey];
   if (!spec) return { ok: false, reason: 'service_not_removable' };
   if (!isPlainObject(parsedData)) return { ok: false, reason: 'service_not_removable' };
+  if (serviceKey === 'termite_bait' && included === true) {
+    provenance = termiteRestoreProvenance(parsedData, provenance);
+  }
+  if (termiteAnnualPlanServiceChangeBlocked(parsedData, {
+    serviceKey, included, removedInputs, provenance, actor,
+  })) {
+    return { ok: false, reason: 'service_not_removable' };
+  }
 
   if (included === false) {
     const captured = { engineInputs: null, inputs: null, selected: [] };
@@ -315,6 +432,23 @@ function applyServiceOptOutToEstimateData(parsedData = {}, {
       if (isPlainObject(carrier.services?.pest) && !carrier.services.pest.version) {
         carrier.services.pest.version = pestVersion;
       }
+    }
+  }
+  // The result-derived program stamp was deleted with the removed row. A
+  // gate-off annual request can therefore outlive a QUARTERLY quote. Replace
+  // that request in every replayable carrier before the canonical reprice;
+  // merely letting it through the restore guard leaves engineRequest (the
+  // preferred carrier) free to turn quarterly into annual when the gate flips.
+  const termiteProgram = String(provenance?.termiteProgram || '').toLowerCase();
+  if (serviceKey === 'termite_bait' && ['quarterly', 'annual_protection'].includes(termiteProgram)) {
+    for (const carrier of inputCarriers(parsedData)) {
+      for (const key of spec.engine) {
+        if (isPlainObject(carrier.services?.[key])) carrier.services[key].plan = termiteProgram;
+      }
+    }
+    if (isPlainObject(req)) {
+      if (!isPlainObject(req.options)) req.options = {};
+      req.options.termitePlan = termiteProgram;
     }
   }
   return { ok: true, removedInputs: null };
@@ -556,6 +690,8 @@ module.exports = {
   serviceOptOutRemovableKeys,
   serviceIsPresentInInputs,
   captureServiceOptOutProvenance,
+  termiteRestoreProvenance,
+  serviceOptOutRestoreBlockedKeys,
   applyServiceOptOutToEstimateData,
   recordServiceOptOutEvent,
   readRemovedInputs,
@@ -569,4 +705,5 @@ module.exports = {
   latestOptOutEventIsStaff,
   lineReviewOnly,
   memberEvidenceInEstimateData,
+  termiteAnnualPlanServiceChangeBlocked,
 };

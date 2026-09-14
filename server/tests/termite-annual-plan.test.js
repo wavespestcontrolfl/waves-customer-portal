@@ -398,6 +398,85 @@ describe('replay-stamp provenance (pre-push audit #4424)', () => {
     }
   });
 
+  test.each([
+    ['OFF to ON (captured)', undefined, 'annual_protection', 'true', false],
+    ['ON to OFF (captured)', 'true', 'quarterly', undefined, false],
+    ['OFF to ON (legacy baseline)', undefined, 'annual_protection', 'true', true],
+    ['ON to OFF (legacy baseline)', 'true', 'quarterly', undefined, true],
+  ])('remove/reprice/restore preserves the issued quarterly program and knobs %s', async (_label, initialGate, requestedPlan, restoredGate, legacy) => {
+    const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
+    const { extractEngineInputs } = require('../routes/estimate-public');
+    const { captureServiceOptOutProvenance, termiteRestoreProvenance, applyServiceOptOutToEstimateData } = require('../services/estimate-service-opt-out');
+    const priorGate = process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const stationCost = constants.TERMITE.systems.trelona.stationCost;
+    try {
+      if (initialGate === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      else process.env.GATE_TERMITE_ANNUAL_PLAN = initialGate;
+      const engineRequest = {
+        profile: { homeSqFt: 2000, lotSqFt: 8000, propertyType: 'single_family' },
+        selectedServices: ['PEST', 'TERMITE_BAIT'],
+        options: { termitePlan: requestedPlan },
+      };
+      const engineInputs = translateV2CallToV1Input(engineRequest.profile, engineRequest.selectedServices, engineRequest.options);
+      const issuedRaw = generateEstimate(engineInputs);
+      const issuedLine = termiteLine(issuedRaw);
+      expect(issuedLine).toMatchObject({ plan: 'quarterly', visitsPerYear: 4, annual: 288 });
+      const data = {
+        engineRequest,
+        engineInputs,
+        inputs: JSON.parse(JSON.stringify(engineInputs)),
+        result: mapV1ToLegacyShape(issuedRaw),
+      };
+      const baseline = JSON.stringify(data);
+      let provenance = captureServiceOptOutProvenance(data, 'termite_bait');
+      expect(provenance).toMatchObject({ termiteProgram: 'quarterly', termitePricingKnobs: { plan: 'quarterly' } });
+      const removed = applyServiceOptOutToEstimateData(data, { serviceKey: 'termite_bait', included: false });
+      expect(removed.ok).toBe(true);
+      const withoutTermite = await serverRecomputeFromEstimateData(data, { replaySavedPricingKnobs: true });
+      expect(withoutTermite.recomputed).toBe(true);
+      expect(withoutTermite.serverResult.results.tmBait).toBeUndefined();
+      data.result = withoutTermite.serverResult;
+      if (legacy) {
+        data.serviceOptOut = { baseline };
+        provenance = termiteRestoreProvenance(data, null);
+        expect(provenance).toMatchObject({ termiteProgram: 'quarterly', termitePricingKnobs: { plan: 'quarterly' } });
+      }
+
+      // A live config/gate change between removal and restore must not move
+      // the sold station install or turn the ignored request into annual.
+      constants.TERMITE.systems.trelona.stationCost = stationCost + 10;
+      if (restoredGate === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      else process.env.GATE_TERMITE_ANNUAL_PLAN = restoredGate;
+      const restored = applyServiceOptOutToEstimateData(data, {
+        serviceKey: 'termite_bait', included: true,
+        removedInputs: removed.removedInputs, provenance,
+      });
+      expect(restored.ok).toBe(true);
+      expect(data.engineRequest.options.termitePlan).toBe('quarterly');
+      for (const carrier of [data.engineInputs, data.inputs]) {
+        expect(carrier.services.termite.plan).toBe('quarterly');
+      }
+      const repriced = await serverRecomputeFromEstimateData(data, {
+        replaySavedPricingKnobs: true,
+        termitePricingKnobsForRestore: provenance.termitePricingKnobs,
+      });
+      expect(repriced.recomputed).toBe(true);
+      expect(termiteLine(repriced.rawEngineResult)).toMatchObject({
+        plan: 'quarterly', visitsPerYear: 4, annual: 288,
+        installation: { price: issuedLine.installation.price },
+      });
+      data.result = repriced.serverResult;
+      expect(termiteLine(generateEstimate(extractEngineInputs(data)))).toMatchObject({
+        plan: 'quarterly', visitsPerYear: 4, annual: 288,
+        installation: { price: issuedLine.installation.price },
+      });
+    } finally {
+      constants.TERMITE.systems.trelona.stationCost = stationCost;
+      if (priorGate === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      else process.env.GATE_TERMITE_ANNUAL_PLAN = priorGate;
+    }
+  });
+
   test('a mapped termite result without a plan stamp cannot inherit stale raw annual provenance', () => {
     const { selectedTermiteAnnualPlanRows } = require('../services/estimate-termite-program-rows');
     process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
