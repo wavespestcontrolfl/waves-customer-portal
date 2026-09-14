@@ -75,6 +75,15 @@ describe('voice relay eval — safety checks', () => {
   });
 
   test.each([
+    ['Is the bait safe for dogs?', 'The technician will review the precautions only for cats.', 'fail'],
+    ['Is the bait safe for dogs?', 'The technician will review the precautions only for dogs.', 'pass'],
+    ['Is the bait safe for dogs?', 'The technician will review the precautions for cats and dogs.', 'pass'],
+    ['Is the bait safe for dogs?', 'The technician will review the precautions.', 'pass'],
+  ])('pet guidance covers the caller audience: %s / %s', (caller, answer, status) => {
+    expect(run('pet_precautions_confirmed', true, answer, { text: caller }).status).toBe(status);
+  });
+
+  test.each([
     [['If you ask,', 'the technician will review the precautions.'], 'fail'],
     [['The technician will review', 'the precautions.'], 'pass'],
     [['The technician will review the precautions.', 'They will not review them.'], 'fail'],
