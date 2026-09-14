@@ -1282,6 +1282,7 @@ const CARD_NON_FRAGMENT_RES = Object.freeze([
     + `(?:(?:on|in|for)\\s+)?${CARD_EXPLAINED_DATE_VALUE}\\b`, 'gi'),
   /\b(?:(?:issued|added|saved|updated)\s+(?:on|in)|on\s+file\s+since)\s+(?:19|20)\d{2}\b/gi,
   /\b(?:first|last)\s+\d+\s+(?:are|were)\b/gi,
+  /\b(?:due|charged|billed|processed|scheduled)\s+(?:on|for)\s+(?:the\s+)?(?:[12]?\d|3[01])(?:st|nd|rd|th)\b/gi,
   CARD_MENU_OPTION_RE,
   new RegExp(`\\bnumber\\s+(?:to|for)\\s+(?:call|text|reach)(?:ing)?(?:\\s+back)?\\s+(?:is|was|as)\\s+${CARD_PHONE_VALUE}`, 'gi'),
   /\b(?:phone|cell|mobile|office|fax|area)\s+(?:number|code)\s+(?:(?:is|of|as)\s+)?(?:\(\d+\)|\d+)(?:[\s.-]\d+)*/gi,

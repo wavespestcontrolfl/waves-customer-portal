@@ -405,3 +405,14 @@ test.each([
     { kind: 'agent', text: reply },
   ])).toBe(expected);
 });
+
+test.each([
+  ['Your card payment is due on the 15th.', 'pass'],
+  ['Your card will be charged on the 15th.', 'pass'],
+  ['Your card will be billed on the 1st.', 'pass'],
+  ['Your card payment is scheduled for the 31st.', 'pass'],
+  ['Your card payment is due on the 15th and your card ends in 4242.', 'fail'],
+  ['Your card will be charged on the 15th and I heard four.', 'fail'],
+])('ordinal billing dates explain only their own day: %s', (text, expected) => {
+  expect(cardStatus([{ kind: 'agent', text }])).toBe(expected);
+});
