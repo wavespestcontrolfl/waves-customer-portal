@@ -54,6 +54,7 @@ function chain(overrides = {}) {
     whereNotExists: jest.fn(function () { return this; }),
     whereExists: jest.fn(function () { return this; }),
     leftJoin: jest.fn(function () { return this; }),
+    joinRaw: jest.fn(function () { return this; }),
     select: jest.fn(function () { return this; }),
     orderBy: jest.fn(function () { return this; }),
     limit: jest.fn(function () { return this; }),
