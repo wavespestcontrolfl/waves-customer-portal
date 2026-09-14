@@ -695,3 +695,21 @@ test('acceptance exposes the locked basis and selection without stored aggregate
   expect(shaped).not.toHaveProperty('committed_totals');
   expect(JSON.stringify(shaped)).not.toMatch(/99999|88888|77777/);
 });
+
+test.each([
+  [{ customer_phone: '+1 (202) 555-0108' }, { customer_phone: '2025550108' }, true],
+  [{ customer_email: ' LEAD@example.test ' }, { customer_email: 'lead@example.test' }, true],
+  [{ customer_phone: '2025550108' }, { customer_phone: '2025550109' }, false],
+  [{}, {}, false],
+  [{ customer_email: 'lead@example.test' }, { customer_id: 'cust-2', customer_email: 'lead@example.test' }, false],
+])('lead-only property groups use canonical contact linkage: %o / %o', async (contact, siblingContact, allowed) => {
+  const current = estimateRow({ customer_id: null, estimate_group_id: 'group-1', ...contact });
+  const sibling = estimateRow({ id: 'est-2', token: 'sib-b', customer_id: null, estimate_group_id: 'group-1', ...siblingContact });
+  db.__rows = () => [sibling];
+  mockCompose.mockResolvedValue({ ...PAGE_PAYLOAD, propertyGroup: [
+    { token: current.token, isCurrent: true }, { token: sibling.token, isCurrent: false },
+  ] });
+  const shaped = await shapeEstimate(current);
+  if (allowed) expect(shaped.page.propertyGroup.map((entry) => entry.id)).toEqual(['est-1', 'est-2']);
+  else expect(shaped.page).not.toHaveProperty('propertyGroup');
+});

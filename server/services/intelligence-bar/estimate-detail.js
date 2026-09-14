@@ -155,9 +155,19 @@ function stripPayload(payload) {
 // The composer builds its switcher from a separate sibling read. Verify its
 // tokens against complete persisted rows before exposing even an address.
 // The payload supplies selectors only; identity and links come from the DB.
+function sameGroupCustomer(current, sibling) {
+  // Match admin-estimate-persistence.ensureEstimateGroupId: any linked
+  // customer requires equal IDs; two lead-only rows need a phone or email.
+  if (current.customer_id || sibling.customer_id) return current.customer_id === sibling.customer_id;
+  const phone = (value) => String(value || '').replace(/\D/g, '').slice(-10);
+  const email = (value) => String(value || '').trim().toLowerCase();
+  return (phone(current.customer_phone).length === 10 && phone(current.customer_phone) === phone(sibling.customer_phone))
+    || !!(email(current.customer_email) && email(current.customer_email) === email(sibling.customer_email));
+}
+
 async function verifiedPropertyGroup(group, current) {
   if (!Array.isArray(group)) return null;
-  if (!current.estimate_group_id || !current.customer_id) return null;
+  if (!current.estimate_group_id) return null;
   try {
     const siblings = group.filter((entry) => !entry.isCurrent);
     if (group.filter((entry) => entry.isCurrent).length !== 1
@@ -172,7 +182,7 @@ async function verifiedPropertyGroup(group, current) {
     for (const entry of group) {
       const sibling = entry.isCurrent ? current : byToken.get(entry.token);
       if (!sibling || sibling.estimate_group_id !== current.estimate_group_id
-        || sibling.customer_id !== current.customer_id) return null;
+        || !sameGroupCustomer(current, sibling)) return null;
       const links = await estimateLinks(sibling, lazy.publicRoute().parseEstimateDataSafe(sibling));
       if (links.link_state === 'blocked' || (!entry.isCurrent && links.link_state !== 'customer_viewable')) return null;
       verified.push({
