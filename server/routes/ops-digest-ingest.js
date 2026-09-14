@@ -220,6 +220,14 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
         metadata: { ...metadata, opsKey: key, subject: title, kind, source: SOURCE, observedAt: effectiveObservedAt },
         trx,
       });
+      // Timestamp-less identical repeats must preserve read state, but they
+      // still establish that the check failed now. Advance the observation
+      // under the same lock so an older clean run cannot retire this failure.
+      if (row?.id && row.deduped && !row.refreshed && req.body.observedAt == null) {
+        await trx('notifications').where({ id: row.id }).update({
+          metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('observedAt', ?::text)", [effectiveObservedAt]),
+        });
+      }
       return { row };
     });
   } catch (err) {
