@@ -9,20 +9,27 @@ const mockNotifyAdmin = jest.fn();
 const mockResolve = jest.fn();
 const mockLockCalls = [];
 const mockStanding = { row: null };
+const mockClean = { row: null, error: null };
 jest.mock('../models/db', () => {
-  const builder = () => {
+  const builder = (table) => {
     const b = {};
     for (const m of ['where', 'whereRaw', 'orderBy', 'select']) b[m] = jest.fn(() => b);
-    b.first = jest.fn(async () => mockStanding.row);
+    b.first = jest.fn(async () => {
+      if (table === 'system_settings') {
+        if (mockClean.error) throw mockClean.error;
+        return mockClean.row;
+      }
+      return mockStanding.row;
+    });
     b.update = jest.fn(async () => 1);
     return b;
   };
-  const trx = jest.fn(() => builder());
+  const trx = jest.fn((table) => builder(table));
   trx.raw = jest.fn((sql, bindings) => {
     if (/pg_advisory/.test(String(sql))) mockLockCalls.push(bindings);
     return { sql, bindings };
   });
-  const db = jest.fn(() => builder());
+  const db = jest.fn((table) => builder(table));
   db.raw = (sql, bindings) => ({ sql, bindings });
   db.transaction = jest.fn(async (fn) => fn(trx));
   return db;
@@ -69,6 +76,8 @@ beforeEach(() => {
   mockResolve.mockReset();
   mockLockCalls.length = 0;
   mockStanding.row = null;
+  mockClean.row = null;
+  mockClean.error = null;
   process.env.NODE_ENV = 'test';
   process.env.OPS_DIGEST_INGEST_TOKEN = TOKEN;
   lane(true);
@@ -238,16 +247,14 @@ describe('bell write', () => {
     expect(mockLockCalls).toEqual([['admin:ops-crons:e22-schedule-integrity:overlaps-2026-09-11']]);
   });
 
-  test('a DELAYED re-post from an earlier run cannot lower the stored observation', async () => {
+  test('a DELAYED re-post cannot replace newer content or re-bell it', async () => {
     // A recurrence already raised the standing row to 14:00.
     mockStanding.row = { created_at: new Date('2026-09-11T10:00:00Z'), observed_at: '2026-09-11T14:00:00.000Z' };
-    mockNotifyAdmin.mockResolvedValue({ id: 'n-old', deduped: true });
-    await post({ ...good(), observedAt: '2026-09-11T12:00:00Z' });
-    const opts = mockNotifyAdmin.mock.calls[0][3];
-    // The stored 14:00 wins, so nothing regresses and the version is
-    // unchanged — a plain dedupe, no rewrite, no re-bell.
-    expect(opts.metadata.observedAt).toBe('2026-09-11T14:00:00.000Z');
-    expect(opts.dedupeVersion).toBe('2026-09-11T14:00:00.000Z');
+    const result = await post({ ...good(), subject: 'older finding', body: 'old body', link: '/admin/old', observedAt: '2026-09-11T12:00:00Z' });
+    expect(result).toEqual({ status: 200, json: { ok: true, stale: true } });
+    // notifyAdmin refreshes a deduped row when CONTENT differs even if the
+    // version is clamped. Skipping it protects the 14:00 row's body/read state.
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 
   test('a LATER run raises the observation and so rewrites the standing row', async () => {
@@ -257,6 +264,25 @@ describe('bell write', () => {
     const opts = mockNotifyAdmin.mock.calls[0][3];
     expect(opts.metadata.observedAt).toBe('2026-09-11T13:00:00.000Z');
     expect(opts.dedupeVersion).toBe('2026-09-11T13:00:00.000Z');
+  });
+
+  test('T2 clean with zero standing rows suppresses delayed T1 but permits later T3', async () => {
+    mockClean.row = { value: '2026-09-11T12:00:00.000Z' };
+    const stale = await post({ ...good(), observedAt: '2026-09-11T11:00:00Z' });
+    expect(stale).toEqual({ status: 200, json: { ok: true, stale: true } });
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-t3', deduped: false });
+    const later = await post({ ...good(), observedAt: '2026-09-11T13:00:00Z' });
+    expect(later).toEqual({ status: 201, json: { ok: true, id: 'n-t3', deduped: false } });
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    expect(mockNotifyAdmin.mock.calls[0][3].metadata.observedAt).toBe('2026-09-11T13:00:00.000Z');
+  });
+
+  test('a failed watermark read is retryable, never an acknowledged stale or bell write', async () => {
+    mockClean.error = new Error('system settings unavailable');
+    const result = await post({ ...good(), observedAt: '2026-09-11T11:00:00Z' });
+    expect(result).toEqual({ status: 503, json: { ok: false, reason: 'bell_write_failed' } });
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 
   test('laterOf and the standing probe: no standing row, unparsable or missing observation all fall back to the incoming value', async () => {
@@ -346,15 +372,20 @@ describe('POST /resolve (fall-off rule)', () => {
     const { status, json } = await resolve({ key: 'e22-schedule-integrity:overlaps', successes: 3 });
     expect(status).toBe(200);
     expect(json).toEqual({ ok: true, resolved: 2 });
-    expect(mockResolve).toHaveBeenCalledWith({ key: 'e22-schedule-integrity:overlaps', source: 'ops-crons', lockKey: 'ops-crons:e22-schedule-integrity:overlaps', notAfter: expect.any(String), resolvedBy: 'ops-crons:3-clean-runs' });
+    expect(mockResolve).toHaveBeenCalledWith({ key: 'e22-schedule-integrity:overlaps', source: 'ops-crons', lockKey: 'ops-crons:e22-schedule-integrity:overlaps', notAfter: expect.any(String), resolvedBy: 'ops-crons:3-clean-runs', throwOnError: true });
   });
 
   test('nothing standing is still a 200 with resolved 0; bad key is 400', async () => {
     mockResolve.mockResolvedValue(0);
     expect((await resolve({ key: 'never-rang' })).json).toEqual({ ok: true, resolved: 0 });
-    expect(mockResolve).toHaveBeenCalledWith({ key: 'never-rang', source: 'ops-crons', lockKey: 'ops-crons:never-rang', notAfter: expect.any(String), resolvedBy: 'ops-crons' });
+    expect(mockResolve).toHaveBeenCalledWith({ key: 'never-rang', source: 'ops-crons', lockKey: 'ops-crons:never-rang', notAfter: expect.any(String), resolvedBy: 'ops-crons', throwOnError: true });
     expect((await resolve({ key: 'has spaces' })).status).toBe(400);
     expect((await resolve({})).status).toBe(400);
+  });
+
+  test('a failed clean resolution returns 503 so the caller can retry', async () => {
+    mockResolve.mockRejectedValue(new Error('settings write failed'));
+    expect(await resolve({ key: 'never-rang' })).toEqual({ status: 503, json: { ok: false, reason: 'resolve_failed' } });
   });
 });
 
@@ -457,4 +488,3 @@ describe('server/index.js mount order (unobservable-when-dark)', () => {
     expect(pre).toBeGreaterThan(at("app.use('/api/', limiter);"));
   });
 });
-
