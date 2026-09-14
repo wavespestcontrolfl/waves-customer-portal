@@ -2137,12 +2137,16 @@ function petGuidanceCoversCaller(guidanceScope, callerAudienceText) {
 const PET_CALLER_NOUN = '(?:dogs?|puppy|cats?|kittens?|pets?|animals?)';
 const PET_CALLER_OWNERSHIP_RE = new RegExp(`\\b(?:i|we)\\s+(?:have|own)\\s+((?:(?:a|an|my|our|one|two|three|four|five|\\d+)\\s+)?${PET_CALLER_NOUN}\\b[^.!?;]*)`, 'i');
 const PET_CALLER_NOUN_RE = new RegExp(`\\b${PET_CALLER_NOUN}\\b`, 'gi');
+const PET_CALLER_POSSESSIVE_RE = new RegExp(`\\b(?:my|our)\\s+(${PET_CALLER_NOUN})\\b`, 'gi');
 
 function petCallerAudienceText(text, previous) {
   if (safetyAudienceScopes(text).size) return text;
   const ownedPet = PET_CALLER_OWNERSHIP_RE.exec(text);
-  const pets = ownedPet ? [...ownedPet[1].matchAll(PET_CALLER_NOUN_RE)].map((match) => match[0]) : [];
-  return pets.length ? `for ${pets.join(' and ')}` : previous;
+  const pets = new Set([
+    ...(ownedPet ? [...ownedPet[1].matchAll(PET_CALLER_NOUN_RE)].map((match) => match[0]) : []),
+    ...[...text.matchAll(PET_CALLER_POSSESSIVE_RE)].map((match) => match[1]),
+  ]);
+  return pets.size ? `for ${[...pets].join(' and ')}` : previous;
 }
 
 function pet_precautions_confirmed(value, record, { spoken }) {

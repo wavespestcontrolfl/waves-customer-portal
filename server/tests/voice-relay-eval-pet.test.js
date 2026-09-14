@@ -81,6 +81,8 @@ describe('voice relay eval — safety checks', () => {
     ['I have two dogs. What precautions should I take?', 'The technician will review the precautions for cats.', 'fail'],
     ['I have a dog and a cat. What precautions should I take?', 'The technician will review the precautions only for dogs.', 'fail'],
     ['I have a dog and a cat. What precautions should I take?', 'The technician will review the precautions for dogs and cats.', 'pass'],
+    ['My cat needs special precautions.', 'The technician will review the precautions only for dogs.', 'fail'],
+    ['My cat needs special precautions.', 'The technician will review the precautions for cats.', 'pass'],
     ['Is the bait safe for dogs?', 'The technician will review the precautions only for dogs.', 'pass'],
     ['Is the bait safe for dogs?', 'The technician will review the precautions for cats and dogs.', 'pass'],
     ['Is the bait safe for dogs?', 'The technician will review the precautions.', 'pass'],
