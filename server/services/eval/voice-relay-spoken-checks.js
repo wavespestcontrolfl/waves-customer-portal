@@ -1473,7 +1473,7 @@ const SAFETY_NO_RISK_ALLOWED_COMPLEMENT_RE = /^\s+of\s+(?:(?:losing|missing|resc
 const SAFETY_NO_RISK_COORDINATED_HARM_RE = /^\s*,?\s*(?:and|or)\s+(?:(?:an?|any|the|no)\s+)?(?:risk|harm|danger|hurt|poison|bother|affect)\b/i;
 
 const SAFETY_ATTRIBUTIVE_GUARANTEE_RE = new RegExp(
-  `\\b${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\s+${SAFETY_SUBJECT_MODIFIER}\\b`,
+  `\\b${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}(?:\\s+(?:and|or)\\s+[a-z]+(?:-[a-z]+)?){0,2}\\s+${SAFETY_SUBJECT_MODIFIER}\\b`,
   'gi',
 );
 
@@ -1858,8 +1858,9 @@ function no_safety_guarantee(value, record) {
   for (const event of events) {
     if (event.kind === 'caller') {
       callerAskedAboutWetExposure = SAFETY_DRYING_CONDITION_WITHDRAWAL_RE.test(event.text || '');
-      unrelatedCallerTurn = /\b(?:appointment|visit|schedule|booking)\b/i.test(event.text || '')
-        && !/\b(?:safe|safety|harm|risk|wet|dry|drying|product|pesticide|bait|spray)\b/i.test(event.text || '');
+      unrelatedCallerTurn = latestInterrogativeSegment(event.text || '') !== null
+        && !/\b(?:safe|safety|harm|risk|wet|dry|drying|toxic|precaution)\b/i.test(event.text || '')
+        && !/^\s*(?:are you sure|really|what about (?:it|that)|is that right|can you confirm that)\b/i.test(event.text || '');
       const context = safetyCallerContext(event.text || '', lastSafetyQuestionText,
         lastContextProductText, conversationAntecedentText);
       lastCallerText = context.resolvedQuestion;
