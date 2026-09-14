@@ -75,19 +75,19 @@ test.each([
   expect(verify([claim('tomorrow', { year: 2026, month: 9, day: 14 }, 'delivery')], transcript, reference, timing)).toBe(false);
 });
 
-test('explicit clocks and deadline wording must agree with the proposed timestamp', () => {
+test.each(['9am', 'nine am'])('explicit clock %s and deadline wording must agree with the proposed timestamp', (clock) => {
   const claims = [claim('tomorrow', { year: 2026, month: 9, day: 14 }, 'delivery')];
   const due_at = '2026-09-14T09:00:00-04:00';
-  expect(verify(claims, 'Agent: I will text the reschedule link tomorrow at 9am.', reference, { due_at, due_type: 'floor' })).toBe(true);
+  expect(verify(claims, `Agent: I will text the reschedule link tomorrow at ${clock}.`, reference, { due_at, due_type: 'floor' })).toBe(true);
   expect(verify(claims, 'Agent: I will text the reschedule link tomorrow at 10am.', reference, { due_at, due_type: 'floor' })).toBe(false);
-  expect(verify(claims, 'Agent: I will text the reschedule link by tomorrow at 9am.', reference, { due_at, due_type: 'deadline' })).toBe(true);
+  expect(verify(claims, `Agent: I will text the reschedule link by tomorrow at ${clock}.`, reference, { due_at, due_type: 'deadline' })).toBe(true);
   const friday = [claim('Friday', { weekday: 5 }, 'delivery')];
   expect(verify(friday, 'Agent: I will text the reschedule link by Friday.', reference,
     { due_at: '2026-09-11T09:00:00-04:00', due_type: 'deadline' })).toBe(false);
 });
 
-test('by requires a deadline for explicitly typed rows; untyped historical rows retain their floor', () => {
-  const transcript = 'Agent: I will text the reschedule link by tomorrow at 8pm.';
+test.each(['by', 'before', 'no later than'])('%s requires a deadline; untyped historical rows retain their floor', (prefix) => {
+  const transcript = `Agent: I will text the reschedule link ${prefix} tomorrow at eight pm.`;
   const claims = [claim('tomorrow', { year: 2026, month: 9, day: 14 }, 'delivery')];
   const due_at = '2026-09-14T20:00:00-04:00';
   expect(verify(claims, transcript, reference, { due_at, due_type: 'floor' })).toBe(false);
