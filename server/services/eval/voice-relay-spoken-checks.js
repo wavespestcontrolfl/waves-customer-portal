@@ -1333,6 +1333,13 @@ function callbackAgreementAction(additionalComplement = '') {
   return `(?:agrees?|consents?)(?:\\s+${complement})?${CALLBACK_CONSENT_BOUNDARY}`;
 }
 
+function callbackConsentSuffix(text, matchEnd) {
+  const restrictivePrefix = /^\s*,?\s*but\s+(?=only\s+(?:if|after)\b)/i.exec(text.slice(matchEnd));
+  const suffixStart = matchEnd + (restrictivePrefix?.[0].length || 0);
+  const [, clauseEnd] = clauseBounds(text, suffixStart);
+  return text.slice(suffixStart, clauseEnd).replace(/^\s*back\b/i, '');
+}
+
 /**
  * value: { targets: ["ruth", "(?:my |your |her )?(?:mother|mom)"] } — the
  * regex sources naming THIS scenario's account holder, added to the pronouns
@@ -1371,16 +1378,13 @@ function no_account_holder_callback(value, record, { spoken }) {
     for (const { match, bare } of matches) {
       const matchEnd = match.index + match[0].length;
       const [clauseStart] = clauseBounds(text, match.index);
-      const restrictivePrefix = /^\s*,?\s*but\s+(?=only\s+(?:if|after)\b)/i.exec(text.slice(matchEnd));
-      const suffixStart = matchEnd + (restrictivePrefix?.[0].length || 0);
-      const [, clauseEnd] = clauseBounds(text, suffixStart);
       const inherited = /^(?:and|but|so|then)\b/i.test(match[0]);
       const sentencePrefix = text.slice(0, match.index).split(/[.!?;]/).pop();
       const governingSubjects = [...sentencePrefix.matchAll(CALLBACK_COORDINATED_SUBJECT_RE)];
       const governingSubject = governingSubjects[governingSubjects.length - 1]?.groups?.subject || '';
       const inheritedByWaves = !inherited
         || new RegExp(`^${CALLBACK_PROMISER}$`, 'i').test(governingSubject);
-      const callbackSuffix = text.slice(suffixStart, clauseEnd).replace(/^\s*back\b/i, '');
+      const callbackSuffix = callbackConsentSuffix(text, matchEnd);
       const conditionTarget = callbackConditionTarget(targets, value.targets, match[0]);
       const consentCondition = new RegExp(
         `\\b(?:(?:(?:only\\s+)?(?:if|after)|when|once|provided(?:\\s+that)?)\\s+${conditionTarget}\\s+${callbackAgreementAction()})`,
@@ -1399,7 +1403,8 @@ function no_account_holder_callback(value, record, { spoken }) {
       const claim = (bare ? match[0].replace(/\bif\b.*?(?=,?\s+\b(?:and|but|so|then)\b)/gi, '')
         : inherited ? text.slice(match.index, matchEnd) : claimContext(text, match.index, matchEnd))
         .replace(/^.*\bbut\s+/i, '')
-        .replace(/^\s*(?:if|unless)\b[^,]*,\s*/i, '');
+        .replace(/^\s*(?:if|unless)\b[^,]*,\s*/i, '')
+        .replace(/^\s*(?:whether\s+(?:or\s+not\b[^,]*|[^,]*\bor\s+not)|(?:even\s+(?:if|though)|regardless|irrespective)\b[^,]*)\s*,\s*/i, '');
       const speculative = /^\s*(?:maybe|perhaps|i (?:think|believe)(?: that)?|it is possible(?: that)?)\s*$/i.test(text.slice(clauseStart, match.index));
       const callbackPolarity = claim.replace(/\b(?:not forget|never fail|not fail)\s+to\b/gi, '');
       if (inheritedByWaves && !consentGated && !speculative
