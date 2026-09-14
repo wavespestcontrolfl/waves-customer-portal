@@ -686,6 +686,9 @@ router.post('/:token/setup', async (req, res, next) => {
       captureNeeded,
     });
   } catch (err) {
+    if (err.code === 'DEPOSIT_RECONCILIATION_REQUIRED') {
+      return res.status(409).json({ error: err.message, reconciliationRequired: true });
+    }
     // A 409 means the invoice already has a live PaymentIntent that setup could
     // neither reuse nor replace. Two cases, distinguished by `inProgress` (set by
     // createInvoicePaymentIntent only when money is genuinely in flight — a live
@@ -786,6 +789,9 @@ router.post('/:token/update-amount', async (req, res, next) => {
 
     res.json(result);
   } catch (err) {
+    if (err.code === 'DEPOSIT_RECONCILIATION_REQUIRED') {
+      return res.status(409).json({ error: err.message, reconciliationRequired: true });
+    }
     // 409 = expected race/in-flight state (e.g. trying to switch tender while
     // a payment is already processing). Surface it to the customer without
     // raising an admin bill-payment-error alert. staleBalance = a combined
@@ -877,6 +883,9 @@ router.post('/:token/finalize', async (req, res, next) => {
     const result = await StripeService.finalizeInvoicePayment(invoice.id, quoteToken, { saveCard: !!saveCard || (await invoiceRequiresSavedMethod(invoice)) });
     res.json(result);
   } catch (err) {
+    if (err.code === 'DEPOSIT_RECONCILIATION_REQUIRED') {
+      return res.status(409).json({ error: err.message, reconciliationRequired: true });
+    }
     logger.error(`[pay-v2] Finalize error: ${err.message}`);
     if (err.statusCode === 409 && err.savedCardPending) {
       return res.status(409).json({

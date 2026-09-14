@@ -267,4 +267,19 @@ async function addReceived(amount = 49) {
       await mockPg('payers').where({ id: payerId }).del();
     }
   });
+
+  test('a withdrawn packet invoice with null payer_id never takes homeowner credit', async () => {
+    const id = await insertInvoice({ status: 'draft' });
+    await mockPg('invoices').where({ id }).update({ scheduled_send_error: 'payer_billed:123' });
+    await addReceived(49);
+    const result = await reconcileReceivedDepositToInvoice(f.estimateId);
+    expect(result).toMatchObject({ state: 'park', invoiceId: id, reason: 'payer_billed' });
+    const invoice = await mockPg('invoices').where({ id }).first();
+    expect(invoice.payer_id).toBeNull();
+    expect(invoice.scheduled_send_error).toBe('payer_billed:123');
+    expect(Number(invoice.total)).toBe(100);
+    expect(invoice.line_items.some((line) => line.category === 'deposit_credit')).toBe(false);
+    expect(Number((await mockPg('estimate_deposits').where({ estimate_id: f.estimateId }).first()).credited_amount)).toBe(0);
+    await expect(assertInvoiceDepositSettlementReady(mockPg, invoice, { lock: false })).resolves.toBeUndefined();
+  });
 });

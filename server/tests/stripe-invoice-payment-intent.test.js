@@ -881,6 +881,23 @@ describe('StripeService.finalizeInvoicePayment stale surcharge clear', () => {
     else process.env.JWT_SECRET = originalJwtSecret;
   });
 
+  test('preserves a locked deposit hold without updating or confirming Stripe', async () => {
+    const hold = Object.assign(new Error('Deposit reconciliation required'), {
+      code: 'DEPOSIT_RECONCILIATION_REQUIRED', statusCode: 409,
+    });
+    jest.doMock('../services/estimate-deposits', () => ({
+      assertInvoiceDepositSettlementReady: jest.fn().mockRejectedValue(hold),
+    }));
+    try {
+      const StripeService = require('../services/stripe');
+      await expect(StripeService.finalizeInvoicePayment(invoice.id, quoteTokenFor())).rejects.toBe(hold);
+      expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
+      expect(stripeClient.paymentIntents.confirm).not.toHaveBeenCalled();
+    } finally {
+      jest.dontMock('../services/estimate-deposits');
+    }
+  });
+
   test('no-fee finalize clears amount_details unconditionally with the unset form (no probe — TOCTOU-proof)', async () => {
     const StripeService = require('../services/stripe');
     const result = await StripeService.finalizeInvoicePayment(invoice.id, quoteTokenFor());

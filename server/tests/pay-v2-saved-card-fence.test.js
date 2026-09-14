@@ -90,6 +90,28 @@ describe('POST /api/pay/:token/setup saved-card reconciliation fence', () => {
   });
 
   test.each([
+    ['setup', {}, 'createInvoicePaymentIntent'],
+    ['update-amount', { paymentIntentId: 'pi-old', methodCategory: 'card' }, 'updateInvoicePaymentIntentMethod'],
+    ['finalize', { quoteToken: 'quote-old' }, 'finalizeInvoicePayment'],
+  ])('preserves a /%s deposit hold discovered after route preflight', async (route, body, method) => {
+    StripeService.assertNoInvoiceChargeReconciliationPending.mockResolvedValue(undefined);
+    StripeService[method].mockRejectedValueOnce(Object.assign(
+      new Error('A received deposit is awaiting invoice reconciliation'),
+      { code: 'DEPOSIT_RECONCILIATION_REQUIRED', statusCode: 409 },
+    ));
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/pay/public-token-0123456789/${route}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        error: 'A received deposit is awaiting invoice reconciliation', reconciliationRequired: true,
+      });
+    });
+    expect(StripeService[method]).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([
     ['active claim', 'STRIPE_CHARGE_IN_PROGRESS', false],
     ['ambiguous outcome', 'STRIPE_AMBIGUOUS_OUTCOME', true],
   ])('does not mint a second PaymentIntent during an %s', async (_label, code, reconciliationRequired) => {

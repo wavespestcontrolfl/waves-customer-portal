@@ -4990,6 +4990,7 @@ const StripeService = {
         err.savedCardPending = true;
         throw err;
       }
+      if (err.code === 'DEPOSIT_RECONCILIATION_REQUIRED') throw err;
       logger.error(`[stripe] Finalize failed for PI ${invoice.stripe_payment_intent_id}: ${err.message}`);
       throw new Error(`Failed to finalize payment: ${err.message}`);
     }

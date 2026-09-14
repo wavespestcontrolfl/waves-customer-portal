@@ -14,6 +14,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const StripeService = require('./stripe');
+const { invoiceWithdrawnFromCustomer } = require('./invoice-helpers');
 const { DEPOSIT } = require('./pricing-engine/constants');
 // Surcharge revert (owner ruling 2026-07-13): a deposit PI can now capture
 // face value + card surcharge (credit funding, quoted at confirm). The
@@ -1196,7 +1197,9 @@ async function reconcileReceivedDepositToInvoice(estimateId) {
       }
       const sourceId = await invoiceDepositEstimateId(invoice, trx);
       if (String(sourceId) !== String(estimateId)) return { state: 'skip' };
-      if (invoice.payer_id) return { state: 'payer', invoiceId: invoice.id };
+      if ([invoice.payer_id, invoiceWithdrawnFromCustomer(invoice)].some(Boolean)) {
+        return { state: 'payer', invoiceId: invoice.id };
+      }
       const scheduledServiceId = invoice.scheduled_service_id
         || (invoice.service_record_id
           ? (await trx('service_records').where({ id: invoice.service_record_id }).first('scheduled_service_id'))?.scheduled_service_id
@@ -1650,7 +1653,8 @@ async function invoiceDepositEstimateId(invoice, trx) {
 // transaction open through their PI decision. A committed but unapplied
 // receipt must never leave the old full balance collectible.
 async function assertInvoiceDepositSettlementReady(trx, invoice, { lock = true } = {}) {
-  if (invoice.payer_id || ['paid', 'prepaid'].includes(invoice.status)
+  if (invoice.payer_id || invoiceWithdrawnFromCustomer(invoice)
+    || ['paid', 'prepaid'].includes(invoice.status)
     || Number(invoice.total) <= 0) return;
   const estimateId = await invoiceDepositEstimateId(invoice, trx);
   if (!estimateId) return;
