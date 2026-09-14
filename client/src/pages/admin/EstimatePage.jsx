@@ -15,6 +15,7 @@ import {
   applyServerTermiteRentalPricingConfig,
   applyServerTermiteMonitoringPricingConfig,
   applyServerTermiteInstallPricingConfig,
+  applyServerTermiteAnnualPlanPricingConfig,
   applyServerRodentBaitBracketsPricingConfig,
   applyServerRodentSetupFeePricingConfig,
   applyServerRodentWaveguardPricingConfig,
@@ -1390,6 +1391,9 @@ function EstimateToolView() {
   // failed server sync (effective absent) must block the quote rather than
   // price and stamp it on stale module state (codex #4313 r3 P1).
   const termiteConfigOkRef = useRef(false);
+  // A failed/404 annual-plan lookup cannot prove the gate is off. Only an
+  // affirmative row response can authorize a fallback annual request.
+  const termiteAnnualConfigKnownRef = useRef(false);
   const refreshPricingConfig = useCallback(() => {
     const run = (async () => {
       const fetchConfigRow = async (key) => {
@@ -1420,13 +1424,14 @@ function EstimateToolView() {
           clearTimeout(timer);
         }
       };
-      const [lawnRow, pestRow, bondRow, rentalRow, monitoringRow, installRow, rodentBracketsRow, rodentSetupRow, rodentWaveguardRow] = await Promise.all([
+      const [lawnRow, pestRow, bondRow, rentalRow, monitoringRow, installRow, annualPlanRow, rodentBracketsRow, rodentSetupRow, rodentWaveguardRow] = await Promise.all([
         fetchConfigRow("lawn_pricing_v2"),
         fetchConfigRow("pest_base"),
         fetchConfigRow("termite_bond"),
         fetchConfigRow("termite_rental"),
         fetchConfigRow("termite_monitoring"),
         fetchConfigRow("termite_install"),
+        fetchConfigRow("termite_annual_plan"),
         fetchConfigRow("rodent_bait_brackets"),
         fetchConfigRow("rodent_setup_fee"),
         fetchConfigRow("rodent_waveguard"),
@@ -1452,6 +1457,15 @@ function EstimateToolView() {
       // Same not-part-of-readiness posture as the rows above.
       if (installRow.ok) applyServerTermiteInstallPricingConfig(installRow.data, installRow.effective);
       termiteConfigOkRef.current = installRow.ok && installRow.effective != null;
+      // Annual protection plan (ruling A-1 = P1): the row's featureAvailable
+      // is the server's gate word — while GATE_TERMITE_ANNUAL_PLAN is off the
+      // fallback ignores a plan request exactly as the engine does. Not part
+      // of readiness (new key).
+      // Applied on EVERY refresh, failure included: a timed-out or errored
+      // lookup resets the plan to unavailable. Such a response is UNKNOWN,
+      // not proof that the server gate is off; annual requests block below.
+      termiteAnnualConfigKnownRef.current = annualPlanRow.ok && annualPlanRow.data != null;
+      applyServerTermiteAnnualPlanPricingConfig(annualPlanRow.ok ? annualPlanRow.data : null, annualPlanRow.ok && annualPlanRow.featureAvailable === true);
       // Rodent bait ladder + setup fee: live-rates posture, not part of the
       // readiness return (new rows — codex #3591 r10 P1). A missing row
       // leaves the in-code default in place.
@@ -2149,6 +2163,9 @@ function EstimateToolView() {
           thatchDepthInches: form.thatchDepthInches,
           thatchMeasurementSource: form.thatchMeasurementSource || "manual",
           termiteBaitSystem: form.termiteBaitSystem || "advance",
+          // Keep the canonical request and fallback preview on the same
+          // program if an annual selection is present on a saved form.
+          ...(form.termitePlan ? { termitePlan: form.termitePlan } : {}),
           termiteMonitoringTier: form.termiteMonitoringTier || "basic",
           termiteBondTerm: form.termiteBondTerm || "none",
           termiteBaitComplexity: form.termiteBaitComplexity || "",
@@ -2397,6 +2414,11 @@ function EstimateToolView() {
     }
     if (form.svcTermiteBait && !termiteConfigOkRef.current) {
       alert("Live termite station pricing (catalog-linked station cost) could not be loaded — retry in a moment. (Termite quotes are blocked rather than priced on a possibly-stale station cost.)");
+      return;
+    }
+    if (form.svcTermiteBait && String(form.termitePlan || '').toLowerCase() === 'annual_protection'
+      && !termiteAnnualConfigKnownRef.current) {
+      alert("Annual termite plan availability could not be verified — retry in a moment. (The quote is blocked rather than priced as quarterly on an unknown gate state.)");
       return;
     }
     // EVERY quote for a MATCHED account waits for the canonical
@@ -6167,7 +6189,7 @@ function EstimateToolView() {
                             >
                               {" "}
                               <span>
-                                {`Termite bait install (${termiteBaitSystemLabel(
+                                {R.tmBait?.plan === 'annual_protection' ? 'Station Setup' : `Termite bait install (${termiteBaitSystemLabel(
                                   R.tmBait?.selectedSystem ||
                                     R.tmBait?.system ||
                                     form.termiteBaitSystem,

@@ -579,7 +579,11 @@ const TERMITE_INSTALL_DEFAULTS = Object.freeze({
 });
 let TERMITE_INSTALL = { ...TERMITE_INSTALL_DEFAULTS };
 const positiveNumber = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : null);
-const nonNegativeNumber = (v) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : null);
+// Match the server bridge's missing-value semantics. Number(null) and
+// Number('') are both zero, but a missing admin knob restores its default;
+// only an explicit numeric zero disables a non-negative term.
+const nonNegativeNumber = (v) => (v !== null && v !== undefined && v !== ''
+  && Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : null);
 // One row per knob: the engine-effective key first, then the row aliases the
 // server bridge reads, then the in-code default (table-driven so the applier
 // carries no per-key branching — codex #4313 r5 P2).
@@ -611,6 +615,46 @@ export function applyServerTermiteInstallPricingConfig(config, effective = confi
   next.cartridgeCostSource = eff?.cartridge_cost_source === 'catalog' ? 'catalog' : 'config';
   TERMITE_INSTALL = next;
   return { ...TERMITE_INSTALL };
+}
+
+// Annual protection plan (ruling A-1 = P1; GATE_TERMITE_ANNUAL_PLAN) —
+// DB-tunable via pricing_config.termite_annual_plan, same live-rates posture
+// as the appliers above. Mirrors the server: setup = stations × perStation
+// (one-time, not tier-discounted); annual = base + step × max(0,
+// ceil((stations − floor) / bracket)). The row's featureAvailable (the
+// server's gate word) decides whether a plan request prices at all.
+const TERMITE_ANNUAL_PLAN_DEFAULTS = Object.freeze({ setupPerStation: 30, annualBase: 249, annualStep: 50, bracketStations: 5, bracketFloor: 10, visitsPerYear: 1, coverageMonths: 12, label: 'Subterranean Termite Protection', available: false });
+let TERMITE_ANNUAL_PLAN = { ...TERMITE_ANNUAL_PLAN_DEFAULTS };
+
+// Every alias the server bridge accepts (the save path normalizes to
+// snake_case, but a row written another way must still mirror).
+// Mirror TERMITE.annualPlanBounds: invalid persisted values fall back,
+// never round into a different quote than the authoritative resolver.
+const TERMITE_ANNUAL_PLAN_KNOBS = [
+  { key: 'setupPerStation', aliases: ['setup_per_station', 'setupPerStation'], min: 1, max: 200 },
+  { key: 'annualBase', aliases: ['annual_base', 'annualBase'], min: 1, max: 2000 },
+  { key: 'annualStep', aliases: ['annual_step', 'annualStep'], min: 0, max: 500 },
+  { key: 'bracketStations', aliases: ['bracket_stations', 'bracketStations'], min: 1, max: 50 },
+  { key: 'bracketFloor', aliases: ['bracket_floor', 'bracketFloor'], min: 0, max: 100 },
+];
+export function applyServerTermiteAnnualPlanPricingConfig(config, featureAvailable = false) {
+  const next = { ...TERMITE_ANNUAL_PLAN_DEFAULTS, available: featureAvailable === true };
+  for (const knob of TERMITE_ANNUAL_PLAN_KNOBS) {
+    const parse = (raw) => {
+      const n = nonNegativeNumber(raw);
+      return Number.isInteger(n) && n >= knob.min && n <= knob.max ? n : null;
+    };
+    const v = firstParsed(parse, config && typeof config === 'object' ? config : null, knob.aliases);
+    next[knob.key] = v ?? TERMITE_ANNUAL_PLAN_DEFAULTS[knob.key];
+  }
+  TERMITE_ANNUAL_PLAN = next;
+  return { ...TERMITE_ANNUAL_PLAN };
+}
+
+function termiteAnnualPlanFee(stations) {
+  const p = TERMITE_ANNUAL_PLAN;
+  const brackets = Math.max(0, Math.ceil((Math.max(1, Number(stations) || 0) - p.bracketFloor) / p.bracketStations));
+  return Math.round(p.annualBase + brackets * p.annualStep);
 }
 
 // Station-check brackets (owner 2026-07-28) — DB-tunable via
@@ -1820,6 +1864,7 @@ export function calculateEstimate(inputs) {
     termiteMonitoringTier,
     termiteBondTerm,
     termiteOwnership,
+    termitePlan,
     trenchingPerimeterLF: _trenchingPerimeterLF,
     trenchingConcreteLF: _trenchingConcreteLF,
     trenchingDirtLF: _trenchingDirtLF,
@@ -2726,7 +2771,12 @@ export function calculateEstimate(inputs) {
       // 10 ft, Trelona 15 ft — so each system's install prices off ITS OWN
       // station count. Menu is Trelona-only; Advance stays computable for
       // replaying old estimates.
-      const tmSystem = termiteBaitSystem || 'trelona';
+      // Annual protection plan (ruling A-1 = P1) — only when the server's
+      // gate says the engine will honor it; otherwise the request is ignored
+      // exactly as the server ignores it (today's quarterly program). The
+      // plan is Trelona-only, so it overrides a legacy Advance request.
+      const onAnnualPlan = TERMITE_ANNUAL_PLAN.available && String(termitePlan || '').toLowerCase() === 'annual_protection';
+      const tmSystem = onAnnualPlan ? 'trelona' : (termiteBaitSystem || 'trelona');
       // Install basis from the live server config + catalog link
       // (applyServerTermiteInstallPricingConfig), never a baked literal —
       // this preview is a CLIENT_FALLBACK save candidate and must price and
@@ -2740,7 +2790,9 @@ export function calculateEstimate(inputs) {
       // Bracketed by the selected system's station count; the retired
       // Basic/Premier tier input no longer changes price (bmo/pmo kept for
       // legacy readers, both stamped with the bracket monthly).
-      const monMonthly = termiteMonitoringMonthly(sta);
+      const setupFee = onAnnualPlan ? Math.round(sta * TERMITE_ANNUAL_PLAN.setupPerStation) : null;
+      const annualFee = onAnnualPlan ? termiteAnnualPlanFee(sta) : null;
+      const monMonthly = onAnnualPlan ? Math.round((annualFee / 12) * 100) / 100 : termiteMonitoringMonthly(sta);
       const bmo = monMonthly;
       const pmo = monMonthly;
       R.tmBait = {
@@ -2771,7 +2823,13 @@ export function calculateEstimate(inputs) {
           misc: TI.misc,
           installMultiplier: TI.multiplier,
           minStations: TI.minStations,
+          ...(onAnnualPlan ? { plan: 'annual_protection', setupPerStation: TERMITE_ANNUAL_PLAN.setupPerStation, annualBase: TERMITE_ANNUAL_PLAN.annualBase, annualStep: TERMITE_ANNUAL_PLAN.annualStep, bracketStations: TERMITE_ANNUAL_PLAN.bracketStations, bracketFloor: TERMITE_ANNUAL_PLAN.bracketFloor, visitsPerYear: TERMITE_ANNUAL_PLAN.visitsPerYear, coverageMonths: TERMITE_ANNUAL_PLAN.coverageMonths, label: TERMITE_ANNUAL_PLAN.label } : {}),
         },
+        plan: onAnnualPlan ? 'annual_protection' : 'quarterly',
+        ...(onAnnualPlan ? { setupFee, setupPerStation: TERMITE_ANNUAL_PLAN.setupPerStation, annualFee, visitsPerYear: TERMITE_ANNUAL_PLAN.visitsPerYear, stationsOwnedBy: 'waves',
+          planLabel: TERMITE_ANNUAL_PLAN.label,
+          planTerms: { coverageMonths: TERMITE_ANNUAL_PLAN.coverageMonths, visitsPerYear: TERMITE_ANNUAL_PLAN.visitsPerYear, retreatOnly: true, subterraneanOnly: true, renewal: 'annual' },
+        } : {}),
         materialCostSource: {
           station: tmSystem === 'advance' ? 'config' : TI.trelonaStationCostSource,
           cartridge: tmSystem === 'trelona' ? TI.cartridgeCostSource : 'none',
@@ -2787,9 +2845,10 @@ export function calculateEstimate(inputs) {
         mo: monMonthly,
         // Quarterly station checks, billed per application (owner
         // 2026-07-20) — mirrors server priceTermiteBait visitsPerYear/perApp
-        // (perApp = monthly × 3, exact by construction).
-        perTreatment: Math.round(monMonthly * 3 * 100) / 100,
-        visitsPerYear: 4,
+        // (perApp = monthly × 3, exact by construction). Annual plan: one
+        // visit, perApp = the annual fee.
+        perTreatment: onAnnualPlan ? annualFee : Math.round(monMonthly * 3 * 100) / 100,
+        visitsPerYear: onAnnualPlan ? TERMITE_ANNUAL_PLAN.visitsPerYear : 4,
       });
       // Bond rider (owner 2026-07-20) — mirrors server priceTermiteBond +
       // the engine's quote-time bondOptions snapshot. Fixed quarterly rate
@@ -2797,8 +2856,9 @@ export function calculateEstimate(inputs) {
       // bundle-discountable. Rates come from the live DB-synced table
       // (applyServerTermiteBondPricingConfig), never a baked literal.
       const TERMITE_BOND_OPTIONS = termiteBondOptionsTable();
-      R.tmBait.bondOptions = TERMITE_BOND_OPTIONS;
-      const tmBond = TERMITE_BOND_OPTIONS.find((o) => o.key === termiteBondTerm) || null;
+      // The bond rider and station rental are retired on the annual plan (plan §A2).
+      if (!onAnnualPlan) R.tmBait.bondOptions = TERMITE_BOND_OPTIONS;
+      const tmBond = onAnnualPlan ? null : (TERMITE_BOND_OPTIONS.find((o) => o.key === termiteBondTerm) || null);
       R.tmBait.selectedBondTerm = tmBond ? tmBond.key : null;
       if (tmBond) {
         R.tmBond = tmBond;
@@ -2822,9 +2882,9 @@ export function calculateEstimate(inputs) {
       // R.tmBait.rented) and recovers it as its own per-application line.
       // NOT tier-counted and NOT bundle-discountable: this is hardware cost
       // recovery on stations Waves still owns.
-      const rentsStations = String(termiteOwnership || '').toLowerCase() === 'rent';
-      R.tmBait.ownership = rentsStations ? 'rent' : 'own';
-      R.tmBait.stationsOwnedBy = rentsStations ? 'waves' : 'customer';
+      const rentsStations = !onAnnualPlan && String(termiteOwnership || '').toLowerCase() === 'rent';
+      R.tmBait.ownership = onAnnualPlan ? 'plan' : (rentsStations ? 'rent' : 'own');
+      R.tmBait.stationsOwnedBy = onAnnualPlan || rentsStations ? 'waves' : 'customer';
       if (rentsStations) {
         const rental = termiteStationRentalLine(tmSystem === 'advance' ? ai : ti);
         if (rental) {
@@ -3594,9 +3654,14 @@ export function calculateEstimate(inputs) {
     // Bracketed station-check monthly off the priced system's station count
     // (owner 2026-07-28) — the flat tier literals are retired.
     const termiteMonthly = R.tmBait.monMonthly ?? termiteMonitoringMonthly(R.tmBait.sta);
+    // The annual plan's fee is the exact annual figure ($299, not the
+    // rounded $24.92 × 12) — carry it into the aggregates as-is.
+    const termiteAnnual = R.tmBait.plan === 'annual_protection' && Number(R.tmBait.annualFee) > 0
+      ? Number(R.tmBait.annualFee)
+      : termiteMonthly * 12;
     ac++;
-    ra += termiteMonthly * 12;
-    lineItems.push({ name: 'Termite Bait', service: 'termite_bait', ann: termiteMonthly * 12, discountable: true });
+    ra += termiteAnnual;
+    lineItems.push({ name: 'Termite Bait', service: 'termite_bait', ann: termiteAnnual, discountable: true });
     // Bond rider: in the recurring totals, no tier count (no ac++), no
     // bundle % discount — mirrors server excludedFromPercentDiscount.
     if (R.tmBond) {
@@ -3905,15 +3970,26 @@ export function calculateEstimate(inputs) {
   // Rented stations are never billed as an install — the cost rides the
   // recurring termite_station_rental line instead (mirrors the server, where
   // installation.price is zeroed while retailValue keeps the hardware value).
-  let tmInstall = R.tmBait && !R.tmBait.rented
-    ? (((R.tmBait.system || 'trelona') === 'advance' ? R.tmBait.ai : R.tmBait.ti) || 0)
-    : 0;
+  // On the annual plan the one-time line is the station SETUP fee (ruling
+  // A-1 = P1), never the install formula.
+  let tmInstall = R.tmBait && R.tmBait.plan === 'annual_protection'
+    ? (Number(R.tmBait.setupFee) || 0)
+    : (R.tmBait && !R.tmBait.rented
+      ? (((R.tmBait.system || 'trelona') === 'advance' ? R.tmBait.ai : R.tmBait.ti) || 0)
+      : 0);
   ot = Math.round(ot * 100) / 100;
 
   // Rodent bait rides INSIDE ad since 2026-08-29 (WaveGuard member) — the
   // old rba add-on is gone.
   const palmAnn = R.injection ? R.injection.ann : 0;
   const palmMo = R.injection ? R.injection.mo : 0;
+  // This is the same setup identity emitted by the authoritative mapper.
+  // tmInstall is already added to totalOT; do not add it to ot a second time.
+  const oneTimeItems = R.tmBait?.plan === 'annual_protection' && tmInstall > 0
+    ? [...otItems, { service: 'termite_bait_installation', name: 'Station Setup', kind: 'setup',
+      price: tmInstall, tierDiscountable: false,
+      detail: `${R.tmBait.sta} stations · $${R.tmBait.setupPerStation} per station · Waves-owned`,
+    }] : otItems;
   const totalOT = ot + tmInstall;
   const y1 = Math.round((ad + palmAnn + totalOT) * 100) / 100;
   const y2 = Math.round((ad + palmAnn + (R.trench && !R.trench.quoteRequired && !R.trench.requiresMeasurement ? 325 : 0)) * 100) / 100;
@@ -3972,7 +4048,7 @@ export function calculateEstimate(inputs) {
       marginWarnings,
     },
     oneTime: {
-      items: otItems,
+      items: oneTimeItems,
       specItems: specItems
         .filter(s => !s.onProg && (s.quoteRequired || s.price > 0))
         .map(s => ({
