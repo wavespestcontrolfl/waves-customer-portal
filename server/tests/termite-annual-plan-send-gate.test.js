@@ -68,7 +68,7 @@ jest.mock('../config/feature-gates', () => {
 const adminEstimatesRouter = require('../routes/admin-estimates');
 
 const { selectedTermiteAnnualPlanRows } = require('../services/estimate-termite-program-rows');
-const { assertEstimateSendable, annualPlanOfferFingerprint } = adminEstimatesRouter._internals;
+const { assertEstimateSendable, annualPlanOfferFingerprint, publishedSiblingDeliveryPatch } = adminEstimatesRouter._internals;
 
 const PLAN_LINE = { service: 'termite_bait', plan: 'annual_protection', stations: 15 };
 const QUARTERLY_LINE = { service: 'termite_bait', plan: 'quarterly', stations: 15 };
@@ -156,6 +156,22 @@ describe('assertEstimateSendable — GATE_TERMITE_ANNUAL_PLAN at delivery', () =
     expect(caught(delivered)).toBeNull();
   });
 
+  test('an annual group sibling gets its own handoff witness and can resend through the group link', () => {
+    const sibling = planDraft({ id: 'sibling', estimate_group_id: 'group-1' });
+    const deliveredAt = '2026-09-12T00:00:00.000Z';
+    const patch = publishedSiblingDeliveryPatch(sibling, {
+      firstDeliveredAt: '2026-09-11T00:00:00.000Z',
+      annualPlanOfferFingerprint: 'anchor-offer',
+    }, deliveredAt);
+    expect(patch.deliveryState.firstDeliveredAt).toBe(deliveredAt);
+    expect(patch.deliveryState.annualPlanOfferFingerprint).not.toBe('anchor-offer');
+    const published = { ...sibling, status: 'sent',
+      estimate_data: { ...sibling.estimate_data, ...patch, groupPublishedByEstimateId: 'anchor' } };
+    expect(caught(published)).toBeNull();
+    published.notes = 'Revised terms';
+    expect(caught(published)?.code).toBe('TERMITE_ANNUAL_PLAN_DISABLED');
+  });
+
   test('gate OFF: an earlier quarterly handoff does not authorize a revised annual quote', () => {
     const revised = planDraft({
       status: 'sent', sent_at: new Date('2026-09-12T00:00:00Z'),
@@ -178,6 +194,21 @@ describe('assertEstimateSendable — GATE_TERMITE_ANNUAL_PLAN at delivery', () =
     delivered.estimate_data.result.lineItems[0] = PLAN_LINE;
     delivered.customer_id = 'customer-2';
     expect(caught(delivered)?.code).toBe('TERMITE_ANNUAL_PLAN_DISABLED');
+  });
+
+  test('gate OFF: changed contact, notes, option or billing mode cannot reuse the prior handoff', () => {
+    const original = planDraft({ status: 'sent' });
+    const fingerprint = annualPlanOfferFingerprint(original);
+    for (const [field, value] of [
+      ['customer_phone', '9415550101'], ['customer_email', 'other@example.test'],
+      ['customer_name', 'Other Customer'], ['notes', 'Different coverage terms'],
+      ['show_one_time_option', true], ['bill_by_invoice', true],
+    ]) {
+      const changed = { ...original, [field]: value,
+        estimate_data: { ...original.estimate_data,
+          deliveryState: { firstDeliveredAt: '2026-09-12T00:00:00.000Z', annualPlanOfferFingerprint: fingerprint } } };
+      expect(caught(changed)?.code).toBe('TERMITE_ANNUAL_PLAN_DISABLED');
+    }
   });
 
   test('gate OFF: a suppressed-only SMS sent_at is not publication and cannot bypass the kill switch', () => {

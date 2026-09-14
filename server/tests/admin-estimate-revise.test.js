@@ -357,6 +357,18 @@ describe('reviseAdminEstimate', () => {
     expect(estimate.status).toBe('sent');
   });
 
+  test('retains the locked row\'s annual delivery witness across an ordinary revision', async () => {
+    const priorData = JSON.parse(sentEstimate.estimate_data);
+    const earlier = { firstDeliveredAt: '2026-07-09T11:00:00.000Z', lastDeliveredAt: '2026-07-09T11:00:00.000Z', annualPlanOfferFingerprint: 'earlier' };
+    const latest = { ...earlier, lastDeliveredAt: '2026-07-09T12:00:00.000Z', annualPlanOfferFingerprint: 'delivered-offer' };
+    const preRead = { ...sentEstimate, estimate_data: JSON.stringify({ ...priorData, deliveryState: earlier }) };
+    const locked = { ...sentEstimate, estimate_data: JSON.stringify({ ...priorData, deliveryState: latest }) };
+    const { database, updates } = makeReviseDatabase({ estimate: preRead, lockedEstimate: locked });
+    await reviseAdminEstimate({ database, estimateId: 'est-1', body: reviseBody,
+      technicianId: 'tech-2', recompute: noRecompute, now: fixedNow });
+    expect(JSON.parse(updates[0].estimate_data).deliveryState).toEqual(latest);
+  });
+
   test('a clarify re-price marker stamped between the pre-read and the row lock survives the rewrite; the revision reports only the attempt it observed before recomputing', async () => {
     const withMarker = (row, attempt) => {
       const data = typeof row.estimate_data === 'string' ? JSON.parse(row.estimate_data) : { ...(row.estimate_data || {}) };

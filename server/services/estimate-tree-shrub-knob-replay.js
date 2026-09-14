@@ -204,6 +204,8 @@ function storedTermiteResult(estData = {}) {
     // a program stamp alone: they predate annual-plan requests, while every
     // priced quote created by this lane persists quarterly or annual here.
     plan: ['annual_protection', 'quarterly'].includes(storedPlan) ? storedPlan : null,
+    planTerms: firstDefined(m.planTerms, r.planTerms) || null,
+    planLabel: firstDefined(m.planLabel, r.planLabel) || null,
     system,
     stations: firstDefined(m.sta, r.stations),
     install: firstDefined(mappedInstall, install.retailValue, install.price),
@@ -230,7 +232,12 @@ function termiteKnobSignalForReplay(estData = {}) {
   if (Number.isFinite(stampedCost) && stampedCost > 0) {
     const knob = (key) => (Number.isFinite(Number(stamp[key])) ? Number(stamp[key]) : PRE_STAMP_TERMITE_INSTALL_KNOBS[key]);
     const planKnobs = stored.plan === 'annual_protection'
-      ? { plan: 'annual_protection', setupPerStation: knob('setupPerStation'), annualBase: knob('annualBase'), annualStep: knob('annualStep'), bracketStations: knob('bracketStations'), bracketFloor: knob('bracketFloor') }
+      ? {
+        plan: 'annual_protection', setupPerStation: knob('setupPerStation'), annualBase: knob('annualBase'),
+        annualStep: knob('annualStep'), bracketStations: knob('bracketStations'), bracketFloor: knob('bracketFloor'),
+        coverageMonths: stored.planTerms?.coverageMonths, visitsPerYear: stored.planTerms?.visitsPerYear,
+        label: stored.planLabel,
+      }
       : (stored.plan === 'quarterly' ? { plan: 'quarterly' } : {});
     return {
       system: String(stamp.system || stored.system).toLowerCase(),

@@ -4759,9 +4759,12 @@ function resolveTermiteAnnualPlanBasis(knobs) {
   const bounds = TERMITE.annualPlanBounds || {};
   const snap = knobs && typeof knobs === 'object' && knobs.plan === 'annual_protection' ? knobs : null;
   const basis = {
-    visitsPerYear: Number(live.visitsPerYear) > 0 ? Number(live.visitsPerYear) : 1,
-    coverageMonths: Number(live.coverageMonths) > 0 ? Number(live.coverageMonths) : 12,
-    label: live.label || 'Subterranean Termite Protection',
+    visitsPerYear: Number.isInteger(Number(snap?.visitsPerYear)) && Number(snap.visitsPerYear) >= 1 && Number(snap.visitsPerYear) <= 24
+      ? Number(snap.visitsPerYear) : (Number(live.visitsPerYear) > 0 ? Number(live.visitsPerYear) : 1),
+    coverageMonths: Number.isInteger(Number(snap?.coverageMonths)) && Number(snap.coverageMonths) >= 1 && Number(snap.coverageMonths) <= 120
+      ? Number(snap.coverageMonths) : (Number(live.coverageMonths) > 0 ? Number(live.coverageMonths) : 12),
+    label: typeof snap?.label === 'string' && snap.label.trim() && snap.label.length <= 120
+      ? snap.label : (live.label || 'Subterranean Termite Protection'),
   };
   for (const [key, fallback] of TERMITE_ANNUAL_PLAN_KNOBS) {
     const { min = 0, max = Infinity, integer = false } = bounds[key] || {};
