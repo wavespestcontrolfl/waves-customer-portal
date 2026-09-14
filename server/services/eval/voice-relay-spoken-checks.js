@@ -2117,7 +2117,7 @@ function pet_precautions_confirmed(value, record, { spoken }) {
   const speechEvents = events.some((event) => event.kind === 'agent')
     ? events : spoken.map((text) => ({ kind: 'agent', text }));
   let callerAudienceText = '';
-  for (const event of speechEvents) {
+  for (const [eventIndex, event] of speechEvents.entries()) {
     if (event.kind === 'caller') {
       callerAudienceText = petCallerAudienceText(event.text || '', callerAudienceText);
       continue;
@@ -2134,7 +2134,9 @@ function pet_precautions_confirmed(value, record, { spoken }) {
       // a condition after a temporal adjunct still makes it uncertain. Keep
       // the original suffix so a clause boundary cannot hide a withdrawal.
       const claim = claimContext(text, match.index, matchEnd);
-      const suffix = text.slice(matchEnd);
+      const laterAgentSpeech = speechEvents.slice(eventIndex + 1)
+        .filter((later) => later.kind === 'agent').map((later) => later.text).join(' ');
+      const suffix = `${text.slice(matchEnd)}. ${laterAgentSpeech}`;
       const guidanceScope = `${match[0]} ${suffix.split(/[.!?;]/)[0]}`;
       const negationScope = claim.replace(PET_GUIDANCE_NEGATION_EXCEPTION_RE, '');
       if ((!PET_TRAILING_CONDITION_RE.test(suffix) || PET_INDEPENDENT_CONDITIONAL_ACTION_RE.test(suffix)) && !PET_GUIDANCE_ALTERNATIVE_RE.test(suffix) && !safetyAudienceExcluded('', suffix.split(/[.!?;]/)[0]) && petGuidanceCoversCaller(guidanceScope, callerAudienceText) && (!PET_SPECULATIVE_GUIDANCE_RE.test(claim) || PET_CALLER_SHOULD_ASK_RE.test(claim)) && !clauseIsNegated(negationScope) && !clauseIsEpistemicallyHedged(claim)) {

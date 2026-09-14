@@ -96,4 +96,14 @@ describe('voice relay eval — safety checks', () => {
     expect(run('pet_precautions_confirmed', true, speech).status).toBe(status);
     expect(run('pet_precautions_confirmed', true, speech.join(' ')).status).toBe(status);
   });
+
+  test('a later agent turn can withdraw a previously promised review', () => {
+    const { runCheck } = require('../services/eval/voice-relay-replay')._internals;
+    const order = [
+      { kind: 'agent', text: 'The technician will review the precautions.' },
+      { kind: 'caller', text: 'Are you sure?' },
+      { kind: 'agent', text: 'They will not review them.' },
+    ];
+    expect(runCheck(exp('pet_precautions_confirmed', true, 'critical'), record({ order })).status).toBe('fail');
+  });
 });
