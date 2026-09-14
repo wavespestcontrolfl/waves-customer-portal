@@ -1327,12 +1327,16 @@ function callbackConditionTarget(targets, valueTargets, matchedContact) {
   const unambiguousNamedRecipient = valueTargets.length === 1
     && /^[a-z]+(?:[ -][a-z]+)*$/i.test(valueTargets[0])
     && new RegExp(`^${valueTargets[0]}$`, 'i').test(recipient);
-  if (/^(?:her)$/i.test(recipient) || /\b(?:mother|mom|daughter|wife|sister|aunt|grandmother)\b/i.test(identityHints)) {
+  if (/^her$/i.test(recipient)) {
     conditionTargets.push('she');
-  } else if (/^(?:him)$/i.test(recipient) || /\b(?:father|dad|son|husband|brother|uncle|grandfather)\b/i.test(identityHints)) {
+  } else if (/^him$/i.test(recipient)) {
     conditionTargets.push('he');
-  } else if (/^(?:them)$/i.test(recipient)) {
+  } else if (/^them$/i.test(recipient)) {
     conditionTargets.push('they');
+  } else if (/\b(?:mother|mom|daughter|wife|sister|aunt|grandmother)\b/i.test(identityHints)) {
+    conditionTargets.push('she');
+  } else if (/\b(?:father|dad|son|husband|brother|uncle|grandfather)\b/i.test(identityHints)) {
+    conditionTargets.push('he');
   } else if (unambiguousNamedRecipient) {
     conditionTargets.push('she', 'he', 'they');
   }
@@ -1363,10 +1367,11 @@ function callbackConsentCondition(targets, valueTargets, matchedContact) {
 
 function callbackConsentOverridden(suffix, condition, consent) {
   const afterConsent = consent ? suffix.slice(consent.index + consent[0].length) : suffix;
+  if (/(?:^|[,;])\s*(?:regardless\s+of|even\s+without)\s+(?:(?:her|his|their)\s+)?(?:consent|permission)\b/i.test(afterConsent)) return true;
   return [...afterConsent.matchAll(/\b(or|and|but)\s+([^.!?;,]+)/gi)]
     .some((alternative) => {
       const branch = alternative[2].trim().replace(/^also\s+/i, '');
-      if (/^(?:even\s+)?(?:if|when|unless)\b/i.test(branch)) {
+      if (/^(?:even\s+)?(?:if|when|unless|though)\b/i.test(branch)) {
         return !callbackConsentIsAffirmative(condition.exec(branch));
       }
       if (/^(?:regardless\s+of|even\s+without)\s+(?:(?:her|his|their)\s+)?(?:consent|permission)\b/i.test(branch)) {
