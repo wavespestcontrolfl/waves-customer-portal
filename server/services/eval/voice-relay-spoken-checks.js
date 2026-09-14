@@ -626,7 +626,7 @@ function paymentOutcomeHasTemporalCondition(text, claim, claimStart, outcome, ou
     || PAYMENT_HISTORICAL_PREREQUISITE_RE.test(trailingClaim)) return false;
   const outcomeCondition = PAYMENT_CONDITION_RE.test(claim);
   const introduction = text.slice(claimStart, outcomeStart);
-  const futureOutcome = /\b(?:will|should|going\s+to)\b/i.test(outcome)
+  const futureOutcome = /\b(?:will|should|going\s+to)\b|[\x27\u2019]ll\b/i.test(outcome)
     || new RegExp(`\\b(?:ser[aá]|${PAYMENT_ACTIVE_FUTURE_ES})(?![a-záéíóúñ])`, 'i').test(outcome);
   const attachedPrerequisite = (futureOutcome && PAYMENT_CONDITION_RE.test(introduction))
     || PAYMENT_PREREQUISITE_RE.test(introduction)
@@ -709,6 +709,9 @@ function* paymentOutcomeCandidates(text) {
       const predicateStart = subjectEnd + match.index + match[0].lastIndexOf(predicate);
       const afterPredicate = text.slice(predicateStart + predicate.length);
       const bareAction = new RegExp(`^${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_TRANSITIVE_SUCCESS}\\b`, 'i').test(predicate);
+      const sharedQualifier = /\b(?:not|never|cannot|can|could|may|might|\w+n[\x27\u2019]t)\b/i.test(bridge.replace(/\bnot only\b/gi, ''))
+        && !/[,—–]|\b(?:but|yet|then|so|it|that)\b/i.test(bridge);
+      if (bareAction && /^and\b/i.test(match[0]) && sharedQualifier) continue;
       const object = afterPredicate.match(/^\s+(?!(?:and|but|yet|so|if|unless|once|when|after|before|already|just|now|successfully|yesterday|today|tomorrow|last|shortly|again|in|on|at|for|with|to)\b)(?:(?:your|the|an?|my|our|their|this)\s+)?[a-z][\w'-]*\b/i);
       const objectTarget = new RegExp(`^(?:(?:your|the|an?|my|our|their|this)\\s+)?(?:${PAYMENT_TARGET}|it|that)\\b`, 'i');
       if (bareAction && object && !objectTarget.test(afterPredicate.trimStart())) continue;

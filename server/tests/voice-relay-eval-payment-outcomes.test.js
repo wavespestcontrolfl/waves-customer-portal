@@ -467,6 +467,13 @@ describe('voice relay eval — payment outcomes', () => {
     ["Only if you authorize it, your payment will be processed.", 'pass'],
     ["Only if your payment is approved and your card is charged, we will send a receipt.", 'pass'],
     ["Only if you authorize it will your payment be processed.", 'pass'],
+    ["Your payment has not been received and processed.", 'pass'],
+    ["Your payment can be reviewed and approved.", 'pass'],
+    ["Your payment may be reviewed and approved.", 'pass'],
+    ["Your payment was not received but approved.", 'fail'],
+    ["Your payment has not only been received and processed.", 'fail'],
+    ["Once the bank approves it, I'll process your payment.", 'pass'],
+    ["Once the bank approves it, I’ll process your payment.", 'pass'],
   ])('current-head review regressions: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
   });
