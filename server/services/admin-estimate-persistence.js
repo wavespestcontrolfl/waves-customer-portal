@@ -2548,7 +2548,11 @@ function estimateReviseBlock(estimate, estimateData, now = new Date()) {
 // whether an unlink may invalidate the draft — dropping it on revise made
 // a later stamp-clear skip invalidation and leave the former lead's draft
 // sendable to the wrong recipient.
-const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'scheduled_service_id', 'manualSendAttempts'];
+// The real-handoff witness is server-owned and must survive an ordinary
+// wholesale revision too. The locked-row pass below overwrites any pending
+// client copy, so the latest committed delivery state wins; a changed offer
+// still fails the annual resend gate through its fingerprint mismatch.
+const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'scheduled_service_id', 'manualSendAttempts', 'deliveryState'];
 // Click-to-estimate mints (#3391 audit P0): both markers are
 // lifecycle-critical and PRIOR-WINS across a revise — the zero-comms
 // opt-out is the lane's owner-approved contract (a revise must never

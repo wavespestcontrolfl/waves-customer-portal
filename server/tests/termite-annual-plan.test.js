@@ -260,6 +260,22 @@ describe('annual plan — DB overlay and admin validation', () => {
 });
 
 describe('replay-stamp provenance (pre-push audit #4424)', () => {
+  test('an issued annual contract keeps its stored cadence, coverage and label after live terms change', () => {
+    process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
+    const inputs = HOME(2000, { services: { termite: { system: 'trelona', plan: 'annual_protection' } } });
+    const sold = termiteLine(generateEstimate(inputs));
+    expect(sold.planTerms).toMatchObject({ coverageMonths: 12, visitsPerYear: 1 });
+    const stored = { engineInputs: inputs, result: { lineItems: [sold] } };
+    const knobs = replay.termiteKnobSignalForReplay(stored);
+    expect(knobs).toMatchObject({ coverageMonths: 12, visitsPerYear: 1, label: sold.planLabel });
+    Object.assign(constants.TERMITE.annualPlan, { coverageMonths: 24, visitsPerYear: 2, label: 'Changed plan' });
+    delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const replayed = termiteLine(generateEstimate({ ...inputs, termitePricingKnobs: knobs }));
+    expect(replayed.plan).toBe('annual_protection');
+    expect(replayed.planTerms).toEqual(sold.planTerms);
+    expect(replayed.planLabel).toBe(sold.planLabel);
+    expect(replayed.annual).toBe(sold.annual);
+  });
   test('the public v2 translator never forwards a caller-supplied replay stamp — gate off prices the quarterly program', () => {
     delete process.env.GATE_TERMITE_ANNUAL_PLAN;
     const v1Input = translateV2CallToV1Input(
@@ -362,6 +378,23 @@ describe('replay-stamp provenance (pre-push audit #4424)', () => {
     } finally {
       delete process.env.GATE_TERMITE_ANNUAL_PLAN;
     }
+  });
+
+  test('a mapped termite result without a plan stamp cannot inherit stale raw annual provenance', () => {
+    const { selectedTermiteAnnualPlanRows } = require('../services/estimate-termite-program-rows');
+    process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
+    const inputs = HOME(2000, { services: { termite: { system: 'trelona', plan: 'annual_protection' } } });
+    const staleAnnual = termiteLine(generateEstimate(inputs));
+    delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const stored = {
+      engineInputs: inputs,
+      result: { results: { tmBait: { sta: 15, ti: 653, system: 'trelona' } } },
+      engineResult: { lineItems: [staleAnnual] },
+    };
+    expect(selectedTermiteAnnualPlanRows(stored)).toHaveLength(0);
+    const knobs = replay.termiteKnobSignalForReplay(stored);
+    expect(knobs?.plan).not.toBe('annual_protection');
+    expect(termiteLine(generateEstimate({ ...inputs, termitePricingKnobs: knobs })).plan).toBe('quarterly');
   });
 
   test('the admin quick-quote sandbox strips the same stamp — gate off, no annual-plan pricing', async () => {
