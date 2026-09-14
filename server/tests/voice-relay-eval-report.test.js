@@ -35,6 +35,10 @@ test.each([
   ['Talstar P and bait were applied respectively to the exterior perimeter and foundation.', 'bait', 'foundation', 'pass'],
   ['Talstar P and bait were applied respectively to the exterior perimeter and foundation.', 'talstar p', 'foundation', 'fail'],
   ['Talstar P and bait were applied respectively to the exterior perimeter and foundation.', 'bait', 'exterior perimeter', 'fail'],
+  ['Talstar P and bait were applied to the exterior perimeter and foundation, respectively.', 'talstar p', 'exterior perimeter', 'pass'],
+  ['Talstar P and bait were applied to the exterior perimeter and foundation, respectively.', 'bait', 'foundation', 'pass'],
+  ['Talstar P and bait were applied to the exterior perimeter and foundation, respectively.', 'talstar p', 'foundation', 'fail'],
+  ['Talstar P and bait were applied to the exterior perimeter and foundation, respectively.', 'bait', 'exterior perimeter', 'fail'],
 ])('respectively preserves product/location pairing: %s / %s / %s', (text, subject, location, status) => {
   expect(checks.report_readback_confirms({ subject, location }, {}, { spoken: [text] })[0]).toBe(status);
 });

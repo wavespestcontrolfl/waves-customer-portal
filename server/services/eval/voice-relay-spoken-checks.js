@@ -1412,6 +1412,12 @@ function reportLocationIsTreatmentTarget(
   affirmed, subjectAt, subjectLength, locationAt, locationLength, locationRecipient, findingVerb,
 ) {
   if (locationRecipient) return true;
+  if (subjectAt < findingVerb.index && findingVerb.index < locationAt
+      && /\b(?:applied|placed|used|treated|sprayed)\s+(?:respectively\s+)?(?:to|at|on|in)\b/i.test(
+        affirmed.slice(findingVerb.index, locationAt),
+      )
+      && /\brespectively\b/i.test(affirmed)
+      && reportRespectivelyPairsFinding(affirmed, subjectAt, locationAt, findingVerb)) return true;
   // A product list may share the following predicate and location, while a
   // location list may share the preceding predicate. Other coordinators split
   // product-location pairs and cannot lend either side to the other.
@@ -1553,12 +1559,28 @@ function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb
 
 function reportRespectivelyPairsFinding(affirmed, subjectAt, locationAt, findingVerb) {
   const respectively = /\brespectively\b/i.exec(affirmed);
-  if (!respectively || !findingVerb || subjectAt > findingVerb.index || locationAt < respectively.index) return true;
-  const locationListStart = respectively.index + respectively[0].length
-    + (/^\s*(?:to|at|on|in)\s+/i.exec(affirmed.slice(respectively.index + respectively[0].length))?.[0].length || 0);
+  if (!respectively || !findingVerb || subjectAt > findingVerb.index) return true;
+  const linkSearchStart = Math.min(respectively.index + respectively[0].length, findingVerb.index + findingVerb[0].length);
+  const locationLink = /\b(?:to|at|on|in)\b/i.exec(affirmed.slice(linkSearchStart, locationAt));
+  if (!locationLink) return false;
+  const locationListStart = linkSearchStart + locationLink.index + locationLink[0].length;
   const productOrdinal = [...affirmed.slice(0, subjectAt).matchAll(/\band\b|,/gi)].length;
   const locationOrdinal = [...affirmed.slice(locationListStart, locationAt).matchAll(/\band\b|,/gi)].length;
   return productOrdinal === locationOrdinal;
+}
+
+function reportClauseBounds(text, at) {
+  const ordinary = clauseBounds(text, at);
+  const sentenceStart = Math.max(text.lastIndexOf('.', at - 1), text.lastIndexOf('!', at - 1),
+    text.lastIndexOf('?', at - 1), text.lastIndexOf(';', at - 1)) + 1;
+  const nextStop = text.slice(at).search(/[.!?;]/);
+  const sentenceEnd = nextStop < 0 ? text.length : at + nextStop;
+  const sentence = text.slice(sentenceStart, sentenceEnd);
+  // The general clause splitter may treat "and bait were applied" as a
+  // second assertion. A respectively list needs both coordinated nouns and
+  // both locations in one frame to preserve their ordinal mapping.
+  return /\brespectively\b/i.test(sentence) && REPORT_FINDING_VERB_RE.test(sentence)
+    ? [sentenceStart, sentenceEnd] : ordinary;
 }
 
 function reportSharedLocationContinuation(text, clauseEnd, location) {
@@ -1609,7 +1631,7 @@ function report_readback_confirms(value, record, { spoken }) {
     for (const m of text.matchAll(subjectRe)) {
       // Preserve the sentence's question mark before clauseOf removes it.
       // A question about a finding does not confirm that finding.
-      const [clauseStart, clauseEnd] = clauseBounds(text, m.index);
+      const [clauseStart, clauseEnd] = reportClauseBounds(text, m.index);
       const sentencePrefix = text.slice(0, m.index).split(/[.!?;]/).pop();
       const interrogative = /^\s*(?:(?:and|but|so)\s+)?(?:was|were|is|are|has|have|had|did|do|does|can|could|would|will|should|what|where|when|why|how)\b/i.test(sentencePrefix);
       const coordinatedQuestion = new RegExp(
@@ -1620,7 +1642,7 @@ function report_readback_confirms(value, record, { spoken }) {
       const asrTagQuestion = /(?:,\s*(?:right|correct)|\b(?:wasn['’]t\s+it|isn['’]t\s+it|aren['’]t\s+they|didn['’]t\s+(?:we|they)))\s*$/i
         .test(text.slice(clauseStart, clauseEnd));
       if (text[clauseEnd] === '?' || interrogative || coordinatedQuestion || sharedLocation.unconfirmed || asrTagQuestion) continue;
-      const reportClause = clauseOf(text, m.index) + sharedLocation.text;
+      const reportClause = text.slice(clauseStart, clauseEnd) + sharedLocation.text;
       if (REPORT_TRAILING_DENIAL_RE.test(reportClause.slice(reportClause.lastIndexOf(',') + 1).trim())) continue;
       const assertion = reportAssertionOf(reportClause, m.index - clauseStart);
       const clause = assertion.text;
