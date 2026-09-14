@@ -1284,7 +1284,7 @@ const CALLBACK_RECIPIENT_CHANNEL = '(?:cell(?:ular)? phone|mobile(?: phone)?|pho
 const CALLBACK_TIMING_ADVERB = '(?:soon|shortly|immediately|promptly|right away|as soon as possible|at once)';
 const CALLBACK_TRAILING_MODIFIER = `(?:\\w+ly|again|back|now|then|too|instead|anyway|today|tomorrow|tonight|later|${CALLBACK_TIMING_ADVERB}|${WEEKDAYS}|next\\s+(?:week|${WEEKDAYS}))`;
 const CALLBACK_CONCESSION = '(?:even\\s+(?:if|though)|whether|(?:regardless|irrespective)(?:\\s+of)?)';
-const CALLBACK_TRAILING_LINK = `(?:and|or|but|so|in|at|on|by|from|before|after|if|unless|when|once|provided|because|to|about|regarding|with|for|as|${CALLBACK_CONCESSION})`;
+const CALLBACK_TRAILING_LINK = `(?:and|or|but|so|in|at|on|by|from|before|after|if|unless|when|once|provided|because|to|about|regarding|with|without|for|as|${CALLBACK_CONCESSION})`;
 // A complete person/actor phrase can end before punctuation, a clause link,
 // or an adverbial modifier. A following bare noun remains part of a possessive
 // phrase ("her landlord", "the technician's supplier") and is not accepted.
@@ -1352,14 +1352,17 @@ function no_account_holder_callback(value, record, { spoken }) {
   const wavesActor = `(?:${CALLBACK_PROMISER}|me|us)\\b(?![\\x27\\u2019]s\\b)${CALLBACK_PHRASE_END}`;
   const recipientFirst = `${recipientTargets}${CALLBACK_MODAL}\\s+${CALLBACK_ADVERB}${CALLBACK_RECIPIENT_ACTION}\\s+${wavesActor}`;
   const re = new RegExp(
-    `\\b(?:(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+${promisedContact}|${inheritedContact}|${recipientFirst}|${inheritedBareContact})`,
+    `\\b(?:(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+${promisedContact}|${inheritedContact}|${recipientFirst})`,
     'gi',
   );
   for (const text of spoken) {
     // Scan inherited actions independently: the first contact can be consent
     // gated while a later bare action still reuses its subject and modal.
-    const matches = [...text.matchAll(re), ...text.matchAll(new RegExp(inheritedBareContact, 'gi'))];
-    for (const match of matches) {
+    const matches = [
+      ...[...text.matchAll(re)].map((match) => ({ match, bare: false })),
+      ...[...text.matchAll(new RegExp(inheritedBareContact, 'gi'))].map((match) => ({ match, bare: true })),
+    ];
+    for (const { match, bare } of matches) {
       const matchEnd = match.index + match[0].length;
       const [clauseStart] = clauseBounds(text, match.index);
       const [, clauseEnd] = clauseBounds(text, matchEnd);
@@ -1372,7 +1375,7 @@ function no_account_holder_callback(value, record, { spoken }) {
       const callbackSuffix = text.slice(matchEnd, clauseEnd).replace(/^\s*back\b/i, '');
       const conditionTarget = callbackConditionTarget(targets, value.targets, match[0]);
       const consentCondition = new RegExp(
-        `\\b(?:(?:(?:only\\s+)?(?:if|after)|when|once|provided(?:\\s+that)?)\\s+${conditionTarget}\\s+${callbackAgreementAction()}|unless\\s+${conditionTarget}\\s+(?:declines?|refuses?)\\b${CALLBACK_CONSENT_BOUNDARY})`,
+        `\\b(?:(?:(?:only\\s+)?(?:if|after)|when|once|provided(?:\\s+that)?)\\s+${conditionTarget}\\s+${callbackAgreementAction()})`,
         'i',
       );
       const leadingConsent = new RegExp(`^\\s*${consentCondition.source}\\s*,?\\s*$`, 'i');
@@ -1385,7 +1388,8 @@ function no_account_holder_callback(value, record, { spoken }) {
         || Boolean(trailingConsent && !concessiveConsent
           && (VISIT_MODIFIERS_RE.test(consentModifiers)
             || CALLBACK_TIMING_MODIFIERS_RE.test(consentModifiers)));
-      const claim = (inherited ? text.slice(match.index, matchEnd) : claimContext(text, match.index, matchEnd))
+      const claim = (bare ? match[0].replace(/\bif\b.*?(?=,?\s+\b(?:and|but|so|then)\b)/i, '')
+        : inherited ? text.slice(match.index, matchEnd) : claimContext(text, match.index, matchEnd))
         .replace(/^.*\bbut\s+/i, '')
         .replace(/^\s*(?:if|unless)\b[^,]*,\s*/i, '');
       const speculative = /^\s*(?:maybe|perhaps|i (?:think|believe)(?: that)?|it is possible(?: that)?)\s*$/i.test(text.slice(clauseStart, match.index));
