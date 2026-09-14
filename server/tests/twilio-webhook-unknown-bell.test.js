@@ -49,7 +49,10 @@ function mockDb(table) {
   if (mockPg && table === 'sms_log') {
     const q = mockPg(table);
     const insert = q.insert.bind(q);
-    q.insert = (row) => insert({ created_at: new Date(Date.now() + ++mockState.sequence), ...row });
+    q.insert = (row) => {
+      mockState.smsLogInsertPayloads.push(JSON.parse(JSON.stringify(row)));
+      return insert({ created_at: new Date(Date.now() + ++mockState.sequence), ...row });
+    };
     if (mockState.omitSmsLogCreatedAt) {
       const ret = q.returning?.bind(q);
       if (ret) q.returning = (...args) => ret(...args).then((rows) => rows.map((r) => ({ ...r, created_at: undefined })));
@@ -57,6 +60,10 @@ function mockDb(table) {
     for (const method of ['first', 'update']) {
       const run = q[method].bind(q);
       q[method] = (...args) => {
+        if (method === 'update' && mockState.failReceiptWrite
+          && args[0]?.metadata?.bindings?.some((value) => String(value).includes('sms_reply_alerted'))) {
+          throw Object.assign(new Error('synthetic receipt write failure'), { code: 'synthetic_receipt_failure' });
+        }
         mockState.pending++;
         return Promise.resolve(run(...args)).finally(() => { mockState.pending--; });
       };
@@ -186,14 +193,17 @@ async function receive(body = 'What services do you offer?', to = aiLine) {
   // tracked PostgreSQL promises rather than asserting immediately after ACK.
   let stable = 0;
   const deadline = Date.now() + 3000;
-  while (stable < 2 && Date.now() < deadline) {
+  const allowDeferredWorkUntil = Date.now() + 25;
+  while ((stable < 2 || Date.now() < allowDeferredWorkUntil) && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 1));
     stable = mockState.pending ? 0 : stable + 1;
   }
   expect(mockState.pending).toBe(0);
   expect(res.body).toBe('<Response></Response>');
   const errors = require('../services/logger').error.mock.calls.filter(([message]) => !String(message).startsWith('AI '));
-  expect(errors).toEqual([]);
+  // The receipt-failure case is expected to log, but its deferred callback
+  // may reach the assertion before or after that log in synthetic mode.
+  if (!mockState.failReceiptWrite) expect(errors).toEqual([]);
   return sid;
 }
 beforeAll(async () => {

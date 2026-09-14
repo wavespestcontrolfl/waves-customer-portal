@@ -21,6 +21,7 @@ const { invoiceOverdueSql, invoiceDaysOverdue } = require('../services/collectio
 const router = require('../routes/admin-customers');
 const { countUnreadInboundSms, markInboundSmsRead, retargetOrClearUnknownSenderBell } = require('../services/inbound-sms-read');
 const { sweepUnknownSenderAlertClaims, SWEEP_HORIZON_MS } = require('../services/sms-reply-alert-sweep');
+const { appendMessage } = require('../services/conversations');
 const NotificationService = require('../services/notification-service');
 const realNotificationService = jest.requireActual('../services/notification-service');
 const { openBalanceSummary } = require('../services/open-balance');
@@ -695,6 +696,67 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
       await mockPg('messages').whereIn('id', [ancientMessageId, recentMessageId]).delete();
       await mockPg('sms_log').whereIn('twilio_sid', [ancientSid, recentSid]).delete();
       await mockPg('conversations').whereIn('id', [ancientConversationId, recentConversationId]).delete();
+    }
+  }, 30000);
+
+  test('the sweep waits for an ordinary unknown sender AI processing lease, then recovers the same unread row after expiry', async () => {
+    const conversationId = randomUUID();
+    const messageId = randomUUID();
+    const sid = `SM-synthetic-processing-lease-${randomBytes(4).toString('hex')}`;
+    const phone = `+1941558${String(Date.now()).slice(-4)}`;
+    const dispatch = jest.fn(async () => true);
+    try {
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: phone, our_endpoint_id: '+19415550194' });
+      await mockPg('messages').insert({ id: messageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: sid, body: 'Synthetic processing text' });
+      await mockPg('sms_log').insert({ direction: 'inbound', from_phone: phone, to_phone: '+19415550194', twilio_sid: sid, message_body: 'Synthetic processing text', metadata: JSON.stringify({ sms_reply_eligible: true, sms_reply_processing_until: new Date(Date.now() + 60000).toISOString() }) });
+
+      expect((await sweepUnknownSenderAlertClaims({ dispatch })).dispatched).toBe(0);
+      expect(dispatch).not.toHaveBeenCalled();
+
+      await mockPg('sms_log').where({ twilio_sid: sid }).update({ metadata: mockPg.raw("metadata || ?::jsonb", [JSON.stringify({ sms_reply_processing_until: new Date(Date.now() - 1000).toISOString() })]) });
+      expect((await sweepUnknownSenderAlertClaims({ dispatch })).dispatched).toBe(1);
+      expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ From: phone, MessageSid: sid, recovery: true }));
+    } finally {
+      await mockPg('messages').where({ id: messageId }).delete();
+      await mockPg('sms_log').where({ twilio_sid: sid }).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
+  test('an inbound append waits for the unknown-sender read-clear phone lock before committing', async () => {
+    const conversationId = randomUUID();
+    const sid = `SM-synthetic-append-lock-${randomBytes(4).toString('hex')}`;
+    const phone = `+1941559${String(Date.now()).slice(-4)}`;
+    let lockTrx;
+    let appendResult;
+    try {
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: phone, our_endpoint_id: '+19415550194' });
+      lockTrx = await mockPg.transaction();
+      await lockTrx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`inbound_sms_bell_retarget:${phone}`]);
+      appendResult = appendMessage({ conversationId, channel: 'sms', direction: 'inbound', authorType: 'lead', contactPhone: phone, twilioSid: sid, body: 'Synthetic inbound while read clear is open' })
+        .then((value) => ({ value }), (error) => ({ error }));
+
+      // Separate connections observe the uncommitted append waiting on the
+      // phone lock, just as a concurrent read-clear transaction would.
+      let waiter;
+      const deadline = Date.now() + 2000;
+      do {
+        ({ rows: [waiter] } = await mockPg.raw("SELECT pid FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND wait_event = 'advisory' LIMIT 1"));
+        if (!waiter) await new Promise((resolve) => setTimeout(resolve, 10));
+      } while (!waiter && Date.now() < deadline);
+      expect(waiter).toBeDefined();
+      expect(await mockPg('messages').where({ twilio_sid: sid }).first()).toBeUndefined();
+      await lockTrx.commit();
+      lockTrx = null;
+      const result = await appendResult;
+      if (result.error) throw result.error;
+      expect(result.value.twilio_sid).toBe(sid);
+      expect(await mockPg('messages').where({ twilio_sid: sid }).first()).toBeDefined();
+    } finally {
+      if (lockTrx) await lockTrx.rollback();
+      if (appendResult) await appendResult;
+      await mockPg('messages').where({ twilio_sid: sid }).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
     }
   }, 30000);
 
