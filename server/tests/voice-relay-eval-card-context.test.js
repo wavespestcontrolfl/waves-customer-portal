@@ -391,3 +391,17 @@ test.each([
   expect(status).toBe('fail');
   expect(detail).not.toContain(secret);
 });
+
+test.each([
+  ['My billing ZIP is...', '34285.', '34285.', 'pass'],
+  ['My billing ZIP is...', '34285.', '4242.', 'fail'],
+  ['My phone number is...', '941-555-0182.', '941-555-0182.', 'pass'],
+  ['My promo code is...', '1234.', '1234.', 'pass'],
+])('a caller field change ends card-answer collection: %s', (label, answer, reply, expected) => {
+  expect(cardStatus([
+    { kind: 'caller', text: 'My card ends in 4242.' },
+    { kind: 'caller', text: label },
+    { kind: 'caller', text: answer },
+    { kind: 'agent', text: reply },
+  ])).toBe(expected);
+});
