@@ -19,12 +19,12 @@ const AMOUNT_SRC = '(?:\\$\\s*\\d[\\d,.]*|\\b\\d[\\d,.]*\\s+dollars?)';
 const PRICE_NOUN_SRC = '(?:price|amount|cost|charge|rate|fee)';
 const VISIT_PRICE_RE = new RegExp([
   `${AMOUNT_SRC}(?:\\s+${PRICE_NOUN_SRC}(?:\\s+(?:is|will\\s+be))?)?\\s*${PRICE_UNIT_SRC}`,
-  `\\b${PRICE_NOUN_SRC}\\s+${PRICE_UNIT_SRC}`,
+  `\\b(?:${PRICE_NOUN_SRC}|billing|billed|bills?|charging|charged|charges?|pricing|priced|payments?|pay|paid)(?:\\s+(?:is|are|was|were|will\\s+be))?\\s+${PRICE_UNIT_SRC}`,
   `\\b${VISIT_UNIT_SRC}\\s+(?:(?:is|was|will\\s+be)\\s+(?:(?:priced|billed|charged)\\s+at\\s+)?|(?:costs?|runs?|will\\s+cost)\\s+)${AMOUNT_SRC}`,
   `\\b${VISIT_UNIT_SRC}\\s+has\\s+(?:a\\s+)?${AMOUNT_SRC}\\s+${PRICE_NOUN_SRC}\\b`,
 ].join('|'), 'i');
 
-const EPA_CERTIFIED_RE = /\bEPA[\s-]*(?:(?:has|have|had)\s+)?(?:officially\s+)?certif(?:ied|ies|ication)\b|\bcertified\b[^.!?]{0,20}\b(?:by|from)\s+(?:the\s+)?EPA\b/i;
+const EPA_CERTIFIED_RE = /\bEPA[\s-]*(?:(?:has|have|had)\s+)?(?:officially\s+)?certif(?:ied|ies|ication)\b|\bcertif(?:ied|ication)\b[^.!?]{0,20}\b(?:by|from)\s+(?:the\s+)?EPA\b/i;
 
 // A copy-only, inactive policy. Factual grounding and send authorization
 // require separate checks; passing this screen establishes neither.

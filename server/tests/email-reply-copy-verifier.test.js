@@ -23,6 +23,8 @@ describe('email reply customer-copy policy', () => {
     'each scheduled routine quarterly residential exterior preventive ongoing planned visit costs $98',
     '$98 per scheduled routine quarterly residential exterior preventive ongoing planned visit',
     'every scheduled visit is billed at $98', 'the rate per routine visit is $98',
+    'The rate is per visit', 'Billing is per visit', 'You will be billed per visit',
+    'Payments are per visit', 'You pay per visit', 'The fee will be per routine visit',
     'The $98 fee is per visit', 'Each visit has a $98 charge', 'We charge $98 on each visit',
   ])('rejects a visit-based pricing construction: %s', rejected);
 
@@ -42,6 +44,7 @@ describe('email reply customer-copy policy', () => {
     'The treatment is EPA-certified.', 'The treatment is EPA certified.',
     'The treatment is EPAcertified.',
     'The treatment is certified by the EPA.',
+    'This treatment has certification from the EPA.', 'This carries certification by EPA.',
     'The EPA has certified this treatment.', 'This product carries EPA certification.',
     'The EPA granted approval for this treatment.',
     'You can return to the treated area after 30 minutes.',
