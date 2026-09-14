@@ -31,8 +31,11 @@ function instantWindow(start, end) {
 function arrivalWindow(date, start) {
   const from = dateTime(date, start);
   if (!from) return 'Time needs review';
-  const to = new Date(new Date(from).getTime() + 120 * 60000).toISOString();
-  return instantWindow(from, to);
+  // Arrival promises add two hours to the Eastern clock, even across DST.
+  const [hour, minute] = String(start).slice(0, 5).split(':');
+  const endHour = (Number(hour) + 2) % 24;
+  const endLabel = `${endHour % 12 || 12}:${minute} ${endHour >= 12 ? 'PM' : 'AM'}`;
+  return `${dateLabel(date)}, ${timeLabel(from)}–${endLabel} ET`;
 }
 
 function address(property) {
@@ -171,7 +174,7 @@ function ProposalCard({ row, ui, busy, selection, onSelection, preview, onPrevie
     <Text>Requested time identified from transcript: {requested}</Text>
     {quote && <Text>Transcript excerpt attributed to the caller (speaker attribution may be inferred): “{quote}”</Text>}
     <Text tone="muted">Verify the speaker attribution and call context before applying this change.</Text>
-    <Text tone="muted">Call {callTime(row.call_at)}{row.phone ? ` · ${row.phone}` : ''}</Text>
+    <Text tone="muted">Call {callTime(row.call_at)}{row.phone ? ` · Customer primary phone: ${row.phone}` : ''}</Text>
 
     <CandidateReview {...{ candidates, selected, selection, busy, who, ui, onSelection, row }} />
 

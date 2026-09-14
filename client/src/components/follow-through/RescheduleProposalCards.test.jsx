@@ -378,3 +378,16 @@ it('requires recurring conflict details before allowing Apply', async () => {
   expect(await screen.findByRole('alert')).toHaveTextContent('The preview was incomplete.');
   expect(screen.queryByRole('button', { name: 'Apply change' })).not.toBeInTheDocument();
 });
+
+
+it.each([['2027-03-14', '01:00', '1:00 AM–3:00 AM ET'], ['2027-11-07', '00:00', '12:00 AM–2:00 AM ET']])('uses Eastern wall-clock arrival promises across DST %s', async (date, start, label) => {
+  adminFetch.mockImplementation(async (url) => url.endsWith('/preview')
+    ? { ...PREVIEW, new_date: date, new_window: { start, end: '04:00' } } : FEED);
+  render(<RescheduleProposalCards ui={ui} />);
+  await screen.findByLabelText('Appointment discussed for Synthetic Caller');
+  selectSecond();
+  fireEvent.click(screen.getByRole('button', { name: 'Preview change' }));
+  await screen.findByRole('button', { name: 'Apply change' });
+  expect(screen.getByText(/^Requested time identified from transcript:/)).toHaveTextContent(label);
+  expect(screen.getByText(/Customer primary phone:/)).toHaveTextContent(ROW.phone);
+});
