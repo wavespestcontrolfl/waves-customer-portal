@@ -297,6 +297,7 @@ export default function RescheduleProposalCards({ ui, pollMs = DEFAULT_POLL_MS }
     // review with rows fetched before the action began.
     request.current += 1;
     reading.current = false;
+    setLoading(false);
     busyRef.current = true;
     setBusy(id);
     setError('');

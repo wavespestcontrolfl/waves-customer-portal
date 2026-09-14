@@ -285,8 +285,8 @@ describe('reschedule proposal review', () => {
     adminFetch.mockImplementation((url) => {
       if (url.endsWith('/preview')) return Promise.resolve(PREVIEW);
       listCalls += 1;
-      if (listCalls === 1) return Promise.resolve(FEED);
-      return new Promise((resolve) => { releaseRead = () => resolve(FEED); });
+      if (listCalls === 1) return Promise.resolve({ ...FEED, has_more: true });
+      return new Promise((resolve) => { releaseRead = () => resolve({ ...FEED, has_more: true }); });
     });
     render(<RescheduleProposalCards ui={ui} />);
     await screen.findByLabelText('Appointment discussed for Synthetic Caller');
@@ -296,6 +296,7 @@ describe('reschedule proposal review', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Preview change' }));
     expect(await screen.findByRole('button', { name: 'Apply change' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Load more proposals' })).toBeEnabled();
     releaseRead();
     await waitFor(() => expect(adminFetch).toHaveBeenCalledTimes(3));
     expect(screen.getByRole('button', { name: 'Apply change' })).toBeEnabled();
