@@ -24,6 +24,7 @@
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const { deliverOpsDigest } = require('./ops-digest');
+const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 
@@ -118,7 +119,7 @@ function taskLaneCarriesCallbackSql(alias) {
 }
 
 // Lane 1: callback-requested calls from today with nothing behind them.
-async function loadCallbackCalls(cutoff = new Date()) {
+async function loadCallbackCalls(cutoff = new Date(), { includeExpired = false } = {}) {
   const cardsEnabled = require('./callback-cards').enabled();
   const { staleAiRowSql } = require('./call-commitments');
   let cards = [];
@@ -157,12 +158,12 @@ async function loadCallbackCalls(cutoff = new Date()) {
     -- callbacks (codex r38): a callback agreed 35 days out must surface
     -- when due, not fall off the created_at horizon before it. Unscheduled
     -- callbacks keep the created_at horizon.
-    WHERE (((c.v2_extraction_status IS DISTINCT FROM 'valid'
+    WHERE (CAST(:includeExpired AS boolean) OR (((c.v2_extraction_status IS DISTINCT FROM 'valid'
               OR COALESCE(c.ai_extraction_enriched #>> '{scheduling,follow_up_start_at}', '') = '')
             AND c.created_at >= now() - interval '30 days')
         OR (c.v2_extraction_status = 'valid'
             AND COALESCE(c.ai_extraction_enriched #>> '{scheduling,follow_up_start_at}', '') <> ''
-            AND ((LEFT(c.ai_extraction_enriched #>> '{scheduling,follow_up_start_at}', 19))::timestamp AT TIME ZONE 'America/New_York') >= now() - interval '30 days'))
+            AND ((LEFT(c.ai_extraction_enriched #>> '{scheduling,follow_up_start_at}', 19))::timestamp AT TIME ZONE 'America/New_York') >= now() - interval '30 days')))
       AND c.updated_at <= :cutoff
       -- Disposition-only selection (codex r45, reverting r44):
       -- scheduling.follow_up_start_at is the SECOND-TREATMENT datetime
@@ -250,14 +251,14 @@ async function loadCallbackCalls(cutoff = new Date()) {
     ORDER BY c.created_at DESC
     LIMIT :cap
     `,
-    { cap: MAX_PER_SECTION, cutoff, cards_enabled: cardsEnabled },
+    { cap: MAX_PER_SECTION, cutoff, cards_enabled: cardsEnabled, includeExpired },
   );
   return [...rows, ...cards.map((row) => ({ ...row, callback_card_summary: true }))];
 }
 
 // Lane 2: follow-up tasks that are overdue-pending, or were auto-expired
 // today without any verified action — the silent-drop class.
-async function loadDroppedFollowUps(cutoff = new Date()) {
+async function loadDroppedFollowUps(cutoff = new Date(), { includeExpired = false } = {}) {
   const { rows } = await db.raw(
     `
     SELECT t.id, t.task_type, t.deadline, t.status, t.recommended_action,
@@ -354,7 +355,7 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
       AND ((t.status IN ('pending', 'in_progress')
            -- Same rolling 30-day horizon as every other leg (codex r30):
            -- a task stuck pending for months is moot, not daily ACT news.
-           AND t.deadline > now() - interval '30 days' AND t.deadline <= :cutoff
+           AND (CAST(:includeExpired AS boolean) OR t.deadline > now() - interval '30 days') AND t.deadline <= :cutoff
            -- Revalidated (codex r17): a human send/interaction after the
            -- task means it was worked even if the verifier hasn't run.
            AND NOT EXISTS (
@@ -396,7 +397,7 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
        -- Half-open 24h window tiles exactly with the daily 6:15pm run —
        -- a 25h window re-reported yesterday's expiries (codex r2).
        OR (t.status = 'expired' AND t.action_verified = false
-           AND t.deadline > now() - interval '30 days' AND t.deadline <= :cutoff
+           AND (CAST(:includeExpired AS boolean) OR t.deadline > now() - interval '30 days') AND t.deadline <= :cutoff
            -- Staff completing AFTER auto-expiry counts (codex r16).
            AND NOT EXISTS (
              SELECT 1 FROM sms_log es
@@ -433,7 +434,7 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
        -- 'verified' can be bogus (the verifier accepts ANY later outbound,
        -- codex r10): re-surface verified tasks with no HUMAN outbound.
        OR (t.status = 'verified'
-           AND t.deadline > now() - interval '30 days' AND t.deadline <= :cutoff
+           AND (CAST(:includeExpired AS boolean) OR t.deadline > now() - interval '30 days') AND t.deadline <= :cutoff
            AND NOT EXISTS (
              SELECT 1 FROM sms_log vs
              -- A text never completes a send_estimate obligation (codex
@@ -475,14 +476,14 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
     ORDER BY t.deadline DESC NULLS LAST
     LIMIT :cap
     `,
-    { cap: MAX_PER_SECTION, cutoff },
+    { cap: MAX_PER_SECTION, cutoff, includeExpired },
   );
   return rows;
 }
 
 // Lane 3: threads whose last message today is inbound — customer waiting.
 // Peer preserves international identity; NANP keeps its domestic key.
-async function loadUnansweredThreads(cutoff = new Date()) {
+async function loadUnansweredThreads(cutoff = new Date(), { includeExpired = false } = {}) {
   const phoneKey = (column) => {
     const digits = `REGEXP_REPLACE(COALESCE(${column}, ''), '[^0-9]', '', 'g')`;
     return `(CASE WHEN ${digits} = '' THEN ''
@@ -505,7 +506,7 @@ async function loadUnansweredThreads(cutoff = new Date()) {
         -- Rolling 7-day live worklist (codex r15): an unanswered thread
         -- must reappear until answered — the marker window stranded
         -- overflow rows.
-        WHERE created_at >= now() - interval '30 days'
+        WHERE (CAST(:includeExpired AS boolean) OR created_at >= now() - interval '30 days')
           AND created_at <= :cutoff
           AND direction = 'inbound'
           -- reschedule_reply rows are machine-handled by RescheduleSMS,
@@ -592,7 +593,7 @@ async function loadUnansweredThreads(cutoff = new Date()) {
     ORDER BY l.created_at DESC
     LIMIT :cap
     `,
-    { cap: MAX_PER_SECTION, cutoff },
+    { cap: MAX_PER_SECTION, cutoff, includeExpired },
   );
   return rows;
 }
@@ -802,7 +803,14 @@ async function runUnworkedCommsWatcher(opts = {}) {
   }
 
   const composed = composeUnworkedCommsDigest(sections, laneFailures);
-  if (!composed) return { skipped: 'nothing_found' };
+  if (!composed) {
+    // A reporting window can be empty while older work remains outstanding.
+    // Recheck the same predicates without date floors before retiring the bell.
+    const proof = await Promise.allSettled(lanes.map((lane) => lane.load(windowCutoff, { includeExpired: true })));
+    if (laneFailures.length === 0 && proof.every((result) => result.status === 'fulfilled'
+      && result.value.length === 0)) await retireIfClean('unworked-comms');
+    return { skipped: 'nothing_found' };
+  }
 
   if (watcherDisabled()) {
     logger.info(`[unworked-comms] disabled — would send ${composed.total} item(s)`);
@@ -824,6 +832,7 @@ async function runUnworkedCommsWatcher(opts = {}) {
 
   try {
     await deliverOpsDigest({
+      fallOff: true, // retired by retireIfClean on the clean run
       key: 'unworked-comms',
       subject: composed.subject,
       html: composed.html,

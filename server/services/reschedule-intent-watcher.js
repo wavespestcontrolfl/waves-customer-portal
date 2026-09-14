@@ -17,6 +17,7 @@
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const { deliverOpsDigest } = require('./ops-digest');
+const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 const { isInternalTestCustomerId, INTERNAL_TEST_CUSTOMER_IDS } = require('./internal-test-customers');
@@ -197,7 +198,7 @@ async function replayPendingBells() {
   }
 }
 
-async function loadUnactionedFlags() {
+async function loadUnactionedFlags({ includeExpired = false } = {}) {
   const rows = await db('agent_decisions as ad')
     .leftJoin('scheduled_services as ss', 'ad.entity_id', 'ss.id')
     .leftJoin('customers as cu', 'ad.customer_id', 'cu.id')
@@ -207,6 +208,7 @@ async function loadUnactionedFlags() {
     // decisions surface) leave the digest immediately (codex r2).
     .where('ad.status', 'pending_review')
     .where(function windowOrLiveVisit() {
+      if (includeExpired) return;
       // The flagger links visits up to 14 days out; a pending flag must
       // stay visible through its linked visit's date, not age out at the
       // 4-day lookback while the visit is still upcoming (codex r24).
@@ -385,7 +387,17 @@ async function runRescheduleIntentWatcher(opts = {}) {
   }
 
   const composed = composeRescheduleIntentDigest(rows);
-  if (!composed) return { skipped: 'nothing_found' };
+  if (!composed) {
+    try {
+      // Reporting horizons are not proof that old pending flags were handled.
+      const outstanding = await (opts.loadRows || loadUnactionedFlags)({ includeExpired: true });
+      if (!outstanding.length) await retireIfClean('reschedule-intent');
+    } catch (err) {
+      logger.error(`[reschedule-intent-watcher] recovery proof query failed: ${err.message}`);
+      return { skipped: 'query_failed' };
+    }
+    return { skipped: 'nothing_found' };
+  }
 
   if (watcherDisabled()) {
     logger.info(`[reschedule-intent-watcher] disabled — would send ${composed.count} row(s)`);
@@ -408,6 +420,7 @@ async function runRescheduleIntentWatcher(opts = {}) {
 
   try {
     await deliverOpsDigest({
+      fallOff: true, // retired by retireIfClean on the clean run
       key: 'reschedule-intent',
       subject: composed.subject,
       html: composed.html,

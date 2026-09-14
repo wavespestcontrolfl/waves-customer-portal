@@ -52,6 +52,7 @@ const EVAL_CALLER_TO = '+19415550100';
 const SCRIPT_PATH = path.join(__dirname, '..', '..', 'scripts', 'run-voice-relay-eval.js');
 const MANUAL_RERUN = 'node server/scripts/run-voice-relay-eval.js --json --judge';
 const OPS_KEY = 'voice-relay-eval';
+const { retireIfClean } = require('../ops-digest-fall-off');
 const OPS_HEADING = 'Voice relay conversation eval';
 // Operational ceiling for the shipped fixture plus one retry, sized for a
 // fixture of up to ninety caller turns and thirty-four scenarios (today's is
@@ -1750,7 +1751,7 @@ async function notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixtur
       body,
       icon: '\u{1F9EA}',
       link: '/admin/dashboard',
-      metadata: JSON.stringify({ fixturePath, summary, failures: lines, attempts: attempts.map(compactAttempt) }),
+      metadata: JSON.stringify({ evalKey: OPS_KEY, fixturePath, summary, failures: lines, attempts: attempts.map(compactAttempt) }),
     });
   } catch (err) {
     notifyError = err;
@@ -1772,7 +1773,7 @@ async function notifyInconclusive({ notify, sendEmail, attempt, fixturePath }) {
       body,
       icon: '\u{1F9EA}',
       link: '/admin/dashboard',
-      metadata: JSON.stringify({ fixturePath, error: attempt.error || null }),
+      metadata: JSON.stringify({ evalKey: OPS_KEY, fixturePath, error: attempt.error || null }),
     });
   } catch (err) {
     notifyError = err;
@@ -1800,6 +1801,11 @@ async function notifyOutcome({ notifyOnFailure, notify, sendEmail, finalAttempt,
   }
   if (finalAttempt.status === 'fail') return notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixturePath });
   if (finalAttempt.status === 'inconclusive') return notifyInconclusive({ notify, sendEmail, attempt: finalAttempt, fixturePath });
+  // Fall-off: an explicit SCHEDULED PASS clears the standing FIX — 'skip'
+  // (fixture missing / sandbox untested) must leave the bell standing
+  // (pre-push P1 on #4397). `notifyOnFailure` is already true here (the
+  // manual-run case returned above).
+  if (notifyOnFailure && finalAttempt.status === 'pass') await retireIfClean(OPS_KEY, { alsoRetire: { category: 'eval_regression', field: 'evalKey' } });
   return null;
 }
 

@@ -46,6 +46,9 @@ describe('notification trigger push tags', () => {
 
   test('non-SMS triggers keep collapsing by trigger key', () => {
     expect(__private.pushTagFor('payment_failed', {})).toBe('waves-payment_failed');
+    // per-attempt when the webhook passes the identity (codex P2 on #4392)
+    expect(__private.pushTagFor('payment_failed', { paymentIntentId: 'pi_1', attemptId: 'ch_9' })).toBe('waves-payment_failed-ch_9');
+    expect(__private.pushTagFor('payment_failed', { paymentIntentId: 'pi_1' })).toBe('waves-payment_failed-pi_1');
   });
 
   it('customer_landline_from_call gets a per-customer push tag so concurrent alerts do not collapse', () => {

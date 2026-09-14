@@ -6,6 +6,7 @@ function getGoogle() {
 }
 const logger = require('./logger');
 const { deliverOpsDigest } = require('./ops-digest');
+const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const MODELS = require('../config/models');
@@ -1772,7 +1773,10 @@ class GoogleBusinessService {
       });
       if (verdict) findings.push({ loc, ...verdict });
     }
-    if (!findings.length) return { healthy: true };
+    if (!findings.length) {
+      await retireIfClean('gbp-sync-health'); // fall-off: every location syncing again (the review bell keeps its own dedupe marker)
+      return { healthy: true };
+    }
 
     const anyFix = findings.some((f) => f.severity === 'FIX');
     // Signature-keyed dedupe (pre-push audit): a constant title would let one
@@ -1822,6 +1826,7 @@ class GoogleBusinessService {
         // The 'review' bell above stays the claim; in-app mode adds the
         // ops_digest row the Activity feed lists (email cadence).
         const sent = await deliverOpsDigest({
+      fallOff: true, // retired by retireIfClean on the clean run
           key: 'gbp-sync-health',
           subject,
           text: body,
