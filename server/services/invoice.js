@@ -1148,7 +1148,7 @@ const InvoiceService = {
     // (the best-effort tax/discount catches then abort with it — accepted
     // for linked money writes; plain unlinked creates keep the
     // untransacted path).
-    const stampedEstimateIdInNotes = (String(notes || "").match(/accepted estimate #([0-9a-fA-F-]{8,})/) || [])[1] || null;
+    const stampedEstimateIdInNotes = require('./setup-fee-alert-reconcile').acceptedEstimateIdFromNotes(notes);
     if (linkedScheduledServiceId || stampedEstimateIdInNotes) {
       if (database && database.isTransaction) {
         if (linkedScheduledServiceId) {
