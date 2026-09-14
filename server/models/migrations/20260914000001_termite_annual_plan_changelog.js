@@ -3,7 +3,10 @@
  * Pricing Logic Changelog. This follows the already-applied seed migration;
  * rerunning it must not rewrite an admin-authored pricing row.
  */
-const SEED_TAG = 'migration:20260911000020';
+// Read-only reference to the earlier seed's audit row. This migration owns
+// only its own changelog identity below; it never writes under the seed tag.
+const SEED_MIGRATION = '20260911000020';
+const SEED_TAG = `migration:${SEED_MIGRATION}`;
 const KEY = 'termite_annual_plan';
 const CHANGELOG_IDENTITY = {
   version_from: 'v4.9',
