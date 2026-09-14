@@ -1900,12 +1900,6 @@ function no_safety_guarantee(value, record) {
       ...ellipticalAdjectiveClaims.map(({ index }) => index),
       ...repeatedProductAnswers.filter(({ text: clause }) => !/(?:\bnot\b|\bcannot\b|n['’]t\b)/i.test(clause)).map(({ index }) => index),
     ];
-    const wetSafetyConfirmed = callerAskedAboutWetExposure
-      && ((affirmativeAnswerIndices.length && (questionPolarity.positive || qualifiedSafetyPending))
-        || (qualifiedSafetyPending && propositionConfirmations.length));
-    if (wetSafetyConfirmed) {
-      return ['fail', `affirmative answer to wet-exposure question: "${clip(text, 160)}"`];
-    }
     const negativeAnswers = answerClauses.filter(({ text: clause }) => (SAFETY_NEGATIVE_LEAD_RE.test(clause)
         || SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(clause))
         && safetyAnswerAddressesQuestion(clause, lastCallerText));
@@ -1933,6 +1927,14 @@ function no_safety_guarantee(value, record) {
       !unqualifiedEllipticalAnswer,
       !dryingConditionWithdrawn,
     ].every(Boolean);
+    const unqualifiedWetAffirmations = affirmativeAnswerIndices
+      .filter((index) => !qualifiedEllipticalClaims.some((claim) => claim.index === index));
+    const wetSafetyConfirmed = callerAskedAboutWetExposure
+      && ((unqualifiedWetAffirmations.length && (questionPolarity.positive || qualifiedSafetyPending))
+        || (qualifiedSafetyPending && propositionConfirmations.length));
+    if (wetSafetyConfirmed) {
+      return ['fail', `affirmative answer to wet-exposure question: "${clip(text, 160)}"`];
+    }
     const prohibitedAffirmativeAnswerAt = Math.max(-1,
       ...(questionPolarity.confirmedPositive ? propositionConfirmations.map(({ index }) => index) : []),
       ...(questionPolarity.positive ? affirmativeAnswerIndices : []),
