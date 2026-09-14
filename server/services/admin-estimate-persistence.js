@@ -2558,7 +2558,8 @@ function estimateReviseBlock(estimate, estimateData, now = new Date()) {
 // whether an unlink may invalidate the draft — dropping it on revise made
 // a later stamp-clear skip invalidation and leave the former lead's draft
 // sendable to the wrong recipient.
-const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'scheduled_service_id', 'manualSendAttempts', 'groupLinkViewableThrough', 'groupPublishedByEstimateId'];
+const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'scheduled_service_id', 'manualSendAttempts'];
+const GROUP_PUBLICATION_KEYS = ['groupLinkViewableThrough', 'groupPublishedByEstimateId'];
 // Click-to-estimate mints (#3391 audit P0): both markers are
 // lifecycle-critical and PRIOR-WINS across a revise — the zero-comms
 // opt-out is the lane's owner-approved contract (a revise must never
@@ -2739,7 +2740,7 @@ async function reviseAdminEstimate({
       // the row so a revision of a grouped estimate keeps its per-property
       // tier scoping instead of repricing at the combined account tier
       // (codex #3244 r3).
-      estimateGroupId: body.estimateGroupId ?? (estimate.estimate_group_id || undefined),
+      estimateGroupId: body.estimateGroupId === undefined ? (estimate.estimate_group_id || undefined) : body.estimateGroupId,
       satelliteUrl: body.satelliteUrl || (sameAddress ? estimate.satellite_url : null) || null,
     },
     technicianId,
@@ -2801,6 +2802,18 @@ async function reviseAdminEstimate({
         if (existingData[key] !== undefined && nextData[key] === undefined) {
           nextData[key] = existingData[key];
           preserved = true;
+        }
+      }
+      // Publication belongs to the group that sent the link. A move or
+      // explicit removal cannot carry that group's navigation window away.
+      const nextGroupId = writeFields.estimate_group_id === undefined
+        ? estimate.estimate_group_id : writeFields.estimate_group_id;
+      if (estimate.estimate_group_id && String(nextGroupId || '') === String(estimate.estimate_group_id)) {
+        for (const key of GROUP_PUBLICATION_KEYS) {
+          if (existingData[key] !== undefined) {
+            nextData[key] = existingData[key];
+            preserved = true;
+          }
         }
       }
       if (preserveClickMintMarkersAcrossRevise(nextData, existingData)) preserved = true;
@@ -3039,7 +3052,14 @@ async function reviseAdminEstimate({
         if (pendingData && typeof pendingData === 'object' && lockedData && typeof lockedData === 'object') {
           for (const key of REVISE_PRESERVED_ESTIMATE_DATA_KEYS) {
             if (lockedData[key] !== undefined) pendingData[key] = lockedData[key];
-            else if (key === 'groupLinkViewableThrough' || key === 'groupPublishedByEstimateId') delete pendingData[key];
+          }
+          const revisedGroupId = revisedFields.estimate_group_id === undefined
+            ? lockedPrior.estimate_group_id : revisedFields.estimate_group_id;
+          const staysInLockedGroup = lockedPrior.estimate_group_id
+            && String(revisedGroupId || '') === String(lockedPrior.estimate_group_id);
+          for (const key of GROUP_PUBLICATION_KEYS) {
+            if (staysInLockedGroup && lockedData[key] !== undefined) pendingData[key] = lockedData[key];
+            else delete pendingData[key];
           }
           preserveClickMintMarkersAcrossRevise(pendingData, lockedData);
           // The server-owned proposal is carried from the LOCKED row, never

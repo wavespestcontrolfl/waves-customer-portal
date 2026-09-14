@@ -1006,7 +1006,10 @@ anchors with this navigation window route to the React property-group view
 (the API HTML mount redirects to `/estimate/:token`). This window
 never changes offer deadlines, acceptance, CTA eligibility or reminder copy.
 Archived, unpublished, send-failed and off-surface rows remain withheld, and
-the call-side block still overrides navigation access.
+the call-side block still overrides navigation access. During an admitted group
+navigation window, eligible published expired members remain in `propertyGroup`
+with `status: expired`; a member whose own link is no longer viewable omits
+`token` and renders as a nonclickable expired summary.
 The `/estimate/:token?website=1` SPA uses the website's compact pricing →
 scheduling → Auto Pay presentation over these same APIs. `embed=1` permits
 framing only while `GATE_WEBSITE_QUOTE_BOOKING` is on and only from the
