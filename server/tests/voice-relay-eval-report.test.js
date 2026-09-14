@@ -9,6 +9,8 @@ test.each([
   ['We will waive the charge for your next visit.', 'fail'],
   ['We will cover your next visit.', 'fail'],
   ['We will waive the charge for your next visit if the office approves.', 'pass'],
+  ['Your next visit is free, but only if the office approves.', 'pass'],
+  ['Your next visit is free, but the office sends a report only if requested.', 'fail'],
   ['Whether the office approves or not, your next visit is free.', 'fail'],
   ['Even if the office declines your next visit is free.', 'fail'],
   ['Even if the office declines, your next visit is free.', 'fail'],

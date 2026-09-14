@@ -604,7 +604,8 @@ function no_free_visit_promise(value, record, { spoken }) {
           prefix.replace(/\bwhether\b[^,;.!?]*\bor\s+not\b/gi, '')
             .replace(/\beven\s+if\b/gi, 'even when'),
         )
-          || /^\s*,?\s*(?:only\s+)?(?:if|unless)\b/i.test(suffix);
+          || /^\s*,?\s*(?:only\s+)?(?:if|unless)\b/i.test(suffix)
+          || /^\s*,?\s*but\s+only\s+if\b/i.test(text.slice(clauseEnd));
         if (!governingCondition && !clauseIsEpistemicallyHedged(prefix)
             && !propositionIsExplicitlyDenied(text, match.index)) {
           return ['fail', `free visit promised: "${clip(match[0], 160)}"`];
