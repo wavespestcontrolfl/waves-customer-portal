@@ -69,6 +69,7 @@ const cronApi = require('../utils/scheduled-cron');
 const { sendEstimateNow } = require('../routes/admin-estimates');
 const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 const { claimDueScheduledEstimates, initScheduledJobs } = require('../services/scheduler');
+const { assertBidSendDate } = require('../services/proposal-bid');
 
 // The every-5-minutes estimate sender, as registered — the ONE tick whose
 // body claims due rows.
@@ -110,6 +111,21 @@ describe('scheduled-estimate cron vs the clarify re-price hold', () => {
     expect(sendEstimateNow).toHaveBeenCalledWith(expect.objectContaining({ id: 'est-held' }), 'both', { callerPreClaimed: true });
     expect(parkedUpdate('est-held').payload).toEqual(expect.objectContaining({ status: 'send_failed', scheduled_at: null }));
     expect(parkedUpdate('est-held').payload.last_send_error).toMatch(/held for a re-price/);
+  });
+
+  test('a late scheduled claim parks an expired fixed bid without retrying', async () => {
+    const tick = scheduledEstimateTick();
+    db.__state.claimRows = [{ id: 'est-expired-bid', send_method: 'email', scheduled_send_attempts: 1 }];
+    let expiredBid;
+    try {
+      assertBidSendDate({ estimate_data: { proposal: { enabled: true, validThrough: '2020-01-01' } } }, new Date('2020-01-02T05:00:00Z'));
+    } catch (error) { expiredBid = error; }
+    expect(expiredBid).toMatchObject({ statusCode: 409, code: 'BID_VALIDITY_EXPIRED' });
+    sendEstimateNow.mockRejectedValue(expiredBid);
+    await tick();
+    expect(sendEstimateNow).toHaveBeenCalledTimes(1);
+    expect(parkedUpdate('est-expired-bid').payload).toEqual(expect.objectContaining({ status: 'send_failed', scheduled_at: null }));
+    expect(parkedUpdate('est-expired-bid').payload.last_send_error).toMatch(/validity date has passed/);
   });
 
   test('a reviewed scheduled attempt stops after any throw, including post-provider bookkeeping failure', async () => {

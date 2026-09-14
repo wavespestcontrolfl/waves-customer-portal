@@ -145,6 +145,7 @@ function makeReviseDatabase({
       whereNot: () => chain,
       whereNull: () => chain,
       whereNotIn: () => chain,
+      select: async () => [],
       whereRaw: (sql) => {
         rawGuards.push(sql);
         return chain;
@@ -633,6 +634,57 @@ describe('reviseAdminEstimate', () => {
     expect(data.scheduled_service_id).toBe('svc-3');
     // Still a full rewrite otherwise — stale snapshot stays dropped.
     expect(data.sendSnapshot).toBeUndefined();
+  });
+
+  test('preserves the locked publication window and anchor routing across wholesale revisions', async () => {
+    const originalData = JSON.parse(sentEstimate.estimate_data);
+    const prior = { ...sentEstimate, estimate_group_id: '11111111-1111-4111-8111-111111111111', estimate_data: JSON.stringify({ ...originalData,
+      groupLinkViewableThrough: '2099-01-01T00:00:00Z', groupPublishedByEstimateId: 'delivered-anchor' }) };
+    const locked = { ...prior, estimate_data: JSON.stringify({ ...originalData,
+      groupLinkViewableThrough: '2099-02-01T00:00:00Z', groupPublishedByEstimateId: 'latest-anchor' }) };
+    const { database, updates } = makeReviseDatabase({ estimate: prior, lockedEstimate: locked });
+    await reviseAdminEstimate({ database, estimateId: 'est-1', body: {
+      ...reviseBody, estimateData: { ...reviseBody.estimateData,
+        groupLinkViewableThrough: '2100-01-01T00:00:00Z', groupPublishedByEstimateId: 'client-forged' },
+    }, recompute: noRecompute, now: fixedNow });
+    expect(JSON.parse(updates[0].estimate_data)).toMatchObject({
+      groupLinkViewableThrough: '2099-02-01T00:00:00Z', groupPublishedByEstimateId: 'latest-anchor',
+    });
+    expect(updates[0].expires_at).toBeUndefined();
+  });
+
+  test('cannot invent publication metadata or resurrect it when the locked row no longer carries it', async () => {
+    for (const priorData of [{}, { groupLinkViewableThrough: '2099-01-01T00:00:00Z', groupPublishedByEstimateId: 'old-anchor' }]) {
+      const prior = { ...sentEstimate, estimate_group_id: '11111111-1111-4111-8111-111111111111',
+        estimate_data: JSON.stringify({ ...JSON.parse(sentEstimate.estimate_data), ...priorData }) };
+      const { database, updates } = makeReviseDatabase({ estimate: prior,
+        lockedEstimate: { ...sentEstimate, estimate_group_id: prior.estimate_group_id } });
+      await reviseAdminEstimate({ database, estimateId: 'est-1', body: {
+        ...reviseBody, estimateData: { ...reviseBody.estimateData,
+          groupLinkViewableThrough: '2100-01-01T00:00:00Z', groupPublishedByEstimateId: 'client-forged' },
+      }, recompute: noRecompute, now: fixedNow });
+      const data = JSON.parse(updates[0].estimate_data);
+      expect(data.groupLinkViewableThrough).toBeUndefined();
+      expect(data.groupPublishedByEstimateId).toBeUndefined();
+    }
+  });
+
+  test.each([
+    ['another group', '22222222-2222-4222-8222-222222222222'],
+    ['no group', null],
+  ])('clears locked group publication metadata when revised into %s', async (_label, estimateGroupId) => {
+    const prior = { ...sentEstimate, estimate_group_id: '11111111-1111-4111-8111-111111111111',
+      estimate_data: JSON.stringify({ ...JSON.parse(sentEstimate.estimate_data),
+        groupLinkViewableThrough: '2099-02-01T00:00:00Z', groupPublishedByEstimateId: 'old-anchor' }) };
+    const { database, updates } = makeReviseDatabase({ estimate: prior });
+    await reviseAdminEstimate({ database, estimateId: prior.id, body: {
+      ...reviseBody, estimateGroupId, estimateData: { ...reviseBody.estimateData,
+        groupLinkViewableThrough: '2100-01-01T00:00:00Z', groupPublishedByEstimateId: 'client-forged' },
+    }, recompute: noRecompute, now: fixedNow });
+    const data = JSON.parse(updates[0].estimate_data);
+    expect(updates[0].estimate_group_id).toBe(estimateGroupId);
+    expect(data.groupLinkViewableThrough).toBeUndefined();
+    expect(data.groupPublishedByEstimateId).toBeUndefined();
   });
 
   test('guards the atomic update against a concurrent commercial-proposal conversion', async () => {

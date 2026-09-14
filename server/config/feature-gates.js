@@ -1936,8 +1936,8 @@ const gates = {
   // Kill switch: unset GATE_COMMERCIAL_ONETIME_SCOPED.
   commercialOneTimeScoped: gateEnvValue('GATE_COMMERCIAL_ONETIME_SCOPED'),
 
-  // Bid unit controls; default off everywhere.
-  // Readers always honor saved quantities and units after the controls are off.
+  // Bid authoring controls and original-form exports; default off everywhere.
+  // Readers always honor saved quantities and dates after the controls are off.
   commercialBidBuilder: gateEnvValue('GATE_COMMERCIAL_BID_BUILDER'),
 
   // Browser-rendered estimate PDF — GET /api/estimates/:token/pdf, the admin
