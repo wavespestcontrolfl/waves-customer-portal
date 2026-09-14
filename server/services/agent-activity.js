@@ -422,7 +422,7 @@ async function loadDigestRows(db, since) {
   const windowed = await base()
     .where((w) => w.where('created_at', '>=', since)
       .orWhereRaw("NULLIF(metadata->>'resolvedAt', '')::timestamptz >= ?", [since]))
-    .orderBy('created_at', 'desc')
+    .orderByRaw("GREATEST(created_at, NULLIF(metadata->>'resolvedAt', '')::timestamptz) DESC")
     .limit(MAX_ITEMS);
   const seen = new Set();
   const rows = [];

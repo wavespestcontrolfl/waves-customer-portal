@@ -5,7 +5,7 @@
 const mockCalls = [];
 function builder(rows) {
   const q = { _rows: rows, _ops: [] };
-  for (const m of ['select', 'where', 'orWhere', 'andWhere', 'whereNull', 'andWhereRaw', 'whereRaw', 'orWhereRaw', 'orderBy', 'limit']) {
+  for (const m of ['select', 'where', 'orWhere', 'andWhere', 'whereNull', 'andWhereRaw', 'whereRaw', 'orWhereRaw', 'orderBy', 'orderByRaw', 'limit']) {
     q[m] = jest.fn((...args) => {
       q._ops.push([m, ...args.map((a) => (typeof a === 'function' ? 'fn' : a))]);
       // knex grouped clauses: invoke the callback with the same builder so nested clauses are recorded too

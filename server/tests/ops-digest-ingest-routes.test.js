@@ -227,7 +227,7 @@ describe('bell write', () => {
       dedupeWindowMs: 24 * 60 * 60 * 1000,
       // a later run's recurrence refreshes the standing row (observedAt above all)
       refreshOnDedupe: true,
-      dedupeVersion: expect.any(String),
+      dedupeVersion: undefined,
       // probe + write share one advisory-locked transaction
       trx: expect.anything(),
       metadata: {
@@ -255,6 +255,16 @@ describe('bell write', () => {
     // notifyAdmin refreshes a deduped row when CONTENT differs even if the
     // version is clamped. Skipping it protects the 14:00 row's body/read state.
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a timestamp-less response-loss retry preserves the standing version', async () => {
+    const payload = good();
+    const stamp = '2026-09-11T11:00:00.000Z';
+    mockStanding.row = { created_at: stamp, observed_at: stamp, dedupe_version: stamp,
+      title: `FIX: ${payload.subject}`, body: payload.body, link: payload.link };
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-read', deduped: true });
+    await post(payload);
+    expect(mockNotifyAdmin.mock.calls[0][3].dedupeVersion).toBeUndefined();
   });
 
   test('a LATER run raises the observation and so rewrites the standing row', async () => {
