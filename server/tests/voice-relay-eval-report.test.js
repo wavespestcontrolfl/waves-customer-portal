@@ -432,6 +432,8 @@ test.each([
   ['Talstar P was applied to the exterior perimeter, but that is incorrect.', 'fail'],
   ['Talstar P was applied to the exterior perimeter, but that is wrong.', 'fail'],
   ['Talstar P was applied to the exterior perimeter, but that is not what happened.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, but that is not true at all.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, but that is completely false.', 'fail'],
   ['Talstar P was applied to the exterior perimeter, but the appointment date was incorrect.', 'pass'],
   ['Talstar P was applied to the exterior perimeter, but the appointment date was wrong.', 'pass'],
 ])('report explicit falsity retracts only its own finding: %s', (text, status) => {
@@ -441,6 +443,7 @@ test.each([
 
 test.each([
   ['Talstar P was applied to the exterior perimeter, but that never happened.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, but that never actually happened.', 'fail'],
   ["Talstar P was applied to the exterior perimeter — that didn't happen.", 'fail'],
   ['Talstar P was applied to the exterior perimeter, but that did not actually occur.', 'fail'],
   ['Talstar P was applied to the exterior perimeter, but the follow-up call never happened.', 'pass'],
