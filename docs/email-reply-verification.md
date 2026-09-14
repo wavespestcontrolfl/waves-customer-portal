@@ -1,0 +1,37 @@
+# Email reply presentation checks
+
+`server/services/email/email-reply-verifier.js` exports
+`verifyEmailReplyStructure({text, customer, wordBudget})` and `wordCount`.
+It returns `{ok, violations}` for the complete reply.
+
+This inactive helper checks the word budget, exact supplied first-name greeting,
+recognized signatures, HTML and lists, boilerplate, links, access credentials,
+and recognized prompt-control language. It makes no model request, database
+write, Gmail call, or draft/send decision. No runtime caller is added.
+
+Whitespace and word-separating dashes count toward the budget; true hyphenated
+compounds remain one word. Name comparison accepts Unicode and punctuation
+equivalents inside the expected name, while preserving the difference between
+an em-dash greeting separator and a hyphen continuing a longer name.
+
+The plain-output screen rejects plus bullets, HTML comments (including an
+unterminated opener), relative/fragment/reference Markdown links, and common
+closing/name structures. Boilerplate screening folds whitespace and smart
+apostrophes. The canonical report access-code helper receives compatibility
+letters/digits with mixed fractions preserved, so a gate width does not become
+a credential. Output-specific prompt-control checks permit ordinary customer
+preparation corrections and operational colon labels.
+
+These are recognized lexical and structural checks, not a comprehensive
+natural-language or HTML parser. Success does not establish customer-copy
+compliance, financial or scheduling truth, or permission to create/send a
+reply. Customer-copy policy is a separately reviewed sibling slice; account
+fact verification and runtime integration remain later work.
+
+This presentation recut preserves the complete combined implementation and
+regression suite on PR #4511, `feat/email-reply-structure` at `c620a389d9`.
+No runtime activation is included in the recut.
+
+Run from `server/` using Node 20 and `TZ=UTC`:
+`node ../node_modules/jest/bin/jest.js --runInBand --no-coverage tests/email-reply-verifier.test.js`.
+Tests use synthetic inputs and need no provider/database credentials.
