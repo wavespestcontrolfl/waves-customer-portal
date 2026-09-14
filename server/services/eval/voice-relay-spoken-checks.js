@@ -1336,6 +1336,10 @@ const REPORT_TRAILING_DENIAL_RE = new RegExp(
   'i',
 );
 const REPORT_CONCISE_NONCOMPLETION_RE = /^\s*(?:(?:(?:is|are|was|were|has|have|had)(?:\s+(?:been|being))?\s+)?(?:(?:only|just|merely|simply|still)\s+)*(?:(?:the|our|your|their|his|her|my|its)\s+)?(?:(?:recommended|scheduled|planned|intended|proposed|suggested|considered|expected|required|needed|pending)\b|(?:an?\s+)?(?:recommendation|plan|proposal|suggestion|possibility)\b|under\s+consideration\b|(?:for\s+)?(?:tomorrow|tonight|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b)|(?:will|shall|would|should|can|could|may|might|must|is going to|are going to|was going to|were going to)\b)/i;
+function reportTrailingNoncompletion(text) {
+  const anaphoric = /^(?:it|this|that)\s+(.+)$/i.exec(text.trim());
+  return Boolean(anaphoric && REPORT_CONCISE_NONCOMPLETION_RE.test(anaphoric[1]));
+}
 // Qualified shorthand must positively state completion or cite the report;
 // unknown qualifiers can describe proposed treatment and are not evidence.
 const REPORT_CONCISE_COMPLETION_RE = new RegExp(`^(?:(?:(?:was|were|is|are|has been|have been|had been)\\s+)?(?:(?:already|actually|just)\\s+)*completed(?:\\s+${REPORT_COMPLETION_TIME})?|as\\s+(?:noted|documented|recorded|shown)\\s+in\\s+the\\s+report)?\\s*$`, 'i');
@@ -1597,12 +1601,13 @@ function reportSharedLocationContinuation(text, clauseEnd, location) {
   const remainder = text.slice(clauseEnd);
   const dashQualifier = remainder.replace(/^[—–]\s*/, '').split(/[.!?;]/)[0];
   if (/^[—–]/.test(remainder) && (REPORT_TRAILING_UNCERTAINTY_RE.test(dashQualifier)
-      || REPORT_TRAILING_DENIAL_RE.test(dashQualifier))) {
+      || REPORT_TRAILING_DENIAL_RE.test(dashQualifier) || reportTrailingNoncompletion(dashQualifier))) {
     return { text: `, ${dashQualifier}`, unconfirmed: true };
   }
   const contrastQualifier = remainder.replace(/^(?:but|however)\s*,?\s*/i, '').split(/[.!?;]/)[0];
   if (/^(?:but|however)\b/i.test(remainder)
-      && (REPORT_TRAILING_DENIAL_RE.test(contrastQualifier) || REPORT_TRAILING_UNCERTAINTY_RE.test(contrastQualifier))) {
+      && (REPORT_TRAILING_DENIAL_RE.test(contrastQualifier) || REPORT_TRAILING_UNCERTAINTY_RE.test(contrastQualifier)
+        || reportTrailingNoncompletion(contrastQualifier))) {
     return { text: '', unconfirmed: true };
   }
   const locationTail = new RegExp(
@@ -1623,7 +1628,8 @@ function reportSharedLocationContinuation(text, clauseEnd, location) {
   // A shared list ends the location noun or adds an adjunct, not a new predicate.
   if (!/^(?:$|[.!?;]|(?:,\s*)?(?:and|or|before|after|with|as|according|which|(?:only\s+)?if|unless)\b)/i.test(qualifier)
       && !REPORT_TRAILING_UNCERTAINTY_RE.test(scopedQualifier)
-      && !REPORT_TRAILING_DENIAL_RE.test(scopedQualifier)) {
+      && !REPORT_TRAILING_DENIAL_RE.test(scopedQualifier)
+      && !reportTrailingNoncompletion(scopedQualifier)) {
     return { text: '', unconfirmed: false };
   }
   const end = remainder.search(/[.!?;]/);
@@ -1631,7 +1637,8 @@ function reportSharedLocationContinuation(text, clauseEnd, location) {
     text: remainder.slice(0, end >= 0 ? end : undefined),
     unconfirmed: (end >= 0 && remainder[end] === '?')
       || REPORT_TRAILING_UNCERTAINTY_RE.test(scopedQualifier)
-      || REPORT_TRAILING_DENIAL_RE.test(scopedQualifier),
+      || REPORT_TRAILING_DENIAL_RE.test(scopedQualifier)
+      || reportTrailingNoncompletion(scopedQualifier),
   };
 }
 

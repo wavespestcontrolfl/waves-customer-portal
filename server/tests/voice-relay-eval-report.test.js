@@ -432,10 +432,13 @@ test.each([
   ['Talstar P was applied to the exterior perimeter, but that is incorrect.', 'fail'],
   ['Talstar P was applied to the exterior perimeter, but that is wrong.', 'fail'],
   ['Talstar P was applied to the exterior perimeter, but that is not what happened.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, but it was only planned.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter — it was only planned.', 'fail'],
   ['Talstar P was applied to the exterior perimeter, but that is not true at all.', 'fail'],
   ['Talstar P was applied to the exterior perimeter, but that is completely false.', 'fail'],
   ['Talstar P was applied to the exterior perimeter, but the appointment date was incorrect.', 'pass'],
   ['Talstar P was applied to the exterior perimeter, but the appointment date was wrong.', 'pass'],
+  ['Talstar P was applied to the exterior perimeter, but the follow-up visit was only planned.', 'pass'],
 ])('report explicit falsity retracts only its own finding: %s', (text, status) => {
   expect(checks.report_readback_confirms({ subject: 'Talstar P', location: 'exterior' }, {}, { spoken: [text] })[0]).toBe(status);
 });
