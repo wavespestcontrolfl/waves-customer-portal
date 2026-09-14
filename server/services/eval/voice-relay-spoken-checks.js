@@ -598,7 +598,7 @@ function paymentOutcomeIsNegated(claim, match) {
   const matchOffset = claim.toLowerCase().lastIndexOf(match[0].toLowerCase());
   if (matchOffset < 0) return false;
   const prefix = claim.slice(0, matchOffset);
-  return /\b(?:no|not|nunca|jam[aá]s)\s+(?:(?:le|te|les)\s+)?(?:(?:your|the|that|this|a)\s+)?$/i.test(prefix);
+  return /\b(?:no|not|nunca|jam[aá]s)\s+(?:(?:(?:se\s+)?(?:le|te|les|lo|la|los|las)|se)\s+)?(?:(?:your|the|that|this|a)\s+)?$/i.test(prefix);
 }
 function paymentOutcomeIsConditional(text, claimStart, claim, outcome, outcomeStart, trailingClaim) {
   const matchOffset = claim.toLowerCase().lastIndexOf(outcome.toLowerCase());
