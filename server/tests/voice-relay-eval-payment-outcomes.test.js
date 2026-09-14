@@ -433,6 +433,14 @@ describe('voice relay eval — payment outcomes', () => {
     ["Your payment method of choice was approved.", 'pass'],
     ["Your card ending in 4242 was charged once you authorized it.", 'fail'],
     ["Once your card ending in 4242 has been charged, we will send a receipt.", 'pass'],
+    ["Your payment is not yet approved.", 'pass'],
+    ["Your payment failed yet cleared.", 'fail'],
+    ["I checked your payment and processed your request.", 'pass'],
+    ["I checked your payment and received your email.", 'pass'],
+    ["I checked your payment and processed documents.", 'pass'],
+    ["Your payment failed but cleared yesterday.", 'fail'],
+    ["I checked your payment and processed it.", 'fail'],
+    ['I checked your payment and processed your payment request.', 'pass'],
   ])('current-head review regressions: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
   });

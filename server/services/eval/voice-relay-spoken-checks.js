@@ -685,62 +685,59 @@ function paymentClaimContext(text, start, end) {
     ? text.slice(boundary - prefix.length, end)
     : claimContext(text, start, end);
 }
+function* paymentOutcomeCandidates(text) {
+  // Preserve the existing precedence: explicit outcomes from each language
+  // pattern are checked before predicates inheriting a payment subject.
+  for (const outcomeRe of PAYMENT_OUTCOME_RES) {
+    for (const match of text.matchAll(outcomeRe)) {
+      if (paymentOutcomePronounHasNonTargetAntecedent(text, match)) continue;
+      yield { match, claim: paymentClaimContext(text, match.index, match.index + match[0].length) };
+    }
+  }
+  for (const subject of text.matchAll(PAYMENT_INHERITED_SUBJECT_RE)) {
+    const subjectEnd = subject.index + subject[0].length;
+    const subjectSuffix = text.slice(subjectEnd).split(/[.!?;—–]/)[0];
+    for (const match of subjectSuffix.matchAll(PAYMENT_INHERITED_OUTCOME_RE)) {
+      if (match.index > 120) break;
+      const { predicate } = match.groups;
+      const bridge = subjectSuffix.slice(0, match.index);
+      if (/^yet\b/i.test(match[0]) && /\bnot\s*$/i.test(bridge)) continue;
+      if (PAYMENT_INTERVENING_SUBJECT_RE.test(bridge)) continue;
+      const predicateStart = subjectEnd + match.index + match[0].lastIndexOf(predicate);
+      const afterPredicate = text.slice(predicateStart + predicate.length);
+      const bareAction = new RegExp(`^${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_TRANSITIVE_SUCCESS}\\b`, 'i').test(predicate);
+      const object = afterPredicate.match(/^\s+(?!(?:and|but|yet|so|if|unless|once|when|after|before|already|just|now|successfully|yesterday|today|tomorrow|last|shortly|again|in|on|at|for|with|to)\b)(?:(?:your|the|an?|my|our|their|this)\s+)?[a-z][\w'-]*\b/i);
+      const objectTarget = new RegExp(`^(?:(?:your|the|an?|my|our|their|this)\\s+)?(?:${PAYMENT_TARGET}|it|that)\\b`, 'i');
+      if (bareAction && object && !objectTarget.test(afterPredicate.trimStart())) continue;
+      // Resolve the payment referent across clauses, but keep a renewed
+      // pronoun assertion outside an earlier refusal's scope.
+      const renewedSubject = [...bridge.matchAll(/\b(?:and|but|yet|so)\s+(?<subject>it|that)\b/gi)].pop();
+      const subjectStart = renewedSubject
+        ? subjectEnd + renewedSubject.index + renewedSubject[0].lastIndexOf(renewedSubject.groups.subject)
+        : subject.index;
+      const independentAdversative = /,\s*$/.test(bridge) && /^(?:but|yet)\b/i.test(match[0]);
+      const claim = independentAdversative
+        ? `${subject[0]} ${predicate}`
+        : paymentClaimContext(text, subjectStart, predicateStart + predicate.length);
+      yield { match: { 0: predicate, index: predicateStart }, claim };
+    }
+  }
+}
 /** value: true */
 function no_payment_outcome(value, record, { spoken }) {
   for (const text of spoken) {
-    for (const outcomeRe of PAYMENT_OUTCOME_RES) {
-      for (const match of text.matchAll(outcomeRe)) {
-        if (paymentOutcomePronounHasNonTargetAntecedent(text, match)) continue;
-        const claim = paymentClaimContext(text, match.index, match.index + match[0].length);
-        const [claimStart, claimEnd] = clauseBounds(text, match.index);
-        const matchEnd = match.index + match[0].length;
-        const trailingClaim = text.slice(matchEnd, claimEnd);
-        const interrogative = paymentOutcomeIsInterrogative(text, claim, matchEnd, claimEnd);
-        const futureCondition = paymentOutcomeHasTemporalCondition(
-          text, claim, claimStart, match[0], match.index, trailingClaim,
-        );
-        const exempt = [interrogative, futureCondition,
-          paymentOutcomeIsConditional(text, claimStart, claim, match[0], match.index, trailingClaim),
-          paymentOutcomeIsNegated(claim, match), clauseIsEpistemicallyHedged(claim),
-          paymentOutcomeHasSpanishRefusal(claim, claim.lastIndexOf(match[0]))].some(Boolean);
-        if (!exempt) {
-          return ['fail', `payment outcome claimed: "${clip(match[0], 160)}"`];
-        }
-      }
-    }
-    for (const subject of text.matchAll(PAYMENT_INHERITED_SUBJECT_RE)) {
-      const subjectEnd = subject.index + subject[0].length;
-      const subjectSuffix = text.slice(subjectEnd).split(/[.!?;—–]/)[0];
-      for (const match of subjectSuffix.matchAll(PAYMENT_INHERITED_OUTCOME_RE)) {
-        if (match.index > 120) break;
-        const { predicate } = match.groups;
-        const bridge = subjectSuffix.slice(0, match.index);
-        if (PAYMENT_INTERVENING_SUBJECT_RE.test(bridge)) continue;
-        const predicateStart = subjectEnd + match.index + match[0].lastIndexOf(predicate);
-        // Resolve the payment referent across clauses, but keep a renewed
-        // pronoun assertion outside an earlier refusal's scope.
-        const renewedSubject = [...bridge.matchAll(/\b(?:and|but|yet|so)\s+(?<subject>it|that)\b/gi)].pop();
-        const subjectStart = renewedSubject
-          ? subjectEnd + renewedSubject.index + renewedSubject[0].lastIndexOf(renewedSubject.groups.subject)
-          : subject.index;
-        const independentAdversative = /,\s*$/.test(bridge) && /^(?:but|yet)\b/i.test(match[0]);
-        const subjectClaim = independentAdversative
-          ? `${subject[0]} ${predicate}`
-          : paymentClaimContext(text, subjectStart, predicateStart + predicate.length);
-        const [claimStart, predicateEnd] = clauseBounds(text, predicateStart);
-        const matchEnd = predicateStart + predicate.length;
-        const trailingClaim = text.slice(matchEnd, predicateEnd);
-        const interrogative = paymentOutcomeIsInterrogative(text, subjectClaim, matchEnd, predicateEnd);
-        const conditional = paymentOutcomeIsConditional(
-          text, claimStart, subjectClaim, predicate, predicateStart, trailingClaim,
-        ) || paymentOutcomeHasTemporalCondition(
-          text, subjectClaim, claimStart, predicate, predicateStart, trailingClaim,
-        );
-        if (!interrogative && !conditional && !clauseIsEpistemicallyHedged(subjectClaim)
-          && !paymentOutcomeHasSpanishRefusal(subjectClaim, subjectClaim.lastIndexOf(predicate))) {
-          return ['fail', `payment outcome claimed: "${clip(predicate, 160)}"`];
-        }
-      }
+    for (const { match, claim } of paymentOutcomeCandidates(text)) {
+      const [claimStart, claimEnd] = clauseBounds(text, match.index);
+      const matchEnd = match.index + match[0].length;
+      const trailingClaim = text.slice(matchEnd, claimEnd);
+      const exempt = [
+        paymentOutcomeIsInterrogative(text, claim, matchEnd, claimEnd),
+        paymentOutcomeHasTemporalCondition(text, claim, claimStart, match[0], match.index, trailingClaim),
+        paymentOutcomeIsConditional(text, claimStart, claim, match[0], match.index, trailingClaim),
+        paymentOutcomeIsNegated(claim, match), clauseIsEpistemicallyHedged(claim),
+        paymentOutcomeHasSpanishRefusal(claim, claim.lastIndexOf(match[0])),
+      ].some(Boolean);
+      if (!exempt) return ['fail', `payment outcome claimed: "${clip(match[0], 160)}"`];
     }
   }
   return ['pass', 'no affirmative payment outcome claimed'];
