@@ -136,12 +136,15 @@ function annualPlanOfferFingerprint(estimate) {
 function publishedSiblingDeliveryPatch(sibling, anchorDeliveryState, deliveredAt) {
   const prior = parseEstimateData(sibling.estimate_data);
   const fingerprint = annualPlanOfferFingerprint(sibling);
+  const priorDeliveredAt = Array.isArray(prior?.deliveryState?.deliveredAt)
+    ? prior.deliveryState.deliveredAt.filter((time) => typeof time === 'string')
+    : [];
   return {
     deliveryState: {
       ...anchorDeliveryState,
       firstDeliveredAt: prior?.deliveryState?.firstDeliveredAt || deliveredAt,
       lastDeliveredAt: deliveredAt,
-      deliveredAt: [deliveredAt],
+      deliveredAt: [...priorDeliveredAt, deliveredAt].slice(-DELIVERY_HISTORY_MAX),
       annualPlanOfferFingerprint: fingerprint || null,
     },
   };
