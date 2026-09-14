@@ -18,6 +18,7 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const {
   acquireEstimateDepositLedgerLock,
   assertInvoiceDepositSettlementReady,
+  handleDepositIntentSucceeded,
   reconcileReceivedDepositToInvoice,
   _private: { markDepositReceived },
 } = require('../services/estimate-deposits');
@@ -249,6 +250,53 @@ async function addReceived(amount = 49) {
     });
     await markDepositReceived({ paymentIntentId: `pi_${randomUUID().replace(/-/g, '')}`, estimateId: f.estimateId, amountDollars: 49 });
     expect(sentSnapshots).toEqual([{ status: 'prepaid', total: 0 }]);
+  });
+
+  test('credited webhook replay settles an exhausted zero-balance invoice after transient close refusal', async () => {
+    const invoiceId = await insertInvoice({ total: 49 });
+    const paymentIntentId = `pi_${randomUUID().replace(/-/g, '')}`;
+    const settleSpy = jest.spyOn(InvoiceService, 'settleZeroBalance')
+      .mockResolvedValueOnce({ settled: false, reason: 'followup_in_flight', retryable: true });
+    try {
+      await markDepositReceived({ paymentIntentId, estimateId: f.estimateId, amountDollars: 49 });
+      const before = await mockPg('invoices').where({ id: invoiceId }).first();
+      const ledgerBefore = await mockPg('estimate_deposits').where({ stripe_payment_intent_id: paymentIntentId }).first();
+      expect(before.status).toBe('sent');
+      expect(Number(before.total)).toBe(0);
+      expect(before.line_items.filter((line) => line.category === 'deposit_credit')).toHaveLength(1);
+      expect(ledgerBefore.status).toBe('credited');
+      expect(Number(ledgerBefore.credited_amount)).toBe(49);
+
+      await expect(handleDepositIntentSucceeded({ id: paymentIntentId, metadata: { estimate_id: f.estimateId } }))
+        .resolves.toMatchObject({ handled: true, replay: true });
+      const after = await mockPg('invoices').where({ id: invoiceId }).first();
+      const ledgerAfter = await mockPg('estimate_deposits').where({ stripe_payment_intent_id: paymentIntentId }).first();
+      expect(after.status).toBe('prepaid');
+      expect(after.line_items.filter((line) => line.category === 'deposit_credit')).toHaveLength(1);
+      expect(Number(ledgerAfter.credited_amount)).toBe(49);
+      expect(settleSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      settleSpy.mockRestore();
+    }
+  });
+
+  test('exhausted credit still finds a later stamped zero-balance invoice', async () => {
+    await insertInvoice({ total: 100, createdAt: new Date('2026-01-01T00:00:00Z') });
+    const coveredId = await insertInvoice({
+      total: 0, createdAt: new Date('2026-01-02T00:00:00Z'),
+      lines: [
+        { description: 'Service', quantity: 1, amount: 49, unit_price: 49 },
+        { category: 'deposit_credit', estimate_id: f.estimateId, quantity: 1, amount: -49, unit_price: -49 },
+      ],
+    });
+    await mockPg('invoices').where({ id: coveredId }).update({ subtotal: 49 });
+    await addReceived(49);
+    await mockPg('estimate_deposits').where({ estimate_id: f.estimateId })
+      .update({ credited_amount: 49, status: 'credited', credited_invoice_id: coveredId });
+
+    expect((await reconcileReceivedDepositToInvoice(f.estimateId)).state).toBe('done');
+    expect((await mockPg('invoices').where({ id: coveredId }).first()).status).toBe('prepaid');
+    expect(Number((await mockPg('estimate_deposits').where({ estimate_id: f.estimateId }).first()).credited_amount)).toBe(49);
   });
 
   test('exact deposit coverage of an annual-prepay invoice parks before consuming the pending term credit', async () => {

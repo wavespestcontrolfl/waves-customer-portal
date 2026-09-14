@@ -1184,6 +1184,7 @@ async function reconcileReceivedDepositToInvoice(estimateId) {
   let appliedTotal = 0;
   let lastAppliedInvoiceId = null;
   let payerInvoiceId = null;
+  let exhausted = false;
   for (const candidate of candidates) {
     const result = await db.transaction(async (trx) => {
       // Bill-To edits use this customer gate before touching customer/visit
@@ -1209,8 +1210,6 @@ async function reconcileReceivedDepositToInvoice(estimateId) {
       });
       if (livePayer.payerId) return { state: 'payer', invoiceId: invoice.id };
       await acquireEstimateDepositLedgerLock(trx, estimateId);
-      const credit = await pendingDepositCredit(estimateId, trx);
-      if (!credit) return { state: 'done' };
       const lines = invoice.line_items == null ? []
         : typeof invoice.line_items === 'string' ? JSON.parse(invoice.line_items) : invoice.line_items;
       if (!Array.isArray(lines)) return { state: 'park', invoiceId: invoice.id };
@@ -1220,9 +1219,17 @@ async function reconcileReceivedDepositToInvoice(estimateId) {
       const dueCents = cents(invoice.subtotal) - cents(invoice.discount_amount)
         + cents(invoice.tax_amount) - priorCreditCents;
       if (dueCents !== cents(invoice.total) || dueCents < 0) return { state: 'park', invoiceId: invoice.id };
-      // A $0 invoice has no balance to credit. Later top-ups may roll to the
-      // next eligible bill, including when a prior deposit covered this one.
-      if (!dueCents) return { state: 'skip' };
+      // A committed credit can leave a $0 invoice open when the separate
+      // zero-balance close is temporarily refused. Its stamped line is the
+      // durable retry marker even after the deposit ledger is exhausted.
+      if (!dueCents) {
+        const stamped = lines.some((line) => line?.category === 'deposit_credit'
+          && String(line.estimate_id) === String(estimateId) && cents(line.amount) < 0);
+        return stamped && ['draft', 'sent', 'viewed', 'overdue'].includes(invoice.status)
+          ? { state: 'settle', invoiceId: invoice.id } : { state: 'skip' };
+      }
+      const credit = await pendingDepositCredit(estimateId, trx);
+      if (!credit) return { state: 'exhausted' };
 
       // Do not infer Stripe state from invoice.status alone. A durable
       // saved-card claim or orphan can represent money in flight even with
@@ -1281,6 +1288,17 @@ async function reconcileReceivedDepositToInvoice(estimateId) {
       if (cents(allocated) !== appliedCents) throw new Error('Late deposit allocation mismatch');
       return { state: 'applied', invoiceId: invoice.id, amount: allocated, remainingCents: dueCents - appliedCents };
     });
+    if (result.state === 'settle') {
+      const settled = await require('./invoice').settleZeroBalance(result.invoiceId);
+      if (!settled.settled && settled.reason !== 'already_settled') {
+        return { state: 'park', invoiceId: result.invoiceId, reason: settled.reason };
+      }
+      continue;
+    }
+    if (result.state === 'exhausted') {
+      exhausted = true;
+      continue;
+    }
     if (result.state === 'applied') {
       appliedTotal += result.amount;
       lastAppliedInvoiceId = result.invoiceId;
@@ -1295,9 +1313,6 @@ async function reconcileReceivedDepositToInvoice(estimateId) {
       // locks, never carrying a stale credit amount across transactions.
       continue;
     }
-    if (result.state === 'done' && appliedTotal > 0) {
-      return { state: 'applied', invoiceId: lastAppliedInvoiceId, amount: appliedTotal };
-    }
     if (result.state === 'payer') {
       payerInvoiceId = result.invoiceId;
       continue;
@@ -1306,7 +1321,8 @@ async function reconcileReceivedDepositToInvoice(estimateId) {
   }
   return appliedTotal > 0
     ? { state: 'applied', invoiceId: lastAppliedInvoiceId, amount: appliedTotal }
-    : (payerInvoiceId ? { state: 'park', invoiceId: payerInvoiceId, reason: 'payer_billed' } : { state: 'no_invoice' });
+    : (payerInvoiceId ? { state: 'park', invoiceId: payerInvoiceId, reason: 'payer_billed' }
+      : (exhausted ? { state: 'done' } : { state: 'no_invoice' }));
 }
 
 async function reconcileReceivedDepositSafely(estimateId, paymentIntentId = null) {
@@ -1350,7 +1366,9 @@ async function handleDepositIntentSucceeded(paymentIntent, eventCreated = null) 
     .where({ stripe_payment_intent_id: paymentIntent.id })
     .first('status');
   if (existing && ['received', 'credited', 'refunded'].includes(existing.status)) {
-    if (existing.status === 'received') await reconcileReceivedDepositSafely(estimateId, paymentIntent.id);
+    if (['received', 'credited'].includes(existing.status)) {
+      await reconcileReceivedDepositSafely(estimateId, paymentIntent.id);
+    }
     return { handled: true, replay: true };
   }
 
