@@ -2,6 +2,44 @@ const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-s
 const report = { subject: 'talstar p', location: 'exterior perimeter' };
 
 test.each([
+  ["You won't have to pay attention during your next visit.", 'pass'],
+  ["You won't have to pay until your next visit.", 'pass'],
+  ["You won't have to pay for your next visit.", 'fail'],
+  ['We waived the charge for your next visit.', 'fail'],
+  ['We will waive the charge for your next visit.', 'fail'],
+  ['We will cover your next visit.', 'fail'],
+  ['We will waive the charge for your next visit if the office approves.', 'pass'],
+  ['Whether the office approves or not, your next visit is free.', 'fail'],
+  ['The claim that your next visit is free is false.', 'pass'],
+])('reviewed free-visit proposition: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['We treated the exterior perimeter with Talstar P.', 'pass'],
+  ['The technician sprayed the exterior perimeter with Talstar P.', 'pass'],
+  ['The exterior perimeter was treated with Talstar P.', 'pass'],
+  ['The claim that Talstar P was applied to the exterior perimeter is false.', 'fail'],
+  ['The report will show that Talstar P was applied to the exterior perimeter.', 'pass'],
+  ['As you can see in the report, Talstar P was applied to the exterior perimeter.', 'pass'],
+  ["Talstar P was applied to the exterior perimeter, wasn't it", 'fail'],
+  ["Talstar P was applied to the exterior perimeter wasn't it", 'fail'],
+  ['The report might show that Talstar P was applied to the exterior perimeter.', 'fail'],
+  ['Talstar P was applied, according to the exterior perimeter technician.', 'fail'],
+])('reviewed report proposition: %s', (text, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['Talstar P and bait were applied respectively to the exterior perimeter and foundation.', 'talstar p', 'exterior perimeter', 'pass'],
+  ['Talstar P and bait were applied respectively to the exterior perimeter and foundation.', 'bait', 'foundation', 'pass'],
+  ['Talstar P and bait were applied respectively to the exterior perimeter and foundation.', 'talstar p', 'foundation', 'fail'],
+  ['Talstar P and bait were applied respectively to the exterior perimeter and foundation.', 'bait', 'exterior perimeter', 'fail'],
+])('respectively preserves product/location pairing: %s / %s / %s', (text, subject, location, status) => {
+  expect(checks.report_readback_confirms({ subject, location }, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   ['Talstar P was applied to the exterior perimeter.', 'pass'],
   ['It is false that we applied Talstar P to the exterior perimeter.', 'fail'],
   ['It is not true that the technician applied Talstar P to the exterior perimeter.', 'fail'],

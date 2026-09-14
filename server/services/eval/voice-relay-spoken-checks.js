@@ -538,6 +538,11 @@ function propositionIsExplicitlyDenied(text, at, findingVerb) {
   const [start] = clauseBounds(text, at);
   const prefix = text.slice(start, at);
   if (EXPLICIT_PROPOSITION_DENIAL_RE.test(prefix)) return true;
+  // A metalinguistic denial can follow the proposition it rejects.
+  // Bound it to this assertion, so a later independent promise or finding
+  // is still evaluated on its own merits.
+  if (/\b(?:the|a|this|that)\s+claim\s+that\s*$/i.test(prefix)
+      && /\b(?:is|was)\s+(?:false|not\s+true|untrue)\b/i.test(text.slice(at).split(/[,;.!?]/)[0])) return true;
   const actorPrefix = text.slice(start, findingVerb && findingVerb.index < at ? findingVerb.index : at);
   const actor = /\b(?:(?:i|we|you|he|she|they)|(?:(?:the|our|an?)\s+(?:[\w'\u2019-]+\s+){0,3})?(?:technician|tech|crew|team))(?:\s+(?:has|have|had|already|just|actually))*\s*$/i.exec(actorPrefix);
   return Boolean(actor && EXPLICIT_PROPOSITION_DENIAL_RE.test(actorPrefix.slice(0, actor.index)));
@@ -549,8 +554,10 @@ const FREE_VISIT_PROMISE_RES = Object.freeze(
 [
   "\\b(?:next|your next|the next|your)\\s+(?:visit|one|service|treatment|appointment)(?:['’]s|\\s+(?:is|will be|would be|comes))\\s+(?:free|on us|at no charge|no charge|at no cost|no cost|complimentary|on the house)\\b",
   "\\b(?:it|that|this)(?:['’]s|\\s+(?:is|will be|would be))\\s+(?:free|on us|at no charge|no charge|at no cost|no cost|complimentary|on the house)\\b",
-  "\\b(?:won['’]t|will not|not going to) have to pay\\b[^.!?]{0,30}?\\b(?:next|your next|the next|your|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b",
+  "\\b(?:won['’]t|will not|not going to) have to pay\\s+(?:(?:anything|a thing|a dime|a penny)\\s+)?(?:for|toward)\\s+(?:the\\s+|your\\s+)?(?:next|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b",
   "\\b(?:we|i)['’]ll cover (?:it|that|this|the (?:cost|visit))\\b",
+  "\\b(?:we|i)(?:\\s+(?:will|would)|['’]ll)\\s+cover\\s+(?:(?:your|the|our)\\s+)?(?:next|return|follow-up|follow up)\\s+(?:visit|service|treatment|appointment)\\b",
+  "\\b(?:we|i)\\s+(?:(?:will|would)\\s+)?waiv(?:e|ed)\\s+(?:the|your)\\s+(?:charge|fee|cost)\\s+for\\s+(?:(?:your|the)\\s+)?(?:next|return|follow-up|follow up)\\s+(?:visit|service|treatment|appointment)\\b",
   "\\b(?:not going to|won['’]t|will not) charge you\\b",
   "\\b(?:won['’]t|will not|not going to|never|no need to) (?:bill|charge|invoice)(?: you)?\\b[^.!?]{0,40}?\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b",
   "\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b[^.!?]{0,20}?\\b(?:costs? (?:you )?nothing|won['’]t cost (?:you )?(?:anything|a thing|a dime|a penny)|(?:is|will be|would be|has been|['’]s) (?:waived|no cost|free of charge|complimentary|at no cost|at no charge))\\b",
@@ -587,7 +594,9 @@ function no_free_visit_promise(value, record, { spoken }) {
           ? causalContext.slice(causalBoundary.index + causalBoundary[0].length, match.index - claimStart)
           : text.slice(claimStart, match.index);
         const suffix = text.slice(match.index + match[0].length, clauseEnd);
-        const governingCondition = /\b(?:if|unless|whether|until|before)\b/i.test(prefix)
+        const governingCondition = /\b(?:if|unless|whether|until|before)\b/i.test(
+          prefix.replace(/\bwhether\b[^,;.!?]*\bor\s+not\b/gi, ''),
+        )
           || /^\s*,?\s*(?:only\s+)?(?:if|unless)\b/i.test(suffix);
         if (!governingCondition && !clauseIsEpistemicallyHedged(prefix)
             && !propositionIsExplicitlyDenied(text, match.index)) {
@@ -1303,7 +1312,7 @@ const REPORT_COORDINATED_LOCATION_PREFIX_RE = new RegExp(
   `^\\s*(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+)?${REPORT_LOCATION_NOUN_PREFIX}$`, 'i',
 );
 const REPORT_FRONTED_LOCATION_PREFIX_RE = new RegExp(`^\\s*${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+${REPORT_LOCATION_NOUN_PREFIX}$`, 'i');
-const REPORT_LOCATION_DETOUR_RE = /\b(?:after|before|while|when|because|since|following|until|unless)\b/i;
+const REPORT_LOCATION_DETOUR_RE = /\b(?:after|before|while|when|because|since|following|until|unless|according\s+to)\b/i;
 const REPORT_COMPLETED_PASSIVE_RE = /\b(?:(?:was|were|got)|(?:has|have|had)(?:\s+(?:\w+ly|already|just|now))*\s+been)\s+(?:(?:\w+ly|already|just|now)\s+)*$/i;
 const REPORT_NONCOMPLETION_GOVERNOR_RE = /(?:\b(?:supposed|expected|required|meant|scheduled|instructed|asked|told|directed|ordered|needed|intended|planned|failed|pretend(?:s|ed|ing)?|want(?:s|ed)?|ought)\s+to(?:\s+(?:\w+ly|already|just|now))*(?:\s+have(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?)?(?:\s+(?:\w+ly|already|just|now))*|\bplan(?:s|ned|ning)?\s+on\s+having(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?(?:\s+(?:\w+ly|already|just|now))*|\bimagin(?:e[sd]?|ing)\s+(?:that\s+)?(?:i|we|you|he|she|they|it)\s+(?:(?:had|has|have|was|were|already|just|now)\s+)*)\s*$/i;
 const REPORT_NONCOMPLETION_MODIFIER_RE = /\b(?:almost|nearly)(?:\s+(?:has|have|had|was|were|got|been)){0,2}\s*$/i;
@@ -1413,6 +1422,17 @@ function reportLocationIsTreatmentTarget(
     subjectAt + subjectLength, findingVerb.index + findingVerb[0].length,
   );
   if (locationAt < subjectAt) {
+    const beforeLocation = affirmed.slice(0, locationAt);
+    const betweenLocationAndProduct = affirmed.slice(locationAt + locationLength, subjectAt);
+    // Active and passive treatment can name the treated area first and
+    // introduce the product with "with": "treated the perimeter with P"
+    // and "the perimeter was treated with P" assert the same pairing.
+    if ((findingVerb.index < locationAt
+          && /^\s+with\s+$/i.test(betweenLocationAndProduct)
+          && /\b(?:treated|sprayed|applied|placed|used)\s+(?:(?:the|a|an)\s+)?$/i.test(beforeLocation))
+        || (locationAt < findingVerb.index
+          && /^\s*(?:(?:the|a|an)\s+)?$/i.test(beforeLocation)
+          && /\b(?:was|were|has\s+been|had\s+been)\s+(?:treated|sprayed|applied|placed|used)\s+with\s+$/i.test(betweenLocationAndProduct))) return true;
     const treatmentTail = affirmed.slice(relationshipStart);
     const laterTargetLink = REPORT_TREATMENT_LOCATION_LINK_RE.exec(treatmentTail);
     const laterTarget = laterTargetLink
@@ -1444,6 +1464,7 @@ function reportLocationIsTreatmentTarget(
 }
 
 function reportVerbGovernsProduct(affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb) {
+  if (locationAt < subjectAt && /\bwith\s+$/i.test(affirmed.slice(locationAt + locationLength, subjectAt))) return true;
   const objectGap = findingVerb.index < subjectAt
     ? affirmed.slice(findingVerb.index + findingVerb[0].length, subjectAt) : '';
   const coordinatedObject = REPORT_COORDINATED_OBJECT_GAP_RE.test(objectGap);
@@ -1530,6 +1551,16 @@ function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb
   return deniedSpans(affirmed).some(([start, end]) => firstAt < end && lastAt > start);
 }
 
+function reportRespectivelyPairsFinding(affirmed, subjectAt, locationAt, findingVerb) {
+  const respectively = /\brespectively\b/i.exec(affirmed);
+  if (!respectively || !findingVerb || subjectAt > findingVerb.index || locationAt < respectively.index) return true;
+  const locationListStart = respectively.index + respectively[0].length
+    + (/^\s*(?:to|at|on|in)\s+/i.exec(affirmed.slice(respectively.index + respectively[0].length))?.[0].length || 0);
+  const productOrdinal = [...affirmed.slice(0, subjectAt).matchAll(/\band\b|,/gi)].length;
+  const locationOrdinal = [...affirmed.slice(locationListStart, locationAt).matchAll(/\band\b|,/gi)].length;
+  return productOrdinal === locationOrdinal;
+}
+
 function reportSharedLocationContinuation(text, clauseEnd, location) {
   const remainder = text.slice(clauseEnd);
   const dashQualifier = remainder.replace(/^[—–]\s*/, '').split(/[.!?;]/)[0];
@@ -1586,7 +1617,9 @@ function report_readback_confirms(value, record, { spoken }) {
         'i',
       ).test(text.slice(clauseEnd));
       const sharedLocation = reportSharedLocationContinuation(text, clauseEnd, value.location);
-      if (text[clauseEnd] === '?' || interrogative || coordinatedQuestion || sharedLocation.unconfirmed) continue;
+      const asrTagQuestion = /(?:,\s*(?:right|correct)|\b(?:wasn['’]t\s+it|isn['’]t\s+it|aren['’]t\s+they|didn['’]t\s+(?:we|they)))\s*$/i
+        .test(text.slice(clauseStart, clauseEnd));
+      if (text[clauseEnd] === '?' || interrogative || coordinatedQuestion || sharedLocation.unconfirmed || asrTagQuestion) continue;
       const reportClause = clauseOf(text, m.index) + sharedLocation.text;
       if (REPORT_TRAILING_DENIAL_RE.test(reportClause.slice(reportClause.lastIndexOf(',') + 1).trim())) continue;
       const assertion = reportAssertionOf(reportClause, m.index - clauseStart);
@@ -1623,7 +1656,8 @@ function report_readback_confirms(value, record, { spoken }) {
           locationAt + locationMatch[0].length,
           findingVerb ? findingVerb.index + findingVerb[0].length : -1,
         );
-        const findingEvidence = affirmed.slice(0, findingEvidenceEnd);
+        const findingEvidence = affirmed.slice(0, findingEvidenceEnd)
+          .replace(/^\s*(?:the report will show that|as you can see in the report,?)\s*/i, '');
         const trailingEvidence = affirmed.slice(findingEvidenceEnd)
           .replace(/^\s*(?:perimeter|area|wall|walls|zone|edge)\b/i, '');
         // A trailing "before" dates completed evidence. Remove only that
@@ -1637,6 +1671,7 @@ function report_readback_confirms(value, record, { spoken }) {
             && !REPORT_TRAILING_UNCERTAINTY_RE.test(trailingEvidence)
             && !REPORT_CONCISE_NONCOMPLETION_RE.test(trailingEvidence) && !REPORT_INSTRUCTION_RE.test(affirmed)
             && !alternativeLocation
+            && reportRespectivelyPairsFinding(affirmed, subjectAt, locationAt, findingVerb)
             && (completedFinding || conciseFinding)
             && !reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb, text.slice(0, clauseStart))) {
           return ['pass', `readback confirmed: "${clip(clause.trim(), 160)}"`];
