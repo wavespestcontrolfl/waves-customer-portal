@@ -82,7 +82,12 @@ async function mintPacketInvoice({ packet, visit, members, customer, trx }) {
   for (const estimateId of estimateIds) {
     const lock = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?)) AS locked',
       [`unminted_setup_fee_manual_billing:${estimateId}`]);
-    if (!lock.rows[0].locked) return office('existing_member_invoice');
+    if (!lock.rows[0].locked) {
+      // Contention does not prove a committed bill exists. Roll back this attempt
+      // so retrying can recheck coverage without freezing an office hold.
+      throw Object.assign(new Error('Estimate billing is being updated. Retry the closeout in a moment.'),
+        { code: 'visit_busy', status: 409, statusCode: 409, isOperational: true });
+    }
     const unlinked = await trx('invoices').where({ customer_id: customer.id })
       .whereNull('scheduled_service_id')
       .where('notes', 'ilike', `%accepted estimate #${estimateId}%`)

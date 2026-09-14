@@ -2380,7 +2380,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
       customerId: fixture.customerId,
       lineItems: [{ description: 'First service application', quantity: 1, unit_price: 120 }],
       notes: `Auto-generated from accepted estimate #${estimateId.toUpperCase()}.`,
-    })).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 });
+    })).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409, statusCode: 409, isOperational: true });
     expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
   });
 
@@ -2601,25 +2601,44 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
   });
 
-  test('an unlinked accepted-estimate writer that wins the shared lock parks ordinary packet mint', async () => {
+  test.each([
+    ['an application invoice commits', 'Synthetic accepted-estimate charge', true, true],
+    ['a setup-only invoice commits', 'WaveGuard Membership — one-time setup fee', true, false],
+    ['an application invoice rolls back', 'Synthetic accepted-estimate charge', false, false],
+  ])('estimate-lock contention leaves packet mint retryable when %s', async (_label, description, commit, held) => {
     const estimateId = await linkFixtureEstimate();
     const writer = await mockPg.transaction();
-    let closeout;
     try {
       await InvoiceService.create({
         database: writer, customerId: fixture.customerId,
-        lineItems: [{ description: 'Synthetic accepted-estimate charge', quantity: 1, unit_price: 99 }],
+        lineItems: [{ description, quantity: 1, unit_price: 99 }],
         notes: `Auto-generated from Accepted estimate #${estimateId.toUpperCase()}.`,
       });
-      closeout = saveVisitCompletionPacket(submission());
-      const saved = await closeout;
-      expect(saved.body.billing).toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
+      await expect(saveVisitCompletionPacket(submission())).rejects.toMatchObject({
+        code: 'visit_busy', statusCode: 409, isOperational: true,
+      });
       expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
-      await writer.commit();
-      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+      expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(0);
+      expect(await mockPg('visit_completion_packets').where({ visit_id: fixture.visitId })).toHaveLength(0);
+      expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'billing_ready' })).toHaveLength(0);
+      expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({
+        status: 'open', billing_hold: false, billing_frozen_at: null,
+      });
+      if (commit) await writer.commit();
+      else await writer.rollback();
+
+      const saved = await saveVisitCompletionPacket(submission());
+      expect(saved.body.billing).toMatchObject(held
+        ? { state: 'office_required', reason: 'existing_member_invoice' }
+        : { state: 'invoice_ready', total: 240 });
+      const replay = await saveVisitCompletionPacket(submission());
+      expect(replay.body.billing).toEqual(saved.body.billing);
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(commit && !held ? 2 : 1);
+      expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(2);
+      expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
     } finally {
       if (!writer.isCompleted()) await writer.rollback();
-      if (closeout) await closeout;
     }
   });
 

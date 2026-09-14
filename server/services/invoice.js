@@ -1148,7 +1148,7 @@ const InvoiceService = {
     // (the best-effort tax/discount catches then abort with it — accepted
     // for linked money writes; plain unlinked creates keep the
     // untransacted path).
-    const stampedEstimateIdInNotes = ((String(notes || "").match(/accepted estimate #([0-9a-fA-F-]{8,})/i) || [])[1] || "").toLowerCase() || null;
+    const stampedEstimateIdInNotes = require('./setup-fee-alert-reconcile').acceptedEstimateIdFromNotes(notes);
     if (linkedScheduledServiceId || stampedEstimateIdInNotes) {
       if (database && database.isTransaction) {
         if (linkedScheduledServiceId) {
@@ -1208,7 +1208,7 @@ const InvoiceService = {
       }
       if (packetOwners.length && !separateSetupFee) {
         throw Object.assign(new Error('This estimate is billed by its saved visit closeout. Resume that closeout.'),
-          { status: 409, code: 'VISIT_PACKET_OWNS_BILLING' });
+          { status: 409, statusCode: 409, isOperational: true, code: 'VISIT_PACKET_OWNS_BILLING' });
       }
     }
     const customer = await database("customers").where({ id: customerId }).first();
