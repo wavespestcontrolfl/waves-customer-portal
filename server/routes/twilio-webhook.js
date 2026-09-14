@@ -937,6 +937,7 @@ router.post('/sms', async (req, res) => {
       && !courtesyOnly && !solicitationEnforced && !unifiedAlreadyRead
       && Boolean(Body || inboundMedia.length)
       && !(process.env.ADAM_PHONE && From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE);
+    const unknownProcessingUntil = new Date(Date.now() + 5 * 60 * 1000).toISOString();
     const [smsLogEntry] = await db('sms_log').insert({
       customer_id: customer?.id || null,
       direction: 'inbound', from_phone: From, to_phone: To,
@@ -952,7 +953,8 @@ router.post('/sms', async (req, res) => {
         domain: numberConfig.domain,
         media: inboundMedia,
         ...(courtesyOnly ? { courtesyOnly: true } : {}),
-        ...(ordinaryUnknownRecoveryCandidate ? { sms_reply_eligible: true } : {}),
+        ...(ordinaryUnknownRecoveryCandidate ? { sms_reply_eligible: true,
+          sms_reply_processing_until: unknownProcessingUntil } : {}),
       }),
     }).returning(['id', 'created_at']).catch(() => {
       sourcePersistenceFailed = true;
@@ -1316,6 +1318,14 @@ router.post('/sms', async (req, res) => {
     let aiAnswered = false;
 
     if (Body && (customer || numberConfig.type === 'location') && aiAutoReplyOn && !schedulingIntent && !rescheduleAsk && !smsReaction && !courtesyOnly) {
+      // The sweep must wait while a live AI attempt can still answer. The
+      // insert's initial five-minute hold covers post-ACK startup/crashes;
+      // refresh it during an unusually slow model/provider round trip.
+      const processingHeartbeat = ordinaryUnknownRecoveryCandidate ? setInterval(() => {
+        void db('sms_log').where({ direction: 'inbound', twilio_sid: MessageSid })
+          .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ sms_reply_processing_until: new Date(Date.now() + 5 * 60 * 1000).toISOString() })]) })
+          .catch((err) => logger.warn('[twilio-webhook] SMS AI processing hold refresh failed', { code: err.code || 'unknown' }));
+      }, 60 * 1000) : null;
       try {
         const WavesAssistant = require('../services/ai-assistant/assistant');
         const aiResult = await WavesAssistant.processMessage({
@@ -1405,6 +1415,7 @@ router.post('/sms', async (req, res) => {
 
         logger.info(`AI Assistant processed: ${From} escalated=${aiResult.escalated} conv=${aiResult.conversationId}`);
       } catch (e) { logger.error(`AI Assistant failed: ${e.message}`); }
+      finally { if (processingHeartbeat) clearInterval(processingHeartbeat); }
     } else if ((schedulingIntent || rescheduleAsk) && aiAutoReplyOn) {
       // Log the intentional skip so we can audit the gate and see volume.
       logger.info('[sms-intent] scheduling-intent detected; skipping auto-reply, routing to human inbox');
@@ -1414,12 +1425,15 @@ router.post('/sms', async (req, res) => {
       logger.info('[sms-intent] courtesy-only closer; skipping auto-reply');
     }
 
-    if (ordinaryUnknownRecoveryCandidate && aiAnswered) {
-      // Only an accepted AI answer retires the conservative pre-ACK stamp.
-      // A failed write leaves at worst one recoverable human bell, never an
-      // invisible first contact. Retry once for a transient DB failure.
+    if (ordinaryUnknownRecoveryCandidate) {
+      // Only an accepted AI answer retires eligibility. Every completed AI
+      // decision clears the processing hold, so no-answer outcomes can be
+      // recovered immediately if the alert dispatch later crashes.
       const narrow = () => db('sms_log').where({ direction: 'inbound', twilio_sid: MessageSid })
-        .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ sms_reply_eligible: false, sms_reply_ai_answered: true })]) });
+        .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
+          sms_reply_eligible: !aiAnswered, sms_reply_processing_until: null,
+          ...(aiAnswered ? { sms_reply_ai_answered: true } : {}),
+        })]) });
       await narrow().catch(() => narrow()).catch((err) =>
         logger.warn('[twilio-webhook] AI answer eligibility narrowing failed', { code: err.code || 'unknown' }));
     }
@@ -2300,7 +2314,7 @@ async function hasRecentUnknownSenderReceipt(From, excludeSid) {
 // double-ringing (codex #4210 round-2 P1: the loud-reaction branch used to
 // fall through to the internal_alert owner forward regardless, ringing a
 // second alert on top of a dispatch that already succeeded).
-async function dispatchUnknownSenderAlert({ From, MessageSid, message }) {
+async function dispatchUnknownSenderAlert({ From, MessageSid, message, recovery = false }) {
   // Persist SID-scoped recovery eligibility (codex #4210 round-9 P1): both
   // call sites into this function already gate on everything that decides
   // an sms_reply alert is owed — not AI-answered, not a tracking number
@@ -2309,10 +2323,11 @@ async function dispatchUnknownSenderAlert({ From, MessageSid, message }) {
   // ENTRY (before the claim race, so both a winner and a loser carry it),
   // lets the recovery sweep (sms-reply-alert-sweep.js) restrict itself to
   // messages that actually passed this webhook's own eligibility instead of
-  // re-deriving — and inevitably drifting from — that logic. Best-effort:
-  // a failed stamp just means this one message doesn't get sweep coverage,
-  // not that the claim/dispatch below is skipped.
-  await db('sms_log').where({ direction: 'inbound', twilio_sid: MessageSid })
+  // re-deriving — and inevitably drifting from — that logic. The sweep's
+  // recovery call never restamps: an accepted AI answer may have since
+  // narrowed an ordinary text's conservative pre-ACK eligibility. Best-
+  // effort on the ordinary path: a failed stamp does not skip dispatch.
+  if (!recovery) await db('sms_log').where({ direction: 'inbound', twilio_sid: MessageSid })
     .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ sms_reply_eligible: true })]) })
     .catch((err) => logger.warn('[twilio-webhook] sms_reply eligibility stamp failed', { code: err.code || 'unknown' }));
   // Claim the window atomically FIRST — no transaction held across the
@@ -2323,6 +2338,19 @@ async function dispatchUnknownSenderAlert({ From, MessageSid, message }) {
   // lease can never mutate a claim a later message has since won.
   const { claimed, token } = await claimUnknownSenderAlertWindow(From);
   if (!claimed) return true;
+  if (recovery) {
+    // The AI may have completed between the sweep's orphan SELECT and this
+    // claim. Never re-stamp or dispatch a now-ineligible/processing message.
+    const row = await db('sms_log').where({ direction: 'inbound', twilio_sid: MessageSid }).first('metadata')
+      .catch(() => null);
+    let meta = row?.metadata || {};
+    if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = {}; } }
+    if (meta.sms_reply_eligible !== true || (meta.sms_reply_processing_until
+      && new Date(meta.sms_reply_processing_until).getTime() > Date.now())) {
+      await releaseUnknownSenderAlertClaim(From, token);
+      return false;
+    }
+  }
   // Secondary guard: a row stamped sms_reply_alerted by any other writer
   // still counts — but this claim was just freshly stamped expiring in a
   // couple of minutes, not from that receipt's actual timestamp. Release it

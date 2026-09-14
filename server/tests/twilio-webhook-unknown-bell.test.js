@@ -232,6 +232,25 @@ test('a delivered non-escalated AI reply does not ring or consume the alert wind
   expect((await storedMetadata()).sms_reply_alerted).toBeUndefined();
   expect(JSON.parse(mockState.smsLogInsertPayloads[0].metadata).sms_reply_eligible).toBe(true);
   expect((await storedMetadata()).sms_reply_eligible).toBe(false);
+  expect((await storedMetadata()).sms_reply_processing_until).toBeNull();
+});
+
+test('recovery cannot ring while an AI answer is still in flight', async () => {
+  let finishAi;
+  processMessage.mockImplementation(() => new Promise((resolve) => { finishAi = resolve; }));
+  const sid = await receive();
+  expect(JSON.parse(mockState.smsLogInsertPayloads[0].metadata).sms_reply_processing_until)
+    .toEqual(expect.any(String));
+  expect(new Date((await storedMetadata()).sms_reply_processing_until).getTime()).toBeGreaterThan(Date.now());
+  expect(await webhookRouter._internals.dispatchUnknownSenderAlert({
+    From: sender, MessageSid: sid, message: 'Synthetic text', recovery: true,
+  })).toBe(false);
+  expect(triggerNotification).not.toHaveBeenCalled();
+  finishAi({ reply: 'Synthetic answer', escalated: false });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  expect((await storedMetadata()).sms_reply_eligible).toBe(false);
+  expect(triggerNotification).not.toHaveBeenCalled();
 });
 
 test('ordinary unknown text is recoverable from its pre-ACK insert when AI does not answer', async () => {

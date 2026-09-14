@@ -111,6 +111,7 @@ async function findCandidatePhones() {
     .where('m.created_at', '>', new Date(Date.now() - SWEEP_HORIZON_MS))
     .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); })
     .whereRaw("l.metadata->>'sms_reply_eligible' = 'true'")
+    .whereRaw("COALESCE((l.metadata->>'sms_reply_processing_until')::timestamptz, '-infinity'::timestamptz) <= NOW()")
     // The two per-message terminal markers findOrphanMessage applies (its
     // own receipt; a deliberate suppression) are repeated here so the
     // steady state — delivered-but-unread messages, which is most of them —
@@ -144,6 +145,7 @@ async function findOrphanMessage(phone) {
     .where({ 'm.channel': 'sms', 'm.direction': 'inbound', 'l.from_phone': phone })
     .where('m.created_at', '>', new Date(Date.now() - SWEEP_HORIZON_MS))
     .whereRaw("l.metadata->>'sms_reply_eligible' = 'true'")
+    .whereRaw("COALESCE((l.metadata->>'sms_reply_processing_until')::timestamptz, '-infinity'::timestamptz) <= NOW()")
     // A candidate's OWN receipt covers it UNCONDITIONALLY, independent of
     // the window math below (codex #4210 round-15 P1): a message first
     // recovered more than 4h after its own arrival (an outage kept the
@@ -216,7 +218,7 @@ async function recoverPhone(phone, dispatch) {
   if (await hasActiveClaim(phone)) return false; // a dispatch is genuinely still in flight — don't race it
   const orphan = await findOrphanMessage(phone);
   if (!orphan) return false; // every unread eligible message already has delivery coverage
-  const delivered = await dispatch({ From: phone, MessageSid: orphan.twilio_sid, message: orphan.body });
+  const delivered = await dispatch({ From: phone, MessageSid: orphan.twilio_sid, message: orphan.body, recovery: true });
   return Boolean(delivered);
 }
 
