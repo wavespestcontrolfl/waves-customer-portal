@@ -534,7 +534,7 @@ function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)
 // refusal before "but" or "so" cannot excuse a subsequent success claim.
 const PAYMENT_ACTOR = '(?:i|we|they|the office|the team|billing|someone|stripe|(?:(?:a|the|our|your|their) )?(?:bank|(?:payment |billing )?(?:processor|system))|(?:a|the|our) (?:team member|billing team|manager))';
 const PAYMENT_SUCCESS_ADVERBS = '(?:(?:not\\s+only|already|just|now|then|(?!(?:probably|possibly|potentially|apparently|supposedly|seemingly|allegedly|presumably|unlikely|conditionally|partially|nearly)\\b)[a-z]+ly)\\s+)*';
-const PAYMENT_NON_OUTCOME_SUFFIX = '(?!\\s+(?:(?:(?:update|change|replacement)\\s+)?requests?|info(?:rmation)?|details?|methods?|links?)\\b)';
+const PAYMENT_NON_OUTCOME_SUFFIX = '(?!\\s+(?:(?:(?:update|change|replacement)\\s+)?requests?|info(?:rmation)?|details?|methods?|links?|numbers?|digits?|expir(?:ation|y)|cvv|cvc|security\\s+code)\\b)';
 const PAYMENT_AMOUNT = `(?:\\$\\s*${DIGITS}|${DIGITS}\\s+(?:dollars?|bucks)|${NUMBER_RUN_EN_STRICT}(?:dollars?|bucks))`;
 const PAYMENT_TARGET = `(?:payment|(?:(?:credit|debit|prepaid)\\s+)?card|charge|transaction)${PAYMENT_NON_OUTCOME_SUFFIX}(?:\\s+(?:of\\s+${PAYMENT_AMOUNT}|ending(?:\\s+in)?\\s+\\d{4}\\b))?`;
 const PAYMENT_OBJECT_PRONOUN = '(?:it|that(?!\\s+(?!(?:and|but|then|yet|so|if|unless|once|when|after|before|until|as|only|provided|providing|assuming|on|in|at|for|with|to|by|again|today|yesterday|tomorrow|last|just|now|already|successfully)\\b|[a-z]+ly\\b)[a-z]))';
@@ -621,7 +621,7 @@ function paymentOutcomeIsInterrogative(text, claim, matchEnd, claimEnd) {
     'i',
   ).test(followup[1]));
   const coordinatedQuestion = new RegExp(
-    `^\\s*(?:(?:and|but|yet|then)\\s+${PAYMENT_INHERITED_PREDICATE}\\s*)+\\?`, 'i',
+    `^\\s*(?:(?:and|but|yet|then)\\s+${PAYMENT_INHERITED_PREDICATE}\\s*)+(?:,\\s*(?:right|correct|yes|no|okay|ok|isn[\\x27\\u2019]t\\s+it|didn[\\x27\\u2019]t\\s+it))?\\s*\\?`, 'i',
   ).test(text.slice(claimEnd).replace(/\bnot(?:\s+only)?\s+/gi, ''));
   return QUESTION_LEAD_RE.test(claim) || coordinatedQuestion || (text[claimEnd] === '?' && !followupQuestion);
 }

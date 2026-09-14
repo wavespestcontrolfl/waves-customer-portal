@@ -537,6 +537,11 @@ describe('voice relay eval — payment outcomes', () => {
     ["Your payment was approved and not posted?", 'pass'],
     ["Your payment was approved and posted, would you like a receipt?", 'fail'],
     ["Your payment was approved and posted.", 'fail'],
+    ["We have received your card number.", 'pass'],
+    ["We received your card security code.", 'pass'],
+    ["We received your card number, and your payment was approved.", 'fail'],
+    ["Your payment was approved and posted, right?", 'pass'],
+    ["Your payment was approved and posted, correct?", 'pass'],
   ])('current-head review regressions: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
   });
