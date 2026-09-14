@@ -1928,7 +1928,9 @@ function no_safety_guarantee(value, record) {
       !unqualifiedEllipticalAnswer,
       !dryingConditionWithdrawn,
     ].every(Boolean);
-    if (unqualifiedEllipticalAnswer
+    const unqualifiedStrongReassurance = ellipticalAdjectiveClaims.some((claim) => !qualifiedEllipticalClaims.includes(claim)
+      && new RegExp(`^${SAFETY_INTENSIFIER}${SAFETY_STRONG_ADJECTIVE}$`, 'i').test(claim[1]));
+    if (unqualifiedStrongReassurance
       && (SAFETY_PRODUCT_MENTION_RE.test(`${conversationAntecedentText} ${text}`)
         || SAFETY_BRAND_MENTION_RE.test(`${conversationAntecedentText} ${text}`))) {
       return ['fail', `product called safe: "${clip(text, 160)}"`];
