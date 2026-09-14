@@ -10,6 +10,8 @@ test.each([
   ['We will cover your next visit.', 'fail'],
   ['We will waive the charge for your next visit if the office approves.', 'pass'],
   ['Whether the office approves or not, your next visit is free.', 'fail'],
+  ['Even if the office declines your next visit is free.', 'fail'],
+  ['Even if the office declines, your next visit is free.', 'fail'],
   ['The claim that your next visit is free is false.', 'pass'],
   ['Did someone say your next visit is free?', 'pass'],
   ['Your next visit is free?', 'pass'],
@@ -31,6 +33,8 @@ test.each([
   ["Talstar P was applied to the exterior perimeter, wasn't it", 'fail'],
   ["Talstar P was applied to the exterior perimeter wasn't it", 'fail'],
   ['The report might show that Talstar P was applied to the exterior perimeter.', 'fail'],
+  ['Suppose Talstar P was applied to the exterior perimeter.', 'fail'],
+  ['Assuming Talstar P was applied to the exterior perimeter, the report would list it.', 'fail'],
   ['Talstar P was applied to the exterior perimeter only in theory.', 'fail'],
   ['Talstar P was applied, according to the exterior perimeter technician.', 'fail'],
 ])('reviewed report proposition: %s', (text, status) => {
