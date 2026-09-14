@@ -9,16 +9,17 @@ const MARKDOWN_LINK_DEFINITION_RE = /^\s*\[[^\]\n]+\]:\s*\S+/im;
 const BOILERPLATE_RE = /\bthank you for (?:reaching out|contacting us)\b|\bhope this (?:email )?finds you well\b|\bplease (?:do not|don't) hesitate to (?:reach out|contact us)\b|\blet us know if you have any (?:other |further )?questions\b/i;
 // Outbound corrections can legitimately supersede preparation instructions.
 // Screen prompt-control language rather than using the stricter exemplar gate.
-const OUTPUT_INSTRUCTION_RE = /\b(?:system|developer)\s+(?:prompt|instructions?)\b|\b(?:assistant|system|user)\s*:|\b(?:ignore|disregard|forget|override)\s+(?:(?:all|the|any)\s+)?(?:previous|prior|above|earlier)\s+instructions?\b|\b(?:ignore|disregard|forget|override)\b[^.!?]{0,80}\b(?:prompt|system|developer)\b|```/i;
+const OUTPUT_INSTRUCTION_RE = /\b(?:system|developer)\s+(?:prompt|instructions?)\b|(?:^|\n)\s*(?:assistant|system|user)\s*:|\b(?:ignore|disregard|forget|override)\s+(?:(?:all|the|any)\s+)?(?:previous|prior|above|earlier)\s+instructions?\b|\b(?:ignore|disregard|forget|override)\b[^.!?]{0,80}\b(?:prompt|system|developer)\b|```/i;
 // Allow modifiers such as "scheduled pest-control", but do not absorb an
 // approved application unit into a later, unrelated mention of a visit.
 const VISIT_SRC = '(?:(?!applications?\\b)[a-z]+(?:-[a-z]+)*\\s+)*visit\\b';
 const VISIT_UNIT_SRC = `(?:each|every|a)\\s+${VISIT_SRC}`;
 const PRICE_UNIT_SRC = `(?:(?:for\\s+)?${VISIT_UNIT_SRC}|per[\\s-]+${VISIT_SRC}|/\\s*${VISIT_SRC})`;
+const AMOUNT_SRC = '(?:\\$\\s*\\d[\\d,.]*|\\b\\d[\\d,.]*\\s+dollars?)';
 const VISIT_PRICE_RE = new RegExp([
-  `(?:\\$\\s*\\d[\\d,.]*|\\b\\d[\\d,.]*\\s+dollars?)\\s*${PRICE_UNIT_SRC}`,
+  `${AMOUNT_SRC}\\s*${PRICE_UNIT_SRC}`,
   `\\b(?:price|amount|cost|charge|rate)\\s+${PRICE_UNIT_SRC}`,
-  `\\b${VISIT_UNIT_SRC}\\s+(?:costs?|is|will\\s+(?:cost|be))\\s+\\$\\s*\\d`,
+  `\\b${VISIT_UNIT_SRC}\\s+(?:costs?|is|will\\s+(?:cost|be))\\s+${AMOUNT_SRC}`,
 ].join('|'), 'i');
 
 function normalizeCopy(text) {
@@ -35,7 +36,7 @@ function forgedSignature(text) {
   const tail = lines.slice(-2).join('\n');
   const closing = /^(?:best|best regards|kind regards|warm regards|regards|sincerely|thanks|thank you|cheers|warmly)[,.]?$/i;
   const dashedName = /(?:^|\n)\s*[-–—]\s*\p{Lu}[\p{L}\p{M}'’.-]*(?:\s+\p{Lu}[\p{L}\p{M}'’.-]*){0,2}[,.]?\s*$/u;
-  const signOffAndName = /^[\p{L}\p{M}'’ -]+,\n\p{Lu}[\p{L}\p{M}'’.-]*(?: \p{Lu}[\p{L}\p{M}'’.-]*){0,3}$/u;
+  const signOffAndName = /^[\p{L}\p{M}'’ -]*\b(?:best|regards|thanks|appreciation|gratitude|faithfully|sincerely|cheers|warmly),\n\p{Lu}[\p{L}\p{M}'’.-]*(?: \p{Lu}[\p{L}\p{M}'’.-]*){0,3}$/u;
   return lines.slice(1).some((line) => closing.test(line))
     || /(?:^|\n)\s*(?:[-–—]\s*)?(?:adam|virginia|the waves pest control team|waves team)\s*$/i.test(tail)
     || dashedName.test(tail)
@@ -52,7 +53,8 @@ function greetingMatches(draft, customer) {
 function customerCopyViolation(draft, normalizedCopy) {
   return findBannedCustomerCopy(normalizedCopy).length > 0
     || VISIT_PRICE_RE.test(normalizedCopy)
-    || /\bWaves\s+(?:Lawn\s*(?:[-+&]|and)?\s*Pest|Pest(?:\s+Control)?\s*(?:[-+&]|and)\s*Lawn)\b/i.test(normalizedCopy)
+    || /\bWaves\s+(?:Lawn\s*(?:[-+&/]|and)?\s*Pest|Pest(?:\s+Control)?\s*(?:[-+&/]|and)\s*Lawn)\b/i.test(normalizedCopy)
+    || /\bEPA[\s-]?certified\b/i.test(normalizedCopy)
     || !!reentrySafetyClaimFinding(draft);
 }
 
@@ -61,12 +63,12 @@ function customerCopyViolation(draft, normalizedCopy) {
 function verifyEmailReplyStructure({ text, customer, wordBudget } = {}) {
   const draft = String(text || '').trim();
   const normalizedCopy = normalizeCopy(draft);
-  // Fold compatibility digits without joining a mixed fraction's numerator
+  // Fold compatibility characters without joining a mixed fraction's numerator
   // to its whole number (NFKC turns "10½" into "101⁄2").
-  const accessCopy = draft.replace(/\p{N}/gu, (number) => {
-    const digits = number.normalize('NFKC');
-    return /^\d+$/.test(digits) ? digits : number;
-  });
+  const accessCopy = [...draft].map((character) => {
+    const folded = normalizeCopy(character);
+    return folded.includes('⁄') ? character : folded;
+  }).join('');
   const violations = [];
 
   if (!draft) violations.push('empty_reply');

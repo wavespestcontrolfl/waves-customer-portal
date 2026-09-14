@@ -29,6 +29,11 @@ facts copied from examples. A successful result must not authorize draft
 creation or sending. No runtime caller is added; the module makes no model
 request, database write or Gmail call.
 
+Known conservative limitation: the canonical report-copy screen also rejects
+outcome words such as "resolved" in billing/account prose. Distinguishing
+those subjects belongs to the later contextual verification slice; the
+inactive helper retains the canonical ban until that work is reviewed.
+
 The remaining work will add separately reviewed financial and scheduling
 checks, followed by complete verification and the shared drafter. The
 original implementation and its full regression suite remain preserved on
