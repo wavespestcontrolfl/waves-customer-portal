@@ -86,6 +86,35 @@ function submission(overrides = {}) {
   };
 }
 
+async function enableFixtureAutopay(label) {
+  const methodId = randomUUID();
+  await mockPg('payment_methods').insert({ id: methodId, customer_id: fixture.customerId,
+    processor: 'stripe', method_type: 'card', stripe_payment_method_id: `pm_fixture_${label}_${methodId}`,
+    is_default: true, autopay_enabled: true, exp_month: 12, exp_year: new Date().getUTCFullYear() + 1 });
+  await mockPg('customers').where({ id: fixture.customerId })
+    .update({ autopay_enabled: true, autopay_payment_method_id: methodId });
+  return methodId;
+}
+
+async function assertPacketCharge(saved) {
+  return mockPg.transaction(async (trx) => {
+    const invoice = await trx('invoices').where({ id: saved.body.billing.invoiceId }).forUpdate().first();
+    await trx('customers').where({ id: fixture.customerId }).forUpdate().first('id');
+    return assertVisitCompletionCharge(trx, invoice, saved.body.packetId);
+  });
+}
+
+async function waitForPgBlocker(blockerPid, message) {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    const { rows } = await mockPg.raw(
+      'SELECT pid FROM pg_stat_activity WHERE ?::int = ANY(pg_blocking_pids(pid))', [blockerPid]);
+    if (rows.length) return rows[0].pid;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(message);
+}
+
 // Inject a real failed SQL statement; a JS rejection cannot prove transaction recovery.
 async function withReadFailure(matches, run) {
   const shared = mockPg;
@@ -1393,6 +1422,102 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
   });
 
+  test('a retention offer granted after packet mint stops automatic collection before provider submission', async () => {
+    const methodId = await enableFixtureAutopay('late_retention');
+    await mockPg('services').where({ id: fixture.catalogId }).update({ engine_keys: JSON.stringify(['pest_control']) });
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ is_recurring: true });
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    await mockPg('retention_offers').insert({ customer_id: fixture.customerId, family_key: 'pest_control',
+      percent_off: 15, max_charges: 2, cap_amount: 75, status: 'granted' });
+
+    await expect(assertPacketCharge(saved)).rejects.toMatchObject({
+      code: 'VISIT_PAYMENT_REVIEW_REQUIRED', reason: 'retention_offer_changed',
+    });
+    const provider = jest.fn();
+    chargeInvoiceWithSavedCard.mockImplementation(async (invoiceId, selectedMethod, options) => {
+      expect(selectedMethod).toBe(methodId);
+      await mockPg.transaction(async (trx) => {
+        const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+        await trx('customers').where({ id: fixture.customerId }).forUpdate().first('id');
+        await assertVisitCompletionCharge(trx, invoice, options.requireVisitCompletionPacketId);
+        provider();
+      });
+    });
+    expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'office_required' });
+    expect(provider).not.toHaveBeenCalled();
+  });
+
+  test('a retention grant holding the customer advisory lock makes collection retry without provider submission', async () => {
+    await enableFixtureAutopay('retention_lock');
+    await mockPg('services').where({ id: fixture.catalogId }).update({ engine_keys: JSON.stringify(['pest_control']) });
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ is_recurring: true });
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    const grant = await mockPg.transaction();
+    const provider = jest.fn();
+    chargeInvoiceWithSavedCard.mockImplementation(async (invoiceId, _methodId, options) => {
+      await mockPg.transaction(async (trx) => {
+        const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+        await trx('customers').where({ id: fixture.customerId }).forUpdate().first('id');
+        await assertVisitCompletionCharge(trx, invoice, options.requireVisitCompletionPacketId);
+        provider();
+      });
+    });
+    try {
+      await grant.raw('SELECT pg_advisory_xact_lock(hashtext(?::text))', [String(fixture.customerId)]);
+      expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'payment_pending' });
+      expect(provider).not.toHaveBeenCalled();
+    } finally {
+      if (!grant.isCompleted()) await grant.rollback();
+    }
+  });
+
+  test('collection retains the customer advisory lock through the provider boundary', async () => {
+    await enableFixtureAutopay('retention_boundary');
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    let reachedProvider;
+    const atProvider = new Promise((resolve) => { reachedProvider = resolve; });
+    let releaseProvider;
+    const providerReleased = new Promise((resolve) => { releaseProvider = resolve; });
+    let collectionPid;
+    chargeInvoiceWithSavedCard.mockImplementation(async (invoiceId, _methodId, options) => {
+      await mockPg.transaction(async (trx) => {
+        const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+        await trx('customers').where({ id: fixture.customerId }).forUpdate().first('id');
+        await assertVisitCompletionCharge(trx, invoice, options.requireVisitCompletionPacketId);
+        ({ rows: [{ pid: collectionPid }] } = await trx.raw('SELECT pg_backend_pid() AS pid'));
+        reachedProvider();
+        await providerReleased;
+        await trx('invoices').where({ id: invoiceId })
+          .update({ status: 'paid', stripe_payment_intent_id: 'pi_fixture_retention_boundary' });
+      });
+    });
+
+    const collection = collectVisitCompletionInvoice(saved.body.packetId);
+    await atProvider;
+    let writer;
+    const writerStarted = new Promise((resolve) => {
+      writer = mockPg.transaction(async (trx) => {
+        resolve();
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?::text))', [String(fixture.customerId)]);
+        await trx('retention_offers').insert({ customer_id: fixture.customerId, family_key: 'pest_control',
+          percent_off: 15, max_charges: 2, cap_amount: 75, status: 'granted' });
+      });
+    });
+    await writerStarted;
+    try {
+      await expect(waitForPgBlocker(collectionPid, 'Retention writer did not wait at the provider boundary'))
+        .resolves.toEqual(expect.any(Number));
+    } finally {
+      releaseProvider();
+      await writer;
+    }
+    expect(await collection).toMatchObject({ state: 'paid' });
+    expect(await mockPg('retention_offers').where({ customer_id: fixture.customerId })).toHaveLength(1);
+  });
+
   test('positive shared-invoice collection remains singular and replays its paid state', async () => {
     const methodId = randomUUID();
     await mockPg('payment_methods').insert({ id: methodId, customer_id: fixture.customerId,
@@ -2239,6 +2364,23 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
   });
 
+  test.each([
+    ['service type', { service_type: 'Fixture Same-Price Converted Service' }],
+    ['catalog service', { service_id: null }],
+  ])('a same-price member %s mutation is refused by the saved identity', async (_label, changes) => {
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    const packet = await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first('payload');
+    expect(packet.payload.billingSnapshot.memberPricing).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: fixture.serviceIds[0], serviceType: 'Fixture General Pest Control', serviceId: fixture.catalogId }),
+    ]));
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update(changes);
+    await expect(assertPacketCharge(saved)).rejects.toMatchObject({
+      code: 'VISIT_PAYMENT_REVIEW_REQUIRED', reason: 'member_service_changed',
+    });
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
   test('no performed applications means no invoice, including on replay', async () => {
     const input = submission();
     for (const item of input.items) item.body.visitOutcome = 'inspection_only';
@@ -2258,6 +2400,16 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(saved.charges_applied).toBe(1);
     expect(Number(saved.amount_applied)).toBe(36);
     expect(saved.applied_invoice_ids).toEqual([result.body.billing.invoiceId]);
+    await mockPg('visit_completion_packet_items').where({ packet_id: result.body.packetId }).update({ status: 'done' });
+    await mockPg('retention_offers').insert([
+      { customer_id: fixture.customerId, family_key: 'lawn_care', percent_off: 15,
+        max_charges: 2, cap_amount: 75, status: 'granted' },
+      { customer_id: fixture.customerId, family_key: 'pest_control', percent_off: 15,
+        max_charges: 2, cap_amount: 75, charges_applied: 2, amount_applied: 50, status: 'exhausted' },
+      { customer_id: fixture.customerId, family_key: 'pest_control', percent_off: 15,
+        max_charges: 2, cap_amount: 75, expires_at: new Date(Date.now() - 60000), status: 'granted' },
+    ]);
+    await expect(assertPacketCharge(result)).resolves.toBeUndefined();
     await saveVisitCompletionPacket(submission());
     expect((await mockPg('retention_offers').where({ id: offer.id }).first()).charges_applied).toBe(1);
   });
