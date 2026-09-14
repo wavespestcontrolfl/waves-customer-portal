@@ -1,4 +1,4 @@
-const { verifyRescheduleDateClaims: verify } = require('../services/reschedule-date-evidence');
+const { verifyRescheduleDateClaims: verify, verifiedAppointmentIdentityClaims } = require('../services/reschedule-date-evidence');
 const reference = new Date('2026-09-14T02:00:00Z'); // September 13 in Eastern.
 const claim = (quote, parts, binding = 'appointment') => ({ quote, binding, ...parts });
 const current = 'Caller: My September 20 appointment.';
@@ -84,4 +84,36 @@ test('explicit clocks and deadline wording must agree with the proposed timestam
   const friday = [claim('Friday', { weekday: 5 }, 'delivery')];
   expect(verify(friday, 'Agent: I will text the reschedule link by Friday.', reference,
     { due_at: '2026-09-11T09:00:00-04:00', due_type: 'deadline' })).toBe(false);
+});
+
+test('by requires a deadline for explicitly typed rows; untyped historical rows retain their floor', () => {
+  const transcript = 'Agent: I will text the reschedule link by tomorrow at 8pm.';
+  const claims = [claim('tomorrow', { year: 2026, month: 9, day: 14 }, 'delivery')];
+  const due_at = '2026-09-14T20:00:00-04:00';
+  expect(verify(claims, transcript, reference, { due_at, due_type: 'floor' })).toBe(false);
+  expect(verify(claims, transcript, reference, { due_at, due_type: 'deadline' })).toBe(true);
+  expect(verify(claims, transcript, reference, { due_at, due_type: null })).toBe(true);
+});
+
+test('only an agent turn establishes delivery timing, including later sentences in the turn', () => {
+  const claims = [claim('tomorrow', { year: 2026, month: 9, day: 14 }, 'delivery')];
+  const timing = { due_at: '2026-09-14T09:00:00-04:00', due_type: 'floor' };
+  const words = 'I will text the reschedule link tomorrow at 9am.';
+  const agentPromise = 'Agent: I will text the reschedule link.';
+  expect(verify(claims, `Caller: ${words}\n${agentPromise}`, reference, timing)).toBe(false);
+  expect(verify(claims, `Customer: ${words}\n${agentPromise}`, reference, timing)).toBe(false);
+  expect(verify(claims, `${words}\n${agentPromise}`, reference, timing)).toBe(false);
+  expect(verify(claims, `Agent: Hello. ${words}`, reference, timing)).toBe(true);
+});
+
+test('separate proved identities survive incomplete coverage without authorizing sending', () => {
+  const transcript = 'Caller: My Tuesday appointment. My Wednesday appointment.\nAgent: I will text the reschedule link.';
+  const tuesday = claim('Tuesday', { weekday: 2 });
+  const wednesday = claim('Wednesday', { weekday: 3 });
+  for (const identity of [tuesday, wednesday]) {
+    expect(verify([identity], transcript, reference)).toBe(false);
+    expect(verifiedAppointmentIdentityClaims([identity], `${transcript}\nCaller: Unrecognized wording.`, reference)).toEqual([identity]);
+  }
+  expect(verifiedAppointmentIdentityClaims([{ ...tuesday, weekday: 3 }], transcript, reference)).toEqual([]);
+  expect(verifiedAppointmentIdentityClaims([{ ...tuesday, quote: ['Tuesday'] }], transcript, reference)).toEqual([]);
 });

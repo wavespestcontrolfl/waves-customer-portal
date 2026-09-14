@@ -184,6 +184,35 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
     expect(next.subject.date_claims[0]).toMatchObject({ month: 9, day: 27 });
   });
 
+  test('incomplete transcript coverage keeps two proved partial appointments as separate parked rows across passes', async () => {
+    const callId = randomUUID();
+    await mockPg('call_log').insert({ id: callId, direction: 'inbound', processing_generation: 0 });
+    const quote = 'I will text you a reschedule link for that appointment';
+    const transcript = `Caller: My Tuesday appointment.\nCaller: My Wednesday appointment.\nAgent: ${quote}.`;
+    const modelItems = [2, 3].map((weekday) => ({ party: 'waves', kind: 'send_reschedule_link', description: 'Text the link',
+      confidence: 0.95, evidence: [{ quote, speaker: 'agent' }], due_at: null, due_type: null,
+      subject: { date_claims: [{ binding: 'appointment', weekday, quote: weekday === 2 ? 'Tuesday' : 'Wednesday' }] } }));
+    const { groundModelCommitments } = require('../services/call-commitments');
+    const items = groundModelCommitments(modelItems, transcript, new Date('2026-09-14T14:00:00Z')).kept;
+    expect(items).toHaveLength(2);
+    await upsertCommitments(mockPg, callId, items, { generation: 0, procGeneration: 0 });
+    const first = await mockPg('call_commitments').where({ call_log_id: callId });
+    expect(first).toHaveLength(2);
+    expect(new Set(first.map((row) => row.commitment_key)).size).toBe(2);
+    expect(first.every((row) => row.subject.date_claims === null && row.subject.identity_unresolved === true)).toBe(true);
+    const tuesday = first.find((row) => row.subject.identity_claims[0].weekday === 2);
+    await applyHumanUpdate(mockPg, tuesday.id, { action: 'dismiss', reviewedBy: randomUUID() });
+    await upsertCommitments(mockPg, callId, [...items].reverse(), { generation: 1, procGeneration: 0 });
+    const second = await mockPg('call_commitments').where({ call_log_id: callId });
+    expect(second).toHaveLength(2);
+    expect(second.find((row) => row.id === tuesday.id)).toMatchObject({ commitment_key: tuesday.commitment_key,
+      human_state: 'dismissed', status: 'dismissed' });
+    const wednesday = second.find((row) => row.id !== tuesday.id);
+    expect(wednesday).toMatchObject({ status: 'open', human_state: null });
+    expect(wednesday.subject).toMatchObject({ date_claims: null, identity_unresolved: true });
+    expect(wednesday.subject.identity_claims[0].weekday).toBe(3);
+  });
+
   test('the persisted activation boundary uses the DATABASE transaction clock, not a JS wall-clock sample — a commitment written in the SAME transaction is never before its own boundary (codex #4293 P1)', async () => {
     const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
     const priorActivatedAt = process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT;

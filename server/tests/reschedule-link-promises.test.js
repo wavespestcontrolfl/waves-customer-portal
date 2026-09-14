@@ -217,6 +217,25 @@ test('a delivery-only claim never binds the appointment date', () => {
     candidates: [nextWeek] }).visit?.id).toBe('next-week');
 });
 
+test('an explicit by promise cannot use a model-proposed floor', () => {
+  const promise = 'I will text the reschedule link by tomorrow at 8pm.';
+  const source = { ...call, transcription: `Agent: ${promise}` };
+  const promised = { ...commitment, evidence: [{ quote: promise, speaker: 'agent' }],
+    due_at: '2030-01-08T20:00:00-05:00', subject: { date_claims: [
+      { binding: 'delivery', quote: 'tomorrow', year: 2030, month: 1, day: 8 },
+    ] } };
+  expect(select({ call: source, commitment: { ...promised, due_type: 'floor' } }).reason).toBe('appointment_date_unresolved');
+  expect(select({ call: source, commitment: { ...promised, due_type: 'deadline' } }).visit?.id).toBe('visit');
+});
+
+test('a caller delivery statement cannot supply timing for the agent promise', () => {
+  const source = { ...call, transcription: `${call.transcription}\nCaller: I will text the reschedule link tomorrow at 9am.` };
+  const promised = { ...commitment, due_at: '2030-01-08T09:00:00-05:00', due_type: 'floor', subject: { date_claims: [
+    { binding: 'delivery', quote: 'tomorrow', year: 2030, month: 1, day: 8 },
+  ] } };
+  expect(select({ call: source, commitment: promised }).reason).toBe('appointment_date_unresolved');
+});
+
 test('a requested new Friday date does not replace the current Tuesday appointment claim', () => {
   const spoken = 'Please move my current Tuesday appointment to Friday.';
   const subject = { date_claims: [
