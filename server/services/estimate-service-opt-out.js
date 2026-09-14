@@ -77,6 +77,30 @@ function inputCarriers(parsedData) {
 // annual price. Treat it like Tree & Shrub's result-derived knobs: never offer
 // the removal. Older events can recover the sold program from their baseline.
 // Quarterly termite remains removable.
+function capturedTermiteRemoval(parsedData, serviceKey, removedInputs) {
+  if (isPlainObject(removedInputs)) return removedInputs;
+  const events = Array.isArray(parsedData?.serviceOptOut?.events)
+    ? parsedData.serviceOptOut.events
+    : [];
+  const removal = events.filter((event) => event?.serviceKey === serviceKey && event.included === false).pop();
+  return readRemovedInputs(removal);
+}
+
+function capturedAnnualTermiteRequest(parsedData, captured) {
+  const serviceInputs = ['engineInputs', 'inputs'].flatMap((carrier) => {
+    const services = captured?.[carrier];
+    if (!isPlainObject(services)) return [];
+    return ['termite', 'termiteBait', 'termite_bait'].map((key) => services[key]).filter(isPlainObject);
+  });
+  if (serviceInputs.some((input) => String(input.plan || input.pricingKnobs?.plan || '').toLowerCase() === 'annual_protection')) {
+    return true;
+  }
+  const restoresTermiteToken = Array.isArray(captured.selected)
+    && captured.selected.some((token) => String(token).toUpperCase() === 'TERMITE_BAIT');
+  return restoresTermiteToken
+    && String(parsedData?.engineRequest?.options?.termitePlan || '').toLowerCase() === 'annual_protection';
+}
+
 function termiteAnnualPlanServiceChangeBlocked(parsedData = {}, {
   serviceKey,
   included,
@@ -87,14 +111,7 @@ function termiteAnnualPlanServiceChangeBlocked(parsedData = {}, {
   if (included === false) return selectedTermiteAnnualPlanRows(parsedData).length > 0;
   if (included !== true) return false;
 
-  let captured = removedInputs;
-  if (!isPlainObject(captured)) {
-    const events = Array.isArray(parsedData?.serviceOptOut?.events)
-      ? parsedData.serviceOptOut.events
-      : [];
-    const removal = events.filter((event) => event?.serviceKey === serviceKey && event.included === false).pop();
-    captured = readRemovedInputs(removal);
-  }
+  const captured = capturedTermiteRemoval(parsedData, serviceKey, removedInputs);
   if (!isPlainObject(captured)) return false;
 
   // A gate-off annual request prices as quarterly, and the ignored request
@@ -105,19 +122,7 @@ function termiteAnnualPlanServiceChangeBlocked(parsedData = {}, {
   if (pricedProgram === 'quarterly') return false;
   if (pricedProgram === 'annual_protection') return true;
 
-  const serviceInputs = ['engineInputs', 'inputs'].flatMap((carrier) => {
-    const services = captured?.[carrier];
-    if (!isPlainObject(services)) return [];
-    return ['termite', 'termiteBait', 'termite_bait'].map((key) => services[key]).filter(isPlainObject);
-  });
-  if (serviceInputs.some((input) => String(input.plan || input.pricingKnobs?.plan || '').toLowerCase() === 'annual_protection')) {
-    return true;
-  }
-
-  const restoresTermiteToken = Array.isArray(captured.selected)
-    && captured.selected.some((token) => String(token).toUpperCase() === 'TERMITE_BAIT');
-  return restoresTermiteToken
-    && String(parsedData?.engineRequest?.options?.termitePlan || '').toLowerCase() === 'annual_protection';
+  return capturedAnnualTermiteRequest(parsedData, captured);
 }
 
 /**
