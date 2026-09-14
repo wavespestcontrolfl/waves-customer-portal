@@ -1354,9 +1354,9 @@ function callbackConditionTarget(targets, valueTargets, matchedContact) {
 function callbackConsentCondition(targets, valueTargets, matchedContact) {
   const conditionTarget = callbackConditionTarget(targets, valueTargets, matchedContact);
   const contactTargets = [conditionTarget];
-  if (/\|she\)/.test(conditionTarget)) contactTargets.push('her');
-  else if (/\|he\)/.test(conditionTarget)) contactTargets.push('him');
-  else if (/\|they\)/.test(conditionTarget)) contactTargets.push('them');
+  if (/\|she(?:\||\))/.test(conditionTarget)) contactTargets.push('her');
+  if (/\|he(?:\||\))/.test(conditionTarget)) contactTargets.push('him');
+  if (/\|they(?:\||\))/.test(conditionTarget)) contactTargets.push('them');
   const conditionedContact = callbackTarget(`(?:${contactTargets.join('|')})`, CALLBACK_ACTION, CALLBACK_LIGHT_ACTION);
   const consentBoundary = '(?=\\s*(?:[,.;!?]|$))';
   const receivedContact = `(?:be\\s+(?:called|contacted|phoned|texted|emailed)|(?:receive|get)\\s+an?\\s+${CALLBACK_CONTACT_NOUN}|(?:an?|the)\\s+${CALLBACK_CONTACT_NOUN})`;
@@ -1388,6 +1388,9 @@ function callbackConsentOverridden(suffix, condition, consent, bareContact) {
         return true;
       }
       if (/^or$/i.test(alternative[1]) && /^(?:she|he|they)\s+(?:refuses?|declines?)\b/i.test(branch)) {
+        return true;
+      }
+      if (/^or$/i.test(alternative[1]) && /^(?:she|he|they)\s+(?:does\s+not|doesn[\x27\u2019]t|will\s+not|won[\x27\u2019]t)\s+(?:agree|consent)\b/i.test(branch)) {
         return true;
       }
       if (new RegExp(`^${bareContact}\\s+anyway\\b`, 'i').test(branch)) return true;
