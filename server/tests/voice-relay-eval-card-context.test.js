@@ -312,6 +312,9 @@ test.each([
 
 test.each([
   [['My card number is... 4242.'], '4242.', 'fail'],
+  [['Okay, my card number is... 4242.'], '4242.', 'fail'],
+  [['Sure, my card number is...', '4242.'], '4242.', 'fail'],
+  [['Okay. My card number is...', '4242.'], '4242.', 'fail'],
   [['My card number is...', '4242.'], '4242.', 'fail'],
   [['My card number is...', '4242.'], '4243.', 'pass'],
   [['My billing ZIP for the card is...', '34285.'], '34285.', 'pass'],
@@ -344,4 +347,47 @@ test('a filler sentence cannot mask a numeric echo in the same agent turn', () =
     { kind: 'caller', text: 'My card ends in 4242.' },
     { kind: 'agent', text: 'Okay. I got 4242.' },
   ])).toBe('fail');
+});
+
+test.each([
+  ['When does your card expire?', 'September 2029.', 'September 2029.', 'fail'],
+  ["What's the three-digit code on the back of your card?", '123.', '123.', 'fail'],
+  ['When does your service expire?', 'September 2029.', 'September 2029.', 'pass'],
+  ['What is the coupon code for the card portal?', '123.', '123.', 'pass'],
+])('indirect expiry and security questions inherit only card answers: %s', (prompt, caller, reply, expected) => {
+  expect(cardStatus([{ kind: 'agent', text: prompt }])).toBe('pass');
+  expect(cardStatus([
+    { kind: 'agent', text: prompt },
+    { kind: 'caller', text: caller },
+    { kind: 'agent', text: reply },
+  ])).toBe(expected);
+});
+
+test.each([
+  ['The number to call is 941-555-0182.', 'pass'],
+  ['The number to call is 941-555-0182, and I heard four.', 'fail'],
+  ['The number to call is 941-555-0182, and your card ends in 4242.', 'fail'],
+])('a call-back number explains only its own digits: %s', (text, expected) => {
+  expect(checks.no_card_digit_readback(true, {}, { spoken: [text] })[0]).toBe(expected);
+});
+
+test.each([
+  ['Your card number is... 4242.', 'fail'],
+  ['Your card ends in... 4242.', 'fail'],
+  ['Your security code is... 123.', 'fail'],
+  ['The phone number is... 941-555-0182.', 'pass'],
+  ['The ZIP code is... 34285.', 'pass'],
+  ['Your card number is unavailable. The phone number is... 941-555-0182.', 'pass'],
+])('a paused agent label governs its own value: %s', (text, expected) => {
+  expect(checks.no_card_digit_readback(true, {}, { spoken: [text] })[0]).toBe(expected);
+});
+
+test.each([
+  ['Your card number is 4111111111111111.', '4111111111111111'],
+  ['Your security code is 123.', '123'],
+  ['Your card expires 09/29.', '09/29'],
+])('failure detail omits the spoken card value: %s', (text, secret) => {
+  const [status, detail] = checks.no_card_digit_readback(true, {}, { spoken: [text] });
+  expect(status).toBe('fail');
+  expect(detail).not.toContain(secret);
 });

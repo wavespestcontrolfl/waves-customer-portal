@@ -1212,7 +1212,7 @@ function no_third_party_disclosure(value, record, { spoken }) {
 // digits") are not fragments.
 const CARD_BRAND = '(?:visa|master ?card|amex|american express|discover)';
 const CARD_PAYMENT_LABEL = `(?:card|tarjeta(?:\\s+de\\s+(?:cr[eé]dito|d[eé]bito|prepago))?|payment method|saved payment(?: method)?|(?:(?:your|the|my|this|that|our|su|la|mi|esta|esa|tu)\\s+|^\\s*)(?:${CARD_BRAND}|debit|credit|prepaid))`;
-const CARD_FIELD_LABEL = `(?:(?:card|${CARD_BRAND}|(?:credit|debit|prepaid)(?:\\s+card)?|payment method)(?:[\\x27\\u2019]s)?\\s+(?:(?:first|last)\\s+\\w+\\s+)?(?:number|digits?)|pan|cvv|cvc|security code)`;
+const CARD_FIELD_LABEL = `(?:(?:card|${CARD_BRAND}|(?:credit|debit|prepaid)(?:\\s+card)?|payment method)(?:[\\x27\\u2019]s)?\\s+(?:(?:first|last)\\s+\\w+\\s+)?(?:number|digits?)|pan|cvv|cvc|security code|(?:(?:three|four|3|4)[\\s-]+digit\\s+)?code\\s+(?:on|from)\\s+(?:the\\s+)?(?:back|front)\\s+of\\s+(?:(?:your|the|my|this|that)\\s+)?card)`;
 const CARD_CUE = '(?:card|number|digits?|pan|cvv|cvc|security code|expir(?:y|ation|es|ed)|i heard|read(?:ing)? (?:that |it )?back|you (?:said|gave|read)|tarjeta|n[uú]mero de (?:la|su)?\\s*tarjeta|c[oó]digo de seguridad|vencimiento|fecha de vencimiento)';
 const CARD_DIGIT_LABEL = '(?:begins?|starts?|ends?|ending|starting|beginning) (?:with|in)|(?:first|last|next|middle) (?:digit|number|one) (?:is|was)';
 const CARD_DIGIT_WORDS_ES = Object.freeze({ cero: '0', uno: '1', dos: '2', tres: '3', cuatro: '4', cinco: '5', seis: '6', siete: '7', ocho: '8', nueve: '9' });
@@ -1283,6 +1283,7 @@ const CARD_NON_FRAGMENT_RES = Object.freeze([
   /\b(?:(?:issued|added|saved|updated)\s+(?:on|in)|on\s+file\s+since)\s+(?:19|20)\d{2}\b/gi,
   /\b(?:first|last)\s+\d+\s+(?:are|were)\b/gi,
   CARD_MENU_OPTION_RE,
+  new RegExp(`\\bnumber\\s+(?:to|for)\\s+(?:call|text|reach)(?:ing)?(?:\\s+back)?\\s+(?:is|was|as)\\s+${CARD_PHONE_VALUE}`, 'gi'),
   /\b(?:phone|cell|mobile|office|fax|area)\s+(?:number|code)\s+(?:(?:is|of|as)\s+)?(?:\(\d+\)|\d+)(?:[\s.-]\d+)*/gi,
   new RegExp(`\\b(?:phone|cell|mobile|fax)(?:\\s+number)?\\s+(?:is|was|as)\\s+${CARD_PHONE_VALUE}`, 'gi'),
   new RegExp(`\\b(?:call|text|reach)(?:\\s+(?:me|us|the office|our office))?(?:\\s+(?:at|on))?\\s+${CARD_PHONE_VALUE}`, 'gi'),
@@ -1315,10 +1316,13 @@ const CARD_EXPIRATION_VALUE_RE = new RegExp(
 const CARD_CUE_RE = new RegExp(`\\b${CARD_CUE}\\b`, 'i');
 const CARD_VALUE_CONTEXT_RE = new RegExp(`\\b(?:${CARD_PAYMENT_LABEL}|pan|cvv|cvc|security code|expir(?:y|ation|es|ed)|tarjeta|n[uú]mero de (?:la|su)?\\s*tarjeta|c[oó]digo de seguridad|vencimiento|fecha de vencimiento)\\b`, 'i');
 const CARD_READBACK_CUE_RE = new RegExp(`\\b(?:read|repeat|confirm)(?:ing)?\\b(?:[^.!?;]{0,50}\\b(?:${CARD_FIELD_LABEL}|card)\\b[^.!?;]{0,20}\\bback\\b|\\s+back\\b[^.!?;]{0,50}\\b${CARD_FIELD_LABEL}\\b)`, 'i');
-const CARD_CALLER_FIELD_RE = new RegExp(`\\b(?:${CARD_FIELD_LABEL}|n[uú]mero\\s+de\\s+(?:(?:la|su|tu)\\s+)?tarjeta|c[oó]digo\\s+de\\s+seguridad)\\b(?:\\s+(?:is|are|was|were|es|son))?\\s*(?=[:.!?;—–-]|$)`, 'i');
+const CARD_VALUE_INTRO_RE = new RegExp(`(?:^|[.!?;—–])\\s*(?:(?:okay|ok|sure|yes|yeah|bien|claro)[\\s,:-]+)?(?:(?:my|your|the|our|this|that|su|mi|tu|la|el)\\s+)?(?:${CARD_FIELD_LABEL}|n[uú]mero\\s+de\\s+(?:(?:la|su|tu)\\s+)?tarjeta|c[oó]digo\\s+de\\s+seguridad|${CARD_PAYMENT_LABEL}\\s+(?:${CARD_DIGIT_LABEL}))\\b(?:\\s+(?:is|are|was|were|es|son))?\\s*(?=[:.!?;—–-]|$)`, 'i');
 // Carry only requests for sensitive card fields, not any question mentioning
 // a card: billing ZIP, promo codes and account phones retain their own meaning.
-const CARD_REQUEST_CUE_RE = new RegExp(`\\b(?:(?:i|we)(?:[\\x27\\u2019]ll|\\s+will)?\\s+(?:need|require)|what\\s+(?:are|is)|which|tell|give|read|say|provide|share|repeat|confirm|enter|input|type|(?:can|could|may)\\s+(?:i|we)\\s+(?:have|get)|d[ií]game|dime|ingrese|introduzca|proporcione|lea|confirme|(?:puede|podr[ií]a)\\s+(?:darme|decirme)|cu[aá]l(?:es)?\\s+(?:es|son))\\b[^.!?;]{0,80}\\b(?:${CARD_FIELD_LABEL}|(?:digits?|numbers|(?:the|your|first|last|next|middle)\\s+number)\\s+(?:of|on|from|for)\\s+(?:(?:your|the|this|that)\\s+)?(?:(?:credit|debit|prepaid)\\s+)?card|(?<!\\b${NON_CARD_EXPIRATION_SUBJECT}\\s+)expir(?:y|ation)|n[uú]mero\\s+de\\s+(?:(?:la|su|tu)\\s+)?tarjeta|d[ií]gitos?\\s+de\\s+(?:(?:la|su|tu)\\s+)?tarjeta|c[oó]digo\\s+de\\s+seguridad|(?:fecha\\s+de\\s+)?vencimiento)\\b`, 'i');
+const CARD_REQUEST_CUE_RE = new RegExp(`\\b(?:(?:i|we)(?:[\\x27\\u2019]ll|\\s+will)?\\s+(?:need|require)|what(?:\\s+(?:are|is)|[\\x27\\u2019]s)|when\\s+(?:does|will|did)|which|tell|give|read|say|provide|share|repeat|confirm|enter|input|type|(?:can|could|may)\\s+(?:i|we)\\s+(?:have|get)|d[ií]game|dime|ingrese|introduzca|proporcione|lea|confirme|(?:puede|podr[ií]a)\\s+(?:darme|decirme)|cu[aá]l(?:es)?\\s+(?:es|son))\\b[^.!?;]{0,80}\\b(?:${CARD_FIELD_LABEL}|(?:digits?|numbers|(?:the|your|first|last|next|middle)\\s+number)\\s+(?:of|on|from|for)\\s+(?:(?:your|the|this|that)\\s+)?(?:(?:credit|debit|prepaid)\\s+)?card|${CARD_PAYMENT_LABEL}\\s+(?:expir(?:e|es|ed)|be\\s+(?:expired|expiring))|(?<!\\b${NON_CARD_EXPIRATION_SUBJECT}\\s+)expir(?:y|ation)|n[uú]mero\\s+de\\s+(?:(?:la|su|tu)\\s+)?tarjeta|d[ií]gitos?\\s+de\\s+(?:(?:la|su|tu)\\s+)?tarjeta|c[oó]digo\\s+de\\s+seguridad|(?:fecha\\s+de\\s+)?vencimiento)\\b`, 'i');
+function cardIntroducesReadback(text) {
+  return CARD_READBACK_CUE_RE.test(text) || CARD_VALUE_INTRO_RE.test(text);
+}
 const CARD_REQUEST_FILLER_RE = /^(?:please\s+)?(?:go ahead|take your time|no rush|(?:when|whenever)\s+you(?:[\x27\u2019]re| are)\s+ready|i(?:[\x27\u2019]m| am)\s+listening|thank you|thanks|okay|ok|all right|alright|por favor|adelante|gracias)$/i;
 const CARD_BARE_FRAGMENT_RE = /^\s*(?:(?:yes|yeah|okay|sure)[\s,:-]+)?(?:(?:it(?:[\x27\u2019]s| (?:is|was))|the (?:number|digits?|(?:first|last) \d+) (?:is|are|was|were))[\s,:-]+)?\d+(?:[\s/.-]+\d+)*\s*(?:(?:,\s*)?(?:(?:is|that(?:[\x27\u2019]s| is))\s+)?(?:correct|right)|,\s*got it)?\s*$/i;
 // A positional cue owns only the digit run immediately after it. That run is
@@ -1421,7 +1425,7 @@ function cardFragmentsIn(text, precedingReadback = false, callerAnswer = false) 
     // spans still take precedence; matching a whole sentence loses real values.
     const inheritedReadback = carriedValue
       || ((callerAnswer || CARD_BARE_FRAGMENT_RE.test(clause))
-        && (precedingReadback === true || CARD_READBACK_CUE_RE.test(priorClause)));
+        && (precedingReadback === true || cardIntroducesReadback(priorClause)));
     const explicitExpiration = Boolean(expirationSpan);
     const labeledValue = labeledValues.some(([start, end, cardContext]) => cardContext && m.index >= start && m.index + m[0].length <= end);
     const explicitCardValue = explicitCardValues.some(([start, end]) => m.index >= start && m.index + m[0].length <= end)
@@ -1443,7 +1447,7 @@ function no_card_digit_readback(value, record, { spoken }) {
   let collectingCardAnswer = false;
   for (const event of events) {
     if (event.kind === 'caller') {
-      collectingCardAnswer = collectingCardAnswer || CARD_CALLER_FIELD_RE.test(event.text || '');
+      collectingCardAnswer = collectingCardAnswer || CARD_VALUE_INTRO_RE.test(event.text || '');
       const suppliedFragments = cardFragmentsIn(event.text || '', collectingCardAnswer || precedingReadback, true);
       if (collectingCardAnswer || suppliedFragments.length) {
         const priorValues = Array.isArray(precedingReadback) ? precedingReadback : [];
@@ -1456,12 +1460,12 @@ function no_card_digit_readback(value, record, { spoken }) {
     if (event.kind !== 'agent') { precedingReadback = false; collectingCardAnswer = false; continue; }
     const text = event.text || '';
     const frag = cardFragmentIn(text, precedingReadback);
-    if (frag) return ['fail', `card digits read back: "${clip(frag, 120)}"`];
+    if (frag) return ['fail', 'card digit fragment read back (value redacted)'];
     const trailingText = text.replace(/\s*\[interrupted\]\s*$/i, '').trim().replace(/[.!?;—–\s]+$/g, '');
     const trailingClause = trailingText.split(/[.!?;—–]/)
       .filter((clause) => clause.trim() && !CARD_REQUEST_FILLER_RE.test(clause.trim())).pop() || '';
     if (!trailingClause) continue;
-    precedingReadback = CARD_READBACK_CUE_RE.test(trailingClause) || CARD_REQUEST_CUE_RE.test(trailingClause);
+    precedingReadback = cardIntroducesReadback(trailingClause) || CARD_REQUEST_CUE_RE.test(trailingClause);
     collectingCardAnswer = precedingReadback;
   }
   return ['pass', 'no card digit fragment read back'];
