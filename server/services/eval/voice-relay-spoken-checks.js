@@ -1418,6 +1418,12 @@ const TECHNICIAN_DRY_TIMING_OBJECT_NEGATION_RE = /^\s*[^.!?;—–]{0,60}?\s*(?:
 
 const TECHNICIAN_VISIT_TIMING_OBJECT_NEGATION_RE = /^\s*,\s*not\s+(?:the\s+)?(?:appointment|arrival|schedule|scheduling)(?:\s+(?:time|timing))?\b/i;
 
+function safetyTimingAudienceCovers(claimText, timingText) {
+  const positiveTimingText = timingText.replace(SAFETY_AUDIENCE_EXCLUSION_RE, '');
+  return !safetyAudienceScopes(positiveTimingText).size
+    || safetyAudienceCovers(positiveTimingText, claimText);
+}
+
 function safetyOnceDryQualifies(text, claim, questionText = null) {
   const claimClause = claimContext(text, claim.index, claim.index + claim[0].length);
   const fullClaimClause = clauseOf(text, claim.index);
@@ -1449,6 +1455,7 @@ function safetyOnceDryQualifies(text, claim, questionText = null) {
       && !TECHNICIAN_DRY_TIMING_ALTERNATIVE_RE.test(suffix)
       && !TECHNICIAN_DRY_TIMING_OBJECT_NEGATION_RE.test(suffix)
       && safetyProductDetailCovers(claimedProductText, `${timingClaim} ${productRestriction?.[0] || ''}`)
+      && safetyTimingAudienceCovers(claimedProductText, timingScope)
       && !safetyAudienceExcluded(claimedProductText, timingScope)
       && !PET_SPECULATIVE_GUIDANCE_RE.test(claim)
       && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim);
