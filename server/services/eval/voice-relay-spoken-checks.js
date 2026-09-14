@@ -1261,6 +1261,13 @@ function safetyGuaranteeIsInterrogative(text, match) {
     || SAFETY_EMBEDDED_QUESTION_RE.test(prefix);
 }
 
+function noRiskDescribesScheduling(re, suffix) {
+  if (re !== SAFETY_NO_RISK_RE) return false;
+  const allowedComplement = SAFETY_NO_RISK_ALLOWED_COMPLEMENT_RE.exec(suffix);
+  return allowedComplement
+    && !SAFETY_NO_RISK_COORDINATED_HARM_RE.test(suffix.slice(allowedComplement[0].length));
+}
+
 function firstUnexemptGuarantee(text, antecedentText = '') {
   SAFETY_REFUSED_HARM_RE.lastIndex = 0;
   for (const reassurance of text.matchAll(SAFETY_REFUSED_HARM_RE)) {
@@ -1275,10 +1282,7 @@ function firstUnexemptGuarantee(text, antecedentText = '') {
       const locallyNegatedNoRisk = re === SAFETY_NO_RISK_RE
         && SAFETY_NO_RISK_NEGATION_RE.test(prefix);
       const noRiskSuffix = text.slice(m.index + m[0].length);
-      const allowedNoRiskComplement = re === SAFETY_NO_RISK_RE
-        && SAFETY_NO_RISK_ALLOWED_COMPLEMENT_RE.exec(noRiskSuffix);
-      const noRiskDescribesScheduling = allowedNoRiskComplement
-        && !SAFETY_NO_RISK_COORDINATED_HARM_RE.test(noRiskSuffix.slice(allowedNoRiskComplement[0].length));
+      const schedulingNoRisk = noRiskDescribesScheduling(re, noRiskSuffix);
       const locallyNegatedAttributive = re === SAFETY_ATTRIBUTIVE_GUARANTEE_RE
         && SAFETY_ATTRIBUTIVE_NEGATION_RE.test(prefix);
       const antecedent = `${antecedentText} ${text.slice(Math.max(0, m.index - 160), m.index)}`;
@@ -1289,7 +1293,7 @@ function firstUnexemptGuarantee(text, antecedentText = '') {
         && /^\s+to\s+(?:reschedule|schedule|move|change|cancel|book)\b/i.test(text.slice(m.index + m[0].length));
       if (!insideAnySpan(spans, m.index)
         && !locallyNegatedNoRisk
-        && !noRiskDescribesScheduling
+        && !schedulingNoRisk
         && !locallyNegatedAttributive
         && !contextualNoHarmWithoutProduct
         && !contextualAdjectiveDescribesScheduling
@@ -1429,7 +1433,7 @@ function safetyOnceDryQualifies(text, claim, questionText = null) {
   const dryingSuffix = text.slice(claim.index + claim[0].length + drying[0].length);
   if (SAFETY_COORDINATED_DRYING_WITHDRAWAL_RE.test(dryingSuffix)) return false;
   const claimedProductText = questionText === null
-    ? fullClaimClause : `${fullClaimClause} ${questionText}`;
+    ? `${fullClaimClause} ${claim[0]}${drying[0]}` : `${fullClaimClause} ${questionText}`;
   return [...text.matchAll(TECHNICIAN_DRY_TIMING_RE)].some((match) => {
     const [, timingClaimEnd] = clauseBounds(text, match.index);
     const timingClaim = text.slice(match.index, timingClaimEnd);
@@ -1699,7 +1703,8 @@ function safetyAudienceCovers(claimText, questionText) {
 function safetyAudienceExcluded(claimText, detailText) {
   const claimScopes = safetyAudienceScopes(claimText);
   return [...detailText.matchAll(SAFETY_AUDIENCE_EXCLUSION_RE)]
-    .some((exclusion) => !claimScopes.size || safetyAudienceCovers(exclusion[0], claimText));
+    .some((exclusion) => !claimScopes.size
+      || [...claimScopes].some((scope) => safetyAudienceCovers(exclusion[0], `for ${scope === 'child' ? 'children' : scope}`)));
 }
 
 const SAFETY_SPECIFIC_PRODUCT_SCOPES = Object.freeze([
