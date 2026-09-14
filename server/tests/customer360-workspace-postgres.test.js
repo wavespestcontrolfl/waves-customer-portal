@@ -723,6 +723,44 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
     }
   }, 30000);
 
+  test('a recovery after a long outage covers unread siblings from the original burst', async () => {
+    const conversationId = randomUUID();
+    const firstId = randomUUID();
+    const secondId = randomUUID();
+    const firstSid = `SM-synthetic-outage-a-${randomBytes(4).toString('hex')}`;
+    const secondSid = `SM-synthetic-outage-b-${randomBytes(4).toString('hex')}`;
+    const phone = `+1941557${String(Date.now()).slice(-4)}`;
+    const firstAt = new Date(Date.now() - 6 * 60 * 60 * 1000);
+    const secondAt = new Date(firstAt.getTime() + 5 * 60 * 1000);
+    const dispatch = jest.fn(async ({ MessageSid }) => {
+      await mockPg('sms_log').where({ twilio_sid: MessageSid }).update({
+        metadata: mockPg.raw("metadata || ?::jsonb", [JSON.stringify({ sms_reply_alerted: true })]),
+        updated_at: new Date(),
+      });
+      return true;
+    });
+    try {
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: phone, our_endpoint_id: '+19415550194' });
+      await mockPg('messages').insert([
+        { id: firstId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: firstSid, body: 'First synthetic outage text', created_at: firstAt },
+        { id: secondId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: secondSid, body: 'Second synthetic outage text', created_at: secondAt },
+      ]);
+      await mockPg('sms_log').insert([
+        { direction: 'inbound', from_phone: phone, to_phone: '+19415550194', twilio_sid: firstSid, message_body: 'First synthetic outage text', metadata: JSON.stringify({ sms_reply_eligible: true }), created_at: firstAt, updated_at: firstAt },
+        { direction: 'inbound', from_phone: phone, to_phone: '+19415550194', twilio_sid: secondSid, message_body: 'Second synthetic outage text', metadata: JSON.stringify({ sms_reply_eligible: true }), created_at: secondAt, updated_at: secondAt },
+      ]);
+
+      expect((await sweepUnknownSenderAlertClaims({ dispatch })).dispatched).toBe(1);
+      expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ MessageSid: firstSid }));
+      expect((await sweepUnknownSenderAlertClaims({ dispatch })).dispatched).toBe(0);
+      expect(dispatch).toHaveBeenCalledTimes(1);
+    } finally {
+      await mockPg('messages').whereIn('id', [firstId, secondId]).delete();
+      await mockPg('sms_log').whereIn('twilio_sid', [firstSid, secondSid]).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
   test('an inbound append waits for the unknown-sender read-clear phone lock before committing', async () => {
     const conversationId = randomUUID();
     const sid = `SM-synthetic-append-lock-${randomBytes(4).toString('hex')}`;

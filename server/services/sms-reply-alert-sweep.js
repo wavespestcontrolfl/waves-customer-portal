@@ -189,21 +189,24 @@ async function findOrphanMessage(phone) {
       // never far enough apart in time for the window's radius to
       // accidentally bridge an unrelated pair.
       //
-      // R's own anchor is `updated_at` (when delivery was actually
-      // confirmed), not `created_at` (when R itself arrived) — codex
-      // #4210 round-14 P1: a dispatch — a sweep recovery in particular —
-      // can land minutes after the message's own arrival, and the
-      // CONFIRMED claim window starts from confirm time, not arrival
-      // time. Anchoring on arrival time understates how far the window
-      // actually reaches, wrongly treating a later message that was
-      // genuinely still within the confirmed window as uncovered once
-      // enough time passes for arrival-based math to disagree with the
-      // real (confirm-time-based) expiry the claim row itself used.
+      // A recovery can deliver hours after the original burst. Its receipt
+      // covers siblings close to the original message's arrival AND later
+      // messages inside the confirmed claim window that starts at delivery.
+      // Either anchor alone loses one side of that gap: arrival-only misses
+      // post-recovery texts, delivery-only re-alerts old siblings after the
+      // claim expires. Both are bounded by the same four-hour window.
       this.select(1).from('sms_log as l2')
         .where({ 'l2.direction': 'inbound', 'l2.from_phone': phone })
         .whereRaw("l2.metadata->>'sms_reply_alerted' = 'true'")
-        .whereRaw('l2.updated_at > l.created_at - (? * interval \'1 millisecond\')', [UNKNOWN_SENDER_ALERT_WINDOW_MS])
-        .whereRaw('l2.updated_at < l.created_at + (? * interval \'1 millisecond\')', [UNKNOWN_SENDER_ALERT_WINDOW_MS]);
+        .andWhere(function withinEitherWindow() {
+          this.where(function nearDelivery() {
+            this.whereRaw('l2.updated_at > l.created_at - (? * interval \'1 millisecond\')', [UNKNOWN_SENDER_ALERT_WINDOW_MS])
+              .whereRaw('l2.updated_at < l.created_at + (? * interval \'1 millisecond\')', [UNKNOWN_SENDER_ALERT_WINDOW_MS]);
+          }).orWhere(function nearArrival() {
+            this.whereRaw('l2.created_at > l.created_at - (? * interval \'1 millisecond\')', [UNKNOWN_SENDER_ALERT_WINDOW_MS])
+              .whereRaw('l2.created_at < l.created_at + (? * interval \'1 millisecond\')', [UNKNOWN_SENDER_ALERT_WINDOW_MS]);
+          });
+        });
     })
     .orderBy('m.created_at', 'asc')
     .first('m.twilio_sid', 'm.body');
