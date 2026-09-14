@@ -22,6 +22,7 @@
 // llm-dispatch-metrics). Customer-facing mail never touches this module.
 
 const logger = require('./logger');
+const crypto = require('node:crypto');
 
 // Resolved at CALL time, not load time: this module is required by fifteen
 // senders, several of which are loaded before their suites set gate env
@@ -36,6 +37,32 @@ function notificationService() {
 
 const CATEGORY = 'ops_digest';
 const MAX_TITLE_CHARS = 200; // notifications.title is varchar(200); body is text (uncapped)
+// system_settings.key is varchar(100); a full SHA-256 digest keeps even the
+// longest allowed source/key pair within it, without sharing a watermark.
+function cleanWatermarkKey(lockKey) {
+  return `ops_digest.clean.${crypto.createHash('sha256').update(String(lockKey)).digest('hex')}`;
+}
+
+async function readCleanWatermark(conn, lockKey) {
+  const row = await conn('system_settings').where({ key: cleanWatermarkKey(lockKey) }).first('value');
+  if (!row) return null;
+  if (typeof row.value !== 'string' || !row.value) throw new Error('invalid ops digest clean watermark');
+  const time = new Date(row.value);
+  if (!Number.isFinite(time.getTime())) throw new Error('invalid ops digest clean watermark');
+  return time.toISOString();
+}
+
+async function recordCleanWatermark(conn, lockKey, observedAt) {
+  const time = new Date(observedAt);
+  if (!Number.isFinite(time.getTime())) throw new Error('invalid ops digest clean observation');
+  const next = time.toISOString();
+  const prior = await readCleanWatermark(conn, lockKey);
+  if (prior && Date.parse(prior) >= Date.parse(next)) return prior;
+  await conn('system_settings')
+    .insert({ key: cleanWatermarkKey(lockKey), value: next, category: CATEGORY })
+    .onConflict('key').merge({ value: next, updated_at: new Date() });
+  return next;
+}
 
 function htmlToText(html) {
   return String(html || '')
@@ -131,9 +158,9 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
  * read. Keyed off the resolved marker, NOT read_at: the owner opening a
  * FIX/ACT bell before the check runs clean must not leave it "needs a fix"
  * forever (pre-push P1). The row stays in the feed as history ("cleared");
- * nothing is deleted. Returns the number of rows retired. Never throws — a
- * failed retire is logged and reported as 0 so the caller can retry on its
- * next clean run.
+ * nothing is deleted. Returns the number of rows retired. Machine callers
+ * use throwOnError so a failed atomic retire/watermark write returns a
+ * retryable non-2xx; in-process callers retain their legacy 0-on-error path.
  */
 // `lockKey`: the dedupeKey the matching ingest uses. When given, the retire
 // runs in its own transaction under the SAME advisory lock notifyAdmin's
@@ -154,7 +181,7 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
 // an earlier run would otherwise lower it. created_at stays in the
 // comparison as a floor for rows written by any other path, so the cutoff
 // fails safe (a bell stays up) rather than clearing a live failure.
-async function resolveOpsDigest({ key, source = null, resolvedBy = 'ops-crons', lockKey = null, notAfter = null } = {}) {
+async function resolveOpsDigest({ key, source = null, resolvedBy = 'ops-crons', lockKey = null, notAfter = null, throwOnError = false } = {}) {
   const opsKey = String(key || '').trim();
   if (!opsKey) return 0;
   const db = require('../models/db');
@@ -180,15 +207,20 @@ async function resolveOpsDigest({ key, source = null, resolvedBy = 'ops-crons', 
     const count = lockKey
       ? await db.transaction(async (trx) => {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${lockKey}`]);
-        return retire(trx);
+        const retired = await retire(trx);
+        // Even with zero live bell rows, this clean run must suppress a
+        // delayed older failure. The lock also serializes ingest's check.
+        if (notAfter) await recordCleanWatermark(trx, lockKey, notAfter);
+        return retired;
       })
       : await retire(db);
     logger.info(`[ops-digest] ${opsKey}: retired ${count} standing row(s) (${resolvedBy})`);
     return Number(count) || 0;
   } catch (err) {
     logger.warn(`[ops-digest] ${opsKey}: retire failed: ${err.message}`);
+    if (throwOnError) throw err;
     return 0;
   }
 }
 
-module.exports = { deliverOpsDigest, resolveOpsDigest, inAppEnabled, htmlToText, CATEGORY };
+module.exports = { deliverOpsDigest, resolveOpsDigest, readCleanWatermark, cleanWatermarkKey, inAppEnabled, htmlToText, CATEGORY };

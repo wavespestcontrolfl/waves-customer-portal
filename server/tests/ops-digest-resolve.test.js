@@ -3,7 +3,8 @@
 // yet resolved — keyed off the resolved marker, not read_at, so a bell the
 // owner already opened still clears. read_at is stamped only if null;
 // metadata merged with resolved/resolvedAt/resolvedBy; nothing deleted. A
-// DB failure reads as 0 so the runner retries next clean run.
+// In-process DB failures read as 0 so those senders retry next clean run;
+// machine /resolve opts into throws so its HTTP response is retryable 503.
 
 const mockDb = jest.fn();
 mockDb.fn = { now: jest.fn(() => 'NOW()') };
@@ -18,7 +19,7 @@ mockDb.transaction = jest.fn(async (fn) => {
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { resolveOpsDigest, CATEGORY } = require('../services/ops-digest');
+const { resolveOpsDigest, readCleanWatermark, cleanWatermarkKey, CATEGORY } = require('../services/ops-digest');
 
 function chain(updateResult) {
   const q = {};
@@ -97,3 +98,43 @@ test('notAfter: only rows observed at or before the clean run retire (metadata.o
   expect(q.whereRaw).toHaveBeenCalledWith("GREATEST(COALESCE(NULLIF(metadata->>'observedAt', '')::timestamptz, created_at), created_at) <= ?::timestamptz", ['2026-09-11T11:10:00.000Z']);
 });
 
+test('a clean run writes its durable per-key watermark even when no bell row stood', async () => {
+  const notifications = chain(0);
+  const settings = { where: jest.fn(() => settings), first: jest.fn(async () => null) };
+  settings.insert = jest.fn(() => settings);
+  settings.onConflict = jest.fn(() => settings);
+  settings.merge = jest.fn(async () => 1);
+  mockDb.mockImplementation((table) => table === 'system_settings' ? settings : notifications);
+  const key = 'ops-crons:e22:overlaps';
+  const n = await resolveOpsDigest({ key: 'e22:overlaps', source: 'ops-crons', lockKey: key, notAfter: '2026-09-11T12:00:00Z', throwOnError: true });
+  expect(n).toBe(0);
+  expect(mockTrxRaw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${key}`]);
+  expect(settings.insert).toHaveBeenCalledWith({ key: cleanWatermarkKey(key), value: '2026-09-11T12:00:00.000Z', category: CATEGORY });
+  expect(cleanWatermarkKey(key).length).toBeLessThanOrEqual(100);
+  expect(settings.onConflict).toHaveBeenCalledWith('key');
+  expect(settings.merge).toHaveBeenCalledWith({ value: '2026-09-11T12:00:00.000Z', updated_at: expect.any(Date) });
+});
+
+test('the clean watermark is monotonic and a corrupt setting fails closed', async () => {
+  const settings = { where: jest.fn(() => settings), first: jest.fn(async () => ({ value: '2026-09-11T14:00:00Z' })) };
+  settings.insert = jest.fn(() => settings);
+  settings.onConflict = jest.fn(() => settings);
+  settings.merge = jest.fn(async () => 1);
+  mockDb.mockImplementation((table) => table === 'system_settings' ? settings : chain(0));
+  expect(await resolveOpsDigest({ key: 'k', lockKey: 'ops-crons:k', notAfter: '2026-09-11T12:00:00Z', throwOnError: true })).toBe(0);
+  expect(settings.insert).not.toHaveBeenCalled();
+  settings.first.mockResolvedValueOnce({ value: 'bad-timestamp' });
+  await expect(readCleanWatermark(mockDb, 'ops-crons:k')).rejects.toThrow(/invalid ops digest clean watermark/);
+  settings.first.mockResolvedValueOnce({ value: null });
+  await expect(readCleanWatermark(mockDb, 'ops-crons:k')).rejects.toThrow(/invalid ops digest clean watermark/);
+});
+
+test('machine clean fails rather than acknowledging zero when the watermark write fails', async () => {
+  const settings = { where: jest.fn(() => settings), first: jest.fn(async () => null) };
+  settings.insert = jest.fn(() => settings);
+  settings.onConflict = jest.fn(() => settings);
+  settings.merge = jest.fn(async () => { throw new Error('settings unavailable'); });
+  mockDb.mockImplementation((table) => table === 'system_settings' ? settings : chain(0));
+  await expect(resolveOpsDigest({ key: 'k', lockKey: 'ops-crons:k', notAfter: '2026-09-11T12:00:00Z', throwOnError: true }))
+    .rejects.toThrow('settings unavailable');
+});

@@ -23,7 +23,8 @@
  *   401  token mismatch
  *   409  in-app digests off (GATE_OPS_DIGESTS_IN_APP / GATE_AGENT_ACTIVITY)
  *   400  payload rejected (kind not FIX/ACT, shape, size, link off /admin)
- *   503  bell row not written
+ *   503  bell/clean-watermark write failed
+ *   200  { ok: true, stale: true } — an older failure already cleared
  *   201  { ok: true, id, deduped }
  *
  * PII: the checks already write id prefixes and masked phones, never names
@@ -42,7 +43,7 @@ const { safeEqual } = require('../middleware/hermes-auth');
 const { notFoundBody } = require('../middleware/errors');
 const { noStore } = require('../middleware/no-store');
 const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
-const { inAppEnabled, resolveOpsDigest, CATEGORY } = require('../services/ops-digest');
+const { inAppEnabled, resolveOpsDigest, readCleanWatermark, CATEGORY } = require('../services/ops-digest');
 
 const router = express.Router();
 // Token-route privacy baseline on every outcome (dark 404, 401, 4xx, 201):
@@ -184,7 +185,7 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
   const { key, kind, subject, text, link, metadata, observedAt } = value;
   const title = `${kind}: ${subject}`;
   const dedupeKey = `${SOURCE}:${key}`;
-  let row = null;
+  let outcome = null;
   try {
     // ONE transaction under the dedupe's advisory lock — the same lock
     // /resolve takes, and the one notifyAdmin takes on the caller's trx
@@ -192,8 +193,12 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
     // FIRST lets the standing observation be read before notifyAdmin's
     // merge can overwrite it, and keeps a resolve from observing any
     // in-between state.
-    row = await db.transaction(async (trx) => {
+    outcome = await db.transaction(async (trx) => {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${dedupeKey}`]);
+      // Resolve removes the standing dedupe key. A durable clean watermark
+      // still suppresses an older failure even when no bell row ever stood.
+      const cleanAt = await readCleanWatermark(trx, dedupeKey);
+      if (cleanAt && Date.parse(observedAt) <= Date.parse(cleanAt)) return { stale: true };
       // MONOTONIC observation, decided BEFORE the write. notifyAdmin's
       // refresh merge takes the incoming metadata verbatim (pinned by
       // notification-dedupe-refresh-semantics.test.js), so a delayed
@@ -209,7 +214,7 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
       // dedupeVersion = the EFFECTIVE observation: an older re-post leaves
       // it unchanged (plain dedupe, no rewrite), a later run's recurrence
       // changes it and so rewrites the standing row and re-bells it.
-      return NotificationService.notifyAdmin(CATEGORY, title, text, {
+      const row = await NotificationService.notifyAdmin(CATEGORY, title, text, {
         link,
         bell: true,
         dedupeKey,
@@ -219,10 +224,13 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
         metadata: { ...metadata, opsKey: key, subject: title, kind, source: SOURCE, observedAt: effectiveObservedAt },
         trx,
       });
+      return { row };
     });
   } catch (err) {
     logger.error(`[ops-digest-ingest] ${key}: bell write threw: ${err.message}`);
   }
+  if (outcome?.stale) return res.status(200).json({ ok: true, stale: true });
+  const row = outcome?.row;
   // null = insert failed; a suppression sentinel = no row either way. Both
   // mean "not in the bell" — say so, and the caller's email fallback runs.
   if (!row || row.suppressed || !row.id) {
@@ -249,9 +257,14 @@ router.post('/resolve', darkUnlessConfigured, ingestAuth, async (req, res) => {
   // clean run's observation time, so only findings observed at or before it
   // retire (a newer failure that landed first survives).
   const notAfter = observedAtFrom(body.observedAt);
-  const resolved = await resolveOpsDigest({ key, source: SOURCE, lockKey: `${SOURCE}:${key}`, notAfter, resolvedBy: successes ? `${SOURCE}:${successes}-clean-runs` : SOURCE });
-  logger.info(`[ops-digest-ingest] ${key}: resolve → ${resolved} row(s)`);
-  return res.status(200).json({ ok: true, resolved });
+  try {
+    const resolved = await resolveOpsDigest({ key, source: SOURCE, lockKey: `${SOURCE}:${key}`, notAfter, resolvedBy: successes ? `${SOURCE}:${successes}-clean-runs` : SOURCE, throwOnError: true });
+    logger.info(`[ops-digest-ingest] ${key}: resolve → ${resolved} row(s)`);
+    return res.status(200).json({ ok: true, resolved });
+  } catch (err) {
+    logger.error(`[ops-digest-ingest] ${key}: resolve failed: ${err.message}`);
+    return res.status(503).json({ ok: false, reason: 'resolve_failed' });
+  }
 });
 
 // Parser failures after auth: plain JSON, never the HTML default. Only

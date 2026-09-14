@@ -1763,10 +1763,15 @@ is unset (that IS the kill switch), then 120/15-min per-IP limiter
 409 while `GATE_OPS_DIGESTS_IN_APP` / `GATE_AGENT_ACTIVITY` are off, 400 on
 a rejected payload (kinds other than FIX/ACT are refused — routine/FYI
 reporting stays on email), 503 when no row landed; the caller emails on
-any non-2xx so nothing is lost. `/resolve` shares the 404 → limiter → 401
+any non-2xx so nothing is lost. A failure observed at or before this key's
+latest clean observation returns 200 `{ ok: true, stale: true }` without a
+bell or email fallback. `/resolve` shares the 404 → limiter → 401
 → 400 layers but deliberately has NO 409: retiring history must never
-depend on the ingest lane being on, so it answers 200 `{ resolved: N }`
-(N may be 0) whatever the gates say. Writes exactly one admin `ops_digest` row
+depend on the ingest lane being on. Under the same per-key advisory lock
+as ingest, it atomically retires rows and advances a durable clean watermark
+even when no rows stand; success answers 200 `{ resolved: N }` (N may be 0),
+and a DB failure answers retryable 503, never false success. Writes exactly
+one admin `ops_digest` row
 (bell:true, dedupe on the check+key pair inside a rolling day; links must
 be `/admin`-relative; subject/body/metadata size-capped) or marks rows
 read + `metadata.resolved` — never deletes, never touches customer rows.
