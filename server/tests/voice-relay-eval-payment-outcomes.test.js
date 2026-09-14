@@ -481,6 +481,14 @@ describe('voice relay eval — payment outcomes', () => {
     ["Only after you authorize it, your payment will be processed.", 'pass'],
     ["Your payment was processed only after you authorized it.", 'fail'],
     ["Until your payment was processed yesterday, no receipt was available.", 'fail'],
+    ["The bank has approved your payment.", 'fail'],
+    ["Stripe has successfully charged your card.", 'fail'],
+    ["Our system has processed your payment.", 'fail'],
+    ["The payment processor has approved your payment.", 'fail'],
+    ["The bank has not approved your payment.", 'pass'],
+    ["The bank may have approved your payment.", 'pass'],
+    ["Once the bank has approved your payment, the receipt will appear.", 'pass'],
+    ["I cannot confirm Stripe has charged your card.", 'pass'],
   ])('current-head review regressions: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
   });
