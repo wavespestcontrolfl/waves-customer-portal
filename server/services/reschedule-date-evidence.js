@@ -76,46 +76,71 @@ const DATE_FREE = [
 
 function transcriptDates(transcript, reference) {
   const dates = [];
-  // Preserve turn boundaries and sentence punctuation before normalizing.
+  let complete = true;
+  // Every sentence retains its turn's speaker. A caller's own delivery
+  // statement must never supply timing for a Waves promise elsewhere.
   const clauses = String(transcript || '').replace(/\b(jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec|sun|mon|tue|tues|wed|thu|thur|thurs|fri|sat)\./gi, '$1')
-    .replace(/\?/g, ' question.').split(/[.!;\n]+/).map(text => normalize(text.replace(/^\s*(?:agent|caller|customer):\s*/i, ''))).filter(Boolean);
-  for (const clause of clauses) {
+    .split('\n').flatMap(line => {
+      const turn = /^\s*(agent|caller|customer):\s*(.*)$/i.exec(line);
+      return (turn ? turn[2] : line).replace(/\?/g, ' question.').split(/[.!;]+/)
+        .map(normalize).filter(Boolean).map(clause => ({ clause, speaker: turn?.[1].toLowerCase() }));
+    });
+  for (const { clause, speaker } of clauses) {
     const matches = [...clause.matchAll(DATE)];
     const shape = clause.replace(DATE, '@');
     if (!matches.length && DATE_FREE.some(pattern => pattern.test(clause))) continue;
     const roles = ROLES.find(([pattern]) => pattern.test(shape))?.[1];
-    if (!roles || roles.length !== matches.length) return null;
-    for (let i = 0; i < matches.length; i++) {
-      const parts = components(matches[i][0], reference);
-      if (!parts) return null;
-      dates.push({ text: matches[i][0], clause, binding: roles[i], parts,
-        before: clause.slice(0, matches[i].index), after: clause.slice(matches[i].index + matches[i][0].length) });
+    if (!roles || roles.length !== matches.length || (roles.includes('delivery') && speaker !== 'agent')) {
+      complete = false;
+      continue;
     }
+    const proven = matches.map((match, i) => ({ text: match[0], clause, binding: roles[i], parts: components(match[0], reference),
+      before: clause.slice(0, match.index), after: clause.slice(match.index + match[0].length) }));
+    if (proven.some(date => !date.parts)) { complete = false; continue; }
+    dates.push(...proven);
   }
-  return dates;
+  return { dates, complete };
+}
+
+function claimCoversDate(claim, date) {
+  if (typeof claim?.quote !== 'string') return false;
+  const quote = normalize(claim?.quote);
+  if (!quote || !date.clause.includes(quote) || !quote.includes(date.text) || claim.binding !== date.binding) return false;
+  return ['year', 'month', 'day', 'weekday'].every(key => claim[key] === date.parts[key]);
+}
+
+// Individually proved appointment identities keep separate office obligations
+// distinct even when the call cannot be certified for automatic sending.
+// These are NOT complete date_claims and never authorize a delivery.
+function verifiedAppointmentIdentityClaims(claims, transcript, reference) {
+  if (!Array.isArray(claims)) return [];
+  const { dates } = transcriptDates(transcript, reference);
+  return claims.flatMap(claim => {
+    const date = dates.find(candidate => candidate.binding === 'appointment' && claimCoversDate(claim, candidate));
+    return date ? [{ binding: 'appointment', quote: claim.quote.trim(), ...date.parts }] : [];
+  });
 }
 
 // The transcript, not the model's list, establishes both coverage and roles.
 // Called on extraction AND on persisted rows immediately before selection.
 function verifyRescheduleDateClaims(claims, transcript, reference, timing = {}) {
   if (!Array.isArray(claims)) return false;
-  const dates = transcriptDates(transcript, reference);
-  if (!dates) return false;
-  const covers = (claim, date) => {
-    const quote = normalize(claim?.quote);
-    if (!quote || !date.clause.includes(quote) || !quote.includes(date.text) || claim.binding !== date.binding) return false;
-    return ['year', 'month', 'day', 'weekday'].every(key => claim[key] === date.parts[key]);
-  };
+  const { dates, complete } = transcriptDates(transcript, reference);
+  if (!complete) return false;
   return dates.filter(date => date.binding === 'delivery').every(date => deliveryTimingMatches(date, timing, reference))
-    && dates.every(date => claims.some(claim => covers(claim, date)))
-    && claims.every(claim => dates.some(date => covers(claim, date)));
+    && dates.every(date => claims.some(claim => claimCoversDate(claim, date)))
+    && claims.every(claim => dates.some(date => claimCoversDate(claim, date)));
 }
 
 // Calendar claims alone cannot prove a delivery floor: the independently
 // extracted due_at/type might still say today, deadline, or nothing at all.
 // Validate those proposals against the same complete delivery clause.
 function deliveryTimingMatches(date, timing, reference) {
-  if (!timing.due_at || (timing.due_type === 'deadline' && !/\bby $/.test(date.before))) return false;
+  const deadline = /\bby $/.test(date.before);
+  // Untyped persisted rows retain their legacy conservative floor. New model
+  // output is checked as an explicit floor when it omits the type, so it
+  // cannot introduce a new untyped 'by' promise through this compatibility.
+  if (!timing.due_at || (timing.due_type != null && (timing.due_type === 'deadline') !== deadline)) return false;
   const due = parseETDateTime(timing.due_at);
   if (Number.isNaN(due.getTime())) return false;
   const tail = date.after.split(' for ')[0].trim();
@@ -136,4 +161,4 @@ function deliveryTimingMatches(date, timing, reference) {
     && (tail !== 'morning' || (actual.hour >= 8 && actual.hour < 12));
 }
 
-module.exports = { verifyRescheduleDateClaims };
+module.exports = { verifyRescheduleDateClaims, verifiedAppointmentIdentityClaims };
