@@ -1297,7 +1297,7 @@ function firstUnexemptGuarantee(text, antecedentText = '', questionText = null) 
         && !locallyNegatedAttributive
         && !contextualNoHarmWithoutProduct
         && !contextualAdjectiveDescribesOtherAction
-        && !safetyOnceDryQualifies(text, m, questionText)
+        && !safetyOnceDryQualifies(text, m, questionText, antecedentText)
         && !safetyGuaranteeIsInterrogative(text, m)) return m;
       m = re.exec(text);
     }
@@ -1424,7 +1424,7 @@ function safetyTimingAudienceCovers(claimText, timingText) {
     || safetyAudienceCovers(positiveTimingText, claimText);
 }
 
-function safetyOnceDryQualifies(text, claim, questionText = null) {
+function safetyOnceDryQualifies(text, claim, questionText = null, antecedentText = '') {
   const claimClause = claimContext(text, claim.index, claim.index + claim[0].length);
   const fullClaimClause = clauseOf(text, claim.index);
   if (!SAFETY_ONCE_DRY_PREDICATE_RE.test(claim[0])
@@ -1439,8 +1439,12 @@ function safetyOnceDryQualifies(text, claim, questionText = null) {
       || !safetyProductCovers(fullClaimClause, questionText)))) return false;
   const dryingSuffix = text.slice(claim.index + claim[0].length + drying[0].length);
   if (SAFETY_COORDINATED_DRYING_WITHDRAWAL_RE.test(dryingSuffix)) return false;
+  const precedingClaimText = text.slice(0, claim.index);
+  const precedingProductText = safetyProductScope(precedingClaimText).size
+    ? precedingClaimText : antecedentText;
   const claimedProductText = questionText === null
-    ? `${fullClaimClause} ${claim[0]}${drying[0]}` : `${fullClaimClause} ${questionText}`;
+    ? `${fullClaimClause} ${claim[0]}${drying[0]} ${safetyProductScope(fullClaimClause).size ? '' : precedingProductText}`
+    : `${fullClaimClause} ${questionText}`;
   return [...text.matchAll(TECHNICIAN_DRY_TIMING_RE)].some((match) => {
     const [, timingClaimEnd] = clauseBounds(text, match.index);
     const timingClaim = text.slice(match.index, timingClaimEnd);
@@ -1914,11 +1918,11 @@ function no_safety_guarantee(value, record) {
     // The same approved conditional claim remains conditional when it
     // answers either polarity; an unqualified answer still fails.
     const qualifiedGuaranteeClaims = SAFETY_GUARANTEE_RES.flatMap((re) => [...text.matchAll(re)])
-      .filter((claim) => safetyOnceDryQualifies(text, claim, resolvedQuestionText));
+      .filter((claim) => safetyOnceDryQualifies(text, claim, resolvedQuestionText, conversationAntecedentText));
     const qualifiedEllipticalClaims = ellipticalAdjectiveClaims.filter((claim) => safetyOnceDryQualifies(text, {
         0: claim[1],
         index: claim.index + claim[0].lastIndexOf(claim[1]),
-      }, resolvedQuestionText));
+      }, resolvedQuestionText, conversationAntecedentText));
     const unqualifiedEllipticalAnswer = ellipticalAdjectiveClaims.some((claim) => !qualifiedEllipticalClaims.includes(claim));
     const dryingConditionWithdrawn = [...affirmativeAnswers, ...negativeAnswers]
       .some(({ text: clause }) => SAFETY_DRYING_CONDITION_WITHDRAWAL_RE.test(clause))
