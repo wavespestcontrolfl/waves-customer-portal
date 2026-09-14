@@ -83,6 +83,25 @@ describe('llm-dispatch-metrics', () => {
   });
   afterAll(() => { process.env = ORIGINAL_ENV; });
 
+  it('keeps unchanged exception lists stable across observation dates', async () => {
+    const mockDeliver = jest.fn(async () => ({ ok: true }));
+    jest.doMock('../services/ops-digest', () => ({ deliverOpsDigest: mockDeliver }));
+    try {
+      const { _private: { emailExceptions } } = load();
+      const exceptions = [{ policy: 'report', detail: 'all providers failed' }];
+      await emailExceptions('2026-09-11', exceptions);
+      await emailExceptions('2026-09-12', exceptions);
+      const [first, second] = mockDeliver.mock.calls.map(([arg]) => arg);
+      expect(first.subject).toBe(second.subject);
+      expect(first.html).toBe(second.html);
+      expect(first.subject).not.toContain('2026-09-11');
+      expect(first.html).not.toContain('2026-09-11');
+      expect(first.sendEmail).toBeInstanceOf(Function);
+    } finally {
+      jest.dontMock('../services/ops-digest');
+    }
+  });
+
   describe('policyLabel', () => {
     it('names TEXT_POLICIES entries by their registry key', () => {
       const { policyLabel } = load();

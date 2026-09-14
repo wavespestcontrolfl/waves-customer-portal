@@ -198,7 +198,7 @@ async function replayPendingBells() {
   }
 }
 
-async function loadUnactionedFlags() {
+async function loadUnactionedFlags({ includeExpired = false } = {}) {
   const rows = await db('agent_decisions as ad')
     .leftJoin('scheduled_services as ss', 'ad.entity_id', 'ss.id')
     .leftJoin('customers as cu', 'ad.customer_id', 'cu.id')
@@ -208,6 +208,7 @@ async function loadUnactionedFlags() {
     // decisions surface) leave the digest immediately (codex r2).
     .where('ad.status', 'pending_review')
     .where(function windowOrLiveVisit() {
+      if (includeExpired) return;
       // The flagger links visits up to 14 days out; a pending flag must
       // stay visible through its linked visit's date, not age out at the
       // 4-day lookback while the visit is still upcoming (codex r24).
@@ -387,7 +388,14 @@ async function runRescheduleIntentWatcher(opts = {}) {
 
   const composed = composeRescheduleIntentDigest(rows);
   if (!composed) {
-    await retireIfClean('reschedule-intent'); // fall-off: no unhandled reschedule text
+    try {
+      // Reporting horizons are not proof that old pending flags were handled.
+      const outstanding = await (opts.loadRows || loadUnactionedFlags)({ includeExpired: true });
+      if (!outstanding.length) await retireIfClean('reschedule-intent');
+    } catch (err) {
+      logger.error(`[reschedule-intent-watcher] recovery proof query failed: ${err.message}`);
+      return { skipped: 'query_failed' };
+    }
     return { skipped: 'nothing_found' };
   }
 
