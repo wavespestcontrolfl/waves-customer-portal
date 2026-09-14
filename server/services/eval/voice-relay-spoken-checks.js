@@ -1298,7 +1298,8 @@ const CALLBACK_TRAILING_LINK = `(?:and|or|but|so|in|at|on|by|from|before|after|i
 const CALLBACK_PHRASE_END = `(?=\\s*(?:[.!?,;:—–]|$|${CALLBACK_TRAILING_MODIFIER}\\b|${CALLBACK_TRAILING_LINK}\\b|(?:the|an?|this|that|these|those|some)\\b))`;
 const CALLBACK_QUESTION_AUX = '(?:can|could|will|would|should|shall|may|might|is|are|has|have)';
 const CALLBACK_QUESTION_AFFIRMATIVE = `(?:(?:${AFFIRMATION}|${BARE_CONFIRMATION})(?:[\\s,]+(?:${AFFIRMATION}|${BARE_CONFIRMATION}))*|(?:(?:${AFFIRMATION})\\s*[,—–:-]\\s*)?(?:we|i|they|the office|our office|the team|our team)(?:[\\x27\\u2019]ll|\\s+(?:will|can|could))(?:\\s+do\\s+(?:that|so|it))?)`;
-const CALLBACK_QUESTION_ANSWER_RE = new RegExp(`^\\s*(?:[^.!?;]*\\b(?:but|however)\\b\\s*)?${CALLBACK_QUESTION_AFFIRMATIVE}[.!\\s]*$`, 'i');
+const CALLBACK_QUESTION_ANSWER_DETAIL = '(?:(?:we|i|they|the office|our office|the team|our team)\\s+(?:can|will)\\s+(?:arrange|make)\\s+(?:that|it)(?:\\s+happen)?|(?:today|tomorrow|tonight|later)(?:\\s+(?:morning|afternoon|evening))?)';
+const CALLBACK_QUESTION_ANSWER_RE = new RegExp(`^\\s*(?:[^.!?;]*\\b(?:but|however)\\b\\s*)?${CALLBACK_QUESTION_AFFIRMATIVE}(?:\\s*[,—–:-]\\s*${CALLBACK_QUESTION_ANSWER_DETAIL})?[.!\\s]*$`, 'i');
 const CALLBACK_QUESTION_DENIAL_RE = new RegExp(
   `^\\s*(?:(?:no|nope)|(?:(?:no|nope)[,\\s]+)?(?:we|i|they|the office|our office|the team|our team)\\s+(?:cannot|can[\\x27\\u2019]t|could not|couldn[\\x27\\u2019]t|will not|won[\\x27\\u2019]t)\\s+(?:do\\s+(?:that|so|it)|arrange\\s+(?:that|it)|make\\s+(?:that|it)\\s+happen|${CALLBACK_VERB}\\b)(?:(?!\\b(?:but|however)\\b)[^.!?;])*)[.!\\s]*$`,
   'i',
