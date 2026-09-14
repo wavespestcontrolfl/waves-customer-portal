@@ -1834,6 +1834,26 @@ test('an interlock that dies mid-send blocks at the provider boundary', async ()
   expect(afterLoss).toMatchObject({ ok: false, code: 'LINK_LOCK_LOST' });
 });
 
+test('a lost interlock after the provider snapshot still blocks the locked SMS start', async () => {
+  const { handlers, client } = fakeInterlock();
+  const input = { customerId: 'customer', body: 'link', metadata: { followThroughCommitmentId: 'commitment' },
+    preProviderCheck: async () => ({ ok: true }),
+    withSmsHandoff: (handoff) => handoff({}) };
+  const provider = jest.fn();
+  await withLiveGate({ outbox: [promiseRow('outbox', 'commitment')], client }, () => links.withSendLock(input, async (locked) => {
+    expect(await locked.preProviderCheck({})).toMatchObject({ ok: true });
+    await expect(locked.withSmsHandoff(async (_trx, onProviderStart) => {
+      // The raw advisory session dies during the sender's awaited consent
+      // recheck, after preProviderCheck passed but before messages.create.
+      handlers.error(new Error('connection terminated unexpectedly'));
+      await onProviderStart();
+      provider();
+    })).rejects.toMatchObject({ code: 'LINK_LOCK_LOST' });
+    return { sent: false };
+  }));
+  expect(provider).not.toHaveBeenCalled();
+});
+
 test('a timed-out interlock attempt keeps its slot until the connection actually settles', async () => {
   // Releasing the connection cap's count on the TIMER firing (rather than
   // the underlying connect actually resolving or rejecting) let a burst of

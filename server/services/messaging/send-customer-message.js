@@ -279,8 +279,9 @@ async function sendCustomerMessageCore(input) {
   if (sendInput.metadata?.appOnly === true) sendInput.channel = 'push';
   // The locked handoff holds a caller's authority rows through the actual
   // provider request. Immediate lead replies and the visit-summary bearer
-  // link (its immediate send and its scheduled replay) are the callers whose
-  // recipient may change between validation and the handoff.
+  // link (its immediate send and its scheduled replay), plus promised
+  // reschedule links, are the callers whose authority may change between
+  // validation and the handoff.
   const smsHandoffAllowed = (input.audience === 'lead' && input.purpose === 'conversational'
       && input.entryPoint === 'lead_response_auto_reply')
     || (input.audience === 'customer' && input.purpose === 'service_completion'
@@ -289,9 +290,13 @@ async function sendCustomerMessageCore(input) {
     // A review ask that follows a combined-visit summary shares that
     // summary's packet row through the request.
     || (input.audience === 'customer' && input.purpose === 'review_request'
-      && ['review_request_send', 'review_outreach_touch'].includes(input.entryPoint));
+      && ['review_request_send', 'review_outreach_touch'].includes(input.entryPoint))
+    || (input.audience === 'customer' && input.purpose === 'appointment'
+      && input.entryPoint === 'reschedule-link-promise'
+      && input.metadata?.original_message_type === 'reschedule_link_promise'
+      && Boolean(input.metadata?.followThroughCommitmentId));
   if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms' || !smsHandoffAllowed)) {
-    return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is restricted to immediate lead replies and visit summaries' };
+    return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is not allowed for this message' };
   }
   if (typeof preSendCheck === 'function' && withSmsHandoff) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SEND_GUARD_COMBINATION',
