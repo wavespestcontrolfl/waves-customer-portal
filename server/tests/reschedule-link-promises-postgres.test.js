@@ -1914,7 +1914,7 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
     const stubRender = async () => 'Your reschedule link: https://example.com/reschedule/token';
     const successfulSend = async () => ({ sent: true, providerMessageId: fakeSid });
 
-    async function seedPromise({ quote, dueAt = null, dueType = null, dateClaims = [] }) {
+    async function seedPromise({ quote, dueAt = null, dueType = null, dateClaims = [], callerText = 'Thank you.' }) {
       const callId = randomUUID();
       const customerId = randomUUID();
       const visitId = randomUUID();
@@ -1924,7 +1924,7 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       await mockPg('scheduled_services').insert({ id: visitId, customer_id: customerId, scheduled_date: '2030-01-20',
         window_start: '09:00', window_end: '10:30', service_type: 'WaveGuard', status: 'confirmed', reschedule_token: 'token' });
       await mockPg('call_log').insert({ id: callId, customer_id: customerId, direction: 'inbound', from_phone: phone,
-        created_at: new Date('2030-01-07T12:00:00Z'), v2_extraction_status: 'valid', processing_generation: 0, transcription: `Agent: ${quote}\nCaller: Thank you.` });
+        created_at: new Date('2030-01-07T12:00:00Z'), v2_extraction_status: 'valid', processing_generation: 0, transcription: `Agent: ${quote}\nCaller: ${callerText}` });
       const [commitment] = await mockPg('call_commitments').insert({
         call_log_id: callId, commitment_key: 'send_reschedule_link:1', party: 'waves', kind: 'send_reschedule_link',
         description: 'send a reschedule link', source: 'ai', status: 'open', confidence: 0.95,
@@ -2218,6 +2218,26 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       expect((await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first()).status).toBe('review');
     });
 
+    test.each([
+      ['date-free', 'I will text you a reschedule link for that appointment.', 'Thank you.', []],
+      ['appointment-only', 'I will text you a reschedule link for that appointment.', 'My appointment is January 20.', [
+        { binding: 'appointment', quote: 'January 20', month: 1, day: 20 },
+      ]],
+    ])('a %s promise with a fabricated due_at parks before the real PostgreSQL dispatch boundary', async (_label, quote, callerText, dateClaims) => {
+      const now = new Date('2030-01-07T14:00:00Z');
+      const commitmentId = await seedPromise({ quote, callerText, dateClaims,
+        dueAt: new Date('2030-01-09T14:00:00Z'), dueType: 'floor' });
+      expect(await links.stagePromises(mockPg)).toBe(1);
+      const row = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
+      expect(row.available_at.getTime()).toBeLessThanOrEqual(now.getTime());
+      const send = jest.fn(successfulSend);
+      await links.sweep(mockPg, { now, send, buildLink: stubBuildLink, render: stubRender });
+      expect(send).not.toHaveBeenCalled();
+      expect(await mockPg('outbox_messages').where({ id: row.id }).first()).toMatchObject({
+        status: 'review', last_error: 'appointment_date_unresolved',
+      });
+    });
+
     test('dispatch rejects a persisted bare-day promise with an invented clock', async () => {
       const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link tomorrow.',
         dueAt: new Date('2030-01-09T04:59:00Z'), dueType: 'floor',
@@ -2307,11 +2327,13 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
     // preDispatchCheck itself, after mutating due_at, exactly as the real
     // messaging pipeline would call it at the provider boundary.
     test('a due_at moved into the future between staging and the provider boundary defers the send to the new floor, not the stale one (codex #4293 P1)', async () => {
-      const now = new Date('2030-01-07T14:00:00Z'); // 9:00 AM ET — inside the send window
-      const newFloor = new Date('2030-01-09T14:00:00Z'); // moved two days out
-      const commitmentId = await seedPromise({ quote: 'I will text you a reschedule link for that appointment.' });
+      const initialFloor = new Date('2030-01-09T14:00:00Z'); // Wednesday 9:00 AM ET
+      const now = new Date('2030-01-09T15:00:00Z'); // Wednesday 10:00 AM ET — after the original floor
+      const newFloor = new Date('2030-01-09T16:00:00Z'); // Wednesday 11:00 AM ET — moved out during dispatch
+      const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link Wednesday morning.',
+        dueAt: initialFloor, dueType: 'floor', dateClaims: [{ binding: 'delivery', quote: 'Wednesday', weekday: 3 }] });
 
-      // No due_at at staging time: the row is immediately due.
+      // The proved original floor is already due when dispatch begins.
       const staged = await links.stagePromises(mockPg);
       expect(staged).toBe(1);
       const row = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
@@ -2348,9 +2370,11 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
     // only passed during office hours.
     //
     test('an injected daytime clock keeps the floor check deterministic when the wall clock is quiet', async () => {
-      const now = new Date('2030-01-07T14:00:00Z'); // 9:00 AM ET — inside the send window
-      const newFloor = new Date('2030-01-09T14:00:00Z'); // moved two days out
-      const commitmentId = await seedPromise({ quote: 'I will text you a reschedule link for that appointment.' });
+      const initialFloor = new Date('2030-01-09T14:00:00Z'); // Wednesday 9:00 AM ET
+      const now = new Date('2030-01-09T15:00:00Z'); // Wednesday 10:00 AM ET — after the original floor
+      const newFloor = new Date('2030-01-09T16:00:00Z'); // Wednesday 11:00 AM ET — moved out during dispatch
+      const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link Wednesday morning.',
+        dueAt: initialFloor, dueType: 'floor', dateClaims: [{ binding: 'delivery', quote: 'Wednesday', weekday: 3 }] });
 
       const staged = await links.stagePromises(mockPg);
       expect(staged).toBe(1);
@@ -2371,7 +2395,7 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       // isWithinSendWindowET()/new Date() calls read exactly this frozen wall
       // clock regardless of the daytime `now` runOne was given — reproducing
       // precisely what an overnight CI run does to this suite.
-      jest.useFakeTimers({ now: parseETDateTime('2030-01-07T22:00:00'),
+      jest.useFakeTimers({ now: parseETDateTime('2030-01-09T22:00:00'),
         doNotFake: ['hrtime', 'nextTick', 'performance', 'queueMicrotask', 'requestAnimationFrame', 'cancelAnimationFrame',
           'requestIdleCallback', 'cancelIdleCallback', 'setImmediate', 'clearImmediate', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] });
       try {

@@ -82,6 +82,20 @@ test('missing date_claims is a legacy extraction requiring review', () => {
     .toBe('appointment_date_unresolved');
 });
 
+test.each(['floor', 'deadline', null])('persisted date-free and appointment-only promises reject an invented due_at (%s)', (dueType) => {
+  const cases = [
+    [call.transcription, []],
+    [`${call.transcription}\nCaller: My appointment is Tuesday, January 8.`, [
+      { binding: 'appointment', quote: 'Tuesday, January 8', month: 1, day: 8, weekday: 2 },
+    ]],
+  ];
+  for (const [transcription, dateClaims] of cases) {
+    expect(select({ call: { ...call, transcription }, commitment: {
+      ...commitment, due_at: '2030-01-07T09:00:00-05:00', due_type: dueType, subject: { date_claims: dateClaims },
+    } }).reason).toBe('appointment_date_unresolved');
+  }
+});
+
 test.each([
   ['My September 20 appointment.', []],
   ['My September 20 appointment.', [{ binding: 'appointment', quote: 'September 20', month: 9, day: 21 }]],

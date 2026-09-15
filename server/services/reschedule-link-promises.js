@@ -1129,7 +1129,8 @@ async function stagePromises(conn) {
         AND COALESCE(o.commitment_generation, -1) < COALESCE(cc.processing_generation, 0)
         AND (o.payload->>'${DELIVERY_UNCERTAIN_KEY}') = 'true'
     )`)
-    .select('cc.id', 'cc.call_log_id', 'cc.created_at', 'cc.processing_generation', 'cc.due_at', 'cc.due_type', 'cc.evidence', 'cl.customer_id').limit(200);
+    .select('cc.id', 'cc.call_log_id', 'cc.created_at', 'cc.processing_generation', 'cc.due_at', 'cc.due_type', 'cc.evidence', 'cc.subject',
+      'cl.customer_id', 'cl.transcription', 'cl.created_at as call_created_at').limit(200);
   // commitment_created_at rides along on the outbox row itself so runOne can
   // judge pre-activation without a second call_commitments query per row —
   // the exact check the r8 activation boundary needs to run before anything
@@ -1147,7 +1148,13 @@ async function stagePromises(conn) {
     // this same floor fresh on every pass in case the commitment's due_at
     // moves out further after this row is staged.
     const commitment = require('./call-commitments').normalizeRow(row);
-    const floor = promisedFloorAt(commitment, stagedAt);
+    // Do not let an unproved future timestamp hide the row from the first
+    // due-now sweep that performs the full context check. Invalid timing is
+    // staged immediately; runOne then parks it through the ordinary
+    // appointment_date_unresolved path without reaching the provider.
+    const timingProved = !structuredDateReason(commitment.subject,
+      { transcription: row.transcription, created_at: row.call_created_at }, commitment);
+    const floor = timingProved ? promisedFloorAt(commitment, stagedAt) : null;
     // The unattempted counterpart to the uncertain-attempt hold above: an
     // older-generation row that never got past claimForDispatch (still
     // 'pending'/'shadow') is not uncertain — it never reached the provider

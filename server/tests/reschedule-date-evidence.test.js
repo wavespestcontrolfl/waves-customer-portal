@@ -15,6 +15,18 @@ test('calendar evidence proves components and coverage independently of the mode
   expect(verify([], 'Agent: I will text you a reschedule link for that appointment.', reference)).toBe(true);
 });
 
+test.each(['floor', 'deadline', null, undefined])('no delivery evidence can authorize an invented %s timestamp', due_type => {
+  const promise = 'Agent: I will text you a reschedule link for that appointment.';
+  for (const [claims, transcript] of [[[], promise], [[september20], `${current}\n${promise}`]]) {
+    for (const due_at of ['2026-09-14T09:00:00-04:00', '2026-09-20T09:00:00-04:00', '', 'invalid']) {
+      expect(verify(claims, transcript, reference, { due_at, due_type })).toBe(false);
+    }
+    for (const due_at of [null, undefined]) {
+      expect(verify(claims, transcript, reference, { due_at, due_type })).toBe(true);
+    }
+  }
+});
+
 test.each([
   ['Sep. 20th', { month: 9, day: 20 }],
   ['September 20, 2026', { year: 2026, month: 9, day: 20 }],
@@ -30,6 +42,17 @@ test.each([
 
 test.each(['February 30', 'next Friday', 'September twenty first', 'a week from now', 'Christmas', 'the following day', '20', '9-20'])('unproven wording %s cannot pass as an empty list', text => {
   expect(verify([], `Caller: My appointment is ${text}.`, reference)).toBe(false);
+});
+
+test.each([
+  ['0/20', { month: 0, day: 20 }],
+  ['9/0', { month: 9, day: 0 }],
+  ['0000-09-20', { year: 0, month: 9, day: 20 }],
+])('explicit zero components in %s cannot become omitted components', (text, parts) => {
+  const transcript = `Caller: My appointment is ${text}.`;
+  const claims = [claim(text, parts)];
+  expect(verify(claims, transcript, reference)).toBe(false);
+  expect(verifiedAppointmentIdentityClaims(claims, transcript, reference)).toEqual([]);
 });
 
 test('date roles come from complete clauses, including current versus requested', () => {

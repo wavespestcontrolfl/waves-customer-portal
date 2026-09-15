@@ -36,7 +36,7 @@ function components(text, reference) {
   const parsed = formats.map(([pattern, read]) => { const match = pattern.exec(rest); return match && read(match); }).find(Boolean);
   if (!parsed) return null;
   Object.assign(result, parsed);
-  const ymd = `${result.year || 2000}-${String(result.month || 1).padStart(2, '0')}-${String(result.day).padStart(2, '0')}`;
+  const ymd = `${result.year ?? 2000}-${String(result.month ?? 1).padStart(2, '0')}-${String(result.day).padStart(2, '0')}`;
   if (!validCalendarDate(ymd)) return null;
   if (result.year && result.month && result.weekday !== undefined && new Date(`${ymd}T12:00:00Z`).getUTCDay() !== result.weekday) return null;
   return result;
@@ -128,7 +128,11 @@ function verifyRescheduleDateClaims(claims, transcript, reference, timing = {}) 
   if (!Array.isArray(claims)) return false;
   const { dates, complete } = transcriptDates(transcript, reference);
   if (!complete) return false;
-  return dates.filter(date => date.binding === 'delivery').every(date => deliveryTimingMatches(date, timing, reference))
+  const deliveryDates = dates.filter(date => date.binding === 'delivery');
+  // An empty delivery list proves no timestamp, even when appointment dates
+  // are present. Never let an invented floor delay a date-free promise.
+  if (!deliveryDates.length && timing.due_at != null) return false;
+  return deliveryDates.every(date => deliveryTimingMatches(date, timing, reference))
     && dates.every(date => claims.some(claim => claimCoversDate(claim, date)))
     && claims.every(claim => dates.some(date => claimCoversDate(claim, date)));
 }

@@ -414,7 +414,13 @@ describe('structured reschedule-link dates and delivery timing', () => {
     expect(groundModelCommitments([{ ...base, evidence: [{ quote: 'I will text the reschedule link tomorrow at 9am', speaker: 'agent' }], subject: { date_claims: [] } }], spoken).kept[0].subject.date_claims).toBeNull();
     const generic = 'Agent: I will text you a reschedule link for that appointment.';
     const simple = { ...base, evidence: [{ quote: generic.slice(7), speaker: 'agent' }], subject: { date_claims: [] } };
-    expect(groundModelCommitments([simple], generic).kept[0].subject.date_claims).toEqual([]);
+    expect(groundModelCommitments([{ ...simple, due_at: null, due_type: null }], generic).kept[0].subject.date_claims).toEqual([]);
+    expect(groundModelCommitments([simple], generic).kept[0].subject.date_claims).toBeNull();
+    const appointmentOnly = `Caller: My September 20 appointment.\n${generic}`;
+    const appointmentClaims = [{ binding: 'appointment', quote: 'September 20', month: 9, day: 20 }];
+    expect(groundModelCommitments([{ ...simple, due_at: null, due_type: null,
+      subject: { date_claims: appointmentClaims } }], appointmentOnly).kept[0].subject.date_claims).toEqual(appointmentClaims);
+    expect(groundModelCommitments([{ ...simple, subject: { date_claims: appointmentClaims } }], appointmentOnly).kept[0].subject.date_claims).toBeNull();
   });
   test.each([
     { due_at: '2026-09-14T09:00:00-04:00', due_type: 'deadline' },
