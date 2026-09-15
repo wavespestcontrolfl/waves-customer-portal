@@ -1191,18 +1191,21 @@ const InvoiceService = {
           .where({ 'i.customer_id': customerId })
           .whereRaw('s.source_estimate_id::text = ?', [stampedEstimateIdInNotes])
           .whereNotNull('i.visit_completion_packet_id').orderBy('i.id')
-          .forUpdate('i').noWait().select('i.id', 'i.status', 'i.line_items', 'i.notes');
+          .forUpdate('i').noWait().select('i.id', 'i.status', 'i.service_date', 'i.line_items', 'i.notes');
       } catch (error) { contention(error); }
-      const { invoiceContainsOnlySetupFeeCharges, sumPositiveSetupFeeCents } = require('./estimate-first-application-invoice');
+      const { invoiceContainsOnlySetupFeeCharges, invoiceContainsSetupFeeLine,
+        sumPositiveSetupFeeCents } = require('./estimate-first-application-invoice');
       // Compare the calculated invoice amounts, not caller-supplied amount.
       const normalizedSetupLines = normalizeInvoiceLineItems(lineItems || []);
-      let separateSetupFee = invoiceContainsOnlySetupFeeCharges({ line_items: normalizedSetupLines })
+      const hasSetupFee = invoiceContainsSetupFeeLine({ line_items: normalizedSetupLines });
+      const separateSetupFee = invoiceContainsOnlySetupFeeCharges({ line_items: normalizedSetupLines })
         && normalizedSetupLines.filter((line) => line.amount > 0)
           .every((line) => /^WaveGuard Membership — one-time setup fee$/i.test(String(line.description || '').trim()))
         && packetOwners.every((owner) => {
           const lines = parseInvoiceLineItems(owner.line_items);
           return lines.length > 0 && lines.every((line) => line && Number.isFinite(Number(line.amount)));
         });
+      let separateSetupFeeAllowed = separateSetupFee;
       if (packetOwners.length && separateSetupFee) {
         // The estimate advisory lock serializes concurrent replacement writers.
         // Lock their fee coverage too, failing operationally on a busy row.
@@ -1222,10 +1225,23 @@ const InvoiceService = {
         const unstampedOwners = [...new Map(packetOwners.map((row) => [String(row.id), row])).values()]
           .filter((row) => !stampedIds.has(String(row.id)) && !['void', 'canceled', 'cancelled'].includes(row.status));
         const packetFeeCents = unstampedOwners.reduce((sum, row) => sum + sumPositiveSetupFeeCents(row), 0);
-        separateSetupFee = obligation.owed && Number.isSafeInteger(obligation.setupFeeRemainingCents)
+        separateSetupFeeAllowed = obligation.owed && Number.isSafeInteger(obligation.setupFeeRemainingCents)
           && sumPositiveSetupFeeCents({ line_items: normalizedSetupLines }) <= obligation.setupFeeRemainingCents - packetFeeCents;
       }
-      if (packetOwners.length && !separateSetupFee) throw packetConflict();
+      // Application ownership is visit-date scoped, matching the inverse
+      // packet guard: an explicit other date is a different application,
+      // while either side missing a date fails closed. Setup-fee coverage is
+      // estimate-wide and therefore deliberately uses every packet owner.
+      const { dateOnly } = require('./visit-groups');
+      const stampedServiceDate = dateOnly(serviceDate);
+      const matchingPacketOwners = stampedServiceDate
+        ? packetOwners.filter((owner) => {
+          const ownerServiceDate = dateOnly(owner.service_date);
+          return !ownerServiceDate || ownerServiceDate === stampedServiceDate;
+        })
+        : packetOwners;
+      if ((hasSetupFee && packetOwners.length && (!separateSetupFee || !separateSetupFeeAllowed))
+        || (!hasSetupFee && matchingPacketOwners.length)) throw packetConflict();
     }
     const customer = await database("customers").where({ id: customerId }).first();
     if (!customer) throw new Error("Customer not found");

@@ -56,7 +56,7 @@ const knex = require('knex');
 const { randomUUID } = require('crypto');
 const { saveVisitCompletionPacket, runVisitCompletionPacketEffects, runVisitCompletionPacketMemberEffects, resumePendingVisitCompletions } = require('../services/visit-completion-packets');
 const { completeScheduledService } = require('../services/complete-scheduled-service');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 const { stopBaseKey, dateOnly } = require('../services/visit-groups');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { chargeInvoiceWithSavedCard } = require('../services/stripe');
@@ -2382,6 +2382,95 @@ postgres('visit completion packet records on PostgreSQL', () => {
       notes: `Auto-generated from accepted estimate #${estimateId.toUpperCase()}.`,
     })).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409, statusCode: 409, isOperational: true });
     expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+  });
+
+  test.each([['prior', -2], ['later', 2]])(
+    'a packet invoice allows an unlinked accepted-estimate application for a %s explicit date', async (_label, days) => {
+      const estimateId = await linkFixtureEstimate();
+      const saved = await saveVisitCompletionPacket(submission());
+      const otherDate = etDateString(addETDays(new Date(), days));
+
+      const invoice = await InvoiceService.create({
+        customerId: fixture.customerId,
+        serviceDate: otherDate,
+        lineItems: [{ description: 'First service application', quantity: 1, unit_price: 120 }],
+        notes: `Auto-generated from accepted estimate #${estimateId}. Another application.`,
+      });
+
+      expect(invoice.customer_id).toBe(fixture.customerId);
+      expect(dateOnly(invoice.service_date)).toBe(otherDate);
+      expect(invoice.id).not.toBe(saved.body.billing.invoiceId);
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(2);
+    });
+
+  test.each([
+    ['the same date', true],
+    ['no date', false],
+  ])('a packet invoice still owns an unlinked accepted-estimate application with %s', async (_label, withDate) => {
+    const estimateId = await linkFixtureEstimate();
+    await saveVisitCompletionPacket(submission());
+
+    await expect(InvoiceService.create({
+      customerId: fixture.customerId,
+      ...(withDate ? { serviceDate: etDateString() } : {}),
+      lineItems: [{ description: 'First service application', quantity: 1, unit_price: 120 }],
+      notes: `Auto-generated from accepted estimate #${estimateId}. Another application.`,
+    })).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+  });
+
+  test('an undated packet invoice fails closed against an explicitly dated application', async () => {
+    const estimateId = await linkFixtureEstimate();
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).update({ service_date: null });
+
+    await expect(InvoiceService.create({
+      customerId: fixture.customerId,
+      serviceDate: etDateString(addETDays(new Date(), 2)),
+      lineItems: [{ description: 'First service application', quantity: 1, unit_price: 120 }],
+      notes: `Auto-generated from accepted estimate #${estimateId}. Another application.`,
+    })).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+  });
+
+  test('packet-carried setup-fee coverage remains estimate-wide across service dates', async () => {
+    const estimateId = await linkFixtureEstimateWithSetupObligation();
+    const prior = await createPaidSetupFee(estimateId);
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('invoices').where({ id: prior.id }).update({ status: 'void' });
+    const packetInvoice = await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).first();
+    await mockPg('invoices').where({ id: packetInvoice.id }).update({
+      notes: 'Office edited packet notes',
+      line_items: JSON.stringify([...packetInvoice.line_items,
+        { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99, amount: 99 }]),
+    });
+
+    await expect(InvoiceService.create({
+      customerId: fixture.customerId,
+      serviceDate: etDateString(addETDays(new Date(), 2)),
+      lineItems: [{ description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99 }],
+      notes: `Auto-generated from accepted estimate #${estimateId}. Replacement setup fee.`,
+    })).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(2);
+  });
+
+  test('an application with a setup fee cannot use another date to bypass estimate-wide fee ownership', async () => {
+    const estimateId = await linkFixtureEstimateWithSetupObligation();
+    const prior = await createPaidSetupFee(estimateId);
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'invoice_ready', invoiceId: expect.any(String) });
+    await mockPg('invoices').where({ id: prior.id }).update({ status: 'void' });
+
+    await expect(InvoiceService.create({
+      customerId: fixture.customerId,
+      serviceDate: etDateString(addETDays(new Date(), 2)),
+      lineItems: [
+        { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99 },
+        { description: 'First service application', quantity: 1, unit_price: 120 },
+      ],
+      notes: `Auto-generated from accepted estimate #${estimateId}. Setup fee and another application.`,
+    })).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(2);
   });
 
   test.each([
