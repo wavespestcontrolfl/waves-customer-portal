@@ -52,6 +52,21 @@ describe('email reply structure verifier', () => {
       .toContain('signature_unsupported');
   });
 
+  test.each([
+    'Best', 'Best regards', 'Kind regards', 'Warm regards', 'Regards', 'Sincerely',
+    'Thanks', 'Thank you', 'Cheers', 'Warmly', 'Take care', 'Best wishes',
+    'All the best', 'All my best', 'With appreciation', 'With gratitude',
+    'With sincere appreciation', 'With sincere gratitude', 'Yours faithfully',
+    'Yours sincerely', 'Kindest regards', 'Many thanks', 'Warmest wishes',
+  ])('rejects recognized closing %s in inline and multiline signatures', (closing) => {
+    for (const separator of [' ', '\n']) {
+      for (const name of ['Alex', 'alex morgan']) {
+        expect(verdict(`Hi Casey, your visit is pending.\n${closing},${separator}${name}`).violations)
+          .toContain('signature_unsupported');
+      }
+    }
+  });
+
   test('matches the complete Unicode customer name at the greeting boundary', () => {
     const customer = { firstName: 'José' };
     expect(verdict('Hi José, I will check.', { customer }).ok).toBe(true);

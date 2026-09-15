@@ -51,7 +51,7 @@ function forgedSignature(text) {
   const closingAndName = closing.test(lines.at(-2) || '')
     && (/^\p{Lu}[\p{L}\p{M}'’.-]*(?: \p{Lu}[\p{L}\p{M}'’.-]*){0,3}$/u.test(lines.at(-1) || '')
       || /^\p{L}[\p{L}\p{M}'’-]*(?: \p{L}[\p{L}\p{M}'’-]*){0,3}$/u.test(lines.at(-1) || ''));
-  const inlineTerminalSignOff = /(?:^|[.!?]\s+|[,;]\s+|\n)(?:best|best regards|kind regards|warm regards|regards|sincerely|thanks|cheers|warmly),\s+(?!\b(?:i|we|you|they|he|she|it|this|that)\b)(\p{L}[\p{L}\p{M}'’-]{1,31}(?:\s+\p{L}[\p{L}\p{M}'’-]{1,31}){0,2})[,.]?\s*$/iu.exec(text);
+  const inlineTerminalSignOff = /(?:^|[.!?]\s+|[,;]\s+|\n)(?:best|best regards|kind regards|warm regards|regards|sincerely|thanks|thank you|cheers|warmly|take care|best wishes|all (?:the|my) best|with (?:sincere )?(?:appreciation|gratitude)|yours (?:faithfully|sincerely)|kindest regards|many thanks|warmest wishes),\s+(?!\b(?:i|we|you|they|he|she|it|this|that)\b)(\p{L}[\p{L}\p{M}'’-]{1,31}(?:\s+\p{L}[\p{L}\p{M}'’-]{1,31}){0,2})[,.]?\s*$/iu.exec(text);
   return (lines.length > 1 && (closing.test(lines.at(-1)) || closingAndName))
     || /(?:^|\n)\s*(?:[-–—]\s*)?(?:adam|virginia|the waves pest control team|waves team)\s*$/i.test(tail)
     || dashedName.test(tail)
