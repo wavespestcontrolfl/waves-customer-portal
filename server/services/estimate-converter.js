@@ -4186,6 +4186,86 @@ async function seedRecurringFollowUpsForParent(database, parentRow, svc = {}, op
   return seedResult;
 }
 
+function converterInvoiceLockRetry(message, code) {
+  const err = new Error(message);
+  // Public accept reads `status`; manual acceptance preserves operational
+  // `statusCode` errors. Set both so every caller rolls its transaction back
+  // and presents the same retryable conflict instead of an opaque 500.
+  err.status = 409;
+  err.statusCode = 409;
+  err.code = code;
+  err.isOperational = true;
+  err.retryableAcceptInvoiceLock = true;
+  return err;
+}
+
+// A converter running inside its caller's transaction may already own the
+// estimate (and sometimes customer / visit) row. Deposit receipts take the
+// ledger key before their estimate FK check, so blocking on that key here can
+// form an ABBA deadlock. In that situation mirror estimate-public's invoice
+// prelocks: every possibly-contended lock is nonblocking and the whole caller
+// transaction retries. Pool-owned conversions keep their established blocking
+// order because they do not enter with earlier row locks.
+async function acquireConverterInvoiceDepositLocks(trx, {
+  estimateId,
+  customerId,
+  scheduledServiceId = null,
+  nonblocking = false,
+}) {
+  const retry = (message, code) => { throw converterInvoiceLockRetry(message, code); };
+  if (!nonblocking) {
+    if (scheduledServiceId) {
+      await require('./scheduled-invoice-mint')
+        .acquireScheduledInvoiceMintLock(trx, scheduledServiceId);
+    }
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [
+      `unminted_setup_fee_manual_billing:${estimateId}`,
+    ]);
+    await trx.raw('SELECT id FROM customers WHERE id = ? FOR KEY SHARE', [customerId]);
+    if (scheduledServiceId) {
+      await trx('scheduled_services').where({ id: scheduledServiceId }).forUpdate().first('id');
+    }
+    const { acquireEstimateDepositLedgerLock } = require('./estimate-deposits');
+    await acquireEstimateDepositLedgerLock(trx, estimateId);
+    return;
+  }
+
+  if (scheduledServiceId) {
+    const { SCHEDULED_SERVICE_INVOICE_MINT_LOCK } = require('./scheduled-invoice-mint');
+    const mint = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS acquired', [
+      SCHEDULED_SERVICE_INVOICE_MINT_LOCK, String(scheduledServiceId),
+    ]);
+    if (!mint.rows?.[0]?.acquired) {
+      retry('This visit invoice is being prepared. Please try again in a moment.', 'ACCEPT_INVOICE_BUSY_RETRY');
+    }
+  }
+  const setup = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?)) AS acquired', [
+    `unminted_setup_fee_manual_billing:${estimateId}`,
+  ]);
+  if (!setup.rows?.[0]?.acquired) {
+    retry('This estimate invoice is being prepared. Please try again in a moment.', 'ACCEPT_INVOICE_BUSY_RETRY');
+  }
+  try {
+    await trx.raw('SELECT id FROM customers WHERE id = ? FOR KEY SHARE NOWAIT', [customerId]);
+    if (scheduledServiceId) {
+      // Preserve the converter's existing visit serialization strength while
+      // refusing immediately if another transaction already owns the row.
+      await trx.raw('SELECT id FROM scheduled_services WHERE id = ? FOR UPDATE NOWAIT', [scheduledServiceId]);
+    }
+  } catch (err) {
+    if (err.code === '55P03') {
+      retry('This invoice is being updated. Please try accepting again in a moment.', 'ACCEPT_INVOICE_BUSY_RETRY');
+    }
+    throw err;
+  }
+  const ledger = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS acquired', [
+    'estimate.deposit.ledger', String(estimateId),
+  ]);
+  if (!ledger.rows?.[0]?.acquired) {
+    retry('Your deposit is being recorded. Please try accepting again in a moment.', 'DEPOSIT_LEDGER_BUSY_RETRY');
+  }
+}
+
 const EstimateConverter = {
   /**
    * Convert an accepted estimate into an active customer with scheduled services.
@@ -4235,6 +4315,7 @@ const EstimateConverter = {
     const deferFollowUpReminderRegistration = opts.deferFollowUpReminderRegistration === true;
     const usingCallerDatabase = !!opts.database;
     const database = opts.database || db;
+    const nonblockingInvoiceLocks = database.isTransaction === true;
     const estimate = await database('estimates').where({ id: estimateId }).first();
     // Catalog SHARE lock BEFORE any scheduled_services row lock in this
     // transaction (codex #4369 r3 P1): the version-2 protected catalog
@@ -6724,11 +6805,7 @@ const EstimateConverter = {
           // converter receives the bare DB; for public accepts this is a
           // savepoint inside the caller's transaction.
           let appliedPrepayDepositCredit = 0;
-          const {
-            acquireEstimateDepositLedgerLock,
-            pendingDepositCredit,
-            consumeDepositCredit,
-          } = require('./estimate-deposits');
+          const { pendingDepositCredit, consumeDepositCredit } = require('./estimate-deposits');
           // Labeled manual discount on the prepay invoice (owner 2026-07-11):
           // DESCRIPTION-level only — the prepay line stays at the NET
           // annualAmount because annual-prepay-renewals seeds each covered
@@ -6752,17 +6829,9 @@ const EstimateConverter = {
           // coverage money).
           const prepayRodentSetupAmount = frozenRodentBaitSetupAmount(estimateData);
           const inv = await database.transaction(async (invoiceTrx) => {
-            // InvoiceService.create takes this accepted-estimate mint lock
-            // before it inserts. Acquire it first here too, then the deposit
-            // ledger lock: other mint paths take the same order. create()
-            // re-acquires it in this transaction without waiting.
-            await invoiceTrx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [
-              `unminted_setup_fee_manual_billing:${estimateId}`,
-            ]);
-            // Hoist the invoice insert's customer FK lock before the ledger:
-            // collectors can already hold the customer while awaiting it.
-            await invoiceTrx.raw('SELECT id FROM customers WHERE id = ? FOR KEY SHARE', [customerId]);
-            await acquireEstimateDepositLedgerLock(invoiceTrx, estimateId);
+            await acquireConverterInvoiceDepositLocks(invoiceTrx, {
+              estimateId, customerId, nonblocking: nonblockingInvoiceLocks,
+            });
             let prepayDepositCredit;
             try {
               prepayDepositCredit = await pendingDepositCredit(estimateId, invoiceTrx);
@@ -7063,11 +7132,7 @@ const EstimateConverter = {
           // and consume) rolls the invoice back, and one retry re-reads the
           // fresh, possibly shrunken balance. Never a discounted invoice
           // beside an unconsumed deposit row.
-          const {
-            acquireEstimateDepositLedgerLock,
-            pendingDepositCredit,
-            consumeDepositCredit,
-          } = require('./estimate-deposits');
+          const { pendingDepositCredit, consumeDepositCredit } = require('./estimate-deposits');
           const invoiceSubtotal = (setupFeeApplies ? setupFeeAmount : 0) + firstApplicationAmount;
           const invoiceTitle = setupFeeApplies && includesFirstApplicationLine
             ? 'WaveGuard Membership Setup + First Application'
@@ -7084,23 +7149,10 @@ const EstimateConverter = {
             let depositLedgerReadFailed = false;
             try {
               inv = await database.transaction(async (trx) => {
-                // create() acquires the visit mint lock before the setup lock.
-                // Match that order, then hoist its customer and scheduled-row
-                // FK locks before the deposit ledger lock. The read, invoice
-                // insert and exact allocation now commit together even if
-                // the caller supplied a transaction (this is its savepoint).
-                if (scheduledServiceId) {
-                  await require('./scheduled-invoice-mint')
-                    .acquireScheduledInvoiceMintLock(trx, scheduledServiceId);
-                }
-                await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [
-                  `unminted_setup_fee_manual_billing:${estimateId}`,
-                ]);
-                await trx.raw('SELECT id FROM customers WHERE id = ? FOR KEY SHARE', [customerId]);
-                if (scheduledServiceId) {
-                  await trx('scheduled_services').where({ id: scheduledServiceId }).forUpdate().first('id');
-                }
-                await acquireEstimateDepositLedgerLock(trx, estimateId);
+                await acquireConverterInvoiceDepositLocks(trx, {
+                  estimateId, customerId, scheduledServiceId,
+                  nonblocking: nonblockingInvoiceLocks,
+                });
                 let depositCredit;
                 try {
                   depositCredit = await pendingDepositCredit(estimateId, trx);
@@ -7144,6 +7196,7 @@ const EstimateConverter = {
               }
             } catch (err) {
               appliedDepositCredit = 0;
+              if (err?.retryableAcceptInvoiceLock) throw err;
               if (attempt === 0) {
                 logger.warn(`[estimate-converter] invoice+deposit transaction failed for estimate ${estimateId} — retrying with a fresh ledger read: ${err.message}`);
               } else {
@@ -7243,6 +7296,7 @@ const EstimateConverter = {
         }
       }
     } catch (err) {
+      if (err?.retryableAcceptInvoiceLock) throw err;
       if (billingTerm === 'prepay_annual') {
         logger.error(`[estimate-converter] Annual prepay invoice/term creation failed for estimate ${estimateId}: ${err.message}`);
         if (draftInvoiceId && !usingCallerDatabase) {
@@ -7833,3 +7887,4 @@ module.exports.assertPerApplicationAddOnPriced = assertPerApplicationAddOnPriced
 module.exports.legacyFlatMonthlyTermiteUnit = legacyFlatMonthlyTermiteUnit;
 module.exports.assertLegacyMonthlyTermiteConvertible = assertLegacyMonthlyTermiteConvertible;
 module.exports.perApplicationFeeUnresolvedBody = perApplicationFeeUnresolvedBody;
+module.exports.acquireConverterInvoiceDepositLocks = acquireConverterInvoiceDepositLocks;

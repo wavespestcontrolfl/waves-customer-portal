@@ -34,12 +34,14 @@ describe('estimate converter annual prepay orchestration', () => {
       if (table === 'estimates') {
         return {
           where: jest.fn().mockReturnThis(),
+          forUpdate: jest.fn().mockReturnThis(),
           first: jest.fn().mockResolvedValue(estimate),
         };
       }
       if (table === 'customers') {
         return {
           where: jest.fn().mockReturnThis(),
+          forUpdate: jest.fn().mockReturnThis(),
           first: jest.fn().mockResolvedValue(customer),
           update: jest.fn().mockResolvedValue(1),
         };
@@ -49,6 +51,7 @@ describe('estimate converter annual prepay orchestration', () => {
           where: jest.fn().mockReturnThis(),
           whereNotNull: jest.fn().mockReturnThis(),
           whereNull: jest.fn().mockReturnThis(),
+          forUpdate: jest.fn().mockReturnThis(),
           count: jest.fn().mockReturnThis(),
           first: jest.fn().mockResolvedValue({ count: 0 }),
         };
@@ -187,6 +190,52 @@ describe('estimate converter annual prepay orchestration', () => {
     // GROSS = net invoice total (578) + credited deposit (49): recording the
     // net would understate the year by the deposit.
     expect(args).toMatchObject({ prepayAmount: 627 });
+  });
+
+  test('annual prepay inside a caller transaction try-locks the ledger and returns a retryable 409 on contention', async () => {
+    const deposits = {
+      acquireEstimateDepositLedgerLock: jest.fn(),
+      pendingDepositCredit: jest.fn(),
+      consumeDepositCredit: jest.fn(),
+    };
+    const { EstimateConverter, invoiceService, db, invoiceTrx } = setup(
+      [{ service: 'lawn_care', name: 'Lawn Care', frequency: 'monthly' }],
+      undefined,
+      { deposits },
+    );
+    invoiceTrx.raw.mockImplementation(async (sql, bindings) => ({
+      rows: [{ acquired: !(sql.includes('pg_try_advisory_xact_lock') && bindings?.[0] === 'estimate.deposit.ledger') }],
+    }));
+    const callerTrx = jest.fn((table) => db(table));
+    callerTrx.isTransaction = true;
+    callerTrx.raw = invoiceTrx.raw;
+    callerTrx.transaction = jest.fn(async (callback) => callback(invoiceTrx));
+
+    await expect(EstimateConverter.convertEstimate('estimate-1', {
+      ...convertOpts,
+      database: callerTrx,
+    })).rejects.toMatchObject({
+      status: 409,
+      statusCode: 409,
+      code: 'DEPOSIT_LEDGER_BUSY_RETRY',
+      isOperational: true,
+    });
+
+    expect(invoiceTrx.raw).toHaveBeenCalledWith(
+      'SELECT pg_try_advisory_xact_lock(hashtext(?)) AS acquired',
+      ['unminted_setup_fee_manual_billing:estimate-1'],
+    );
+    expect(invoiceTrx.raw).toHaveBeenCalledWith(
+      'SELECT id FROM customers WHERE id = ? FOR KEY SHARE NOWAIT',
+      ['customer-1'],
+    );
+    expect(invoiceTrx.raw).toHaveBeenCalledWith(
+      'SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS acquired',
+      ['estimate.deposit.ledger', 'estimate-1'],
+    );
+    expect(deposits.acquireEstimateDepositLedgerLock).not.toHaveBeenCalled();
+    expect(deposits.pendingDepositCredit).not.toHaveBeenCalled();
+    expect(invoiceService.create).not.toHaveBeenCalled();
   });
 
   test('deposit ledger READ failure aborts the prepay conversion (fail closed — never mint with a dropped credit)', async () => {
@@ -354,6 +403,63 @@ describe('estimate converter annual prepay orchestration', () => {
     expect(db.transaction).not.toHaveBeenCalled();
     expect(deposits.pendingDepositCredit).toHaveBeenCalledWith('estimate-1', invoiceTrx);
     expect(invoiceService.create).toHaveBeenCalledWith(expect.objectContaining({ database: invoiceTrx }));
+  });
+
+  test('standard invoice inside a caller transaction does not retry or swallow a busy-ledger 409', async () => {
+    const deposits = {
+      acquireEstimateDepositLedgerLock: jest.fn(),
+      pendingDepositCredit: jest.fn(),
+    };
+    const { EstimateConverter, invoiceService, db, invoiceTrx, warn } = setup(
+      [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly', visitsPerYear: 4 }],
+      undefined,
+      { deposits },
+    );
+    invoiceTrx.raw.mockImplementation(async (sql, bindings) => ({
+      rows: [{ acquired: !(sql.includes('pg_try_advisory_xact_lock') && bindings?.[0] === 'estimate.deposit.ledger') }],
+    }));
+    const callerTrx = jest.fn((table) => db(table));
+    callerTrx.isTransaction = true;
+    callerTrx.raw = invoiceTrx.raw;
+    callerTrx.transaction = jest.fn(async (callback) => callback(invoiceTrx));
+
+    await expect(EstimateConverter.convertEstimate('estimate-1', {
+      billingTerm: 'standard', skipAutoSchedule: true, autoSendInvoice: false,
+      skipWelcomeSms: true, skipMembershipEmail: true, database: callerTrx,
+    })).rejects.toMatchObject({
+      status: 409,
+      code: 'DEPOSIT_LEDGER_BUSY_RETRY',
+      retryableAcceptInvoiceLock: true,
+    });
+
+    expect(invoiceTrx.raw.mock.calls.filter(([sql, bindings]) => (
+      sql.includes('pg_try_advisory_xact_lock') && bindings?.[0] === 'estimate.deposit.ledger'
+    ))).toHaveLength(1);
+    expect(invoiceService.create).not.toHaveBeenCalled();
+    expect(deposits.acquireEstimateDepositLedgerLock).not.toHaveBeenCalled();
+    expect(deposits.pendingDepositCredit).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('retrying with a fresh ledger read'));
+  });
+
+  test('caller-transaction visit prelock preserves FOR UPDATE strength without waiting', async () => {
+    const { EstimateConverter } = setup(
+      [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly', visitsPerYear: 4 }],
+    );
+    const trx = {
+      raw: jest.fn().mockResolvedValue({ rows: [{ acquired: true }] }),
+    };
+
+    await EstimateConverter.acquireConverterInvoiceDepositLocks(trx, {
+      estimateId: 'estimate-1',
+      customerId: 'customer-1',
+      scheduledServiceId: 'service-1',
+      nonblocking: true,
+    });
+
+    expect(trx.raw).toHaveBeenCalledWith(
+      'SELECT id FROM scheduled_services WHERE id = ? FOR UPDATE NOWAIT',
+      ['service-1'],
+    );
   });
 
   test('single quarterly service with explicit visitsPerYear: coverage count comes from the line', async () => {
