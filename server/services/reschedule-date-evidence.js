@@ -36,7 +36,7 @@ function components(text, reference) {
   const parsed = formats.map(([pattern, read]) => { const match = pattern.exec(rest); return match && read(match); }).find(Boolean);
   if (!parsed) return null;
   Object.assign(result, parsed);
-  const ymd = `${result.year || 2000}-${String(result.month || 1).padStart(2, '0')}-${String(result.day).padStart(2, '0')}`;
+  const ymd = `${result.year ?? 2000}-${String(result.month ?? 1).padStart(2, '0')}-${String(result.day).padStart(2, '0')}`;
   if (!validCalendarDate(ymd)) return null;
   if (result.year && result.month && result.weekday !== undefined && new Date(`${ymd}T12:00:00Z`).getUTCDay() !== result.weekday) return null;
   return result;

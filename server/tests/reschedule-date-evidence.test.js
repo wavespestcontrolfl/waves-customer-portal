@@ -44,6 +44,17 @@ test.each(['February 30', 'next Friday', 'September twenty first', 'a week from 
   expect(verify([], `Caller: My appointment is ${text}.`, reference)).toBe(false);
 });
 
+test.each([
+  ['0/20', { month: 0, day: 20 }],
+  ['9/0', { month: 9, day: 0 }],
+  ['0000-09-20', { year: 0, month: 9, day: 20 }],
+])('explicit zero components in %s cannot become omitted components', (text, parts) => {
+  const transcript = `Caller: My appointment is ${text}.`;
+  const claims = [claim(text, parts)];
+  expect(verify(claims, transcript, reference)).toBe(false);
+  expect(verifiedAppointmentIdentityClaims(claims, transcript, reference)).toEqual([]);
+});
+
 test('date roles come from complete clauses, including current versus requested', () => {
   const transcript = 'Caller: Please move my current Tuesday appointment to Friday.\nAgent: I will text the reschedule link tomorrow morning.';
   const claims = [claim('Tuesday', { weekday: 2 }), claim('Friday', { weekday: 5 }, 'requested'),
