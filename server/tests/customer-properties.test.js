@@ -1,4 +1,4 @@
-const { normStreet, addressKey, unitKey, streetEmbeddedUnitKey, streetKey, normalizeZip, normalizeOccupancy, isNewAddress, OCCUPANCY_TYPES, defaultOccupancyForContactRole, defaultRelationshipForContactRole } = require('../services/customer-properties');
+const { normStreet, addressKey, unitKey, streetEmbeddedUnitKey, streetKey, normalizeZip, normalizeOccupancy, isNewAddress, OCCUPANCY_TYPES, defaultOccupancyForContactRole, defaultRelationshipForContactRole, syncPrimaryAddress } = require('../services/customer-properties');
 
 describe('address key normalization (suffix + ZIP)', () => {
   test('normalizeZip takes the 5-digit form (ZIP+4 insensitive)', () => {
@@ -107,6 +107,34 @@ describe('customer-properties pure helpers', () => {
     expect(isNewAddress([{ address_line1: '100 Main St', city: 'Bradenton' }], { address_line1: '100 Main St', city: 'Sarasota' })).toBe(true);
     expect(isNewAddress([], { address_line1: '12398 Amber Creek Cir' })).toBe(true);
     expect(isNewAddress(null, { address_line1: '1 Main St' })).toBe(true);
+  });
+});
+
+describe('syncPrimaryAddress explicit line 2 intent', () => {
+  test('an explicit null clears the primary unit and recomputes its address key', async () => {
+    const primary = {
+      id: 'prop-1', customer_id: 'cust-1', is_primary: true, active: true,
+      address_line1: '10 Main St', address_line2: 'Unit 4',
+      city: 'Sarasota', state: 'FL', zip: '34236',
+      address_key: addressKey({ address_line1: '10 Main St', address_line2: 'Unit 4', city: 'Sarasota', zip: '34236' }),
+    };
+    let written = null;
+    const conn = () => {
+      const query = {
+        where: () => query,
+        first: async () => primary,
+        update: async (patch) => { written = patch; return 1; },
+      };
+      return query;
+    };
+
+    await syncPrimaryAddress({ ...primary, id: 'cust-1', address_line2: null }, conn, { explicitLine2: true });
+
+    expect(written).toMatchObject({ address_line2: null, latitude: null, longitude: null });
+    expect(written.address_key).toBe(addressKey({
+      address_line1: '10 Main St', address_line2: null, city: 'Sarasota', zip: '34236',
+    }));
+    expect(written.address_key).not.toBe(primary.address_key);
   });
 });
 
