@@ -133,6 +133,26 @@ function verifyRescheduleDateClaims(claims, transcript, reference, timing = {}) 
     && claims.every(claim => dates.some(date => claimCoversDate(claim, date)));
 }
 
+// The evidence grammar accepts weekday-qualified absolute dates and "Sept";
+// the shared deadline parser does not. Normalize only after components() has
+// validated the evidence, then retain every stated component in the result.
+function parseProvenETDeadline(date, clockText, reference) {
+  let dayText = date.text;
+  if (date.parts.weekday !== undefined && (date.parts.month !== undefined || date.parts.year !== undefined)) {
+    dayText = dayText.replace(new RegExp(`^${weekday}\\s+`), '');
+  } else if (date.parts.weekday !== undefined && date.parts.day === undefined) {
+    dayText = WEEKDAYS[date.parts.weekday];
+  }
+  dayText = dayText.replace(/^sept(?=\s)/, 'september');
+  const proved = parseQuotedETDeadline(`${dayText} ${clockText}`, reference);
+  if (!proved) return null;
+  const parsed = etParts(proved);
+  return ['year', 'month', 'day', 'weekday'].every(key => {
+    if (date.parts[key] === undefined) return true;
+    return date.parts[key] === (key === 'weekday' ? parsed.dayOfWeek : parsed[key]);
+  }) ? proved : null;
+}
+
 // Calendar claims alone cannot prove a delivery floor: the independently
 // extracted due_at/type might still say today, deadline, or nothing at all.
 // Validate those proposals against the same complete delivery clause.
@@ -147,20 +167,19 @@ function deliveryTimingMatches(date, timing, reference) {
   const tail = date.after.split(' for ')[0].trim();
   if (tail.startsWith('at ')) {
     const numericClock = tail.replace(new RegExp(`^at (${HOURS.join('|')})(?= ?(?:am|pm)$)`), (_, word) => `at ${HOURS.indexOf(word) + 1}`);
-    const proved = parseQuotedETDeadline(`${date.text} ${numericClock}`, reference);
+    const proved = parseProvenETDeadline(date, numericClock, reference);
     return !!proved && due.getTime() === proved.getTime();
   }
-  // A bare day permits a proposed clock on that day; 'morning' additionally
-  // uses the existing booking morning band, 08:00–12:00 (triage-auto-resolve).
-  // Other dayparts are unsupported by this delivery verifier and remain
-  // in review. No default clock is invented for missing due_at.
-  if (tail && tail !== 'morning') return false;
-  const provedDay = parseQuotedETDeadline(`${date.text} at 11:59 pm`, reference);
+  // A bare day proves no clock, so it cannot certify an arbitrary model time.
+  // "Morning" uses the existing booking band, 08:00–12:00
+  // (triage-auto-resolve). Other dayparts remain in review.
+  if (tail !== 'morning') return false;
+  const provedDay = parseProvenETDeadline(date, 'at 11:59 pm', reference);
   if (!provedDay) return false;
   const actual = etParts(due);
   const expected = etParts(provedDay);
   return ['year', 'month', 'day'].every(key => actual[key] === expected[key])
-    && (tail !== 'morning' || (actual.hour >= 8 && actual.hour < 12));
+    && actual.hour >= 8 && actual.hour < 12;
 }
 
 module.exports = { verifyRescheduleDateClaims, verifiedAppointmentIdentityClaims };

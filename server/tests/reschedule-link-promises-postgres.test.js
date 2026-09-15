@@ -2037,7 +2037,7 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       const beforeFriday = new Date('2030-01-07T14:00:00Z'); // Monday, 9:00 AM ET — before due_at
       const onFriday = new Date('2030-01-11T15:00:00Z'); // Friday, 10:00 AM ET — after due_at
 
-      const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link by Friday.', dateClaims: [{ binding: 'delivery', quote: 'Friday', weekday: 5 }], dueAt });
+      const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link by Friday at 9am.', dateClaims: [{ binding: 'delivery', quote: 'Friday', weekday: 5 }], dueAt });
 
       // Staging: the row's available_at is the promised floor, not now.
       const staged = await links.stagePromises(mockPg);
@@ -2193,7 +2193,7 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
 
     test('a persisted deadline permits delivery before the deadline', async () => {
       const now = new Date('2030-01-07T14:00:00Z');
-      const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link by Friday.', dateClaims: [{ binding: 'delivery', quote: 'Friday', weekday: 5 }],
+      const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link by Friday at 9am.', dateClaims: [{ binding: 'delivery', quote: 'Friday', weekday: 5 }],
         dueAt: new Date('2030-01-11T14:00:00Z'), dueType: 'deadline' });
       await links.stagePromises(mockPg);
       const row = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
@@ -2214,6 +2214,18 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       await links.stagePromises(mockPg);
       const send = jest.fn(successfulSend);
       await links.sweep(mockPg, { now: new Date('2030-01-07T14:00:00Z'), send, buildLink: stubBuildLink, render: stubRender });
+      expect(send).not.toHaveBeenCalled();
+      expect((await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first()).status).toBe('review');
+    });
+
+    test('dispatch rejects a persisted bare-day promise with an invented clock', async () => {
+      const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link tomorrow.',
+        dueAt: new Date('2030-01-09T04:59:00Z'), dueType: 'floor',
+        dateClaims: [{ binding: 'delivery', quote: 'tomorrow', year: 2030, month: 1, day: 8 }] });
+      await links.stagePromises(mockPg);
+      const send = jest.fn(successfulSend);
+      const row = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
+      await links.runOne(mockPg, row, { now: new Date('2030-01-09T14:00:00Z'), send, buildLink: stubBuildLink, render: stubRender });
       expect(send).not.toHaveBeenCalled();
       expect((await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first()).status).toBe('review');
     });

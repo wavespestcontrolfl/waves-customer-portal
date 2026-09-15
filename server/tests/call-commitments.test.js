@@ -427,6 +427,16 @@ describe('structured reschedule-link dates and delivery timing', () => {
     ] } };
     expect(groundModelCommitments([item], `Agent: ${quote}.`, new Date('2026-09-14T02:00:00Z')).kept[0].subject.date_claims).toBeNull();
   });
+  test('a bare delivery day cannot ground a model-invented late clock', () => {
+    const quote = 'I will text the reschedule link tomorrow';
+    const item = { ...base, due_at: '2026-09-14T23:59:00-04:00', due_text: 'tomorrow',
+      evidence: [{ quote, speaker: 'agent' }], subject: { date_claims: [
+        { binding: 'delivery', quote: 'tomorrow', year: 2026, month: 9, day: 14 },
+      ] } };
+    const out = groundModelCommitments([item], `Agent: ${quote}.`, new Date('2026-09-14T02:00:00Z'));
+    expect(out.kept).toHaveLength(1);
+    expect(out.kept[0].subject.date_claims).toBeNull();
+  });
   test('a newly extracted by-date needs an explicit deadline type', () => {
     const quote = 'I will text the reschedule link by tomorrow at 9am';
     const claims = [{ binding: 'delivery', quote: 'tomorrow', year: 2026, month: 9, day: 14 }];
