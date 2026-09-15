@@ -303,6 +303,14 @@
     "approval": null,
     "scope": "record"
   },
+  "get_estimate_detail": {
+    "module": "estimate-tools.js",
+    "domain": "estimate",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "record"
+  },
   "find_similar_estimates": {
     "module": "estimate-tools.js",
     "domain": "estimate",
