@@ -291,13 +291,14 @@ router.get('/:token', async (req, res, next) => {
   try {
     const firstRead = await InvoiceService.getByToken(req.params.token);
     if (!firstRead) return res.status(404).json({ error: 'Invoice not found' });
-    await require('../services/estimate-deposits').assertInvoiceDepositSettlementReady(db, firstRead, { lock: false });
-    // The guard may have waited for an in-flight deposit reconciliation to
-    // commit. Reload every enriched field before showing totals or offering
-    // an off-Stripe transfer amount; the first snapshot can still be gross.
-    const data = await InvoiceService.getByToken(req.params.token, { recordView: false });
+    // Wait for an already-recording receipt before exposing a balance that
+    // can be paid outside Stripe. The reload shares the locked transaction
+    // and must not count the same request as another view.
+    const data = await require('../services/estimate-deposits').withInvoiceDepositSettlement(
+      firstRead.id,
+      (trx) => InvoiceService.getByToken(req.params.token, { recordView: false, database: trx }),
+    );
     if (!data) return res.status(404).json({ error: 'Invoice not found' });
-    await require('../services/estimate-deposits').assertInvoiceDepositSettlementReady(db, data, { lock: false });
     // Phase 2: an accrued invoice is not individually viewable/payable — it
     // renders on the consolidated statement. Fail closed on the pay surface
     // (receipts stay permanent; the block is here, not in getByToken).

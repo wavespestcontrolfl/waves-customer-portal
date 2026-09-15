@@ -1176,7 +1176,7 @@ async function sweepTerminalEstimateDeposits() {
 // dollars visible for manual reconciliation. Invoice row -> ledger lock is
 // the same order used by void and payment writers.
 function retryableDepositSettlementError(invoiceId, reason, cause = null) {
-  const err = new Error(`Deposit-covered invoice ${invoiceId} could not close (${reason}); retry webhook`);
+  const err = new Error(`Invoice ${invoiceId} deposit settlement could not finish (${reason}); retry webhook`);
   err.code = 'DEPOSIT_SETTLEMENT_RETRYABLE';
   err.retryable = true;
   err.invoiceId = invoiceId;
@@ -1265,7 +1265,7 @@ async function reconcileReceivedDepositToInvoice(estimateId) {
       if (!dueCents) {
         const stamped = lines.some((line) => line?.category === 'deposit_credit'
           && String(line.estimate_id) === String(estimateId) && cents(line.amount) < 0);
-        return stamped && ['draft', 'sent', 'viewed', 'overdue'].includes(invoice.status)
+        return stamped && ['draft', 'scheduled', 'sending', 'sent', 'viewed', 'overdue'].includes(invoice.status)
           ? { state: 'settle', invoiceId: invoice.id } : { state: 'skip' };
       }
       const credit = await pendingDepositCredit(estimateId, trx);
@@ -1294,11 +1294,18 @@ async function reconcileReceivedDepositToInvoice(estimateId) {
       const paymentWork = [
         invoice.stripe_payment_intent_id, invoice.payment_recorded_at, invoice.paid_at,
         Number(invoice.credit_applied || 0) > 0, invoice.payer_statement_id,
-        !['draft', 'sent', 'viewed', 'overdue'].includes(invoice.status),
+        !['draft', 'scheduled', 'sending', 'sent', 'viewed', 'overdue'].includes(invoice.status),
         activePayment, chargeAttempt, paymentPlan, orphan, ambiguous,
       ].some(Boolean);
       if (paymentWork) {
         return { state: 'park', invoiceId: invoice.id };
+      }
+
+      // Delivery ownership is temporary, unlike a live payment. Keep the
+      // receipt webhook retryable until the sender finalizes/restores its
+      // claim (or the existing stale-send sweep parks it for review).
+      if (invoice.status === 'sending') {
+        throw retryableDepositSettlementError(invoice.id, 'invoice_delivery_in_flight');
       }
 
       const appliedCents = Math.min(dueCents, cents(credit.amount));
@@ -1743,6 +1750,33 @@ async function assertInvoiceDepositSettlementReady(trx, invoice, { lock = true }
   }
 }
 
+// Keep the invoice snapshot and the receipt ledger stable through a read or
+// provider handoff. Receipt recording commits before it requests an invoice
+// lock, so invoice -> ledger waits for uncommitted receipts without cycling.
+async function withInvoiceDepositSettlement(invoiceId, callback, database = db) {
+  return database.transaction(async (trx) => {
+    const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+    if (!invoice) return null;
+    await assertInvoiceDepositSettlementReady(trx, invoice);
+    // Provider logging uses a separate connection with a customer FK. Keep a
+    // customer merge from holding that row while waiting on our invoice. Do
+    // not wait here: an existing merge must finish after this rollback.
+    if (invoice.customer_id) {
+      try {
+        await trx('customers').where({ id: invoice.customer_id }).forKeyShare().noWait().first();
+      } catch (err) {
+        if (err.code !== '55P03') throw err;
+        const retry = new Error('This invoice is being updated. Please try again in a moment.');
+        retry.code = 'INVOICE_BUSY_RETRY';
+        retry.status = 409;
+        retry.statusCode = 409;
+        throw retry;
+      }
+    }
+    return callback(trx, invoice);
+  });
+}
+
 // Customer-scoped variant for flows that mint an invoice OFF the estimate
 // path (Customer 360 / AnnualPrepayLauncher manual annual-prepay invoice):
 // walk the customer's estimates with received deposit rows (oldest row
@@ -2020,6 +2054,7 @@ module.exports = {
   acquireEstimateDepositLedgerLock,
   assessDepositFollowUpEligibility,
   assertInvoiceDepositSettlementReady,
+  withInvoiceDepositSettlement,
   computeDepositAmount,
   DEPOSIT_FOLLOWUP_WINDOW,
   consumeDepositCredit,

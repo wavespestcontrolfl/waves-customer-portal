@@ -1,4 +1,5 @@
 const crypto = require("crypto");
+const { isDeepStrictEqual } = require("node:util");
 const db = require("../models/db");
 const logger = require("./logger");
 const TaxCalculator = require("./tax-calculator");
@@ -998,20 +999,27 @@ async function convertLeadOnInvoiceSent({ invoiceId, customerId, priorStatus, pr
   }
 }
 
-async function annualPrepayInvoiceTableExists() {
-  if (!db.schema?.hasTable) return false;
-  return db.schema
-    .hasTable("annual_prepay_terms")
-    .catch(() => false);
+async function optionalInvoiceRead(database, read, fallback) {
+  try {
+    return database?.isTransaction && typeof database.transaction === "function"
+      ? await database.transaction(read)
+      : await read(database);
+  } catch {
+    return fallback;
+  }
 }
 
-async function loadAnnualPrepayTermForInvoice(invoiceId) {
+async function annualPrepayInvoiceTableExists(database = db) {
+  if (!database.schema?.hasTable) return false;
+  return optionalInvoiceRead(database, (conn) => conn.schema.hasTable("annual_prepay_terms"), false);
+}
+
+async function loadAnnualPrepayTermForInvoice(invoiceId, database = db) {
   if (!invoiceId) return null;
-  const exists = await annualPrepayInvoiceTableExists();
+  const exists = await annualPrepayInvoiceTableExists(database);
   if (!exists) return null;
-  const term = await db("annual_prepay_terms")
-    .where({ prepay_invoice_id: invoiceId })
-    .first();
+  const term = await optionalInvoiceRead(database, (conn) => conn("annual_prepay_terms")
+    .where({ prepay_invoice_id: invoiceId }).first(), null);
   if (!term) return null;
   return {
     id: term.id,
@@ -2395,8 +2403,8 @@ const InvoiceService = {
    * Get invoice by public token — for the /pay page.
    * Also records view and updates status unless this is a follow-up read.
    */
-  async getByToken(token, { recordView = true } = {}) {
-    let invoice = await db("invoices").where({ token }).first();
+  async getByToken(token, { recordView = true, database = db } = {}) {
+    let invoice = await database("invoices").where({ token }).first();
     if (!invoice) return null;
     // NOTE: do NOT block payer_statement_id here — getByToken also backs the
     // PERMANENT receipt endpoints (receipt-v2), which must never 404 (AGENTS.md).
@@ -2408,17 +2416,17 @@ const InvoiceService = {
     // settlement between the first SELECT and this UPDATE must stay prepaid.
     const seenAt = new Date();
     if (recordView) {
-      await db("invoices").where({ id: invoice.id }).update({
-        view_count: db.raw("COALESCE(view_count, 0) + 1"),
-        viewed_at: db.raw("COALESCE(viewed_at, ?)", [seenAt]),
-        status: db.raw("CASE WHEN status = 'sent' THEN 'viewed' ELSE status END"),
+      await database("invoices").where({ id: invoice.id }).update({
+        view_count: database.raw("COALESCE(view_count, 0) + 1"),
+        viewed_at: database.raw("COALESCE(viewed_at, ?)", [seenAt]),
+        status: database.raw("CASE WHEN status = 'sent' THEN 'viewed' ELSE status END"),
       });
-      invoice = await db("invoices").where({ id: invoice.id }).first();
+      invoice = await database("invoices").where({ id: invoice.id }).first();
       if (!invoice) return null;
     }
 
     // Enrich with customer info
-    const customer = await db("customers")
+    const customer = await database("customers")
       .where({ id: invoice.customer_id })
       .select(
         "first_name",
@@ -2434,7 +2442,7 @@ const InvoiceService = {
         "property_type",
       )
       .first();
-    const annualPrepayTerm = await loadAnnualPrepayTermForInvoice(invoice.id);
+    const annualPrepayTerm = await loadAnnualPrepayTermForInvoice(invoice.id, database);
 
     const line_items =
       typeof invoice.line_items === "string"
@@ -2443,7 +2451,7 @@ const InvoiceService = {
 
     // Annual-prepay coverage callout (null for ordinary invoices). Built from
     // the parsed line items so setup-fee-waived detection sees the real text.
-    const annual_prepay = await loadInvoiceAnnualPrepay({ ...invoice, line_items });
+    const annual_prepay = await loadInvoiceAnnualPrepay({ ...invoice, line_items }, database);
 
     return {
       ...invoice,
@@ -2758,6 +2766,51 @@ const InvoiceService = {
         // applies. If ops disables the invoice template to halt broken
         // billing texts, this flow needs to stop too.
         metadata: { original_message_type: "invoice" },
+        // The canonical sender owns push-first / push+SMS / Twilio routing.
+        // Wrap that ONE provider dispatcher so the invoice row and estimate
+        // deposit ledger stay stable through whichever delivery leg it picks.
+        // The canonical message audit runs after this callback commits.
+        withProviderHandoff: async (dispatch) => {
+          let dispatchedOutcome = null;
+          try {
+            const outcome = await require("./estimate-deposits").withInvoiceDepositSettlement(
+              invoiceId,
+              async (trx, current) => {
+                const ownership = await require("./invoice-helpers").selfPayAtDispatch(invoiceId, trx)();
+                if (ownership.ok !== true) {
+                  return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+                    code: ownership.code, error: ownership.reason, validator: "check_invoice_ownership_boundary" };
+                }
+                if (invoiceAmountDue(current) <= 0
+                  || invoiceAmountDue(current) !== invoiceAmountDue(sendInvoice)
+                  || !isDeepStrictEqual(parseInvoiceLineItems(current.line_items), parseInvoiceLineItems(sendInvoice.line_items))) {
+                  return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+                    code: "INVOICE_BALANCE_CHANGED", error: "Invoice balance changed while preparing delivery; retry send",
+                    validator: "check_invoice_deposit_settlement" };
+                }
+                dispatchedOutcome = await dispatch();
+                return dispatchedOutcome;
+              },
+            );
+            return outcome || { sent: false, blocked: true, deliveryOutcome: "not_sent",
+              code: "INVOICE_UNREADABLE", error: "Invoice could not be re-read before delivery",
+              validator: "check_invoice_deposit_settlement" };
+          } catch (err) {
+            // A commit/connection error AFTER provider acceptance cannot be
+            // rewritten as a definite non-send: that would restore the send
+            // claim and offer an automatic retry of a message the customer
+            // already received. Preserve the provider's actual provenance;
+            // normal delivered bookkeeping below remains idempotent.
+            if (dispatchedOutcome
+              && (dispatchedOutcome.sent || dispatchedOutcome.deliveryOutcome !== "not_sent")) {
+              logger.error(`[invoice] Provider outcome known for ${invoiceId} but deposit-settlement handoff could not close: ${err.message}`);
+              return { ...dispatchedOutcome, settlementHandoffError: err.message };
+            }
+            return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+              code: err.code || "INVOICE_DEPOSIT_SETTLEMENT_FAILED", error: err.message,
+              retryable: err.retryable === true, validator: "check_invoice_deposit_settlement" };
+          }
+        },
       });
 
       if (!sendResult.sent) {
@@ -5353,13 +5406,19 @@ const InvoiceService = {
       if (totalCents !== creditCents) return skip("balance_due");
       await require("./stripe").assertNoInvoiceChargeReconciliationPending(id, trx);
       if ([invoice.payer_id, invoice.payer_statement_id, invoice.annual_prepay_term_id,
-        invoice.stripe_payment_intent_id, invoice.payment_recorded_at, invoice.status === "sending"].some(Boolean)) {
+        invoice.stripe_payment_intent_id, invoice.payment_recorded_at].some(Boolean)) {
         return skip("existing_payment_work");
       }
       const payment = await trx("payments").whereIn("status", ["paid", "processing"])
         .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [id]).first("id");
       const plan = await trx("payment_plans").where({ invoice_id: id, status: "active" }).first("id");
       if (payment || plan) return skip("existing_payment_work");
+      // Delivery owns the invoice row while its pay link is being handed to a
+      // provider. The deposit credit is already durable, so this is a retryable
+      // close gap after delivery resolves; it is not evidence of payment work.
+      if (invoice.status === "sending") {
+        return { ...skip("invoice_delivery_in_flight"), retryable: true };
+      }
       const sequence = await trx("invoice_followup_sequences").where({ invoice_id: id }).forUpdate()
         .first("id", "status", "touch_claimed_at");
       if (sequence?.status === "stopped") return skip("collection_stopped");

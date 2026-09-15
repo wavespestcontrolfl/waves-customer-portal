@@ -12,10 +12,10 @@ jest.mock('../services/invoice-prepay', () => ({
 const db = require('../models/db');
 const InvoiceService = require('../services/invoice');
 
-function mockInvoiceReads(initial, afterView) {
+function mockInvoiceReads(initial, afterView, database = db) {
   let row = { ...initial };
   let update = null;
-  db.mockImplementation((table) => {
+  database.mockImplementation((table) => {
     if (table === 'invoices') {
       const q = {};
       q.where = jest.fn(() => q);
@@ -64,5 +64,22 @@ describe('invoice public-token view', () => {
 
     expect(getUpdate()).toBeNull();
     expect(data).toMatchObject({ status: 'prepaid', total: 101, view_count: 1 });
+  });
+
+  test('a settlement follow-up uses its transaction for every invoice and enrichment read', async () => {
+    const prepaid = { id: 'inv-1', token: 'public-token', customer_id: 'cust-1', status: 'prepaid', total: 101, view_count: 1 };
+    const transaction = jest.fn();
+    transaction.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    transaction.schema = { hasTable: jest.fn(async () => false) };
+    transaction.isTransaction = true;
+    transaction.transaction = jest.fn(async (callback) => callback(transaction));
+    mockInvoiceReads(prepaid, prepaid, transaction);
+
+    const data = await InvoiceService.getByToken(prepaid.token, { recordView: false, database: transaction });
+
+    expect(data).toMatchObject({ status: 'prepaid', total: 101 });
+    expect(db).not.toHaveBeenCalled();
+    expect(require('../services/invoice-prepay').loadInvoiceAnnualPrepay)
+      .toHaveBeenCalledWith(expect.objectContaining({ id: 'inv-1' }), transaction);
   });
 });

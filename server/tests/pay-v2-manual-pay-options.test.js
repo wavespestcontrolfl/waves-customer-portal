@@ -20,7 +20,14 @@ jest.mock('../models/db', () => {
   return dbFn;
 });
 jest.mock('../services/invoice', () => ({ getByToken: jest.fn() }));
-jest.mock('../services/estimate-deposits', () => ({ assertInvoiceDepositSettlementReady: jest.fn(async () => {}) }));
+jest.mock('../services/estimate-deposits', () => ({
+  assertInvoiceDepositSettlementReady: jest.fn(async () => {}),
+  withInvoiceDepositSettlement: jest.fn(async (_id, callback) => {
+    const database = require('../models/db');
+    await require('../services/estimate-deposits').assertInvoiceDepositSettlementReady(database, {});
+    return callback(database);
+  }),
+}));
 jest.mock('../services/invoice-attachments', () => ({ list: jest.fn(async () => []) }));
 jest.mock('../services/stripe', () => ({
   isAvailable: () => true,
@@ -151,7 +158,7 @@ describe('GET /pay/:token manualPayOptions', () => {
     const { body, status } = await getPayPage(before, { refreshedData: after });
     expect(status).toBe(200);
     expect(InvoiceService.getByToken).toHaveBeenNthCalledWith(1, before.token);
-    expect(InvoiceService.getByToken).toHaveBeenNthCalledWith(2, before.token, { recordView: false });
+    expect(InvoiceService.getByToken).toHaveBeenNthCalledWith(2, before.token, { recordView: false, database: db });
     expect(body.invoice).toMatchObject({ total: 101, amountDue: 101, lineItems: after.line_items });
     expect(body.invoice.version).toBe(new Date(after.updated_at).getTime());
     expect(body.manualPayOptions).toMatchObject({ amountDue: 101, version: new Date(after.updated_at).getTime() });

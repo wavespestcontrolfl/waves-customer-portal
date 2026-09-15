@@ -1,6 +1,13 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/estimate-deposits', () => ({ assertInvoiceDepositSettlementReady: jest.fn() }));
+jest.mock('../services/estimate-deposits', () => ({
+  assertInvoiceDepositSettlementReady: jest.fn(async () => {}),
+  withInvoiceDepositSettlement: jest.fn(async (_id, callback) => {
+    const database = require('../models/db');
+    await require('../services/estimate-deposits').assertInvoiceDepositSettlementReady(database, {});
+    return callback(database);
+  }),
+}));
 jest.mock('../services/stripe', () => ({
   assertNoInvoiceChargeReconciliationPending: jest.fn(),
   parkInvoiceForSavedCardReconciliation: jest.fn(),

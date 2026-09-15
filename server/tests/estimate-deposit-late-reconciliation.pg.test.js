@@ -252,6 +252,171 @@ async function addReceived(amount = 49) {
     }
   });
 
+  test('locked pay or delivery snapshot waits for an uncommitted receipt and refuses the gross balance', async () => {
+    const invoiceId = await insertInvoice({ total: 100 });
+    const recorded = deferred();
+    const release = deferred();
+    const receipt = mockPg.transaction(async (trx) => {
+      await acquireEstimateDepositLedgerLock(trx, f.estimateId);
+      await trx('estimate_deposits').insert({
+        estimate_id: f.estimateId, customer_id: f.customerId,
+        stripe_payment_intent_id: `pi_${randomUUID().replace(/-/g, '')}`,
+        amount: 49, status: 'received', received_at: trx.fn.now(),
+      });
+      recorded.resolve();
+      await release.promise;
+    });
+    await reached(recorded);
+    const dispatch = jest.fn();
+    const attempted = deferred();
+    const onLockQuery = (query) => {
+      if (query.sql.includes('pg_advisory_xact_lock') && query.bindings?.[0] === 'estimate.deposit.ledger') attempted.resolve();
+    };
+    mockPg.on('query', onLockQuery);
+    let completed = false;
+    const snapshot = Deposits.withInvoiceDepositSettlement(invoiceId, dispatch)
+      .then(() => { completed = true; return null; }, (err) => { completed = true; return err; });
+    try {
+      await reached(attempted);
+      expect(completed).toBe(false);
+      expect(dispatch).not.toHaveBeenCalled();
+    } finally {
+      mockPg.removeListener('query', onLockQuery);
+      release.resolve();
+    }
+    await receipt;
+    expect(await snapshot).toMatchObject({ code: 'DEPOSIT_RECONCILIATION_REQUIRED' });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test('provider handoff keeps a later receipt behind its invoice snapshot until dispatch completes', async () => {
+    const invoiceId = await insertInvoice({ total: 100 });
+    const entered = deferred();
+    const release = deferred();
+    let receiptAcquired = false;
+    const handoff = Deposits.withInvoiceDepositSettlement(invoiceId, async (trx, current) => {
+      expect(Number(current.total)).toBe(100);
+      expect(trx.isTransaction).toBe(true);
+      entered.resolve();
+      await release.promise;
+      return { sent: true };
+    });
+    await reached(entered);
+    const attempted = deferred();
+    const onLockQuery = (query) => {
+      if (query.sql.includes('pg_advisory_xact_lock') && query.bindings?.[0] === 'estimate.deposit.ledger') attempted.resolve();
+    };
+    mockPg.on('query', onLockQuery);
+    const receipt = mockPg.transaction(async (trx) => {
+      await acquireEstimateDepositLedgerLock(trx, f.estimateId);
+      receiptAcquired = true;
+    });
+    try {
+      await reached(attempted);
+      expect(receiptAcquired).toBe(false);
+    } finally {
+      mockPg.removeListener('query', onLockQuery);
+      release.resolve();
+    }
+    await expect(handoff).resolves.toEqual({ sent: true });
+    await receipt;
+    expect(receiptAcquired).toBe(true);
+  });
+
+  test('customer merge contention retries before provider dispatch', async () => {
+    const invoiceId = await insertInvoice();
+    const locked = deferred();
+    const release = deferred();
+    const merge = mockPg.transaction(async (trx) => {
+      await trx('customers').where({ id: f.customerId }).forUpdate().first();
+      locked.resolve();
+      await release.promise;
+      await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+    });
+    const dispatch = jest.fn();
+    try {
+      await reached(locked);
+      await expect(Deposits.withInvoiceDepositSettlement(invoiceId, dispatch))
+        .rejects.toMatchObject({ code: 'INVOICE_BUSY_RETRY', status: 409 });
+      expect(dispatch).not.toHaveBeenCalled();
+    } finally { release.resolve(); }
+    await merge;
+  });
+
+  test('provider logging customer FK lock remains compatible with handoff prelock', async () => {
+    const invoiceId = await insertInvoice();
+    await expect(Deposits.withInvoiceDepositSettlement(invoiceId, async () => {
+      await mockPg.transaction(async (trx) => {
+        await trx('customers').where({ id: f.customerId }).forKeyShare().noWait().first();
+      });
+      return { sent: true };
+    })).resolves.toEqual({ sent: true });
+  });
+
+  test('late receipt reduces a scheduled invoice and preserves its delivery plan', async () => {
+    const id = await insertInvoice({ status: 'scheduled', total: 100 });
+    const sendAt = new Date('2099-01-01T15:00:00Z');
+    await mockPg('invoices').where({ id }).update({
+      scheduled_send_at: sendAt, scheduled_send_attempts: 2,
+      scheduled_request_review: true, scheduled_review_delay_minutes: 180,
+    });
+    await addReceived(49);
+    await reconcileReceivedDepositToInvoice(f.estimateId);
+    const invoice = await mockPg('invoices').where({ id }).first();
+    expect(invoice.status).toBe('scheduled');
+    expect(Number(invoice.total)).toBe(51);
+    expect(invoice.scheduled_send_at).toEqual(sendAt);
+    expect(invoice.scheduled_send_attempts).toBe(2);
+    expect(invoice.scheduled_request_review).toBe(true);
+    expect(invoice.scheduled_review_delay_minutes).toBe(180);
+    expect(invoice.line_items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ category: 'deposit_credit', amount: -49 }),
+    ]));
+    expect(Number((await mockPg('estimate_deposits').where({ estimate_id: f.estimateId }).first()).credited_amount)).toBe(49);
+  });
+
+  test.each([false, true])('receipt during an invoice send retries only without live payment work (live PI: %s)', async (livePi) => {
+    const invoiceId = await insertInvoice({ status: 'sending', total: 100 });
+    if (livePi) await mockPg('invoices').where({ id: invoiceId }).update({ stripe_payment_intent_id: 'pi_existing_live' });
+    const paymentIntentId = `pi_${randomUUID().replace(/-/g, '')}`;
+    const receipt = markDepositReceived({ paymentIntentId, estimateId: f.estimateId, amountDollars: 49 });
+    if (livePi) await receipt;
+    else await expect(receipt).rejects.toMatchObject({ code: 'DEPOSIT_SETTLEMENT_RETRYABLE', invoiceId });
+    expect(Number((await mockPg('invoices').where({ id: invoiceId }).first()).total)).toBe(100);
+    expect(Number((await mockPg('estimate_deposits').where({ estimate_id: f.estimateId }).first()).credited_amount)).toBe(0);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    if (livePi) return;
+    await mockPg('invoices').where({ id: invoiceId }).update({ status: 'scheduled' });
+    await expect(handleDepositIntentSucceeded({ id: paymentIntentId, metadata: { estimate_id: f.estimateId } }))
+      .resolves.toMatchObject({ handled: true, replay: true });
+    const invoice = await mockPg('invoices').where({ id: invoiceId }).first();
+    expect(Number(invoice.total)).toBe(51);
+    expect(invoice.status).toBe('scheduled');
+    expect(invoice.line_items.filter((line) => line.category === 'deposit_credit')).toHaveLength(1);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('a send claim between full credit and zero-balance close leaves the webhook retryable', async () => {
+    const invoiceId = await insertInvoice({ status: 'scheduled', total: 49 });
+    const paymentIntentId = `pi_${randomUUID().replace(/-/g, '')}`;
+    const actualSettle = InvoiceService.settleZeroBalance;
+    const settleSpy = jest.spyOn(InvoiceService, 'settleZeroBalance').mockImplementationOnce(async (id) => {
+      await mockPg('invoices').where({ id }).update({ status: 'sending' });
+      return actualSettle(id);
+    });
+    try {
+      await expect(markDepositReceived({ paymentIntentId, estimateId: f.estimateId, amountDollars: 49 }))
+        .rejects.toMatchObject({ code: 'DEPOSIT_SETTLEMENT_RETRYABLE', invoiceId });
+      expect(Number((await mockPg('estimate_deposits').where({ estimate_id: f.estimateId }).first()).credited_amount)).toBe(49);
+      await mockPg('invoices').where({ id: invoiceId }).update({ status: 'scheduled' });
+      await handleDepositIntentSucceeded({ id: paymentIntentId, metadata: { estimate_id: f.estimateId } });
+      const invoice = await mockPg('invoices').where({ id: invoiceId }).first();
+      expect(invoice.status).toBe('prepaid');
+      expect(invoice.line_items.filter((line) => line.category === 'deposit_credit')).toHaveLength(1);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    } finally { settleSpy.mockRestore(); }
+  });
+
   test('claimed saved-card charge with null PI parks the deposit; replay does not mutate the invoice', async () => {
     const id = await insertInvoice();
     await addReceived();
@@ -293,8 +458,8 @@ async function addReceived(amount = 49) {
     expect(sentSnapshots).toEqual([{ status: 'prepaid', total: 0 }]);
   });
 
-  test('credited webhook replay settles an exhausted zero-balance invoice after transient close refusal', async () => {
-    const invoiceId = await insertInvoice({ total: 49 });
+  test.each(['sent', 'scheduled'])('credited webhook replay settles an exhausted %s invoice after transient close refusal', async (status) => {
+    const invoiceId = await insertInvoice({ total: 49, status });
     const paymentIntentId = `pi_${randomUUID().replace(/-/g, '')}`;
     const settleSpy = jest.spyOn(InvoiceService, 'settleZeroBalance')
       .mockResolvedValueOnce({ settled: false, reason: 'followup_in_flight', retryable: true });
@@ -303,7 +468,7 @@ async function addReceived(amount = 49) {
         .rejects.toMatchObject({ code: 'DEPOSIT_SETTLEMENT_RETRYABLE', retryable: true, invoiceId });
       const before = await mockPg('invoices').where({ id: invoiceId }).first();
       const ledgerBefore = await mockPg('estimate_deposits').where({ stripe_payment_intent_id: paymentIntentId }).first();
-      expect(before.status).toBe('sent');
+      expect(before.status).toBe(status);
       expect(Number(before.total)).toBe(0);
       expect(before.line_items.filter((line) => line.category === 'deposit_credit')).toHaveLength(1);
       expect(ledgerBefore.status).toBe('credited');
