@@ -160,6 +160,8 @@ describe('voice relay card expiration value parser', () => {
     ['09/29', '0929'],
     ['09/29/2029', '092929'],
     ['septiembre dos mil veintinueve', '0929'],
+    ['29 de septiembre de 2029', '092929'],
+    ['veintinueve de septiembre de dos mil veintinueve', '092929'],
   ])('normalizes expiration values: %s', (value, expected) => {
     expect(normalizedCardExpiration(value)).toBe(expected);
   });
@@ -170,6 +172,7 @@ describe('voice relay card expiration value parser', () => {
     ['October 2031', '10', true],
     ['October 2031', '11', false],
     ['septiembre dos mil veintinueve', '09/29', true],
+    ['29 de septiembre de 2029', '09/29/2029', true],
   ])('compares equivalent expiration forms: %s / %s', (supplied, candidate, expected) => {
     expect(cardValuesMatch(supplied, candidate)).toBe(expected);
   });
@@ -179,5 +182,66 @@ describe('voice relay card expiration value parser', () => {
     expect(supplied).toEqual(['September 2029']);
     expect(cardFragmentsIn('2029.', supplied)).toEqual(['2029']);
     expect(cardValuesMatch('September two thousand twenty-nine', '09/29')).toBe(true);
+  });
+
+  test('matches a Spanish day-first expiration to its numeric echo', () => {
+    const supplied = cardFragmentsIn('Su tarjeta vence veintinueve de septiembre de dos mil veintinueve.');
+    expect(supplied).toEqual(['29 de septiembre de 2029']);
+    expect(cardFragmentsIn('09/29/2029.', supplied)).toEqual(['09/29/2029']);
+  });
+
+  test.each([
+    [['4242', 'September 2029'], '42420929.', ['42420929']],
+    [['4242', 'September 2029'], '42422029.', ['42422029']],
+    [['123', 'October 2031'], '1231031.', ['1231031']],
+    [['4242', 'September 2029'], '42421029.', []],
+    [['4242', 'September 2029'], '09294242.', []],
+  ])('canonicalizes each expiration before matching combined evidence: %j -> %s', (supplied, reply, expected) => {
+    expect(cardFragmentsIn(reply, supplied)).toEqual(expected);
+  });
+
+  test.each([
+    ['September, correct?', ['September 2029'], ['September']],
+    ["It's September, correct?", ['September 2029'], ['September']],
+    ['Thanks. September, correct?', ['September 2029'], ['September']],
+    ['September.', ['September 2029'], ['September']],
+    ['Septiembre, correcto?', ['septiembre 2029'], ['Septiembre']],
+    ['October, correct?', ['September 2029'], []],
+    ['May I help?', ['May 2029'], []],
+    ['The appointment is in September.', ['September 2029'], []],
+    ['September is the appointment month.', ['September 2029'], []],
+    ['The service month is September.', ['September 2029'], []],
+  ])('matches only a bare named month from supplied expiration evidence: %s', (reply, supplied, expected) => {
+    expect(cardFragmentsIn(reply, supplied)).toEqual(expected);
+  });
+
+  test('extracts a bare month while collecting an explicit card answer', () => {
+    expect(cardFragmentsIn('September.', true, true)).toEqual(['September']);
+  });
+
+  test.each([
+    ['My security code is one hundred oh one.', ['101']],
+    ['My security code is one hundred zero five.', ['105']],
+    ['My card number is two thousand oh one.', ['2001']],
+    ['My card number is oh one.', ['01']],
+    ['My card number is one hundred oh one twenty-three.', ['10123']],
+  ])('preserves zero placeholders in English scaled and grouped values: %s', (caller, expected) => {
+    expect(cardFragmentsIn(caller)).toEqual(expected);
+  });
+
+  test.each([
+    ['My security code is one hundred oh one.', '101.'],
+    ['My security code is one hundred zero five.', '105.'],
+    ['My card number is two thousand oh one.', '2001.'],
+  ])('matches an English scaled zero value to its numeric echo: %s', (caller, reply) => {
+    expect(cardFragmentsIn(reply, cardFragmentsIn(caller))).toEqual([reply.replace('.', '')]);
+  });
+
+  test.each([
+    ['I heard one hundred oh one appointments and your card ends in four.', ['4']],
+    ['The balance is one hundred oh one dollars and your security code is two hundred three.', ['203']],
+    ['My card number is one hundred oh one, and we have twenty-three appointments.', ['101']],
+  ])('keeps scaled-zero amount and count spans separate from neighboring card values: %s', (text, expected) => {
+    expect(cardFragmentsIn(text)).toEqual(expected);
   });
 });

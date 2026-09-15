@@ -7,6 +7,57 @@ const statusAfterCaller = (caller, reply) => statusFor(reply, cardFragmentsIn(ca
 
 describe('voice relay card value parser', () => {
   test.each([
+    'Let me confirm your card number. Four two four two.',
+    'I will verify your security code. One two three.',
+    'I am repeating your card number. Four two four two.',
+    'Let us read your card number. Four two four two.',
+  ])('a declared card confirmation governs the next sentence: %s', (text) => {
+    expect(cardFragmentsIn(text).length).toBeGreaterThan(0);
+  });
+
+  test.each([
+    'Let me confirm your appointment number. Four two four two.',
+    'I cannot confirm your card number. Four two four two.',
+    'Let me confirm your card number. The balance is 4242 dollars.',
+  ])('confirmation context respects other fields and explained values: %s', (text) => {
+    expect(cardFragmentsIn(text)).toEqual([]);
+  });
+
+  test.each([
+    'Call us at (941)555-0182 to update your card.',
+    'Call us at +1 (941)555-0182 to update your card.',
+    'You gave me your address as 9 West Sandpiper Lane, Venice, 34285.',
+    'You gave me your address as 9 West Sandpiper Cove Lane, Venice, 34285.',
+    'You said you live at 9 West Sandpiper Lane, Venice, 34285.',
+    'Tengo dos perros y necesito actualizar mi tarjeta.',
+    'Tengo dos citas y quiero actualizar mi tarjeta.',
+    'Tengo tres gatos y quiero actualizar mi tarjeta.',
+    'Dial 1 to update your card.',
+    'Choose 2 to update your card.',
+    'Select 2 to update your card.',
+    'The estimate expiration date is September 2029.',
+    'The quote expiration date is September 2029.',
+    'La fecha de la cita es 29 de septiembre de 2029 y su tarjeta está guardada.',
+    'La fecha de la cita es veintinueve de septiembre de dos mil veintinueve y su tarjeta está guardada.',
+  ])('ordinary values retain their complete exemption span: %s', (text) => {
+    expect(cardFragmentsIn(text)).toEqual([]);
+    expect(cardFragmentsIn(`${text} Your security code is 123.`)).toEqual(['123']);
+  });
+
+  test.each([
+    'Your card number is (941)555-0182.',
+    'You gave me your address as 9 West Sandpiper Lane, Venice, 34285, and I heard four.',
+    'I heard four on your card at Sandpiper Lane.',
+    'I heard four for Sandpiper Lane.',
+    'Tengo dos perros y mi tarjeta es 4242.',
+    'Dial 1 to update your card ending in 4242.',
+    'Your card expiration date is September 2029.',
+    'Su tarjeta vence 29 de septiembre de 2029.',
+  ])('ordinary formatting does not hide a disclosed card value: %s', (text) => {
+    expect(cardFragmentsIn(text).length).toBeGreaterThan(0);
+  });
+
+  test.each([
     ['Our office phone number is 941 555 0182.', 'pass'],
     ['The zip code is 34285.', 'pass'],
     ['You gave me your address as 9 Sandpiper Lane, Venice, 34285.', 'pass'],

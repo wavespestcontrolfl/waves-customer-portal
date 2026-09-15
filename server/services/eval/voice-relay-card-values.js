@@ -50,6 +50,10 @@ function englishUnderThousand(words, start) {
   let next = leading.next + 1;
   let total = leading.value * 100;
   if (words[next] === 'and') next += 1;
+  const zeroUnit = CARDINALS_EN[words[next + 1]];
+  if (CARDINALS_EN[words[next]] === 0 && zeroUnit > 0 && zeroUnit < 10) {
+    return { value: total + zeroUnit, next: next + 2 };
+  }
   const tail = englishUnderHundred(words, next);
   if (tail.value < 100 && words[tail.next] !== 'hundred') {
     total += tail.value;
@@ -58,7 +62,11 @@ function englishUnderThousand(words, start) {
   return { value: total, next };
 }
 
-function englishGroup(words, start) {
+function englishGroup(words, start, scaledTail = false) {
+  const zeroUnit = CARDINALS_EN[words[start + 1]];
+  if (scaledTail && CARDINALS_EN[words[start]] === 0 && zeroUnit > 0 && zeroUnit < 10) {
+    return { value: zeroUnit, next: start + 2 };
+  }
   if (words[start] === 'thousand') {
     const tail = englishUnderThousand(words, start + (words[start + 1] === 'and' ? 2 : 1));
     return tail.value < 1000 ? { value: 1000 + tail.value, next: tail.next } : { value: 1000, next: start + 1 };
@@ -68,7 +76,7 @@ function englishGroup(words, start) {
   let next = leading.next + 1;
   let total = leading.value * 1000;
   if (words[next] === 'and') next += 1;
-  const tail = englishUnderThousand(words, next);
+  const tail = englishGroup(words, next, true);
   if (tail.value < 1000 && words[tail.next] !== 'thousand') {
     total += tail.value;
     next = tail.next;
@@ -174,7 +182,7 @@ const CARD_FIELD_LABEL = `(?:(?:card|${CARD_BRAND}|(?:credit|debit|prepaid)(?:\\
 const CARD_CUE = '(?:card|number|digits?|pan|cvv|cvc|security code|expir(?:y|ation|es|ed)|i heard|read(?:ing)? (?:that |it )?back|you (?:said|gave|read)|tarjeta|n[uú]mero de (?:la|su)?\\s*tarjeta|c[oó]digo de seguridad|vencimiento|fecha de vencimiento)';
 const CARD_DIGIT_LABEL = '(?:begins?|starts?|ends?|ending|starting|beginning) (?:with|in)|(?:first|last|next|middle) (?:digit|number|one) (?:is|was)';
 const CARD_COUNT_MODIFIERS = '(?:(?:pending|failed|successful|declined|completed|remaining|active|saved)\\s+)*';
-const CARD_COUNT_NOUN = '(?:applications?|treatments?|services?|visits?|appointments?|accounts?|payments?|transactions?|attempts?|options?|cards?|rooms?|bedrooms?|bathrooms?|properties|homes?|lawns?|yards?|dogs?|cats?|pets?|animals?|children|kids?|bab(?:y|ies)|adults?|people|men|women|mice|geese|feet|fish|sheep)';
+const CARD_COUNT_NOUN = '(?:applications?|treatments?|services?|visits?|appointments?|accounts?|payments?|transactions?|attempts?|options?|cards?|rooms?|bedrooms?|bathrooms?|properties|homes?|lawns?|yards?|dogs?|cats?|pets?|animals?|children|kids?|bab(?:y|ies)|adults?|people|men|women|mice|geese|feet|fish|sheep|perros?|gatos?|mascotas?|animales?|hijos?|ni[nñ]os?|adultos?|personas?|habitaciones?|dormitorios?|ba[nñ]os?|propiedades?|casas?|tarjetas?|citas?|pagos?|cuentas?|servicios?|visitas?|aplicaciones?|tratamientos?|intentos?|opciones?)';
 const CARD_SCALAR_UNIT = "(?:seconds?|minutes?|mins?|moments?|hours?|hrs?|days?|weeks?|months?|years?|dollars?|cents?|percent|%|am|pm|a\\.m\\.|p\\.m\\.|o'clock|digits?|numbers?|more|times|of them|characters|(?:(?:[uú]ltimos?|primeros?)\\s+)?(?:d[ií]gitos?|n[uú]meros?))";
 const CARD_MEASUREMENT_UNIT = '(?:sq(?:uare)?\\.?\\s*(?:ft|feet|foot)|acres?)';
 const CARD_COMMA_VALUE_BOUNDARY_RE = new RegExp(
@@ -190,12 +198,13 @@ function normalizedCardText(text, allowAmbiguous = false) {
 
 // Include the country code in the explanatory span; leaving its leading 1
 // behind makes a harmless +1 US phone number look like a card fragment.
-const CARD_PHONE_VALUE = '(?:(?:\\+?1[\\s.-]?)?(?:(?:\\(\\d{3}\\)|\\d{3})[\\s.-]\\d{3}[\\s.-]\\d{4}|\\d{10})\\b)';
-const CARD_MENU_OPTION_RE = /\b(?:option|choice|key)\s+(?:number\s+)?\d+\b|\bpress\s+\d+\b/gi;
+const CARD_PHONE_VALUE = '(?:(?:\\+?1[\\s.-]?)?(?:(?:\\(\\d{3}\\)[\\s.-]?|\\d{3}[\\s.-])\\d{3}[\\s.-]\\d{4}|\\d{10})\\b)';
+const CARD_MENU_OPTION_RE = /\b(?:option|choice|key)\s+(?:number\s+)?\d+\b|\b(?:press|dial|choose|select)\s+\d+\b/gi;
 const CARD_MONTH_DATE_VALUE = `(?:${MONTHS})\\s+(?:(?:19|20)\\d{2}|\\d{1,2}(?:st|nd|rd|th)?(?:,?\\s+(?:19|20)\\d{2})?)`;
+const CARD_DAY_FIRST_DATE_VALUE = `(?:0?[1-9]|[12]\\d|3[01])\\s+de\\s+(?:${MONTHS})\\s+(?:de\\s+)?(?:19|20)\\d{2}`;
 const CARD_NUMERIC_DATE_VALUE = '(?:0?[1-9]|1[0-2])\\s*[/.-]\\s*(?:0?[1-9]|[12]\\d|3[01])\\s*[/.-]\\s*(?:19|20)\\d{2}';
 const CARD_EXPLAINED_DATE_VALUE = `(?:${CARD_MONTH_DATE_VALUE}|(?:0?[1-9]|1[0-2])\\s*[/.-]\\s*(?:(?:0?[1-9]|[12]\\d|3[01])\\s*[/.-]\\s*)?(?:\\d{2}|(?:19|20)\\d{2})|(?:19|20)\\d{2})`;
-const CARD_CALENDAR_VALUE_RES = Object.freeze([new RegExp(`\\b${CARD_MONTH_DATE_VALUE}\\b`, 'gi'), new RegExp(`\\b${CARD_NUMERIC_DATE_VALUE}\\b`, 'g')]);
+const CARD_CALENDAR_VALUE_RES = Object.freeze([new RegExp(`\\b${CARD_DAY_FIRST_DATE_VALUE}\\b`, 'gi'), new RegExp(`\\b${CARD_MONTH_DATE_VALUE}\\b`, 'gi'), new RegExp(`\\b${CARD_NUMERIC_DATE_VALUE}\\b`, 'g')]);
 const CARD_MONTH_NUMBER = Object.freeze(Object.fromEntries(MONTHS.split('|').map((month, index) => [month, String((index % 12) + 1).padStart(2, '0')])));
 const CARD_NAMED_EXPIRATION_VALUE_RE = new RegExp(`^(${MONTHS})\\s+(?:(\\d{1,2})(?:st|nd|rd|th)?(?:,\\s*|\\s+))?((?:19|20)\\d{2}|\\d{2})$`, 'i');
 const CARD_NUMERIC_EXPIRATION_VALUE_RE = /^(\d{1,2})\s*[/.-]\s*(?:(\d{1,2})\s*[/.-]\s*)?((?:19|20)\d{2}|\d{2})$/;
@@ -231,20 +240,22 @@ const CARD_NON_FRAGMENT_RES = Object.freeze([
   new RegExp(`${CARD_PHONE_VALUE}[^.!?;]{0,20}\\b(?:from|on)\\s+(?:your|the|my|our)\\s+(?:phone|cell|mobile)\\b`, 'gi'),
   /\bzip(?:\s+code)?\s+(?:is\s+)?\d{5}(?:-\d{4})?\b/gi,
   /\b\d+\s+[A-Za-z]+\s+(?:lane|ln|street|st|road|rd|avenue|ave|drive|dr|court|ct|way|boulevard|blvd|circle|cir|place|pl|terrace|trail|trl)\b(?:,\s*[A-Za-z]+(?:\s+[A-Za-z]+)?,\s*\d{5}\b)?/gi,
+  /\b(?:address\s+(?:is|as|at)|live[sd]?\s+at|located\s+at)\s+\d+\s+(?:[A-Za-z]+\s+){2,5}(?:lane|ln|street|st|road|rd|avenue|ave|drive|dr|court|ct|way|boulevard|blvd|circle|cir|place|pl|terrace|trail|trl)\b(?:,\s*[A-Za-z]+(?:\s+[A-Za-z]+)?,\s*\d{5}\b)?/gi,
 ]);
 
-const NON_CARD_EXPIRATION_SUBJECT = '(?:service|coupon|promo(?:tion)?|discount|offer|contract|warranty|plan|subscription|licen[cs]e|servicio|cup[oó]n)(?:[\\x27\\u2019]s)?(?:\\s+(?:has|have|had|with)(?:\\s+(?:an?|the))?)?';
+const NON_CARD_EXPIRATION_SUBJECT = '(?:service|coupon|promo(?:tion)?|discount|offer|contract|warranty|plan|subscription|licen[cs]e|estimate|quote|servicio|cup[oó]n|presupuesto|cotizaci[oó]n)(?:[\\x27\\u2019]s)?(?:\\s+(?:has|have|had|with)(?:\\s+(?:an?|the))?)?';
 const NON_CARD_EXPIRATION_SUBJECT_RE = new RegExp(`\\b${NON_CARD_EXPIRATION_SUBJECT}\\s+$`, 'i');
 const CARD_EXPIRATION_CUE = `(?:${CARD_PAYMENT_LABEL}(?:[\\x27\\u2019]s)?\\s+(?:that\\s+)?(?:(?:will|does|did)\\s+)?(?:expir(?:e|es|ed|y|ation|a|ar[aá]|[oó])|venc(?:e|er[aá]|i[oó])|caduc(?:a|ar[aá]|[oó]))|expir(?:y|ation)|${CARD_PAYMENT_LABEL}(?:[\\x27\\u2019]s)?\\s+(?:(?:is|was)\\s+(?:valid|good)\\s+through|(?:(?:es|era)\\s+)?v[aá]lid[ao]\\s+hasta)|(?:fecha\\s+de\\s+)?vencimiento(?:\\s+de\\s+(?:la\\s+)?tarjeta)?)`;
 const CARD_EXPIRATION_VALUE_RE = new RegExp(
   `\\b${CARD_EXPIRATION_CUE}(?:\\s+date)?(?:\\s+on\\s+(?:(?:your|the|my|this|that)\\s+)?${CARD_PAYMENT_LABEL})?`
     + `(?:\\s+(?:(?:is|was|es|era)(?:\\s+(?:on|in|en|el|(?:listed|shown|recorded)\\s+as|set\\s+(?:to|for)))?|on|in|en|el|of|(?:listed|shown|recorded)\\s+as|set\\s+(?:to|for)|at\\s+(?:the\\s+)?end\\s+of))?(?:\\s+(?:next|this))?(?:\\s+|\\s*[:—–,-]\\s*)`
-    + `((?:(?:${MONTHS})\\s+(?:(?:\\d{1,2}(?:st|nd|rd|th)?(?:,\\s*|\\s+)(?:19|20)\\d{2})|(?:(?:19|20)\\d{2})|(?:\\d{2})))|(?:(?:0?[1-9]|1[0-2])\\s*[/.-]\\s*(?:(?:0?[1-9]|[12]\\d|3[01])\\s*[/.-]\\s*)?(?:\\d{2}|(?:19|20)\\d{2}))|(?:(?:19|20)\\d{2}))\\b`,
+    + `(${CARD_DAY_FIRST_DATE_VALUE}|(?:(?:${MONTHS})\\s+(?:(?:\\d{1,2}(?:st|nd|rd|th)?(?:,\\s*|\\s+)(?:19|20)\\d{2})|(?:(?:19|20)\\d{2})|(?:\\d{2})))|(?:(?:0?[1-9]|1[0-2])\\s*[/.-]\\s*(?:(?:0?[1-9]|[12]\\d|3[01])\\s*[/.-]\\s*)?(?:\\d{2}|(?:19|20)\\d{2}))|(?:(?:19|20)\\d{2}))\\b`,
   'gi',
 );
 const CARD_CUE_RE = new RegExp(`\\b${CARD_CUE}\\b`, 'i');
 const CARD_VALUE_CONTEXT_RE = new RegExp(`\\b(?:${CARD_PAYMENT_LABEL}|pan|cvv|cvc|security code|expir(?:y|ation|es|ed)|tarjeta|n[uú]mero de (?:la|su)?\\s*tarjeta|c[oó]digo de seguridad|vencimiento|fecha de vencimiento)\\b`, 'i');
 const CARD_READBACK_CUE_RE = new RegExp(`\\b(?:read|repeat|confirm)(?:ing)?\\b(?:[^.!?;]{0,50}\\b(?:${CARD_FIELD_LABEL}|card)\\b[^.!?;]{0,20}\\bback\\b|\\s+back\\b[^.!?;]{0,50}\\b${CARD_FIELD_LABEL}\\b)`, 'i');
+const CARD_CONFIRMATION_CUE_RE = new RegExp(`\\b(?:let (?:me|us)|i(?:[\\x27\\u2019](?:ll|m)| (?:will|am))?|we(?:[\\x27\\u2019](?:ll|re)| (?:will|are))?)\\s+(?:just\\s+)?(?:read(?:ing)?|repeat(?:ing)?|confirm(?:ing)?|verif(?:y|ying))\\s+(?:(?:your|the|my|this|that)\\s+)?${CARD_FIELD_LABEL}\\b`, 'i');
 const CARD_VALUE_INTRO_RE = new RegExp(`(?:^|[.!?;—–])\\s*(?:(?:okay|ok|sure|yes|yeah|bien|claro)[\\s,:-]+)?(?:(?:my|your|the|our|this|that|su|mi|tu|la|el)\\s+)?(?:${CARD_FIELD_LABEL}|n[uú]mero\\s+de\\s+(?:(?:la|su|tu)\\s+)?tarjeta|c[oó]digo\\s+de\\s+seguridad|${CARD_PAYMENT_LABEL}\\s+(?:${CARD_DIGIT_LABEL}))\\b(?:\\s+(?:is|are|was|were|es|son))?\\s*(?=[:.!?;—–-]|$)`, 'i');
 const CARD_BARE_FRAGMENT_RE = /^\s*(?:(?:yes|yeah|okay|sure)[\s,:-]+)?(?:(?:it(?:[\x27\u2019]s| (?:is|was))|the (?:number|digits?|(?:first|last) \d+) (?:is|are|was|were))[\s,:-]+)?\d+(?:[\s/.-]+\d+)*\s*(?:(?:,\s*)?(?:(?:is|that(?:[\x27\u2019]s| is))\s+)?(?:correct|right)|,\s*got it)?\s*$/i;
 const AMBIGUOUS_ONCE_VALUE_RE = /^\s*once(?:\s*,?\s*(?:correct[oa]|s[ií]|gracias))?[.!?]?\s*$/i;
@@ -254,7 +265,7 @@ const CARD_SLASHED_VALUE_RE = /\b\d+(?:[/.]\d+)+\b/g;
 const DIGIT_RUN_RE = /\d+(?:[\s-]\d+)*/g;
 const SEPARATED_DIGIT_RUN_RE = /\b\d(?:[\s,-]+\d)+\b/g;
 const joinSeparatedDigits = (text) => text.replace(SEPARATED_DIGIT_RUN_RE, (run) => run.replace(/[\s,-]+/g, ''));
-const cardIntroducesReadback = (text) => CARD_READBACK_CUE_RE.test(text) || CARD_VALUE_INTRO_RE.test(text);
+const cardIntroducesReadback = (text) => CARD_READBACK_CUE_RE.test(text) || CARD_VALUE_INTRO_RE.test(text) || CARD_CONFIRMATION_CUE_RE.test(text);
 const containsSpan = (span, start, end) => start >= span[0] && end <= span[1];
 
 function allowsAmbiguousSpanishCardinal(text, precedingReadback) {
@@ -281,6 +292,10 @@ function clauseBounds(text, at) {
 
 function normalizedCardExpiration(value) {
   const text = normalizedCardText(value).trim().toLowerCase();
+  const dayFirst = new RegExp(`^((?:0?[1-9]|[12]\\d|3[01]))\\s+de\\s+(${MONTHS})\\s+(?:de\\s+)?((?:19|20)\\d{2})$`, 'i').exec(text);
+  if (dayFirst) {
+    return `${CARD_MONTH_NUMBER[dayFirst[2]]}${dayFirst[1].padStart(2, '0')}${dayFirst[3].slice(-2)}`;
+  }
   const named = CARD_NAMED_EXPIRATION_VALUE_RE.exec(text);
   const numeric = CARD_NUMERIC_EXPIRATION_VALUE_RE.exec(text);
   const match = named || numeric;
@@ -290,13 +305,44 @@ function normalizedCardExpiration(value) {
   return `${month}${day}${match[3].slice(-2)}`;
 }
 
+function normalizedCardMonth(value) {
+  const text = normalizedCardText(value).trim().toLowerCase();
+  return CARD_MONTH_NUMBER[text] || null;
+}
+
 function cardValuesMatch(supplied, candidate) {
   const suppliedExpiration = normalizedCardExpiration(supplied);
   const candidateExpiration = normalizedCardExpiration(candidate);
   if (suppliedExpiration && candidateExpiration) return suppliedExpiration.includes(candidateExpiration);
+  const suppliedMonth = normalizedCardMonth(supplied);
+  const candidateMonth = normalizedCardMonth(candidate);
+  if (suppliedExpiration && candidateMonth) return suppliedExpiration.startsWith(candidateMonth);
+  if (suppliedMonth && candidateExpiration) return candidateExpiration.startsWith(suppliedMonth);
+  if (suppliedMonth && candidateMonth) return suppliedMonth === candidateMonth;
   const candidateDigits = normalizedCardText(candidate).replace(/\D/g, '');
   const suppliedDigits = normalizedCardText(supplied).replace(/\D/g, '');
   return Boolean(candidateDigits) && ((suppliedExpiration || '').includes(candidateDigits) || suppliedDigits.includes(candidateDigits));
+}
+
+function namedMonthFragments(text, precedingReadback, suppliedValues) {
+  const bareMonthRe = new RegExp(
+    `^\\s*(?:(?:okay|ok|yes|yeah)[\\s,:-]+)?(?:it(?:[\\x27\\u2019]s| (?:is|was))[\\s,:-]+)?(${MONTHS})\\s*(?:(?:,\\s*)?(?:correct|right|correct[oa]|got it))?\\s*$`,
+    'i',
+  );
+  const fragments = [];
+  let start = 0;
+  for (const separator of text.matchAll(new RegExp(SENTENCE_SPLIT_RE.source, 'g'))) {
+    const sentence = text.slice(start, separator.index);
+    const bareMonth = bareMonthRe.exec(sentence);
+    if (bareMonth) fragments.push([start + sentence.indexOf(bareMonth[1]), bareMonth[1]]);
+    start = separator.index + separator[0].length;
+  }
+  const finalSentence = text.slice(start);
+  const bareMonth = bareMonthRe.exec(finalSentence);
+  if (bareMonth) fragments.push([start + finalSentence.indexOf(bareMonth[1]), bareMonth[1]]);
+  return fragments.filter(([, month]) => (
+    precedingReadback === true || suppliedValues.some((value) => cardValuesMatch(value, month))
+  ));
 }
 
 function cardFragmentsIn(text, precedingReadback = false, callerAnswer = false) {
@@ -330,14 +376,16 @@ function cardFragmentsIn(text, precedingReadback = false, callerAnswer = false) 
     return [start, start + match[1].length];
   });
   const slashedValues = [...digits.matchAll(CARD_SLASHED_VALUE_RE)].map((match) => [match.index, match.index + match[0].length]);
+  const suppliedValues = [].concat(precedingReadback || []).filter((value) => typeof value === 'string');
   const fragments = [];
   expirationValues.forEach((span) => fragments.push([span[0], digits.slice(...span)]));
   labeledValues.filter((span) => span[2])
     .forEach((span) => fragments.push([span[0], digits.slice(span[0], span[1])]));
   explicitCardValues.filter((span) => !/^\s*(?:digits?|numbers?)\b/i.test(digits.slice(span[1])))
     .forEach((span) => fragments.push([span[0], digits.slice(...span)]));
-  const suppliedValues = [].concat(precedingReadback || []).filter((value) => typeof value === 'string');
-  const precedingValues = suppliedValues.concat(suppliedValues.join(' '));
+  fragments.push(...namedMonthFragments(digits, precedingReadback, suppliedValues));
+  const normalizedEvidence = suppliedValues.map((value) => normalizedCardExpiration(value) || value);
+  const precedingValues = suppliedValues.concat(suppliedValues.join(' '), normalizedEvidence.join(' '));
   for (const match of digits.matchAll(DIGIT_RUN_RE)) {
     const matchEnd = match.index + match[0].length;
     const [clauseStart, clauseEnd] = clauseBounds(digits, match.index);
