@@ -464,17 +464,10 @@ function claimFitsDate(claim, ymd) {
   return Object.entries({ year, month, day, weekday }).every(([key, value]) => claim[key] == null || claim[key] === value);
 }
 
-function structuredDateReason(subject, call) {
-  if (!Array.isArray(subject?.date_claims)) return 'appointment_date_unresolved';
-  for (const claim of subject.date_claims) {
-    if (!claim || !['appointment', 'delivery', 'requested'].includes(claim.binding)
-      || !norm(claim.quote) || !norm(call.transcription).includes(norm(claim.quote))) return 'appointment_date_unresolved';
-    if (claim.binding !== 'appointment') continue;
-    const limits = { year: [1900, 2100], month: [1, 12], day: [1, 31], weekday: [0, 6] };
-    if (!Object.keys(limits).some((key) => claim[key] != null)) return 'appointment_date_unresolved';
-    for (const [key, [min, max]] of Object.entries(limits)) {
-      if (claim[key] != null && (!Number.isInteger(claim[key]) || claim[key] < min || claim[key] > max)) return 'appointment_date_unresolved';
-    }
+function structuredDateReason(subject, call, commitment) {
+  const reference = call.created_at ? new Date(call.created_at) : null;
+  if (!require('./reschedule-date-evidence').verifyRescheduleDateClaims(subject?.date_claims, call.transcription, reference, commitment)) {
+    return 'appointment_date_unresolved';
   }
   // A model-selected full date cannot be its own evidence. Partial claims
   // narrow the candidate set before visit_date is ever compared with it.
@@ -531,7 +524,7 @@ function selectDiscussedVisit({ commitment, call, customer, candidates = [], now
     && (groundedSubject || promisedQuotes.some((quote) => RESCHEDULE_WORD.test(quote) || MOVE_INTENT.test(quote) || EXISTING_SLOT.test(quote)));
   if (revoked || !promisedQuotes.length || !aboutThisAppointment
     || !Number.isFinite(Number(commitment.confidence)) || Number(commitment.confidence) < 0.9) return skip('promise_needs_review');
-  const dateReason = structuredDateReason(subject, call);
+  const dateReason = structuredDateReason(subject, call, commitment);
   if (dateReason) return skip(dateReason);
   const selected = narrowBySubject(candidates, subject);
   if (selected.length !== 1) return skip(selected.length ? 'ambiguous_visit'
@@ -1136,7 +1129,8 @@ async function stagePromises(conn) {
         AND COALESCE(o.commitment_generation, -1) < COALESCE(cc.processing_generation, 0)
         AND (o.payload->>'${DELIVERY_UNCERTAIN_KEY}') = 'true'
     )`)
-    .select('cc.id', 'cc.call_log_id', 'cc.created_at', 'cc.processing_generation', 'cc.due_at', 'cc.due_type', 'cc.evidence', 'cl.customer_id').limit(200);
+    .select('cc.id', 'cc.call_log_id', 'cc.created_at', 'cc.processing_generation', 'cc.due_at', 'cc.due_type', 'cc.evidence', 'cc.subject',
+      'cl.customer_id', 'cl.transcription', 'cl.created_at as call_created_at').limit(200);
   // commitment_created_at rides along on the outbox row itself so runOne can
   // judge pre-activation without a second call_commitments query per row —
   // the exact check the r8 activation boundary needs to run before anything
@@ -1154,7 +1148,13 @@ async function stagePromises(conn) {
     // this same floor fresh on every pass in case the commitment's due_at
     // moves out further after this row is staged.
     const commitment = require('./call-commitments').normalizeRow(row);
-    const floor = promisedFloorAt(commitment, stagedAt);
+    // Do not let an unproved future timestamp hide the row from the first
+    // due-now sweep that performs the full context check. Invalid timing is
+    // staged immediately; runOne then parks it through the ordinary
+    // appointment_date_unresolved path without reaching the provider.
+    const timingProved = !structuredDateReason(commitment.subject,
+      { transcription: row.transcription, created_at: row.call_created_at }, commitment);
+    const floor = timingProved ? promisedFloorAt(commitment, stagedAt) : null;
     // The unattempted counterpart to the uncertain-attempt hold above: an
     // older-generation row that never got past claimForDispatch (still
     // 'pending'/'shadow') is not uncertain — it never reached the provider

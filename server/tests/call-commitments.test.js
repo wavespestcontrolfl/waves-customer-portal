@@ -388,6 +388,7 @@ describe('model contract', () => {
     expect(props.subject.required || []).not.toContain('date_claims');
     expect(props.subject.additionalProperties).toBe(false);
     expect(props.subject.properties.identity_unresolved).toBeUndefined();
+    expect(props.subject.properties.identity_claims).toBeUndefined();
     expect(props.subject.properties.date_claims.items.properties.binding.enum).toEqual(['appointment', 'requested', 'delivery', 'unresolved']);
   });
 });
@@ -402,7 +403,59 @@ describe('structured reschedule-link dates and delivery timing', () => {
     evidence: [{ quote: 'I will text the reschedule link tomorrow at nine', speaker: 'agent' }],
     due_at: '2026-09-14T09:00:00-04:00', due_text: 'tomorrow at nine', due_type: 'floor',
   };
-  test('persists partial appointment and delivery claims independently; a callback date stays unresolved', () => {
+  test('persists proven appointment and ET-relative delivery components', () => {
+    const spoken = 'Caller: My September 20 appointment.\nAgent: I will text the reschedule link tomorrow at 9am.';
+    const claims = [
+      { binding: 'appointment', quote: 'September 20', month: 9, day: 20 },
+      { binding: 'delivery', quote: 'tomorrow', year: 2026, month: 9, day: 14 },
+    ];
+    const out = groundModelCommitments([{ ...base, evidence: [{ quote: 'I will text the reschedule link tomorrow at 9am', speaker: 'agent' }], subject: { date_claims: claims } }], spoken, new Date('2026-09-14T02:00:00Z'));
+    expect(out.kept[0].subject.date_claims).toEqual(claims);
+    expect(groundModelCommitments([{ ...base, evidence: [{ quote: 'I will text the reschedule link tomorrow at 9am', speaker: 'agent' }], subject: { date_claims: [] } }], spoken).kept[0].subject.date_claims).toBeNull();
+    const generic = 'Agent: I will text you a reschedule link for that appointment.';
+    const simple = { ...base, evidence: [{ quote: generic.slice(7), speaker: 'agent' }], subject: { date_claims: [] } };
+    expect(groundModelCommitments([{ ...simple, due_at: null, due_type: null }], generic).kept[0].subject.date_claims).toEqual([]);
+    expect(groundModelCommitments([simple], generic).kept[0].subject.date_claims).toBeNull();
+    const appointmentOnly = `Caller: My September 20 appointment.\n${generic}`;
+    const appointmentClaims = [{ binding: 'appointment', quote: 'September 20', month: 9, day: 20 }];
+    expect(groundModelCommitments([{ ...simple, due_at: null, due_type: null,
+      subject: { date_claims: appointmentClaims } }], appointmentOnly).kept[0].subject.date_claims).toEqual(appointmentClaims);
+    expect(groundModelCommitments([{ ...simple, subject: { date_claims: appointmentClaims } }], appointmentOnly).kept[0].subject.date_claims).toBeNull();
+  });
+  test.each([
+    { due_at: '2026-09-14T09:00:00-04:00', due_type: 'deadline' },
+    { due_at: '2026-09-13T09:00:00-04:00', due_type: 'floor' },
+    { due_at: null, due_type: null },
+  ])('extraction parks a delivery date with unproved timing: %j', timing => {
+    const quote = 'I will text the reschedule link tomorrow morning';
+    const item = { ...base, ...timing, evidence: [{ quote, speaker: 'agent' }], subject: { date_claims: [
+      { binding: 'delivery', quote: 'tomorrow morning', year: 2026, month: 9, day: 14 },
+    ] } };
+    expect(groundModelCommitments([item], `Agent: ${quote}.`, new Date('2026-09-14T02:00:00Z')).kept[0].subject.date_claims).toBeNull();
+  });
+  test('a bare delivery day cannot ground a model-invented late clock', () => {
+    const quote = 'I will text the reschedule link tomorrow';
+    const item = { ...base, due_at: '2026-09-14T23:59:00-04:00', due_text: 'tomorrow',
+      evidence: [{ quote, speaker: 'agent' }], subject: { date_claims: [
+        { binding: 'delivery', quote: 'tomorrow', year: 2026, month: 9, day: 14 },
+      ] } };
+    const out = groundModelCommitments([item], `Agent: ${quote}.`, new Date('2026-09-14T02:00:00Z'));
+    expect(out.kept).toHaveLength(1);
+    expect(out.kept[0].subject.date_claims).toBeNull();
+  });
+  test('a newly extracted by-date needs an explicit deadline type', () => {
+    const quote = 'I will text the reschedule link by tomorrow at 9am';
+    const claims = [{ binding: 'delivery', quote: 'tomorrow', year: 2026, month: 9, day: 14 }];
+    const make = (dueType) => ({ ...base, due_type: dueType, evidence: [{ quote, speaker: 'agent' }],
+      subject: { date_claims: claims } });
+    const spoken = `Agent: ${quote}.`;
+    const reference = new Date('2026-09-14T02:00:00Z');
+    for (const dueType of [undefined, null, 'floor']) {
+      expect(groundModelCommitments([make(dueType)], spoken, reference).kept[0].subject.date_claims).toBeNull();
+    }
+    expect(groundModelCommitments([make('deadline')], spoken, reference).kept[0].subject.date_claims).toEqual(claims);
+  });
+  test('an unresolved callback date invalidates the complete list while preserving the promise', () => {
     const item = { ...base, subject: { date_claims: [
       { binding: 'appointment', quote: 'My September 20 appointment needs to move to Friday', month: 9, day: 20 },
       { binding: 'requested', quote: 'move to Friday', weekday: 5 },
@@ -411,21 +464,33 @@ describe('structured reschedule-link dates and delivery timing', () => {
     ] } };
     const out = groundModelCommitments([item], transcript);
     expect(out.kept).toHaveLength(1);
-    expect(out.kept[0].subject.date_claims).toEqual(item.subject.date_claims);
+    expect(out.kept[0].subject.date_claims).toBeNull();
     expect(out.kept[0]).toMatchObject({ due_type: 'floor', due_basis: 'stated', due_at: '2026-09-14T13:00:00.000Z' });
     const row = require('../services/call-commitments').toRow('call', out.kept[0], { generation: 4 });
     expect(row.due_type).toBe('floor');
-    expect(JSON.parse(row.subject).date_claims).toEqual(item.subject.date_claims);
+    expect(JSON.parse(row.subject).date_claims).toBeNull();
   });
-  test('an explicit empty list stays distinct from omitted or ungrounded claims', () => {
+  test('an explicit empty list cannot hide dates spoken in the transcript', () => {
     const empty = groundModelCommitments([{ ...base, subject: { date_claims: [] } }], transcript).kept[0];
     const missing = groundModelCommitments([{ ...base, subject: { visit_date: '2026-09-20' } }], transcript).kept[0];
     const ungrounded = groundModelCommitments([{ ...base, subject: { date_claims: [
       { binding: 'appointment', quote: 'my October 21 appointment', month: 10, day: 21 },
     ] } }], transcript).kept[0];
-    expect(empty.subject.date_claims).toEqual([]);
+    expect(empty.subject.date_claims).toBeNull();
     expect(missing.subject.date_claims).toBeNull();
     expect(ungrounded.subject.date_claims).toBeNull();
+  });
+  test('unproved model visit fields cannot become identity when date coverage fails', () => {
+    const spoken = 'Caller: I am out next Tuesday.\nAgent: I will text you a reschedule link for that appointment.';
+    const quote = 'I will text you a reschedule link for that appointment';
+    const model = { ...base, evidence: [{ quote, speaker: 'agent' }], subject: {
+      visit_date: '2026-09-15', service: 'Pest Service', date_claims: [{ binding: 'appointment', weekday: 2, quote: 'Tuesday' }],
+    } };
+    const first = groundModelCommitments([model], spoken, new Date('2026-09-14T14:00:00Z')).kept[0];
+    const second = groundModelCommitments([{ ...model, subject: { ...model.subject, visit_date: '2026-09-16', service: 'Lawn Service' } }], spoken,
+      new Date('2026-09-14T14:00:00Z')).kept[0];
+    expect(first.subject).toMatchObject({ date_claims: null, identity_unresolved: true, identity_claims: [] });
+    expect(commitmentKey(first)).toBe(commitmentKey(second));
   });
   test('invalid calendar components or fabricated weekdays invalidate the whole list', () => {
     const quote = 'My September 20 appointment needs to move to Friday';
@@ -569,6 +634,51 @@ describe('reschedule-link upsert identity across quote-only rows', () => {
     const second = await write(oldRows, [prior]);
     expect(JSON.parse(second.inserts[0].at(-1)).date_claims).toHaveLength(1);
     expect(JSON.parse(second.inserts[0].at(-1)).identity_unresolved).toBeUndefined();
+  });
+  test('two independently proved partial visits keep distinct parked identities across generations', async () => {
+    const transcript = [
+      'Caller: My Tuesday appointment.',
+      'Caller: My Wednesday appointment.',
+      'Agent: I will text you a reschedule link for that appointment.',
+    ].join('\n');
+    const promise = { party: 'waves', kind: 'send_reschedule_link', description: 'Text a reschedule link', confidence: 0.9,
+      evidence: [{ quote: 'I will text you a reschedule link for that appointment', speaker: 'agent' }], due_at: null, due_type: null };
+    const modelItems = [2, 3].map((weekday) => ({ ...promise, subject: { date_claims: [
+      { binding: 'appointment', weekday, quote: weekday === 2 ? 'Tuesday' : 'Wednesday' },
+    ] } }));
+    const grounded = groundModelCommitments(modelItems, transcript, new Date('2026-09-14T14:00:00Z')).kept;
+    expect(grounded).toHaveLength(2);
+    expect(new Set(grounded.map(commitmentKey)).size).toBe(2);
+    for (const entry of grounded) {
+      expect(entry.subject).toMatchObject({ date_claims: null, identity_unresolved: true });
+      expect(entry.subject.identity_claims).toHaveLength(1);
+    }
+    const first = await write(undefined, grounded);
+    expect(first.result.written).toBe(2);
+    const stored = first.inserts.map((values) => ({ commitment_key: values[1], subject: JSON.parse(values.at(-1)) }));
+    const second = await write(stored, grounded);
+    expect(second.result.written).toBe(2);
+    expect(second.inserts.map((values) => values[1])).toEqual(first.inserts.map((values) => values[1]));
+    for (const values of second.inserts) expect(JSON.parse(values.at(-1))).toMatchObject({ date_claims: null, identity_unresolved: true });
+    const dismissed = [{ ...stored[0], status: 'dismissed', human_state: 'dismissed' }];
+    const terminal = await write(dismissed, grounded);
+    expect(terminal.inserts[0][1]).toBe(dismissed[0].commitment_key);
+    expect(terminal.inserts[1][1]).not.toBe(dismissed[0].commitment_key);
+    expect(terminal.insertSql).toMatch(/subject = CASE WHEN call_commitments\.human_state IS NULL/);
+    expect(terminal.insertSql).not.toMatch(/status = EXCLUDED\.status/);
+  });
+  test('a proved partial identity stays parked when a later full-date extraction aliases its key', async () => {
+    const promise = { party: 'waves', kind: 'send_reschedule_link', description: 'Text the link',
+      evidence: [{ quote: 'I will text your reschedule link', speaker: 'agent' }] };
+    const priorSubject = { date_claims: null, identity_unresolved: true,
+      identity_claims: [{ binding: 'appointment', weekday: 2, quote: 'Tuesday' }] };
+    const newer = { ...promise, subject: { visit_date: '2026-09-15',
+      date_claims: [{ binding: 'appointment', year: 2026, month: 9, day: 15, weekday: 2, quote: 'Tuesday September 15' }] } };
+    const oldRows = [{ commitment_key: commitmentKey({ ...promise, subject: priorSubject }), subject: priorSubject }];
+    const result = await write(oldRows, [newer]);
+    expect(result.inserts[0][1]).toBe(oldRows[0].commitment_key);
+    expect(JSON.parse(result.inserts[0].at(-1))).toMatchObject({ date_claims: null, identity_unresolved: true,
+      identity_claims: priorSubject.identity_claims });
   });
 });
 
