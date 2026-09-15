@@ -6,6 +6,20 @@ const statusFor = (text, precedingReadback = false, callerAnswer = false) => (
 const statusAfterCaller = (caller, reply) => statusFor(reply, cardFragmentsIn(caller));
 
 describe('voice relay card value parser', () => {
+  test('preserves equal card groups at distinct positions for a full numeric echo', () => {
+    const supplied = cardFragmentsIn('My card number is 4242, 4242, 4242, 4242.');
+    expect(supplied).toEqual(['4242', '4242', '4242', '4242']);
+    expect(cardFragmentsIn('4242424242424242.', supplied)).toEqual(['4242424242424242']);
+  });
+
+  test('deduplicates overlapping matchers without duplicating supplied evidence', () => {
+    expect(cardFragmentsIn('My card number is 4242. My card expires September 2029.'))
+      .toEqual(['4242', 'September 2029']);
+    const supplied = cardFragmentsIn('My card number is (941)555-0182.');
+    expect(supplied).toEqual(['(941)', '555-0182']);
+    expect(cardFragmentsIn('9415550182.', supplied)).toEqual(['9415550182']);
+  });
+
   test.each([
     ['doce mil doscientos treinta y cuatro', '12234'],
     ['treinta y cuatro mil doscientos', '34200'],

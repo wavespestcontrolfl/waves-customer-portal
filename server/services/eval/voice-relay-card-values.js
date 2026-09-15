@@ -392,10 +392,20 @@ function cardFragmentsIn(text, precedingReadback = false, callerAnswer = false) 
     const inheritedReadback = carriedValue || (responseLooksLikeAnswer && hasReadbackContext);
     if (!CARD_CUE_RE.test(clause) && !inheritedReadback) continue;
     if (explained) continue;
-    fragments.push([match.index, candidateValue]);
+    fragments.push([valueSpan ? valueSpan[0] : match.index, candidateValue]);
   }
   fragments.sort((left, right) => left[0] - right[0]);
-  return [...new Set(fragments.map(([, value]) => value))];
+  // Different matchers can identify the same span; equal values at separate
+  // positions are distinct spoken groups and must remain in the evidence.
+  const spans = fragments.reduce((ordered, [start, value]) => {
+    const previous = ordered[ordered.length - 1];
+    if (previous && start < previous[0] + previous[1].length) {
+      const end = Math.max(previous[0] + previous[1].length, start + value.length);
+      previous[1] = digits.slice(previous[0], end);
+    } else ordered.push([start, value]);
+    return ordered;
+  }, []);
+  return spans.map(([, value]) => value);
 }
 
 module.exports = { cardFragmentsIn, normalizedCardExpiration, cardValuesMatch };
