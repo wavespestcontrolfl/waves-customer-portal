@@ -215,6 +215,73 @@ postgres('visit completion packet records on PostgreSQL', () => {
     await mockPg('products_catalog').where({ id: fixture.productId }).del();
   });
 
+  test.each([
+    ['ordinary', 'accepted estimate', 99], ['ordinary', 'ACCEPTED ESTIMATE', 99],
+    ['terminal', 'accepted estimate', 99], ['terminal', 'ACCEPTED ESTIMATE', 99],
+    ['terminal', 'ACCEPTED ESTIMATE', 40],
+  ])('%s completion recognizes a late fee invoice with %s stamp ($%s)', async (lane, phrase, feeAmount) => {
+    const estimateId = randomUUID();
+    const serviceId = fixture.serviceIds[0];
+    fixture.estimateIds.push(estimateId);
+    const priorGate = process.env.GATE_UNMINTED_SETUP_FEE_PARK;
+    process.env.GATE_UNMINTED_SETUP_FEE_PARK = 'true';
+    const obligations = require('../services/setup-fee-obligation');
+    const readObligation = obligations.findUnmintedSetupFeeObligation;
+    let observedOwed = false;
+    let coveringInvoice;
+    try {
+      await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ visit_id: null });
+      await mockPg('estimates').insert({ id: estimateId, customer_id: fixture.customerId, status: 'accepted',
+        accepted_at: new Date(), estimate_data: JSON.stringify({
+          recurring: { services: [{ name: 'Pest Control', frequency: 'quarterly', mo: 29.33 }] },
+          sendSnapshot: { pricingBundle: { firstVisitFees: [{ service: 'waveguard_setup', amount: 99 }] } },
+        }) });
+      await mockPg('scheduled_services').where({ id: serviceId }).update({ source_estimate_id: estimateId, is_recurring: true });
+      await mockPg('activity_log').insert({ customer_id: fixture.customerId,
+        action: 'estimate_converted', description: `Estimate #${estimateId} converted: synthetic stamp coverage` });
+      if (lane === 'terminal') {
+        const prior = await InvoiceService.create({ customerId: fixture.customerId, scheduledServiceId: serviceId,
+          lineItems: [{ description: 'First service application', quantity: 1, unit_price: 120 }] });
+        await mockPg('invoices').where({ id: prior.id }).update({ status: 'refunded' });
+      }
+      jest.spyOn(obligations, 'findUnmintedSetupFeeObligation').mockImplementationOnce(async (...args) => {
+        const read = await readObligation(...args);
+        observedOwed = read.owed;
+        // Commit through the real writer after the initial read, before
+        // completion's locked recheck. No post-create reconciliation runs.
+        coveringInvoice = await InvoiceService.create({ customerId: fixture.customerId,
+          lineItems: [{ description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: feeAmount }],
+          notes: `${phrase} #${phrase === 'ACCEPTED ESTIMATE' ? estimateId.toUpperCase() : estimateId}.`,
+        });
+        return read;
+      });
+      const result = await completeScheduledService({ serviceId, idempotencyKey: randomUUID(),
+        actor: submission().actor, body: { ...submission().items[0].body, sendCompletionSms: false, requestReview: false } });
+      expect(observedOwed).toBe(true);
+      expect(result.status).toBeLessThan(300);
+      const alerts = await mockPg('notifications').where({ recipient_type: 'admin', category: 'billing' })
+        .whereRaw("metadata->>'scheduledServiceId' = ?", [serviceId]);
+      expect(alerts).toHaveLength(1);
+      if (lane === 'ordinary') {
+        expect(alerts[0].body).toContain(`setup fee is covered by invoice ${coveringInvoice.invoice_number}`);
+        expect(alerts[0].body).toContain('do NOT re-bill the setup fee');
+      } else if (feeAmount < 99) {
+        expect(alerts[0].body).toContain('$59.00 remaining');
+        expect(alerts[0].metadata.expectedSetupFeeCents).toBe(9900);
+      } else {
+        expect(alerts[0].body).not.toContain('ALSO:');
+        expect(alerts[0].body).not.toContain('setup fee');
+      }
+      expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    } finally {
+      jest.restoreAllMocks();
+      if (priorGate === undefined) delete process.env.GATE_UNMINTED_SETUP_FEE_PARK;
+      else process.env.GATE_UNMINTED_SETUP_FEE_PARK = priorGate;
+      await mockPg('notifications').whereRaw("metadata->>'scheduledServiceId' = ?", [serviceId]).del();
+    }
+  });
+
   test('two canonical records commit together and their effects remain pending', async () => {
     const result = await saveVisitCompletionPacket(submission());
     expect(result).toMatchObject({ status: 202, body: { state: 'records_saved', replayed: false } });
