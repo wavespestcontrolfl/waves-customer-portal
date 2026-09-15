@@ -2039,7 +2039,7 @@ const ATTEMPTED_STATUSES = ['sent', 'delivered', 'review'];
 async function markLinkUsed(conn, row) {
   await conn.transaction(async (trx) => {
     await lockTriageCall(trx, row.related_call_log_id);
-    await require('./triage-auto-resolve').resolveRescheduleCards(trx, row.related_call_log_id, USED_LINK_NOTE, row.related_scheduled_service_id);
+    await require('./call-reschedule-apply').resolveRescheduleCards(trx, row.related_call_log_id, USED_LINK_NOTE, { visitId: row.related_scheduled_service_id });
     // A row parked for a missing carrier receipt raised this promise's own
     // exception card, and classifyTriageItem keeps that card out of the
     // generic sweep. The customer following the same link answers it: there

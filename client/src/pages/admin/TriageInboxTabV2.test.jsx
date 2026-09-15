@@ -53,6 +53,46 @@ describe('reschedule proposal controls', () => {
   });
 });
 
+describe('promised reschedule link review', () => {
+  it('reloads a changed card after a stale Mark handled action and retries with the refreshed version', async () => {
+    const stale = { ...ordinary, id: 'promise', first_name: 'Promise', last_name: 'Card',
+      reason_code: 'reschedule_link_promise', feedback_verdict: null };
+    const refreshed = { ...stale, first_name: 'Updated', updated_at: '2026-09-13T04:01:00.000Z' };
+    let listLoads = 0;
+    let resolveAttempts = 0;
+    adminFetch.mockImplementation(async (url) => {
+      if (url.startsWith('/admin/triage?')) {
+        listLoads += 1;
+        return { items: [listLoads === 1 ? stale : refreshed], counts: { open: 1, resolved: 0, dismissed: 0 } };
+      }
+      if (url === '/admin/triage/promise/resolve') {
+        resolveAttempts += 1;
+        if (resolveAttempts === 1) throw Object.assign(new Error('Stale version'), { status: 409 });
+        return { ok: true };
+      }
+      return { ok: true };
+    });
+
+    render(<TriageInboxTabV2 />);
+    const staleCard = (await screen.findByText('Promise Card')).closest('.py-4');
+    fireEvent.click(within(staleCard).getByRole('button', { name: /mark handled/i }));
+    await waitFor(() => expect(listLoads).toBe(2));
+    expect(screen.getByText('Updated Card')).toBeInTheDocument();
+    expect(screen.getByText(/review the refreshed card before marking it handled/i)).toBeInTheDocument();
+    expect(screen.queryByText('Promise Card')).not.toBeInTheDocument();
+    expect(adminFetch).toHaveBeenCalledWith('/admin/triage/promise/resolve', {
+      method: 'PUT', body: JSON.stringify({ expected_updated_at: stale.updated_at }),
+    });
+
+    const updatedCard = screen.getByText('Updated Card').closest('.py-4');
+    fireEvent.click(within(updatedCard).getByRole('button', { name: /mark handled/i }));
+    await waitFor(() => expect(resolveAttempts).toBe(2));
+    expect(adminFetch).toHaveBeenCalledWith('/admin/triage/promise/resolve', {
+      method: 'PUT', body: JSON.stringify({ expected_updated_at: refreshed.updated_at }),
+    });
+  });
+});
+
 // secondary_contact_captured review items carry the second person named on
 // the call (a realtor's buyer, a landlord's tenant) — the card must show the
 // operator WHO to confirm, in both payload shapes the server produces.
