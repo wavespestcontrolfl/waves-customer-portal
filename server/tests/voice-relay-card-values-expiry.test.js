@@ -221,6 +221,8 @@ describe('voice relay card expiration value parser', () => {
 
   test.each([
     ['My security code is one hundred oh one.', ['101']],
+    ['My security code is a hundred oh one.', ['101']],
+    ['My card number is a thousand oh one.', ['1001']],
     ['My security code is one hundred zero five.', ['105']],
     ['My card number is two thousand oh one.', ['2001']],
     ['My card number is oh one.', ['01']],

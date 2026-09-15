@@ -41,11 +41,8 @@ function englishUnderHundred(words, start) {
 }
 
 function englishUnderThousand(words, start) {
-  if (words[start] === 'hundred') {
-    const tail = englishUnderHundred(words, start + (words[start + 1] === 'and' ? 2 : 1));
-    return tail.value < 100 ? { value: 100 + tail.value, next: tail.next } : { value: 100, next: start + 1 };
-  }
-  const leading = englishUnderHundred(words, start);
+  // A bare scale ("a hundred") has the same remainder rules as "one hundred".
+  const leading = words[start] === 'hundred' ? { value: 1, next: start } : englishUnderHundred(words, start);
   if (leading.value >= 100 || words[leading.next] !== 'hundred') return leading;
   let next = leading.next + 1;
   let total = leading.value * 100;
@@ -67,11 +64,7 @@ function englishGroup(words, start, scaledTail = false) {
   if (scaledTail && CARDINALS_EN[words[start]] === 0 && zeroUnit > 0 && zeroUnit < 10) {
     return { value: zeroUnit, next: start + 2 };
   }
-  if (words[start] === 'thousand') {
-    const tail = englishUnderThousand(words, start + (words[start + 1] === 'and' ? 2 : 1));
-    return tail.value < 1000 ? { value: 1000 + tail.value, next: tail.next } : { value: 1000, next: start + 1 };
-  }
-  const leading = englishUnderThousand(words, start);
+  const leading = words[start] === 'thousand' ? { value: 1, next: start } : englishUnderThousand(words, start);
   if (leading.value >= 1000 || words[leading.next] !== 'thousand') return leading;
   let next = leading.next + 1;
   let total = leading.value * 1000;
@@ -118,42 +111,35 @@ const COMPOUND_ARTICLE_ES_RES = Object.freeze([
 ]);
 const SPANISH_CONTEXT_RE = /\b(?:el|la|los|las|su|sus|mi|mis|tu|tus|es|son|tarjeta|c[oó]digo|seguridad|vence|vencimiento|caduca|fecha|n[uú]mero|d[ií]gitos?)\b/i;
 
-function spanishGroup(words, start) {
-  const word = words[start];
-  const value = CARDINALS_ES[word];
-  if (value < 10 && words[start + 1] === 'mil') {
-    let total = value * 1000;
-    let next = start + 2;
-    if (next < words.length && words[next] !== 'doble' && words[next] !== 'triple') {
-      const tail = spanishGroup(words, next);
-      total += tail.value;
-      next = tail.next;
-    }
-    return { value: total, next };
-  }
-  if (value === 1000) {
-    let total = value;
-    let next = start + 1;
-    if (next < words.length && words[next] !== 'doble' && words[next] !== 'triple') {
-      const tail = spanishGroup(words, next);
-      total += tail.value;
-      next = tail.next;
-    }
-    return { value: total, next };
-  }
-  if (value >= 100) {
-    const tail = words[start + 1] && CARDINALS_ES[words[start + 1]];
-    if (tail !== undefined && tail < 100) {
-      const parsed = spanishGroup(words, start + 1);
-      return { value: value + parsed.value, next: parsed.next };
-    }
-    return { value, next: start + 1 };
-  }
-  if (value >= 30 && value % 10 === 0 && words[start + 1] === 'y') {
+function spanishUnderHundred(words, start) {
+  const value = CARDINALS_ES[words[start]];
+  if (value >= 30 && value < 100 && value % 10 === 0 && words[start + 1] === 'y') {
     const unit = CARDINALS_ES[words[start + 2]];
     if (unit > 0 && unit < 10) return { value: value + unit, next: start + 3 };
   }
   return { value, next: start + 1 };
+}
+
+function spanishUnderThousand(words, start) {
+  const leading = spanishUnderHundred(words, start);
+  if (leading.value < 100 || leading.value >= 1000) return leading;
+  const tail = spanishUnderHundred(words, leading.next);
+  return tail.value < 100
+    ? { value: leading.value + tail.value, next: tail.next } : leading;
+}
+
+function spanishGroup(words, start) {
+  const leading = spanishUnderThousand(words, start);
+  const standaloneScale = words[start] === 'mil';
+  if (!standaloneScale && (leading.value >= 1000 || words[leading.next] !== 'mil')) return leading;
+  let next = standaloneScale ? start + 1 : leading.next + 1;
+  let total = standaloneScale ? 1000 : leading.value * 1000;
+  const tail = spanishUnderThousand(words, next);
+  if (tail.value < 1000 && words[tail.next] !== 'mil') {
+    total += tail.value;
+    next = tail.next;
+  }
+  return { value: total, next };
 }
 
 function spokenDigitsEs(text, allowAmbiguous = false) {

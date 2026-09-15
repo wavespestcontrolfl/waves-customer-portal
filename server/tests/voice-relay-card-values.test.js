@@ -7,6 +7,18 @@ const statusAfterCaller = (caller, reply) => statusFor(reply, cardFragmentsIn(ca
 
 describe('voice relay card value parser', () => {
   test.each([
+    ['doce mil doscientos treinta y cuatro', '12234'],
+    ['treinta y cuatro mil doscientos', '34200'],
+    ['ciento veintitrés mil cuatrocientos', '123400'],
+    ['veinte mil treinta mil', '2000030000'],
+    ['mil doscientos treinta y cuatro', '1234'],
+  ])('normalizes Spanish thousand groups and their numeric echoes: %s', (spoken, digits) => {
+    const supplied = cardFragmentsIn(`Mi tarjeta es ${spoken}.`);
+    expect(supplied).toEqual([digits]);
+    expect(cardFragmentsIn(`${digits}.`, supplied)).toEqual([digits]);
+  });
+
+  test.each([
     'Let me confirm your card number. Four two four two.',
     'I will verify your security code. One two three.',
     'I am repeating your card number. Four two four two.',
