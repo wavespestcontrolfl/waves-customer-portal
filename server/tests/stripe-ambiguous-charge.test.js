@@ -59,6 +59,12 @@ describe('Stripe charge outcome classification', () => {
     expect(savedCardClaimIsStale({ created_at: '2026-07-14T12:05:00Z' }, now)).toBe(true);
   });
 
+  test('suppresses deposit-held completion prompts without treating them as a saved-card charge outcome', () => {
+    const err = { code: 'DEPOSIT_RECONCILIATION_REQUIRED' };
+    expect(savedCardChargeSuppressesAlternateCollection(err)).toBe(true);
+    expect(savedCardChargeNeedsReconciliation(err)).toBe(false);
+  });
+
   test('only treats transport failures as charge ambiguity after create was submitted', () => {
     const error = { type: 'StripeConnectionError' };
     expect(shouldTreatSavedCardFailureAsAmbiguous({ chargeSubmitted: false, error })).toBe(false);

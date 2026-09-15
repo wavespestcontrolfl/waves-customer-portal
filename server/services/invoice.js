@@ -1,4 +1,5 @@
 const crypto = require("crypto");
+const { isDeepStrictEqual } = require("node:util");
 const db = require("../models/db");
 const logger = require("./logger");
 const TaxCalculator = require("./tax-calculator");
@@ -839,6 +840,7 @@ function invoiceNotSendableError(invoice) {
 async function claimInvoiceForSend(invoiceId, { allowClaimed = false, database = db } = {}) {
   const current = await database("invoices").where({ id: invoiceId }).first();
   if (!current) throw invoiceNotSendableError(current);
+  await require("./estimate-deposits").assertInvoiceDepositSettlementReady(database, current, { lock: false });
 
   if (allowClaimed) {
     if (!SEND_FINALIZABLE_STATUSES.includes(current.status)) {
@@ -997,20 +999,27 @@ async function convertLeadOnInvoiceSent({ invoiceId, customerId, priorStatus, pr
   }
 }
 
-async function annualPrepayInvoiceTableExists() {
-  if (!db.schema?.hasTable) return false;
-  return db.schema
-    .hasTable("annual_prepay_terms")
-    .catch(() => false);
+async function optionalInvoiceRead(database, read, fallback) {
+  try {
+    return database?.isTransaction && typeof database.transaction === "function"
+      ? await database.transaction(read)
+      : await read(database);
+  } catch {
+    return fallback;
+  }
 }
 
-async function loadAnnualPrepayTermForInvoice(invoiceId) {
+async function annualPrepayInvoiceTableExists(database = db) {
+  if (!database.schema?.hasTable) return false;
+  return optionalInvoiceRead(database, (conn) => conn.schema.hasTable("annual_prepay_terms"), false);
+}
+
+async function loadAnnualPrepayTermForInvoice(invoiceId, database = db) {
   if (!invoiceId) return null;
-  const exists = await annualPrepayInvoiceTableExists();
+  const exists = await annualPrepayInvoiceTableExists(database);
   if (!exists) return null;
-  const term = await db("annual_prepay_terms")
-    .where({ prepay_invoice_id: invoiceId })
-    .first();
+  const term = await optionalInvoiceRead(database, (conn) => conn("annual_prepay_terms")
+    .where({ prepay_invoice_id: invoiceId }).first(), null);
   if (!term) return null;
   return {
     id: term.id,
@@ -2220,8 +2229,8 @@ const InvoiceService = {
     // Same atomic discipline as the converter: credit line exists IFF the
     // ledger consumed exactly that amount in the same transaction; a
     // mismatch rolls back and one retry re-reads the fresh balance. Deposit
-    // machinery failures NEVER block visit invoicing — fall back to the
-    // plain create and alert for manual reconciliation.
+    // machinery failures leave invoicing on hold for manual reconciliation;
+    // an unknown deposit balance must never become a full-balance pay link.
     //
     // skipDepositCredit (Codex P1, PR #2897 fix round): callers whose
     // contract is an UNTOUCHED invoice for operator review — the backdated
@@ -2276,18 +2285,12 @@ const InvoiceService = {
     }
     if (sourceEstimateId) {
       const {
+        acquireEstimateDepositLedgerLock,
         pendingDepositCredit,
         consumeDepositCredit,
       } = require("./estimate-deposits");
+      let depositError;
       for (let attempt = 0; attempt < 2; attempt += 1) {
-        let depositCredit = null;
-        try {
-          depositCredit = await pendingDepositCredit(sourceEstimateId);
-        } catch {
-          break; // ledger unreadable — invoice proceeds uncredited
-        }
-        const requested = depositCredit ? depositCredit.amount : 0;
-        if (!(requested > 0)) break;
         try {
           return await runMintTransaction(async (trx) => {
             // EVERY linked mint holds the shared advisory lock (Codex PR
@@ -2306,14 +2309,17 @@ const InvoiceService = {
             // that actually created the invoice.
             const adopted = await adoptUnderMintLock(trx);
             if (adopted) return adopted;
+            const createParams = await buildParams(trx);
+            await acquireEstimateDepositLedgerLock(trx, sourceEstimateId);
+            const depositCredit = await pendingDepositCredit(sourceEstimateId, trx);
             // Request the full unapplied balance; create() caps it against
             // its own post-discount, after-tax total (a pre-discount cap
             // here consumed ledger dollars the discounted invoice never
             // reflected) and reports the effective amount back.
             const created = await this.create({
-              ...(await buildParams(trx)),
+              ...createParams,
               database: trx,
-              depositCredit: { amount: requested, estimateId: sourceEstimateId },
+              depositCredit: depositCredit ? { amount: depositCredit.amount, estimateId: sourceEstimateId } : null,
             });
             await settleRetention(created, trx);
             const effective = Number(created?.applied_deposit_credit) || 0;
@@ -2333,6 +2339,7 @@ const InvoiceService = {
             return created;
           });
         } catch (err) {
+          depositError = err;
           // Stale-price/authorization refusals are terminal — retrying the
           // same stale params can't fix them (mirrors the shared mint
           // helper's contract).
@@ -2354,6 +2361,7 @@ const InvoiceService = {
           }
         }
       }
+      throw depositError;
     }
 
     if (replayFromScheduled) {
@@ -2393,24 +2401,32 @@ const InvoiceService = {
 
   /**
    * Get invoice by public token — for the /pay page.
-   * Also records view and updates status.
+   * Also records view and updates status unless this is a follow-up read.
    */
-  async getByToken(token) {
-    const invoice = await db("invoices").where({ token }).first();
+  async getByToken(token, { recordView = true, database = db } = {}) {
+    let invoice = await database("invoices").where({ token }).first();
     if (!invoice) return null;
     // NOTE: do NOT block payer_statement_id here — getByToken also backs the
     // PERMANENT receipt endpoints (receipt-v2), which must never 404 (AGENTS.md).
     // The accrued-invoice "statement-only" block lives in the PAY + invoice-PDF
     // routes instead (the collection surfaces), not this shared loader.
 
-    // Record view
-    const updates = { view_count: (invoice.view_count || 0) + 1 };
-    if (!invoice.viewed_at) updates.viewed_at = new Date();
-    if (invoice.status === "sent") updates.status = "viewed";
-    await db("invoices").where({ id: invoice.id }).update(updates);
+    // The pay page rereads after its deposit fence. That read must not count
+    // as another view. Keep the write conditional on the LIVE status: a
+    // settlement between the first SELECT and this UPDATE must stay prepaid.
+    const seenAt = new Date();
+    if (recordView) {
+      await database("invoices").where({ id: invoice.id }).update({
+        view_count: database.raw("COALESCE(view_count, 0) + 1"),
+        viewed_at: database.raw("COALESCE(viewed_at, ?)", [seenAt]),
+        status: database.raw("CASE WHEN status = 'sent' THEN 'viewed' ELSE status END"),
+      });
+      invoice = await database("invoices").where({ id: invoice.id }).first();
+      if (!invoice) return null;
+    }
 
     // Enrich with customer info
-    const customer = await db("customers")
+    const customer = await database("customers")
       .where({ id: invoice.customer_id })
       .select(
         "first_name",
@@ -2426,7 +2442,7 @@ const InvoiceService = {
         "property_type",
       )
       .first();
-    const annualPrepayTerm = await loadAnnualPrepayTermForInvoice(invoice.id);
+    const annualPrepayTerm = await loadAnnualPrepayTermForInvoice(invoice.id, database);
 
     const line_items =
       typeof invoice.line_items === "string"
@@ -2435,11 +2451,10 @@ const InvoiceService = {
 
     // Annual-prepay coverage callout (null for ordinary invoices). Built from
     // the parsed line items so setup-fee-waived detection sees the real text.
-    const annual_prepay = await loadInvoiceAnnualPrepay({ ...invoice, line_items });
+    const annual_prepay = await loadInvoiceAnnualPrepay({ ...invoice, line_items }, database);
 
     return {
       ...invoice,
-      ...updates,
       customer: require('./invoice-address').invoiceCustomerAddress(invoice, customer),
       annual_prepay,
       // Amount the customer actually pays = total − applied account credit. The
@@ -2731,6 +2746,8 @@ const InvoiceService = {
       const {
         sendCustomerMessage,
       } = require("./messaging/send-customer-message");
+      const sendInvoice = await db("invoices").where({ id: invoiceId }).first();
+      await require("./estimate-deposits").assertInvoiceDepositSettlementReady(db, sendInvoice, { lock: false });
       const sendResult = await sendCustomerMessage({
         to: customer.phone,
         body,
@@ -2749,6 +2766,51 @@ const InvoiceService = {
         // applies. If ops disables the invoice template to halt broken
         // billing texts, this flow needs to stop too.
         metadata: { original_message_type: "invoice" },
+        // The canonical sender owns push-first / push+SMS / Twilio routing.
+        // Wrap that ONE provider dispatcher so the invoice row and estimate
+        // deposit ledger stay stable through whichever delivery leg it picks.
+        // The canonical message audit runs after this callback commits.
+        withProviderHandoff: async (dispatch) => {
+          let dispatchedOutcome = null;
+          try {
+            const outcome = await require("./estimate-deposits").withInvoiceDepositSettlement(
+              invoiceId,
+              async (trx, current) => {
+                const ownership = await require("./invoice-helpers").selfPayAtDispatch(invoiceId, trx)();
+                if (ownership.ok !== true) {
+                  return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+                    code: ownership.code, error: ownership.reason, validator: "check_invoice_ownership_boundary" };
+                }
+                if (invoiceAmountDue(current) <= 0
+                  || invoiceAmountDue(current) !== invoiceAmountDue(sendInvoice)
+                  || !isDeepStrictEqual(parseInvoiceLineItems(current.line_items), parseInvoiceLineItems(sendInvoice.line_items))) {
+                  return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+                    code: "INVOICE_BALANCE_CHANGED", error: "Invoice balance changed while preparing delivery; retry send",
+                    validator: "check_invoice_deposit_settlement" };
+                }
+                dispatchedOutcome = await dispatch();
+                return dispatchedOutcome;
+              },
+            );
+            return outcome || { sent: false, blocked: true, deliveryOutcome: "not_sent",
+              code: "INVOICE_UNREADABLE", error: "Invoice could not be re-read before delivery",
+              validator: "check_invoice_deposit_settlement" };
+          } catch (err) {
+            // A commit/connection error AFTER provider acceptance cannot be
+            // rewritten as a definite non-send: that would restore the send
+            // claim and offer an automatic retry of a message the customer
+            // already received. Preserve the provider's actual provenance;
+            // normal delivered bookkeeping below remains idempotent.
+            if (dispatchedOutcome
+              && (dispatchedOutcome.sent || dispatchedOutcome.deliveryOutcome !== "not_sent")) {
+              logger.error(`[invoice] Provider outcome known for ${invoiceId} but deposit-settlement handoff could not close: ${err.message}`);
+              return { ...dispatchedOutcome, settlementHandoffError: err.message };
+            }
+            return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+              code: err.code || "INVOICE_DEPOSIT_SETTLEMENT_FAILED", error: err.message,
+              retryable: err.retryable === true, validator: "check_invoice_deposit_settlement" };
+          }
+        },
       });
 
       if (!sendResult.sent) {
@@ -5344,13 +5406,19 @@ const InvoiceService = {
       if (totalCents !== creditCents) return skip("balance_due");
       await require("./stripe").assertNoInvoiceChargeReconciliationPending(id, trx);
       if ([invoice.payer_id, invoice.payer_statement_id, invoice.annual_prepay_term_id,
-        invoice.stripe_payment_intent_id, invoice.payment_recorded_at, invoice.status === "sending"].some(Boolean)) {
+        invoice.stripe_payment_intent_id, invoice.payment_recorded_at].some(Boolean)) {
         return skip("existing_payment_work");
       }
       const payment = await trx("payments").whereIn("status", ["paid", "processing"])
         .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [id]).first("id");
       const plan = await trx("payment_plans").where({ invoice_id: id, status: "active" }).first("id");
       if (payment || plan) return skip("existing_payment_work");
+      // Delivery owns the invoice row while its pay link is being handed to a
+      // provider. The deposit credit is already durable, so this is a retryable
+      // close gap after delivery resolves; it is not evidence of payment work.
+      if (invoice.status === "sending") {
+        return { ...skip("invoice_delivery_in_flight"), retryable: true };
+      }
       const sequence = await trx("invoice_followup_sequences").where({ invoice_id: id }).forUpdate()
         .first("id", "status", "touch_claimed_at");
       if (sequence?.status === "stopped") return skip("collection_stopped");

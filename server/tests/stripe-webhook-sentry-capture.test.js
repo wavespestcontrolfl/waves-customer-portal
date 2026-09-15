@@ -63,7 +63,10 @@ jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn(() => 'https:
 jest.mock('../services/payment-lifecycle-email', () => ({ sendRefundIssued: jest.fn() }));
 jest.mock('../services/receipt-delivery-queue', () => ({}));
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn() }));
-jest.mock('../services/estimate-deposits', () => ({ handleDepositChargeReversed: jest.fn(async () => ({ handled: false })) }));
+jest.mock('../services/estimate-deposits', () => ({
+  handleDepositChargeReversed: jest.fn(async () => ({ handled: false })),
+  handleDepositIntentSucceeded: jest.fn(),
+}));
 jest.mock('../services/stripe', () => ({
   retrievePaymentIntent: jest.fn(async (piId) => ({ id: piId, metadata: {} })),
   // The unstamped recurring-card backstop re-reads the intent live.
@@ -141,6 +144,38 @@ function ledgerBuilder({ update }) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+});
+
+test('a retryable deposit close leaves the event unprocessed and the same event can reclaim and settle', async () => {
+  const { handleDepositIntentSucceeded } = require('../services/estimate-deposits');
+  const { classifyExistingWebhookEvent } = require('../routes/stripe-webhook-helpers');
+  classifyExistingWebhookEvent.mockImplementation(
+    jest.requireActual('../routes/stripe-webhook-helpers').classifyExistingWebhookEvent,
+  );
+  const retry = Object.assign(new Error('deposit close must retry'), { code: 'DEPOSIT_SETTLEMENT_RETRYABLE' });
+  handleDepositIntentSucceeded.mockRejectedValueOnce(retry).mockResolvedValue({ handled: true });
+  const ledger = { id: 'evt_deposit_retry', processed: false, error: null };
+  const update = jest.fn(async (values) => { Object.assign(ledger, values); return 1; });
+  const builder = ledgerBuilder({ update });
+  builder.returning.mockResolvedValueOnce(['evt_deposit_retry']).mockResolvedValue([]);
+  builder.first = jest.fn(async () => ledger);
+  db.mockImplementation((table) => {
+    if (table === 'stripe_webhook_events') return builder;
+    throw new Error(`Unexpected table ${table}`);
+  });
+  mockConstructEvent.mockReturnValue({
+    id: ledger.id, type: 'payment_intent.succeeded', created: 1754500000,
+    data: { object: { id: 'pi_deposit_retry', metadata: { purpose: 'estimate_deposit', estimate_id: 'estimate-1' } } },
+  });
+
+  expect((await postWebhook()).status).toBe(500);
+  expect(ledger.processed).toBe(false);
+  expect(ledger.error).toBe(retry.message);
+  expect((await postWebhook()).status).toBe(200);
+  expect(ledger.processed).toBe(true);
+  expect(handleDepositIntentSucceeded).toHaveBeenCalledTimes(2);
+  expect((await postWebhook()).status).toBe(200);
+  expect(handleDepositIntentSucceeded).toHaveBeenCalledTimes(2);
 });
 
 test('handler-path exception captures generic text + identifiers to Sentry, records the ledger error, and 500s', async () => {

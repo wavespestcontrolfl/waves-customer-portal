@@ -61,7 +61,12 @@ are unchanged; snapshots remain authoritative when the rollout gate is off.
 `/invoice.pdf`, `/attachments/:id` — the invoice pay surface; router-wide
 60/min limiter + url-safe 20-64 token format gate with generic 404,
 mirroring pay-statement.js; legacy 25-32 char invoice tokens remain
-valid. OWNER RULING 2026-08-16, superseding the earlier "no sibling-
+valid. A received estimate deposit awaiting invoice reconciliation blocks
+the pay-page GET and new collection with HTTP 409 and
+`reconciliationRequired: true`. The deposit ledger is the hold authority;
+payer-billed invoices are exempt. Recording an already-settled PaymentIntent
+and permanent receipt access remain available. OWNER RULING 2026-08-16,
+superseding the earlier "no sibling-
 invoice data on this surface" P0: with GATE_PAY_INCLUDE_BALANCE on, the
 pay page ITEMIZES the customer's other open self-pay invoices — numbers,
 dates, amounts, an accepted forwarded-link disclosure — and the Pay
