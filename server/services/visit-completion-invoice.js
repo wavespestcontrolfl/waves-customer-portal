@@ -200,6 +200,7 @@ async function mintPacketInvoice({ packet, visit, members, customer, trx }) {
       billedServiceIds: billed.map(({ member }) => member.id),
       billingLane: resolveBillingLane(customer).mode,
       memberPricing: billed.map(({ member }) => ({ id: member.id, price: Number(member.estimated_price),
+        serviceType: member.service_type, serviceId: member.service_id,
         isCallback: Boolean(member.is_callback), invoiceOnComplete: Boolean(member.create_invoice_on_complete) })),
     } })]), updated_at: trx.fn.now(),
   });
