@@ -76,7 +76,7 @@ const CHANNELS = Object.freeze(['sms', 'email', 'call', 'in_person', 'unknown'])
 
 // Bumped when the derivation rules or the model prompt change, so a row can
 // say which extractor produced it.
-const EXTRACTOR_VERSION = 'commitments-v3';
+const EXTRACTOR_VERSION = 'commitments-v5';
 
 // Mirrors CALL_PROC_EXTRACT_TIMEOUT_MS in call-recording-processor.js; the
 // claim ceiling counts this leg at the same budget.
@@ -113,17 +113,29 @@ const REPEATABLE_KINDS = new Set(['send_report', 'send_paperwork', 'provide_info
 
 function currentVisitDate(subject) {
   if (!subject || typeof subject !== 'object') return '';
-  const appointmentClaims = (Array.isArray(subject.date_claims) ? subject.date_claims : [])
+  const provedIdentity = subject.identity_unresolved === true && Array.isArray(subject.identity_claims);
+  const appointmentClaims = (Array.isArray(provedIdentity ? subject.identity_claims : subject.date_claims)
+    ? (provedIdentity ? subject.identity_claims : subject.date_claims) : [])
     .filter((claim) => claim?.binding === 'appointment');
   const fullDates = [...new Set(appointmentClaims
     .filter((claim) => claim.year && claim.month && claim.day)
     .map((claim) => `${claim.year}-${String(claim.month).padStart(2, '0')}-${String(claim.day).padStart(2, '0')}`))];
   const statedDate = String(subject.visit_date || '').trim();
-  return /^\d{4}-\d{2}-\d{2}$/.test(statedDate) ? statedDate : (fullDates.length === 1 ? fullDates[0] : '');
+  return !provedIdentity && /^\d{4}-\d{2}-\d{2}$/.test(statedDate) ? statedDate : (fullDates.length === 1 ? fullDates[0] : '');
 }
 
 function rescheduleSubjectFingerprint(subject) {
   if (!subject || typeof subject !== 'object') return null;
+  if (subject.identity_unresolved === true && Array.isArray(subject.identity_claims)) {
+    // An incomplete coverage list cannot certify visit_date, service, or
+    // address for automatic selection. The helper independently proved only
+    // these appointment claims; they may separate office ledger identities
+    // while date_claims:null continues to park every automatic delivery.
+    const proved = [...new Set((Array.isArray(subject.identity_claims) ? subject.identity_claims : [])
+      .filter((claim) => claim?.binding === 'appointment')
+      .map((claim) => [claim.year ?? '', claim.month ?? '', claim.day ?? '', claim.weekday ?? ''].join('-')))].sort();
+    return proved.length ? JSON.stringify(['', '', '', ...proved]) : null;
+  }
   const visitDate = currentVisitDate(subject);
   // Once the current visit has a full date, a partial/full claim about that
   // same visit adds evidence, not identity. Likewise one full appointment
@@ -519,31 +531,28 @@ function quoteExpressesAction(normalizedQuote, item) {
 // the link worker parks them instead of choosing an appointment by default.
 // All claims in an explicit list must be usable; dropping just one would
 // falsely make the remaining list look complete.
-function groundedDateClaims(subject, transcript) {
+function groundedDateClaims(subject, transcript, reference, timing) {
   getValidator();
-  if (!subject || !validateDateClaims(subject.date_claims)) return null;
-  const flat = normalizeForMatch(transcript);
-  const turns = speakerTurns(transcript);
-  const claims = [];
-  for (const claim of subject.date_claims) {
-    const quote = String(claim?.quote || '').trim();
-    const q = normalizeForMatch(quote);
-    const grounded = turns ? turns.ordered.some((turn) => turn.text.includes(q)) : flat.includes(q);
-    if (q.length < 3 || !grounded) return null;
-    const normalized = { binding: claim.binding, quote };
-    for (const part of ['year', 'month', 'day', 'weekday']) if (claim[part] !== undefined) normalized[part] = claim[part];
-    if (claim.binding !== 'unresolved' && !['year', 'month', 'day', 'weekday'].some((part) => normalized[part] !== undefined)) return null;
-    if (normalized.year && normalized.month && normalized.day) {
-      const date = new Date(Date.UTC(normalized.year, normalized.month - 1, normalized.day));
-      if (date.getUTCMonth() !== normalized.month - 1 || date.getUTCDate() !== normalized.day) return null;
-      if (normalized.weekday !== undefined && date.getUTCDay() !== normalized.weekday) return null;
-    }
-    claims.push(normalized);
-  }
-  return claims;
+  if (!subject || !validateDateClaims(subject.date_claims)
+    || !require('./reschedule-date-evidence').verifyRescheduleDateClaims(subject.date_claims, transcript, reference,
+      { ...timing, due_type: timing?.due_type || 'floor' })) return null;
+  return subject.date_claims.map(claim => ({ ...claim, quote: claim.quote.trim() }));
 }
 
-function groundModelCommitments(items, transcript) {
+function normalizedRescheduleSubject(item, transcript, reference) {
+  const input = item.subject && typeof item.subject === 'object' ? item.subject : {};
+  const dateClaims = groundedDateClaims(input, transcript, reference, item);
+  // The model cannot write these internal identity fields (its schema
+  // rejects them). Only independently proved appointment claims may
+  // distinguish incomplete obligations in the office ledger.
+  const identityClaims = dateClaims === null && Array.isArray(input.date_claims) && validateDateClaims(input.date_claims)
+    ? require('./reschedule-date-evidence').verifiedAppointmentIdentityClaims(input.date_claims, transcript, reference)
+    : [];
+  return { visit_date: input.visit_date, service: input.service, address: input.address, quote: input.quote,
+    date_claims: dateClaims, ...(dateClaims === null ? { identity_unresolved: true, identity_claims: identityClaims } : {}) };
+}
+
+function groundModelCommitments(items, transcript, reference = null) {
   const flat = normalizeForMatch(transcript);
   const turns = speakerTurns(transcript);
   const kept = [];
@@ -570,9 +579,7 @@ function groundModelCommitments(items, transcript) {
     // The model may omit a subject despite the prompt, or produce one bad
     // claim. Keep its visit fields but mark the claim list incomplete so the
     // consumer can fail closed. An explicit [] alone means "none spoken".
-    const subject = item.kind === 'send_reschedule_link'
-      ? { ...(item.subject && typeof item.subject === 'object' ? item.subject : {}), date_claims: groundedDateClaims(item.subject, transcript) }
-      : null;
+    const subject = item.kind === 'send_reschedule_link' ? normalizedRescheduleSubject(item, transcript, reference) : null;
     kept.push({
       party: item.party,
       kind: COMMITMENT_KINDS.includes(item.kind) ? item.kind : 'other',
@@ -622,7 +629,7 @@ async function extractCommitmentsWithModel(transcript, { callStartedAt = null, c
   if (!validate(parsed)) {
     return { items: [], skipped: 'schema_failed', errors: validate.errors, model: MODELS.FLAGSHIP, ms: Date.now() - startedAt };
   }
-  const grounded = groundModelCommitments(parsed.commitments, transcript);
+  const grounded = groundModelCommitments(parsed.commitments, transcript, callStartedAt ? new Date(callStartedAt) : null);
   return { items: grounded.kept, droppedUngrounded: grounded.droppedUngrounded, droppedLowConfidence: grounded.droppedLowConfidence, droppedMismatched: grounded.droppedMismatched, malformedDueAt: grounded.malformedDueAt, model: MODELS.FLAGSHIP, ms: Date.now() - startedAt };
 }
 
@@ -669,7 +676,9 @@ function appointmentConstraints(subject) {
     parts.day.add(day);
     parts.weekday.add(new Date(Date.UTC(year, month - 1, day)).getUTCDay());
   }
-  for (const claim of Array.isArray(subject?.date_claims) ? subject.date_claims : []) {
+  const claims = subject?.identity_unresolved === true && Array.isArray(subject.identity_claims)
+    ? subject.identity_claims : subject?.date_claims;
+  for (const claim of Array.isArray(claims) ? claims : []) {
     if (claim?.binding !== 'appointment') continue;
     for (const part of Object.keys(parts)) if (Number.isInteger(claim[part])) parts[part].add(claim[part]);
   }
@@ -707,8 +716,11 @@ function distinctCurrentVisit(oldSubject, newSubject) {
 // This marker is written by reconciliation only; the model schema rejects
 // it. A routine second extraction must not turn a parked identity back into
 // an auto-send merely because its newly generated key now exists exactly.
-function parkUnresolvedIdentity(row) {
-  row.subject = JSON.stringify({ ...parseRescheduleSubject(row.subject), date_claims: null, identity_unresolved: true });
+function parkUnresolvedIdentity(row, oldSubject = null) {
+  const subject = parseRescheduleSubject(row.subject);
+  const old = parseRescheduleSubject(oldSubject);
+  row.subject = JSON.stringify({ ...subject, date_claims: null, identity_unresolved: true,
+    ...(Array.isArray(old?.identity_claims) ? { identity_claims: old.identity_claims } : {}) });
 }
 
 async function reconcileRescheduleKeys(trx, callLogId, rows) {
@@ -729,7 +741,7 @@ async function reconcileRescheduleKeys(trx, callLogId, rows) {
     const exactKeys = new Set(siblings.map((row) => row.commitment_key));
     for (const row of siblings) {
       const exact = existing.find((old) => old.commitment_key === row.commitment_key);
-      if (parseRescheduleSubject(exact?.subject)?.identity_unresolved === true) parkUnresolvedIdentity(row);
+      if (parseRescheduleSubject(exact?.subject)?.identity_unresolved === true) parkUnresolvedIdentity(row, exact.subject);
     }
     const unmatched = siblings.filter((row) => !existing.some((old) => old.commitment_key === row.commitment_key));
     for (const row of unmatched) {
@@ -738,7 +750,7 @@ async function reconcileRescheduleKeys(trx, callLogId, rows) {
       const old = matches.length === 1 && !exactKeys.has(matches[0].commitment_key) ? matches[0] : null;
       if (old && siblings.filter((candidate) => legacyRescheduleMatches(old.subject, parseRescheduleSubject(candidate.subject))).length === 1) {
         row.commitment_key = old.commitment_key;
-        if (parseRescheduleSubject(old.subject)?.identity_unresolved === true) parkUnresolvedIdentity(row);
+        if (parseRescheduleSubject(old.subject)?.identity_unresolved === true) parkUnresolvedIdentity(row, old.subject);
       } else if (!subject || existing.some((prior) => !distinctCurrentVisit(prior.subject, subject))) {
         parkUnresolvedIdentity(row);
       }
