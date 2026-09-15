@@ -121,6 +121,103 @@ const TECH_360_STRIPPED_CUSTOMER_FIELDS = [
   'servicePausedAt', 'servicePausedOn', 'servicePauseReason',
 ];
 
+// Technician Customer 360 is a field-context view, not a raw database-row
+// export. Keep the service-history fields its three live consumers render and
+// exclude report credentials plus the job-cost columns on service_records.
+const TECH_360_SERVICE_FIELDS = [
+  'id', 'customer_id', 'technician_id', 'scheduled_service_id', 'service_id',
+  'service_date', 'service_type', 'service_line', 'status',
+  'technician_notes', 'notes', 'products_used', 'areas_treated', 'technician_name',
+  'soil_temp', 'thatch_measurement', 'soil_ph', 'soil_moisture', 'areas_serviced',
+  'customer_interaction', 'is_callback', 'completion_source',
+  'protocol_defaults_used', 'protocol_name', 'tech_attestation_text',
+  'customer_interaction_source', 'service_tier', 'service_tier_source',
+  'visit_number', 'started_at', 'arrived_at', 'actual_start_time', 'check_in_time',
+  'ended_at', 'completed_at', 'actual_end_time', 'check_out_time',
+  'created_at', 'updated_at',
+];
+
+// Customer 360 appointment consumers need identity, timing, assignment and
+// recurrence context. Pricing, payer/prepay/discount state, estimate lineage,
+// and prep-page credentials remain office-only and are deliberately absent.
+const TECH_360_SCHEDULED_FIELDS = [
+  'id', 'customer_id', 'technician_id', 'property_id', 'service_id', 'visit_id',
+  'scheduled_date', 'window_start', 'window_end', 'service_type',
+  'service_key_snapshot', 'service_category_snapshot', 'status', 'notes',
+  'internal_notes', 'customer_confirmed', 'confirmed_at', 'field_confirmed_at',
+  'technician_name', 'tech_name', 'is_recurring', 'recurring_parent_id',
+  'recurring_pattern', 'recurring_ongoing', 'recurring_nth',
+  'recurring_weekday', 'recurring_interval_days', 'skip_weekends',
+  'weekend_shift', 'zone', 'route_order', 'estimated_duration_minutes',
+  'service_address_line1', 'service_address_line2', 'service_address_city',
+  'service_address_state', 'service_address_zip', 'lat', 'lng',
+  'actual_start_time', 'actual_end_time', 'completed_at', 'created_at', 'updated_at',
+];
+
+function pickFields(source, fields) {
+  if (!source || typeof source !== 'object') return {};
+  return Object.fromEntries(fields.filter((field) => Object.prototype.hasOwnProperty.call(source, field))
+    .map((field) => [field, source[field]]));
+}
+
+function techSafeAuditRecord(record) {
+  if (!record || typeof record !== 'object') return null;
+  const safe = pickFields(record, [
+    'advisory', 'reasonCode', 'note', 'approvedByRole', 'approvedAt',
+    'recordedByRole', 'recordedAt', 'notRecorded', 'missing',
+    'cleanoutCompleted', 'cleanoutMethod', 'lastProductInTank', 'equipmentName',
+  ]);
+  if (Array.isArray(record.blocks)) {
+    safe.blocks = record.blocks.map((block) => pickFields(block, [
+      'code', 'message', 'source', 'productId', 'productName',
+    ]));
+  }
+  if (Array.isArray(record.warnings)) {
+    safe.warnings = record.warnings.map((warning) => pickFields(warning, ['code', 'message']));
+  }
+  return safe;
+}
+
+function techSafeInventoryDeduction(item) {
+  return pickFields(item, [
+    'productId', 'productName', 'amount', 'amountUnit', 'status', 'warning',
+    'deductedAmount', 'inventoryUnit',
+    // Older stored snapshots use snake_case; the live renderer supports both.
+    'product_id', 'product_name', 'amount_unit', 'deducted_amount', 'inventory_unit',
+  ]);
+}
+
+function techSafeStructuredNotes(value) {
+  let notes = value;
+  if (typeof notes === 'string') {
+    try { notes = JSON.parse(notes); } catch { return {}; }
+  }
+  if (!notes || typeof notes !== 'object' || Array.isArray(notes)) return {};
+  const safe = pickFields(notes, ['projectCompletion', 'projectType', 'portalAttached']);
+  for (const field of [
+    'waveguardManagerApproval', 'waveguardBlackoutApproval',
+    'waveguardNLimitApproval', 'waveguardInventoryAdvisory', 'waveguardTankCleanout',
+  ]) {
+    if (notes[field]) safe[field] = techSafeAuditRecord(notes[field]);
+  }
+  if (Array.isArray(notes.inventoryDeductions)) {
+    safe.inventoryDeductions = notes.inventoryDeductions.map(techSafeInventoryDeduction);
+  }
+  return safe;
+}
+
+function techSafeServiceRecord(record) {
+  const safe = pickFields(record, TECH_360_SERVICE_FIELDS);
+  if (record && Object.prototype.hasOwnProperty.call(record, 'structured_notes')) {
+    safe.structured_notes = techSafeStructuredNotes(record.structured_notes);
+  }
+  return safe;
+}
+
+function techSafeScheduledService(service) {
+  return pickFields(service, TECH_360_SCHEDULED_FIELDS);
+}
+
 // Appointment history for the customer-detail payload (`scheduled`): past +
 // future, all statuses, capped to the rows NEAREST ET-today (ties: newest
 // first). Consumers (ScheduleCustomerSidebar, MobileCustomerDetailSheet,
@@ -155,6 +252,9 @@ function techSafe360Payload(payload) {
   for (const key of TECH_360_STRIPPED_KEYS) delete out[key];
   out.customer = { ...payload.customer };
   for (const field of TECH_360_STRIPPED_CUSTOMER_FIELDS) delete out.customer[field];
+  out.services = (payload.services || []).map(techSafeServiceRecord);
+  out.scheduled = (payload.scheduled || []).map(techSafeScheduledService);
+  out.upcomingScheduled = (payload.upcomingScheduled || []).map(techSafeScheduledService);
   return out;
 }
 

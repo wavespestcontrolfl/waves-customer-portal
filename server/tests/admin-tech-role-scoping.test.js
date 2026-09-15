@@ -469,8 +469,46 @@ describe('techSafe360Payload', () => {
       contracts: [{ id: 1 }], annualPrepayTerms: [{ id: 1 }], prepaidPlans: [{ id: 1 }],
       notificationPrefs: {}, referralInfo: {}, customerDiscounts: [{ id: 1 }],
       healthScore: 88, tags: ['vip'],
-      preferences: { gate_code: '1234' }, services: [{ id: 's1' }],
-      scheduled: [{ id: 'v1' }], upcomingScheduled: [{ id: 'v2' }],
+      preferences: { gate_code: '1234' },
+      services: [{
+        id: 's1', scheduled_service_id: 'v1', service_type: 'Lawn care', service_date: '2026-09-01',
+        technician_name: 'Tech One', notes: 'Watch the gate', products_used: 'Product A',
+        revenue: 125, material_cost: 18, labor_cost: 35, drive_cost: 7,
+        total_job_cost: 60, gross_profit: 65, gross_margin_pct: 52,
+        revenue_per_man_hour: 150, cost_per_1000sf: 2.5, revenue_per_1000sf: 5,
+        report_view_token: 'report-bearer-token', report_pdf_url: '/reports/private.pdf',
+        structured_notes: {
+          projectCompletion: true,
+          projectType: 'termite',
+          portalAttached: true,
+          projectReport: { token: 'project-bearer-token', url: '/report/project/project-bearer-token' },
+          waveguardManagerApproval: {
+            advisory: true, recordedByRole: 'technician', recordedAt: '2026-09-01T12:00:00Z',
+            blocks: [{ code: 'repeat_product', message: 'Review rotation', productName: 'Product A', internal: 'office' }],
+          },
+          inventoryDeductions: [{
+            productId: 'p1', productName: 'Product A', status: 'deducted', deductedAmount: 2,
+            inventoryUnit: 'oz', costUsed: 11.25, cost_used: 11.25,
+          }],
+          invoiceAlreadySent: true,
+        },
+        service_data: { invoiceId: 'invoice-1' },
+        resolved_completion_snapshot: { private: true },
+      }],
+      scheduled: [{
+        id: 'v1', customer_id: 'c1', technician_id: 'tech-1', scheduled_date: '2026-09-01',
+        window_start: '09:00:00', window_end: '11:00:00', service_type: 'Lawn care',
+        status: 'completed', notes: 'Gate is on the left', is_recurring: true,
+        estimated_price: 125, primary_line_price: 100, prepaid_amount: 50,
+        prepaid_method: 'card', payer_id: 'payer-1', discount_dollars: 10,
+        source_estimate_id: 'estimate-1', prep_token: 'prep-bearer-token',
+        prep_expires_at: '2026-10-01T00:00:00Z', job_card: { paragraph: 'opaque' },
+      }],
+      upcomingScheduled: [{
+        id: 'v2', customer_id: 'c1', technician_id: 'tech-1', scheduled_date: '2026-10-01',
+        window_start: '10:00:00', service_type: 'Pest control', status: 'confirmed',
+        technician_name: 'Tech One', prep_token: 'future-prep-bearer-token', estimated_price: 89,
+      }],
       photos: [{ id: 'ph1' }], complianceRecords: [], nutrientLedger: { rows: [] },
       estimates: [{ id: 'e1' }],
     };
@@ -484,12 +522,88 @@ describe('techSafe360Payload', () => {
     expect(safe).not.toHaveProperty('estimates');
     // Field-relevant context survives.
     expect(safe.preferences).toEqual({ gate_code: '1234' });
-    expect(safe.services).toHaveLength(1);
-    expect(safe.upcomingScheduled).toHaveLength(1);
+    expect(safe.services[0]).toEqual(expect.objectContaining({
+      id: 's1', scheduled_service_id: 'v1', service_type: 'Lawn care',
+      technician_name: 'Tech One', notes: 'Watch the gate', products_used: 'Product A',
+    }));
+    expect(safe.services[0]).not.toHaveProperty('report_view_token');
+    expect(safe.services[0]).not.toHaveProperty('report_pdf_url');
+    for (const field of [
+      'revenue', 'material_cost', 'labor_cost', 'drive_cost', 'total_job_cost',
+      'gross_profit', 'gross_margin_pct', 'revenue_per_man_hour',
+      'cost_per_1000sf', 'revenue_per_1000sf',
+    ]) expect(safe.services[0]).not.toHaveProperty(field);
+    expect(safe.services[0]).not.toHaveProperty('service_data');
+    expect(safe.services[0]).not.toHaveProperty('resolved_completion_snapshot');
+    expect(safe.services[0].structured_notes).toEqual({
+      projectCompletion: true,
+      projectType: 'termite',
+      portalAttached: true,
+      waveguardManagerApproval: {
+        advisory: true,
+        recordedByRole: 'technician',
+        recordedAt: '2026-09-01T12:00:00Z',
+        blocks: [{ code: 'repeat_product', message: 'Review rotation', productName: 'Product A' }],
+      },
+      inventoryDeductions: [{
+        productId: 'p1', productName: 'Product A', status: 'deducted',
+        deductedAmount: 2, inventoryUnit: 'oz',
+      }],
+    });
+    expect(safe.services[0].structured_notes).not.toHaveProperty('projectReport');
+    expect(safe.services[0].structured_notes.inventoryDeductions[0]).not.toHaveProperty('costUsed');
+    expect(safe.services[0].structured_notes.inventoryDeductions[0]).not.toHaveProperty('cost_used');
+    expect(safe.scheduled[0]).toEqual(expect.objectContaining({
+      id: 'v1', technician_id: 'tech-1', scheduled_date: '2026-09-01',
+      window_start: '09:00:00', service_type: 'Lawn care', status: 'completed',
+      notes: 'Gate is on the left', is_recurring: true,
+    }));
+    expect(safe.upcomingScheduled[0]).toEqual(expect.objectContaining({
+      id: 'v2', scheduled_date: '2026-10-01', service_type: 'Pest control',
+      status: 'confirmed', technician_name: 'Tech One',
+    }));
+    for (const row of [...safe.scheduled, ...safe.upcomingScheduled]) {
+      for (const field of [
+        'prep_token', 'prep_expires_at', 'estimated_price', 'primary_line_price',
+        'prepaid_amount', 'prepaid_method', 'payer_id', 'discount_dollars',
+        'source_estimate_id', 'job_card',
+      ]) expect(row).not.toHaveProperty(field);
+    }
     expect(safe.photos).toHaveLength(1);
     // Original payload untouched (admin path reuses it).
     expect(payload.cards).toHaveLength(1);
     expect(payload.customer.monthlyRate).toBe(89);
+    expect(payload.services[0].report_view_token).toBe('report-bearer-token');
+    expect(payload.services[0].structured_notes.projectReport.token).toBe('project-bearer-token');
+    expect(payload.scheduled[0].prep_token).toBe('prep-bearer-token');
+  });
+
+  test('nested projections are mutation-isolated from the admin payload', () => {
+    const payload = {
+      customer: { id: 'c1' },
+      services: [{
+        id: 's1', notes: 'Original note',
+        structured_notes: {
+          waveguardManagerApproval: { blocks: [{ code: 'watch', message: 'Original warning' }] },
+          inventoryDeductions: [{ productId: 'p1', deductedAmount: 1 }],
+        },
+      }],
+      scheduled: [{ id: 'v1', notes: 'Original appointment note' }],
+      upcomingScheduled: [{ id: 'v2', notes: 'Original upcoming note' }],
+    };
+
+    const safe = techSafe360Payload(payload);
+    safe.services[0].notes = 'Changed';
+    safe.services[0].structured_notes.waveguardManagerApproval.blocks[0].message = 'Changed';
+    safe.services[0].structured_notes.inventoryDeductions[0].deductedAmount = 99;
+    safe.scheduled[0].notes = 'Changed';
+    safe.upcomingScheduled[0].notes = 'Changed';
+
+    expect(payload.services[0].notes).toBe('Original note');
+    expect(payload.services[0].structured_notes.waveguardManagerApproval.blocks[0].message).toBe('Original warning');
+    expect(payload.services[0].structured_notes.inventoryDeductions[0].deductedAmount).toBe(1);
+    expect(payload.scheduled[0].notes).toBe('Original appointment note');
+    expect(payload.upcomingScheduled[0].notes).toBe('Original upcoming note');
   });
 });
 
