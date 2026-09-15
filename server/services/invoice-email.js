@@ -8,6 +8,7 @@
  * we can attach PDFs without modifying the thin one-off email wrapper.
  */
 
+const { isDeepStrictEqual } = require('node:util');
 const logger = require('./logger');
 const db = require('../models/db');
 const { invoiceAmountDue } = require('./invoice-helpers');
@@ -335,6 +336,21 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     '— Waves Pest Control',
   ]);
 
+  const invoiceAtDispatch = async () => {
+    const current = await db('invoices').where({ id: invoice.id }).first();
+    await require('./estimate-deposits').assertInvoiceDepositSettlementReady(db, current, { lock: false });
+    // Reconciliation can finish while the PDF or template renders, leaving
+    // no pending ledger balance. Compare the committed row after the fence
+    // with the values used by BOTH the email and its attachment.
+    const fresh = await db('invoices').where({ id: invoice.id }).first();
+    if (!fresh || invoiceAmountDue(fresh) !== amountDue
+      || !isDeepStrictEqual(fresh.line_items || [], invoice.line_items || [])) {
+      return { ok: false, reason: 'Invoice balance changed while preparing email; retry delivery' };
+    }
+    if (!effectiveOverride) return require('./invoice-helpers').selfPayAtDispatch(invoice.id, db)();
+    return { ok: true };
+  };
+
   if (sendgrid.isConfigured()) {
     try {
       const result = await EmailTemplateLibrary.sendTemplate({
@@ -374,12 +390,8 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
         // What must not happen is the homeowner receiving a pay link for debt
         // that moved to AP while this send was being prepared.
         withProviderHandoff: async (dispatch) => {
-          const current = await db('invoices').where({ id: invoice.id }).first();
-          await require('./estimate-deposits').assertInvoiceDepositSettlementReady(db, current, { lock: false });
-          if (!effectiveOverride) {
-            const verdict = await require('./invoice-helpers').selfPayAtDispatch(invoice.id, db)();
-            if (verdict.ok !== true) return verdict;
-          }
+          const verdict = await invoiceAtDispatch();
+          if (verdict.ok !== true) return verdict;
           await dispatch();
           return { ok: true };
         },
@@ -414,6 +426,8 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   if (!transporter) return { ok: false, error: 'Email not configured', recipient: recipientPayload };
 
   try {
+    const verdict = await invoiceAtDispatch();
+    if (verdict.ok !== true) return { ok: false, error: verdict.reason, recipient: recipientPayload };
     await transporter.sendMail({
       from: '"Waves Pest Control, LLC" <contact@wavespestcontrol.com>',
       to: recipient.email,

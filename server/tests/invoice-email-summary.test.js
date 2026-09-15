@@ -7,11 +7,13 @@
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/sendgrid-mail', () => ({
-  isConfigured: () => true,
+  isConfigured: jest.fn(() => true),
   newsletterGroupId: () => null,
   serviceGroupId: () => null,
   sendOne: jest.fn(),
 }));
+jest.mock('nodemailer', () => ({ createTransport: jest.fn(() => ({ sendMail: jest.fn().mockResolvedValue({}) })) }));
+jest.mock('../services/email-fallback-gate', () => ({ smtpFallbackAllowed: () => true }));
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(),
 }));
@@ -80,6 +82,7 @@ function mockDb(invoice) {
 describe('sendInvoiceEmail service summary', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    require('../services/sendgrid-mail').isConfigured.mockReturnValue(true);
     EmailTemplates.sendTemplate.mockResolvedValue({ sent: true, message: { provider_message_id: 'sg-1' } });
   });
 
@@ -107,6 +110,54 @@ describe('sendInvoiceEmail service summary', () => {
       expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
     } finally {
       fence.mockRestore();
+    }
+  });
+
+  test.each([
+    ['reduced balance', { total: '101.00', line_items: [{ type: 'deposit_credit', amount: -49 }] }],
+    ['changed lines with the same total', { line_items: [{ type: 'deposit_credit', amount: -49 }, { amount: 49 }] }],
+  ])('blocks stale rendered email after %s', async (_label, changes) => {
+    mockDb(invoiceRow());
+    const dispatch = jest.fn();
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      mockDb(invoiceRow(changes));
+      const verdict = await withProviderHandoff(dispatch);
+      return { sent: verdict.ok, reason: verdict.reason };
+    });
+    const result = await sendInvoiceEmail('inv-1');
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/balance changed/);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test('dispatches an unchanged rendered invoice', async () => {
+    mockDb(invoiceRow());
+    const dispatch = jest.fn();
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      const verdict = await withProviderHandoff(dispatch);
+      return { sent: verdict.ok, reason: verdict.reason };
+    });
+    expect((await sendInvoiceEmail('inv-1', { recipientOverride: { email: 'office@example.com' } })).ok).toBe(true);
+    expect(dispatch).toHaveBeenCalledTimes(1);
+  });
+
+  test('SMTP rejects a balance changed during PDF rendering', async () => {
+    const previousPassword = process.env.GOOGLE_SMTP_PASSWORD;
+    process.env.GOOGLE_SMTP_PASSWORD = 'synthetic-test-password';
+    require('../services/sendgrid-mail').isConfigured.mockReturnValue(false);
+    mockDb(invoiceRow());
+    require('../services/pdf/invoice-pdf').buildInvoicePDFBuffer.mockImplementationOnce(async () => {
+      mockDb(invoiceRow({ total: '101.00' }));
+      return Buffer.from('old-pdf');
+    });
+    try {
+      const result = await sendInvoiceEmail('inv-1');
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatch(/balance changed/);
+      expect(require('nodemailer').createTransport.mock.results[0].value.sendMail).not.toHaveBeenCalled();
+    } finally {
+      if (previousPassword === undefined) delete process.env.GOOGLE_SMTP_PASSWORD;
+      else process.env.GOOGLE_SMTP_PASSWORD = previousPassword;
     }
   });
 

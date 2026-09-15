@@ -1670,6 +1670,49 @@ function estimateAcceptError(message, status = 422) {
   return err;
 }
 
+// Acceptance already owns the estimate row by the time it mints a first
+// invoice. A deposit receipt owns the ledger key before its estimate FK
+// check, so waiting on that key here can deadlock the receipt. Try-lock and
+// roll back the whole accept on contention; a retry sees the recorded money.
+async function lockAcceptInvoiceDepositLedger(trx, { estimateId, customerId, scheduledServiceId = null }) {
+  const retry = (message, code) => {
+    const err = estimateAcceptError(message, 409);
+    err.code = code;
+    throw err;
+  };
+  if (scheduledServiceId) {
+    const { SCHEDULED_SERVICE_INVOICE_MINT_LOCK } = require('../services/scheduled-invoice-mint');
+    const mint = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS acquired', [
+      SCHEDULED_SERVICE_INVOICE_MINT_LOCK, String(scheduledServiceId),
+    ]);
+    if (!mint.rows?.[0]?.acquired) retry('This visit invoice is being prepared. Please try again in a moment.', 'ACCEPT_INVOICE_BUSY_RETRY');
+  }
+  const setup = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?)) AS acquired', [
+    `unminted_setup_fee_manual_billing:${estimateId}`,
+  ]);
+  if (!setup.rows?.[0]?.acquired) retry('This estimate invoice is being prepared. Please try again in a moment.', 'ACCEPT_INVOICE_BUSY_RETRY');
+  // Hoist the invoice insert's FK locks before the ledger key. A collector
+  // can already own the customer row while waiting for that same key.
+  try {
+    // NOWAIT matters here: receipt/reconciliation and collection can own
+    // these rows while this accept owns the estimate. A blocked FK prelock
+    // would recreate the lock cycle the ledger try-lock avoids.
+    await trx.raw('SELECT id FROM customers WHERE id = ? FOR KEY SHARE NOWAIT', [customerId]);
+    if (scheduledServiceId) {
+      await trx.raw('SELECT id FROM scheduled_services WHERE id = ? FOR KEY SHARE NOWAIT', [scheduledServiceId]);
+    }
+  } catch (err) {
+    if (err.code === '55P03') retry('This invoice is being updated. Please try accepting again in a moment.', 'ACCEPT_INVOICE_BUSY_RETRY');
+    throw err;
+  }
+  const locked = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS acquired', [
+    'estimate.deposit.ledger', String(estimateId),
+  ]);
+  if (!locked.rows?.[0]?.acquired) {
+    retry('Your deposit is being recorded. Please try accepting again in a moment.', 'DEPOSIT_LEDGER_BUSY_RETRY');
+  }
+}
+
 function roundInvoiceAmount(value) {
   const amount = Number(value);
   return Number.isFinite(amount) ? Math.round(amount * 100) / 100 : null;
@@ -11312,11 +11355,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // after-tax total (a pre-tax cap here under-applied the credit on
         // taxed invoices and stranded the difference on the ledger) and
         // reports the effective amount back as applied_deposit_credit.
-        // Read through the accept trx so the consume below shares its
-        // snapshot; a read failure degrades to "no credit" (the deposit
-        // stays received on the ledger), never to an unbacked discount.
+        // Hold the deposit key across the read, invoice insert and exact
+        // consume. A competing receipt either commits before this read or
+        // records after our invoice commit and reconciles against it.
         const { pendingDepositCredit: pendingEstimateDepositCredit, consumeDepositCredit: consumeEstimateDepositCredit } = require('../services/estimate-deposits');
-        const invoiceDepositCredit = await pendingEstimateDepositCredit(estimate.id, trx).catch(() => null);
+        await lockAcceptInvoiceDepositLedger(trx, {
+          estimateId: estimate.id, customerId, scheduledServiceId: acceptLinkedSsId,
+        });
+        const invoiceDepositCredit = await pendingEstimateDepositCredit(estimate.id, trx);
         const requestedInvoiceDepositCredit = invoiceDepositCredit ? Number(invoiceDepositCredit.amount) : 0;
         const inv = await InvoiceService.create({
           database: trx,
@@ -11790,14 +11836,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               firstApplicationAmount: standardFirstApplicationAmount,
               firstScheduledServiceId: standardConversionResult.firstScheduledServiceId,
             }) ? standardConversionResult.firstScheduledServiceId : undefined;
-            // Acceptance deposit credits this first invoice — same trx-shared
-            // ledger read + consume as the invoice-mode mint above: the credit
-            // line exists IFF the ledger consumed exactly that amount, or the
-            // whole accept rolls back. A clean read failure degrades to "no
-            // credit" (the deposit stays received on the ledger and rolls
-            // forward), never to an unbacked discount.
+            // Acceptance deposit credits this first invoice under the same
+            // ledger key through read, insert and exact consumption. A read
+            // failure rolls back instead of publishing an unknown balance.
             const { pendingDepositCredit: pendingStandardDepositCredit, consumeDepositCredit: consumeStandardDepositCredit } = require('../services/estimate-deposits');
-            const standardDepositCredit = await pendingStandardDepositCredit(estimate.id, trx).catch(() => null);
+            await lockAcceptInvoiceDepositLedger(trx, {
+              estimateId: estimate.id, customerId, scheduledServiceId: attachScheduledServiceId,
+            });
+            const standardDepositCredit = await pendingStandardDepositCredit(estimate.id, trx);
             const requestedStandardDepositCredit = standardDepositCredit ? Number(standardDepositCredit.amount) : 0;
             const inv = await InvoiceService.create({
               database: trx,

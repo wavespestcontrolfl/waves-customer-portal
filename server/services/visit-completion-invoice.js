@@ -8,7 +8,7 @@ const { acquireScheduledInvoiceMintLock, TERMINAL_INVOICE_STATUSES } = require('
 const { lockStop, dateOnly } = require('./visit-groups');
 const { resolveBillingLane, completionInvoiceAmount } = require('./billing-lane');
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
-const { pendingDepositCredit, consumeDepositCredit } = require('./estimate-deposits');
+const { acquireEstimateDepositLedgerLock, pendingDepositCredit, consumeDepositCredit } = require('./estimate-deposits');
 
 function office(reason, serviceId = null) {
   return { state: 'office_required', reason, serviceId, invoiceId: null };
@@ -121,6 +121,11 @@ async function mintPacketInvoice({ packet, visit, members, customer, trx }) {
     if (offer) { offers.push(offer); lineItems.push(offer.lineItem); }
   }
   const sourceEstimateId = sourceIds[0];
+  // The packet already holds customer, visit and billed-member locks. Keep
+  // the deposit key through the read, invoice insert and exact consumption;
+  // a receipt arriving first is seen here, and one arriving later reconciles
+  // against the committed packet invoice.
+  if (sourceEstimateId) await acquireEstimateDepositLedgerLock(trx, sourceEstimateId);
   const deposit = sourceEstimateId ? await pendingDepositCredit(sourceEstimateId, trx) : null;
   const invoice = await InvoiceService.create({
     database: trx, customerId: customer.id, scheduledServiceId: billed[0].member.id,
