@@ -75,6 +75,33 @@ async function buildMemberLines(member, customer, trx) {
 }
 
 async function mintPacketInvoice({ packet, visit, members, customer, trx }) {
+  // Unlinked accepted-estimate writers use this same lock. Try rather than
+  // wait while holding the packet's customer/member rows, then recheck a
+  // writer that already committed before minting any packet invoice.
+  const estimateIds = [...new Set(members.map((member) => member.source_estimate_id).filter(Boolean))].sort();
+  for (const estimateId of estimateIds) {
+    const lock = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?)) AS locked',
+      [`unminted_setup_fee_manual_billing:${estimateId}`]);
+    if (!lock.rows[0].locked) {
+      // Contention does not prove a committed bill exists. Roll back this attempt
+      // so retrying can recheck coverage without freezing an office hold.
+      throw Object.assign(new Error('Estimate billing is being updated. Retry the closeout in a moment.'),
+        { code: 'visit_busy', status: 409, statusCode: 409, isOperational: true });
+    }
+    const unlinked = await trx('invoices').where({ customer_id: customer.id })
+      .whereNull('scheduled_service_id')
+      .where('notes', 'ilike', `%accepted estimate #${estimateId}%`)
+      .where(function relevantApplication() {
+        this.where('service_date', dateOnly(visit.scheduled_date)).orWhereNull('service_date');
+      }).forUpdate().noWait().select('status', 'line_items', 'notes');
+    const { invoiceContainsOnlySetupFeeCharges, invoiceContainsSetupFeeLine } = require('./estimate-first-application-invoice');
+    if (unlinked.some((invoice) => {
+      if (invoice.status === 'void') return false;
+      if (invoice.status === 'refunded') return true;
+      if (['canceled', 'cancelled'].includes(invoice.status)) return invoiceContainsSetupFeeLine(invoice);
+      return !invoiceContainsOnlySetupFeeCharges(invoice);
+    })) return office('existing_member_invoice');
+  }
   const existing = await trx('invoices').where(function linkedMember() {
     this.whereIn('scheduled_service_id', members.map((member) => member.id))
       .orWhereIn('service_record_id', members.map((member) => member.record_id));
@@ -151,6 +178,7 @@ async function mintPacketInvoice({ packet, visit, members, customer, trx }) {
       billedServiceIds: billed.map(({ member }) => member.id),
       billingLane: resolveBillingLane(customer).mode,
       memberPricing: billed.map(({ member }) => ({ id: member.id, price: Number(member.estimated_price),
+        serviceType: member.service_type, serviceId: member.service_id,
         isCallback: Boolean(member.is_callback), invoiceOnComplete: Boolean(member.create_invoice_on_complete) })),
     } })]), updated_at: trx.fn.now(),
   });
