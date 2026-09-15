@@ -221,6 +221,164 @@ describe('Customer360ProfileV2 profile state', () => {
     expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/customer-a'))).toHaveLength(2);
   });
 
+  it('discards A conversation data when its post-send refresh lands during the switch to B', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    const aRefresh = deferred();
+    const aRefreshComms = deferred();
+    const bDetail = deferred();
+    let aDetailReads = 0;
+    let aCommsReads = 0;
+    const fetchMock = vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/communications/sms')) return response({ sent: true });
+      if (path.endsWith('/customer-a/comms')) {
+        aCommsReads += 1;
+        return aCommsReads === 1 ? response({ comms: [] }) : aRefreshComms.promise;
+      }
+      if (path.endsWith('/customer-b/comms')) {
+        return response({ comms: [{ id: 'b-message', channel: 'sms', direction: 'inbound', body: 'Current B message' }] });
+      }
+      if (path.endsWith('/customer-a')) {
+        aDetailReads += 1;
+        const detail = customerDetail('customer-a', 'Avery');
+        detail.customer.phone = '+19415550100';
+        return aDetailReads === 1 ? response(detail) : aRefresh.promise;
+      }
+      if (path.endsWith('/customer-b')) return bDetail.promise;
+      return response({ timeline: [], commitments: [], enabled: true, has_more: false });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { rerender } = render(
+      <Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} initialTab="comms" />,
+    );
+    await screen.findAllByText('Avery Customer');
+    const composer = await screen.findByPlaceholderText('Type a message…');
+    fireEvent.change(composer, { target: { value: 'Message for A' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send', exact: true }));
+    await waitFor(() => {
+      expect(aDetailReads).toBe(2);
+      expect(aCommsReads).toBe(2);
+    });
+
+    rerender(<Customer360ProfileV2 customerId="customer-b" onClose={vi.fn()} initialTab="comms" />);
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/customer-b'))).toBe(true));
+    await act(async () => {
+      aRefresh.resolve(await response(customerDetail('customer-a', 'Avery')));
+      aRefreshComms.resolve(await response({
+        comms: [{ id: 'a-message', channel: 'sms', direction: 'inbound', body: 'Stale A message' }],
+      }));
+    });
+    await act(async () => {
+      const detail = customerDetail('customer-b', 'Blair');
+      detail.customer.phone = '+19415550101';
+      bDetail.resolve(await response(detail));
+    });
+
+    expect(await screen.findByText('Current B message')).toBeInTheDocument();
+    expect(screen.queryByText('Stale A message')).not.toBeInTheDocument();
+    expect(screen.getAllByText('Blair Customer').length).toBeGreaterThan(0);
+  });
+
+  it('keeps the current A draft and sending state when an earlier A POST finishes after A to B to A navigation', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    const firstPost = deferred();
+    const currentPost = deferred();
+    let aSends = 0;
+    let aDetailReads = 0;
+    const fetchMock = vi.fn((url, options = {}) => {
+      const path = String(url);
+      if (path.endsWith('/communications/sms')) {
+        const { customerId: sentCustomerId } = JSON.parse(options.body);
+        if (sentCustomerId === 'customer-a') {
+          aSends += 1;
+          return aSends === 1 ? firstPost.promise : currentPost.promise;
+        }
+      }
+      if (path.endsWith('/customer-a')) {
+        aDetailReads += 1;
+        const detail = customerDetail('customer-a', 'Avery');
+        detail.customer.phone = '+19415550100';
+        return response(detail);
+      }
+      if (path.endsWith('/customer-b')) {
+        const detail = customerDetail('customer-b', 'Blair');
+        detail.customer.phone = '+19415550101';
+        return response(detail);
+      }
+      return response({ comms: [], timeline: [], commitments: [], enabled: true, has_more: false });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const view = render(
+      <Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} initialTab="comms" />,
+    );
+    await screen.findAllByText('Avery Customer');
+    fireEvent.change(await screen.findByPlaceholderText('Type a message…'), { target: { value: 'First A message' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send', exact: true }));
+    await waitFor(() => expect(aSends).toBe(1));
+
+    view.rerender(<Customer360ProfileV2 customerId="customer-b" onClose={vi.fn()} initialTab="comms" />);
+    await screen.findAllByText('Blair Customer');
+    view.rerender(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} initialTab="comms" />);
+    await screen.findAllByText('Avery Customer');
+    const currentComposer = await screen.findByPlaceholderText('Type a message…');
+    fireEvent.change(currentComposer, { target: { value: 'Current A draft' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send', exact: true }));
+    await waitFor(() => expect(aSends).toBe(2));
+
+    await act(async () => { firstPost.resolve(await response({ sent: true })); });
+    expect(currentComposer).toHaveValue('Current A draft');
+    expect(screen.getByRole('button', { name: '…' })).toBeDisabled();
+    expect(aDetailReads).toBe(2);
+
+    await act(async () => { currentPost.resolve(await response({ sent: true })); });
+    await waitFor(() => expect(currentComposer).toHaveValue(''));
+    expect(screen.getByRole('button', { name: 'Send', exact: true })).toBeDisabled();
+    expect(aDetailReads).toBe(3);
+  });
+
+  it('does not show A send errors or lock the composer after switching to B', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    const aPost = deferred();
+    const fetchMock = vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/communications/sms')) return aPost.promise;
+      if (path.endsWith('/customer-a')) {
+        const detail = customerDetail('customer-a', 'Avery');
+        detail.customer.phone = '+19415550100';
+        return response(detail);
+      }
+      if (path.endsWith('/customer-b')) {
+        const detail = customerDetail('customer-b', 'Blair');
+        detail.customer.phone = '+19415550101';
+        return response(detail);
+      }
+      return response({ comms: [], timeline: [], commitments: [], enabled: true, has_more: false });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { rerender } = render(
+      <Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} initialTab="comms" />,
+    );
+    await screen.findAllByText('Avery Customer');
+    fireEvent.change(await screen.findByPlaceholderText('Type a message…'), { target: { value: 'Message for A' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send', exact: true }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/communications/sms'))).toBe(true));
+
+    rerender(<Customer360ProfileV2 customerId="customer-b" onClose={vi.fn()} initialTab="comms" />);
+    await screen.findAllByText('Blair Customer');
+    const composer = await screen.findByPlaceholderText('Type a message…');
+    expect(composer).toHaveValue('');
+    fireEvent.change(composer, { target: { value: 'Draft for B' } });
+    expect(screen.getByRole('button', { name: 'Send', exact: true })).toBeEnabled();
+
+    await act(async () => { aPost.resolve(await response({ error: 'A send failed' }, 503)); });
+    expect(screen.queryByText('A send failed')).not.toBeInTheDocument();
+    expect(composer).toHaveValue('Draft for B');
+    expect(screen.getByRole('button', { name: 'Send', exact: true })).toBeEnabled();
+  });
+
   it('shows this customer\'s unread count beside Message and clears it after reading', async () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });

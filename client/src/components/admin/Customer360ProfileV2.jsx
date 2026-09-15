@@ -9088,6 +9088,7 @@ function useCustomerMessages({
   embedded,
   activeTab,
   customerId,
+  customerIdRef,
   data,
   setData,
 }) {
@@ -9110,6 +9111,7 @@ function useCustomerMessages({
   };
   const commsSeqRef = useRef(0);
   const commsAbortRef = useRef(null);
+  const smsSeqRef = useRef(0);
   useEffect(() => {
     if (
       loading ||
@@ -9155,12 +9157,18 @@ function useCustomerMessages({
   useEffect(
     () => () => {
       if (commsAbortRef.current) commsAbortRef.current.abort();
+      smsSeqRef.current += 1;
     },
     [],
   );
   const sendSms = async () => {
     const c = data.customer;
     if (sendingSms || !smsReply.trim() || !c.phone) return;
+    const seq = ++smsSeqRef.current;
+    const forCustomerId = customerId;
+    const stillViewing = () =>
+      smsSeqRef.current === seq &&
+      String(customerIdRef.current) === String(forCustomerId);
     setSendingSms(true);
     setSmsErr("");
     try {
@@ -9173,27 +9181,31 @@ function useCustomerMessages({
           messageType: "manual",
         }),
       });
+      if (!stillViewing()) return;
       setSmsReply("");
       const [fresh, freshComms] = await Promise.all([
-        adminFetch(`/admin/customers/${customerId}`),
-        adminFetch(`/admin/customers/${customerId}/comms`).catch(() => ({
+        adminFetch(`/admin/customers/${forCustomerId}`),
+        adminFetch(`/admin/customers/${forCustomerId}/comms`).catch(() => ({
           comms: [],
         })),
       ]);
+      if (!stillViewing()) return;
       setData(fresh);
       setComms(freshComms.comms || []);
       setCommsReadScope(freshComms.readScope || null);
       setCommsLoaded(true);
     } catch (err) {
-      setSmsErr(err.message || "SMS failed to send");
+      if (stillViewing()) setSmsErr(err.message || "SMS failed to send");
+    } finally {
+      if (stillViewing()) setSendingSms(false);
     }
-    setSendingSms(false);
   };
   useEffect(() => {
     setMessageOpen(false);
     setMessageOpened(false);
     setLinkRequest(0);
     commsSeqRef.current += 1;
+    smsSeqRef.current += 1;
     if (commsAbortRef.current) commsAbortRef.current.abort();
     setCommsLoading(false);
     setCommsReadScope(null);
@@ -9201,7 +9213,12 @@ function useCustomerMessages({
     setCommsLoaded(false);
     setCommsComposerReady(false);
     setCommsErr("");
+    setSendingSms(false);
+    setSmsErr("");
   }, [customerId, profileReloadKey, isAdmin]);
+  useEffect(() => {
+    setSmsReply("");
+  }, [customerId]);
   return {
     comms,
     commsLoading,
@@ -9760,6 +9777,7 @@ export default function Customer360ProfileV2({
     embedded,
     activeTab,
     customerId,
+    customerIdRef,
     data,
     setData,
   });

@@ -112,10 +112,11 @@ const db = require('../models/db');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const scheduleRouter = require('../routes/admin-schedule');
 const customersRouter = require('../routes/admin-customers');
+const { technicianServicesCustomer } = require('../services/technician-visit-scope');
 
 const { scopeToAssignedTech, technicianOwnsScheduledService } = scheduleRouter._test;
 const {
-  technicianServicesCustomer, techSafeListRow, techSafeListFilters, techSafeSort,
+  techSafeListRow, techSafeListFilters, techSafeSort,
   techSafe360Payload,
   TECH_LIST_STRIPPED_FIELDS, TECH_360_STRIPPED_KEYS, TECH_360_STRIPPED_CUSTOMER_FIELDS,
 } = customersRouter._private;

@@ -74,6 +74,24 @@ function RemountableDirectory() {
 }
 
 describe('CustomersPageV2 workflow state', () => {
+  it.each(['/admin/customers', '/admin/customers?view=intelligence'])('keeps office intelligence out of technician navigation at %s', async (entry) => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(list) : response({})));
+    render(<MemoryRouter initialEntries={[entry]}><CustomersPageV2 /></MemoryRouter>);
+    await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
+    expect(screen.queryByRole('button', { name: 'Opportunities', exact: true })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add Customer', exact: true })).not.toBeInTheDocument();
+    expect(fetch.mock.calls.some(([url]) => String(url).includes('/customers/intelligence'))).toBe(false);
+  });
+
+  it('preserves the admin Opportunities navigation', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(list) : response({})));
+    render(<MemoryRouter initialEntries={['/admin/customers']}><CustomersPageV2 /></MemoryRouter>);
+    await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
+    expect(screen.getByRole('button', { name: 'Opportunities', exact: true })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add Customer', exact: true })).toBeInTheDocument();
+  });
+
   it('opens the churn alert with the at-risk filter and preserves manual changes on profile return', async () => {
     const requests = [];
     vi.stubGlobal('fetch', vi.fn((url) => {
