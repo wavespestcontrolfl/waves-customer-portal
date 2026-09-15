@@ -92,7 +92,7 @@ describe('unminted setup-fee parking — Charge Now beside-branch wiring', () =>
   });
 
   test('the mint hold releases when EITHER lookup found an invoice — the completion keeps reusing it', () => {
-    expect(dispatchSource).toMatch(/unmintedSetupFeeHold: !!unmintedSetupFeeObligation && !existingCompletionInvoice && !preMintedInvoice,/);
+    expect(dispatchSource).toMatch(/unmintedSetupFeeHold: !!unmintedSetupFeeObligation && !terminalCompletionInvoice && !existingCompletionInvoice && !preMintedInvoice,/);
   });
 });
 

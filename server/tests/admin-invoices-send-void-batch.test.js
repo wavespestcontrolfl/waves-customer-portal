@@ -22,6 +22,10 @@ jest.mock('../services/invoice', () => ({
   voidInvoice: jest.fn(),
   unvoidInvoice: jest.fn(),
 }));
+jest.mock('../services/setup-fee-alert-reconcile', () => ({
+  acceptedEstimateIdFromNotes: jest.requireActual('../services/setup-fee-alert-reconcile').acceptedEstimateIdFromNotes,
+  reconcileSetupFeeAlert: jest.fn(async () => {}),
+}));
 jest.mock('../services/short-url', () => ({
   shortenOrPassthrough: jest.fn(async (url) => url),
   invoiceShortCodePrefix: jest.fn(() => 'i'),
@@ -33,6 +37,7 @@ jest.mock('../utils/portal-url', () => ({
 const express = require('express');
 const db = require('../models/db');
 const InvoiceService = require('../services/invoice');
+const SetupFeeAlerts = require('../services/setup-fee-alert-reconcile');
 const router = require('../routes/admin-invoices');
 
 async function withServer(fn) {
@@ -53,6 +58,40 @@ const post = (baseUrl, path, body) => fetch(`${baseUrl}/admin/invoices${path}`, 
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify(body || {}),
+});
+
+describe('POST / accepted-estimate billing lock', () => {
+  const estimateId = 'e1000000-0000-0000-0000-000000000001';
+  let mockTrxRaw;
+  const createBody = (notes) => ({ customerId: 'cust-1', title: 'Setup fee',
+    lineItems: [{ description: 'WaveGuard Membership — one-time setup fee', amount: 99 }], notes });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    InvoiceService.create.mockResolvedValue({ id: 'inv-1', customer_id: 'cust-1', token: 'token-1' });
+    mockTrxRaw = jest.fn(async () => ({}));
+    db.transaction = jest.fn(async (work) => work({ raw: mockTrxRaw }));
+  });
+
+  test('mixed-case stamp takes the normalized estimate lock and reconciles after creation', async () => {
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/', createBody(`ACCEPTED ESTIMATE #${estimateId.toUpperCase()}.`));
+      expect(response.status).toBe(201);
+    });
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(mockTrxRaw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))',
+      [`unminted_setup_fee_manual_billing:${estimateId}`]);
+    expect(SetupFeeAlerts.reconcileSetupFeeAlert).toHaveBeenCalledWith(expect.objectContaining({ sourceEstimateId: estimateId }));
+  });
+
+  test('malformed freeform stamp does not take an estimate lock', async () => {
+    await withServer(async (baseUrl) => {
+      const response = await post(baseUrl, '/', createBody('accepted estimate #freeform.'));
+      expect(response.status).toBe(201);
+    });
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(SetupFeeAlerts.reconcileSetupFeeAlert).not.toHaveBeenCalled();
+  });
 });
 
 test('packet ownership refusal is an operator-visible 409 with a code', async () => {
