@@ -93,6 +93,33 @@ test.each(['9am', 'nine am'])('explicit clock %s and deadline wording must agree
     { due_at: '2026-09-11T09:00:00-04:00', due_type: 'deadline' })).toBe(false);
 });
 
+test.each([
+  ['Sunday September 20', { weekday: 0, month: 9, day: 20 }, true],
+  ['Sept 20', { month: 9, day: 20 }, true],
+  ['Monday September 20', { weekday: 1, month: 9, day: 20 }, false],
+])('normalizes only validated delivery date grammar for the deadline parser: %s', (text, parts, expected) => {
+  const claims = [claim(text, parts, 'delivery')];
+  const transcript = `Agent: I will text the reschedule link ${text} at 9am.`;
+  expect(verify(claims, transcript, reference,
+    { due_at: '2026-09-20T09:00:00-04:00', due_type: 'floor' })).toBe(expected);
+});
+
+test.each([
+  ['Tue', 2, '2026-09-15T09:00:00-04:00'], ['Tues', 2, '2026-09-15T09:00:00-04:00'],
+  ['Thur', 4, '2026-09-17T09:00:00-04:00'], ['Thurs', 4, '2026-09-17T09:00:00-04:00'],
+])('normalizes bare abbreviated delivery weekday %s', (text, weekday, due_at) => {
+  const claims = [claim(text, { weekday }, 'delivery')];
+  expect(verify(claims, `Agent: I will text the reschedule link ${text} at 9am.`, reference,
+    { due_at, due_type: 'floor' })).toBe(true);
+});
+
+test.each(['floor', 'deadline'])('a day-only %s promise cannot prove a model-selected clock', (due_type) => {
+  const prefix = due_type === 'deadline' ? 'by ' : '';
+  const claims = [claim('tomorrow', { year: 2026, month: 9, day: 14 }, 'delivery')];
+  const transcript = `Agent: I will text the reschedule link ${prefix}tomorrow.`;
+  expect(verify(claims, transcript, reference, { due_at: '2026-09-14T23:59:00-04:00', due_type })).toBe(false);
+});
+
 test.each(['by', 'before', 'no later than'])('%s requires a deadline; untyped historical rows retain their floor', (prefix) => {
   const transcript = `Agent: I will text the reschedule link ${prefix} tomorrow at eight pm.`;
   const claims = [claim('tomorrow', { year: 2026, month: 9, day: 14 }, 'delivery')];
