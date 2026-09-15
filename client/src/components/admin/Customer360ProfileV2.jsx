@@ -9165,10 +9165,9 @@ function useCustomerMessages({
     const c = data.customer;
     if (sendingSms || !smsReply.trim() || !c.phone) return;
     const seq = ++smsSeqRef.current;
-    const forCustomerId = customerId;
     const stillViewing = () =>
       smsSeqRef.current === seq &&
-      String(customerIdRef.current) === String(forCustomerId);
+      String(customerIdRef.current) === String(customerId);
     setSendingSms(true);
     setSmsErr("");
     try {
@@ -9184,8 +9183,8 @@ function useCustomerMessages({
       if (!stillViewing()) return;
       setSmsReply("");
       const [fresh, freshComms] = await Promise.all([
-        adminFetch(`/admin/customers/${forCustomerId}`),
-        adminFetch(`/admin/customers/${forCustomerId}/comms`).catch(() => ({
+        adminFetch(`/admin/customers/${customerId}`),
+        adminFetch(`/admin/customers/${customerId}/comms`).catch(() => ({
           comms: [],
         })),
       ]);
