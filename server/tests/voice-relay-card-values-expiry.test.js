@@ -173,4 +173,11 @@ describe('voice relay card expiration value parser', () => {
   ])('compares equivalent expiration forms: %s / %s', (supplied, candidate, expected) => {
     expect(cardValuesMatch(supplied, candidate)).toBe(expected);
   });
+
+  test('matches a spoken compound expiration year to its numeric echo', () => {
+    const supplied = cardFragmentsIn('My card expires September two thousand twenty-nine.');
+    expect(supplied).toEqual(['September 2029']);
+    expect(cardFragmentsIn('2029.', supplied)).toEqual(['2029']);
+    expect(cardValuesMatch('September two thousand twenty-nine', '09/29')).toBe(true);
+  });
 });

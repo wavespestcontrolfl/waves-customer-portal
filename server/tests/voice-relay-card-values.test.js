@@ -332,4 +332,39 @@ describe('voice relay card value parser', () => {
   ])('scopes billing month/day exemptions to their value span: %s', (text, expected) => {
     expect(cardFragmentsIn(text)).toEqual(expected);
   });
+
+  test.each([
+    ['My security code is two hundred three.', ['203']],
+    ['My security code is a hundred and three.', ['103']],
+    ['My card number is a thousand and three.', ['1003']],
+    ['My card number is twelve hundred.', ['1200']],
+    ['My card number is one hundred twenty-three.', ['123']],
+    ['My card number is twenty-three forty-five.', ['2345']],
+    ['My card number is four one one.', ['411']],
+    ['My card number is double twenty-three.', ['2323']],
+    ['My card number is two hundred three hundred.', ['200300']],
+    ['My card number is twenty thousand thirty-nine.', ['20039']],
+    ['My card number is twenty-three thousand thirty-nine.', ['23039']],
+    ['My card number is one hundred thousand twenty-three.', ['100023']],
+    ['My card number is one thousand two hundred thirty-four.', ['1234']],
+    ['My card number is twenty thousand thirty thousand.', ['2000030000']],
+  ])('normalizes English compound and grouped card values: %s', (text, expected) => {
+    expect(cardFragmentsIn(text)).toEqual(expected);
+  });
+
+  test.each([
+    ['My security code is two hundred three.', '203.'],
+    ['My card number is one hundred twenty-three.', '123.'],
+    ['My card number is twenty-three forty-five.', '2345.'],
+  ])('matches an English compound caller value to its numeric echo: %s', (caller, reply) => {
+    expect(cardFragmentsIn(reply, cardFragmentsIn(caller))).toEqual([reply.replace('.', '')]);
+  });
+
+  test.each([
+    ['I heard one hundred twenty-nine dollars and I heard four.', ['4']],
+    ['I heard two hundred applications and your security code is one hundred twenty-three.', ['123']],
+    ['The balance is one hundred twenty-nine and your card ends in twenty-three forty-five.', ['2345']],
+  ])('keeps compound amount and count explanations scoped to their spans: %s', (text, expected) => {
+    expect(cardFragmentsIn(text)).toEqual(expected);
+  });
 });

@@ -11,6 +11,13 @@ const NUMBER_WORDS_EN = Object.freeze({
 });
 const TEEN_WORDS_EN = Object.freeze({ ten: '10', eleven: '11', twelve: '12', thirteen: '13', fourteen: '14', fifteen: '15', sixteen: '16', seventeen: '17', eighteen: '18', nineteen: '19' });
 const TENS_WORDS_EN = Object.freeze({ twenty: '2', thirty: '3', forty: '4', fifty: '5', sixty: '6', seventy: '7', eighty: '8', ninety: '9' });
+const CARDINALS_EN = Object.freeze({
+  ...Object.fromEntries(Object.entries(NUMBER_WORDS_EN).map(([word, value]) => [word, Number(value)])),
+  ...Object.fromEntries(Object.entries(TEEN_WORDS_EN).map(([word, value]) => [word, Number(value)])),
+  ...Object.fromEntries(Object.entries(TENS_WORDS_EN).map(([word, value]) => [word, Number(value) * 10])),
+  hundred: 100,
+  thousand: 1000,
+});
 const NUMBER_WORD_EN_STRICT = [...Object.keys(NUMBER_WORDS_EN).filter((word) => word !== 'oh'), ...Object.keys(TEEN_WORDS_EN), ...Object.keys(TENS_WORDS_EN), 'hundred', 'thousand'].join('|');
 const NUMBER_RUN_EN_STRICT = `(?:(?:${NUMBER_WORD_EN_STRICT})\\b(?:\\s+and\\s+|[\\s-]+)?){1,6}`;
 const DIGITS = '\\d[\\d,]*(?:\\.\\d+)?';
@@ -19,23 +26,71 @@ const MONTHS = 'january|february|march|april|may|june|july|august|september|octo
 const SENTENCE_SPLIT_RE = /[.!?;]+(?=\s|$)/;
 const BILLING_AMOUNT_NOUN = 'balance|total|owe[sd]?|owing|amount (?:due|owed)|price[sd]?|cost[s]?|charge[sd]?|rate|fee|saldo|monto|debe|precio|cuesta|cobra|tarifa';
 
+const CARDINAL_TOKEN_EN = `(?:${Object.keys(CARDINALS_EN).join('|')})`;
+const CARDINAL_RUN_EN_RE = new RegExp(`\\b(?:(?:double|triple)[\\s-]+)?${CARDINAL_TOKEN_EN}(?:(?:[\\s,.-]+|\\s+and\\s+)(?:(?:double|triple)[\\s-]+)?${CARDINAL_TOKEN_EN})*\\b`, 'gi');
+
+function englishUnderHundred(words, start) {
+  const value = CARDINALS_EN[words[start]];
+  if (value >= 20 && value < 100 && value % 10 === 0) {
+    let unitIndex = start + 1;
+    if (words[unitIndex] === 'and') unitIndex += 1;
+    const unit = CARDINALS_EN[words[unitIndex]];
+    if (unit > 0 && unit < 10) return { value: value + unit, next: unitIndex + 1 };
+  }
+  return { value, next: start + 1 };
+}
+
+function englishUnderThousand(words, start) {
+  if (words[start] === 'hundred') {
+    const tail = englishUnderHundred(words, start + (words[start + 1] === 'and' ? 2 : 1));
+    return tail.value < 100 ? { value: 100 + tail.value, next: tail.next } : { value: 100, next: start + 1 };
+  }
+  const leading = englishUnderHundred(words, start);
+  if (leading.value >= 100 || words[leading.next] !== 'hundred') return leading;
+  let next = leading.next + 1;
+  let total = leading.value * 100;
+  if (words[next] === 'and') next += 1;
+  const tail = englishUnderHundred(words, next);
+  if (tail.value < 100 && words[tail.next] !== 'hundred') {
+    total += tail.value;
+    next = tail.next;
+  }
+  return { value: total, next };
+}
+
+function englishGroup(words, start) {
+  if (words[start] === 'thousand') {
+    const tail = englishUnderThousand(words, start + (words[start + 1] === 'and' ? 2 : 1));
+    return tail.value < 1000 ? { value: 1000 + tail.value, next: tail.next } : { value: 1000, next: start + 1 };
+  }
+  const leading = englishUnderThousand(words, start);
+  if (leading.value >= 1000 || words[leading.next] !== 'thousand') return leading;
+  let next = leading.next + 1;
+  let total = leading.value * 1000;
+  if (words[next] === 'and') next += 1;
+  const tail = englishUnderThousand(words, next);
+  if (tail.value < 1000 && words[tail.next] !== 'thousand') {
+    total += tail.value;
+    next = tail.next;
+  }
+  return { value: total, next };
+}
+
 function spokenDigitsEn(text) {
-  const token = `(?:(?:double|triple)[\\s-]+)?(?:${Object.keys(NUMBER_WORDS_EN).join('|')}|${Object.keys(TEEN_WORDS_EN).join('|')}|(?:${Object.keys(TENS_WORDS_EN).join('|')})(?:[\\s-]+(?:one|two|three|four|five|six|seven|eight|nine))?)`;
-  const re = new RegExp(`\\b${token}(?:[\\s,.-]+${token})*\\b`, 'gi');
-  return String(text || '').replace(re, (run) => {
-    let out = '';
+  return String(text || '').replace(CARDINAL_RUN_EN_RE, (run) => {
+    const words = run.toLowerCase().split(/[\s,.-]+/).filter(Boolean);
     let repeat = 1;
-    let tens = null;
-    for (const word of run.toLowerCase().split(/[\s,.-]+/).filter(Boolean)) {
-      if (word === 'double' || word === 'triple') { repeat = word === 'double' ? 2 : 3; continue; }
-      if (word in TENS_WORDS_EN) { if (tens) out += `${tens}0`; tens = TENS_WORDS_EN[word]; continue; }
-      let digits = NUMBER_WORDS_EN[word] || TEEN_WORDS_EN[word];
-      if (!digits) continue;
-      if (tens) { if (word in NUMBER_WORDS_EN && digits !== '0') digits = tens + digits; else out += `${tens}0`; tens = null; }
-      out += digits.repeat(repeat);
+    let out = '';
+    for (let index = 0; index < words.length;) {
+      const word = words[index];
+      if (word === 'double' || word === 'triple') { repeat = word === 'double' ? 2 : 3; index += 1; continue; }
+      if (word === 'and') { index += 1; continue; }
+      const group = englishGroup(words, index);
+      out += String(group.value).repeat(repeat);
       repeat = 1;
+      index = group.next;
     }
-    return tens ? `${out}${tens}0` : out;
+    return out;
   });
 }
 
