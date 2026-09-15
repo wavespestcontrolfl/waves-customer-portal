@@ -87,7 +87,7 @@ async function mintPacketInvoice({ packet, visit, members, customer, trx }) {
   if (sourceIds.length > 1) return office('mixed_estimate_billing');
   // A performed plan application discounted to zero can still owe its
   // accepted setup fee. Lock its fee authority, but only billed estimates
-  // inspect unlinked application invoices before this packet can mint.
+  // inspect stamped application invoices before this packet can mint.
   const billedEstimateIds = new Set(sourceIds.filter(Boolean));
   const feeEstimateIds = feeReviewCandidates.map((member) => member.source_estimate_id);
   for (const estimateId of [...new Set([...billedEstimateIds, ...feeEstimateIds])].sort()) {
@@ -98,10 +98,9 @@ async function mintPacketInvoice({ packet, visit, members, customer, trx }) {
         { code: 'visit_busy', status: 409, statusCode: 409, isOperational: true });
     }
     if (!billedEstimateIds.has(estimateId)) continue;
-    let unlinked;
+    let stamped;
     try {
-      unlinked = await trx('invoices').where({ customer_id: customer.id })
-        .whereNull('scheduled_service_id')
+      stamped = await trx('invoices').where({ customer_id: customer.id })
         .where('notes', 'ilike', `%accepted estimate #${estimateId}%`)
         .where(function relevantApplication() {
           this.where('service_date', dateOnly(visit.scheduled_date)).orWhereNull('service_date');
@@ -112,7 +111,7 @@ async function mintPacketInvoice({ packet, visit, members, customer, trx }) {
         { code: 'visit_busy', status: 409, statusCode: 409, isOperational: true });
     }
     const { invoiceContainsOnlySetupFeeCharges, invoiceContainsSetupFeeLine } = require('./estimate-first-application-invoice');
-    if (unlinked.some((invoice) => {
+    if (stamped.some((invoice) => {
       if (invoice.status === 'void') return false;
       if (invoice.status === 'refunded') return true;
       if (['canceled', 'cancelled'].includes(invoice.status)) return invoiceContainsSetupFeeLine(invoice);

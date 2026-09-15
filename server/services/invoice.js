@@ -1114,10 +1114,13 @@ const InvoiceService = {
       throw new Error('Visit invoice creation requires its owning transaction');
     }
     let linkedScheduledServiceId = scheduledServiceId;
-    if (!linkedScheduledServiceId && serviceRecordId) {
+    let linkedRecordServiceDate = null;
+    if (serviceRecordId) {
       const linkedRecord = await database('service_records')
-        .where({ id: serviceRecordId, customer_id: customerId }).first('scheduled_service_id');
-      linkedScheduledServiceId = linkedRecord?.scheduled_service_id || null;
+        .where({ id: serviceRecordId, customer_id: customerId })
+        .first('scheduled_service_id', 'service_date');
+      if (!linkedScheduledServiceId) linkedScheduledServiceId = linkedRecord?.scheduled_service_id || null;
+      linkedRecordServiceDate = linkedRecord?.service_date || null;
     }
 
     // Phase 2 atomicity: a NET-terms accrual (statement get/create + invoice
@@ -1173,7 +1176,7 @@ const InvoiceService = {
     }
     // A stamped writer may have waited behind packet adoption. Recheck its
     // owner inside the mint transaction, before creating another charge.
-    if (!linkedScheduledServiceId && stampedEstimateIdInNotes) {
+    if (stampedEstimateIdInNotes) {
       const packetConflict = () => Object.assign(
         new Error('This estimate is billed by its saved visit closeout. Resume that closeout.'),
         { status: 409, statusCode: 409, isOperational: true, code: 'VISIT_PACKET_OWNS_BILLING' });
@@ -1182,6 +1185,16 @@ const InvoiceService = {
         throw Object.assign(new Error('Estimate billing is being updated. Retry in a moment.'),
           { status: 409, statusCode: 409, isOperational: true, code: 'VISIT_PACKET_OWNS_BILLING' });
       };
+      // Match the date create() will persist: explicit input wins, then a
+      // service record's own completion date, then a scheduled-only visit.
+      // Pin a derived value so the later context read cannot validate one
+      // date here and insert another after a concurrent edit.
+      if (!serviceDate && serviceRecordId) serviceDate = linkedRecordServiceDate;
+      if (!serviceDate && !serviceRecordId && scheduledServiceId) {
+        const linkedScheduled = await database('scheduled_services')
+          .where({ id: scheduledServiceId, customer_id: customerId }).first('scheduled_date');
+        serviceDate = linkedScheduled?.scheduled_date || null;
+      }
       let packetOwners;
       try {
         packetOwners = await database('invoices as i')
