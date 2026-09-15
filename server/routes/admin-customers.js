@@ -3,7 +3,7 @@ const Joi = require('joi');
 const { normalizeContactRole } = require('../constants/contact-roles');
 const router = express.Router();
 const db = require('../models/db');
-const { addETDays } = require('../utils/datetime-et');
+const { technicianCurrentVisitFilter, technicianServicesCustomer } = require('../services/technician-visit-scope');
 const LeadScorer = require('../services/lead-scorer');
 const PipelineManager = require('../services/pipeline-manager');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
@@ -44,31 +44,8 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // to that tech. Admin requests are unscoped. Endpoints with no tech surface
 // at all (comms, timeline, credits, pipeline, CRM writes) are requireAdmin
 // outright.
-// Assignment currency — ONE predicate for every technician access path
-// (per-customer proxy AND the directory subquery): dead statuses never
-// authorize, and everything else (pending/confirmed/en_route/on_site/
-// completed) must sit inside the ET date window. Completed visits stay
-// accessible for post-visit paperwork; a stale never-actioned pending row
-// or a years-old completion grants nothing.
-const TECH_ACCESS_DEAD_STATUSES = ['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show'];
-const TECH_ACCESS_WINDOW_DAYS = 7;
-const techAccessCutoff = () => etDateString(addETDays(new Date(), -TECH_ACCESS_WINDOW_DAYS));
-
-function currentAssignmentFilter(q, technicianId) {
-  return q
-    .where('scheduled_services.technician_id', technicianId)
-    .whereNotIn('scheduled_services.status', TECH_ACCESS_DEAD_STATUSES)
-    .where('scheduled_services.scheduled_date', '>=', techAccessCutoff());
-}
-
-async function technicianServicesCustomer(req, customerId) {
-  if (req.techRole !== 'technician') return true;
-  const assigned = await currentAssignmentFilter(
-    db('scheduled_services').where({ customer_id: customerId }),
-    req.technicianId,
-  ).first('id');
-  return !!assigned;
-}
+// Assignment currency is shared with schedule, protocols and turf profiles
+// through technician-visit-scope; directory and detail must use the same rule.
 
 // Fields stripped from list rows for technician tokens. The field flows
 // that search customers (estimate builder, project-report picker) render
@@ -2316,9 +2293,9 @@ router.get('/', async (req, res, next) => {
     const isTechRequest = req.techRole === 'technician';
     const scopeTechAssigned = (q) => {
       if (isTechRequest) {
-        q.whereIn('customers.id', currentAssignmentFilter(
+        q.whereIn('customers.id', technicianCurrentVisitFilter(
+          req,
           db('scheduled_services').select('customer_id'),
-          req.technicianId,
         ));
       }
       return q;
@@ -2976,7 +2953,7 @@ router.get('/:id/latest-scheduled-service', async (req, res, next) => {
       // TECH'S OWN latest visit — without this, an office-scheduled
       // follow-up assigned to another tech leaks into the project modal.
       .modify((q) => {
-        if (req.techRole === 'technician') currentAssignmentFilter(q, req.technicianId);
+        technicianCurrentVisitFilter(req, q);
       })
       .orderBy('scheduled_date', 'desc')
       .orderBy('created_at', 'desc')
@@ -5697,7 +5674,6 @@ router._private = {
   SCHEDULED_HISTORY_LIMIT,
   customerScheduledHistoryQuery,
   customerScheduledHistory,
-  technicianServicesCustomer,
   techSafeListRow,
   techSafeListFilters,
   techSafeSort,
@@ -5705,7 +5681,6 @@ router._private = {
   TECH_LIST_STRIPPED_FIELDS,
   TECH_360_STRIPPED_KEYS,
   TECH_360_STRIPPED_CUSTOMER_FIELDS,
-  TECH_ACCESS_DEAD_STATUSES,
   adminMembershipDailyIdempotencyKey,
   adminMembershipStartIdempotencyKey,
   adminNotificationPrefsDbUpdates,
