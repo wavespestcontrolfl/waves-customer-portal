@@ -10,7 +10,7 @@ const MARKDOWN_LINK_DEFINITION_RE = /^\s*\[[^\]\n]+\]:\s*\S+/im;
 const BOILERPLATE_RE = /\bthank you for (?:reaching out|contacting us)\b|\bhope this (?:email )?finds you well\b|\bplease (?:do not|don't) hesitate to (?:reach out|contact us)\b|\blet us know if you have any (?:other |further )?questions\b/i;
 // Outbound corrections can legitimately supersede preparation instructions.
 // Screen prompt-control language rather than using the stricter exemplar gate.
-const OUTPUT_INSTRUCTION_RE = /\b(?:system|developer)\s+(?:prompt|instructions?)\b|(?:^|\n)\s*(?:assistant|system|user)\s*:|\b(?:ignore|disregard|forget|override)\s+(?:(?:all|the|any)\s+)?(?:previous|prior|above|earlier)\s+instructions?\b|\b(?:ignore|disregard|forget|override)\s+(?:(?:all|any|these|those)\s+)?instructions?\b|\b(?:do\s+not|don't|never)\s+follow\s+(?:(?:all|any|the)\s+)?(?:previous|prior|above|earlier)\s+instructions?\b|\b(?:ignore|disregard|forget|override)\b[^.!?]{0,80}\b(?:prompt|system|developer)\b|```/i;
+const OUTPUT_INSTRUCTION_RE = /\b(?:system|developer)\s+(?:prompt|instructions?)\b|(?:^|\n)\s*(?:assistant|system|user)\s*:|\b(?:ignore|disregard|forget|override)\s+(?:(?:all|the|any)\s+)?(?:previous|prior|above|earlier)\s+instructions?\b|\b(?:ignore|disregard|forget|override)\s+(?:(?:all|any|these|those)\s+)?instructions?\b|\b(?:do\s+not|don't|never)\s+follow\s+(?:(?:all|any|the|these|those)\s+)?(?:(?:previous|prior|above|earlier)\s+)?instructions?\b|\b(?:ignore|disregard|forget|override)\b[^.!?]{0,80}\b(?:prompt|system|developer)\b|```/i;
 // A payment or postal error identifier is not a property-access credential.
 // Remove only the explicitly labeled code/value span; the shared detector
 // still sees an actual gate or lockbox code elsewhere in the reply.
@@ -22,7 +22,7 @@ function normalizeCopy(text) {
 
 function wordCount(text) {
   const trimmed = String(text || '').trim();
-  return trimmed ? trimmed.split(/[\s\u2012-\u2015]+/).filter((word) => word && !/^[-\u2012-\u2015]+$/.test(word)).length : 0;
+  return trimmed ? trimmed.split(/[\s\u2012-\u2015]+/).filter((word) => word && !/^[-\u2010-\u2015\u2212]+$/.test(word)).length : 0;
 }
 
 function containsUnsupportedLink(text) {
@@ -51,12 +51,12 @@ function forgedSignature(text) {
   const closingAndName = closing.test(lines.at(-2) || '')
     && (/^\p{Lu}[\p{L}\p{M}'’.-]*(?: \p{Lu}[\p{L}\p{M}'’.-]*){0,3}$/u.test(lines.at(-1) || '')
       || /^\p{L}[\p{L}\p{M}'’-]*(?: \p{L}[\p{L}\p{M}'’-]*){0,3}$/u.test(lines.at(-1) || ''));
-  const inlineTerminalSignOff = /(?:^|[.!?]\s+|[,;]\s+|\n)(?:best|best regards|kind regards|warm regards|regards|sincerely|thanks|cheers|warmly),\s+(\p{L}[\p{L}\p{M}'’-]{1,31}(?:\s+\p{L}[\p{L}\p{M}'’-]{1,31}){0,2})[,.]?\s*$/iu.exec(text);
+  const inlineTerminalSignOff = /(?:^|[.!?]\s+|[,;]\s+|\n)(?:best|best regards|kind regards|warm regards|regards|sincerely|thanks|cheers|warmly),\s+(?!\b(?:i|we|you|they|he|she|it|this|that)\b)(\p{L}[\p{L}\p{M}'’-]{1,31}(?:\s+\p{L}[\p{L}\p{M}'’-]{1,31}){0,2})[,.]?\s*$/iu.exec(text);
   return (lines.length > 1 && (closing.test(lines.at(-1)) || closingAndName))
     || /(?:^|\n)\s*(?:[-–—]\s*)?(?:adam|virginia|the waves pest control team|waves team)\s*$/i.test(tail)
     || dashedName.test(tail)
     || (lines.length > 2 && namedSignOff)
-    || (inlineTerminalSignOff && inlineTerminalSignOff[1].split(/\s+/).every((name) => /^\p{Lu}/u.test(name)));
+    || Boolean(inlineTerminalSignOff);
 }
 
 function greetingMatches(draft, customer) {
