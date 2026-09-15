@@ -32,6 +32,21 @@ jest.setTimeout(30000);
 let mockCurrentRole = 'technician';
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+const mockSyncPrimaryAddress = jest.fn(async () => {});
+jest.mock('../services/customer-properties', () => ({
+  syncPrimaryAddress: (...args) => mockSyncPrimaryAddress(...args),
+}));
+const mockAddressFanout = jest.fn(async () => {});
+jest.mock('../services/customer-address-fanout', () => ({
+  propagateCustomerAddressChange: (...args) => mockAddressFanout(...args),
+}));
+const mockEnsureCustomerGeocoded = jest.fn(async () => null);
+const mockRegeocodeCustomerAddressGuarded = jest.fn(async () => null);
+jest.mock('../services/geocoder', () => ({
+  ensureCustomerGeocoded: (...args) => mockEnsureCustomerGeocoded(...args),
+  regeocodeCustomerAddressGuarded: (...args) => mockRegeocodeCustomerAddressGuarded(...args),
+}));
+jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => {}) }));
 jest.mock('../middleware/admin-auth', () => {
   const actual = jest.requireActual('../middleware/admin-auth');
   return {
@@ -369,6 +384,72 @@ describe('customer routes: assigned-customer proxy (technician role)', () => {
     await expect(technicianServicesCustomer(tech, 'cust-stale-pending')).resolves.toBe(false);
     // Cancelled visit — never authorizes, even with a future date.
     await expect(technicianServicesCustomer(tech, 'cust-dead')).resolves.toBe(false);
+  });
+});
+
+describe('customer profile address writes (admin role)', () => {
+  const customer = (overrides = {}) => ({
+    id: 'cust-address', account_id: 'acct-address', deleted_at: null,
+    first_name: 'Test', last_name: 'Customer', active: true,
+    address_line1: '10 Main St', address_line2: 'Unit 4',
+    city: 'Sarasota', state: 'FL', zip: '34236',
+    latitude: 27.1, longitude: -82.4,
+    waveguard_tier: null, monthly_rate: 0, billing_mode: null,
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockCurrentRole = 'admin';
+  });
+
+  test('an explicit unit clear reaches the primary mirror and uses guarded re-geocoding', async () => {
+    db.__state.customers = [customer()];
+
+    const { status } = await call('PUT', '/api/admin/customers/cust-address', { addressLine2: '' });
+
+    expect(status).toBe(200);
+    expect(mockSyncPrimaryAddress).toHaveBeenCalledWith(
+      expect.objectContaining({ address_line1: '10 Main St', address_line2: null }),
+      expect.anything(),
+      { explicitLine2: true },
+    );
+    expect(db.__state.writes).toContainEqual(expect.objectContaining({
+      table: 'customers', u: { latitude: null, longitude: null },
+    }));
+    expect(mockRegeocodeCustomerAddressGuarded).toHaveBeenCalledWith('cust-address');
+  });
+
+  test('a street move explicitly clears a stale property unit and uses guarded re-geocoding', async () => {
+    db.__state.customers = [customer({ address_line2: null })];
+
+    const { status } = await call('PUT', '/api/admin/customers/cust-address', { addressLine1: '20 Oak Street' });
+
+    expect(status).toBe(200);
+    expect(mockSyncPrimaryAddress).toHaveBeenCalledWith(
+      expect.objectContaining({ address_line1: '20 Oak St', address_line2: null }),
+      expect.anything(),
+      { explicitLine2: true },
+    );
+    expect(db.__state.writes).toContainEqual(expect.objectContaining({
+      table: 'customers', u: { latitude: null, longitude: null },
+    }));
+    expect(mockRegeocodeCustomerAddressGuarded).toHaveBeenCalledWith('cust-address');
+    expect(mockEnsureCustomerGeocoded).not.toHaveBeenCalled();
+  });
+
+  test('a locality-only edit keeps unspecified line 2 semantics while re-geocoding', async () => {
+    db.__state.customers = [customer()];
+
+    const { status } = await call('PUT', '/api/admin/customers/cust-address', { city: 'Venice' });
+
+    expect(status).toBe(200);
+    expect(mockSyncPrimaryAddress).toHaveBeenCalledWith(
+      expect.objectContaining({ city: 'Venice' }),
+      expect.anything(),
+      { explicitLine2: false },
+    );
+    expect(mockRegeocodeCustomerAddressGuarded).toHaveBeenCalledWith('cust-address');
   });
 });
 

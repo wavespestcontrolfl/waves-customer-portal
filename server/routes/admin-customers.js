@@ -4044,7 +4044,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
               .syncScalarWriteToLedger(trx, req.params.id, updates.monthly_rate, { source: 'admin_edit' });
           }
           if (addressChanged) {
-            await require('../services/customer-properties').syncPrimaryAddress(lockedAfter, trx);
+            await require('../services/customer-properties').syncPrimaryAddress(lockedAfter, trx, {
+              // A line-1 edit also rewrites line 2 from the normalized address:
+              // propagate its null on a street move instead of retaining a
+              // stale unit from the former primary-property row.
+              explicitLine2: updates.address_line2 !== undefined,
+            });
             // Open leads/estimates snapshot the address at creation and never
             // re-read customers.* — sync the copies that still match the old
             // address (matching rules in the fan-out service header).
@@ -4194,15 +4199,14 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       }
     }
 
-    // If address changed, re-geocode (clear lat/lng first so ensureCustomerGeocoded refreshes)
+    // Address normalization deliberately rewrites line 1 for a line-2 edit;
+    // retain the existing presence-triggered clear/re-geocode self-heal.
     const addressChanged = ['address_line1', 'city', 'state', 'zip'].some(f => updates[f] !== undefined);
     if (addressChanged) {
-      // lat/lng were already cleared inside the update transaction (gh-r46).
-      // Re-geocode the customer, then mirror the fresh coords onto the primary
-      // property — syncPrimaryAddress cleared them on the address edit, so without
-      // this the property row would stay permanently null after every address edit.
-      void require('../services/geocoder').ensureCustomerGeocoded(req.params.id)
-        .then((coords) => coords && require('../services/customer-properties').syncPrimaryCoordsFromCustomer(req.params.id))
+      // The guarded helper compares the full address snapshot before writing
+      // and mirrors customer/property coordinates in one transaction, so a
+      // slow response for an older edit cannot overwrite a newer address.
+      void require('../services/geocoder').regeocodeCustomerAddressGuarded(req.params.id)
         .catch(() => {});
     }
 
