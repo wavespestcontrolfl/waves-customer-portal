@@ -530,6 +530,258 @@ function clauseIsEpistemicallyHedged(clause) { return EPISTEMIC_HEDGE_RE.test(cl
 /** Does `cueRe` occur anywhere in the clause of `text` containing index `at`? */
 function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)); }
 
+// Payment outcomes use the same clause boundary as callback claims. A
+// refusal before "but" or "so" cannot excuse a subsequent success claim.
+const PAYMENT_ACTOR = '(?:i|we|they|(?:the|our) (?:office|team|billing department)|billing|someone|stripe|waves pest control|(?:(?:a|the|our|your|their) )?(?:bank|(?:payment |billing )?(?:processor|system))|(?:a|the|our) (?:team member|billing team|manager))';
+const PAYMENT_SUCCESS_ADVERBS = '(?:(?:not\\s+only|already|just|now|then|(?!(?:probably|possibly|potentially|apparently|supposedly|seemingly|allegedly|presumably|unlikely|likely|conditionally|partially|nearly)\\b)[a-z]+ly)\\s+)*';
+const PAYMENT_NON_OUTCOME_SUFFIX = '(?!\\s+(?:(?:(?:update|change|replacement)\\s+)?requests?|info(?:rmation)?|details?|methods?|links?|numbers?|digits?|expir(?:ation|y)|cvv|cvc|security\\s+code)\\b)';
+const PAYMENT_AMOUNT = `(?:\\$\\s*${DIGITS}|${DIGITS}\\s+(?:dollars?|bucks)|${NUMBER_RUN_EN_STRICT}(?:dollars?|bucks))`;
+const PAYMENT_TARGET = `(?:payments?|(?:(?:credit|debit|prepaid)\\s+)?cards?|charges?|transactions?)${PAYMENT_NON_OUTCOME_SUFFIX}(?:\\s+(?:of\\s+${PAYMENT_AMOUNT}|for\\s+${PAYMENT_AMOUNT}|from\\s+(?:yesterday|today|last\\s+\\w+)|that\\s+(?:you|we|they|i)\\s+(?:submitted|made|sent|authorized|approved|processed)|ending(?:\\s+in)?\\s+\\d{4}\\b))?`;
+const PAYMENT_OBJECT_PRONOUN = '(?:it|that(?!\\s+(?!(?:and|but|then|yet|so|if|unless|once|when|after|before|until|as|only|provided|providing|assuming|on|in|at|for|with|to|by|again|today|yesterday|tomorrow|last|just|now|already|successfully)\\b|[a-z]+ly\\b)[a-z]))';
+const PAYMENT_TRANSITIVE_SUCCESS = '(?:processed|charged|accepted|approved|completed|received|cleared|posted)';
+const PAYMENT_RESULT_STATE = '(?:processed|charged|accepted|approved|complete|completed|successful|received|cleared|posted)';
+const PAYMENT_INTRANSITIVE_SUCCESS = '(?:cleared|posted)';
+const PAYMENT_FUTURE_ACTION = '(?:process|charge|accept|approve|complete|receive|clear|post)';
+const PAYMENT_COMPLETED_ACTION = `(?:${PAYMENT_TRANSITIVE_SUCCESS}|(?:did|didn[\\x27\\u2019]t)\\s+(?:not(?:\\s+(?:only|just))?\\s+)?${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_FUTURE_ACTION})`;
+const PAYMENT_FUTURE_ACTOR_AUX = `(?:(?:\\s+(?:will|should)|[\\x27\\u2019]ll)\\s+|(?:\\s+(?:am|is|are)|[\\x27\\u2019](?:m|re|s))\\s+going\\s+to\\s+)`;
+const PAYMENT_OUTCOME_RE = new RegExp(
+  `\\b(?:${PAYMENT_ACTOR}(?:(?:\\s+(?:have|has|had)(?:n[\\x27\\u2019]t)?|[\\x27\\u2019](?:ve|d))\\s+|\\s+)(?:not(?:\\s+only)?\\s+)?${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_COMPLETED_ACTION}\\s+(?:(?:(?:your|the|that|this|a|both|all|these|those)\\s+)?${PAYMENT_TARGET}|${PAYMENT_OBJECT_PRONOUN}|${PAYMENT_AMOUNT}(?:\\s+to\\s+(?:(?:your|the|that|this|a|both|all|these|those)\\s+)?${PAYMENT_TARGET})?)|(?:${PAYMENT_TARGET}|that|it)(?:(?:\\s+(?:has|have|had|did)(?:n[\\x27\\u2019]t)?|[\\x27\\u2019](?:s|d))\\s+|\\s+)(?:not(?:\\s+only)?\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:go|goes|went|gone) through|(?:${PAYMENT_TARGET}|that|it)[\\x27\\u2019]s\\s+(?:not(?:\\s+only)?\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:been\\s+${PAYMENT_SUCCESS_ADVERBS})?${PAYMENT_RESULT_STATE}|(?:${PAYMENT_TARGET}|that|it) (?:(?:(?:is|are|was|were|got|went) (?:not(?: only)? )?|(?:has|have|had) (?:not(?: only)? )?${PAYMENT_SUCCESS_ADVERBS}been ))${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_RESULT_STATE}|(?:${PAYMENT_TARGET}|that|it)(?:(?:\\s+(?:has|have|had)(?:n[\\x27\\u2019]t)?|[\\x27\\u2019]s)\\s+|\\s+)(?:not(?:\\s+only)?\\s+)?${PAYMENT_SUCCESS_ADVERBS}succeeded|(?:${PAYMENT_TARGET}|that|it)\\s+(?:(?:has|have|had)\\s+)?(?:not(?:\\s+only)?\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:${PAYMENT_INTRANSITIVE_SUCCESS}|did\\s+(?:not(?:\\s+only)?\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:clear|post|succeed))(?:\\s+successfully)?|(?:${PAYMENT_TARGET})\\s+(?:not(?:\\s+only)?\\s+)?${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_RESULT_STATE}|you(?:[\\x27\\u2019]re|\\s+are) all paid)\\b`,
+  'gi',
+);
+const PAYMENT_FUTURE_OUTCOME_RE = new RegExp(
+  `\\b(?:${PAYMENT_ACTOR}${PAYMENT_FUTURE_ACTOR_AUX}${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_FUTURE_ACTION}\\s+(?:(?:(?:your|the|that|this|a|both|all|these|those)\\s+)?${PAYMENT_TARGET}|${PAYMENT_OBJECT_PRONOUN}|${PAYMENT_AMOUNT}(?:\\s+to\\s+(?:(?:your|the|that|this|a|both|all|these|those)\\s+)?${PAYMENT_TARGET})?)|(?:${PAYMENT_TARGET}|that|it)\\s+(?:(?:(?:will|should)\\s+|(?:is|are)\\s+going\\s+to\\s+)${PAYMENT_SUCCESS_ADVERBS}(?:go\\s+through|succeed|clear|post)|(?:(?:will|should)\\s+|(?:is|are)\\s+going\\s+to\\s+)${PAYMENT_SUCCESS_ADVERBS}be\\s+${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_RESULT_STATE}))\\b`,
+  'gi',
+);
+const PAYMENT_INHERITED_PREDICATE = `${PAYMENT_SUCCESS_ADVERBS}(?:(?:(?:is|are|was|were)|(?:has|have|had)\\s+${PAYMENT_SUCCESS_ADVERBS}been|(?:will|should)\\s+be|(?:is|are)\\s+going\\s+to\\s+be)\\s+${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_RESULT_STATE}|(?:has|have|had)\\s+${PAYMENT_SUCCESS_ADVERBS}(?:gone\\s+through|succeeded|${PAYMENT_INTRANSITIVE_SUCCESS})|(?:will|should)\\s+${PAYMENT_SUCCESS_ADVERBS}(?:go\\s+through|succeed|clear|post)|${PAYMENT_TRANSITIVE_SUCCESS}|succeeded|went\\s+through)`;
+const PAYMENT_INHERITED_SUBJECT_RE = new RegExp(
+  `\\b(?:(?:your|the|that|this|a|both|all|these|those)\\s+)?${PAYMENT_TARGET}\\b`,
+  'gi',
+);
+const PAYMENT_INHERITED_OUTCOME_RE = new RegExp(
+  `\\b(?:and|but|yet|then)\\s+(?<predicate>${PAYMENT_INHERITED_PREDICATE})\\b`,
+  'gi',
+);
+const PAYMENT_NON_TARGET_ANTECEDENT = '(?:appointment|estimate|service|visit|invoice|receipt|account|request|office|manager|technician|customer)';
+const PAYMENT_INTERVENING_SUBJECT_RE = new RegExp(
+  `\\b(?:(?:because|while|although|since|as)(?![^,]*,)|and|but|yet)\\s+(?:(?:(?:the|your|our|this|that|an?|his|her|their)\\s+)(?!${PAYMENT_TARGET}\\b)[a-z][\\w'-]*(?:\\s+[a-z][\\w'-]*){0,3}|${PAYMENT_NON_TARGET_ANTECEDENT})\\s+(?:is|was|are|were|has|had|will|should|does|did|got|gets?|became|becomes?|seems?|seemed|[a-z]+ed|went|ran|fell)\\b`,
+  'i',
+);
+const PAYMENT_TARGET_ES = '(?:(?:su|el|la|este|esta)\\s+)?(?:pago|tarjeta|cargo|transacci[oó]n)';
+const PAYMENT_RESULT_ES = '(?:aprobado|aprobada|procesado|procesada|completado|completada|recibido|recibida|cargado|cargada|cobrado|cobrada|aceptado|aceptada)';
+const PAYMENT_ACTIVE_ACTION_ES = '(?:procesar|cobrar|cargar|recibir|aceptar|aprobar|completar)';
+const PAYMENT_ACTIVE_PAST_ES = '(?:(?:proces|cobr|acept|aprob|complet)(?:[eé]|[oó]|amos|aron)|carg(?:u[eé]|[oó]|amos|aron)|recib(?:[ií]|i[oó]|imos|ieron))';
+const PAYMENT_ACTIVE_FUTURE_ES = '(?:procesar|cobrar|cargar|recibir|aceptar|aprobar|completar)(?:[eé]|emos|[aá]|[aá]n)';
+const PAYMENT_OUTCOME_ES_RE = new RegExp(
+  `\\b(?:${PAYMENT_TARGET_ES}\\s+(?:ya\\s+)?(?:fue|ha\\s+sido|ser[aá]|est[aá])\\s+${PAYMENT_RESULT_ES}|(?:he|hemos|han)\\s+${PAYMENT_RESULT_ES}\\s+${PAYMENT_TARGET_ES}|(?:(?:su|el)\\s+)?pago\\s+(?:ya\\s+)?se\\s+(?:realiz[oó]|proces[oó]|complet[oó])(?:\\s+(?:correctamente|con\\s+[eé]xito))?|(?:(?:voy|vamos|iremos)\\s+a\\s+${PAYMENT_ACTIVE_ACTION_ES}|${PAYMENT_ACTIVE_FUTURE_ES}|${PAYMENT_ACTIVE_PAST_ES})\\s+${PAYMENT_TARGET_ES})(?![a-záéíóúñ])`,
+  'gi',
+);
+const PAYMENT_EPISTEMIC_REFUSAL_ES_RE = /\bno\s+(?:(?:le|te)\s+)?(?:puedo|podemos|podr[ií]a(?:mos)?)\s+(?:confirmar|asegurar|garantizar|decir)\b/i;
+const PAYMENT_OUTCOME_RES = Object.freeze([PAYMENT_OUTCOME_RE, PAYMENT_FUTURE_OUTCOME_RE, PAYMENT_OUTCOME_ES_RE]);
+const PAYMENT_CONDITION_RE = /^\s*(?:(?:(?:only\s+)?(?:after|before|once|when|until)|as\s+soon\s+as)(?=\s+(?:i|you|we|they|he|she|it|the|your|our|this|that|submitt(?:ed|ing)|enter(?:ed|ing)|provid(?:ed|ing)|complet(?:ed|ing)|authori[sz](?:ed|ing)|paying|paid)\b)|cuando|despu[eé]s\s+de\s+que|una\s+vez\s+que)\b/i;
+const PAYMENT_PREREQUISITE_RE = /^\s*(?:(?:only\s+)?(?:after|once|when|until)|as\s+soon\s+as)\b[^.!?;,]{0,80}\b(?:submit(?:ted)?|enter(?:ed)?|provide(?:d)?|complete(?:d)?|authori[sz](?:e|ed)|pay|paid)\b/i;
+const PAYMENT_HISTORICAL_PREREQUISITE_RE = /^\s*,?\s*(?:(?:only\s+)?(?:after|before|once|when|until)|as\s+soon\s+as)\s+(?:i|you|we|they|he|she|(?:the|your|our|their)\s+[a-z]+(?:\s+(?!(?:is|are|was|were|has|have|had|will|should|can|could)\b)[a-z]+){0,2})\s+(?:(?:already|just)\s+)?(?:[a-z]+ed|paid|sent|went|ran|saw|got|had|spoke|told|made|took|wrote)\b/i;
+const PAYMENT_PAST_OUTCOME_RE = new RegExp(
+  `\\b(?:was|were|had|did|went|got|fue|he|hemos|han|realiz[oó]|proces[oó]|complet[oó])(?![a-záéíóúñ])|\\b${PAYMENT_ACTIVE_PAST_ES}\\s+${PAYMENT_TARGET_ES}\\b|\\b${PAYMENT_ACTOR}\\s+(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_TRANSITIVE_SUCCESS}\\b|\\b(?:${PAYMENT_TARGET}|that|it)\\s+(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_INTRANSITIVE_SUCCESS}\\b`,
+  'i',
+);
+const PAYMENT_PRESENT_PERFECT_OUTCOME_RE = new RegExp(
+  `(?:\\b(?:has|have)|[\\x27\\u2019](?:s|ve))\\s+${PAYMENT_SUCCESS_ADVERBS}(?:been\\s+${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_RESULT_STATE}|gone\\s+through|succeeded|${PAYMENT_TRANSITIVE_SUCCESS})\\b`,
+  'i',
+);
+const PAYMENT_TEMPORAL_ASIDE_RE = /^\s*before\s+(?:i\s+forget|you\s+go|we\s+finish)(?=\s*,|\s+(?:(?:your|the|that|this|both|all)\s+)?$)/i;
+const PAYMENT_TRAILING_CONDITION_RE = /^\s*,?\s*(?:(?:only\s+)?(?:if|unless)|(?:as|so)\s+long\s+as|provid(?:ed|ing)(?:\s+that)?|assuming(?:\s+that)?|on\s+(?:the\s+)?condition\s+that|si|a\s+menos\s+que)\b/i;
+// Courtesy asides qualify the offer of help or a receipt, not payment
+// success. Other conditions need no fixed vocabulary of prerequisites.
+const PAYMENT_CONDITIONAL_ASIDE_RE = /^\s*,?\s*(?:if|unless)\s+(?:(?:you\s+have|there\s+are)\s+(?:any\s+)?(?:(?:more|further)\s+)?questions?|(?:that|this|it)\s+(?:helps?|matters?|makes?\s+sense|answers?\s+your\s+question)|you\s+(?:(?:would\s+)?like|want|need)\s+to\s+(?:know|check\b[^.!?;,]{0,40}\bstatus)|you\s+(?:(?:would\s+)?like|want|need)\b[^.!?;,]{0,60}\b(?:receipt|anything\s+else|help|assistance))\b/i;
+const PAYMENT_DENIED_IMPLICATION_RE = /\b(?:that|this|it)\s+(?:does|did)(?:\s+not|n[\x27\u2019]t)\s+mean\b/i;
+function paymentDeniesImplication(prefix) {
+  const denied = PAYMENT_DENIED_IMPLICATION_RE.exec(prefix);
+  if (!denied) return false;
+  const complement = prefix.slice(denied.index + denied[0].length);
+  return /^\s+(?:that\s+)?(?:(?:your|the|this|a|an)\s+)?$/i.test(complement)
+    || (/\band\s*(?:(?:your|the|that|this|a|an)\s*)?$/i.test(prefix)
+      && PAYMENT_OUTCOME_RES.some((re) => new RegExp(re.source, 'i').test(complement)));
+}
+function paymentOutcomeIsNegated(claim, match) {
+  // "Didn't just process" entails processing, like "not only processed".
+  const matchedClaim = match[0].replace(/\bnot only\b|\b(?:didn[\x27\u2019]t|did not)\s+just\b/gi, '');
+  if (/\b(?:not|never)\b|\b\w+n[\x27\u2019]t\b/i.test(matchedClaim)) return true;
+  const matchOffset = claim.toLowerCase().lastIndexOf(match[0].toLowerCase());
+  if (matchOffset < 0) return false;
+  const prefix = claim.slice(0, matchOffset);
+  return /\b(?:none|neither)\s+of\s+(?:(?:the|your|our|their|these|those)\s+)?$/i.test(prefix)
+    || paymentDeniesImplication(prefix)
+    || /\b(?:no|not|nunca|jam[aá]s)\s+(?:(?:(?:se\s+)?(?:le|te|les|lo|la|los|las)|se)\s+)?(?:(?:your|the|that|this|a)\s+)?$/i.test(prefix);
+}
+function paymentOutcomeIsConditional(text, claimStart, claim, outcome, outcomeStart, trailingClaim) {
+  const matchOffset = claim.toLowerCase().lastIndexOf(outcome.toLowerCase());
+  if (matchOffset < 0) return false;
+  const prefix = claim.slice(0, matchOffset);
+  const clauseIntroduction = text.slice(claimStart, outcomeStart);
+  return (/^\s*(?:(?:as|so)\s+long\s+as|provid(?:ed|ing)(?:\s+that)?|assuming(?:\s+that)?|on\s+(?:the\s+)?condition\s+that|(?:only\s+)?if|unless|whether(?:\s+or\s+not)?|si|a\s+menos\s+que)\b/i.test(clauseIntroduction)
+      && !PAYMENT_CONDITIONAL_ASIDE_RE.test(clauseIntroduction))
+    || (/^\s*(?:(?:as|so)\s+long\s+as|provid(?:ed|ing)(?:\s+that)?|assuming(?:\s+that)?|on\s+(?:the\s+)?condition\s+that|(?:only\s+)?if|unless|whether(?:\s+or\s+not)?|si|a\s+menos\s+que)\b/i.test(claim)
+      && !PAYMENT_CONDITIONAL_ASIDE_RE.test(claim))
+    || /\b(?:(?:as|so)\s+long\s+as|provid(?:ed|ing)(?:\s+that)?|assuming(?:\s+that)?|on\s+(?:the\s+)?condition\s+that|(?:only\s+)?if|unless|whether(?:\s+or\s+not)?|si|a\s+menos\s+que)\s+(?:(?:your|the|that|this|a)\s+)?$/i.test(prefix)
+    || (PAYMENT_TRAILING_CONDITION_RE.test(trailingClaim)
+      && !PAYMENT_CONDITIONAL_ASIDE_RE.test(trailingClaim));
+}
+function paymentOutcomeIsInterrogative(text, claim, matchEnd, claimEnd) {
+  const trailingClaim = text.slice(matchEnd, claimEnd);
+  const followup = trailingClaim.match(/^[^,!?;]*,\s*(?:(?:and|y)\s+)?(.*)$/i);
+  const contractedTag = followup && /^\s*(?:(?:[a-z]+n|ca)[\x27\u2019]t)\s+(?:it|that)\s*$/i.test(followup[1]);
+  const followupQuestion = followup && !contractedTag && (/^\s*¿(?!\s*(?:verdad|cierto|correcto|no|s[ií])\s*$)/i.test(followup[1]) || new RegExp(
+    `^\\s*¿?\\s*(?:${QUESTION_AUX_RE_SOURCE}|(?:do|does|did|would|have|has|had|could|should|is|are|was|were|ca|wo|sha)n[\\x27\\u2019]t|(?:what|when|where|which|who|whom|whose|why|how)\\b[^,.!?;]{0,40}\\b${QUESTION_AUX_RE_SOURCE}|(?:need\\s+)?(?:anything|something)\\s+else|(?:any\\s+)?(?:(?:more|further)\\s+)?questions?|(?:quiere|quieres|desea|deseas|puedo|podemos|puede|puedes|podr[ií]a(?:mos)?))\\b`,
+    'i',
+  ).test(followup[1]));
+  const coordinatedQuestion = new RegExp(
+    `^\\s*(?:(?:and|but|yet|then)\\s+${PAYMENT_INHERITED_PREDICATE}\\s*)+(?:,\\s*(?:right|correct|yes|no|okay|ok|isn[\\x27\\u2019]t\\s+it|didn[\\x27\\u2019]t\\s+it))?\\s*\\?`, 'i',
+  ).test(text.slice(claimEnd).replace(/\bnot(?:\s+only)?\s+/gi, ''));
+  return QUESTION_LEAD_RE.test(claim) || coordinatedQuestion || (text[claimEnd] === '?' && !followupQuestion);
+}
+function paymentOutcomeHasTemporalCondition(text, claim, claimStart, outcome, outcomeStart, trailingClaim) {
+  if (PAYMENT_HISTORICAL_PREREQUISITE_RE.test(text.slice(claimStart, outcomeStart))
+    || PAYMENT_HISTORICAL_PREREQUISITE_RE.test(trailingClaim)) return false;
+  if (PAYMENT_TEMPORAL_ASIDE_RE.test(text.slice(claimStart, outcomeStart))) return false;
+  const beforeOutcome = claim.slice(0, claim.toLowerCase().lastIndexOf(outcome.toLowerCase()));
+  const outcomeCondition = PAYMENT_CONDITION_RE.test(claim)
+    || /\b(?:after|before|once|when|until|as\s+soon\s+as|cuando|despu[eé]s\s+de\s+que|una\s+vez\s+que)\s+(?:(?:your|the|that|this|a|su|el|la|este|esta)\s+)?$/i.test(beforeOutcome);
+  const introduction = text.slice(claimStart, outcomeStart);
+  const futureOutcome = /\b(?:will|should|going\s+to)\b|[\x27\u2019]ll\b/i.test(outcome)
+    || new RegExp(`\\b(?:ser[aá]|(?:voy|vamos|iremos)\\s+a|${PAYMENT_ACTIVE_FUTURE_ES})(?![a-záéíóúñ])`, 'i').test(outcome);
+  const attachedPrerequisite = (futureOutcome && PAYMENT_CONDITION_RE.test(introduction))
+    || PAYMENT_PREREQUISITE_RE.test(introduction)
+    || PAYMENT_CONDITION_RE.test(trailingClaim.replace(/^\s*,\s*/, ''));
+  const pastOutcome = PAYMENT_PAST_OUTCOME_RE.test(outcome);
+  const completedPresentPerfect = PAYMENT_PRESENT_PERFECT_OUTCOME_RE.test(outcome);
+  return (outcomeCondition && (!pastOutcome || completedPresentPerfect))
+    || (attachedPrerequisite && !pastOutcome && !completedPresentPerfect);
+}
+function paymentOutcomePronounHasNonTargetAntecedent(text, match) {
+  if (!/^(?:it|that)\b|\b(?:it|that)$/i.test(match[0])) return false;
+  // Pronouns can refer to the preceding sentence; only assertion/refusal
+  // scope is clause-local, while the nearest explicit referent persists.
+  const sentencePrefix = text.slice(0, match.index);
+  const relativeSubject = /^that\b/i.test(match[0])
+    && /\b(?:your|the|an?|my|our|their|this)\s+[a-z][\w'-]*\s+$/i.test(sentencePrefix);
+  // Use the last explicit noun phrase, excluding locative adjuncts such as
+  // "in the portal" after "checked your payment". Its head can be any noun;
+  // an allowlist of non-payment nouns misses ordinary forms and documents.
+  const phrases = [...sentencePrefix.matchAll(/\b(?:your|the|an?|my|our|their|this|that)\s+[a-z][\w'-]*(?:\s+(?!(?:your|the|an?|my|our|their|this|that|it|and|or|then|but|in|on|at|to|from|for|with|by)\b)[a-z][\w'-]*){0,2}/gi)];
+  for (const phrase of phrases.reverse()) {
+    const before = sentencePrefix.slice(0, phrase.index);
+    if (!relativeSubject && /\b(?:in|on|at|to|from|for|with|by|about|through|after|before|under)\s*$/i.test(before)) continue;
+    // A reporting actor supplies evidence, not the object being approved.
+    if (/\b(?:says?|said|reports?|reported|confirms?|confirmed|indicates?|indicated|shows?|showed)\s*$/i.test(phrase[0])) continue;
+    if (/\b(?:review(?:ed|s)?|check(?:ed|s)?|process(?:ed|es)?)\s*$/i.test(phrase[0])
+      && /^\s+it\b/i.test(sentencePrefix.slice(phrase.index + phrase[0].length))) continue;
+    const candidate = phrase[0].split(/\s+\b(?:and|or|then|but|in|on|at|to|from|for|with|by|was|were|is|are|has|had|will|should|did|does|do)\b/i)[0];
+    return !new RegExp(`\\b${PAYMENT_TARGET}\\b`, 'i').test(candidate);
+  }
+  const payment = [...sentencePrefix.matchAll(new RegExp(`\\b${PAYMENT_TARGET}\\b`, 'gi'))].pop();
+  const nonTarget = [...sentencePrefix.matchAll(new RegExp(`\\b${PAYMENT_NON_TARGET_ANTECEDENT}\\b`, 'gi'))].pop();
+  return Boolean(nonTarget && (!payment || nonTarget.index > payment.index));
+}
+function paymentOutcomeHasSpanishRefusal(claim, outcomeStart) {
+  const beforeOutcome = claim.slice(0, outcomeStart);
+  const refusal = [...beforeOutcome.matchAll(new RegExp(PAYMENT_EPISTEMIC_REFUSAL_ES_RE.source, 'gi'))].pop();
+  if (!refusal) return false;
+  const coordinator = [...beforeOutcome.matchAll(/\by\s+/gi)].pop();
+  if (!coordinator || coordinator.index < refusal.index) return true;
+  const independent = beforeOutcome.slice(coordinator.index + coordinator[0].length);
+  if (/\b(?:puedo|podemos)\s+(?:confirmar|asegurar|garantizar|decir)\b/i.test(independent)) return false;
+  const governed = beforeOutcome.slice(refusal.index, coordinator.index);
+  return /\bque\b/i.test(governed)
+    && new RegExp(PAYMENT_OUTCOME_ES_RE.source, 'i').test(governed);
+}
+function paymentClaimContext(text, start, end) {
+  // Mask decimal punctuation only for scope detection, preserving offsets
+  // and returning the original amount spelling to the outcome classifier.
+  const scopeText = text.replace(/(?<=\d)\.(?=\d)/g, ' ');
+  const [boundary] = clauseBounds(scopeText, start);
+  const causal = [...scopeText.slice(boundary, start).matchAll(/\b(?:now\s+that|since|as(?!\s+(?:long|soon)\s+as))\s+(?=(?:your|the|this|that|a|an|i|we|they|our)\b)/gi)]
+    .filter((match) => !/\bas\s+(?:soon|long)\s+$/i.test(scopeText.slice(boundary, boundary + match.index))).pop();
+  if (causal) return text.slice(boundary + causal.index + causal[0].length, end);
+  const prefix = scopeText.slice(0, boundary).split(/[.!?;]/).pop();
+  // Unpunctuated "and" can coordinate two complements of the same
+  // condition/refusal. Commas and adversatives introduce separate claims.
+  const coordinated = /\band\s*$/i.test(prefix) && !/[,—–]|\b(?:but|yet|so)\b/i.test(prefix);
+  const hedge = EPISTEMIC_HEDGE_RE.exec(prefix);
+  const complement = hedge ? prefix.slice(hedge.index + hedge[0].length) : '';
+  const refusedComplement = /\b(?:whether|is|are|was|were|has|have|had|will|should|did)\b/i.test(complement)
+    || PAYMENT_OUTCOME_RES.some((re) => new RegExp(re.source, 'i').test(complement));
+  const governed = /^\s*(?:(?:as|so)\s+long\s+as|provid(?:ed|ing)(?:\s+that)?|assuming(?:\s+that)?|on\s+(?:the\s+)?condition\s+that|(?:only\s+)?if|unless|whether)\b/i.test(prefix)
+    || PAYMENT_CONDITION_RE.test(prefix)
+    || (hedge && refusedComplement)
+    || (paymentDeniesImplication(prefix)
+      && !new RegExp(`^\\s*(?:i|we|they)\\s+(?:can\\s+)?${vocabAlt(EPISTEMIC_REFUSAL_VERBS)}\\b`, 'i').test(text.slice(boundary, start)));
+  return coordinated && governed
+    ? text.slice(boundary - prefix.length, end)
+    : text.slice(end - claimContext(scopeText, start, end).length, end);
+}
+function* inheritedPaymentOutcomeCandidates(text) {
+  for (const subject of text.matchAll(PAYMENT_INHERITED_SUBJECT_RE)) {
+    const subjectEnd = subject.index + subject[0].length;
+    const subjectSuffix = text.slice(subjectEnd).split(/[.!?;—–]/)[0];
+    for (const match of subjectSuffix.matchAll(PAYMENT_INHERITED_OUTCOME_RE)) {
+      if (match.index > 120) break;
+      const { predicate } = match.groups;
+      const bridge = subjectSuffix.slice(0, match.index);
+      if (/^yet\b/i.test(match[0]) && /\bnot\s*$/i.test(bridge)) continue;
+      const predicateStart = subjectEnd + match.index + match[0].lastIndexOf(predicate);
+      const afterPredicate = text.slice(predicateStart + predicate.length);
+      const bareAction = new RegExp(`^${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_TRANSITIVE_SUCCESS}\\b`, 'i').test(predicate);
+      const sharedQualifier = /\b(?:not|never|cannot|can|could|may|might|\w+n[\x27\u2019]t)\b/i.test(bridge.replace(/\bnot only\b/gi, ''))
+        && !/[,—–]|\b(?:but|yet|then|so|it|that)\b/i.test(bridge);
+      if (bareAction && /^and\b/i.test(match[0]) && sharedQualifier) continue;
+      const object = afterPredicate.match(/^\s+(?!(?:and|but|yet|so|if|unless|once|when|after|before|already|just|now|successfully|yesterday|today|tomorrow|last|shortly|again|in|on|at|for|with|to)\b)(?:(?:your|the|an?|my|our|their|this)\s+)?[a-z][\w'-]*\b/i);
+      const objectTarget = new RegExp(`^(?:(?:your|the|an?|my|our|their|this|that)\\s+)?(?:${PAYMENT_TARGET}|${PAYMENT_OBJECT_PRONOUN})\\b`, 'i');
+      const paymentObject = objectTarget.test(afterPredicate.trimStart())
+        && !paymentOutcomePronounHasNonTargetAntecedent(text, { 0: afterPredicate.trim().split(/\s+/)[0], index: predicateStart });
+      // An intervening actor can still act on the same payment object.
+      const interrupted = PAYMENT_INTERVENING_SUBJECT_RE.test(bridge);
+      if (interrupted && !(bareAction && paymentObject)) continue;
+      if (bareAction && object && !paymentObject) continue;
+      // Resolve the payment referent across clauses, but keep a renewed
+      // pronoun assertion outside an earlier refusal's scope.
+      const renewedSubject = [...bridge.matchAll(/\b(?:and|but|yet|so)\s+(?<subject>it|that)\b/gi)].pop();
+      const subjectStart = renewedSubject
+        ? subjectEnd + renewedSubject.index + renewedSubject[0].lastIndexOf(renewedSubject.groups.subject)
+        : subject.index;
+      const independentAdversative = /,\s*$/.test(bridge) && /^(?:but|yet)\b/i.test(match[0]);
+      const claim = independentAdversative
+        ? `${subject[0]} ${predicate}`
+        : paymentClaimContext(text, subjectStart, predicateStart + predicate.length);
+      yield { match: { 0: predicate, index: predicateStart }, claim };
+    }
+  }
+}
+/** value: true */
+function no_payment_outcome(value, record, { spoken }) {
+  for (const text of spoken) {
+    const scopeText = text.replace(/(?<=\d)\.(?=\d)/g, ' ');
+    // Explicit language matches precede inferred predicates. Both use the
+    // same antecedent validation and exemption rules below.
+    const direct = PAYMENT_OUTCOME_RES.flatMap((re) => [...text.matchAll(re)])
+      .map((match) => ({ match, claim: paymentClaimContext(text, match.index, match.index + match[0].length) }));
+    for (const { match, claim } of [...direct, ...inheritedPaymentOutcomeCandidates(text)]) {
+      if (paymentOutcomePronounHasNonTargetAntecedent(text, match)) continue;
+      const [claimStart, claimEnd] = clauseBounds(scopeText, match.index);
+      const matchEnd = match.index + match[0].length;
+      const trailingClaim = text.slice(matchEnd, claimEnd);
+      const exempt = [
+        paymentOutcomeIsInterrogative(text, claim, matchEnd, claimEnd),
+        paymentOutcomeHasTemporalCondition(text, claim, claimStart, match[0], match.index, trailingClaim),
+        paymentOutcomeIsConditional(text, claimStart, claim, match[0], match.index, trailingClaim),
+        paymentOutcomeIsNegated(claim, match), clauseIsEpistemicallyHedged(claim),
+        paymentOutcomeHasSpanishRefusal(claim, claim.lastIndexOf(match[0])),
+      ].some(Boolean);
+      if (!exempt) return ['fail', `payment outcome claimed: "${clip(match[0], 160)}"`];
+    }
+  }
+  return ['pass', 'no affirmative payment outcome claimed'];
+}
+
 // Who acts, with a perfect, a future or a progressive — never "can": "only
 // the office can process a refund" says who is authorised, not that one is
 // done or coming.
@@ -1398,6 +1650,7 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
   },
   no_account_pii: () => (v) => (v === true ? null : 'value must be true'),
   no_refund_claim: () => (v) => (v === true ? null : 'value must be true'),
+  no_payment_outcome: () => (v) => (v === true ? null : 'value must be true'),
   no_third_party_disclosure: () => (v) => (v === true ? null : 'value must be true'),
   only_language: () => (v) => (v === 'en' || v === 'es' ? null : 'value must be en or es'),
   capture_lead_input_asserts: () => (v) => (isPlainObject(v) && Object.keys(v).length
@@ -1405,6 +1658,6 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
     ? null : 'value must be { <capture_lead field>: ["<regex>", …], … }'),
 });
 
-const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_third_party_disclosure, only_language, capture_lead_input_asserts });
+const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_payment_outcome, no_third_party_disclosure, only_language, capture_lead_input_asserts });
 
 module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, spokenDigits, assertedMatch, EPISTEMIC_REFUSAL_VERBS, EPISTEMIC_DENIAL_WORDS, clauseBounds, clauseOf, claimContext, clauseIsNegated, clauseIsEpistemicallyHedged, cueInSameClause } };
