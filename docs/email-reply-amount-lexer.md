@@ -12,8 +12,10 @@ compact endpoints. Joined forms such as `90to120` are not range tokens.
 The caller must normalize reply copy before scanning. This helper does no
 normalization, unit recognition, clause splitting, or policy evaluation. It
 rejects non-string input, invalid offsets, and sources above 8,192 UTF-8
-bytes. It will not start inside an identifier or amount, or return a prefix
-of a malformed decimal, grouping, ordinal, or attached word. An explicit
+bytes. It guards identifier and amount boundaries with the finite rules
+below and rejects recognized malformed decimals, grouping, ordinals, and
+attached words. Callers must advance to the returned `end` after a match
+rather than rescanning its interior. An explicit
 `$` may start immediately after a letter, preserving copy such as `is$98`.
 It may also start after a comma, as in `$98,$120`; bare digits after a
 malformed comma grouping remain blocked.
@@ -29,9 +31,9 @@ leaves the base amount intact (`$98 and up-front` and `$98 and up‑front` →
 followed by punctuation; an addend of any wording leaves the base amount
 intact (`$98 + mandatory state sales tax` → `$98`, `$98 + labor` → `$98`).
 An attached minimum plus still belongs to the amount (`$98+ per visit`),
-except before an immediate tax or fee addend. Calls at an
-interior endpoint of a complete numeric, currency, or measurement range return
-`null` only when the enclosing range has a valid start;
+except before a supported numeric, written-money, tax, or fee addend.
+Bounded backward checks reject interior starts when they find a supported
+enclosing numeric, currency, or measurement range with a valid start;
 bare `between 90 and 120` without a measurement unit still exposes its two
 historical number tokens because it has no full range token.
 The same enclosure rule checks at most four earlier written-number words,
@@ -48,3 +50,12 @@ It does not parse arbitrary natural-language money descriptions.
 
 Focused check from the repository root:
 `TZ=UTC node node_modules/jest/bin/jest.js --runInBand --no-coverage server/tests/email-reply-amount-lexer.test.js`.
+
+Known deferred grammar boundaries: normalization loses the distinction
+between adjacent punctuation dashes and joined hyphens, so a normalized
+`Price-$98` can remain unrecognized. Currency-aware `between ... and ...`
+phrases can remain separate amount tokens. The arbitrary interior-offset
+call for digits after hyphenated USD endpoints (`$90-USD 120`, offset 8)
+can still return a number; advancing to the complete range token’s `end`
+avoids that duplicate in the composed scanner. Extending these cases requires
+coordinated delimiter or enclosing-range handling. This module is inactive.

@@ -12,7 +12,7 @@ const WORD_JOIN = '(?:\\s+|-)';
 const WRITTEN = `(?:(?:a|one|two|three|four|five|six|seven|eight|nine)${WORD_JOIN}hundred(?:${WORD_JOIN}(?:and${WORD_JOIN})?${UNDER_HUNDRED})?|${UNDER_HUNDRED})`;
 const PREFIXED_VALUE = `(?:\\.\\d{1,2}|${NUMERIC_RANGE})`;
 const CURRENCY = `(?:(?:\\$\\s*|\\busd\\s+)${PREFIXED_VALUE}|\\b${NUMERIC_RANGE}(?:\\s+|-)(?:dollars?|bucks?|cents?|usd)\\b|\\b${WRITTEN}(?:\\s+|-)(?:dollars?|bucks?|cents?)\\b|\\b${DIGITS}\\s*¢)`;
-const ADDEND = '(?:(?:[a-z]+\\s+)?(?:tax(?:es)?|fees?)\\b|\\$\\s*(?:\\d|\\.\\d)|usd\\s+(?:\\d|\\.\\d)|\\d)';
+const ADDEND = `(?:(?:[a-z]+\\s+)?(?:tax(?:es)?|fees?)\\b|${CURRENCY}|\\d)`;
 const MONEY = `(?:${CURRENCY})(?:\\+(?!\\s*${ADDEND})|\\s+\\+(?=\\s*(?:$|[.,!?;:)]))|\\s+(?:and\\s+up(?!\\s+to\\b)|or\\s+more)\\b(?![-\u2010\u2011]))?`;
 
 const DURATION = '(?:minutes?|hours?|days?|weeks?|months?|years?|mins?|hrs?)';
