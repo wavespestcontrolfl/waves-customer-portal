@@ -63,6 +63,7 @@ function validStart(source, at) {
   const previous = previousCodePoint(source, at);
   return !previous || !LEFT_JOIN.test(previous.text)
     || (source[at] === '$' && (LETTER.test(previous.text) || previous.text === ','))
+    || (previous.text === ',' && /^usd\s+/i.test(source.slice(at)))
     || openingQuoteBefore(source, previous);
 }
 

@@ -129,6 +129,13 @@ describe('bounded anchored email reply amount lexer', () => {
     expect(matchAt('$$98', 1)).toBeNull();
   });
 
+  test.each(['$98,USD 120', 'USD 98,USD 120', '$98,usd 120'])(
+    'preserves comma-delimited explicit USD amounts: %s', (source) => {
+      const at = source.indexOf(',') + 1;
+      expect(matchAt(source, at)).toEqual(token('money', source.slice(at), at));
+    },
+  );
+
   test('rejects a joined second dollar sign but preserves distinct amounts', () => {
     expect(matchAt('$98$120')).toBeNull();
     expect(matchAt('98$120')).toBeNull();
