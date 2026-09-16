@@ -2,6 +2,26 @@ const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-s
 const report = { subject: 'talstar p', location: 'exterior perimeter' };
 
 test.each([
+  ["that's not true", 'fail'],
+  ["that's false", 'fail'],
+  ['that’s incorrect', 'fail'],
+  ["it's only planned", 'fail'],
+  ["it's not applied", 'fail'],
+  ["we've not applied it", 'fail'],
+  ["that's not true because the report was mistaken", 'fail'],
+  ["it's only planned indoors", 'pass'],
+  ["we've not applied it indoors", 'pass'],
+])('contracted report retractions keep their scope: %s', (tail, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter, but ${tail}.`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
+test('a noncompletion at the matched adverb location still retracts that finding', () => {
+  const spoken = ["Talstar P was applied indoors, but it's only planned indoors."];
+  expect(checks.report_readback_confirms({ subject: 'talstar p', location: 'indoors' }, {}, { spoken })[0]).toBe('fail');
+});
+
+test.each([
   ['Talstar P was applied to the exterior perimeter, subject to office approval.', 'fail'],
   ['Subject to office approval, Talstar P was applied to the exterior perimeter.', 'fail'],
   ['Talstar P was applied to the exterior perimeter, but only with office approval.', 'fail'],

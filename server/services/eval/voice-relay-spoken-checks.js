@@ -1392,7 +1392,10 @@ function reportTrailingNoncompletion(text) {
   const qualifier = text.trim();
   const anaphoric = /^(?:it|this|that)\s+(.+)$/i.exec(qualifier)
     || new RegExp(`^${REPORT_RETRACTION_ACTOR}\\s+(.+?)\\s+(?:to\\s+${REPORT_ANAPHORIC_ACTION}|(?:on\\s+)?${REPORT_ANAPHORIC_GERUND})(?:\\s+(?:there|at\\s+that\\s+location))?\\s*$`, 'i').exec(qualifier);
-  return Boolean(anaphoric && REPORT_CONCISE_NONCOMPLETION_RE.test(anaphoric[1]));
+  // A different locative adverb qualifies that place, not this finding.
+  // The scenario's own location has already been normalized to "there".
+  return Boolean(anaphoric && REPORT_CONCISE_NONCOMPLETION_RE.test(anaphoric[1])
+    && !/\b(?:indoors|outdoors|inside|outside|upstairs|downstairs)\b/i.test(anaphoric[1]));
 }
 // Qualified shorthand must positively state completion or cite the report;
 // unknown qualifiers can describe proposed treatment and are not evidence.
@@ -1665,6 +1668,8 @@ function reportRetractionClause(text, subject, location) {
   // the same causal boundary used for free-visit claims, not an arbitrary word cap.
   // Here "do so" refers to the finding; its "so" is not a new clause.
   const anaphoric = text.replace(/\b(?:actually|in\s+fact)\b[,\s]*/gi, '')
+    .replace(/\b(it|that|this)['’]s\b/gi, '$1 is')
+    .replace(/\b(we|they|you)['’]ve\b/gi, '$1 have')
     .replace(/\b(do|did|done)\s+so\b/gi, '$1 that');
   const qualifier = clauseOf(anaphoric, 0).split(CLAIM_CAUSAL_BOUNDARY_RE)[0]
     .split(/\bsince\b/i)[0].trim().replace(/,\s*$/, '');
@@ -1673,7 +1678,7 @@ function reportRetractionClause(text, subject, location) {
   // checks; a denial about bait or an indoor treatment remains independent.
   const product = new RegExp(`(?:(?:the|your|our)\\s+)?(?:${subject})(?:\\s+[a-z0-9]\\b)?`, 'gi');
   const place = new RegExp(
-    `${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+${REPORT_LOCATION_NOUN_PREFIX}`
+    `(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+)?${REPORT_LOCATION_NOUN_PREFIX}`
       + `(?:${location})(?:\\s+(?:perimeter|area|walls?|zone|edge))?`,
     'gi',
   );
