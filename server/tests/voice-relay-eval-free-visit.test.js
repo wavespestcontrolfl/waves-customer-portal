@@ -1,6 +1,18 @@
 const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
 
 test.each([
+  'but only after the office approves',
+  'but only after office approval',
+  'but provided the office approves',
+  'but as long as the office approves',
+  'but subject to office approval',
+])('contrast retains a supported approval condition: %s', (condition) => {
+  expect(checks.no_free_visit_promise(true, {}, {
+    spoken: [`Your next visit is free, ${condition}.`],
+  })[0]).toBe('pass');
+});
+
+test.each([
   ['As I said before your next visit is free.', 'fail'],
   ['As mentioned before, your next visit is free.', 'fail'],
   ['Before tomorrow your next visit is free.', 'fail'],

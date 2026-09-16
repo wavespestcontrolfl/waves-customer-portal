@@ -544,7 +544,7 @@ function propositionIsExplicitlyDenied(text, at, findingVerb) {
   return Boolean(actor && EXPLICIT_PROPOSITION_DENIAL_RE.test(actorPrefix.slice(0, actor.index)));
 }
 
-// The vocabulary from the existing fixture; only its refusal scope changes.
+// Visit promises include direct payment wording; qualifiers stay claim-scoped.
 const FREE_VISIT_PAYMENT_TARGET = `(?:(?:your|the|a|an|our|that|this)\\s+)?(?:(?:next|return|follow-up|follow up|upcoming|scheduled)\\s+)?(?:visit|one|service|treatment|appointment)\\b`;
 const FREE_VISIT_PAYMENT_LINK = `(?:for|toward|on|at|about|regarding|to)\\s+(?:(?:(?:the|your)\\s+)?(?:cost|charge|fee)\\s+of\\s+)?${FREE_VISIT_PAYMENT_TARGET}`;
 const FREE_VISIT_PROMISE_RES = Object.freeze(
@@ -581,7 +581,7 @@ const FREE_VISIT_AS_LONG_AS_CONDITION_SOURCE = `as\\s+long\\s+as\\s+${FREE_VISIT
 const FREE_VISIT_APPROVAL_QUALIFIER_SOURCE = `(?:subject\\s+to|only\\s+with)\\s+(?:(?:the|your|our)\\s+)?(?:[\\w\\x27\\u2019-]+\\s+){0,3}(?:approval|authorization|confirmation|consent)\\b`;
 const FREE_VISIT_CONDITION_SOURCE = `(?:${FREE_VISIT_PROVIDED_CONDITION_SOURCE}|${FREE_VISIT_AS_LONG_AS_CONDITION_SOURCE}|${FREE_VISIT_APPROVAL_QUALIFIER_SOURCE}|only\\s+after\\s+(?:(?:the|an?|your|our|their)\\s+)?[\\w\\x27\\u2019-]+\\b)`;
 const FREE_VISIT_PREPOSED_CONDITION_RE = new RegExp(`^\\s*${FREE_VISIT_CONDITION_SOURCE}`, 'i');
-const FREE_VISIT_POSTCLAIM_CONDITION_RE = new RegExp(`^\\s*,?\\s*(?:(?:only\\s+)?(?:if|unless)\\b|but\\s+only\\s+if\\b|(?:but\\s+)?${FREE_VISIT_APPROVAL_QUALIFIER_SOURCE}|${FREE_VISIT_CONDITION_SOURCE})`, 'i');
+const FREE_VISIT_POSTCLAIM_CONDITION_RE = new RegExp(`^\\s*,?\\s*(?:but\\s+)?(?:(?:only\\s+)?(?:if|unless)\\b|${FREE_VISIT_CONDITION_SOURCE})`, 'i');
 // A condition can introduce a separate instruction after an asserted promise.
 // Require a predicate before the imperative so "if you call us" remains a gate.
 const FREE_VISIT_CONDITIONAL_FOLLOWUP_RE = /^\s*,?\s*(?:if|unless)\s+you\s+(?:have|need|want|notice|experience|find|get|receive)\b[^.!?;]*?\s+(?:please\s+)?(?<!\bto\s)(?<!\band\s)(?<!\bor\s)(?:call|contact|ask|tell|let|reach|give|check|email|text|message)\b/i;
