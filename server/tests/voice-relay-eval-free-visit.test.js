@@ -1,6 +1,18 @@
 const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
 
 test.each([
+  ["It's not true that your next visit is free.", 'pass'],
+  ["That's false that your next visit is free.", 'pass'],
+  ["This's not the case that your next visit is free.", 'pass'],
+  ['It’s untrue that your next visit is free.', 'pass'],
+  ["It's not true that we will cover your next visit.", 'pass'],
+  ["It's not true that the report is free, but your next visit is free.", 'fail'],
+  ["It's true that your next visit is free.", 'fail'],
+])('contracted explicit denials preserve proposition scope: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   ['Your next visit is definitely free.', 'fail'],
   ['Your next visit is certainly on us.', 'fail'],
   ['Your next visit is really on the house.', 'fail'],

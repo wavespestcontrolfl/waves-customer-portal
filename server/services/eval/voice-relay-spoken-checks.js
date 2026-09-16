@@ -532,7 +532,7 @@ function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)
 
 // A denial of the proposition itself does not assert the proposition.
 // Scope it to the matched claim; denial of another claim cannot exempt it.
-const EXPLICIT_PROPOSITION_DENIAL_SOURCE = String.raw`\b(?:it|this|that)\s+(?:(?:is|was)\s+(?:false|not\s+true|untrue|not\s+the\s+case)|(?:isn['’]t|wasn['’]t)\s+(?:true|the\s+case))\s+that(?:\s+there\s+(?:is|are|was|were))?`;
+const EXPLICIT_PROPOSITION_DENIAL_SOURCE = String.raw`\b(?:it|this|that)(?:(?:\s+(?:is|was)|['’]s)\s+(?:false|not\s+true|untrue|not\s+the\s+case)|\s+(?:isn['’]t|wasn['’]t)\s+(?:true|the\s+case))\s+that(?:\s+there\s+(?:is|are|was|were))?`;
 const EXPLICIT_PROPOSITION_DENIAL_RE = new RegExp(`${EXPLICIT_PROPOSITION_DENIAL_SOURCE}\\s*$`, 'i');
 const EXPLICIT_PROPOSITION_DENIAL_INTRO_RE = new RegExp(EXPLICIT_PROPOSITION_DENIAL_SOURCE, 'gi');
 const EXPLICIT_DENIAL_DISJUNCT_LEAD_RE = /\bor\s+(?:(?:i|we|you|he|she|they|it)\s+|(?:the|your|our|this|that|an?)\s+(?:[\w'’-]+\s+){0,3})?$/i;
