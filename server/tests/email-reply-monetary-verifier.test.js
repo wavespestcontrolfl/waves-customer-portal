@@ -78,6 +78,25 @@ describe('email reply monetary visit-pricing policy', () => {
   ])('rejects amounts charged at a visit: %s', rejected);
 
   test.each([
+    '$98 on each visit', 'You pay USD 98 on every scheduled visit',
+    '$98 on any visit', '$98 on scheduled visits', '$98 on your routine visits',
+  ])('rejects amounts charged on recurring visits: %s', rejected);
+
+  test.each([
+    'We charge each visit $98', 'We bill every visit USD 98',
+  ])('rejects billing-verb visit objects followed by an amount: %s', rejected);
+
+  test.each([
+    'Each visit has a price of $98', 'Every visit has a cost of USD 98',
+    'Every visit has an amount of $98',
+  ])('rejects visit price nouns followed by an amount: %s', rejected);
+
+  test.each([
+    '$98 plus tax per visit', '$98 + tax per visit',
+    'We charge $98 before tax per visit', '$98 plus fees for every visit',
+  ])('rejects narrowly qualified amounts per visit: %s', rejected);
+
+  test.each([
     '$98 per on-site visit', 'USD 98 for each in-home visit',
     'After-hours visit costs $98', '$98 for your after-hours visit',
   ])('rejects hyphenated modifiers beginning with stop words: %s', rejected);
@@ -120,6 +139,9 @@ describe('email reply monetary visit-pricing policy', () => {
     '$98 for your plan includes routine visits.',
     'USD 98 for your plan covers scheduled visits.',
     'Please pay $98 at your next visit.',
+    'Please pay $98 on your next visit.', 'We received $98 on your last visit.',
+    'Your $98 payment is due on the next scheduled visit.',
+    'We received $98 plus a tax refund before your next visit.',
   ])('preserves application prices and unrelated visit prose: %s', (text) => {
     expect(verdict(text)).toEqual({ ok: true, violations: [] });
   });

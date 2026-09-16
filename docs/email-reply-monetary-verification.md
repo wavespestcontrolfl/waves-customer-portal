@@ -14,7 +14,11 @@ forms include dollar symbols, USD prefixes/suffixes, and amounts followed by
 such as `Each visit costs 98`; duration and photo counts remain valid. The
 monetary grammar also covers articleless subjects (`Visit costs $98`), price
 labels separated by a colon or dash, and amounts charged `at each` or `at
-every` visit. A one-off payment reminder for the next visit remains valid.
+every` visit. `On` applies only to recurring quantifiers or plural visits, so a
+one-off payment reminder for the next visit remains valid. Billing verbs may
+put the visit before the amount, and `has a price/cost/amount of` forms are
+recognized. A single `plus`/`before` tax-or-fee qualifier may sit between an
+amount and its visit unit.
 Visit noun phrases allow at most eight modifiers and stop at clause words,
 prepositions, determiners, and account/payment/access nouns. Thus an account
 payment followed later by visit timing, such as `We received $98 for your
