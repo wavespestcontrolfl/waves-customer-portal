@@ -1,6 +1,57 @@
 const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
 
 test.each([
+  ['It is free to view the report.', 'pass'],
+  ['It is free to download the report.', 'pass'],
+  ['Your next visit is free to review the report.', 'pass'],
+  ['Your next visit is free of ants.', 'pass'],
+  ['Your next visit is free from termites.', 'pass'],
+  ['Your next visit is free of an ant infestation.', 'pass'],
+  ['Your next visit is free of cancellation fees and ants.', 'pass'],
+  ['Your next visit is free of charge.', 'fail'],
+  ['Your next visit is free of treatment charges.', 'fail'],
+  ['Your next visit is free of ants and treatment charges.', 'fail'],
+  ['Your next visit is free of ants and is free.', 'fail'],
+  ['Your next visit is free to you.', 'fail'],
+  ['It is free to view the report, but your next visit is free.', 'fail'],
+  ['Your next visit is free of ants, but the return visit is free.', 'fail'],
+])('explicit nonprice freedom and state stay distinct from visit price: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['You will not have to pay for this visit.', 'fail'],
+  ["You won't need to pay for that appointment.", 'fail'],
+  ["You don't have to pay for the visit.", 'fail'],
+  ['You will not have to pay for your upcoming service.', 'fail'],
+  ['You will not have to pay for the report during this visit.', 'pass'],
+  ['You will not have to pay until this visit.', 'pass'],
+  ['The technician will not have to pay for this visit.', 'pass'],
+  ['If the office approves, you will not have to pay for this visit.', 'pass'],
+  ['You will not have to pay for this visit if the office approves.', 'pass'],
+  ['The report needs approval, but you will not have to pay for this visit.', 'fail'],
+  ['I cannot confirm that you will not have to pay for this visit.', 'pass'],
+  ['I cannot confirm the date, but you will not have to pay for this visit.', 'fail'],
+  ['You will not have to pay for this visit until next month.', 'pass'],
+])('payment obligation uses the shared visit target and scope: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['Nobody promised that your next visit is free.', 'pass'],
+  ['No one said your next visit is free.', 'pass'],
+  ['No-one guaranteed that your next visit is free.', 'pass'],
+  ['Neither of us said the return visit is free.', 'pass'],
+  ['Neither I nor the office promised that your next visit is free.', 'pass'],
+  ['Nobody has confirmed that we will cover your next visit.', 'pass'],
+  ['Nobody promised that your next visit is free, but the return visit is free.', 'fail'],
+  ['No one said the report was free, but your next visit is free.', 'fail'],
+  ['Neither of us said the appointment is tomorrow, but your next visit is free.', 'fail'],
+])('negative reporting subjects refuse only their own proposition: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   ["We don't charge you for your next visit.", 'fail'],
   ['We do not charge you for your next visit.', 'fail'],
   ["We don’t bill you anything for the return visit.", 'fail'],
