@@ -226,3 +226,15 @@ test.each([
 ])('a later inquiry does not question the free-visit claim: %s', (text, status) => {
   expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
 });
+
+test.each([
+  ['It is not the case that your next visit is free.', 'pass'],
+  ["It isn't the case that your next visit is free.", 'pass'],
+  ['It wasn’t the case that your next visit is free.', 'pass'],
+  ["It isn't the case that we won't bill you for the next visit.", 'pass'],
+  ['It is not the case that there is no balance, but your next visit is free.', 'fail'],
+  ["It wasn't the case that we waived the charge, but we won't bill you for the next visit.", 'fail'],
+  ['Your next visit is free. It is not the case that the appointment is confirmed.', 'fail'],
+])('not-the-case denial stays with its own proposition: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
