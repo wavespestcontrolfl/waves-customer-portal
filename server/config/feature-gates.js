@@ -552,6 +552,19 @@ const gates = {
   // when it flips.
   editApptPriceServiceScope: process.env.GATE_EDIT_APPT_PRICE_SERVICE_SCOPE === 'true',
 
+  // Multiple discounts on one service, and the one rule for how they combine
+  // (owner ruling 2026-09-11, "the lesser of the two"): dollar credits come
+  // off first, then percentages compound on what is left (10% then 5% off
+  // $111 is $16.10, never an additive $16.65), with one WaveGuard tier per
+  // document. The rule lives in server/services/discount-stack.js
+  // (stackDiscounts / stackVisitDiscounts / stackDocumentDiscounts) and
+  // GET /api/admin/discounts/stacking reports this value for pickers to
+  // read. This slice ships the engine and the gate read only — no route or
+  // service imports discount-stack.js yet, so the flip is inert until a
+  // later slice wires a caller. Off (default, and everywhere until then):
+  // byte-identical to today.
+  discountStacking: process.env.GATE_DISCOUNT_STACKING === 'true',
+
   // Collective series moves on every staff surface (owner rulings 2026-07-30
   // + 2026-08-28): with the gate on, ANY date move of a cadence visit that
   // reaches SmartRebooker.reschedule — dispatch drag, the Edit appointment
