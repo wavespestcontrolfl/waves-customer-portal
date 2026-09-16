@@ -2157,7 +2157,7 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
   // Locked: the edit is classified (restated or not) against the row the
   // update will overwrite, never a snapshot another save has since changed.
   const before = renewalAudit && ['reopen', 'edit'].includes(action)
-    ? await conn('call_commitments').where({ id }).forUpdate().first('id', 'kind', 'party', 'description', 'due_at', 'human_state', 'reviewed_at') : null;
+    ? await conn('call_commitments').where({ id }).forUpdate().first('id', 'kind', 'party', 'description', 'due_at', 'human_state', 'reviewed_at', 'subject') : null;
   // Same kind/party check as `before` above, but scoped to dismiss/fulfill
   // and independent of renewalAudit (which the callback branch below still
   // needs `before` — populated only for reopen/edit — to gate on).
@@ -2237,6 +2237,16 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
         // An office-entered time does not carry the model's original
         // deadline classification. Default it to the safe send floor.
         patch.due_type = parsed ? 'floor' : null;
+        if (before?.kind === 'send_reschedule_link' && before.party === 'waves') {
+          const subject = parseRescheduleSubject(before.subject);
+          const marked = subject && typeof subject === 'object' ? { ...subject } : {};
+          // Backend-only provenance for the exact office-entered instant.
+          // The model schema rejects this field. Confirm must still affirm
+          // the edit before the promise worker may trust it.
+          if (parsed) marked.office_due_at = parsed.toISOString();
+          else delete marked.office_due_at;
+          patch.subject = Object.keys(marked).length ? JSON.stringify(marked) : null;
+        }
       }
       // An edited obligation is a NEW obligation: the proof that kept the
       // old wording ("send estimate") is not proof for the new one ("send

@@ -96,6 +96,24 @@ test.each(['floor', 'deadline', null])('persisted date-free and appointment-only
   }
 });
 
+test('only an exact confirmed office timing marker overrides timing while date coverage still fails closed', () => {
+  const dueAt = '2030-01-09T14:00:00.000Z';
+  const office = { ...commitment, human_state: 'confirmed', due_at: dueAt, due_type: 'floor',
+    subject: { date_claims: [], office_due_at: dueAt } };
+  expect(select({ commitment: office }).visit?.id).toBe('visit');
+  for (const changed of [
+    { ...office, subject: { date_claims: [] } },
+    { ...office, subject: { date_claims: [], office_due_at: '2030-01-10T14:00:00.000Z' } },
+    { ...office, human_state: 'edited' },
+    { ...office, due_type: 'deadline' },
+  ]) expect(select({ commitment: changed }).reason).toBe('appointment_date_unresolved');
+
+  const source = { ...call, transcription: `${call.transcription}\nCaller: My September 20 appointment.` };
+  expect(select({ call: source, commitment: { ...office, subject: { office_due_at: dueAt, date_claims: [
+    { binding: 'appointment', quote: 'September 20', month: 9, day: 21 },
+  ] } } }).reason).toBe('appointment_date_unresolved');
+});
+
 test.each([
   ['My September 20 appointment.', []],
   ['My September 20 appointment.', [{ binding: 'appointment', quote: 'September 20', month: 9, day: 21 }]],

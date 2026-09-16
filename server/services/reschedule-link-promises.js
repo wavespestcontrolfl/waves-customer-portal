@@ -466,7 +466,11 @@ function claimFitsDate(claim, ymd) {
 
 function structuredDateReason(subject, call, commitment) {
   const reference = call.created_at ? new Date(call.created_at) : null;
-  if (!require('./reschedule-date-evidence').verifyRescheduleDateClaims(subject?.date_claims, call.transcription, reference, commitment)) {
+  const officeDue = commitment?.due_at ? new Date(commitment.due_at) : null;
+  const timingVerifiedByOffice = commitment?.human_state === 'confirmed' && commitment?.due_type === 'floor'
+    && officeDue && !Number.isNaN(officeDue.getTime()) && subject?.office_due_at === officeDue.toISOString();
+  if (!require('./reschedule-date-evidence').verifyRescheduleDateClaims(subject?.date_claims, call.transcription, reference, commitment,
+    { timingVerifiedByOffice })) {
     return 'appointment_date_unresolved';
   }
   // A model-selected full date cannot be its own evidence. Partial claims
@@ -1129,7 +1133,7 @@ async function stagePromises(conn) {
         AND COALESCE(o.commitment_generation, -1) < COALESCE(cc.processing_generation, 0)
         AND (o.payload->>'${DELIVERY_UNCERTAIN_KEY}') = 'true'
     )`)
-    .select('cc.id', 'cc.call_log_id', 'cc.created_at', 'cc.processing_generation', 'cc.due_at', 'cc.due_type', 'cc.evidence', 'cc.subject',
+    .select('cc.id', 'cc.call_log_id', 'cc.created_at', 'cc.processing_generation', 'cc.due_at', 'cc.due_type', 'cc.evidence', 'cc.subject', 'cc.human_state',
       'cl.customer_id', 'cl.transcription', 'cl.created_at as call_created_at').limit(200);
   // commitment_created_at rides along on the outbox row itself so runOne can
   // judge pre-activation without a second call_commitments query per row —
