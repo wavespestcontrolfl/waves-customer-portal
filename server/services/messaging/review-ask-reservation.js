@@ -39,6 +39,36 @@
 // review-ask-history.js's own spacing-evidence reader already tests exactly
 // this (status === 'sending' + the marker) — this module is the one place
 // both it and every general reader share, so the semantics can't drift.
+//
+// REBUTTED FINDING (structural pass, "finding 6" / codex #4331 P1 pre-push
+// audit on this seam): a review-ask reservation was given the SAME 72h age
+// bound as a reply reservation, on the theory that a never-resolved
+// placeholder should not hide from general readers forever. That bound has
+// been REMOVED again for review-ask placeholders — they are excluded from
+// general readers UNCONDITIONALLY, regardless of age. The two families are
+// not the same risk:
+//   - A reply reservation guards an AMBIGUOUS AUTOMATIC reply that may have
+//     actually reached the customer. Hiding it forever would bury a real
+//     sent message, so it surfaces after REPLY_RESERVATION_HOLD_HOURS for an
+//     operator to see and settle.
+//   - A review-ask reservation is SYNTHETIC. It is never itself a delivered
+//     message — it is placeholder spacing evidence for an attempt that
+//     either lands (and gets its own separately-logged row, or is promoted
+//     to 'sent' in place) or doesn't. Letting an aged one surface to a
+//     general reader is pure harm, not a safety net: these readers are not
+//     display-only (csr-coach.verifyFollowUps marks a follow-up task
+//     VERIFIED off exactly this kind of read; ContextAggregator feeds
+//     composers a body with the reservation's status stripped) — an aged
+//     'sending' placeholder from a crash before delivery would read as
+//     genuine evidence the ask went out, when it never did.
+// A stale, never-resolved review-ask reservation is instead resolved by the
+// stranded-send reconciliation (review-request.js#_reconcileStrandedBatch:
+// promote on provider evidence, release via releaseUnsent on proven-unsent)
+// and, when that reconciliation's own review_requests claim never covers
+// the row (an uncertain outcome that left the request 'pending' rather than
+// 'sending'), exposed to an operator via the stale-reservation count folded
+// into reconcileStrandedSends' own log line — never by quietly admitting it
+// to a delivered-message reader once it ages out.
 
 function parseMetadata(value) {
   try {
@@ -65,18 +95,15 @@ const SEND_RESERVATION_MARKERS = [REVIEW_ASK_MARKER, ...REPLY_RESERVATION_MARKER
 // unbounded hide would bury an ambiguous automatic reply for good.
 const REPLY_RESERVATION_HOLD_HOURS = 24;
 const REPLY_RESERVATION_HOLD_MS = REPLY_RESERVATION_HOLD_HOURS * 60 * 60 * 1000;
-// A review-ask placeholder gets the SAME treatment, mirrored at the ask-
-// spacing window itself (ASK_SPACING_MS in review-ask-history.js) rather
-// than the reply hold's shorter one (codex #4331 P1, structural pass,
-// finding 6): a review-ask reservation that never resolves — a crash before
-// settlement, or a stamp failure whose promotion also failed — used to hide
-// from every general reader FOREVER. Past 72h the send attempt is
-// definitively over one way or another (its own spacing window has
-// elapsed), so the placeholder is no longer live spacing evidence and must
-// stop hiding as a real row: an operator investigating the thread, a
-// signal-detector count, or a drafter's grounding history must see it as
-// the unresolved 'sending' oddity it now is, not as a message that never
-// happened.
+// NOT a general-reader hide bound (see the REBUTTED FINDING note above — a
+// review-ask reservation is excluded from those readers unconditionally,
+// any age). This is the ask-SPACING window only, mirroring ASK_SPACING_MS
+// in review-ask-history.js, used in exactly two places: reserveForRequest's
+// reuse-vs-renew decision (an existing unresolved reservation older than
+// this is renewed in place rather than reused with a stale timestamp — a
+// fresh delivery attempt must not compute its own retry math off a
+// timestamp from a previous, long-over attempt) and the stale-reservation
+// count reconcileStrandedSends logs for operator visibility.
 const REVIEW_ASK_RESERVATION_HOLD_HOURS = 72;
 const REVIEW_ASK_RESERVATION_HOLD_MS = REVIEW_ASK_RESERVATION_HOLD_HOURS * 60 * 60 * 1000;
 
@@ -98,30 +125,39 @@ function isUnresolvedReviewAskReservation(row) {
 }
 
 // True while ANY send reservation is still in flight — what general readers
-// (history, counts, context, unanswered-thread checks) must hide. Both
-// reservation families age out of the hide on their own hold: a review-ask
-// placeholder past REVIEW_ASK_RESERVATION_HOLD_HOURS, a reply placeholder
-// past REPLY_RESERVATION_HOLD_HOURS.
+// (history, counts, context, unanswered-thread checks) must hide.
 function isUnresolvedSendReservation(row, now = Date.now()) {
   const metadata = unresolvedMetadata(row);
   if (!metadata) return false;
-  const createdAt = row.created_at ? new Date(row.created_at).getTime() : NaN;
-  const withinHold = (holdMs) => !Number.isFinite(createdAt) || createdAt >= now - holdMs;
-  if (metadata[REVIEW_ASK_MARKER] === true) return withinHold(REVIEW_ASK_RESERVATION_HOLD_MS);
+  // A review-ask placeholder is excluded UNCONDITIONALLY, any age (see the
+  // REBUTTED FINDING note at the top of this file) — it is synthetic and
+  // never itself a delivered message, so a general reader (csr-coach
+  // follow-up verification, a composer's grounding context, an outbound
+  // count) must never admit it once it ages past some window. It is
+  // resolved by the stranded-send reconciliation, or surfaced to an
+  // operator through that reconciliation's own stale-reservation count —
+  // never by this predicate letting it through.
+  if (metadata[REVIEW_ASK_MARKER] === true) return true;
   if (!REPLY_RESERVATION_MARKERS.some(marker => metadata[marker] === true)) return false;
-  return withinHold(REPLY_RESERVATION_HOLD_MS);
+  // A reply reservation guards an ambiguous AUTOMATIC reply that may have
+  // actually reached the customer — bounded so a real send doesn't hide
+  // forever (see REPLY_RESERVATION_HOLD_HOURS above).
+  const createdAt = row.created_at ? new Date(row.created_at).getTime() : NaN;
+  return !Number.isFinite(createdAt) || createdAt >= now - REPLY_RESERVATION_HOLD_MS;
 }
 
 // Excludes every unresolved send reservation at the SQL level (metadata is
 // jsonb) — apply this to a query BEFORE any LIMIT/ORDER-then-slice so an
 // unresolved placeholder can never displace a real row out of a bounded
 // history window. `table` lets a caller that aliases or joins sms_log
-// qualify the column; default matches a bare `db('sms_log')` query.
+// qualify the column; default matches a bare `db('sms_log')` query. Mirrors
+// isUnresolvedSendReservation exactly: the review-ask arm is unconditional
+// (any age), only the reply-marker arm carries an age bound.
 function excludeUnresolvedSendReservations(query, table = 'sms_log') {
   const replyMarkers = REPLY_RESERVATION_MARKERS.map(marker => `COALESCE(${table}.metadata->>'${marker}', 'false') = 'true'`).join(' OR ');
   return query.whereRaw(
     `NOT (${table}.status = 'sending' AND (`
-      + `(COALESCE(${table}.metadata->>'${REVIEW_ASK_MARKER}', 'false') = 'true' AND ${table}.created_at >= NOW() - INTERVAL '${REVIEW_ASK_RESERVATION_HOLD_HOURS} hours')`
+      + `COALESCE(${table}.metadata->>'${REVIEW_ASK_MARKER}', 'false') = 'true'`
       + ` OR ((${replyMarkers}) AND ${table}.created_at >= NOW() - INTERVAL '${REPLY_RESERVATION_HOLD_HOURS} hours')))`,
   );
 }
@@ -150,11 +186,12 @@ function defaultDb() {
 // hold the request row's lock (the conditional status UPDATE the ask-branch
 // callers run first) so this lookup-then-insert can't itself race a second
 // reservation for the same request.
-// Reuse is bounded by REVIEW_ASK_RESERVATION_HOLD_HOURS: an existing
-// reservation older than its own hold is RENEWED in place (same row,
-// created_at/updated_at reset to now) rather than reused as-is or
-// replaced — see the comment at the renewal site for why (codex #4331 P1,
-// pre-push audit on the seam itself).
+// Reuse is bounded by REVIEW_ASK_RESERVATION_HOLD_HOURS (the ask-spacing
+// window, NOT the general-reader hide — that stays unconditional, see the
+// REBUTTED FINDING note above): an existing reservation older than its own
+// spacing window is RENEWED in place (same row, created_at/updated_at reset
+// to now) rather than reused as-is or replaced — see the comment at the
+// renewal site for why (codex #4331 P1, pre-push audit on the seam itself).
 async function reserveForRequest({ trx, request, to, body, fromPhone }) {
   const conn = trx || defaultDb();
   const existing = await conn('sms_log')
@@ -168,28 +205,28 @@ async function reserveForRequest({ trx, request, to, body, fromPhone }) {
       return { id: existing.id, reservedAt: new Date(existing.created_at), requestId: request.id, reused: true };
     }
     // codex #4331 P1 (pre-push audit on the seam itself): an unresolved
-    // reservation older than its own hold has already aged out of
-    // isUnresolvedSendReservation's hide and out of the spacing window a
-    // fresh retryAt would be computed from — reusing its stale created_at
-    // as-is would compute a retryAt in the past (uncertain-outcome handling
-    // adds ASK_SPACING_MS to reservedAt) and let it read as resolved-and-
-    // gone to any reader keyed on the 72h hold, WHILE this new attempt is
-    // relying on it as its own in-flight marker.
+    // reservation older than its own ask-spacing window is from a PRIOR
+    // attempt whose spacing math is already over — reusing its stale
+    // created_at as-is would compute a NEW retryAt in the past
+    // (uncertain-outcome handling adds ASK_SPACING_MS to reservedAt), and
+    // lastManualAskAt / _askSpacingHold would anchor the next hold on a
+    // timestamp from an attempt that ended a long time ago, WHILE this new
+    // attempt is relying on the same row as its own in-flight marker. (This
+    // is purely a spacing-correctness fix — the row is excluded from
+    // general readers unconditionally either way, at any age.)
     //
     // RENEWED IN PLACE (chosen over delete+insert): the SAME row keeps its
     // id — nothing downstream ever sees a second row, so releaseUnsent /
     // promote / the general-reader predicates all keep working against
     // whichever id a caller already holds. Resetting created_at (and
-    // updated_at) to now is the one write that keeps every reader's
-    // semantics correct at once: isUnresolvedSendReservation's hide
-    // restarts its 72h window from the new attempt (it is genuinely in
-    // flight again), the spacing readers compute retryAt/lastManualAskAt
-    // off the new timestamp instead of a stale one already in the past,
-    // and any age-based cleanup of expired reservations no longer matches
-    // a row that is actively being retried. A delete+insert would achieve
-    // the same reader semantics but hands out a new id for no benefit and
-    // reintroduces a (small) window where the row briefly doesn't exist at
-    // all inside the same transaction.
+    // updated_at) to now is the write that keeps spacing correct for the
+    // new attempt (retryAt / lastManualAskAt compute off the fresh
+    // timestamp instead of a stale one already in the past) and keeps it
+    // inside the window reconcileStrandedSends' stale-reservation count
+    // uses, since it is actively being retried, not abandoned. A
+    // delete+insert would reach the same spacing correctness but hands out
+    // a new id for no benefit and reintroduces a (small) window where the
+    // row briefly doesn't exist at all inside the same transaction.
     const renewedAt = new Date();
     await conn('sms_log').where({ id: existing.id, status: 'sending' }).update({
       from_phone: fromPhone,
@@ -264,6 +301,24 @@ async function promote({ trx, reservation }) {
   }
 }
 
+// Count of unresolved review-ask reservations older than the ask-spacing
+// window — an operator-facing signal, not a cleanup action: reconciled and
+// released via reconcileStrandedSends when its review_requests claim
+// covers them; folded into that sweep's own log line (staleReservations=N)
+// when it doesn't, so a stuck placeholder from a crash before delivery is
+// visible without a dedicated view (the smallest honest exposure, per the
+// pre-push audit — not a new reconciliation view).
+async function countStaleUnresolved({ trx } = {}) {
+  const conn = trx || defaultDb();
+  const row = await conn('sms_log')
+    .where({ status: 'sending' })
+    .whereRaw(`metadata->>'${REVIEW_ASK_MARKER}' = 'true'`)
+    .where('created_at', '<', new Date(Date.now() - REVIEW_ASK_RESERVATION_HOLD_MS))
+    .count('* as c')
+    .first();
+  return parseInt(row?.c || 0, 10);
+}
+
 module.exports = {
   isUnresolvedReviewAskReservation,
   isUnresolvedSendReservation,
@@ -276,4 +331,5 @@ module.exports = {
   releaseUnsent,
   releaseById,
   promote,
+  countStaleUnresolved,
 };
