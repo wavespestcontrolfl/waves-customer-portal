@@ -94,6 +94,39 @@ describe('bounded email reply pricing clause recognition', () => {
   });
 
   test.each([
+    'one-hundred-dollar',
+    'one-hundred-and-twenty-eight-dollar',
+    'one-hundred-twenty-eight-dollar',
+  ])('keeps a fully hyphenated written amount out of the visit phrase: %s', (amount) => {
+    expect(tokens(`a ${amount} visit fee`)).toEqual([
+      { kind: 'word', text: 'a' }, { kind: 'money', text: amount },
+      { kind: 'visit', text: 'visit' }, { kind: 'word', text: 'fee' },
+    ]);
+  });
+
+  test('preserves written-number measurements and spaced currency', () => {
+    expect(tokens('One-hundred-and-twenty-eight minutes')).toEqual([
+      { kind: 'measurement', text: 'one-hundred-and-twenty-eight minutes' },
+    ]);
+    expect(kinds('Each visit costs one hundred dollars')).toEqual([
+      'eachVisit', 'word', 'money',
+    ]);
+  });
+
+  test.each([
+    ["Please pay $98 at today's visit", "at today's visit"],
+    ["Please pay $98 on tomorrow's visit", "on tomorrow's visit"],
+    ["We received $98 on Monday's scheduled visit", "on monday's scheduled visit"],
+    ["We received $98 at next Tuesday's visit", "at next tuesday's visit"],
+    ['Please pay $98 at today’s visit', "at today's visit"],
+  ])('classifies temporal possessive visit timing: %s', (text, timing) => {
+    expect(tokens(text).at(-1)).toEqual({ kind: 'timing', text: timing });
+  });
+  test('keeps recurring on every visit as a unit', () => {
+    expect(tokens('$98 on every visit').at(-1)).toEqual({ kind: 'unit', text: 'on every visit' });
+  });
+
+  test.each([
     '$1,298.50 per visit', 'USD 98-120 for each visit',
     '98 dollars per visit', 'Ninety-eight dollars per visit',
     'One hundred dollars per visit', '$98+ per visit',

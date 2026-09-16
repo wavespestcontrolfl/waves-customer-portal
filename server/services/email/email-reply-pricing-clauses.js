@@ -45,6 +45,8 @@ const MANY_VISITS = `(?:${PLURAL_DET}\\s+)?${VISITS}`;
 const EACH_VISIT = `(?:each|every|any)\\s+(?:${VISIT}|${VISITS})`;
 const RECURRING = `(?:${EACH_VISIT}|${MANY_VISITS})`;
 const SINGLE_VISIT = `(?:${ONE_VISIT})`;
+const WEEKDAY = '(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)';
+const TEMPORAL_POSSESSIVE = `(?:today|tomorrow|yesterday|(?:(?:this|next|last)\\s+)?${WEEKDAY})'s`;
 const APPLICATION = `(?:${MODIFIER}\\s+){0,4}applications?\\b`;
 
 const DIGITS = '\\d{1,9}(?:,\\d{3}){0,3}(?:\\.\\d{1,2})?';
@@ -52,7 +54,8 @@ const NUMERIC_RANGE = `${DIGITS}(?:\\s*(?:-|to)\\s*(?:(?:\\$\\s*|usd\\s+))?${DIG
 const ONE_TO_NINETEEN = '(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen)';
 const TENS = '(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)';
 const UNDER_HUNDRED = `(?:${ONE_TO_NINETEEN}|${TENS}(?:[-\\s](?:one|two|three|four|five|six|seven|eight|nine))?)`;
-const WRITTEN = `(?:(?:a|one|two|three|four|five|six|seven|eight|nine)\\s+hundred(?:\\s+(?:and\\s+)?${UNDER_HUNDRED})?|${UNDER_HUNDRED})`;
+const WORD_JOIN = '(?:\\s+|-)';
+const WRITTEN = `(?:(?:a|one|two|three|four|five|six|seven|eight|nine)${WORD_JOIN}hundred(?:${WORD_JOIN}(?:and${WORD_JOIN})?${UNDER_HUNDRED})?|${UNDER_HUNDRED})`;
 const CURRENCY = `(?:(?:\\$\\s*|\\busd\\s+)${NUMERIC_RANGE}|\\b${NUMERIC_RANGE}(?:\\s+|-)(?:dollars?|bucks?|usd)\\b|\\b${WRITTEN}(?:\\s+|-)(?:dollars?|bucks?)\\b)`;
 const MONEY = `(?:${CURRENCY})(?:\\s*\\+(?!\\s*(?:tax(?:es)?|fees?)\\b)|\\s+(?:and\\s+up|or\\s+more))?`;
 const MEASURE_SPAN = `(?:between\\s+${DIGITS}\\s+and\\s+${DIGITS}|from\\s+${DIGITS}\\s+to\\s+${DIGITS}|${DIGITS}\\s*(?:-|to)\\s*${DIGITS}|${DIGITS}|${WRITTEN})`;
@@ -63,7 +66,7 @@ const MEASURE = `${MEASURE_SPAN}\\s+(?:minutes?|hours?|days?|weeks?|months?|year
 const PATTERNS = [
   ['unit', `(?:(?:on\\s+(?:a|the)\\s+)?visit-by-visit(?:\\s+basis)?|(?:-?per[\\s-]+|/\\s*|by\\s+(?:(?:the|each)\\s+)?)${VISIT}|(?:-?per[\\s-]+|/\\s*|by\\s+(?:(?:the|each)\\s+)?)${VISITS}|(?:for|on|at)\\s+${RECURRING})`],
   ['application', `(?:-?per[\\s-]+|for\\s+(?:${APPLICATION_DET}\\s+)?|/\\s*)${APPLICATION}`],
-  ['timing', `(?:on|at)\\s+${SINGLE_VISIT}`],
+  ['timing', `(?:on|at)\\s+(?:${TEMPORAL_POSSESSIVE}\\s+${VISIT}|${SINGLE_VISIT})`],
   ['forVisit', `for\\s+${SINGLE_VISIT}`],
   ['eachVisit', EACH_VISIT],
   ['visits', MANY_VISITS],

@@ -24,9 +24,14 @@ forms remains `money` evidence.
 Currency words also stop visit modifiers, preserving `ninety-eight dollar` as
 `money` before a `visit fee` phrase.
 Hyphenated currency (`ninety-eight-dollar`, `98-dollar`) stays `money` as well.
+The bounded written-number grammar also accepts fully hyphenated hundreds
+(`one-hundred-and-twenty-eight-dollar`), while the same number followed by a
+duration unit remains a `measurement`.
 Compound predicates such as `pay-per-visit` emit `word pay` followed by
 `unit -per-visit`; the same boundary preserves `-per-application` as an
 `application` token. Application units accept the full visit determiner set.
+One-off `on`/`at` timing also accepts possessive today, tomorrow, yesterday,
+and weekday names (with optional this/next/last for weekdays).
 
 Token text is lowercase normalized copy, except billing/pricing verb and noun
 inflections are stemmed (`billed`/`billing` → `bill`, `prices` → `price`,
