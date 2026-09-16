@@ -710,6 +710,18 @@ function unsentOutcome(outcome) {
   // reason rather than as a held send (codex #4331 P1). approved_phone_drift
   // is the exception only because its callers throw immediately below.
   if (outcome.refused) return { sent: false, failed: outcome.refused, nextAllowedAt: null };
+  // An uncertain provider handoff or a claim another sender already holds is
+  // NOT a queued retry (codex P1): sendSMS leaves the row exactly as the
+  // in-flight attempt found it — no scheduled_for — for the stranded-send
+  // reconciliation (or the claim's owner) to resolve, not for
+  // processScheduled, which only selects status='pending' rows with a
+  // scheduled_for. Falling through to the generic deferred shape below told
+  // callers a text "will go out automatically" that no cron pass can ever
+  // pick up. Reported with its own `uncertain` marker so every caller can
+  // tell the operator the honest state instead.
+  if (outcome.uncertain || outcome.claimLost) {
+    return { sent: false, uncertain: true, reason: outcome.reason || null, nextAllowedAt: null };
+  }
   return outcome.failed
     ? { sent: false, failed: outcome.failed, nextAllowedAt: null }
     : { sent: false, deferred: outcome.deferred, nextAllowedAt: outcome.nextAllowedAt || null };
@@ -3570,6 +3582,25 @@ const ReviewService = {
         if (freed && row.sequence_id) {
           await trx("review_sequences").where({ id: row.sequence_id, status: "active" }).whereNull("next_run_at")
             .update({ next_run_at: new Date(Date.now() + 30 * 60 * 1000), updated_at: new Date() });
+        }
+        // Codex #4331 P1: reconciliation just PROVED (not merely presumed —
+        // evidence.found is false only after _inlineSendEvidence exhausts
+        // local logs, the provider, and an unfiltered provider pass) that
+        // this ask's own sms_log reservation never reached the customer.
+        // Left `sending`, that reservation still reads as a delivered ask to
+        // _askSpacingHold/lastManualAskAt for up to 72h, holding the very
+        // retry this release just re-queued. An uncertain outcome
+        // (evidence.unavailable) returns above and never reaches here, so
+        // the conservative hold is untouched for every outcome but a proven
+        // negative. Same transaction as the release: the requeue and the
+        // reservation clear commit together or not at all. Email touches
+        // never open one of these (reserveReviewSms is SMS-only).
+        if (freed && !email) {
+          await trx("sms_log")
+            .where({ status: "sending" })
+            .whereRaw("metadata->>'review_request_id' = ?", [String(row.id)])
+            .whereRaw("metadata->>'review_ask_reservation' = 'true'")
+            .del();
         }
         return { released: freed };
       });

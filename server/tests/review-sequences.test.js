@@ -43,7 +43,7 @@ jest.mock('../utils/cron-lock', () => {
 });
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSendCustomerMessage(...a) }));
 jest.mock('../services/email-template-library', () => ({ sendTemplate: (...a) => mockEmailSendTemplate(...a) }));
-jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async (url) => url) }));
+jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async (url) => url), existingShortUrlFor: async () => null }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal.test' }));
 jest.mock('../services/customer-contact', () => ({
   // Honor explicit null/'' so tests can model a customer missing a channel.
@@ -140,6 +140,7 @@ function makeMock(initial = {}, opts = {}) {
       whereExists() { this.matchNone = true; return this; },
       whereNotExists() { return this; },
       forUpdate() { return this; },
+      skipLocked() { return this; },
       whereNull(c) { this.nulls.push(c); return this; },
       leftJoin() { return this; }, joinRaw() { return this; }, select(...cols) { this.selected = cols; return this; },
       orderBy(c, d = 'asc') { this.order = [c, d]; return this; },
@@ -1611,6 +1612,63 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       const row = mock.__state.rows.review_requests[0];
       expect(row.status).toBe('sent');
       expect(row.sms_sent_at).toBeTruthy();
+    });
+
+    test('reconciliation proving a stranded ask unsent also clears its reservation, so the requeued retry is not held by the 3-day rule (codex #4331 P1)', async () => {
+      const staleClaimedAt = new Date(Date.now() - 20 * 60000); // past INLINE_CLAIM_STALE_MS (10 min)
+      const mock = makeMock({
+        customers: [{ id: 'strand-1', first_name: 'Jo', phone: '+19410000199', nearest_location_id: 'venice' }],
+        review_requests: [{
+          id: 'rr-strand-1', customer_id: 'strand-1', status: 'sending', channel: 'sms',
+          template_key: 'day0_ask', token: 'tstrand1', location_id: 'venice',
+          created_at: new Date(Date.now() - 5 * 3600000), claimed_at: staleClaimedAt,
+          triggered_by: 'cron', sms_sent_at: null,
+        }],
+        // The reservation the ask's own send opened before the provider call
+        // — never resolved, because that attempt's outcome came back uncertain.
+        sms_log: [{
+          id: 'res-strand-1', customer_id: 'strand-1', direction: 'outbound', status: 'sending',
+          message_body: 'Would you leave us a quick review?',
+          metadata: { review_ask_reservation: true, review_request_id: 'rr-strand-1' },
+          created_at: staleClaimedAt,
+        }],
+      });
+      db.mockImplementation(mock);
+      // _inlineSendEvidence's provider-lookup pass must return a definitive
+      // "no message found" for this to prove unsent rather than stay
+      // unavailable — the real Twilio client is absent in this test process,
+      // which the module reports as `unavailable`, not `found: false`.
+      const TwilioService = require('../services/twilio');
+      const findSpy = jest.spyOn(TwilioService, 'findOutboundMessageSince').mockResolvedValue({ found: false });
+
+      try {
+        // Bypasses _strandedSendPage's own query (this harness doesn't model
+        // knex's OR-group builders) and drives the reconciliation logic under
+        // test directly with the exact row shape that page selects.
+        const outcome = await ReviewService._reconcileStrandedBatch(
+          [{
+            id: 'rr-strand-1', customer_id: 'strand-1', token: 'tstrand1', claimed_at: staleClaimedAt,
+            sequence_id: null, sequence_step: null, channel: 'sms', template_key: 'day0_ask',
+          }],
+          new Date(Date.now() - 10 * 60000),
+        );
+
+        expect(outcome).toEqual({ finished: 0, released: 1 });
+        const row = mock.__state.rows.review_requests[0];
+        expect(row.status).toBe('pending');
+        expect(row.claimed_at).toBeNull();
+        // The proven-unsent reservation is cleared, not left to read as a
+        // recent ask for the next 72h.
+        expect(mock.__state.rows.sms_log).toHaveLength(0);
+
+        // The requeued retry must not be held by _askSpacingHold reading the
+        // (now-gone) reservation as a prior ask inside the last 72h.
+        const resent = await ReviewService.sendSMS('rr-strand-1');
+        expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+        expect(resent.sent).toBe(true);
+      } finally {
+        findSpy.mockRestore();
+      }
     });
 
     test('a non-ask uncertain send whose deferred write fails stays fenced, not due (pre-push codex P1 on #4331)', async () => {
@@ -5367,6 +5425,65 @@ describe('legacy sendSMS — ambiguous returned provider failure', () => {
     expect(await ReviewService.sendSMS('rr-unc-1')).toMatchObject({ deferred: 'provider_retry' });
     expect(mock.__state.rows.review_requests[0].status).toBe('pending');
     expect(mock.__state.rows.review_requests[0].scheduled_for).toBeTruthy();
+  });
+});
+
+// Codex P1: sendSMS's `uncertain`/`claimLost` outcomes leave the row exactly
+// as the in-flight attempt found it — no scheduled_for — for the
+// stranded-send reconciliation (or the claim's owner) to resolve;
+// processScheduled only ever selects status='pending' rows WITH a
+// scheduled_for, so neither outcome is a queued retry. unsentOutcome (feeding
+// create()/_createGated, and from there /trigger, /tech-trigger and the
+// Intelligence Bar tool) used to fold both into the same generic `deferred`
+// shape a real cron-owned retry produces, telling the operator a text "will
+// go out automatically" that no cron pass could ever pick up.
+describe('unsentOutcome — uncertain and claim-held sends are not a queued retry', () => {
+  test('an uncertain provider handoff reports a distinct code, not the generic deferred shape', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'unc-out-1', first_name: 'Lee', phone: '+19410000196', nearest_location_id: 'venice' }],
+    });
+    db.mockImplementation(mock);
+    const sendSpy = jest.spyOn(ReviewService, 'sendSMS')
+      .mockResolvedValueOnce({ sent: false, uncertain: true, reason: 'provider_uncertain', requestId: 'ignored' });
+
+    try {
+      const request = await ReviewService.create({ customerId: 'unc-out-1', triggeredBy: 'tech' });
+      expect(request.sendOutcome).toEqual({ sent: false, uncertain: true, reason: 'provider_uncertain', nextAllowedAt: null });
+      // Not the generic deferred shape a real cron-owned retry uses — a
+      // caller keying off `.deferred` to decide whether a retry is queued
+      // must not see one here.
+      expect(request.sendOutcome.deferred).toBeUndefined();
+    } finally { sendSpy.mockRestore(); }
+  });
+
+  test('a claim another sender already holds also reports the distinct code, not the generic deferred shape', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'unc-out-2', first_name: 'Sam', phone: '+19410000197', nearest_location_id: 'venice' }],
+    });
+    db.mockImplementation(mock);
+    const sendSpy = jest.spyOn(ReviewService, 'sendSMS')
+      .mockResolvedValueOnce({ sent: false, claimLost: true, reason: 'review_claim_lost', requestId: 'ignored' });
+
+    try {
+      const request = await ReviewService.create({ customerId: 'unc-out-2', triggeredBy: 'tech' });
+      expect(request.sendOutcome).toEqual({ sent: false, uncertain: true, reason: 'review_claim_lost', nextAllowedAt: null });
+      expect(request.sendOutcome.deferred).toBeUndefined();
+    } finally { sendSpy.mockRestore(); }
+  });
+
+  test('an ordinary provider-retry deferral keeps its real nextAllowedAt (the queued-retry copy stays honest)', async () => {
+    const retryAt = new Date(Date.now() + 5 * 60000).toISOString();
+    const mock = makeMock({
+      customers: [{ id: 'unc-out-3', first_name: 'Di', phone: '+19410000198', nearest_location_id: 'venice' }],
+    });
+    db.mockImplementation(mock);
+    const sendSpy = jest.spyOn(ReviewService, 'sendSMS')
+      .mockResolvedValueOnce({ deferred: 'provider_retry', nextAllowedAt: retryAt });
+
+    try {
+      const request = await ReviewService.create({ customerId: 'unc-out-3', triggeredBy: 'tech' });
+      expect(request.sendOutcome).toEqual({ sent: false, deferred: 'provider_retry', nextAllowedAt: retryAt });
+    } finally { sendSpy.mockRestore(); }
   });
 });
 
