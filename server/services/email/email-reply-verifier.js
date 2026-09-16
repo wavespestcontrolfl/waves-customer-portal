@@ -7,15 +7,16 @@ const BARE_HOST_RE = /\b[a-z0-9-]+(?:\.[a-z0-9-]+)+\b/gi;
 const PHONE_URI_RE = /\b(?:tel|sms):(?:\/\/)?(?:\+?\d|\(\d)[\d()+.,;*#?=&%-]*/i;
 const MARKDOWN_LINK_RE = /\[[^\]\n]+\]\(\s*(?:<[^>\n]*>|[^)\n]*)\s*\)|\[[^\]\n]+\]\[[^\]\n]*\]/i;
 const MARKDOWN_LINK_DEFINITION_RE = /^\s*\[[^\]\n]+\]:\s*\S+/im;
-const BOILERPLATE_RE = /\bthank you for (?:reaching out|contacting us)\b|\bhope this (?:email )?finds you well\b|\bplease (?:do not|don't) hesitate to (?:reach out|contact us)\b|\blet us know if you have any (?:other |further )?questions\b/i;
+const BOILERPLATE_RE = /\b(?:thank you|thanks) for (?:reaching out|contacting us)\b|\bhope this (?:email )?finds you well\b|\bplease (?:do not|don't) hesitate to (?:reach out|contact us)\b|\blet us know if you have any (?:other |further )?questions\b/i;
 // Outbound corrections can legitimately supersede preparation instructions.
 // Screen prompt-control language rather than using the stricter exemplar gate.
 const OUTPUT_INSTRUCTION_RE = /\b(?:system|developer)\s+(?:prompt|instructions?)\b|(?:^|\n)\s*(?:assistant|system|user)\s*:|\b(?:ignore|disregard|forget|override)\s+(?:(?:all|the|any)\s+)?(?:previous|prior|above|earlier)\s+instructions?\b|\b(?:ignore|disregard|forget|override)\s+(?:(?:all|any|these|those)\s+)?instructions?\b|\b(?:do\s+not|don't|never)\s+follow\s+(?:(?:all|any|the|these|those)\s+)?(?:(?:previous|prior|above|earlier)\s+)?instructions?\b|\b(?:ignore|disregard|forget|override)\b[^.!?]{0,80}\b(?:prompt|system|developer)\b|```/i;
+const PREPARATION_CORRECTION_RE = /\b(?:(?:ignore|disregard|forget|override)\s+(?:(?:all|the|any)\s+)?(?:previous|prior|above|earlier)\s+instructions?|(?:do\s+not|don't|never)\s+follow\s+(?:(?:all|any|the|these|those)\s+)?(?:previous|prior|above|earlier)\s+instructions?)\b(?=\s+(?:about|for|on|regarding|to)\s+(?:prepar(?:ation|ing|e)\b|(?:the|your)\s+(?:appointment|visit|service)\b))/gi;
 // A payment or postal error identifier is not a property-access credential.
 // Remove only the explicitly labeled code/value span; the shared detector
 // still sees an actual gate or lockbox code elsewhere in the reply.
 const NON_ACCESS_CODE_RE = /\b(?:payment|billing|invoice|transaction|postal|zip|service|error)\s+(?:error\s+)?code\b\s*(?:(?:is|was|reads?)\s+|[:=]\s*|\s+)(?=[a-z0-9]*\d)[a-z0-9]{2,12}\b|\b(?=[a-z0-9]*\d)[a-z0-9]{2,12}\b\s+(?:is|was)\s+(?:the\s+)?(?:payment|billing|invoice|transaction|postal|zip|service|error)\s+(?:error\s+)?code\b/gi;
-const ACCESS_CONTEXT_RE = /\b(?:gate|door|garage|keypad|lock\s?box|entry|alarm|access|(?:enter(?:ing)?|open(?:ing)?|unlock(?:ing)?)\s+(?:the\s+|your\s+)?(?:property|premises|home|house|building))\b/i;
+const PHYSICAL_ACCESS_CONTEXT_RE = /\b(?:gate|door|garage|keypad|lock\s?box|alarm|(?:property|premises|home|house|building)\s+(?:access|entry)|(?:access|entry)\s+(?:(?:to|into|for)\s+)?(?:the\s+|your\s+)?(?:property|premises|home|house|building)|(?:enter(?:ing)?|open(?:ing)?|unlock(?:ing)?)\s+(?:the\s+|your\s+)?(?:property|premises|home|house|building))\b/i;
 function normalizeCopy(text) {
   return text.normalize('NFKC').replace(/[\u2010-\u2015\u2212]/g, '-').replace(/[‘’]/g, "'");
 }
@@ -88,18 +89,19 @@ function verifyEmailReplyStructure({ text, customer, wordBudget } = {}) {
   if (/<!--|<![^>]*>|<\/?[a-z][^>]*>|<\/?[a-z][^>\n]*$/im.test(draft)) violations.push('html_not_allowed');
   if (/^\s*(?:(?:[-+*]|\d+[.)])\s+|•)/m.test(normalizedCopy)) violations.push('bullets_not_allowed');
   if (BOILERPLATE_RE.test(normalizedCopy.replace(/\s+/g, ' '))) violations.push('boilerplate_not_allowed');
-  if (OUTPUT_INSTRUCTION_RE.test(normalizedCopy)) violations.push('untrusted_instruction');
+  const instructionCopy = normalizedCopy.replace(PREPARATION_CORRECTION_RE,
+    (match) => match.replace(/\binstructions?\b/i, 'preparation directions'));
+  if (OUTPUT_INSTRUCTION_RE.test(instructionCopy)) violations.push('untrusted_instruction');
   if (forgedSignature(draft)) violations.push('signature_unsupported');
   if (containsUnsupportedLink(draft) || PHONE_URI_RE.test(draft) || MARKDOWN_LINK_RE.test(draft)
     || MARKDOWN_LINK_DEFINITION_RE.test(draft)) violations.push('link_unsupported');
   const screenedAccessCopy = accessCopy.replace(NON_ACCESS_CODE_RE, (match, offset) => {
     const sentenceBefore = accessCopy.slice(0, offset).split(/[.!?\n]/).at(-1);
     const sentenceAfter = accessCopy.slice(offset + match.length).split(/[.!?\n]/)[0];
-    // Account/portal/system access is not entry to the property. Retain any
-    // separate physical-access noun in the same sentence before exempting.
-    const physicalContext = `${sentenceBefore} ${sentenceAfter}`
-      .replace(/\b(?:account|portal|system)\s+access\b/gi, '');
-    return ACCESS_CONTEXT_RE.test(physicalContext) ? match : ' ';
+    // Exempt the labeled non-access value unless the same sentence also
+    // positively identifies entry to a property or a physical access device.
+    const physicalContext = `${sentenceBefore} ${sentenceAfter}`;
+    return PHYSICAL_ACCESS_CONTEXT_RE.test(physicalContext) ? match : ' ';
   });
   if (containsReportAccessCode(screenedAccessCopy)) violations.push('access_code');
   if (!greetingMatches(draft, customer)) violations.push('greeting_mismatch');
