@@ -158,6 +158,29 @@ test.each([
 });
 
 test.each([
+  ['we only planned it', 'fail'],
+  ['we only considered it', 'fail'],
+  ['the technician only scheduled it', 'fail'],
+  ['we only considered Talstar P', 'fail'],
+  ['we only planned it there', 'fail'],
+  ['we only planned it for the exterior perimeter', 'fail'],
+  ['we only planned it for today', 'fail'],
+  ['we only planned it, not completed', 'fail'],
+  ['we only planned bait', 'pass'],
+  ['we only considered the appointment', 'pass'],
+  ['we only planned bait there', 'pass'],
+  ['we only planned it indoors', 'pass'],
+  ['we only considered it for the garage', 'pass'],
+  ['we only planned it in the garage', 'pass'],
+  ['we only planned it for the garage, not completed', 'pass'],
+  ['we only planned it, not completed indoors', 'pass'],
+  ['we finished it', 'pass'],
+])('actor direct-object noncompletion keeps treatment scope: %s', (tail, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter, but ${tail}.`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
+test.each([
   ['are you sure?', 'fail'],
   ['are you certain?', 'fail'],
   ['are you sure about that?', 'fail'],
