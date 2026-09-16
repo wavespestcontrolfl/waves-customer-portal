@@ -1,8 +1,11 @@
 const { normalizeEmailReplyCopy } = require('./email-reply-copy-normalizer');
 
-// Keep a visit's adjectives local to the unit. In particular, a correct
-// "per application" amount must not absorb a separate reference to a visit.
-const VISIT_SRC = '(?:(?!applications?\\b)(?:[a-z]+(?:-[a-z]+)*|\\d+(?:\\.\\d+)?-(?:minute|hour|day|week|month|year)s?)\\s+)*visits?\\b';
+// Keep a visit's modifiers local to its noun phrase. Clause boundaries,
+// prepositions, determiners, and account/payment/access nouns cannot bridge a
+// price to a later scheduling reference; eight modifiers preserve known copy.
+const VISIT_MODIFIER_STOP_SRC = '(?:a|access|account|accounts|after|an|and|any|are|at|balance|balances|be|been|before|being|but|by|can|could|did|do|does|during|each|every|for|from|had|has|have|her|his|if|in|into|is|its|may|might|must|my|of|on|one|or|our|payment|payments|per|should|since|than|that|the|their|then|these|this|those|through|to|until|was|were|when|where|while|will|with|without|would|your)';
+const VISIT_MODIFIER_SRC = `(?!(?:applications?|${VISIT_MODIFIER_STOP_SRC})\\b)(?:[a-z]+(?:-[a-z]+)*|\\d+(?:\\.\\d+)?-(?:minute|hour|day|week|month|year)s?)`;
+const VISIT_SRC = `(?:${VISIT_MODIFIER_SRC}\\s+){0,8}visits?\\b`;
 const VISIT_UNIT_SRC = `(?:each|every|a|an|one|the|your|our|my|their|his|her|its|this|that|any)\\s+${VISIT_SRC}`;
 const PRICE_UNIT_SRC = `(?:(?:(?:for|on)\\s+)?${VISIT_UNIT_SRC}|per[\\s-]+${VISIT_SRC}|/\\s*${VISIT_SRC})`;
 const POSSESSIVE_VISIT_SRC = `${VISIT_UNIT_SRC}(?:'s|')`;

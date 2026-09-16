@@ -12,6 +12,10 @@ prices such as `Each visit's price is$98`, and price or billing verbs. Monetary
 forms include dollar symbols, USD prefixes/suffixes, and amounts followed by
 `dollars` or `bucks`. Bare numbers match only with explicit pricing context,
 such as `Each visit costs 98`; duration and photo counts remain valid.
+Visit noun phrases allow at most eight modifiers and stop at clause words,
+prepositions, determiners, and account/payment/access nouns. Thus an account
+payment followed later by visit timing, such as `We received $98 for your
+account before the next visit`, does not become a visit price.
 
 The shared `email-reply-copy-normalizer` bounds raw input at 8,192 UTF-8 bytes,
 512 whitespace-delimited tokens, and eight formatting passes before matching.

@@ -91,6 +91,12 @@ describe('email reply monetary visit-pricing policy', () => {
     'Each visit runs 1.5 hours', 'USD `98` per application',
     'USD ``98` per visit', 'The note contains an unmatched ` character.',
     'The notes contain an unmatched * character.', 'The note contains a backslash before \\q.',
+    'We received $98 for your account before the next visit.',
+    'Your $98 payment cleared before your next scheduled visit.',
+    'We received USD 98 for your gate access ahead of the scheduled visit.',
+    'The $98 balance is due before the next visit.',
+    'Your account received the $98 payment after the prior visit and before the next visit.',
+    '$98 per alpha beta gamma delta epsilon zeta eta theta iota visit',
   ])('preserves application prices and unrelated visit prose: %s', (text) => {
     expect(verdict(text)).toEqual({ ok: true, violations: [] });
   });
