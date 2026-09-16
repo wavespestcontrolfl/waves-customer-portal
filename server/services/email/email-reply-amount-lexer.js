@@ -170,17 +170,21 @@ function matchEmailReplyAmountAt(source, at = 0) {
   if (insideEarlierWrittenAmount(source, at)) return null;
 
   let longest = null;
+  let invalidEnd = at;
   for (const { kind, re } of MATCHERS) {
     re.lastIndex = at;
     const match = re.exec(source);
     if (!match) continue;
     const end = at + match[0].length;
-    if (!validEnd(source, end)) continue;
+    if (!validEnd(source, end)) {
+      invalidEnd = Math.max(invalidEnd, end);
+      continue;
+    }
     if (!longest || end > longest.end) {
       longest = { kind, text: match[0], start: at, end };
     }
   }
-  return longest;
+  return longest && longest.end >= invalidEnd ? longest : null;
 }
 
 module.exports = { matchEmailReplyAmountAt };
