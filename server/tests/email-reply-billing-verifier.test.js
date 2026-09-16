@@ -4,6 +4,16 @@ const verdict = (text) => verifyEmailReplyBilling({ text });
 const rejected = (text) => expect(verdict(text).violations).toContain('customer_copy_compliance');
 
 describe('email reply amountless billing policy', () => {
+  test.each(['We use pay-per-visit', 'You are billed-per-visit'])(
+    'consumes embedded compound billing units: %s', rejected,
+  );
+
+  test.each(['We use pay-per-application', 'You are billed-per-application'])(
+    'preserves compound application billing: %s', (text) => {
+      expect(verdict(text)).toEqual({ ok: true, violations: [] });
+    },
+  );
+
   test.each([
     'The rate is per visit', 'Billing is per visit', 'You will be billed per visit',
     'Payments are per visit', 'You pay per visit', 'The fee will be per routine visit',
