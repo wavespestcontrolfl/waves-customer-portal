@@ -27,6 +27,7 @@ const { scheduledServiceTrackTokenExpiry } = require('./track-token-expiry');
 const { clearTechCurrentJob } = require('./tech-status');
 const { shiftCallFollowUpsForParentMove, planCallFollowUpShift } = require('./call-booking-catalog');
 const { findConflictingVisits, acquireOccupancyLock, acquireOccupancyLocks } = require('./scheduling/occupancy');
+const { lockTechDays } = require('./scheduling/tech-day-lock');
 const { resolveStopCoords } = require('./scheduling/travel-gap');
 const { arrivalWindowRoutingEnabled } = require('./scheduling/arrival-route');
 const { guardedCoordSelects, preloadServiceLocations } = require('./scheduling/day-stops');
@@ -101,6 +102,95 @@ function reviewedOccurrencesMatch(actual, expected) {
       && REVIEWED_OCCURRENCE_FIELDS.every((field) => Object.prototype.hasOwnProperty.call(disclosed, field)
         && disclosed[field] === row[field]);
   });
+}
+
+const CONFLICT_SNAPSHOT_FIELDS = [
+  'target_id', 'target_date', 'target_start', 'target_end',
+  'conflict_id', 'conflict_date', 'conflict_start', 'conflict_end',
+  'conflict_duration', 'reason', 'warning', 'status', 'service_type',
+];
+
+function hhmm(value) {
+  return value ? String(value).slice(0, 5) : null;
+}
+
+function conflictSnapshotItem(target, row) {
+  // Give the target-shaped arrival/capacity verdict a stable synthetic id.
+  const synthetic = row?.conflict_reason && String(row.id) === String(target.id);
+  const reason = row?.conflict_reason || 'overlap';
+  return {
+    target_id: String(target.id),
+    target_date: dateOnly(target.date),
+    target_start: hhmm(target.windowStart),
+    target_end: hhmm(target.windowEnd),
+    conflict_id: synthetic ? `infeasible:${reason}` : String(row.id),
+    conflict_date: synthetic ? dateOnly(target.date) : dateOnly(row.scheduled_date),
+    conflict_start: hhmm(row.window_start),
+    conflict_end: hhmm(row.window_end),
+    conflict_duration: row.estimated_duration_minutes == null ? null : Number(row.estimated_duration_minutes),
+    reason,
+    warning: row.warning || null,
+    // Target status may change when reviewed moves land pending.
+    status: synthetic ? null : (row.status || null),
+    service_type: row.service_type || null,
+  };
+}
+
+function sortConflictSnapshot(rows) {
+  return [...rows].sort((a, b) => {
+    for (const field of CONFLICT_SNAPSHOT_FIELDS) {
+      const cmp = String(a[field] ?? '').localeCompare(String(b[field] ?? ''));
+      if (cmp) return cmp;
+    }
+    return 0;
+  });
+}
+
+function conflictSnapshotsMatch(actual, expected) {
+  if (!Array.isArray(expected) || actual.length !== expected.length) return false;
+  const want = sortConflictSnapshot(expected);
+  return sortConflictSnapshot(actual).every((row, index) => {
+    const disclosed = want[index];
+    return disclosed && CONFLICT_SNAPSHOT_FIELDS.every((field) =>
+      Object.prototype.hasOwnProperty.call(disclosed, field) && disclosed[field] === row[field]);
+  });
+}
+
+function conflictsChanged() {
+  return Object.assign(new Error('The destination schedule changed. Refresh the proposal.'), {
+    statusCode: 409,
+    status: 409,
+    isOperational: true,
+    code: 'CONFLICTS_CHANGED',
+  });
+}
+
+async function probeMoveConflicts({
+  conn, target, excludeServiceIds, options = {}, travel,
+}) {
+  if (!target.windowStart || !target.windowEnd) return { rows: [], snapshot: [] };
+  const useArrivalWindows = options.overlapAdvisory === true
+    && options.adminWindowRules === true && arrivalWindowRoutingEnabled();
+  const rows = await findConflictingVisits({
+    db: conn,
+    date: target.date,
+    windowStart: target.windowStart,
+    windowEnd: target.windowEnd,
+    excludeServiceIds,
+    excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
+    ...(travel !== undefined ? { travel } : {}),
+    ...(useArrivalWindows ? { arrivalWindow: {
+      serviceId: target.id,
+      technicianId: target.technicianId || null,
+      changes: target.changes,
+    } } : {}),
+  });
+  return { rows, snapshot: sortConflictSnapshot(rows.map((row) => conflictSnapshotItem(target, row))) };
+}
+
+function assertConflictSnapshot(actual, options) {
+  if (!Object.prototype.hasOwnProperty.call(options, 'expectConflictSnapshot')) return;
+  if (!conflictSnapshotsMatch(actual, options.expectConflictSnapshot)) throw conflictsChanged();
 }
 
 // Seasonal mosquito cadence lives in the seeder — single source of truth for
@@ -752,7 +842,7 @@ function parseWindow(w) {
 // rescheduleSeries (inside its transaction) and previewSeriesMove (read-only
 // counts for the surfaces), so what a surface previews is exactly what the
 // move probes and writes.
-async function makeSeriesProjector({ service, parent, newDate, seriesDateStr }) {
+async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, conn = db }) {
   const pattern = parent.recurring_pattern;
   const isMonthBasedPattern = isMonthBasedRecurrence(pattern);
   // Seasonal series keep their seeded weekend/season contract on re-anchor
@@ -767,7 +857,7 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr }) 
   // preference alongside the operator-set series flag — the flag alone
   // is operator provenance; the preference is never persisted onto rows.
   const seriesSkipWeekends = !!parent.skip_weekends
-    || await customerPrefersNoWeekends(db, parent.customer_id);
+    || await customerPrefersNoWeekends(conn, parent.customer_id);
   const projectSeriesDate = (raw) => {
     let out = String(raw).split('T')[0];
     // The weekend shift applies to EVERY recurring pattern (hook B6 P1 —
@@ -1012,6 +1102,46 @@ class SmartRebooker {
     const s = (service.service_type || '').toLowerCase();
     if (s.includes('lawn') || s.includes('turf') || s.includes('mosquito')) return { start: '08:00', end: '10:00', display: '8:00-10:00 AM' };
     return { start: '09:00', end: '12:00', display: '9:00 AM-12:00 PM' };
+  }
+
+  // Read-only counterpart to the exact commit probe; ordinary movers omit it.
+  async previewMoveConflicts(serviceId, newDate, newWindow, options = {}) {
+    const conn = options.conn || db;
+    const service = await conn('scheduled_services').where({ id: serviceId }).first();
+    if (!service) throw Object.assign(new Error('Service not found'), { statusCode: 404 });
+    const date = dateOnly(newDate);
+    const win = parseWindow(newWindow);
+    const persistedEnd = win.end || (options.clearWindowEnd === true ? null : service.window_end);
+    const windowStart = win.start || service.window_start;
+    const windowEnd = persistedEnd || (process.env.REBOOKER_NULL_END_OCCUPANCY === 'off'
+      ? null : occupancyProbeEnd(windowStart, null, service.estimated_duration_minutes));
+    if (!date || !windowStart || !windowEnd) return [];
+    if (options.overlapAdvisory === true && options.adminWindowRules === true
+      && arrivalWindowRoutingEnabled()) await preloadServiceLocations(conn, [serviceId]);
+    const technicianId = Object.prototype.hasOwnProperty.call(options, 'technicianId')
+      ? options.technicianId : service.technician_id;
+    const target = {
+      id: serviceId,
+      date,
+      windowStart,
+      windowEnd,
+      technicianId,
+      changes: {
+        scheduled_date: date,
+        window_start: windowStart,
+        window_end: persistedEnd,
+        technician_id: technicianId || null,
+      },
+    };
+    const travel = options.travelGap === true ? await resolveStopCoords(conn, serviceId) : undefined;
+    const { snapshot } = await probeMoveConflicts({
+      conn,
+      target,
+      excludeServiceIds: [...new Set([serviceId, ...(options.excludeServiceIds || [])].map(String))],
+      options,
+      travel,
+    });
+    return snapshot;
   }
 
   async reschedule(serviceId, newDate, newWindow, reason, initiatedBy, options = {}) {
@@ -1294,15 +1424,12 @@ class SmartRebooker {
         // date-occupancy -> tech in one order (no deadlock inversion). See the
         // ORDERING CONTRACT in scheduling/occupancy.js.
         await acquireOccupancyLock(trx, newDateStr);
-        // Then the tech-scoped slot-reserve lock (same namespace + `${techId ||
-        // 'unassigned'}` key shape slot-reservation.js uses). STILL needed even
-        // with the date lock above: the kept-tech overlap check must serialize
-        // against slot-reservation.js estimate reserves + createSelfBooking,
-        // which take this tech lock but NOT the date-occupancy one.
-        await trx.raw(
-          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-          ['slot-reserve', `${keptTechId || 'unassigned'}:${newDateStr}`],
-        );
+        // Fence both the kept route and unassigned capacity against U↔T
+        // assignment changes. The helper dedupes a techless target.
+        await lockTechDays(trx, [
+          { techId: keptTechId, date: newDateStr },
+          { techId: null, date: newDateStr },
+        ]);
       }
       // Caller-supplied pre-move guard (the call applier's customer/property/
       // call row locks) — AFTER rung 1, BEFORE this transaction's first row
@@ -1339,16 +1466,14 @@ class SmartRebooker {
         if (String(currentVisitId || '') !== String(service.visit_id || '')) {
           throw Object.assign(new Error('Cannot reschedule — the visit changed concurrently'), { statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED' });
         }
-        const visit = currentVisitId ? await trx('service_visits').where({ id: currentVisitId }).first('status') : null;
-        // A visit that entered FINALIZATION (closing, …) after the plan
-        // observed one member must not lose that member (local codex gate
-        // P0): the detach seam ignores non-open visits, so the solo move
-        // would strand the parent and its issued/payment artifacts at the
-        // old stop. Anything other than open or dissolved is frozen —
-        // the same verdict visit-groups' guards give.
-        if (visit && String(visit.status) !== 'open' && String(visit.status) !== 'dissolved') {
-          throw Object.assign(new Error('This visit already has an issued link, records or a payment in progress — finish it, or contact the office to move it.'), { statusCode: 409, code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', isOperational: true, reason: 'visit_not_open' });
+        // Re-run the COMPLETE frozen verdict under the stop lock. Status alone
+        // misses a still-open visit whose packet/artifact/payment or completion
+        // claim appeared after moveVisitAsUnit returned its solo fallback.
+        const verdict = await vg.frozenVisitVerdict(trx, currentVisitId);
+        if (verdict.frozen) {
+          throw Object.assign(new Error('This visit already has an issued link, records or a payment in progress — finish it, or contact the office to move it.'), { statusCode: 409, code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', isOperational: true, reason: verdict.reason });
         }
+        const visit = currentVisitId ? await trx('service_visits').where({ id: currentVisitId }).first('status') : null;
         if (visit && String(visit.status) === 'open') {
           const members = await vg.openMembers(trx, currentVisitId);
           if (members.some((m) => String(m.id) !== String(serviceId))) {
@@ -1457,21 +1582,25 @@ class SmartRebooker {
       // visits moving in the same sweep don't collide with their own
       // pre-move positions.
       if (updates.window_start && occupancyGateEnd) {
-        const occupancyClash = await findConflictingVisits({
-          db: trx,
-          date: newDateStr,
-          windowStart: updates.window_start,
-          windowEnd: occupancyGateEnd,
+        // The shared probe owns customer travel and admin arrival/capacity,
+        // keeping Preview and Apply on one policy.
+        const travel = options.travelGap === true ? await resolveStopCoords(trx, serviceId) : undefined;
+        const { rows: occupancyClash, snapshot } = await probeMoveConflicts({
+          conn: trx,
+          target: {
+            id: serviceId,
+            date: newDateStr,
+            windowStart: updates.window_start,
+            windowEnd: occupancyGateEnd,
+            technicianId: keptTechId,
+            changes: updates,
+          },
           excludeServiceIds: [...new Set([serviceId, ...(options.excludeServiceIds || [])].map(String))],
-          excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
-          // Travel gap (GATE_SLOT_TRAVEL_GAP): the moving row's own pin —
-          // CUSTOMER-FACING movers only (options.travelGap: public reschedule
-          // page, SMS reply). Auto-dispatch generates its candidates under
-          // its own route policy; admin and tech (rain-out) moves are
-          // advisory; all stay overlap-only (GH codex #3803 r4 P1).
-          ...(options.travelGap === true ? { travel: await resolveStopCoords(trx, serviceId) } : {}),
-          ...(useArrivalWindows ? { arrivalWindow: { serviceId, technicianId: keptTechId, changes: updates } } : {}),
+          options,
+          travel,
         });
+        // Present means exact; [] asserts clear under the occupancy lock.
+        assertConflictSnapshot(snapshot, options);
         if (occupancyClash.length) {
           arrivalWarning = occupancyClash[0].warning || null;
           if (!overlapAdvisory) {
@@ -1485,6 +1614,8 @@ class SmartRebooker {
           }
           overlapWarned = true;
         }
+      } else {
+        assertConflictSnapshot([], options);
       }
 
       // Save-time eligibility for a tech change (422 TECH_NOT_ASSIGNABLE) on
@@ -1671,7 +1802,7 @@ class SmartRebooker {
     // shared with the admin schedule-edit path; best-effort outside the trx.
     const followUpReport = {};
     try {
-      const shifted = await shiftCallFollowUpsForParentMove({
+      const shifted = options.skipCallFollowUpShift ? 0 : await shiftCallFollowUpsForParentMove({
         conn: db,
         parentServiceId: serviceId,
         fromDate: originalDate,
@@ -1987,6 +2118,25 @@ class SmartRebooker {
       // rung-1 site fires it, and the no-projected-dates path falls through to
       // the call below, whichever comes first.
       let beforeMoveRan = false;
+      let reviewedMaintenancePreflightRan = false;
+      const preflightReviewedMaintenance = async () => {
+        if (reviewedMaintenancePreflightRan
+          || (!Array.isArray(options.expectOccurrenceIds) && !Array.isArray(options.expectOccurrences)
+            && !Object.prototype.hasOwnProperty.call(options, 'expectConflictSnapshot'))
+          || typeof options.beforeMove !== 'function') return;
+        const result = await trx.raw(
+          'SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked',
+          ['recurring-series-maintenance', String(parentId)],
+        );
+        if (result.rows[0]?.locked !== true) {
+          throw Object.assign(new Error('This plan is being updated — reload and save again.'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'VISIT_CHANGED_RETRY',
+          });
+        }
+        reviewedMaintenancePreflightRan = true;
+      };
       const runBeforeMove = async () => {
         if (beforeMoveRan) return;
         beforeMoveRan = true;
@@ -2109,10 +2259,8 @@ class SmartRebooker {
       const droppedIdx = assertAnchorMovable(siblings);
       const startIdx = droppedIdx;
       // What the sweep is about to write, as a comparable shape: identity,
-      // position (date + exception state) and whether the row is swept —
-      // exactly the inputs the lock keys and the memoized projection were
-      // derived from. Window/tech/tracker columns are NOT part of it: they
-      // are taken fresh from the locked read.
+      // position, technician and movability — the lock/projection inputs.
+      // Window and tracker columns come fresh from the locked read.
       const seriesFingerprint = (list) => list.map((s) => [
         String(s.id),
         dateOnly(s.scheduled_date),
@@ -2121,6 +2269,7 @@ class SmartRebooker {
         // while this sweep waited means the locks guard the wrong stop —
         // abort like any other concurrent series change (codex #3609 r33).
         String(s.property_id || ''),
+        String(s.technician_id || ''),
         s.date_exception === true ? 'x' : '-',
         s.date_exception_cadence_date ? dateOnly(s.date_exception_cadence_date) : '',
         (RESCHEDULABLE.has(s.status) || (wasLive && String(s.id) === String(serviceId))) ? 'm' : '-',
@@ -2185,6 +2334,31 @@ class SmartRebooker {
           });
           const followUpDays = followUpPlan.map((k) => k.new_day);
           await acquireOccupancyLocks(trx, [...projectedDates, ...followUpDays]);
+          // Reviewed Apply's callback takes customer-comms. Maintenance owns
+          // that lock in the opposite order, so never wait for maintenance
+          // after the callback: try it here while only occupancy is held.
+          await preflightReviewedMaintenance();
+          if (Object.prototype.hasOwnProperty.call(options, 'expectConflictSnapshot')) {
+            // Fence every source holder and projected destination before
+            // callback rows; the locked fingerprint catches assignments that
+            // committed while these fences were awaited.
+            const sweptSet = new Set(sweptIds.map(String));
+            const techDays = [];
+            for (let i = startIdx; i < siblings.length; i++) {
+              const sib = siblings[i];
+              if (!sweptSet.has(String(sib.id))) continue;
+              const targetTech = String(sib.id) === String(serviceId)
+                && Object.prototype.hasOwnProperty.call(options, 'technicianId')
+                ? options.technicianId : sib.technician_id;
+              techDays.push(
+                { techId: sib.technician_id, date: dateOnly(sib.scheduled_date) },
+                { techId: targetTech, date: projectOccurrenceDate(i - startIdx, sib) },
+                // Unassigned work is a fixed capacity blocker for every route.
+                { techId: null, date: projectOccurrenceDate(i - startIdx, sib) },
+              );
+            }
+            await lockTechDays(trx, techDays);
+          }
           await runBeforeMove();
           // Visit stop locks for EVERY swept occurrence, right after
           // rung 1 — the same occupancy-then-stop order the single-row
@@ -2205,7 +2379,15 @@ class SmartRebooker {
               .filter((x) => sweptSet.has(String(x.id)))
               .map((r) => vg.stopBaseKey({ propertyId: r.property_id, customerId: service.customer_id, scheduledDate: r.scheduled_date })))].sort();
             for (const vgKey of keys) {
-              await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit.stop', vgKey]);
+              const lockSql = reviewedMaintenancePreflightRan
+                ? 'SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked'
+                : 'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))';
+              const result = await trx.raw(lockSql, ['visit.stop', vgKey]);
+              if (reviewedMaintenancePreflightRan && result.rows[0]?.locked !== true) {
+                throw Object.assign(new Error('This visit is being updated — reload and save again.'), {
+                  statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY',
+                });
+              }
             }
           }
           // Rung 1 → the per-parent recurring-series maintenance lock, the
@@ -2380,19 +2562,6 @@ class SmartRebooker {
             });
           }
 
-          // First ROW lock of the series path — taken here, AFTER the rung-1
-          // date advisory locks, never before (see the NOTE at the top of the
-          // transaction). The projected date set is already known from the
-          // plain-SELECT sibling read above (no row lock), so the parent
-          // update can wait until the advisory locks are held.
-          if (isMonthBasedPattern) {
-            await trx('scheduled_services').where({ id: parentId }).update({
-              recurring_nth: opts.nth,
-              recurring_weekday: opts.weekday,
-              updated_at: trx.fn.now(),
-            });
-          }
-
           const seriesClash = await trx('scheduled_services')
             .whereRaw('(id = ? OR recurring_parent_id = ?)', [parentId, parentId])
             .whereNotIn('id', sweptIds)
@@ -2428,8 +2597,11 @@ class SmartRebooker {
         }
       }
 
-      if (Array.isArray(options.expectOccurrences)) {
-        const actual = [];
+      const pinnedConflictRows = new Map();
+      const needsReviewedOccurrences = Array.isArray(options.expectOccurrences)
+        || Object.prototype.hasOwnProperty.call(options, 'expectConflictSnapshot');
+      const actualReviewedOccurrences = [];
+      if (needsReviewedOccurrences) {
         for (let i = startIdx; i < siblings.length; i++) {
           const row = siblings[i];
           if (!sweptIds.includes(String(row.id))) continue;
@@ -2456,18 +2628,64 @@ class SmartRebooker {
               disclosed.to_end = null;
             }
           }
-          actual.push(disclosed);
+          actualReviewedOccurrences.push(disclosed);
         }
-        actual.sort((a, b) => a.id.localeCompare(b.id));
-        if (!reviewedOccurrencesMatch(actual, options.expectOccurrences)) {
+        actualReviewedOccurrences.sort((a, b) => a.id.localeCompare(b.id));
+        if (Array.isArray(options.expectOccurrences)
+          && !reviewedOccurrencesMatch(actualReviewedOccurrences, options.expectOccurrences)) {
           throw Object.assign(new Error('The recurring dates or windows changed. Refresh the proposal.'), { statusCode: 409, code: 'SERIES_CHANGED' });
         }
       }
+      await preflightReviewedMaintenance();
       await runBeforeMove();
+      if (Object.prototype.hasOwnProperty.call(options, 'expectConflictSnapshot')) {
+        const actualSnapshot = [];
+        for (const occurrence of actualReviewedOccurrences) {
+          if (!occurrence.to_start) continue;
+          const row = siblings.find((candidate) => String(candidate.id) === occurrence.id);
+          const windowEnd = occupancyProbeEnd(
+            occurrence.to_start, occurrence.to_end, row?.estimated_duration_minutes,
+          );
+          const technicianId = occurrence.id === String(serviceId)
+            && Object.prototype.hasOwnProperty.call(options, 'technicianId')
+            ? options.technicianId : row?.technician_id;
+          const probe = await probeMoveConflicts({
+            conn: trx,
+            target: {
+              id: occurrence.id,
+              date: occurrence.to_date,
+              windowStart: occurrence.to_start,
+              windowEnd,
+              technicianId,
+              changes: {
+                scheduled_date: occurrence.to_date,
+                window_start: occurrence.to_start,
+                window_end: occurrence.to_end,
+                technician_id: technicianId || null,
+              },
+            },
+            excludeServiceIds: sweptIds,
+            options,
+            travel: seriesTravel,
+          });
+          pinnedConflictRows.set(occurrence.id, probe.rows);
+          actualSnapshot.push(...probe.snapshot);
+        }
+        assertConflictSnapshot(actualSnapshot, options);
+      }
       // The call/proposal guard runs on the locked series before its first write.
       if (typeof options.moveGuard === 'function') {
         const guardedService = await trx('scheduled_services').where({ id: serviceId }).forUpdate().first();
         await options.moveGuard({ trx, technicianId: siblings[droppedIdx].technician_id, service: guardedService });
+      }
+      // First recurring-config write, after every reviewed destination was
+      // re-probed and accepted under its occupancy lock.
+      if (isMonthBasedPattern) {
+        await trx('scheduled_services').where({ id: parentId }).update({
+          recurring_nth: opts.nth,
+          recurring_weekday: opts.weekday,
+          updated_at: trx.fn.now(),
+        });
       }
       const touched = [];
       for (let i = startIdx; i < siblings.length; i++) {
@@ -2662,16 +2880,22 @@ class SmartRebooker {
           // legacy flat-60 — this probe always ran, unlike the guard.
           const anchorOccEnd = anchorGateEnd
             || occupancyProbeEnd(updateData.window_start, updateData.window_end, null);
-          const anchorOccClash = await findConflictingVisits({
-            db: trx,
-            date: String(date).split('T')[0],
-            windowStart: updateData.window_start,
-            windowEnd: anchorOccEnd,
+          const cached = pinnedConflictRows.get(String(sib.id));
+          const anchorOccClash = cached || (await probeMoveConflicts({
+            conn: trx,
+            target: {
+              id: sib.id,
+              date: String(date).split('T')[0],
+              windowStart: updateData.window_start,
+              windowEnd: anchorOccEnd,
+              technicianId: Object.prototype.hasOwnProperty.call(updateData, 'technician_id')
+                ? updateData.technician_id : sib.technician_id,
+              changes: updateData,
+            },
             excludeServiceIds: sweptIds,
-            excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
+            options,
             travel: seriesTravel,
-            ...(useArrivalWindows ? { arrivalWindow: { serviceId: sib.id, changes: updateData } } : {}),
-          });
+          })).rows;
           if (anchorOccClash.length) {
             if (anchorOccClash[0].warning) arrivalWarnings.set(String(date).split('T')[0], anchorOccClash[0].warning);
             if (!overlapAdvisory) {
@@ -2745,16 +2969,21 @@ class SmartRebooker {
           // ran even for techless siblings). sweptIds excludes exactly the
           // rows this sweep is moving; everything else counts (boosters,
           // pre-anchor cadence rows that stayed put, other plans).
-          const occClash = await findConflictingVisits({
-            db: trx,
-            date: String(date).split('T')[0],
-            windowStart: updateData.window_start,
-            windowEnd: occEnd,
+          const cached = pinnedConflictRows.get(String(sib.id));
+          const occClash = cached || (await probeMoveConflicts({
+            conn: trx,
+            target: {
+              id: sib.id,
+              date: String(date).split('T')[0],
+              windowStart: updateData.window_start,
+              windowEnd: occEnd,
+              technicianId: sib.technician_id,
+              changes: updateData,
+            },
             excludeServiceIds: sweptIds,
-            excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
+            options,
             travel: seriesTravel,
-            ...(useArrivalWindows ? { arrivalWindow: { serviceId: sib.id, changes: updateData } } : {}),
-          });
+          })).rows;
           if (occClash.length) {
             if (occClash[0].warning) arrivalWarnings.set(String(date).split('T')[0], occClash[0].warning);
             if (overlapAdvisory) {
@@ -3038,6 +3267,15 @@ class SmartRebooker {
 
       return touched;
     }).catch(async (err) => {
+      // A tech-day → callback-row cycle can choose this transaction as its
+      // 40P01 victim. Series callbacks/accumulators cannot be retried safely;
+      // map it before winner/failure telemetry interprets the outcome.
+      if (err?.code === '40P01'
+        && Object.prototype.hasOwnProperty.call(options, 'expectConflictSnapshot')) {
+        throw Object.assign(new Error('This visit is being updated — reload and save again.'), {
+          statusCode: 409, status: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY',
+        });
+      }
       // Two concurrent identical operations: the loser usually fails an
       // appointment CAS (SLOT_TAKEN) before it ever reaches the unique
       // series_moves insert (23505). On a transactional conflict, replay
@@ -3188,30 +3426,32 @@ class SmartRebooker {
   // option here so the disclosed anchor and kept sibling windows are
   // validated exactly as they will be during the move.
   async previewSeriesMove(serviceId, newDate, newWindow = {}, options = {}) {
-    const service = await db('scheduled_services').where({ id: serviceId }).first();
+    const conn = options.conn || db;
+    const service = await conn('scheduled_services').where({ id: serviceId }).first();
     if (!service) throw Object.assign(new Error('Service not found'), { statusCode: 404 });
     const seriesDateStr = dateOnly(newDate);
     const empty = {
       collective: false, deltaDays: 0, movableCount: 0, skippedCount: 0,
-      exceptionCount: 0, conflictCount: 0, firstAffectedDate: null, lastAffectedDate: null,
+      exceptionCount: 0, conflictCount: 0, conflicts: [], conflictSnapshot: [],
+      firstAffectedDate: null, lastAffectedDate: null,
     };
     if (service.is_recurring !== true || !seriesDateStr || seriesDateStr === dateOnly(service.scheduled_date)) {
       return empty;
     }
     const parentId = service.recurring_parent_id || service.id;
-    const parent = await db('scheduled_services').where({ id: parentId }).first();
+    const parent = await conn('scheduled_services').where({ id: parentId }).first();
     if (!parent || (!parent.is_recurring && !parent.recurring_pattern)) return empty;
     const TERMINAL = ['completed', 'cancelled'];
-    const siblings = await db('scheduled_services')
+    const siblings = await conn('scheduled_services')
       .whereRaw('(id = ? OR (recurring_parent_id = ? AND is_recurring = true))', [parentId, parentId])
       .where('customer_id', service.customer_id)
       .whereRaw('COALESCE(date_exception_cadence_date, scheduled_date) >= ?::date', [seriesPosition(service)])
       .whereNotIn('status', TERMINAL)
       .orderByRaw('COALESCE(date_exception_cadence_date, scheduled_date) asc, scheduled_date asc')
-      .select('id', 'status', 'customer_confirmed', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'date_exception', 'date_exception_cadence_date', 'property_id');
+      .select('id', 'status', 'customer_confirmed', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'date_exception', 'date_exception_cadence_date', 'property_id', 'technician_id');
     const droppedIdx = siblings.findIndex((s) => String(s.id) === String(serviceId));
     if (droppedIdx === -1) return empty;
-    const { deltaDays, cadenceSlotDate, projectOccurrenceDate } = await makeSeriesProjector({ service, parent, newDate, seriesDateStr });
+    const { deltaDays, cadenceSlotDate, projectOccurrenceDate } = await makeSeriesProjector({ service, parent, newDate, seriesDateStr, conn });
     const swept = siblings.slice(droppedIdx);
     // Staff surfaces move a live anchor (allowLive); every other live/skipped
     // row is counted-but-not-moved, exactly as the sweep does.
@@ -3221,6 +3461,11 @@ class SmartRebooker {
     const dates = [];
     const occurrences = [];
     let conflictCount = 0;
+    const conflicts = [];
+    const conflictSnapshot = [];
+    if (options.overlapAdvisory === true && options.adminWindowRules === true
+      && arrivalWindowRoutingEnabled()) await preloadServiceLocations(conn, sweptIds);
+    const seriesTravel = options.travelGap === true ? await resolveStopCoords(conn, serviceId) : undefined;
     for (let i = 0; i < swept.length; i++) {
       const row = swept[i];
       if (!movable.includes(row)) {
@@ -3235,22 +3480,48 @@ class SmartRebooker {
       const occurrenceWindow = isAnchor ? newWindow : {};
       const anchorCleared = isAnchor && options.clearAnchorWindow === true;
       const disclosed = reviewedOccurrence(row, date, occurrenceWindow, options, anchorCleared);
-      if (!isAnchor && disclosed.to_start) {
-        const clash = await findConflictingVisits({
-          db,
-          date,
-          windowStart: disclosed.to_start,
-          windowEnd: occupancyProbeEnd(disclosed.to_start, disclosed.to_end, row.estimated_duration_minutes),
+      if (disclosed.to_start) {
+        const windowEnd = occupancyProbeEnd(disclosed.to_start, disclosed.to_end, row.estimated_duration_minutes);
+        const technicianId = isAnchor && Object.prototype.hasOwnProperty.call(options, 'technicianId')
+          ? options.technicianId : row.technician_id;
+        const probe = await probeMoveConflicts({
+          conn,
+          target: {
+            id: row.id,
+            date,
+            windowStart: disclosed.to_start,
+            windowEnd,
+            technicianId,
+            changes: {
+              scheduled_date: date,
+              window_start: disclosed.to_start,
+              window_end: disclosed.to_end,
+              technician_id: technicianId || null,
+            },
+          },
           excludeServiceIds: sweptIds,
-          excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
+          options,
+          travel: seriesTravel,
         });
-        if (clash.length) {
+        if (probe.rows.length) {
           conflictCount += 1;
-          if (options.overlapAdvisory !== true && !siblingClashWithinHorizon(date) && clash.every(isSeededPlaceholderRow)) {
+          conflicts.push({ occurrenceId: row.id, date, appointments: probe.snapshot.map((appointment) => ({
+            id: appointment.conflict_id,
+            service_name: appointment.service_type || 'Service',
+            status: appointment.status,
+            window_start: appointment.conflict_start,
+            window_end: appointment.conflict_end,
+            reason: appointment.reason,
+            warning: appointment.warning,
+          })) });
+          if (!isAnchor && options.overlapAdvisory !== true
+            && !siblingClashWithinHorizon(date) && probe.rows.every(isSeededPlaceholderRow)) {
             disclosed.to_start = null;
             disclosed.to_end = null;
           }
         }
+        // A far placeholder made windowless has no destination to pin.
+        if (disclosed.to_start) conflictSnapshot.push(...probe.snapshot);
       }
       occurrences.push(disclosed);
     }
@@ -3266,6 +3537,8 @@ class SmartRebooker {
       skippedCount: swept.length - movable.length,
       exceptionCount: movable.filter((row, idx) => idx > 0 && row.date_exception === true).length,
       conflictCount,
+      conflicts,
+      conflictSnapshot: sortConflictSnapshot(conflictSnapshot),
       firstAffectedDate: dates[0] || null,
       lastAffectedDate: dates[dates.length - 1] || null,
     };
