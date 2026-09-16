@@ -928,6 +928,38 @@ test.each([
   expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
 });
 
+test.each([
+  ['we did not', 'fail'],
+  ["we didn't", 'fail'],
+  ['I did not', 'fail'],
+  ["the technician didn't", 'fail'],
+  ['we have not', 'fail'],
+  ["we've not", 'fail'],
+  ["he hasn't", 'fail'],
+  ["the technician hadn't", 'fail'],
+  ['we did not there', 'fail'],
+  ['we did not at that location', 'fail'],
+  ['we did not at all', 'fail'],
+  ['we did not, sorry', 'fail'],
+  ['we did not indoors', 'pass'],
+  ['we did not at the garage', 'pass'],
+  ['we did not call the office', 'pass'],
+  ['we did not apply bait there', 'pass'],
+  ['we did not apply it indoors', 'pass'],
+])('standalone negated auxiliaries retain report finding scope: %s', (tail, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter, but ${tail}.`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
+test.each([
+  ['today', 'we did not today', 'fail'],
+  ['yesterday', 'we did not today', 'pass'],
+  ['', 'we did not today', 'pass'],
+])('standalone negated auxiliaries retain report date scope: %s / %s', (findingDay, tail, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter${findingDay ? ` ${findingDay}` : ''}, but ${tail}.`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
 test.each(['your', 'our', 'their', 'his', 'her', 'my', 'its'])
 ('possessive determiners preserve treatment-location frames: %s', (determiner) => {
   const findings = [

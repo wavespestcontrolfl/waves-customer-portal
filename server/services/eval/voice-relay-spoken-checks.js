@@ -1500,10 +1500,12 @@ const REPORT_TRAILING_UNCERTAINTY_RE = new RegExp(
   'i',
 );
 const REPORT_RETRACTION_ACTOR = `(?:i|we|you|he|she|they|(?:(?:the|our)\\s+)?(?:technician|tech|crew|team))`;
+// A standalone negated auxiliary elliptically retracts the preceding finding.
+const REPORT_NEGATED_AUXILIARY = `(?:did|have|has|had)(?:n[\x27\u2019]t|\\s+(?:not|never))`;
 const REPORT_ANAPHORIC_ACTION = `(?:(?:do|did|done)\\s+(?:that|so|it)|(?:appl(?:y|ied)|spray(?:ed)?|us(?:e|ed)|place[ds]?|put|treat(?:ed)?)\\s+(?:it|that))`;
 const REPORT_ANAPHORIC_GERUND = `(?:doing|applying|spraying|using|placing|putting|treating)\\s+(?:it|that|so)`;
 const REPORT_TRAILING_DENIAL_RE = new RegExp(
-  `^(?:actually\\s+)?(?:not(?:\\s+(?:really|actually))?(?:\\s+${REPORT_FINDING_VERB_RE.source})?|no|`
+  `^(?:actually\\s+)?(?:not(?:\\s+(?:really|actually))?(?:\\s+${REPORT_FINDING_VERB_RE.source})?|no|${REPORT_RETRACTION_ACTOR}\\s+${REPORT_NEGATED_AUXILIARY}|`
     + `(?:it|that|this)\\s+(?:was|is)\\s+(?:(?:really|completely|entirely|totally|absolutely)\\s+)?(?:false|untrue|incorrect|inaccurate|wrong|not\\s+what\\s+happened|not\\s+the\\s+case)|(?:it|that|this)\\s+(?:isn['’]t|wasn['’]t)\\s+the\\s+case|(?:it|that|this)\\s+(?:never\\s+(?:actually\\s+)?(?:happened|occurred|took\\s+place)|did(?:n['’]t|\\s+not)\\s+(?:actually\\s+)?(?:happen|occur|take\\s+place)|(?:has|had)(?:n['’]t|\\s+not)\\s+(?:happened|occurred|taken\\s+place))|(?:it|that|this)\\s+(?:was|is|has|had)(?:n[\x27\u2019]t|\\s+(?:not|never))(?:\\s+been)?(?:\\s+(?:true|correct|accurate|(?:actually\\s+)?${REPORT_FINDING_VERB_RE.source}))?|${REPORT_RETRACTION_ACTOR}\\s+(?:(?:did|have|has|had)(?:n[\x27\u2019]t|\\s+(?:not|never))|never)\\s+(?:actually\\s+)?${REPORT_ANAPHORIC_ACTION})(?:\\s+(?:there|at\\s+that\\s+location))?(?:\\s+at\\s+all)?(?:\\s*,\\s*(?:sorry|my\\s+mistake|my\\s+apologies))?\\s*$`,
   'i',
 );
