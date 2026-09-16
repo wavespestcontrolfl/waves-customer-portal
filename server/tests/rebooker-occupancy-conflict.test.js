@@ -188,6 +188,86 @@ describe('reschedule — shared occupancy conflict gate', () => {
     expect(trxScheduled.update).toHaveBeenCalled();
   });
 
+  test('an explicit empty reviewed snapshot rejects a newly appeared conflict before guard or write', async () => {
+    const { trxScheduled } = wireRescheduleMocks(service());
+    const moveGuard = jest.fn();
+    findConflictingVisits.mockResolvedValue([{
+      id: 'svc-new', scheduled_date: TARGET, window_start: '09:30:00', window_end: '10:30:00',
+      status: 'confirmed', service_type: 'Pest control',
+    }]);
+
+    await expect(SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin',
+      { overlapAdvisory: true, expectConflictSnapshot: [], moveGuard },
+    )).rejects.toMatchObject({ statusCode: 409, code: 'CONFLICTS_CHANGED' });
+    expect(moveGuard).not.toHaveBeenCalled();
+    expect(trxScheduled.update).not.toHaveBeenCalled();
+  });
+
+  test('a reviewed conflict pins its identity and window; unchanged commits, same-count window drift rejects', async () => {
+    const reviewed = {
+      id: 'svc-other', scheduled_date: TARGET, window_start: '09:30:00', window_end: '10:30:00',
+      status: 'confirmed', service_type: 'Pest control',
+    };
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(service()) });
+      throw new Error(`Unexpected db table ${table}`);
+    });
+    findConflictingVisits.mockResolvedValue([reviewed]);
+    const snapshot = await SmartRebooker.previewMoveConflicts(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, { overlapAdvisory: true },
+    );
+    expect(snapshot).toEqual([expect.objectContaining({
+      target_id: 'svc-1', conflict_id: 'svc-other', conflict_start: '09:30', conflict_end: '10:30',
+    })]);
+
+    let wired = wireRescheduleMocks(service());
+    findConflictingVisits.mockResolvedValue([reviewed]);
+    await expect(SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin',
+      { overlapAdvisory: true, expectConflictSnapshot: snapshot },
+    )).resolves.toMatchObject({ success: true });
+    expect(wired.trxScheduled.update).toHaveBeenCalled();
+
+    wired = wireRescheduleMocks(service());
+    findConflictingVisits.mockResolvedValue([{ ...reviewed, window_start: '10:00:00', window_end: '11:00:00' }]);
+    await expect(SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin',
+      { overlapAdvisory: true, expectConflictSnapshot: snapshot },
+    )).rejects.toMatchObject({ code: 'CONFLICTS_CHANGED' });
+    expect(wired.trxScheduled.update).not.toHaveBeenCalled();
+  });
+
+  test('arrival/capacity infeasibility gets a stable synthetic conflict identity', async () => {
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(service()) });
+      throw new Error(`Unexpected db table ${table}`);
+    });
+    findConflictingVisits.mockResolvedValue([{
+      id: 'svc-1', conflict_reason: 'arrival_window', warning: 'Route cannot keep the promised arrival windows.',
+      window_start: '09:00', window_end: '11:00', status: 'confirmed',
+    }]);
+    const snapshot = await SmartRebooker.previewMoveConflicts(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' },
+      { overlapAdvisory: true, adminWindowRules: true },
+    );
+    expect(snapshot).toEqual([expect.objectContaining({
+      conflict_id: 'infeasible:arrival_window', reason: 'arrival_window',
+      warning: 'Route cannot keep the promised arrival windows.', status: null,
+    })]);
+
+    const { trxScheduled } = wireRescheduleMocks(service());
+    findConflictingVisits.mockResolvedValue([{
+      id: 'svc-1', conflict_reason: 'arrival_window', warning: 'Route cannot keep the promised arrival windows.',
+      window_start: '09:00', window_end: '11:00', status: 'pending',
+    }]);
+    await expect(SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin',
+      { overlapAdvisory: true, adminWindowRules: true, pendingConfirmation: true, expectConflictSnapshot: snapshot },
+    )).resolves.toMatchObject({ success: true });
+    expect(trxScheduled.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'pending' }));
+  });
+
   test('keepStatus (office Combine): a pending row keeps pending and writes no status history; the default still lands on confirmed', async () => {
     const kept = wireRescheduleMocks(service({ status: 'pending' }));
     await SmartRebooker.reschedule('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', { overlapAdvisory: true, keepStatus: true });
@@ -402,10 +482,11 @@ describe('reschedule — shared occupancy conflict gate', () => {
 
     // Existing tech-scoped probe still runs (its query hits the trx builder)...
     expect(trxScheduled.where).toHaveBeenCalledWith('technician_id', 'tech-1');
-    // ...alongside the new tech-blind check, under date-occupancy THEN the
-    // tech-keyed lock.
+    // ...under date occupancy, assigned-route, and unassigned-capacity fences.
     expect(findConflictingVisits).toHaveBeenCalledTimes(1);
-    expect(slotReserveKeys(trx)).toEqual([`occupancy:${TARGET}`, `tech-1:${TARGET}`]);
+    expect(slotReserveKeys(trx)).toEqual([
+      `occupancy:${TARGET}`, `tech-1:${TARGET}`, `unassigned:${TARGET}`,
+    ]);
   });
 
   test('different-tech concurrent writers serialize on ONE shared date key (their tech locks differ)', async () => {
@@ -427,10 +508,9 @@ describe('reschedule — shared occupancy conflict gate', () => {
     );
     const keysB = slotReserveKeys(runB.trx);
 
-    // Tech-scoped keys differ — on their own they can't serialize this pair.
-    expect(keysA[1]).toBe(`tech-1:${TARGET}`);
-    expect(keysB[1]).toBe(`unassigned:${TARGET}`);
-    // The date-wide key is tech-independent and FIRST for both writers.
+    // Assigned routes also fence unassigned capacity; techless routes dedupe it.
+    expect(keysA).toEqual([`occupancy:${TARGET}`, `tech-1:${TARGET}`, `unassigned:${TARGET}`]);
+    expect(keysB).toEqual([`occupancy:${TARGET}`, `unassigned:${TARGET}`]);
     expect(keysA[0]).toBe(`occupancy:${TARGET}`);
     expect(keysB[0]).toBe(keysA[0]);
   });
@@ -876,9 +956,8 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     const anchorUpdate = chain({ update: jest.fn().mockImplementation(() => updateResult(1)) });
     const logInsert = chain();
 
-    // Month-based order: siblings SELECT, parent UPDATE, seriesClash probe,
-    // anchor UPDATE.
-    const scheduledQueue = [siblingsQuery, siblingsQuery, parentLookup, parentUpdate, seriesClashProbe, anchorUpdate];
+    // The parent recurrence write follows every guarded destination check.
+    const scheduledQueue = [siblingsQuery, siblingsQuery, parentLookup, seriesClashProbe, parentUpdate, anchorUpdate];
     const trx = jest.fn((table) => {
     if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
       if (table === 'scheduled_services') return scheduledQueue.shift();
@@ -981,7 +1060,12 @@ describe('reschedule — visit membership fence (codex #3609 r13 P2)', () => {
     const lockSpy = jest.spyOn(vg, 'lockStopForRow').mockResolvedValue('p1:2026-09-01');
     const membersSpy = jest.spyOn(vg, 'openMembers');
     const unitSpy = jest.spyOn(vg, 'moveVisitAsUnit').mockResolvedValue(null);
-    const wire = (visitStatus, others) => {
+    let frozenReason = null;
+    const frozenSpy = jest.spyOn(vg, 'frozenVisitVerdict').mockImplementation(async () => ({
+      frozen: !!frozenReason, reason: frozenReason,
+    }));
+    const wire = (visitStatus, others, reason = visitStatus === 'closing' ? 'visit_not_open' : null) => {
+      frozenReason = reason;
       const { trx, trxScheduled } = wireRescheduleMocks(service({ visit_id: 'v1' }));
       const inner = trx.getMockImplementation();
       trx.mockImplementation((table) => (table === 'service_visits' ? chain({ first: jest.fn().mockResolvedValue({ status: visitStatus }) }) : inner(table)));
@@ -1006,6 +1090,12 @@ describe('reschedule — visit membership fence (codex #3609 r13 P2)', () => {
       ({ trxScheduled } = wire('closing', [{ id: 'svc-1' }, { id: 'svc-2' }]));
       await expect(SmartRebooker.rescheduleOnce('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'rain', 'admin')).rejects.toMatchObject({ code: 'VISIT_FROZEN_MOVE_UNSUPPORTED' });
       expect(trxScheduled.update).not.toHaveBeenCalled();
+      // Status remains open, but an issued visit artifact makes the full
+      // frozen verdict refuse the former solo fallback too.
+      ({ trxScheduled } = wire('open', [{ id: 'svc-1' }], 'link_issued'));
+      await expect(SmartRebooker.rescheduleOnce('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'rain', 'admin'))
+        .rejects.toMatchObject({ code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', reason: 'link_issued' });
+      expect(trxScheduled.update).not.toHaveBeenCalled();
       // the stop moved under us ⇒ same re-entry remedy
       ({ trxScheduled } = wire('open', [{ id: 'svc-1' }]));
       lockSpy.mockRejectedValueOnce(Object.assign(new Error('moved'), { code: 'VISIT_STOP_MOVED' }));
@@ -1016,9 +1106,9 @@ describe('reschedule — visit membership fence (codex #3609 r13 P2)', () => {
       lockSpy.mockClear();
       await expect(SmartRebooker.rescheduleOnce('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'rain', 'admin', { visitPolicy: 'single' })).resolves.toMatchObject({ success: true });
       expect(lockSpy).not.toHaveBeenCalled();
-      expect(unitSpy).toHaveBeenCalledTimes(4);
+      expect(unitSpy).toHaveBeenCalledTimes(5);
     } finally {
-      lockSpy.mockRestore(); membersSpy.mockRestore(); unitSpy.mockRestore();
+      lockSpy.mockRestore(); membersSpy.mockRestore(); unitSpy.mockRestore(); frozenSpy.mockRestore();
     }
   });
 
