@@ -6,6 +6,19 @@ const verdict = (text, options = {}) => verifyEmailReplyMonetaryPricing({ text, 
 const rejected = (text) => expect(verdict(text).violations).toContain('customer_copy_compliance');
 
 describe('email reply monetary visit-pricing policy', () => {
+  test.each([
+    '98 cents per visit', 'ninety-eight cents per visit',
+    'A ninety-eight-cent visit fee applies',
+    '$98 per 30-min visit', '$98 for each 1-hr visit',
+  ])('consumes cent amounts and abbreviated visit durations: %s', rejected);
+
+  test.each([
+    'Each application costs $98', "This application's price is $98",
+    'Each visit costs 98 mins', 'Each visit runs 1 hr',
+  ])('preserves application-first prices and abbreviated measurements: %s', (text) => {
+    expect(verdict(text)).toEqual({ ok: true, violations: [] });
+  });
+
   test.each(['$98 for the 1st visit', '$98 per the 2nd visit'])(
     'consumes bounded numeric ordinal visit units: %s', rejected,
   );
