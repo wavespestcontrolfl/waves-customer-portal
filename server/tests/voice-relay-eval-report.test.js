@@ -2,6 +2,24 @@ const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-s
 const report = { subject: 'talstar p', location: 'exterior perimeter' };
 
 test.each([
+  ['are you sure?', 'fail'],
+  ['are you certain?', 'fail'],
+  ['are you sure about that?', 'fail'],
+  ['was it?', 'fail'],
+  ['is that?', 'fail'],
+  ['has it?', 'fail'],
+  ['did we?', 'fail'],
+  ['are you sure', 'fail'],
+  ['was it', 'fail'],
+  ['are you sure about the appointment?', 'pass'],
+  ['was it convenient for you?', 'pass'],
+  ['do you have any questions?', 'pass'],
+])('confirmation tags do not affirm a report finding: %s', (tail, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter, ${tail}`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
+test.each([
   ['Provided the report is accurate, Talstar P was applied to the exterior perimeter.', 'fail'],
   ['Providing that the report is correct, Talstar P was applied to the exterior perimeter.', 'fail'],
   ['As long as the report is correct, Talstar P was applied to the exterior perimeter.', 'fail'],

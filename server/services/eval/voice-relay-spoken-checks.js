@@ -1736,7 +1736,7 @@ function report_readback_confirms(value, record, { spoken }) {
       const sharedLocation = reportSharedLocationContinuation(text, clauseEnd, value.location, value.subject);
       const asrTagQuestion = /(?:,\s*(?:right|correct)|\b(?:wasn['’]t\s+it|isn['’]t\s+it|aren['’]t\s+they|didn['’]t\s+(?:we|they)))\s*$/i
         .test(text.slice(clauseStart, clauseEnd))
-        || /,\s*(?:(?:is|was)\s+(?:that|this|it)\s+(?:right|correct|true)|(?:did|do)\s+(?:we|they))\s*$/i
+        || /(?:,\s*|\s+)(?:(?:is|was|has|had)\s+(?:that|this|it)(?:\s+(?:right|correct|true))?|(?:did|do)\s+(?:we|they)|(?:are|were)\s+(?:you|we|they)\s+(?:sure|certain)(?:\s+(?:about|of)\s+(?:it|this|that))?)\s*$/i
           .test(text.slice(clauseStart, clauseEnd));
       const independentFollowupQuestion = FOLLOWUP_QUESTION_RE.test(text.slice(m.index + m[0].length, clauseEnd));
       if ((text[clauseEnd] === '?' && !independentFollowupQuestion)
