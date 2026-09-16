@@ -1,6 +1,25 @@
 const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
 
 test.each([
+  ['We will cover your next visit and the report if the office approves.', 'pass'],
+  ["We'll cover your next visit and the report if the office approves.", 'pass'],
+  ['We will cover the cost of your next visit and the report only if the office approves.', 'pass'],
+  ['We will cover your next visit and the report, if the office approves.', 'pass'],
+  ['We will cover your next visit and the report is ready if the office approves.', 'fail'],
+  ['We will cover your next visit and we will send the report if the office approves.', 'fail'],
+  ['We will cover your next visit and the report. If the office approves, we will call.', 'fail'],
+  ['We will cover your next visit, but the report is ready if the office approves.', 'fail'],
+  ['Your next visit is free of charge if the office approves.', 'pass'],
+  ['Your next visit is completely free of charge if the office approves.', 'pass'],
+  ['Your next visit is free of charge, provided the office approves.', 'pass'],
+  ['Your next visit is free of charge, but that is not true.', 'pass'],
+  ['Your next visit is free of charge, but the report date is not true.', 'fail'],
+  ['Your next visit is free of charge.', 'fail'],
+])('price phrases and coordinated objects retain their own tail scope: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   ['Your next visit is free of cancellation fees.', 'pass'],
   ['The return visit is free of any rescheduling fee.', 'pass'],
   ['Your next visit is free from booking charges.', 'pass'],
