@@ -290,7 +290,8 @@ async function applyProposal(conn, id, { actorId, visitId, previewHash, now = ne
       if (!liveCard || !openStates.includes(liveCard.status)
         || new Date(liveCard.updated_at).getTime() !== new Date(card.updated_at).getTime()
         || !liveCall || liveCall.processing_token || liveCall.v2_extraction_status !== 'valid'
-        || liveCall.customer_id !== customer.id || liveCustomer?.deleted_at
+        || liveCall.customer_id !== customer.id || !liveCustomer || liveCustomer.deleted_at
+        || (selected.property && !liveProperty)
         || digest(liveCustomer) !== digest(customer) || digest(liveProperty) !== digest(selected.property)
         || digest([liveCall.transcription, liveCall.ai_extraction_enriched]) !== digest([call.transcription, v2])
         || Number(liveCall.processing_generation) !== Number(call.processing_generation)) {
