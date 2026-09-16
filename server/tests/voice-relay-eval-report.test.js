@@ -1,6 +1,22 @@
 const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
 const report = { subject: 'talstar p', location: 'exterior perimeter' };
 
+test.each(['.', '!', ';'])('report corrections retain scope after %s', (separator) => {
+  for (const [tail, status] of [
+    ['Actually, it was not applied there.', 'fail'],
+    ['It was not applied there.', 'fail'],
+    ['Actually, we were mistaken.', 'fail'],
+    ['Actually, it was only planned.', 'fail'],
+    ['Actually, it was not applied indoors.', 'pass'],
+    ['Actually, bait was not applied there.', 'pass'],
+    ['Actually, the appointment was not confirmed.', 'pass'],
+    ['The technician left. Actually, it was not applied indoors.', 'pass'],
+  ]) {
+    const spoken = [`Talstar P was applied to the exterior perimeter${separator} ${tail}`];
+    expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+  }
+});
+
 test.each([
   ["that's not true", 'fail'],
   ["that's false", 'fail'],

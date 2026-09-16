@@ -1939,9 +1939,9 @@ function reportSharedLocationContinuation(text, clauseEnd, location, subject) {
   const remainder = text.slice(clauseEnd);
   // Reuse the splitter's actual boundaries so a retraction is not lost at
   // "though", "yet", or another coordinator the splitter already recognizes.
-  // Sentence terminators still end the statement rather than qualify it.
+  // An immediately following sentence can explicitly retract the same finding.
   const boundary = new RegExp(`^(?:${CLAUSE_BOUNDARY_TOKEN_RE.source})\\s*,?\\s*`, 'i').exec(remainder);
-  if (boundary && !/[.!?;]/.test(boundary[0])) {
+  if (boundary) {
     const qualifier = reportRetractionClause(remainder.slice(boundary[0].length), subject, location);
     const findingText = text.slice(0, clauseEnd).split(/[.!?;]/).pop();
     if (REPORT_TRAILING_UNCERTAINTY_RE.test(qualifier) || reportTrailingDenialOrCorrection(qualifier)
