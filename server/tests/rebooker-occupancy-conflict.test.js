@@ -188,6 +188,15 @@ describe('reschedule — shared occupancy conflict gate', () => {
     expect(trxScheduled.update).toHaveBeenCalled();
   });
 
+  test.each([null, 'tech-1'])('reviewed single move pins the observed technician %s', async (technicianId) => {
+    const { trxScheduled } = wireRescheduleMocks(service({ technician_id: technicianId }));
+    trxScheduled.update.mockImplementation(() => updateResult(0));
+    await expect(SmartRebooker.reschedule('svc-1', TARGET, { start: '09:00', end: '11:00' },
+      'customer_request', 'admin', { overlapAdvisory: true, expectConflictSnapshot: [] },
+    )).rejects.toMatchObject({ statusCode: 409 });
+    expect(trxScheduled.where).toHaveBeenCalledWith({ technician_id: technicianId });
+  });
+
   test('an explicit empty reviewed snapshot rejects a newly appeared conflict before guard or write', async () => {
     const { trxScheduled } = wireRescheduleMocks(service());
     const moveGuard = jest.fn();

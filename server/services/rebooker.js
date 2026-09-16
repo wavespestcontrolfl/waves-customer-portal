@@ -1631,6 +1631,7 @@ class SmartRebooker {
       if (typeof options.moveGuard === 'function') {
         await options.moveGuard({ trx, technicianId: keptTechId, service });
       }
+      // A reviewed move also pins the route whose destination was probed.
       // A tech CHANGE pins the observed prior technician in the CAS: the
       // pre-read is unlocked, and a dispatch reassignment A→B landing
       // between read and write would otherwise let this move commit and
@@ -1641,7 +1642,8 @@ class SmartRebooker {
         && (updates.technician_id || null) !== (service.technician_id || null);
       const committedRows = await applyTrackLifecycleCas(
         trx('scheduled_services')
-          .where(techChangeRequested ? { technician_id: service.technician_id ?? null } : {})
+          .where(techChangeRequested || Object.prototype.hasOwnProperty.call(options, 'expectConflictSnapshot')
+            ? { technician_id: service.technician_id ?? null } : {})
           // The full observed tracker/lifecycle snapshot is in the CAS (see
           // applyTrackLifecycleCas): the lifecycleRewound decision above
           // came from the outer read, and tracker writers advance state and
