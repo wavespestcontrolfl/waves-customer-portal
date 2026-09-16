@@ -37,6 +37,8 @@ describe('email reply company-name policy', () => {
     rejected('You contacted **Waves *Termite* Control**.');
     rejected('You contacted Waves `Termite` Control.');
     rejected('You contacted Waves ``Termite`` Control.');
+    rejected('You contacted Waves `Termite\n` Control.');
+    rejected('You contacted Waves ``Termite\r\nControl`` Services.');
     expect(verdict('You contacted **Waves *Pest* Control**.'))
       .toEqual({ ok: true, violations: [] });
     expect(verdict('You contacted Waves `Pest` Control.'))
@@ -61,6 +63,18 @@ describe('email reply company-name policy', () => {
     rejected('The company name is waves wildlife services.');
     rejected('waves MOSQUITO SERVICES will follow up.');
     rejected('Thank you for choosing waves Termite Control.');
+  });
+
+  test('screens bounded introduced company-name shapes outside the service taxonomy', () => {
+    rejected('You contacted Waves Ant Control.');
+    rejected('You contacted Waves Home Services.');
+    rejected('The company name is waves indoor ant solutions.');
+    expect(verdict('You contacted Waves about ant control.'))
+      .toEqual({ ok: true, violations: [] });
+    expect(verdict('You contacted Waves for home services.'))
+      .toEqual({ ok: true, violations: [] });
+    expect(verdict('Sound waves affect home services in coastal areas.'))
+      .toEqual({ ok: true, violations: [] });
   });
 
   test('allows service descriptors only when they lead into a canonical company team role', () => {
