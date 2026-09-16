@@ -568,7 +568,7 @@ const CLAIM_CAUSAL_BOUNDARY_RE = new RegExp(
 const FREE_VISIT_TEMPORAL_PARENTHETICAL_RE = /,\s*(?:as of (?:today|now)|since (?:today|yesterday))\s*,\s*(?:that\s*)?$/i;
 // A conditional "provided/providing/only after" needs a subject and finite
 // predicate. A participial effect ("providing protection") is not a gate.
-const FREE_VISIT_PRONOUN_CONDITION_PREDICATE_SOURCE = `(?:${CLAUSE_FINITE_PREDICATE_RE.source}|\\b(?:approv(?:e|es|ed)|confirm(?:s|ed)?|authoriz(?:e|es|ed)|agree(?:s|d)?|qualif(?:y|ies|ied)|consent(?:s|ed)?|accept(?:s|ed)?|decid(?:e|es|ed)|request(?:s|ed)?|pay|pays|paid|sign(?:s|ed)?)\\b)`;
+const FREE_VISIT_PRONOUN_CONDITION_PREDICATE_SOURCE = `(?:${CLAUSE_FINITE_PREDICATE_RE.source}|\\b(?:approv(?:e|es|ed)|confirm(?:s|ed)?|authoriz(?:e|es|ed)|agree(?:s|d)?|qualif(?:y|ies|ied)|consent(?:s|ed)?|accept(?:s|ed)?|decid(?:e|es|ed)|request(?:s|ed)?|pay|pays|paid|sign(?:s|ed)?|get|gets|got|giv(?:e|es|en)|gave|receiv(?:e|es|ed)|obtain(?:s|ed)?|grant(?:s|ed)?)\\b)`;
 // Longer noun subjects need a known finite predicate: otherwise a double
 // object effect ("providing the billing office treatment reports") looks
 // like an office condition merely because "reports" ends in "s".
@@ -580,15 +580,20 @@ const FREE_VISIT_PREPOSED_CONDITION_RE = new RegExp(`^\\s*${FREE_VISIT_CONDITION
 const FREE_VISIT_POSTCLAIM_CONDITION_RE = new RegExp(`^\\s*,?\\s*(?:(?:only\\s+)?(?:if|unless)\\b|but\\s+only\\s+if\\b|(?:but\\s+)?${FREE_VISIT_APPROVAL_QUALIFIER_SOURCE}|${FREE_VISIT_CONDITION_SOURCE})`, 'i');
 // A condition can introduce a separate instruction after an asserted promise.
 // Require a predicate before the imperative so "if you call us" remains a gate.
-const FREE_VISIT_CONDITIONAL_FOLLOWUP_RE = /^\s*,?\s*(?:if|unless)\s+you\s+(?:have|need|want|notice|experience|find|get|receive)\b[^.!?;]*?\s+(?:please\s+)?(?<!\bto\s)(?:call|contact|ask|tell|let|reach|give|check)\b/i;
+const FREE_VISIT_CONDITIONAL_FOLLOWUP_RE = /^\s*,?\s*(?:if|unless)\s+you\s+(?:have|need|want|notice|experience|find|get|receive)\b[^.!?;]*?\s+(?:please\s+)?(?<!\bto\s)(?<!\band\s)(?<!\bor\s)(?:call|contact|ask|tell|let|reach|give|check)\b/i;
+const FREE_VISIT_PREPOSED_COORDINATED_CONDITION_RE = /^\s*(?:only\s+)?(?:if|unless)\b[^,;.!?]*\band\b[^,;.!?]*,\s*$/i;
 function freeVisitHasPostclaimCondition(tail) {
   return FREE_VISIT_POSTCLAIM_CONDITION_RE.test(tail)
     && !FREE_VISIT_CONDITIONAL_FOLLOWUP_RE.test(tail);
 }
-function freeVisitConditionPrefix(prefix) {
+function freeVisitConditionPrefix(prefix, sentencePrefix = '') {
   // The comma closes the conditional instruction before this new assertion.
-  return FREE_VISIT_CONDITIONAL_FOLLOWUP_RE.test(prefix) && /,\s*$/.test(prefix)
-    ? '' : prefix;
+  if (FREE_VISIT_CONDITIONAL_FOLLOWUP_RE.test(prefix) && /,\s*$/.test(prefix)) return '';
+  // The shared clause splitter can end a preposed condition at a coordinated
+  // verb ("if you have approval and give us the number"). Retain that one
+  // comma-closed introduction, but not a separate conditional instruction.
+  return FREE_VISIT_PREPOSED_COORDINATED_CONDITION_RE.test(sentencePrefix)
+    && !FREE_VISIT_CONDITIONAL_FOLLOWUP_RE.test(sentencePrefix) ? sentencePrefix : prefix;
 }
 const FOLLOWUP_QUESTION_RE = /(?:,\s*|\s+(?:and|but|so)\s+)(?:(?:and|but|so)\s+)?(?:did|do|does|is|are|was|were|will|would|can|could|should|has|have|had|what|who|why|how|where|when)\b/i;
 const FREE_VISIT_LEADING_QUESTION_RE = /^(?!\s*(?:do|does|did)\s+not\b)\s*(?:did|do|does|is|are|was|were|will|would|can|could|should|has|have|had|what|who|why|how)\b[^,;:]*$/i;
@@ -596,7 +601,7 @@ const FREE_VISIT_QUESTION_TERMINATOR_RE = /^(?:\?|or\s+(?:not|paid|billable|char
 const FREE_VISIT_ACKNOWLEDGMENT_RE = /^\s*,?\s*(?:ok(?:ay)?|all\s*right|alright|sounds?\s+good|got\s+it|you\s+(?:follow|understand|know)|understood|yeah|yes|good)(?:\s+then)?(?=\s*(?:$|[,;]))/i;
 const FREE_VISIT_TRUTH_QUESTION_RE = /^\s*,?\s*(?:(?:is|was)\s+(?:that|this|it)\s+(?:true|correct|right)|right|correct)\s*$/i;
 const FREE_VISIT_TRAILING_RETRACTION_RE = /^\s*,?\s*(?:but|however)\s+(?:it|that|this)(?:\s+(?:(?:is|was)\s+(?:not\s+true|false|untrue|incorrect|wrong)|(?:isn['’]t|wasn['’]t)\s+true)|['’]s\s+(?:not\s+true|false|untrue|incorrect|wrong))(?=\s*(?:$|[,;.!?]|\b(?:because|since|as(?!\s+(?:long|soon)\s+as\b))\b))/i;
-const FREE_VISIT_NOUN_REFUSAL_RE = /\b(?:no|not\s+a)\s+(?:guarantees?|promises?)\s+(?:that\s*)?$/i;
+const FREE_VISIT_NOUN_REFUSAL_RE = /\b(?:no|not\s+a)\s+(?:guarantees?|promises?)\s+(?:that\s+)?(?:(?:i|we|you|he|she|they|the\s+(?:office|team))\s+)?$/i;
 function freeVisitIsRefused(prefix) {
   return FREE_VISIT_NOUN_REFUSAL_RE.test(prefix) || clauseIsEpistemicallyHedged(prefix);
 }
@@ -643,11 +648,12 @@ function no_free_visit_promise(value, record, { spoken }) {
           ? causalContext.slice(causalBoundary.index + causalBoundary[0].length, match.index - claimStart)
           : text.slice(claimStart, match.index);
         const trailingRetraction = FREE_VISIT_TRAILING_RETRACTION_RE.test(text.slice(match.index + match[0].length));
+        const sentencePrefix = text.slice(0, match.index).split(/[.!?;]/).pop();
         // "Whether X or Y, [promise]" asserts the promise across both
         // alternatives. A whether phrase embedded in a refusal or an
         // incomplete question still governs the free-visit proposition.
         const governingCondition = /\b(?:if|unless|whether|until)\b/i.test(
-          freeVisitConditionPrefix(prefix).replace(/^\s*whether\b[^,;.!?]*\bor\b[^,;.!?]*,\s*/i, '')
+          freeVisitConditionPrefix(prefix, sentencePrefix).replace(/^\s*whether\b[^,;.!?]*\bor\b[^,;.!?]*,\s*/i, '')
             .replace(/\beven\s+if\b/gi, 'even when'),
         )
           || FREE_VISIT_PREPOSED_CONDITION_RE.test(freeVisitConditionPrefix(clausePrefix))

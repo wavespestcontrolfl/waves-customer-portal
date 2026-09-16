@@ -17,6 +17,10 @@ test.each([
   ['Your next visit is free if you need to call us.', 'pass'],
   ['Your next visit is free if you want to contact the office.', 'pass'],
   ['Your next visit is free if the office approves.', 'pass'],
+  ['Your next visit is free if you have approval and give us the confirmation number.', 'pass'],
+  ['Your next visit is free, if you have approval and give us the confirmation number.', 'pass'],
+  ['If you have approval and give us the confirmation number, your next visit is free.', 'pass'],
+  ['Your next visit is free if you have questions and call us.', 'pass'],
   ['I cannot confirm before approval that your next visit is free.', 'pass'],
 ])('conditions must govern the free-visit claim: %s', (text, status) => {
   expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
@@ -71,12 +75,17 @@ test.each([
 test.each([
   ['There is no guarantee that your next visit is free.', 'pass'],
   ['There is no promise that your next visit is free.', 'pass'],
+  ['There is no guarantee that we will not charge you for your next visit.', 'pass'],
+  ["There is no promise that you won't have to pay for the next visit.", 'pass'],
+  ['There is no guarantee that the office will not charge you for the next visit.', 'pass'],
   ['There are no guarantees we will cover your next visit.', 'pass'],
   ['I make no promises that we will cover your next visit.', 'pass'],
   ['There is not a guarantee that your next visit is free.', 'pass'],
   ['There is no guarantee that the appointment is tomorrow, but your next visit is free.', 'fail'],
   ['There is no promise that bait is included, so we will cover your next visit.', 'fail'],
   ['There is no guarantee that your next visit is free, but we will cover your next visit.', 'fail'],
+  ['There is no guarantee that we will not charge you for your next visit, but we will cover your next visit.', 'fail'],
+  ['There is no guarantee that the office approves, but we will not charge you for your next visit.', 'fail'],
   ['The office gave no guarantee about pricing; your next visit is free.', 'fail'],
 ])('noun-form refusals govern only their free-visit proposition: %s', (text, status) => {
   expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
@@ -284,6 +293,10 @@ test.each([
   ['Your next visit is free, provided the regional billing office approves.', 'pass'],
   ['Providing the billing office confirms, your next visit is free.', 'pass'],
   ['Your next visit is free, providing you approve.', 'pass'],
+  ['Your next visit is free, provided we get approval.', 'pass'],
+  ['Your next visit is free, provided you give consent.', 'pass'],
+  ['Your next visit is free, providing they receive authorization.', 'pass'],
+  ['Your next visit is free, provided we obtain approval.', 'pass'],
   ['Your next visit is free, provided we confirm.', 'pass'],
   ['Your next visit is free, provided you are eligible.', 'pass'],
   ['Your next visit is free, providing they authorize it.', 'pass'],
