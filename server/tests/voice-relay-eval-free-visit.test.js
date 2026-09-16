@@ -87,3 +87,16 @@ test.each([
 ])('contracted trailing denial only retracts the visit promise: %s', (text, status) => {
   expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
 });
+
+test.each([
+  ['Do not worry, your next visit is free.', 'fail'],
+  ["Don't worry, your next visit is free.", 'fail'],
+  ['Do not worry your next visit is free.', 'fail'],
+  ['Do you have any questions, your next visit is free.', 'fail'],
+  ['Do you think your next visit is free?', 'pass'],
+  ["Don't you think your next visit is free?", 'pass'],
+  ['Do we cover your next visit?', 'pass'],
+  ['Do you think your next visit is free', 'pass'],
+])('question wording governs only its own free-visit proposition: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});

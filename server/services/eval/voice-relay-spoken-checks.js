@@ -575,10 +575,16 @@ function no_free_visit_promise(value, record, { spoken }) {
     for (const re of FREE_VISIT_PROMISE_RES) {
       for (const match of text.matchAll(re)) {
         const [questionStart, questionEnd] = clauseBounds(text, match.index);
+        const questionPrefix = text.slice(questionStart, match.index);
+        // An inverted question can lack punctuation in ASR, but an
+        // imperative ("Do not worry") or a prior question before a comma
+        // does not question the free-visit proposition that follows.
+        const leadingQuestion = /^\s*(?:did|do|does|is|are|was|were|will|would|can|could|should|has|have|had|what|who|why|how)\b/i.test(questionPrefix)
+          && !/^\s*(?:do|does|did)\s+not\b/i.test(questionPrefix)
+          && !/[,;:]/.test(questionPrefix);
         if ((text[questionEnd] === '?'
               && !FOLLOWUP_QUESTION_RE.test(text.slice(match.index + match[0].length, questionEnd)))
-            || /^\s*(?:did|do|does|is|are|was|were|will|would|can|could|should|has|have|had|what|who|why|how)\b/i
-              .test(text.slice(questionStart, match.index))) continue;
+            || leadingQuestion) continue;
         const claim = claimContext(text, match.index, match.index);
         const [clauseStart, clauseEnd] = clauseBounds(text, match.index);
         const clausePrefix = text.slice(clauseStart, match.index);
