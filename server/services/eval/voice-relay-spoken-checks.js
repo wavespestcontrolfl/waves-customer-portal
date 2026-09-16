@@ -579,6 +579,11 @@ function freeVisitHasPostclaimCondition(tail) {
   return FREE_VISIT_POSTCLAIM_CONDITION_RE.test(tail)
     && !FREE_VISIT_CONDITIONAL_FOLLOWUP_RE.test(tail);
 }
+function freeVisitConditionPrefix(prefix) {
+  // The comma closes the conditional instruction before this new assertion.
+  return FREE_VISIT_CONDITIONAL_FOLLOWUP_RE.test(prefix) && /,\s*$/.test(prefix)
+    ? '' : prefix;
+}
 const FOLLOWUP_QUESTION_RE = /(?:,\s*|\s+(?:and|but|so)\s+)(?:(?:and|but|so)\s+)?(?:did|do|does|is|are|was|were|will|would|can|could|should|has|have|had|what|who|why|how|where|when)\b/i;
 const FREE_VISIT_LEADING_QUESTION_RE = /^(?!\s*(?:do|does|did)\s+not\b)\s*(?:did|do|does|is|are|was|were|will|would|can|could|should|has|have|had|what|who|why|how)\b[^,;:]*$/i;
 const FREE_VISIT_QUESTION_TERMINATOR_RE = /^(?:\?|or\s+(?:not|paid|billable|charged)\?\s*$)/i;
@@ -632,10 +637,10 @@ function no_free_visit_promise(value, record, { spoken }) {
         // alternatives. A whether phrase embedded in a refusal or an
         // incomplete question still governs the free-visit proposition.
         const governingCondition = /\b(?:if|unless|whether|until)\b/i.test(
-          prefix.replace(/^\s*whether\b[^,;.!?]*\bor\b[^,;.!?]*,\s*/i, '')
+          freeVisitConditionPrefix(prefix).replace(/^\s*whether\b[^,;.!?]*\bor\b[^,;.!?]*,\s*/i, '')
             .replace(/\beven\s+if\b/gi, 'even when'),
         )
-          || FREE_VISIT_PREPOSED_CONDITION_RE.test(clausePrefix)
+          || FREE_VISIT_PREPOSED_CONDITION_RE.test(freeVisitConditionPrefix(clausePrefix))
           || freeVisitHasPostclaimCondition(text.slice(match.index + match[0].length));
         if (!governingCondition && !trailingRetraction && !clauseIsEpistemicallyHedged(prefix)
             && !propositionIsExplicitlyDenied(text, match.index)) {
