@@ -547,16 +547,17 @@ function propositionIsExplicitlyDenied(text, at, findingVerb) {
 // Visit promises include direct payment wording; qualifiers stay claim-scoped.
 const FREE_VISIT_PAYMENT_TARGET = `(?:(?:your|the|a|an|our|that|this)\\s+)?(?:(?:next|return|follow-up|follow up|upcoming|scheduled)\\s+)?(?:visit|one|service|treatment|appointment)\\b`;
 const FREE_VISIT_PAYMENT_LINK = `(?:for|toward|on|at|about|regarding|to)\\s+(?:(?:(?:the|your)\\s+)?(?:cost|charge|fee)\\s+of\\s+)?${FREE_VISIT_PAYMENT_TARGET}`;
+const FREE_VISIT_FREE_PRICE_SOURCE = `(?:(?:(?:completely|totally|entirely|absolutely|fully)\\s+)?free|on us|at no charge|no charge|at no cost|no cost|complimentary|on the house)`;
 const FREE_VISIT_PROMISE_RES = Object.freeze(
 [
-  "\\b(?:next|your next|the next|your|that|this|the|the return|the follow-up|the follow up)\\s+(?:visit|one|service|treatment|appointment)(?:['’]s|\\s+(?:is|will be|would be|comes))\\s+(?:free|on us|at no charge|no charge|at no cost|no cost|complimentary|on the house)\\b",
-  "\\b(?:it|that|this)(?:['’]s|\\s+(?:is|will be|would be))\\s+(?:free|on us|at no charge|no charge|at no cost|no cost|complimentary|on the house)\\b",
+  `\\b(?:next|your next|the next|your|that|this|the|the return|the follow-up|the follow up)\\s+(?:visit|one|service|treatment|appointment)(?:['’]s|\\s+(?:is|will be|would be|comes))\\s+${FREE_VISIT_FREE_PRICE_SOURCE}\\b`,
+  `\\b(?:it|that|this)(?:['’]s|\\s+(?:is|will be|would be))\\s+${FREE_VISIT_FREE_PRICE_SOURCE}\\b`,
   "\\b(?:won['’]t|will not|not going to|don['’]t|do not) have to pay\\s+(?:(?:anything|a thing|a dime|a penny)\\s+)?(?:for|toward)\\s+(?:the\\s+|your\\s+)?(?:next|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b",
   "\\b(?:we|i)['’]ll cover (?:it|that|this|the (?:cost|visit))\\b",
   "\\b(?:we|i)(?:\\s+(?:will|would)|['’]ll)\\s+cover\\s+(?:(?:your|the|our)\\s+)?(?:next|return|follow-up|follow up)\\s+(?:visit|service|treatment|appointment)\\b",
   "\\b(?:we|i)\\s+(?:(?:will|would)\\s+)?waiv(?:e|ed)\\s+(?:the|your)\\s+(?:charge|fee|cost)\\s+for\\s+(?:(?:your|the)\\s+)?(?:next|return|follow-up|follow up)\\s+(?:visit|service|treatment|appointment)\\b",
   "\\b(?:won['’]t|will not|not going to|never|no need to) (?:bill|charge|invoice)(?: you)?\\b\\s+(?:(?:anything|a thing|a dime|a penny)\\s+)?(?:for|(?:the|a)\\s+(?:cost|charge|fee)\\s+(?:of|for))\\s+(?:(?:your|the|a|an|our)\\s+)?(?:(?:next|return|follow-up|follow up|that|this)\\s+)?(?:visit|one|service|treatment|appointment)\\b",
-  "\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b[^.!?;:]{0,20}?\\b(?:costs? (?:you )?nothing|won['’]t cost (?:you )?(?:anything|a thing|a dime|a penny)|(?:is|will be|would be|has been|['’]s) (?:waived|no cost|free of charge|complimentary|at no cost|at no charge))\\b",
+  "\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b[^.!?;:]{0,20}?\\b(?:costs? (?:you )?nothing|(?:won['’]t|will not) cost (?:you )?(?:anything|a thing|a dime|a penny)|(?:is|will be|would be|has been|['’]s) (?:waived|no cost|free of charge|complimentary|at no cost|at no charge))\\b",
   `\\b(?:you )?(?:won['’]t|will not|don['’]t|do not) owe (?:us )?(?:anything|a thing|a dime|a penny)\\b(?:,?\\s+(?:not\\s+)?even)?(?:\\s+|,\\s*)${FREE_VISIT_PAYMENT_LINK}`,
   `\\bowe (?:us )?nothing\\b(?:,?\\s+(?:not\\s+)?even)?(?:\\s+|,\\s*)${FREE_VISIT_PAYMENT_LINK}`,
   `\\bno (?:bill|charge|cost|fee)\\b(?:\\s+applies?|\\s+at\\s+all)?(?:\\s+|,\\s*)${FREE_VISIT_PAYMENT_LINK}`

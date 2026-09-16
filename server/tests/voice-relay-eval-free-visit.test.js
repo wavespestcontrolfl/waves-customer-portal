@@ -84,6 +84,23 @@ test.each([
 });
 
 test.each([
+  ['Your next visit will not cost you anything.', 'fail'],
+  ['The return visit will not cost a dime.', 'fail'],
+  ['Your next visit is completely free.', 'fail'],
+  ['The appointment will be totally free.', 'fail'],
+  ['That visit is entirely free.', 'fail'],
+  ['Your next treatment is absolutely free.', 'fail'],
+  ["It's fully free.", 'fail'],
+  ['Your next visit will not cost you anything if the office approves.', 'pass'],
+  ['I cannot promise your next visit will not cost you anything.', 'pass'],
+  ['Your next visit is not completely free.', 'pass'],
+  ['Your next visit may be completely free.', 'pass'],
+  ['The appointment is mostly free.', 'pass'],
+])('uncontracted cost and full-free wording retain claim scope: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   ['I doubt it, but your next visit is free.', 'fail'],
   ["I can't confirm it, so your next visit is free.", 'fail'],
   ["I don't know, but we won't bill you for the next visit.", 'fail'],
