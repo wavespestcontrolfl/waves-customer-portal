@@ -1451,6 +1451,13 @@ const REPORT_TRAILING_DENIAL_RE = new RegExp(
   'i',
 );
 const REPORT_CONCISE_NONCOMPLETION_RE = /^\s*(?:(?:(?:is|are|was|were|has|have|had)(?:\s+(?:been|being))?\s+)?(?:(?:only|just|merely|simply|still)\s+)*(?:(?:the|our|your|their|his|her|my|its)\s+)?(?:(?:recommended|scheduled|planned|intended|proposed|suggested|considered|expected|required|needed|pending)\b|(?:an?\s+)?(?:recommendation|plan|proposal|suggestion|possibility)\b|under\s+consideration\b|(?:for\s+)?(?:tomorrow|tonight|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b)|(?:will|shall|would|should|can|could|may|might|must|is going to|are going to|was going to|were going to)\b)/i;
+const REPORT_NONCOMPLETION_TIME = `(?:${REPORT_COMPLETION_TIME}|${MODIFIED_WEEKDAY_RE_SOURCE}|next\\s+(?:month|year))`;
+const REPORT_NONCOMPLETION_REMAINDER_RE = new RegExp(
+  `^\\s*(?:(?:to\\s+)?(?:(?:be|have\\s+been)\\s+)?(?:applied|sprayed|treated|placed|used|put)(?:\\s+(?:it|that))?)?\\s*`
+    + `(?:(?:(?:to|at|in|on|around|along|for)\\s+)?(?:there|at\\s+that\\s+location)|(?:for\\s+)?${REPORT_NONCOMPLETION_TIME})?\\s*`
+    + `(?:,\\s*(?:not|never)\\s+(?:actually\\s+)?(?:completed|finished|done|applied|sprayed|treated)(?:\\s+(?:there|at\\s+that\\s+location))?)?\\s*$`,
+  'i',
+);
 function reportTrailingNoncompletion(text) {
   const qualifier = text.trim();
   const actor = new RegExp(`^${REPORT_RETRACTION_ACTOR}\\s+(.+?)\\s+(?:to\\s+${REPORT_ANAPHORIC_ACTION}|(?:on\\s+)?${REPORT_ANAPHORIC_GERUND})(?:\\s+(?:there|at\\s+that\\s+location))?\\s*$`, 'i').exec(qualifier);
@@ -1463,7 +1470,7 @@ function reportTrailingNoncompletion(text) {
   // A later "not completed" can reinforce it only without a different target.
   // The matched location is normalized to "there" before this check.
   const remainder = anaphoric[1].slice(noncompletion[0].length);
-  return /^\s*(?:(?:to\s+)?(?:(?:be|have\s+been)\s+)?(?:applied|sprayed|treated|placed|used|put)(?:\s+(?:it|that))?)?\s*(?:(?:(?:to|at|in|on|around|along|for)\s+)?(?:there|at\s+that\s+location)|(?:for\s+)?(?:tomorrow|tonight|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)))?\s*(?:,\s*(?:not|never)\s+(?:actually\s+)?(?:completed|finished|done|applied|sprayed|treated)(?:\s+(?:there|at\s+that\s+location))?)?\s*$/i.test(remainder);
+  return REPORT_NONCOMPLETION_REMAINDER_RE.test(remainder);
 }
 // Qualified shorthand must positively state completion or cite the report;
 // unknown qualifiers can describe proposed treatment and are not evidence.

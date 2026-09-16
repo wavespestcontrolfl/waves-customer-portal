@@ -57,6 +57,19 @@ test.each([
   ['it was only planned, not completed indoors', 'pass'],
   ['it was only planned, not completed in the garage', 'pass'],
   ['the follow-up was only planned, not completed', 'pass'],
+  ['it was only planned for today', 'fail'],
+  ['it was only planned for yesterday', 'fail'],
+  ['it was only planned for tomorrow', 'fail'],
+  ['it was only planned for next week', 'fail'],
+  ['it was only planned for Monday', 'fail'],
+  ['it was only planned for next Monday', 'fail'],
+  ['it was only planned for September 7', 'fail'],
+  ['it was only planned for 9/7', 'fail'],
+  ['it was only planned for 2026-09-20', 'fail'],
+  ['it was only planned for today, not completed', 'fail'],
+  ['it was only planned for today in the garage', 'pass'],
+  ['it was only planned for the garage today', 'pass'],
+  ['it was only planned for the garage on Monday', 'pass'],
 ])('proposed treatment retracts only its named location: %s', (tail, status) => {
   const spoken = [`Talstar P was applied to the exterior perimeter, but ${tail}.`];
   expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
