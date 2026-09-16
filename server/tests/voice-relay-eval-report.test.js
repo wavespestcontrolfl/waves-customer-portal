@@ -525,6 +525,10 @@ test.each(['but', 'however', 'though', 'although', 'yet', 'while', 'and', 'or', 
 
 test.each([
   ['we did not actually do that', 'fail'],
+  ['we did not apply it there', 'fail'],
+  ['we never applied it', 'fail'],
+  ['we only planned to apply it', 'fail'],
+  ['we did not apply it indoors', 'pass'],
   ["we didn't do so", 'fail'],
   ['the technician never did that', 'fail'],
   ['the technician had not done that', 'fail'],
