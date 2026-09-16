@@ -622,7 +622,8 @@ function freeVisitHasCoordinatedPriceCondition(tail) {
 const FREE_VISIT_COORDINATED_OBJECT_CONDITION_RE = new RegExp(`^\\s+(?:and|or)\\s+([^,;.!?]+?)\\s*,?\\s+((?:only\\s+)?(?:if|unless)\\b|${FREE_VISIT_CONDITION_SOURCE})`, 'i');
 const FREE_VISIT_OBJECT_NOUN_PHRASE_RE = /^(?:(?:the|a|an|your|our|this|that)\s+)?(?:[\w'’-]+\s+){0,3}[\w'’-]+$/i;
 function freeVisitHasCoordinatedObjectCondition(tail, claim) {
-  if (!/\bcover(?:ed|ing)?\b/i.test(claim)) return false;
+  if (!FREE_VISIT_DEFERRABLE_PAYMENT_RE.test(claim)
+      && !/\b(?:cover(?:ed|ing)?|waiv(?:e|ed|ing))\b/i.test(claim)) return false;
   const continuation = FREE_VISIT_COORDINATED_OBJECT_CONDITION_RE.exec(tail);
   if (!continuation) return false;
   const object = continuation[1].trim();
