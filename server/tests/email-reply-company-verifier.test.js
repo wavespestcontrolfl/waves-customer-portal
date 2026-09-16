@@ -92,12 +92,16 @@ describe('email reply company-name policy', () => {
       .toEqual({ ok: true, violations: [] });
   });
 
-  test('allows service descriptors only when they lead into a canonical company team role', () => {
+  test('allows service descriptors only when they lead into a canonical company role or plan', () => {
     expect(verdict('The Waves Pest Control lawn care team will follow up.'))
       .toEqual({ ok: true, violations: [] });
     expect(verdict('The Waves Pest Control wildlife services crew will follow up.'))
       .toEqual({ ok: true, violations: [] });
     expect(verdict('You contacted the Waves Pest Control lawn care team.'))
+      .toEqual({ ok: true, violations: [] });
+    expect(verdict('The Waves Pest Control lawn care plan is scheduled.'))
+      .toEqual({ ok: true, violations: [] });
+    expect(verdict('The Waves Pest Control mosquito control program remains scheduled.'))
       .toEqual({ ok: true, violations: [] });
     rejected('You contacted Waves Pest Control lawn care.');
     rejected('The Waves Pest Control lawn care division will follow up.');
@@ -105,6 +109,7 @@ describe('email reply company-name policy', () => {
     rejected('You contacted Waves Pest Control Mosquito Control.');
     rejected('The company name is Waves Pest Control termite services.');
     rejected('The company name is Waves Pest Control Lawn Care Team.');
+    rejected('The company name is Waves Pest Control Lawn Care Plan.');
     expect(verdict('Waves Pest Control termite service is scheduled.'))
       .toEqual({ ok: true, violations: [] });
     expect(verdict('Waves Pest Control mosquito control remains scheduled.'))

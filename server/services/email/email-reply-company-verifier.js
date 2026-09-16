@@ -31,7 +31,7 @@ const NONCANONICAL_SERVICE_NAME_RE = /\bwaves\s+(?!pest\s+control\b)(?:(?:lawn|p
 const GENERIC_INTRODUCED_NAME_RE = /\bwaves\s+(?!pest\s+control\b)((?:(?!(?:a|an|and|about|for|of|on|or|regarding|the|to|with|your)\b)[a-z][a-z'-]*\s+){1,3})(?:control|care|services?|exterminating|solutions?|company|group|enterprises|holdings|partners|brands)\b/gi;
 const COMPANY_INTRO_RE = /(?:\b(?:contacted|called|emailed|hired|booked|chose|selected|reached|from)\s+(?:the\s+)?(?:(?:company|business)\s+)?|\b(?:company|business)(?:\s+name)?\s+(?:is|was)\s+)$/i;
 const EXPLICIT_NAME_ASSERTION_RE = /\b(?:company|business)(?:\s+name)?\s+(?:is|was)\s+$/i;
-const CANONICAL_TEAM_DESCRIPTOR_RE = /\b(Waves\s+Pest\s+Control)\s+(?:lawn|pest|termite|mosquito|rodent|wildlife|turf|shrub|tree|bed\s*bug)(?:\s+(?:care|control|services?))?(?=\s+(?:team|crew|technicians?|specialists?)\b)/gi;
+const CANONICAL_DESCRIPTIVE_SUFFIX_RE = /\b(Waves\s+Pest\s+Control)\s+(?:lawn|pest|termite|mosquito|rodent|wildlife|turf|shrub|tree|bed\s*bug)(?:\s+(?:care|control|services?))?(?=\s+(?:team|crew|technicians?|specialists?|plans?|programs?)\b)/gi;
 const CANONICAL_SERVICE_SUFFIX_RE = /\bwaves\s+pest\s+control\s+((?:lawn|pest|termite|mosquito|rodent|wildlife|turf|shrub|tree|bed\s*bug)\s+(?:control|care|services?|exterminating))\b/gi;
 
 function normalizedIntroduction(copy, index) {
@@ -65,7 +65,7 @@ function hasNoncanonicalServiceSuffix(copy) {
 // factual accuracy nor authorization to create or send a reply.
 function verifyEmailReplyCompanyName({ text } = {}) {
   const copy = normalizeCompanyCopy(text);
-  const suffixCopy = copy.replace(CANONICAL_TEAM_DESCRIPTOR_RE,
+  const suffixCopy = copy.replace(CANONICAL_DESCRIPTIVE_SUFFIX_RE,
     (match, canonicalName, offset) => (EXPLICIT_NAME_ASSERTION_RE.test(normalizedIntroduction(copy, offset))
       ? match
       : canonicalName));
