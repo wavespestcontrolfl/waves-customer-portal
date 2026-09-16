@@ -164,6 +164,18 @@ async function mintPacketInvoice({ packet, visit, members, customer, trx }) {
     if (hasAcceptanceCandidate) {
       const adoptionIds = new Set(adoptionMembers.map((member) => member.id));
       if (billed.some(({ member }) => !adoptionIds.has(member.id))) return office('existing_member_invoice');
+      // An accepted invoice carries one tax rate from its linked owner. It
+      // cannot represent a commercial stop whose completed base applications
+      // have different tax treatment, including zero/unpriced same-trip rows.
+      if (['commercial', 'business'].includes(customer.property_type)) {
+        const rates = new Set();
+        for (const member of adoptionMembers) {
+          const tax = await require('./tax-calculator')
+            .calculateTax(customer.id, member.service_type, 100, { database: trx });
+          rates.add(tax.rate);
+        }
+        if (rates.size !== 1) return office('mixed_tax_treatment');
+      }
       return adoptAcceptanceInvoice({ packet, members: adoptionMembers, customer, trx, invoices: existing });
     }
   }
