@@ -1205,12 +1205,14 @@ const InvoiceService = {
           .whereNotNull('i.visit_completion_packet_id').orderBy('i.id')
           .forUpdate('i').noWait().select('i.id', 'i.status', 'i.service_date', 'i.line_items', 'i.notes');
       } catch (error) { contention(error); }
-      const { invoiceContainsOnlySetupFeeCharges, invoiceContainsSetupFeeLine,
+      const { classifyAcceptedEstimateInvoiceCoverage,
         sumPositiveSetupFeeCents } = require('./estimate-first-application-invoice');
       // Compare the calculated invoice amounts, not caller-supplied amount.
       const normalizedSetupLines = normalizeInvoiceLineItems(lineItems || []);
-      const hasSetupFee = invoiceContainsSetupFeeLine({ line_items: normalizedSetupLines });
-      const separateSetupFee = invoiceContainsOnlySetupFeeCharges({ line_items: normalizedSetupLines })
+      const incomingCoverage = classifyAcceptedEstimateInvoiceCoverage(
+        { line_items: normalizedSetupLines }, serviceDate,
+      );
+      const separateSetupFee = incomingCoverage.setupFeeOnly
         && normalizedSetupLines.filter((line) => line.amount > 0)
           .every((line) => /^WaveGuard Membership — one-time setup fee$/i.test(String(line.description || '').trim()))
         && packetOwners.every((owner) => {
@@ -1244,16 +1246,10 @@ const InvoiceService = {
       // packet guard: an explicit other date is a different application,
       // while either side missing a date fails closed. Setup-fee coverage is
       // estimate-wide and therefore deliberately uses every packet owner.
-      const { dateOnly } = require('./visit-groups');
-      const stampedServiceDate = dateOnly(serviceDate);
-      const matchingPacketOwners = stampedServiceDate
-        ? packetOwners.filter((owner) => {
-          const ownerServiceDate = dateOnly(owner.service_date);
-          return !ownerServiceDate || ownerServiceDate === stampedServiceDate;
-        })
-        : packetOwners;
-      if ((hasSetupFee && packetOwners.length && (!separateSetupFee || !separateSetupFeeAllowed))
-        || (!hasSetupFee && matchingPacketOwners.length)) throw packetConflict();
+      const matchingPacketOwners = packetOwners.filter((owner) =>
+        classifyAcceptedEstimateInvoiceCoverage(owner, serviceDate).matchesApplicationDate);
+      if ((incomingCoverage.hasSetupFee && packetOwners.length && (!separateSetupFee || !separateSetupFeeAllowed))
+        || (!incomingCoverage.hasSetupFee && matchingPacketOwners.length)) throw packetConflict();
     }
     const customer = await database("customers").where({ id: customerId }).first();
     if (!customer) throw new Error("Customer not found");

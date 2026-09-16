@@ -211,6 +211,21 @@ function invoiceContainsOnlySetupFeeCharges(row) {
   return hasFee;
 }
 
+// Classify rows only after the caller has acquired its own transaction and
+// row locks. Setup-fee coverage is estimate-wide; application coverage is
+// visit-date scoped, with a missing date failing closed as a possible match.
+// Status remains caller-owned because packet ownership survives terminal
+// invoice states while adoption deliberately distinguishes them.
+function classifyAcceptedEstimateInvoiceCoverage(row, applicationDate) {
+  const rowDate = dateOnly(row?.service_date || row?.scheduled_date);
+  const targetDate = dateOnly(applicationDate);
+  return {
+    hasSetupFee: invoiceHasPositiveSetupFeeLine(row),
+    setupFeeOnly: invoiceContainsOnlySetupFeeCharges(row),
+    matchesApplicationDate: !rowDate || !targetDate || rowDate === targetDate,
+  };
+}
+
 // Cents totals for coverage comparison (Codex PR r7 P1): boolean
 // any-positive-line evidence lets a $9.90 typo retire a $99 obligation —
 // resolution compares SUMMED live coverage against the frozen expected
@@ -276,6 +291,7 @@ module.exports = {
   invoiceContainsSetupFeeLine,
   invoiceHasPositiveSetupFeeLine,
   invoiceContainsOnlySetupFeeCharges,
+  classifyAcceptedEstimateInvoiceCoverage,
   invoiceBillsBaseApplication,
   sumPositiveSetupFeeCents,
   acceptanceSetupFeeMatchesAuthority,
