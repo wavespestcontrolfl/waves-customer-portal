@@ -206,6 +206,32 @@ async function prepareAcceptanceInvoice({
   return { estimateId, invoice, deposit, pestId, lawnId };
 }
 
+async function prepareTwoFamilyRetentionPacket({ addon = false } = {}) {
+  const lawnCatalogId = randomUUID();
+  fixture.extraCatalogIds.push(lawnCatalogId);
+  await mockPg('services').where({ id: fixture.catalogId }).update({
+    name: 'Fixture Pest Control', engine_keys: JSON.stringify(['pest_control']),
+  });
+  await mockPg('services').insert({ id: lawnCatalogId, name: 'Fixture Lawn Care',
+    service_key: `fixture_${lawnCatalogId}`, engine_keys: JSON.stringify(['lawn_care']), is_active: true });
+  const [pestId, lawnId] = fixture.serviceIds;
+  await mockPg('scheduled_services').where({ id: pestId }).update({
+    service_type: 'Quarterly Pest Control', is_recurring: true, recurring_ongoing: true,
+    ...(addon ? { estimated_price: 145 } : {}),
+  });
+  await mockPg('scheduled_services').where({ id: lawnId }).update({
+    service_id: lawnCatalogId, service_type: 'Lawn Care', is_recurring: true, recurring_ongoing: true,
+  });
+  if (addon) {
+    await mockPg('scheduled_service_addons').insert({ scheduled_service_id: pestId,
+      service_id: fixture.catalogId, service_name: 'Fixture Pest Add-on', base_price: 25, estimated_price: 25 });
+  }
+  const saved = await saveVisitCompletionPacket(submission());
+  await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+  const invoice = await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).first();
+  return { saved, invoice, pestId, lawnId };
+}
+
 async function createUnownedInvoiceLink({ scheduledDate, recordDate = scheduledDate }) {
   const visitId = randomUUID();
   const scheduledServiceId = randomUUID();
@@ -313,7 +339,8 @@ postgres('visit completion packet records on PostgreSQL', () => {
 
     require('../services/notification-triggers').triggerNotification.mockReset().mockResolvedValue({ suppressed: true });
     fixture = { customerId: randomUUID(), techId: randomUUID(), catalogId: randomUUID(), productId: randomUUID(),
-      visitId: randomUUID(), serviceIds: [randomUUID(), randomUUID()].sort(), key: randomUUID(), estimateIds: [] };
+      visitId: randomUUID(), serviceIds: [randomUUID(), randomUUID()].sort(), key: randomUUID(), estimateIds: [],
+      extraCatalogIds: [] };
     const date = etDateString();
     await mockPg('customers').insert({ id: fixture.customerId, first_name: 'Fixture', phone: '+12025550123',
       email: `${fixture.customerId}@example.invalid`, property_type: 'residential', autopay_enabled: false,
@@ -368,6 +395,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     await mockPg('technicians').where({ id: fixture.techId }).del();
     await mockPg('service_completion_profiles').where({ service_key: `fixture_${fixture.catalogId}` }).del();
     await mockPg('services').where({ id: fixture.catalogId }).del();
+    if (fixture.extraCatalogIds.length) await mockPg('services').whereIn('id', fixture.extraCatalogIds).del();
     await mockPg('products_catalog').where({ id: fixture.productId }).del();
   });
 
@@ -1754,6 +1782,72 @@ postgres('visit completion packet records on PostgreSQL', () => {
     });
     expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'office_required' });
     expect(provider).not.toHaveBeenCalled();
+  });
+
+  test('a late offer for a family removed from a shared invoice does not hold the remaining family', async () => {
+    const { saved, invoice, pestId } = await prepareTwoFamilyRetentionPacket();
+    const remainingLines = invoice.line_items.filter((line) => line.client_id !== `scheduled_${pestId}_primary`);
+    await InvoiceService.update(invoice.id, { line_items: remainingLines });
+    await mockPg('retention_offers').insert({ customer_id: fixture.customerId, family_key: 'pest_control',
+      percent_off: 15, max_charges: 2, cap_amount: 75, status: 'granted' });
+
+    await expect(assertPacketCharge(saved)).resolves.toBeUndefined();
+  });
+
+  test('a late offer still holds when its family has a positive line on the shared invoice', async () => {
+    const { saved } = await prepareTwoFamilyRetentionPacket();
+    await mockPg('retention_offers').insert({ customer_id: fixture.customerId, family_key: 'pest_control',
+      percent_off: 15, max_charges: 2, cap_amount: 75, status: 'granted' });
+
+    await expect(assertPacketCharge(saved)).rejects.toMatchObject({
+      code: 'VISIT_PAYMENT_REVIEW_REQUIRED', reason: 'retention_offer_changed',
+    });
+  });
+
+  test('an unattributed positive edit keeps every scheduled family offer conservative', async () => {
+    const { saved, invoice, pestId } = await prepareTwoFamilyRetentionPacket();
+    const editedLines = invoice.line_items
+      .filter((line) => line.client_id !== `scheduled_${pestId}_primary`)
+      .concat({ description: 'Office-added service charge', quantity: 1, unit_price: 25, amount: 25 });
+    await InvoiceService.update(invoice.id, { line_items: editedLines });
+    await mockPg('retention_offers').insert({ customer_id: fixture.customerId, family_key: 'pest_control',
+      percent_off: 15, max_charges: 2, cap_amount: 75, status: 'granted' });
+
+    await expect(assertPacketCharge(saved)).rejects.toMatchObject({ reason: 'retention_offer_changed' });
+  });
+
+  test.each(['unreadable', false, [], ' ', null, undefined].map((amount) => [amount]))('a malformed stored line amount %p cannot prove a scheduled family absent', async (amount) => {
+    const { saved, invoice, pestId, lawnId } = await prepareTwoFamilyRetentionPacket();
+    await mockPg('invoices').where({ id: invoice.id }).update({ line_items: JSON.stringify([
+      { client_id: `scheduled_${lawnId}_primary`, description: 'Lawn Care', amount: 120 },
+      { client_id: `scheduled_${pestId}_primary`, description: 'Quarterly Pest Control', amount },
+    ]) });
+    await mockPg('retention_offers').insert({ customer_id: fixture.customerId, family_key: 'pest_control',
+      percent_off: 15, max_charges: 2, cap_amount: 75, status: 'granted' });
+
+    await expect(assertPacketCharge(saved)).rejects.toMatchObject({ reason: 'retention_offer_changed' });
+  });
+
+  test('a positive add-on keeps its family offer applicable after staff removes the base line', async () => {
+    const { saved, invoice, pestId } = await prepareTwoFamilyRetentionPacket({ addon: true });
+    const editedLines = invoice.line_items.filter((line) => line.client_id !== `scheduled_${pestId}_primary`);
+    expect(editedLines).toEqual(expect.arrayContaining([
+      expect.objectContaining({ client_id: expect.stringMatching(new RegExp(`^scheduled_${pestId}_addon_`)), amount: 25 }),
+    ]));
+    await InvoiceService.update(invoice.id, { line_items: editedLines });
+    await mockPg('retention_offers').insert({ customer_id: fixture.customerId, family_key: 'pest_control',
+      percent_off: 15, max_charges: 2, cap_amount: 75, status: 'granted' });
+
+    await expect(assertPacketCharge(saved)).rejects.toMatchObject({ reason: 'retention_offer_changed' });
+  });
+
+  test('an offer already allocated to this invoice does not hold its positive family line', async () => {
+    const { saved, invoice } = await prepareTwoFamilyRetentionPacket();
+    await mockPg('retention_offers').insert({ customer_id: fixture.customerId, family_key: 'pest_control',
+      percent_off: 15, max_charges: 2, cap_amount: 75, status: 'granted',
+      applied_invoice_ids: JSON.stringify([invoice.id]) });
+
+    await expect(assertPacketCharge(saved)).resolves.toBeUndefined();
   });
 
   test('a retention grant holding the customer advisory lock makes collection retry without provider submission', async () => {

@@ -937,7 +937,16 @@ function promoteWinnerAsPrimaryRule(winner, loser) {
 function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null } = {}) {
   const winnerPriorValues = {};
   const backfills = {};
+  const addressStatus = addressCompat(winner, loser).status;
+  const winnerHasStreet = !isEmptyValue(winner.address_line1);
   for (const field of BACKFILL_FIELDS) {
+    // Once the winner has a street, its address columns are one premise tuple:
+    // fill a missing component only when the canonical comparator proves the
+    // loser belongs to that same premise. A different home may still move over
+    // as a secondary property, but must never donate its unit/city/ZIP to the
+    // winner's account-address mirror. A truly addressless winner still takes
+    // the loser's whole tuple in the replacement block below.
+    if (winnerHasStreet && ADDRESS_BACKFILL_FIELDS.has(field) && addressStatus !== 'match') continue;
     if (isEmptyValue(winner[field]) && !isEmptyValue(loser[field])) backfills[field] = loser[field];
   }
   // An address backfills as a TUPLE: a winner with no street but a stale
@@ -990,7 +999,8 @@ function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null 
   const loserUnitText = loser.address_line2
     || rawUnitText(loser.address_line1)
     || null;
-  if (!winnerHasUnit && winnerKey && loserKey && winnerKey.key === loserKey.key
+  if (addressStatus === 'match'
+    && !winnerHasUnit && winnerKey && loserKey && winnerKey.key === loserKey.key
     && ((loserKey && loserKey.unit) || unitFromLine2(loser.address_line2))
     && isEmptyValue(winner.address_line2) && loserUnitText) {
     backfills.address_line2 = loserUnitText;
@@ -1147,13 +1157,29 @@ function rowLevelMergeConflict(winner, loser) {
  * rowLevelMergeConflict, but each needs a query, so they live in one
  * async rule the executor throws on and the IB preview runs before it
  * builds a card (codex #4348 r7 P2: an operator was still able to approve
- * a legacy/special billing-mode pair, or a loser belonging to a
- * multi-property account with other live members, and watch the executor
- * refuse it). `database` is any knex handle — the preview reads unlocked,
- * executeMerge re-reads under its row locks. Returns { code, message } or
- * null.
+ * a legacy/special billing-mode pair, a loser belonging to a multi-property
+ * account with other live members, or an addressed winner whose only primary
+ * property is inactive, and watch the executor refuse it). `database` is any
+ * knex handle — the preview reads unlocked, executeMerge re-reads under its
+ * row locks. Returns { code, message } or null.
  */
 async function dbLevelMergeConflict(database, winner, loser) {
+  // An incompatible winner address must be anchored before the property sweep.
+  // ensurePrimaryProperty deliberately preserves an existing inactive primary,
+  // so this state can never satisfy the executor's active-primary invariant.
+  // Refuse it in the shared preflight so previews never offer an approval that
+  // the locked write will deterministically reject.
+  if (!isEmptyValue(winner.address_line1) && addressCompat(winner, loser).status !== 'match') {
+    const primary = await database('customer_properties')
+      .where({ customer_id: winner.id, is_primary: true })
+      .first('id', 'active');
+    if (primary?.active === false) {
+      return {
+        code: 'inactive_primary_property_conflict',
+        message: 'surviving customer has an inactive primary property — reactivate it or reconcile saved properties before merging',
+      };
+    }
+  }
   // Legacy NULL is a real cadence too — the monthly cron treats NULL as
   // monthly membership, and completion billing reads the SURVIVOR's mode.
   // Mixing a special-mode side with a legacy side is only safe when the
@@ -1333,6 +1359,7 @@ const BACKFILL_FIELDS = [
   'city', 'state', 'zip', 'lead_source', 'lead_source_detail', 'preferred_language',
   'contact_role',
 ];
+const ADDRESS_BACKFILL_FIELDS = new Set(['address_line1', 'address_line2', 'city', 'state', 'zip']);
 
 function isEmptyValue(v) {
   return v === null || v === undefined || String(v).trim() === ''
@@ -1515,7 +1542,11 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // locks and run unlocked by the IB preview so the operator never
     // approves a card this executor would refuse.
     const dbConflict = await dbLevelMergeConflict(trx, winner, loser);
-    if (dbConflict) throw new Error(`executeMerge: ${dbConflict.message}`);
+    if (dbConflict) {
+      const err = new Error(`executeMerge: ${dbConflict.message}`);
+      err.mergeConflictCode = dbConflict.code;
+      throw err;
+    }
     // Same-account primary handoff (shared notification/channel prefs
     // resolve via (account_id, is_primary_profile=true)) is decided by
     // promoteWinnerAsPrimaryRule inside predictWinnerBackfills below.
@@ -1542,6 +1573,41 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       if (blockers.length) throw new Error(`executeMerge(auto): loser is not a shell (${blockers.join(', ')})`);
       if (!namesCompatible(winner, loser)) throw new Error('executeMerge(auto): names conflict');
       if (!ADDRESS_COMPATIBLE.has(addr.status)) throw new Error(`executeMerge(auto): address ${addr.status}`);
+    }
+
+    // Anchor the survivor's own account address before customer_properties is
+    // swept. Otherwise an addressed winner with no property row inherits the
+    // loser's primary flag, making the loser's service address the surviving
+    // account primary. Same-premises rows keep the established inheritance
+    // path: their missing components may enrich the winner below, and creating
+    // a pre-enrichment primary here would leave that mirror stale. Run the
+    // canonical lazy creator on this transaction, under the customer locks
+    // above. A legacy winner can already have this exact account address saved
+    // as an active secondary; promote that row first so the address-key unique
+    // does not reject a duplicate insert and its identity/metadata survive.
+    // Then require an ACTIVE primary: a 23505 from an unrelated property unique
+    // or an inactive legacy primary must not be mistaken for success.
+    if (!isEmptyValue(winner.address_line1) && addr.status !== 'match') {
+      const { addressKey, ensurePrimaryProperty } = require('./customer-properties');
+      const winnerProperties = await trx('customer_properties')
+        .where({ customer_id: winnerId, active: true })
+        .select('id', 'is_primary', 'address_line1', 'address_line2', 'city', 'zip');
+      let winnerPrimary = winnerProperties.find((row) => row.is_primary === true) || null;
+      if (!winnerPrimary) {
+        const winnerAddressKey = addressKey(winner);
+        const savedAccountRow = winnerProperties.find((row) => addressKey(row) === winnerAddressKey);
+        if (savedAccountRow) {
+          await trx('customer_properties').where({ id: savedAccountRow.id })
+            .update({ is_primary: true, updated_at: trx.fn.now() });
+        }
+        await ensurePrimaryProperty(winner, { conn: trx });
+        winnerPrimary = await trx('customer_properties')
+          .where({ customer_id: winnerId, is_primary: true, active: true })
+          .first('id');
+      }
+      if (!winnerPrimary) {
+        throw new Error('executeMerge: could not preserve the surviving customer account address as its primary property');
+      }
     }
 
     const repointed = {};
@@ -5100,7 +5166,9 @@ function predictLoserStateDiscarded(winner, loser) {
 // carry, conversation threads on the same (channel, endpoint). Sorted so
 // the fingerprint is stable; a table that does not exist yet (42P01) is
 // simply not predicted.
-async function predictCollisionFolds(database, winnerId, loserId) {
+async function predictCollisionFolds(database, winner, loser) {
+  const winnerId = winner.id;
+  const loserId = loser.id;
   const ids = [winnerId, loserId];
   const details = {};
   const read = async (table, columns) => {
@@ -5117,6 +5185,22 @@ async function predictCollisionFolds(database, winnerId, loserId) {
     if (owners.has(String(winnerId)) && owners.has(String(loserId))) {
       details[table] = 'both records have a row: the fields merge into the surviving row and the archived record\'s row is dropped';
     }
+  }
+  // executeMerge initializes an addressed winner's missing primary before the
+  // FK sweep. If the loser owns a primary, that deliberate collision invokes
+  // repointCustomerProperties (which demotes the moved row) and makes automatic
+  // undo unavailable. Predict only this newly deterministic collision; other
+  // active-address collisions retain the existing runtime/journal fallback.
+  const propertyRows = await read('customer_properties', ['customer_id', 'is_primary', 'active']);
+  const winnerRows = propertyRows.filter((row) => String(row.customer_id) === String(winnerId));
+  const winnerHasPrimary = winnerRows.some((row) => row.is_primary === true);
+  const winnerHasActivePrimary = winnerRows.some((row) => row.is_primary === true && row.active === true);
+  const winnerWillEstablishPrimary = !winnerHasPrimary
+    && !isEmptyValue(winner.address_line1)
+    && addressCompat(winner, loser).status !== 'match';
+  const loserHasPrimary = propertyRows.some((row) => String(row.customer_id) === String(loserId) && row.is_primary === true);
+  if (loserHasPrimary && (winnerHasActivePrimary || winnerWillEstablishPrimary)) {
+    details.customer_properties = 'the archived record\'s primary property will be demoted because the surviving account keeps its own primary address';
   }
   const tagRows = await read('customer_tags', ['customer_id', 'tag']);
   const winnerTags = new Set(tagRows.filter((r) => String(r.customer_id) === String(winnerId)).map((r) => r.tag));
@@ -5169,7 +5253,7 @@ async function describeMergeEffects(database, winner, loser) {
   // Collection cases landing under the winner: the executor's reconcile
   // can revoke surplus approvals — stated and pinned (state + version).
   const collection_cases = await previewCollectionCaseReconciliation(database, winner.id, loser.id);
-  const collisionFolds = await predictCollisionFolds(database, winner.id, loser.id);
+  const collisionFolds = await predictCollisionFolds(database, winner, loser);
   const predictedCollisionHandlers = [...(referral?.folded_into_winner_promoter ? ['referral_promoters'] : []), ...collisionFolds.tables];
   const financial_effects = {
     account_credits_moved_to_winner: credits,
