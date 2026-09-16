@@ -27,7 +27,7 @@ function normalizeCompanyCopy(text) {
   return normalized;
 }
 
-const NONCANONICAL_SERVICE_NAME_RE = /\bwaves\s+(?!pest\s+control\b)(?:(?:lawn|pest|termite|mosquito|rodent|wildlife|turf|shrub|tree|bed\s*bug)\s+(?:control|care|services?|exterminating)|exterminating|lawn\b|pest\b)/gi;
+const NONCANONICAL_SERVICE_NAME_RE = /\bwaves[\s-]+(?!pest\s+control\b)(?:(?:lawn|pest|termite|mosquito|rodent|wildlife|turf|shrub|tree|bed\s*bug)[\s-]+(?:control|care|services?|exterminating)|exterminating|lawn\b|pest\b)/gi;
 const GENERIC_INTRODUCED_NAME_RE = /\bwaves\s+(?!pest\s+control\b)((?:(?!(?:a|an|and|about|for|of|on|or|regarding|the|to|with|your)\b)[a-z][a-z'-]*\s+){1,3})(?:control|care|services?|exterminating|solutions?|company|group|enterprises|holdings|partners|brands)\b/gi;
 const COMPANY_INTRO_RE = /(?:\b(?:contacted|called|emailed|hired|booked|chose|selected|reached|from)\s+(?:the\s+)?(?:(?:company|business)\s+)?|\b(?:company|business)(?:\s+name)?\s+(?:is|was)\s+)$/i;
 const EXPLICIT_NAME_ASSERTION_RE = /\b(?:company|business)(?:\s+name)?\s+(?:is|was)\s+$/i;

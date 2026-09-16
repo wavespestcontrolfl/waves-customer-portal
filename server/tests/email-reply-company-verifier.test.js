@@ -131,3 +131,7 @@ describe('email reply company-name policy', () => {
     expect(verdict(copy)).toEqual({ ok: true, violations: [] });
   });
 });
+
+test.each(['You contacted Waves-Termite Control', 'You contacted Waves Termite-Control'])('rejects a punctuated alias: %s', (text) => {
+ expect(verifyEmailReplyCompanyName({ text }).ok).toBe(false);
+});
