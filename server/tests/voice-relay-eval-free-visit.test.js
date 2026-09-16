@@ -1,6 +1,20 @@
 const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
 
 test.each([
+  ['Your next visit is free of cancellation fees and we will bill you normally.', 'pass'],
+  ['Your next visit is now free of cancellation fees and we will bill you normally.', 'pass'],
+  ['Your next visit is free of cancellation fees and the office will bill you normally.', 'pass'],
+  ['Your next visit is free of cancellation fees and rescheduling charges and we will bill you normally.', 'pass'],
+  ['Your next visit is free from ants and the office will bill you normally.', 'pass'],
+  ['Your next visit is free of cancellation fees and treatment charges.', 'fail'],
+  ['Your next visit is now free of cancellation fees and the treatment charges.', 'fail'],
+  ['Your next visit is free of cancellation fees and we will bill you normally, but the return visit is free.', 'fail'],
+  ['Your next visit is free of cancellation fees and the next visit is complimentary.', 'fail'],
+])('nonprice qualifiers allow a coordinated finite clause: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   ['It is free to view the report.', 'pass'],
   ['It is free to download the report.', 'pass'],
   ['Your next visit is free to review the report.', 'pass'],
