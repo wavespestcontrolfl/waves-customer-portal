@@ -5,6 +5,8 @@
 const db = require('../../models/db');
 
 const { portalUrl } = require('../../utils/portal-url');
+const MAX_PER_CUSTOMER = 10;
+const DEFAULT_PER_CUSTOMER = 3;
 
 // Resolve the portal origin in each environment for customer and staff links.
 const estimateLink = (token, query = '') => portalUrl(`/estimate/${encodeURIComponent(token)}${query}`);
@@ -150,6 +152,50 @@ function stripPayload(payload) {
   return out;
 }
 
+// The composer builds its switcher from a separate sibling read. Verify its
+// tokens against complete persisted rows before exposing even an address.
+// The payload supplies selectors only; identity and links come from the DB.
+function sameGroupCustomer(current, sibling) {
+  // Match admin-estimate-persistence.ensureEstimateGroupId: any linked
+  // customer requires equal IDs; two lead-only rows need a phone or email.
+  if (current.customer_id || sibling.customer_id) return current.customer_id === sibling.customer_id;
+  const phone = (value) => String(value || '').replace(/\D/g, '').slice(-10);
+  const email = (value) => String(value || '').trim().toLowerCase();
+  return (phone(current.customer_phone).length === 10 && phone(current.customer_phone) === phone(sibling.customer_phone))
+    || !!(email(current.customer_email) && email(current.customer_email) === email(sibling.customer_email));
+}
+
+async function verifiedPropertyGroup(group, current) {
+  if (!Array.isArray(group)) return null;
+  if (!current.estimate_group_id) return null;
+  try {
+    const siblings = group.filter((entry) => !entry.isCurrent);
+    if (group.filter((entry) => entry.isCurrent).length !== 1
+      || group.find((entry) => entry.isCurrent)?.token !== current.token
+      || siblings.some((entry) => !entry.token || entry.token === current.token)) return null;
+    const tokens = siblings.map((entry) => entry.token);
+    if (new Set(tokens).size !== tokens.length) return null;
+    const rows = await db('estimates').select('*').whereIn('token', tokens);
+    if (rows.length !== tokens.length) return null;
+    const byToken = new Map(rows.map((sibling) => [sibling.token, sibling]));
+    const verified = [];
+    for (const entry of group) {
+      const sibling = entry.isCurrent ? current : byToken.get(entry.token);
+      if (!sibling || sibling.estimate_group_id !== current.estimate_group_id
+        || !sameGroupCustomer(current, sibling)) return null;
+      const links = await estimateLinks(sibling, lazy.publicRoute().parseEstimateDataSafe(sibling));
+      if (links.link_state === 'blocked' || (!entry.isCurrent && links.link_state !== 'customer_viewable')) return null;
+      verified.push({
+        id: sibling.id, address: sibling.address || null, status: sibling.status, isCurrent: sibling.id === current.id,
+        customer_link: links.customer_link, staff_preview_link: links.staff_preview_link,
+      });
+    }
+    return verified;
+  } catch {
+    return null;
+  }
+}
+
 // Drafts use the same staff preview mode as the Customer View page.
 async function pageProjection(row, linkState) {
   try {
@@ -161,7 +207,12 @@ async function pageProjection(row, linkState) {
     if (!payload || typeof payload !== 'object') {
       return { page: null, page_unavailable: 'the estimate page composed no payload for this row' };
     }
-    return { page: stripPayload(payload) };
+    const page = stripPayload(payload);
+    if (Array.isArray(payload.propertyGroup)) {
+      const group = await verifiedPropertyGroup(payload.propertyGroup, row);
+      if (group) page.propertyGroup = group;
+    }
+    return { page };
   } catch (err) {
     // The page itself would 500 for this row — say so rather than falling
     // back to the stored columns. This tool exists because those columns are
@@ -255,6 +306,7 @@ async function shapeEstimate(row) {
     tier: row.waveguard_tier,
     pricing_version: row.pricing_version || null,
     price_locked: !!membershipFrozen(row),
+    price_locked_at: row.price_locked_at || null,
     ...projection,
     ...(reconciliation_error ? { reconciliation_error } : {}),
     accepted: row.accepted_at ? { at: row.accepted_at, service_mode: row.accepted_service_mode || null, frequency: row.accepted_frequency_key || null } : null,
@@ -271,23 +323,70 @@ async function shapeEstimate(row) {
   };
 }
 
-async function getEstimateDetail({ estimate_id } = {}) {
-  if (!estimate_id) return { error: 'Provide estimate_id' };
+const COLLECTED_DEPOSIT_STATUSES = new Set(['received', 'credited', 'refunding', 'refunded']);
+const money = (value) => value == null || value === '' || !Number.isFinite(Number(value))
+  ? null : Math.round(Number(value) * 100) / 100;
+
+function depositEntry(deposit) {
+  const collected = COLLECTED_DEPOSIT_STATUSES.has(deposit.status);
+  const amount = money(deposit.amount);
+  const surcharge = money(deposit.card_surcharge);
+  // Stale captures can enter refunding/refunded without receipt stamping.
+  // Their default zero surcharge is not evidence of the amount paid.
+  const receiptRecorded = !!deposit.received_at;
+  return {
+    amount, card_surcharge: receiptRecorded ? surcharge : null, collected,
+    total_paid: collected && receiptRecorded && amount !== null && surcharge !== null
+      ? money(amount + surcharge) : null,
+    credited: money(deposit.credited_amount), refunded: money(deposit.refunded_amount),
+    refunded_surcharge: money(deposit.refunded_surcharge),
+    status: deposit.status, received_at: deposit.received_at,
+  };
+}
+
+async function getEstimateDetail({ estimate_id, customer_id, limit } = {}) {
+  if (!estimate_id && !customer_id) return { error: 'Provide estimate_id or customer_id' };
   // The public composer and reconciler need the whole persisted row.
-  const rows = await db('estimates').select('*').where('id', estimate_id).limit(1);
-  if (!rows.length) return { count: 0, estimates: [], error: 'No estimate matches that id' };
-  return { count: 1, estimates: [await shapeEstimate(rows[0])] };
+  let query = db('estimates').select('*').orderBy('created_at', 'desc');
+  if (estimate_id) query = query.where('id', estimate_id).limit(1);
+  else {
+    const count = Math.max(1, Math.min(Math.trunc(Number(limit)) || DEFAULT_PER_CUSTOMER, MAX_PER_CUSTOMER));
+    query = query.where('customer_id', customer_id).whereNull('archived_at').limit(count);
+  }
+  const rows = await query;
+  if (!rows.length) return { count: 0, estimates: [], error: estimate_id
+    ? 'No estimate matches that id' : 'No estimates on file for that customer' };
+  const estimates = [];
+  for (const row of rows) estimates.push(await shapeEstimate(row));
+  const readable = estimates.filter((estimate) => estimate.withheld !== 'provenance_blocked');
+  if (readable.length) {
+    try {
+      const deposits = await db('estimate_deposits')
+        .whereIn('estimate_id', readable.map((estimate) => estimate.id))
+        .select('estimate_id', 'amount', 'card_surcharge', 'credited_amount', 'refunded_amount', 'refunded_surcharge', 'status', 'received_at')
+        .orderBy('created_at', 'desc');
+      for (const estimate of readable) estimate.deposits = deposits
+        .filter((deposit) => deposit.estimate_id === estimate.id).map(depositEntry);
+    } catch {
+      for (const estimate of readable) {
+        estimate.deposits = null;
+        estimate.deposits_unavailable = 'deposit records could not be read';
+      }
+    }
+  }
+  return { count: estimates.length, estimates };
 }
 
 const GET_ESTIMATE_DETAIL_TOOL = {
   name: 'get_estimate_detail',
-  description: `Read one estimate by estimate_id as the customer's own estimate page prices it. Returns status, timestamps, customer or staff preview link state, and the composed page under \`page\`. \`page.pricing\` includes plan cadences, per-application prices, selectable additions, and one-time breakdowns; an authored commercial quote is in \`page.proposal\`. Quote-required pricing is withheld with a reason; low-confidence cadences are marked ranged without exact figures. Residential combined plan totals are withheld while itemized application prices remain; commercial and monthly-billed totals remain where displayed. A failed live membership verification sets \`page\` to null with page_unavailable. Provenance blocks withhold the entire record. Use staff_preview_link for staff inspection so it does not register customer engagement; customer_link is the shareable customer URL. Never reconstruct hidden totals or infer final invoice amounts. Use for questions about amounts inside a specific sent estimate; first identify its estimate_id.`,
+  description: `Read estimates as the customer's own estimate page prices them: estimate_id returns exactly one, even when customer_id is also given; customer_id alone returns the latest nonarchived estimates (default 3, max 10). Returns status, timestamps, customer or staff preview link state, and the composed page under \`page\`. \`page.pricing\` includes plan cadences, per-application prices, selectable additions, and one-time breakdowns; an authored commercial quote is in \`page.proposal\`. Quote-required pricing is withheld with a reason; low-confidence cadences are marked ranged without exact figures. Residential combined plan totals are withheld while itemized application prices remain; commercial and monthly-billed totals remain where displayed. A verified \`page.propertyGroup\` lists sibling id, address, status and links only; use its id to read that sibling's pricing separately. Deposits report captured face amount plus card surcharge as total_paid, credited/refunded amounts, status and received_at; pending, failed and unknown statuses have total_paid null. A failed deposit read yields deposits:null and deposits_unavailable, never an empty ledger. A failed live membership verification sets \`page\` to null with page_unavailable. Provenance blocks withhold the entire record, including deposits. Accepted service mode/frequency and price_locked_at identify the accepted basis, but stored aggregate totals do not establish the final invoice amount. Use staff_preview_link for staff inspection so it does not register customer engagement; customer_link is the shareable customer URL. Never reconstruct hidden totals or infer final invoice amounts.`,
   input_schema: {
     type: 'object',
     properties: {
       estimate_id: { type: 'string', format: 'uuid', description: 'Estimate UUID — returns exactly that estimate' },
+      customer_id: { type: 'string', format: 'uuid', description: 'Customer UUID — return recent nonarchived estimates when no estimate_id is given' },
+      limit: { type: 'number', description: 'With customer_id: how many recent estimates to return (default 3, max 10)' },
     },
-    required: ['estimate_id'],
   },
 };
 
