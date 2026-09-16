@@ -101,8 +101,35 @@ test.each([
   expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
 });
 
+test.each([
+  ['that was a mistake', 'fail'],
+  ['it was a mistake', 'fail'],
+  ['this was a mistake', 'fail'],
+  ['that is an error', 'fail'],
+  ["that's a mistake", 'fail'],
+  ['it was a mistake, sorry', 'fail'],
+  ['that was a mistake about it', 'fail'],
+  ['that was a mistake about Talstar P at the exterior perimeter', 'fail'],
+  ['that was a mistake about the exterior perimeter', 'fail'],
+  ['that was a mistake about the appointment', 'pass'],
+  ['that was a mistake about the garage', 'pass'],
+  ['that was a mistake about bait indoors', 'pass'],
+  ['that was a mistake about bait there', 'pass'],
+  ['that was a mistake about Talstar P in the garage', 'pass'],
+  ['it was a mistake to schedule the appointment', 'pass'],
+  ['that was a mistake indoors', 'pass'],
+])('deictic corrections preserve the reported finding scope: %s', (tail, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter, but ${tail}.`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
 test('an inline speaker correction retracts the report finding', () => {
   const spoken = ['Talstar P was applied to the exterior perimeter, I was mistaken.'];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe('fail');
+});
+
+test('an inline deictic correction retracts the report finding', () => {
+  const spoken = ['Talstar P was applied to the exterior perimeter, that was a mistake.'];
   expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe('fail');
 });
 

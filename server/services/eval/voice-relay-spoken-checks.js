@@ -1520,8 +1520,10 @@ const REPORT_TRAILING_DENIAL_RE = new RegExp(
   'i',
 );
 const REPORT_TRAILING_CORRECTION_RE = /^(?:sorry,?\s*)?(?:(?:i\s+(?:was|am)|we\s+(?:were|are))\s+(?:mistaken|wrong)|(?:i|we)\s+(?:(?:made|have\s+made|had\s+made)\s+(?:a|an)\s+(?:mistake|error)|misspoke|(?:had|got)\s+(?:it|this|that)\s+wrong))(?:\s+(?:about|regarding)\s+(?:it|this|that)(?:\s+(?:there|at\s+that\s+location))?)?(?:,\s*(?:sorry|my\s+mistake|my\s+apologies))?\s*$/i;
+const REPORT_TRAILING_DEICTIC_CORRECTION_RE = /^(?:sorry,?\s*)?(?:it|this|that)\s+(?:was|is)\s+(?:a|an)\s+(?:mistake|error)(?:\s+(?:about|regarding)\s+(?:it|this|that|there)(?:\s+(?:there|at\s+that\s+location))?)?(?:,\s*(?:sorry|my\s+mistake|my\s+apologies))?\s*$/i;
 function reportTrailingDenialOrCorrection(text) {
-  return REPORT_TRAILING_DENIAL_RE.test(text) || REPORT_TRAILING_CORRECTION_RE.test(text);
+  return REPORT_TRAILING_DENIAL_RE.test(text) || REPORT_TRAILING_CORRECTION_RE.test(text)
+    || REPORT_TRAILING_DEICTIC_CORRECTION_RE.test(text);
 }
 const REPORT_CONCISE_NONCOMPLETION_RE = /^\s*(?:(?:(?:is|are|was|were|has|have|had)(?:\s+(?:been|being))?\s+)?(?:(?:only|just|merely|simply|still)\s+)*(?:(?:the|our|your|their|his|her|my|its)\s+)?(?:(?:recommended|scheduled|planned|intended|proposed|suggested|considered|expected|required|needed|pending)\b|(?:an?\s+)?(?:recommendation|plan|proposal|suggestion|possibility)\b|under\s+consideration\b|(?:for\s+)?(?:tomorrow|tonight|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b)|(?:will|shall|would|should|can|could|may|might|must|is going to|are going to|was going to|were going to)\b)/i;
 const REPORT_NONCOMPLETION_TIME = `(?:${REPORT_COMPLETION_TIME}|${MODIFIED_WEEKDAY_RE_SOURCE}|next\\s+(?:month|year))`;
