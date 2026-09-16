@@ -3543,6 +3543,25 @@ const ReviewService = {
           await trx("review_sequences").where({ id: row.sequence_id, status: "active" }).whereNull("next_run_at")
             .update({ next_run_at: new Date(Date.now() + 30 * 60 * 1000), updated_at: new Date() });
         }
+        // Codex #4331 P1: reconciliation just PROVED (not merely presumed —
+        // evidence.found is false only after _inlineSendEvidence exhausts
+        // local logs, the provider, and an unfiltered provider pass) that
+        // this ask's own sms_log reservation never reached the customer.
+        // Left `sending`, that reservation still reads as a delivered ask to
+        // _askSpacingHold/lastManualAskAt for up to 72h, holding the very
+        // retry this release just re-queued. An uncertain outcome
+        // (evidence.unavailable) returns above and never reaches here, so
+        // the conservative hold is untouched for every outcome but a proven
+        // negative. Same transaction as the release: the requeue and the
+        // reservation clear commit together or not at all. Email touches
+        // never open one of these (reserveReviewSms is SMS-only).
+        if (freed && !email) {
+          await trx("sms_log")
+            .where({ status: "sending" })
+            .whereRaw("metadata->>'review_request_id' = ?", [String(row.id)])
+            .whereRaw("metadata->>'review_ask_reservation' = 'true'")
+            .del();
+        }
         return { released: freed };
       });
       finished += outcome.finished || 0;
