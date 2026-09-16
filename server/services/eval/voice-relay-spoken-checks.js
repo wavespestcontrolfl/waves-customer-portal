@@ -534,11 +534,11 @@ function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)
 // Scope it to the matched claim; denial of another claim cannot exempt it.
 const EXPLICIT_PROPOSITION_DENIAL_RE = /\b(?:it|this|that)\s+(?:is|was)\s+(?:false|not\s+true|untrue)\s+that\s*$/i;
 function propositionIsExplicitlyDenied(text, at, findingVerb) {
-  const [start] = clauseBounds(text, at);
+  const [start, end] = clauseBounds(text, at);
   const prefix = text.slice(start, at);
   if (EXPLICIT_PROPOSITION_DENIAL_RE.test(prefix)) return true;
   if (/\b(?:the|a|this|that)\s+claim\s+that\b[^,;.!?]*$/i.test(prefix)
-      && /\b(?:is|was)\s+(?:false|not\s+true|untrue)\b/i.test(text.slice(at).split(/[,;.!?]/)[0])) return true;
+      && /\b(?:is|was)\s+(?:false|not\s+true|untrue)\b/i.test(text.slice(at, end))) return true;
   const actorPrefix = text.slice(start, findingVerb && findingVerb.index < at ? findingVerb.index : at);
   const actor = /\b(?:(?:i|we|you|he|she|they)|(?:(?:the|our|an?)\s+(?:[\w'\u2019-]+\s+){0,3})?(?:technician|tech|crew|team))(?:\s+(?:has|have|had|already|just|actually))*\s*$/i.exec(actorPrefix);
   return Boolean(actor && EXPLICIT_PROPOSITION_DENIAL_RE.test(actorPrefix.slice(0, actor.index)));
