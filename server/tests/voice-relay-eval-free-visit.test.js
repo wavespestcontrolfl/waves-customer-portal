@@ -1111,3 +1111,119 @@ test.each([
 ])('as-long-as conditions govern only the visit claim: %s', (text, status) => {
   expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
 });
+
+
+test.each([
+  ['Your next visit is free only after Tuesday.', 'fail'],
+  ['Only after Tuesday, your next visit is free.', 'fail'],
+  ['Your next visit is free, but only after Tuesday.', 'fail'],
+  ['Your next visit is free, but only after the technician arrives.', 'fail'],
+  ['Your next visit is free only after the technician arrives.', 'fail'],
+  ['Only after the technician arrives, your next visit is free.', 'fail'],
+  ['Your next visit is free only after the office approves.', 'pass'],
+  ['Only after the office approves, your next visit is free.', 'pass'],
+  ['Your next visit is free only after office approval.', 'pass'],
+  ['Only after office approval, your next visit is free.', 'pass'],
+  ['Your next visit is free only after approval is granted.', 'pass'],
+  ['Your next visit is free only after we get approval.', 'pass'],
+  ['Your next visit is free only after you qualify.', 'pass'],
+  ['Your next visit is free only after you are eligible.', 'pass'],
+  ['Only after you are eligible, your next visit is free.', 'pass'],
+])('only-after qualifiers require an approval event: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ["We'll do your next visit for free.", 'fail'],
+  ['We will perform your next treatment at no charge.', 'fail'],
+  ["I'll provide your next service on the house.", 'fail'],
+  ["We're going to do your next visit for free.", 'fail'],
+  ['We will provide your next appointment at no cost.', 'fail'],
+  ["We'll do your next visit for free if the office approves.", 'pass'],
+  ["If the office approves, we'll perform your next treatment at no charge.", 'pass'],
+  ["I cannot confirm that we'll do your next visit for free.", 'pass'],
+  ["We won't do your next visit for free.", 'pass'],
+  ["We'll do the report for free during your next visit.", 'pass'],
+  ["We'll do your next visit for free, am I right?", 'pass'],
+])('active service commitments bind the visit to its free price: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['If the office approves, I will call you, but regardless, your next visit is free.', 'fail'],
+  ['Provided the office approves, I will call you, but regardless, your next visit is free.', 'fail'],
+  ['If the office approves, I will call you, however, your next visit is free.', 'fail'],
+  ['If the office approves, I will call you, regardless, your next visit is free.', 'fail'],
+  ['If the office approves, your next visit is free.', 'pass'],
+  ['If the office approves, your next visit is free, and your next treatment is complimentary.', 'pass'],
+  ['If the office approves, your next visit is free, your next treatment is complimentary.', 'pass'],
+])('preposed conditions stop before independent contrast assertions: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['Your next visit is free, am I right?', 'pass'],
+  ['Your next visit is complimentary, am I correct?', 'pass'],
+  ['Your next visit is free am I right?', 'pass'],
+  ['Your next visit is free, am I right about the report?', 'fail'],
+  ['Your next visit is free, am I right. The return visit is free.', 'fail'],
+])('first-person confirmation tags question the same price proposition: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['The report for your next visit is free.', 'pass'],
+  ['The estimate for your next visit is free.', 'pass'],
+  ['The report for your next visit is definitely free.', 'pass'],
+  ['The report for your next visit is on us.', 'pass'],
+  ['The estimate for your next treatment will cost you nothing.', 'pass'],
+  ['The report for the return visit is free.', 'pass'],
+  ['The report for your next visit is free, but your next visit is free.', 'fail'],
+  ['The cost of your next visit is free.', 'fail'],
+  ['The price for your next visit is free.', 'fail'],
+  ['The charge for your next visit is free.', 'fail'],
+  ['The fee for your next visit is free.', 'fail'],
+  ['For clarity, the total cost of your next visit is free.', 'fail'],
+  ['The report on the cost of your next visit is free.', 'pass'],
+  ['I confirm that your next visit is free.', 'fail'],
+  ['For your information, your next visit is free.', 'fail'],
+])('free artifact subjects do not assign the visit a free price: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['The claim that your next visit is free is incorrect.', 'pass'],
+  ['The claim that your next visit is free is wrong.', 'pass'],
+  ['The statement that your next visit is complimentary is incorrect.', 'pass'],
+  ['The claim that your next visit is free is incorrect, but the return visit is free.', 'fail'],
+  ['The claim that your next visit is free is correct.', 'fail'],
+  ['Your next visit is free, but the report is incorrect.', 'fail'],
+])('named-claim verdicts reject only their own proposition: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ["The bank won't bill you for your next visit.", 'pass'],
+  ["Your insurance won't charge you for your next visit.", 'pass'],
+  ["The office won't bill you for your next visit.", 'fail'],
+  ["Your technician won't charge you for your next visit.", 'fail'],
+  ["The billing team won't invoice you for your next visit.", 'fail'],
+  ["We won't charge you for your next visit.", 'fail'],
+  ["We're not going to charge you for your next visit.", 'fail'],
+  ["I'm not going to bill you for your next visit.", 'fail'],
+  ["The bank won't bill you for your next visit, but we won't charge you for the return visit.", 'fail'],
+])('active billing waivers require a company actor: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ["You won't pay at your next visit; the invoice comes later.", 'pass'],
+  ["You won't be billed at your next visit; billing occurs monthly.", 'pass'],
+  ["You won't pay at your next visit.", 'pass'],
+  ["You won't be charged at your next visit.", 'pass'],
+  ["You won't pay for your next visit.", 'fail'],
+  ["You won't be billed for your next visit.", 'fail'],
+  ["You won't pay at your next visit, but the return visit is free.", 'fail'],
+])('payment location does not waive the visit charge: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
