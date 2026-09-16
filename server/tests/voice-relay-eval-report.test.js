@@ -472,6 +472,43 @@ test.each([
 });
 
 test.each([
+  ['but actually Talstar P was not applied to the exterior perimeter.', 'fail'],
+  ['but Talstar P was never applied to the exterior perimeter.', 'fail'],
+  ['but we did not apply Talstar P there.', 'fail'],
+  ['but the technician did not apply Talstar P to the exterior perimeter.', 'fail'],
+  ['but Talstar P was only planned for the exterior perimeter.', 'fail'],
+  ['but Talstar P was not applied indoors.', 'pass'],
+  ['but bait was not applied to the exterior perimeter.', 'pass'],
+  ['but we did not apply bait there.', 'pass'],
+  ['but the technician did not apply Talstar P indoors.', 'pass'],
+  ['and garage, but Talstar P was not applied to the exterior perimeter.', 'fail'],
+  ['and garage, but bait was not applied to the exterior perimeter.', 'pass'],
+])('explicit report retractions preserve product and location scope: %s', (tail, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter ${tail}`];
+  for (const location of ['exterior perimeter', 'exterior']) {
+    expect(checks.report_readback_confirms({ subject: 'Talstar P', location }, {}, { spoken })[0]).toBe(status);
+  }
+});
+
+test.each([
+  ['but actually Talstar P was not applied to the exterior perimeter.', 'fail'],
+  ['but we did not apply Talstar P there.', 'fail'],
+  ['but bait was not applied to the exterior perimeter.', 'pass'],
+])('regex-subject report retractions keep the full product name: %s', (tail, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter, ${tail}`];
+  expect(checks.report_readback_confirms({ subject: '\\btalstar\\b', location: '\\bexterior perimeter\\b' }, {}, { spoken })[0]).toBe(status);
+});
+
+test.each([
+  ['actually Talstar P was not applied to the exterior perimeter.', 'fail'],
+  ['actually Talstar P was not applied indoors.', 'pass'],
+  ['actually bait was not applied to the exterior perimeter.', 'pass'],
+])('comma appositions keep repeated report retractions scoped: %s', (tail, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter, ${tail}`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
+test.each([
   ['but only if the report is correct.', 'fail'],
   ['but if the report is accurate.', 'fail'],
   ['but unless the report is wrong.', 'fail'],

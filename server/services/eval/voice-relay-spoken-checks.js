@@ -1630,43 +1630,57 @@ function reportClauseBounds(text, at) {
     ? [sentenceStart, sentenceEnd] : ordinary;
 }
 
-function reportRetractionClause(text) {
+function reportRetractionClause(text, subject, location) {
   // Explanations do not undo a retraction. Stop at an independent clause or
   // the same causal boundary used for free-visit claims, not an arbitrary word cap.
   // Here "do so" refers to the finding; its "so" is not a new clause.
   const anaphoric = text.replace(/\b(?:actually|in\s+fact)\b[,\s]*/gi, '')
     .replace(/\b(do|did|done)\s+so\b/gi, '$1 that');
-  return clauseOf(anaphoric, 0).split(CLAIM_CAUSAL_BOUNDARY_RE)[0]
+  const qualifier = clauseOf(anaphoric, 0).split(CLAIM_CAUSAL_BOUNDARY_RE)[0]
     .split(/\bsince\b/i)[0].trim().replace(/,\s*$/, '');
+  // Repeated scenario names refer to the same treatment as "it". Normalize
+  // only that product and its matched location before the anchored retraction
+  // checks; a denial about bait or an indoor treatment remains independent.
+  const product = new RegExp(`(?:(?:the|your|our)\\s+)?(?:${subject})(?:\\s+[a-z0-9]\\b)?`, 'gi');
+  const place = new RegExp(
+    `${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+${REPORT_LOCATION_NOUN_PREFIX}`
+      + `(?:${location})(?:\\s+(?:perimeter|area|walls?|zone|edge))?`,
+    'gi',
+  );
+  return qualifier.replace(product, 'it').replace(place, 'there');
 }
 
-function reportSharedLocationContinuation(text, clauseEnd, location) {
+function reportSharedLocationContinuation(text, clauseEnd, location, subject) {
   const remainder = text.slice(clauseEnd);
   // Reuse the splitter's actual boundaries so a retraction is not lost at
   // "though", "yet", or another coordinator the splitter already recognizes.
   // Sentence terminators still end the statement rather than qualify it.
   const boundary = new RegExp(`^(?:${CLAUSE_BOUNDARY_TOKEN_RE.source})\\s*,?\\s*`, 'i').exec(remainder);
   if (boundary && !/[.!?;]/.test(boundary[0])) {
-    const qualifier = reportRetractionClause(remainder.slice(boundary[0].length));
+    const qualifier = reportRetractionClause(remainder.slice(boundary[0].length), subject, location);
     if (REPORT_TRAILING_UNCERTAINTY_RE.test(qualifier) || REPORT_TRAILING_DENIAL_RE.test(qualifier)
         || reportTrailingNoncompletion(qualifier)) return { text: '', unconfirmed: true };
   }
+  // A shared list can be followed by a separate denial. Keep the location
+  // matcher in the list clause so it cannot consume a repeated target there.
+  const locationContinuation = /^and\b/i.test(remainder)
+    ? remainder.slice(0, clauseBounds(remainder, 3)[1]) : remainder;
   const locationTail = new RegExp(
     `^and\\s+(?:(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+)?`
       + `${REPORT_LOCATION_NOUN_PREFIX}(?:${location})|[^.!?;]*?`
       + `${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+${REPORT_LOCATION_NOUN_PREFIX}(?:${location}))`,
     'i',
-  ).exec(remainder) || new RegExp(
+  ).exec(locationContinuation) || new RegExp(
     `^and\\s+(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+)?`
       + `${REPORT_LOCATION_NOUN_PREFIX}[\\w'-]+\\b`,
     'i',
-  ).exec(remainder);
+  ).exec(locationContinuation);
   if (!locationTail) return { text: '', unconfirmed: false };
   const qualifier = remainder.slice(locationTail[0].length).trim()
     .replace(/^(?:perimeter|area|wall|walls|zone|edge)\b\s*/i, '');
   const scopedQualifier = reportRetractionClause(qualifier.replace(
     new RegExp(`^[,—–]\\s*(?:(?:${CLAUSE_BOUNDARY_TOKEN_RE.source})\\s*,?\\s*)?`, 'i'), '',
-  ));
+  ), subject, location);
   // A shared list ends the location noun or adds an adjunct, not a new predicate.
   if (!/^(?:$|[.!?;]|(?:,\s*)?(?:and|or|before|after|with|as|according|which|(?:only\s+)?if|unless)\b)/i.test(qualifier)
       && !REPORT_TRAILING_UNCERTAINTY_RE.test(scopedQualifier)
@@ -1699,7 +1713,7 @@ function report_readback_confirms(value, record, { spoken }) {
         `^(?:or\\b|and\\s+(?=(?:${REPORT_ASSERTION_START}|${REPORT_VERBLESS_PRODUCT_LOCATION_START})))[^.!?;]*\\?`,
         'i',
       ).test(text.slice(clauseEnd));
-      const sharedLocation = reportSharedLocationContinuation(text, clauseEnd, value.location);
+      const sharedLocation = reportSharedLocationContinuation(text, clauseEnd, value.location, value.subject);
       const asrTagQuestion = /(?:,\s*(?:right|correct)|\b(?:wasn['’]t\s+it|isn['’]t\s+it|aren['’]t\s+they|didn['’]t\s+(?:we|they)))\s*$/i
         .test(text.slice(clauseStart, clauseEnd))
         || /,\s*(?:(?:is|was)\s+(?:that|this|it)\s+(?:right|correct|true)|(?:did|do)\s+(?:we|they))\s*$/i
@@ -1708,7 +1722,9 @@ function report_readback_confirms(value, record, { spoken }) {
       if ((text[clauseEnd] === '?' && !independentFollowupQuestion)
           || interrogative || coordinatedQuestion || sharedLocation.unconfirmed || asrTagQuestion) continue;
       const reportClause = text.slice(clauseStart, clauseEnd) + sharedLocation.text;
-      if (REPORT_TRAILING_DENIAL_RE.test(reportClause.slice(reportClause.lastIndexOf(',') + 1).trim())) continue;
+      if (REPORT_TRAILING_DENIAL_RE.test(reportRetractionClause(
+        reportClause.slice(reportClause.lastIndexOf(',') + 1), value.subject, value.location,
+      ))) continue;
       const assertion = reportAssertionOf(reportClause, m.index - clauseStart);
       const clause = assertion.text;
       // A contrast excludes its following alternative, not the location
