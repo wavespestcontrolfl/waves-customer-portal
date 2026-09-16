@@ -609,6 +609,28 @@ router.post('/sms', async (req, res, next) => {
       await releaseCardClaim();
       await releaseProjectClaim();
       await restoreContractLinks();
+      // The inline review link's claim + sms_log reservation (armed together
+      // above, under the review-send lock) can still be held when an
+      // UNRELATED abort fires later in this handler — e.g. the manual-reply
+      // reservation arm below, which has no idea a review link is riding the
+      // same send. Every dedicated review-claim call site already clears
+      // these two itself before calling abortUnsent (it sets
+      // claimedReviewRequestId back to null first), so this is a no-op
+      // there; it is the ONLY cleanup for a later abort that never touches
+      // them at all (codex #4331/#4333 P1) — left standing, the synthetic
+      // reservation blocks the customer's next ask for up to 72h despite no
+      // provider call ever being made.
+      if (claimedReviewRequestId) {
+        const requestId = claimedReviewRequestId;
+        const claimToken = claimedReviewClaimToken;
+        claimedReviewRequestId = null;
+        try {
+          await require('../services/review-request').releaseInlineClaim(requestId, claimToken);
+        } catch (releaseErr) {
+          logger.warn(`[communications] inline review claim release failed (requestId=${requestId}): ${releaseErr.message}`);
+        }
+      }
+      await releaseLockedReviewReservation();
       await reopenScheduledSuggestions({
         decisionIds: [claimedDecisionId, ...parkedThreadIds],
         reason: 'Send was not attempted — suggestion reopened.',
