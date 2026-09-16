@@ -1,7 +1,7 @@
 const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
 const express = require('express');
 const crypto = require('crypto');
-const { gateEnvValue } = require('../config/feature-gates');
+const { gateEnvValue, termiteAnnualPlanSelectionEnabled } = require('../config/feature-gates');
 const router = express.Router();
 const db = require('../models/db');
 const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData, REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
@@ -53,6 +53,8 @@ const {
   completePendingInvalidation,
   takePendingInvalidation,
 } = require('../services/admin-estimate-persistence');
+const { selectedTermiteAnnualPlanRows } = require('../services/estimate-termite-program-rows');
+const { estimateOfferVersion, annualPlanOfferFingerprint, annualPlanHasDeliveredOffer } = require('../services/estimate-offer-version');
 const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
 const {
   inferEstimateServiceInterest,
@@ -115,18 +117,21 @@ function parseEstimateData(estimateData) {
   return typeof estimateData === 'object' ? estimateData : null;
 }
 
-// Operational delivery stamps may change while the claim is taken. Contact,
-// property, scope, terms and dollars must still be the offer that was reviewed.
-function estimateOfferVersion(row) {
-  const data = { ...(parseEstimateData(row.estimate_data) || {}) };
-  for (const key of ['sendSnapshot', 'deliveryState', 'manualSendAttempts']) delete data[key];
-  if (data.estimatorEngine) {
-    data.estimatorEngine = { ...data.estimatorEngine };
-    delete data.estimatorEngine.delivering_at;
-    delete data.estimatorEngine.delivering_token;
-  }
-  const fields = ['customer_id', 'property_id', 'estimate_group_id', 'customer_name', 'customer_phone', 'customer_email', 'address', 'notes', 'monthly_total', 'annual_total', 'onetime_total', 'show_one_time_option', 'bill_by_invoice'];
-  return crypto.createHash('sha256').update(JSON.stringify([fields.map((key) => row[key]), data])).digest('hex');
+function publishedSiblingDeliveryPatch(sibling, anchorDeliveryState, deliveredAt) {
+  const prior = parseEstimateData(sibling.estimate_data);
+  const fingerprint = annualPlanOfferFingerprint(sibling);
+  const priorDeliveredAt = Array.isArray(prior?.deliveryState?.deliveredAt)
+    ? prior.deliveryState.deliveredAt.filter((time) => typeof time === 'string')
+    : [];
+  return {
+    deliveryState: {
+      ...anchorDeliveryState,
+      firstDeliveredAt: prior?.deliveryState?.firstDeliveredAt || deliveredAt,
+      lastDeliveredAt: deliveredAt,
+      deliveredAt: [...priorDeliveredAt, deliveredAt].slice(-DELIVERY_HISTORY_MAX),
+      annualPlanOfferFingerprint: fingerprint || null,
+    },
+  };
 }
 
 // When an operator authors a commercial proposal, their line items ARE the
@@ -641,6 +646,16 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
       err.code = fallback ? 'CLIENT_FALLBACK_PRICING' : 'PRICING_AUTHORITY_NOT_SERVER';
       throw err;
     }
+  }
+  // Pricing stamps alone cannot authorize a new annual contract after kill.
+  // Only an exact offer issued by a real provider handoff can be resent.
+  const estimateData = parseEstimateData(estimate.estimate_data || estimate.estimateData);
+  if (selectedTermiteAnnualPlanRows(estimateData).length > 0
+    && !termiteAnnualPlanSelectionEnabled() && !annualPlanHasDeliveredOffer(estimate)) {
+    const err = new Error('The termite annual protection plan is disabled until the annual and cancellation gates are enabled — reopen the estimate in the estimate tool and save it on the quarterly program before sending.');
+    err.statusCode = 422;
+    err.code = 'TERMITE_ANNUAL_PLAN_DISABLED';
+    throw err;
   }
   assertEstimateManagerApprovalResolved(estimate);
   if (commercialRiskTypeReviewNeeded(estimate.estimate_data || estimate.estimateData)) {
@@ -2879,6 +2894,9 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // forward untouched by suppressed attempts.
   const priorDeliveredAt = Array.isArray(priorDeliveryState?.deliveredAt) ? priorDeliveryState.deliveredAt.filter((t) => typeof t === 'string') : [];
   const deliveredAt = (stampChannels.length ? [...priorDeliveredAt, lastDeliveredAt] : priorDeliveredAt).slice(-DELIVERY_HISTORY_MAX);
+  const deliveredAnnualFingerprint = stampChannels.length
+    ? annualPlanOfferFingerprint(estimate)
+    : priorDeliveryState?.annualPlanOfferFingerprint;
   const deliveryStatePatch = {
     deliveryState: {
       attemptedAt: now().toISOString(),
@@ -2888,6 +2906,9 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       ...(firstDeliveredAt ? { firstDeliveredAt } : {}),
       ...(lastDeliveredAt ? { lastDeliveredAt } : {}),
       ...(deliveredAt.length ? { deliveredAt } : {}),
+      // Only a REAL provider handoff can authorize an annual resend while
+      // the gate is OFF. Suppressed attempts retain the prior fingerprint.
+      ...(deliveredAnnualFingerprint ? { annualPlanOfferFingerprint: deliveredAnnualFingerprint } : {}),
     },
     // The per-park handoff witness rides the finalization write too, so a
     // transient failure of the in-branch stamp can never leave a delivered
@@ -3130,6 +3151,13 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             throw new Error(`sibling send snapshot did not freeze pricing${snapshot?.sendSnapshot?.pricingBundleError ? `: ${snapshot.sendSnapshot.pricingBundleError}` : ''}`);
           }
           siblingSnapshotPatch = { ...siblingSnapshotPatch, sendSnapshot: snapshot.sendSnapshot };
+          // The anchor's provider handoff publishes this sibling's own offer.
+          // A gate-off resend must verify the sibling's fingerprint, not the
+          // anchor's, and must have a real-handoff timestamp on that row.
+          const siblingDeliveryStatePatch = stampChannels.length > 0
+            ? publishedSiblingDeliveryPatch(sibling, deliveryStatePatch.deliveryState, lastDeliveredAt)
+            : {};
+          siblingSnapshotPatch = { ...siblingSnapshotPatch, ...siblingDeliveryStatePatch };
           const updated = await publishClaimedGroupSibling(estimate, sibling, siblingExpiry, siblingSnapshotPatch);
           if (!updated) {
             // Zero rows is EITHER a mid-publication acceptance (price-locked,
@@ -3152,7 +3180,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // the same (GH codex P2 r3).
           shadowLogFallbackDelivery(sibling, { handoff: stampChannels.length > 0 });
           if (!updated) {
-            await recordTerminalSiblingDelivery(sibling, snapshot, { delivered: stampChannels.length > 0, sendMethod, deliveryStatePatch });
+            await recordTerminalSiblingDelivery(sibling, snapshot, { delivered: stampChannels.length > 0, sendMethod, deliveryStatePatch: siblingDeliveryStatePatch });
           } else {
             await snapshotPublishedSibling(sibling, siblingSnapshotPatch, { now, nextExpiresAt, sendMethod });
           }
@@ -5257,6 +5285,8 @@ router._internals = {
   resolveBlockingAutomationForProposal,
   clearStaleProposalDelivery,
   assertEstimateSendable,
+  annualPlanOfferFingerprint,
+  publishedSiblingDeliveryPatch,
   sendRequiresServerPricingFor,
   isAuthoredProposalRow,
   PROPOSAL_PROVENANCE_SOURCE,

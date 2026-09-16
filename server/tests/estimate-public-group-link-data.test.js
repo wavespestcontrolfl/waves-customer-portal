@@ -7,6 +7,7 @@ jest.mock('../models/db', () => {
   return mock;
 });
 jest.mock('../config/feature-gates', () => ({
+  ...jest.requireActual('../config/feature-gates'),
   isEnabled: jest.fn(() => false),
   gateEnvValue: jest.fn(() => false),
   gates: {},
@@ -132,6 +133,31 @@ describe('GET /:token/data — navigation after the anchor offer expires', () =>
       expect(estimatePublicRouter.isEstimateAcceptActive(row)).toBe(false);
       expect(estimatePublicRouter.isEstimateCustomerViewable(row)).toBe(false);
     });
+  });
+
+  test.each(['missing', 'stale', 'exact'])('annual %s witness governs navigation and expired summaries', async (witness) => {
+    const row = anchor();
+    row.estimate_data.result.results = { tmBait: { plan: 'annual_protection' } };
+    const { annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
+    if (witness !== 'missing') row.estimate_data.deliveryState = {
+      firstDeliveredAt: past, annualPlanOfferFingerprint: witness === 'exact' ? annualPlanOfferFingerprint(row) : 'old-offer',
+    };
+    const sibling = estimateRow({ id: 'live-sibling', token: 'livesiblingtoken', estimate_group_id: row.estimate_group_id, expires_at: future });
+    const prior = process.env.GATE_TERMITE_ANNUAL_PLAN;
+    delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    try {
+      await withServer(async (baseUrl) => {
+        dbRows = { estimates: row, siblings: [row, sibling] };
+        const response = await fetch(`${baseUrl}/estimates/${row.token}/data?refresh=1`);
+        expect(response.status).toBe(witness === 'exact' ? 200 : 404);
+        dbRows = { estimates: sibling, siblings: [row, sibling] };
+        const body = await (await fetch(`${baseUrl}/estimates/${sibling.token}/data?refresh=1`)).json();
+        expect(body.propertyGroup?.some(member => member.token === row.token) || false).toBe(witness === 'exact');
+      });
+    } finally {
+      if (prior === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      else process.env.GATE_TERMITE_ANNUAL_PLAN = prior;
+    }
   });
 
   test('shows only published expired siblings as nonactionable summaries', async () => {

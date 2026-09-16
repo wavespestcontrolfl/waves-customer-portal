@@ -22,6 +22,8 @@
  *    fresh quotes keep resolving the live config.
  */
 
+const { authoritativeMappedTermiteEnvelope } = require('./estimate-termite-program-rows');
+
 const NEUTRAL_TREE_SHRUB_KNOBS = {
   densityFactor: 1,
   perPalmAnnual: 0,
@@ -177,14 +179,9 @@ function termiteRawLine(estData) {
   ];
   return lineItems.find((li) => li && li.service === 'termite_bait') || null;
 }
-function termiteMappedEnvelope(estData) {
-  const result = estData && typeof estData.result === 'object' ? estData.result : estData;
-  const tmBait = result && result.results && result.results.tmBait;
-  return tmBait && typeof tmBait === 'object' ? tmBait : null;
-}
 function storedTermiteResult(estData = {}) {
   const line = termiteRawLine(estData);
-  const mapped = termiteMappedEnvelope(estData);
+  const mapped = authoritativeMappedTermiteEnvelope(estData);
   if (!line && !mapped) return null;
   const m = mapped || {};
   const r = line || {};

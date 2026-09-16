@@ -17,6 +17,7 @@ jest.mock('../middleware/admin-auth', () => ({
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({
+  ...jest.requireActual('../config/feature-gates'),
   isEnabled: jest.fn(() => false), gateEnvValue: jest.fn(() => false),
 }));
 jest.mock('../services/email-fallback-gate', () => ({ smtpFallbackAllowed: jest.fn(() => false) }));
@@ -792,6 +793,31 @@ describe('group publication navigation', () => {
 });
 
 describe('reviewed send attempt receipts', () => {
+  test.each([
+    ['email rejection', 'email', () => email.sendTemplate.mockRejectedValueOnce(new Error('Template disabled'))],
+    ['suppressed SMS', 'sms', () => sendCustomerMessage.mockResolvedValueOnce({ sent: true, reason: 'SMS suppressed' })],
+  ])('%s cannot issue an annual offer; a real handoff can', async (_name, method, arrange) => {
+    const { annualPlanOfferFingerprint, annualPlanHasDeliveredOffer } = require('../services/estimate-offer-version');
+    row.estimate_data = { result: { results: { tmBait: { plan: 'annual_protection', annualFee: 299 } } } };
+    const priorAnnual = process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const priorCancel = process.env.GATE_CANCEL_FLOW_V2;
+    process.env.GATE_TERMITE_ANNUAL_PLAN = process.env.GATE_CANCEL_FLOW_V2 = 'true';
+    try {
+      arrange();
+      expect((await router.sendEstimateNow(structuredClone(row), method, { callerPreClaimed: true })).sent).toBe(false);
+      expect(annualPlanHasDeliveredOffer(row)).toBe(false);
+      const fingerprint = annualPlanOfferFingerprint(row);
+      expect((await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true })).sent).toBe(true);
+      expect(dataOf().deliveryState.annualPlanOfferFingerprint).toBe(fingerprint);
+      expect(annualPlanHasDeliveredOffer(row)).toBe(true);
+    } finally {
+      if (priorAnnual === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      else process.env.GATE_TERMITE_ANNUAL_PLAN = priorAnnual;
+      if (priorCancel === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
+      else process.env.GATE_CANCEL_FLOW_V2 = priorCancel;
+    }
+  });
+
   test('a repeat customer open between preview and scheduling preserves the reviewed version', async () => {
     row.status = 'viewed';
     row.view_count = 1;

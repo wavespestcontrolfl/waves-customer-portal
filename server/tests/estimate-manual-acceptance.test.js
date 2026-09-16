@@ -82,9 +82,10 @@ const {
   markEstimateManuallyAccepted,
 } = require('../services/estimate-manual-acceptance');
 
-function makeDb(estimate, claimedOverrides = null) {
+function makeDb(estimate, claimedOverrides = null, lockedEstimate = null) {
   const updates = [];
   const inserts = [];
+  const reads = [];
   const database = jest.fn((table) => {
     const builder = {
       clause: null,
@@ -111,10 +112,12 @@ function makeDb(estimate, claimedOverrides = null) {
         return this;
       },
       forUpdate() {
+        this.locked = true;
         return this;
       },
-      first: async () => {
-        if (table === 'estimates') return estimate;
+      async first(...columns) {
+        reads.push({ table, locked: !!this.locked, columns });
+        if (table === 'estimates') return this.locked && lockedEstimate ? lockedEstimate : estimate;
         return null;
       },
       update(patch) {
@@ -160,7 +163,7 @@ function makeDb(estimate, claimedOverrides = null) {
   // payload must not be a Promise); awaiting it for the lock acquire works.
   database.raw = jest.fn((sql) => ({ rows: [], __raw: String(sql) }));
   database.transaction = jest.fn(async (callback) => callback(database));
-  return { database, updates, inserts };
+  return { database, updates, inserts, reads };
 }
 
 describe('estimate manual acceptance', () => {
@@ -1053,6 +1056,116 @@ describe('estimate manual acceptance', () => {
     // The claim carried the lock guard and nothing after it ran.
     expect(updates[0].nullColumns).toEqual(['price_locked_at']);
     expect(updates).toHaveLength(1);
+  });
+});
+
+describe('manual annual protection replay guard', () => {
+  const originalAnnualGate = process.env.GATE_TERMITE_ANNUAL_PLAN;
+  const originalCancellationGate = process.env.GATE_CANCEL_FLOW_V2;
+  let annualEngineResult;
+  let quarterlyEngineResult;
+
+  beforeAll(() => {
+    const { generateEstimate } = require('../services/pricing-engine/estimate-engine');
+    const input = { homeSqFt: 2000, lotSqFt: 8000, propertyType: 'single_family',
+      services: { termite: { system: 'trelona', plan: 'annual_protection' } } };
+    process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
+    process.env.GATE_CANCEL_FLOW_V2 = 'true';
+    annualEngineResult = generateEstimate(input);
+    delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    quarterlyEngineResult = generateEstimate(input);
+  });
+
+  beforeEach(() => {
+    process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
+    process.env.GATE_CANCEL_FLOW_V2 = 'true';
+  });
+
+  afterAll(() => {
+    if (originalAnnualGate === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    else process.env.GATE_TERMITE_ANNUAL_PLAN = originalAnnualGate;
+    if (originalCancellationGate === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
+    else process.env.GATE_CANCEL_FLOW_V2 = originalCancellationGate;
+  });
+
+  const estimateWith = (engineResult = annualEngineResult) => ({
+    id: 'annual-manual-replay', status: 'sent', customer_id: 'annual-customer',
+    monthly_total: '24.92', annual_total: '299.00', onetime_total: '450.00',
+    estimate_data: { engineResult },
+  });
+  const witness = (estimate) => {
+    const { annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
+    estimate.estimate_data.deliveryState = {
+      firstDeliveredAt: '2026-09-10T14:00:00.000Z',
+      annualPlanOfferFingerprint: annualPlanOfferFingerprint(estimate),
+    };
+    return estimate;
+  };
+  const accept = (estimate, database, converter = { convertEstimate: jest.fn().mockResolvedValue({ customerId: estimate.customer_id }) }) =>
+    markEstimateManuallyAccepted({ estimateId: estimate.id, database,
+      leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
+      estimateConverter: converter });
+
+  test.each(['GATE_TERMITE_ANNUAL_PLAN', 'GATE_CANCEL_FLOW_V2']
+    .flatMap((gate) => ['missing', 'stale', 'exact'].map((state) => [gate, state])))(
+    '%s off: %s delivery witness', async (gate, state) => {
+      const estimate = state === 'missing' ? estimateWith() : witness(estimateWith());
+      if (state === 'stale') estimate.notes = 'Changed after the real handoff';
+      delete process.env[gate];
+      const { database, updates, reads } = makeDb(estimate);
+      const converter = { convertEstimate: jest.fn().mockResolvedValue({ customerId: estimate.customer_id }) };
+      if (state !== 'exact') {
+        await expect(accept(estimate, database, converter)).rejects.toMatchObject({
+          statusCode: 409, code: 'TERMITE_ANNUAL_PLAN_DISABLED',
+        });
+        expect(updates).toEqual([]);
+        expect(converter.convertEstimate).not.toHaveBeenCalled();
+        expect(reads).toContainEqual({ table: 'estimates', locked: true, columns: [] });
+        return;
+      }
+      const result = await accept(estimate, database, converter);
+      expect(result.alreadyAccepted).toBe(false);
+      expect(updates.some(({ table, patch }) => table === 'estimates' && patch.status === 'accepted')).toBe(true);
+      expect(converter.convertEstimate).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  test('a quarterly unlocked peek cannot bypass the fresh locked annual offer', async () => {
+    const quarterly = estimateWith(quarterlyEngineResult);
+    const annual = estimateWith();
+    delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const { database, updates, reads } = makeDb(quarterly, null, annual);
+    await expect(accept(quarterly, database)).rejects.toMatchObject({
+      statusCode: 409, code: 'TERMITE_ANNUAL_PLAN_DISABLED',
+    });
+    expect(reads).toContainEqual({ table: 'estimates', locked: true, columns: [] });
+    expect(updates).toEqual([]);
+  });
+
+  test('a live annual selection accepts before any delivery witness exists', async () => {
+    const estimate = estimateWith();
+    const { database, updates } = makeDb(estimate);
+    await accept(estimate, database);
+    expect(updates.some(({ table, patch }) => table === 'estimates' && patch.status === 'accepted')).toBe(true);
+  });
+
+  test('quarterly termite acceptance remains available with both annual gates off', async () => {
+    const estimate = estimateWith(quarterlyEngineResult);
+    delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    delete process.env.GATE_CANCEL_FLOW_V2;
+    const { database, updates } = makeDb(estimate);
+    await accept(estimate, database);
+    expect(updates.some(({ table, patch }) => table === 'estimates' && patch.status === 'accepted')).toBe(true);
+  });
+
+  test('an already accepted annual retry remains idempotent after both gates close', async () => {
+    const estimate = { ...estimateWith(), status: 'accepted' };
+    delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    delete process.env.GATE_CANCEL_FLOW_V2;
+    const { database, updates } = makeDb(estimate);
+    const result = await accept(estimate, database);
+    expect(result.alreadyAccepted).toBe(true);
+    expect(updates).toEqual([]);
   });
 });
 

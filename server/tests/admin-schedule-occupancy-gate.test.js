@@ -101,7 +101,7 @@ const SVC = {
 function chain(row) {
   const builder = {};
   const self = () => builder;
-  for (const m of ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhereRaw', 'orderBy', 'orderByRaw', 'limit', 'select', 'forUpdate', 'returning', 'leftJoin', 'join', 'groupBy', 'distinct', 'andWhere', 'orWhere', 'modify', 'clone']) {
+  for (const m of ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhereRaw', 'orderBy', 'orderByRaw', 'limit', 'select', 'forUpdate', 'forShare', 'returning', 'leftJoin', 'join', 'groupBy', 'distinct', 'andWhere', 'orWhere', 'modify', 'clone']) {
     builder[m] = jest.fn(self);
   }
   builder.first = jest.fn().mockResolvedValue(row);
@@ -386,6 +386,45 @@ describe('POST / — admin create', () => {
     serviceType: 'General Pest Control',
     sendConfirmationSms: false,
   };
+
+  test('the locked annual offer blocks booking after an unlocked quarterly preflight', async () => {
+    const priorAnnual = process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const priorCancellation = process.env.GATE_CANCEL_FLOW_V2;
+    process.env.GATE_CANCEL_FLOW_V2 = 'true';
+    delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const estimate = (plan) => ({ id: 'est-annual-race', customer_id: 'cust-1', status: 'sent',
+      monthly_total: '24.92', annual_total: '299.00', onetime_total: '450.00',
+      estimate_data: { result: { results: { tmBait: { plan } } } },
+    });
+    const unlocked = estimate('quarterly');
+    const fresh = estimate('annual_protection');
+    const scheduledInserts = jest.fn();
+    const lockedEstimate = chain(fresh);
+    lockedEstimate.forShare.mockImplementation(() => { callOrder.push('estimate'); return lockedEstimate; });
+    trx.mockImplementation((table) => {
+      if (table === 'estimates') return lockedEstimate;
+      const c = chain(table === 'customers' ? { id: 'cust-1' } : table === 'scheduled_services' ? { ...SVC } : undefined);
+      if (table === 'scheduled_services') c.insert = scheduledInserts;
+      return c;
+    });
+    db.mockImplementation((table) => chain(table === 'estimates' ? unlocked
+      : table === 'customers' ? { id: 'cust-1', first_name: 'Test', last_name: 'Customer' } : undefined));
+    try {
+      const { status, body } = await post({ ...createBody, sourceEstimateId: unlocked.id });
+      expect(status).toBe(409);
+      expect(body.code).toBe('TERMITE_ANNUAL_PLAN_DISABLED');
+      expect(lockedEstimate.forShare).toHaveBeenCalledTimes(1);
+      expect(lockedEstimate.first).toHaveBeenCalledWith();
+      expect(callOrder.indexOf('occupancy:2099-07-03')).toBeLessThan(callOrder.indexOf('comms'));
+      expect(callOrder.indexOf('comms')).toBeLessThan(callOrder.indexOf('estimate'));
+      expect(scheduledInserts).not.toHaveBeenCalled();
+    } finally {
+      if (priorAnnual === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      else process.env.GATE_TERMITE_ANNUAL_PLAN = priorAnnual;
+      if (priorCancellation === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
+      else process.env.GATE_CANCEL_FLOW_V2 = priorCancellation;
+    }
+  });
 
   test('takes rung 1 before the comms lock and BOOKS with a warning when the parent window is occupied', async () => {
     findConflictingVisits.mockResolvedValueOnce([{ id: 'svc-other' }]);

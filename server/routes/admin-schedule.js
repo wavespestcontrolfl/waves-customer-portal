@@ -5647,7 +5647,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         // restored loser's source_estimate_id onto a kept-customer visit.
         if (linkedEstimateId) {
           const freshLinkedEstimate = await trx('estimates')
-            .where({ id: linkedEstimateId }).forShare().first('id', 'customer_id', 'property_id');
+            .where({ id: linkedEstimateId }).forShare().first();
           if (!freshLinkedEstimate
             || (freshLinkedEstimate.customer_id && String(freshLinkedEstimate.customer_id) !== String(customerId))) {
             const estErr = new Error('The linked estimate changed while booking (a merge was undone) — reload and book again.');
@@ -5655,6 +5655,13 @@ router.post('/', requireAdmin, async (req, res, next) => {
             estErr.isOperational = true;
             estErr.code = 'CUSTOMER_CHANGED_RETRY';
             throw estErr;
+          }
+          // Acceptance runs after this booking commits. Fence a stale modal
+          // against the full locked offer now, before any visit is inserted.
+          if (require('../services/estimate-offer-version').annualPlanPublicReplayBlocked(freshLinkedEstimate)) {
+            throw Object.assign(httpError(409, 'This annual protection offer has not been delivered in its current form while the annual plan is disabled. Send the current offer or rebuild the estimate before booking from it.'), {
+              code: 'TERMITE_ANNUAL_PLAN_DISABLED',
+            });
           }
           // The preflight property compare re-runs under the fence (codex
           // #4015 r2 P2): a quote re-pointed at another property while this

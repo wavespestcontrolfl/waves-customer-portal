@@ -366,6 +366,32 @@ beforeEach(() => {
 });
 
 describe('FIX 1 — standard recurring conversion is atomic with acceptance', () => {
+  test('a new annual offer committed after preflight is refused under the acceptance lock', async () => {
+    resetStore(recurringPestEstimate());
+    const prior = process.env.GATE_TERMITE_ANNUAL_PLAN;
+    delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const transaction = db.transaction;
+    const spy = jest.spyOn(db, 'transaction').mockImplementationOnce(async (callback) => {
+      const data = JSON.parse(storedEstimate().estimate_data);
+      data.result.results = { tmBait: { plan: 'annual_protection' } };
+      storedEstimate().estimate_data = JSON.stringify(data);
+      return transaction(callback);
+    });
+    try {
+      const response = await putAccept('tok-atomic-1-x0123456789');
+      expect(response.status).toBe(409);
+      expect(storedEstimate().status).toBe('sent');
+      expect(storedEstimate().price_locked_at).toBeNull();
+      expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+      expect(InvoiceService.create).not.toHaveBeenCalled();
+      expect(db.__state.tables.invoices).toEqual([]);
+    } finally {
+      spy.mockRestore();
+      if (prior === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      else process.env.GATE_TERMITE_ANNUAL_PLAN = prior;
+    }
+  });
+
   test('annual coverage overlap returns a billing code and rolls back acceptance', async () => {
     resetStore(recurringPestEstimate());
     const scheduledDate = require('../utils/datetime-et').etDateString(new Date(Date.now() + 7 * 86400000));

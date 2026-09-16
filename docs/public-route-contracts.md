@@ -1028,6 +1028,17 @@ recover a missed grant on HTML or `/data` access after a temporary call block
 clears: the shared transaction pins its id, token and group, requires current
 published/call-clear eligibility, and updates only navigation metadata from
 eligible actual offer deadlines.
+Termite annual protection is selectable only while both
+`GATE_TERMITE_ANNUAL_PLAN` and `GATE_CANCEL_FLOW_V2` are enabled. With either
+gate off, an unaccepted annual offer remains viewable and acceptable only
+when its server-owned `deliveryState` records a real provider handoff and a
+fingerprint matching the current customer, property, scope, terms and price.
+Pricing stamps, suppressed sends and earlier quarterly handoffs do not qualify.
+The legacy view and `/data` withhold ineligible offers; `/accept` returns its
+inactive 409. Accepted and declined terminal views retain their existing guards.
+Browser-authored delivery receipts are stripped; staff revisions preserve the
+locked row's receipt, whose fingerprint cannot authorize changed terms.
+Supported customer revision history is a separate prerequisite before activation.
 The `/estimate/:token?website=1` SPA uses the website's compact pricing →
 scheduling → Auto Pay presentation over these same APIs. `embed=1` permits
 framing only while `GATE_WEBSITE_QUOTE_BOOKING` is on and only from the

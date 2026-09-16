@@ -22,6 +22,7 @@ const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { groupLinkStillViewable } = require('../services/proposal-bid');
 const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
+const { annualPlanPublicReplayBlocked } = require('../services/estimate-offer-version');
 
 // Gate pass for the accepted-estimate /book links (GATE_BOOKING_CUSTOMERS_ONLY):
 // the links carry only the correlation estimate_id, so under the customers-only
@@ -8397,6 +8398,7 @@ async function handleEstimateView(req, res, next) {
       // 'sending' row would otherwise render the stale whole-building
       // quote (codex r4 P1 on #3804).
       || estimateOffCustomerSurface(estimate)
+      || annualPlanPublicReplayBlocked(estimate)
       // The DURABLE call-side verdict too (codex P1, PR #3304 GH r9):
       // when the estimate-side marker could not be written, the block
       // lives on the CALL — and this page would otherwise keep serving a
@@ -8412,7 +8414,7 @@ async function handleEstimateView(req, res, next) {
     // window under the group's lock before deciding this expired entry link.
     if (needsExpiredGroupNavigationRefresh(estimate)) {
       const fresh = await refreshExpiredGroupNavigation(db, estimate);
-      if (!fresh) {
+      if (!fresh || annualPlanPublicReplayBlocked(fresh)) {
         if (req.path.startsWith('/estimate/')) return next();
         return res.status(404).set('Content-Type', 'text/html').send(renderEstimateNotFoundPage());
       }
@@ -8435,6 +8437,13 @@ async function handleEstimateView(req, res, next) {
     }
 
     await reconcileFrozenMembershipSnapshot(estimate);
+
+    // Membership reconciliation can change the offer after the initial
+    // publication check. Match /data and /accept on the repriced row.
+    if (annualPlanPublicReplayBlocked(estimate)) {
+      if (req.path.startsWith('/estimate/')) return next();
+      return res.status(404).set('Content-Type', 'text/html').send(renderEstimateNotFoundPage());
+    }
 
     // Parsed once here (post-reconcile) so the V2 gate's one-time check below
     // can read it; reused by the rest of the handler.
@@ -10513,7 +10522,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // against a linkage correction. One order everywhere:
         // estimates → leads → call_log. This lock also removes the
         // read-then-update gap on the verdict below.
-        const freshLinkRow = await trx('estimates').where({ id: estimate.id }).forUpdate().first('estimate_data');
+        const freshLinkRow = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
+        // A concurrent revision can replace the offer after the public preflight.
+        if (annualPlanPublicReplayBlocked(freshLinkRow)) {
+          throw Object.assign(new Error('Estimate is no longer active'), { status: 409 });
+        }
         let freshLinkData = null;
         try {
           freshLinkData = typeof freshLinkRow?.estimate_data === 'string'
@@ -18358,6 +18371,7 @@ function isEstimateAcceptActive(estimate = {}, now = new Date()) {
   // otherwise erase the marker (pre-push codex P0 on #3804). Accept refuses
   // it again under its locked read.
   if (estimateOffCustomerSurface(estimate)) return false;
+  if (annualPlanPublicReplayBlocked(estimate)) return false;
   if (['accepted', 'declined', 'expired', 'send_failed'].includes(estimate.status)) return false;
   // An unpublished estimate (draft / scheduled-but-not-yet-sent) must never be
   // acceptable through the public link. The legacy server-HTML page short-
@@ -18404,6 +18418,7 @@ function isEstimateCustomerViewable(estimate = {}, now = new Date()) {
   // renders, and a held row staff flip to 'declined' must not render again
   // (codex r5 P0 on #3804).
   if (estimateOffCustomerSurface(estimate)) return false;
+  if (annualPlanPublicReplayBlocked(estimate)) return false;
   if (['accepted', 'declined'].includes(estimate.status)) return true;
   if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) return false;
   if (['expired', 'send_failed'].includes(estimate.status)) return false;
@@ -18444,7 +18459,7 @@ function isEstimateExtensionRequestEligible(estimate = {}, now = new Date()) {
   // it, so an auto-grant would re-send a link that 404s (codex r7 P0 on
   // #3804); the extension writes carry the same predicate for the window
   // between this read and the claim.
-  if (estimateOffCustomerSurface(estimate)) return false;
+  if (estimateOffCustomerSurface(estimate) || annualPlanPublicReplayBlocked(estimate)) return false;
   if (['accepted', 'declined'].includes(estimate.status)) return false;
   if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) return false;
   if (!estimate.sent_at && !estimate.viewed_at) return false;
@@ -25505,7 +25520,8 @@ async function composeEstimateDataPayload(estimate, {
             && sibling.disposition !== 'expired_unsent'
             && !sibling.price_locked_at
             && !sibling.archived_at
-            && !estimateOffCustomerSurface(sibling);
+            && !estimateOffCustomerSurface(sibling)
+            && !annualPlanPublicReplayBlocked(sibling);
           if ((ordinaryViewable || expiredPublished)
             && !(await callSideBlockForEstimateData(db, parseEstimateDataSafe(sibling)))) {
             viewable.push(sibling);
@@ -26156,6 +26172,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       && ['sent', 'viewed', 'expired'].includes(estimate.status)
       && !estimate.archived_at
       && !estimateOffCustomerSurface(estimate)
+      && !annualPlanPublicReplayBlocked(estimate)
       && groupLinkStillViewable(estimate);
     if (!isEstimateCustomerViewable(estimate) && !adminDraftPreview && !docPinViewBypass && !groupLinkViewBypass) {
       // Carries exactly one extra bit beyond the bare 404: this token maps to

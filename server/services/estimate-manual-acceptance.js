@@ -429,7 +429,16 @@ async function markEstimateManuallyAccepted({
     // marker-only terminal invalidation.
     {
       const freshLinkRow = await trx('estimates').where({ id: estimateId })
-        .forUpdate().first('estimate_data', 'archived_at');
+        .forUpdate().first();
+      // The unlocked preflight may have read a quarterly draft before a
+      // concurrent edit committed an annual one. Validate the complete,
+      // freshly locked offer: its delivery fingerprint includes row columns
+      // as well as estimate_data. Do this before claiming or converting.
+      if (require('./estimate-offer-version').annualPlanPublicReplayBlocked(freshLinkRow)) {
+        const disabled = httpError('This annual protection offer has not been delivered in its current form while the annual plan is disabled. Send the current offer or rebuild the estimate before accepting.', 409);
+        disabled.code = 'TERMITE_ANNUAL_PLAN_DISABLED';
+        throw disabled;
+      }
       const manualAcceptData = (() => {
         const raw = freshLinkRow?.estimate_data;
         if (!raw) return null;

@@ -8,6 +8,7 @@ const {
 
 const FUTURE = new Date(Date.now() + 86400000).toISOString();
 const PAST = new Date(Date.now() - 86400000).toISOString();
+const { annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
 
 describe('estimateOffCustomerSurface (the one verdict every public predicate shares)', () => {
   const held = JSON.stringify({ estimatorEngine: { reprice_pending_at: '2026-09-03T12:00:00Z' } });
@@ -54,6 +55,43 @@ describe('estimateOffCustomerSurface (the one verdict every public predicate sha
 });
 
 describe('isEstimateCustomerViewable (React /:token/data security gate)', () => {
+  it('holds a revised annual offer after the gates close until that exact offer has a real handoff', () => {
+    const priorAnnual = process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const priorCancel = process.env.GATE_CANCEL_FLOW_V2;
+    const annualLine = { service: 'termite_bait', plan: 'annual_protection', annual: 299 };
+    const row = { status: 'sent', expires_at: FUTURE, customer_email: 'customer@example.test',
+      estimate_data: { result: { lineItems: [annualLine] } } };
+    try {
+      process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
+      process.env.GATE_CANCEL_FLOW_V2 = 'true';
+      expect(isEstimateCustomerViewable(row)).toBe(true);
+      process.env.GATE_TERMITE_ANNUAL_PLAN = 'false';
+      expect(isEstimateCustomerViewable(row)).toBe(false);
+      expect(isEstimateAcceptActive(row)).toBe(false);
+      const delivered = { ...row, estimate_data: { ...row.estimate_data,
+        deliveryState: { firstDeliveredAt: '2026-09-12T00:00:00Z', annualPlanOfferFingerprint: annualPlanOfferFingerprint(row) },
+      } };
+      expect(isEstimateCustomerViewable(delivered)).toBe(true);
+      expect(isEstimateAcceptActive(delivered)).toBe(true);
+      const revised = { ...delivered, estimate_data: { ...delivered.estimate_data,
+        result: { lineItems: [{ ...annualLine, annual: 399 }] },
+      } };
+      expect(isEstimateCustomerViewable(revised)).toBe(false);
+      expect(isEstimateAcceptActive(revised)).toBe(false);
+      const quarterly = { ...row, estimate_data: { result: { lineItems: [{ ...annualLine, plan: 'quarterly' }] } } };
+      expect(isEstimateCustomerViewable(quarterly)).toBe(true);
+      expect(isEstimateAcceptActive(quarterly)).toBe(true);
+      process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
+      process.env.GATE_CANCEL_FLOW_V2 = 'false';
+      expect(isEstimateCustomerViewable(revised)).toBe(false);
+      expect(isEstimateAcceptActive(delivered)).toBe(true);
+    } finally {
+      if (priorAnnual === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      else process.env.GATE_TERMITE_ANNUAL_PLAN = priorAnnual;
+      if (priorCancel === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
+      else process.env.GATE_CANCEL_FLOW_V2 = priorCancel;
+    }
+  });
   it('serves a published, unexpired estimate', () => {
     expect(isEstimateCustomerViewable({ status: 'sent', expires_at: FUTURE })).toBe(true);
     expect(isEstimateCustomerViewable({ status: 'viewed', expires_at: FUTURE })).toBe(true);
