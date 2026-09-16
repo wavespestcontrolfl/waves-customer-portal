@@ -1519,9 +1519,10 @@ const REPORT_NONCOMPLETION_MODIFIER_RE = /\b(?:almost|nearly)(?:\s+(?:has|have|h
 const REPORT_SAME_LOCATION_REF = `(?:\\s+(?:there|at\\s+that\\s+location))?`;
 const REPORT_UNCERTAIN_NEGATED_TREATMENT = `(?:(?:was|is)(?:n[\x27\u2019]t|\\s+(?:not|never))|(?:has|had)(?:n[\x27\u2019]t|\\s+(?:not|never))\\s+been)\\s+(?:actually\\s+)?${REPORT_FINDING_VERB_RE.source}`;
 const REPORT_UNCERTAIN_PREDICATE = `(?:(?:was|is|has been|had been)(?:\\s+${REPORT_FINDING_VERB_RE.source})?|${REPORT_UNCERTAIN_NEGATED_TREATMENT}|did(?:n[\x27\u2019]t|\\s+(?:not|never))?)`;
+const REPORT_UNCERTAIN_COMPLEMENT = `(?:(?:that|if|whether)\\s+)?`;
 const REPORT_TRAILING_UNCERTAINTY_RE = new RegExp(
-  `^\\s*(?:,\\s*)?(?:${REPORT_COMPLETION_TIME}\\s*,?\\s*)?(?:(?:(?:i\\s+am|we\\s+are|i['’]m|we['’]re)\\s+(?:not\\s+(?:sure|certain)|${vocabAlt(EPISTEMIC_DENIAL_WORDS)}))(?:\\s+(?:(?:of|about)\\s+(?:it|this|that)|(?:it|this|that)\\s+${REPORT_UNCERTAIN_PREDICATE}${REPORT_SAME_LOCATION_REF}))?|(?:i|we)\\s+(?:(?:do|does|did)\\s+)?${EPISTEMIC_HEDGE_PREFIX_SOURCE}(?:\\s+(?:whether\\s+)?(?:it|this|that)(?:\\s+${REPORT_UNCERTAIN_PREDICATE}${REPORT_SAME_LOCATION_REF})?)?(?:\\s+for\\s+(?:sure|certain))?|(?:maybe|perhaps|possibly|potentially|probably)(?:\\s+not)?|i\\s+`
-    + `(?:think|believe|guess|suppose)(?:\\s+(?:it|that|this)\\s+`
+  `^\\s*(?:,\\s*)?(?:${REPORT_COMPLETION_TIME}\\s*,?\\s*)?(?:(?:(?:i\\s+am|we\\s+are|i['’]m|we['’]re)\\s+(?:not\\s+(?:sure|certain)|${vocabAlt(EPISTEMIC_DENIAL_WORDS)}))(?:\\s+(?:(?:of|about)\\s+(?:it|this|that)|${REPORT_UNCERTAIN_COMPLEMENT}(?:it|this|that)\\s+${REPORT_UNCERTAIN_PREDICATE}${REPORT_SAME_LOCATION_REF}))?|(?:i|we)\\s+(?:(?:do|does|did)\\s+)?${EPISTEMIC_HEDGE_PREFIX_SOURCE}(?:\\s+${REPORT_UNCERTAIN_COMPLEMENT}(?:it|this|that)(?:\\s+${REPORT_UNCERTAIN_PREDICATE}${REPORT_SAME_LOCATION_REF})?)?(?:\\s+for\\s+(?:sure|certain))?|(?:maybe|perhaps|possibly|potentially|probably)(?:\\s+not)?|i\\s+`
+    + `(?:think|believe|guess|suppose)(?:\\s+(?:that\\s+)?(?:it|that|this)\\s+`
     + `${REPORT_UNCERTAIN_PREDICATE}${REPORT_SAME_LOCATION_REF})?)\\s*(?=$|,)`
   // These adjuncts condition the preceding assertion, rather than assert it.
   // Anchor at the finding's tail so conditions in later explanations stay local.

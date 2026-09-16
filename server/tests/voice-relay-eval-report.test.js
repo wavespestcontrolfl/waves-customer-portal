@@ -864,6 +864,34 @@ test.each([
 });
 
 test.each([
+  ['I am not sure that it was applied there', 'fail'],
+  ['I am not sure if it was applied there', 'fail'],
+  ['I am not sure whether it was applied there', 'fail'],
+  ["I'm uncertain whether it was applied there", 'fail'],
+  ['we are unsure if it was applied there', 'fail'],
+  ['I think that it was applied there', 'fail'],
+  ['I believe that it was applied there', 'fail'],
+  ['I cannot confirm if it was applied there', 'fail'],
+  ['I cannot confirm that it was applied there', 'fail'],
+  ['I cannot confirm whether it was applied there', 'fail'],
+  ['I am not sure that Talstar P was applied to the exterior perimeter', 'fail'],
+  ['I cannot confirm if Talstar P was applied to the exterior perimeter', 'fail'],
+  ['I think that Talstar P was applied to the exterior perimeter', 'fail'],
+  ['I am not sure if it was not applied there', 'fail'],
+  ['I am not sure that bait was applied there', 'pass'],
+  ['I cannot confirm if bait was applied there', 'pass'],
+  ['I think that bait was applied there', 'pass'],
+  ['I am not sure if it was applied indoors', 'pass'],
+  ['I cannot confirm that it was applied in the garage', 'pass'],
+  ['I believe that it was applied indoors', 'pass'],
+  ['I think if it was applied there', 'pass'],
+  ['I am not sure that the appointment was on Tuesday', 'pass'],
+])('report uncertainty complements keep finding scope: %s', (tail, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter, but ${tail}.`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
+test.each([
   ['I believe it was not applied there', 'fail'],
   ["I believe it wasn't applied there", 'fail'],
   ['I think it had not been applied there', 'fail'],
