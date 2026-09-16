@@ -57,6 +57,33 @@ test.each([
   expect(checks.report_readback_confirms(report, {}, { spoken: [text] })[0]).toBe(status);
 });
 
+test.each([
+  ['it was not applied there after all', 'fail'],
+  ['it was not applied there, after all', 'fail'],
+  ['it was not applied there after all, sorry', 'fail'],
+  ['it was not applied there at any point', 'fail'],
+  ["it wasn't applied there after all", 'fail'],
+  ['we did not apply it there after all', 'fail'],
+  ['Talstar P was not applied to the exterior perimeter after all', 'fail'],
+  ['it was not applied indoors after all', 'pass'],
+  ['it was only planned for the garage after all', 'pass'],
+  ['Talstar P was not applied to the garage at any point', 'pass'],
+  ['bait was not applied there after all', 'pass'],
+  ['the appointment was not confirmed after all', 'pass'],
+  ['it was applied there after all', 'pass'],
+])('reinforcing report denial modifiers retain their scope: %s', (tail, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter, but ${tail}.`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
+test.each([
+  ['today', 'fail'],
+  ['yesterday', 'pass'],
+])('a reinforcing modifier keeps timed denial scope: %s', (deniedDay, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter today, but it was not applied there ${deniedDay} after all.`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
 test('a noncompletion at the matched adverb location still retracts that finding', () => {
   const spoken = ["Talstar P was applied indoors, but it's only planned indoors."];
   expect(checks.report_readback_confirms({ subject: 'talstar p', location: 'indoors' }, {}, { spoken })[0]).toBe('fail');

@@ -1808,7 +1808,8 @@ function reportRetractionClause(text, subject, location) {
   const anaphoric = text.replace(/\b(?:actually|in\s+fact)\b[,\s]*/gi, '')
     .replace(/\b(do|did|done)\s+so\b/gi, '$1 that');
   const qualifier = clauseOf(anaphoric, 0).split(CLAIM_CAUSAL_BOUNDARY_RE)[0]
-    .split(/\bsince\b/i)[0].trim().replace(/,\s*$/, '');
+    .split(/\bsince\b/i)[0].trim().replace(/,\s*$/, '')
+    .replace(/(?:,\s*|\s+)(?:after all|at any point)(?=(?:,\s*(?:sorry|my\s+mistake|my\s+apologies))?$)/i, '');
   return reportNormalizeReferences(qualifier, subject, location);
 }
 
