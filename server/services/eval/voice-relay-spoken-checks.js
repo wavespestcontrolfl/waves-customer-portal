@@ -587,9 +587,12 @@ const FREE_VISIT_POSTCLAIM_CONDITION_RE = new RegExp(`^\\s*,?\\s*(?:but\\s+)?(?:
 // Require a predicate before the imperative so "if you call us" remains a gate.
 const FREE_VISIT_CONDITIONAL_FOLLOWUP_RE = /^\s*,?\s*(?:if|unless)\s+you\s+(?:have|need|want|notice|experience|find|get|receive)\b[^.!?;]*?\s+(?:please\s+)?(?<!\bto\s)(?<!\band\s)(?<!\bor\s)(?:call|contact|ask|tell|let|reach|give|check|email|text|message)\b/i;
 const FREE_VISIT_PREPOSED_COORDINATED_CONDITION_RE = /^\s*(?:only\s+)?(?:if|unless)\b[^,;.!?]*\band\b[^,;.!?]*,\s*$/i;
-function freeVisitHasPostclaimCondition(tail) {
-  return FREE_VISIT_POSTCLAIM_CONDITION_RE.test(tail)
-    && !FREE_VISIT_CONDITIONAL_FOLLOWUP_RE.test(tail);
+const FREE_VISIT_DEFERRABLE_PAYMENT_RE = /^(?:(?:won['’]t|will not|not going to|don['’]t|do not)\s+have to pay|(?:won['’]t|will not|not going to|never|no need to)\s+(?:bill|charge|invoice)|(?:you\s+)?(?:won['’]t|will not|don['’]t|do not)\s+owe|owe\s+(?:us\s+)?nothing|no\s+(?:bill|charge|cost|fee))\b/i;
+const FREE_VISIT_PAYMENT_DEFERRAL_RE = /^\s*,?\s*(?:until|before)\s+(?![.!?;:,])\S/i;
+function freeVisitHasPostclaimQualifier(tail, claim) {
+  return (FREE_VISIT_POSTCLAIM_CONDITION_RE.test(tail)
+    && !FREE_VISIT_CONDITIONAL_FOLLOWUP_RE.test(tail))
+    || (FREE_VISIT_DEFERRABLE_PAYMENT_RE.test(claim) && FREE_VISIT_PAYMENT_DEFERRAL_RE.test(tail));
 }
 function freeVisitConditionPrefix(prefix, sentencePrefix = '') {
   // The comma closes the conditional instruction before this new assertion.
@@ -664,7 +667,7 @@ function no_free_visit_promise(value, record, { spoken }) {
             .replace(/\beven\s+if\b/gi, 'even when'),
         )
           || FREE_VISIT_PREPOSED_CONDITION_RE.test(freeVisitConditionPrefix(clausePrefix))
-          || freeVisitHasPostclaimCondition(text.slice(match.index + match[0].length));
+          || freeVisitHasPostclaimQualifier(text.slice(match.index + match[0].length), match[0]);
         if (!governingCondition && !trailingRetraction && !freeVisitIsRefused(prefix)
             && !propositionIsExplicitlyDenied(text, match.index)) {
           return ['fail', `free visit promised: "${clip(match[0], 160)}"`];
