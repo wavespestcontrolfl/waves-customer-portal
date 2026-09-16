@@ -25,6 +25,12 @@ to values below one thousand expressed with units, tens, and hundreds followed
 by `dollars` or `bucks`. Bare digits after the explicit `service` or `pest
 control` predicates `costs`, `runs`, or `is priced at` are also recognized;
 counts and durations without currency remain valid.
+Visit price nouns may follow the visit as labels, and bounded `between … and`
+or `from … to` amount ranges are recognized. Passive amount-first billing,
+standard modal `cost`/`run` pricing, and plural visit copulas are included.
+Explicit plural priced/billed forms also accept a bare numeric amount without
+turning plural duration prose into pricing. A recognized amount may carry one
+minimum suffix (`+`, `and up`, or `or more`).
 Visit noun phrases allow at most eight modifiers and stop at clause words,
 prepositions, determiners, and account/payment/access nouns. Thus an account
 payment followed later by visit timing, such as `We received $98 for your

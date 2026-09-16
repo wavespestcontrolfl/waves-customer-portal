@@ -22,19 +22,24 @@ const TENS_SRC = '(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)';
 const UNDER_HUNDRED_SRC = `(?:${ONE_TO_NINETEEN_SRC}|${TENS_SRC}(?:[-\\s](?:one|two|three|four|five|six|seven|eight|nine))?)`;
 const WRITTEN_NUMBER_SRC = `(?:(?:a|one|two|three|four|five|six|seven|eight|nine)\\s+hundred(?:\\s+(?:and\\s+)?${UNDER_HUNDRED_SRC})?|${UNDER_HUNDRED_SRC})`;
 const WRITTEN_AMOUNT_SRC = `\\b${WRITTEN_NUMBER_SRC}\\s+(?:dollars?|bucks?)\\b`;
-const AMOUNT_SRC = `(?:(?:only|just|about|around|approximately|roughly|exactly|nearly|almost|up\\s+to|at\\s+least|as\\s+low\\s+as)\\s+){0,3}(?:(?:\\$\\s*|\\bUSD\\s+)${NUMERIC_PRICE_SRC}|\\b${NUMERIC_PRICE_SRC}\\s+(?:dollars?|bucks?|USD)\\b|${WRITTEN_AMOUNT_SRC})`;
+const BASE_AMOUNT_SRC = `(?:(?:only|just|about|around|approximately|roughly|exactly|nearly|almost|up\\s+to|at\\s+least|as\\s+low\\s+as)\\s+){0,3}(?:(?:\\$\\s*|\\bUSD\\s+)${NUMERIC_PRICE_SRC}|\\b${NUMERIC_PRICE_SRC}\\s+(?:dollars?|bucks?|USD)\\b|${WRITTEN_AMOUNT_SRC})`;
+const MINIMUM_SUFFIX_SRC = '(?:\\s*\\+|\\s+(?:and\\s+up|or\\s+more))?';
+const AMOUNT_SRC = `${BASE_AMOUNT_SRC}${MINIMUM_SUFFIX_SRC}`;
 const PRICE_NOUN_SRC = '(?:prices?|amounts?|costs?|charges?|rates?|fees?|invoices?)';
 const CONTEXT_AMOUNT_SRC = `(?:${AMOUNT_SRC}|${NUMERIC_PRICE_SRC}\\b)`;
 const AMOUNT_UNIT_QUALIFIER_SRC = `(?:\\s+(?:(?:plus|before)\\s+(?:tax(?:es)?|fees?)|\\+\\s*(?:tax(?:es)?|fees?)))?`;
 const VISIT_FEE_PHRASE_SRC = `(?:${VISIT_SRC}|service-visits?)`;
 const SERVICE_PRICE_SUBJECT_SRC = `(?:(?:(?:the|our|your)\\s+)?services?|pest\\s+control)`;
+const PROSE_RANGE_SRC = `(?:between\\s+${AMOUNT_SRC}\\s+and\\s+${AMOUNT_SRC}|from\\s+${AMOUNT_SRC}\\s+to\\s+${AMOUNT_SRC})`;
 
 const VISIT_MONETARY_PRICE_RE = new RegExp([
   `${AMOUNT_SRC}(?:\\s+${PRICE_NOUN_SRC}(?:\\s+(?:is|will\\s+be))?)?${AMOUNT_UNIT_QUALIFIER_SRC}\\s*(?:[(:,-]\\s*)?${PRICE_UNIT_SRC}`,
   `\\b${PRICE_UNIT_SRC}\\s*(?:[,:(-]\\s*)?(?:(?:the|our|your|a)\\s+)?${PRICE_NOUN_SRC}\\s+(?:is|are|was|were|will\\s+be|of)\\s*${CONTEXT_AMOUNT_SRC}`,
   `\\b${PRICE_UNIT_SRC}\\s*(?:[,:(-]\\s*)?(?:(?:we|you)\\s+)?(?:charge|bill|pay|invoice)\\s+${CONTEXT_AMOUNT_SRC}`,
-  `\\b${VISIT_REFERENCE_SRC}\\s+(?:(?:is|was|will\\s+be)\\s+(?:(?:priced|billed|charged|invoiced)\\s+(?:at\\s+)?)?|(?:costs?|runs?|will\\s+cost)\\s+)${AMOUNT_SRC}`,
-  `\\b${VISIT_REFERENCE_SRC}\\s+(?:(?:is|was|will\\s+be)\\s+(?:priced|billed|charged|invoiced)\\s+(?:at\\s+)?|(?:costs?|will\\s+cost)\\s+)${NUMERIC_PRICE_SRC}\\b`,
+  `\\b${VISIT_REFERENCE_SRC}\\s+(?:(?:is|are|was|were|will\\s+be)\\s+(?:(?:priced|billed|charged|invoiced)\\s+(?:at\\s+)?)?|(?:costs?|runs?|will\\s+cost)\\s+)${AMOUNT_SRC}`,
+  `\\b${VISIT_REFERENCE_SRC}\\s+(?:can|could|may|might|must|shall|should|will|would)\\s+(?:cost|run)\\s+${AMOUNT_SRC}`,
+  `\\b${VISIT_REFERENCE_SRC}\\s+(?:costs?|runs?|will\\s+cost|(?:is|was|will\\s+be)\\s+priced\\s+at)\\s+${PROSE_RANGE_SRC}`,
+  `\\b${VISIT_REFERENCE_SRC}\\s+(?:(?:is|are|was|were|will\\s+be)\\s+(?:priced|billed|charged|invoiced)\\s+(?:at\\s+)?|(?:costs?|will\\s+cost)\\s+)${NUMERIC_PRICE_SRC}\\b`,
   `\\b${VISIT_REFERENCE_SRC}\\s+has\\s+(?:an?\\s+)?${AMOUNT_SRC}\\s+${PRICE_NOUN_SRC}\\b`,
   `\\b${VISIT_REFERENCE_SRC}\\s+has\\s+(?:an?\\s+)?${PRICE_NOUN_SRC}\\s+of\\s+${CONTEXT_AMOUNT_SRC}`,
   `\\bvisits\\s+(?:(?:are|were|will\\s+be)\\s+(?:(?:priced|billed|charged|invoiced)\\s+(?:at\\s+)?)?|(?:cost|run|will\\s+cost)\\s+)${AMOUNT_SRC}\\s+(?:each|apiece)\\b`,
@@ -47,6 +52,9 @@ const VISIT_MONETARY_PRICE_RE = new RegExp([
   `${AMOUNT_SRC}\\s+${VISIT_FEE_PHRASE_SRC}\\s+${PRICE_NOUN_SRC}\\b`,
   `\\b${VISIT_REFERENCE_SRC}\\s*[:\\-]\\s*${AMOUNT_SRC}`,
   `\\b${SERVICE_PRICE_SUBJECT_SRC}\\s+(?:costs?|runs?|will\\s+cost|(?:is|was|will\\s+be)\\s+priced\\s+at)\\s+${NUMERIC_PRICE_SRC}\\s+${PRICE_UNIT_SRC}`,
+  `\\b${VISIT_REFERENCE_SRC}\\s+${PRICE_NOUN_SRC}\\s*(?:(?:is|are|was|were|will\\s+be)\\s*|[:\\-]\\s*)${CONTEXT_AMOUNT_SRC}`,
+  `\\b${PRICE_NOUN_SRC}\\s+(?:for\\s+)?${PRICE_UNIT_SRC}\\s+ranges?\\s+from\\s+${AMOUNT_SRC}\\s+to\\s+${AMOUNT_SRC}`,
+  `${AMOUNT_SRC}\\s+(?:is|was|will\\s+be)\\s+(?:charged|billed|invoiced|priced)\\s+${PRICE_UNIT_SRC}`,
 ].join('|'), 'i');
 
 // Inactive wording policy only. A future caller must establish commercial

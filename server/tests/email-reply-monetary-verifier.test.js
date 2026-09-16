@@ -129,6 +129,40 @@ describe('email reply monetary visit-pricing policy', () => {
   ])('rejects bare amounts after explicit service pricing predicates: %s', rejected);
 
   test.each([
+    'Visit fee: $98', 'Visit price is $98', 'Visit cost — USD 98',
+  ])('rejects visit price-noun labels followed by amounts: %s', rejected);
+
+  test.each([
+    'Each visit costs between $90 and $120',
+    'Each visit costs from $90 to $120',
+    'The price per visit ranges from $90 to $120',
+  ])('rejects bounded prose visit-price ranges: %s', rejected);
+
+  test.each([
+    '$98 is charged per visit', '$98 will be billed for each visit',
+    'USD 98 is invoiced for every visit',
+  ])('rejects passive amount-first visit pricing: %s', rejected);
+
+  test.each([
+    'Each visit would cost $98', 'Every visit should cost $98',
+    'A visit may run USD 98', 'Each visit can cost $98',
+    'A visit could run USD 98', 'Every visit might cost $98',
+    'Each visit must cost USD 98', 'A visit shall run $98',
+    'Every visit will run $98',
+  ])('rejects bounded modal visit pricing: %s', rejected);
+
+  test.each([
+    'Visits are $98', 'Scheduled visits were billed at USD 98',
+    'Your visits are priced at $98', 'Your visits are priced at 98',
+    'Scheduled visits were billed at 98',
+  ])('rejects plural visit prices without each/apiece suffixes: %s', rejected);
+
+  test.each([
+    '$98+ per visit', 'USD 98+ for each visit', '$98 and up per visit',
+    '$98 or more per visit',
+  ])('rejects minimum-price suffixes: %s', rejected);
+
+  test.each([
     'USD `98` per visit', '$98 per\\-visit', 'USD ``98`` per visit',
     '**USD `98` per visit**', 'USD `98\n` per visit', 'USD 98\\\nper visit',
     '$98\\\r\nfor each visit', 'USD 98 per&#32;visit', 'USD **98\nper visit**',
@@ -179,6 +213,14 @@ describe('email reply monetary visit-pricing policy', () => {
     'Pest control runs 98 minutes per visit.',
     'The $98 payment posted 30 minutes before the visit.',
     'Our services take 98 minutes per visit.',
+    'Visit fee details are in the portal.', 'Visit cost review is pending.',
+    'Each visit lasts between 90 and 120 minutes.',
+    'The visit window ranges from 9 to 11.',
+    '$98 was charged on your last visit.',
+    'A visit may run 90 minutes.', 'Visits are 90 minutes long.',
+    'A visit can run 90 minutes.', 'Visits could run 2 hours.',
+    'Your visits are 98 minutes long.',
+    '$98+ photos were uploaded for each visit.',
   ])('preserves application prices and unrelated visit prose: %s', (text) => {
     expect(verdict(text)).toEqual({ ok: true, violations: [] });
   });
