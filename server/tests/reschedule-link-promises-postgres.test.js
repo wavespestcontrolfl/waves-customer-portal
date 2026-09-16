@@ -1914,7 +1914,7 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
     const stubRender = async () => 'Your reschedule link: https://example.com/reschedule/token';
     const successfulSend = async () => ({ sent: true, providerMessageId: fakeSid });
 
-    async function seedPromise({ quote, dueAt = null, dueType = null, dateClaims = [], callerText = 'Thank you.' }) {
+    async function seedPromise({ quote, dueAt = null, dueType = null, dateClaims = [], callerText = 'Thank you.', rescheduleToken = 'token' }) {
       const callId = randomUUID();
       const customerId = randomUUID();
       const visitId = randomUUID();
@@ -1922,7 +1922,7 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       await mockPg('customers').insert({ id: customerId, first_name: 'Pat', last_name: 'Customer', phone,
         address_line1: '1 Example St', city: 'Bradenton', zip: '34205', active: true });
       await mockPg('scheduled_services').insert({ id: visitId, customer_id: customerId, scheduled_date: '2030-01-20',
-        window_start: '09:00', window_end: '10:30', service_type: 'WaveGuard', status: 'confirmed', reschedule_token: 'token' });
+        window_start: '09:00', window_end: '10:30', service_type: 'WaveGuard', status: 'confirmed', reschedule_token: rescheduleToken });
       await mockPg('call_log').insert({ id: callId, customer_id: customerId, direction: 'inbound', from_phone: phone,
         created_at: new Date('2030-01-07T12:00:00Z'), v2_extraction_status: 'valid', processing_generation: 0, transcription: `Agent: ${quote}\nCaller: ${callerText}` });
       const [commitment] = await mockPg('call_commitments').insert({
@@ -2234,6 +2234,94 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       await links.sweep(mockPg, { now, send, buildLink: stubBuildLink, render: stubRender });
       expect(send).not.toHaveBeenCalled();
       expect(await mockPg('outbox_messages').where({ id: row.id }).first()).toMatchObject({
+        status: 'review', last_error: 'appointment_date_unresolved',
+      });
+    });
+
+    test.each([
+      ['date-free', 'I will text you a reschedule link for that appointment.', []],
+      ['spoken-delivery', 'I will text you the reschedule link tomorrow at 9am.', [
+        { binding: 'delivery', quote: 'tomorrow', year: 2030, month: 1, day: 8 },
+      ]],
+    ])('a staff-entered %s floor is trusted only after Edit and Confirm, then dispatches when due', async (_label, quote, dateClaims) => {
+      const dueAt = new Date('2030-01-09T14:00:00Z');
+      const beforeDue = new Date('2030-01-07T14:00:00Z');
+      const afterDue = new Date('2030-01-09T15:00:00Z');
+      const commitmentId = await seedPromise({ quote, dateClaims });
+
+      const edited = await applyHumanUpdate(mockPg, commitmentId, { action: 'edit', due_at: dueAt.toISOString(), reviewedBy: randomUUID() });
+      expect(edited).toMatchObject({ human_state: 'edited', due_type: 'floor' });
+      expect(edited.subject.office_due_at).toBe(dueAt.toISOString());
+      const confirmed = await applyHumanUpdate(mockPg, commitmentId, { action: 'confirm', reviewedBy: randomUUID() });
+      expect(confirmed).toMatchObject({ human_state: 'confirmed', due_type: 'floor' });
+      expect(confirmed.subject.office_due_at).toBe(dueAt.toISOString());
+
+      expect(await links.stagePromises(mockPg)).toBe(1);
+      const row = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
+      expect(row.available_at).toEqual(dueAt);
+      const send = jest.fn(successfulSend);
+      await links.sweep(mockPg, { now: beforeDue, send, buildLink: stubBuildLink, render: stubRender });
+      expect(send).not.toHaveBeenCalled();
+      expect((await mockPg('outbox_messages').where({ id: row.id }).first()).status).toBe('pending');
+
+      await links.sweep(mockPg, { now: afterDue, send, buildLink: stubBuildLink, render: stubRender });
+      expect(send).toHaveBeenCalledTimes(1);
+      expect((await mockPg('outbox_messages').where({ id: row.id }).first()).status).toBe('sent');
+    });
+
+    test('clearing an office floor removes its marker and restores immediate date-free dispatch', async () => {
+      const now = new Date('2030-01-07T14:00:00Z');
+      const commitmentId = await seedPromise({ quote: 'I will text you a reschedule link for that appointment.' });
+      await applyHumanUpdate(mockPg, commitmentId, { action: 'edit', due_at: '2030-01-09T14:00:00Z', reviewedBy: randomUUID() });
+      const cleared = await applyHumanUpdate(mockPg, commitmentId, { action: 'edit', due_at: null, reviewedBy: randomUUID() });
+      expect(cleared).toMatchObject({ human_state: 'edited', due_at: null, due_type: null });
+      expect(cleared.subject.office_due_at).toBeUndefined();
+      await applyHumanUpdate(mockPg, commitmentId, { action: 'confirm', reviewedBy: randomUUID() });
+
+      expect(await links.stagePromises(mockPg)).toBe(1);
+      const send = jest.fn(successfulSend);
+      await links.sweep(mockPg, { now, send, buildLink: stubBuildLink, render: stubRender });
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+
+    test('Confirm alone, a description-only edit, and a stale office marker cannot trust a timestamp', async () => {
+      const now = new Date('2030-01-07T14:00:00Z');
+      const modelId = await seedPromise({ quote: 'I will text you a reschedule link for that appointment.',
+        dueAt: new Date('2030-01-09T14:00:00Z'), dueType: 'floor', rescheduleToken: 'model-token' });
+      await applyHumanUpdate(mockPg, modelId, { action: 'confirm', reviewedBy: randomUUID() });
+
+      const descriptionId = await seedPromise({ quote: 'I will text you a reschedule link for that appointment.',
+        dueAt: new Date('2030-01-09T14:00:00Z'), dueType: 'floor', rescheduleToken: 'description-token' });
+      await applyHumanUpdate(mockPg, descriptionId, { action: 'edit', description: 'send the promised reschedule link', reviewedBy: randomUUID() });
+      await applyHumanUpdate(mockPg, descriptionId, { action: 'confirm', reviewedBy: randomUUID() });
+
+      const officeId = await seedPromise({ quote: 'I will text you a reschedule link for that appointment.', rescheduleToken: 'office-token' });
+      await applyHumanUpdate(mockPg, officeId, { action: 'edit', due_at: '2030-01-09T14:00:00Z', reviewedBy: randomUUID() });
+      await applyHumanUpdate(mockPg, officeId, { action: 'confirm', reviewedBy: randomUUID() });
+      await mockPg('call_commitments').where({ id: officeId }).update({ due_at: new Date('2030-01-10T14:00:00Z') });
+
+      expect(await links.stagePromises(mockPg)).toBe(3);
+      const send = jest.fn(successfulSend);
+      await links.sweep(mockPg, { now, send, buildLink: stubBuildLink, render: stubRender });
+      expect(send).not.toHaveBeenCalled();
+      const rows = await mockPg('outbox_messages').whereIn('commitment_id', [modelId, descriptionId, officeId]);
+      expect(rows).toHaveLength(3);
+      expect(rows.every((row) => row.status === 'review' && row.last_error === 'appointment_date_unresolved')).toBe(true);
+    });
+
+    test('office timing provenance never bypasses transcript date-role coverage', async () => {
+      const now = new Date('2030-01-07T14:00:00Z');
+      const commitmentId = await seedPromise({ quote: 'I will text you a reschedule link for that appointment.',
+        callerText: 'My appointment is January 20.',
+        dateClaims: [{ binding: 'appointment', quote: 'January 20', month: 1, day: 21 }] });
+      await applyHumanUpdate(mockPg, commitmentId, { action: 'edit', due_at: '2030-01-09T14:00:00Z', reviewedBy: randomUUID() });
+      await applyHumanUpdate(mockPg, commitmentId, { action: 'confirm', reviewedBy: randomUUID() });
+
+      expect(await links.stagePromises(mockPg)).toBe(1);
+      const send = jest.fn(successfulSend);
+      await links.sweep(mockPg, { now, send, buildLink: stubBuildLink, render: stubRender });
+      expect(send).not.toHaveBeenCalled();
+      expect(await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first()).toMatchObject({
         status: 'review', last_error: 'appointment_date_unresolved',
       });
     });

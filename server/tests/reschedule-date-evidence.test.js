@@ -27,6 +27,23 @@ test.each(['floor', 'deadline', null, undefined])('no delivery evidence can auth
   }
 });
 
+test('independently proved office timing overrides only timing, never date roles or coverage', () => {
+  const options = { timingVerifiedByOffice: true };
+  const timing = { due_at: '2026-09-20T09:00:00-04:00', due_type: 'floor' };
+  const promise = 'Agent: I will text you a reschedule link for that appointment.';
+  expect(verify([], promise, reference, timing, options)).toBe(true);
+  expect(verify([], promise, reference, timing, { timingVerifiedByOffice: 'true' })).toBe(false);
+  expect(verify([september20], `${current}\n${promise}`, reference, timing, options)).toBe(true);
+  expect(verify([{ ...september20, day: 21 }], current, reference, timing, options)).toBe(false);
+  expect(verify([], current, reference, timing, options)).toBe(false);
+  expect(verify([], `${promise}\nCaller: The following day.`, reference, timing, options)).toBe(false);
+  const delivery = claim('tomorrow', { year: 2026, month: 9, day: 14 }, 'delivery');
+  const spoken = 'Agent: I will text the reschedule link by tomorrow at 9am.';
+  expect(verify([delivery], spoken, reference, timing, options)).toBe(true);
+  expect(verify([delivery], spoken, reference, timing)).toBe(false);
+  expect(verify([{ ...delivery, binding: 'appointment' }], spoken, reference, timing, options)).toBe(false);
+});
+
 test.each([
   ['Sep. 20th', { month: 9, day: 20 }],
   ['September 20, 2026', { year: 2026, month: 9, day: 20 }],
