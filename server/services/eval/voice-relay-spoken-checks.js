@@ -532,7 +532,7 @@ function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)
 
 // A denial of the proposition itself does not assert the proposition.
 // Scope it to the matched claim; denial of another claim cannot exempt it.
-const EXPLICIT_PROPOSITION_DENIAL_RE = /\b(?:it|this|that)\s+(?:is|was)\s+(?:false|not\s+true|untrue)\s+that\s*$/i;
+const EXPLICIT_PROPOSITION_DENIAL_RE = /\b(?:it|this|that)\s+(?:(?:is|was)\s+(?:false|not\s+true|untrue)|(?:isn['’]t|wasn['’]t)\s+true)\s+that\s*$/i;
 function propositionIsExplicitlyDenied(text, at, findingVerb) {
   const [start, end] = clauseBounds(text, at);
   const prefix = text.slice(start, at);
@@ -549,26 +549,25 @@ const FREE_VISIT_PROMISE_RES = Object.freeze(
 [
   "\\b(?:next|your next|the next|your)\\s+(?:visit|one|service|treatment|appointment)(?:['’]s|\\s+(?:is|will be|would be|comes))\\s+(?:free|on us|at no charge|no charge|at no cost|no cost|complimentary|on the house)\\b",
   "\\b(?:it|that|this)(?:['’]s|\\s+(?:is|will be|would be))\\s+(?:free|on us|at no charge|no charge|at no cost|no cost|complimentary|on the house)\\b",
-  "\\b(?:won['’]t|will not|not going to) have to pay\\s+(?:(?:anything|a thing|a dime|a penny)\\s+)?(?:for|toward)\\s+(?:the\\s+|your\\s+)?(?:next|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b",
+  "\\b(?:won['’]t|will not|not going to|don['’]t|do not) have to pay\\s+(?:(?:anything|a thing|a dime|a penny)\\s+)?(?:for|toward)\\s+(?:the\\s+|your\\s+)?(?:next|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b",
   "\\b(?:we|i)['’]ll cover (?:it|that|this|the (?:cost|visit))\\b",
   "\\b(?:we|i)(?:\\s+(?:will|would)|['’]ll)\\s+cover\\s+(?:(?:your|the|our)\\s+)?(?:next|return|follow-up|follow up)\\s+(?:visit|service|treatment|appointment)\\b",
   "\\b(?:we|i)\\s+(?:(?:will|would)\\s+)?waiv(?:e|ed)\\s+(?:the|your)\\s+(?:charge|fee|cost)\\s+for\\s+(?:(?:your|the)\\s+)?(?:next|return|follow-up|follow up)\\s+(?:visit|service|treatment|appointment)\\b",
-  "\\b(?:not going to|won['’]t|will not) charge you\\b",
-  "\\b(?:won['’]t|will not|not going to|never|no need to) (?:bill|charge|invoice)(?: you)?\\b[^.!?]{0,40}?\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b",
+  "\\b(?:won['’]t|will not|not going to|never|no need to) (?:bill|charge|invoice)(?: you)?\\b\\s+(?:(?:anything|a thing|a dime|a penny)\\s+)?(?:for|(?:the|a)\\s+(?:cost|charge|fee)\\s+(?:of|for))\\s+(?:(?:your|the|a|an|our)\\s+)?(?:(?:next|return|follow-up|follow up|that|this)\\s+)?(?:visit|one|service|treatment|appointment)\\b",
   "\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b[^.!?]{0,20}?\\b(?:costs? (?:you )?nothing|won['’]t cost (?:you )?(?:anything|a thing|a dime|a penny)|(?:is|will be|would be|has been|['’]s) (?:waived|no cost|free of charge|complimentary|at no cost|at no charge))\\b",
   "\\b(?:you )?(?:won['’]t|will not|don['’]t|do not) owe (?:us )?(?:anything|a thing|a dime|a penny)\\b[^.!?]{0,40}?\\b(?:visit|one|service|treatment|appointment)\\b",
   "\\bowe (?:us )?nothing\\b[^.!?]{0,40}?\\b(?:visit|one|service|treatment|appointment)\\b",
   "\\bno (?:bill|charge|cost|fee)\\b[^.!?]{0,30}?\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b"
 ].map((source) => new RegExp(source, 'gi')));
 const FREE_VISIT_CAUSAL_BOUNDARY_RE = new RegExp(
-  `\\b(?:as(?!\\s+of\\b)|since(?!\\s+(?:today|yesterday|now)\\b)|now\\s+that)\\b(?=\\s+(?:(?:i|we|you|he|she|they|it)\\s+|`
+  `\\b(?:as(?!\\s+of\\b)|since(?!\\s+(?:today|yesterday|now)\\b)|now\\s+that|given\\s+that|due\\s+to\\s+the\\s+fact\\s+that)\\b(?=\\s+(?:(?:i|we|you|he|she|they|it)\\s+|`
     + `(?:(?:the|your|our|his|her|their|this|that)\\s+)?(?:[\\w\\x27\\u2019-]+\\s+){1,3})`
     + `${CLAUSE_FINITE_PREDICATE_RE.source})`,
   'gi',
 );
 const FREE_VISIT_TEMPORAL_PARENTHETICAL_RE = /,\s*(?:as of (?:today|now)|since (?:today|yesterday))\s*,\s*(?:that\s*)?$/i;
 const FOLLOWUP_QUESTION_RE = /(?:,\s*|\s+(?:and|but|so)\s+)(?:(?:and|but|so)\s+)?(?:did|do|does|is|are|was|were|will|would|can|could|should|has|have|had|what|who|why|how|where|when)\b/i;
-const FREE_VISIT_TRAILING_RETRACTION_RE = /^\s*,?\s*(?:but|however)\s+(?:it|that|this)(?:\s+(?:(?:is|was)\s+(?:not\s+true|false|untrue|incorrect|wrong)|(?:isn['’]t|wasn['’]t)\s+true)|['’]s\s+(?:not\s+true|false|untrue|incorrect|wrong))\s*$/i;
+const FREE_VISIT_TRAILING_RETRACTION_RE = /^\s*,?\s*(?:but|however)\s+(?:it|that|this)(?:\s+(?:(?:is|was)\s+(?:not\s+true|false|untrue|incorrect|wrong)|(?:isn['’]t|wasn['’]t)\s+true)|['’]s\s+(?:not\s+true|false|untrue|incorrect|wrong))(?=\s*(?:$|[,;.!?]|\b(?:because|since|as(?!\s+(?:long|soon)\s+as\b))\b))/i;
 /** value: true */
 function no_free_visit_promise(value, record, { spoken }) {
   for (const text of spoken) {
@@ -600,11 +599,12 @@ function no_free_visit_promise(value, record, { spoken }) {
           ? causalContext.slice(causalBoundary.index + causalBoundary[0].length, match.index - claimStart)
           : text.slice(claimStart, match.index);
         const suffix = text.slice(match.index + match[0].length, clauseEnd);
-        const trailingRetraction = FREE_VISIT_TRAILING_RETRACTION_RE.test(
-          text.slice(match.index + match[0].length).split(/[.!?;]/)[0],
-        );
+        const trailingRetraction = FREE_VISIT_TRAILING_RETRACTION_RE.test(text.slice(match.index + match[0].length));
+        // "Whether X or Y, [promise]" asserts the promise across both
+        // alternatives. A whether phrase embedded in a refusal or an
+        // incomplete question still governs the free-visit proposition.
         const governingCondition = /\b(?:if|unless|whether|until|before)\b/i.test(
-          prefix.replace(/\bwhether\b[^,;.!?]*\bor\s+not\b/gi, '')
+          prefix.replace(/^\s*whether\b[^,;.!?]*\bor\b[^,;.!?]*,\s*/i, '')
             .replace(/\beven\s+if\b/gi, 'even when'),
         )
           || /^\s*,?\s*(?:only\s+)?(?:if|unless)\b/i.test(suffix)
