@@ -36,7 +36,10 @@ const {
   supersedeStaleDecision,
 } = require('../services/sms-suggest-mode');
 const autoSendExecutor = require('../services/sms-auto-send');
-const { excludeUnresolvedSendReservations } = require('../services/messaging/review-ask-reservation');
+const {
+  excludeUnresolvedSendReservations,
+  releaseById: releaseReservationById,
+} = require('../services/messaging/review-ask-reservation');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -398,7 +401,7 @@ router.post('/sms', async (req, res, next) => {
     const id = lockedReviewReservationId;
     lockedReviewReservationId = null;
     try {
-      await db('sms_log').where({ id }).del();
+      await releaseReservationById({ id });
     } catch (delErr) {
       logger.warn(`[communications] locked review reservation cleanup failed (${id}): ${delErr.message}`);
     }
@@ -938,7 +941,7 @@ router.post('/sms', async (req, res, next) => {
             try {
               const logged = outcome.providerMessageId && await db('sms_log')
                 .where({ twilio_sid: outcome.providerMessageId, direction: 'outbound' }).first('id');
-              if (logged) await db('sms_log').where({ id: reviewReservationId }).del();
+              if (logged) await releaseReservationById({ id: reviewReservationId });
               else await db('sms_log').where({ id: reviewReservationId }).update({
                 status: 'sent', twilio_sid: outcome.providerMessageId || null, updated_at: new Date(),
               });
@@ -946,7 +949,7 @@ router.post('/sms', async (req, res, next) => {
               logger.warn(`[communications] accepted review keeps its reservation (${reviewReservationId}): ${stampErr.message}`);
             }
           } else if (outcome?.deliveryOutcome === 'not_sent') {
-            await db('sms_log').where({ id: reviewReservationId }).del();
+            await releaseReservationById({ id: reviewReservationId });
           }
         };
         try {

@@ -583,7 +583,12 @@ describe('review request follow-up flow', () => {
         scheduled_for: null,
         status: 'pending',
       }));
-      expect(ReviewService.sendSMS).toHaveBeenCalledWith('rr-admin', { expectedPhone: null });
+      // freshCreate: true (codex #4331 P1, structural pass, finding 1) marks
+      // this as the fresh-immediate-send call site so a reservation-write
+      // failure that survives a retry throws through _createGated's own
+      // persistence-failure cleanup instead of returning a refusal this row
+      // can never recover from (scheduled_for stays null either way).
+      expect(ReviewService.sendSMS).toHaveBeenCalledWith('rr-admin', { expectedPhone: null, freshCreate: true });
     } finally {
       ReviewService.sendSMS = originalSendSMS;
     }
