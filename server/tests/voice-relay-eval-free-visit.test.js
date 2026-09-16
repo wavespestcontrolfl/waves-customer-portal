@@ -268,6 +268,22 @@ test.each([
 });
 
 test.each([
+  ['You do not have to pay for your next visit until next month.', 'pass'],
+  ['We will not charge you for the next visit until it is completed.', 'pass'],
+  ["You won't have to pay for the return visit before it begins.", 'pass'],
+  ["We won't bill you for the next visit until next month.", 'pass'],
+  ["You don't owe anything for your next visit until the office sends the invoice.", 'pass'],
+  ['No charge for the next visit until next month.', 'pass'],
+  ['You do not have to pay for your next visit.', 'fail'],
+  ['Your next visit is free until next month.', 'fail'],
+  ['We will waive the charge for your next visit until next month.', 'fail'],
+  ["We won't charge you for the next visit, but the office will wait until next month to send a report.", 'fail'],
+  ["You don't owe anything for the next visit. Until next month, the office is closed.", 'fail'],
+])('deferred payment is scoped to its payment claim: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   ["It isn't true that your next visit is free.", 'pass'],
   ['It wasn’t true that your next visit is free.', 'pass'],
   ["It isn't true that we won't bill you for the next visit.", 'pass'],
