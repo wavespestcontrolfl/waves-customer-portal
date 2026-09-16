@@ -570,3 +570,15 @@ test.each([
   const spoken = [`Talstar P was applied to the exterior perimeter, but ${tail}.`];
   expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
 });
+
+test.each(['because it rained', 'since it rained', 'as it was raining', 'given that it was raining'])
+('explained report retractions retain their proposition: %s', (explanation) => {
+  for (const denial of ['that never happened', 'it was not applied there', 'I am not sure', 'it was only planned']) {
+    for (const locations of ['exterior perimeter', 'exterior perimeter and garage']) {
+      const spoken = [`Talstar P was applied to the ${locations}, but ${denial} ${explanation}.`];
+      expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe('fail');
+    }
+  }
+  const spoken = [`Talstar P was applied to the exterior perimeter, but the office did not call ${explanation}.`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe('pass');
+});

@@ -559,7 +559,7 @@ const FREE_VISIT_PROMISE_RES = Object.freeze(
   "\\bowe (?:us )?nothing\\b[^.!?]{0,40}?\\b(?:visit|one|service|treatment|appointment)\\b",
   "\\bno (?:bill|charge|cost|fee)\\b[^.!?]{0,30}?\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b"
 ].map((source) => new RegExp(source, 'gi')));
-const FREE_VISIT_CAUSAL_BOUNDARY_RE = new RegExp(
+const CLAIM_CAUSAL_BOUNDARY_RE = new RegExp(
   `\\b(?:as(?!\\s+of\\b)|since(?!\\s+(?:today|yesterday|now)\\b)|now\\s+that|given\\s+that|due\\s+to\\s+the\\s+fact\\s+that)\\b(?=\\s+(?:(?:i|we|you|he|she|they|it)\\s+|`
     + `(?:(?:the|your|our|his|her|their|this|that)\\s+)?(?:[\\w\\x27\\u2019-]+\\s+){1,3})`
     + `${CLAUSE_FINITE_PREDICATE_RE.source})`,
@@ -602,7 +602,7 @@ function no_free_visit_promise(value, record, { spoken }) {
           && clauseIsEpistemicallyHedged(clausePrefix.slice(0, temporalParenthetical.index))
           ? clauseStart : match.index - claim.length;
         const causalContext = text.slice(claimStart, match.index + match[0].length);
-        const causalBoundary = [...causalContext.matchAll(FREE_VISIT_CAUSAL_BOUNDARY_RE)].reverse()
+        const causalBoundary = [...causalContext.matchAll(CLAIM_CAUSAL_BOUNDARY_RE)].reverse()
           .find((boundary) => {
             const before = causalContext.slice(0, boundary.index);
             const refusal = EPISTEMIC_HEDGE_RE.exec(before);
@@ -1630,6 +1630,15 @@ function reportClauseBounds(text, at) {
     ? [sentenceStart, sentenceEnd] : ordinary;
 }
 
+function reportRetractionClause(text) {
+  // Explanations do not undo a retraction. Stop at an independent clause or
+  // the same causal boundary used for free-visit claims, not an arbitrary word cap.
+  // Here "do so" refers to the finding; its "so" is not a new clause.
+  const anaphoric = text.replace(/\b(do|did|done)\s+so\b/gi, '$1 that');
+  return clauseOf(anaphoric, 0).split(CLAIM_CAUSAL_BOUNDARY_RE)[0]
+    .split(/\bsince\b/i)[0].trim().replace(/,\s*$/, '');
+}
+
 function reportSharedLocationContinuation(text, clauseEnd, location) {
   const remainder = text.slice(clauseEnd);
   // Reuse the splitter's actual boundaries so a retraction is not lost at
@@ -1637,7 +1646,7 @@ function reportSharedLocationContinuation(text, clauseEnd, location) {
   // Sentence terminators still end the statement rather than qualify it.
   const boundary = new RegExp(`^(?:${CLAUSE_BOUNDARY_TOKEN_RE.source})\\s*,?\\s*`, 'i').exec(remainder);
   if (boundary && !/[.!?;]/.test(boundary[0])) {
-    const qualifier = remainder.slice(boundary[0].length).split(/[.!?;]/)[0];
+    const qualifier = reportRetractionClause(remainder.slice(boundary[0].length));
     if (REPORT_TRAILING_UNCERTAINTY_RE.test(qualifier) || REPORT_TRAILING_DENIAL_RE.test(qualifier)
         || reportTrailingNoncompletion(qualifier)) return { text: '', unconfirmed: true };
   }
@@ -1654,8 +1663,9 @@ function reportSharedLocationContinuation(text, clauseEnd, location) {
   if (!locationTail) return { text: '', unconfirmed: false };
   const qualifier = remainder.slice(locationTail[0].length).trim()
     .replace(/^(?:perimeter|area|wall|walls|zone|edge)\b\s*/i, '');
-  const scopedQualifier = qualifier.replace(/^[,—–]\s*(?:(?:but|however)\s*,?\s*)?/i, '')
-    .replace(/[.!?;].*$/, '');
+  const scopedQualifier = reportRetractionClause(qualifier.replace(
+    new RegExp(`^[,—–]\\s*(?:(?:${CLAUSE_BOUNDARY_TOKEN_RE.source})\\s*,?\\s*)?`, 'i'), '',
+  ));
   // A shared list ends the location noun or adds an adjunct, not a new predicate.
   if (!/^(?:$|[.!?;]|(?:,\s*)?(?:and|or|before|after|with|as|according|which|(?:only\s+)?if|unless)\b)/i.test(qualifier)
       && !REPORT_TRAILING_UNCERTAINTY_RE.test(scopedQualifier)
