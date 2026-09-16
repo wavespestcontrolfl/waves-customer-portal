@@ -88,6 +88,7 @@ const sendgrid = require('../services/sendgrid-mail');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { computeProposalTotals, normalizeProposal } = require('../services/estimate-proposal');
+const { annualPlanOfferFingerprint, annualPlanHasDeliveredOffer } = require('../services/estimate-offer-version');
 const { gateEnvValue } = require('../config/feature-gates');
 
 let row;
@@ -107,6 +108,29 @@ function savedEstimate(overrides = {}) {
 
 function dataOf(estimate = row) {
   return typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
+}
+
+function revisedAnnualEstimate() {
+  const estimate = savedEstimate({ estimate_data: {
+    result: { results: { tmBait: { plan: 'annual_protection', annualFee: 299, setupFee: 450 } } },
+  } });
+  const originalFingerprint = annualPlanOfferFingerprint(estimate);
+  estimate.estimate_data.deliveryState = {
+    firstDeliveredAt: '2026-01-01T10:00:00.000Z',
+    lastDeliveredAt: '2026-01-01T10:00:00.000Z',
+    deliveredAt: ['2026-01-01T10:00:00.000Z'],
+    annualPlanOfferFingerprint: originalFingerprint,
+  };
+  estimate.estimate_data.customerPreferences = { preferredVisitDay: 'Tuesday' };
+  const revisedFingerprint = annualPlanOfferFingerprint(estimate);
+  estimate.estimate_data.deliveryState.annualPlanPublicRevisions = [{
+    version: 1, kind: 'preferences', at: '2026-01-01T11:00:00.000Z',
+    sourceFingerprint: originalFingerprint,
+    previousFingerprint: originalFingerprint,
+    fingerprint: revisedFingerprint,
+  }];
+  expect(annualPlanHasDeliveredOffer(estimate)).toBe(true);
+  return { estimate, originalFingerprint, revisedFingerprint };
 }
 
 // The send tests need one persisted row. Reads clone it, and whole-blob and
@@ -234,6 +258,33 @@ describe('commercial bid authoring', () => {
 });
 
 describe('reviewed send attempt receipts', () => {
+  test.each([
+    ['definitely failed email', 'email', () => email.sendTemplate.mockRejectedValueOnce(new Error('Template disabled'))],
+    ['suppressed SMS', 'sms', () => sendCustomerMessage.mockResolvedValueOnce({ sent: true, reason: 'SMS suppressed' })],
+  ])('a %s resend retains the annual public revision until a real handoff', async (_outcome, method, arrange) => {
+    const { estimate, originalFingerprint, revisedFingerprint } = revisedAnnualEstimate();
+    row = estimate;
+    const originalDeliveryState = structuredClone(dataOf().deliveryState);
+    arrange();
+
+    const noHandoff = await router.sendEstimateNow(structuredClone(row), method, { callerPreClaimed: true });
+    expect(noHandoff.sent).toBe(false);
+    expect(dataOf().deliveryState).toEqual(originalDeliveryState);
+    expect(annualPlanHasDeliveredOffer(row)).toBe(true);
+    expect(dataOf().deliveryState.annualPlanOfferFingerprint).toBe(originalFingerprint);
+    expect(annualPlanOfferFingerprint(row)).toBe(revisedFingerprint);
+
+    const delivered = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(delivered.sent).toBe(true);
+    expect(delivered.sentChannels).toContain('email');
+    expect(dataOf().deliveryState).toMatchObject({
+      firstDeliveredAt: originalDeliveryState.firstDeliveredAt,
+      annualPlanOfferFingerprint: revisedFingerprint,
+    });
+    expect(dataOf().deliveryState.annualPlanPublicRevisions).toBeUndefined();
+    expect(annualPlanHasDeliveredOffer(row)).toBe(true);
+  });
+
   test('a repeat customer open between preview and scheduling preserves the reviewed version', async () => {
     row.status = 'viewed';
     row.view_count = 1;

@@ -51,7 +51,10 @@ jest.mock('../models/db', () => {
     b.forUpdate = () => b;
     b.leftJoin = () => b;
     b.first = async () => { const r = matched()[0]; return r ? { ...r } : undefined; };
-    b.update = (obj) => { const hits = matched(); hits.forEach((r) => Object.assign(r, obj)); return Promise.resolve(hits.length); };
+    b.update = (obj) => {
+      if (state.beforeUpdate) { const hook = state.beforeUpdate; state.beforeUpdate = null; hook(); }
+      const hits = matched(); hits.forEach((r) => Object.assign(r, obj)); return Promise.resolve(hits.length);
+    };
     b.insert = async (row) => [{ id: `${table}-${rows().length + 1}`, ...row }];
     b.pluck = async () => [];
     b.del = async () => 0;
@@ -76,7 +79,8 @@ const express = require('express');
 const db = require('../models/db');
 const { generateEstimate } = require('../services/pricing-engine/estimate-engine');
 const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
-const { selectTierCeiling, applyMembershipRepriceToEstimate } = require('../routes/estimate-public');
+const { selectTierCeiling, applyMembershipRepriceToEstimate, isEstimateCustomerViewable, isEstimateAcceptActive } = require('../routes/estimate-public');
+const { annualPlanOfferFingerprint, annualPlanHasDeliveredOffer } = require('../services/estimate-offer-version');
 const { serviceOptOutEngineTierReference } = require('../services/estimate-service-opt-out');
 
 let server;
@@ -132,6 +136,7 @@ function estimateRow(estimateData, overrides = {}) {
 }
 
 function seed(row) {
+  db.__state.beforeUpdate = null;
   db.__state.tables = { estimates: [row], customers: [], call_log: [], leads: [] };
   return () => db.__state.tables.estimates[0];
 }
@@ -203,6 +208,124 @@ describe('selectTierCeiling', () => {
     expect(serviceOptOutEngineTierReference(data)).toBe('Gold');
     expect(selectTierCeiling(data)).toBe('Gold');
     expect(serviceOptOutEngineTierReference({})).toBeNull();
+  });
+});
+
+describe('delivered annual plans retain verified public revisions', () => {
+  const previousGates = [process.env.GATE_TERMITE_ANNUAL_PLAN, process.env.GATE_CANCEL_FLOW_V2];
+  afterEach(() => {
+    ['GATE_TERMITE_ANNUAL_PLAN', 'GATE_CANCEL_FLOW_V2'].forEach((key, i) => {
+      if (previousGates[i] === undefined) delete process.env[key]; else process.env[key] = previousGates[i];
+    });
+  });
+  function annualRow(extraServices = {}) {
+    process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
+    process.env.GATE_CANCEL_FLOW_V2 = 'true';
+    const { raw, estimateData } = engineEstimateData({ pest: { frequency: 'quarterly' }, termite: { plan: 'annual_protection', system: 'trelona' }, ...extraServices });
+    const row = estimateRow(estimateData, {
+      waveguard_tier: estimateData.result.recurring.waveGuardTier, monthly_total: raw.summary.recurringMonthlyAfterDiscount,
+      annual_total: raw.summary.recurringAnnualAfterDiscount, onetime_total: estimateData.result.oneTime.total,
+    });
+    estimateData.deliveryState = { firstDeliveredAt: '2026-09-16T00:00:00Z', annualPlanOfferFingerprint: annualPlanOfferFingerprint(row) };
+    row.estimate_data = JSON.stringify(estimateData);
+    delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    delete process.env.GATE_CANCEL_FLOW_V2;
+    return row;
+  }
+
+  test('tier and preference edits remain viewable and accept-active after gates close', async () => {
+    const row = annualRow();
+    const read = seed(row);
+    const originalFingerprint = annualPlanOfferFingerprint(row);
+    expect((await selectTier(row.token, 'Bronze')).status).toBe(200);
+    expect(annualPlanHasDeliveredOffer(read())).toBe(true);
+    expect(annualPlanOfferFingerprint(read())).not.toBe(originalFingerprint);
+    const response = await fetch(`${base}/api/estimates/${row.token}/preferences`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ interior_spray: false, deliveryState: { firstDeliveredAt: 'forged' } }),
+    });
+    expect(response.status).toBe(200);
+    const delivery = JSON.parse(read().estimate_data).deliveryState;
+    expect(delivery.firstDeliveredAt).toBe('2026-09-16T00:00:00Z');
+    expect(delivery.annualPlanOfferFingerprint).toBe(originalFingerprint);
+    expect(delivery.annualPlanPublicRevisions.map((r) => r.kind)).toEqual(['select-tier', 'preferences']);
+    expect(isEstimateCustomerViewable(read())).toBe(true);
+    expect(isEstimateAcceptActive(read())).toBe(true);
+    read().notes = 'Unreviewed replacement terms';
+    expect(isEstimateAcceptActive(read())).toBe(false);
+  });
+
+  test('a concurrent acceptance refuses both the public price and revision write', async () => {
+    const row = annualRow();
+    const read = seed(row);
+    const beforeData = row.estimate_data;
+    const beforePrice = row.monthly_total;
+    db.__state.beforeUpdate = () => { read().status = 'accepted'; read().price_locked_at = new Date(); };
+    expect((await selectTier(row.token, 'Bronze')).status).toBe(409);
+    expect(read().estimate_data).toBe(beforeData);
+    expect(read().monthly_total).toBe(beforePrice);
+  });
+
+  test('a persisted mixed commercial interior edit retains its annual handoff with annual gates closed', async () => {
+    const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+    process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
+    process.env.GATE_CANCEL_FLOW_V2 = 'true';
+    const engineInputs = translateV2CallToV1Input({ ...PROPERTY, propertyType: 'Commercial', isCommercial: true },
+      ['PEST', 'TERMITE_BAIT'], { termitePlan: 'annual_protection' });
+    const raw = generateEstimate(engineInputs);
+    const data = { result: mapV1ToLegacyShape(raw), engineResult: raw, engineInputs };
+    // Commercial termite quotes use a separate program. Build a mixed saved
+    // offer from real residential annual and commercial pest engine rows.
+    const annual = JSON.parse(annualRow().estimate_data);
+    data.result.results.tmBait = annual.result.results.tmBait;
+    data.result.recurring.services.push(annual.result.recurring.services.find((line) => line.service === 'termite_bait'));
+    data.engineResult.lineItems.push(annual.engineResult.lineItems.find((line) => line.service === 'termite_bait'));
+    const row = estimateRow(data, { monthly_total: data.result.recurring.monthlyTotal,
+      annual_total: data.result.recurring.annualTotal, onetime_total: data.result.oneTime.total });
+    data.deliveryState = { firstDeliveredAt: '2026-09-16T00:00:00Z', annualPlanOfferFingerprint: annualPlanOfferFingerprint(row) };
+    row.estimate_data = JSON.stringify(data);
+    const read = seed(row);
+    delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    delete process.env.GATE_CANCEL_FLOW_V2;
+    const priorInteriorGate = process.env.GATE_COMMERCIAL_INTERIOR_OPTION;
+    process.env.GATE_COMMERCIAL_INTERIOR_OPTION = 'true';
+    try {
+      const response = await fetch(`${base}/api/estimates/${row.token}/interior-service`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ included: false }),
+      });
+      expect({ status: response.status, body: await response.json() }).toMatchObject({ status: 200 });
+      expect(JSON.parse(read().estimate_data).deliveryState.annualPlanPublicRevisions.at(-1).kind).toBe('interior-service');
+      expect(isEstimateAcceptActive(read())).toBe(true);
+    } finally {
+      if (priorInteriorGate === undefined) delete process.env.GATE_COMMERCIAL_INTERIOR_OPTION;
+      else process.env.GATE_COMMERCIAL_INTERIOR_OPTION = priorInteriorGate;
+    }
+  });
+
+  test.each(['mapped', 'raw'])('%s: non-termite removal previews without writing and commits a verified annual revision', async (shape) => {
+    const row = annualRow({ lawn: LAWN });
+    if (shape === 'raw') {
+      const data = JSON.parse(row.estimate_data);
+      delete data.result;
+      row.estimate_data = data;
+      data.deliveryState.annualPlanOfferFingerprint = annualPlanOfferFingerprint(row);
+      row.estimate_data = JSON.stringify(data);
+    }
+    const read = seed(row);
+    const beforeData = row.estimate_data;
+    const { applyServiceMixChange } = require('../routes/estimate-public');
+    const body = { serviceKey: 'lawn_care', included: false };
+    const preview = await applyServiceMixChange({ estimate: { ...read() }, body: { ...body, dryRun: true } });
+    expect(preview).toMatchObject({ status: 200, body: { dryRun: true } });
+    expect(read().estimate_data).toBe(beforeData);
+    const stale = await applyServiceMixChange({ estimate: { ...read() }, body: { ...body, previewBasis: 'stale' } });
+    expect(stale).toMatchObject({ status: 409, body: { error: 'estimate_changed_since_preview' } });
+    expect(read().estimate_data).toBe(beforeData);
+    const committed = await applyServiceMixChange({ estimate: { ...read() }, body: { ...body, previewBasis: preview.body.previewBasis } });
+    expect(committed).toMatchObject({ status: 200 });
+    expect(JSON.parse(read().estimate_data).deliveryState.annualPlanPublicRevisions.at(-1).kind).toBe('service-mix');
+    expect(isEstimateCustomerViewable(read())).toBe(true);
+    expect(isEstimateAcceptActive(read())).toBe(true);
   });
 });
 

@@ -1007,7 +1007,16 @@ Termite annual protection is selectable only while both
 switch is off, an unaccepted row whose current priced result selects annual
 protection is public-viewable and accept-active only if `deliveryState` records
 a real first handoff and an annual-offer fingerprint matching its current
-customer, scope, terms, and price. An unsent or revised annual offer cannot
+customer, scope, terms, and price. Supported customer tier, pest-preference,
+commercial-interior and non-termite service-mix edits may advance that witness
+through `deliveryState.annualPlanPublicRevisions`: a server-authored, bounded
+history rooted in the original handoff and bound to the entire current offer.
+The revision is persisted in the same guarded update as the computed price;
+a lost race or service-mix dry run writes neither. Customer/property identity,
+notes, billing options and annual station/setup/coverage terms cannot change
+through this history. Browser receipts remain stripped, and staff revisions
+cannot create customer-revision authority. Ordinary server-computed bundle
+discount changes remain supported. An unsent or otherwise revised annual offer cannot
 reuse an earlier quarterly handoff or a stored pricing stamp: the legacy view
 and `/data` refuse it as ineligible, and `/accept` returns its inactive 409.
 Already accepted or declined rows remain available for their existing terminal

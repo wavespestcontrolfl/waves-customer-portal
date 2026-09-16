@@ -20,7 +20,7 @@ const { formatAddress } = require('../utils/address-normalizer');
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
-const { annualPlanPublicReplayBlocked } = require('../services/estimate-offer-version');
+const { annualPlanPublicReplayBlocked, captureAnnualPlanPublicRevision, stampAnnualPlanPublicRevision } = require('../services/estimate-offer-version');
 
 // Gate pass for the accepted-estimate /book links (GATE_BOOKING_CUSTOMERS_ONLY):
 // the links carry only the correlation estimate_id, so under the customers-only
@@ -13978,6 +13978,7 @@ router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) 
     if (refuseFrozenRestartMutation(estimate, res)) return undefined;
     // Reconcile before this handler recomputes + persists, so a stale
     // "existing customer" classification isn't written back into estimate_data.
+    const annualRevisionSource = captureAnnualPlanPublicRevision(estimate);
     await reconcileFrozenMembershipSnapshot(estimate);
 
     const { selectedTier } = req.body;
@@ -14099,7 +14100,7 @@ router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) 
           ));
         }
       })
-      .update(writes);
+      .update(stampAnnualPlanPublicRevision(annualRevisionSource, writes, 'select-tier'));
     if (!tierUpdateCount) {
       return res.status(409).json({ error: 'Estimate is no longer active' });
     }
@@ -14622,6 +14623,7 @@ router.put('/:token/interior-service', commercialInteriorSwitchLimiter, async (r
       return res.status(400).json({ error: 'included is required' });
     }
     const included = req.body.included;
+    const annualRevisionSource = captureAnnualPlanPublicRevision(estimate);
 
     let parsedData = {};
     try { parsedData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {}); }
@@ -14662,12 +14664,12 @@ router.put('/:token/interior-service', commercialInteriorSwitchLimiter, async (r
           ));
         }
       })
-      .update({
+      .update(stampAnnualPlanPublicRevision(annualRevisionSource, {
         estimate_data: JSON.stringify(parsedData),
         monthly_total: monthlyTotal,
         annual_total: annualTotal,
         updated_at: db.fn.now(),
-      });
+      }, 'interior-service'));
     if (!updateCount) {
       return res.status(409).json({ error: 'Estimate is no longer active' });
     }
@@ -14983,6 +14985,7 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     // member's frozen snapshot would otherwise re-grant the combined tier —
     // and unlike those routes this one WRITES the repriced result back.
     // In-memory only; the write below persists whatever it corrected.
+    const annualRevisionSource = actor === 'customer' ? captureAnnualPlanPublicRevision(estimate) : null;
     await reconcileFrozenMembershipSnapshot(estimate);
 
     const serviceKey = String(body.serviceKey || '');
@@ -15453,7 +15456,7 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
             ));
           }
         })
-        .update({
+        .update(stampAnnualPlanPublicRevision(annualRevisionSource, {
           estimate_data: JSON.stringify(parsedData),
           monthly_total: next.monthlyTotal,
           annual_total: next.annualTotal,
@@ -15466,7 +15469,7 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
           pricing_authority: 'SERVER',
           server_computed_price: next.annualTotal,
           updated_at: trx.fn.now(),
-        });
+        }, 'service-mix'));
       if (!updateCount) return;
       // Rule 14: a deterministic green check auto-applies with an audit trail
       // and NO bell. This row is the blob-independent copy and surfaces in the
@@ -15559,6 +15562,7 @@ router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) 
     if (refuseFrozenRestartMutation(estimate, res)) return undefined;
     // Reconcile before this handler recomputes + persists, so a stale
     // "existing customer" classification isn't written back into estimate_data.
+    const annualRevisionSource = captureAnnualPlanPublicRevision(estimate);
     await reconcileFrozenMembershipSnapshot(estimate);
 
     // Only accept known pref keys; coerce to boolean.
@@ -15679,13 +15683,13 @@ router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) 
           ));
         }
       })
-      .update({
+      .update(stampAnnualPlanPublicRevision(annualRevisionSource, {
         estimate_data: JSON.stringify(parsedData),
         monthly_total: monthlyTotal,
         annual_total: annualTotal,
         onetime_total: onetimeTotal,
         updated_at: db.fn.now(),
-      });
+      }, 'preferences'));
     if (!prefUpdateCount) {
       return res.status(409).json({ error: 'Estimate is no longer active' });
     }
