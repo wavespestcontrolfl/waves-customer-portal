@@ -110,6 +110,44 @@ test.each([
 });
 
 test.each([
+  ['It is not true that there is no charge for your next visit.', 'pass'],
+  ['It is false that there is no charge for your next visit.', 'pass'],
+  ['There is no charge for your next visit.', 'fail'],
+  ['It is not true that there is no charge for the report, but there is no charge for your next visit.', 'fail'],
+  ['Your next visit is not a service that is free.', 'pass'],
+  ['Your next visit is not the one that is complimentary.', 'pass'],
+  ['Your next visit is not a treatment that is complimentary.', 'pass'],
+  ['Your next visit is a service that is free.', 'fail'],
+  ['Your next visit is the one that is complimentary.', 'fail'],
+  ['Your next visit is a treatment that is complimentary.', 'fail'],
+  ["The technician won't have to pay for your next visit.", 'pass'],
+  ['The technician will not have to pay for your next visit.', 'pass'],
+  ["We don't owe anything for your next visit.", 'pass'],
+  ['We owe nothing for your next visit.', 'pass'],
+  ["I don't owe anything for your next visit.", 'pass'],
+  ["You won't have to pay for your next visit.", 'fail'],
+  ["The customer won't have to pay for your next visit.", 'fail'],
+  ["You don't owe anything for your next visit.", 'fail'],
+  ['You owe us nothing for your next visit.', 'fail'],
+  ["The office won't bill you for the next visit.", 'fail'],
+  ["We don't owe anything for your next visit, but you don't owe anything for your next visit.", 'fail'],
+])('price denials and debtor scope stay with their own proposition: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['Your next visit is going to be free.', 'fail'],
+  ["Your next visit's going to be free.", 'fail'],
+  ['The return visit is going to be complimentary.', 'fail'],
+  ['Your next visit will cost you nothing.', 'fail'],
+  ['The return visit will cost nothing.', 'fail'],
+  ['Your next visit is going to cost you nothing.', 'fail'],
+  ['Your next visit is not going to be free.', 'pass'],
+  ['Your next visit could cost you nothing.', 'pass'],
+  ['Your next visit is free to cancel.', 'pass'],
+  ['Your next visit is free to reschedule.', 'pass'],
+  ['Your next visit is free to you.', 'fail'],
+  ['Your next visit is free to cancel, but the return visit is free.', 'fail'],
   ['Your next visit includes a report that is complimentary.', 'pass'],
   ['Your next visit includes a report that is free.', 'pass'],
   ["Your next visit includes a report that's free.", 'pass'],
