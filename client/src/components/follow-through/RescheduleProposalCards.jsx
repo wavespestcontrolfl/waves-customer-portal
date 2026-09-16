@@ -132,11 +132,11 @@ function SeriesReview({ series, Text }) {
     <div className="space-y-1">{occurrences.map((occurrence) => <Text key={occurrence.id}>{occurrenceLabel(occurrence)}</Text>)}</div>
     {skipped > 0 && <Text tone="muted">{skipped} in-progress or skipped visit{skipped === 1 ? '' : 's'} will stay put.</Text>}
     {exceptions > 0 && <Text tone="muted">{exceptions} date exception{exceptions === 1 ? '' : 's'} will move with the plan.</Text>}
-    {conflicts > 0 && <Text tone="alert">{conflicts} landing date{conflicts === 1 ? '' : 's'} overlap another appointment.</Text>}
+    {conflicts > 0 && <Text tone="alert">{conflicts} landing date{conflicts === 1 ? '' : 's'} {conflicts === 1 ? 'has' : 'have'} schedule warnings.</Text>}
     {(series.conflicts || []).map((conflict) => <div key={conflict.occurrenceId} className="space-y-1">
-      <Text tone="alert">Recurring overlap on {dateLabel(conflict.date)}:</Text>
+      <Text tone="alert">Recurring schedule warning on {dateLabel(conflict.date)}:</Text>
       {conflict.appointments.map((appointment) => <Text key={appointment.id} tone="alert">
-        {appointment.service_name} · {staffWindow(conflict.date, appointment.window_start, appointment.window_end)} · {humanize(appointment.status)}
+        {appointment.service_name}{!String(appointment.id).startsWith('infeasible:') && <> · {staffWindow(conflict.date, appointment.window_start, appointment.window_end)} · {humanize(appointment.status)}</>}
       </Text>)}
     </div>)}
   </>;
@@ -150,12 +150,12 @@ function PreviewReview({ preview, who, Text }) {
     {preview.from && <Text tone="muted">Staff booking: {staffWindow(preview.from.date, preview.from.start, preview.from.end)} → {staffWindow(preview.new_date, preview.new_window?.start, preview.new_window?.end)}</Text>}
     <SeriesReview series={preview.series} Text={Text} />
     {preview.overlap.count > 0 && <div className="space-y-1">
-      <Text tone="alert">Selected appointment overlaps {preview.overlap.count} existing appointment{preview.overlap.count === 1 ? '' : 's'}:</Text>
+      <Text tone="alert">Selected appointment has {preview.overlap.count} schedule warning{preview.overlap.count === 1 ? '' : 's'}:</Text>
       {preview.overlap.appointments.map((appointment) => <Text key={appointment.id} tone="alert">
-        {appointment.service_name} · {instantWindow(appointment.current_window?.start_at, appointment.current_window?.end_at)} · {humanize(appointment.status)}
+        {appointment.service_name}{!String(appointment.id).startsWith('infeasible:') && <> · {instantWindow(appointment.current_window?.start_at, appointment.current_window?.end_at)} · {humanize(appointment.status)}</>}
       </Text>)}
     </div>}
-    <Text tone="muted">Schedule overlaps are advisory; both appointments remain on the calendar.</Text>
+    <Text tone="muted">Schedule warnings are advisory; applying this change keeps other appointments on the calendar.</Text>
   </div>;
 }
 

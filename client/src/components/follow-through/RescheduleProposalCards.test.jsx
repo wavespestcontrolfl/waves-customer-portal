@@ -114,8 +114,8 @@ describe('reschedule proposal review', () => {
     expect(screen.getByText('Recurring plan impact (2 visits)')).toBeInTheDocument();
     expect(screen.getAllByText(/Oct 12, 2026 at 2:00 PM–3:00 PM ET → Thu, Oct 15, 2026 at 1:00 PM–2:00 PM ET/)).toHaveLength(2);
     expect(screen.getByText(/Nov 12, 2026 at 10:00 AM–11:30 AM ET → Sun, Nov 15, 2026 at 10:00 AM–11:30 AM ET/)).toBeInTheDocument();
-    expect(screen.getByText(/landing date.*overlap.*another appointment/)).toBeInTheDocument();
-    expect(screen.getByText(/Recurring overlap on/)).toHaveTextContent('Nov 15, 2026');
+    expect(screen.getByText(/landing date.*schedule warnings/)).toBeInTheDocument();
+    expect(screen.getByText(/Recurring schedule warning on/)).toHaveTextContent('Nov 15, 2026');
     expect(screen.getByText(/Conflicting lawn visit/)).toHaveTextContent('confirmed');
 
     fireEvent.click(screen.getByRole('button', { name: 'Apply change' }));
@@ -137,10 +137,25 @@ describe('reschedule proposal review', () => {
     await screen.findByLabelText('Appointment discussed for Synthetic Caller');
     selectSecond();
     fireEvent.click(screen.getByRole('button', { name: 'Preview change' }));
-    expect(await screen.findByText('Selected appointment overlaps 1 existing appointment:')).toBeInTheDocument();
+    expect(await screen.findByText('Selected appointment has 1 schedule warning:')).toBeInTheDocument();
     expect(screen.getByText(/Lawn care.*1:30 PM–2:30 PM ET.*confirmed/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Apply change' })).toBeEnabled();
     expect(adminFetch.mock.calls.some(([url]) => url.endsWith('/apply'))).toBe(false);
+  });
+
+  it.each([false, true])('shows route-capacity verdicts without inventing another appointment (series=%s)', async (series) => {
+    const warning = { id: 'infeasible:route_unverified', service_name: 'This route could not be verified.', status: null };
+    const reviewed = { ...PREVIEW, overlap: { count: series ? 0 : 1, appointments: series ? [] : [warning] },
+      series: series ? { ...PREVIEW.series, conflicts: [{ occurrenceId: 'visit-future', date: '2026-11-15', appointments: [warning] }] }
+        : { collective: false } };
+    adminFetch.mockImplementation(async (url) => url.endsWith('/preview') ? reviewed : FEED);
+    render(<RescheduleProposalCards ui={ui} />);
+    await screen.findByLabelText('Appointment discussed for Synthetic Caller');
+    selectSecond();
+    fireEvent.click(screen.getByRole('button', { name: 'Preview change' }));
+    expect(await screen.findByText(warning.service_name)).toHaveTextContent(/^This route could not be verified\.$/);
+    expect(screen.queryByText(/overlaps .* existing appointment/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Apply change' })).toBeEnabled();
   });
 
   it('requires a complete overlap check before enabling Apply', async () => {
