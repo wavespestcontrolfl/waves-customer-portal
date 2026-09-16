@@ -36,7 +36,10 @@ const {
   supersedeStaleDecision,
 } = require('../services/sms-suggest-mode');
 const autoSendExecutor = require('../services/sms-auto-send');
-const { excludeUnresolvedSendReservations } = require('../services/messaging/review-ask-reservation');
+const {
+  excludeUnresolvedSendReservations,
+  releaseById: releaseReservationById,
+} = require('../services/messaging/review-ask-reservation');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -398,7 +401,7 @@ router.post('/sms', async (req, res, next) => {
     const id = lockedReviewReservationId;
     lockedReviewReservationId = null;
     try {
-      await db('sms_log').where({ id }).del();
+      await releaseReservationById({ id });
     } catch (delErr) {
       logger.warn(`[communications] locked review reservation cleanup failed (${id}): ${delErr.message}`);
     }
@@ -609,6 +612,28 @@ router.post('/sms', async (req, res, next) => {
       await releaseCardClaim();
       await releaseProjectClaim();
       await restoreContractLinks();
+      // The inline review link's claim + sms_log reservation (armed together
+      // above, under the review-send lock) can still be held when an
+      // UNRELATED abort fires later in this handler — e.g. the manual-reply
+      // reservation arm below, which has no idea a review link is riding the
+      // same send. Every dedicated review-claim call site already clears
+      // these two itself before calling abortUnsent (it sets
+      // claimedReviewRequestId back to null first), so this is a no-op
+      // there; it is the ONLY cleanup for a later abort that never touches
+      // them at all (codex #4331/#4333 P1) — left standing, the synthetic
+      // reservation blocks the customer's next ask for up to 72h despite no
+      // provider call ever being made.
+      if (claimedReviewRequestId) {
+        const requestId = claimedReviewRequestId;
+        const claimToken = claimedReviewClaimToken;
+        claimedReviewRequestId = null;
+        try {
+          await require('../services/review-request').releaseInlineClaim(requestId, claimToken);
+        } catch (releaseErr) {
+          logger.warn(`[communications] inline review claim release failed (requestId=${requestId}): ${releaseErr.message}`);
+        }
+      }
+      await releaseLockedReviewReservation();
       await reopenScheduledSuggestions({
         decisionIds: [claimedDecisionId, ...parkedThreadIds],
         reason: 'Send was not attempted — suggestion reopened.',
@@ -916,7 +941,7 @@ router.post('/sms', async (req, res, next) => {
             try {
               const logged = outcome.providerMessageId && await db('sms_log')
                 .where({ twilio_sid: outcome.providerMessageId, direction: 'outbound' }).first('id');
-              if (logged) await db('sms_log').where({ id: reviewReservationId }).del();
+              if (logged) await releaseReservationById({ id: reviewReservationId });
               else await db('sms_log').where({ id: reviewReservationId }).update({
                 status: 'sent', twilio_sid: outcome.providerMessageId || null, updated_at: new Date(),
               });
@@ -924,7 +949,7 @@ router.post('/sms', async (req, res, next) => {
               logger.warn(`[communications] accepted review keeps its reservation (${reviewReservationId}): ${stampErr.message}`);
             }
           } else if (outcome?.deliveryOutcome === 'not_sent') {
-            await db('sms_log').where({ id: reviewReservationId }).del();
+            await releaseReservationById({ id: reviewReservationId });
           }
         };
         try {

@@ -1678,6 +1678,61 @@ describe('admin communications SMS route', () => {
     });
   });
 
+  test('a failed manual-reservation arm also releases a concurrently-held inline review claim and reservation (codex #4331/#4333 P1)', async () => {
+    // An inline review link rides this send alongside OTHER pending
+    // suggestions on the thread — parkedThreadIds.length > 0 means the
+    // review seam reserves its OWN sms_log row rather than repurposing
+    // manualReservationId, so manualReservationId is still armed and live
+    // when the durable-uncertainty boundary below fails to record it.
+    const ReviewService = require('../services/review-request');
+    mockGates.smsAutoSend = true;
+    suggestMode.parkThreadSuggestions.mockResolvedValueOnce(['parked-1']);
+    suggestMode.settleReplyHoldingReservation.mockResolvedValueOnce(false);
+
+    const smsLogDeletes = [];
+    db.mockImplementation((table) => {
+      const first = jest.fn();
+      if (table === 'review_requests') {
+        first.mockResolvedValue({
+          id: 'rr-1', customer_id: 'cust-A', status: 'pending',
+          sms_sent_at: null, triggered_by: 'auto_inline', token: 'tok-abc123',
+        });
+      } else if (table === 'customers') {
+        first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+      }
+      const builder = makeUniversalBuilder();
+      builder.first = first;
+      if (table === 'sms_log') {
+        const realDel = builder.del;
+        builder.del = jest.fn((...args) => { smsLogDeletes.push(true); return realDel(...args); });
+      }
+      return builder;
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to: '+15551234567',
+          body: 'Review us: portal.wavespestcontrol.com/rate/tok-abc123',
+          messageType: 'manual',
+          reviewRequestId: 'rr-1',
+        }),
+      });
+
+      expect(res.status).toBe(503);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      // The inline claim taken before this abort must be handed back — left
+      // standing, it blocks a retry for the whole stale-claim window with no
+      // provider call ever made.
+      expect(ReviewService.releaseInlineClaim).toHaveBeenCalledWith('rr-1', expect.any(Date));
+      // And the sms_log reservation armed alongside it must be deleted, not
+      // left 'sending' to read as a recent ask for the next 72h.
+      expect(smsLogDeletes.length).toBeGreaterThan(0);
+    });
+  });
+
   test('a gate-on manual send without fromNumber reserves and still sends (no 503)', async () => {
     // Regression: the reservation insert must resolve a non-null from_phone
     // without referencing an out-of-scope customer. With the gate on and no
