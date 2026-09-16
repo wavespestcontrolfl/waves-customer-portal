@@ -113,10 +113,19 @@ function capDollars(dollars, maxDiscountDollars) {
   return Number.isFinite(cap) ? Math.min(dollars, Math.max(0, cap)) : dollars;
 }
 
+// The dollar (or percent) figure a discount row carries under either
+// naming convention this module sees in practice — a catalog row's
+// `amount` and a visit/invoice term's `discountAmount`. One place to read
+// it so discountStepDollars and stackOrder's percent-rate comparison can
+// never disagree about which field a given caller used.
+function resolveDiscountAmount(discount) {
+  return Number(discount?.amount ?? discount?.discountAmount) || 0;
+}
+
 // Dollars ONE discount takes off `remaining`, clamped to [0, remaining].
 function discountStepDollars(discount, remaining) {
   if (!discount || !(remaining > 0)) return 0;
-  const amount = Number(discount.amount ?? discount.discountAmount) || 0;
+  const amount = resolveDiscountAmount(discount);
   let dollars = 0;
   if (isPercentDiscountType(discount.discountType)) {
     // Integer-cents basis-point math (Codex P1): remainingCents and
@@ -141,11 +150,41 @@ function discountStepDollars(discount, remaining) {
 
 // Fixed credits first (in the order given), then percentages, then a free
 // service (which takes whatever is left).
+//
+// Percentages compound multiplicatively, so in EXACT math 5% then 10% and
+// 10% then 5% reach the identical final total — multiplication commutes.
+// But each step is rounded to the nearest cent as it's taken, and the SUM
+// of independently-rounded steps is not itself commutative: $99 at 5% then
+// 10% (in that input order) totaled a cent different from 10% then 5%
+// before this fix (Codex pre-push audit P2). Rather than carry exact
+// unrounded fractions through the whole stack (which would still need a
+// rule for how to divide the eventual rounding among the individual
+// items), percentages are sorted into ONE canonical order regardless of
+// how the caller listed them — largest rate first, ties broken by input
+// index for stability — so two calls stacking the SAME set of percentages
+// always compound in the SAME sequence and land on the SAME total, no
+// matter which order they were entered in. Each item's reported `dollars`
+// still reflects its own place in that canonical compounding (mapped back
+// to its original input index for the caller), which is what keeps
+// per-term reporting exact: it sums to totalDollars precisely because it
+// IS the sequence that produced totalDollars, not a separate estimate of
+// it. Fixed credits and the free-service catch-all are unaffected — a
+// fixed dollar figure doesn't depend on compounding order the way a
+// percentage does, and there is normally at most one free service in a
+// stack (it takes whatever remains, regardless of position).
 function stackOrder(discounts) {
   const rank = (d) => (isFixedDiscountType(d?.discountType) ? 0 : isPercentDiscountType(d?.discountType) ? 1 : 2);
   return discounts
     .map((discount, index) => ({ discount, index }))
-    .sort((a, b) => rank(a.discount) - rank(b.discount) || a.index - b.index);
+    .sort((a, b) => {
+      const rankDiff = rank(a.discount) - rank(b.discount);
+      if (rankDiff !== 0) return rankDiff;
+      if (rank(a.discount) === 1) {
+        const rateDiff = resolveDiscountAmount(b.discount) - resolveDiscountAmount(a.discount);
+        if (rateDiff !== 0) return rateDiff;
+      }
+      return a.index - b.index;
+    });
 }
 
 // Spread `totalDollars` pro rata across `poolLines` by `weightOf(line)`,
@@ -222,11 +261,28 @@ function stackDiscounts(base, discounts, { compound = true } = {}) {
   const list = Array.isArray(discounts) ? discounts : [];
   const full = Math.max(0, cents(base));
   let remaining = full;
+  // compound:false (legacy/gate-off): each discount is still individually
+  // sized against the FULL base — that's the defining legacy behavior,
+  // kept as-is — but several full-base discounts can together add up to
+  // more than the base holds ($80 + $50 fixed on a $100 base is $130).
+  // `budget` bounds what the AGGREGATE (and so each item, in the same
+  // fixed-then-percent-then-free-service order the loop already uses) is
+  // allowed to count toward the total, so totalDollars never exceeds
+  // `full` and the invariant totalDollars === full - net holds here too
+  // (Codex pre-push audit P2). compound:true doesn't need this — its own
+  // `remaining` already shrinks step to step, so discountStepDollars'
+  // own clamp keeps every step within what's left.
+  let budget = full;
   const dollarsByIndex = new Array(list.length).fill(0);
   for (const { discount, index } of stackOrder(list)) {
-    const dollars = discountStepDollars(discount, compound ? remaining : full);
+    const raw = discountStepDollars(discount, compound ? remaining : full);
+    const dollars = compound ? raw : Math.min(raw, Math.max(0, cents(budget)));
     dollarsByIndex[index] = dollars;
-    if (compound) remaining = cents(remaining - dollars);
+    if (compound) {
+      remaining = cents(remaining - dollars);
+    } else {
+      budget = cents(budget - dollars);
+    }
   }
   const items = dollarsByIndex.map((dollars, index) => ({ index, dollars }));
   const totalDollars = cents(items.reduce((sum, item) => sum + item.dollars, 0));
@@ -274,6 +330,14 @@ function stackVisitDiscounts({ lines, appointmentDiscount, compound = true }) {
     appointmentDiscountDollars: 0,
   }));
   const appt = appointmentDiscount && appointmentDiscount.discountType ? appointmentDiscount : null;
+  // Which pass the appointment discount belongs to is one decision, not
+  // two: step 2 (the fixed-credit pass) takes it exactly when compounding
+  // AND it's a fixed credit; step 4 (the percent / legacy-catch-all pass)
+  // takes it in every other case where it exists at all. Computing that
+  // once here and reusing it (negated) in step 4's own condition removes
+  // the duplicated `compound` / `isFixedDiscountType(appt...)` logic that
+  // used to appear, inverted, in both conditions separately.
+  const apptInFixedPass = compound && !!appt && isFixedDiscountType(appt.discountType);
 
   // 1. Fixed line credits (legacy: every line credit, in one pass).
   for (const line of state) {
@@ -285,7 +349,7 @@ function stackVisitDiscounts({ lines, appointmentDiscount, compound = true }) {
 
   // 2. Fixed appointment credit, spread pro rata over the eligible lines.
   let appointmentDiscountDollars = 0;
-  if (compound && appt && isFixedDiscountType(appt.discountType)) {
+  if (apptInFixedPass) {
     const eligible = state.filter((line) => line.eligible && line.remaining > 0);
     const pool = cents(eligible.reduce((sum, line) => sum + line.remaining, 0));
     appointmentDiscountDollars = discountStepDollars(appt, pool);
@@ -312,7 +376,7 @@ function stackVisitDiscounts({ lines, appointmentDiscount, compound = true }) {
   // no per-line meaning for the appointment discount, so every line's
   // appointmentDiscountDollars stays 0 there, unchanged from before this
   // field existed.
-  if (appt && (!compound || !isFixedDiscountType(appt.discountType))) {
+  if (appt && !apptInFixedPass) {
     const eligibleLines = state.filter((line) => line.eligible);
     const base = cents(eligibleLines.reduce((sum, line) => sum + line.remaining, 0));
     appointmentDiscountDollars = discountStepDollars(appt, base);
@@ -351,11 +415,13 @@ function stackVisitDiscounts({ lines, appointmentDiscount, compound = true }) {
  * still carry a balance (allocateProRata — same technique, same rounding,
  * as stackVisitDiscounts' fixed-appointment-credit pass); (3) each line's
  * own percent/free_service terms, on what's left; (4) percent/free_service
- * document-wide terms, on the total remainder across every line. A
- * document-level term reaches EVERY line — there is no `eligible` scoping
- * here, unlike the appointment discount above (no surface today needs a
- * per-line "Applies to" filter on an invoice-level discount) — and there
- * is no compound:false: the gate-off path never reaches this function, so
+ * document-wide terms, each against its own remaining pool. A document-
+ * level term reaches EVERY line by default, but an `eligibleLines` array on
+ * the term (index into `lines`) narrows it to a subset — fixed, percentage,
+ * and free_service terms all honor it (steps 2 and 4 both resolve one term
+ * at a time against just the lines it reaches), the replay of a scheduled
+ * appointment discount's own "Applies to" line scope. There is still no
+ * compound:false: the gate-off path never reaches this function, so
  * callers keep their own pre-lane math for that case (invoice.js's
  * create() computes each line discount off its own full line and each
  * manual discount independently against the untouched subtotal, exactly
@@ -429,19 +495,42 @@ function stackDocumentDiscounts({ lines, documentTerms }) {
     line.remaining = stacked.net;
   }
 
-  // 4. DOCUMENT percent/free_service terms, on the total remainder across
-  // every line (no per-line allocation — no consumer needs a document
-  // percentage's per-line share today, unlike the fixed pass above whose
-  // allocation step 3 depends on). `eligibleLines` is deliberately NOT
-  // honored here: the only scoped document term today is a frozen
-  // appointment stamp, which is always fixed_amount and so never reaches
-  // this pass. A scoped document PERCENTAGE would need its own pool here.
+  // 4. DOCUMENT percent/free_service terms — same per-term pool technique
+  // as the fixed pass above (step 2), now honoring `eligibleLines` for
+  // these types too (Codex pre-push audit P1). This used to batch every
+  // non-fixed document term into one stackDiscounts() call against the
+  // total remainder across ALL lines, on the reasoning that "the only
+  // scoped document term today is a frozen appointment stamp, which is
+  // always fixed_amount" — but calculateVisitFinancialsForAddons already
+  // supports a service-SCOPED percentage appointment discount, and the
+  // catalog has a service-scoped free_service preset; replaying either as
+  // a document term here computed against every line regardless of scope,
+  // so an unrelated service got discounted too, and a scoped free_service
+  // term could zero the WHOLE invoice instead of just its own line.
+  // Resolved one term at a time, in the order given, against its own
+  // eligible pool's CURRENT remainder — an unscoped term still reaches
+  // every line still carrying a balance and, since its pool then equals
+  // the old finalBase, compounds to the identical total a document-wide
+  // percentage always had. Per-line allocation is a natural side effect of
+  // needing a real per-term pool at all now (the old "no consumer needs a
+  // per-line share" reasoning no longer holds once scoping requires this
+  // pool in the first place), and it's what actually lets the eligible
+  // line's own `net` reflect the discount instead of just the aggregate
+  // `documentTerms[].dollars` figure.
   const docNonFixedIdx = docTerms
     .map((t, i) => (!isFixedDiscountType(t?.discountType) ? i : -1))
     .filter((i) => i >= 0);
-  const finalBase = cents(state.reduce((sum, line) => sum + line.remaining, 0));
-  const docNonFixedStacked = stackDiscounts(finalBase, docNonFixedIdx.map((i) => docTerms[i]), { compound: true });
-  docNonFixedIdx.forEach((termIdx, i) => { docDollars[termIdx] = docNonFixedStacked.items[i].dollars; });
+  for (const termIdx of docNonFixedIdx) {
+    const term = docTerms[termIdx];
+    const pool = state.filter((line, i) => line.remaining > 0 && termReachesLine(term, i));
+    const poolTotal = cents(pool.reduce((sum, line) => sum + line.remaining, 0));
+    const dollars = discountStepDollars(term, poolTotal);
+    docDollars[termIdx] = dollars;
+    if (!pool.length) continue;
+    allocateProRata(pool, poolTotal, (line) => line.remaining, dollars, (line, share) => {
+      line.remaining = cents(Math.max(0, line.remaining - share));
+    });
+  }
 
   return {
     lines: state.map((line) => ({ termDollars: line.termDollars, net: line.remaining })),
