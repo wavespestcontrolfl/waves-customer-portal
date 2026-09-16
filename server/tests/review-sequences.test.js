@@ -5296,6 +5296,65 @@ describe('legacy sendSMS — ambiguous returned provider failure', () => {
   });
 });
 
+// Codex P1: sendSMS's `uncertain`/`claimLost` outcomes leave the row exactly
+// as the in-flight attempt found it — no scheduled_for — for the
+// stranded-send reconciliation (or the claim's owner) to resolve;
+// processScheduled only ever selects status='pending' rows WITH a
+// scheduled_for, so neither outcome is a queued retry. unsentOutcome (feeding
+// create()/_createGated, and from there /trigger, /tech-trigger and the
+// Intelligence Bar tool) used to fold both into the same generic `deferred`
+// shape a real cron-owned retry produces, telling the operator a text "will
+// go out automatically" that no cron pass could ever pick up.
+describe('unsentOutcome — uncertain and claim-held sends are not a queued retry', () => {
+  test('an uncertain provider handoff reports a distinct code, not the generic deferred shape', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'unc-out-1', first_name: 'Lee', phone: '+19410000196', nearest_location_id: 'venice' }],
+    });
+    db.mockImplementation(mock);
+    const sendSpy = jest.spyOn(ReviewService, 'sendSMS')
+      .mockResolvedValueOnce({ sent: false, uncertain: true, reason: 'provider_uncertain', requestId: 'ignored' });
+
+    try {
+      const request = await ReviewService.create({ customerId: 'unc-out-1', triggeredBy: 'tech' });
+      expect(request.sendOutcome).toEqual({ sent: false, uncertain: true, reason: 'provider_uncertain', nextAllowedAt: null });
+      // Not the generic deferred shape a real cron-owned retry uses — a
+      // caller keying off `.deferred` to decide whether a retry is queued
+      // must not see one here.
+      expect(request.sendOutcome.deferred).toBeUndefined();
+    } finally { sendSpy.mockRestore(); }
+  });
+
+  test('a claim another sender already holds also reports the distinct code, not the generic deferred shape', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'unc-out-2', first_name: 'Sam', phone: '+19410000197', nearest_location_id: 'venice' }],
+    });
+    db.mockImplementation(mock);
+    const sendSpy = jest.spyOn(ReviewService, 'sendSMS')
+      .mockResolvedValueOnce({ sent: false, claimLost: true, reason: 'review_claim_lost', requestId: 'ignored' });
+
+    try {
+      const request = await ReviewService.create({ customerId: 'unc-out-2', triggeredBy: 'tech' });
+      expect(request.sendOutcome).toEqual({ sent: false, uncertain: true, reason: 'review_claim_lost', nextAllowedAt: null });
+      expect(request.sendOutcome.deferred).toBeUndefined();
+    } finally { sendSpy.mockRestore(); }
+  });
+
+  test('an ordinary provider-retry deferral keeps its real nextAllowedAt (the queued-retry copy stays honest)', async () => {
+    const retryAt = new Date(Date.now() + 5 * 60000).toISOString();
+    const mock = makeMock({
+      customers: [{ id: 'unc-out-3', first_name: 'Di', phone: '+19410000198', nearest_location_id: 'venice' }],
+    });
+    db.mockImplementation(mock);
+    const sendSpy = jest.spyOn(ReviewService, 'sendSMS')
+      .mockResolvedValueOnce({ deferred: 'provider_retry', nextAllowedAt: retryAt });
+
+    try {
+      const request = await ReviewService.create({ customerId: 'unc-out-3', triggeredBy: 'tech' });
+      expect(request.sendOutcome).toEqual({ sent: false, deferred: 'provider_retry', nextAllowedAt: retryAt });
+    } finally { sendSpy.mockRestore(); }
+  });
+});
+
 describe('shared ask history foundation', () => {
   const history = require('../services/review-ask-history');
   const base = new Date('2035-01-01T15:00:00Z').getTime();

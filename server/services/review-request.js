@@ -709,6 +709,18 @@ function unsentOutcome(outcome) {
   // reason rather than as a held send (codex #4331 P1). approved_phone_drift
   // is the exception only because its callers throw immediately below.
   if (outcome.refused) return { sent: false, failed: outcome.refused, nextAllowedAt: null };
+  // An uncertain provider handoff or a claim another sender already holds is
+  // NOT a queued retry (codex P1): sendSMS leaves the row exactly as the
+  // in-flight attempt found it — no scheduled_for — for the stranded-send
+  // reconciliation (or the claim's owner) to resolve, not for
+  // processScheduled, which only selects status='pending' rows with a
+  // scheduled_for. Falling through to the generic deferred shape below told
+  // callers a text "will go out automatically" that no cron pass can ever
+  // pick up. Reported with its own `uncertain` marker so every caller can
+  // tell the operator the honest state instead.
+  if (outcome.uncertain || outcome.claimLost) {
+    return { sent: false, uncertain: true, reason: outcome.reason || null, nextAllowedAt: null };
+  }
   return outcome.failed
     ? { sent: false, failed: outcome.failed, nextAllowedAt: null }
     : { sent: false, deferred: outcome.deferred, nextAllowedAt: outcome.nextAllowedAt || null };

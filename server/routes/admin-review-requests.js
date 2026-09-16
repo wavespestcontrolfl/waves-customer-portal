@@ -127,12 +127,19 @@ router.post('/tech-trigger', async (req, res, next) => {
     const alreadyDelivered = request.sendOutcome?.alreadyDelivered === true;
     // A block or suppression (opt-out, no consented recipient) will not clear
     // by retrying; only the unqueued provider failure is worth another try.
+    // Uncertain/claim-held outcomes (codex P1) are checked BEFORE the
+    // generic deferred branch: sendSMS leaves those rows exactly as the
+    // in-flight attempt found them — no scheduled_for — so processScheduled
+    // can never select them. Promising "will go out automatically" there was
+    // a promise no cron pass could keep; report the unresolved state instead.
     const unsentFields = !unsent ? {}
-      : unsent.failed === 'send_failed_unqueued'
-        ? { failed: unsent.failed, message: 'The review text could not be sent. Try again in a few minutes.' }
-        : unsent.failed
-          ? { failed: unsent.failed, message: 'The review text was not sent: this customer cannot receive review texts right now.' }
-          : { deferred: unsent.deferred, nextAllowedAt: unsent.nextAllowedAt, message: 'The review text is queued and will go out automatically' };
+      : unsent.uncertain
+        ? { uncertain: true, message: 'Delivery could not be confirmed — this review text may already be with the customer. Check the SMS delivery log before sending another.' }
+        : unsent.failed === 'send_failed_unqueued'
+          ? { failed: unsent.failed, message: 'The review text could not be sent. Try again in a few minutes.' }
+          : unsent.failed
+            ? { failed: unsent.failed, message: 'The review text was not sent: this customer cannot receive review texts right now.' }
+            : { deferred: unsent.deferred, nextAllowedAt: unsent.nextAllowedAt, message: 'The review text is queued and will go out automatically' };
     res.json({
       sent: !unsent,
       ...unsentFields,
