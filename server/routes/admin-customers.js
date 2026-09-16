@@ -5,7 +5,6 @@ const router = express.Router();
 const db = require('../models/db');
 const { technicianCurrentVisitFilter, technicianServicesCustomer } = require('../services/technician-visit-scope');
 const LeadScorer = require('../services/lead-scorer');
-const PipelineManager = require('../services/pipeline-manager');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { stageLifecycleStamps } = require('../services/customer-stages');
@@ -3640,7 +3639,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         member_since: etDateString(),
         referral_code: code, lead_source: normalized.leadSource,
         pipeline_stage: normalized.pipelineStage,
-        pipeline_stage_changed_at: new Date(),
+        ...stageLifecycleStamps(null, normalized.pipelineStage, {}, { today: etDateString() }),
         assigned_to: req.technicianId,
         company_name: normalized.companyName, property_type: normalized.propertyType, contact_role: normalized.contactRole.value, crm_notes: normalized.notes,
       }).returning('*');
@@ -3668,10 +3667,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
       return { ...created, _attachedToExistingAccount: !!account.existingCustomer, _existingCustomer: account.existingCustomer, _propertyCount: Number(siblingCount?.count || 0) + 1 };
     });
 
-    // Intentional fire-and-forget: derived pipeline/score state can lag the
-    // create response, and failures should not roll back the durable customer.
-    void PipelineManager.onEvent(customer.id, 'lead_created')
-      .catch(err => logger.warn(`[customers:${customer.id}] pipeline lead_created failed: ${err.message}`));
+    // The transaction already saved the chosen stage (default: new_lead).
+    // Replaying lead_created here would overwrite an explicit stage choice.
+    // Derived scoring can lag the response and must not roll back creation.
     void LeadScorer.calculateScore(customer.id)
       .catch(err => logger.warn(`[customers:${customer.id}] lead score failed: ${err.message}`));
     await auditCustomerMutation(req, 'customer.create', customer.id, {
