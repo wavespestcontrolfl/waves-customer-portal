@@ -1321,15 +1321,15 @@ const REPORT_COMPLETION_TIME = `(?:(?:on\\s+)?(?:${VISIT_TIME_RE.source})|yester
 const REPORT_COMPLETION_TIME_RE = new RegExp(REPORT_COMPLETION_TIME, 'gi');
 const REPORT_PARTICIPLE_RE = /^(?:applied|placed|used|treated|sprayed|put|received)$/i;
 const REPORT_LOCATION_RECIPIENT_VERB_RE = /^(?:got|received)$/i;
-const REPORT_NOUN_LED_PREFIX_RE = /^\s*(?:(?:the|a|an)\s*)?$/i;
+const REPORT_NOUN_LED_PREFIX_RE = /^\s*(?:(?:the|a|an|your|our|their|his|her|my|its)\s*)?$/i;
 const REPORT_LOCATION_RECIPIENT_PREDICATE_RE = /^\s*(?:(?:itself|has|have|had|already|also|just|now|\w+ly)\s+)*$/i;
-const REPORT_DIRECT_OBJECT_GAP_RE = /^\s*(?:(?:the|a|an)\s+)?$/i;
+const REPORT_DIRECT_OBJECT_GAP_RE = /^\s*(?:(?:the|a|an|your|our|their|his|her|my|its)\s+)?$/i;
 const REPORT_COORDINATED_OBJECT_GAP_RE = /\b(?:around|along|on|to|at|in)\b[^.!?;]*\band\s+(?:[\w'\u2019-]+\s+){0,2}$/i;
 const REPORT_WENT_LOCATION_RE = /^\s*(?:around|along|on|to|at|in)\b/i;
 const REPORT_TREATMENT_LOCATION_LINK_RE = /\b(?:around|along|on|to|at|in)\b/i;
-const REPORT_LOCATION_NOUN_PREFIX = `(?:(?:almost|nearly)\\s+)?(?:(?:the|a|an)\\s+)?(?:(?:full|entire|whole|outer|inner|front|rear|back|side|northern|southern|eastern|western|exterior|interior)\\s+){0,2}`;
+const REPORT_LOCATION_NOUN_PREFIX = `(?:(?:almost|nearly)\\s+)?(?:(?:the|a|an|your|our|their|his|her|my|its)\\s+)?(?:(?:full|entire|whole|outer|inner|front|rear|back|side|northern|southern|eastern|western|exterior|interior)\\s+){0,2}`;
 const REPORT_LOCATION_TARGET_PREFIX_RE = new RegExp(`^\\s*${REPORT_LOCATION_NOUN_PREFIX}$`, 'i');
-const REPORT_SHARED_LOCATION_TARGET_PREFIX_RE = new RegExp(`^\\s*(?:(?:the|a|an)\\s+)?(?:[\\w'\\u2019-]+\\s+){1,3}and\\s+${REPORT_LOCATION_NOUN_PREFIX}$`, 'i');
+const REPORT_SHARED_LOCATION_TARGET_PREFIX_RE = new RegExp(`^\\s*(?:(?:the|a|an|your|our|their|his|her|my|its)\\s+)?(?:[\\w'\\u2019-]+\\s+){1,3}and\\s+${REPORT_LOCATION_NOUN_PREFIX}$`, 'i');
 const REPORT_COORDINATED_LOCATION_PREFIX_RE = new RegExp(
   `^\\s*(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+)?${REPORT_LOCATION_NOUN_PREFIX}$`, 'i',
 );
@@ -1356,8 +1356,9 @@ const REPORT_TRAILING_DENIAL_RE = new RegExp(
 );
 const REPORT_CONCISE_NONCOMPLETION_RE = /^\s*(?:(?:(?:is|are|was|were|has|have|had)(?:\s+(?:been|being))?\s+)?(?:(?:only|just|merely|simply|still)\s+)*(?:(?:the|our|your|their|his|her|my|its)\s+)?(?:(?:recommended|scheduled|planned|intended|proposed|suggested|considered|expected|required|needed|pending)\b|(?:an?\s+)?(?:recommendation|plan|proposal|suggestion|possibility)\b|under\s+consideration\b|(?:for\s+)?(?:tomorrow|tonight|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b)|(?:will|shall|would|should|can|could|may|might|must|is going to|are going to|was going to|were going to)\b)/i;
 function reportTrailingNoncompletion(text) {
-  const anaphoric = /^(?:it|this|that)\s+(.+)$/i.exec(text.trim())
-    || new RegExp(`^${REPORT_RETRACTION_ACTOR}\\s+(.+?)\\s+to\\s+${REPORT_ANAPHORIC_ACTION}\\s*$`, 'i').exec(text.trim());
+  const qualifier = text.replace(/\b(?:actually|in\s+fact)\b[,\s]*/gi, '').trim();
+  const anaphoric = /^(?:it|this|that)\s+(.+)$/i.exec(qualifier)
+    || new RegExp(`^${REPORT_RETRACTION_ACTOR}\\s+(.+?)\\s+to\\s+${REPORT_ANAPHORIC_ACTION}\\s*$`, 'i').exec(qualifier);
   return Boolean(anaphoric && REPORT_CONCISE_NONCOMPLETION_RE.test(anaphoric[1]));
 }
 // Qualified shorthand must positively state completion or cite the report;
@@ -1365,8 +1366,8 @@ function reportTrailingNoncompletion(text) {
 const REPORT_CONCISE_COMPLETION_RE = new RegExp(`^(?:(?:(?:was|were|is|are|has been|have been|had been)\\s+)?(?:(?:already|actually|just)\\s+)*completed(?:\\s+${REPORT_COMPLETION_TIME})?|as\\s+(?:noted|documented|recorded|shown)\\s+in\\s+the\\s+report)?\\s*$`, 'i');
 const REPORT_HYPOTHETICAL_QUALIFIER_RE = /\b(?:only|just|merely)\s+(?:in\s+theory|hypothetically|on\s+paper)\b/i;
 const REPORT_HYPOTHETICAL_GOVERNOR_RE = /^\s*(?:suppose|supposing|assuming|imagine|let['’]s\s+say)\b/i;
-const REPORT_ASSERTION_START = `(?:(?:the|a|an)\\s+)?(?:[\\w'\u2019-]+\\s+){1,4}(?:(?:(?:was|were|is|are|has|have|had|got)\\s+(?:\\w+ly\\s+)?)?(?:${REPORT_FINDING_VERB_RE.source}|\\b(?:receiving|getting)\\b))`;
-const REPORT_VERBLESS_PRODUCT_LOCATION_START = `(?:(?:the|a|an)\\s+)?(?:(?:granular|gel|liquid|residual)\\s+)?(?:bait|dust|foam|granules?|product|treatment)\\s+${REPORT_TREATMENT_LOCATION_LINK_RE.source}`;
+const REPORT_ASSERTION_START = `(?:(?:the|a|an|your|our|their|his|her|my|its)\\s+)?(?:[\\w'\u2019-]+\\s+){1,4}(?:(?:(?:was|were|is|are|has|have|had|got)\\s+(?:\\w+ly\\s+)?)?(?:${REPORT_FINDING_VERB_RE.source}|\\b(?:receiving|getting)\\b))`;
+const REPORT_VERBLESS_PRODUCT_LOCATION_START = `(?:(?:the|a|an|your|our|their|his|her|my|its)\\s+)?(?:(?:granular|gel|liquid|residual)\\s+)?(?:bait|dust|foam|granules?|product|treatment)\\s+${REPORT_TREATMENT_LOCATION_LINK_RE.source}`;
 const REPORT_ASSERTION_BOUNDARY_RE = new RegExp(`(?:,\\s*|\\b(?:with|and|before|after)\\s+)(?=${REPORT_ASSERTION_START})|\\bwith\\s+(?=${REPORT_VERBLESS_PRODUCT_LOCATION_START})`, 'gi');
 const REPORT_UNRELATED_OR_CLAUSE_RE = /^or\s+(?:(?:the|our|your|their)\s+)?(?:technician|tech|crew|team|office|report|i|we|you|he|she|they|it)\s+(?:is|are|was|were|has|have|had|will|would|should|can|could|did|does|do)\b/i;
 const REPORT_SHARED_LIST_CONDITION_RE = new RegExp(
@@ -1469,9 +1470,9 @@ function reportLocationIsTreatmentTarget(
     // and "the perimeter was treated with P" assert the same pairing.
     if ((findingVerb.index < locationAt
           && /^\s+with\s+$/i.test(betweenLocationAndProduct)
-          && /\b(?:treated|sprayed|applied|placed|used)\s+(?:(?:the|a|an)\s+)?$/i.test(beforeLocation))
+          && /\b(?:treated|sprayed|applied|placed|used)\s+(?:(?:the|a|an|your|our|their|his|her|my|its)\s+)?$/i.test(beforeLocation))
         || (locationAt < findingVerb.index
-          && /^\s*(?:(?:the|a|an)\s+)?$/i.test(beforeLocation)
+          && /^\s*(?:(?:the|a|an|your|our|their|his|her|my|its)\s+)?$/i.test(beforeLocation)
           && /\b(?:was|were|has\s+been|had\s+been)\s+(?:treated|sprayed|applied|placed|used)\s+with\s+$/i.test(betweenLocationAndProduct))) return true;
     const treatmentTail = affirmed.slice(relationshipStart);
     const laterTargetLink = REPORT_TREATMENT_LOCATION_LINK_RE.exec(treatmentTail);
@@ -1498,7 +1499,7 @@ function reportLocationIsTreatmentTarget(
     && new RegExp(`^\\s*${REPORT_COMPLETION_TIME}\\s*$`, 'i').test(precedingTarget);
   return Boolean(finalTargetLink) && !REPORT_LOCATION_DETOUR_RE.test(locationLink)
     && (!precedingTarget || /\band\s*$/i.test(precedingTarget) || precedingTargetIsTime)
-    && !/\b(?:near|beside|next to|adjacent to)\s+(?:(?:the|a|an)\s+)?$/i.test(locationLink)
+    && !/\b(?:near|beside|next to|adjacent to)\s+(?:(?:the|a|an|your|our|their|his|her|my|its)\s+)?$/i.test(locationLink)
     && (REPORT_LOCATION_TARGET_PREFIX_RE.test(targetPrefix)
       || REPORT_SHARED_LOCATION_TARGET_PREFIX_RE.test(targetPrefix));
 }
@@ -1563,10 +1564,10 @@ function reportHasConciseFinding(affirmed, subjectAt, subjectLength, locationAt,
     .replace(/^\s*(?:(?:is|are|was|were|has|have|had)\s+(?:been\s+)?)?/i, '');
   // Presentation punctuation does not change the trailing qualifier's scope.
   const qualifier = affirmed.slice(evidenceEnd)
-    .split(/,?\s+and\s+(?=(?:(?:the|a|an)\s+)?[\w'\u2019-]+(?:\s+[\w'\u2019-]+){0,2}\s+(?:is|are|was|were|has|have|around|along|on|to|at|in)\b)/i)[0]
+    .split(/,?\s+and\s+(?=(?:(?:the|a|an|your|our|their|his|her|my|its)\s+)?[\w'\u2019-]+(?:\s+[\w'\u2019-]+){0,2}\s+(?:is|are|was|were|has|have|around|along|on|to|at|in)\b)/i)[0]
     .replace(/^[\s,:—–-]+/, '')
     .replace(/^(?:perimeter|area|wall|walls|zone|edge)\b[\s,]*/i, '');
-  return !findingVerb && /^(?:(?:the|a|an|granular)\s*)?$/i.test(affirmed.slice(0, firstAt).trim())
+  return !findingVerb && /^(?:(?:the|a|an|your|our|their|his|her|my|its|granular)\s*)?$/i.test(affirmed.slice(0, firstAt).trim())
     && REPORT_FRONTED_LOCATION_PREFIX_RE.test(locationPrefix)
     && REPORT_CONCISE_COMPLETION_RE.test(qualifier);
 }

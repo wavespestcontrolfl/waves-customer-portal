@@ -541,3 +541,32 @@ test.each([
   const spoken = [`Talstar P was applied to the exterior perimeter, but ${tail}.`];
   expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
 });
+
+test.each(['your', 'our', 'their', 'his', 'her', 'my', 'its'])
+('possessive determiners preserve treatment-location frames: %s', (determiner) => {
+  const findings = [
+    `Talstar P was applied around ${determiner} exterior perimeter.`,
+    `We treated ${determiner} exterior perimeter with Talstar P.`,
+    `${determiner} exterior perimeter was treated with Talstar P.`,
+    `${determiner} exterior perimeter received Talstar P.`,
+    `Talstar P around ${determiner} exterior perimeter.`,
+    `Around ${determiner} exterior perimeter, Talstar P was applied.`,
+  ];
+  for (const text of findings) expect(checks.report_readback_confirms(report, {}, { spoken: [text] })[0]).toBe('pass');
+  const spoken = [`Talstar P was applied near ${determiner} exterior perimeter.`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe('fail');
+});
+
+test.each([
+  ['actually it was only a recommendation', 'fail'],
+  ['actually, it was only a recommendation', 'fail'],
+  ['it was actually only planned', 'fail'],
+  ['it actually was only a recommendation', 'fail'],
+  ['in fact it was only planned', 'fail'],
+  ['we actually only planned to do so', 'fail'],
+  ['actually the follow-up was only planned', 'pass'],
+  ['it was actually applied indoors too', 'pass'],
+])('discourse modifiers do not hide report noncompletion: %s', (tail, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter, but ${tail}.`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
