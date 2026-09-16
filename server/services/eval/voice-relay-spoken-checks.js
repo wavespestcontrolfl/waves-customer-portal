@@ -1476,7 +1476,7 @@ function no_third_party_disclosure(value, record, { spoken }) {
 // (clauseIsNegated) — the shared clause primitive doing directly what no
 // fixture lookbehind could.
 const REPORT_UNCERTAINTY_RE = /\b(?:can|must|may|might|could|would|should|will|shall|going to|i\s+(?:think|believe|guess|suppose)|my\s+(?:guess|belief|assumption)\s+is|plan(?:s|ned)? to|intend(?:s|ed|ing)?(?:\s+to)?|wish(?:es|ed|ing)?|maybe|perhaps|possibly|potentially|probably)\b/i;
-const REPORT_INSTRUCTION_RE = /(?:^|,\s*)(?:please\s+)?(?:apply|use|put|treat|spray|place)\b|\b(?:please|make sure|ensure|remember to)\b/i;
+const REPORT_INSTRUCTION_RE = /(?:^|,\s*)(?:please\s+)?(?:apply|use|put|treat|spray|place)\b|\b(?:make sure|ensure|remember to|please\s+(?:confirm|verify|check|tell))\b/i;
 const REPORT_FINDING_VERB_RE = /\b(?:applied|placed|used|treated|sprayed|put|went|got|received)\b/i;
 const REPORT_COMPLETION_TIME = `(?:(?:on\\s+)?(?:${VISIT_TIME_RE.source})|yesterday|earlier|recently|last\\s+(?:week|month|year)|(?:before|after)\\s+(?:breakfast|lunch|dinner))(?:\\s+(?:this\\s+)?(?:morning|afternoon|evening|night))?`;
 const REPORT_COMPLETION_TIME_RE = new RegExp(REPORT_COMPLETION_TIME, 'gi');
@@ -1575,6 +1575,14 @@ const REPORT_SHARED_LIST_CONDITION_RE = new RegExp(
 
 function reportFindingIsUncertain(text) {
   return REPORT_UNCERTAINTY_RE.test(text.replace(REPORT_COMPLETION_TIME_RE, ''));
+}
+
+function reportFindingIsInstruction(affirmed, subjectAt, locationAt, findingVerb, findingEvidenceEnd) {
+  const firstFindingAt = Math.min(subjectAt, locationAt, findingVerb ? findingVerb.index : Infinity);
+  // A comma before the finding can end an unrelated instruction; a later
+  // instruction after the matched treatment is outside its evidence span.
+  const governingStart = affirmed.lastIndexOf(',', firstFindingAt - 1) + 1;
+  return REPORT_INSTRUCTION_RE.test(affirmed.slice(governingStart, findingEvidenceEnd));
 }
 
 // A comma or "with" opens a separate report assertion only when its right
@@ -1860,7 +1868,8 @@ function reportRetractionClause(text, subject, location) {
   // the same causal boundary used for free-visit claims, not an arbitrary word cap.
   // Here "do so" refers to the finding; its "so" is not a new clause.
   const anaphoric = text.replace(/\b(?:actually|in\s+fact)\b[,\s]*/gi, '')
-    .replace(/\b(do|did|done)\s+so\b/gi, '$1 that');
+    .replace(/\b(do|did|done)\s+so\b/gi, '$1 that')
+    .replace(/^\s*(?:no|nope)\s*,\s*(?=\S)/i, '');
   const qualifier = clauseOf(anaphoric, 0).split(CLAIM_CAUSAL_BOUNDARY_RE)[0]
     .split(/\bsince\b/i)[0].trim().replace(/,\s*$/, '')
     .replace(/(?:,\s*|\s+)(?:after all|at any point)(?=(?:,\s*(?:sorry|my\s+mistake|my\s+apologies))?$)/i, '');
@@ -2032,7 +2041,8 @@ function report_readback_confirms(value, record, { spoken }) {
             && !REPORT_HYPOTHETICAL_GOVERNOR_RE.test(findingEvidence)
             && !REPORT_TRAILING_UNCERTAINTY_RE.test(trailingEvidence)
             && !REPORT_HYPOTHETICAL_QUALIFIER_RE.test(trailingEvidence)
-            && !REPORT_CONCISE_NONCOMPLETION_RE.test(trailingEvidence) && !REPORT_INSTRUCTION_RE.test(affirmed)
+            && !REPORT_CONCISE_NONCOMPLETION_RE.test(trailingEvidence)
+            && !reportFindingIsInstruction(affirmed, subjectAt, locationAt, findingVerb, findingEvidenceEnd)
             && !alternativeLocation
             && reportRespectivelyPairsFinding(affirmed, subjectAt, locationAt, findingVerb)
             && (completedFinding || conciseFinding)

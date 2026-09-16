@@ -38,6 +38,28 @@ test.each([
 });
 
 test.each([
+  ['no, it was not', 'fail'],
+  ['no, that never happened', 'fail'],
+  ['no, it was only planned', 'fail'],
+  ["nope, it wasn't applied there", 'fail'],
+  ['no, it was not applied indoors', 'pass'],
+  ['no, bait was not applied there', 'pass'],
+  ['no, it was only planned for the garage', 'pass'],
+  ['no, the appointment was not confirmed', 'pass'],
+])('discourse no keeps report retraction scope: %s', (tail, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter, but ${tail}.`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
+test.each([
+  ['today', 'fail'],
+  ['yesterday', 'pass'],
+])('discourse no keeps report date scope: %s', (deniedDay, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter today, but no, it was not applied there ${deniedDay}.`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
+test.each([
   ['Talstar P was applied to the exterior perimeter today, but it was not applied there today.', 'fail'],
   ["Talstar P was applied to the exterior perimeter today, but it wasn't applied there today.", 'fail'],
   ["Talstar P was applied to the exterior perimeter today, but we didn't apply it there today.", 'fail'],
@@ -527,6 +549,21 @@ test.each([
   ['Please apply Talstar P to the exterior perimeter.', 'fail'],
 ])('report findings preserve their affirmative location: %s', (text, status) => {
   expect(checks.report_readback_confirms(report, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['We applied Talstar P to the exterior perimeter, please check your email for the report.', 'pass'],
+  ['Please check your email, Talstar P was applied to the exterior perimeter.', 'pass'],
+  ['Please note that Talstar P was applied to the exterior perimeter.', 'pass'],
+  ['We applied Talstar P to the exterior perimeter, please apply bait indoors.', 'pass'],
+  ['We applied Talstar P to the exterior perimeter, remember to check the report.', 'pass'],
+  ['Please confirm Talstar P was applied to the exterior perimeter.', 'fail'],
+  ['Please check that Talstar P was applied to the exterior perimeter.', 'fail'],
+  ['Please tell me Talstar P was applied to the exterior perimeter.', 'fail'],
+  ['Please make sure Talstar P was applied to the exterior perimeter.', 'fail'],
+  ['Please apply Talstar P to the exterior perimeter.', 'fail'],
+])('report treatment instructions stay local to the finding: %s', (spoken, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken: [spoken] })[0]).toBe(status);
 });
 
 test.each([
