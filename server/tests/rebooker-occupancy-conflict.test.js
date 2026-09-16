@@ -981,7 +981,12 @@ describe('reschedule — visit membership fence (codex #3609 r13 P2)', () => {
     const lockSpy = jest.spyOn(vg, 'lockStopForRow').mockResolvedValue('p1:2026-09-01');
     const membersSpy = jest.spyOn(vg, 'openMembers');
     const unitSpy = jest.spyOn(vg, 'moveVisitAsUnit').mockResolvedValue(null);
-    const wire = (visitStatus, others) => {
+    let frozenReason = null;
+    const frozenSpy = jest.spyOn(vg, 'frozenVisitVerdict').mockImplementation(async () => ({
+      frozen: !!frozenReason, reason: frozenReason,
+    }));
+    const wire = (visitStatus, others, reason = visitStatus === 'closing' ? 'visit_not_open' : null) => {
+      frozenReason = reason;
       const { trx, trxScheduled } = wireRescheduleMocks(service({ visit_id: 'v1' }));
       const inner = trx.getMockImplementation();
       trx.mockImplementation((table) => (table === 'service_visits' ? chain({ first: jest.fn().mockResolvedValue({ status: visitStatus }) }) : inner(table)));
@@ -1006,6 +1011,12 @@ describe('reschedule — visit membership fence (codex #3609 r13 P2)', () => {
       ({ trxScheduled } = wire('closing', [{ id: 'svc-1' }, { id: 'svc-2' }]));
       await expect(SmartRebooker.rescheduleOnce('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'rain', 'admin')).rejects.toMatchObject({ code: 'VISIT_FROZEN_MOVE_UNSUPPORTED' });
       expect(trxScheduled.update).not.toHaveBeenCalled();
+      // Status remains open, but an issued visit artifact makes the full
+      // frozen verdict refuse the former solo fallback too.
+      ({ trxScheduled } = wire('open', [{ id: 'svc-1' }], 'link_issued'));
+      await expect(SmartRebooker.rescheduleOnce('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'rain', 'admin'))
+        .rejects.toMatchObject({ code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', reason: 'link_issued' });
+      expect(trxScheduled.update).not.toHaveBeenCalled();
       // the stop moved under us ⇒ same re-entry remedy
       ({ trxScheduled } = wire('open', [{ id: 'svc-1' }]));
       lockSpy.mockRejectedValueOnce(Object.assign(new Error('moved'), { code: 'VISIT_STOP_MOVED' }));
@@ -1016,9 +1027,9 @@ describe('reschedule — visit membership fence (codex #3609 r13 P2)', () => {
       lockSpy.mockClear();
       await expect(SmartRebooker.rescheduleOnce('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'rain', 'admin', { visitPolicy: 'single' })).resolves.toMatchObject({ success: true });
       expect(lockSpy).not.toHaveBeenCalled();
-      expect(unitSpy).toHaveBeenCalledTimes(4);
+      expect(unitSpy).toHaveBeenCalledTimes(5);
     } finally {
-      lockSpy.mockRestore(); membersSpy.mockRestore(); unitSpy.mockRestore();
+      lockSpy.mockRestore(); membersSpy.mockRestore(); unitSpy.mockRestore(); frozenSpy.mockRestore();
     }
   });
 

@@ -46,7 +46,7 @@ module.exports = {
   // registered estimate-tools.js source path. Cover its row, provenance,
   // membership, acceptance, and composer dependencies here.
   get_estimate_detail: {
-    tables: ['estimates', 'estimate_acceptances', 'call_log', 'leads', 'scheduled_services', 'services', 'customers', 'annual_prepay_terms', 'autopay_log', 'payment_methods', 'payment_method_consents', 'payers', 'referral_program_settings'],
+    tables: ['estimates', 'estimate_acceptances', 'estimate_deposits', 'call_log', 'leads', 'scheduled_services', 'services', 'customers', 'annual_prepay_terms', 'autopay_log', 'payment_methods', 'payment_method_consents', 'payers', 'referral_program_settings'],
     columns: {
       // The estimate row is selected in full for the public composer.
       estimates: [
@@ -61,6 +61,10 @@ module.exports = {
       // whenever an accepted estimate carries a terms-version stamp.
       estimate_acceptances: [
         'id', 'estimate_id', 'terms_version', 'terms_text', 'accepted_at', 'ip', 'user_agent',
+      ],
+      estimate_deposits: [
+        'estimate_id', 'amount', 'card_surcharge', 'credited_amount', 'refunded_amount',
+        'refunded_surcharge', 'status', 'received_at', 'created_at',
       ],
       // callSideBlockForEstimateData's own reads, reached from estimateLinks
       // for an engine-drafted row (estimatorEngine.callLogId): the blocking
