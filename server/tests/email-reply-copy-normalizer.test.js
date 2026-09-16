@@ -43,6 +43,7 @@ describe('bounded email copy normalization', () => {
 
   test('checks expanded compatibility characters before formatting', () => {
     expect(normalize('\uFDFA'.repeat(300)).reason).toBe('copy_size');
+    expect(normalize('\uFDFA'.repeat(2730)).reason).toBe('copy_size');
   });
 
   test('bounds raw and decoded token counts', () => {

@@ -15,15 +15,18 @@ function normalizeEmailReplyCopy(text = '') {
   if (exceedsSize(text)) return failure('copy_size');
   if ((text.match(/\S+/g) || []).length > COPY_LIMITS.tokens) return failure('copy_tokens');
 
-  let copy = decodeHTML(text).normalize('NFKC')
+  let copy = decodeHTML(text).normalize('NFKC');
+  // Compatibility normalization can expand characters or introduce spaces.
+  // Reject that expansion before any replacement regex sees it.
+  if (exceedsSize(copy)) return failure('copy_size');
+  if ((copy.match(/\S+/g) || []).length > COPY_LIMITS.tokens) return failure('copy_tokens');
+
+  copy = copy
     .replace(/[\u2010-\u2015\u2212]/g, '-')
     .replace(/[‘’]/g, "'")
     .replace(/\\(?:\r\n?|\n)/g, ' ')
     .replace(/\\([-!"#$%&'()*+,.\/:;<=>?@[\]^_`{|}~\\])/g, '$1')
     .replace(/\s+/g, ' ');
-  // Compatibility normalization can expand characters or introduce spaces.
-  if (exceedsSize(copy)) return failure('copy_size');
-  if ((copy.match(/\S+/g) || []).length > COPY_LIMITS.tokens) return failure('copy_tokens');
 
   for (let pass = 0; pass < COPY_LIMITS.formatPasses; pass += 1) {
     const next = copy
