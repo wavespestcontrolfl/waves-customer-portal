@@ -219,9 +219,21 @@ test.each([
   ["You don't have to pay attention during your next visit.", 'pass'],
   ["You don't owe anything on that invoice; your next visit is Tuesday.", 'pass'],
   ["You don't owe anything on that invoice: your next visit is Tuesday.", 'pass'],
+  ["You don't owe anything on that invoice, your next visit is Tuesday.", 'pass'],
+  ["You don't owe anything on that invoice, but your next visit is Tuesday.", 'pass'],
+  ["You don't owe anything on that invoice, and your next visit is Tuesday.", 'pass'],
   ['You owe us nothing on that invoice; your next visit is Tuesday.', 'pass'],
+  ['You owe us nothing on that invoice, and your next visit is Tuesday.', 'pass'],
   ['No charge on that invoice; the next visit is Tuesday.', 'pass'],
+  ['No charge on that invoice, your next visit is Tuesday.', 'pass'],
+  ['No charge on that invoice, but your next visit is Tuesday.', 'pass'],
   ["You don't owe anything for your next visit.", 'fail'],
+  ["You don't owe anything, for your next visit.", 'fail'],
+  ["You don't owe anything for the cost of your next visit.", 'fail'],
+  ["You don't owe anything, even for your next visit.", 'fail'],
+  ['No charge, for the next visit.', 'fail'],
+  ['No charge applies to the next visit.', 'fail'],
+  ['No charge at all for the next visit.', 'fail'],
 ])('payment language refers to the visit charge: %s', (text, status) => {
   expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
 });
