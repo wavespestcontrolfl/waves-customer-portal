@@ -566,6 +566,12 @@ const CLAIM_CAUSAL_BOUNDARY_RE = new RegExp(
   'gi',
 );
 const FREE_VISIT_TEMPORAL_PARENTHETICAL_RE = /,\s*(?:as of (?:today|now)|since (?:today|yesterday))\s*,\s*(?:that\s*)?$/i;
+// A conditional "provided/providing/only after" needs a subject and finite
+// predicate. A participial effect ("providing protection") is not a gate.
+const FREE_VISIT_PROVIDED_CONDITION_SOURCE = `(?:provided|providing)(?:\\s+that)?\\s+(?:(?:i|we|you|he|she|they|it)\\s+[\\w\\x27\\u2019-]+\\b|(?:the|an?|your|our|their|this|that)\\s+[\\w\\x27\\u2019-]+\\s+(?:${CLAUSE_FINITE_PREDICATE_RE.source}|[\\w\\x27\\u2019-]+(?:s|ed)\\b))`;
+const FREE_VISIT_CONDITION_SOURCE = `(?:${FREE_VISIT_PROVIDED_CONDITION_SOURCE}|only\\s+after\\s+(?:(?:the|an?|your|our|their)\\s+)?[\\w\\x27\\u2019-]+\\b)`;
+const FREE_VISIT_PREPOSED_CONDITION_RE = new RegExp(`^\\s*${FREE_VISIT_CONDITION_SOURCE}`, 'i');
+const FREE_VISIT_POSTCLAIM_CONDITION_RE = new RegExp(`^\\s*,?\\s*(?:(?:only\\s+)?(?:if|unless)\\b|but\\s+only\\s+if\\b|${FREE_VISIT_CONDITION_SOURCE})`, 'i');
 const FOLLOWUP_QUESTION_RE = /(?:,\s*|\s+(?:and|but|so)\s+)(?:(?:and|but|so)\s+)?(?:did|do|does|is|are|was|were|will|would|can|could|should|has|have|had|what|who|why|how|where|when)\b/i;
 const FREE_VISIT_LEADING_QUESTION_RE = /^(?!\s*(?:do|does|did)\s+not\b)\s*(?:did|do|does|is|are|was|were|will|would|can|could|should|has|have|had|what|who|why|how)\b[^,;:]*$/i;
 const FREE_VISIT_QUESTION_TERMINATOR_RE = /^(?:\?|or\s+(?:not|paid|billable|charged)\?\s*$)/i;
@@ -595,7 +601,7 @@ function no_free_visit_promise(value, record, { spoken }) {
               && !/^\s*,/.test(questionTail) && !independentFollowup));
         if (propositionQuestion || leadingQuestion) continue;
         const claim = claimContext(text, match.index, match.index);
-        const [clauseStart, clauseEnd] = clauseBounds(text, match.index);
+        const [clauseStart] = clauseBounds(text, match.index);
         const clausePrefix = text.slice(clauseStart, match.index);
         const temporalParenthetical = FREE_VISIT_TEMPORAL_PARENTHETICAL_RE.exec(clausePrefix);
         const claimStart = temporalParenthetical
@@ -614,7 +620,6 @@ function no_free_visit_promise(value, record, { spoken }) {
         const prefix = causalBoundary
           ? causalContext.slice(causalBoundary.index + causalBoundary[0].length, match.index - claimStart)
           : text.slice(claimStart, match.index);
-        const suffix = text.slice(match.index + match[0].length, clauseEnd);
         const trailingRetraction = FREE_VISIT_TRAILING_RETRACTION_RE.test(text.slice(match.index + match[0].length));
         // "Whether X or Y, [promise]" asserts the promise across both
         // alternatives. A whether phrase embedded in a refusal or an
@@ -623,8 +628,8 @@ function no_free_visit_promise(value, record, { spoken }) {
           prefix.replace(/^\s*whether\b[^,;.!?]*\bor\b[^,;.!?]*,\s*/i, '')
             .replace(/\beven\s+if\b/gi, 'even when'),
         )
-          || /^\s*,?\s*(?:only\s+)?(?:if|unless)\b/i.test(suffix)
-          || /^\s*,?\s*but\s+only\s+if\b/i.test(text.slice(clauseEnd));
+          || FREE_VISIT_PREPOSED_CONDITION_RE.test(clausePrefix)
+          || FREE_VISIT_POSTCLAIM_CONDITION_RE.test(text.slice(match.index + match[0].length));
         if (!governingCondition && !trailingRetraction && !clauseIsEpistemicallyHedged(prefix)
             && !propositionIsExplicitlyDenied(text, match.index)) {
           return ['fail', `free visit promised: "${clip(match[0], 160)}"`];

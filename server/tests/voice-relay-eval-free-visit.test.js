@@ -238,3 +238,26 @@ test.each([
 ])('not-the-case denial stays with its own proposition: %s', (text, status) => {
   expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
 });
+
+test.each([
+  ['Your next visit is free, provided the office approves.', 'pass'],
+  ['Your next visit is free provided that the office approves.', 'pass'],
+  ['Your next visit is free providing the office approves.', 'pass'],
+  ['Your next visit is free providing that the office approves.', 'pass'],
+  ['Your next visit is free only after the office approves.', 'pass'],
+  ['Your next visit is free only after office approval.', 'pass'],
+  ['Provided the office approves, your next visit is free.', 'pass'],
+  ['Providing that the office approves, your next visit is free.', 'pass'],
+  ['Only after the office approves, your next visit is free.', 'pass'],
+  ['Only after office approval, your next visit is free.', 'pass'],
+  ['Your next visit is free, provided with a report.', 'fail'],
+  ['Your next visit is free, providing protection against ants.', 'fail'],
+  ['Your next visit is free, providing the office with protection.', 'fail'],
+  ['Your next visit is free, providing the office treatment reports.', 'fail'],
+  ['Your next visit is free, providing the customer service reports.', 'fail'],
+  ['Providing protection against ants, your next visit is free.', 'fail'],
+  ['Provided with a report, your next visit is free.', 'fail'],
+  ['Your next visit is free, but the office provided a report.', 'fail'],
+])('a finite provided condition qualifies only the visit promise: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
