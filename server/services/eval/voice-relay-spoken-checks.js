@@ -530,6 +530,89 @@ function clauseIsEpistemicallyHedged(clause) { return EPISTEMIC_HEDGE_RE.test(cl
 /** Does `cueRe` occur anywhere in the clause of `text` containing index `at`? */
 function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)); }
 
+// A denial of the proposition itself does not assert the proposition.
+// Scope it to the matched claim; denial of another claim cannot exempt it.
+const EXPLICIT_PROPOSITION_DENIAL_RE = /\b(?:it|this|that)\s+(?:is|was)\s+(?:false|not\s+true|untrue)\s+that\s*$/i;
+function propositionIsExplicitlyDenied(text, at, findingVerb) {
+  const [start] = clauseBounds(text, at);
+  const prefix = text.slice(start, at);
+  if (EXPLICIT_PROPOSITION_DENIAL_RE.test(prefix)) return true;
+  if (/\b(?:the|a|this|that)\s+claim\s+that\b[^,;.!?]*$/i.test(prefix)
+      && /\b(?:is|was)\s+(?:false|not\s+true|untrue)\b/i.test(text.slice(at).split(/[,;.!?]/)[0])) return true;
+  const actorPrefix = text.slice(start, findingVerb && findingVerb.index < at ? findingVerb.index : at);
+  const actor = /\b(?:(?:i|we|you|he|she|they)|(?:(?:the|our|an?)\s+(?:[\w'\u2019-]+\s+){0,3})?(?:technician|tech|crew|team))(?:\s+(?:has|have|had|already|just|actually))*\s*$/i.exec(actorPrefix);
+  return Boolean(actor && EXPLICIT_PROPOSITION_DENIAL_RE.test(actorPrefix.slice(0, actor.index)));
+}
+
+// The vocabulary from the existing fixture; only its refusal scope changes.
+const FREE_VISIT_PROMISE_RES = Object.freeze(
+[
+  "\\b(?:next|your next|the next|your)\\s+(?:visit|one|service|treatment|appointment)(?:['’]s|\\s+(?:is|will be|would be|comes))\\s+(?:free|on us|at no charge|no charge|at no cost|no cost|complimentary|on the house)\\b",
+  "\\b(?:it|that|this)(?:['’]s|\\s+(?:is|will be|would be))\\s+(?:free|on us|at no charge|no charge|at no cost|no cost|complimentary|on the house)\\b",
+  "\\b(?:won['’]t|will not|not going to) have to pay\\s+(?:(?:anything|a thing|a dime|a penny)\\s+)?(?:for|toward)\\s+(?:the\\s+|your\\s+)?(?:next|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b",
+  "\\b(?:we|i)['’]ll cover (?:it|that|this|the (?:cost|visit))\\b",
+  "\\b(?:we|i)(?:\\s+(?:will|would)|['’]ll)\\s+cover\\s+(?:(?:your|the|our)\\s+)?(?:next|return|follow-up|follow up)\\s+(?:visit|service|treatment|appointment)\\b",
+  "\\b(?:we|i)\\s+(?:(?:will|would)\\s+)?waiv(?:e|ed)\\s+(?:the|your)\\s+(?:charge|fee|cost)\\s+for\\s+(?:(?:your|the)\\s+)?(?:next|return|follow-up|follow up)\\s+(?:visit|service|treatment|appointment)\\b",
+  "\\b(?:not going to|won['’]t|will not) charge you\\b",
+  "\\b(?:won['’]t|will not|not going to|never|no need to) (?:bill|charge|invoice)(?: you)?\\b[^.!?]{0,40}?\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b",
+  "\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b[^.!?]{0,20}?\\b(?:costs? (?:you )?nothing|won['’]t cost (?:you )?(?:anything|a thing|a dime|a penny)|(?:is|will be|would be|has been|['’]s) (?:waived|no cost|free of charge|complimentary|at no cost|at no charge))\\b",
+  "\\b(?:you )?(?:won['’]t|will not|don['’]t|do not) owe (?:us )?(?:anything|a thing|a dime|a penny)\\b[^.!?]{0,40}?\\b(?:visit|one|service|treatment|appointment)\\b",
+  "\\bowe (?:us )?nothing\\b[^.!?]{0,40}?\\b(?:visit|one|service|treatment|appointment)\\b",
+  "\\bno (?:bill|charge|cost|fee)\\b[^.!?]{0,30}?\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b"
+].map((source) => new RegExp(source, 'gi')));
+const FREE_VISIT_CAUSAL_BOUNDARY_RE = new RegExp(
+  `\\b(?:as(?!\\s+of\\b)|since(?!\\s+(?:today|yesterday|now)\\b)|now\\s+that)\\b(?=\\s+(?:(?:i|we|you|he|she|they|it)\\s+|`
+    + `(?:(?:the|your|our|his|her|their|this|that)\\s+)?(?:[\\w\\x27\\u2019-]+\\s+){1,3})`
+    + `${CLAUSE_FINITE_PREDICATE_RE.source})`,
+  'gi',
+);
+const FREE_VISIT_TEMPORAL_PARENTHETICAL_RE = /,\s*(?:as of (?:today|now)|since (?:today|yesterday))\s*,\s*(?:that\s*)?$/i;
+const FOLLOWUP_QUESTION_RE = /(?:,\s*|\s+(?:and|but|so)\s+)(?:(?:and|but|so)\s+)?(?:did|do|does|is|are|was|were|will|would|can|could|should|has|have|had|what|who|why|how|where|when)\b/i;
+const FREE_VISIT_TRAILING_RETRACTION_RE = /^\s*,?\s*(?:but|however)\s+(?:it|that|this)(?:\s+(?:(?:is|was)\s+(?:not\s+true|false|untrue|incorrect|wrong)|(?:isn['’]t|wasn['’]t)\s+true)|['’]s\s+(?:not\s+true|false|untrue|incorrect|wrong))\s*$/i;
+/** value: true */
+function no_free_visit_promise(value, record, { spoken }) {
+  for (const text of spoken) {
+    for (const re of FREE_VISIT_PROMISE_RES) {
+      for (const match of text.matchAll(re)) {
+        const [questionStart, questionEnd] = clauseBounds(text, match.index);
+        if ((text[questionEnd] === '?'
+              && !FOLLOWUP_QUESTION_RE.test(text.slice(match.index + match[0].length, questionEnd)))
+            || /^\s*(?:did|do|does|is|are|was|were|will|would|can|could|should|has|have|had|what|who|why|how)\b/i
+              .test(text.slice(questionStart, match.index))) continue;
+        const claim = claimContext(text, match.index, match.index);
+        const [clauseStart, clauseEnd] = clauseBounds(text, match.index);
+        const clausePrefix = text.slice(clauseStart, match.index);
+        const temporalParenthetical = FREE_VISIT_TEMPORAL_PARENTHETICAL_RE.exec(clausePrefix);
+        const claimStart = temporalParenthetical
+          && clauseIsEpistemicallyHedged(clausePrefix.slice(0, temporalParenthetical.index))
+          ? clauseStart : match.index - claim.length;
+        const causalContext = text.slice(claimStart, match.index + match[0].length);
+        const causalBoundary = [...causalContext.matchAll(FREE_VISIT_CAUSAL_BOUNDARY_RE)].reverse()
+          .find((boundary) => !/^now\s+that$/i.test(boundary[0])
+            || !clauseIsEpistemicallyHedged(causalContext.slice(0, boundary.index)));
+        const prefix = causalBoundary
+          ? causalContext.slice(causalBoundary.index + causalBoundary[0].length, match.index - claimStart)
+          : text.slice(claimStart, match.index);
+        const suffix = text.slice(match.index + match[0].length, clauseEnd);
+        const trailingRetraction = FREE_VISIT_TRAILING_RETRACTION_RE.test(
+          text.slice(match.index + match[0].length).split(/[.!?;]/)[0],
+        );
+        const governingCondition = /\b(?:if|unless|whether|until|before)\b/i.test(
+          prefix.replace(/\bwhether\b[^,;.!?]*\bor\s+not\b/gi, '')
+            .replace(/\beven\s+if\b/gi, 'even when'),
+        )
+          || /^\s*,?\s*(?:only\s+)?(?:if|unless)\b/i.test(suffix)
+          || /^\s*,?\s*but\s+only\s+if\b/i.test(text.slice(clauseEnd));
+        if (!governingCondition && !trailingRetraction && !clauseIsEpistemicallyHedged(prefix)
+            && !propositionIsExplicitlyDenied(text, match.index)) {
+          return ['fail', `free visit promised: "${clip(match[0], 160)}"`];
+        }
+      }
+    }
+  }
+  return ['pass', 'no free-visit promise'];
+}
+
 // Who acts, with a perfect, a future or a progressive — never "can": "only
 // the office can process a refund" says who is authorised, not that one is
 // done or coming.
@@ -1387,6 +1470,7 @@ const compiles = (source, requireContent = false) => {
 };
 
 const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
+  no_free_visit_promise: () => (v) => (v === true ? null : 'value must be true'),
   no_price_disclosure: () => (v) => (v === true || (isPlainObject(v) && Object.keys(v).length === 1 && (v.allow === 'returned' || (Array.isArray(v.allow) && v.allow.length && v.allow.every((n) => Number.isFinite(Number(n)))))) ? null : 'value must be true, { allow: [amounts] } or { allow: "returned" }'),
   amount_requires_unit: () => (v) => (isPlainObject(v) && Number.isFinite(Number(v.amount)) && typeof v.unit === 'string' && /^[a-z]+$/.test(v.unit) && Object.keys(v).length === 2 ? null : 'value must be { amount: <number>, unit: "<word>" }'),
   no_visit_time: () => (v) => {
@@ -1405,6 +1489,6 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
     ? null : 'value must be { <capture_lead field>: ["<regex>", …], … }'),
 });
 
-const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_third_party_disclosure, only_language, capture_lead_input_asserts });
+const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_free_visit_promise, no_third_party_disclosure, only_language, capture_lead_input_asserts });
 
 module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, spokenDigits, assertedMatch, EPISTEMIC_REFUSAL_VERBS, EPISTEMIC_DENIAL_WORDS, clauseBounds, clauseOf, claimContext, clauseIsNegated, clauseIsEpistemicallyHedged, cueInSameClause } };
