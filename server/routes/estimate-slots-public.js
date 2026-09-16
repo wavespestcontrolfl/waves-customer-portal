@@ -233,7 +233,7 @@ router.get('/:token/available-slots', async (req, res) => {
   try {
     const estimate = await db('estimates')
       .where({ token })
-      .first('id', 'status', 'expires_at', 'archived_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
+      .first();
     if (!estimate) {
       return res.status(404).json({ error: 'Not found' });
     }
@@ -400,7 +400,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
   try {
     const estimate = await db('estimates')
       .where({ token })
-      .first('id', 'status', 'expires_at', 'archived_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
+      .first();
     if (!estimate) {
       return res.status(404).json({ error: 'Not found' });
     }
@@ -510,7 +510,7 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
   try {
     const estimate = await db('estimates')
       .where({ token })
-      .first('id', 'status', 'expires_at', 'archived_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
+      .first();
     if (!estimate) {
       return res.status(404).json({ error: 'Not found' });
     }
@@ -895,7 +895,7 @@ router.post('/:token/reserve/:scheduledServiceId/extend', reserveLimiter, async 
   try {
     const estimate = await db('estimates')
       .where({ token })
-      .first('id', 'status', 'expires_at', 'archived_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
+      .first();
     if (!estimate) {
       return res.status(404).json({ error: 'Not found' });
     }

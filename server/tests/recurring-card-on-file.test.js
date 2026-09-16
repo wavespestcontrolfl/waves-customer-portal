@@ -101,7 +101,8 @@ jest.mock('../routes/estimate-public', () => ({
   // re-judges it under the row lock).
   isEstimateAcceptActive: (e = {}) => !e.archived_at
     && !['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'].includes(e.status)
-    && !(e.expires_at && new Date(e.expires_at) < new Date()),
+    && !(e.expires_at && new Date(e.expires_at) < new Date())
+    && !jest.requireActual('../services/estimate-offer-version').annualPlanPublicReplayBlocked(e),
 }));
 
 const {
@@ -593,6 +594,41 @@ describe('replaceRecurringCardIntent ("use a different payment method")', () => 
   const liveById = (map) => mockRetrieveSetupIntent.mockImplementation(async (id) => map[id] || null);
   const db = require('../models/db');
   beforeEach(() => { mockDbFixtures.estimates = { id: 'est-1', status: 'viewed', accepted_at: null }; });
+
+  it('rechecks the full locked annual offer before minting or retiring a card intent', async () => {
+    const priorAnnual = process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const priorCancel = process.env.GATE_CANCEL_FLOW_V2;
+    const { annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
+    const row = { id: 'est-1', status: 'viewed', accepted_at: null, customer_email: 'owner@example.test',
+      estimate_data: { result: { lineItems: [{ service: 'termite_bait', plan: 'annual_protection', annual: 299 }] } } };
+    const delivered = { ...row, estimate_data: { ...row.estimate_data, deliveryState: {
+      firstDeliveredAt: '2026-09-12T00:00:00Z', annualPlanOfferFingerprint: annualPlanOfferFingerprint(row),
+    } } };
+    try {
+      process.env.GATE_TERMITE_ANNUAL_PLAN = 'false';
+      process.env.GATE_CANCEL_FLOW_V2 = 'false';
+      liveById({ seti_1: LIVE_GOOD, seti_after: FRESH });
+      mockCreateRecurringCardSetupIntent.mockResolvedValue(FRESH);
+      mockRetireSetupIntent.mockResolvedValue({ ...LIVE_GOOD, metadata: { ...LIVE_GOOD.metadata, retired: 'true', replaced_by: 'seti_after' } });
+      mockDbFixtures.estimates = (...cols) => { expect(cols).toEqual([]); return delivered; };
+      expect((await replaceRecurringCardIntent({ estimate: EST, setupIntentId: 'seti_1' })).ok).toBe(true);
+      expect(mockCreateRecurringCardSetupIntent).toHaveBeenCalledTimes(1);
+      expect(mockRetireSetupIntent).toHaveBeenCalledTimes(1);
+
+      for (const blocked of [row, { ...delivered, notes: 'changed after delivery' }]) {
+        mockDbFixtures.estimates = (...cols) => { expect(cols).toEqual([]); return blocked; };
+        expect(await replaceRecurringCardIntent({ estimate: EST, setupIntentId: 'seti_1' }))
+          .toEqual({ ok: false, reason: 'estimate_inactive' });
+      }
+      expect(mockCreateRecurringCardSetupIntent).toHaveBeenCalledTimes(1);
+      expect(mockRetireSetupIntent).toHaveBeenCalledTimes(1);
+    } finally {
+      if (priorAnnual === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      else process.env.GATE_TERMITE_ANNUAL_PLAN = priorAnnual;
+      if (priorCancel === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
+      else process.env.GATE_CANCEL_FLOW_V2 = priorCancel;
+    }
+  });
 
   it('mints the replacement FIRST (keyed on the retired id), then stamps the old intent retired + replaced_by — under the estimate row lock', async () => {
     liveById({ seti_1: LIVE_GOOD, seti_after: FRESH });

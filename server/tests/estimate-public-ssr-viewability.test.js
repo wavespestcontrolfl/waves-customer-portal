@@ -24,7 +24,7 @@ jest.mock('../services/waveguard-existing-services', () => ({
   isActivePlanCustomer: jest.fn(async () => false),
 }));
 
-const { handleEstimateView } = require('../routes/estimate-public');
+const { handleEstimateView, handleEstimateAsk } = require('../routes/estimate-public');
 const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
 
 const FUTURE = new Date(Date.now() + 86400000).toISOString();
@@ -80,11 +80,11 @@ const ESTIMATE_MOUNT = '/estimate/tok-ssr-gate'; // app.get('/estimate/:token') 
 const API_MOUNT = '/tok-ssr-gate'; // app.use('/api/estimates') — no SPA fallthrough
 
 describe('handleEstimateView — SSR viewability gate', () => {
-  test.each([API_MOUNT, ESTIMATE_MOUNT])('rechecks the annual witness after membership repricing on %s', async (mount) => {
+  test.each([API_MOUNT, ESTIMATE_MOUNT, 'ask'])('rechecks the annual witness after membership repricing on %s', async (mount) => {
     const { annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
     const persistence = require('../services/admin-estimate-persistence');
     const result = { lineItems: [{ service: 'termite_bait', plan: 'annual_protection' }] };
-    const row = { ...PII, id: 'annual-member', customer_id: 'lapsed-member', status: 'sent',
+    const row = { ...PII, id: 'annual-member', token: 'tok-ssr-gate', customer_id: 'lapsed-member', status: 'sent',
       expires_at: FUTURE, use_v2_view: false, monthly_total: 30,
       estimate_data: { result, membershipSnapshot: { isExistingCustomer: true } } };
     row.estimate_data.deliveryState = { firstDeliveredAt: new Date().toISOString(),
@@ -95,12 +95,24 @@ describe('handleEstimateView — SSR viewability gate', () => {
     const priorGate = process.env.GATE_TERMITE_ANNUAL_PLAN;
     delete process.env.GATE_TERMITE_ANNUAL_PLAN;
     try {
-      const { res, next } = await runView(row, mount);
+      let res, next;
+      if (mount === 'ask') {
+        currentRow = row;
+        const req = makeReq('/tok-ssr-gate/ask');
+        req.body = { question: 'What does this cover?', askToken: require('jsonwebtoken').sign({
+          kind: 'estimate_ask', estimateId: row.id,
+          tokenHash: require('crypto').createHash('sha256').update(row.token).digest('hex'),
+        }, process.env.ESTIMATE_ASK_TOKEN_SECRET || process.env.JWT_SECRET, { expiresIn: '2h' }) };
+        res = makeRes(); res.json = res.send;
+        await handleEstimateAsk(req, res, (error) => { throw error; });
+        expect(res.statusCode).toBe(409);
+        expect(res.body).toEqual({ error: 'estimate_expired' });
+      } else ({ res, next } = await runView(row, mount));
       expect(reprice).toHaveBeenCalled();
       if (mount === API_MOUNT) {
         expect(res.statusCode).toBe(404);
         expect(res.body).not.toContain(PII.customer_email);
-      } else {
+      } else if (mount === ESTIMATE_MOUNT) {
         expect(next).toHaveBeenCalledTimes(1);
         expect(res.sent).toBe(false);
       }

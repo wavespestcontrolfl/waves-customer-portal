@@ -537,7 +537,7 @@ async function replaceRecurringCardIntent({ estimate, setupIntentId }) {
     // linkage invalidation that landed after the route's pre-read is a
     // terminal state under which nothing may be minted or retired.
     const row = await trx('estimates').where({ id: estimate.id }).forUpdate()
-      .first('id', 'status', 'accepted_at', 'archived_at', 'expires_at', 'estimate_data');
+      .first();
     if (!row) return { ok: false, reason: 'intent_mismatch' };
     if (row.status === 'accepted' || row.accepted_at) return { ok: false, reason: 'estimate_accepted' };
     const gates = require('../routes/estimate-public');

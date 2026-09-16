@@ -26,6 +26,7 @@ jest.mock('../services/estimate-slot-availability', () => ({
 }));
 jest.mock('../services/slot-reservation', () => ({
   reserveSlot: jest.fn(),
+  extendReservation: jest.fn(),
   releaseReservation: jest.fn(),
 }));
 jest.mock('../services/estimate-membership-context', () => ({
@@ -52,6 +53,7 @@ jest.mock('../routes/estimate-public', () => ({
     if (['draft', 'scheduled'].includes(estimate.status)) return false;
     if (['expired', 'send_failed'].includes(estimate.status)) return false;
     if (estimate.expires_at && new Date(estimate.expires_at) < now) return false;
+    if (jest.requireActual('../services/estimate-offer-version').annualPlanPublicReplayBlocked(estimate)) return false;
     return true;
   },
   isEstimateAcceptActive: jest.fn(() => true),
@@ -106,6 +108,7 @@ beforeEach(() => {
   getAvailableSlots.mockReset();
   findEstimateSlots.mockReset();
   slotReservation.reserveSlot.mockReset();
+  slotReservation.extendReservation.mockReset();
   lastFirstArgs = null;
 });
 
@@ -162,12 +165,66 @@ describe('slot endpoints status-gate parity with /:token/data', () => {
     expect(getAvailableSlots).not.toHaveBeenCalled();
   });
 
-  test('the estimate SELECT fetches archived_at so the gate can see it', async () => {
+  test('the estimate SELECT fetches the complete offer for the exposure gate', async () => {
     currentEstimate = { id: 'est-1', status: 'sent', expires_at: null, archived_at: null };
     getAvailableSlots.mockResolvedValue({ primary: [], expander: [], metadata: {} });
     const res = await fetch(`${base}/${TOKEN}/available-slots`);
     expect(res.status).toBe(200);
-    expect(lastFirstArgs).toContain('archived_at');
+    expect(lastFirstArgs).toEqual([]);
+  });
+});
+
+describe('issued annual protection after the gates close', () => {
+  const previousAnnual = process.env.GATE_TERMITE_ANNUAL_PLAN;
+  const previousCancel = process.env.GATE_CANCEL_FLOW_V2;
+  afterEach(() => {
+    if (previousAnnual === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    else process.env.GATE_TERMITE_ANNUAL_PLAN = previousAnnual;
+    if (previousCancel === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
+    else process.env.GATE_CANCEL_FLOW_V2 = previousCancel;
+  });
+
+  test('exact delivered offer can browse and reserve; missing or stale handoff cannot', async () => {
+    const { annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
+    const row = { id: 'est-annual', status: 'sent', customer_email: 'owner@example.test',
+      estimate_data: { result: { lineItems: [{ service: 'termite_bait', plan: 'annual_protection', annual: 299 }] } } };
+    const delivered = { ...row, estimate_data: { ...row.estimate_data, deliveryState: {
+      firstDeliveredAt: '2026-09-12T00:00:00Z', annualPlanOfferFingerprint: annualPlanOfferFingerprint(row),
+    } } };
+    process.env.GATE_TERMITE_ANNUAL_PLAN = 'false';
+    process.env.GATE_CANCEL_FLOW_V2 = 'false';
+    getAvailableSlots.mockResolvedValue({ primary: [], expander: [], metadata: {} });
+    findEstimateSlots.mockResolvedValue({ primary: [], expander: [] });
+    slotReservation.reserveSlot.mockResolvedValue({ scheduledServiceId: 'scheduled-1', expiresAt: '2027-05-20T13:15:00.000Z' });
+    const holdUrl = `${base}/${TOKEN}/reserve/00000000-0000-4000-8000-000000000001/extend`;
+    slotReservation.extendReservation.mockResolvedValue({ scheduledServiceId: '00000000-0000-4000-8000-000000000001', expiresAt: '2027-05-20T13:20:00.000Z' });
+    const find = () => fetch(`${base}/${TOKEN}/find-slots`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: 'next week' }) });
+    const extend = () => fetch(holdUrl, { method: 'POST' });
+
+    currentEstimate = delivered;
+    expect((await fetch(`${base}/${TOKEN}/available-slots`)).status).toBe(200);
+    expect(lastFirstArgs).toEqual([]);
+    expect((await fetch(`${base}/${TOKEN}/reserve`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ slotId: '2027-05-20_09-00_tech-1' }) })).status).toBe(201);
+    expect((await find()).status).toBe(200);
+    expect((await extend()).status).toBe(200);
+    expect(lastFirstArgs).toEqual([]);
+    expect(slotReservation.reserveSlot).toHaveBeenCalledTimes(1);
+    expect(slotReservation.extendReservation).toHaveBeenCalledTimes(1);
+
+    for (const unissued of [row, { ...delivered, notes: 'changed after handoff' }]) {
+      currentEstimate = unissued;
+      expect((await fetch(`${base}/${TOKEN}/available-slots`)).status).toBe(404);
+      expect((await fetch(`${base}/${TOKEN}/reserve`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slotId: '2027-05-20_09-00_tech-1' }) })).status).toBe(404);
+      expect((await find()).status).toBe(404);
+      expect((await extend()).status).toBe(404);
+    }
+    expect(getAvailableSlots).toHaveBeenCalledTimes(1);
+    expect(findEstimateSlots).toHaveBeenCalledTimes(1);
+    expect(slotReservation.reserveSlot).toHaveBeenCalledTimes(1);
+    expect(slotReservation.extendReservation).toHaveBeenCalledTimes(1);
   });
 });
 

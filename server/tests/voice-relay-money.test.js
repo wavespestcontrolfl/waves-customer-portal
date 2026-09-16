@@ -21,7 +21,10 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/lead-from-extraction', () => ({ createLeadFromExtraction: jest.fn() }));
 jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: jest.fn(() => false),
+  termiteAnnualPlanSelectionEnabled: jest.requireActual('../config/feature-gates').termiteAnnualPlanSelectionEnabled,
+}));
 jest.mock('../services/call-recording-processor', () => ({
   CONTACT_MATCH_PHONE_COLS: ['phone'],
   summarizePriorCall: jest.fn(),
@@ -41,7 +44,8 @@ jest.mock('../services/pricing-engine', () => ({ generateEstimate: jest.fn() }))
 jest.mock('../routes/estimate-public', () => ({
   buildPricingBundle: jest.fn(),
   isEstimateCustomerViewable: jest.fn((row = {}, now = new Date()) => !row.archived_at
-    && !(row.expires_at && new Date(row.expires_at) < now)),
+    && !(row.expires_at && new Date(row.expires_at) < now)
+    && !jest.requireActual('../services/estimate-offer-version').annualPlanPublicReplayBlocked(row)),
 }));
 jest.mock('../services/open-balance', () => ({ openBalanceSummary: jest.fn() }));
 // The LIVE payer authority. open-balance.js records the pre-push P0: payer-null
@@ -290,16 +294,48 @@ describe('get_open_estimates — SENT-price doctrine', () => {
   // classified every estimate as per-application and suppressed the truthful
   // "billed $X per month" line), and show_one_time_option / waveguard_tier
   // shape the bundle itself.
-  test('the estimate projection carries every field buildPricingBundle reads', async () => {
+  test('the estimate projection carries pricing and annual-viewability fields', async () => {
     primeDb({ estimates: [SENT_ESTIMATE] });
     await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
     const selected = builders.estimates.select.mock.calls.flat();
-    for (const col of ['customer_id', 'customer_phone', 'show_one_time_option', 'waveguard_tier',
+    for (const col of ['customer_id', 'property_id', 'estimate_group_id', 'customer_name', 'customer_phone',
+      'customer_email', 'address', 'notes', 'show_one_time_option', 'bill_by_invoice', 'waveguard_tier',
       'monthly_total', 'annual_total', 'onetime_total', 'estimate_data']) {
       expect(selected).toContain(col);
     }
     // …and the row the bundle builder is handed is the row that was read.
     expect(buildPricingBundle).toHaveBeenCalledWith(expect.objectContaining({ id: 'est-1' }));
+  });
+
+  test('the caller can hear an exact delivered annual offer after gate closure, but not an unissued or changed offer', async () => {
+    const previousAnnual = process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const previousCancel = process.env.GATE_CANCEL_FLOW_V2;
+    const { annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
+    const row = { ...SENT_ESTIMATE, customer_id: CUSTOMER_ID, customer_email: 'owner@example.test',
+      estimate_data: { result: { lineItems: [{ service: 'termite_bait', plan: 'annual_protection', annual: 299 }] } } };
+    const delivered = { ...row, estimate_data: { ...row.estimate_data, deliveryState: {
+      firstDeliveredAt: '2026-09-12T00:00:00Z', annualPlanOfferFingerprint: annualPlanOfferFingerprint(row),
+    } } };
+    try {
+      process.env.GATE_TERMITE_ANNUAL_PLAN = 'false';
+      process.env.GATE_CANCEL_FLOW_V2 = 'false';
+      primeDb({ estimates: [delivered] });
+      const quoted = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
+      expect(quoted).toMatch(/Open estimates on this account/);
+      expect(buildPricingBundle).toHaveBeenCalledTimes(1);
+      for (const blocked of [row, { ...delivered, notes: 'revised after delivery' }]) {
+        buildPricingBundle.mockClear();
+        primeDb({ estimates: [blocked] });
+        const hidden = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
+        expect(hidden).toMatch(/No open estimates on this account/);
+        expect(buildPricingBundle).not.toHaveBeenCalled();
+      }
+    } finally {
+      if (previousAnnual === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      else process.env.GATE_TERMITE_ANNUAL_PLAN = previousAnnual;
+      if (previousCancel === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
+      else process.env.GATE_CANCEL_FLOW_V2 = previousCancel;
+    }
   });
 
   test('the estimate view token is never SELECTed, and never reaches the output', async () => {

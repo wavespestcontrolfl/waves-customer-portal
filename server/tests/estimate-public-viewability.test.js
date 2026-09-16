@@ -78,7 +78,9 @@ describe('isEstimateCustomerViewable (React /:token/data security gate)', () => 
       } };
       expect(isEstimateCustomerViewable(revised)).toBe(false);
       expect(isEstimateAcceptActive(revised)).toBe(false);
-      const { resolveEstimateDeclineGuard } = require('../routes/estimate-public');
+      const { resolveEstimateDeclineGuard, isEstimateAskAnswerable } = require('../routes/estimate-public');
+      expect(isEstimateAskAnswerable(revised)).toBe(false);
+      expect(isEstimateAskAnswerable(delivered)).toBe(true);
       expect(resolveEstimateDeclineGuard(revised)).toMatchObject({ ok: false, status: 404 });
       expect(resolveEstimateDeclineGuard(delivered)).toEqual({ ok: true });
       expect(resolveEstimateDeclineGuard({ ...revised, status: 'declined' })).toEqual({ ok: true, alreadyDeclined: true });

@@ -217,10 +217,12 @@ async function openEstimatesText(customerId, { tier = 'redacted' } = {}) {
     // truthful "billed $X per month" line), and `show_one_time_option` /
     // `waveguard_tier` shape the bundle itself. Selecting them is what keeps
     // the phone and the estimate page quoting the same estimate.
-    // `archived_at` rides along for the viewability predicate below.
+    // `archived_at` and the offer fingerprint fields ride along for the
+    // customer viewability predicate below; the token stays out of this read.
     .select('id', 'status', 'service_type', 'created_at', 'sent_at', 'expires_at', 'archived_at',
       'monthly_total', 'annual_total', 'onetime_total', 'estimate_data',
-      'customer_id', 'customer_phone', 'show_one_time_option', 'waveguard_tier',
+      'customer_id', 'property_id', 'customer_name', 'customer_phone', 'customer_email',
+      'address', 'notes', 'show_one_time_option', 'bill_by_invoice', 'waveguard_tier',
       // The pricing-authority verdict reads these (uncapped codex P1 r28).
       'pricing_authority', 'price_locked_at', 'estimate_group_id');
   // ⭐ STATUS IS NOT THE SAME QUESTION AS "CAN THE CUSTOMER SEE THIS?".

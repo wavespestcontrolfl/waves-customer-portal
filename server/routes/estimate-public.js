@@ -533,7 +533,7 @@ function isEstimateAskAnswerable(estimate = {}, now = new Date()) {
   // lead's estimate content.
   // Same for a clarify re-price hold: the held row is off the customer
   // surface, so its ask token answers nothing about it either.
-  if (estimateOffCustomerSurface(estimate)) return false;
+  if (estimateOffCustomerSurface(estimate) || annualPlanPublicReplayBlocked(estimate)) return false;
   if (['accepted', 'declined', 'expired', 'send_failed'].includes(estimate.status)) return false;
   if (estimate.expires_at && new Date(estimate.expires_at) < now) return false;
   return true;
@@ -26332,6 +26332,7 @@ async function handleEstimateAsk(req, res, next) {
     // the setup is waived or annual prepay is unavailable while the page and
     // accept flow self-correct.
     await reconcileFrozenMembershipSnapshot(estimate);
+    if (!isEstimateAskAnswerable(estimate)) return res.status(409).json({ error: 'estimate_expired' });
 
     let estData = {};
     try {
