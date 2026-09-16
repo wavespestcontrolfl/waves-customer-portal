@@ -9,6 +9,8 @@ describe('email reply amountless billing policy', () => {
     'Payments are per visit', 'You pay per visit', 'The fee will be per routine visit',
     'Our rate is per visit', 'Rate per visit',
     'Billing is per 30-minute scheduled visit',
+    'Billing is per on-site visit', 'Billing is per in-home visit',
+    'Billing is per after-hours visit', 'Every in-home visit is billed separately',
     'Our fees are per scheduled routine quarterly residential exterior preventive ongoing planned visit',
     'We invoice per visit', 'You will be invoiced per visit', 'Your invoice is per visit',
     'Invoicing is per visit', 'Our prices are per visit', 'Our fees are per visit',
@@ -19,6 +21,7 @@ describe('email reply amountless billing policy', () => {
     'Each visit is billed separately', 'Every visit is invoiced on its own',
     'Each visit will be charged individually', 'Our visits are billed separately',
     'Our visits were charged individually', 'Their visits are invoiced on their own',
+    'Visits are billed separately', 'Routine visits are charged individually',
   ])('rejects unit-first separate billing: %s', rejected);
 
   test.each([
@@ -39,10 +42,21 @@ describe('email reply amountless billing policy', () => {
     'Please pay the invoice before your next visit.',
     'Payment is the account balance due before the scheduled visit.',
     'Please pay the balance after we confirm access for your visit.',
+    'Please pay the balance on your next visit.',
+    'Please pay the balance in our office before your visit.',
+    'You can pay on your next visit.', 'You may pay on the next scheduled visit.',
+    'You can pay on our next visit.',
+    'Our fees for your plan include routine visits.',
+    'Our fees for your plan cover scheduled visits.',
     'The notes contain an unmatched * or ` and a backslash before \\q.',
   ])('preserves ordinary and per-application prose: %s', (text) => {
     expect(verdict(text)).toEqual({ ok: true, violations: [] });
   });
+
+  test.each([
+    'You pay on each visit.', 'You pay on every scheduled visit.',
+    'You pay on your visits.', 'Payments are on routine visits.',
+  ])('keeps recurring on-visit billing in policy: %s', rejected);
 
   test.each([
     '$98 per visit', 'USD 98 for each scheduled visit', 'The rate is 98 per visit',

@@ -19,7 +19,12 @@ words in the draft cannot grant the exemption. Ordinary reminders, access
 discussions, feedback uses of `rate`, and per-application billing remain valid.
 Visit modifiers are capped at eight words and stop at clause, preposition, or
 determiner boundaries, so a payment reminder such as `pay the outstanding
-balance before our next visit` is not mistaken for per-visit billing.
+balance before our next visit` is not mistaken for per-visit billing. Stop
+words must be complete whitespace-delimited tokens; compounds such as
+`on-site`, `in-home`, and `after-hours` remain valid visit modifiers. Include
+and cover predicates also end the phrase, so plan coverage is not treated as a
+billing unit. A singular `on your next visit` is payment timing; recurring
+forms such as `on each visit` remain subject to the policy.
 
 Monetary clauses such as `$98 per visit`, `the rate is 98 per visit`, or `each
 visit is billed at 98` belong to the separately reviewed monetary sibling and
