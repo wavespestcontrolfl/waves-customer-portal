@@ -562,8 +562,10 @@ const gates = {
   // read. This slice ships the engine and the gate read only — no route or
   // service imports discount-stack.js yet, so the flip is inert until a
   // later slice wires a caller. Off (default, and everywhere until then):
-  // byte-identical to today. Registered here for logGateStatus; the route
-  // reads process.env at CALL time (strict 'true'), so a flip needs no redeploy.
+  // byte-identical to today. This map entry is for logGateStatus only — the
+  // canonical CALL-TIME reader is discountStackingLive() below (strict
+  // 'true'); every caller, the stacking endpoint included, must use that,
+  // not this cached-at-load value, so a flip needs no redeploy.
   discountStacking: process.env.GATE_DISCOUNT_STACKING === 'true',
 
   // Collective series moves on every staff surface (owner rulings 2026-07-30
@@ -2687,6 +2689,21 @@ function gateEnvValue(envName) {
   return ['1', 'true', 'on'].includes(String(process.env[envName] || '').toLowerCase());
 }
 
+// GATE_DISCOUNT_STACKING read at CALL time — strict `=== 'true'`, NOT
+// gateEnvValue's more permissive '1'/'true'/'on' case-insensitive rule,
+// because this gate's documented contract (and the endpoint test locking it
+// in) is that any other spelling or casing — 'TRUE', '1', unset — is off.
+// The `discountStacking` gates-map entry above is for logGateStatus only;
+// this is the one canonical reader every caller must use — today
+// server/routes/admin-discounts.js's GET /stacking, and later whichever
+// schedule/invoice slice wires an actual caller — so none of them can drift
+// from what the endpoint reports (Codex pre-push audit P1: the route used
+// to read the load-time gates-map value via isEnabled(), which never sees a
+// flip until the process restarts).
+function discountStackingLive() {
+  return process.env.GATE_DISCOUNT_STACKING === 'true';
+}
+
 // Timestamp-valued gate parsed at CALL time (rollout EPOCHS such as
 // GATE_PEST_STRANDED_RECOVERY). STRICT: a full ISO-8601 timestamp WITH an
 // explicit offset (`2026-08-28T14:00:00Z` / `2026-08-28T10:00:00-04:00`)
@@ -2728,5 +2745,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive };
 // gates 1775330914

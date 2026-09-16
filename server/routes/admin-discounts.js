@@ -7,6 +7,7 @@ const logger = require('../services/logger');
 const { parseETDateTime } = require('../utils/datetime-et');
 const { attachDiscountCatalogClassification } = require('../services/discount-catalog-classifier');
 const { auditDiscountCatalogChange, ipFromReq, uaFromReq } = require('../services/audit-log');
+const { discountStackingLive } = require('../config/feature-gates');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -27,12 +28,10 @@ function changedFields(before, after) {
 // GET /api/admin/discounts/stacking — is multi-discount stacking live?
 // Declared before the list route's neighbors for clarity; every surface that
 // offers a discount picker reads this so its controls and its preview match
-// what the server will actually save (GATE_DISCOUNT_STACKING). Read from the
-// environment at CALL time (strict 'true', same rule as the gates map entry)
-// so a flip needs no redeploy; the map entry exists for logGateStatus only.
-function discountStackingLive() {
-  return process.env.GATE_DISCOUNT_STACKING === 'true';
-}
+// what the server will actually save (GATE_DISCOUNT_STACKING). discountStackingLive()
+// (server/config/feature-gates.js) reads the environment at CALL time
+// (strict 'true') so a flip needs no redeploy — the canonical reader, so
+// this route and any later schedule/invoice caller can never disagree.
 router.get('/stacking', async (_req, res) => {
   res.json({ enabled: discountStackingLive() });
 });

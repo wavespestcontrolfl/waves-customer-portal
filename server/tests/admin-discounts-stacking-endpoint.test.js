@@ -64,7 +64,27 @@ test('the route is declared before the catalog list, so /stacking is never read 
   const src = fs.readFileSync(path.join(__dirname, '../routes/admin-discounts.js'), 'utf8');
   expect(src.indexOf("router.get('/stacking'")).toBeLessThan(src.indexOf("router.get('/',"));
   expect(src).toMatch(/enabled: discountStackingLive\(\)/);
-  expect(src).toMatch(/process\.env\.GATE_DISCOUNT_STACKING === 'true'/);
+});
+
+// The route imports the canonical call-time reader from feature-gates.js
+// rather than defining its own or reading process.env directly (Codex
+// GitHub round 1 P2: two places reading the same env var independently is
+// exactly how the load-time isEnabled() drift happened in the first
+// place). Checked at both ends: the route imports it, and feature-gates.js
+// still enforces the strict 'true' rule the endpoint's own behavior
+// depends on.
+test('the route imports discountStackingLive from feature-gates.js rather than reading the gate itself', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const routeSrc = fs.readFileSync(path.join(__dirname, '../routes/admin-discounts.js'), 'utf8');
+  expect(routeSrc).toMatch(/require\(['"]\.\.\/config\/feature-gates['"]\)/);
+  expect(routeSrc).toMatch(/discountStackingLive/);
+  expect(routeSrc).not.toMatch(/process\.env\.GATE_DISCOUNT_STACKING/);
+
+  const gatesSrc = fs.readFileSync(path.join(__dirname, '../config/feature-gates.js'), 'utf8');
+  expect(gatesSrc).toMatch(/function discountStackingLive\(\)/);
+  expect(gatesSrc).toMatch(/process\.env\.GATE_DISCOUNT_STACKING === 'true'/);
+  expect(gatesSrc).toMatch(/module\.exports = \{[^}]*discountStackingLive/);
 });
 
 test('the gate is read at call time: a flip after the module loaded is reported on the next read', async () => {
