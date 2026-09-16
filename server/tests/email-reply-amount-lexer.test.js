@@ -42,9 +42,25 @@ describe('bounded anchored email reply amount lexer', () => {
     expect(matchAt('98.')).toEqual(token('number', '98'));
     expect(matchAt('98, next')).toEqual(token('number', '98'));
     expect(matchAt('USD .98!')).toEqual(token('money', 'USD .98'));
+    expect(matchAt('$98,$120 per visit', 4)).toEqual(token('money', '$120', 4));
+    expect(matchAt('98,12', 3)).toBeNull();
     expect(matchAt('$98 + tax')).toEqual(token('money', '$98'));
     expect(matchAt('98¢ + tax')).toEqual(token('money', '98¢'));
     expect(matchAt('$$98', 1)).toBeNull();
+  });
+
+  test('allows opening straight and curly quotes before an amount', () => {
+    expect(matchAt("'$98 per visit'", 1)).toEqual(token('money', '$98', 1));
+    expect(matchAt("'98 dollars per visit'", 1)).toEqual(token('money', '98 dollars', 1));
+    expect(matchAt("('98 dollars')", 2)).toEqual(token('money', '98 dollars', 2));
+    expect(matchAt('‘$98 per visit’', 1)).toEqual(token('money', '$98', 1));
+    expect(matchAt('“‘98 dollars’”', 2)).toEqual(token('money', '98 dollars', 2));
+  });
+
+  test('still rejects an apostrophe inside a word or malformed number', () => {
+    expect(matchAt("visit'98", 6)).toBeNull();
+    expect(matchAt("98'99", 3)).toBeNull();
+    expect(matchAt('visit’98', 6)).toBeNull();
   });
 
   test.each([

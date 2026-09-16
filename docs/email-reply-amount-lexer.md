@@ -13,6 +13,10 @@ rejects non-string input, invalid offsets, and sources above 8,192 UTF-8
 bytes. It will not start inside an identifier or amount, or return a prefix
 of a malformed decimal, grouping, ordinal, or attached word. An explicit
 `$` may start immediately after a letter, preserving copy such as `is$98`.
+It may also start after a comma, as in `$98,$120`; bare digits after a
+malformed comma grouping remain blocked.
+An opening straight or curly quote may precede an amount; apostrophes inside
+words or malformed numbers do not create a new amount boundary.
 
 The finite currency scope is dollar signs, USD, dollars, bucks, cents, and
 the cent sign (`98¢`). It recognizes numeric and bounded written amounts,

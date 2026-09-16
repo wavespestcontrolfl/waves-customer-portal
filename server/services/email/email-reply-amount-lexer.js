@@ -24,10 +24,18 @@ const MATCHERS = [
   ['number', NUMBER],
 ].map(([kind, source]) => ({ kind, re: new RegExp(source, 'iy') }));
 
-const LEFT_JOIN = /[\p{L}\p{N}_.$¢,'’\-]/u;
+const LEFT_JOIN = /[\p{L}\p{N}_.$¢,'‘’\-]/u;
 const LETTER = /\p{L}/u;
 const RIGHT_JOIN = /[\p{L}\p{N}_¢]/u;
 const DIGIT = /\d/;
+const OPEN_QUOTE_PUNCT = new Set(['(', '[', '{', ':', ';', ',', '"', '“', '‘']);
+
+function openingQuoteBefore(source, at) {
+  if (!['\'', '‘', '’'].includes(source[at - 1])) return false;
+  if (at === 1) return true;
+  const before = source[at - 2];
+  return /\s/u.test(before) || OPEN_QUOTE_PUNCT.has(before);
+}
 
 function validEnd(source, end) {
   const next = source[end];
@@ -42,7 +50,8 @@ function matchEmailReplyAmountAt(source, at = 0) {
   if (typeof source !== 'string' || Buffer.byteLength(source, 'utf8') > MAX_SOURCE_BYTES
     || !Number.isInteger(at) || at < 0 || at >= source.length) return null;
   if (at > 0 && LEFT_JOIN.test(source[at - 1])
-    && !(source[at] === '$' && LETTER.test(source[at - 1]))) return null;
+    && !(source[at] === '$' && (LETTER.test(source[at - 1]) || source[at - 1] === ','))
+    && !openingQuoteBefore(source, at)) return null;
 
   let longest = null;
   for (const { kind, re } of MATCHERS) {
