@@ -936,6 +936,7 @@ function deliveryIdentityMatches({ call, commitment, current, visit, customer, s
     && normalizePhone(customer.phone) === normalizePhone(String(call.direction || '').startsWith('outbound') ? call.to_phone : call.from_phone)
     && Number(call.processing_generation) === Number(generation)
     && Number(commitment.last_seen_generation) === Number(generation)
+    && attemptGenerationMatchesCommitment(current, commitment)
     && (context?.visit?.id === visitId || (current.provider_message_id && current.provider_message_id === sms.twilio_sid) || (link && String(sms.message_body).includes(link.replace(/^https?:\/\//, ''))));
 }
 
@@ -955,19 +956,33 @@ function deliveryIdentityMatches({ call, commitment, current, visit, customer, s
 // than trusting every caller to have already checked, is what stops a late
 // receipt for a SUPERSEDED generation from fulfilling the REPLACEMENT
 // commitment's live obligation and clearing its still-open exception card
-// (codex #4293 P1). A row with no recorded generation (older data, or a
-// caller that never stamped one) falls through to the old, ungated
-// behavior rather than block on data that was never captured.
+// (codex #4293 P1). The two generations are independent: Office
+// Edit -> Confirm renews commitment.processing_generation without changing
+// call_log.processing_generation or commitment.last_seen_generation, so the
+// attempt's own commitment_generation must match too. A legacy NULL
+// commitment_generation is treated as generation zero only; once the office
+// renews the promise it can no longer speak for the renewed obligation. A
+// missing payload.call_generation retains its legacy behavior because older
+// rows never captured that separate call-generation evidence.
 //
 // Shared with markLinkUsed, whose own late-arriving-customer-move path is
 // the identical shape: an OLDER generation's outbox row (the one whose link
 // the customer actually clicked) speaking for whatever the commitment has
 // become since a replacement recording reopened it (codex #4293 P1).
+function attemptGenerationMatchesCommitment(row, commitment) {
+  const current = Number(commitment.processing_generation ?? 0);
+  return row.commitment_generation == null
+    ? current === 0
+    : Number(row.commitment_generation) === current;
+}
+
 async function attemptOwnsCurrentGeneration(trx, row, commitmentId, payload = row.payload) {
+  const commitment = await trx('call_commitments').where({ id: commitmentId }).forUpdate()
+    .first('id', 'last_seen_generation', 'processing_generation');
+  if (!commitment) return true;
   const generation = payload?.call_generation;
-  if (generation == null) return true;
-  const commitment = await trx('call_commitments').where({ id: commitmentId }).forUpdate().first('id', 'last_seen_generation');
-  return !commitment || Number(commitment.last_seen_generation) === Number(generation);
+  return (generation == null || Number(commitment.last_seen_generation) === Number(generation))
+    && attemptGenerationMatchesCommitment(row, commitment);
 }
 
 async function fulfilPromise(trx, row, sms, call) {
@@ -1023,7 +1038,7 @@ async function settleDelivery(conn, row, sms, context = null) {
     const customer = call?.customer_id ? await trx('customers').where({ id: call.customer_id }).whereNull('deleted_at').first('phone') : null;
     if (!deliveryIdentityMatches({ call, commitment, current, visit, customer, sms, context, visitId, generation })) return { needsReview: true };
     await trx('outbox_messages').where({ id: row.id }).update(settledOutboxPatch(current, sms, context, { delivered, visitId, generation }));
-    if (delivered) await fulfilPromise(trx, row, sms, call);
+    if (delivered) await fulfilPromise(trx, current, sms, call);
     return { scopeChanged: false };
   // deliveryIdentityMatches failing (context changed — most often reprocessing
   // advancing the generation before this receipt arrived) says nothing about
@@ -2057,8 +2072,8 @@ async function markLinkUsed(conn, row) {
     // is no office work left to chase. The card closes; the promise's own
     // status does NOT move, because a missing receipt is still not proof of
     // delivery (codex #4293 r2 P2).
-    const current = await trx('outbox_messages').where({ id: row.id }).first('status', 'payload');
-    if (current?.status === 'review' && await attemptOwnsCurrentGeneration(trx, row, row.commitment_id, current.payload)) {
+    const current = await trx('outbox_messages').where({ id: row.id }).first('status', 'payload', 'commitment_generation');
+    if (current?.status === 'review' && await attemptOwnsCurrentGeneration(trx, current, row.commitment_id, current.payload)) {
       await clearPromiseException(trx, row.related_call_log_id, row.commitment_id, USED_LINK_NOTE);
     }
     await trx('outbox_messages').where({ id: row.id })
@@ -2098,7 +2113,7 @@ async function reconcileRows(conn, rows) {
 // one visit.
 async function resolveUsedLink(conn, visitId) {
   return reconcileRows(conn, await unreconciledPromiseRows(conn).where({ related_scheduled_service_id: visitId })
-    .select('id', 'status', 'commitment_id', 'related_call_log_id', 'related_scheduled_service_id', 'sent_at'));
+    .select('id', 'status', 'commitment_id', 'commitment_generation', 'related_call_log_id', 'related_scheduled_service_id', 'sent_at'));
 }
 
 // Only a row whose visit HAS a self-serve move on record, made after the
@@ -2132,7 +2147,7 @@ function whereSelfServeMoveExists(query) {
 // sweep until it lands.
 async function reconcileUsedLinks(conn, now = new Date()) {
   const rows = await whereSelfServeMoveExists(unreconciledPromiseRows(conn)).orderBy(SCAN_FAIRNESS_ORDER)
-    .limit(100).select('id', 'status', 'commitment_id', 'related_call_log_id', 'related_scheduled_service_id', 'sent_at');
+    .limit(100).select('id', 'status', 'commitment_id', 'commitment_generation', 'related_call_log_id', 'related_scheduled_service_id', 'sent_at');
   await stampScanned(conn, rows, now);
   return reconcileRows(conn, rows);
 }

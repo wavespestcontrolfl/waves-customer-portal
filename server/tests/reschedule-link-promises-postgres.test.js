@@ -1629,6 +1629,68 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       }
     });
 
+    test('a late receipt for the pre-Confirm attempt cannot fulfil the office-renewed promise or clear its card', async () => {
+      const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
+      const priorCallCommitments = gates.callCommitments;
+      try {
+        process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'true';
+        gates.callCommitments = true;
+        const callId = randomUUID();
+        const customerId = randomUUID();
+        const visitId = randomUUID();
+        const phone = '+15555550100';
+        const twilioSid = `SM${randomUUID().replaceAll('-', '').slice(0, 32)}`;
+        await mockPg('customers').insert({ id: customerId, first_name: 'Pat', last_name: 'Customer', phone,
+          address_line1: '1 Example St', city: 'Bradenton', zip: '34205', active: true });
+        await mockPg('scheduled_services').insert({ id: visitId, customer_id: customerId, scheduled_date: '2030-01-08',
+          window_start: '09:00', window_end: '10:30', service_type: 'WaveGuard', status: 'confirmed', reschedule_token: 'token' });
+        await mockPg('call_log').insert({ id: callId, customer_id: customerId, direction: 'inbound', from_phone: phone,
+          processing_generation: 0 });
+        const [commitment] = await mockPg('call_commitments').insert({
+          call_log_id: callId, commitment_key: 'send_reschedule_link:1', party: 'waves', kind: 'send_reschedule_link',
+          description: 'send a reschedule link', source: 'ai', status: 'open', last_seen_generation: 0, processing_generation: 0,
+        }).returning('id');
+        const outboxId = randomUUID();
+        await mockPg('outbox_messages').insert({ id: outboxId, channel: 'sms', status: 'sent', provider_message_id: twilioSid,
+          sent_at: new Date('2030-01-07T14:00:00Z'), payload: { call_generation: 0, delivery_outcome_uncertain: true },
+          commitment_id: commitment.id, commitment_generation: 0, related_call_log_id: callId,
+          related_customer_id: customerId, related_scheduled_service_id: visitId });
+        await mockPg('triage_items').insert({ call_log_id: callId, category: 'customer_followup', severity: 'advisory',
+          reason_code: 'reschedule_link_promise', status: 'open', summary: 'A promised reschedule link needs attention.',
+          payload: { reschedule_link_promise: { commitment_id: commitment.id, commitment_ids: [commitment.id], reason: 'provider_outcome_unknown' } } });
+
+        // Edit -> Confirm renews only the promise's processing_generation. The
+        // call generation and extraction generation remain zero, so those two
+        // older fences alone cannot distinguish this attempt from the renewed
+        // obligation.
+        await applyHumanUpdate(mockPg, commitment.id, { action: 'edit', description: 'send the corrected reschedule link', reviewedBy: randomUUID() });
+        const confirmed = await applyHumanUpdate(mockPg, commitment.id, { action: 'confirm', reviewedBy: randomUUID() });
+        expect(confirmed).toMatchObject({ status: 'open', human_state: 'confirmed', last_seen_generation: 0 });
+        expect(Number(confirmed.processing_generation)).toBe(1);
+
+        // The carrier receipt for generation zero arrives only after the office
+        // has renewed the promise.
+        await mockPg('sms_log').insert({ id: randomUUID(), customer_id: customerId, direction: 'outbound',
+          from_phone: '+15555550199', to_phone: phone, twilio_sid: twilioSid, status: 'delivered',
+          message_body: 'Your reschedule link: https://example.com/reschedule/token' });
+        const oldAttempt = await mockPg('outbox_messages').where({ id: outboxId }).first();
+        await links.runOne(mockPg, oldAttempt, { now: new Date('2030-01-07T14:05:00Z') });
+
+        const afterCommitment = await mockPg('call_commitments').where({ id: commitment.id }).first();
+        expect(afterCommitment.status).toBe('open');
+        expect(afterCommitment.fulfilled_at).toBeNull();
+        expect(Number(afterCommitment.processing_generation)).toBe(1);
+        const afterCard = await mockPg('triage_items').where({ call_log_id: callId, reason_code: 'reschedule_link_promise' }).first();
+        expect(afterCard.status).toBe('open');
+        const afterAttempt = await mockPg('outbox_messages').where({ id: outboxId }).first();
+        expect(afterAttempt).toMatchObject({ status: 'review', last_error: 'delivery_scope_changed', commitment_generation: 0 });
+        expect(afterAttempt.payload.delivery_outcome_uncertain).toBe(false);
+      } finally {
+        if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
+        gates.callCommitments = priorCallCommitments;
+      }
+    });
+
     test('confirm after a genuinely delivered attempt restores fulfilled instead of re-texting (same dedup decision as Reopen)', async () => {
       const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
       const priorCallCommitments = gates.callCommitments;

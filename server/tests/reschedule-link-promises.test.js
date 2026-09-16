@@ -1026,22 +1026,44 @@ describe('a staff Confirm is an affirmative review, not a claim (codex #4293 P1 
     expect(cardState.status).toBe('open');
   });
 
-  test('a late delivery receipt for the CURRENT generation still fulfils the commitment and clears its card', async () => {
+  test('a late receipt from before an office renewal cannot fulfil the renewed promise when the call generation is unchanged', async () => {
     const { conn, state, cardState } = fakeFulfilConnWithCard(
-      { id: 'commitment', status: 'open', human_state: null, last_seen_generation: 1 },
+      { id: 'commitment', status: 'open', human_state: 'confirmed', last_seen_generation: 1, processing_generation: 2 },
       { id: 'card', call_log_id: 'call', reason_code: 'reschedule_link_promise', status: 'open', payload: { reschedule_link_promise: { commitment_ids: ['commitment'] } } },
     );
-    await links.fulfilPromise(conn, { id: 'outbox', commitment_id: 'commitment', related_call_log_id: 'call', payload: { call_generation: 1 } },
+    await links.fulfilPromise(conn, { id: 'outbox', commitment_id: 'commitment', commitment_generation: 1,
+      related_call_log_id: 'call', payload: { call_generation: 1 } }, { id: 'sms1' }, { id: 'call' });
+    expect(state.status).toBe('open');
+    expect(state.fulfilled_at).toBeUndefined();
+    expect(cardState.status).toBe('open');
+  });
+
+  test('a late delivery receipt for the CURRENT generation still fulfils the commitment and clears its card', async () => {
+    const { conn, state, cardState } = fakeFulfilConnWithCard(
+      { id: 'commitment', status: 'open', human_state: null, last_seen_generation: 1, processing_generation: 1 },
+      { id: 'card', call_log_id: 'call', reason_code: 'reschedule_link_promise', status: 'open', payload: { reschedule_link_promise: { commitment_ids: ['commitment'] } } },
+    );
+    await links.fulfilPromise(conn, { id: 'outbox', commitment_id: 'commitment', commitment_generation: 1,
+      related_call_log_id: 'call', payload: { call_generation: 1 } },
       { id: 'sms1' }, { id: 'call' });
     expect(state.status).toBe('fulfilled');
     expect(cardState.status).toBe('resolved');
   });
 
-  test('a row with no recorded generation falls back to the old, ungated behavior', async () => {
-    const { conn, state } = fakeFulfilConnWithCard({ id: 'commitment', status: 'open', human_state: null, last_seen_generation: 9 }, null);
+  test('a legacy row with no recorded generations keeps generation-zero behavior', async () => {
+    const { conn, state } = fakeFulfilConnWithCard(
+      { id: 'commitment', status: 'open', human_state: null, last_seen_generation: 9, processing_generation: 0 }, null);
     await links.fulfilPromise(conn, { id: 'outbox', commitment_id: 'commitment', related_call_log_id: 'call', payload: {} },
       { id: 'sms1' }, { id: 'call' });
     expect(state.status).toBe('fulfilled');
+  });
+
+  test('a legacy row with no commitment generation cannot fulfil an office-renewed promise', async () => {
+    const { conn, state } = fakeFulfilConnWithCard(
+      { id: 'commitment', status: 'open', human_state: 'confirmed', last_seen_generation: 9, processing_generation: 1 }, null);
+    await links.fulfilPromise(conn, { id: 'outbox', commitment_id: 'commitment', related_call_log_id: 'call', payload: {} },
+      { id: 'sms1' }, { id: 'call' });
+    expect(state.status).toBe('open');
   });
 
   // markLinkUsed's own generation fence (codex #4293 P1 — this round's sweep):
@@ -1057,9 +1079,9 @@ describe('a staff Confirm is an affirmative review, not a claim (codex #4293 P1 
   // above) because markLinkUsed, unlike fulfilPromise, itself reads and
   // writes outbox_messages — its own reconciliation stamp — inside the same
   // transaction as the card check.
-  function fakeMarkLinkUsedConn({ commitment, outboxPayload, cardPayload }) {
+  function fakeMarkLinkUsedConn({ commitment, outboxPayload, outboxCommitmentGeneration = null, cardPayload }) {
     const commitmentState = { ...commitment };
-    const outboxState = { status: 'review', payload: outboxPayload };
+    const outboxState = { status: 'review', payload: outboxPayload, commitment_generation: outboxCommitmentGeneration };
     const cardState = cardPayload ? { id: 'card', call_log_id: 'call', reason_code: 'reschedule_link_promise', status: 'open', payload: cardPayload } : null;
     const callLogState = { id: 'call', review_status: 'open' };
     function commitmentsBuilder() {
@@ -1142,8 +1164,9 @@ describe('a staff Confirm is an affirmative review, not a claim (codex #4293 P1 
 
   test('the customer using an OLDER attempt\'s link after a replacement recording reopened the commitment leaves the replacement\'s card intact (codex #4293 P1)', async () => {
     const { conn, cardState, outboxState } = fakeMarkLinkUsedConn({
-      commitment: { id: 'commitment', last_seen_generation: 2 },
+      commitment: { id: 'commitment', last_seen_generation: 2, processing_generation: 2 },
       outboxPayload: { call_generation: 1 },
+      outboxCommitmentGeneration: 1,
       cardPayload: { reschedule_link_promise: { commitment_id: 'commitment', commitment_ids: ['commitment'] } },
     });
     await links.markLinkUsed(conn, { id: 'outbox', commitment_id: 'commitment', related_call_log_id: 'call', related_scheduled_service_id: 'visit' });
@@ -1157,8 +1180,9 @@ describe('a staff Confirm is an affirmative review, not a claim (codex #4293 P1 
 
   test('the customer using the link with no replacement generation in play clears the card exactly as before', async () => {
     const { conn, cardState, outboxState } = fakeMarkLinkUsedConn({
-      commitment: { id: 'commitment', last_seen_generation: 1 },
+      commitment: { id: 'commitment', last_seen_generation: 1, processing_generation: 1 },
       outboxPayload: { call_generation: 1 },
+      outboxCommitmentGeneration: 1,
       cardPayload: { reschedule_link_promise: { commitment_id: 'commitment', commitment_ids: ['commitment'] } },
     });
     await links.markLinkUsed(conn, { id: 'outbox', commitment_id: 'commitment', related_call_log_id: 'call', related_scheduled_service_id: 'visit' });
@@ -1166,14 +1190,26 @@ describe('a staff Confirm is an affirmative review, not a claim (codex #4293 P1 
     expect(cardState.status).toBe('resolved');
   });
 
-  test('a row with no recorded generation falls back to the old, ungated behavior for markLinkUsed too', async () => {
+  test('a legacy row with no recorded generations keeps generation-zero behavior for markLinkUsed too', async () => {
     const { conn, cardState } = fakeMarkLinkUsedConn({
-      commitment: { id: 'commitment', last_seen_generation: 9 },
+      commitment: { id: 'commitment', last_seen_generation: 9, processing_generation: 0 },
       outboxPayload: {},
       cardPayload: { reschedule_link_promise: { commitment_id: 'commitment', commitment_ids: ['commitment'] } },
     });
     await links.markLinkUsed(conn, { id: 'outbox', commitment_id: 'commitment', related_call_log_id: 'call', related_scheduled_service_id: 'visit' });
     expect(cardState.status).toBe('resolved');
+  });
+
+  test('an older attempt cannot clear the renewed promise card when only commitment_generation changed', async () => {
+    const { conn, cardState, outboxState } = fakeMarkLinkUsedConn({
+      commitment: { id: 'commitment', last_seen_generation: 1, processing_generation: 2 },
+      outboxPayload: { call_generation: 1 },
+      outboxCommitmentGeneration: 1,
+      cardPayload: { reschedule_link_promise: { commitment_id: 'commitment', commitment_ids: ['commitment'] } },
+    });
+    await links.markLinkUsed(conn, { id: 'outbox', commitment_id: 'commitment', related_call_log_id: 'call', related_scheduled_service_id: 'visit' });
+    expect(outboxState.payload.link_used_reconciled_at).toBeDefined();
+    expect(cardState.status).toBe('open');
   });
 });
 
