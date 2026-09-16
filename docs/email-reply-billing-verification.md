@@ -24,7 +24,14 @@ words must be complete whitespace-delimited tokens; compounds such as
 `on-site`, `in-home`, and `after-hours` remain valid visit modifiers. Include
 and cover predicates also end the phrase, so plan coverage is not treated as a
 billing unit. A singular `on your next visit` is payment timing; recurring
-forms such as `on each visit` remain subject to the policy.
+forms such as `on each visit` remain subject to the policy. Singular invoice,
+payment, and charge references such as `this invoice is for your recent visit`
+are likewise outside the recurring-unit policy. Billing labels accept bounded
+colon, comma, and dash separators, including after a copula. Bare `rate` is
+classified as billing only with a billing copula, `per`, or one of those label
+separators, preserving feedback requests such as `Please rate each visit`.
+Separate-billing language is screened with the adverb before or after the
+billing verb.
 
 Monetary clauses such as `$98 per visit`, `the rate is 98 per visit`, or `each
 visit is billed at 98` belong to the separately reviewed monetary sibling and

@@ -5,14 +5,18 @@ const VISIT_MODIFIER_SRC = `(?!(?:applications?|${VISIT_MODIFIER_STOP_SRC})(?=\\
 const VISIT_SRC = `(?:${VISIT_MODIFIER_SRC}\\s+){0,8}visits?\\b`;
 const BARE_VISITS_SRC = `(?:${VISIT_MODIFIER_SRC}\\s+){0,8}visits\\b`;
 const VISIT_UNIT_SRC = `(?:each|every|a|an|one|the|your|our|my|their|his|her|its|this|that|any)\\s+${VISIT_SRC}`;
-const ON_RECURRING_VISIT_SRC = `(?:(?:each|every|any)\\s+${VISIT_SRC}|(?:(?:the|your|our|my|their|his|her|its|these|those)\\s+)?${BARE_VISITS_SRC})`;
-const PRICE_UNIT_SRC = `(?:for\\s+${VISIT_UNIT_SRC}|on\\s+${ON_RECURRING_VISIT_SRC}|${VISIT_UNIT_SRC}|per[\\s-]+${VISIT_SRC}|/\\s*${VISIT_SRC})`;
+const RECURRING_VISIT_UNIT_SRC = `(?:(?:each|every|any)\\s+${VISIT_SRC}|(?:(?:the|your|our|my|their|his|her|its|these|those)\\s+)?${BARE_VISITS_SRC})`;
+const PRICE_UNIT_SRC = `(?:(?:for|on)\\s+${RECURRING_VISIT_UNIT_SRC}|${VISIT_UNIT_SRC}|per[\\s-]+${VISIT_SRC}|/\\s*${VISIT_SRC})`;
 const VISIT_SUBJECT_SRC = `(?:${VISIT_UNIT_SRC}|${BARE_VISITS_SRC})`;
-const BILLING_TERM_SRC = '(?:prices?|amounts?|costs?|charges?|fees?|(?:the|a|our|your|its)\\s+rates?|rates?(?=\\s+(?:is|are|was|were|will\\s+be|per)\\b)|invoices?|invoiced|invoicing|billing|billed|bills?|charging|charged|charges?|pricing|priced|payments?|pay|paid)';
+const BILLING_TERM_SRC = '(?:prices?|amounts?|costs?|charges?|fees?|(?:the|a|our|your|its)\\s+rates?|rates?(?=(?:\\s+(?:is|are|was|were|will\\s+be|per)\\b|\\s*[:,-]))|invoices?|invoiced|invoicing|billing|billed|bills?|charging|charged|charges?|pricing|priced|payments?|pay|paid)';
+const BILLING_UNIT_SEPARATOR_SRC = '(?:\\s+(?:is|are|was|were|will\\s+be)(?:\\s+|\\s*[:,-]\\s*)|\\s+|\\s*[:,-]\\s*)';
+const ACTIVE_BILLING_VERB_SRC = '(?:bills?|billed|billing|charges?|charged|charging|invoices?|invoiced|invoicing)';
+const SEPARATE_BILLING_PREDICATE_SRC = `(?:(?:billed|charged|invoiced)\\s+(?:separately|individually|on\\s+(?:its|their)\\s+own)|(?:separately|individually)\\s+(?:billed|charged|invoiced))`;
 
 const AMOUNTLESS_BILLING_RE = new RegExp([
-  `\\b${BILLING_TERM_SRC}(?:\\s+(?:is|are|was|were|will\\s+be))?\\s+${PRICE_UNIT_SRC}`,
-  `\\b${VISIT_SUBJECT_SRC}\\s+(?:is|are|was|were|will\\s+be)\\s+(?:billed|charged|invoiced)\\s+(?:separately|individually|on\\s+(?:its|their)\\s+own)\\b`,
+  `\\b${BILLING_TERM_SRC}${BILLING_UNIT_SEPARATOR_SRC}${PRICE_UNIT_SRC}`,
+  `\\b${VISIT_SUBJECT_SRC}\\s+(?:is|are|was|were|will\\s+be)\\s+${SEPARATE_BILLING_PREDICATE_SRC}\\b`,
+  `\\b(?:(?:${ACTIVE_BILLING_VERB_SRC})\\s+(?:separately|individually)|(?:separately|individually)\\s+(?:${ACTIVE_BILLING_VERB_SRC}))\\s+(?:for|on)\\s+${RECURRING_VISIT_UNIT_SRC}`,
 ].join('|'), 'i');
 
 // Inactive wording policy only. A future caller must establish commercial

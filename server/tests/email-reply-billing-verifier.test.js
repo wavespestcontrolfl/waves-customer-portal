@@ -22,12 +22,18 @@ describe('email reply amountless billing policy', () => {
     'Each visit will be charged individually', 'Our visits are billed separately',
     'Our visits were charged individually', 'Their visits are invoiced on their own',
     'Visits are billed separately', 'Routine visits are charged individually',
+    'We bill separately for each visit', 'We charge individually on every visit',
+    'We billed separately for each visit', 'We separately bill for each visit',
+    'Each visit is separately billed', 'Routine visits were individually charged',
   ])('rejects unit-first separate billing: %s', rejected);
 
   test.each([
     'Billing is' + String.fromCharCode(92, 10) + 'per visit',
     'Billing is per&#32;visit', '`Billing` is per visit',
-    '**Our *fees* are per visit**',
+    '**Our *fees* are per visit**', 'Billing: per visit',
+    'Billing — per visit', 'Our fees, per routine visit',
+    'Rate: per visit', 'Rates — per visit',
+    'Billing is: per visit', 'Rate is — per routine visit',
   ])('screens rendered amountless billing: %s', rejected);
 
   test.each([
@@ -48,6 +54,10 @@ describe('email reply amountless billing policy', () => {
     'You can pay on our next visit.',
     'Our fees for your plan include routine visits.',
     'Our fees for your plan cover scheduled visits.',
+    'This invoice is for your recent visit.',
+    'Your invoice is for this visit.',
+    'This payment is for your last visit.',
+    'The charge is for the scheduled visit.',
     'The notes contain an unmatched * or ` and a backslash before \\q.',
   ])('preserves ordinary and per-application prose: %s', (text) => {
     expect(verdict(text)).toEqual({ ok: true, violations: [] });
@@ -56,6 +66,7 @@ describe('email reply amountless billing policy', () => {
   test.each([
     'You pay on each visit.', 'You pay on every scheduled visit.',
     'You pay on your visits.', 'Payments are on routine visits.',
+    'Invoices are for your visits.', 'Billing is for every routine visit.',
   ])('keeps recurring on-visit billing in policy: %s', rejected);
 
   test.each([
