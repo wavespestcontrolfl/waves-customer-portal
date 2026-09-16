@@ -43,7 +43,7 @@ jest.mock('../utils/cron-lock', () => {
 });
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSendCustomerMessage(...a) }));
 jest.mock('../services/email-template-library', () => ({ sendTemplate: (...a) => mockEmailSendTemplate(...a) }));
-jest.mock('../services/short-url', () => ({ shortenOrPassthrough: async (url) => url }));
+jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async (url) => url) }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal.test' }));
 jest.mock('../services/customer-contact', () => ({
   // Honor explicit null/'' so tests can model a customer missing a channel.
@@ -140,6 +140,7 @@ function makeMock(initial = {}, opts = {}) {
       // never deleted, so EXISTS matches nothing and NOT EXISTS everything.
       whereExists() { this.matchNone = true; return this; },
       whereNotExists() { return this; },
+      forUpdate() { return this; },
       whereNull(c) { this.nulls.push(c); return this; },
       leftJoin() { return this; }, joinRaw() { return this; }, select(...cols) { this.selected = cols; return this; },
       orderBy(c, d = 'asc') { this.order = [c, d]; return this; },
@@ -1562,6 +1563,55 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       // state is not a sendable one, and a due row retries on its own.
       expect(out).toEqual({ refused: 'send_fence_unstored' });
       expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('a transient reservation-write failure retries once, then un-fences the row instead of parking it for 72h (codex #4331 P1)', async () => {
+      const due = new Date(Date.now() - 60000);
+      const mock = makeMock({
+        customers: [{ id: 'uq-resfail', first_name: 'Ida', phone: '+19410000164', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-uq-resfail', customer_id: 'uq-resfail', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tuqrf', location_id: 'venice', created_at: new Date(), scheduled_for: due }],
+        // Every attempt to insert the sms_log reservation fails (a transient
+        // DB blip) — the pre-send fence write on review_requests above this
+        // succeeds normally, exactly as it would in production.
+      }, { onInsert: (table) => (table === 'sms_log' ? new Error('pg blip on reservation insert') : null) });
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.sendSMS('rr-uq-resfail');
+
+      expect(out).toEqual({ refused: 'send_state_unverified' });
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(mock.__state.rows.sms_log || []).toHaveLength(0);
+      const row = mock.__state.rows.review_requests[0];
+      expect(row.status).toBe('pending');
+      // Restored to the pre-fence due date, not left parked 72h out — a
+      // failed reservation must not read as "recently asked" for 3 days
+      // when nothing was ever sent.
+      expect(row.scheduled_for).toEqual(due);
+    });
+
+    test('a transient reservation-write failure that succeeds on retry sends normally', async () => {
+      const due = new Date(Date.now() - 60000);
+      let smsLogInsertAttempts = 0;
+      const mock = makeMock({
+        customers: [{ id: 'uq-resretry', first_name: 'Ida', phone: '+19410000164', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-uq-resretry', customer_id: 'uq-resretry', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tuqrr', location_id: 'venice', created_at: new Date(), scheduled_for: due }],
+      }, {
+        onInsert: (table) => {
+          if (table !== 'sms_log') return null;
+          smsLogInsertAttempts += 1;
+          return smsLogInsertAttempts === 1 ? new Error('pg blip on reservation insert') : null;
+        },
+      });
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.sendSMS('rr-uq-resretry');
+
+      expect(smsLogInsertAttempts).toBe(2);
+      expect(out.sent).toBe(true);
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+      const row = mock.__state.rows.review_requests[0];
+      expect(row.status).toBe('sent');
+      expect(row.sms_sent_at).toBeTruthy();
     });
 
     test('a non-ask uncertain send whose deferred write fails stays fenced, not due (pre-push codex P1 on #4331)', async () => {
@@ -6057,4 +6107,39 @@ test('failed spacing-retry persistence never deletes an existing queued request'
     .rejects.toMatchObject({ code: 'review_retry_persistence_failed' });
   expect(mock.__state.rows.review_requests).toEqual([queued]);
   expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+});
+
+
+test('a held email deletes its minted short code together with the pending request', async () => {
+  const customer = { id: 'held-email-code', first_name: 'Synthetic', phone: '+12025550101', email: 'synthetic@example.test' };
+  const mock = makeMock({ customers: [customer], short_codes: [],
+    notification_prefs: [{ customer_id: customer.id, email_enabled: true, review_request: true }] },
+  { throwSelectWhen: q => q.table === 'sms_log' });
+  db.mockImplementation(mock);
+  require('../services/short-url').shortenOrPassthrough.mockImplementationOnce(async (url, options) => {
+    mock.__state.rows.short_codes.push({ kind: options.kind, entity_type: options.entityType, entity_id: String(options.entityId), code: 'held-code' });
+    return 'https://portal.test/l/held-code';
+  });
+  const result = await ReviewService.sendOutreachTouch({ customer, channel: 'email' });
+  expect(result).toMatchObject({ blocked: true, code: 'REVIEW_HISTORY_UNAVAILABLE' });
+  expect(mock.__state.rows.review_requests).toEqual([]);
+  expect(mock.__state.rows.short_codes).toEqual([]);
+  expect(mockEmailSendTemplate).not.toHaveBeenCalled();
+});
+
+test('a queued SMS retry renews its expired unsent review link before provider handoff', async () => {
+  const customer = { id: 'expired-retry', first_name: 'Synthetic', phone: '+12025550101', nearest_location_id: 'venice' };
+  const expired = new Date(Date.now() - 86400000);
+  const mock = makeMock({ customers: [customer], review_requests: [{ id: 'expired-ask', customer_id: customer.id,
+    status: 'pending', channel: 'sms', template_key: 'friendly_ask', location_id: 'venice', token: 'expired-token', expires_at: expired,
+    scheduled_for: new Date(Date.now() - 60000), created_at: new Date(Date.now() - 15 * 86400000) }] });
+  db.mockImplementation(mock);
+  const before = Date.now();
+  mockSendCustomerMessage.mockImplementationOnce(async () => {
+    expect(new Date(mock.__state.rows.review_requests[0].expires_at).getTime()).toBeGreaterThanOrEqual(before + 14 * 86400000);
+    return { sent: true, deliveryOutcome: 'accepted' };
+  });
+  await ReviewService.sendSMS('expired-ask');
+  expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+  expect(mock.__state.rows.review_requests[0].sms_sent_at).toBeTruthy();
 });
