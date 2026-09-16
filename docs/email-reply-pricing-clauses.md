@@ -12,18 +12,20 @@ unmatched markup cannot silently join a claim.
 The finite recognizer uses longest anchored matches at each position. It
 distinguishes explicit-currency `money`, bare `number`, duration/count
 `measurement`, singular `visit`, plural `visits`, quantified `eachVisit`,
-recurring `unit`, singular `forVisit`, one-off `timing`, per/for-application
+recurring `unit`, singular `forVisit`, one-off `timing`, application noun/unit
 `application`, possessives, auxiliaries (`be`), modals, and ordinary `word`
 tokens. A visit noun phrase has at most eight modifiers; predicates,
 prepositions, determiners, and account/payment/access terms stop it. Duration
-modifiers may use one hyphen or space. `on a visit-by-visit basis` is one unit;
-`30-45 minutes` is one measurement.
+modifiers may use one hyphen or space, including bounded `min`/`mins` and
+`hr`/`hrs` abbreviations. `on a visit-by-visit basis` is one unit;
+`30-45 minutes` and compact `98mins` are measurements.
 Bounded prose ranges such as `between 90 and 120 minutes` and `from 90 to
 120 minutes` are also single measurements; explicit currency in the same
 forms remains `money` evidence.
 Currency words also stop visit modifiers, preserving `ninety-eight dollar` as
 `money` before a `visit fee` phrase.
-Hyphenated currency (`ninety-eight-dollar`, `98-dollar`) stays `money` as well.
+Hyphenated currency (`ninety-eight-dollar`, `98-dollar`, `98-cent`) stays
+`money` as well; spaced numeric and written cents are explicit money too.
 The bounded written-number grammar also accepts fully hyphenated hundreds
 (`one-hundred-and-twenty-eight-dollar`), while the same number followed by a
 duration unit remains a `measurement`.
@@ -35,6 +37,9 @@ visit nouns. A hyphenated continuation such as `application-related` or
 `visit-related` cannot be truncated into an application or visit token.
 Bounded numeric ordinals (`1st`, `2nd`, and similar forms up to three digits)
 may modify a visit or application noun.
+Bare or determined application subjects (`each application`, `this
+application`) also emit `application` without a per/for prefix; the longest
+prefixed form still wins when present.
 One-off `on`/`at` timing also accepts possessive today, tomorrow, yesterday,
 and weekday names (with optional this/next/last for weekdays).
 

@@ -20,7 +20,7 @@ const STEM = Object.freeze({
 const STOP_WORDS = [
   'a', 'access', 'account', 'accounts', 'after', 'an', 'and', 'any', 'are', 'at',
   'balance', 'balances', 'be', 'been', 'before', 'being', 'buck', 'bucks', 'but', 'by', 'can',
-  'client', 'clients', 'could', 'cover', 'covered', 'covering', 'covers',
+  'cent', 'cents', 'client', 'clients', 'could', 'cover', 'covered', 'covering', 'covers',
   'customer', 'customers', 'did', 'do', 'does', 'dollar', 'dollars', 'during', 'each', 'every',
   'for', 'from', 'had', 'has', 'have', 'her', 'his', 'if', 'include', 'included',
   'includes', 'including', 'in', 'into', 'is', 'its', 'may', 'might', 'must',
@@ -33,8 +33,8 @@ const STOP_WORDS = [
   ...Object.keys(STEM),
 ];
 const STOP = `(?:${[...new Set(STOP_WORDS)].join('|')})`;
-const DURATION = '(?:minutes?|hours?|days?|weeks?|months?|years?)';
-const MODIFIER = `(?!(?:applications?|${STOP})(?=\\s|$))(?:[a-z]+(?:-(?!(?:dollars?|bucks?)\\b)[a-z]+)*|\\d{1,3}(?:st|nd|rd|th)|\\d{1,9}(?:\\.\\d{1,2})?(?:-(?:minute|hour|day|week|month|year)s?|\\s+${DURATION}))`;
+const DURATION = '(?:minutes?|hours?|days?|weeks?|months?|years?|mins?|hrs?)';
+const MODIFIER = `(?!(?:applications?|${STOP})(?=\\s|$))(?:[a-z]+(?:-(?!(?:dollars?|bucks?|cents?)\\b)[a-z]+)*|\\d{1,3}(?:st|nd|rd|th)|\\d{1,9}(?:\\.\\d{1,2})?(?:-|\\s+)${DURATION})`;
 const VISIT = `(?:${MODIFIER}\\s+){0,8}(?:service-)?visit\\b(?!-[a-z])`;
 const VISITS = `(?:${MODIFIER}\\s+){0,8}(?:service-)?visits\\b(?!-[a-z])`;
 const SINGULAR_DET = '(?:a|an|one|the|your|our|my|their|his|her|its|this|that)';
@@ -58,16 +58,17 @@ const TENS = '(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)';
 const UNDER_HUNDRED = `(?:${ONE_TO_NINETEEN}|${TENS}(?:[-\\s](?:one|two|three|four|five|six|seven|eight|nine))?)`;
 const WORD_JOIN = '(?:\\s+|-)';
 const WRITTEN = `(?:(?:a|one|two|three|four|five|six|seven|eight|nine)${WORD_JOIN}hundred(?:${WORD_JOIN}(?:and${WORD_JOIN})?${UNDER_HUNDRED})?|${UNDER_HUNDRED})`;
-const CURRENCY = `(?:(?:\\$\\s*|\\busd\\s+)${NUMERIC_RANGE}|\\b${NUMERIC_RANGE}(?:\\s+|-)(?:dollars?|bucks?|usd)\\b|\\b${WRITTEN}(?:\\s+|-)(?:dollars?|bucks?)\\b)`;
+const CURRENCY = `(?:(?:\\$\\s*|\\busd\\s+)${NUMERIC_RANGE}|\\b${NUMERIC_RANGE}(?:\\s+|-)(?:dollars?|bucks?|cents?|usd)\\b|\\b${WRITTEN}(?:\\s+|-)(?:dollars?|bucks?|cents?)\\b)`;
 const MONEY = `(?:${CURRENCY})(?:\\s*\\+(?!\\s*(?:tax(?:es)?|fees?)\\b)|\\s+(?:and\\s+up|or\\s+more))?`;
 const MEASURE_SPAN = `(?:between\\s+${DIGITS}\\s+and\\s+${DIGITS}|from\\s+${DIGITS}\\s+to\\s+${DIGITS}|${DIGITS}\\s*(?:-|to)\\s*${DIGITS}|${DIGITS}|${WRITTEN})`;
-const MEASURE = `${MEASURE_SPAN}\\s+(?:minutes?|hours?|days?|weeks?|months?|years?|photos?|pictures?|points?|ounces?|gallons?|reminders?)\\b`;
+const MEASURE = `(?:${MEASURE_SPAN}\\s+(?:${DURATION}|photos?|pictures?|points?|ounces?|gallons?|reminders?)|${DIGITS}(?:mins?|hrs?))\\b`;
 
 // Longest anchored match wins. The stable order breaks equal-length ties;
 // unit/application/measurement forms precede their shorter constituents.
 const PATTERNS = [
   ['unit', `(?:(?:on\\s+(?:a|the)\\s+)?visit-by-visit(?:\\s+basis)?|(?:-?per[\\s-]+|/\\s*|by\\s+)${PREFIXED_VISIT}|(?:for|on|at)\\s+${RECURRING})`],
   ['application', `(?:-?per[\\s-]+|for\\s+|/\\s*)${PREFIXED_APPLICATION}`],
+  ['application', PREFIXED_APPLICATION],
   ['timing', `(?:on|at)\\s+(?:${TEMPORAL_POSSESSIVE}\\s+${VISIT}|${SINGLE_VISIT})`],
   ['forVisit', `for\\s+${SINGLE_VISIT}`],
   ['eachVisit', EACH_VISIT],

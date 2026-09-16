@@ -104,6 +104,49 @@ describe('bounded email reply pricing clause recognition', () => {
     ]);
   });
 
+  test.each([
+    ['98 cents per visit', '98 cents'],
+    ['ninety-eight cents per visit', 'ninety-eight cents'],
+  ])('recognizes explicit cents before a recurring visit unit: %s', (text, amount) => {
+    expect(tokens(text)).toEqual([
+      { kind: 'money', text: amount }, { kind: 'unit', text: 'per visit' },
+    ]);
+  });
+  test.each(['98-cent', 'ninety-eight-cent'])('keeps cent adjectives out of visit modifiers: %s', (amount) => {
+    expect(tokens(`a ${amount} visit fee`)).toEqual([
+      { kind: 'word', text: 'a' }, { kind: 'money', text: amount },
+      { kind: 'visit', text: 'visit' }, { kind: 'word', text: 'fee' },
+    ]);
+  });
+
+  test('recognizes application subjects without a unit prefix', () => {
+    expect(tokens('Each application costs $98')).toEqual([
+      { kind: 'application', text: 'each application' },
+      { kind: 'word', text: 'cost' }, { kind: 'money', text: '$98' },
+    ]);
+    expect(tokens("This application's price is $98")).toEqual([
+      { kind: 'application', text: 'this application' },
+      { kind: 'possessive', text: "'s" }, { kind: 'word', text: 'price' },
+      { kind: 'be', text: 'is' }, { kind: 'money', text: '$98' },
+    ]);
+    expect(tokens('for each application')).toEqual([
+      { kind: 'application', text: 'for each application' },
+    ]);
+  });
+
+  test('recognizes abbreviated visit duration modifiers and compact measurements', () => {
+    expect(tokens('$98 per 30-min visit')).toEqual([
+      { kind: 'money', text: '$98' }, { kind: 'unit', text: 'per 30-min visit' },
+    ]);
+    expect(tokens('$98 for each 1-hr visit')).toEqual([
+      { kind: 'money', text: '$98' }, { kind: 'unit', text: 'for each 1-hr visit' },
+    ]);
+    expect(tokens('Each visit costs 98mins')).toEqual([
+      { kind: 'eachVisit', text: 'each visit' }, { kind: 'word', text: 'cost' },
+      { kind: 'measurement', text: '98mins' },
+    ]);
+  });
+
   test('keeps inherited object property names as ordinary string tokens', () => {
     expect(tokens('constructor')).toEqual([{ kind: 'word', text: 'constructor' }]);
   });
