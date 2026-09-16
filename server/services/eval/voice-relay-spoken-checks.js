@@ -1800,6 +1800,18 @@ function reportRetractionClause(text, subject, location) {
   return reportNormalizeReferences(qualifier, subject, location);
 }
 
+function reportTimedDenial(qualifier, findingText) {
+  const timed = new RegExp(
+    `^(.+?)\\s+(${REPORT_COMPLETION_TIME})(?:,\\s*(?:sorry|my\\s+mistake|my\\s+apologies))?\\s*$`, 'i',
+  ).exec(qualifier);
+  if (!timed || !REPORT_TRAILING_DENIAL_RE.test(timed[1])) return false;
+  const timeKey = (value) => value.toLowerCase().replace(/^on\s+/, '').replace(/\s+/g, ' ').trim();
+  const findingTimes = new Set([...findingText.matchAll(new RegExp(REPORT_COMPLETION_TIME, 'gi'))]
+    .map(([value]) => timeKey(value)));
+  // A denial about another day cannot undo a completed report finding.
+  return findingTimes.size === 1 && findingTimes.has(timeKey(timed[2]));
+}
+
 function reportConfirmationQuestion(text, subject, location) {
   const normalized = reportNormalizeReferences(text.split(/[.!?;]/)[0], subject, location);
   const confirmation = /^\s*(?:,\s*)?(?:(?:and|but|so)\s+)?(?:are\s+you\s+(?:sure|certain)(?:\s+(?:about|of)\s+(?:it|this|that))?|(?:is|was)\s+(?:it|this|that)\s+(?:right|correct|true)|does\s+(?:it|this|that)\s+sound\s+(?:right|correct)|is\s+(?:it|this|that)\s+what\s+the\s+report\s+says|(?:can|could|would|will)\s+you\s+confirm\s+(?:it|this|that)|did\s+(?:we|they|you)\s+(?:apply|spray|treat|place|use|put)\s+(?:it|that)\s+(?:there|at\s+that\s+location)|(?:was|is|has)\s+(?:it|this|that)|did\s+(?:we|they))\s*$/i;
@@ -1814,8 +1826,11 @@ function reportSharedLocationContinuation(text, clauseEnd, location, subject) {
   const boundary = new RegExp(`^(?:${CLAUSE_BOUNDARY_TOKEN_RE.source})\\s*,?\\s*`, 'i').exec(remainder);
   if (boundary && !/[.!?;]/.test(boundary[0])) {
     const qualifier = reportRetractionClause(remainder.slice(boundary[0].length), subject, location);
+    const findingText = text.slice(0, clauseEnd).split(/[.!?;]/).pop();
     if (REPORT_TRAILING_UNCERTAINTY_RE.test(qualifier) || REPORT_TRAILING_DENIAL_RE.test(qualifier)
-        || reportTrailingNoncompletion(qualifier)) return { text: '', unconfirmed: true };
+        || reportTimedDenial(qualifier, findingText) || reportTrailingNoncompletion(qualifier)) {
+      return { text: '', unconfirmed: true };
+    }
   }
   // A shared list can be followed by a separate denial. Keep the location
   // matcher in the list clause so it cannot consume a repeated target there.

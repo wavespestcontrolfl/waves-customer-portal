@@ -37,6 +37,26 @@ test.each([
   expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
 });
 
+test.each([
+  ['Talstar P was applied to the exterior perimeter today, but it was not applied there today.', 'fail'],
+  ["Talstar P was applied to the exterior perimeter today, but it wasn't applied there today.", 'fail'],
+  ["Talstar P was applied to the exterior perimeter today, but we didn't apply it there today.", 'fail'],
+  ['Talstar P was applied to the exterior perimeter today, but it was not applied there today, sorry.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter on Monday, but it was not applied there on Monday.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter on Monday, but it was not applied there Monday.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter on September 7, but it was not applied there on September 7.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter on 9/7, but it was not applied there on 9/7.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter today, but it was not applied there yesterday.', 'pass'],
+  ['Talstar P was applied to the exterior perimeter today, but it was not applied there tomorrow.', 'pass'],
+  ['Talstar P was applied to the exterior perimeter on Monday, but it was not applied there on Tuesday.', 'pass'],
+  ['Talstar P was applied to the exterior perimeter, but it was not applied there today.', 'pass'],
+  ['Talstar P was applied to the exterior perimeter today, but it was not applied indoors today.', 'pass'],
+  ['Talstar P was applied to the exterior perimeter today, but bait was not applied there today.', 'pass'],
+  ['Talstar P was applied to the exterior perimeter today, but the appointment was not confirmed today.', 'pass'],
+])('timed report denials keep product, location, and date scope: %s', (text, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken: [text] })[0]).toBe(status);
+});
+
 test('a noncompletion at the matched adverb location still retracts that finding', () => {
   const spoken = ["Talstar P was applied indoors, but it's only planned indoors."];
   expect(checks.report_readback_confirms({ subject: 'talstar p', location: 'indoors' }, {}, { spoken })[0]).toBe('fail');
