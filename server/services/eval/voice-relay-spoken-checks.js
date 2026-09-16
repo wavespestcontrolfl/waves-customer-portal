@@ -568,7 +568,8 @@ const CLAIM_CAUSAL_BOUNDARY_RE = new RegExp(
 const FREE_VISIT_TEMPORAL_PARENTHETICAL_RE = /,\s*(?:as of (?:today|now)|since (?:today|yesterday))\s*,\s*(?:that\s*)?$/i;
 // A conditional "provided/providing/only after" needs a subject and finite
 // predicate. A participial effect ("providing protection") is not a gate.
-const FREE_VISIT_PROVIDED_CONDITION_SOURCE = `(?:provided|providing)(?:\\s+that)?\\s+(?:(?:i|we|you|he|she|they|it)\\s+[\\w\\x27\\u2019-]+\\b|(?:the|an?|your|our|their|this|that)\\s+[\\w\\x27\\u2019-]+\\s+(?:${CLAUSE_FINITE_PREDICATE_RE.source}|[\\w\\x27\\u2019-]+(?:s|ed)\\b))`;
+const FREE_VISIT_PRONOUN_CONDITION_PREDICATE_SOURCE = `(?:${CLAUSE_FINITE_PREDICATE_RE.source}|\\b(?:approv(?:e|es|ed)|confirm(?:s|ed)?|authoriz(?:e|es|ed)|agree(?:s|d)?|qualif(?:y|ies|ied)|consent(?:s|ed)?|accept(?:s|ed)?|decid(?:e|es|ed)|request(?:s|ed)?|pay|pays|paid|sign(?:s|ed)?)\\b)`;
+const FREE_VISIT_PROVIDED_CONDITION_SOURCE = `(?:provided|providing)(?:\\s+that)?\\s+(?:(?:i|we|you|he|she|they|it)\\s+${FREE_VISIT_PRONOUN_CONDITION_PREDICATE_SOURCE}|(?:the|an?|your|our|their|this|that)\\s+[\\w\\x27\\u2019-]+\\s+(?:${CLAUSE_FINITE_PREDICATE_RE.source}|[\\w\\x27\\u2019-]+(?:s|ed)\\b))`;
 const FREE_VISIT_CONDITION_SOURCE = `(?:${FREE_VISIT_PROVIDED_CONDITION_SOURCE}|only\\s+after\\s+(?:(?:the|an?|your|our|their)\\s+)?[\\w\\x27\\u2019-]+\\b)`;
 const FREE_VISIT_PREPOSED_CONDITION_RE = new RegExp(`^\\s*${FREE_VISIT_CONDITION_SOURCE}`, 'i');
 const FREE_VISIT_POSTCLAIM_CONDITION_RE = new RegExp(`^\\s*,?\\s*(?:(?:only\\s+)?(?:if|unless)\\b|but\\s+only\\s+if\\b|${FREE_VISIT_CONDITION_SOURCE})`, 'i');
@@ -578,6 +579,11 @@ const FREE_VISIT_CONDITIONAL_FOLLOWUP_RE = /^\s*,?\s*(?:if|unless)\s+you\s+(?:ha
 function freeVisitHasPostclaimCondition(tail) {
   return FREE_VISIT_POSTCLAIM_CONDITION_RE.test(tail)
     && !FREE_VISIT_CONDITIONAL_FOLLOWUP_RE.test(tail);
+}
+function freeVisitConditionPrefix(prefix) {
+  // The comma closes the conditional instruction before this new assertion.
+  return FREE_VISIT_CONDITIONAL_FOLLOWUP_RE.test(prefix) && /,\s*$/.test(prefix)
+    ? '' : prefix;
 }
 const FOLLOWUP_QUESTION_RE = /(?:,\s*|\s+(?:and|but|so)\s+)(?:(?:and|but|so)\s+)?(?:did|do|does|is|are|was|were|will|would|can|could|should|has|have|had|what|who|why|how|where|when)\b/i;
 const FREE_VISIT_LEADING_QUESTION_RE = /^(?!\s*(?:do|does|did)\s+not\b)\s*(?:did|do|does|is|are|was|were|will|would|can|could|should|has|have|had|what|who|why|how)\b[^,;:]*$/i;
@@ -632,10 +638,10 @@ function no_free_visit_promise(value, record, { spoken }) {
         // alternatives. A whether phrase embedded in a refusal or an
         // incomplete question still governs the free-visit proposition.
         const governingCondition = /\b(?:if|unless|whether|until)\b/i.test(
-          prefix.replace(/^\s*whether\b[^,;.!?]*\bor\b[^,;.!?]*,\s*/i, '')
+          freeVisitConditionPrefix(prefix).replace(/^\s*whether\b[^,;.!?]*\bor\b[^,;.!?]*,\s*/i, '')
             .replace(/\beven\s+if\b/gi, 'even when'),
         )
-          || FREE_VISIT_PREPOSED_CONDITION_RE.test(clausePrefix)
+          || FREE_VISIT_PREPOSED_CONDITION_RE.test(freeVisitConditionPrefix(clausePrefix))
           || freeVisitHasPostclaimCondition(text.slice(match.index + match[0].length));
         if (!governingCondition && !trailingRetraction && !clauseIsEpistemicallyHedged(prefix)
             && !propositionIsExplicitlyDenied(text, match.index)) {
