@@ -64,6 +64,25 @@ describe('email reply monetary visit-pricing policy', () => {
   ])('rejects possessive singular and plural visit prices: %s', rejected);
 
   test.each([
+    'First visit costs $98', '$98 for first visit', 'Visit costs $98',
+  ])('rejects articleless visit prices: %s', rejected);
+
+  test.each([
+    'Price per visit: $98', 'Rate for every visit: USD 98',
+    'Price per visit — $98',
+  ])('rejects punctuated visit-price labels: %s', rejected);
+
+  test.each([
+    '$98 at each visit', 'You pay $98 at every visit',
+    'USD 98 at every scheduled visit',
+  ])('rejects amounts charged at a visit: %s', rejected);
+
+  test.each([
+    '$98 per on-site visit', 'USD 98 for each in-home visit',
+    'After-hours visit costs $98', '$98 for your after-hours visit',
+  ])('rejects hyphenated modifiers beginning with stop words: %s', rejected);
+
+  test.each([
     'USD `98` per visit', '$98 per\\-visit', 'USD ``98`` per visit',
     '**USD `98` per visit**', 'USD `98\n` per visit', 'USD 98\\\nper visit',
     '$98\\\r\nfor each visit', 'USD 98 per&#32;visit', 'USD **98\nper visit**',
@@ -97,6 +116,10 @@ describe('email reply monetary visit-pricing policy', () => {
     'The $98 balance is due before the next visit.',
     'Your account received the $98 payment after the prior visit and before the next visit.',
     '$98 per alpha beta gamma delta epsilon zeta eta theta iota visit',
+    'Visit is scheduled for Friday.', 'Visit is 98 minutes long.',
+    '$98 for your plan includes routine visits.',
+    'USD 98 for your plan covers scheduled visits.',
+    'Please pay $98 at your next visit.',
   ])('preserves application prices and unrelated visit prose: %s', (text) => {
     expect(verdict(text)).toEqual({ ok: true, violations: [] });
   });

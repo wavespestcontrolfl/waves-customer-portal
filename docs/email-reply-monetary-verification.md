@@ -11,11 +11,17 @@ visit units, including modified visit nouns, singular/plural forms, possessive
 prices such as `Each visit's price is$98`, and price or billing verbs. Monetary
 forms include dollar symbols, USD prefixes/suffixes, and amounts followed by
 `dollars` or `bucks`. Bare numbers match only with explicit pricing context,
-such as `Each visit costs 98`; duration and photo counts remain valid.
+such as `Each visit costs 98`; duration and photo counts remain valid. The
+monetary grammar also covers articleless subjects (`Visit costs $98`), price
+labels separated by a colon or dash, and amounts charged `at each` or `at
+every` visit. A one-off payment reminder for the next visit remains valid.
 Visit noun phrases allow at most eight modifiers and stop at clause words,
 prepositions, determiners, and account/payment/access nouns. Thus an account
 payment followed later by visit timing, such as `We received $98 for your
-account before the next visit`, does not become a visit price.
+account before the next visit`, does not become a visit price. Stop words apply
+only as standalone tokens, preserving modifiers such as `on-site`, `in-home`,
+and `after-hours`. Plan predicates such as `includes` and `covers` also stop the
+noun phrase, so a plan amount followed by its included visits remains valid.
 
 The shared `email-reply-copy-normalizer` bounds raw input at 8,192 UTF-8 bytes,
 512 whitespace-delimited tokens, and eight formatting passes before matching.
