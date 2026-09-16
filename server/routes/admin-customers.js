@@ -3876,11 +3876,10 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         // Handle empty strings for numeric/date fields
         if (v === 'waveguard_tier') {
           updates[v] = req.body[k];
-          // A human set (or cleared) the tier: record 'manual' provenance so
-          // the auto-tier machinery (GATE_AUTO_WAVEGUARD_TIER realignment +
-          // label-only messaging suppression) never treats an admin-chosen
-          // tier as a derived label it may move. Clearing the tier clears
-          // provenance with it. Ships with migration 20260728000001.
+          // A changed (or cleared) tier is a human decision: record 'manual'
+          // provenance so the auto-tier machinery never moves it. The locked
+          // row below distinguishes that from a full-form echo of an unchanged
+          // auto-derived label, whose factual provenance must be preserved.
           updates.waveguard_tier_source = req.body[k] ? 'manual' : null;
         }
         else if (v === 'monthly_rate') { updates[v] = req.body[k] === '' ? 0 : parseFloat(req.body[k]) || 0; }
@@ -3954,6 +3953,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     // guarantees the locking transaction below ran and reassigned this.)
     let contactAuditBefore = before;
     let contactAuditAt = null;
+    // Membership lifecycle and sensitive-audit decisions must describe the
+    // transition that actually committed. The initial read is validation/UI
+    // context only; an overlapping save can commit while this request waits
+    // for the customer row lock.
+    let committedBefore = before;
+    let committedAfter = { ...before, ...updates };
     const laneStampEligible = req.body.billingMode === undefined && updates.billing_mode === undefined;
     if (Object.keys(updates).length) {
       const contactConflict = await findCrossAccountContactConflict(
@@ -3973,7 +3978,6 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
 
       const sensitiveFields = SENSITIVE_CUSTOMER_FIELDS;
       const changed = Object.keys(updates).filter(field => before && before[field] !== updates[field]);
-      const after = { ...before, ...updates };
       // PRESENCE-triggered, not diff-triggered — matching the IB update path
       // (and the geocode block below): resaving an unchanged address must
       // still self-heal a primary-property mirror or lead/estimate snapshot
@@ -4030,18 +4034,30 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           const lockedBefore = await trx('customers').where({ id: req.params.id }).forUpdate().first() || before;
           contactAuditBefore = lockedBefore;
           contactAuditAt = new Date();
+          // Directory saves submit the complete form, including an unchanged
+          // tier. An auto-derived label stays auto when the LOCKED row confirms
+          // the submitted tier is unchanged; only an actual tier choice earns
+          // manual/null provenance. Compare against the committed tier seen
+          // under the lock, rather than the earlier validation read.
+          if (updates.waveguard_tier !== undefined
+            && lockedBefore.waveguard_tier_source === 'auto'
+            && membershipTierKey(updates.waveguard_tier) === membershipTierKey(lockedBefore.waveguard_tier)) {
+            delete updates.waveguard_tier_source;
+          }
           // Implied-monthly stamp (#3140), decided from the LOCKED row: only
           // when this lane-less save still transitions the locked state into
           // the inferred-monthly shape — a concurrent explicit lane
           // committed before our lock leaves billing_mode set and the stamp
           // off. Mutating `updates` here also rides into lockedAfter and the
-          // UPDATE below; `changed`/`after` are patched post-commit.
+          // UPDATE below; `changed` is recomputed post-commit.
           if (laneStampEligible) {
             const { impliedMonthlyStampForWrite } = require('../services/billing-lane');
             impliedLaneStamp = impliedMonthlyStampForWrite(lockedBefore, { ...lockedBefore, ...updates });
             if (impliedLaneStamp) updates.billing_mode = impliedLaneStamp;
           }
           const lockedAfter = { ...lockedBefore, ...updates };
+          committedBefore = lockedBefore;
+          committedAfter = lockedAfter;
           // Assigning an email serializes against a customer-merge UNDO
           // checking whether that address is claimed (customer-dedupe.js
           // revertMerge — customers.email has NO unique constraint, so only
@@ -4188,13 +4204,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         }
         return next(e);
       }
-      if (impliedLaneStamp && !changed.includes('billing_mode')) {
-        // The stamp was decided under the lock, after `changed`/`after`
-        // were snapshotted — patch both so the sensitive audit records the
-        // lane write and the membership-email logic sees the real outcome.
-        changed.push('billing_mode');
-        after.billing_mode = impliedLaneStamp;
-      }
+      // Refresh the pre-lock audit diff from the authoritative locked
+      // transition. This retains the existing audit/lane behavior while
+      // preventing a stale editor from auditing or messaging a transition
+      // another request already committed.
+      changed.splice(0, changed.length, ...Object.keys(updates)
+        .filter((field) => committedBefore[field] !== committedAfter[field]));
       if (emailSync?.heldNewsletterResume) {
         // Deferred held-newsletter DOI (2026-07-30 lane) — execute now that
         // the edit committed. Fire-and-forget WITH an owner (Codex #3084
@@ -4241,20 +4256,20 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       // membership in this same save (rate/lane set) correctly counts as a
       // membership start, because the label side evaluates to non-member.
       const { isAutoDerivedTierLabelRow } = require('../services/self-booking-plan-sync');
-      const beforeHasMembership = hasMembership(before) && !isAutoDerivedTierLabelRow(before);
-      const afterHasMembership = hasMembership(after) && !isAutoDerivedTierLabelRow(after);
-      const membershipFieldChanged = membershipDetailsChanged(before, after);
+      const beforeHasMembership = hasMembership(committedBefore) && !isAutoDerivedTierLabelRow(committedBefore);
+      const afterHasMembership = hasMembership(committedAfter) && !isAutoDerivedTierLabelRow(committedAfter);
+      const membershipFieldChanged = membershipDetailsChanged(committedBefore, committedAfter);
       const membershipEventAt = new Date();
-      if (updates.active === false && before.active !== false && beforeHasMembership) {
+      if (updates.active === false && committedBefore.active !== false && beforeHasMembership) {
         void AccountMembershipEmail.sendMembershipCanceled({
           customerId: req.params.id,
           effectiveDate: membershipEventAt,
           reason: req.body.churnReason || 'Account deactivated',
-          membershipTier: before.waveguard_tier,
-          monthlyRate: before.monthly_rate,
+          membershipTier: committedBefore.waveguard_tier,
+          monthlyRate: committedBefore.monthly_rate,
           idempotencyKey: adminMembershipDailyIdempotencyKey('membership.canceled', req.params.id, 'admin', membershipEventAt),
         }).catch(err => logger.warn(`[customers] membership.canceled email failed for ${req.params.id}: ${err.message}`));
-      } else if (updates.active === true && before.active === false && afterHasMembership) {
+      } else if (updates.active === true && committedBefore.active === false && afterHasMembership) {
         void AccountMembershipEmail.sendMembershipReactivated({
           customerId: req.params.id,
           effectiveDate: membershipEventAt,
@@ -4262,36 +4277,35 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         }).catch(err => logger.warn(`[customers] membership.reactivated email failed for ${req.params.id}: ${err.message}`));
       } else if (!beforeHasMembership && afterHasMembership) {
         // Effective-membership transition alone is the trigger (Codex #3011
-        // r9): a label becoming a REAL membership can happen WITHOUT the
-        // tier/rate fields changing — re-saving the same tier flips
-        // provenance to 'manual', or an established billing lane is selected
-        // — and membershipDetailsChanged compares only tier and rate.
+        // r9): an auto label can become a REAL membership without its tier
+        // changing when this save establishes a paid rate/lane, while
+        // membershipDetailsChanged compares only tier and rate.
         void AccountMembershipEmail.sendMembershipStarted({
           customerId: req.params.id,
           effectiveDate: membershipEventAt,
-          membershipTier: after.waveguard_tier,
-          monthlyRate: after.monthly_rate,
+          membershipTier: committedAfter.waveguard_tier,
+          monthlyRate: committedAfter.monthly_rate,
           // Explicit lane from this save's own outcome — the send is
           // fire-and-forget, so the row-fallback could race a concurrent
           // edit; null rides the resolver fallback (#3140).
-          billingLane: after.billing_mode || null,
+          billingLane: committedAfter.billing_mode || null,
           sourceId: `admin_membership_start:${req.params.id}:${etDateString(membershipEventAt)}`,
-          idempotencyKey: adminMembershipStartIdempotencyKey(req.params.id, before, after, membershipEventAt),
+          idempotencyKey: adminMembershipStartIdempotencyKey(req.params.id, committedBefore, committedAfter, membershipEventAt),
         }).catch(err => logger.warn(`[customers] membership.started email failed for ${req.params.id}: ${err.message}`));
       } else if (beforeHasMembership && !afterHasMembership) {
         void AccountMembershipEmail.sendMembershipCanceled({
           customerId: req.params.id,
           effectiveDate: membershipEventAt,
           reason: 'Membership removed',
-          membershipTier: before.waveguard_tier,
-          monthlyRate: before.monthly_rate,
+          membershipTier: committedBefore.waveguard_tier,
+          monthlyRate: committedBefore.monthly_rate,
           idempotencyKey: adminMembershipDailyIdempotencyKey('membership.canceled', req.params.id, 'admin_membership_removed', membershipEventAt),
         }).catch(err => logger.warn(`[customers] membership.canceled email failed for ${req.params.id}: ${err.message}`));
       } else if (membershipFieldChanged && afterHasMembership) {
         void AccountMembershipEmail.sendMembershipUpdated({
           customerId: req.params.id,
-          before,
-          after,
+          before: committedBefore,
+          after: committedAfter,
           effectiveDate: membershipEventAt,
         }).catch(err => logger.warn(`[customers] membership.updated email failed for ${req.params.id}: ${err.message}`));
       }
