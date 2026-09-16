@@ -1468,6 +1468,8 @@ const REPORT_DIRECT_OBJECT_GAP_RE = /^\s*(?:(?:the|a|an|your|our|their|his|her|m
 const REPORT_COORDINATED_OBJECT_GAP_RE = /\b(?:around|along|on|to|at|in)\b[^.!?;]*\band\s+(?:[\w'\u2019-]+\s+){0,2}$/i;
 const REPORT_WENT_LOCATION_RE = /^\s*(?:around|along|on|to|at|in)\b/i;
 const REPORT_TREATMENT_LOCATION_LINK_RE = /\b(?:around|along|on|to|at|in)\b/i;
+const REPORT_ADVERBIAL_LOCATION_RE = /^(?:indoors|outdoors|inside|outside)$/i;
+const REPORT_ADVERBIAL_LOCATION_GAP_RE = new RegExp(`^\\s*(?:${REPORT_COMPLETION_TIME}\\s*)?$`, 'i');
 const REPORT_LOCATION_NOUN_PREFIX = `(?:(?:almost|nearly)\\s+)?(?:(?:the|a|an|your|our|their|his|her|my|its)\\s+)?(?:(?:full|entire|whole|outer|inner|front|rear|back|side|northern|southern|eastern|western|exterior|interior)\\s+){0,2}`;
 const REPORT_LOCATION_TARGET_PREFIX_RE = new RegExp(`^\\s*${REPORT_LOCATION_NOUN_PREFIX}$`, 'i');
 const REPORT_SHARED_LOCATION_TARGET_PREFIX_RE = new RegExp(`^\\s*(?:(?:the|a|an|your|our|their|his|her|my|its)\\s+)?(?:[\\w'\\u2019-]+\\s+){1,3}and\\s+${REPORT_LOCATION_NOUN_PREFIX}$`, 'i');
@@ -1652,6 +1654,11 @@ function reportLocationIsTreatmentTarget(
       && (!laterTargetLink || laterTargetIsTime);
   }
   const locationLink = affirmed.slice(relationshipStart, locationAt);
+  // Locative adverbs are treatment targets without a preposition: "applied
+  // indoors" and "applied Talstar P outside" both identify the location.
+  if (findingVerb.index < locationAt
+      && REPORT_ADVERBIAL_LOCATION_RE.test(affirmed.slice(locationAt, locationAt + locationLength))
+      && REPORT_ADVERBIAL_LOCATION_GAP_RE.test(locationLink)) return true;
   const targetLinks = [...locationLink.matchAll(new RegExp(REPORT_TREATMENT_LOCATION_LINK_RE.source, 'gi'))];
   const finalTargetLink = targetLinks[targetLinks.length - 1];
   const precedingTargetLink = targetLinks[targetLinks.length - 2];

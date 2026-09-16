@@ -495,6 +495,27 @@ test.each([
 });
 
 test.each([
+  ['indoors', 'Talstar P was applied indoors.', 'pass'],
+  ['indoors', 'We applied Talstar P indoors.', 'pass'],
+  ['outdoors', 'The technician sprayed Talstar P outdoors.', 'pass'],
+  ['outside', 'The technician placed Talstar P outside.', 'pass'],
+  ['inside', 'Talstar P was applied inside.', 'pass'],
+  ['indoors', 'Talstar P was applied today indoors.', 'pass'],
+  ['indoors', 'Talstar P was applied outdoors.', 'fail'],
+  ['indoors', 'Talstar P was applied to a container indoors.', 'fail'],
+  ['indoors', 'Talstar P was not applied indoors.', 'fail'],
+  ['indoors', 'Talstar P was only planned for indoors.', 'fail'],
+  ['indoors', 'Did we apply Talstar P indoors?', 'fail'],
+  ['indoors', 'Talstar P was applied indoors, but it was not applied indoors.', 'fail'],
+  ['indoors', 'Talstar P was applied indoors, but it was only planned indoors.', 'fail'],
+  ['indoors', 'Talstar P was applied indoors, but it was not applied outdoors.', 'pass'],
+  ['outside', 'Talstar P was applied outside, but it was never applied outside.', 'fail'],
+])('report locative adverbs preserve completion and retraction scope: %s, %s', (location, spoken, status) => {
+  const finding = { subject: 'talstar p', location };
+  expect(checks.report_readback_confirms(finding, {}, { spoken: [spoken] })[0]).toBe(status);
+});
+
+test.each([
   [{ subject: '\\btalstar\\b', location: '\\b(?:exterior|perimeter)\\b' }, 'pass'],
   [{ subject: '\\bbait\\b', location: '\\bfoundation\\b' }, 'pass'],
 ])('coordinated location recipients preserve each report finding: %j', (finding, status) => {
