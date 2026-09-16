@@ -15,6 +15,32 @@
  * discounts rather than before. Callers pass the gate's value; nothing here
  * reads the environment.
  *
+ * SLOT PRECEDENCE (the #4405 product rule: "a stored visit stamp rides the
+ * invoice stack frozen and ahead of the rest" — a line-scoped term resolves
+ * on its own line before a document-wide term ever sees the remainder).
+ * This is a SEPARATE axis from the compounding order above, and it is NOT
+ * "sort every percentage by rate regardless of where it lives" — slot beats
+ * rate. Every entry point in this module resolves a mixed line/document
+ * stack in exactly this order:
+ *   1. Fixed dollar credits, any slot, first.
+ *   2. Line-slot percentages (and a line-slot free_service), on their own
+ *      line — rate descending among themselves, input index as the tiebreak.
+ *   3. Document-slot percentages (and a document-slot free_service), on the
+ *      remainder of their eligible pool — same rate-descending rule, applied
+ *      only among terms that share that slot.
+ * stackVisitDiscounts and stackDocumentDiscounts implement this natively —
+ * their line/appointment and line/document-term splits ARE the two slots.
+ * stackDiscounts has no lines of its own, so a discount MAY carry an
+ * optional `slot: 'document'` to mark it document-scoped; every discount
+ * without one defaults to `'line'`, which is why a caller who never sets
+ * `slot` sees zero behavior change from before this rule existed — with
+ * every item in the one slot, precedence never enters into it and rate
+ * order alone still decides everything, exactly as documented above. Given
+ * the SAME mixed-slot terms, all three exports land on the identical total
+ * (Codex pre-push audit P1: $100 with a line 10% and a document 50%-capped-
+ * $10 is $80 either way — the line's 10% must run before the document's
+ * 50% sees the remainder, even though 50 > 10, because slot outranks rate).
+ *
  * Tier discounts (catalog stack_group 'tier', is_stackable=false) never
  * combine with each other: Silver + Gold, Bronze + Silver, ... are refused.
  * Any non-stackable catalog group follows the same rule.
@@ -122,6 +148,18 @@ function resolveDiscountAmount(discount) {
   return Number(discount?.amount ?? discount?.discountAmount) || 0;
 }
 
+// Which slot a discount belongs to for the precedence rule above. Only
+// stackDiscounts' flat list needs this read explicitly — stackVisitDiscounts
+// and stackDocumentDiscounts already know a term's slot from WHERE it came
+// from (a line vs the appointment/document level) and never set this field.
+// Defaulting an unmarked discount to 'line' is what keeps every existing
+// stackDiscounts caller (none of which have ever heard of `slot`) getting
+// the exact same result as before: with nothing marked 'document', every
+// item is in the one slot and rate order alone decides the sequence.
+function resolveDiscountSlot(discount) {
+  return discount?.slot === 'document' ? 'document' : 'line';
+}
+
 // Dollars ONE discount takes off `remaining`, clamped to [0, remaining].
 function discountStepDollars(discount, remaining) {
   if (!discount || !(remaining > 0)) return 0;
@@ -148,8 +186,14 @@ function discountStepDollars(discount, remaining) {
   return Math.min(remaining, Math.max(0, cents(dollars)));
 }
 
-// Fixed credits first (in the order given), then percentages, then a free
-// service (which takes whatever is left).
+// Fixed credits first (any slot, in the order given), then LINE-slot
+// percentages and free_service (rate descending), then DOCUMENT-slot
+// percentages and free_service (rate descending) — the module header's
+// slot precedence rule, encoded as five ranks: 0 fixed, 1 line-percent,
+// 2 line-free_service, 3 document-percent, 4 document-free_service. A
+// caller who never sets `slot` puts everything in rank pair (1,2) — slot
+// never distinguishes anything, and the ranking collapses to the original
+// fixed-then-percent-then-free_service order, unchanged.
 //
 // Percentages compound multiplicatively, so in EXACT math 5% then 10% and
 // 10% then 5% reach the identical final total — multiplication commutes.
@@ -159,27 +203,38 @@ function discountStepDollars(discount, remaining) {
 // before this fix (Codex pre-push audit P2). Rather than carry exact
 // unrounded fractions through the whole stack (which would still need a
 // rule for how to divide the eventual rounding among the individual
-// items), percentages are sorted into ONE canonical order regardless of
-// how the caller listed them — largest rate first, ties broken by input
-// index for stability — so two calls stacking the SAME set of percentages
-// always compound in the SAME sequence and land on the SAME total, no
-// matter which order they were entered in. Each item's reported `dollars`
-// still reflects its own place in that canonical compounding (mapped back
-// to its original input index for the caller), which is what keeps
-// per-term reporting exact: it sums to totalDollars precisely because it
-// IS the sequence that produced totalDollars, not a separate estimate of
-// it. Fixed credits and the free-service catch-all are unaffected — a
-// fixed dollar figure doesn't depend on compounding order the way a
-// percentage does, and there is normally at most one free service in a
-// stack (it takes whatever remains, regardless of position).
+// items), percentages sharing a slot are sorted into ONE canonical order
+// regardless of how the caller listed them — largest rate first among that
+// slot's own percentages, ties broken by input index for stability — so
+// two calls stacking the SAME set land on the SAME total no matter which
+// order they were entered in. Rate never breaks a TIE ACROSS slots — slot
+// rank already separated them before rate is ever consulted, which is the
+// fix for Codex pre-push audit P1 (round 3): a line 10% used to lose to a
+// document 50% purely on rate, even though the line term must resolve
+// first regardless of either rate. Each item's reported `dollars` still
+// reflects its own place in that canonical compounding (mapped back to its
+// original input index for the caller), which is what keeps per-term
+// reporting exact: it sums to totalDollars precisely because it IS the
+// sequence that produced totalDollars, not a separate estimate of it.
+// Fixed credits are unaffected by rate or slot ordering between
+// themselves — a fixed dollar figure doesn't depend on compounding order
+// the way a percentage does — and there is normally at most one
+// free_service per slot (it takes whatever remains in that slot, regardless
+// of position within it).
 function stackOrder(discounts) {
-  const rank = (d) => (isFixedDiscountType(d?.discountType) ? 0 : isPercentDiscountType(d?.discountType) ? 1 : 2);
+  const rank = (d) => {
+    if (isFixedDiscountType(d?.discountType)) return 0;
+    const slotBase = resolveDiscountSlot(d) === 'document' ? 3 : 1;
+    return isPercentDiscountType(d?.discountType) ? slotBase : slotBase + 1;
+  };
+  const isPercentRank = (r) => r === 1 || r === 3;
   return discounts
     .map((discount, index) => ({ discount, index }))
     .sort((a, b) => {
-      const rankDiff = rank(a.discount) - rank(b.discount);
+      const rankA = rank(a.discount);
+      const rankDiff = rankA - rank(b.discount);
       if (rankDiff !== 0) return rankDiff;
-      if (rank(a.discount) === 1) {
+      if (isPercentRank(rankA)) {
         const rateDiff = resolveDiscountAmount(b.discount) - resolveDiscountAmount(a.discount);
         if (rateDiff !== 0) return rateDiff;
       }

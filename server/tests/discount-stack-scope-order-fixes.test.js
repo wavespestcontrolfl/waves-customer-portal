@@ -25,6 +25,7 @@
 const {
   stackDiscounts,
   stackDocumentDiscounts,
+  stackVisitDiscounts,
 } = require('../services/discount-stack');
 
 describe('P1 — eligibleLines is honored for percentage and free_service document terms', () => {
@@ -249,5 +250,96 @@ describe('cross-export agreement — the same discounts, the same order, the sam
     expect(lineA.lines[0].net).toBe(sdA.net);
     expect(lineB.lines[0].net).toBe(sdB.net);
     expect(lineA.lines[0].net).toBe(lineB.lines[0].net);
+  });
+});
+
+describe('slot precedence — line before document, even when the document rate is higher', () => {
+  test('the exact reported repro: $100 base, line 10%, document 50% capped at $10, agrees at $80 across all three exports, both input orders', () => {
+    const line10 = { discountType: 'percentage', amount: 10 }; // slot defaults to 'line'
+    const doc50 = { discountType: 'percentage', amount: 50, maxDiscountDollars: 10, slot: 'document' };
+
+    // stackDiscounts: the `slot` tag is what lets a flat call reproduce
+    // the line-before-document precedence at all — without it there is
+    // nothing to tell it these two percentages don't share a slot, and it
+    // falls back to pure rate order (50% would run first).
+    const sdLineFirst = stackDiscounts(100, [line10, doc50]);
+    const sdDocFirst = stackDiscounts(100, [doc50, line10]);
+    expect(sdLineFirst.net).toBe(80);
+    expect(sdDocFirst.net).toBe(80);
+    // Per-term dollars still map back to each call's own input order.
+    expect(sdLineFirst.items.map((i) => i.dollars)).toEqual([10, 10]);
+    expect(sdDocFirst.items.map((i) => i.dollars)).toEqual([10, 10]);
+
+    // stackDocumentDiscounts: the line's own 10% is a LINE term, the 50%
+    // (capped $10) is a DOCUMENT term — slots come from where each term
+    // lives, not a `slot` field.
+    const docRes = stackDocumentDiscounts({
+      lines: [{ gross: 100, terms: [{ discountType: 'percentage', amount: 10 }] }],
+      documentTerms: [{ discountType: 'percentage', amount: 50, maxDiscountDollars: 10 }],
+    });
+    expect(docRes.lines[0].net).toBe(80);
+
+    // stackVisitDiscounts: the line discount is the line slot, the
+    // appointment discount is the document slot.
+    const visitRes = stackVisitDiscounts({
+      lines: [{ gross: 100, lineDiscount: { discountType: 'percentage', amount: 10 }, eligible: true }],
+      appointmentDiscount: { discountType: 'percentage', amount: 50, maxDiscountDollars: 10 },
+    });
+    expect(visitRes.total).toBe(80);
+  });
+
+  test('a capped document percentage never gets to compound on the pre-line-discount base, proving the cap itself respects precedence', () => {
+    // Line 20% (uncapped), document 80% capped at $5, base $100. If rate
+    // ruled the document 80% would run FIRST (before the line's 20% ever
+    // touches the base) and net would be $100 - $5 - 20%-of-$95($19) =
+    // $76. Slot precedence runs the line's 20% first instead: $100 - $20
+    // = $80, then the document's 80%-of-$80 ($64) caps at $5 -> net $75.
+    const line20 = { discountType: 'percentage', amount: 20 };
+    const doc80Capped = { discountType: 'percentage', amount: 80, maxDiscountDollars: 5, slot: 'document' };
+
+    const sd = stackDiscounts(100, [line20, doc80Capped]);
+    expect(sd.net).toBe(75);
+    expect(sd.items.map((i) => i.dollars)).toEqual([20, 5]);
+
+    const docRes = stackDocumentDiscounts({
+      lines: [{ gross: 100, terms: [line20] }],
+      documentTerms: [{ discountType: 'percentage', amount: 80, maxDiscountDollars: 5 }],
+    });
+    expect(docRes.lines[0].net).toBe(75);
+
+    const visitRes = stackVisitDiscounts({
+      lines: [{ gross: 100, lineDiscount: line20, eligible: true }],
+      appointmentDiscount: { discountType: 'percentage', amount: 80, maxDiscountDollars: 5 },
+    });
+    expect(visitRes.total).toBe(75);
+  });
+
+  test('with no slot marked at all, behavior is exactly the pre-existing rate-only order (backward compatible)', () => {
+    // Neither term claims a slot, so both default to 'line' — precedence
+    // never enters into it, and pure rate order (the prior round's fix)
+    // still decides: the 50% (capped $10) still runs first here, unlike
+    // the marked-document case above.
+    const result = stackDiscounts(100, [
+      { discountType: 'percentage', amount: 10 },
+      { discountType: 'percentage', amount: 50, maxDiscountDollars: 10 },
+    ]);
+    expect(result.net).toBe(81); // matches the pre-slot-fix stackDiscounts total
+    expect(result.items.map((i) => i.dollars)).toEqual([9, 10]);
+  });
+
+  test('multiple percentages within the SAME slot still sort by rate, only across slots does slot win', () => {
+    // Two line percentages (15%, 5%) and one document percentage (30%
+    // capped at $4): both line terms resolve first (rate order between
+    // them: 15% then 5%), then the document term on the remainder.
+    const terms = [
+      { discountType: 'percentage', amount: 5 }, // line, listed first
+      { discountType: 'percentage', amount: 30, maxDiscountDollars: 4, slot: 'document' },
+      { discountType: 'percentage', amount: 15 }, // line, listed last
+    ];
+    const result = stackDiscounts(200, terms);
+    // Line phase: 15% of 200 = 30, remaining 170; 5% of 170 = 8.5,
+    // remaining 161.5. Document phase: 30% of 161.5 = 48.45, capped at 4.
+    expect(result.items.map((i) => i.dollars)).toEqual([8.5, 4, 30]);
+    expect(result.net).toBe(157.5);
   });
 });
