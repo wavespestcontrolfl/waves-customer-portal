@@ -7,6 +7,19 @@ const rejected = (text) => expect(verdict(text).violations).toContain('customer_
 
 describe('email reply monetary visit-pricing policy', () => {
   test.each([
+    'There is a one-hundred-dollar visit fee.',
+    'There is a one-hundred-and-twenty-eight-dollar visit fee.',
+    'There is a one-hundred-twenty-eight-dollar visit fee.',
+  ])('consumes fully hyphenated monetary adjectives: %s', rejected);
+
+  test.each([
+    "Please pay $98 at today's visit", "Please pay $98 on tomorrow's visit",
+    "Please pay $98 at Monday's visit", "$98 was paid at yesterday's visit",
+  ])('preserves recognized temporal possessive payment timing: %s', (text) => {
+    expect(verdict(text)).toEqual({ ok: true, violations: [] });
+  });
+
+  test.each([
     '$98 pay-per-visit', '$98 billed-per-visit',
     'There is a ninety-eight-dollar visit fee.',
     'There is a 98-dollar visit.',
