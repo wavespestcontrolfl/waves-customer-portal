@@ -7,6 +7,21 @@ const rejected = (text) => expect(verdict(text).violations).toContain('customer_
 
 describe('email reply monetary visit-pricing policy', () => {
   test.each([
+    '$98 pay-per-visit', '$98 billed-per-visit',
+    'There is a ninety-eight-dollar visit fee.',
+    'There is a 98-dollar visit.',
+  ])('consumes compound unit and currency evidence: %s', rejected);
+
+  test.each([
+    '$98 pay-per-application', '$98 billed-per-application',
+    '$98 for this application', '$98 for my next application',
+    '$98 for their next application', '$98 for his next application',
+    '$98 for her next application',
+  ])('preserves recognized application units: %s', (text) => {
+    expect(verdict(text)).toEqual({ ok: true, violations: [] });
+  });
+
+  test.each([
     'Each visit costs up to $98.',
     'Each visit is at least USD 98.',
     'Each visit costs as low as $98.',

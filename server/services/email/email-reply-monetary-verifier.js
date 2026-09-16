@@ -19,7 +19,7 @@ const PRICE_AMOUNT = `(?:${RANGE_START}${MONEY}|<number>)`;
 
 const PRICE_CLAUSES = [
   // Amount-first prices, including a fee label or a passive billing predicate.
-  `${MONEY}(?: ${NOUN}(?: <be>)?)?(?: <be> ${BILL})?${TAX}${SEPARATOR} (?:${UNIT}|${VISIT})`,
+  `${MONEY}(?: ${NOUN}(?: <be>)?)?(?: (?:<be> )?${BILL})?${TAX}${SEPARATOR} (?:${UNIT}|${VISIT})`,
   `${MONEY} ${VISIT} ${NOUN}`,
   // Visit subjects and labels. An unmarked number needs a pricing predicate;
   // a plain copula or colon needs an explicitly monetary amount.
