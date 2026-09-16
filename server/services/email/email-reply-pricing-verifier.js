@@ -14,7 +14,7 @@ function normalizeCopy(text) {
   do {
     previous = copy;
     copy = copy
-      .replace(/(?<!`)(`+)(?!`)([^`\r\n]+?)\1(?!`)/g, '$2')
+      .replace(/(?<!`)(`+)(?!`)([^`]+?)\1(?!`)/g, (_, delimiter, contents) => contents.replace(/\r\n?|\n/g, ' '))
       .replace(/(\*\*\*|___|\*\*|__|\*|_)([^\s*_](?:[^\r\n]*?[^\s*_])?)\1/g, '$2');
   } while (copy !== previous);
   return copy;
@@ -28,15 +28,21 @@ const PRICE_UNIT_SRC = `(?:(?:(?:for|on)\\s+)?${VISIT_UNIT_SRC}|per[\\s-]+${VISI
 const NUMBER_SRC = '\\d(?:[\\d,.]*\\d)?';
 const NUMERIC_PRICE_SRC = `${NUMBER_SRC}(?:\\s*(?:-|to)\\s*(?:(?:\\$\\s*|USD\\s+))?${NUMBER_SRC})?`;
 const AMOUNT_SRC = `(?:(?:only|just|about|around|approximately|roughly|exactly|nearly|almost|up\\s+to|at\\s+least|as\\s+low\\s+as)\\s+){0,3}(?:(?:\\$\\s*|\\bUSD\\s+)${NUMERIC_PRICE_SRC}|\\b${NUMERIC_PRICE_SRC}\\s+(?:dollars?|bucks?|USD)\\b)`;
-const PRICE_NOUN_SRC = '(?:price|amount|cost|charge|rate|fee|invoice)';
+const PRICE_NOUN_SRC = '(?:prices?|amounts?|costs?|charges?|rates?|fees?|invoices?)';
+const CONTEXT_AMOUNT_SRC = `(?:${AMOUNT_SRC}|${NUMERIC_PRICE_SRC}\\b)`;
 const VISIT_PRICE_RE = new RegExp([
   `${AMOUNT_SRC}(?:\\s+${PRICE_NOUN_SRC}(?:\\s+(?:is|will\\s+be))?)?\\s*(?:[(:,-]\\s*)?${PRICE_UNIT_SRC}`,
-  `\\b(?:price|amount|cost|charge|fee|(?:the|a|our|your|its)\\s+rate|rate(?=\\s+(?:is|are|was|were|will\\s+be|per)\\b)|invoices?|invoiced|invoicing|billing|billed|bills?|charging|charged|charges?|pricing|priced|payments?|pay|paid)(?:\\s+(?:is|are|was|were|will\\s+be))?\\s+${PRICE_UNIT_SRC}`,
+  `\\b(?:prices?|amounts?|costs?|charges?|fees?|(?:the|a|our|your|its)\\s+rates?|rates?(?=\\s+(?:is|are|was|were|will\\s+be|per)\\b)|invoices?|invoiced|invoicing|billing|billed|bills?|charging|charged|charges?|pricing|priced|payments?|pay|paid)(?:\\s+(?:is|are|was|were|will\\s+be))?\\s+${PRICE_UNIT_SRC}`,
   `\\b${PRICE_UNIT_SRC}\\s*(?:[,:(-]\\s*)?(?:(?:the|our|your|a)\\s+)?${PRICE_NOUN_SRC}\\s+(?:is|was|will\\s+be|of)\\s+${AMOUNT_SRC}`,
-  `\\b${PRICE_UNIT_SRC}\\s*(?:[,:(-]\\s*)?(?:(?:we|you)\\s+)?(?:charge|bill|pay|invoice)\\s+${AMOUNT_SRC}`,
+  `\\b${PRICE_UNIT_SRC}\\s*(?:[,:(-]\\s*)?(?:(?:we|you)\\s+)?(?:charge|bill|pay|invoice)\\s+${CONTEXT_AMOUNT_SRC}`,
   `\\b${VISIT_UNIT_SRC}\\s+(?:(?:is|was|will\\s+be)\\s+(?:(?:priced|billed|charged|invoiced)\\s+(?:at\\s+)?)?|(?:costs?|runs?|will\\s+cost)\\s+)${AMOUNT_SRC}`,
   `\\b${VISIT_UNIT_SRC}\\s+has\\s+(?:a\\s+)?${AMOUNT_SRC}\\s+${PRICE_NOUN_SRC}\\b`,
   `\\bvisits\\s+(?:(?:are|were|will\\s+be)\\s+(?:(?:priced|billed|charged|invoiced)\\s+(?:at\\s+)?)?|(?:cost|run|will\\s+cost)\\s+)${AMOUNT_SRC}\\s+(?:each|apiece)\\b`,
+  `\\b${PRICE_NOUN_SRC}\\s+(?:is|are|was|were|will\\s+be|of)\\s+${CONTEXT_AMOUNT_SRC}\\s*[,:(-]?\\s*${PRICE_UNIT_SRC}`,
+  `\\b(?:charge|charges|charged|charging|bill|billed|invoice|invoiced|pay|paid)\\s+${CONTEXT_AMOUNT_SRC}\\s*[,:(-]?\\s*${PRICE_UNIT_SRC}`,
+  `\\b${PRICE_UNIT_SRC}\\s+(?:(?:the|our|your|a)\\s+)?${PRICE_NOUN_SRC}\\s+(?:is|are|was|were|will\\s+be|of)\\s+${CONTEXT_AMOUNT_SRC}`,
+  `\\b${VISIT_UNIT_SRC}\\s+(?:(?:costs?|runs?|will\\s+cost)\\s+|(?:is|was|will\\s+be)\\s+(?:priced|billed|charged|invoiced)\\s+(?:at\\s+)?)${CONTEXT_AMOUNT_SRC}`,
+  `\\b${VISIT_UNIT_SRC}\\s+(?:is|was|will\\s+be)\\s+(?:billed|charged|invoiced)\\s+(?:separately|individually|on\\s+its\\s+own)\\b`,
 ].join('|'), 'i');
 
 // Inactive wording policy only. A future caller must establish commercial

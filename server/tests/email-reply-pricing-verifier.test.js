@@ -122,3 +122,25 @@ describe('email reply visit-pricing policy', () => {
   });
 
 });
+
+test('screens rendered multiline code pricing without rejecting application prices', () => {
+  expect(verifyEmailReplyPricing({ text: 'USD `98\n` per visit' }).ok).toBe(false);
+  expect(verifyEmailReplyPricing({ text: 'USD `98\r\n` per application' }).ok).toBe(true);
+});
+
+test.each([
+ 'Each visit is billed separately', 'Every visit is invoiced on its own',
+ 'Each visit will be charged individually', 'The rate is 98 per visit',
+ 'We charge 98 per visit', 'Each visit costs 98', 'Each visit is billed at 98',
+ 'Our prices are per visit', 'Our fees are per visit', 'Rates are per visit',
+ 'Our amounts are per visit', 'Our costs are per visit',
+])('rejects explicit amountless or numeric pricing: %s', (text) => {
+ expect(verifyEmailReplyPricing({ text }).ok).toBe(false);
+});
+test.each([
+ 'Each visit is 98 minutes long', 'We take 98 photos per visit',
+ 'Our prices are per application', 'Each visit is billed per application',
+ 'The rate is 98 per application. We confirm each visit.',
+])('preserves non-pricing numbers and application wording: %s', (text) => {
+ expect(verifyEmailReplyPricing({ text }).ok).toBe(true);
+});
