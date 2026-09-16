@@ -343,3 +343,89 @@ describe('slot precedence — line before document, even when the document rate 
     expect(result.net).toBe(157.5);
   });
 });
+
+describe('cap tie-break — same rate, different caps, resolves deterministically (the tighter cap first)', () => {
+  test('the exact reported repro: $100 at 50% capped $10 plus 50% uncapped nets $45 in both orders, across every place stackOrder is used', () => {
+    const capped = { discountType: 'percentage', amount: 50, maxDiscountDollars: 10 };
+    const uncapped = { discountType: 'percentage', amount: 50 };
+
+    // stackDiscounts directly, both input orders.
+    const sdA = stackDiscounts(100, [capped, uncapped]);
+    const sdB = stackDiscounts(100, [uncapped, capped]);
+    expect(sdA.net).toBe(45);
+    expect(sdB.net).toBe(45);
+    // Per-term dollars still map back to each call's own input order: the
+    // capped term always takes $10 (it resolves first regardless of which
+    // position it was listed in), the uncapped term takes the rest ($45).
+    expect(sdA.items.map((i) => i.dollars)).toEqual([10, 45]);
+    expect(sdB.items.map((i) => i.dollars)).toEqual([45, 10]);
+
+    // stackDocumentDiscounts: both as document-level terms, both orders.
+    const docA = stackDocumentDiscounts({ lines: [{ gross: 100, terms: [] }], documentTerms: [capped, uncapped] });
+    const docB = stackDocumentDiscounts({ lines: [{ gross: 100, terms: [] }], documentTerms: [uncapped, capped] });
+    expect(docA.lines[0].net).toBe(45);
+    expect(docB.lines[0].net).toBe(45);
+
+    // stackDocumentDiscounts: both as ONE line's own terms, both orders —
+    // exercises the same stackOrder fix through step 1/3's stackDiscounts
+    // delegation instead of step 4's document-term loop.
+    const lineA = stackDocumentDiscounts({ lines: [{ gross: 100, terms: [capped, uncapped] }], documentTerms: [] });
+    const lineB = stackDocumentDiscounts({ lines: [{ gross: 100, terms: [uncapped, capped] }], documentTerms: [] });
+    expect(lineA.lines[0].net).toBe(45);
+    expect(lineB.lines[0].net).toBe(45);
+  });
+
+  test('stackVisitDiscounts has no same-slot tie to break — one discount slot per line and per appointment means two same-rate percentages can never compound on the same base there', () => {
+    // The cap tie-break lives inside stackOrder, which stackVisitDiscounts
+    // never calls (it hand-computes each of its four steps directly) —
+    // there is no way to hand a stackVisitDiscounts line or appointment
+    // slot a SECOND percentage to tie against the first. What IS shared is
+    // discountStepDollars' own cap handling, so a single capped percentage
+    // through stackVisitDiscounts still agrees with the same single
+    // discount through stackDiscounts.
+    const capped = { discountType: 'percentage', amount: 50, maxDiscountDollars: 10 };
+    const visitRes = stackVisitDiscounts({
+      lines: [{ gross: 100, lineDiscount: capped, eligible: true }],
+      appointmentDiscount: null,
+    });
+    const sdRes = stackDiscounts(100, [capped]);
+    expect(visitRes.lines[0].lineDiscountDollars).toBe(sdRes.items[0].dollars);
+    expect(visitRes.lines[0].lineDiscountDollars).toBe(10);
+  });
+
+  test('a three-term equal-rate case: ascending cap order (tightest first, uncapped last) wins regardless of how the caller lists them', () => {
+    const tight = { discountType: 'percentage', amount: 40, maxDiscountDollars: 5 };
+    const loose = { discountType: 'percentage', amount: 40, maxDiscountDollars: 15 };
+    const open = { discountType: 'percentage', amount: 40 };
+
+    for (const order of [
+      [tight, loose, open],
+      [open, tight, loose],
+      [loose, open, tight],
+      [open, loose, tight],
+    ]) {
+      const result = stackDiscounts(300, order);
+      // Canonical processing is always tight($5) -> loose($15) -> open
+      // (40% of the $280 left = $112), for a $132 total / $168 net,
+      // however the caller ordered the same three terms.
+      expect(result.totalDollars).toBe(132);
+      expect(result.net).toBe(168);
+      // Each term's own reported dollars still matches its OWN identity
+      // (found by object reference) rather than its input position.
+      const dollarsFor = (term) => result.items[order.indexOf(term)].dollars;
+      expect(dollarsFor(tight)).toBe(5);
+      expect(dollarsFor(loose)).toBe(15);
+      expect(dollarsFor(open)).toBe(112);
+    }
+  });
+
+  test('caps ONLY break ties at equal rate — a higher rate still runs first even against a much tighter cap', () => {
+    const higherRateTightCap = { discountType: 'percentage', amount: 90, maxDiscountDollars: 1 };
+    const lowerRateUncapped = { discountType: 'percentage', amount: 10 };
+    const result = stackDiscounts(100, [lowerRateUncapped, higherRateTightCap]);
+    // Rate still decides first: 90% of $100 capped at $1 resolves before
+    // the 10% — the cap tie-break never overrides an actual rate
+    // difference, it only breaks a genuine tie.
+    expect(result.items.map((i) => i.dollars)).toEqual([9.9, 1]);
+  });
+});

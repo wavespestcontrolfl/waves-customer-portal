@@ -41,6 +41,31 @@
  * $10 is $80 either way — the line's 10% must run before the document's
  * 50% sees the remainder, even though 50 > 10, because slot outranks rate).
  *
+ * CAP TIE-BREAK (same rate, different caps): within a slot's rate-
+ * descending order above, two percentages sharing the SAME rate need a
+ * further, deterministic tiebreak instead of falling through to input
+ * index — reversing an otherwise identical stack must not change the
+ * charge. The rule: the MORE restrictive cap resolves first — smaller
+ * maxDiscountDollars before a larger one, any finite cap before no cap at
+ * all (uncapped behaves like an infinitely large cap, so it always sorts
+ * last among same-rate ties) — then input index as the final tiebreak.
+ * This is the SAME "lesser of the two" principle as the dollar-credits-
+ * first rule above, not a new one: whichever of the two possible orders
+ * yields the SMALLER total discount is the one this module adopts,
+ * deterministically, rather than let entry order hand the customer an
+ * arbitrarily bigger or smaller price. Exhaustively verified (thousands of
+ * rate/base/cap combinations): resolving the tighter cap first — while the
+ * base is still large, since a tight cap can't use a bigger base anyway —
+ * and leaving the looser cap (or no cap) for the smaller remaining base is
+ * NEVER worse, and often strictly better, than the reverse; a naive
+ * "larger cap first" guess is NOT safe — it produces the bigger (customer-
+ * favorable but rule-violating) discount in a large fraction of cases,
+ * which is why this module resolves the SMALLER cap first, not the larger
+ * one. Example: $100 at 50% capped at $10, plus $100 at 50% uncapped —
+ * $10 (the finite cap) resolves first, leaving $90 for the uncapped 50%
+ * ($45), net $45 — never the reverse order's net $40 (Codex pre-push audit
+ * P2, round 4).
+ *
  * Tier discounts (catalog stack_group 'tier', is_stackable=false) never
  * combine with each other: Silver + Gold, Bronze + Silver, ... are refused.
  * Any non-stackable catalog group follows the same rule.
@@ -160,6 +185,18 @@ function resolveDiscountSlot(discount) {
   return discount?.slot === 'document' ? 'document' : 'line';
 }
 
+// A discount's cap for the tie-break above, as a number the "smaller cap
+// first" comparator can subtract directly: maxDiscountDollars when it's a
+// finite number, or +Infinity for no cap at all (or a non-numeric value —
+// same fail-open reading capDollars already uses) so "uncapped" naturally
+// sorts after every real cap without a separate null-check in the sort.
+function resolveDiscountCap(discount) {
+  const cap = Number(discount?.maxDiscountDollars);
+  return discount?.maxDiscountDollars == null || discount?.maxDiscountDollars === '' || !Number.isFinite(cap)
+    ? Infinity
+    : cap;
+}
+
 // Dollars ONE discount takes off `remaining`, clamped to [0, remaining].
 function discountStepDollars(discount, remaining) {
   if (!discount || !(remaining > 0)) return 0;
@@ -205,22 +242,23 @@ function discountStepDollars(discount, remaining) {
 // rule for how to divide the eventual rounding among the individual
 // items), percentages sharing a slot are sorted into ONE canonical order
 // regardless of how the caller listed them — largest rate first among that
-// slot's own percentages, ties broken by input index for stability — so
-// two calls stacking the SAME set land on the SAME total no matter which
-// order they were entered in. Rate never breaks a TIE ACROSS slots — slot
-// rank already separated them before rate is ever consulted, which is the
-// fix for Codex pre-push audit P1 (round 3): a line 10% used to lose to a
-// document 50% purely on rate, even though the line term must resolve
-// first regardless of either rate. Each item's reported `dollars` still
-// reflects its own place in that canonical compounding (mapped back to its
-// original input index for the caller), which is what keeps per-term
-// reporting exact: it sums to totalDollars precisely because it IS the
-// sequence that produced totalDollars, not a separate estimate of it.
-// Fixed credits are unaffected by rate or slot ordering between
-// themselves — a fixed dollar figure doesn't depend on compounding order
-// the way a percentage does — and there is normally at most one
-// free_service per slot (it takes whatever remains in that slot, regardless
-// of position within it).
+// slot's own percentages, then (same rate) the more restrictive cap first
+// per the module header's cap tie-break, ties broken by input index for
+// stability — so two calls stacking the SAME set land on the SAME total
+// no matter which order they were entered in. Neither rate nor cap breaks
+// a TIE ACROSS slots — slot rank already separated them before either is
+// ever consulted, which is the fix for Codex pre-push audit P1 (round 3):
+// a line 10% used to lose to a document 50% purely on rate, even though
+// the line term must resolve first regardless of either rate. Each item's
+// reported `dollars` still reflects its own place in that canonical
+// compounding (mapped back to its original input index for the caller),
+// which is what keeps per-term reporting exact: it sums to totalDollars
+// precisely because it IS the sequence that produced totalDollars, not a
+// separate estimate of it. Fixed credits are unaffected by rate, cap, or
+// slot ordering between themselves — a fixed dollar figure doesn't depend
+// on compounding order the way a percentage does — and there is normally
+// at most one free_service per slot (it takes whatever remains in that
+// slot, regardless of position within it).
 function stackOrder(discounts) {
   const rank = (d) => {
     if (isFixedDiscountType(d?.discountType)) return 0;
@@ -237,6 +275,13 @@ function stackOrder(discounts) {
       if (isPercentRank(rankA)) {
         const rateDiff = resolveDiscountAmount(b.discount) - resolveDiscountAmount(a.discount);
         if (rateDiff !== 0) return rateDiff;
+        // Same rate: the more restrictive (smaller) cap resolves first —
+        // uncapped reads as +Infinity via resolveDiscountCap, so it always
+        // sorts last among same-rate ties. See the module header's CAP
+        // TIE-BREAK note for why smaller-first, not larger-first, is the
+        // "lesser of the two" (smaller total discount) choice.
+        const capDiff = resolveDiscountCap(a.discount) - resolveDiscountCap(b.discount);
+        if (capDiff !== 0) return capDiff;
       }
       return a.index - b.index;
     });
