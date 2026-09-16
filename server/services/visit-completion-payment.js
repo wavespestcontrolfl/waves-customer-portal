@@ -1,5 +1,6 @@
 'use strict';
 
+const { isDeepStrictEqual } = require('node:util');
 const db = require('../models/db');
 const VisitGroups = require('./visit-groups');
 const { resolveBillingLane } = require('./billing-lane');
@@ -50,6 +51,14 @@ async function assertVisitCompletionCharge(trx, invoice, packetId) {
       || totalCents > frozen.totalCents || netSubtotalCents > frozen.netSubtotalCents) {
     refuse('invoice_above_saved_amount');
   }
+  // Adoption freezes the acceptance invoice's exact line contract. Any later
+  // edit, even a same-total replacement or decrease, requires office review.
+  if (Object.hasOwn(frozen, 'acceptedLineItems')) {
+    const currentLines = require('./invoice')._parseInvoiceLineItems(invoice.line_items);
+    if (!Array.isArray(frozen.acceptedLineItems)
+        || !isDeepStrictEqual(currentLines, frozen.acceptedLineItems)) refuse('accepted_invoice_lines_changed');
+    if (!await require('./estimate-deposits').invoiceDepositCreditIsBacked(invoice, trx)) refuse('deposit_credit_changed');
+  }
   const customer = await trx('customers').where({ id: invoice.customer_id }).first();
   if (!customer || resolveBillingLane(customer).mode !== frozen.billingLane) refuse('billing_lane_changed');
   // Schedule conversions lock the service before its invoice. As in
@@ -78,7 +87,8 @@ async function assertVisitCompletionCharge(trx, invoice, packetId) {
       refuse('member_stop_changed');
     }
     const pricing = frozen.memberPricing?.find((entry) => entry.id === member.id);
-    if (!pricing || pricing.price !== Number(member.estimated_price)
+    const currentPrice = member.estimated_price === null ? null : Number(member.estimated_price);
+    if (!pricing || pricing.price !== currentPrice
         || pricing.isCallback !== Boolean(member.is_callback)
         || pricing.invoiceOnComplete !== Boolean(member.create_invoice_on_complete)) refuse('member_price_changed');
     // Older saved packets predate the service-identity snapshot. New packets
@@ -102,8 +112,12 @@ async function assertVisitCompletionCharge(trx, invoice, packetId) {
   const grantLock = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?::text)) AS locked',
     [String(customer.id)]);
   if (!grantLock.rows[0].locked) throw new Error('Retention grant is in progress. Retry closeout.');
+  const adoptedPositiveIds = new Set((Array.isArray(frozen.acceptedLineItems) ? frozen.acceptedLineItems : [])
+    .filter((line) => require('./invoice').lineIsBaseApplication(line) && Number(line.amount) > 0)
+    .map((line) => /^scheduled_(.+)_primary$/.exec(String(line.client_id || ''))?.[1]).filter(Boolean));
   const retainedFamilies = billed.filter((member) => (member.is_recurring || member.recurring_ongoing)
-    && !member.is_callback && Number(member.estimated_price) > 0)
+    && !member.is_callback
+    && (Number(member.estimated_price) > 0 || adoptedPositiveIds.has(String(member.id))))
     .map(require('./cancellation-processor').familyOfServiceRow).filter(Boolean);
   const offers = await trx('retention_offers').where({ customer_id: customer.id, status: 'granted' })
     .whereIn('family_key', retainedFamilies)
