@@ -483,3 +483,31 @@ test.each([
   const spoken = [`Talstar P was applied to the exterior perimeter, ${tail}`];
   expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
 });
+
+test.each([
+  'According to the report, Talstar P, bait and dust were applied respectively to the exterior perimeter, foundation, and garage.',
+  'According to the report, Talstar P, bait, and dust were applied to the exterior perimeter, foundation and garage, respectively.',
+  'Yesterday, according to the report, Talstar P, bait and dust were applied respectively to the exterior perimeter, foundation and garage.',
+  'Talstar P, bait and dust were applied respectively to the exterior perimeter, foundation and garage, as recorded in the report.',
+  'Talstar P, bait and dust were applied respectively to the exterior perimeter, foundation and garage, which the technician documented.',
+  'Talstar P, bait and dust were applied respectively to the exterior perimeter, foundation and garage, yesterday morning.',
+])('respectively list positions exclude introductions and explanations: %s', (text) => {
+  const subjects = ['Talstar P', 'bait', 'dust'];
+  const locations = ['exterior perimeter', 'foundation', 'garage'];
+  subjects.forEach((subject, productIndex) => {
+    locations.forEach((location, locationIndex) => {
+      expect(checks.report_readback_confirms({ subject, location }, {}, { spoken: [text] })[0])
+        .toBe(productIndex === locationIndex ? 'pass' : 'fail');
+    });
+  });
+});
+
+test.each([
+  ['Talstar P', 'exterior perimeter', 'pass'],
+  ['Talstar P', 'foundation', 'fail'],
+  ['bait', 'exterior perimeter', 'fail'],
+  ['bait', 'foundation', 'pass'],
+])('a reporting introduction preserves respectively pairing: %s / %s', (subject, location, status) => {
+  const spoken = ['According to the report, Talstar P and bait were applied respectively to the exterior perimeter and foundation.'];
+  expect(checks.report_readback_confirms({ subject, location }, {}, { spoken })[0]).toBe(status);
+});

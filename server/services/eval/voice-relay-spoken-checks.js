@@ -1584,9 +1584,16 @@ function reportRespectivelyPairsFinding(affirmed, subjectAt, locationAt, finding
   const locationLink = /\b(?:to|at|on|in)\b/i.exec(affirmed.slice(linkSearchStart, locationAt));
   if (!locationLink) return false;
   const locationListStart = linkSearchStart + locationLink.index + locationLink[0].length;
-  const productOrdinal = [...affirmed.slice(0, subjectAt).matchAll(/\band\b|,/gi)].length;
-  const locationOrdinal = [...affirmed.slice(locationListStart, locationAt).matchAll(/\band\b|,/gi)].length;
-  return productOrdinal === locationOrdinal;
+  // Compare positions from the ends of the paired lists: reporting prefixes
+  // can contain commas, and an Oxford comma plus "and" is one separator.
+  const locationListEnd = respectively.index > locationListStart ? respectively.index : affirmed.length;
+  const locationTail = affirmed.slice(locationAt, locationListEnd)
+    .split(new RegExp(`,\\s*(?=(?:according\\s+to|as|which|${REPORT_COMPLETION_TIME})\\b)`, 'i'))[0]
+    .replace(/,\s*$/, '');
+  const separator = /,\s*(?:and\b)?|\band\b/gi;
+  const productsAfter = [...affirmed.slice(subjectAt, findingVerb.index).matchAll(separator)].length;
+  const locationsAfter = [...locationTail.matchAll(separator)].length;
+  return productsAfter === locationsAfter;
 }
 
 function reportClauseBounds(text, at) {
