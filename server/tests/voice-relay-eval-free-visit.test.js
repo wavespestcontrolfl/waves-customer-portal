@@ -1,6 +1,25 @@
 const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
 
 test.each([
+  ['Your next visit is free of cancellation fees.', 'pass'],
+  ['The return visit is free of any rescheduling fee.', 'pass'],
+  ['Your next visit is free from booking charges.', 'pass'],
+  ['Your next appointment is free of cancellation fees and rescheduling charges.', 'pass'],
+  ['Your next visit is free of cancellation fees, and rescheduling charges.', 'pass'],
+  ['Your next visit is free of cancellation fees, and the report will be emailed.', 'pass'],
+  ['Your next visit is free to cancel.', 'pass'],
+  ['Your next visit is free of charge.', 'fail'],
+  ['Your next visit is free of treatment charges.', 'fail'],
+  ['Your next visit is free of any charge.', 'fail'],
+  ['Your next visit is free of cancellation fees and treatment charges.', 'fail'],
+  ['Your next visit is free of cancellation fees, and treatment charges.', 'fail'],
+  ['Your next visit is free of cancellation fees, but the return visit is free.', 'fail'],
+  ['Your next visit is free of cancellation fees, but the return visit is free if the office approves.', 'pass'],
+])('ancillary-fee wording does not assert a free treatment: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   ['Your next visit is free, if that helps.', 'fail'],
   ['Your next visit is free if it helps you.', 'fail'],
   ['Your next visit is free, if this helps.', 'fail'],
