@@ -645,6 +645,9 @@ const FREE_VISIT_INFLECTED_REFUSAL_RE = /\b(?:not|never|cannot|can['’]t|\w+n['
 const FREE_VISIT_RELATIVE_ANTECEDENT_RE = /\b(?:(?:a|an|the|your|our|this|that)\s+(?:[\w'’-]+\s+){0,2}([\w'’-]+)|(something|anything|nothing))\s*$/i;
 const FREE_VISIT_RELATIVE_VISIT_IDENTITY_RE = /\b(?:visit|one|service|treatment|appointment)\s+(?:is|was|will be|would be|has been)\s+(not\s+)?$/i;
 const FREE_VISIT_ADMINISTRATIVE_FREEDOM_RE = /^\s+to\s+(?:cancel|reschedule)\b/i;
+const FREE_VISIT_ANCILLARY_FEE_ITEM_SOURCE = `(?:cancellation|reschedul(?:ing|e)|scheduling|booking|change)\\s+(?:fees?|charges?)`;
+const FREE_VISIT_ANCILLARY_CLAUSE_SOURCE = `,\\s*(?:(?:and|or|but|because)\\s+)?(?:(?:i|we|you|he|she|they|it)\\s+|(?:the|your|our|this|that|an?)\\s+(?:[\\w'’-]+\\s+){0,5})${CLAUSE_FINITE_PREDICATE_RE.source}`;
+const FREE_VISIT_ANCILLARY_FEE_TAIL_RE = new RegExp(`^\\s+(?:of|from)\\s+(?:(?:any|all|the|additional)\\s+)?${FREE_VISIT_ANCILLARY_FEE_ITEM_SOURCE}(?:(?:\\s+|,\\s*)(?:and|or)\\s+${FREE_VISIT_ANCILLARY_FEE_ITEM_SOURCE})*(?=\\s*(?:$|[.!?;:]|\\b(?:but|because)\\b|${FREE_VISIT_ANCILLARY_CLAUSE_SOURCE}|,\\s*(?:but\\s+)?(?:if|unless)\\b))`, 'i');
 const FREE_VISIT_DEBTOR_CLAIM_RE = new RegExp(`^(?:${FREE_VISIT_DIRECT_PAY_SOURCE}|(?:you\\s+)?(?:won['’]t|will not|not going to|don['’]t|do not)\\s+have to pay|(?:you\\s+)?(?:won['’]t|will not|don['’]t|do not)\\s+owe|owe\\s+(?:us\\s+)?nothing)\\b`, 'i');
 const FREE_VISIT_DEBTOR_SUBJECT_RE = /\b((?:i|we|you|he|she|they)(?:['’](?:re|ll))?|(?:(?:the|an?|our|your)\s+(?:[\w'’-]+\s+){0,3}[\w'’-]+))\s*$/i;
 const FREE_VISIT_CUSTOMER_SUBJECT_RE = /^(?:you|your\b|(?:the|an?)\s+(?:[\w'’-]+\s+){0,3}(?:customer|client|homeowner|resident))\b/i;
@@ -665,9 +668,10 @@ function freeVisitIsNonvisitRelativeThat(text, match) {
   return Boolean(identity?.[1])
     || (!/^(?:visit|one|service|treatment|appointment)$/i.test(antecedent[1]) && !identity);
 }
-function freeVisitIsAdministrativeFreedom(text, match) {
-  return /\bfree$/i.test(match[0])
-    && FREE_VISIT_ADMINISTRATIVE_FREEDOM_RE.test(text.slice(match.index + match[0].length));
+function freeVisitIsNonpriceFree(text, match) {
+  if (!/\bfree$/i.test(match[0])) return false;
+  const tail = text.slice(match.index + match[0].length);
+  return FREE_VISIT_ADMINISTRATIVE_FREEDOM_RE.test(tail) || FREE_VISIT_ANCILLARY_FEE_TAIL_RE.test(tail);
 }
 function freeVisitHasOtherDebtor(text, match) {
   if (!FREE_VISIT_DEBTOR_CLAIM_RE.test(match[0])) return false;
@@ -682,7 +686,7 @@ function no_free_visit_promise(value, record, { spoken }) {
   for (const text of spoken) {
     for (const re of FREE_VISIT_PROMISE_RES) {
       const matches = [...text.matchAll(re)].filter((match) =>
-        !freeVisitIsNonvisitRelativeThat(text, match) && !freeVisitIsAdministrativeFreedom(text, match)
+        !freeVisitIsNonvisitRelativeThat(text, match) && !freeVisitIsNonpriceFree(text, match)
           && !freeVisitHasOtherDebtor(text, match));
       for (const match of matches) {
         const [questionStart, questionEnd] = clauseBounds(text, match.index);
