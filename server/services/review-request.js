@@ -2187,8 +2187,25 @@ const ReviewService = {
         try {
           reservation = await reserveSendableReviewSms({ request, to: contact.phone, body });
         } catch (stateErr) {
-          logger.warn(`[review] send-state reservation failed (requestId=${requestId} errType=${stateErr?.name || "Error"})`);
-          return { refused: "send_state_unverified" };
+          // A transient DB blip here (nothing has reached the provider yet)
+          // must not stand on the pre-send fence above: that fence already
+          // pushed scheduled_for 72h out, so returning now with no repair
+          // parks a never-sent ask for three days — it reads as "recently
+          // asked" when nothing was sent (codex #4331 P1). Retry once, and
+          // only on a second failure restore scheduled_for to what it was
+          // before the fence so the due row is picked up again immediately.
+          logger.warn(`[review] send-state reservation failed, retrying once (requestId=${requestId} errType=${stateErr?.name || "Error"})`);
+          try {
+            reservation = await reserveSendableReviewSms({ request, to: contact.phone, body });
+          } catch (retryErr) {
+            logger.error(`[review] send-state reservation LOST after retry (requestId=${requestId} errType=${retryErr?.name || "Error"})`);
+            try {
+              await db("review_requests").where({ id: requestId, status: "pending" }).update({ scheduled_for: fencedFrom });
+            } catch (unfenceErr) {
+              logger.error(`[review] could not restore pre-send fence after reservation failure (requestId=${requestId} errType=${unfenceErr?.name || "Error"})`);
+            }
+            return { refused: "send_state_unverified" };
+          }
         }
         if (!reservation) return { refused: "request_not_sendable" };
       }
