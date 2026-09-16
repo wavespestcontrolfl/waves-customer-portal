@@ -3639,7 +3639,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         member_since: etDateString(),
         referral_code: code, lead_source: normalized.leadSource,
         pipeline_stage: normalized.pipelineStage,
-        pipeline_stage_changed_at: new Date(),
+        ...stageLifecycleStamps(null, normalized.pipelineStage, {}, { today: etDateString() }),
         assigned_to: req.technicianId,
         company_name: normalized.companyName, property_type: normalized.propertyType, contact_role: normalized.contactRole.value, crm_notes: normalized.notes,
       }).returning('*');

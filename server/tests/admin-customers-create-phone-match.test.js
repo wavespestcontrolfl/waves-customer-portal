@@ -165,7 +165,7 @@ beforeEach(() => {
 });
 
 describe('POST /admin/customers — phone-match confirm gate', () => {
-  test.each(['won', 'active_customer', 'contacted', 'new_lead', undefined])(
+  test.each(['won', 'active_customer', 'contacted', 'churned', 'new_lead', undefined])(
     'preserves the created pipeline stage %s after background work finishes', async (pipelineStage) => {
       const state = freshState({ phoneMatch: false });
       install(state);
@@ -177,6 +177,10 @@ describe('POST /admin/customers — phone-match confirm gate', () => {
         // treating a mocked no-op dispatcher as proof the stage survived.
         await Promise.all(PipelineManager.onEvent.mock.results.map((result) => result.value));
         expect(state.customersById[body.id].pipeline_stage).toBe(pipelineStage || 'new_lead');
+        if (pipelineStage === 'churned') {
+          expect(state.customersById[body.id].churned_at).toBe(require('../utils/datetime-et').etDateString());
+          expect(state.customersById[body.id].churn_reason).toBeNull();
+        }
         expect(LeadScorer.calculateScore).toHaveBeenCalledWith(body.id);
         expect(state.inserts.filter((entry) => entry.table === 'customer_interactions')).toEqual([]);
       });
