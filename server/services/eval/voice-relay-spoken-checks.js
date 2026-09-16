@@ -1912,7 +1912,7 @@ function reportRetractionClause(text, subject, location) {
   // Here "do so" refers to the finding; its "so" is not a new clause.
   const anaphoric = text.replace(/\b(?:actually|in\s+fact)\b[,\s]*/gi, '')
     .replace(/\b(do|did|done)\s+so\b/gi, '$1 that')
-    .replace(/^\s*(?:no|nope)\s*,\s*(?=\S)/i, '');
+    .replace(/^\s*(?:(?:no|nope|sorry|my\s+mistake|my\s+apologies)\s*,\s*)+(?=\S)/i, '');
   const qualifier = clauseOf(anaphoric, 0).split(CLAIM_CAUSAL_BOUNDARY_RE)[0]
     .split(/\bsince\b/i)[0].trim().replace(/,\s*$/, '')
     .replace(/(?:,\s*|\s+)(?:after all|at any point)(?=(?:,\s*(?:sorry|my\s+mistake|my\s+apologies))?$)/i, '');
@@ -1998,103 +1998,104 @@ function* reportContentMatches(text, regex) {
 function report_readback_confirms(value, record, { spoken }) {
   const subjectRe = new RegExp(value.subject, 'gi');
   const locationRe = new RegExp(value.location, 'gi');
-  for (const text of spoken) {
-    for (const m of reportContentMatches(text, subjectRe)) {
-      // Preserve the sentence's question mark before clauseOf removes it.
-      // A question about a finding does not confirm that finding.
-      const [clauseStart, clauseEnd] = reportClauseBounds(text, m.index);
-      const clausePrefix = text.slice(clauseStart, m.index);
-      const interrogative = /^(?!\s*(?:(?:and|but|so)\s+)?(?:do|does|did)\s+not\b)\s*(?:(?:and|but|so)\s+)?(?:was|were|is|are|has|have|had|did|do|does|can|could|would|will|should|what|where|when|why|how)\b/i.test(clausePrefix);
-      const coordinatedQuestion = new RegExp(
-        `^(?:or\\b|and\\s+(?=(?:${REPORT_ASSERTION_START}|${REPORT_VERBLESS_PRODUCT_LOCATION_START})))[^.!?;]*\\?`,
-        'i',
-      ).test(text.slice(clauseEnd).split(/,?\s*\b(?:but|however|though|yet|so|then)\b/i)[0]);
-      const sharedLocation = reportSharedLocationContinuation(text, clauseEnd, value.location, value.subject);
-      const asrTagQuestion = /(?:,\s*(?:right|correct)|\b(?:wasn['’]t\s+it|isn['’]t\s+it|aren['’]t\s+they|didn['’]t\s+(?:we|they)))\s*$/i
-        .test(text.slice(clauseStart, clauseEnd))
-        || /(?:,\s*|\s+)(?:(?:is|was|has|had)\s+(?:that|this|it)(?:\s+(?:right|correct|true))?|(?:did|do)\s+(?:we|they)|(?:are|were)\s+(?:you|we|they)\s+(?:sure|certain)(?:\s+(?:about|of)\s+(?:it|this|that))?)\s*$/i
-          .test(text.slice(clauseStart, clauseEnd));
-      const independentFollowupQuestion = FOLLOWUP_QUESTION_RE.test(text.slice(m.index + m[0].length, clauseEnd));
-      const firstLocation = reportContentMatches(text.slice(clauseStart, clauseEnd), locationRe).next().value;
-      const locationEnd = firstLocation ? clauseStart + firstLocation.index + firstLocation[0].length : 0;
-      // A scenario may match only "exterior" and leave the location's noun
-      // before the comma. It still belongs to the finding, not the question.
-      const locationNoun = /^\s+(?:perimeter|area|walls?|zone|edge)\b/i.exec(text.slice(locationEnd));
-      const findingEnd = Math.max(m.index + m[0].length,
-        locationEnd + (locationNoun ? locationNoun[0].length : 0));
-      const inlineQuestion = reportConfirmationQuestion(
-        text.slice(findingEnd, clauseEnd), value.subject, value.location,
+  // Speech-event boundaries must not hide an immediately following correction.
+  const text = spoken.map((utterance) => /[.!?;]\s*$/.test(utterance)
+    ? utterance : `${utterance}.`).join(' ');
+  for (const m of reportContentMatches(text, subjectRe)) {
+    // Preserve the sentence's question mark before clauseOf removes it.
+    // A question about a finding does not confirm that finding.
+    const [clauseStart, clauseEnd] = reportClauseBounds(text, m.index);
+    const clausePrefix = text.slice(clauseStart, m.index);
+    const interrogative = /^(?!\s*(?:(?:and|but|so)\s+)?(?:do|does|did)\s+not\b)\s*(?:(?:and|but|so)\s+)?(?:was|were|is|are|has|have|had|did|do|does|can|could|would|will|should|what|where|when|why|how)\b/i.test(clausePrefix);
+    const coordinatedQuestion = new RegExp(
+      `^(?:or\\b|and\\s+(?=(?:${REPORT_ASSERTION_START}|${REPORT_VERBLESS_PRODUCT_LOCATION_START})))[^.!?;]*\\?`,
+      'i',
+    ).test(text.slice(clauseEnd).split(/,?\s*\b(?:but|however|though|yet|so|then)\b/i)[0]);
+    const sharedLocation = reportSharedLocationContinuation(text, clauseEnd, value.location, value.subject);
+    const asrTagQuestion = /(?:,\s*(?:right|correct)|\b(?:wasn['’]t\s+it|isn['’]t\s+it|aren['’]t\s+they|didn['’]t\s+(?:we|they)))\s*$/i
+      .test(text.slice(clauseStart, clauseEnd))
+      || /(?:,\s*|\s+)(?:(?:is|was|has|had)\s+(?:that|this|it)(?:\s+(?:right|correct|true))?|(?:did|do)\s+(?:we|they)|(?:are|were)\s+(?:you|we|they)\s+(?:sure|certain)(?:\s+(?:about|of)\s+(?:it|this|that))?)\s*$/i
+        .test(text.slice(clauseStart, clauseEnd));
+    const independentFollowupQuestion = FOLLOWUP_QUESTION_RE.test(text.slice(m.index + m[0].length, clauseEnd));
+    const firstLocation = reportContentMatches(text.slice(clauseStart, clauseEnd), locationRe).next().value;
+    const locationEnd = firstLocation ? clauseStart + firstLocation.index + firstLocation[0].length : 0;
+    // A scenario may match only "exterior" and leave the location's noun
+    // before the comma. It still belongs to the finding, not the question.
+    const locationNoun = /^\s+(?:perimeter|area|walls?|zone|edge)\b/i.exec(text.slice(locationEnd));
+    const findingEnd = Math.max(m.index + m[0].length,
+      locationEnd + (locationNoun ? locationNoun[0].length : 0));
+    const inlineQuestion = reportConfirmationQuestion(
+      text.slice(findingEnd, clauseEnd), value.subject, value.location,
+    );
+    const continuationQuestion = reportConfirmationQuestion(
+      text.slice(clauseEnd), value.subject, value.location,
+    );
+    if ((text[clauseEnd] === '?' && !independentFollowupQuestion)
+        || interrogative || coordinatedQuestion || sharedLocation.unconfirmed || asrTagQuestion
+        || inlineQuestion || continuationQuestion) continue;
+    const reportClause = text.slice(clauseStart, clauseEnd) + sharedLocation.text;
+    const assertion = reportAssertionOf(reportClause, m.index - clauseStart, value.subject, value.location);
+    const clause = assertion.text;
+    // An apology can follow an inline correction after another comma. Keep
+    // the correction attached to this finding's assertion, not an earlier one.
+    const withoutApology = clause.replace(/,\s*(?:sorry|my\s+mistake|my\s+apologies)\s*$/i, '');
+    if (reportTrailingDenialOrCorrection(reportRetractionClause(
+      withoutApology.slice(withoutApology.lastIndexOf(',') + 1), value.subject, value.location,
+    ))) continue;
+    // A contrast excludes its following alternative, not the location
+    // affirmed before it: "exterior rather than indoors" and "exterior,
+    // not indoors" still confirm exterior. Require both halves in the
+    // affirmative portion.
+    const affirmativeClause = clause.replace(/^\s*(?:rather than|instead of)\b[^,]*,\s*/i, '');
+    const affirmativeStart = clause.length - affirmativeClause.length;
+    const affirmed = affirmativeClause.split(/\b(?:rather than|instead of)\b|,\s*\bnot\b/i)[0];
+    const subjectAt = m.index - clauseStart - assertion.start - affirmativeStart;
+    for (const locationMatch of reportContentMatches(affirmed, locationRe)) {
+      const locationAt = locationMatch.index;
+      const orTail = text.slice(clauseEnd);
+      const alternativeLocation = reportHasAlternativeLocation(affirmed, locationAt, orTail);
+      // A completed treatment verb states the relationship. Concise report
+      // summaries may omit it ("Talstar P around the perimeter"), but must
+      // start with a finding term and connect it to its location; a caller
+      // question or a list of terms is not such a summary.
+      const findingVerbs = [...affirmed.matchAll(new RegExp(REPORT_FINDING_VERB_RE.source, 'gi'))];
+      const findingVerb = findingVerbs.find((candidate) => reportHasCompletedFinding(
+        affirmed, subjectAt, m[0].length, locationAt, locationMatch[0].length, candidate,
+      ));
+      const completedFinding = Boolean(findingVerb);
+      const conciseFinding = reportHasConciseFinding(
+        affirmed, subjectAt, m[0].length, locationAt, locationMatch[0].length, findingVerbs[0],
       );
-      const continuationQuestion = reportConfirmationQuestion(
-        text.slice(clauseEnd), value.subject, value.location,
+      // Modals and uncertainty govern the treatment only through its matched
+      // evidence. A later explanatory clause ("which you can see" or "as the
+      // report will show") does not make the completed treatment uncertain.
+      const findingEvidenceEnd = Math.max(
+        subjectAt + m[0].length,
+        locationAt + locationMatch[0].length,
+        findingVerb ? findingVerb.index + findingVerb[0].length : -1,
       );
-      if ((text[clauseEnd] === '?' && !independentFollowupQuestion)
-          || interrogative || coordinatedQuestion || sharedLocation.unconfirmed || asrTagQuestion
-          || inlineQuestion || continuationQuestion) continue;
-      const reportClause = text.slice(clauseStart, clauseEnd) + sharedLocation.text;
-      const assertion = reportAssertionOf(reportClause, m.index - clauseStart, value.subject, value.location);
-      const clause = assertion.text;
-      // An apology can follow an inline correction after another comma. Keep
-      // the correction attached to this finding's assertion, not an earlier one.
-      const withoutApology = clause.replace(/,\s*(?:sorry|my\s+mistake|my\s+apologies)\s*$/i, '');
-      if (reportTrailingDenialOrCorrection(reportRetractionClause(
-        withoutApology.slice(withoutApology.lastIndexOf(',') + 1), value.subject, value.location,
-      ))) continue;
-      // A contrast excludes its following alternative, not the location
-      // affirmed before it: "exterior rather than indoors" and "exterior,
-      // not indoors" still confirm exterior. Require both halves in the
-      // affirmative portion.
-      const affirmativeClause = clause.replace(/^\s*(?:rather than|instead of)\b[^,]*,\s*/i, '');
-      const affirmativeStart = clause.length - affirmativeClause.length;
-      const affirmed = affirmativeClause.split(/\b(?:rather than|instead of)\b|,\s*\bnot\b/i)[0];
-      const subjectAt = m.index - clauseStart - assertion.start - affirmativeStart;
-      for (const locationMatch of reportContentMatches(affirmed, locationRe)) {
-        const locationAt = locationMatch.index;
-        const orTail = text.slice(clauseEnd);
-        const alternativeLocation = reportHasAlternativeLocation(affirmed, locationAt, orTail);
-        // A completed treatment verb states the relationship. Concise report
-        // summaries may omit it ("Talstar P around the perimeter"), but must
-        // start with a finding term and connect it to its location; a caller
-        // question or a list of terms is not such a summary.
-        const findingVerbs = [...affirmed.matchAll(new RegExp(REPORT_FINDING_VERB_RE.source, 'gi'))];
-        const findingVerb = findingVerbs.find((candidate) => reportHasCompletedFinding(
-          affirmed, subjectAt, m[0].length, locationAt, locationMatch[0].length, candidate,
-        ));
-        const completedFinding = Boolean(findingVerb);
-        const conciseFinding = reportHasConciseFinding(
-          affirmed, subjectAt, m[0].length, locationAt, locationMatch[0].length, findingVerbs[0],
-        );
-        // Modals and uncertainty govern the treatment only through its matched
-        // evidence. A later explanatory clause ("which you can see" or "as the
-        // report will show") does not make the completed treatment uncertain.
-        const findingEvidenceEnd = Math.max(
-          subjectAt + m[0].length,
-          locationAt + locationMatch[0].length,
-          findingVerb ? findingVerb.index + findingVerb[0].length : -1,
-        );
-        const findingEvidence = affirmed.slice(0, findingEvidenceEnd)
-          .replace(/^\s*(?:the report will show that|as you can see in the report,?)\s*/i, '');
-        const trailingEvidence = affirmed.slice(findingEvidenceEnd)
-          .replace(/^\s*(?:perimeter|area|wall|walls|zone|edge)\b/i, '');
-        // A trailing "before" dates completed evidence. Remove only that
-        // temporal marker, preserving any actual denial or condition later.
-        const evidenceEnd = Math.max(subjectAt, locationAt, completedFinding ? findingVerb.index : -1);
-        const claimText = (completedFinding || conciseFinding)
-          ? affirmed.slice(0, evidenceEnd) + affirmed.slice(evidenceEnd).replace(/\bbefore\b/gi, 'prior to') : affirmed;
-        const claim = claimContext(claimText, Math.min(subjectAt, locationAt), claimText.length);
-        if (affirmed.slice(subjectAt, subjectAt + m[0].length).toLowerCase() === m[0].toLowerCase()
-            && !reportFindingIsUncertain(findingEvidence)
-            && !REPORT_HYPOTHETICAL_GOVERNOR_RE.test(findingEvidence)
-            && !REPORT_TRAILING_UNCERTAINTY_RE.test(trailingEvidence)
-            && !REPORT_HYPOTHETICAL_QUALIFIER_RE.test(trailingEvidence)
-            && !REPORT_CONCISE_NONCOMPLETION_RE.test(trailingEvidence)
-            && !reportFindingIsInstruction(affirmed, subjectAt, locationAt, findingVerb, findingEvidenceEnd)
-            && !alternativeLocation
-            && reportRespectivelyPairsFinding(affirmed, subjectAt, locationAt, findingVerb)
-            && (completedFinding || conciseFinding)
-            && !reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb, text.slice(0, clauseStart))) {
-          return ['pass', `readback confirmed: "${clip(clause.trim(), 160)}"`];
-        }
+      const findingEvidence = affirmed.slice(0, findingEvidenceEnd)
+        .replace(/^\s*(?:the report will show that|as you can see in the report,?)\s*/i, '');
+      const trailingEvidence = affirmed.slice(findingEvidenceEnd)
+        .replace(/^\s*(?:perimeter|area|wall|walls|zone|edge)\b/i, '');
+      // A trailing "before" dates completed evidence. Remove only that
+      // temporal marker, preserving any actual denial or condition later.
+      const evidenceEnd = Math.max(subjectAt, locationAt, completedFinding ? findingVerb.index : -1);
+      const claimText = (completedFinding || conciseFinding)
+        ? affirmed.slice(0, evidenceEnd) + affirmed.slice(evidenceEnd).replace(/\bbefore\b/gi, 'prior to') : affirmed;
+      const claim = claimContext(claimText, Math.min(subjectAt, locationAt), claimText.length);
+      if (affirmed.slice(subjectAt, subjectAt + m[0].length).toLowerCase() === m[0].toLowerCase()
+          && !reportFindingIsUncertain(findingEvidence)
+          && !REPORT_HYPOTHETICAL_GOVERNOR_RE.test(findingEvidence)
+          && !REPORT_TRAILING_UNCERTAINTY_RE.test(trailingEvidence)
+          && !REPORT_HYPOTHETICAL_QUALIFIER_RE.test(trailingEvidence)
+          && !REPORT_CONCISE_NONCOMPLETION_RE.test(trailingEvidence)
+          && !reportFindingIsInstruction(affirmed, subjectAt, locationAt, findingVerb, findingEvidenceEnd)
+          && !alternativeLocation
+          && reportRespectivelyPairsFinding(affirmed, subjectAt, locationAt, findingVerb)
+          && (completedFinding || conciseFinding)
+          && !reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb, text.slice(0, clauseStart))) {
+        return ['pass', `readback confirmed: "${clip(clause.trim(), 160)}"`];
       }
     }
   }

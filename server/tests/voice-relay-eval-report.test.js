@@ -1,6 +1,31 @@
 const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
 const report = { subject: 'talstar p', location: 'exterior perimeter' };
 
+test.each([
+  ['Actually, it was not applied there.', 'fail'],
+  ['Sorry, it was not applied there.', 'fail'],
+  ['Sorry, that was false.', 'fail'],
+  ['Sorry, it was only planned.', 'fail'],
+  ['My apologies, it was not applied there.', 'fail'],
+  ['Sorry, it was not applied indoors.', 'pass'],
+  ['Sorry, bait was not applied there.', 'pass'],
+  ['Sorry, the appointment was not confirmed.', 'pass'],
+])('speech events and apologies preserve report correction scope: %s', (tail, status) => {
+  const finding = 'Talstar P was applied to the exterior perimeter';
+  for (const spoken of [[`${finding}.`, tail], [finding, tail], [`${finding}, but ${tail}`]]) {
+    expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+  }
+});
+
+test('each speech event retains its own subsequent correction', () => {
+  const spoken = [
+    'The technician arrived.',
+    'Talstar P was applied to the exterior perimeter.',
+    'Actually, it was not applied there.',
+  ];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe('fail');
+});
+
 test.each(['.', '!', ';'])('report corrections retain scope after %s', (separator) => {
   for (const [tail, status] of [
     ['Actually, it was not applied there.', 'fail'],
