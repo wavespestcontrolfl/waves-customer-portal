@@ -1497,10 +1497,12 @@ const REPORT_COMPLETED_PASSIVE_RE = /\b(?:(?:was|were|got)|(?:has|have|had)(?:\s
 const REPORT_NONCOMPLETION_GOVERNOR_RE = /(?:\b(?:supposed|expected|required|meant|scheduled|instructed|asked|told|directed|ordered|needed|intended|planned|failed|pretend(?:s|ed|ing)?|want(?:s|ed)?|ought)\s+to(?:\s+(?:\w+ly|already|just|now))*(?:\s+have(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?)?(?:\s+(?:\w+ly|already|just|now))*|\bplan(?:s|ned|ning)?\s+on\s+having(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?(?:\s+(?:\w+ly|already|just|now))*|\bimagin(?:e[sd]?|ing)\s+(?:that\s+)?(?:i|we|you|he|she|they|it)\s+(?:(?:had|has|have|was|were|already|just|now)\s+)*)\s*$/i;
 const REPORT_NONCOMPLETION_MODIFIER_RE = /\b(?:almost|nearly)(?:\s+(?:has|have|had|was|were|got|been)){0,2}\s*$/i;
 const REPORT_SAME_LOCATION_REF = `(?:\\s+(?:there|at\\s+that\\s+location))?`;
+const REPORT_UNCERTAIN_NEGATED_TREATMENT = `(?:(?:was|is)(?:n[\x27\u2019]t|\\s+(?:not|never))|(?:has|had)(?:n[\x27\u2019]t|\\s+(?:not|never))\\s+been)\\s+(?:actually\\s+)?${REPORT_FINDING_VERB_RE.source}`;
+const REPORT_UNCERTAIN_PREDICATE = `(?:(?:was|is|has been|had been)(?:\\s+${REPORT_FINDING_VERB_RE.source})?|${REPORT_UNCERTAIN_NEGATED_TREATMENT}|did(?:n[\x27\u2019]t|\\s+(?:not|never))?)`;
 const REPORT_TRAILING_UNCERTAINTY_RE = new RegExp(
-  `^\\s*(?:,\\s*)?(?:${REPORT_COMPLETION_TIME}\\s*,?\\s*)?(?:(?:(?:i\\s+am|we\\s+are|i['’]m|we['’]re)\\s+(?:not\\s+(?:sure|certain)|${vocabAlt(EPISTEMIC_DENIAL_WORDS)}))(?:\\s+(?:(?:of|about)\\s+(?:it|this|that)|(?:it|this|that)\\s+(?:(?:was|is|has been|had been)(?:\\s+${REPORT_FINDING_VERB_RE.source})?|did)${REPORT_SAME_LOCATION_REF}))?|(?:i|we)\\s+(?:(?:do|does|did)\\s+)?${EPISTEMIC_HEDGE_PREFIX_SOURCE}(?:\\s+(?:whether\\s+)?(?:it|this|that)(?:\\s+(?:was|is|has been|had been)(?:\\s+${REPORT_FINDING_VERB_RE.source})?${REPORT_SAME_LOCATION_REF})?)?(?:\\s+for\\s+(?:sure|certain))?|(?:maybe|perhaps|possibly|potentially|probably)(?:\\s+not)?|i\\s+`
+  `^\\s*(?:,\\s*)?(?:${REPORT_COMPLETION_TIME}\\s*,?\\s*)?(?:(?:(?:i\\s+am|we\\s+are|i['’]m|we['’]re)\\s+(?:not\\s+(?:sure|certain)|${vocabAlt(EPISTEMIC_DENIAL_WORDS)}))(?:\\s+(?:(?:of|about)\\s+(?:it|this|that)|(?:it|this|that)\\s+${REPORT_UNCERTAIN_PREDICATE}${REPORT_SAME_LOCATION_REF}))?|(?:i|we)\\s+(?:(?:do|does|did)\\s+)?${EPISTEMIC_HEDGE_PREFIX_SOURCE}(?:\\s+(?:whether\\s+)?(?:it|this|that)(?:\\s+${REPORT_UNCERTAIN_PREDICATE}${REPORT_SAME_LOCATION_REF})?)?(?:\\s+for\\s+(?:sure|certain))?|(?:maybe|perhaps|possibly|potentially|probably)(?:\\s+not)?|i\\s+`
     + `(?:think|believe|guess|suppose)(?:\\s+(?:it|that|this)\\s+`
-    + `(?:(?:was|is|has been|had been)(?:\\s+${REPORT_FINDING_VERB_RE.source})?|did)${REPORT_SAME_LOCATION_REF})?)\\s*(?=$|,)`
+    + `${REPORT_UNCERTAIN_PREDICATE}${REPORT_SAME_LOCATION_REF})?)\\s*(?=$|,)`
   // These adjuncts condition the preceding assertion, rather than assert it.
   // Anchor at the finding's tail so conditions in later explanations stay local.
   + `|^\\s*,?\\s*(?:${REPORT_COMPLETION_TIME}\\s*,?\\s*)?(?:only\\s+)?(?:if|unless|until|whether|assuming|provided(?!\\s+by\\b)|providing(?=\\s+(?:that\\b|(?:[\\w\x27\u2019-]+\\s+){1,5}${CLAUSE_FINITE_PREDICATE_RE.source}))|${FREE_VISIT_APPROVAL_QUALIFIER_SOURCE}|on\\s+condition\\s+that|as\\s+long\\s+as)\\b`,
@@ -1787,10 +1789,11 @@ function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb
 
 function reportRespectivelyPairsFinding(affirmed, subjectAt, locationAt, findingVerb) {
   const respectively = /\brespectively\b/i.exec(affirmed);
-  if (!respectively || !findingVerb || subjectAt > findingVerb.index) return true;
+  if (!respectively || !findingVerb) return true;
   const linkSearchStart = Math.min(respectively.index + respectively[0].length, findingVerb.index + findingVerb[0].length);
   const locationLink = /\b(?:to|at|on|in)\b/i.exec(affirmed.slice(linkSearchStart, locationAt));
   if (!locationLink) return false;
+  const locationLinkAt = linkSearchStart + locationLink.index;
   const locationListStart = linkSearchStart + locationLink.index + locationLink[0].length;
   // Compare positions from the ends of the paired lists: reporting prefixes
   // can contain commas, and an Oxford comma plus "and" is one separator.
@@ -1799,7 +1802,10 @@ function reportRespectivelyPairsFinding(affirmed, subjectAt, locationAt, finding
     .split(new RegExp(`,\\s*(?=(?:according\\s+to|as|which|${REPORT_COMPLETION_TIME})\\b)`, 'i'))[0]
     .replace(/,\s*$/, '');
   const separator = /,\s*(?:and\b)?|\band\b/gi;
-  const productsAfter = [...affirmed.slice(subjectAt, findingVerb.index).matchAll(separator)].length;
+  // Active treatment lists put the products after the verb, before the first
+  // target link; passive lists put them before the verb.
+  const productListEnd = subjectAt > findingVerb.index ? locationLinkAt : findingVerb.index;
+  const productsAfter = [...affirmed.slice(subjectAt, productListEnd).matchAll(separator)].length;
   const locationsAfter = [...locationTail.matchAll(separator)].length;
   return productsAfter === locationsAfter;
 }

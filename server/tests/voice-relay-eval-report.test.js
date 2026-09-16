@@ -335,6 +335,14 @@ test.each([
   ['Talstar P and bait were applied to the exterior perimeter and foundation, respectively.', 'bait', 'foundation', 'pass'],
   ['Talstar P and bait were applied to the exterior perimeter and foundation, respectively.', 'talstar p', 'foundation', 'fail'],
   ['Talstar P and bait were applied to the exterior perimeter and foundation, respectively.', 'bait', 'exterior perimeter', 'fail'],
+  ['We applied Talstar P and bait to the exterior perimeter and foundation, respectively.', 'talstar p', 'exterior perimeter', 'pass'],
+  ['We applied Talstar P and bait to the exterior perimeter and foundation, respectively.', 'bait', 'foundation', 'pass'],
+  ['We applied Talstar P and bait to the exterior perimeter and foundation, respectively.', 'talstar p', 'foundation', 'fail'],
+  ['We applied Talstar P and bait to the exterior perimeter and foundation, respectively.', 'bait', 'exterior perimeter', 'fail'],
+  ['We applied Talstar P and bait respectively to the exterior perimeter and foundation.', 'talstar p', 'exterior perimeter', 'pass'],
+  ['We applied Talstar P and bait respectively to the exterior perimeter and foundation.', 'bait', 'foundation', 'pass'],
+  ['We applied Talstar P and bait respectively to the exterior perimeter and foundation.', 'talstar p', 'foundation', 'fail'],
+  ['We applied Talstar P and bait respectively to the exterior perimeter and foundation.', 'bait', 'exterior perimeter', 'fail'],
 ])('respectively preserves product/location pairing: %s / %s / %s', (text, subject, location, status) => {
   expect(checks.report_readback_confirms({ subject, location }, {}, { spoken: [text] })[0]).toBe(status);
 });
@@ -760,6 +768,24 @@ test.each([
   ['I think it was applied indoors', 'pass'],
   ['I believe it was applied to the garage', 'pass'],
 ])('report uncertainty keeps treatment and location scope: %s', (tail, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter, but ${tail}.`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
+test.each([
+  ['I believe it was not applied there', 'fail'],
+  ["I believe it wasn't applied there", 'fail'],
+  ['I think it had not been applied there', 'fail'],
+  ['I believe it was never applied there', 'fail'],
+  ["I'm not sure it was not applied there", 'fail'],
+  ['we are unsure it has not been applied there', 'fail'],
+  ['I cannot confirm whether it was not applied there', 'fail'],
+  ['I believe it was not applied to the exterior perimeter', 'fail'],
+  ['I believe it was not applied indoors', 'pass'],
+  ['I believe it was not applied to the garage', 'pass'],
+  ['I believe bait was not applied there', 'pass'],
+  ['I am not sure it was not applied indoors', 'pass'],
+])('negated anaphoric uncertainty keeps report scope: %s', (tail, status) => {
   const spoken = [`Talstar P was applied to the exterior perimeter, but ${tail}.`];
   expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
 });
