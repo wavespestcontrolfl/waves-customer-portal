@@ -21,6 +21,8 @@ describe('email reply report and regulatory claims policy', () => {
     'The treatment is EPA-certified.', 'The treatment is EPA certified.',
     'The treatment is EPAcertified.',
     'The treatment is certified by the EPA.',
+    'The treatment is certified by the U.S. EPA.',
+    'The treatment has certification from US EPA.',
     'This treatment has certification from the EPA.', 'This carries certification by EPA.',
     'The EPA has certified this treatment.', 'This product carries EPA certification.',
     "This treatment has the EPA's certification.", 'This treatment has the EPA’s certification.',
@@ -46,4 +48,11 @@ describe('email reply report and regulatory claims policy', () => {
   test('conservatively retains the canonical subject-agnostic outcome ban', () => {
     rejected('The billing problem is resolved.');
   });
+  test('screens nested emphasis while preserving allowed regulatory wording', () => {
+    rejected('**The product is EPA-*certified*.**');
+    rejected('Your home is pest-**_free_**.');
+    rejected("__This treatment has the **EPA's certification**.__");
+    expect(verdict('**The product is EPA-*registered*.**')).toEqual({ ok: true, violations: [] });
+  });
+
 });

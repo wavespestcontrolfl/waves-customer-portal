@@ -4,16 +4,20 @@ const { reentrySafetyClaimFinding } = require('../content/content-guardrails');
 // Normalize typography before matching the customer-visible copy. This
 // includes nonbreaking hyphens in compliance claims.
 function normalizeCopy(text) {
-  return String(text || '').normalize('NFKC')
+  let copy = String(text || '').normalize('NFKC')
     .replace(/[\u2010-\u2015\u2212]/g, '-')
-    .replace(/[‘’]/g, "'")
-    // Inline Markdown emphasis renders without its paired delimiters.
-    // Requiring nonspace content avoids turning stray punctuation into a
-    // clean claim. The canonical re-entry guard handles richer markup.
-    .replace(/(\*\*\*|___|\*\*|__|\*|_)([^\s*_](?:[^\r\n]*?[^\s*_])?)\1/g, '$2');
+    .replace(/[‘’]/g, "'");
+  // Peel paired emphasis layers until stable; every changed pass removes
+  // delimiters, including nested wrappers, while leaving stray punctuation.
+  let previous;
+  do {
+    previous = copy;
+    copy = copy.replace(/(\*\*\*|___|\*\*|__|\*|_)([^\s*_](?:[^\r\n]*?[^\s*_])?)\1/g, '$2');
+  } while (copy !== previous);
+  return copy;
 }
 
-const EPA_CERTIFIED_RE = /\bEPA(?:'s)?[\s-]*(?:(?:has|have|had)\s+)?(?:officially\s+)?certif(?:ied|ies|ication)\b|\bcertif(?:ied|ication)\b[^.!?]{0,20}\b(?:by|from)\s+(?:the\s+)?EPA\b/i;
+const EPA_CERTIFIED_RE = /\bEPA(?:'s)?[\s-]*(?:(?:has|have|had)\s+)?(?:officially\s+)?certif(?:ied|ies|ication)\b|\bcertif(?:ied|ication)\b[^.!?]{0,20}\b(?:by|from)\s+(?:the\s+)?(?:U\.?S\.?\s+)?EPA\b/i;
 
 // A claims-only, inactive policy. Factual grounding and send authorization
 // require separate checks; passing this screen establishes neither.
