@@ -1,6 +1,22 @@
 const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
 
 test.each([
+  ['As I said before your next visit is free.', 'fail'],
+  ['As mentioned before, your next visit is free.', 'fail'],
+  ['Before tomorrow your next visit is free.', 'fail'],
+  ['Your next visit is free, if you have questions call us.', 'fail'],
+  ['Your next visit is free, if you have questions, please call us.', 'fail'],
+  ['Your next visit is free, if you need help contact the office.', 'fail'],
+  ['Your next visit is free if you call us.', 'pass'],
+  ['Your next visit is free if you need to call us.', 'pass'],
+  ['Your next visit is free if you want to contact the office.', 'pass'],
+  ['Your next visit is free if the office approves.', 'pass'],
+  ['I cannot confirm before approval that your next visit is free.', 'pass'],
+])('conditions must govern the free-visit claim: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   ["You won't have to pay attention during your next visit.", 'pass'],
   ["You won't have to pay until your next visit.", 'pass'],
   ["You won't have to pay for your next visit.", 'fail'],
@@ -236,5 +252,28 @@ test.each([
   ["It wasn't the case that we waived the charge, but we won't bill you for the next visit.", 'fail'],
   ['Your next visit is free. It is not the case that the appointment is confirmed.', 'fail'],
 ])('not-the-case denial stays with its own proposition: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['Your next visit is free, provided the office approves.', 'pass'],
+  ['Your next visit is free provided that the office approves.', 'pass'],
+  ['Your next visit is free providing the office approves.', 'pass'],
+  ['Your next visit is free providing that the office approves.', 'pass'],
+  ['Your next visit is free only after the office approves.', 'pass'],
+  ['Your next visit is free only after office approval.', 'pass'],
+  ['Provided the office approves, your next visit is free.', 'pass'],
+  ['Providing that the office approves, your next visit is free.', 'pass'],
+  ['Only after the office approves, your next visit is free.', 'pass'],
+  ['Only after office approval, your next visit is free.', 'pass'],
+  ['Your next visit is free, provided with a report.', 'fail'],
+  ['Your next visit is free, providing protection against ants.', 'fail'],
+  ['Your next visit is free, providing the office with protection.', 'fail'],
+  ['Your next visit is free, providing the office treatment reports.', 'fail'],
+  ['Your next visit is free, providing the customer service reports.', 'fail'],
+  ['Providing protection against ants, your next visit is free.', 'fail'],
+  ['Provided with a report, your next visit is free.', 'fail'],
+  ['Your next visit is free, but the office provided a report.', 'fail'],
+])('a finite provided condition qualifies only the visit promise: %s', (text, status) => {
   expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
 });
