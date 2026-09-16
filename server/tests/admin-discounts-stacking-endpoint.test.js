@@ -63,5 +63,20 @@ test('the route is declared before the catalog list, so /stacking is never read 
   const path = require('path');
   const src = fs.readFileSync(path.join(__dirname, '../routes/admin-discounts.js'), 'utf8');
   expect(src.indexOf("router.get('/stacking'")).toBeLessThan(src.indexOf("router.get('/',"));
-  expect(src).toMatch(/enabled: isEnabled\('discountStacking'\)/);
+  expect(src).toMatch(/enabled: discountStackingLive\(\)/);
+  expect(src).toMatch(/process\.env\.GATE_DISCOUNT_STACKING === 'true'/);
+});
+
+test('the gate is read at call time: a flip after the module loaded is reported on the next read', async () => {
+  const before = await readStacking();
+  expect(before.body.enabled).toBe(true);
+  process.env.GATE_DISCOUNT_STACKING = 'false';
+  const off = await readStacking();
+  expect(off.body.enabled).toBe(false);
+  process.env.GATE_DISCOUNT_STACKING = 'TRUE';
+  const wrongCase = await readStacking();
+  expect(wrongCase.body.enabled).toBe(false);
+  process.env.GATE_DISCOUNT_STACKING = 'true';
+  const on = await readStacking();
+  expect(on.body.enabled).toBe(true);
 });

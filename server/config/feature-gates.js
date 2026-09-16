@@ -562,7 +562,8 @@ const gates = {
   // read. This slice ships the engine and the gate read only — no route or
   // service imports discount-stack.js yet, so the flip is inert until a
   // later slice wires a caller. Off (default, and everywhere until then):
-  // byte-identical to today.
+  // byte-identical to today. Registered here for logGateStatus; the route
+  // reads process.env at CALL time (strict 'true'), so a flip needs no redeploy.
   discountStacking: process.env.GATE_DISCOUNT_STACKING === 'true',
 
   // Collective series moves on every staff surface (owner rulings 2026-07-30
