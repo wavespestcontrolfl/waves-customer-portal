@@ -585,8 +585,10 @@ const FREE_VISIT_MULTIWORD_CONDITION_SOURCE = `(?:the|an?|your|our|their|this|th
 const FREE_VISIT_FINITE_CONDITION_SOURCE = `(?:(?:i|we|you|he|she|they|it)\\s+${FREE_VISIT_PRONOUN_CONDITION_PREDICATE_SOURCE}|${FREE_VISIT_MULTIWORD_CONDITION_SOURCE}|(?:the|an?|your|our|their|this|that)\\s+[\\w\\x27\\u2019-]+\\s+(?:${CLAUSE_FINITE_PREDICATE_RE.source}|[\\w\\x27\\u2019-]+(?:s|ed)\\b))`;
 const FREE_VISIT_PROVIDED_CONDITION_SOURCE = `(?:provided|providing)(?:\\s+that)?\\s+${FREE_VISIT_FINITE_CONDITION_SOURCE}`;
 const FREE_VISIT_AS_LONG_AS_CONDITION_SOURCE = `as\\s+long\\s+as\\s+${FREE_VISIT_FINITE_CONDITION_SOURCE}`;
+const FREE_VISIT_ASSUMING_CONDITION_SOURCE = `assuming(?:\\s+that)?\\s+(?:${FREE_VISIT_FINITE_CONDITION_SOURCE}|(?:(?:the|your|our)\\s+)?(?:approval|authorization|confirmation|consent)\\b)`;
+const FREE_VISIT_ON_CONDITION_SOURCE = `on\\s+(?:the\\s+)?condition\\s+that\\s+${FREE_VISIT_FINITE_CONDITION_SOURCE}`;
 const FREE_VISIT_APPROVAL_QUALIFIER_SOURCE = `(?:subject\\s+to|only\\s+with)\\s+(?:(?:the|your|our)\\s+)?(?:[\\w\\x27\\u2019-]+\\s+){0,3}(?:approval|authorization|confirmation|consent)\\b`;
-const FREE_VISIT_CONDITION_SOURCE = `(?:${FREE_VISIT_PROVIDED_CONDITION_SOURCE}|${FREE_VISIT_AS_LONG_AS_CONDITION_SOURCE}|${FREE_VISIT_APPROVAL_QUALIFIER_SOURCE}|only\\s+after\\s+(?:(?:the|an?|your|our|their)\\s+)?[\\w\\x27\\u2019-]+\\b)`;
+const FREE_VISIT_CONDITION_SOURCE = `(?:${FREE_VISIT_PROVIDED_CONDITION_SOURCE}|${FREE_VISIT_AS_LONG_AS_CONDITION_SOURCE}|${FREE_VISIT_ASSUMING_CONDITION_SOURCE}|${FREE_VISIT_ON_CONDITION_SOURCE}|${FREE_VISIT_APPROVAL_QUALIFIER_SOURCE}|only\\s+after\\s+(?:(?:the|an?|your|our|their)\\s+)?[\\w\\x27\\u2019-]+\\b)`;
 const FREE_VISIT_PREPOSED_CONDITION_RE = new RegExp(`^\\s*${FREE_VISIT_CONDITION_SOURCE}`, 'i');
 const FREE_VISIT_POSTCLAIM_CONDITION_RE = new RegExp(`^\\s*,?\\s*(?:but\\s+)?(?:(?:only\\s+)?(?:if|unless)\\b|${FREE_VISIT_CONDITION_SOURCE})`, 'i');
 const FREE_VISIT_SHARED_CONDITION_INTRO_RE = new RegExp(`^\\s*(?:(?:only\\s+)?(?:if|unless)\\b|${FREE_VISIT_CONDITION_SOURCE})[^,;.!?]*,\\s*`, 'i');
@@ -661,7 +663,7 @@ const FREE_VISIT_ANCILLARY_FEE_ITEM_SOURCE = `(?:cancellation|reschedul(?:ing|e)
 const FREE_VISIT_ANCILLARY_CLAUSE_SOURCE = `,\\s*(?:(?:and|or|but|because)\\s+)?(?:(?:i|we|you|he|she|they|it)\\s+|(?:the|your|our|this|that|an?)\\s+(?:[\\w'’-]+\\s+){0,5})${CLAUSE_FINITE_PREDICATE_RE.source}`;
 const FREE_VISIT_ANCILLARY_FEE_TAIL_RE = new RegExp(`^\\s+(?:of|from)\\s+(?:(?:any|all|the|additional)\\s+)?${FREE_VISIT_ANCILLARY_FEE_ITEM_SOURCE}(?:(?:\\s+|,\\s*)(?:and|or)\\s+${FREE_VISIT_ANCILLARY_FEE_ITEM_SOURCE})*(?=\\s*(?:$|[.!?;:]|\\b(?:but|because)\\b|${FREE_VISIT_ANCILLARY_CLAUSE_SOURCE}|,\\s*(?:but\\s+)?(?:if|unless)\\b))`, 'i');
 const FREE_VISIT_DEBTOR_CLAIM_RE = new RegExp(`^(?:${FREE_VISIT_DIRECT_PAY_SOURCE}|(?:you\\s+)?(?:won['’]t|will not|not going to|don['’]t|do not)\\s+have to pay|(?:you\\s+)?(?:won['’]t|will not|don['’]t|do not)\\s+owe|owe\\s+(?:us\\s+)?nothing)\\b`, 'i');
-const FREE_VISIT_DEBTOR_SUBJECT_RE = /\b((?:i|we|you|he|she|they)(?:['’](?:re|ll))?|(?:(?:the|an?|our|your)\s+(?:[\w'’-]+\s+){0,3}[\w'’-]+))\s*$/i;
+const FREE_VISIT_DEBTOR_SUBJECT_RE = /\b((?:i|we|you|he|she|they)(?:['’](?:ll|m|re|s))?|(?:(?:the|an?|our|your)\s+(?:[\w'’-]+\s+){0,3}[\w'’-]+))(?:\s+(?:will|shall|(?:am|is|are)\s+going\s+to|going\s+to))?\s*$/i;
 const FREE_VISIT_CUSTOMER_SUBJECT_RE = /^(?:you|your\b|(?:the|an?)\s+(?:[\w'’-]+\s+){0,3}(?:customer|client|homeowner|resident))\b/i;
 function freeVisitIsRefused(prefix) {
   return FREE_VISIT_NOUN_REFUSAL_RE.test(prefix)

@@ -1,6 +1,44 @@
 const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
 
 test.each([
+  ['Your next visit is free, assuming the office approves.', 'pass'],
+  ['Assuming the office approves, your next visit is free.', 'pass'],
+  ['Your next visit is free assuming that we get approval.', 'pass'],
+  ['Assuming approval, your next visit is free.', 'pass'],
+  ['Your next visit is free, on condition that the office approves.', 'pass'],
+  ['On the condition that we get consent, your next visit is free.', 'pass'],
+  ['Assuming the office approves, your next visit is free and your next treatment is complimentary.', 'pass'],
+  ['Your next visit is free, assuming responsibility for the report.', 'fail'],
+  ['Assuming responsibility for the report, your next visit is free.', 'fail'],
+  ['Your next visit is free, but the report is ready assuming the office approves.', 'fail'],
+  ['Assuming the office approves, the report is ready, but your next visit is free.', 'fail'],
+  ['Your next visit is free, on condition that the report is delivered, but the return visit is free.', 'fail'],
+])('assuming and on-condition qualifiers govern only their visit claims: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['We will owe nothing for your next visit.', 'pass'],
+  ['I will owe nothing for your next visit.', 'pass'],
+  ["We'll owe nothing for your next visit.", 'pass'],
+  ['I’ll owe nothing for your next visit.', 'pass'],
+  ['We are going to owe nothing for your next visit.', 'pass'],
+  ["We're going to owe nothing for your next visit.", 'pass'],
+  ['The technician will owe nothing for your next visit.', 'pass'],
+  ['You will owe nothing for your next visit.', 'fail'],
+  ["You'll owe nothing for your next visit.", 'fail'],
+  ['You are going to owe nothing for your next visit.', 'fail'],
+  ["You're going to owe nothing for your next visit.", 'fail'],
+  ['The customer will owe nothing for your next visit.', 'fail'],
+  ['We will owe nothing for your next visit, but you will owe nothing for your next visit.', 'fail'],
+  ['You will owe nothing for your next visit if the office approves.', 'pass'],
+  ['You will owe nothing for your next visit until next month.', 'pass'],
+  ['You will owe nothing for your next visit, but the report will wait until next month.', 'fail'],
+])('future owe statements keep their explicit debtor: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   ['Your next visit is now free.', 'fail'],
   ['Your next visit is already free.', 'fail'],
   ['Your next visit is still free.', 'fail'],
