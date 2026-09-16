@@ -211,6 +211,21 @@ function invoiceContainsOnlySetupFeeCharges(row) {
   return hasFee;
 }
 
+// Classify rows only after the caller has acquired its own transaction and
+// row locks. Setup-fee coverage is estimate-wide; application coverage is
+// visit-date scoped, with a missing date failing closed as a possible match.
+// Status remains caller-owned because packet ownership survives terminal
+// invoice states while adoption deliberately distinguishes them.
+function classifyAcceptedEstimateInvoiceCoverage(row, applicationDate) {
+  const rowDate = dateOnly(row?.service_date || row?.scheduled_date);
+  const targetDate = dateOnly(applicationDate);
+  return {
+    hasSetupFee: invoiceHasPositiveSetupFeeLine(row),
+    setupFeeOnly: invoiceContainsOnlySetupFeeCharges(row),
+    matchesApplicationDate: !rowDate || !targetDate || rowDate === targetDate,
+  };
+}
+
 // Cents totals for coverage comparison (Codex PR r7 P1): boolean
 // any-positive-line evidence lets a $9.90 typo retire a $99 obligation —
 // resolution compares SUMMED live coverage against the frozen expected
@@ -228,6 +243,30 @@ function sumPositiveSetupFeeCents(row) {
     const amt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
     return Number.isFinite(amt) && amt > 0 ? sum + Math.round(amt * 100) : sum;
   }, 0);
+}
+
+// Acceptance invoices stay editable until delivery, so their line JSON cannot
+// authorize a setup charge. Compare it with acceptance-frozen evidence: the
+// estimate owns the WaveGuard fee and setup_fee_claims owns any rodent fee.
+async function acceptanceSetupFeeMatchesAuthority({ invoice, estimateId }, conn = db) {
+  const billedCents = sumPositiveSetupFeeCents(invoice);
+  const estimate = await conn('estimates').where({ id: estimateId,
+    customer_id: invoice.customer_id, status: 'accepted' }).first('estimate_data');
+  if (!estimate) return false;
+  const { parseEstimateData, snapshotShowsSetupFee } = require('./setup-fee-obligation')._private;
+  const estimateData = parseEstimateData(estimate.estimate_data);
+  const shown = estimateData.acceptedSetupFeeAmount == null
+    ? snapshotShowsSetupFee(estimateData)
+    : { evidence: 'shown', amount: estimateData.acceptedSetupFeeAmount };
+  const waveGuardCents = shown.evidence === 'shown' && shown.amount != null
+    ? Math.round(Number(shown.amount) * 100) : (shown.evidence === 'shown' ? NaN : 0);
+  const claim = await conn('setup_fee_claims').where({ invoice_id: invoice.id })
+    .forUpdate().noWait().first('amount', 'estimate_id');
+  if (claim?.estimate_id && String(claim.estimate_id) !== String(estimateId)) return false;
+  const claimCents = claim ? Math.round(Number(claim.amount) * 100) : 0;
+  if (![waveGuardCents, claimCents].every(Number.isSafeInteger)
+      || Math.min(waveGuardCents, claimCents) < 0 || (claim && claimCents === 0)) return false;
+  return billedCents === waveGuardCents + claimCents;
 }
 
 function sumBaseApplicationCents(row) {
@@ -252,7 +291,9 @@ module.exports = {
   invoiceContainsSetupFeeLine,
   invoiceHasPositiveSetupFeeLine,
   invoiceContainsOnlySetupFeeCharges,
+  classifyAcceptedEstimateInvoiceCoverage,
   invoiceBillsBaseApplication,
   sumPositiveSetupFeeCents,
+  acceptanceSetupFeeMatchesAuthority,
   sumBaseApplicationCents,
 };

@@ -386,6 +386,12 @@ function validatePricingConfigData(configKey, data, oldConfig) {
     if (!data || typeof data !== 'object' || Array.isArray(data)) {
       return fail('termite_annual_plan must be an object of plan knobs (setup_per_station, annual_base, annual_step, bracket_stations, bracket_floor)');
     }
+    // Direct PUTs normalize aliases first. Proposal leaf writes do not, so
+    // reject noncanonical keys instead of approving a value the bridge ignores.
+    if (['setupPerStation', 'annualBase', 'annualStep', 'bracketStations', 'bracketFloor']
+      .some((key) => Object.hasOwn(data, key))) {
+      return fail('termite_annual_plan requires canonical snake_case pricing keys');
+    }
     // The bands live with the engine (TERMITE.annualPlanBounds) — the same
     // ones the replay resolver accepts a stamp against — so they cannot drift.
     const bounds = TERMITE.annualPlanBounds;
@@ -393,7 +399,7 @@ function validatePricingConfigData(configKey, data, oldConfig) {
       && (!b.integer || Math.abs(num(v) - Math.round(num(v))) < 1e-9);
     const checkPlan = (keys, b) => {
       for (const key of keys) {
-        if (data?.[key] == null) continue;
+        if (!Object.hasOwn(data, key)) continue;
         if (!withinBand(b)(data[key])) return fail(`termite_annual_plan.${key} must be ${b.label}`);
       }
       return null;
@@ -1258,6 +1264,7 @@ router.post('/margin-check', async (req, res) => {
 // they picked (codex P1 on the station-rental PR).
 const CONFIG_KEY_FEATURE_GATES = {
   termite_rental: 'GATE_TERMITE_STATION_RENTAL',
+  termite_annual_plan: 'GATE_TERMITE_ANNUAL_PLAN',
 };
 
 // Gated SUB-features that live inside a broader config row (the row itself
@@ -1477,6 +1484,29 @@ router.put('/:key', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+async function resolvePricingQuoteInput(body) {
+  const { sanitizeClientIdentityFields } = require('../services/estimate-client-identity-fields');
+  const input = sanitizeClientIdentityFields({ ...(body || {}) });
+  const customerId = input.existingCustomerId || input.customerId;
+  if (!customerId) return input;
+  const { resolveCustomerQualifyingEvidence, isActivePlanCustomer } = require('../services/waveguard-existing-services');
+  try {
+    const evidence = await resolveCustomerQualifyingEvidence(db, {
+      customerId,
+      address: input.address || null,
+      groupedEstimate: !!(input.groupWithEstimateId || input.estimateGroupId),
+    });
+    input.priorQualifyingServices = evidence.tierKeys;
+    input.setupWaiverPriorQualifyingServices = evidence.setupWaiverKeys;
+    if (await isActivePlanCustomer(db, customerId, { strict: true })) input.recurringCustomer = true;
+    return input;
+  } catch {
+    const err = new Error('Could not confirm this customer\'s existing services. Retry the quote.');
+    err.status = 503;
+    throw err;
+  }
+}
+
 // POST /estimate — run the pricing engine with live DB-synced constants
 // This is the single entry point estimators should use. Body schema matches
 // the modular engine's generateEstimate input.
@@ -1493,14 +1523,9 @@ router.post('/estimate', async (req, res, next) => {
       }
     } catch { /* non-fatal — fall back to in-memory constants */ }
 
-    // Replay knobs (termitePricingKnobs, treeShrubPricingKnobs, the
-    // recurring-customer identity flags) are server-derived from a STORED
-    // estimate row — never a posted value. This sandbox prices whatever the
-    // admin UI sends, so strip them exactly as the persistence path does: a
-    // posted `termitePricingKnobs.plan` stamp must not price the annual plan
-    // past an unset GATE_TERMITE_ANNUAL_PLAN (pre-push audit #4424).
-    const { sanitizeClientIdentityFields } = require('../services/estimate-client-identity-fields');
-    const estimate = pricingEngine.generateEstimate(sanitizeClientIdentityFields({ ...(req.body || {}) }));
+    // Strip posted replay authority and derive linked-customer eligibility
+    // from the same evidence resolver used by saved estimates.
+    const estimate = pricingEngine.generateEstimate(await resolvePricingQuoteInput(req.body));
     res.json({ estimate });
   } catch (err) { next(err); }
 });
@@ -1517,10 +1542,7 @@ router.post('/quick-quote', async (req, res, next) => {
         await pricingEngine.syncConstantsFromDB();
       }
     } catch { /* non-fatal */ }
-    // Same posted-input door as /estimate above: replay/identity stamps are
-    // server-derived only, so the compact quote prices a sanitized copy.
-    const { sanitizeClientIdentityFields } = require('../services/estimate-client-identity-fields');
-    res.json({ quote: pricingEngine.quickQuote(sanitizeClientIdentityFields({ ...(req.body || {}) })) });
+    res.json({ quote: pricingEngine.quickQuote(await resolvePricingQuoteInput(req.body)) });
   } catch (err) { next(err); }
 });
 

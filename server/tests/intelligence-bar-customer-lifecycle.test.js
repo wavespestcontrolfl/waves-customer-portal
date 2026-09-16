@@ -233,6 +233,23 @@ describe('merge_customers', () => {
     expect(mockExecuteMerge).not.toHaveBeenCalled();
   });
 
+  test('an incompatible addressed winner with an inactive primary refuses preview before approval', async () => {
+    db.__qb.select.mockResolvedValueOnce([
+      { ...winnerRow, billing_mode: 'per_application', per_application_fee: '85.00', address_line1: '100 Main St' },
+      { ...loserRow, address_line1: '200 Oak Ave' },
+    ]);
+    db.__qb.first.mockResolvedValueOnce({ id: 'inactive-primary', active: false });
+
+    const refused = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {});
+    expect(refused).toMatchObject({
+      code: 'inactive_primary_property_conflict',
+      error: expect.stringMatching(/inactive primary property.*reconcile/i),
+    });
+    expect(refused.preview).toBeUndefined();
+    expect(mockDescribeMergeEffects).not.toHaveBeenCalled();
+    expect(mockExecuteMerge).not.toHaveBeenCalled();
+  });
+
   test('the card names the notes the merge appends onto the survivor (Codex r7 P2)', async () => {
     db.__qb.select.mockResolvedValueOnce([winnerRow, loserRow]);
     mockDescribeMergeEffects.mockResolvedValueOnce({ ...EFFECTS, financial_effects: { ...FINANCIAL, note_appends: { crm_notes: 'a\n\nb', technician_notes: 'Dog in the back yard' } } });

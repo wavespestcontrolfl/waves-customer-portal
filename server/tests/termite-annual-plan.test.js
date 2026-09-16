@@ -256,7 +256,7 @@ describe('annual plan — DB overlay and admin validation', () => {
       [{ annual_base: 2490 }, 'annual_base'],
       [{ annual_step: -1 }, 'annual_step'],
       [{ bracket_stations: 0 }, 'bracket_stations'],
-      [{ bracketFloor: 101 }, 'bracketFloor'],
+      [{ bracket_floor: 101 }, 'bracket_floor'],
     ]) {
       const verdict = validatePricingConfigData('termite_annual_plan', { setup_per_station: 30, annual_base: 249, ...patch }, null);
       expect(verdict.ok).toBe(false);
