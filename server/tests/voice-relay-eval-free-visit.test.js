@@ -1,6 +1,22 @@
 const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
 
 test.each([
+  ['As I said before your next visit is free.', 'fail'],
+  ['As mentioned before, your next visit is free.', 'fail'],
+  ['Before tomorrow your next visit is free.', 'fail'],
+  ['Your next visit is free, if you have questions call us.', 'fail'],
+  ['Your next visit is free, if you have questions, please call us.', 'fail'],
+  ['Your next visit is free, if you need help contact the office.', 'fail'],
+  ['Your next visit is free if you call us.', 'pass'],
+  ['Your next visit is free if you need to call us.', 'pass'],
+  ['Your next visit is free if you want to contact the office.', 'pass'],
+  ['Your next visit is free if the office approves.', 'pass'],
+  ['I cannot confirm before approval that your next visit is free.', 'pass'],
+])('conditions must govern the free-visit claim: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   ["You won't have to pay attention during your next visit.", 'pass'],
   ["You won't have to pay until your next visit.", 'pass'],
   ["You won't have to pay for your next visit.", 'fail'],

@@ -572,6 +572,13 @@ const FREE_VISIT_PROVIDED_CONDITION_SOURCE = `(?:provided|providing)(?:\\s+that)
 const FREE_VISIT_CONDITION_SOURCE = `(?:${FREE_VISIT_PROVIDED_CONDITION_SOURCE}|only\\s+after\\s+(?:(?:the|an?|your|our|their)\\s+)?[\\w\\x27\\u2019-]+\\b)`;
 const FREE_VISIT_PREPOSED_CONDITION_RE = new RegExp(`^\\s*${FREE_VISIT_CONDITION_SOURCE}`, 'i');
 const FREE_VISIT_POSTCLAIM_CONDITION_RE = new RegExp(`^\\s*,?\\s*(?:(?:only\\s+)?(?:if|unless)\\b|but\\s+only\\s+if\\b|${FREE_VISIT_CONDITION_SOURCE})`, 'i');
+// A condition can introduce a separate instruction after an asserted promise.
+// Require a predicate before the imperative so "if you call us" remains a gate.
+const FREE_VISIT_CONDITIONAL_FOLLOWUP_RE = /^\s*,?\s*(?:if|unless)\s+you\s+(?:have|need|want|notice|experience|find|get|receive)\b[^.!?;]*?\s+(?:please\s+)?(?<!\bto\s)(?:call|contact|ask|tell|let|reach|give|check)\b/i;
+function freeVisitHasPostclaimCondition(tail) {
+  return FREE_VISIT_POSTCLAIM_CONDITION_RE.test(tail)
+    && !FREE_VISIT_CONDITIONAL_FOLLOWUP_RE.test(tail);
+}
 const FOLLOWUP_QUESTION_RE = /(?:,\s*|\s+(?:and|but|so)\s+)(?:(?:and|but|so)\s+)?(?:did|do|does|is|are|was|were|will|would|can|could|should|has|have|had|what|who|why|how|where|when)\b/i;
 const FREE_VISIT_LEADING_QUESTION_RE = /^(?!\s*(?:do|does|did)\s+not\b)\s*(?:did|do|does|is|are|was|were|will|would|can|could|should|has|have|had|what|who|why|how)\b[^,;:]*$/i;
 const FREE_VISIT_QUESTION_TERMINATOR_RE = /^(?:\?|or\s+(?:not|paid|billable|charged)\?\s*$)/i;
@@ -624,12 +631,12 @@ function no_free_visit_promise(value, record, { spoken }) {
         // "Whether X or Y, [promise]" asserts the promise across both
         // alternatives. A whether phrase embedded in a refusal or an
         // incomplete question still governs the free-visit proposition.
-        const governingCondition = /\b(?:if|unless|whether|until|before)\b/i.test(
+        const governingCondition = /\b(?:if|unless|whether|until)\b/i.test(
           prefix.replace(/^\s*whether\b[^,;.!?]*\bor\b[^,;.!?]*,\s*/i, '')
             .replace(/\beven\s+if\b/gi, 'even when'),
         )
           || FREE_VISIT_PREPOSED_CONDITION_RE.test(clausePrefix)
-          || FREE_VISIT_POSTCLAIM_CONDITION_RE.test(text.slice(match.index + match[0].length));
+          || freeVisitHasPostclaimCondition(text.slice(match.index + match[0].length));
         if (!governingCondition && !trailingRetraction && !clauseIsEpistemicallyHedged(prefix)
             && !propositionIsExplicitlyDenied(text, match.index)) {
           return ['fail', `free visit promised: "${clip(match[0], 160)}"`];
