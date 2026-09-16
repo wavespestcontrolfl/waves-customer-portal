@@ -443,3 +443,18 @@ describe('csr-coach verifyFollowUps — an unresolved reservation is not proof s
     expect(updates.filter((u) => u.status === 'verified')).toHaveLength(1);
   });
 });
+
+
+test('estimator thread excludes unresolved review reservations before applying its history limit', async () => {
+  const rows = [
+    { from_phone: '+15555550100', to_phone: '+15555550101', message_body: 'Actual delivered reply', created_at: new Date('2026-09-01T12:00:00Z'), direction: 'outbound', status: 'sent' },
+    { from_phone: '+15555550100', to_phone: '+15555550101', message_body: 'Unconfirmed review placeholder', created_at: new Date('2026-09-02T12:00:00Z'), direction: 'outbound', status: 'sending', metadata: { review_ask_reservation: true } },
+  ];
+  const query = makeSmsLogQuery(rows);
+  query.select = () => query;
+  db.mockReturnValue(query);
+  const { loadSmsThread } = require('../services/estimator-engine/context-builder');
+  expect(await loadSmsThread('+15555550101', { limit: 1 })).toEqual([
+    { direction: 'outbound', body: 'Actual delivered reply', at: rows[0].created_at },
+  ]);
+});

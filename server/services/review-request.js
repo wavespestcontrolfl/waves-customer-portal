@@ -769,9 +769,9 @@ async function persistedReviewRetryAt(requestId) {
   }
 }
 
-async function reserveReviewSms({ request, to, body }) {
+async function reserveReviewSms({ request, to, body, conn = db }) {
   const reservedAt = new Date();
-  const [reservation] = await db("sms_log").insert({
+  const [reservation] = await conn("sms_log").insert({
     customer_id: request.customer_id,
     direction: "outbound",
     from_phone: TWILIO_NUMBERS.getOutboundNumber(request.location_id),
@@ -790,22 +790,45 @@ async function reserveReviewSms({ request, to, body }) {
   return { id: reservation.id, reservedAt, requestId: request.id };
 }
 
+async function reserveSendableReviewSms({ request, to, body }) {
+  return db.transaction(async (trx) => {
+    const stillSendable = await trx("review_requests")
+      .where({ id: request.id, status: "pending" }).update({ status: "pending" });
+    if (!stillSendable) return null;
+    return reserveReviewSms({ request, to, body, conn: trx });
+  });
+}
+
 // Queued asks an enrollment replaces. Exported for the PostgreSQL test: the
 // in-flight carve-out is a correlated NOT EXISTS on JSON metadata, which the
 // unit suite's query mock cannot evaluate.
 function supersedeQueuedAsks(customerId) {
-  return db("review_requests")
-    .where({ customer_id: customerId, status: "pending" })
-    .whereNull("sms_sent_at")
-    .whereNotNull("scheduled_for")
-    .whereRaw(ASK_TOUCH_SQL)
-    .whereNotExists(function () {
-      this.select(1).from("sms_log")
-        .whereRaw("sms_log.metadata->>'review_request_id' = review_requests.id::text")
-        .whereRaw("sms_log.metadata->>'review_ask_reservation' = 'true'")
-        .where("sms_log.status", "sending");
-    })
-    .update({ status: "suppressed" });
+  return db.transaction(async (trx) => {
+    // Lock candidate requests FIRST, then check reservations in a separate
+    // READ COMMITTED statement. An UPDATE started while reserveSendableReviewSms
+    // holds a row lock can otherwise retain a pre-reservation snapshot for
+    // its NOT EXISTS subquery even after it waits for the row to commit.
+    const candidates = await trx("review_requests")
+      .where({ customer_id: customerId, status: "pending" })
+      .whereNull("sms_sent_at")
+      .whereNotNull("scheduled_for")
+      .whereRaw(ASK_TOUCH_SQL)
+      .orderBy("id")
+      .select("id")
+      .forUpdate();
+    if (!candidates.length) return 0;
+    return trx("review_requests")
+      .whereIn("id", candidates.map((row) => row.id))
+      .where({ status: "pending" })
+      .whereNull("sms_sent_at")
+      .whereNotExists(function () {
+        this.select(1).from("sms_log")
+          .whereRaw("sms_log.metadata->>'review_request_id' = review_requests.id::text")
+          .whereRaw("sms_log.metadata->>'review_ask_reservation' = 'true'")
+          .where("sms_log.status", "sending");
+      })
+      .update({ status: "suppressed" });
+  });
 }
 
 // A resolved review-ask reservation for THIS request is proof the provider
@@ -2043,6 +2066,16 @@ const ReviewService = {
     const spacingHold = await this._askSpacingHold(request);
     if (spacingHold) return spacingHold;
 
+    // A never-sent ask may have waited through a long history outage. Renew
+    // its expired token before dispatch, so the queued retry cannot text a
+    // link that /rate already rejects. A changed/claimed row cannot renew.
+    if (request.expires_at && new Date(request.expires_at).getTime() <= Date.now()) {
+      const expiresAt = new Date(Date.now() + 14 * 86400000);
+      const renewed = await db("review_requests").where({ id: request.id, status: "pending" })
+        .whereNull("sms_sent_at").update({ expires_at: expiresAt });
+      if (!renewed) return { refused: "request_changed" };
+      request.expires_at = expiresAt;
+    }
     const reviewUrl = await buildReviewUrl(request, customer.id);
     const techName = request.tech_name || "Our team";
     // Outreach-template renders (custom_body / template_key) resolve the tech
@@ -2175,17 +2208,34 @@ const ReviewService = {
       } = require("./messaging/send-customer-message");
       if (OUTREACH.isAskTemplate(request.template_key)) {
         // Enrollment may supersede this ask after the earlier row read.
-        let stillSendable = 0;
+        // The row lock from this conditional update must remain held until
+        // the reservation insert commits. Otherwise supersedeQueuedAsks can
+        // run between the check and insert, suppress this row, and the
+        // provider call below still sends the now-superseded ask.
         try {
-          stillSendable = await db("review_requests")
-            .where({ id: requestId, status: "pending" }).update({ status: "pending" });
+          reservation = await reserveSendableReviewSms({ request, to: contact.phone, body });
         } catch (stateErr) {
-          logger.warn(`[review] send-state recheck failed (requestId=${requestId} errType=${stateErr?.name || "Error"})`);
-          return { refused: "send_state_unverified" };
+          // A transient DB blip here (nothing has reached the provider yet)
+          // must not stand on the pre-send fence above: that fence already
+          // pushed scheduled_for 72h out, so returning now with no repair
+          // parks a never-sent ask for three days — it reads as "recently
+          // asked" when nothing was sent (codex #4331 P1). Retry once, and
+          // only on a second failure restore scheduled_for to what it was
+          // before the fence so the due row is picked up again immediately.
+          logger.warn(`[review] send-state reservation failed, retrying once (requestId=${requestId} errType=${stateErr?.name || "Error"})`);
+          try {
+            reservation = await reserveSendableReviewSms({ request, to: contact.phone, body });
+          } catch (retryErr) {
+            logger.error(`[review] send-state reservation LOST after retry (requestId=${requestId} errType=${retryErr?.name || "Error"})`);
+            try {
+              await db("review_requests").where({ id: requestId, status: "pending" }).update({ scheduled_for: fencedFrom });
+            } catch (unfenceErr) {
+              logger.error(`[review] could not restore pre-send fence after reservation failure (requestId=${requestId} errType=${unfenceErr?.name || "Error"})`);
+            }
+            return { refused: "send_state_unverified" };
+          }
         }
-        if (!stillSendable) return { refused: "request_not_sendable" };
-        // The SMS reservation holds spacing across the other send paths.
-        reservation = await reserveReviewSms({ request, to: contact.phone, body });
+        if (!reservation) return { refused: "request_not_sendable" };
       }
       providerStarted = true;
       try {
@@ -4523,7 +4573,10 @@ const ReviewService = {
       // (Codex #4332 P2). A leftover pending row is harmless: it carries no
       // send and the next attempt re-runs the same guard.
       try {
-        await db("review_requests").where({ id: request.id, status: "pending" }).del();
+        await db.transaction(async (trx) => {
+          const removed = await trx("review_requests").where({ id: request.id, status: "pending" }).del();
+          if (removed) await trx("short_codes").where({ kind: "review", entity_type: "review_requests", entity_id: String(request.id) }).del();
+        });
       } catch (cleanupErr) {
         logger.warn(`[review] blocked email ask cleanup failed (requestId=${request.id} code=${result.code} errType=${cleanupErr?.name || "Error"})`);
       }
@@ -7191,5 +7244,6 @@ ReviewService.unshortenedReviewUrl = unshortenedReviewUrl;
 ReviewService.REVIEW_TOKEN_RE = REVIEW_TOKEN_RE;
 ReviewService.LEGACY_REVIEW_DELAY_MINUTES = LEGACY_REVIEW_DELAY_MINUTES;
 ReviewService.supersedeQueuedAsks = supersedeQueuedAsks;
+ReviewService.reserveSendableReviewSms = reserveSendableReviewSms;
 
 module.exports = ReviewService;
