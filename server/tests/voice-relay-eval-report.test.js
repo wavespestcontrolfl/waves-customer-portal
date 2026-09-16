@@ -50,6 +50,13 @@ test.each([
   ['Talstar P was scheduled to be applied to the exterior perimeter', 'fail'],
   ['it was only planned there', 'fail'],
   ['it was only planned', 'fail'],
+  ['it was only planned, not completed', 'fail'],
+  ['it was only planned, never actually completed there', 'fail'],
+  ['it was only planned, not completed at the exterior perimeter', 'fail'],
+  ['it was only planned for the garage, not completed', 'pass'],
+  ['it was only planned, not completed indoors', 'pass'],
+  ['it was only planned, not completed in the garage', 'pass'],
+  ['the follow-up was only planned, not completed', 'pass'],
 ])('proposed treatment retracts only its named location: %s', (tail, status) => {
   const spoken = [`Talstar P was applied to the exterior perimeter, but ${tail}.`];
   expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);

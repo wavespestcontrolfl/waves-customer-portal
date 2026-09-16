@@ -1448,9 +1448,10 @@ function reportTrailingNoncompletion(text) {
   const noncompletion = REPORT_CONCISE_NONCOMPLETION_RE.exec(anaphoric[1]);
   if (!noncompletion) return false;
   // A proposed treatment elsewhere does not retract the completed finding.
+  // A later "not completed" can reinforce it only without a different target.
   // The matched location is normalized to "there" before this check.
   const remainder = anaphoric[1].slice(noncompletion[0].length);
-  return /^\s*(?:(?:to\s+)?(?:(?:be|have\s+been)\s+)?(?:applied|sprayed|treated|placed|used|put)(?:\s+(?:it|that))?)?\s*(?:(?:(?:to|at|in|on|around|along|for)\s+)?(?:there|at\s+that\s+location)|(?:for\s+)?(?:tomorrow|tonight|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)))?\s*$/i.test(remainder);
+  return /^\s*(?:(?:to\s+)?(?:(?:be|have\s+been)\s+)?(?:applied|sprayed|treated|placed|used|put)(?:\s+(?:it|that))?)?\s*(?:(?:(?:to|at|in|on|around|along|for)\s+)?(?:there|at\s+that\s+location)|(?:for\s+)?(?:tomorrow|tonight|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)))?\s*(?:,\s*(?:not|never)\s+(?:actually\s+)?(?:completed|finished|done|applied|sprayed|treated)(?:\s+(?:there|at\s+that\s+location))?)?\s*$/i.test(remainder);
 }
 // Qualified shorthand must positively state completion or cite the report;
 // unknown qualifiers can describe proposed treatment and are not evidence.
