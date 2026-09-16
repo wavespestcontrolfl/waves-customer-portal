@@ -1,6 +1,28 @@
 const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
 
 test.each([
+  ['Your next visit is free once the office approves.', 'pass'],
+  ['Once the office approves, your next visit is free.', 'pass'],
+  ['Your next visit is free when the office approves.', 'pass'],
+  ['When the office approves, your next visit is free.', 'pass'],
+  ['Your next visit is free once the billing office confirms.', 'pass'],
+  ['When we get approval, your next visit is free.', 'pass'],
+  ['Your next visit is free once approval is granted.', 'pass'],
+  ['When the report is approved, your next visit is free.', 'pass'],
+  ['We will cover your next visit once the office approves.', 'pass'],
+  ['Your next visit is free and complimentary when the office approves.', 'pass'],
+  ['We will cover your next visit and the report once the office approves.', 'pass'],
+  ['Your next visit is free when the visit begins.', 'fail'],
+  ['Once the appointment begins, your next visit is free.', 'fail'],
+  ['Your next visit is free when the technician arrives.', 'fail'],
+  ['Your next visit is free once approval.', 'fail'],
+  ['The office approved the report, but your next visit is free.', 'fail'],
+  ['Your next visit is free when the visit begins, but the return visit is free.', 'fail'],
+])('once and when gate price only on a finite approval event: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   ["You won't be charged for your next visit and the report if the office approves.", 'pass'],
   ['You will pay nothing for this visit and the report if the office approves.', 'pass'],
   ['You will not have to pay for your next visit and the report if the office approves.', 'pass'],
