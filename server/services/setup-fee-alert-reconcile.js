@@ -19,8 +19,16 @@
 const db = require('../models/db');
 const logger = require('./logger');
 
+// All note-stamped writers use the same case-insensitive linkage and lower-
+// case lock key, including historical stamps with the original loose shape.
+function acceptedEstimateIdFromNotes(notes) {
+  const match = /accepted estimate #([0-9a-f-]{8,})/i.exec(String(notes || ''));
+  return match ? match[1].toLowerCase() : null;
+}
+
 async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel = '' }) {
   if (!customerId || !sourceEstimateId) return;
+  sourceEstimateId = String(sourceEstimateId).toLowerCase();
   const dedupeKey = `unminted_setup_fee_manual_billing:${sourceEstimateId}`;
   // Pre-read the visit ids the coverage scans will touch so their shared
   // mint locks can be taken in the SAME global order every invoice writer
@@ -184,7 +192,7 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
             if (String(tCustomer) !== String(customerId)) return;
             const tStamped = await trx('invoices')
               .where({ customer_id: tCustomer })
-              .where('notes', 'like', `%accepted estimate #${sourceEstimateId}%`)
+              .where('notes', 'ilike', `%accepted estimate #${sourceEstimateId}%`)
               .forUpdate()
               .select('id', 'status', 'line_items', 'notes');
             const tVisitIds = [...new Set(terminalFeeAlerts.map((row) => {
@@ -246,7 +254,7 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
           const deadAway = new Set([...require('./invoice').CANCELLED_SERVICE_RESOLVED_STATUSES, 'void']);
           const stampedAll = await trx('invoices')
             .where({ customer_id: scanCustomerId })
-            .where('notes', 'like', `%accepted estimate #${sourceEstimateId}%`)
+            .where('notes', 'ilike', `%accepted estimate #${sourceEstimateId}%`)
             .forUpdate()
             .select('id', 'status', 'line_items', 'notes');
           const stampedLive = stampedAll
@@ -560,8 +568,7 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
 async function reconcileSetupFeeAlertForInvoice(invoice) {
   try {
     if (!invoice) return;
-    const stamp = String(invoice.notes || '').match(/accepted estimate #([0-9a-fA-F-]{8,})/);
-    let estimateId = stamp ? stamp[1] : null;
+    let estimateId = acceptedEstimateIdFromNotes(invoice.notes);
     let customerId = invoice.customer_id || null;
     let linkedVisitId = invoice.scheduled_service_id || null;
     if (!linkedVisitId && invoice.service_record_id) {
@@ -624,4 +631,4 @@ async function sweepSetupFeeAlerts() {
   }
 }
 
-module.exports = { reconcileSetupFeeAlert, reconcileSetupFeeAlertForInvoice, sweepSetupFeeAlerts };
+module.exports = { acceptedEstimateIdFromNotes, reconcileSetupFeeAlert, reconcileSetupFeeAlertForInvoice, sweepSetupFeeAlerts };

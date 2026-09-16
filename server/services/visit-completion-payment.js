@@ -57,8 +57,9 @@ async function assertVisitCompletionCharge(trx, invoice, packetId) {
   const members = await trx('visit_completion_packet_items as i')
     .join('scheduled_services as s', 's.id', 'i.scheduled_service_id')
     .join('service_records as r', 'r.id', 'i.service_record_id')
+    .leftJoin('services as catalog', 'catalog.id', 's.service_id')
     .where('i.packet_id', packet.id).orderBy('s.id').forUpdate('s', 'i').noWait()
-    .select('s.*', 'i.status as item_status', 'i.invoice_id', 'r.id as record_id',
+    .select('s.*', 'catalog.service_key', 'catalog.name as service_name', 'i.status as item_status', 'i.invoice_id', 'r.id as record_id',
       'r.status as record_status', 'r.customer_id as record_customer_id',
       'r.scheduled_service_id as record_service_id', 'r.structured_notes as record_notes');
   if (members.length < 1 || members.some((member) => member.item_status !== 'done'
@@ -80,6 +81,11 @@ async function assertVisitCompletionCharge(trx, invoice, packetId) {
     if (!pricing || pricing.price !== Number(member.estimated_price)
         || pricing.isCallback !== Boolean(member.is_callback)
         || pricing.invoiceOnComplete !== Boolean(member.create_invoice_on_complete)) refuse('member_price_changed');
+    // Older saved packets predate the service-identity snapshot. New packets
+    // also fence in-place conversions that retain the same price and row ID.
+    if (Object.hasOwn(pricing, 'serviceType')
+        && (pricing.serviceType !== member.service_type || pricing.serviceId !== member.service_id)) refuse('member_service_changed');
+    if (require('./no-cost-visit-types').isAlwaysFreeServiceType(member.service_type)) refuse('member_coverage_changed');
     if (member.status !== 'completed' || member.record_status !== 'completed'
         || ['inspection_only', 'customer_declined', 'incomplete'].includes(member.record_notes?.visitOutcome)
         || member.prepaid_method || Number(member.prepaid_amount) > 0) refuse('member_coverage_changed');
@@ -91,6 +97,20 @@ async function assertVisitCompletionCharge(trx, invoice, packetId) {
       refuse('member_prepaid');
     }
   }
+  // Granting an offer holds this same customer advisory lock. Collection
+  // retains it through the provider call; contention retries without charging.
+  const grantLock = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?::text)) AS locked',
+    [String(customer.id)]);
+  if (!grantLock.rows[0].locked) throw new Error('Retention grant is in progress. Retry closeout.');
+  const retainedFamilies = billed.filter((member) => (member.is_recurring || member.recurring_ongoing)
+    && !member.is_callback && Number(member.estimated_price) > 0)
+    .map(require('./cancellation-processor').familyOfServiceRow).filter(Boolean);
+  const offers = await trx('retention_offers').where({ customer_id: customer.id, status: 'granted' })
+    .whereIn('family_key', retainedFamilies)
+    .whereRaw("NOT (COALESCE(applied_invoice_ids, '[]'::jsonb) @> ?::jsonb)", [JSON.stringify([invoice.id])])
+    .forUpdate().noWait();
+  if (offers.some((offer) => require('./cancellation-resolution/retention-offer')
+    .retentionDiscountForInvoice(offer, netSubtotalCents / 100))) refuse('retention_offer_changed');
   // Alternate one-time card consents own their existing financial contract.
   // Refuse the mixed lane instead of silently selecting another saved method.
   const ids = billed.map((member) => member.id);

@@ -117,6 +117,72 @@ function nextProviderRetryAt(providerOutcome, now = new Date()) {
   return new Date(now.getTime() + delayMs);
 }
 
+/**
+ * The single source of truth for "did this attempt definitely NOT reach the
+ * customer" — derived from this module's own closed outcome vocabulary
+ * rather than left to each caller's own reading of `blocked`.
+ *
+ * The contract (enforced end to end: twilio-sms.js's DELIVERY_OUTCOMES set
+ * plus explicitDeliveryOutcome, which collapses anything not in it to
+ * 'uncertain' before a value ever reaches a caller):
+ *
+ *   deliveryOutcome: 'accepted'   -> definitely SENT.
+ *   deliveryOutcome: 'not_sent'   -> definitely NOT SENT, independent of
+ *                                    `blocked` — a pipeline/validator
+ *                                    refusal, a disabled template, the
+ *                                    owner-silence kill switch (which also
+ *                                    sets `sent: true` for its own
+ *                                    accounting — `sent` answers a
+ *                                    different question than
+ *                                    deliveryOutcome; only deliveryOutcome
+ *                                    says whether the customer's carrier
+ *                                    was ever asked), or a definitive
+ *                                    provider rejection (a synchronous
+ *                                    Twilio error isDefinitiveTwilioRejection
+ *                                    recognizes) are all tagged this way,
+ *                                    whether or not `blocked` is set.
+ *   deliveryOutcome: 'uncertain'  -> UNKNOWN — the SDK handoff was crossed
+ *                                    (or a push attempt may still be in
+ *                                    flight: appPending/appRetryable/
+ *                                    APP_DELIVERY_HOLD tag 'uncertain' even
+ *                                    though `blocked` is also true there)
+ *                                    with no definitive verdict either way.
+ *   missing/malformed value        -> UNKNOWN, EXCEPT one gap this
+ *                                    contract does not close: withSendLock's
+ *                                    own LOCK_BUSY / PROMISED_LINK_IN_PROGRESS
+ *                                    objects (reschedule-link-promises.js)
+ *                                    return straight out of
+ *                                    sendCustomerMessage() before
+ *                                    sendCustomerMessageCore ever tags a
+ *                                    deliveryOutcome — for exactly that one
+ *                                    untagged shape, `blocked === true` is
+ *                                    the only signal available and is known
+ *                                    to mean NOT SENT (sendCore was never
+ *                                    invoked). An explicit deliveryOutcome,
+ *                                    when present, always overrides this
+ *                                    fallback.
+ *
+ * Nothing in this vocabulary is actually ambiguous once deliveryOutcome is
+ * read directly: every blocked:true shape that could still mean "maybe
+ * reached the provider" (the push in-flight/retry shapes) tags 'uncertain'
+ * explicitly rather than leaving deliveryOutcome unset.
+ *
+ * @param {{ deliveryOutcome?: string, blocked?: boolean } | null | undefined} outcome
+ *   A sendCustomerMessage() result, or a thrown error's own
+ *   `.providerOutcome` (sendCustomerMessageCore tags every throw with the
+ *   provider outcome it had observed, or the pre-dispatch 'not_sent'
+ *   default when the throw happened before dispatch ever ran).
+ * @returns {'sent' | 'not_sent' | 'unknown'}
+ */
+function classifyDeliveryCertainty(outcome) {
+  if (!outcome) return 'unknown';
+  if (outcome.deliveryOutcome === 'accepted') return 'sent';
+  if (outcome.deliveryOutcome === 'not_sent') return 'not_sent';
+  if (outcome.deliveryOutcome === 'uncertain') return 'unknown';
+  if (outcome.blocked === true) return 'not_sent';
+  return 'unknown';
+}
+
 function isAutopayCustomerSms(input = {}) {
   if (input.channel !== 'sms') return false;
   if (!['customer', 'lead'].includes(input.audience)) return false;
@@ -168,12 +234,23 @@ function normalizeRecipient(phone) {
  *   deliveryOutcome: 'accepted' | 'not_sent' | 'uncertain',
  *   nextAllowedAt?: string,
  *   providerMessageId?: string,
+ *   sentAt?: string,
  *   auditLogId?: string | null,
  *   segmentCount?: number,
  *   encoding?: 'GSM_7' | 'UCS_2',
  * }>}
  */
 async function sendCustomerMessage(input) {
+  // The feature's canonical compound gate (this delivery gate AND
+  // GATE_CALL_COMMITMENTS); live mode only — shadow observes, it never locks.
+  const promises = require('../reschedule-link-promises');
+  if (promises.mode() === 'true') {
+    return promises.withSendLock(input, (lockedInput) => sendCustomerMessageCore(lockedInput));
+  }
+  return sendCustomerMessageCore(input);
+}
+
+async function sendCustomerMessageCore(input) {
   let providerOutcome = { sent: false, deliveryOutcome: 'not_sent' };
   try {
   // 1. Contract validation
@@ -194,7 +271,7 @@ async function sendCustomerMessage(input) {
 
   // 3. Normalize recipient + clone input so downstream sees the canonical
   //    form. Caller closures stay outside message state and audit payloads.
-  const { preDispatchCheck, preSendCheck, withSmsHandoff, ...inputRest } = input;
+  const { preDispatchCheck, preProviderCheck, preSendCheck, withSmsHandoff, ...inputRest } = input;
   const normalizedTo = normalizeRecipient(input.to);
   const sendInput = { ...inputRest, to: normalizedTo };
   // Request lifecycle email companions have no text leg. Keep their App
@@ -202,8 +279,9 @@ async function sendCustomerMessage(input) {
   if (sendInput.metadata?.appOnly === true) sendInput.channel = 'push';
   // The locked handoff holds a caller's authority rows through the actual
   // provider request. Immediate lead replies and the visit-summary bearer
-  // link (its immediate send and its scheduled replay) are the callers whose
-  // recipient may change between validation and the handoff.
+  // link (its immediate send and its scheduled replay), plus promised
+  // reschedule links, are the callers whose authority may change between
+  // validation and the handoff.
   const smsHandoffAllowed = (input.audience === 'lead' && input.purpose === 'conversational'
       && input.entryPoint === 'lead_response_auto_reply')
     || (input.audience === 'customer' && input.purpose === 'service_completion'
@@ -212,9 +290,13 @@ async function sendCustomerMessage(input) {
     // A review ask that follows a combined-visit summary shares that
     // summary's packet row through the request.
     || (input.audience === 'customer' && input.purpose === 'review_request'
-      && ['review_request_send', 'review_outreach_touch'].includes(input.entryPoint));
+      && ['review_request_send', 'review_outreach_touch'].includes(input.entryPoint))
+    || (input.audience === 'customer' && input.purpose === 'appointment'
+      && input.entryPoint === 'reschedule-link-promise'
+      && input.metadata?.original_message_type === 'reschedule_link_promise'
+      && Boolean(input.metadata?.followThroughCommitmentId));
   if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms' || !smsHandoffAllowed)) {
-    return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is restricted to immediate lead replies and visit summaries' };
+    return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is not allowed for this message' };
   }
   if (typeof preSendCheck === 'function' && withSmsHandoff) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SEND_GUARD_COMBINATION',
@@ -476,6 +558,25 @@ async function sendCustomerMessage(input) {
       };
     }
   };
+  const runCallerPreProviderCheck = async () => {
+    if (typeof preProviderCheck !== 'function') return { ok: true };
+    try {
+      const verdict = await preProviderCheck({ channel: sendInput.channel });
+      return verdict?.ok === true ? verdict : {
+        ok: false,
+        code: verdict?.code || 'PRE_PROVIDER_CHECK_FAILED',
+        reason: verdict?.reason || 'pre-provider check did not pass',
+        retryable: verdict?.retryable === true,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        code: err?.code || 'PRE_PROVIDER_CHECK_FAILED',
+        reason: err?.message || 'pre-provider check failed',
+        retryable: err?.retryable === true,
+      };
+    }
+  };
   const providerPreSendCheck = async () => {
     const windowVerdict = checkSendWindow(sendInput, policy, contactState);
     if (!windowVerdict || windowVerdict.ok !== true) {
@@ -493,6 +594,8 @@ async function sendCustomerMessage(input) {
     }
     const callerVerdict = await runCallerPreSendCheck();
     if (!callerVerdict.ok) return rememberBoundaryBlock(callerVerdict, 'pre_send_check_boundary');
+    const providerVerdict = await runCallerPreProviderCheck();
+    if (!providerVerdict.ok) return rememberBoundaryBlock(providerVerdict, 'pre_provider_check_boundary');
     // The awaited caller guard may itself straddle 20:00 ET. Keep this pure
     // clock check as the final operation before returning to the provider.
     const finalWindowVerdict = checkSendWindow(sendInput, policy, contactState);
@@ -662,6 +765,7 @@ async function sendCustomerMessage(input) {
     blocked: false,
     deliveryOutcome: providerOutcome.deliveryOutcome,
     providerMessageId: providerOutcome.providerMessageId,
+    sentAt: providerOutcome.sentAt,
     channel: providerOutcome.provider === 'push' ? 'push' : sendInput.channel,
     auditLogId: audit.id,
     segmentCount: segmentMeta.segmentCount,
@@ -783,6 +887,11 @@ async function dispatchToProvider(input, hooks = {}) {
 module.exports = {
   sendCustomerMessage,
   normalizeRecipient,
+  // The shared "was this definitely not sent" derivation — every site
+  // that decides whether to retire a delivery_outcome_uncertain-style flag
+  // must route through this instead of reading `blocked`/`deliveryOutcome`
+  // itself, so a future outcome shape only needs updating here.
+  classifyDeliveryCertainty,
   // Exposed for tests
   _internals: {
     validateContract,
