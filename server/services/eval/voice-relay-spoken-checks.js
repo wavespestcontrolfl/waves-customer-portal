@@ -532,7 +532,7 @@ function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)
 
 // A denial of the proposition itself does not assert the proposition.
 // Scope it to the matched claim; denial of another claim cannot exempt it.
-const EXPLICIT_PROPOSITION_DENIAL_RE = /\b(?:it|this|that)\s+(?:(?:is|was)\s+(?:false|not\s+true|untrue)|(?:isn['’]t|wasn['’]t)\s+true)\s+that\s*$/i;
+const EXPLICIT_PROPOSITION_DENIAL_RE = /\b(?:it|this|that)\s+(?:(?:is|was)\s+(?:false|not\s+true|untrue|not\s+the\s+case)|(?:isn['’]t|wasn['’]t)\s+(?:true|the\s+case))\s+that\s*$/i;
 function propositionIsExplicitlyDenied(text, at, findingVerb) {
   const [start, end] = clauseBounds(text, at);
   const prefix = text.slice(start, at);
@@ -559,7 +559,7 @@ const FREE_VISIT_PROMISE_RES = Object.freeze(
   "\\bowe (?:us )?nothing\\b[^.!?]{0,40}?\\b(?:visit|one|service|treatment|appointment)\\b",
   "\\bno (?:bill|charge|cost|fee)\\b[^.!?]{0,30}?\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b"
 ].map((source) => new RegExp(source, 'gi')));
-const FREE_VISIT_CAUSAL_BOUNDARY_RE = new RegExp(
+const CLAIM_CAUSAL_BOUNDARY_RE = new RegExp(
   `\\b(?:as(?!\\s+of\\b)|since(?!\\s+(?:today|yesterday|now)\\b)|now\\s+that|given\\s+that|due\\s+to\\s+the\\s+fact\\s+that)\\b(?=\\s+(?:(?:i|we|you|he|she|they|it)\\s+|`
     + `(?:(?:the|your|our|his|her|their|this|that)\\s+)?(?:[\\w\\x27\\u2019-]+\\s+){1,3})`
     + `${CLAUSE_FINITE_PREDICATE_RE.source})`,
@@ -602,7 +602,7 @@ function no_free_visit_promise(value, record, { spoken }) {
           && clauseIsEpistemicallyHedged(clausePrefix.slice(0, temporalParenthetical.index))
           ? clauseStart : match.index - claim.length;
         const causalContext = text.slice(claimStart, match.index + match[0].length);
-        const causalBoundary = [...causalContext.matchAll(FREE_VISIT_CAUSAL_BOUNDARY_RE)].reverse()
+        const causalBoundary = [...causalContext.matchAll(CLAIM_CAUSAL_BOUNDARY_RE)].reverse()
           .find((boundary) => {
             const before = causalContext.slice(0, boundary.index);
             const refusal = EPISTEMIC_HEDGE_RE.exec(before);
