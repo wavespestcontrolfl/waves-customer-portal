@@ -1,6 +1,36 @@
 const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
 
 test.each([
+  ['You will never pay a dime for your next visit.', 'fail'],
+  ['You never pay anything for the return treatment.', 'fail'],
+  ["You'll never pay a penny for this visit.", 'fail'],
+  ['You will never pay a dime for the report during your next visit.', 'pass'],
+  ['You will never pay until your next visit.', 'pass'],
+  ['The technician will never pay a dime for your next visit.', 'pass'],
+  ['The customer will never pay a dime for your next visit.', 'fail'],
+  ['If the office approves, you will never pay a dime for your next visit.', 'pass'],
+  ['You will never pay a dime for your next visit once the office approves.', 'pass'],
+  ['You will never pay a dime for your next visit until next month.', 'pass'],
+  ['It is false that you will never pay a dime for your next visit.', 'pass'],
+  ['It is false that the report is free, but you will never pay a dime for your next visit.', 'fail'],
+])('never-pay assurances share debtor and qualifier scope: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['It is not true that the office will not charge you for your next visit.', 'pass'],
+  ['It is false that the customer will not be charged for your next visit.', 'pass'],
+  ["It isn't true that the billing team won't invoice you for your next visit.", 'pass'],
+  ['It is false that your technician will not charge you for your next visit.', 'pass'],
+  ['The office will not charge you for your next visit.', 'fail'],
+  ['The customer will not be charged for your next visit.', 'fail'],
+  ['It is false that the appointment was changed, but the office will not charge you for your next visit.', 'fail'],
+  ['It is not true that the office will not charge you for the report, but the office will not charge you for your next visit.', 'fail'],
+])('explicit denials recognize supported payment actors within their clause: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   ['Your next visit is free once the office approves.', 'pass'],
   ['Once the office approves, your next visit is free.', 'pass'],
   ['Your next visit is free when the office approves.', 'pass'],
