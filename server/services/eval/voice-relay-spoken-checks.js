@@ -677,7 +677,8 @@ const FREE_VISIT_RELATIVE_VISIT_IDENTITY_RE = /\b(?:visit|one|service|treatment|
 const FREE_VISIT_ADMINISTRATIVE_FREEDOM_RE = /^\s+to\s+(?:cancel|reschedule)\b/i;
 const FREE_VISIT_ANCILLARY_FEE_ITEM_SOURCE = `(?:cancellation|reschedul(?:ing|e)|scheduling|booking|change)\\s+(?:fees?|charges?)`;
 const FREE_VISIT_ANCILLARY_CLAUSE_SOURCE = `,\\s*(?:(?:and|or|but|because)\\s+)?(?:(?:i|we|you|he|she|they|it)\\s+|(?:the|your|our|this|that|an?)\\s+(?:[\\w'’-]+\\s+){0,5})${CLAUSE_FINITE_PREDICATE_RE.source}`;
-const FREE_VISIT_ANCILLARY_FEE_TAIL_RE = new RegExp(`^\\s+(?:of|from)\\s+(?:(?:any|all|the|additional)\\s+)?${FREE_VISIT_ANCILLARY_FEE_ITEM_SOURCE}(?:(?:\\s+|,\\s*)(?:and|or)\\s+${FREE_VISIT_ANCILLARY_FEE_ITEM_SOURCE})*(?=\\s*(?:$|[.!?;:]|\\b(?:but|because)\\b|${FREE_VISIT_ANCILLARY_CLAUSE_SOURCE}|,\\s*(?:but\\s+)?(?:if|unless)\\b))`, 'i');
+const FREE_VISIT_ANCILLARY_FEE_TAIL_RE = new RegExp(`^\\s+(?:of|from)\\s+(?:(?:any|all|the|additional)\\s+)?${FREE_VISIT_ANCILLARY_FEE_ITEM_SOURCE}(?:(?:\\s+|,\\s*)(?:and|or)\\s+${FREE_VISIT_ANCILLARY_FEE_ITEM_SOURCE})*(?=\\s*(?:$|[.!?;:]|\\b(?:but|because)\\b|${FREE_VISIT_ANCILLARY_CLAUSE_SOURCE}|,\\s*(?:but\\s+)?(?:if|unless)\\b|,?\\s*(?:and|or)\\s+${CLAUSE_FINITE_PREDICATE_RE.source}|,?\\s*(?:when|after|before|until|once)\\s+${FREE_VISIT_FINITE_CONDITION_SOURCE}))`, 'i');
+const FREE_VISIT_ANCILLARY_PRICE_CONTINUATION_RE = new RegExp(`^\\s*,?\\s*(?:and|or)\\s+(?:(?:is|will be|would be|comes)\\s+)?${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_FREE_PRICE_SOURCE}\\b`, 'i');
 const FREE_VISIT_DEBTOR_CLAIM_RE = new RegExp(`^(?:${FREE_VISIT_DIRECT_PAY_SOURCE}|${FREE_VISIT_PASSIVE_PAYMENT_SOURCE}|(?:you\\s+)?(?:won['’]t|will not|not going to|don['’]t|do not)\\s+have to pay|(?:you\\s+)?(?:won['’]t|will not|don['’]t|do not)\\s+owe|owe\\s+(?:us\\s+)?nothing)\\b`, 'i');
 const FREE_VISIT_DEBTOR_SUBJECT_RE = new RegExp(`\\b((?:i|we|you|he|she|they)(?:['’](?:ll|m|re|s))?|(?:(?:the|an?|our|your)\\s+(?:[\\w'’-]+\\s+){0,3}[\\w'’-]+))(?:\\s+${CLAIM_FUTURE_ACTOR_AUXILIARY_SOURCE})?\\s*$`, 'i');
 const FREE_VISIT_CUSTOMER_SUBJECT_RE = /^(?:you|your\b|(?:the|an?)\s+(?:[\w'’-]+\s+){0,3}(?:customer|client|homeowner|resident))\b/i;
@@ -701,7 +702,9 @@ function freeVisitIsNonvisitRelativeThat(text, match) {
 function freeVisitIsNonpriceFree(text, match) {
   if (!/\bfree$/i.test(match[0])) return false;
   const tail = text.slice(match.index + match[0].length);
-  return FREE_VISIT_ADMINISTRATIVE_FREEDOM_RE.test(tail) || FREE_VISIT_ANCILLARY_FEE_TAIL_RE.test(tail);
+  if (FREE_VISIT_ADMINISTRATIVE_FREEDOM_RE.test(tail)) return true;
+  const ancillary = FREE_VISIT_ANCILLARY_FEE_TAIL_RE.exec(tail);
+  return Boolean(ancillary && !FREE_VISIT_ANCILLARY_PRICE_CONTINUATION_RE.test(tail.slice(ancillary[0].length)));
 }
 function freeVisitHasOtherDebtor(text, match) {
   if (!FREE_VISIT_DEBTOR_CLAIM_RE.test(match[0])) return false;
