@@ -42,7 +42,7 @@ function validEnd(source, end) {
   if (!next) return true;
   if (RIGHT_JOIN.test(next)) return false;
   if ((next === '.' || next === ',') && DIGIT.test(source[end + 1] || '')) return false;
-  if ((next === '-' || next === "'") && RIGHT_JOIN.test(source[end + 1] || '')) return false;
+  if (['-', "'", '‘', '’'].includes(next) && RIGHT_JOIN.test(source[end + 1] || '')) return false;
   return true;
 }
 

@@ -3,6 +3,17 @@ const { matchEmailReplyAmountAt: matchAt } = require('../services/email/email-re
 const token = (kind, text, start = 0) => ({ kind, text, start, end: start + text.length });
 
 describe('bounded anchored email reply amount lexer', () => {
+  test.each(["98'99", '98’99', '98‘99', "$98'99", '$98’99', '$98‘99'])(
+    'rejects internal straight and curly apostrophe joins: %s', (text) => {
+      expect(matchAt(text)).toBeNull();
+    },
+  );
+  test.each(["'$98'", '‘$98’'])(
+    'preserves legitimate closing quote delimiters: %s', (source) => {
+      expect(matchAt(source, 1)).toEqual(token('money', '$98', 1));
+    },
+  );
+
   test.each(['$98 and update me', '$98 or moreover we can discuss it'])(
     'preserves money before ordinary prose resembling a minimum suffix: %s', (text) => {
       expect(matchAt(text)).toEqual(token('money', '$98'));
