@@ -1,3 +1,6 @@
+// The stacking lane is dark by default; these cases exercise it ON, so the
+// gate must be set before the route/service modules snapshot it.
+process.env.GATE_DISCOUNT_STACKING = 'true';
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
@@ -710,5 +713,127 @@ describe('invoice tier discounts', () => {
     });
 
     expect(invoice.total).toBe(90);
+  });
+
+  describe('discount stacking on one line (owner ruling 2026-09-11)', () => {
+    const SILVER = {
+      id: 'silver-id', name: 'WaveGuard Silver', discount_type: 'percentage', amount: 10,
+      is_active: true, show_in_invoices: true, stack_group: 'tier', is_stackable: false,
+    };
+    const GOLD = {
+      id: 'gold-id', name: 'WaveGuard Gold', discount_type: 'percentage', amount: 15,
+      is_active: true, show_in_invoices: true, stack_group: 'tier', is_stackable: false,
+    };
+    const MILITARY = {
+      id: 'military-id', name: 'Military Discount', discount_type: 'percentage', amount: 5,
+      is_active: true, show_in_invoices: true, is_stackable: true,
+    };
+    const REFERRAL = {
+      id: 'referral-id', name: 'Referral Credit', discount_type: 'fixed_amount', amount: 25,
+      is_active: true, show_in_invoices: true, is_stackable: true,
+    };
+    const line = { client_id: 'line-1', description: 'Pest Control', quantity: 1, unit_price: 111, amount: 111 };
+    const pick = (d) => ({ _kind: 'discount', discount_id: d.id, discount_for: 'line-1', description: d.name, quantity: 1, unit_price: -1, amount: -1 });
+
+    test('Silver then Military compounds to $16.10 off $111, not an additive $16.65', async () => {
+      const ctx = setupDb({
+        customer: { id: 'customer-1', waveguard_tier: 'Bronze', property_type: 'residential' },
+        discounts: [SILVER, MILITARY],
+      });
+      const invoice = await InvoiceService.create({
+        customerId: 'customer-1',
+        title: 'Pest Control',
+        lineItems: [line, pick(SILVER), pick(MILITARY)],
+      });
+      expect(invoice.discount_amount).toBe(16.1);
+      expect(invoice.total).toBe(94.9);
+      const stored = JSON.parse(ctx.getInsertedInvoice().line_items);
+      expect(stored.map((i) => i.amount)).toEqual([111, -11.1, -5]);
+    });
+
+    test('a dollar credit comes off before the percentage', async () => {
+      setupDb({
+        customer: { id: 'customer-1', waveguard_tier: 'Bronze', property_type: 'residential' },
+        discounts: [SILVER, REFERRAL],
+      });
+      const invoice = await InvoiceService.create({
+        customerId: 'customer-1',
+        title: 'Pest Control',
+        lineItems: [line, pick(SILVER), pick(REFERRAL)],
+      });
+      expect(invoice.discount_amount).toBe(33.6);
+      expect(invoice.total).toBe(77.4);
+    });
+
+    test('a stored visit stamp freezes, and a hand-added discount compounds on what it left', async () => {
+      const ctx = setupDb({
+        customer: { id: 'customer-1', waveguard_tier: 'Bronze', property_type: 'residential' },
+        discounts: [MILITARY],
+      });
+      const invoice = await InvoiceService.create({
+        customerId: 'customer-1',
+        title: 'Pest Control',
+        trustedStoredDiscountSources: ['scheduled_service'],
+        lineItems: [
+          line,
+          // The visit's own stamp: already resolved, never recomputed.
+          {
+            client_id: 'd-stamp', _kind: 'discount', discount_for: 'line-1',
+            description: 'WaveGuard Silver', quantity: 1, unit_price: -11.1, amount: -11.1,
+            discount_type: 'percentage', discount_amount: 10, discount_dollars: 11.1,
+            use_stored_discount: true, stored_discount_source: 'scheduled_service',
+          },
+          pick(MILITARY),
+        ],
+      });
+      // Military takes 5% of the $99.90 the stamp left ($5.00), not 5% of
+      // $111 ($5.55).
+      expect(invoice.discount_amount).toBe(16.1);
+      expect(invoice.total).toBe(94.9);
+      const stored = JSON.parse(ctx.getInsertedInvoice().line_items);
+      expect(stored.map((i) => i.amount)).toEqual([111, -11.1, -5]);
+    });
+
+    test('the SAME tier twice on one line is refused — the catalog read dedupes ids, the check must not', async () => {
+      setupDb({
+        customer: { id: 'customer-1', waveguard_tier: 'Bronze', property_type: 'residential' },
+        discounts: [SILVER],
+      });
+      await expect(InvoiceService.create({
+        customerId: 'customer-1',
+        title: 'Pest Control',
+        lineItems: [line, pick(SILVER), { ...pick(SILVER), client_id: 'd-silver-2' }],
+      })).rejects.toThrow(/Only one WaveGuard tier discount can apply/);
+    });
+
+    test('the same tier on two DIFFERENT lines is allowed — each reaches its own line', async () => {
+      const second = { client_id: 'line-2', description: 'Mosquito', quantity: 1, unit_price: 60, amount: 60 };
+      setupDb({
+        customer: { id: 'customer-1', waveguard_tier: 'Silver', property_type: 'residential' },
+        discounts: [SILVER],
+      });
+      const invoice = await InvoiceService.create({
+        customerId: 'customer-1',
+        title: 'Pest Control',
+        lineItems: [
+          line, pick(SILVER),
+          second, { ...pick(SILVER), client_id: 'd-silver-2', discount_for: 'line-2' },
+        ],
+      });
+      expect(invoice.discount_amount).toBe(17.1);
+      expect(invoice.total).toBe(153.9);
+    });
+
+    test('two WaveGuard tiers on one invoice are refused', async () => {
+      setupDb({
+        customer: { id: 'customer-1', waveguard_tier: 'Bronze', property_type: 'residential' },
+        discounts: [SILVER, GOLD],
+      });
+      await expect(InvoiceService.create({
+        customerId: 'customer-1',
+        title: 'Pest Control',
+        lineItems: [line, pick(SILVER), pick(GOLD)],
+      })).rejects.toThrow(/Only one WaveGuard tier discount can apply/);
+    });
   });
 });
