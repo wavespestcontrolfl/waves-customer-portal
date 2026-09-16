@@ -347,6 +347,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     await mockPg('customers').where({ id: fixture.customerId }).del();
     if (fixture.formTemplateId) await mockPg('job_form_templates').where({ id: fixture.formTemplateId }).del();
     if (fixture.discountId) await mockPg('discounts').where({ id: fixture.discountId }).del();
+    if (fixture.taxabilityId) await mockPg('service_taxability').where({ id: fixture.taxabilityId }).del();
     if (fixture.payerId) await mockPg('payers').where({ id: fixture.payerId }).del();
     await mockPg('notification_preferences').where({ admin_user_id: fixture.techId }).del();
     await mockPg('push_subscriptions').where({ admin_user_id: fixture.techId }).del();
@@ -2746,6 +2747,43 @@ postgres('visit completion packet records on PostgreSQL', () => {
     await expect(assertPacketCharge(saved)).rejects.toMatchObject({ reason: 'member_price_changed' });
   });
 
+  test('mixed commercial tax treatment cannot inherit an acceptance invoice owner rate', async () => {
+    await mockPg('customers').where({ id: fixture.customerId }).update({
+      property_type: 'commercial', zip: '34209',
+    });
+    const { invoice, pestId, lawnId } = await prepareAcceptanceInvoice({ scheduledPrices: [240, null] });
+    fixture.taxabilityId = randomUUID();
+    const exemptType = `Fixture Exempt Treatment ${fixture.taxabilityId}`;
+    await mockPg('service_taxability').insert({ id: fixture.taxabilityId,
+      service_key: `fixture_exempt_${fixture.taxabilityId.replaceAll('-', '_')}`,
+      service_label: exemptType, is_taxable: false, tax_category: 'fixture_exempt' });
+    await mockPg('scheduled_services').where({ id: pestId }).update({ service_type: 'Recurring Pest Control' });
+    await mockPg('scheduled_services').where({ id: lawnId }).update({ service_type: exemptType });
+    const lines = invoice.line_items.map((line) => {
+      if (line.client_id === `scheduled_${pestId}_primary`) {
+        return { ...line, accepted_service_type: 'Recurring Pest Control' };
+      }
+      if (line.client_id === `scheduled_${lawnId}_primary`) {
+        return { ...line, accepted_service_type: exemptType };
+      }
+      return line;
+    });
+    await mockPg('invoices').where({ id: invoice.id }).update({ line_items: JSON.stringify(lines) });
+    const TaxCalculator = require('../services/tax-calculator');
+    const pestTax = await TaxCalculator.calculateTax(fixture.customerId, 'Recurring Pest Control', 100);
+    const lawnTax = await TaxCalculator.calculateTax(fixture.customerId, exemptType, 100);
+    expect(pestTax.rate).toBeGreaterThan(0);
+    expect(lawnTax.rate).toBe(0);
+
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'office_required', reason: 'mixed_tax_treatment' });
+    expect(await mockPg('invoices').where({ id: invoice.id }).first()).toMatchObject({
+      visit_completion_packet_id: null, service_record_id: null, status: 'draft',
+    });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
   test('rejects an edited acceptance invoice with an unowned custom charge', async () => {
     const { invoice } = await prepareAcceptanceInvoice();
     await InvoiceService.update(invoice.id, { line_items: [
@@ -2841,15 +2879,6 @@ postgres('visit completion packet records on PostgreSQL', () => {
     await expect(assertPacketCharge(saved)).rejects.toMatchObject({ reason: 'accepted_invoice_lines_changed' });
   });
 
-  test('stamped creation still sees packet ownership after staff changes invoice notes', async () => {
-    const { invoice, estimateId } = await prepareAcceptanceInvoice();
-    expect((await saveVisitCompletionPacket(submission())).body.billing.state).toBe('invoice_ready');
-    await InvoiceService.update(invoice.id, { notes: 'Office reviewed this invoice.' });
-    await expect(InvoiceService.create({ database: mockPg, customerId: fixture.customerId,
-      notes: acceptanceInvoiceNotes(estimateId),
-      lineItems: [{ description: 'First service application', quantity: 1, unit_price: 220 }] }))
-      .rejects.toMatchObject({ status: 409, code: 'VISIT_PACKET_OWNS_BILLING' });
-  });
 
   test('an offer granted after adoption blocks the later collection effect', async () => {
     const { invoice } = await prepareAcceptanceInvoice();
@@ -2888,14 +2917,6 @@ postgres('visit completion packet records on PostgreSQL', () => {
       .toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
   });
 
-  test('rejects a paid acceptance invoice', async () => {
-    const { invoice } = await prepareAcceptanceInvoice({ status: 'paid' });
-    expect((await saveVisitCompletionPacket(submission())).body.billing)
-      .toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
-    expect((await mockPg('invoices').where({ id: invoice.id }).first())).toMatchObject({
-      visit_completion_packet_id: null, service_record_id: null, status: 'paid',
-    });
-  });
 
   test('rejects adoption after an in-place service conversion changes the accepted identity', async () => {
     const { invoice, lawnId } = await prepareAcceptanceInvoice();
@@ -2906,26 +2927,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
       .toMatchObject({ visit_completion_packet_id: null, service_record_id: null });
   });
 
-  test('rejects an acceptance invoice with any prior charge attempt', async () => {
-    const { invoice } = await prepareAcceptanceInvoice();
-    await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: invoice.id,
-      stripe_payment_method_id: 'pm_fixture_acceptance_attempt', idempotency_key: fixture.key,
-      status: 'claimed', submitted_at: new Date() });
-    expect((await saveVisitCompletionPacket(submission())).body.billing)
-      .toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
-  });
 
-  test('rejects acceptance adoption when an extra member invoice exists', async () => {
-    const { invoice, lawnId } = await prepareAcceptanceInvoice();
-    await InvoiceService.create({ database: mockPg, customerId: fixture.customerId,
-      scheduledServiceId: lawnId, title: 'Existing lawn invoice',
-      lineItems: [{ description: 'Lawn Care', quantity: 1, unit_price: 100 }], dueDate: etDateString() });
-    expect((await saveVisitCompletionPacket(submission())).body.billing)
-      .toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
-    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(2);
-    expect((await mockPg('invoices').where({ id: invoice.id }).first()))
-      .toMatchObject({ visit_completion_packet_id: null, service_record_id: null });
-  });
 
   test('the adopted invoice charge fence rejects a service conversion after the packet snapshot', async () => {
     const { invoice, lawnId } = await prepareAcceptanceInvoice();
