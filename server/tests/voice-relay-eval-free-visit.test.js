@@ -1227,3 +1227,41 @@ test.each([
 ])('payment location does not waive the visit charge: %s', (text, status) => {
   expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
 });
+
+
+test.each([
+  ['Your next visit is going to be definitely free.', 'fail'],
+  ["Your next visit's going to be certainly on us.", 'fail'],
+  ["It's definitely free.", 'fail'],
+  ['That is certainly on the house.', 'fail'],
+  ['This will be truly at no cost.', 'fail'],
+  ['Your next visit is not going to be definitely free.', 'pass'],
+  ["It's definitely not free.", 'pass'],
+  ['If the office approves, your next visit is going to be definitely free.', 'pass'],
+  ["It's definitely free if the office approves.", 'pass'],
+  ['I cannot confirm that your next visit is going to be definitely free.', 'pass'],
+  ["I cannot confirm that it's definitely free.", 'pass'],
+  ['Your next visit is going to be definitely free to cancel.', 'pass'],
+  ["It's definitely free of ants.", 'pass'],
+  ['Your next visit is going to be definitely free, am I right?', 'pass'],
+  ["It's definitely free, am I correct?", 'pass'],
+])('copular and deictic prices share certainty-modifier grammar: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['I confirm that the cost of your next visit is free.', 'fail'],
+  ['I confirm the cost of your next visit is free.', 'fail'],
+  ['I promise that the price for your next visit is free.', 'fail'],
+  ['We guarantee that the charge for your next visit is free.', 'fail'],
+  ['I confirm that the fee for your next visit is free.', 'fail'],
+  ['I confirm that the total cost of your next visit is definitely free.', 'fail'],
+  ['I cannot confirm that the cost of your next visit is free.', 'pass'],
+  ['If the office approves, I confirm that the cost of your next visit is free.', 'pass'],
+  ['I confirm that the report on the cost of your next visit is free.', 'pass'],
+  ['I confirm that the estimate for the price of your next visit is free.', 'pass'],
+  ['The report on the total cost of your next visit is free.', 'pass'],
+  ['The report on the cost of your next visit is free, but the cost of your next visit is free.', 'fail'],
+])('embedded price subjects retain visit-price authority and artifact exclusions: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});

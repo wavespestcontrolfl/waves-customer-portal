@@ -574,8 +574,8 @@ const FREE_VISIT_PASSIVE_PAYMENT_SOURCE = `(?:(?:(?:will\\s+(?:not|never)|won['�
 const FREE_VISIT_NEGATED_BILLING_SOURCE = `(?:won['’]t|will not|not going to|never|no need to|don['’]t|do not|doesn['’]t|does not)\\s+(?:bill|charge|invoice)`;
 const FREE_VISIT_PROMISE_RES = Object.freeze(
 [
-  `\\b(?:next|your next|the next|your|that|this|the|the return|the follow-up|the follow up)\\s+(?:visit|one|service|treatment|appointment)(?:['’]s(?: going to be)?|\\s+(?:is(?: going to be)?|will be|would be|comes))\\s+${FREE_VISIT_FREE_PRICE_SOURCE}\\b`,
-  `\\b(?:it|that|this)(?:['’]s|\\s+(?:is|will be|would be))\\s+${FREE_VISIT_FREE_PRICE_SOURCE}\\b`,
+  `\\b(?:next|your next|the next|your|that|this|the|the return|the follow-up|the follow up)\\s+(?:visit|one|service|treatment|appointment)(?:['’]s(?: going to be)?|\\s+(?:is(?: going to be)?|will be|would be|comes))\\s+${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_FREE_PRICE_SOURCE}\\b`,
+  `\\b(?:it|that|this)(?:['’]s|\\s+(?:is|will be|would be))\\s+${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_FREE_PRICE_SOURCE}\\b`,
   `\\b(?:we|i)(?:['’]ll|\\s+will|['’](?:re|m)\\s+going\\s+to|\\s+(?:are|am)\\s+going\\s+to)\\s+(?:do|perform|provide)\\s+${FREE_VISIT_PAYMENT_TARGET}\\s+(?:for\\s+)?${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_FREE_PRICE_SOURCE}\\b`,
   `\\b${FREE_VISIT_NEGATED_PAYMENT_OBLIGATION_SOURCE}\\s+(?:(?:anything|a thing|a dime|a penny)\\s+)?(?:for|toward)\\s+${FREE_VISIT_PAYMENT_TARGET}`,
   `\\b${FREE_VISIT_DIRECT_PAY_SOURCE}\\s+${FREE_VISIT_PAYMENT_LINK}`,
@@ -715,14 +715,16 @@ const FREE_VISIT_BILLING_CLAIM_RE = new RegExp(`^${FREE_VISIT_NEGATED_BILLING_SO
 const FREE_VISIT_DEBTOR_SUBJECT_RE = new RegExp(`\\b((?:i|we|you|he|she|they)(?:['’](?:ll|m|re|s))?|(?:(?:the|an?|our|your)\\s+(?:[\\w'’-]+\\s+){0,3}[\\w'’-]+))(?:\\s+${CLAIM_FUTURE_ACTOR_AUXILIARY_SOURCE})?\\s*$`, 'i');
 const FREE_VISIT_COMPANY_SUBJECT_RE = /^(?:(?:i|we)(?:['’](?:ll|m|re|ve|s))?|waves(?:\s+pest\s+control)?|billing|management|office|(?:(?:the|an?|our|your)\s+)?(?:[\w'’-]+\s+){0,3}(?:technician|tech|crew|team|office|billing|manager|company))$/i;
 const FREE_VISIT_COPULAR_CLAIM_RE = new RegExp(`^${FREE_VISIT_PAYMENT_TARGET}(?:['’]s|\\s+(?:is|will|would|has|comes|costs?))`, 'i');
+const FREE_VISIT_EMBEDDING_PREPOSITION_RE = /\b(?:for|of|from|with|about|regarding|on|at|to)\s+(?:(?:your|the|this|that)\s+)?$/i;
 function freeVisitIsEmbeddedVisitSubject(text, match) {
   if (!FREE_VISIT_COPULAR_CLAIM_RE.test(match[0])) return false;
   const [start] = clauseBounds(text, match.index);
   const prefix = text.slice(start, match.index).split(',').pop();
   // A cost/price subject prices the visit itself; a report/estimate subject
   // describes a separate artifact even when it names the same visit.
-  return /\b(?:for|of|from|with|about|regarding|on|at|to)\s+(?:(?:your|the|this|that)\s+)?$/i.test(prefix)
-    && !/^\s*(?:(?:the|your|our|this|that|an?)\s+)?(?:(?:total|full|entire|actual|usual|normal|standard)\s+){0,2}(?:cost|price|charge|fee)\s+(?:of|for)\s+$/i.test(prefix);
+  const priceSubject = /\b(?:(?:the|your|our|this|that|an?)\s+)?(?:(?:total|full|entire|actual|usual|normal|standard)\s+){0,2}(?:cost|price|charge|fee)\s+(?:of|for)\s+$/i.exec(prefix);
+  return FREE_VISIT_EMBEDDING_PREPOSITION_RE.test(prefix)
+    && !(priceSubject && !FREE_VISIT_EMBEDDING_PREPOSITION_RE.test(prefix.slice(0, priceSubject.index)));
 }
 const FREE_VISIT_CUSTOMER_SUBJECT_RE = /^(?:you|your\b|(?:the|an?)\s+(?:[\w'’-]+\s+){0,3}(?:customer|client|homeowner|resident))\b/i;
 function freeVisitIsRefused(prefix) {
