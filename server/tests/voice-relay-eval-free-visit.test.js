@@ -176,3 +176,14 @@ test.each([
 ])('causal complements end an unrelated refusal: %s', (text, status) => {
   expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
 });
+
+test.each([
+  ['I cannot confirm the appointment time now that your next visit is free.', 'fail'],
+  ['I cannot confirm the appointment time right now that your next visit is free.', 'fail'],
+  ["I can't verify the office schedule now that your next visit is free.", 'fail'],
+  ['I cannot confirm, now that your next visit is free.', 'fail'],
+  ['I cannot confirm now that your next visit is free.', 'pass'],
+  ['I cannot confirm right now that your next visit is free.', 'pass'],
+])('now-that only stays inside a refusal of the visit claim: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});

@@ -593,8 +593,14 @@ function no_free_visit_promise(value, record, { spoken }) {
           ? clauseStart : match.index - claim.length;
         const causalContext = text.slice(claimStart, match.index + match[0].length);
         const causalBoundary = [...causalContext.matchAll(FREE_VISIT_CAUSAL_BOUNDARY_RE)].reverse()
-          .find((boundary) => !/^now\s+that$/i.test(boundary[0])
-            || !clauseIsEpistemicallyHedged(causalContext.slice(0, boundary.index)));
+          .find((boundary) => {
+            const before = causalContext.slice(0, boundary.index);
+            const refusal = EPISTEMIC_HEDGE_RE.exec(before);
+            // "confirm [right] now that ..." refuses the claim, while
+            // "confirm the appointment time now that ..." gives a reason.
+            return !/^now\s+that$/i.test(boundary[0]) || !refusal
+              || !/^\s*(?:right\s*)?$/i.test(before.slice(refusal.index + refusal[0].length));
+          });
         const prefix = causalBoundary
           ? causalContext.slice(causalBoundary.index + causalBoundary[0].length, match.index - claimStart)
           : text.slice(claimStart, match.index);
