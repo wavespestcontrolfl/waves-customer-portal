@@ -156,6 +156,33 @@ test('an inline deictic correction retracts the report finding', () => {
 });
 
 test.each([
+  ['Talstar P was applied to the exterior perimeter, I was mistaken, sorry.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, not really, sorry.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, that was a mistake, sorry.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, it was not applied there, sorry.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, I was mistaken, my apologies.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, but I was mistaken, sorry.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, I was mistaken about the appointment, sorry.', 'pass'],
+  ['Talstar P was applied to the exterior perimeter, I was mistaken about bait indoors, sorry.', 'pass'],
+  ['Talstar P was applied to the exterior perimeter, it was not applied indoors, sorry.', 'pass'],
+  ['Talstar P was applied to the exterior perimeter, bait was placed indoors, I was mistaken, sorry.', 'pass'],
+  ['Talstar P was applied to the exterior perimeter, bait was placed indoors, it was not applied there, sorry.', 'pass'],
+  ['Talstar P was applied to the exterior perimeter, bait was not applied there, sorry.', 'pass'],
+])('inline corrections before apologies keep the matched finding scope: %s', (spoken, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken: [spoken] })[0]).toBe(status);
+});
+
+test('an inline correction after another treatment applies to that treatment', () => {
+  const spoken = ['Talstar P was applied to the exterior perimeter, bait was placed indoors, I was mistaken, sorry.'];
+  expect(checks.report_readback_confirms({ subject: 'bait', location: 'indoors' }, {}, { spoken })[0]).toBe('fail');
+});
+
+test('an anaphoric denial after another treatment applies to that treatment', () => {
+  const spoken = ['Talstar P was applied to the exterior perimeter, bait was placed indoors, it was not applied there, sorry.'];
+  expect(checks.report_readback_confirms({ subject: 'bait', location: 'indoors' }, {}, { spoken })[0]).toBe('fail');
+});
+
+test.each([
   ['today', 'fail'],
   ['yesterday', 'pass'],
 ])('a reinforcing modifier keeps timed denial scope: %s', (deniedDay, status) => {

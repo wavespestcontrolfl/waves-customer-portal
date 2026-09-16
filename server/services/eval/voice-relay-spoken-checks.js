@@ -1604,11 +1604,17 @@ function reportFindingIsInstruction(affirmed, subjectAt, locationAt, findingVerb
 // completed one. This separates "Talstar was applied indoors, bait was
 // placed outside" and "...with bait placed outside" without splitting
 // leading/parenthetical commas or ordinary "with a backpack sprayer" terms.
-function reportAssertionOf(clause, subjectAt) {
+function reportAssertionOf(clause, subjectAt, subject, location) {
   let start = 0;
   const governingStart = clause.length - claimContext(clause, subjectAt, clause.length).length;
   REPORT_ASSERTION_BOUNDARY_RE.lastIndex = 0;
   for (const boundary of clause.matchAll(REPORT_ASSERTION_BOUNDARY_RE)) {
+    // "not applied" and "it was not applied there" retract the current
+    // finding; a newly named product still opens its own assertion.
+    const continuation = reportRetractionClause(
+      clause.slice(boundary.index + boundary[0].length), subject, location,
+    );
+    if (reportTrailingDenialOrCorrection(continuation)) continue;
     if (!REPORT_FINDING_VERB_RE.test(clause.slice(start, boundary.index))
       || REPORT_TRAILING_UNCERTAINTY_RE.test(clause.slice(boundary.index))) continue;
     if (boundary.index >= subjectAt) return { text: clause.slice(start, boundary.index), start };
@@ -2003,11 +2009,14 @@ function report_readback_confirms(value, record, { spoken }) {
           || interrogative || coordinatedQuestion || sharedLocation.unconfirmed || asrTagQuestion
           || inlineQuestion || continuationQuestion) continue;
       const reportClause = text.slice(clauseStart, clauseEnd) + sharedLocation.text;
-      if (reportTrailingDenialOrCorrection(reportRetractionClause(
-        reportClause.slice(reportClause.lastIndexOf(',') + 1), value.subject, value.location,
-      ))) continue;
-      const assertion = reportAssertionOf(reportClause, m.index - clauseStart);
+      const assertion = reportAssertionOf(reportClause, m.index - clauseStart, value.subject, value.location);
       const clause = assertion.text;
+      // An apology can follow an inline correction after another comma. Keep
+      // the correction attached to this finding's assertion, not an earlier one.
+      const withoutApology = clause.replace(/,\s*(?:sorry|my\s+mistake|my\s+apologies)\s*$/i, '');
+      if (reportTrailingDenialOrCorrection(reportRetractionClause(
+        withoutApology.slice(withoutApology.lastIndexOf(',') + 1), value.subject, value.location,
+      ))) continue;
       // A contrast excludes its following alternative, not the location
       // affirmed before it: "exterior rather than indoors" and "exterior,
       // not indoors" still confirm exterior. Require both halves in the
