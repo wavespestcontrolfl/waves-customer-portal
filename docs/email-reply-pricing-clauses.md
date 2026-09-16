@@ -18,6 +18,11 @@ tokens. A visit noun phrase has at most eight modifiers; predicates,
 prepositions, determiners, and account/payment/access terms stop it. Duration
 modifiers may use one hyphen or space. `on a visit-by-visit basis` is one unit;
 `30-45 minutes` is one measurement.
+Bounded prose ranges such as `between 90 and 120 minutes` and `from 90 to
+120 minutes` are also single measurements; explicit currency in the same
+forms remains `money` evidence.
+Currency words also stop visit modifiers, preserving `ninety-eight dollar` as
+`money` before a `visit fee` phrase.
 
 Token text is lowercase normalized copy, except billing/pricing verb and noun
 inflections are stemmed (`billed`/`billing` → `bill`, `prices` → `price`,

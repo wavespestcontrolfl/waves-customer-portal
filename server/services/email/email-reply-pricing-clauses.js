@@ -19,14 +19,14 @@ const STEM = Object.freeze({
 });
 const STOP_WORDS = [
   'a', 'access', 'account', 'accounts', 'after', 'an', 'and', 'any', 'are', 'at',
-  'balance', 'balances', 'be', 'been', 'before', 'being', 'but', 'by', 'can',
+  'balance', 'balances', 'be', 'been', 'before', 'being', 'buck', 'bucks', 'but', 'by', 'can',
   'client', 'clients', 'could', 'cover', 'covered', 'covering', 'covers',
-  'customer', 'customers', 'did', 'do', 'does', 'during', 'each', 'every',
+  'customer', 'customers', 'did', 'do', 'does', 'dollar', 'dollars', 'during', 'each', 'every',
   'for', 'from', 'had', 'has', 'have', 'her', 'his', 'if', 'include', 'included',
   'includes', 'including', 'in', 'into', 'is', 'its', 'may', 'might', 'must',
   'my', 'of', 'on', 'one', 'or', 'our', 'payment', 'payments', 'per', 'please',
   'should', 'since', 'than', 'that', 'the', 'their', 'then', 'these', 'this',
-  'those', 'through', 'to', 'until', 'was', 'we', 'were', 'when', 'where',
+  'those', 'through', 'to', 'until', 'usd', 'was', 'we', 'were', 'when', 'where',
   'while', 'will', 'with', 'without', 'would', 'you', 'your',
   'amount', 'apply', 'bill', 'charge', 'cost', 'fee', 'generate', 'incur',
   'invoice', 'occur', 'pay', 'price', 'range', 'rate', 'run',
@@ -54,7 +54,8 @@ const UNDER_HUNDRED = `(?:${ONE_TO_NINETEEN}|${TENS}(?:[-\\s](?:one|two|three|fo
 const WRITTEN = `(?:(?:a|one|two|three|four|five|six|seven|eight|nine)\\s+hundred(?:\\s+(?:and\\s+)?${UNDER_HUNDRED})?|${UNDER_HUNDRED})`;
 const CURRENCY = `(?:(?:\\$\\s*|\\busd\\s+)${NUMERIC_RANGE}|\\b${NUMERIC_RANGE}\\s+(?:dollars?|bucks?|usd)\\b|\\b${WRITTEN}\\s+(?:dollars?|bucks?)\\b)`;
 const MONEY = `(?:${CURRENCY})(?:\\s*\\+(?!\\s*(?:tax(?:es)?|fees?)\\b)|\\s+(?:and\\s+up|or\\s+more))?`;
-const MEASURE = `(?:${DIGITS}\\s*(?:-|to)\\s*${DIGITS}|${DIGITS}|${WRITTEN})\\s+(?:minutes?|hours?|days?|weeks?|months?|years?|photos?|pictures?|points?|ounces?|gallons?|reminders?)\\b`;
+const MEASURE_SPAN = `(?:between\\s+${DIGITS}\\s+and\\s+${DIGITS}|from\\s+${DIGITS}\\s+to\\s+${DIGITS}|${DIGITS}\\s*(?:-|to)\\s*${DIGITS}|${DIGITS}|${WRITTEN})`;
+const MEASURE = `${MEASURE_SPAN}\\s+(?:minutes?|hours?|days?|weeks?|months?|years?|photos?|pictures?|points?|ounces?|gallons?|reminders?)\\b`;
 
 // Longest anchored match wins. The stable order breaks equal-length ties;
 // unit/application/measurement forms precede their shorter constituents.

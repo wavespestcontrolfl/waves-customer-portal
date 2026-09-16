@@ -36,6 +36,26 @@ describe('bounded email reply pricing clause recognition', () => {
   });
 
   test.each([
+    ['Each visit costs between 90 and 120 minutes.', 'between 90 and 120 minutes'],
+    ['Each visit costs from 90 to 120 minutes.', 'from 90 to 120 minutes'],
+  ])('keeps a complete prose duration range as one measurement: %s', (text, range) => {
+    expect(tokens(text)).toEqual([
+      { kind: 'eachVisit', text: 'each visit' },
+      { kind: 'word', text: 'cost' },
+      { kind: 'measurement', text: range },
+    ]);
+  });
+
+  test('keeps currency prose ranges as money, not measurement', () => {
+    expect(kinds('Each visit costs between $90 and $120.')).toEqual([
+      'eachVisit', 'word', 'word', 'money', 'word', 'money',
+    ]);
+    expect(kinds('Each visit costs from $90 to $120.')).toEqual([
+      'eachVisit', 'word', 'word', 'money',
+    ]);
+  });
+
+  test.each([
     '$1,298.50 per visit', 'USD 98-120 for each visit',
     '98 dollars per visit', 'Ninety-eight dollars per visit',
     'One hundred dollars per visit', '$98+ per visit',
@@ -77,6 +97,19 @@ describe('bounded email reply pricing clause recognition', () => {
     ]);
     expect(words('Our fees for your plan include routine visits')).toEqual([
       'our', 'fee', 'for', 'your', 'plan', 'include', 'routine visits',
+    ]);
+  });
+
+  test('keeps written currency evidence ahead of a visit fee noun phrase', () => {
+    expect(tokens('There is a ninety-eight dollar visit fee.')).toEqual([
+      { kind: 'word', text: 'there' }, { kind: 'be', text: 'is' },
+      { kind: 'word', text: 'a' }, { kind: 'money', text: 'ninety-eight dollar' },
+      { kind: 'visit', text: 'visit' }, { kind: 'word', text: 'fee' },
+    ]);
+    expect(tokens('There is a one hundred dollar service-visit charge.')).toEqual([
+      { kind: 'word', text: 'there' }, { kind: 'be', text: 'is' },
+      { kind: 'word', text: 'a' }, { kind: 'money', text: 'one hundred dollar' },
+      { kind: 'visit', text: 'service-visit' }, { kind: 'word', text: 'charge' },
     ]);
   });
 
