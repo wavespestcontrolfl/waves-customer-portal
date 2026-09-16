@@ -59,6 +59,8 @@ describe('email reply company-name policy', () => {
     rejected('You contacted waves mosquito services.');
     rejected('You contacted waves pest.');
     rejected('The company name is waves wildlife services.');
+    rejected('waves MOSQUITO SERVICES will follow up.');
+    rejected('Thank you for choosing waves Termite Control.');
   });
 
   test('allows service descriptors only when they lead into a canonical company team role', () => {

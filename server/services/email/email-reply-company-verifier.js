@@ -27,8 +27,8 @@ const CANONICAL_TEAM_DESCRIPTOR_RE = /\b(Waves\s+Pest\s+Control)\s+(?:lawn|pest|
 
 function hasNoncanonicalServiceName(copy) {
   return [...copy.matchAll(NONCANONICAL_SERVICE_NAME_RE)].some((match) => {
-    const wavesToken = match[0].split(/\s/, 1)[0];
-    return wavesToken !== 'waves' || COMPANY_INTRO_RE.test(copy.slice(0, match.index));
+    const alias = match[0];
+    return alias !== alias.toLowerCase() || COMPANY_INTRO_RE.test(copy.slice(0, match.index));
   });
 }
 
