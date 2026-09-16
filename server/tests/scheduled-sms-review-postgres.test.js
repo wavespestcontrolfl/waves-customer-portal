@@ -3,6 +3,7 @@ const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
 jest.mock('../models/db', () => {
   const db = (...args) => db.connection(...args);
+  db.transaction = (...args) => db.connection.transaction(...args);
   db.raw = (...args) => db.connection.raw(...args);
   return db;
 });
@@ -13,6 +14,7 @@ jest.mock('../utils/cron-lock', () => ({
 const { randomUUID } = require('node:crypto');
 const { dispatchScheduledSms, markScheduledSmsSent } = require('../services/scheduled-sms-delivery');
 const { recoverStaleScheduledSmsClaims } = require('../services/scheduler');
+const { lastManualAskAt } = require('../services/review-ask-history');
 
 postgres('queued review ask settlement against migrated PostgreSQL', () => {
   let database, trx, customerId;
@@ -140,5 +142,62 @@ postgres('queued review ask settlement against migrated PostgreSQL', () => {
       review_delivery_uncertain_exhausted: true,
     });
     expect(saved.metadata.terminal_pending).toBeUndefined();
+  });
+
+  // Codex P1, deferred audit (review-ask-queued-serialization #4334): a
+  // bundled completion+review send that crashed right after Twilio accepted
+  // it (or was requeued by stale-claim recovery finding no separate delivery
+  // proof) keeps review_ask_reservation on THIS row from that prior attempt
+  // — its only evidence the ask may have reached the customer. Retrying it
+  // trips its own spacing hold (dispatchReviewAsk never excludes this row's
+  // own reservation), and the completion-must-not-wait branch used to strip
+  // that marker off in the same update that removes the review suffix,
+  // destroying the evidence. It must now survive as a standalone reservation
+  // through the seam.
+  test('a prior reservation survives as standalone evidence when a bundled completion strips its review suffix', async () => {
+    const priorAttemptAt = new Date(Date.now() - 3600000);
+    const [reviewRequest] = await trx('review_requests').insert({
+      id: randomUUID(), customer_id: customerId, status: 'pending', sms_sent_at: null,
+      scheduled_for: new Date(Date.now() - 60000),
+    }).returning('*');
+    const completionBody = 'Your service is complete: https://portal.test/report/abc'
+      + '\n\nEnjoyed the service? A quick review means the world: https://portal.test/rate/review1';
+    const row = await message({
+      status: 'sending',
+      created_at: priorAttemptAt,
+      updated_at: priorAttemptAt,
+      message_body: completionBody,
+      metadata: {
+        entry_point: 'dispatch_completion_deferred',
+        bundled_review_request_id: reviewRequest.id,
+        review_ask_reservation: true,
+        scheduled_sms_attempts: 1,
+      },
+    });
+    const send = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-completion-only' }));
+
+    const result = await dispatchScheduledSms(row, row.metadata, send);
+
+    // The completion still goes out, stripped of the review invitation.
+    expect(result).toMatchObject({ sent: true, deliveryOutcome: 'accepted' });
+    expect(send).toHaveBeenCalledTimes(1);
+    const saved = await trx('sms_log').where({ id: row.id }).first();
+    expect(saved.message_body).toBe('Your service is complete: https://portal.test/report/abc');
+    expect(saved.metadata.review_ask_reservation).toBeUndefined();
+    expect(saved.metadata.bundled_review_request_id).toBeUndefined();
+
+    // The prior attempt's evidence survives on a SEPARATE row, correlated to
+    // the same review request — not deleted alongside the strip.
+    const reservations = await trx('sms_log')
+      .where({ customer_id: customerId, direction: 'outbound', status: 'sending' })
+      .whereRaw("metadata->>'review_ask_reservation' = 'true'");
+    expect(reservations).toHaveLength(1);
+    expect(reservations[0].id).not.toBe(row.id);
+    expect(reservations[0].metadata.review_request_id).toBe(reviewRequest.id);
+
+    // The 72h ask-spacing window still holds a future ask to this customer.
+    const heldAt = await lastManualAskAt(customerId, { since: new Date(Date.now() - 1000) });
+    expect(heldAt).not.toBeNull();
+    expect(heldAt.getTime()).toBeGreaterThan(Date.now() - 5000);
   });
 });

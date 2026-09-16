@@ -2,6 +2,19 @@ const db = require('../models/db');
 const { ASK_SPACING_MS, looksLikeReviewAsk } = require('./review-ask-history');
 const { dispatchReviewAsk } = require('./review-ask-dispatch');
 const { requiresDurableFinalize } = require('./messaging/deferred-replay-registry');
+// The reservation lifecycle's single owner (codex #4331 structural pass).
+// This file's OWN dispatch/hold/recovery writes stamp review_ask_reservation
+// directly onto the scheduled sms_log row being sent — the queued row IS the
+// reservation here (no satellite placeholder to insert/release/promote), so
+// reserveForRequest/releaseUnsent/promote don't fit that path: forcing them
+// would mean either a second row nothing else expects or splitting this
+// file's atomic multi-field updates (queued_at preservation, finalize_pending,
+// attempt refunds) across writes the seam's fixed patch shapes don't cover.
+// REVIEW_ASK_MARKER is adopted throughout for the one shared marker name.
+// reserveForRequest IS adopted below, for the one place this file creates a
+// genuine SEPARATE reservation: preserving a prior attempt's evidence on a
+// bundled completion row before that row's own marker gets stripped.
+const { REVIEW_ASK_MARKER, reserveForRequest } = require('./messaging/review-ask-reservation');
 
 async function acceptedScheduledSms(id, err) {
   if (err?.providerOutcome?.deliveryOutcome === 'accepted') return err.providerOutcome;
@@ -17,7 +30,7 @@ async function markScheduledSmsSent(msg, meta, result, reviewAsk = !!meta.bundle
   // Preserve the queue time while ordering the conversation by delivery.
   // Finalization evidence rides the same atomic update so a crash cannot
   // lose the owed replay hooks or the accepted SID they need.
-  let metadataSql = "(COALESCE(metadata, '{}'::jsonb) - 'review_ask_reservation' - 'review_delivery_uncertain_exhausted' - 'review_delivery_safety_until') || jsonb_build_object('queued_at', COALESCE(metadata->'queued_at', to_jsonb(created_at)))";
+  let metadataSql = `(COALESCE(metadata, '{}'::jsonb) - '${REVIEW_ASK_MARKER}' - 'review_delivery_uncertain_exhausted' - 'review_delivery_safety_until') || jsonb_build_object('queued_at', COALESCE(metadata->'queued_at', to_jsonb(created_at)))`;
   const bindings = [];
   if (requiresDurableFinalize(meta.entry_point)) {
     metadataSql += " || jsonb_build_object('finalize_pending', true, 'provider_message_id', ?::text)";
@@ -56,7 +69,7 @@ async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3) {
   const clearUnsentReservation = async () => {
     if (!reviewAsk) return;
     await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
-      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'review_ask_reservation' - 'review_delivery_uncertain_exhausted' - 'review_delivery_safety_until'"),
+      metadata: db.raw(`COALESCE(metadata, '{}'::jsonb) - '${REVIEW_ASK_MARKER}' - 'review_delivery_uncertain_exhausted' - 'review_delivery_safety_until'`),
     });
     delete meta.review_ask_reservation;
     delete meta.review_delivery_uncertain_exhausted;
@@ -118,7 +131,7 @@ async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3) {
         finalAttemptSafetyUntil = attemptsExhausted
           ? new Date(reservedAt.getTime() + ASK_SPACING_MS)
           : null;
-        const reservationSql = "COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('review_ask_reservation', true, 'queued_at', COALESCE(metadata->'queued_at', to_jsonb(created_at)))"
+        const reservationSql = `COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('${REVIEW_ASK_MARKER}', true, 'queued_at', COALESCE(metadata->'queued_at', to_jsonb(created_at)))`
           + (finalAttemptSafetyUntil
             ? " || jsonb_build_object('review_delivery_uncertain_exhausted', true, 'review_delivery_safety_until', ?::timestamptz)"
             : '');
@@ -191,6 +204,20 @@ async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3) {
         ? explicitRetryAt
         : new Date(Date.now() + 15 * 60 * 1000);
       const bundledReviewRequestId = meta.bundled_review_request_id;
+      // A crash right after a prior provider handoff (or stale-claim
+      // recovery finding no separate delivery proof) can leave THIS row
+      // requeued with review_ask_reservation already set from that earlier
+      // attempt — the only evidence it may have reached the customer. This
+      // branch is about to strip that same marker so the row can continue
+      // as an ordinary completion send; deleting it in place would erase
+      // the prior attempt's evidence entirely (codex P1, deferred audit).
+      // Migrate it to a standalone reservation through the seam — keyed to
+      // the same review request, inserted (or renewed, if one already
+      // exists from an earlier pass through this exact branch) in the SAME
+      // transaction as the strip below — so it survives as the ordinary
+      // unresolved reservation every reader already honors, independent of
+      // what happens to this row next.
+      const priorReservationPending = meta.review_ask_reservation === true;
       // The completion/receipt must continue without the optional ask, but
       // dropping its only replay linkage used to strand an unscheduled inline
       // request: delivery finalization could no longer mark it delivered and
@@ -204,9 +231,18 @@ async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3) {
           .where({ id: bundledReviewRequestId, status: 'pending' })
           .whereNull('sms_sent_at')
           .update({ scheduled_for: reviewRetryAt });
+        if (priorReservationPending) {
+          await reserveForRequest({
+            trx,
+            request: { id: bundledReviewRequestId, customer_id: msg.customer_id },
+            to: msg.to_phone,
+            body: msg.message_body,
+            fromPhone: msg.from_phone,
+          });
+        }
         const changed = await trx('sms_log').where({ id: msg.id, status: 'sending' }).update({
           message_body: body,
-          metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) - 'bundled_review_request_id' - 'review_ask_reservation'"),
+          metadata: trx.raw(`COALESCE(metadata, '{}'::jsonb) - 'bundled_review_request_id' - '${REVIEW_ASK_MARKER}'`),
           updated_at: new Date(),
         });
         if (!changed) throw new Error('Scheduled completion claim lost before removing review invitation');
