@@ -600,7 +600,12 @@ and keys via the shared /64-collapsing `rateLimitKey`). Eligibility
 requires a PUBLISHED estimate (sent_at/viewed_at set — the expiration
 sweep flips never-sent drafts to 'expired' too, and those must never
 qualify) that is past expires_at or sweep-expired, not
-accepted/declined/archived. Concurrency: the 24h dedupe stamp and the
+accepted/declined/archived. Fixed-validity bids and groups containing any live
+fixed-validity sibling (draft, scheduled, mid-send, published or expired —
+not only the rows an extension would revive) are ineligible before
+any claim: both the POST and the expired `/data` response use generic 404
+without the extension-offer bit. Admin extensions refuse the whole group
+before changing any expiry. Concurrency: the 24h dedupe stamp and the
 lifetime auto-grant burn live in DEDICATED estimates columns
 (`extension_requested_at` / `extension_auto_granted_at`, migration
 20260711000001 — never estimate_data, whose full-blob writers could erase
@@ -1000,8 +1005,29 @@ against all live tokens 2026-08-07); accept/decline carry a 10/hr
 limiter — the two heaviest public money-adjacent writes; select-tier/
 preferences ride estimateToggleLimiter, data/pdf ride dataLimiter).
 Authored commercial proposals expose reviewed four-decimal quantities and unit
-rates, explicit unit labels and cent-rounded line amounts through the existing
-normalized proposal and document output. These additions do not widen draft access.
+rates, explicit unit labels, cent-rounded line amounts, and the fixed
+`validThrough` date in their normalized proposal and document output. A fixed
+price hold governs expiry even after resends and cannot be changed by the
+generic extension or auto-renew paths; these additions do not widen draft access.
+A delivered group anchor may remain navigable through its stored
+`estimate_data.groupLinkViewableThrough` after its own offer expires, in both
+the HTML and `/data` views, so valid siblings remain reachable. Expired legacy
+anchors with this navigation window route to the React property-group view
+(the API HTML mount redirects to `/estimate/:token`). This window
+never changes offer deadlines, acceptance, CTA eligibility or reminder copy.
+Archived, unpublished, send-failed and off-surface rows remain withheld, and
+the call-side block still overrides navigation access. During an admitted group
+navigation window, eligible published expired members remain in `propertyGroup`
+with `status: expired`; a member whose own link is no longer viewable omits
+`token` and renders as a nonclickable expired summary.
+An active anchor's own unexpired deadline also permits these summaries; receipt
+visibility alone after acceptance or decline does not extend this window. Expired
+navigation-only pages hide the unavailable PDF download. Legacy token redirects
+retain no-store privacy headers. An expired anchor without a live window can
+recover a missed grant on HTML or `/data` access after a temporary call block
+clears: the shared transaction pins its id, token and group, requires current
+published/call-clear eligibility, and updates only navigation metadata from
+eligible actual offer deadlines.
 The `/estimate/:token?website=1` SPA uses the website's compact pricing →
 scheduling → Auto Pay presentation over these same APIs. `embed=1` permits
 framing only while `GATE_WEBSITE_QUOTE_BOOKING` is on and only from the

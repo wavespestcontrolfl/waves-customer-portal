@@ -6,7 +6,10 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: () => false, gateEnvValue: () => false }));
+jest.mock('../config/feature-gates', () => ({
+  ...jest.requireActual('../config/feature-gates'),
+  isEnabled: () => false, gateEnvValue: () => false,
+}));
 jest.mock('../services/scheduling/blackout-dates', () => ({
   isBlackoutDate: async () => false,
   lockClosureState: jest.requireActual('../services/scheduling/blackout-dates').lockClosureState,
