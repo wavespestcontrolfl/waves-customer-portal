@@ -1716,7 +1716,7 @@ function reportRetractionClause(text, subject, location) {
 
 function reportConfirmationQuestion(text, subject, location) {
   const normalized = reportNormalizeReferences(text.split(/[.!?;]/)[0], subject, location);
-  const confirmation = /^\s*(?:,\s*)?(?:(?:and|but|so)\s+)?(?:are\s+you\s+(?:sure|certain)(?:\s+(?:about|of)\s+(?:it|this|that))?|(?:is|was)\s+(?:it|this|that)\s+(?:right|correct|true)|is\s+(?:it|this|that)\s+what\s+the\s+report\s+says|(?:can|could|would|will)\s+you\s+confirm\s+(?:it|this|that)|did\s+(?:we|they|you)\s+(?:apply|spray|treat|place|use|put)\s+(?:it|that)\s+(?:there|at\s+that\s+location)|(?:was|is|has)\s+(?:it|this|that)|did\s+(?:we|they))\s*$/i;
+  const confirmation = /^\s*(?:,\s*)?(?:(?:and|but|so)\s+)?(?:are\s+you\s+(?:sure|certain)(?:\s+(?:about|of)\s+(?:it|this|that))?|(?:is|was)\s+(?:it|this|that)\s+(?:right|correct|true)|does\s+(?:it|this|that)\s+sound\s+(?:right|correct)|is\s+(?:it|this|that)\s+what\s+the\s+report\s+says|(?:can|could|would|will)\s+you\s+confirm\s+(?:it|this|that)|did\s+(?:we|they|you)\s+(?:apply|spray|treat|place|use|put)\s+(?:it|that)\s+(?:there|at\s+that\s+location)|(?:was|is|has)\s+(?:it|this|that)|did\s+(?:we|they))\s*$/i;
   return confirmation.test(normalized);
 }
 
@@ -1790,8 +1790,12 @@ function report_readback_confirms(value, record, { spoken }) {
           .test(text.slice(clauseStart, clauseEnd));
       const independentFollowupQuestion = FOLLOWUP_QUESTION_RE.test(text.slice(m.index + m[0].length, clauseEnd));
       const firstLocation = new RegExp(value.location, 'i').exec(text.slice(clauseStart, clauseEnd));
+      const locationEnd = firstLocation ? clauseStart + firstLocation.index + firstLocation[0].length : 0;
+      // A scenario may match only "exterior" and leave the location's noun
+      // before the comma. It still belongs to the finding, not the question.
+      const locationNoun = /^\s+(?:perimeter|area|walls?|zone|edge)\b/i.exec(text.slice(locationEnd));
       const findingEnd = Math.max(m.index + m[0].length,
-        firstLocation ? clauseStart + firstLocation.index + firstLocation[0].length : 0);
+        locationEnd + (locationNoun ? locationNoun[0].length : 0));
       const inlineQuestion = reportConfirmationQuestion(
         text.slice(findingEnd, clauseEnd), value.subject, value.location,
       );

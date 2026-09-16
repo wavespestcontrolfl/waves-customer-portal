@@ -58,13 +58,36 @@ test.each([
   ['did we apply it there?', 'fail'],
   ['can you confirm that?', 'fail'],
   ['is that what the report says?', 'fail'],
+  ['does that sound right?', 'fail'],
   ['but do you have any questions?', 'pass'],
   ['can you confirm the appointment date?', 'pass'],
   ['did we apply it indoors?', 'pass'],
+  ['does the appointment date sound right?', 'pass'],
   ['and bait was applied indoors, but are you sure?', 'pass'],
 ])('inline confirmation questions keep their report scope: %s', (tail, status) => {
   const spoken = [`Talstar P was applied to the exterior perimeter, ${tail}`];
   expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
+test.each([
+  { subject: 'Talstar P', location: 'exterior perimeter' },
+  { subject: '\\btalstar\\b', location: 'exterior perimeter' },
+  { subject: 'Talstar P', location: '\\b(?:exterior|perimeter)\\b' },
+  { subject: '\\btalstar\\b', location: '\\b(?:exterior|perimeter)\\b' },
+])('confirmation questions recognize full and partial report patterns: %j', (finding) => {
+  for (const [tail, status] of [
+    ['did we apply it there?', 'fail'],
+    ['did we apply it to the exterior perimeter?', 'fail'],
+    ['can you confirm that?', 'fail'],
+    ['is that what the report says?', 'fail'],
+    ['does that sound right?', 'fail'],
+    ['did we apply it indoors?', 'pass'],
+    ['can you confirm the appointment date?', 'pass'],
+    ['does the appointment date sound right?', 'pass'],
+  ]) {
+    const spoken = [`Talstar P was applied to the exterior perimeter, ${tail}`];
+    expect(checks.report_readback_confirms(finding, {}, { spoken })[0]).toBe(status);
+  }
 });
 
 test.each([
