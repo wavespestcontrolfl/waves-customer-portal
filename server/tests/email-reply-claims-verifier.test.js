@@ -98,3 +98,7 @@ test('screens soft breaks inside paired emphasis', () => {
  expect(verifyEmailReplyClaims({ text: 'The treatment has EPA **formal\ncertification**.' }).ok).toBe(false);
  expect(verifyEmailReplyClaims({ text: 'The treatment is **EPA\nregistered**.' }).ok).toBe(true);
 });
+
+test.each(['pet&ensp;safe', 'child&#32;safe', 'pet&nbsp;safe'])('screens normalized safety claims: %s', (claim) => {
+ expect(verifyEmailReplyClaims({ text: 'The treatment is '+claim+'.' }).ok).toBe(false);
+});

@@ -37,7 +37,8 @@ function verifyEmailReplyClaims({ text } = {}) {
   const violations = [];
   if (findBannedCustomerCopy(normalized).length > 0
     || EPA_CERTIFIED_RE.test(normalized)
-    || reentrySafetyClaimFinding(draft)) violations.push('customer_copy_compliance');
+    || reentrySafetyClaimFinding(draft)
+    || reentrySafetyClaimFinding(normalized)) violations.push('customer_copy_compliance');
   return { ok: violations.length === 0, violations };
 }
 
