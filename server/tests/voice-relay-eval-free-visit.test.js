@@ -1,6 +1,21 @@
 const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
 
 test.each([
+  ['It is not true that your next visit is free or your next treatment is complimentary.', 'pass'],
+  ["It isn't true that your next visit is free or the return visit is on us.", 'pass'],
+  ['It is false that the report is free or your next visit is free.', 'pass'],
+  ['It is not true that we will cover your next visit or you will not pay for the return visit.', 'pass'],
+  ['It is not true that your next visit is free or your next treatment is complimentary or the return visit is on us.', 'pass'],
+  ['It is not true that the report is free or your next visit is free, but the return visit is free.', 'fail'],
+  ['It is not true that your next visit is free or your next treatment is complimentary; the return visit is free.', 'fail'],
+  ['It is not true that your next visit is free. Your next treatment is complimentary.', 'fail'],
+  ['It is not true that your next visit is free and your next treatment is complimentary.', 'fail'],
+  ['It is not true that your next visit is free, but your next treatment is complimentary.', 'fail'],
+])('explicit denial of a disjunction stays within its complement: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   ['You will never pay a dime for your next visit.', 'fail'],
   ['You never pay anything for the return treatment.', 'fail'],
   ["You'll never pay a penny for this visit.", 'fail'],
