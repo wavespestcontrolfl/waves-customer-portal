@@ -71,6 +71,18 @@ test.each(['single', 'series', 'arrival-route'])('%s preview binds disclosed con
     await expect(applyProposal(conn, 'card', { actorId: 'staff', visitId: 'visit', now, rebooker,
       previewHash: preview.preview_hash })).rejects.toMatchObject({ status: 409 });
     conflicts.at(-1).conflict_id = originalId;
+    for (const table of ['customers', 'customer_properties']) {
+      const saved = tables[table];
+      applyReviewedCallReschedule.mockImplementationOnce(async ({ conn: liveConn, guard }) => {
+        tables[table] = []; // Disappears after Apply's fresh preview, before its locked guard.
+        await guard(liveConn);
+        throw new Error('Missing identity must not pass the guard');
+      });
+      try {
+        await expect(applyProposal(conn, 'card', { actorId: 'staff', visitId: 'visit', now, rebooker,
+          previewHash: preview.preview_hash })).rejects.toMatchObject({ status: 409 });
+      } finally { tables[table] = saved; }
+    }
     tables.customer_properties[0].address_line1 = 'Changed property';
     await expect(applyProposal(conn, 'card', { actorId: 'staff', visitId: 'visit', now, rebooker,
       previewHash: preview.preview_hash })).rejects.toMatchObject({ status: 409 });
