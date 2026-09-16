@@ -11,7 +11,7 @@ const WORD_JOIN = '(?:\\s+|-)';
 const WRITTEN = `(?:(?:a|one|two|three|four|five|six|seven|eight|nine)${WORD_JOIN}hundred(?:${WORD_JOIN}(?:and${WORD_JOIN})?${UNDER_HUNDRED})?|${UNDER_HUNDRED})`;
 const PREFIXED_VALUE = `(?:\\.\\d{1,2}|${NUMERIC_RANGE})`;
 const CURRENCY = `(?:(?:\\$\\s*|\\busd\\s+)${PREFIXED_VALUE}|\\b${NUMERIC_RANGE}(?:\\s+|-)(?:dollars?|bucks?|cents?|usd)\\b|\\b${WRITTEN}(?:\\s+|-)(?:dollars?|bucks?|cents?)\\b|\\b${DIGITS}\\s*¢)`;
-const MONEY = `(?:${CURRENCY})(?:\\s*\\+(?!\\s*(?:tax(?:es)?|fees?)\\b)|\\s+(?:and\\s+up|or\\s+more)\\b(?!-))?`;
+const MONEY = `(?:${CURRENCY})(?:\\s*\\+(?!\\s*(?:tax(?:es)?|fees?)\\b)|\\s+(?:and\\s+up(?!\\s+to\\b)|or\\s+more)\\b(?!-))?`;
 
 const DURATION = '(?:minutes?|hours?|days?|weeks?|months?|years?|mins?|hrs?)';
 const MEASURE_SPAN = `(?:between\\s+${DIGITS}\\s+and\\s+${DIGITS}|from\\s+${DIGITS}\\s+to\\s+${DIGITS}|${DIGITS}\\s*(?:-|to)\\s*${DIGITS}|${DIGITS}|${WRITTEN})`;
@@ -69,7 +69,7 @@ function validEnd(source, end) {
   if (!next) return true;
   if (next === '$') return false;
   if (RIGHT_JOIN.test(next)) return false;
-  if ((next === '.' || next === ',') && DIGIT.test(source[end + 1] || '')) return false;
+  if ((next === '.' || next === ',') && /^[.,]+\d/.test(source.slice(end))) return false;
   if (['-', "'", '‘', '’'].includes(next)
     && RIGHT_JOIN.test(nextCodePoint(source, end + next.length) || '')) return false;
   return true;

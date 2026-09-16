@@ -24,6 +24,20 @@ describe('bounded anchored email reply amount lexer', () => {
       expect(matchAt(source)).toEqual(token('money', '$98'));
     },
   );
+  test.each(['$1,,000', '$98..50', '$98.,50', '$98,.50', '1,,000', '98..50'])(
+    'rejects partial amounts before numeric punctuation runs: %s', (text) => {
+      expect(matchAt(text)).toBeNull();
+    },
+  );
+  test('preserves punctuation without a joined numeric continuation', () => {
+    expect(matchAt('$98...')).toEqual(token('money', '$98'));
+    expect(matchAt('$98... 2 visits')).toEqual(token('money', '$98'));
+  });
+  test.each(['$98 and up to 2 follow-ups', '$98 AND UP TO 2 follow-ups'])(
+    'keeps up-to prose outside the amount: %s', (text) => {
+      expect(matchAt(text)).toEqual(token('money', '$98'));
+    },
+  );
   test.each(['$1234,567', '1234,567', '$12345,678', '$12,34,567'])(
     'rejects malformed grouped amounts: %s', (text) => {
       expect(matchAt(text)).toBeNull();
