@@ -13,6 +13,52 @@ function refuse(reason) {
   throw error;
 }
 
+// Staff may remove one service family's charges from a shared invoice after
+// packet mint. Generated base and add-on lines retain their scheduled member
+// id, so an offer for a family with no remaining positive member-owned line no
+// longer needs to hold an unrelated family's charge. Any positive line whose
+// ownership is not exact keeps the pre-existing, schedule-derived family set.
+function retainedFamiliesForCurrentLines(invoice, billed, adoptedPositiveIds) {
+  const familyOfServiceRow = require('./cancellation-processor').familyOfServiceRow;
+  const recurringFamilyByMemberId = new Map();
+  for (const member of billed) {
+    if (!(member.is_recurring || member.recurring_ongoing) || member.is_callback) continue;
+    if (!(Number(member.estimated_price) > 0 || adoptedPositiveIds.has(String(member.id)))) continue;
+    const family = familyOfServiceRow(member);
+    if (family) recurringFamilyByMemberId.set(String(member.id), family);
+  }
+  const conservativeFamilies = [...new Set(recurringFamilyByMemberId.values())];
+
+  const billedIds = billed.map((member) => String(member.id));
+  const currentFamilies = new Set();
+  let currentLines = invoice.line_items;
+  try {
+    if (typeof currentLines === 'string') currentLines = JSON.parse(currentLines);
+  } catch {
+    return conservativeFamilies;
+  }
+  if (!Array.isArray(currentLines)) return conservativeFamilies;
+  if (currentLines.some((line) => {
+    const amount = line?.amount;
+    const numeric = typeof amount === 'number' || (typeof amount === 'string' && amount.trim() !== '');
+    return !numeric || !Number.isFinite(Number(amount));
+  })) return conservativeFamilies;
+  const positiveLines = currentLines.filter((line) => Number(line.amount) > 0);
+  const subtotal = Number(invoice.subtotal);
+  const netSubtotal = subtotal - Number(invoice.discount_amount || 0);
+  if (!positiveLines.length && (subtotal > 0 || netSubtotal > 0)) return conservativeFamilies;
+  for (const line of positiveLines) {
+    const clientId = String(line.client_id || '');
+    const memberId = billedIds.find((id) => clientId === `scheduled_${id}_primary`
+      || (clientId.startsWith(`scheduled_${id}_addon_`)
+        && clientId.length > `scheduled_${id}_addon_`.length));
+    if (!memberId) return conservativeFamilies;
+    const family = recurringFamilyByMemberId.get(memberId);
+    if (family) currentFamilies.add(family);
+  }
+  return [...currentFamilies];
+}
+
 /** Called by the canonical saved-card charger under its invoice/customer locks. */
 async function assertVisitCompletionCharge(trx, invoice, packetId) {
   if (invoice.visit_completion_packet_id !== packetId || invoice.payer_id) refuse('invoice_owner_changed');
@@ -115,10 +161,7 @@ async function assertVisitCompletionCharge(trx, invoice, packetId) {
   const adoptedPositiveIds = new Set((Array.isArray(frozen.acceptedLineItems) ? frozen.acceptedLineItems : [])
     .filter((line) => require('./invoice').lineIsBaseApplication(line) && Number(line.amount) > 0)
     .map((line) => /^scheduled_(.+)_primary$/.exec(String(line.client_id || ''))?.[1]).filter(Boolean));
-  const retainedFamilies = billed.filter((member) => (member.is_recurring || member.recurring_ongoing)
-    && !member.is_callback
-    && (Number(member.estimated_price) > 0 || adoptedPositiveIds.has(String(member.id))))
-    .map(require('./cancellation-processor').familyOfServiceRow).filter(Boolean);
+  const retainedFamilies = retainedFamiliesForCurrentLines(invoice, billed, adoptedPositiveIds);
   const offers = await trx('retention_offers').where({ customer_id: customer.id, status: 'granted' })
     .whereIn('family_key', retainedFamilies)
     .whereRaw("NOT (COALESCE(applied_invoice_ids, '[]'::jsonb) @> ?::jsonb)", [JSON.stringify([invoice.id])])
