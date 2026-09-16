@@ -34,11 +34,12 @@ const STOP_WORDS = [
 ];
 const STOP = `(?:${[...new Set(STOP_WORDS)].join('|')})`;
 const DURATION = '(?:minutes?|hours?|days?|weeks?|months?|years?)';
-const MODIFIER = `(?!(?:applications?|${STOP})(?=\\s|$))(?:[a-z]+(?:-[a-z]+)*|\\d{1,9}(?:\\.\\d{1,2})?(?:-(?:minute|hour|day|week|month|year)s?|\\s+${DURATION}))`;
+const MODIFIER = `(?!(?:applications?|${STOP})(?=\\s|$))(?:[a-z]+(?:-(?!(?:dollars?|bucks?)\\b)[a-z]+)*|\\d{1,9}(?:\\.\\d{1,2})?(?:-(?:minute|hour|day|week|month|year)s?|\\s+${DURATION}))`;
 const VISIT = `(?:${MODIFIER}\\s+){0,8}(?:service-)?visit\\b`;
 const VISITS = `(?:${MODIFIER}\\s+){0,8}(?:service-)?visits\\b`;
 const SINGULAR_DET = '(?:a|an|one|the|your|our|my|their|his|her|its|this|that)';
 const PLURAL_DET = '(?:the|your|our|my|their|his|her|its|these|those)';
+const APPLICATION_DET = `(?:each|every|any|${SINGULAR_DET}|${PLURAL_DET})`;
 const ONE_VISIT = `(?:${SINGULAR_DET}\\s+)?${VISIT}`;
 const MANY_VISITS = `(?:${PLURAL_DET}\\s+)?${VISITS}`;
 const EACH_VISIT = `(?:each|every|any)\\s+(?:${VISIT}|${VISITS})`;
@@ -52,7 +53,7 @@ const ONE_TO_NINETEEN = '(?:one|two|three|four|five|six|seven|eight|nine|ten|ele
 const TENS = '(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)';
 const UNDER_HUNDRED = `(?:${ONE_TO_NINETEEN}|${TENS}(?:[-\\s](?:one|two|three|four|five|six|seven|eight|nine))?)`;
 const WRITTEN = `(?:(?:a|one|two|three|four|five|six|seven|eight|nine)\\s+hundred(?:\\s+(?:and\\s+)?${UNDER_HUNDRED})?|${UNDER_HUNDRED})`;
-const CURRENCY = `(?:(?:\\$\\s*|\\busd\\s+)${NUMERIC_RANGE}|\\b${NUMERIC_RANGE}\\s+(?:dollars?|bucks?|usd)\\b|\\b${WRITTEN}\\s+(?:dollars?|bucks?)\\b)`;
+const CURRENCY = `(?:(?:\\$\\s*|\\busd\\s+)${NUMERIC_RANGE}|\\b${NUMERIC_RANGE}(?:\\s+|-)(?:dollars?|bucks?|usd)\\b|\\b${WRITTEN}(?:\\s+|-)(?:dollars?|bucks?)\\b)`;
 const MONEY = `(?:${CURRENCY})(?:\\s*\\+(?!\\s*(?:tax(?:es)?|fees?)\\b)|\\s+(?:and\\s+up|or\\s+more))?`;
 const MEASURE_SPAN = `(?:between\\s+${DIGITS}\\s+and\\s+${DIGITS}|from\\s+${DIGITS}\\s+to\\s+${DIGITS}|${DIGITS}\\s*(?:-|to)\\s*${DIGITS}|${DIGITS}|${WRITTEN})`;
 const MEASURE = `${MEASURE_SPAN}\\s+(?:minutes?|hours?|days?|weeks?|months?|years?|photos?|pictures?|points?|ounces?|gallons?|reminders?)\\b`;
@@ -60,8 +61,8 @@ const MEASURE = `${MEASURE_SPAN}\\s+(?:minutes?|hours?|days?|weeks?|months?|year
 // Longest anchored match wins. The stable order breaks equal-length ties;
 // unit/application/measurement forms precede their shorter constituents.
 const PATTERNS = [
-  ['unit', `(?:(?:on\\s+(?:a|the)\\s+)?visit-by-visit(?:\\s+basis)?|(?:per[\\s-]+|/\\s*|by\\s+(?:(?:the|each)\\s+)?)${VISIT}|(?:per[\\s-]+|/\\s*|by\\s+(?:(?:the|each)\\s+)?)${VISITS}|(?:for|on|at)\\s+${RECURRING})`],
-  ['application', `(?:per[\\s-]+|for\\s+(?:(?:each|every|any|a|an|one|the|your|our)\\s+)?|/\\s*)${APPLICATION}`],
+  ['unit', `(?:(?:on\\s+(?:a|the)\\s+)?visit-by-visit(?:\\s+basis)?|(?:-?per[\\s-]+|/\\s*|by\\s+(?:(?:the|each)\\s+)?)${VISIT}|(?:-?per[\\s-]+|/\\s*|by\\s+(?:(?:the|each)\\s+)?)${VISITS}|(?:for|on|at)\\s+${RECURRING})`],
+  ['application', `(?:-?per[\\s-]+|for\\s+(?:${APPLICATION_DET}\\s+)?|/\\s*)${APPLICATION}`],
   ['timing', `(?:on|at)\\s+${SINGLE_VISIT}`],
   ['forVisit', `for\\s+${SINGLE_VISIT}`],
   ['eachVisit', EACH_VISIT],
@@ -75,7 +76,7 @@ const PATTERNS = [
   ['possessive', "(?:'s|')"],
   ['word', '\\+(?=\\s*(?:tax(?:es)?|fees?)\\b)'],
   ['sep', '[,:()\\-]'],
-  ['word', '[a-z]+(?:-[a-z]+)*\\b'],
+  ['word', '[a-z]+(?:-(?!per-)[a-z]+)*\\b'],
 ].map(([kind, source]) => ({ kind, re: new RegExp(source, 'iy') }));
 
 function recognizeEmailReplyPricingClauses(text = '') {

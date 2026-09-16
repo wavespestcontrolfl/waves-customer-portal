@@ -56,6 +56,44 @@ describe('bounded email reply pricing clause recognition', () => {
   });
 
   test.each([
+    ['$98 pay-per-visit', 'pay', 'unit', '-per-visit'],
+    ['$98 billed-per-visit', 'bill', 'unit', '-per-visit'],
+    ['$98 pay-per-application', 'pay', 'application', '-per-application'],
+  ])('preserves the predicate and embedded unit in %s', (text, predicate, kind, unit) => {
+    expect(tokens(text)).toEqual([
+      { kind: 'money', text: '$98' },
+      { kind: 'word', text: predicate },
+      { kind, text: unit },
+    ]);
+  });
+  test('keeps an amountless pay-per-visit predicate visible', () => {
+    expect(tokens('We use pay-per-visit')).toEqual([
+      { kind: 'word', text: 'we' }, { kind: 'word', text: 'use' },
+      { kind: 'word', text: 'pay' }, { kind: 'unit', text: '-per-visit' },
+    ]);
+  });
+
+  test.each([
+    'for this application', 'for my next application',
+    'for their application', 'for his application', 'for her application',
+  ])('recognizes complete application determiners: %s', (unit) => {
+    expect(tokens(`$98 ${unit}`)).toEqual([
+      { kind: 'money', text: '$98' }, { kind: 'application', text: unit },
+    ]);
+  });
+
+  test.each([
+    ['a ninety-eight-dollar visit fee', 'ninety-eight-dollar', 'visit', 'fee'],
+    ['a 98-dollar visit', '98-dollar', 'visit', null],
+  ])('retains hyphenated currency before visit: %s', (text, amount, visit, noun) => {
+    expect(tokens(text)).toEqual([
+      { kind: 'word', text: 'a' }, { kind: 'money', text: amount },
+      { kind: 'visit', text: visit },
+      ...(noun ? [{ kind: 'word', text: noun }] : []),
+    ]);
+  });
+
+  test.each([
     '$1,298.50 per visit', 'USD 98-120 for each visit',
     '98 dollars per visit', 'Ninety-eight dollars per visit',
     'One hundred dollars per visit', '$98+ per visit',
