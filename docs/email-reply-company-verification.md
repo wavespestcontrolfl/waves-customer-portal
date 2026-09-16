@@ -17,7 +17,10 @@ introduction such as `contacted`, `contacted the company`, or `the company name
 is`; title- and mixed-case aliases from the service taxonomy remain name-shaped
 on their own. An introduced alias outside that taxonomy is screened when one to
 three service words lead into a company noun. Prepositional references such as
-`contacted Waves about ant control` remain valid.
+`contacted Waves about ant control` remain valid. A title- or mixed-case service
+suffix directly on `Waves Pest Control` is rejected; an introduced lowercase
+suffix is also rejected. Lowercase operational service prose and service
+descriptors followed by a recognized team role remain valid.
 
 The shared retired-name and suffix patterns live in
 `server/services/customer-company-name.js`. `previsit-brief.js` imports those

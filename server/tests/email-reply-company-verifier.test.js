@@ -91,6 +91,15 @@ describe('email reply company-name policy', () => {
       .toEqual({ ok: true, violations: [] });
     rejected('You contacted Waves Pest Control lawn care.');
     rejected('The Waves Pest Control lawn care division will follow up.');
+    rejected('You contacted Waves Pest Control Termite Services.');
+    rejected('You contacted Waves Pest Control Mosquito Control.');
+    rejected('The company name is Waves Pest Control termite services.');
+    expect(verdict('Waves Pest Control termite service is scheduled.'))
+      .toEqual({ ok: true, violations: [] });
+    expect(verdict('Waves Pest Control mosquito control remains scheduled.'))
+      .toEqual({ ok: true, violations: [] });
+    expect(verdict('You contacted Waves Pest Control about termite services.'))
+      .toEqual({ ok: true, violations: [] });
   });
 
   test.each([
