@@ -11,6 +11,8 @@ describe('email reply amountless billing policy', () => {
     'Billing is per 30-minute scheduled visit',
     'Billing is per 30 minute visit', 'The fee is for each 2 hour visit',
     'Our rates are per 1.5 hours scheduled visit',
+    'Billing occurs per visit', 'Charges apply per visit',
+    'The billing frequency is per visit', 'Pricing applied per routine visit',
     'Billing is per on-site visit', 'Billing is per in-home visit',
     'Billing is per after-hours visit', 'Every in-home visit is billed separately',
     'Our fees are per scheduled routine quarterly residential exterior preventive ongoing planned visit',
@@ -29,6 +31,13 @@ describe('email reply amountless billing policy', () => {
     'Each visit is separately billed', 'Routine visits were individually charged',
     'Each visit gets billed separately', 'Visits get charged individually',
     'Routine visits got invoiced separately', 'Each visit gets separately billed',
+    'Each visit has been billed separately', 'Visits have been charged individually',
+    'Routine visits had been individually invoiced',
+    'You pay separately for each visit', 'Each visit is paid separately',
+    'Every visit was individually paid',
+    'Each visit has a separate charge', 'Every visit incurs a fee',
+    'Each visit generates its own invoice', 'Visits incurred an individual charge',
+    'Every visit generated a separate invoice',
   ])('rejects unit-first separate billing: %s', rejected);
 
   test.each([
@@ -67,6 +76,17 @@ describe('email reply amountless billing policy', () => {
     'Our fees are not per application.',
     'Billing is not for your recent visit.',
     'Each visit runs 30 minutes.', 'Each visit runs 1.5 hours.',
+    'Billing occurs after the service is complete.',
+    'Charges apply to your account after service.',
+    'The billing frequency is monthly.',
+    'Charges apply per application.',
+    'The billing frequency is per application.',
+    'Each visit has been scheduled separately.',
+    'You pay separately for the account balance before your next visit.',
+    'Each visit is paid in full.',
+    'Each visit has a separate reminder.',
+    'Every visit incurs a review step.',
+    'Each visit generates its own report.',
     'The notes contain an unmatched * or ` and a backslash before \\q.',
   ])('preserves ordinary and per-application prose: %s', (text) => {
     expect(verdict(text)).toEqual({ ok: true, violations: [] });

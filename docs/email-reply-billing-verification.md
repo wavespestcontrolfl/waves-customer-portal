@@ -31,10 +31,13 @@ colon, comma, and dash separators, including after a copula. Bare `rate` is
 classified as billing only with a billing copula, `per`, or one of those label
 separators, preserving feedback requests such as `Please rate each visit`.
 Separate-billing language is screened with the adverb before or after the
-billing verb, including `get`, `gets`, and `got` passive forms. The explicit
-unit remains prohibited when connected by bounded `not` or `never` negation.
-Duration modifiers accept hyphenated and spaced numeric forms such as
-`30-minute` and `30 minute`.
+billing verb, including `get`, `gets`, `got`, and perfect passive forms. This
+also covers separate payment wording and bounded nominal predicates such as a
+visit having a separate charge, incurring a fee, or generating its own
+invoice. Bounded `occurs`, `applies`, and `frequency is` connectors join a
+billing term to an explicit unit. The explicit unit remains prohibited when
+connected by bounded `not` or `never` negation. Duration modifiers accept
+hyphenated and spaced numeric forms such as `30-minute` and `30 minute`.
 
 Monetary recognition belongs to the separately reviewed monetary sibling, but
 the lexical policies can overlap: `The $98 fee is per visit` contains the
