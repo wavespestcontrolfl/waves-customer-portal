@@ -532,13 +532,27 @@ function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)
 
 // A denial of the proposition itself does not assert the proposition.
 // Scope it to the matched claim; denial of another claim cannot exempt it.
-const EXPLICIT_PROPOSITION_DENIAL_RE = /\b(?:it|this|that)\s+(?:(?:is|was)\s+(?:false|not\s+true|untrue|not\s+the\s+case)|(?:isn['’]t|wasn['’]t)\s+(?:true|the\s+case))\s+that(?:\s+there\s+(?:is|are|was|were))?\s*$/i;
+const EXPLICIT_PROPOSITION_DENIAL_SOURCE = String.raw`\b(?:it|this|that)\s+(?:(?:is|was)\s+(?:false|not\s+true|untrue|not\s+the\s+case)|(?:isn['’]t|wasn['’]t)\s+(?:true|the\s+case))\s+that(?:\s+there\s+(?:is|are|was|were))?`;
+const EXPLICIT_PROPOSITION_DENIAL_RE = new RegExp(`${EXPLICIT_PROPOSITION_DENIAL_SOURCE}\\s*$`, 'i');
+const EXPLICIT_PROPOSITION_DENIAL_INTRO_RE = new RegExp(EXPLICIT_PROPOSITION_DENIAL_SOURCE, 'gi');
 const CLAIM_FUTURE_ACTOR_AUXILIARY_SOURCE = `(?:will|shall|(?:am|is|are)\\s+going\\s+to|going\\s+to)`;
 const EXPLICIT_DENIAL_ACTOR_RE = new RegExp(`\\b(?:(?:i|we|you|he|she|they)(?:['’](?:ll|m|re|s))?|(?:(?:the|our|your|an?)\\s+(?:[\\w'\\u2019-]+\\s+){0,3})?(?:technician|tech|crew|team|office|billing|manager|company|customer|client|homeowner|resident))(?:\\s+(?:has|have|had|already|just|actually|${CLAIM_FUTURE_ACTOR_AUXILIARY_SOURCE}))*\\s*$`, 'i');
 function propositionIsExplicitlyDenied(text, at, findingVerb) {
   const [start, end] = clauseBounds(text, at);
   const prefix = text.slice(start, at);
   if (EXPLICIT_PROPOSITION_DENIAL_RE.test(prefix)) return true;
+  // Denying "X or Y" denies each disjunct. A conjunction or contrasting
+  // follow-up does not carry that denial to another claim.
+  const spokenPrefix = text.slice(0, at);
+  const sentenceStart = Math.max(
+    spokenPrefix.lastIndexOf('.'), spokenPrefix.lastIndexOf('!'), spokenPrefix.lastIndexOf('?'),
+    spokenPrefix.lastIndexOf(';'), spokenPrefix.lastIndexOf(':'),
+  ) + 1;
+  const sentencePrefix = text.slice(sentenceStart, at);
+  const denial = [...sentencePrefix.matchAll(EXPLICIT_PROPOSITION_DENIAL_INTRO_RE)].pop();
+  const disjunctPrefix = denial && sentencePrefix.slice(denial.index + denial[0].length);
+  if (disjunctPrefix && /\bor\s+(?:(?:your|the|a|an|this|that)\s+)?$/i.test(disjunctPrefix)
+      && !/(?:[,;:—–]|\b(?:but|and|however|yet|so|then|because|although|though)\b)/i.test(disjunctPrefix)) return true;
   if (/\b(?:the|a|this|that)\s+claim\s+that\b[^,;.!?]*$/i.test(prefix)
       && /\b(?:is|was)\s+(?:false|not\s+true|untrue)\b/i.test(text.slice(at, end))) return true;
   const actorPrefix = text.slice(start, findingVerb && findingVerb.index < at ? findingVerb.index : at);
@@ -602,7 +616,7 @@ const FREE_VISIT_CONDITION_SOURCE = `(?:${FREE_VISIT_PROVIDED_CONDITION_SOURCE}|
 const FREE_VISIT_PREPOSED_CONDITION_RE = new RegExp(`^\\s*${FREE_VISIT_CONDITION_SOURCE}`, 'i');
 const FREE_VISIT_POSTCLAIM_CONDITION_RE = new RegExp(`^\\s*,?\\s*(?:but\\s+)?(?:(?:only\\s+)?(?:if|unless)\\b|${FREE_VISIT_CONDITION_SOURCE})`, 'i');
 const FREE_VISIT_SHARED_CONDITION_INTRO_RE = new RegExp(`^\\s*(?:(?:only\\s+)?(?:if|unless)\\b|${FREE_VISIT_CONDITION_SOURCE})[^,;.!?]*,\\s*`, 'i');
-const FREE_VISIT_CONVERSATIONAL_IF_SOURCE = `if\\s+(?:(?:that|this|it)\\s+helps?(?:\\s+you)?|you\\s+ask\\s+me)`;
+const FREE_VISIT_CONVERSATIONAL_IF_SOURCE = `if\\s+(?:(?:that|this|it)\\s+(?:helps?(?:\\s+you)?|makes?\\s+(?:any\\s+)?sense)|you\\s+(?:ask\\s+me|(?:were|are)\\s+wondering)|you['’]re\\s+wondering)`;
 const FREE_VISIT_CONVERSATIONAL_IF_RE = new RegExp(`\\b${FREE_VISIT_CONVERSATIONAL_IF_SOURCE}(?=\\s*(?:[,;.!?]|$))`, 'gi');
 const FREE_VISIT_CONVERSATIONAL_IF_LEADING_RE = new RegExp(`^\\s*${FREE_VISIT_CONVERSATIONAL_IF_SOURCE}\\s*,\\s*`, 'i');
 // A condition can introduce a separate instruction after an asserted promise.
