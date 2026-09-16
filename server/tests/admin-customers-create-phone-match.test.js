@@ -20,13 +20,15 @@ jest.mock('../middleware/admin-auth', () => ({
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => {}) }));
-jest.mock('../services/pipeline-manager', () => ({ onEvent: jest.fn(async () => {}) }));
 jest.mock('../services/lead-scorer', () => ({ calculateScore: jest.fn(async () => 0) }));
 jest.mock('../services/geocoder', () => ({ ensureCustomerGeocoded: jest.fn(async () => {}) }));
 
 const express = require('express');
 const db = require('../models/db');
 const router = require('../routes/admin-customers');
+const PipelineManager = require('../services/pipeline-manager');
+const LeadScorer = require('../services/lead-scorer');
+jest.spyOn(PipelineManager, 'onEvent');
 
 // Minimal chainable knex stand-in. Chain calls are recorded; terminals
 // resolve from the fixture state. Inserts are captured so tests can assert
@@ -65,13 +67,21 @@ function makeDb(state) {
     q.insert = (row) => {
       state.inserts.push({ table, row });
       const saved = { id: `${table}-new`, ...row };
+      if (table === 'customers') state.customersById[saved.id] = saved;
       return {
         returning: async () => [saved],
         onConflict: () => ({ ignore: async () => {} }),
         then: (ok, err) => Promise.resolve([saved]).then(ok, err),
       };
     };
-    q.update = async (patch) => { state.updates.push({ table, patch }); return 1; };
+    q.update = async (patch) => {
+      state.updates.push({ table, patch });
+      const idWhere = q._ops.find((o) => o.op === 'where' && o.args[0]?.id);
+      if (table === 'customers' && state.customersById[idWhere?.args[0].id]) {
+        Object.assign(state.customersById[idWhere.args[0].id], patch);
+      }
+      return 1;
+    };
     // Awaiting a non-terminal chain (assertPhoneAttachConfirmed's profiles
     // select on the matched account).
     q.then = (ok, err) => {
@@ -155,6 +165,24 @@ beforeEach(() => {
 });
 
 describe('POST /admin/customers — phone-match confirm gate', () => {
+  test.each(['won', 'active_customer', 'contacted', 'new_lead', undefined])(
+    'preserves the created pipeline stage %s after background work finishes', async (pipelineStage) => {
+      const state = freshState({ phoneMatch: false });
+      install(state);
+      await withServer(async (baseUrl) => {
+        const response = await post(baseUrl, '/', { pipelineStage });
+        expect(response.status).toBe(201);
+        const body = await response.json();
+        // Observe any asynchronous event's real persistence, rather than
+        // treating a mocked no-op dispatcher as proof the stage survived.
+        await Promise.all(PipelineManager.onEvent.mock.results.map((result) => result.value));
+        expect(state.customersById[body.id].pipeline_stage).toBe(pipelineStage || 'new_lead');
+        expect(LeadScorer.calculateScore).toHaveBeenCalledWith(body.id);
+        expect(state.inserts.filter((entry) => entry.table === 'customer_interactions')).toEqual([]);
+      });
+    },
+  );
+
   it('same phone + same street key ("Street" vs "St") → 409 DUPLICATE_PROFILE, no insert', async () => {
     const state = freshState();
     install(state);
