@@ -6,6 +6,10 @@ const verdict = (text, options = {}) => verifyEmailReplyMonetaryPricing({ text, 
 const rejected = (text) => expect(verdict(text).violations).toContain('customer_copy_compliance');
 
 describe('email reply monetary visit-pricing policy', () => {
+  test.each(['98¢ per visit', '$.98 per visit', 'USD .98 per visit'])(
+    'rejects symbolic sub-dollar visit prices: %s', rejected,
+  );
+
   test.each([
     '98 cents per visit', 'ninety-eight cents per visit',
     'A ninety-eight-cent visit fee applies',
