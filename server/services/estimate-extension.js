@@ -22,6 +22,7 @@ const { shortenOrPassthrough } = require('./short-url');
 const { leadIdForEstimate } = require('./estimate-lead-linkage');
 const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { annualPlanPublicReplayBlocked } = require('./estimate-offer-version');
 // Router module doubling as the template helper — same import the
 // estimate-follow-up service uses.
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
@@ -283,18 +284,24 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['estimate-group-send', String(estimate.estimate_group_id)]);
       const locked = await trx('estimates').where({ estimate_group_id: estimate.estimate_group_id })
-        .orderBy('id').forUpdate().select('id', 'estimate_data');
+        .orderBy('id').forUpdate().select('*');
       anchor = locked.find((row) => row.id === estimate.id);
     } else {
       // A generic proposal save can add a fixed hold after public preflight.
       // Judge the locked row before the write so refusal keeps its public
       // FIXED_BID_VALIDITY / generic-404 classification.
       anchor = await trx('estimates').where({ id: estimate.id }).whereNull('estimate_group_id')
-        .forUpdate().first('estimate_data');
+        .forUpdate().first();
     }
     if (!anchor) {
       const err = new Error('Estimate changed groups while extending — retry.');
       err.statusCode = 409;
+      throw err;
+    }
+    if (annualPlanPublicReplayBlocked(anchor)) {
+      const err = new Error('This annual protection offer has not been delivered in its current form while the annual plan is disabled. Send the current offer or rebuild the estimate before extending it.');
+      err.statusCode = 409;
+      err.code = 'TERMITE_ANNUAL_PLAN_DISABLED';
       throw err;
     }
     if (await fixedBidBlocksExtension(trx, { ...estimate, estimate_data: anchor.estimate_data })) {

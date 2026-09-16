@@ -16091,10 +16091,10 @@ router.post('/:token/measurement-review', measurementReviewLimiter, async (req, 
 // later requests fall back to notify-office-only, and the office extends
 // manually via POST /api/admin/estimates/:id/extend on their own judgment.
 // Every path raises an in-app admin notification.
-// The notify-only extension claim: group lock (same lock proposal saves,
+// The extension claim (auto-grant or notify-only): group lock (same lock proposal saves,
 // grouped sends, extensions and renewals take) → re-read the row FOR UPDATE
-// and confirm it is STILL in the group just locked → fixed-hold verdict on
-// that CONFIRMED group → dedupe claim pinned to that same membership, all in
+// and confirm it is STILL in the group just locked → annual replay and
+// fixed-hold verdicts on that CONFIRMED group → dedupe claim pinned to that membership, all in
 // one transaction. `blocked` is the generic-404 answer; `claimed` 0 without a
 // block is the ordinary 24h dedupe (GH codex P1 r5 on #4309).
 //
@@ -16111,7 +16111,7 @@ router.post('/:token/measurement-review', measurementReviewLimiter, async (req, 
 // burning `extension_requested_at`, and paging the office instead of
 // returning the contract's generic 404 (GH codex P1 r6 on #4309). Exported
 // for tests.
-async function claimNotifyOnlyExtensionRequest(estimateId, dedupeOpen) {
+async function claimEstimateExtensionRequest(estimateId, dedupeOpen, autoGrant = false) {
   return db.transaction(async (trx) => {
     const initial = await trx('estimates').where({ id: estimateId }).first();
     if (!initial) return { claimed: 0, blocked: true };
@@ -16124,13 +16124,17 @@ async function claimNotifyOnlyExtensionRequest(estimateId, dedupeOpen) {
     // a newly added fixed hold or group move cannot slip past the claim.
     const fresh = await trx('estimates').where({ id: estimateId }).forUpdate().first();
     if (!fresh || (fresh.estimate_group_id || null) !== groupId) return { claimed: 0, blocked: true };
+    if (annualPlanPublicReplayBlocked(fresh)) return { claimed: 0, blocked: true };
     if (await require('../services/estimate-extension').fixedBidBlocksExtension(trx, fresh)) return { claimed: 0, blocked: true };
     let query = trx('estimates').where({ id: estimateId });
     query = groupId ? query.where({ estimate_group_id: groupId }) : query.whereNull('estimate_group_id');
+    if (autoGrant) query = query.whereNull('extension_auto_granted_at');
     const claimed = await query
       .where(dedupeOpen)
       .whereRaw(REPRICE_PENDING_ABSENT_SQL)
-      .update({ extension_requested_at: trx.fn.now() });
+      .update(autoGrant
+        ? { extension_requested_at: trx.fn.now(), extension_auto_granted_at: trx.fn.now() }
+        : { extension_requested_at: trx.fn.now() });
     return { claimed, blocked: false };
   });
 }
@@ -16183,24 +16187,14 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
         return res.status(404).json({ error: 'Estimate not found' });
       }
     }
-    // Step 1 — try to claim THE lifetime auto-grant. One conditional UPDATE
-    // checks the 24h dedupe AND the unburned cap AND records BOTH stamps, so
+    // Step 1 — try to claim THE lifetime auto-grant under the group/row locks.
+    // One conditional UPDATE checks the 24h dedupe AND the unburned cap AND records BOTH stamps, so
     // the burn is atomic with the claim: concurrent POSTs can't double-grant,
     // and there is no window where an extension exists without its burn.
     // Burn-BEFORE-grant is the fail-closed direction.
-    const autoClaimed = await db('estimates')
-      .where({ id: estimate.id })
-      .whereNull('extension_auto_granted_at')
-      .where(DEDUPE_OPEN)
-      // A clarify re-price hold that landed after the eligibility read
-      // must not burn the grant (codex r7 P0 on #3804): the zero-row
-      // falls through to the notify-office path — a human hears, no link
-      // goes out.
-      .whereRaw(REPRICE_PENDING_ABSENT_SQL)
-      .update({
-        extension_requested_at: db.fn.now(),
-        extension_auto_granted_at: db.fn.now(),
-      });
+    const autoClaim = await claimEstimateExtensionRequest(estimate.id, DEDUPE_OPEN, true);
+    if (autoClaim.blocked) return res.status(404).json({ error: 'Estimate not found' });
+    const autoClaimed = autoClaim.claimed;
 
     if (autoClaimed) {
       // Auto-grant path: the EXTENSION is the deliverable.
@@ -16235,7 +16229,9 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
             ? { extension_requested_at: null, extension_auto_granted_at: null }
             : { extension_requested_at: null },
         ).catch((e) => logger.warn(`[estimate-extension-request] auto-claim release failed for estimate ${estimate.id}: ${e.message}`));
-        if (err.code === 'FIXED_BID_VALIDITY') return res.status(404).json({ error: 'Estimate not found' });
+        if (['FIXED_BID_VALIDITY', 'TERMITE_ANNUAL_PLAN_DISABLED'].includes(err.code)) {
+          return res.status(404).json({ error: 'Estimate not found' });
+        }
         logger.error(`[estimate-extension-request] auto-grant failed for estimate ${estimate.id}: ${err.message}`);
         return res.status(500).json({ error: 'extension_request_failed' });
       }
@@ -16294,7 +16290,7 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
     // the preflight above and this claim, and the route contract answers a
     // fixed-validity group with the generic 404 BEFORE any claim burns the
     // window or pages the office.
-    const { claimed, blocked } = await claimNotifyOnlyExtensionRequest(estimate.id, DEDUPE_OPEN);
+    const { claimed, blocked } = await claimEstimateExtensionRequest(estimate.id, DEDUPE_OPEN);
     if (blocked) return res.status(404).json({ error: 'Estimate not found' });
     if (!claimed) {
       const fresh = await db('estimates').where({ id: estimate.id }).first('id', 'estimate_data');
@@ -16448,8 +16444,9 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
       // → call_log), or a decline racing a linkage reconcile (which locks
       // the estimate then updates the lead) can deadlock (codex P1, PR
       // #3304 GH r7b).
-      const declineLocked = await trx('estimates').where({ id: estimate.id }).forUpdate().first('id');
+      const declineLocked = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
       if (!declineLocked) return { staleLinkage: false, declinedCount: 0 };
+      if (annualPlanPublicReplayBlocked(declineLocked)) return { annualBlocked: true, declinedCount: 0 };
       let declineLinkData = null;
       try {
         declineLinkData = typeof estimate.estimate_data === 'string'
@@ -16518,13 +16515,13 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
       }
       return { staleLinkage: false, declinedCount };
     });
-    if (declineTxn.staleLinkage) {
+    if (declineTxn.staleLinkage || declineTxn.annualBlocked) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
     const declinedCount = declineTxn.declinedCount;
     if (declinedCount) await transferGroupFollowupOwnership(estimate);
     if (!declinedCount) {
-      const fresh = await db('estimates').where({ id: estimate.id }).first('status', 'expires_at', 'archived_at', 'estimate_data');
+      const fresh = await db('estimates').where({ id: estimate.id }).first();
       const freshGuard = resolveEstimateDeclineGuard(fresh);
       if (freshGuard.alreadyDeclined) return res.json({ success: true, alreadyDeclined: true });
       // Honor the guard's own status: a row archived mid-flight must return
@@ -18477,7 +18474,8 @@ function resolveEstimateDeclineGuard(estimate, now = new Date()) {
   // decline probe must not reveal or mutate them either. Generic 404, same
   // contract as an unknown token; checked BEFORE alreadyDeclined so an
   // archived declined row doesn't confirm its own existence.
-  if (estimate.archived_at || UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) {
+  if (estimate.archived_at || UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)
+    || annualPlanPublicReplayBlocked(estimate)) {
     return { ok: false, status: 404, error: 'Estimate not found' };
   }
   // A pending or full linkage invalidation kills the decline too (codex
@@ -26174,7 +26172,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       && !estimateOffCustomerSurface(estimate)
       && !annualPlanPublicReplayBlocked(estimate)
       && groupLinkStillViewable(estimate);
-    if (!isEstimateCustomerViewable(estimate) && !adminDraftPreview && !docPinViewBypass && !groupLinkViewBypass) {
+    if (!isEstimateCustomerViewable(estimate) && !adminDraftPreview && !(docPinViewBypass && !annualPlanPublicReplayBlocked(estimate)) && !groupLinkViewBypass) {
       // Carries exactly one extra bit beyond the bare 404: this token maps to
       // a real, published estimate that died of expiry (never a draft), so the
       // SPA's not-found screen may offer the "Request an extension" button.
@@ -26529,7 +26527,7 @@ module.exports.recurringServiceReceivesTierDiscount = recurringServiceReceivesTi
 module.exports.recurringServiceCountsTowardTier = recurringServiceCountsTowardTier;
 module.exports.adminDraftPreviewEligible = adminDraftPreviewEligible;
 module.exports.isEstimateExtensionRequestEligible = isEstimateExtensionRequestEligible;
-module.exports.claimNotifyOnlyExtensionRequest = claimNotifyOnlyExtensionRequest;
+module.exports.claimEstimateExtensionRequest = claimEstimateExtensionRequest;
 module.exports.anchoredAnnualTotal = anchoredAnnualTotal;
 module.exports.clampLawnLadderEntry = clampLawnLadderEntry;
 module.exports.pricingBundleMissingRequiredSetupFee = pricingBundleMissingRequiredSetupFee;

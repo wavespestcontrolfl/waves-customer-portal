@@ -133,6 +133,7 @@ test('operational metadata and database representations preserve the issued offe
     expect(annualPlanOfferFingerprint(estimate)).toBe(fingerprint);
   }
   Object.assign(estimate.estimate_data, { viewedMonthlyTotal: 299, followupOwnershipFrom: 'sibling',
+    leadServiceHandoffAttempt: { at: 'now', parkId: 'synthetic-park' },
     groupLinkViewableThrough: '2099-01-01T00:00:00Z', automation: { autoSend: { at: 'now' } } });
   estimate.annual_total = '299.00';
   estimate.estimate_data.result.lineItems = [{ stations: 15, plan: 'annual_protection', service: 'termite_bait' }];

@@ -366,7 +366,7 @@ beforeEach(() => {
 });
 
 describe('FIX 1 — standard recurring conversion is atomic with acceptance', () => {
-  test('a new annual offer committed after preflight is refused under the acceptance lock', async () => {
+  test.each(['accept', 'decline'])('a new annual offer committed after preflight is refused under the %s lock', async (action) => {
     resetStore(recurringPestEstimate());
     const prior = process.env.GATE_TERMITE_ANNUAL_PLAN;
     delete process.env.GATE_TERMITE_ANNUAL_PLAN;
@@ -378,8 +378,8 @@ describe('FIX 1 — standard recurring conversion is atomic with acceptance', ()
       return transaction(callback);
     });
     try {
-      const response = await putAccept('tok-atomic-1-x0123456789');
-      expect(response.status).toBe(409);
+      const response = await fetch(`${base}/api/estimates/tok-atomic-1-x0123456789/${action}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      expect(response.status).toBe(action === 'accept' ? 409 : 404);
       expect(storedEstimate().status).toBe('sent');
       expect(storedEstimate().price_locked_at).toBeNull();
       expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();

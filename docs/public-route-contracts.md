@@ -1035,7 +1035,9 @@ when its server-owned `deliveryState` records a real provider handoff and a
 fingerprint matching the current customer, property, scope, terms and price.
 Pricing stamps, suppressed sends and earlier quarterly handoffs do not qualify.
 The legacy view and `/data` withhold ineligible offers; `/accept` returns its
-inactive 409. Accepted and declined terminal views retain their existing guards.
+inactive 409. Document-render pins cannot bypass annual withholding. Decline and
+extension claims recheck the annual verdict under their existing locks before
+transitioning or notifying. Accepted and declined terminal views retain their existing guards.
 Browser-authored delivery receipts are stripped; staff revisions preserve the
 locked row's receipt, whose fingerprint cannot authorize changed terms.
 Supported customer revision history is a separate prerequisite before activation.

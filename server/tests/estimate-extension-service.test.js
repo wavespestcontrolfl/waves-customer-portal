@@ -145,7 +145,7 @@ describe('extendEstimate validation (pre-write throws)', () => {
     const anchor = { id: 'anchor', estimate_group_id: 'group', status: 'viewed', expires_at: PAST };
     const update = jest.fn();
     let locked = false;
-    const query = { update, select: jest.fn(async (...columns) => columns.includes('id')
+    const query = { update, select: jest.fn(async (...columns) => columns.includes('*')
       ? [anchor]
       : [{ estimate_data: { proposal: locked ? { validThrough: '2099-12-21' } : {} } }]) };
     for (const method of ['where', 'whereNot', 'whereNull', 'whereIn', 'whereRaw', 'orderBy', 'forUpdate']) query[method] = jest.fn(() => query);
@@ -171,6 +171,67 @@ describe('extendEstimate validation (pre-write throws)', () => {
       .rejects.toMatchObject({ statusCode: 400, code: 'FIXED_BID_VALIDITY' });
     expect(query.forUpdate).toHaveBeenCalledTimes(1);
     expect(query.update).not.toHaveBeenCalled();
+  });
+
+  it('refuses a quarterly snapshot rewritten to an undelivered annual plan under the row lock', async () => {
+    const priorAnnual = process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const priorCancellation = process.env.GATE_CANCEL_FLOW_V2;
+    process.env.GATE_CANCEL_FLOW_V2 = 'true';
+    delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    try {
+      const estimate = { id: 'quarterly-snapshot', status: 'viewed', sent_at: PAST, expires_at: PAST,
+        estimate_data: { result: { results: { tmBait: { plan: 'quarterly' } } } } };
+      const fresh = { ...estimate,
+        estimate_data: { result: { results: { tmBait: { plan: 'annual_protection' } } } } };
+      const query = { update: jest.fn(), first: jest.fn(async () => fresh) };
+      for (const method of ['where', 'whereNull', 'forUpdate']) query[method] = jest.fn(() => query);
+      const trx = jest.fn(() => query);
+      db.transaction.mockImplementationOnce(async (run) => run(trx));
+      const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+      sendCustomerMessage.mockClear();
+      await expect(extendEstimate({ estimate, days: 7, silent: false }))
+        .rejects.toMatchObject({ statusCode: 409, code: 'TERMITE_ANNUAL_PLAN_DISABLED' });
+      expect(query.forUpdate).toHaveBeenCalledTimes(1);
+      expect(query.first).toHaveBeenCalledWith();
+      expect(query.update).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    } finally {
+      if (priorAnnual === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      else process.env.GATE_TERMITE_ANNUAL_PLAN = priorAnnual;
+      if (priorCancellation === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
+      else process.env.GATE_CANCEL_FLOW_V2 = priorCancellation;
+    }
+  });
+
+  it('reads every fingerprint field from the locked group anchor before extending', async () => {
+    const priorAnnual = process.env.GATE_TERMITE_ANNUAL_PLAN;
+    delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    try {
+      const estimate = { id: 'group-anchor', estimate_group_id: 'group-1', status: 'viewed', sent_at: PAST, expires_at: PAST,
+        estimate_data: { result: { results: { tmBait: { plan: 'quarterly' } } } } };
+      const fresh = { ...estimate,
+        estimate_data: { result: { results: { tmBait: { plan: 'annual_protection' } } } } };
+      const { annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
+      fresh.estimate_data.deliveryState = {
+        firstDeliveredAt: '2026-09-01T12:00:00Z', annualPlanOfferFingerprint: annualPlanOfferFingerprint(fresh),
+      };
+      fresh.notes = 'Changed after handoff';
+      const siblings = { select: jest.fn(async () => []) };
+      for (const method of ['where', 'whereNot', 'whereNull', 'whereIn', 'whereRaw']) siblings[method] = jest.fn(() => siblings);
+      db.mockImplementationOnce(() => siblings);
+      const locked = { select: jest.fn(async () => [fresh]), update: jest.fn() };
+      for (const method of ['where', 'orderBy', 'forUpdate']) locked[method] = jest.fn(() => locked);
+      const trx = jest.fn(() => locked);
+      trx.raw = jest.fn(async () => {});
+      db.transaction.mockImplementationOnce(async (run) => run(trx));
+      await expect(extendEstimate({ estimate, days: 7, silent: true }))
+        .rejects.toMatchObject({ statusCode: 409, code: 'TERMITE_ANNUAL_PLAN_DISABLED' });
+      expect(locked.select).toHaveBeenCalledWith('*');
+      expect(locked.update).not.toHaveBeenCalled();
+    } finally {
+      if (priorAnnual === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      else process.env.GATE_TERMITE_ANNUAL_PLAN = priorAnnual;
+    }
   });
 
   it('refuses a LIVE sending claim — in-flight finalization owns status and expiry', async () => {

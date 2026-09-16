@@ -150,6 +150,9 @@ describe('GET /:token/data — navigation after the anchor offer expires', () =>
         dbRows = { estimates: row, siblings: [row, sibling] };
         const response = await fetch(`${baseUrl}/estimates/${row.token}/data?refresh=1`);
         expect(response.status).toBe(witness === 'exact' ? 200 : 404);
+        const pin = require('../services/pdf/estimate-doc-pdf').signEstimateDocPin(row.token);
+        const pinned = await fetch(`${baseUrl}/estimates/${row.token}/data?mode=pdf&dpin=${pin}`);
+        expect(pinned.status).toBe(witness === 'exact' ? 200 : 404);
         dbRows = { estimates: sibling, siblings: [row, sibling] };
         const body = await (await fetch(`${baseUrl}/estimates/${sibling.token}/data?refresh=1`)).json();
         expect(body.propertyGroup?.some(member => member.token === row.token) || false).toBe(witness === 'exact');

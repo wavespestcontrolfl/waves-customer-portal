@@ -32,7 +32,7 @@ function annualPlanOfferFingerprint(estimate) {
   if (!data || !selectedTermiteAnnualPlanRows(data).length) return null;
   if (!data.result && !data.engineResult) return null;
   const offerData = { ...data };
-  for (const key of ['groupLinkViewableThrough', 'groupPublishedByEstimateId', 'proposalDelivery', 'leadServiceHandoffAt', 'leadServiceHandoffParkId', 'viewedMonthlyTotal', 'followupOwnershipFrom']) {
+  for (const key of ['groupLinkViewableThrough', 'groupPublishedByEstimateId', 'proposalDelivery', 'leadServiceHandoffAttempt', 'leadServiceHandoffAt', 'leadServiceHandoffParkId', 'viewedMonthlyTotal', 'followupOwnershipFrom']) {
     delete offerData[key];
   }
   if (offerData.estimatorEngine) {
