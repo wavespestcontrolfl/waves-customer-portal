@@ -164,7 +164,7 @@ describe('every consumer consults the preference LIVE (source pins)', () => {
   test('rebooker projects seasonal siblings with the live preference', () => {
     const rebookerSrc = fs.readFileSync(path.join(__dirname, '../services/rebooker.js'), 'utf8');
     expect(rebookerSrc).toContain('const seriesSkipWeekends = !!parent.skip_weekends');
-    expect(rebookerSrc).toContain('|| await customerPrefersNoWeekends(db, parent.customer_id);');
+    expect(rebookerSrc).toContain('|| await customerPrefersNoWeekends(conn, parent.customer_id);');
     expect(rebookerSrc).toContain('{ skipWeekends: seriesSkipWeekends }');
   });
 });
