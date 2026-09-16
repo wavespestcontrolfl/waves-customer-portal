@@ -1,6 +1,41 @@
 const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
 
 test.each([
+  ['Your next visit is free and complimentary if the office approves.', 'pass'],
+  ['Your next visit is complimentary and free if the office approves.', 'pass'],
+  ['Your next visit is free and will be complimentary if the office approves.', 'pass'],
+  ['Your next visit is free and complimentary, provided the office approves.', 'pass'],
+  ['Your next visit is free and complimentary if you have approval and call us.', 'pass'],
+  ['Your next visit is free and complimentary if you have questions call us.', 'fail'],
+  ['Your next visit is free and complimentary, if you have questions, please call us.', 'fail'],
+  ['Your next visit is free and the report is complimentary if the office approves.', 'fail'],
+  ['Your next visit is free and the next treatment is complimentary if the office approves.', 'fail'],
+  ['Your next visit is free and complimentary if the office approves, but the return visit is free.', 'fail'],
+  ['Your next visit is free and complimentary. If the office approves, we will call.', 'fail'],
+])('coordinated price predicates share only their own condition: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['You will not be charged for your next visit.', 'fail'],
+  ["You won't be billed for the return visit.", 'fail'],
+  ['You are not being charged for your next visit.', 'fail'],
+  ["You're not going to be charged for your next visit.", 'fail'],
+  ["You'll be charged nothing for your next visit.", 'fail'],
+  ['The customer will not be invoiced for your next visit.', 'fail'],
+  ['The technician will not be charged for your next visit.', 'pass'],
+  ['We will not be billed for your next visit.', 'pass'],
+  ['You might not be charged for your next visit.', 'pass'],
+  ['You will not be charged for your next visit if the office approves.', 'pass'],
+  ['You will not be charged for your next visit until next month.', 'pass'],
+  ["You won't be billed for the return visit before it is completed.", 'pass'],
+  ['You will not be charged for your next visit, but the report will wait until next month.', 'fail'],
+  ['You will not be charged for the report during your next visit.', 'pass'],
+])('passive customer payment keeps debtor and deferral scope: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   ['Your next visit is free, assuming the office approves.', 'pass'],
   ['Assuming the office approves, your next visit is free.', 'pass'],
   ['Your next visit is free assuming that we get approval.', 'pass'],
