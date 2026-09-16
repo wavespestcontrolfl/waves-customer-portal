@@ -144,3 +144,17 @@ test.each([
 ])('preserves non-pricing numbers and application wording: %s', (text) => {
  expect(verifyEmailReplyPricing({ text }).ok).toBe(true);
 });
+
+test.each([
+ 'One visit costs $98', 'The first visit costs $98', '$98 for your next visit',
+ 'USD 98\\\nper visit', '$98\\\r\nfor each visit', 'Billing is\\\nper visit',
+ 'USD 98 per&#32;visit', 'USD **98\nper visit**',
+])('screens rendered or definite visit prices: %s', (text) => {
+ expect(verifyEmailReplyPricing({ text }).ok).toBe(false);
+});
+test.each(['Each visit runs 90 minutes', 'Each visit runs 30-45 minutes', 'Each visit runs 1.5 hours'])('allows visit duration: %s', (text) => {
+ expect(verifyEmailReplyPricing({ text }).ok).toBe(true);
+});
+test('bounds malformed monetary-token matching', () => {
+ expect(verifyEmailReplyPricing({ text: '$' + '1,'.repeat(50000) + 'x' }).ok).toBe(true);
+});
