@@ -1888,11 +1888,13 @@ export default function DispatchPageV2({
           allowInvoiceCompletion={getAdminUser()?.role === "admin"}
           onViewDetails={
             isMobile
-              ? () => {
+              ? (createdProject) => {
                   // Pest-completion parity: swap the report sheet for the
                   // appointment detail sheet (cancel / no-show / reschedule /
                   // rain-out / price edit).
-                  const svc = projectService;
+                  const svc = createdProject?.id
+                    ? { ...projectService, linkedProject: createdProject }
+                    : projectService;
                   setProjectService(null);
                   setDetailService(svc);
                 }
