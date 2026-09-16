@@ -1539,7 +1539,7 @@ const REPORT_COORDINATED_LOCATION_PREFIX_RE = new RegExp(
 const REPORT_FRONTED_LOCATION_PREFIX_RE = new RegExp(`^\\s*${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+${REPORT_LOCATION_NOUN_PREFIX}$`, 'i');
 const REPORT_LOCATION_DETOUR_RE = /\b(?:after|before|while|when|because|since|following|until|unless|according\s+to)\b/i;
 const REPORT_COMPLETED_PASSIVE_RE = /\b(?:(?:was|were|got)|(?:has|have|had)(?:\s+(?:\w+ly|already|just|now))*\s+been)\s+(?:(?:\w+ly|already|just|now)\s+)*$/i;
-const REPORT_NONCOMPLETION_GOVERNOR_RE = /(?:\b(?:supposed|expected|required|meant|scheduled|instructed|asked|told|directed|ordered|needed|intended|planned|failed|pretend(?:s|ed|ing)?|want(?:s|ed)?|ought)\s+to(?:\s+(?:\w+ly|already|just|now))*(?:\s+have(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?)?(?:\s+(?:\w+ly|already|just|now))*|\bplan(?:s|ned|ning)?\s+on\s+having(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?(?:\s+(?:\w+ly|already|just|now))*|\bimagin(?:e[sd]?|ing)\s+(?:that\s+)?(?:i|we|you|he|she|they|it)\s+(?:(?:had|has|have|was|were|already|just|now)\s+)*)\s*$/i;
+const REPORT_NONCOMPLETION_GOVERNOR_RE = /(?:\b(?:supposed|expected|required|meant|scheduled|instructed|asked|told|directed|ordered|needed|intended|planned|failed|pretend(?:s|ed|ing)?|want(?:s|ed)?|ought)\s+(?:(?:me|us|you|him|her|them|(?:(?:the|our|your|their)\s+)?(?:[\w'’-]+\s+){0,3}(?:technician|tech|crew|team))\s+)?to(?:\s+(?:\w+ly|already|just|now))*(?:\s+have(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?)?(?:\s+(?:\w+ly|already|just|now))*|\bplan(?:s|ned|ning)?\s+on\s+having(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?(?:\s+(?:\w+ly|already|just|now))*|\bimagin(?:e[sd]?|ing)\s+(?:that\s+)?(?:i|we|you|he|she|they|it)\s+(?:(?:had|has|have|was|were|already|just|now)\s+)*)\s*$/i;
 const REPORT_NONCOMPLETION_MODIFIER_RE = /\b(?:almost|nearly)(?:\s+(?:has|have|had|was|were|got|been)){0,2}\s*$/i;
 const REPORT_SAME_LOCATION_REF = `(?:\\s+(?:there|at\\s+that\\s+location))?`;
 const REPORT_UNCERTAIN_NEGATED_TREATMENT = `(?:(?:was|is)(?:n[\x27\u2019]t|\\s+(?:not|never))|(?:has|had)(?:n[\x27\u2019]t|\\s+(?:not|never))\\s+been)\\s+(?:actually\\s+)?${REPORT_FINDING_VERB_RE.source}`;
@@ -1941,15 +1941,19 @@ function reportConfirmationQuestion(text, subject, location) {
   return confirmation.test(normalized);
 }
 
-function reportSharedLocationContinuation(text, clauseEnd, location, subject) {
+function reportSharedLocationContinuation(text, clauseEnd, location, subject, assertionEnd, findingText) {
   const remainder = text.slice(clauseEnd);
   // Reuse the splitter's actual boundaries so a retraction is not lost at
   // "though", "yet", or another coordinator the splitter already recognizes.
   // An immediately following sentence can explicitly retract the same finding.
   const boundary = new RegExp(`^(?:${CLAUSE_BOUNDARY_TOKEN_RE.source})\\s*,?\\s*`, 'i').exec(remainder);
+  // Pronouns retract the last assertion. An earlier assertion can still be
+  // retracted when the correction explicitly names its product.
+  if (assertionEnd < clauseEnd && !(boundary && new RegExp(subject, 'i').test(
+    clauseOf(remainder.slice(boundary[0].length), 0),
+  ))) return { text: '', unconfirmed: false };
   if (boundary) {
     const qualifier = reportRetractionClause(remainder.slice(boundary[0].length), subject, location);
-    const findingText = text.slice(0, clauseEnd).split(/[.!?;]/).pop();
     if (REPORT_TRAILING_UNCERTAINTY_RE.test(qualifier) || reportTrailingDenialOrCorrection(qualifier)
         || reportTimedDenial(qualifier, findingText) || reportTrailingNoncompletion(qualifier)) {
       return { text: '', unconfirmed: true };
@@ -1975,20 +1979,18 @@ function reportSharedLocationContinuation(text, clauseEnd, location, subject) {
   const scopedQualifier = reportRetractionClause(qualifier.replace(
     new RegExp(`^[,—–]\\s*(?:(?:${CLAUSE_BOUNDARY_TOKEN_RE.source})\\s*,?\\s*)?`, 'i'), '',
   ), subject, location);
+  const unconfirmed = REPORT_TRAILING_UNCERTAINTY_RE.test(scopedQualifier)
+    || reportTrailingDenialOrCorrection(scopedQualifier)
+    || reportTrailingNoncompletion(scopedQualifier);
   // A shared list ends the location noun or adds an adjunct, not a new predicate.
   if (!/^(?:$|[.!?;]|(?:,\s*)?(?:and|or|before|after|with|as|according|which|(?:only\s+)?if|unless)\b)/i.test(qualifier)
-      && !REPORT_TRAILING_UNCERTAINTY_RE.test(scopedQualifier)
-      && !reportTrailingDenialOrCorrection(scopedQualifier)
-      && !reportTrailingNoncompletion(scopedQualifier)) {
+      && !unconfirmed) {
     return { text: '', unconfirmed: false };
   }
   const end = remainder.search(/[.!?;]/);
   return {
     text: remainder.slice(0, end >= 0 ? end : undefined),
-    unconfirmed: (end >= 0 && remainder[end] === '?')
-      || REPORT_TRAILING_UNCERTAINTY_RE.test(scopedQualifier)
-      || reportTrailingDenialOrCorrection(scopedQualifier)
-      || reportTrailingNoncompletion(scopedQualifier),
+    unconfirmed: (end >= 0 && remainder[end] === '?') || unconfirmed,
   };
 }
 
@@ -2008,14 +2010,21 @@ function report_readback_confirms(value, record, { spoken }) {
   for (const m of reportContentMatches(text, subjectRe)) {
     // Preserve the sentence's question mark before clauseOf removes it.
     // A question about a finding does not confirm that finding.
-    const [clauseStart, clauseEnd] = reportClauseBounds(text, m.index);
+    const [scopeStart, scopeEnd] = reportClauseBounds(text, m.index);
+    const initialAssertion = reportAssertionOf(
+      text.slice(scopeStart, scopeEnd), m.index - scopeStart, value.subject, value.location,
+    );
+    const clauseStart = scopeStart + initialAssertion.start;
+    const clauseEnd = clauseStart + initialAssertion.text.length;
     const clausePrefix = text.slice(clauseStart, m.index);
     const interrogative = /^(?!\s*(?:(?:and|but|so)\s+)?(?:do|does|did)\s+not\b)\s*(?:(?:and|but|so)\s+)?(?:was|were|is|are|has|have|had|did|do|does|can|could|would|will|should|what|where|when|why|how)\b/i.test(clausePrefix);
     const coordinatedQuestion = new RegExp(
       `^(?:or\\b|and\\s+(?=(?:${REPORT_ASSERTION_START}|${REPORT_VERBLESS_PRODUCT_LOCATION_START})))[^.!?;]*\\?`,
       'i',
     ).test(text.slice(clauseEnd).split(/,?\s*\b(?:but|however|though|yet|so|then)\b/i)[0]);
-    const sharedLocation = reportSharedLocationContinuation(text, clauseEnd, value.location, value.subject);
+    const sharedLocation = reportSharedLocationContinuation(
+      text, scopeEnd, value.location, value.subject, clauseEnd, initialAssertion.text,
+    );
     const asrTagQuestion = /(?:,\s*(?:right|correct)|\b(?:wasn['’]t\s+it|isn['’]t\s+it|aren['’]t\s+they|didn['’]t\s+(?:we|they)))\s*$/i
       .test(text.slice(clauseStart, clauseEnd))
       || /(?:,\s*|\s+)(?:(?:is|was|has|had)\s+(?:that|this|it)(?:\s+(?:right|correct|true))?|(?:did|do)\s+(?:we|they)|(?:are|were)\s+(?:you|we|they)\s+(?:sure|certain)(?:\s+(?:about|of)\s+(?:it|this|that))?)\s*$/i

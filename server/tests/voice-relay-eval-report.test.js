@@ -1224,3 +1224,42 @@ test.each([
   const spoken = [`Talstar P was applied to the exterior perimeter, but ${tail}.`];
   expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
 });
+
+
+test.each([
+  ['We wanted the technician to have applied Talstar P to the exterior perimeter.', 'fail'],
+  ['We expected the technician to have applied Talstar P to the exterior perimeter.', 'fail'],
+  ['We asked the technician to have applied Talstar P to the exterior perimeter.', 'fail'],
+  ['We wanted our licensed technician to have applied Talstar P to the exterior perimeter.', 'fail'],
+  ['We expected him to have applied Talstar P to the exterior perimeter.', 'fail'],
+  ['We asked them to have applied Talstar P to the exterior perimeter.', 'fail'],
+  ['The technician had applied Talstar P to the exterior perimeter.', 'pass'],
+  ['Our licensed technician had applied Talstar P to the exterior perimeter.', 'pass'],
+  ['We wanted the technician to have finished the report after he applied Talstar P to the exterior perimeter.', 'pass'],
+  ['We expected the technician to have finished the report, but he applied Talstar P to the exterior perimeter.', 'pass'],
+  ['We asked the technician to have applied bait indoors. Talstar P was applied to the exterior perimeter.', 'pass'],
+])('actor objects retain noncompletion governor scope: %s', (text, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['Talstar P was applied to the exterior perimeter, bait was placed indoors, but it was not applied there.', 'pass', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, bait was placed indoors, but that never happened.', 'pass', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, bait was placed indoors, but we did not do that.', 'pass', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, bait was placed indoors, but it was only planned.', 'pass', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, bait was placed indoors, but Talstar P was not applied to the exterior perimeter.', 'fail', 'pass'],
+  ['Talstar P was applied to the exterior perimeter, bait was placed indoors, but bait was not placed indoors.', 'pass', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, bait was placed indoors.', 'pass', 'pass'],
+  ['Bait was placed indoors, Talstar P was applied to the exterior perimeter, but it was not applied there.', 'fail', 'pass'],
+])('report assertion boundaries bind retractions to their antecedents: %s', (text, talstarStatus, baitStatus) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken: [text] })[0]).toBe(talstarStatus);
+  expect(checks.report_readback_confirms({ subject: 'bait', location: 'indoors' }, {}, { spoken: [text] })[0]).toBe(baitStatus);
+});
+
+
+test.each([
+  "It's not true that Talstar P was applied to the exterior perimeter.",
+  "That's not true that we applied Talstar P to the exterior perimeter.",
+])('contracted explicit proposition denials reject report evidence: %s', (text) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken: [text] })[0]).toBe('fail');
+});
