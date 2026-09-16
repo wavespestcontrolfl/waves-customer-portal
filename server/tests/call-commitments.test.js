@@ -388,6 +388,7 @@ describe('model contract', () => {
     expect(props.subject.required || []).not.toContain('date_claims');
     expect(props.subject.additionalProperties).toBe(false);
     expect(props.subject.properties.identity_unresolved).toBeUndefined();
+    expect(props.subject.properties.identity_unresolved_reason).toBeUndefined();
     expect(props.subject.properties.identity_claims).toBeUndefined();
     expect(props.subject.properties.date_claims.items.properties.binding.enum).toEqual(['appointment', 'requested', 'delivery', 'unresolved']);
   });
@@ -489,7 +490,8 @@ describe('structured reschedule-link dates and delivery timing', () => {
     const first = groundModelCommitments([model], spoken, new Date('2026-09-14T14:00:00Z')).kept[0];
     const second = groundModelCommitments([{ ...model, subject: { ...model.subject, visit_date: '2026-09-16', service: 'Lawn Service' } }], spoken,
       new Date('2026-09-14T14:00:00Z')).kept[0];
-    expect(first.subject).toMatchObject({ date_claims: null, identity_unresolved: true, identity_claims: [] });
+    expect(first.subject).toMatchObject({ date_claims: null, identity_unresolved: true,
+      identity_unresolved_reason: 'incomplete_extraction', identity_claims: [] });
     expect(commitmentKey(first)).toBe(commitmentKey(second));
   });
   test('invalid calendar components or fabricated weekdays invalidate the whole list', () => {
@@ -615,10 +617,12 @@ describe('reschedule-link upsert identity across quote-only rows', () => {
     const result = await write(oldRows, [pest, lawn]);
     expect(result.result.written).toBe(2);
     expect(new Set(result.inserts.map((values) => values[1])).size).toBe(2);
-    for (const values of result.inserts) expect(JSON.parse(values.at(-1))).toMatchObject({ date_claims: null, identity_unresolved: true });
+    for (const values of result.inserts) expect(JSON.parse(values.at(-1))).toMatchObject({ date_claims: null, identity_unresolved: true,
+      identity_unresolved_reason: 'reconciliation_ambiguity' });
     const secondPassRows = oldRows.concat(result.inserts.map((values) => ({ commitment_key: values[1], subject: JSON.parse(values.at(-1)) })));
     const second = await write(secondPassRows, [pest, lawn]);
-    for (const values of second.inserts) expect(JSON.parse(values.at(-1))).toMatchObject({ date_claims: null, identity_unresolved: true });
+    for (const values of second.inserts) expect(JSON.parse(values.at(-1))).toMatchObject({ date_claims: null, identity_unresolved: true,
+      identity_unresolved_reason: 'reconciliation_ambiguity' });
   });
   test('an internally parked alias remains parked when a later extraction adds optional detail', async () => {
     const prior = item('2026-09-20');
@@ -626,7 +630,8 @@ describe('reschedule-link upsert identity across quote-only rows', () => {
     const oldRows = [{ commitment_key: commitmentKey(prior), subject: { ...prior.subject, date_claims: null, identity_unresolved: true } }];
     const second = await write(oldRows, [enriched]);
     expect(second.inserts[0][1]).toBe(oldRows[0].commitment_key);
-    expect(JSON.parse(second.inserts[0].at(-1))).toMatchObject({ date_claims: null, identity_unresolved: true });
+    expect(JSON.parse(second.inserts[0].at(-1))).toMatchObject({ date_claims: null, identity_unresolved: true,
+      identity_unresolved_reason: 'reconciliation_ambiguity' });
   });
   test('a generic missing claim list is not an identity marker and can be completed on reprocess', async () => {
     const prior = item('2026-09-20');
@@ -634,6 +639,24 @@ describe('reschedule-link upsert identity across quote-only rows', () => {
     const second = await write(oldRows, [prior]);
     expect(JSON.parse(second.inserts[0].at(-1)).date_claims).toHaveLength(1);
     expect(JSON.parse(second.inserts[0].at(-1)).identity_unresolved).toBeUndefined();
+  });
+  test('a normalized date-free extraction with missing claims recovers when a later pass proves the explicit empty list', async () => {
+    const transcript = 'Agent: I will text you a reschedule link for that appointment.';
+    const promise = { party: 'waves', kind: 'send_reschedule_link', description: 'Text the reschedule link', confidence: 0.9,
+      evidence: [{ quote: 'I will text you a reschedule link for that appointment', speaker: 'agent' }], due_at: null, due_type: null };
+    const missing = groundModelCommitments([{ ...promise, subject: null }], transcript).kept[0];
+    const corrected = groundModelCommitments([{ ...promise, subject: { date_claims: [] } }], transcript).kept[0];
+    expect(missing.subject).toMatchObject({ date_claims: null, identity_unresolved: true,
+      identity_unresolved_reason: 'incomplete_extraction' });
+    expect(corrected.subject).toMatchObject({ date_claims: [] });
+    const first = await write(undefined, [missing]);
+    const stored = [{ commitment_key: first.inserts[0][1], subject: JSON.parse(first.inserts[0].at(-1)) }];
+    const second = await write(stored, [corrected]);
+    const recovered = JSON.parse(second.inserts[0].at(-1));
+    expect(second.inserts[0][1]).toBe(stored[0].commitment_key);
+    expect(recovered.date_claims).toEqual([]);
+    expect(recovered.identity_unresolved).toBeUndefined();
+    expect(recovered.identity_unresolved_reason).toBeUndefined();
   });
   test('two independently proved partial visits keep distinct parked identities across generations', async () => {
     const transcript = [
@@ -650,7 +673,8 @@ describe('reschedule-link upsert identity across quote-only rows', () => {
     expect(grounded).toHaveLength(2);
     expect(new Set(grounded.map(commitmentKey)).size).toBe(2);
     for (const entry of grounded) {
-      expect(entry.subject).toMatchObject({ date_claims: null, identity_unresolved: true });
+      expect(entry.subject).toMatchObject({ date_claims: null, identity_unresolved: true,
+        identity_unresolved_reason: 'incomplete_extraction' });
       expect(entry.subject.identity_claims).toHaveLength(1);
     }
     const first = await write(undefined, grounded);

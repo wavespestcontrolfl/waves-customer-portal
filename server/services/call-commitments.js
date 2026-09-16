@@ -76,7 +76,9 @@ const CHANNELS = Object.freeze(['sms', 'email', 'call', 'in_person', 'unknown'])
 
 // Bumped when the derivation rules or the model prompt change, so a row can
 // say which extractor produced it.
-const EXTRACTOR_VERSION = 'commitments-v6';
+const EXTRACTOR_VERSION = 'commitments-v7';
+const IDENTITY_UNRESOLVED_INCOMPLETE = 'incomplete_extraction';
+const IDENTITY_UNRESOLVED_AMBIGUOUS = 'reconciliation_ambiguity';
 
 // Mirrors CALL_PROC_EXTRACT_TIMEOUT_MS in call-recording-processor.js; the
 // claim ceiling counts this leg at the same budget.
@@ -549,7 +551,8 @@ function normalizedRescheduleSubject(item, transcript, reference) {
     ? require('./reschedule-date-evidence').verifiedAppointmentIdentityClaims(input.date_claims, transcript, reference)
     : [];
   return { visit_date: input.visit_date, service: input.service, address: input.address, quote: input.quote,
-    date_claims: dateClaims, ...(dateClaims === null ? { identity_unresolved: true, identity_claims: identityClaims } : {}) };
+    date_claims: dateClaims, ...(dateClaims === null ? { identity_unresolved: true,
+      identity_unresolved_reason: IDENTITY_UNRESOLVED_INCOMPLETE, identity_claims: identityClaims } : {}) };
 }
 
 function groundModelCommitments(items, transcript, reference = null) {
@@ -713,13 +716,23 @@ function distinctCurrentVisit(oldSubject, newSubject) {
     && ![...oldDates[part]].some((value) => newDates[part].has(value)));
 }
 
-// This marker is written by reconciliation only; the model schema rejects
-// it. A routine second extraction must not turn a parked identity back into
-// an auto-send merely because its newly generated key now exists exactly.
+// These markers are backend-only; the model schema rejects them. A row parked
+// because key reconciliation could not prove one identity remains sticky. A
+// normalized extraction that merely omitted or failed date_claims is marked
+// separately and may recover when a later pass supplies a complete, grounded
+// list. Historical unresolved rows have no reason, so they remain sticky:
+// their origin cannot be proved after the fact.
+function stickyUnresolvedIdentity(value) {
+  const subject = parseRescheduleSubject(value);
+  return subject?.identity_unresolved === true
+    && subject.identity_unresolved_reason !== IDENTITY_UNRESOLVED_INCOMPLETE;
+}
+
 function parkUnresolvedIdentity(row, oldSubject = null) {
   const subject = parseRescheduleSubject(row.subject);
   const old = parseRescheduleSubject(oldSubject);
   row.subject = JSON.stringify({ ...subject, date_claims: null, identity_unresolved: true,
+    identity_unresolved_reason: IDENTITY_UNRESOLVED_AMBIGUOUS,
     ...(Array.isArray(old?.identity_claims) ? { identity_claims: old.identity_claims } : {}) });
 }
 
@@ -741,7 +754,7 @@ async function reconcileRescheduleKeys(trx, callLogId, rows) {
     const exactKeys = new Set(siblings.map((row) => row.commitment_key));
     for (const row of siblings) {
       const exact = existing.find((old) => old.commitment_key === row.commitment_key);
-      if (parseRescheduleSubject(exact?.subject)?.identity_unresolved === true) parkUnresolvedIdentity(row, exact.subject);
+      if (stickyUnresolvedIdentity(exact?.subject)) parkUnresolvedIdentity(row, exact.subject);
     }
     const unmatched = siblings.filter((row) => !existing.some((old) => old.commitment_key === row.commitment_key));
     for (const row of unmatched) {
@@ -750,7 +763,7 @@ async function reconcileRescheduleKeys(trx, callLogId, rows) {
       const old = matches.length === 1 && !exactKeys.has(matches[0].commitment_key) ? matches[0] : null;
       if (old && siblings.filter((candidate) => legacyRescheduleMatches(old.subject, parseRescheduleSubject(candidate.subject))).length === 1) {
         row.commitment_key = old.commitment_key;
-        if (parseRescheduleSubject(old.subject)?.identity_unresolved === true) parkUnresolvedIdentity(row, old.subject);
+        if (stickyUnresolvedIdentity(old.subject)) parkUnresolvedIdentity(row, old.subject);
       } else if (!subject || existing.some((prior) => !distinctCurrentVisit(prior.subject, subject))) {
         parkUnresolvedIdentity(row);
       }

@@ -195,8 +195,32 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       await upsertCommitments(mockPg, callId, items, { generation, procGeneration: 0 });
       const siblings = await mockPg('call_commitments').where({ call_log_id: callId, status: 'open' });
       expect(siblings).toHaveLength(2);
-      expect(siblings.every((row) => row.subject.date_claims === null && row.subject.identity_unresolved === true)).toBe(true);
+      expect(siblings.every((row) => row.subject.date_claims === null && row.subject.identity_unresolved === true
+        && row.subject.identity_unresolved_reason === 'reconciliation_ambiguity')).toBe(true);
     }
+  });
+
+  test('a corrected date-free extraction repairs its same-key incomplete subject without un-parking reconciliation ambiguity', async () => {
+    const callId = randomUUID();
+    const quote = 'I will text you a reschedule link for that appointment';
+    const transcript = `Agent: ${quote}.`;
+    await mockPg('call_log').insert({ id: callId, direction: 'inbound', processing_generation: 0 });
+    const base = { party: 'waves', kind: 'send_reschedule_link', description: 'Send the link', confidence: 0.95,
+      evidence: [{ quote, speaker: 'agent' }], due_at: null, due_type: null };
+    const { groundModelCommitments } = require('../services/call-commitments');
+    const incomplete = groundModelCommitments([{ ...base, subject: null }], transcript).kept[0];
+    await upsertCommitments(mockPg, callId, [incomplete], { generation: 0, procGeneration: 0 });
+    const before = await mockPg('call_commitments').where({ call_log_id: callId }).first();
+    expect(before.subject).toMatchObject({ date_claims: null, identity_unresolved: true,
+      identity_unresolved_reason: 'incomplete_extraction' });
+
+    const corrected = groundModelCommitments([{ ...base, subject: { date_claims: [] } }], transcript).kept[0];
+    await upsertCommitments(mockPg, callId, [corrected], { generation: 1, procGeneration: 0 });
+    const after = await mockPg('call_commitments').where({ call_log_id: callId }).first();
+    expect(after.id).toBe(before.id);
+    expect(after.subject.date_claims).toEqual([]);
+    expect(after.subject.identity_unresolved).toBeUndefined();
+    expect(after.subject.identity_unresolved_reason).toBeUndefined();
   });
 
   test('conflicting partial appointment dates cannot inherit another promise dismissal', async () => {
