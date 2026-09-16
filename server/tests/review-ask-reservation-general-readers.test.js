@@ -46,8 +46,26 @@ describe('isUnresolvedReviewAskReservation — the shared predicate', () => {
       // Past the reconciliation hold it SURFACES as the unresolved attempt it is.
       expect(isUnresolvedSendReservation({ status: 'sending', metadata: { [marker]: true }, created_at: stale })).toBe(false);
     }
-    // A review-ask reservation is hidden for as long as it is unresolved.
+    // A review-ask reservation outlives the reply hold (25h < its own 72h
+    // bound) — still hidden here, unlike the reply markers above.
     expect(isUnresolvedSendReservation({ status: 'sending', metadata: { review_ask_reservation: true }, created_at: stale })).toBe(true);
+  });
+
+  // Codex #4331 P1 (structural pass, finding 6): a review-ask reservation
+  // used to hide from every general reader UNCONDITIONALLY, so a
+  // never-resolved one (a crash before settlement, or a stamp-then-promote
+  // failure) hid a real customer interaction forever. It now ages out on
+  // its own 72h window — the same span its ask-spacing evidence covers —
+  // exactly like a reply reservation ages out of its 24h hold.
+  test('a review-ask reservation ages out of the hide past its own 72h window', () => {
+    const withinHold = new Date(Date.now() - 71 * 3600000);
+    const pastHold = new Date(Date.now() - 73 * 3600000);
+    expect(isUnresolvedSendReservation({ status: 'sending', metadata: { review_ask_reservation: true }, created_at: withinHold })).toBe(true);
+    expect(isUnresolvedSendReservation({ status: 'sending', metadata: { review_ask_reservation: true }, created_at: pastHold })).toBe(false);
+    // The narrow spacing-evidence predicate is unaffected by age — its
+    // callers (review-ask-history.js) already scope their own lookback
+    // window rather than relying on this predicate to do it.
+    expect(isUnresolvedReviewAskReservation({ status: 'sending', metadata: { review_ask_reservation: true }, created_at: pastHold })).toBe(true);
   });
 
   test('false for an ordinary sending row without the marker', () => {
@@ -70,6 +88,9 @@ describe('excludeUnresolvedSendReservations — SQL-level exclusion', () => {
     expect(sql).toContain("sms_log.metadata->>'manual_send_reservation'");
     expect(sql).toContain("sms_log.metadata->>'auto_send_reservation'");
     expect(sql).toContain("sms_log.created_at >= NOW() - INTERVAL '24 hours'");
+    // The review-ask arm carries its own (longer) age bound, applied only
+    // to that arm — a reply reservation must not inherit the 72h span.
+    expect(sql).toContain("sms_log.created_at >= NOW() - INTERVAL '72 hours'");
   });
 
   test('qualifies an aliased/joined table when given', () => {
@@ -149,16 +170,21 @@ describe('ContextAggregator.getContextForCustomer — smsHistory excludes only t
   };
 
   test('an unresolved reservation is hidden, a resolved one appears, real messages are unaffected', async () => {
+    // Relative to "now", preserving the original fixture's spacing (12h,
+    // 24h, 24h): the reservation must land inside the 72h hold to stay
+    // hidden here — a fixed calendar date would eventually drift stale
+    // (AGENTS.md P1, near-today date literals) and this stack's own 72h
+    // hold makes that drift observable within days, not months.
     installSmsLog([
-      { customer_id: customer.id, direction: 'inbound', message_body: 'Ants in the kitchen', message_type: 'manual', created_at: new Date('2026-09-01T12:00:00Z') },
+      { customer_id: customer.id, direction: 'inbound', message_body: 'Ants in the kitchen', message_type: 'manual', created_at: new Date(Date.now() - 69 * 3600000) },
       // In-flight, unconfirmed review-ask reservation — must NOT read as a
       // sent message.
-      { customer_id: customer.id, direction: 'outbound', status: 'sending', message_body: 'Please leave a Google review: https://g.page/r/example/review', message_type: 'review', metadata: { review_ask_reservation: true }, created_at: new Date('2026-09-02T09:00:00Z') },
+      { customer_id: customer.id, direction: 'outbound', status: 'sending', message_body: 'Please leave a Google review: https://g.page/r/example/review', message_type: 'review', metadata: { review_ask_reservation: true }, created_at: new Date(Date.now() - 48 * 3600000) },
       // The SAME reservation mechanism, but resolved to a real status
       // (admin-communications.js's settleReviewReservation path) — this IS
       // a real message and must still show.
-      { customer_id: customer.id, direction: 'outbound', status: 'sent', message_body: 'Please leave a Google review: https://g.page/r/example/review', message_type: 'review', metadata: { review_ask_reservation: true }, created_at: new Date('2026-09-03T09:00:00Z') },
-      { customer_id: customer.id, direction: 'outbound', message_body: 'Happy to help — see you Friday!', message_type: 'manual', created_at: new Date('2026-09-04T09:00:00Z') },
+      { customer_id: customer.id, direction: 'outbound', status: 'sent', message_body: 'Please leave a Google review: https://g.page/r/example/review', message_type: 'review', metadata: { review_ask_reservation: true }, created_at: new Date(Date.now() - 24 * 3600000) },
+      { customer_id: customer.id, direction: 'outbound', message_body: 'Happy to help — see you Friday!', message_type: 'manual', created_at: new Date() },
     ]);
 
     const context = await ContextAggregator.getContextForCustomer(customer);
@@ -174,15 +200,16 @@ describe('ContextAggregator.getContextForCustomer — smsHistory excludes only t
     const real = Array.from({ length: 20 }, (_, i) => ({
       customer_id: customer.id, direction: i % 2 === 0 ? 'inbound' : 'outbound',
       message_body: `msg-${i}`, message_type: 'manual',
-      created_at: new Date(Date.UTC(2026, 8, 1, 0, i)),
+      created_at: new Date(Date.now() - (60 - i) * 60000),
     }));
     const reservation = {
       customer_id: customer.id, direction: 'outbound', status: 'sending',
       message_body: 'Please leave a Google review: https://g.page/r/example/review',
       message_type: 'review', metadata: { review_ask_reservation: true },
-      // Newest of the bunch — without the SQL-level exclusion this would be
-      // the row that survives the LIMIT 20 and bumps a real one out.
-      created_at: new Date(Date.UTC(2026, 8, 1, 1, 0)),
+      // Newest of the bunch (and well inside the 72h hold) — without the
+      // SQL-level exclusion this would be the row that survives the LIMIT
+      // 20 and bumps a real one out.
+      created_at: new Date(Date.now() - 60000),
     };
     installSmsLog([...real, reservation]);
 
@@ -210,11 +237,11 @@ describe('customer-health computeEngagementScore — outbound-count signal exclu
   test('an unresolved reservation does not count as an outbound touch; a resolved one does', async () => {
     installDb({
       sms: [
-        { customer_id: 'cust-eng-1', direction: 'inbound', created_at: new Date('2026-09-01T00:00:00Z') },
-        // Unresolved — must not count toward smsOutbound.
-        { customer_id: 'cust-eng-1', direction: 'outbound', status: 'sending', metadata: { review_ask_reservation: true }, created_at: new Date('2026-09-02T00:00:00Z') },
+        { customer_id: 'cust-eng-1', direction: 'inbound', created_at: new Date(Date.now() - 48 * 3600000) },
+        // Unresolved — must not count toward smsOutbound. Inside the 72h hold.
+        { customer_id: 'cust-eng-1', direction: 'outbound', status: 'sending', metadata: { review_ask_reservation: true }, created_at: new Date(Date.now() - 24 * 3600000) },
         // Resolved — a real outbound touch, must count.
-        { customer_id: 'cust-eng-1', direction: 'outbound', status: 'sent', metadata: { review_ask_reservation: true }, created_at: new Date('2026-09-03T00:00:00Z') },
+        { customer_id: 'cust-eng-1', direction: 'outbound', status: 'sent', metadata: { review_ask_reservation: true }, created_at: new Date() },
       ],
     });
 
@@ -226,7 +253,9 @@ describe('customer-health computeEngagementScore — outbound-count signal exclu
   test('an all-unresolved-reservation history counts zero outbound touches', async () => {
     installDb({
       sms: [
-        { customer_id: 'cust-eng-2', direction: 'outbound', status: 'sending', metadata: { review_ask_reservation: true }, created_at: new Date('2026-09-01T00:00:00Z') },
+        // Inside the 72h hold — a stale-past-72h reservation is covered by
+        // its own "ages out of the hide" test below.
+        { customer_id: 'cust-eng-2', direction: 'outbound', status: 'sending', metadata: { review_ask_reservation: true }, created_at: new Date(Date.now() - 3600000) },
       ],
     });
 
@@ -423,12 +452,14 @@ describe('csr-coach verifyFollowUps — an unresolved reservation is not proof s
     return updates;
   }
 
-  const task = { id: 'task-1', customer_id: 'cust-csr-1', created_at: new Date('2026-09-01T00:00:00Z') };
+  // Both within the 72h hold: the reservation-still-hides case is the point
+  // of the first test below; aging past 72h is covered separately.
+  const task = { id: 'task-1', customer_id: 'cust-csr-1', created_at: new Date(Date.now() - 48 * 3600000) };
 
   test('a still-unresolved reservation after the task does NOT verify it', async () => {
     const updates = installDb({
       tasks: [task],
-      sms: [{ customer_id: 'cust-csr-1', direction: 'outbound', status: 'sending', metadata: { review_ask_reservation: true }, created_at: new Date('2026-09-02T00:00:00Z') }],
+      sms: [{ customer_id: 'cust-csr-1', direction: 'outbound', status: 'sending', metadata: { review_ask_reservation: true }, created_at: new Date(Date.now() - 24 * 3600000) }],
     });
     await csrCoach.verifyFollowUps();
     expect(updates.filter((u) => u.status === 'verified')).toHaveLength(0);
@@ -437,7 +468,7 @@ describe('csr-coach verifyFollowUps — an unresolved reservation is not proof s
   test('a real outbound text after the task still verifies it', async () => {
     const updates = installDb({
       tasks: [task],
-      sms: [{ customer_id: 'cust-csr-1', direction: 'outbound', status: 'sent', metadata: { review_ask_reservation: true }, created_at: new Date('2026-09-02T00:00:00Z') }],
+      sms: [{ customer_id: 'cust-csr-1', direction: 'outbound', status: 'sent', metadata: { review_ask_reservation: true }, created_at: new Date(Date.now() - 24 * 3600000) }],
     });
     await csrCoach.verifyFollowUps();
     expect(updates.filter((u) => u.status === 'verified')).toHaveLength(1);
@@ -447,8 +478,8 @@ describe('csr-coach verifyFollowUps — an unresolved reservation is not proof s
 
 test('estimator thread excludes unresolved review reservations before applying its history limit', async () => {
   const rows = [
-    { from_phone: '+15555550100', to_phone: '+15555550101', message_body: 'Actual delivered reply', created_at: new Date('2026-09-01T12:00:00Z'), direction: 'outbound', status: 'sent' },
-    { from_phone: '+15555550100', to_phone: '+15555550101', message_body: 'Unconfirmed review placeholder', created_at: new Date('2026-09-02T12:00:00Z'), direction: 'outbound', status: 'sending', metadata: { review_ask_reservation: true } },
+    { from_phone: '+15555550100', to_phone: '+15555550101', message_body: 'Actual delivered reply', created_at: new Date(Date.now() - 2 * 3600000), direction: 'outbound', status: 'sent' },
+    { from_phone: '+15555550100', to_phone: '+15555550101', message_body: 'Unconfirmed review placeholder', created_at: new Date(Date.now() - 3600000), direction: 'outbound', status: 'sending', metadata: { review_ask_reservation: true } },
   ];
   const query = makeSmsLogQuery(rows);
   query.select = () => query;

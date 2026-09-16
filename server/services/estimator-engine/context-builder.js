@@ -12,8 +12,8 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-reservation');
 const { firstExternalPhone, last10 } = require('../external-phone');
+const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-reservation');
 
 function parseMaybeJson(value) {
   if (!value) return null;
@@ -319,6 +319,8 @@ async function loadSmsThread(phone, { limit = 20, before = null, since = null } 
   const digits = last10(phone);
   if (!digits) return [];
   try {
+    // codex #4331 P2 (structural pass): an unresolved review-ask reservation
+    // must not be presented to the estimator model as a delivered message.
     let q = excludeUnresolvedSendReservations(db('sms_log'))
       .select('from_phone', 'to_phone', 'message_body', 'created_at')
       .where(function whereEitherDirection() {
