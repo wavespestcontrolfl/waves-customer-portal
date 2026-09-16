@@ -246,6 +246,18 @@ test('lead handoff closure reaches only the provider hook, never message or audi
   expect(persistAudit.mock.calls[0][0].input).not.toHaveProperty('withSmsHandoff');
 });
 
+test('promised reschedule link can use the locked SMS handoff only with its delivery identity', async () => {
+  const valid = { ...BASE_INPUT, audience: 'customer', purpose: 'appointment', entryPoint: 'reschedule-link-promise',
+    metadata: { original_message_type: 'reschedule_link_promise', followThroughCommitmentId: 'promise-1' },
+    withSmsHandoff: jest.fn() };
+  expect((await sendCustomerMessage(valid)).sent).toBe(true);
+  expect(sendViaTwilio.mock.calls[0][1].withSmsHandoff).toEqual(expect.any(Function));
+  sendViaTwilio.mockClear();
+  expect(await sendCustomerMessage({ ...valid, metadata: { original_message_type: 'reschedule_link_promise' } }))
+    .toMatchObject({ sent: false, blocked: true, code: 'UNSUPPORTED_SMS_HANDOFF' });
+  expect(sendViaTwilio).not.toHaveBeenCalled();
+});
+
 test.each([
   [{ prefs: { sms_enabled: false }, suppressionLoaded: true }, 'SMS_OPTED_OUT'],
   [{ prefs: { sms_enabled: true }, suppressionLoaded: true, suppression: { reason: 'opt_out_keyword' } }, 'SUPPRESSED_OPT_OUT'],
