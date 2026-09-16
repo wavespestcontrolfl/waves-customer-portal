@@ -470,3 +470,16 @@ test.each([
   const spoken = [`Talstar P was applied to the exterior perimeter, ${tail}`];
   expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
 });
+
+test.each([
+  ['but only if the report is correct.', 'fail'],
+  ['but if the report is accurate.', 'fail'],
+  ['but unless the report is wrong.', 'fail'],
+  ['however, only if the report is accurate.', 'fail'],
+  ['— only if the report is accurate.', 'fail'],
+  ['but the office will send a copy only if you request it.', 'pass'],
+  ['but the follow-up is tomorrow unless you reschedule.', 'pass'],
+])('contrast continuations preserve conditions governing a report: %s', (tail, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter, ${tail}`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});

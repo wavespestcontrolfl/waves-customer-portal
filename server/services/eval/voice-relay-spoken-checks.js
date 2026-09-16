@@ -1333,7 +1333,7 @@ const REPORT_TRAILING_UNCERTAINTY_RE = new RegExp(
     + `(?:(?:was|is|has been|had been)(?:\\s+${REPORT_FINDING_VERB_RE.source})?|did))?)\\s*(?=$|,)`
   // These adjuncts condition the preceding assertion, rather than assert it.
   // Anchor at the finding's tail so conditions in later explanations stay local.
-  + `|^\\s*,?\\s*(?:${REPORT_COMPLETION_TIME}\\s*,?\\s*)?(?:only\\s+)?(?:assuming|provided(?!\\s+by\\b)|providing(?=\\s+(?:that\\b|(?:[\\w\x27\u2019-]+\\s+){1,5}${CLAUSE_FINITE_PREDICATE_RE.source}))|on\\s+condition\\s+that|as\\s+long\\s+as)\\b`,
+  + `|^\\s*,?\\s*(?:${REPORT_COMPLETION_TIME}\\s*,?\\s*)?(?:only\\s+)?(?:if|unless|until|whether|assuming|provided(?!\\s+by\\b)|providing(?=\\s+(?:that\\b|(?:[\\w\x27\u2019-]+\\s+){1,5}${CLAUSE_FINITE_PREDICATE_RE.source}))|on\\s+condition\\s+that|as\\s+long\\s+as)\\b`,
   'i',
 );
 const REPORT_TRAILING_DENIAL_RE = new RegExp(
