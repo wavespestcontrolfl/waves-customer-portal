@@ -802,18 +802,32 @@ async function reserveSendableReviewSms({ request, to, body }) {
 // in-flight carve-out is a correlated NOT EXISTS on JSON metadata, which the
 // unit suite's query mock cannot evaluate.
 function supersedeQueuedAsks(customerId) {
-  return db("review_requests")
-    .where({ customer_id: customerId, status: "pending" })
-    .whereNull("sms_sent_at")
-    .whereNotNull("scheduled_for")
-    .whereRaw(ASK_TOUCH_SQL)
-    .whereNotExists(function () {
-      this.select(1).from("sms_log")
-        .whereRaw("sms_log.metadata->>'review_request_id' = review_requests.id::text")
-        .whereRaw("sms_log.metadata->>'review_ask_reservation' = 'true'")
-        .where("sms_log.status", "sending");
-    })
-    .update({ status: "suppressed" });
+  return db.transaction(async (trx) => {
+    // Lock candidate requests FIRST, then check reservations in a separate
+    // READ COMMITTED statement. An UPDATE started while reserveSendableReviewSms
+    // holds a row lock can otherwise retain a pre-reservation snapshot for
+    // its NOT EXISTS subquery even after it waits for the row to commit.
+    const candidates = await trx("review_requests")
+      .where({ customer_id: customerId, status: "pending" })
+      .whereNull("sms_sent_at")
+      .whereNotNull("scheduled_for")
+      .whereRaw(ASK_TOUCH_SQL)
+      .orderBy("id")
+      .select("id")
+      .forUpdate();
+    if (!candidates.length) return 0;
+    return trx("review_requests")
+      .whereIn("id", candidates.map((row) => row.id))
+      .where({ status: "pending" })
+      .whereNull("sms_sent_at")
+      .whereNotExists(function () {
+        this.select(1).from("sms_log")
+          .whereRaw("sms_log.metadata->>'review_request_id' = review_requests.id::text")
+          .whereRaw("sms_log.metadata->>'review_ask_reservation' = 'true'")
+          .where("sms_log.status", "sending");
+      })
+      .update({ status: "suppressed" });
+  });
 }
 
 // A resolved review-ask reservation for THIS request is proof the provider
@@ -2200,8 +2214,25 @@ const ReviewService = {
         try {
           reservation = await reserveSendableReviewSms({ request, to: contact.phone, body });
         } catch (stateErr) {
-          logger.warn(`[review] send-state reservation failed (requestId=${requestId} errType=${stateErr?.name || "Error"})`);
-          return { refused: "send_state_unverified" };
+          // A transient DB blip here (nothing has reached the provider yet)
+          // must not stand on the pre-send fence above: that fence already
+          // pushed scheduled_for 72h out, so returning now with no repair
+          // parks a never-sent ask for three days — it reads as "recently
+          // asked" when nothing was sent (codex #4331 P1). Retry once, and
+          // only on a second failure restore scheduled_for to what it was
+          // before the fence so the due row is picked up again immediately.
+          logger.warn(`[review] send-state reservation failed, retrying once (requestId=${requestId} errType=${stateErr?.name || "Error"})`);
+          try {
+            reservation = await reserveSendableReviewSms({ request, to: contact.phone, body });
+          } catch (retryErr) {
+            logger.error(`[review] send-state reservation LOST after retry (requestId=${requestId} errType=${retryErr?.name || "Error"})`);
+            try {
+              await db("review_requests").where({ id: requestId, status: "pending" }).update({ scheduled_for: fencedFrom });
+            } catch (unfenceErr) {
+              logger.error(`[review] could not restore pre-send fence after reservation failure (requestId=${requestId} errType=${unfenceErr?.name || "Error"})`);
+            }
+            return { refused: "send_state_unverified" };
+          }
         }
         if (!reservation) return { refused: "request_not_sendable" };
       }
