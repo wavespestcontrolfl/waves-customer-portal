@@ -87,7 +87,8 @@ async function assertVisitCompletionCharge(trx, invoice, packetId) {
       refuse('member_stop_changed');
     }
     const pricing = frozen.memberPricing?.find((entry) => entry.id === member.id);
-    if (!pricing || pricing.price !== Number(member.estimated_price)
+    const currentPrice = member.estimated_price === null ? null : Number(member.estimated_price);
+    if (!pricing || pricing.price !== currentPrice
         || pricing.isCallback !== Boolean(member.is_callback)
         || pricing.invoiceOnComplete !== Boolean(member.create_invoice_on_complete)) refuse('member_price_changed');
     // Older saved packets predate the service-identity snapshot. New packets

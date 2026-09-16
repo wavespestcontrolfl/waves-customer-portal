@@ -40,7 +40,7 @@ async function memberBillingEligibility(member, customer, trx) {
   return null;
 }
 
-async function buildMemberLines(member, customer, trx, checkedEligibility = undefined) {
+async function buildMemberLines(member, customer, trx, checkedEligibility = undefined, { deferMissingPrice = false } = {}) {
   const eligibility = checkedEligibility === undefined
     ? await memberBillingEligibility(member, customer, trx) : checkedEligibility;
   if (eligibility) return eligibility;
@@ -70,6 +70,9 @@ async function buildMemberLines(member, customer, trx, checkedEligibility = unde
   // A combined plan's customer-level fallback is not a price for each member.
   // Explicit zero is allowed only when the canonical lane also says zero.
   if (!Number.isFinite(price)) {
+    if (deferMissingPrice && member.estimated_price === null) {
+      return { lineItems: [], deferredOffice: office('member_price_missing', member.id) };
+    }
     return office('member_price_missing', member.id);
   }
   if (price === 0 && amount === 0) return { lineItems: [], feeReviewOnly };
@@ -86,16 +89,20 @@ async function mintPacketInvoice({ packet, visit, members, customer, trx }) {
   const billed = [];
   const feeReviewCandidates = [];
   const adoptionMembers = [];
+  const deferredOffices = [];
   for (const member of members) {
     const eligibility = await memberBillingEligibility(member, customer, trx);
-    const built = await buildMemberLines(member, customer, trx, eligibility);
+    const adoptionEligible = !eligibility && !member.is_callback
+      && !isAlwaysFreeServiceType(member.service_type);
+    const built = await buildMemberLines(member, customer, trx, eligibility, {
+      deferMissingPrice: adoptionEligible && Boolean(member.source_estimate_id) && !member.recurring_parent_id,
+    });
     if (built.state === 'office_required') return built;
+    if (built.deferredOffice) deferredOffices.push(built.deferredOffice);
     // Acceptance itemization covers every performed first-visit member,
     // including a member whose mutable scheduled price is now zero. Callback
     // and always-free work never inherits the accepted first-application bill.
-    if (!eligibility && !member.is_callback && !isAlwaysFreeServiceType(member.service_type)) {
-      adoptionMembers.push(member);
-    }
+    if (adoptionEligible) adoptionMembers.push(member);
     if (built.lineItems.length) billed.push({ member, lineItems: built.lineItems });
     else if (built.feeReviewOnly) feeReviewCandidates.push(member);
   }
@@ -154,11 +161,14 @@ async function mintPacketInvoice({ packet, visit, members, customer, trx }) {
     } catch (error) { visitBusy(error); }
   }
   if (existing.length) {
-    if (!hasAcceptanceCandidate) return office('existing_member_invoice');
-    const adoptionIds = new Set(adoptionMembers.map((member) => member.id));
-    if (billed.some(({ member }) => !adoptionIds.has(member.id))) return office('existing_member_invoice');
-    return adoptAcceptanceInvoice({ packet, members: adoptionMembers, customer, trx, invoices: existing });
+    if (hasAcceptanceCandidate) {
+      const adoptionIds = new Set(adoptionMembers.map((member) => member.id));
+      if (billed.some(({ member }) => !adoptionIds.has(member.id))) return office('existing_member_invoice');
+      return adoptAcceptanceInvoice({ packet, members: adoptionMembers, customer, trx, invoices: existing });
+    }
   }
+  if (deferredOffices.length) return deferredOffices[0];
+  if (existing.length) return office('existing_member_invoice');
   if (!billed.length && !feeReviewCandidates.length) return { state: 'no_charge', invoiceId: null };
   for (const estimateId of [...billedEstimateIds].sort()) {
     let stamped;
@@ -264,7 +274,8 @@ async function linkPacketInvoice({ packet, invoice, members, customer, trx, acce
       netSubtotalCents: Math.round((Number(invoice.subtotal) - Number(invoice.discount_amount || 0)) * 100),
       billedServiceIds: members.map((member) => member.id),
       billingLane: resolveBillingLane(customer).mode,
-      memberPricing: members.map((member) => ({ id: member.id, price: Number(member.estimated_price),
+      memberPricing: members.map((member) => ({ id: member.id,
+        price: member.estimated_price === null ? null : Number(member.estimated_price),
         serviceType: member.service_type, serviceId: member.service_id,
         isCallback: Boolean(member.is_callback), invoiceOnComplete: Boolean(member.create_invoice_on_complete) })),
     } })]), updated_at: trx.fn.now(),

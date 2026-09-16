@@ -2648,10 +2648,12 @@ postgres('visit completion packet records on PostgreSQL', () => {
 
 
   test.each([
-    ['historical aggregate', 'aggregate'], ['partial member coverage', 'partial'],
-    ['foreign accepted-service identity', 'foreign'],
-  ])('rejects an acceptance invoice with %s', async (_label, coverage) => {
-    const { invoice } = await prepareAcceptanceInvoice({ coverage });
+    ['historical aggregate', 'aggregate', null], ['partial member coverage', 'partial', null],
+    ['foreign accepted-service identity', 'foreign', null],
+    ['partial coverage and an unpriced same-trip member', 'partial', [240, null]],
+    ['accepted net above its known scheduled ceiling', 'exact', [200, null]],
+  ])('rejects an acceptance invoice with %s', async (_label, coverage, scheduledPrices) => {
+    const { invoice } = await prepareAcceptanceInvoice({ coverage, scheduledPrices });
     const result = await saveVisitCompletionPacket(submission());
     expect(result.body.billing).toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
     expect(await mockPg('invoices').where({ id: invoice.id }).first()).toMatchObject({
@@ -2729,6 +2731,19 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect((await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first()).payload.billingSnapshot)
       .toMatchObject({ invoiceId: invoice.id, totalCents: 27100, netSubtotalCents: 32100,
         billedServiceIds: expect.arrayContaining(fixture.serviceIds) });
+  });
+
+  test('adopts an exact acceptance invoice for its deliberately unpriced same-trip member', async () => {
+    const { invoice, lawnId } = await prepareAcceptanceInvoice({ scheduledPrices: [240, null] });
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'invoice_ready', invoiceId: invoice.id, total: 319 });
+    const snapshot = (await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first())
+      .payload.billingSnapshot;
+    expect(snapshot.memberPricing.find((member) => member.id === lawnId).price).toBeNull();
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    await expect(assertPacketCharge(saved)).resolves.toBeUndefined();
+    await mockPg('scheduled_services').where({ id: lawnId }).update({ estimated_price: 0 });
+    await expect(assertPacketCharge(saved)).rejects.toMatchObject({ reason: 'member_price_changed' });
   });
 
   test('rejects an edited acceptance invoice with an unowned custom charge', async () => {
@@ -3605,6 +3620,14 @@ postgres('visit completion packet records on PostgreSQL', () => {
 
   test('a missing member price cannot inherit a whole-plan per-application fee', async () => {
     await mockPg('customers').where({ id: fixture.customerId }).update({ billing_mode: 'per_application', per_application_fee: 240 });
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ estimated_price: null });
+    const result = await saveVisitCompletionPacket(submission());
+    expect(result.body.billing).toMatchObject({ state: 'office_required', reason: 'member_price_missing' });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
+  });
+
+  test('an unpriced source-estimate member still refuses without an exact acceptance invoice', async () => {
+    await linkFixtureEstimate();
     await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ estimated_price: null });
     const result = await saveVisitCompletionPacket(submission());
     expect(result.body.billing).toMatchObject({ state: 'office_required', reason: 'member_price_missing' });
