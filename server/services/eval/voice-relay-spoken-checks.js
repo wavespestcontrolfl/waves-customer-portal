@@ -1376,7 +1376,7 @@ const REPORT_TRAILING_UNCERTAINTY_RE = new RegExp(
     + `(?:(?:was|is|has been|had been)(?:\\s+${REPORT_FINDING_VERB_RE.source})?|did))?)\\s*(?=$|,)`
   // These adjuncts condition the preceding assertion, rather than assert it.
   // Anchor at the finding's tail so conditions in later explanations stay local.
-  + `|^\\s*,?\\s*(?:${REPORT_COMPLETION_TIME}\\s*,?\\s*)?(?:only\\s+)?(?:if|unless|until|whether|assuming|provided(?!\\s+by\\b)|providing(?=\\s+(?:that\\b|(?:[\\w\x27\u2019-]+\\s+){1,5}${CLAUSE_FINITE_PREDICATE_RE.source}))|on\\s+condition\\s+that|as\\s+long\\s+as)\\b`,
+  + `|^\\s*,?\\s*(?:${REPORT_COMPLETION_TIME}\\s*,?\\s*)?(?:only\\s+)?(?:if|unless|until|whether|assuming|provided(?!\\s+by\\b)|providing(?=\\s+(?:that\\b|(?:[\\w\x27\u2019-]+\\s+){1,5}${CLAUSE_FINITE_PREDICATE_RE.source}))|${FREE_VISIT_APPROVAL_QUALIFIER_SOURCE}|on\\s+condition\\s+that|as\\s+long\\s+as)\\b`,
   'i',
 );
 const REPORT_RETRACTION_ACTOR = `(?:i|we|you|he|she|they|(?:(?:the|our)\\s+)?(?:technician|tech|crew|team))`;
@@ -1399,7 +1399,7 @@ function reportTrailingNoncompletion(text) {
 const REPORT_CONCISE_COMPLETION_RE = new RegExp(`^(?:(?:(?:was|were|is|are|has been|have been|had been)\\s+)?(?:(?:already|actually|just)\\s+)*completed(?:\\s+${REPORT_COMPLETION_TIME})?|as\\s+(?:noted|documented|recorded|shown)\\s+in\\s+the\\s+report)?\\s*$`, 'i');
 const REPORT_HYPOTHETICAL_QUALIFIER_RE = /\b(?:only|just|merely)\s+(?:in\s+theory|hypothetically|on\s+paper)\b/i;
 const REPORT_HYPOTHETICAL_GOVERNOR_RE = new RegExp(
-  `^\\s*(?:suppose|supposing|assuming|imagine|let['’]s\\s+say|${FREE_VISIT_PROVIDED_CONDITION_SOURCE}|as\\s+long\\s+as|on\\s+condition\\s+that)\\b`, 'i',
+  `^\\s*(?:suppose|supposing|assuming|imagine|let['’]s\\s+say|${FREE_VISIT_PROVIDED_CONDITION_SOURCE}|${FREE_VISIT_APPROVAL_QUALIFIER_SOURCE}|as\\s+long\\s+as|on\\s+condition\\s+that)\\b`, 'i',
 );
 const REPORT_ASSERTION_START = `(?:(?:the|a|an|your|our|their|his|her|my|its)\\s+)?(?:[\\w'\u2019-]+\\s+){1,4}(?:(?:(?:was|were|is|are|has|have|had|got)\\s+(?:\\w+ly\\s+)?)?(?:${REPORT_FINDING_VERB_RE.source}|\\b(?:receiving|getting)\\b))`;
 const REPORT_VERBLESS_PRODUCT_LOCATION_START = `(?:(?:the|a|an|your|our|their|his|her|my|its)\\s+)?(?:(?:granular|gel|liquid|residual)\\s+)?(?:bait|dust|foam|granules?|product|treatment)\\s+${REPORT_TREATMENT_LOCATION_LINK_RE.source}`;

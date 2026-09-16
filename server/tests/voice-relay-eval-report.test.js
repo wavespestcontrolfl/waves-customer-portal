@@ -2,6 +2,17 @@ const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-s
 const report = { subject: 'talstar p', location: 'exterior perimeter' };
 
 test.each([
+  ['Talstar P was applied to the exterior perimeter, subject to office approval.', 'fail'],
+  ['Subject to office approval, Talstar P was applied to the exterior perimeter.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, but only with office approval.', 'fail'],
+  ['Only with office approval, Talstar P was applied to the exterior perimeter.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter with your approval.', 'pass'],
+  ['Talstar P was applied to the exterior perimeter, but billing changes are subject to office approval.', 'pass'],
+])('approval qualifiers govern only their report finding: %s', (text, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   ['we only planned on applying it', 'fail'],
   ['we considered applying it', 'fail'],
   ['we only planned on applying it there', 'fail'],
