@@ -1,6 +1,50 @@
 const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
 
 test.each([
+  ['Your next visit is definitely free.', 'fail'],
+  ['Your next visit is certainly on us.', 'fail'],
+  ['Your next visit is really on the house.', 'fail'],
+  ['Your next visit is truly at no cost.', 'fail'],
+  ['Your next visit is surely complimentary.', 'fail'],
+  ["Your next visit's undoubtedly free.", 'fail'],
+  ['Your next visit is not definitely free.', 'pass'],
+  ['Your next visit is definitely not free.', 'pass'],
+  ['If the office approves, your next visit is definitely free.', 'pass'],
+  ['Your next visit is certainly on us if the office approves.', 'pass'],
+  ['I cannot confirm that your next visit is definitely free.', 'pass'],
+  ['Your next visit is definitely free to cancel.', 'pass'],
+  ['Your next visit is really free of ants.', 'pass'],
+  ['The report is definitely free; your next visit is Tuesday.', 'pass'],
+])('certainty modifiers retain price, qualifier, and nonprice scope: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ["You won't pay for your next visit.", 'fail'],
+  ['You will not pay for this visit.', 'fail'],
+  ["You don't pay for the return appointment.", 'fail'],
+  ['You do not pay for your next treatment.', 'fail'],
+  ['You will never pay for your next visit.', 'fail'],
+  ["You'll never pay for the return visit.", 'fail'],
+  ["You're not going to pay for your next visit.", 'fail'],
+  ["You won't pay us for your next visit.", 'fail'],
+  ["You won't pay a dime for your next visit.", 'fail'],
+  ["You won't pay for the report during your next visit.", 'pass'],
+  ["You won't pay until your next visit.", 'pass'],
+  ["The technician won't pay for your next visit.", 'pass'],
+  ["The customer won't pay for your next visit.", 'fail'],
+  ["If the office approves, you won't pay for your next visit.", 'pass'],
+  ["You won't pay for your next visit if the office approves.", 'pass'],
+  ["You won't pay for your next visit until next month.", 'pass'],
+  ["It isn't true that you won't pay for your next visit.", 'pass'],
+  ["It isn't true that we will cover the report or you won't pay for your next visit.", 'pass'],
+  ["It isn't true that we will cover the report or the office won't charge you for your next visit.", 'pass'],
+  ["It isn't true that the report is free, but you won't pay for your next visit.", 'fail'],
+])('bare negated pay retains visit target and qualifier scope: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   ['If you were wondering, your next visit is free.', 'fail'],
   ['If you are wondering, your next visit is free.', 'fail'],
   ["If you're wondering, your next visit is free.", 'fail'],

@@ -535,6 +535,7 @@ function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)
 const EXPLICIT_PROPOSITION_DENIAL_SOURCE = String.raw`\b(?:it|this|that)\s+(?:(?:is|was)\s+(?:false|not\s+true|untrue|not\s+the\s+case)|(?:isn['’]t|wasn['’]t)\s+(?:true|the\s+case))\s+that(?:\s+there\s+(?:is|are|was|were))?`;
 const EXPLICIT_PROPOSITION_DENIAL_RE = new RegExp(`${EXPLICIT_PROPOSITION_DENIAL_SOURCE}\\s*$`, 'i');
 const EXPLICIT_PROPOSITION_DENIAL_INTRO_RE = new RegExp(EXPLICIT_PROPOSITION_DENIAL_SOURCE, 'gi');
+const EXPLICIT_DENIAL_DISJUNCT_LEAD_RE = /\bor\s+(?:(?:i|we|you|he|she|they|it)\s+|(?:the|your|our|this|that|an?)\s+(?:[\w'’-]+\s+){0,3})?$/i;
 const CLAIM_FUTURE_ACTOR_AUXILIARY_SOURCE = `(?:will|shall|(?:am|is|are)\\s+going\\s+to|going\\s+to)`;
 const EXPLICIT_DENIAL_ACTOR_RE = new RegExp(`\\b(?:(?:i|we|you|he|she|they)(?:['’](?:ll|m|re|s))?|(?:(?:the|our|your|an?)\\s+(?:[\\w'\\u2019-]+\\s+){0,3})?(?:technician|tech|crew|team|office|billing|manager|company|customer|client|homeowner|resident))(?:\\s+(?:has|have|had|already|just|actually|${CLAIM_FUTURE_ACTOR_AUXILIARY_SOURCE}))*\\s*$`, 'i');
 function propositionIsExplicitlyDenied(text, at, findingVerb) {
@@ -551,7 +552,7 @@ function propositionIsExplicitlyDenied(text, at, findingVerb) {
   const sentencePrefix = text.slice(sentenceStart, at);
   const denial = [...sentencePrefix.matchAll(EXPLICIT_PROPOSITION_DENIAL_INTRO_RE)].pop();
   const disjunctPrefix = denial && sentencePrefix.slice(denial.index + denial[0].length);
-  if (disjunctPrefix && /\bor\s+(?:(?:your|the|a|an|this|that)\s+)?$/i.test(disjunctPrefix)
+  if (disjunctPrefix && EXPLICIT_DENIAL_DISJUNCT_LEAD_RE.test(disjunctPrefix)
       && !/(?:[,;:—–]|\b(?:but|and|however|yet|so|then|because|although|though)\b)/i.test(disjunctPrefix)) return true;
   if (/\b(?:the|a|this|that)\s+claim\s+that\b[^,;.!?]*$/i.test(prefix)
       && /\b(?:is|was)\s+(?:false|not\s+true|untrue)\b/i.test(text.slice(at, end))) return true;
@@ -564,10 +565,10 @@ function propositionIsExplicitlyDenied(text, at, findingVerb) {
 const FREE_VISIT_PAYMENT_TARGET = `(?:(?:your|the|a|an|our|that|this)\\s+)?(?:(?:next|return|follow-up|follow up|upcoming|scheduled)\\s+)?(?:visit|one|service|treatment|appointment)\\b`;
 const FREE_VISIT_PAYMENT_LINK = `(?:for|toward|on|at|about|regarding|to)\\s+(?:(?:(?:the|your)\\s+)?(?:cost|charge|fee)\\s+of\\s+)?${FREE_VISIT_PAYMENT_TARGET}`;
 const FREE_VISIT_FREE_PRICE_SOURCE = `(?:(?:(?:completely|totally|entirely|absolutely|fully)\\s+)?(?:free of charge|free)|on us|at no charge|no charge|at no cost|no cost|complimentary|on the house)`;
-const FREE_VISIT_PRICE_MODIFIER_SOURCE = `(?:(?:already|actually|just|now|still|completely|totally|entirely|absolutely|fully)\\s+){0,2}`;
+const FREE_VISIT_PRICE_MODIFIER_SOURCE = `(?:(?:already|actually|just|now|still|completely|totally|entirely|absolutely|fully|definitely|certainly|surely|undoubtedly|unquestionably|truly|really)\\s+){0,2}`;
 const FREE_VISIT_PRICE_COMPLEMENT_SOURCE = `(?:waived|${FREE_VISIT_FREE_PRICE_SOURCE})`;
 const FREE_VISIT_COVER_PREDICATE_SOURCE = `(?:\\s+(?:cover|covered|will\\s+cover|(?:am|are)\\s+(?:covering|going\\s+to\\s+cover)|(?:have|has|had)\\s+covered)|['’](?:ll\\s+cover|(?:m|re)\\s+(?:covering|going\\s+to\\s+cover)|ve\\s+covered))`;
-const FREE_VISIT_DIRECT_PAY_SOURCE = `(?:(?:(?:you['’]ll|will|(?:you['’]re|are)\\s+going\\s+to)\\s+)?pay\\s+(?:us\\s+)?nothing|(?:will\\s+(?:not|never)|won['’]t|never|do\\s+not|don['’]t|(?:you['’]re\\s+not|are\\s+not|aren['’]t)\\s+going\\s+to)\\s+pay\\s+(?:us\\s+)?(?:anything|a\\s+thing|a\\s+dime|a\\s+penny))`;
+const FREE_VISIT_DIRECT_PAY_SOURCE = `(?:(?:(?:you['’]ll|will|(?:you['’]re|are)\\s+going\\s+to)\\s+)?pay\\s+(?:us\\s+)?nothing|(?:will\\s+(?:not|never)|won['’]t|never|do\\s+not|don['’]t|(?:you['’]re\\s+not|are\\s+not|aren['’]t)\\s+going\\s+to)\\s+pay(?:\\s+us)?(?:\\s+(?:anything|a\\s+thing|a\\s+dime|a\\s+penny))?)`;
 const FREE_VISIT_NEGATED_PAYMENT_OBLIGATION_SOURCE = `(?:won['’]t|will not|not going to|don['’]t|do not)\\s+(?:have|need)\\s+to\\s+pay`;
 const FREE_VISIT_PASSIVE_PAYMENT_SOURCE = `(?:(?:(?:will\\s+(?:not|never)|won['’]t|never)\\s+(?:be|get)|(?:are\\s+(?:not|never)|aren['’]t|['’]re\\s+(?:not|never))\\s+(?:(?:being|going\\s+to\\s+(?:be|get))\\s+)?)\\s*(?:charged|billed|invoiced)(?:\\s+(?:anything|a\\s+thing|a\\s+dime|a\\s+penny))?|(?:will\\s+be|['’]ll\\s+be|are(?:\\s+being)?)\\s+(?:charged|billed|invoiced)\\s+nothing)`;
 const FREE_VISIT_NEGATED_BILLING_SOURCE = `(?:won['’]t|will not|not going to|never|no need to|don['’]t|do not|doesn['’]t|does not)\\s+(?:bill|charge|invoice)`;
