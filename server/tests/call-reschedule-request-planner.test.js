@@ -106,6 +106,7 @@ describe('reviewed request planner', () => {
       service_id: 'quarterly-pest',
       service_type: 'Quarterly Pest Control Service',
       catalog_service_name: 'Quarterly Pest Control Service',
+      source_action: 'ai_call_pipeline_followup',
     });
     expect(planRescheduleFromCall({
       v2,
@@ -119,6 +120,19 @@ describe('reviewed request planner', () => {
       newDate: '2099-09-11',
       newWindow: { start: '16:00', end: '17:00' },
     });
+  });
+
+  test('keeps a confirmed dispatch-owned visit in the editor for reviewed Apply', () => {
+    expect(plan(requestExtraction(), [candidate({
+      status: 'confirmed',
+      source_action: 'ai_call_pipeline_followup',
+    })])).toMatchObject({
+      action: 'skip',
+      reason: 'dispatch_owned_workflow',
+      visitId: VISIT_ID,
+    });
+    expect(plan(requestExtraction(), [candidate({ status: 'confirmed', source_action: null })]))
+      .toMatchObject({ action: 'apply', visitId: VISIT_ID });
   });
 
   test('keeps grouped, parked no-op, and office-review visits in the editor', () => {

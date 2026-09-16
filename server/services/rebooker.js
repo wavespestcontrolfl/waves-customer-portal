@@ -2227,7 +2227,18 @@ class SmartRebooker {
               .filter((x) => sweptSet.has(String(x.id)))
               .map((r) => vg.stopBaseKey({ propertyId: r.property_id, customerId: service.customer_id, scheduledDate: r.scheduled_date })))].sort();
             for (const vgKey of keys) {
-              await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit.stop', vgKey]);
+              // Ordinary series moves own stop before maintenance. Reviewed
+              // moves already own maintenance, so waiting here would invert
+              // that order when their destination dates do not overlap.
+              const lockSql = reviewedMaintenancePreflightRan
+                ? 'SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked'
+                : 'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))';
+              const result = await trx.raw(lockSql, ['visit.stop', vgKey]);
+              if (reviewedMaintenancePreflightRan && result.rows[0]?.locked !== true) {
+                throw Object.assign(new Error('This visit is being updated — reload and save again.'), {
+                  statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY',
+                });
+              }
             }
           }
           // Acquire the per-parent recurring-series maintenance lock; reviewed

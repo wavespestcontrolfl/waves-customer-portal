@@ -134,6 +134,19 @@ describe('reviewed call reschedule', () => {
     expect(canonicalMover.reschedule).toHaveBeenCalledTimes(1);
   });
 
+  test('does not invoke the mover for a confirmed dispatch-owned visit', async () => {
+    const protectedVisit = visit({ source_action: 'ai_call_pipeline_followup', status: 'confirmed' });
+    const conn = makeConn({ lockedVisit: protectedVisit });
+    const rebooker = mover(conn);
+
+    await expect(applyReviewedCallReschedule(args(conn, rebooker, [protectedVisit]))).resolves.toEqual({
+      outcome: 'skipped',
+      reason: 'dispatch_owned_workflow',
+    });
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    expect(conn.events).toEqual([]);
+  });
+
   test.each([
     ['agent commitment', { agent_committed_booking: true }, 'agent_committed_booking'],
     ['confirmed time', { confirmed_start_at: '2026-09-15T14:00:00-04:00' }, 'confirmed_start_supersedes_proposal'],
