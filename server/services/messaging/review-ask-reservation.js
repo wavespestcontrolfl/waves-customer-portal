@@ -150,6 +150,11 @@ function defaultDb() {
 // hold the request row's lock (the conditional status UPDATE the ask-branch
 // callers run first) so this lookup-then-insert can't itself race a second
 // reservation for the same request.
+// Reuse is bounded by REVIEW_ASK_RESERVATION_HOLD_HOURS: an existing
+// reservation older than its own hold is RENEWED in place (same row,
+// created_at/updated_at reset to now) rather than reused as-is or
+// replaced — see the comment at the renewal site for why (codex #4331 P1,
+// pre-push audit on the seam itself).
 async function reserveForRequest({ trx, request, to, body, fromPhone }) {
   const conn = trx || defaultDb();
   const existing = await conn('sms_log')
@@ -158,7 +163,42 @@ async function reserveForRequest({ trx, request, to, body, fromPhone }) {
     .whereRaw(`metadata->>'${REVIEW_ASK_MARKER}' = 'true'`)
     .first('id', 'created_at');
   if (existing) {
-    return { id: existing.id, reservedAt: new Date(existing.created_at), requestId: request.id, reused: true };
+    const ageMs = Date.now() - new Date(existing.created_at).getTime();
+    if (ageMs < REVIEW_ASK_RESERVATION_HOLD_MS) {
+      return { id: existing.id, reservedAt: new Date(existing.created_at), requestId: request.id, reused: true };
+    }
+    // codex #4331 P1 (pre-push audit on the seam itself): an unresolved
+    // reservation older than its own hold has already aged out of
+    // isUnresolvedSendReservation's hide and out of the spacing window a
+    // fresh retryAt would be computed from — reusing its stale created_at
+    // as-is would compute a retryAt in the past (uncertain-outcome handling
+    // adds ASK_SPACING_MS to reservedAt) and let it read as resolved-and-
+    // gone to any reader keyed on the 72h hold, WHILE this new attempt is
+    // relying on it as its own in-flight marker.
+    //
+    // RENEWED IN PLACE (chosen over delete+insert): the SAME row keeps its
+    // id — nothing downstream ever sees a second row, so releaseUnsent /
+    // promote / the general-reader predicates all keep working against
+    // whichever id a caller already holds. Resetting created_at (and
+    // updated_at) to now is the one write that keeps every reader's
+    // semantics correct at once: isUnresolvedSendReservation's hide
+    // restarts its 72h window from the new attempt (it is genuinely in
+    // flight again), the spacing readers compute retryAt/lastManualAskAt
+    // off the new timestamp instead of a stale one already in the past,
+    // and any age-based cleanup of expired reservations no longer matches
+    // a row that is actively being retried. A delete+insert would achieve
+    // the same reader semantics but hands out a new id for no benefit and
+    // reintroduces a (small) window where the row briefly doesn't exist at
+    // all inside the same transaction.
+    const renewedAt = new Date();
+    await conn('sms_log').where({ id: existing.id, status: 'sending' }).update({
+      from_phone: fromPhone,
+      to_phone: to,
+      message_body: body,
+      created_at: renewedAt,
+      updated_at: renewedAt,
+    });
+    return { id: existing.id, reservedAt: renewedAt, requestId: request.id, reused: true, renewed: true };
   }
   const reservedAt = new Date();
   const [reservation] = await conn('sms_log').insert({
