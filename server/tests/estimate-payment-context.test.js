@@ -326,7 +326,7 @@ describe('buildEstimatePaymentContext', () => {
     expect(ctx.annualPrepay.paid).toBe(true);
   });
 
-  it('resolves the pay-per-application acceptance invoice with exact line amounts', async () => {
+  it('resolves an itemized pay-per-application acceptance invoice with exact line amounts', async () => {
     configureDb({
       scheduled_services: { annual_prepay_term_id: null, payment_method_preference: 'pay_at_visit' },
       annual_prepay_terms: null,
@@ -339,7 +339,8 @@ describe('buildEstimatePaymentContext', () => {
         notes: 'Auto-generated from accepted estimate #est-1. Customer selected pay per application — $99 setup fee plus first application.',
         line_items: JSON.stringify([
           { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99 },
-          { description: 'First service application', quantity: 1, unit_price: 135.67 },
+          { client_id: 'scheduled_pest_primary', description: 'Quarterly Pest Control', quantity: 1, unit_price: 88.5 },
+          { client_id: 'scheduled_lawn_primary', description: 'Lawn Care', quantity: 1, unit_price: 47.17 },
         ]),
       },
     });

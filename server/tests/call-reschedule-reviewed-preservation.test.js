@@ -1,3 +1,4 @@
+jest.mock('../services/rebooker', () => ({ reschedule: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../routes/admin-dispatch', () => ({ applySeriesMoveEffects: jest.fn().mockResolvedValue({}) }));
@@ -361,5 +362,93 @@ describe('applyReviewedCallReschedule', () => {
     const plan = planRescheduleFromCall({ v2: extraction, call, customer, candidates: [candidate], now: NOW,
       humanOverride: { visitId: VISIT_ID } });
     expect(plan).toMatchObject({ action: 'skip', reason: 'office_review_unconfirmed', visitId: VISIT_ID });
+  });
+});
+
+const canonicalMover = require('../services/rebooker');
+const reminders = AppointmentReminders;
+function args(conn, rebooker, candidates = [visit()]) {
+  return { ...applyArgs(conn, rebooker), candidates, operationKey: 'proposal:card:hash' };
+}
+
+describe('reviewed call reschedule', () => {
+  beforeEach(() => reminders.handleReschedule.mockClear().mockResolvedValue({}));
+
+  test('takes the customer fence before identity rows and preserves current internal notes', async () => {
+    const conn = makeConn({ lockedVisit: visit({ internal_notes: 'New staff note written before Apply' }) });
+    const rebooker = mover(conn);
+    await expect(applyReviewedCallReschedule(args(conn, rebooker))).resolves.toMatchObject({
+      outcome: 'applied', visitId: 'visit-reviewed', newDate: '2026-09-15',
+    });
+    expect(conn.events.slice(0, 5)).toEqual([
+      'customer-comms:lock', 'customers:share', 'customer_properties:share', 'triage-call:lock', 'call_log:update-lock',
+    ]);
+    expect(conn.updates.filter(({ table }) => table === 'scheduled_services')).toEqual([]);
+    expect(rebooker.reschedule.mock.calls[0][5]).toMatchObject({
+      skipCallFollowUpShift: true, notifyRequested: false, pendingConfirmation: true, operationKey: 'proposal:card:hash',
+    });
+    expect(reminders.handleReschedule).toHaveBeenCalledWith('visit-reviewed', '2026-09-15T14:00',
+      { sendNotification: false, expectSchedule: { date: '2026-09-15', windowStart: '14:00' } });
+  });
+
+  test('refuses an open portal request after locking the selected visit and before proposal mutation', async () => {
+    const conn = makeConn({ portalRequest: { id: 'request-open' } });
+    await expect(applyReviewedCallReschedule(args(conn, mover(conn)))).rejects.toMatchObject({
+      status: 409, message: expect.stringContaining('portal reschedule request'),
+    });
+    expect(conn.events.indexOf('scheduled_services:update-lock')).toBeLessThan(conn.events.indexOf('service_requests:select'));
+    expect(conn.inserts).toEqual([]);
+  });
+
+  test.each(['applied', 'noop'])('does not write undisclosed extracted access notes for a reviewed %s', async (outcome) => {
+    const selected = visit(outcome === 'noop'
+      ? { scheduled_date: '2026-09-15', window_start: '14:00:00', window_end: '15:00:00' } : {});
+    const conn = makeConn({ lockedVisit: { ...selected, internal_notes: 'Current staff instruction' } });
+    const input = args(conn, mover(conn), [selected]);
+    input.v2 = { ...extraction, property: { access_notes: 'Unreviewed extracted instruction' } };
+    await expect(applyReviewedCallReschedule(input)).resolves.toMatchObject({ outcome });
+    expect(input.guard).toHaveBeenCalledTimes(1);
+    expect(conn.updates.filter(({ table }) => table === 'scheduled_services')).toEqual([]);
+    expect(JSON.stringify(conn.inserts)).not.toContain('Unreviewed extracted instruction');
+  });
+
+  test('passes an explicitly empty reviewed conflict set to the locked mover', async () => {
+    const conn = makeConn();
+    const rebooker = mover(conn);
+    await applyReviewedCallReschedule({ ...args(conn, rebooker), conflictSnapshot: [] });
+    expect(rebooker.reschedule.mock.calls[0][5]).toMatchObject({ expectConflictSnapshot: [] });
+  });
+
+  test('uses the canonical mover when no test injection is supplied', async () => {
+    const conn = makeConn();
+    canonicalMover.reschedule.mockImplementationOnce(async (...params) => {
+      await params[5].beforeMove(conn);
+      await params[5].moveGuard({ trx: conn });
+      return {};
+    });
+    await expect(applyReviewedCallReschedule(args(conn, null))).resolves.toMatchObject({ outcome: 'applied' });
+    expect(canonicalMover.reschedule).toHaveBeenCalledTimes(1);
+  });
+
+  test('does not invoke the mover for a confirmed dispatch-owned visit', async () => {
+    const protectedVisit = visit({ source_action: 'ai_call_pipeline_followup', status: 'confirmed' });
+    const conn = makeConn({ lockedVisit: protectedVisit });
+    const rebooker = mover(conn);
+
+    await expect(applyReviewedCallReschedule(args(conn, rebooker, [protectedVisit]))).resolves.toEqual({
+      outcome: 'skipped',
+      reason: 'dispatch_owned_workflow',
+    });
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    expect(conn.events).toEqual([]);
+  });
+
+  test.each([
+    ['agent commitment', { agent_committed_booking: true }, 'agent_committed_booking'],
+    ['confirmed time', { confirmed_start_at: '2026-09-15T14:00:00-04:00' }, 'confirmed_start_supersedes_proposal'],
+  ])('refuses a request-only proposal superseded by %s', (_label, scheduling, reason) => {
+    const v2 = { ...extraction, scheduling: { ...extraction.scheduling, ...scheduling } };
+    expect(planRescheduleFromCall({ v2, call, customer, candidates: [visit()], now: NOW,
+      humanOverride: { visitId: 'visit-reviewed' } })).toMatchObject({ action: 'skip', reason });
   });
 });
