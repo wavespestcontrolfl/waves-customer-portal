@@ -5,6 +5,38 @@ const kinds = (text) => tokens(text).map(({ kind }) => kind);
 const words = (text) => tokens(text).map(({ text }) => text);
 
 describe('bounded email reply pricing clause recognition', () => {
+  test.each(['—', '–', '‒', '―', '&mdash;', '&#8211;'])(
+    'preserves pricing units before punctuation dash %s', (dash) => {
+      expect(kinds(`$98 per visit${dash}plus tax`)).toEqual(['money', 'unit', 'sep', 'word', 'word']);
+      expect(kinds(`Billing is per visit${dash}plus tax`)).toContain('unit');
+      expect(kinds(`$98 per application${dash}plus tax`)).toContain('application');
+      expect(kinds(`$98/mo${dash}plus tax`)).toContain('period');
+      expect(kinds(`Price${dash}$98 per visit`)).toEqual(['word', 'sep', 'money', 'unit']);
+    },
+  );
+
+  test.each(['—', '–'])(
+    'preserves amount and duration ranges separated by %s', (dash) => {
+      expect(kinds(`$98${dash}120 per visit`)).toEqual(['money', 'unit']);
+      expect(kinds(`Each visit takes 30${dash}45 minutes`)).toEqual(['eachVisit', 'word', 'measurement']);
+    },
+  );
+
+  test('fails closed when lowercasing expands accepted copy beyond the lexer limit', () => {
+    const text = `${'İ'.repeat(2730)} $98 per visit`;
+    expect(Buffer.byteLength(text, 'utf8')).toBeLessThan(8192);
+    expect(Buffer.byteLength(text.toLowerCase(), 'utf8')).toBeGreaterThan(8192);
+    expect(recognize(text)).toEqual({ ok: false, reason: 'copy_size' });
+  });
+
+  test('retains trailing pricing evidence when lowercase expansion stays within bounds', () => {
+    const text = `${'İ'.repeat(2700)} $98 per visit`;
+    expect(recognize(text).ok).toBe(true);
+    expect(tokens(text).slice(-2)).toEqual([
+      { kind: 'money', text: '$98' }, { kind: 'unit', text: 'per visit' },
+    ]);
+  });
+
   test.each(['98¢ per visit', '$.98 per visit', 'USD .98 per visit'])(
     'keeps sub-dollar money ahead of a visit unit: %s', (text) => {
       expect(kinds(text)).toEqual(['money', 'unit']);

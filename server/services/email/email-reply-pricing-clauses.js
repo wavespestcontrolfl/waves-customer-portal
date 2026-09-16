@@ -1,4 +1,4 @@
-const { normalizeEmailReplyCopy } = require('./email-reply-copy-normalizer');
+const { normalizeEmailReplyCopy, COPY_LIMITS } = require('./email-reply-copy-normalizer');
 const { matchEmailReplyAmountAt } = require('./email-reply-amount-lexer');
 const { matchEmailReplyUnitAt } = require('./email-reply-unit-lexer');
 
@@ -37,6 +37,9 @@ function recognizeEmailReplyPricingClauses(text = '') {
   if (!normalized.ok) return { ok: false, reason: normalized.reason };
 
   const source = normalized.text.toLowerCase();
+  if (Buffer.byteLength(source, 'utf8') > COPY_LIMITS.bytes) {
+    return { ok: false, reason: 'copy_size' };
+  }
   const clauses = [];
   let clause = [];
   for (let at = 0; at < source.length;) {

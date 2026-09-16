@@ -6,6 +6,10 @@
 on failure. Success returns `{ ok: true, clauses }`; each clause is an array of
 `{ kind, text }` tokens. Sentence punctuation (`.`, `!`, `?`, `;`) ends a clause,
 while comma, colon, dash, and parentheses remain `sep` tokens.
+Normalization spaces punctuation dashes U+2012–U+2015 (including decoded entities)
+so they cannot become lexical hyphens that hide an adjacent unit or amount.
+ASCII and Unicode lexical hyphens still preserve joined words; numeric and
+duration ranges continue to accept spaced dashes.
 Whitespace is discarded. Unknown characters remain `barrier` tokens, so
 unmatched markup cannot silently join a claim.
 
@@ -62,6 +66,8 @@ Unknown words, including JavaScript object property names such as
 `constructor`, keep string token text.
 
 The same 8,192-byte, 512-token, eight-format-pass normalization limits apply.
+The token limit is checked after punctuation spacing, and the scanner checks
+the byte limit again after lowercasing, which can expand Unicode characters.
 This inactive helper has no runtime caller, database access, provider call, or
 send path. The finite vocabulary is deliberately narrower than a general
 English parser.
