@@ -780,7 +780,7 @@ router.post('/sms', async (req, res, next) => {
               // knows about a claim once this seam has returned it (Codex
               // #4331 P2). Cleanup failure is logged, not rethrown: the
               // caller's 503 already tells the operator to retry.
-              logger.warn(`[communications] inline review reservation write failed (requestId=${rr.id}): ${reserveErr.message}`);
+              logger.warn(`[communications] inline review reservation write failed (requestId=${rr.id} errCode=${reserveErr?.code || reserveErr?.name || "Error"})`);
               reservationId = null;
             }
             if (!reservationId) {
