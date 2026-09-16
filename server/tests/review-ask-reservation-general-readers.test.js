@@ -52,26 +52,34 @@ describe('isUnresolvedReviewAskReservation — the shared predicate', () => {
       // Past the reconciliation hold it SURFACES as the unresolved attempt it is.
       expect(isUnresolvedSendReservation({ status: 'sending', metadata: { [marker]: true }, created_at: stale })).toBe(false);
     }
-    // A review-ask reservation outlives the reply hold (25h < its own 72h
-    // bound) — still hidden here, unlike the reply markers above.
+    // A review-ask reservation is unconditional (any age) — still hidden
+    // here, unlike the reply markers above, which age out past their hold.
     expect(isUnresolvedSendReservation({ status: 'sending', metadata: { review_ask_reservation: true }, created_at: stale })).toBe(true);
   });
 
-  // Codex #4331 P1 (structural pass, finding 6): a review-ask reservation
-  // used to hide from every general reader UNCONDITIONALLY, so a
-  // never-resolved one (a crash before settlement, or a stamp-then-promote
-  // failure) hid a real customer interaction forever. It now ages out on
-  // its own 72h window — the same span its ask-spacing evidence covers —
-  // exactly like a reply reservation ages out of its 24h hold.
-  test('a review-ask reservation ages out of the hide past its own 72h window', () => {
-    const withinHold = new Date(Date.now() - 71 * 3600000);
-    const pastHold = new Date(Date.now() - 73 * 3600000);
-    expect(isUnresolvedSendReservation({ status: 'sending', metadata: { review_ask_reservation: true }, created_at: withinHold })).toBe(true);
-    expect(isUnresolvedSendReservation({ status: 'sending', metadata: { review_ask_reservation: true }, created_at: pastHold })).toBe(false);
-    // The narrow spacing-evidence predicate is unaffected by age — its
-    // callers (review-ask-history.js) already scope their own lookback
+  // Codex #4331 P1 (pre-push audit, REBUTTING the earlier structural-pass
+  // "finding 6"): that finding gave a review-ask reservation the same 72h
+  // age bound as a reply reservation, on the theory that a never-resolved
+  // placeholder shouldn't hide from general readers forever. Reverted — the
+  // two families are not the same risk. A reply reservation guards an
+  // AMBIGUOUS AUTOMATIC reply that may have actually reached the customer,
+  // so hiding it forever would bury a real sent message. A review-ask
+  // reservation is SYNTHETIC — never itself a delivered message — and these
+  // readers are not display-only (csr-coach.verifyFollowUps marks a
+  // follow-up VERIFIED off exactly this kind of read; ContextAggregator
+  // feeds composers a body with status stripped): an aged 'sending'
+  // placeholder from a crash before delivery must never present as
+  // delivery evidence for an ask that was never sent. It is resolved by the
+  // stranded-send reconciliation instead, or surfaced to an operator via
+  // that reconciliation's own stale-reservation count — never by aging out
+  // of this predicate.
+  test('a review-ask reservation stays hidden from general readers no matter how old — unlike a reply reservation', () => {
+    const veryOld = new Date(Date.now() - 365 * 24 * 3600000);
+    expect(isUnresolvedSendReservation({ status: 'sending', metadata: { review_ask_reservation: true }, created_at: veryOld })).toBe(true);
+    // The narrow spacing-evidence predicate is likewise unaffected by age —
+    // its callers (review-ask-history.js) already scope their own lookback
     // window rather than relying on this predicate to do it.
-    expect(isUnresolvedReviewAskReservation({ status: 'sending', metadata: { review_ask_reservation: true }, created_at: pastHold })).toBe(true);
+    expect(isUnresolvedReviewAskReservation({ status: 'sending', metadata: { review_ask_reservation: true }, created_at: veryOld })).toBe(true);
   });
 
   test('false for an ordinary sending row without the marker', () => {
@@ -96,9 +104,9 @@ describe('excludeUnresolvedSendReservations — SQL-level exclusion', () => {
     expect(sql).toContain("sms_log.metadata->>'manual_send_reservation'");
     expect(sql).toContain("sms_log.metadata->>'auto_send_reservation'");
     expect(sql).toContain("sms_log.created_at >= NOW() - INTERVAL '24 hours'");
-    // The review-ask arm carries its own (longer) age bound, applied only
-    // to that arm — a reply reservation must not inherit the 72h span.
-    expect(sql).toContain("sms_log.created_at >= NOW() - INTERVAL '72 hours'");
+    // The review-ask arm is UNCONDITIONAL (any age) — no interval clause on
+    // that arm at all; only the reply-marker arm carries an age bound.
+    expect(sql).not.toContain('72 hours');
   });
 
   test('qualifies an aliased/joined table when given', () => {
@@ -262,8 +270,9 @@ describe('customer-health computeEngagementScore — outbound-count signal exclu
   test('an all-unresolved-reservation history counts zero outbound touches', async () => {
     installDb({
       sms: [
-        // Inside the 72h hold — a stale-past-72h reservation is covered by
-        // its own "ages out of the hide" test below.
+        // Any age hides here (unconditional exclusion — see the
+        // "stays hidden ... no matter how old" test above); this row just
+        // happens to be recent.
         { customer_id: 'cust-eng-2', direction: 'outbound', status: 'sending', metadata: { review_ask_reservation: true }, created_at: new Date(Date.now() - 3600000) },
       ],
     });

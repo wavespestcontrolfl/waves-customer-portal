@@ -1,16 +1,21 @@
 'use strict';
 
 /**
- * reserveForRequest's age-bounded reuse (codex #4331 P1, pre-push audit on
- * the seam itself). A retry that finds an existing unresolved reservation
- * must not blindly reuse its (possibly stale) created_at: once a
- * reservation is older than its own hold window
- * (REVIEW_ASK_RESERVATION_HOLD_HOURS), reusing it as-is would compute a
- * retryAt already in the past for an uncertain outcome, read as
- * resolved-and-gone to every general reader's 72h hide, and — were some
- * future age-based cleanup ever added — could be reclaimed while this very
- * attempt still depends on it. The fix renews the SAME row in place
- * (created_at/updated_at reset to now) rather than reusing it unchanged or
+ * reserveForRequest's age-bounded REUSE-VS-RENEW decision (codex #4331 P1,
+ * pre-push audit on the seam itself).
+ *
+ * This is a SPACING-correctness fix, not a general-reader visibility one:
+ * general readers hide an unresolved review-ask reservation unconditionally
+ * regardless of age (see review-ask-reservation-general-readers.test.js — a
+ * separate, later pre-push audit REBUTTED giving review-ask reservations a
+ * 72h age bound mirroring the reply reservation's 24h one). What DOES still
+ * need an age bound here is reuse: a retry that finds an existing
+ * unresolved reservation must not blindly reuse its (possibly long-stale)
+ * created_at — an uncertain outcome would compute a retryAt already in the
+ * past, and lastManualAskAt/_askSpacingHold would anchor the next hold on a
+ * timestamp from an attempt that ended long ago. The fix renews the SAME
+ * row in place (created_at/updated_at reset to now) once it is older than
+ * REVIEW_ASK_RESERVATION_HOLD_HOURS, rather than reusing it unchanged or
  * replacing it with a second row.
  */
 
@@ -20,7 +25,6 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const db = require('../models/db');
 const {
   reserveForRequest,
-  isUnresolvedSendReservation,
   REVIEW_ASK_RESERVATION_HOLD_HOURS,
 } = require('../services/messaging/review-ask-reservation');
 
@@ -81,15 +85,16 @@ describe('reserveForRequest — age-bounded reuse', () => {
     expect(rows[0].to_phone).toBe('+19410000000');
   });
 
-  test('(b) a reservation 73 hours old is renewed to now on the next attempt, and no longer matches the hide/sweep filter', async () => {
+  test('(b) a reservation 73 hours old is renewed to now on the next attempt', async () => {
     const staleAt = new Date(Date.now() - 73 * 3600000);
     expect(Date.now() - staleAt.getTime()).toBeGreaterThan(REVIEW_ASK_RESERVATION_HOLD_HOURS * 3600000);
     const rows = installSmsLog([
       { id: 'res-stale', status: 'sending', created_at: staleAt, updated_at: staleAt, metadata: { review_ask_reservation: true, review_request_id: 'rr-1' }, message_body: 'old body', to_phone: '+19410000000' },
     ]);
-    // Before renewal, this row already reads as resolved-and-gone to every
-    // general reader (the exact "sweep ignores it mid-delivery" risk).
-    expect(isUnresolvedSendReservation(rows[0])).toBe(false);
+    // Note: general-reader visibility (isUnresolvedSendReservation) is
+    // UNCONDITIONAL for a review-ask marker regardless of age (see
+    // review-ask-reservation-general-readers.test.js) — this test is about
+    // spacing correctness (retryAt / lastManualAskAt), not hiding.
 
     const result = await reserveForRequest({ request, to: '+19410000009', body: 'new body', fromPhone: '+19415550000' });
 
@@ -101,9 +106,6 @@ describe('reserveForRequest — age-bounded reuse', () => {
     expect(rows[0].updated_at.getTime()).toEqual(rows[0].created_at.getTime());
     expect(rows[0].message_body).toBe('new body');
     expect(rows[0].to_phone).toBe('+19410000009');
-    // Renewed, it is live in-flight evidence again — hidden from general
-    // readers exactly as a brand-new reservation would be.
-    expect(isUnresolvedSendReservation(rows[0])).toBe(true);
   });
 
   test('a second renewal attempt on an already-fresh (just-renewed) row reuses it unchanged', async () => {
@@ -124,5 +126,44 @@ describe('reserveForRequest — age-bounded reuse', () => {
     expect(second.renewed).not.toBe(true);
     expect(rows[0].created_at).toEqual(renewedAt);
     expect(rows).toHaveLength(1);
+  });
+});
+
+describe('countStaleUnresolved — operator-facing visibility (pre-push audit: "the smallest honest exposure")', () => {
+  test('counts only unresolved review-ask reservations older than the spacing window', async () => {
+    const { countStaleUnresolved } = require('../services/messaging/review-ask-reservation');
+    const stale = new Date(Date.now() - 73 * 3600000);
+    const fresh = new Date(Date.now() - 3600000);
+    const rows = [
+      { id: 'stale-1', status: 'sending', created_at: stale, metadata: { review_ask_reservation: true, review_request_id: 'rr-a' } },
+      { id: 'stale-2', status: 'sending', created_at: stale, metadata: { review_ask_reservation: true, review_request_id: 'rr-b' } },
+      { id: 'fresh-1', status: 'sending', created_at: fresh, metadata: { review_ask_reservation: true, review_request_id: 'rr-c' } },
+      // Resolved — not counted regardless of age.
+      { id: 'resolved-1', status: 'sent', created_at: stale, metadata: { review_ask_reservation: true, review_request_id: 'rr-d' } },
+    ];
+    db.mockImplementation((table) => {
+      if (table !== 'sms_log') throw new Error(`unexpected table ${table}`);
+      let equals = {};
+      let beforeCutoff = null;
+      const q = {
+        where(cond, op, val) {
+          if (cond && typeof cond === 'object') { equals = { ...equals, ...cond }; return q; }
+          if (op === '<') { beforeCutoff = val; return q; }
+          return q;
+        },
+        whereRaw() { return q; },
+        count() {
+          const matched = rows.filter((r) => Object.entries(equals).every(([k, v]) => r[k] === v))
+            .filter((r) => r.status === 'sending')
+            .filter((r) => !beforeCutoff || new Date(r.created_at).getTime() < beforeCutoff.getTime());
+          return { first: async () => ({ c: String(matched.length) }) };
+        },
+      };
+      return q;
+    });
+
+    const count = await countStaleUnresolved();
+
+    expect(count).toBe(2);
   });
 });
