@@ -1298,3 +1298,29 @@ test.each([
 ])('adjectival free prices bind committed services and customer benefits: %s', (text, status) => {
   expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
 });
+
+
+test.each([
+  ['You will not pay for your next visit report.', 'pass'],
+  ['You will not be charged for your next visit summary.', 'pass'],
+  ["You won't pay for your return treatment estimate.", 'pass'],
+  ['You will pay nothing for your next visit report.', 'pass'],
+  ['You will not have to pay for your next visit summary.', 'pass'],
+  ["You don't owe anything for your next visit report.", 'pass'],
+  ['There is no charge for your next visit estimate.', 'pass'],
+  ["We won't charge you for your next visit summary.", 'pass'],
+  ['We will waive the fee for your next visit report.', 'pass'],
+  ['We will cover your next visit report.', 'pass'],
+  ['We will cover your next treatment summary.', 'pass'],
+  ['We will cover the cost of your next visit estimate.', 'pass'],
+  ['You will not pay for your next visit.', 'fail'],
+  ['You will not be charged for your next visit.', 'fail'],
+  ["We won't charge you for your next visit.", 'fail'],
+  ['We will waive the fee for your next visit.', 'fail'],
+  ['We will cover your next visit.', 'fail'],
+  ['We will cover the cost of your next visit.', 'fail'],
+  ['You will not pay for your next visit report, but your next visit is free.', 'fail'],
+  ['We will cover your next visit summary, but we will cover your next visit.', 'fail'],
+])('payment and coverage targets exclude compound report artifacts: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
