@@ -1,6 +1,30 @@
 const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
 
 test.each([
+  ["We don't charge you for your next visit.", 'fail'],
+  ['We do not charge you for your next visit.', 'fail'],
+  ["We don’t bill you anything for the return visit.", 'fail'],
+  ['The office does not invoice you for your next visit.', 'fail'],
+  ["The office doesn't charge you for your next visit.", 'fail'],
+  ["We don't invoice you for your next visit.", 'fail'],
+  ["We don't charge you today; the next visit is Tuesday.", 'pass'],
+  ["We don't charge you a cancellation fee for your next visit.", 'pass'],
+  ["We don't charge you for the report during your next visit.", 'pass'],
+  ['If the office approves, we do not charge you for your next visit.', 'pass'],
+  ["We don't charge you for your next visit if the office approves.", 'pass'],
+  ["The report needs approval, but we don't charge you for your next visit.", 'fail'],
+  ["We don't charge you for your next visit until next month.", 'pass'],
+  ['We do not bill you for the return visit before it begins.', 'pass'],
+  ["We don't charge you for your next visit, but the report waits until next month.", 'fail'],
+  ["I cannot confirm that we don't charge you for your next visit.", 'pass'],
+  ['It is false that we do not charge you for your next visit.', 'pass'],
+  ["I cannot confirm the date, but we don't charge you for your next visit.", 'fail'],
+  ["It is false that we don't charge you for the report, but we don't charge you for your next visit.", 'fail'],
+])('present-tense billing assurances retain target and qualifier scope: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   ["You don't need to pay for your next visit.", 'fail'],
   ["You won't need to pay for your next visit.", 'fail'],
   ['You do not need to pay for the return treatment.', 'fail'],
