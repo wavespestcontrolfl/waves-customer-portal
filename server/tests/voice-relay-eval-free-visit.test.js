@@ -1,6 +1,58 @@
 const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
 
 test.each([
+  ["You won't be charged for your next visit and the report if the office approves.", 'pass'],
+  ['You will pay nothing for this visit and the report if the office approves.', 'pass'],
+  ['You will not have to pay for your next visit and the report if the office approves.', 'pass'],
+  ["You don't owe anything for your next visit and the report if the office approves.", 'pass'],
+  ["We don't charge you for the next visit and the report if the office approves.", 'pass'],
+  ['No charge for the next visit and the report if the office approves.', 'pass'],
+  ['We will waive the fee for your next visit and the report if the office approves.', 'pass'],
+  ['We will cover your next visit and the report if the office approves.', 'pass'],
+  ["You won't be charged for your next visit and the report.", 'fail'],
+  ["You won't be charged for your next visit and the report if that helps.", 'fail'],
+  ["You won't be charged for your next visit and the report if anything changes please call us.", 'fail'],
+  ["You won't be charged for your next visit and the report is ready if the office approves.", 'fail'],
+  ["You won't be charged for your next visit and you get a report if the office approves.", 'fail'],
+  ["You won't be charged for your next visit and the report if the office approves, but the return visit is free.", 'fail'],
+  ['Your next visit is free and the report if the office approves.', 'fail'],
+])('coordinated objects gate payment claims only when the condition governs both: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['Your next visit is free, if anything changes please call us.', 'fail'],
+  ['Your next visit is free if anything happens text us.', 'fail'],
+  ['Your next visit is free, if there are questions please email us.', 'fail'],
+  ['Your next visit is free if there is a problem, call us.', 'fail'],
+  ['If anything changes, please call us, your next visit is free.', 'fail'],
+  ['If there are questions, please contact us, your next visit is free.', 'fail'],
+  ['Your next visit is free if anything changes.', 'pass'],
+  ['Your next visit is free if there is approval.', 'pass'],
+  ['Your next visit is free if anything changes and you call us.', 'pass'],
+  ['Your next visit is free if there are questions and you email us.', 'pass'],
+  ['Your next visit is free if the office approves.', 'pass'],
+])('independent non-you conditional instructions do not gate price: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['Your next visit is now on us.', 'fail'],
+  ['Your next visit is still on the house.', 'fail'],
+  ["Your next visit's already on us.", 'fail'],
+  ['Your next visit is now no cost.', 'fail'],
+  ['Your next visit is still at no charge.', 'fail'],
+  ['Your next visit is now on us if the office approves.', 'pass'],
+  ['If the office approves, your next visit is still on the house.', 'pass'],
+  ['I cannot confirm that your next visit is now on us.', 'pass'],
+  ["Your next visit is now on us, but that's false.", 'pass'],
+  ['The report is now on us; your next visit is Tuesday.', 'pass'],
+  ['Your next visit is now free to cancel.', 'pass'],
+])('modified price complements use the full free-price vocabulary: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   ['Your next visit is free of cancellation fees and we will bill you normally.', 'pass'],
   ['Your next visit is now free of cancellation fees and we will bill you normally.', 'pass'],
   ['Your next visit is free of cancellation fees and the office will bill you normally.', 'pass'],
