@@ -3,7 +3,7 @@ const Joi = require('joi');
 const { normalizeContactRole } = require('../constants/contact-roles');
 const router = express.Router();
 const db = require('../models/db');
-const { addETDays } = require('../utils/datetime-et');
+const { technicianCurrentVisitFilter, technicianServicesCustomer } = require('../services/technician-visit-scope');
 const LeadScorer = require('../services/lead-scorer');
 const PipelineManager = require('../services/pipeline-manager');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
@@ -44,31 +44,8 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // to that tech. Admin requests are unscoped. Endpoints with no tech surface
 // at all (comms, timeline, credits, pipeline, CRM writes) are requireAdmin
 // outright.
-// Assignment currency — ONE predicate for every technician access path
-// (per-customer proxy AND the directory subquery): dead statuses never
-// authorize, and everything else (pending/confirmed/en_route/on_site/
-// completed) must sit inside the ET date window. Completed visits stay
-// accessible for post-visit paperwork; a stale never-actioned pending row
-// or a years-old completion grants nothing.
-const TECH_ACCESS_DEAD_STATUSES = ['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show'];
-const TECH_ACCESS_WINDOW_DAYS = 7;
-const techAccessCutoff = () => etDateString(addETDays(new Date(), -TECH_ACCESS_WINDOW_DAYS));
-
-function currentAssignmentFilter(q, technicianId) {
-  return q
-    .where('scheduled_services.technician_id', technicianId)
-    .whereNotIn('scheduled_services.status', TECH_ACCESS_DEAD_STATUSES)
-    .where('scheduled_services.scheduled_date', '>=', techAccessCutoff());
-}
-
-async function technicianServicesCustomer(req, customerId) {
-  if (req.techRole !== 'technician') return true;
-  const assigned = await currentAssignmentFilter(
-    db('scheduled_services').where({ customer_id: customerId }),
-    req.technicianId,
-  ).first('id');
-  return !!assigned;
-}
+// Assignment currency is shared with schedule, protocols and turf profiles
+// through technician-visit-scope; directory and detail must use the same rule.
 
 // Fields stripped from list rows for technician tokens. The field flows
 // that search customers (estimate builder, project-report picker) render
@@ -144,6 +121,103 @@ const TECH_360_STRIPPED_CUSTOMER_FIELDS = [
   'servicePausedAt', 'servicePausedOn', 'servicePauseReason',
 ];
 
+// Technician Customer 360 is a field-context view, not a raw database-row
+// export. Keep the service-history fields its three live consumers render and
+// exclude report credentials plus the job-cost columns on service_records.
+const TECH_360_SERVICE_FIELDS = [
+  'id', 'customer_id', 'technician_id', 'scheduled_service_id', 'service_id',
+  'service_date', 'service_type', 'service_line', 'status',
+  'technician_notes', 'notes', 'products_used', 'areas_treated', 'technician_name',
+  'soil_temp', 'thatch_measurement', 'soil_ph', 'soil_moisture', 'areas_serviced',
+  'customer_interaction', 'is_callback', 'completion_source',
+  'protocol_defaults_used', 'protocol_name', 'tech_attestation_text',
+  'customer_interaction_source', 'service_tier', 'service_tier_source',
+  'visit_number', 'started_at', 'arrived_at', 'actual_start_time', 'check_in_time',
+  'ended_at', 'completed_at', 'actual_end_time', 'check_out_time',
+  'created_at', 'updated_at',
+];
+
+// Customer 360 appointment consumers need identity, timing, assignment and
+// recurrence context. Pricing, payer/prepay/discount state, estimate lineage,
+// and prep-page credentials remain office-only and are deliberately absent.
+const TECH_360_SCHEDULED_FIELDS = [
+  'id', 'customer_id', 'technician_id', 'property_id', 'service_id', 'visit_id',
+  'scheduled_date', 'window_start', 'window_end', 'service_type',
+  'service_key_snapshot', 'service_category_snapshot', 'status', 'notes',
+  'internal_notes', 'customer_confirmed', 'confirmed_at', 'field_confirmed_at',
+  'technician_name', 'tech_name', 'is_recurring', 'recurring_parent_id',
+  'recurring_pattern', 'recurring_ongoing', 'recurring_nth',
+  'recurring_weekday', 'recurring_interval_days', 'skip_weekends',
+  'weekend_shift', 'zone', 'route_order', 'estimated_duration_minutes',
+  'service_address_line1', 'service_address_line2', 'service_address_city',
+  'service_address_state', 'service_address_zip', 'lat', 'lng',
+  'actual_start_time', 'actual_end_time', 'completed_at', 'created_at', 'updated_at',
+];
+
+function pickFields(source, fields) {
+  if (!source || typeof source !== 'object') return {};
+  return Object.fromEntries(fields.filter((field) => Object.prototype.hasOwnProperty.call(source, field))
+    .map((field) => [field, source[field]]));
+}
+
+function techSafeAuditRecord(record) {
+  if (!record || typeof record !== 'object') return null;
+  const safe = pickFields(record, [
+    'advisory', 'reasonCode', 'note', 'approvedByRole', 'approvedAt',
+    'recordedByRole', 'recordedAt', 'notRecorded', 'missing',
+    'cleanoutCompleted', 'cleanoutMethod', 'lastProductInTank', 'equipmentName',
+  ]);
+  if (Array.isArray(record.blocks)) {
+    safe.blocks = record.blocks.map((block) => pickFields(block, [
+      'code', 'message', 'source', 'productId', 'productName',
+    ]));
+  }
+  if (Array.isArray(record.warnings)) {
+    safe.warnings = record.warnings.map((warning) => pickFields(warning, ['code', 'message']));
+  }
+  return safe;
+}
+
+function techSafeInventoryDeduction(item) {
+  return pickFields(item, [
+    'productId', 'productName', 'amount', 'amountUnit', 'status', 'warning',
+    'deductedAmount', 'inventoryUnit',
+    // Older stored snapshots use snake_case; the live renderer supports both.
+    'product_id', 'product_name', 'amount_unit', 'deducted_amount', 'inventory_unit',
+  ]);
+}
+
+function techSafeStructuredNotes(value) {
+  let notes = value;
+  if (typeof notes === 'string') {
+    try { notes = JSON.parse(notes); } catch { return {}; }
+  }
+  if (!notes || typeof notes !== 'object' || Array.isArray(notes)) return {};
+  const safe = pickFields(notes, ['projectCompletion', 'projectType', 'portalAttached']);
+  for (const field of [
+    'waveguardManagerApproval', 'waveguardBlackoutApproval',
+    'waveguardNLimitApproval', 'waveguardInventoryAdvisory', 'waveguardTankCleanout',
+  ]) {
+    if (notes[field]) safe[field] = techSafeAuditRecord(notes[field]);
+  }
+  if (Array.isArray(notes.inventoryDeductions)) {
+    safe.inventoryDeductions = notes.inventoryDeductions.map(techSafeInventoryDeduction);
+  }
+  return safe;
+}
+
+function techSafeServiceRecord(record) {
+  const safe = pickFields(record, TECH_360_SERVICE_FIELDS);
+  if (record && Object.prototype.hasOwnProperty.call(record, 'structured_notes')) {
+    safe.structured_notes = techSafeStructuredNotes(record.structured_notes);
+  }
+  return safe;
+}
+
+function techSafeScheduledService(service) {
+  return pickFields(service, TECH_360_SCHEDULED_FIELDS);
+}
+
 // Appointment history for the customer-detail payload (`scheduled`): past +
 // future, all statuses, capped to the rows NEAREST ET-today (ties: newest
 // first). Consumers (ScheduleCustomerSidebar, MobileCustomerDetailSheet,
@@ -178,6 +252,9 @@ function techSafe360Payload(payload) {
   for (const key of TECH_360_STRIPPED_KEYS) delete out[key];
   out.customer = { ...payload.customer };
   for (const field of TECH_360_STRIPPED_CUSTOMER_FIELDS) delete out.customer[field];
+  out.services = (payload.services || []).map(techSafeServiceRecord);
+  out.scheduled = (payload.scheduled || []).map(techSafeScheduledService);
+  out.upcomingScheduled = (payload.upcomingScheduled || []).map(techSafeScheduledService);
   return out;
 }
 
@@ -2316,9 +2393,9 @@ router.get('/', async (req, res, next) => {
     const isTechRequest = req.techRole === 'technician';
     const scopeTechAssigned = (q) => {
       if (isTechRequest) {
-        q.whereIn('customers.id', currentAssignmentFilter(
+        q.whereIn('customers.id', technicianCurrentVisitFilter(
+          req,
           db('scheduled_services').select('customer_id'),
-          req.technicianId,
         ));
       }
       return q;
@@ -2976,7 +3053,7 @@ router.get('/:id/latest-scheduled-service', async (req, res, next) => {
       // TECH'S OWN latest visit — without this, an office-scheduled
       // follow-up assigned to another tech leaks into the project modal.
       .modify((q) => {
-        if (req.techRole === 'technician') currentAssignmentFilter(q, req.technicianId);
+        technicianCurrentVisitFilter(req, q);
       })
       .orderBy('scheduled_date', 'desc')
       .orderBy('created_at', 'desc')
@@ -4067,7 +4144,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
               .syncScalarWriteToLedger(trx, req.params.id, updates.monthly_rate, { source: 'admin_edit' });
           }
           if (addressChanged) {
-            await require('../services/customer-properties').syncPrimaryAddress(lockedAfter, trx);
+            await require('../services/customer-properties').syncPrimaryAddress(lockedAfter, trx, {
+              // A line-1 edit also rewrites line 2 from the normalized address:
+              // propagate its null on a street move instead of retaining a
+              // stale unit from the former primary-property row.
+              explicitLine2: updates.address_line2 !== undefined,
+            });
             // Open leads/estimates snapshot the address at creation and never
             // re-read customers.* — sync the copies that still match the old
             // address (matching rules in the fan-out service header).
@@ -4217,15 +4299,14 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       }
     }
 
-    // If address changed, re-geocode (clear lat/lng first so ensureCustomerGeocoded refreshes)
+    // Address normalization deliberately rewrites line 1 for a line-2 edit;
+    // retain the existing presence-triggered clear/re-geocode self-heal.
     const addressChanged = ['address_line1', 'city', 'state', 'zip'].some(f => updates[f] !== undefined);
     if (addressChanged) {
-      // lat/lng were already cleared inside the update transaction (gh-r46).
-      // Re-geocode the customer, then mirror the fresh coords onto the primary
-      // property — syncPrimaryAddress cleared them on the address edit, so without
-      // this the property row would stay permanently null after every address edit.
-      void require('../services/geocoder').ensureCustomerGeocoded(req.params.id)
-        .then((coords) => coords && require('../services/customer-properties').syncPrimaryCoordsFromCustomer(req.params.id))
+      // The guarded helper compares the full address snapshot before writing
+      // and mirrors customer/property coordinates in one transaction, so a
+      // slow response for an older edit cannot overwrite a newer address.
+      void require('../services/geocoder').regeocodeCustomerAddressGuarded(req.params.id)
         .catch(() => {});
     }
 
@@ -5697,7 +5778,6 @@ router._private = {
   SCHEDULED_HISTORY_LIMIT,
   customerScheduledHistoryQuery,
   customerScheduledHistory,
-  technicianServicesCustomer,
   techSafeListRow,
   techSafeListFilters,
   techSafeSort,
@@ -5705,7 +5785,6 @@ router._private = {
   TECH_LIST_STRIPPED_FIELDS,
   TECH_360_STRIPPED_KEYS,
   TECH_360_STRIPPED_CUSTOMER_FIELDS,
-  TECH_ACCESS_DEAD_STATUSES,
   adminMembershipDailyIdempotencyKey,
   adminMembershipStartIdempotencyKey,
   adminNotificationPrefsDbUpdates,
