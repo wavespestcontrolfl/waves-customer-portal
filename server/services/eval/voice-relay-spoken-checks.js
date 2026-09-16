@@ -1911,12 +1911,18 @@ function reportSharedLocationContinuation(text, clauseEnd, location, subject) {
   };
 }
 
+function* reportContentMatches(text, regex) {
+  for (const match of text.matchAll(regex)) {
+    if (match[0]) yield match;
+  }
+}
+
 /** value: { subject: "<regex>", location: "<regex>" } */
 function report_readback_confirms(value, record, { spoken }) {
   const subjectRe = new RegExp(value.subject, 'gi');
   const locationRe = new RegExp(value.location, 'gi');
   for (const text of spoken) {
-    for (const m of text.matchAll(subjectRe)) {
+    for (const m of reportContentMatches(text, subjectRe)) {
       // Preserve the sentence's question mark before clauseOf removes it.
       // A question about a finding does not confirm that finding.
       const [clauseStart, clauseEnd] = reportClauseBounds(text, m.index);
@@ -1932,7 +1938,7 @@ function report_readback_confirms(value, record, { spoken }) {
         || /(?:,\s*|\s+)(?:(?:is|was|has|had)\s+(?:that|this|it)(?:\s+(?:right|correct|true))?|(?:did|do)\s+(?:we|they)|(?:are|were)\s+(?:you|we|they)\s+(?:sure|certain)(?:\s+(?:about|of)\s+(?:it|this|that))?)\s*$/i
           .test(text.slice(clauseStart, clauseEnd));
       const independentFollowupQuestion = FOLLOWUP_QUESTION_RE.test(text.slice(m.index + m[0].length, clauseEnd));
-      const firstLocation = new RegExp(value.location, 'i').exec(text.slice(clauseStart, clauseEnd));
+      const firstLocation = reportContentMatches(text.slice(clauseStart, clauseEnd), locationRe).next().value;
       const locationEnd = firstLocation ? clauseStart + firstLocation.index + firstLocation[0].length : 0;
       // A scenario may match only "exterior" and leave the location's noun
       // before the comma. It still belongs to the finding, not the question.
@@ -1962,7 +1968,7 @@ function report_readback_confirms(value, record, { spoken }) {
       const affirmativeStart = clause.length - affirmativeClause.length;
       const affirmed = affirmativeClause.split(/\b(?:rather than|instead of)\b|,\s*\bnot\b/i)[0];
       const subjectAt = m.index - clauseStart - assertion.start - affirmativeStart;
-      for (const locationMatch of affirmed.matchAll(locationRe)) {
+      for (const locationMatch of reportContentMatches(affirmed, locationRe)) {
         const locationAt = locationMatch.index;
         const orTail = text.slice(clauseEnd);
         const alternativeLocation = reportHasAlternativeLocation(affirmed, locationAt, orTail);
@@ -2198,6 +2204,21 @@ const compiles = (source, requireContent = false) => {
   }
 };
 
+function reportPatternMayConsumeText(source) {
+  // These tokens can assert a position but cannot name a product or place.
+  // Keep optional consuming alternatives valid; runtime skips their empty hits.
+  let remaining = source;
+  let before;
+  do {
+    before = remaining;
+    remaining = remaining
+      .replace(/\(\?(?:[=!]|<[=!])(?:\\.|[^()])*\)/g, '')
+      .replace(/\\[bBAZzG]|\^|\$/g, '')
+      .replace(/\(\?:(?:\|)*\)|\((?:\|)*\)/g, '');
+  } while (remaining !== before);
+  return !/^\|*$/.test(remaining);
+}
+
 const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
   no_free_visit_promise: () => (v) => (v === true ? null : 'value must be true'),
   no_price_disclosure: () => (v) => (v === true || (isPlainObject(v) && Object.keys(v).length === 1 && (v.allow === 'returned' || (Array.isArray(v.allow) && v.allow.length && v.allow.every((n) => Number.isFinite(Number(n)))))) ? null : 'value must be true, { allow: [amounts] } or { allow: "returned" }'),
@@ -2214,7 +2235,9 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
   no_third_party_disclosure: () => (v) => (v === true ? null : 'value must be true'),
   report_readback_confirms: () => (v) => (isPlainObject(v) && Object.keys(v).length === 2
     && typeof v.subject === 'string' && v.subject.trim() && compiles(v.subject)
+    && reportPatternMayConsumeText(v.subject)
     && typeof v.location === 'string' && v.location.trim() && compiles(v.location)
+    && reportPatternMayConsumeText(v.location)
     ? null : 'value must be { subject: "<regex>", location: "<regex>" }'),
   only_language: () => (v) => (v === 'en' || v === 'es' ? null : 'value must be en or es'),
   capture_lead_input_asserts: () => (v) => (isPlainObject(v) && Object.keys(v).length

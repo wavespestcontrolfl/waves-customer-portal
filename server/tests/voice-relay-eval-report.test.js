@@ -642,6 +642,22 @@ test('zero-width subjects finish without confirming an absent location', () => {
   expect(JSON.parse(output)).toEqual(['fail', 'fail']);
 });
 
+test.each([
+  [{ subject: '(?:)', location: 'exterior perimeter' }, 'Around the exterior perimeter.', 'fail'],
+  [{ subject: '\\b', location: 'exterior perimeter' }, 'Around the exterior perimeter.', 'fail'],
+  [{ subject: 'Talstar P', location: '(?:)' }, 'Talstar P was applied to nowhere.', 'fail'],
+  [{ subject: 'Talstar P', location: '\\b' }, 'Talstar P was applied to nowhere.', 'fail'],
+  [{ subject: '(?=Talstar P)', location: 'exterior perimeter' }, 'Talstar P was applied to the exterior perimeter.', 'fail'],
+  [{ subject: '(?:\\b|^)', location: 'exterior perimeter' }, 'Around the exterior perimeter.', 'fail'],
+  [{ subject: 'Talstar P', location: '(?=exterior perimeter)' }, 'Talstar P was applied to the exterior perimeter.', 'fail'],
+  [{ subject: '(?:Talstar P)?', location: 'exterior perimeter' }, 'Around the exterior perimeter.', 'fail'],
+  [{ subject: '(?:Talstar P)?', location: 'exterior perimeter' }, 'Talstar P was applied to the exterior perimeter.', 'pass'],
+  [{ subject: 'Talstar P', location: '(?:exterior perimeter)?' }, 'Talstar P was applied to nowhere.', 'fail'],
+  [{ subject: 'Talstar P', location: '(?:exterior perimeter)?' }, 'Talstar P was applied to the exterior perimeter.', 'pass'],
+])('report findings require nonempty subject and location evidence: %j / %s', (finding, spoken, status) => {
+  expect(checks.report_readback_confirms(finding, {}, { spoken: [spoken] })[0]).toBe(status);
+});
+
 // Scenario location expressions can match the first noun in a full location.
 test.each([
   ['Talstar P is on the exterior perimeter, and bait is along the foundation.', 'pass'],
@@ -764,6 +780,15 @@ test.each([
 test.each([
   [report, true],
   [{ subject: 'Talstar P', location: '(?:exterior|perimeter)' }, true],
+  [{ subject: '(?:Talstar P)?', location: 'exterior perimeter' }, true],
+  [{ subject: 'Talstar P', location: '(?:exterior perimeter)?' }, true],
+  [{ subject: '(?:)', location: 'exterior perimeter' }, false],
+  [{ subject: '\\b', location: 'exterior perimeter' }, false],
+  [{ subject: '(?=Talstar P)', location: 'exterior perimeter' }, false],
+  [{ subject: '(?:\\b|^)', location: 'exterior perimeter' }, false],
+  [{ subject: 'Talstar P', location: '(?:)' }, false],
+  [{ subject: 'Talstar P', location: '\\b' }, false],
+  [{ subject: 'Talstar P', location: '(?=exterior perimeter)' }, false],
   [null, false],
   [{ subject: 'Talstar P' }, false],
   [{ subject: '', location: 'exterior' }, false],
