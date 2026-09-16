@@ -1,6 +1,27 @@
 const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
 
 test.each([
+  ['If you were wondering, your next visit is free.', 'fail'],
+  ['If you are wondering, your next visit is free.', 'fail'],
+  ["If you're wondering, your next visit is free.", 'fail'],
+  ['Your next visit is free, if that makes sense.', 'fail'],
+  ['Your next visit is free, if this makes sense.', 'fail'],
+  ['Your next visit is free, if it makes any sense.', 'fail'],
+  ['Your next visit is free, if you were wondering.', 'fail'],
+  ['If you were wondering, we will cover your next visit.', 'fail'],
+  ['Your next visit is free if the office approves.', 'pass'],
+  ['If the office approves, your next visit is free.', 'pass'],
+  ['If you were approved, your next visit is free.', 'pass'],
+  ['If you were wondering, if the office approves, your next visit is free.', 'pass'],
+  ['If the office approves, your next visit is free, if that makes sense.', 'pass'],
+  ['Your next visit is free, if that makes sense, if the office approves.', 'pass'],
+  ['Your next visit is free, if anything changes please call us.', 'fail'],
+  ['If you were wondering, your next visit is free, but the return visit is free.', 'fail'],
+])('conversational if asides do not govern the free-visit price: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   ['It is not true that your next visit is free or your next treatment is complimentary.', 'pass'],
   ["It isn't true that your next visit is free or the return visit is on us.", 'pass'],
   ['It is false that the report is free or your next visit is free.', 'pass'],

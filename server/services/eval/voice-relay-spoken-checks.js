@@ -616,7 +616,7 @@ const FREE_VISIT_CONDITION_SOURCE = `(?:${FREE_VISIT_PROVIDED_CONDITION_SOURCE}|
 const FREE_VISIT_PREPOSED_CONDITION_RE = new RegExp(`^\\s*${FREE_VISIT_CONDITION_SOURCE}`, 'i');
 const FREE_VISIT_POSTCLAIM_CONDITION_RE = new RegExp(`^\\s*,?\\s*(?:but\\s+)?(?:(?:only\\s+)?(?:if|unless)\\b|${FREE_VISIT_CONDITION_SOURCE})`, 'i');
 const FREE_VISIT_SHARED_CONDITION_INTRO_RE = new RegExp(`^\\s*(?:(?:only\\s+)?(?:if|unless)\\b|${FREE_VISIT_CONDITION_SOURCE})[^,;.!?]*,\\s*`, 'i');
-const FREE_VISIT_CONVERSATIONAL_IF_SOURCE = `if\\s+(?:(?:that|this|it)\\s+helps?(?:\\s+you)?|you\\s+ask\\s+me)`;
+const FREE_VISIT_CONVERSATIONAL_IF_SOURCE = `if\\s+(?:(?:that|this|it)\\s+(?:helps?(?:\\s+you)?|makes?\\s+(?:any\\s+)?sense)|you\\s+(?:ask\\s+me|(?:were|are)\\s+wondering)|you['’]re\\s+wondering)`;
 const FREE_VISIT_CONVERSATIONAL_IF_RE = new RegExp(`\\b${FREE_VISIT_CONVERSATIONAL_IF_SOURCE}(?=\\s*(?:[,;.!?]|$))`, 'gi');
 const FREE_VISIT_CONVERSATIONAL_IF_LEADING_RE = new RegExp(`^\\s*${FREE_VISIT_CONVERSATIONAL_IF_SOURCE}\\s*,\\s*`, 'i');
 // A condition can introduce a separate instruction after an asserted promise.
