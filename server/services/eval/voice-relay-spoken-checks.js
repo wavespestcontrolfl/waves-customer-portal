@@ -533,6 +533,8 @@ function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)
 // A denial of the proposition itself does not assert the proposition.
 // Scope it to the matched claim; denial of another claim cannot exempt it.
 const EXPLICIT_PROPOSITION_DENIAL_RE = /\b(?:it|this|that)\s+(?:(?:is|was)\s+(?:false|not\s+true|untrue|not\s+the\s+case)|(?:isn['’]t|wasn['’]t)\s+(?:true|the\s+case))\s+that(?:\s+there\s+(?:is|are|was|were))?\s*$/i;
+const CLAIM_FUTURE_ACTOR_AUXILIARY_SOURCE = `(?:will|shall|(?:am|is|are)\\s+going\\s+to|going\\s+to)`;
+const EXPLICIT_DENIAL_ACTOR_RE = new RegExp(`\\b(?:(?:i|we|you|he|she|they)(?:['’](?:ll|m|re|s))?|(?:(?:the|our|an?)\\s+(?:[\\w'\\u2019-]+\\s+){0,3})?(?:technician|tech|crew|team))(?:\\s+(?:has|have|had|already|just|actually|${CLAIM_FUTURE_ACTOR_AUXILIARY_SOURCE}))*\\s*$`, 'i');
 function propositionIsExplicitlyDenied(text, at, findingVerb) {
   const [start, end] = clauseBounds(text, at);
   const prefix = text.slice(start, at);
@@ -540,7 +542,7 @@ function propositionIsExplicitlyDenied(text, at, findingVerb) {
   if (/\b(?:the|a|this|that)\s+claim\s+that\b[^,;.!?]*$/i.test(prefix)
       && /\b(?:is|was)\s+(?:false|not\s+true|untrue)\b/i.test(text.slice(at, end))) return true;
   const actorPrefix = text.slice(start, findingVerb && findingVerb.index < at ? findingVerb.index : at);
-  const actor = /\b(?:(?:i|we|you|he|she|they)|(?:(?:the|our|an?)\s+(?:[\w'\u2019-]+\s+){0,3})?(?:technician|tech|crew|team))(?:\s+(?:has|have|had|already|just|actually))*\s*$/i.exec(actorPrefix);
+  const actor = EXPLICIT_DENIAL_ACTOR_RE.exec(actorPrefix);
   return Boolean(actor && EXPLICIT_PROPOSITION_DENIAL_RE.test(actorPrefix.slice(0, actor.index)));
 }
 
@@ -604,9 +606,14 @@ const FREE_VISIT_PREPOSED_COORDINATED_CONDITION_RE = /^\s*(?:only\s+)?(?:if|unle
 const FREE_VISIT_DEFERRABLE_PAYMENT_RE = new RegExp(`^(?:${FREE_VISIT_DIRECT_PAY_SOURCE}|${FREE_VISIT_PASSIVE_PAYMENT_SOURCE}|(?:won['’]t|will not|not going to|don['’]t|do not)\\s+have to pay|(?:won['’]t|will not|not going to|never|no need to)\\s+(?:bill|charge|invoice)|(?:you\\s+)?(?:won['’]t|will not|don['’]t|do not)\\s+owe|owe\\s+(?:us\\s+)?nothing|no\\s+(?:bill|charge|cost|fee))\\b`, 'i');
 const FREE_VISIT_PAYMENT_DEFERRAL_RE = /^\s*,?\s*(?:until|before)\s+(?![.!?;:,])\S/i;
 const FREE_VISIT_COORDINATED_PRICE_CONDITION_RE = new RegExp(`^\\s+(?:and|or)\\s+(?:(?:is|will be|would be)\\s+)?${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_FREE_PRICE_SOURCE}\\b\\s*,?\\s+((?:only\\s+)?(?:if|unless)\\b|${FREE_VISIT_CONDITION_SOURCE})`, 'i');
+function freeVisitHasGoverningTailCondition(tail) {
+  const conditionalTail = tail.replace(FREE_VISIT_CONVERSATIONAL_IF_RE, '').replace(/^(?:\s*,\s*)+/, ', ');
+  return FREE_VISIT_POSTCLAIM_CONDITION_RE.test(conditionalTail)
+    && !FREE_VISIT_CONDITIONAL_FOLLOWUP_RE.test(tail);
+}
 function freeVisitHasCoordinatedPriceCondition(tail) {
   const condition = FREE_VISIT_COORDINATED_PRICE_CONDITION_RE.exec(tail);
-  return Boolean(condition && !FREE_VISIT_CONDITIONAL_FOLLOWUP_RE.test(
+  return Boolean(condition && freeVisitHasGoverningTailCondition(
     tail.slice(condition[0].length - condition[1].length),
   ));
 }
@@ -619,12 +626,11 @@ function freeVisitHasCoordinatedObjectCondition(tail, claim) {
   const object = continuation[1].trim();
   return FREE_VISIT_OBJECT_NOUN_PHRASE_RE.test(object)
     && !CLAUSE_FINITE_PREDICATE_RE.test(object)
-    && !/^(?:i|we|you|he|she|they|it)(?:['’](?:ll|re|ve|s))?\b/i.test(object);
+    && !/^(?:i|we|you|he|she|they|it)(?:['’](?:ll|re|ve|s))?\b/i.test(object)
+    && freeVisitHasGoverningTailCondition(tail.slice(continuation[0].length - continuation[2].length));
 }
 function freeVisitHasPostclaimQualifier(tail, claim) {
-  const conditionalTail = tail.replace(FREE_VISIT_CONVERSATIONAL_IF_RE, '').replace(/^(?:\s*,\s*)+/, ', ');
-  return (FREE_VISIT_POSTCLAIM_CONDITION_RE.test(conditionalTail)
-    && !FREE_VISIT_CONDITIONAL_FOLLOWUP_RE.test(tail))
+  return freeVisitHasGoverningTailCondition(tail)
     || freeVisitHasCoordinatedPriceCondition(tail)
     || freeVisitHasCoordinatedObjectCondition(tail, claim)
     || (FREE_VISIT_DEFERRABLE_PAYMENT_RE.test(claim) && FREE_VISIT_PAYMENT_DEFERRAL_RE.test(tail));
@@ -673,7 +679,7 @@ const FREE_VISIT_ANCILLARY_FEE_ITEM_SOURCE = `(?:cancellation|reschedul(?:ing|e)
 const FREE_VISIT_ANCILLARY_CLAUSE_SOURCE = `,\\s*(?:(?:and|or|but|because)\\s+)?(?:(?:i|we|you|he|she|they|it)\\s+|(?:the|your|our|this|that|an?)\\s+(?:[\\w'’-]+\\s+){0,5})${CLAUSE_FINITE_PREDICATE_RE.source}`;
 const FREE_VISIT_ANCILLARY_FEE_TAIL_RE = new RegExp(`^\\s+(?:of|from)\\s+(?:(?:any|all|the|additional)\\s+)?${FREE_VISIT_ANCILLARY_FEE_ITEM_SOURCE}(?:(?:\\s+|,\\s*)(?:and|or)\\s+${FREE_VISIT_ANCILLARY_FEE_ITEM_SOURCE})*(?=\\s*(?:$|[.!?;:]|\\b(?:but|because)\\b|${FREE_VISIT_ANCILLARY_CLAUSE_SOURCE}|,\\s*(?:but\\s+)?(?:if|unless)\\b))`, 'i');
 const FREE_VISIT_DEBTOR_CLAIM_RE = new RegExp(`^(?:${FREE_VISIT_DIRECT_PAY_SOURCE}|${FREE_VISIT_PASSIVE_PAYMENT_SOURCE}|(?:you\\s+)?(?:won['’]t|will not|not going to|don['’]t|do not)\\s+have to pay|(?:you\\s+)?(?:won['’]t|will not|don['’]t|do not)\\s+owe|owe\\s+(?:us\\s+)?nothing)\\b`, 'i');
-const FREE_VISIT_DEBTOR_SUBJECT_RE = /\b((?:i|we|you|he|she|they)(?:['’](?:ll|m|re|s))?|(?:(?:the|an?|our|your)\s+(?:[\w'’-]+\s+){0,3}[\w'’-]+))(?:\s+(?:will|shall|(?:am|is|are)\s+going\s+to|going\s+to))?\s*$/i;
+const FREE_VISIT_DEBTOR_SUBJECT_RE = new RegExp(`\\b((?:i|we|you|he|she|they)(?:['’](?:ll|m|re|s))?|(?:(?:the|an?|our|your)\\s+(?:[\\w'’-]+\\s+){0,3}[\\w'’-]+))(?:\\s+${CLAIM_FUTURE_ACTOR_AUXILIARY_SOURCE})?\\s*$`, 'i');
 const FREE_VISIT_CUSTOMER_SUBJECT_RE = /^(?:you|your\b|(?:the|an?)\s+(?:[\w'’-]+\s+){0,3}(?:customer|client|homeowner|resident))\b/i;
 function freeVisitIsRefused(prefix) {
   return FREE_VISIT_NOUN_REFUSAL_RE.test(prefix)

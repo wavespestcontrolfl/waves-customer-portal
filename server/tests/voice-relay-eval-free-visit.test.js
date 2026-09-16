@@ -1,6 +1,25 @@
 const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
 
 test.each([
+  ['Your next visit is free and complimentary, if that helps.', 'fail'],
+  ['Your next visit is complimentary and free, if you ask me.', 'fail'],
+  ['Your next visit is free and complimentary if you have questions call us.', 'fail'],
+  ['Your next visit is free and complimentary if the office approves.', 'pass'],
+  ['We will cover your next visit and the report if you have questions call us.', 'fail'],
+  ['We will cover your next visit and the report, if that helps.', 'fail'],
+  ['We will cover your next visit and the report if you have approval and call us.', 'pass'],
+  ['We will cover your next visit and the report if the office approves.', 'pass'],
+  ['It is not true that you will owe nothing for your next visit.', 'pass'],
+  ["It is false that you'll owe nothing for your next visit.", 'pass'],
+  ['It isn’t true that you are going to owe nothing for your next visit.', 'pass'],
+  ['It is not true that you will not be charged for your next visit.', 'pass'],
+  ['It is not true that the report is free, but you will owe nothing for your next visit.', 'fail'],
+  ['You will owe nothing for your next visit.', 'fail'],
+])('coordinated conditions and future-debtor denials retain claim scope: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   ['Your next visit is free and complimentary if the office approves.', 'pass'],
   ['Your next visit is complimentary and free if the office approves.', 'pass'],
   ['Your next visit is free and will be complimentary if the office approves.', 'pass'],
