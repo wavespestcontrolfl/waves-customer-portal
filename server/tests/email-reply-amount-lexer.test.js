@@ -3,6 +3,11 @@ const { matchEmailReplyAmountAt: matchAt } = require('../services/email/email-re
 const token = (kind, text, start = 0) => ({ kind, text, start, end: start + text.length });
 
 describe('bounded anchored email reply amount lexer', () => {
+  test.each(['$98++$20', 'USD 98++20', '$98++', '98 dollars++$20'])(
+    'rejects repeated minimum operators: %s', (text) => {
+      expect(matchAt(text)).toBeNull();
+    },
+  );
   test.each(['98 dollars$120', '98 minutes$120', 'one hundred dollars$120', '98 dollars𐐀'])(
     'does not downgrade an invalid longer amount into a bare number: %s', (text) => {
       expect(matchAt(text)).toBeNull();

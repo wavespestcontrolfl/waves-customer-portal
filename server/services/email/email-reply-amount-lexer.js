@@ -70,6 +70,7 @@ function validStart(source, at) {
 function validEnd(source, end) {
   const next = nextCodePoint(source, end);
   if (!next) return true;
+  if (next === '+' && source[end - 1] === '+') return false;
   if (next === '$') return false;
   if (RIGHT_JOIN.test(next)) return false;
   if ((next === '.' || next === ',') && /^[.,]+\d/.test(source.slice(end))) return false;
