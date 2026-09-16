@@ -132,13 +132,7 @@ function invoiceContainsSetupFeeLine(row) {
     try { items = JSON.parse(items); } catch { items = null; }
   }
   if (Array.isArray(items) && items.length) {
-    return items.some((li) => {
-      const desc = String(li?.description || '');
-      if (!/setup fee/i.test(desc) || /waiv/i.test(desc)) return false;
-      const qty = li?.quantity != null ? Number(li.quantity) : 1;
-      const amt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
-      return Number.isFinite(amt) && amt > 0;
-    });
+    return invoiceHasPositiveSetupFeeLine({ line_items: items });
   }
   const notes = String(row?.notes || '');
   return /setup fee/i.test(notes) && !/setup fee waiv/i.test(notes);
