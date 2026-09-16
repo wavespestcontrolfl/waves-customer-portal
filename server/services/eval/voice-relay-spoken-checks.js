@@ -587,6 +587,7 @@ const FREE_VISIT_APPROVAL_QUALIFIER_SOURCE = `(?:subject\\s+to|only\\s+with)\\s+
 const FREE_VISIT_CONDITION_SOURCE = `(?:${FREE_VISIT_PROVIDED_CONDITION_SOURCE}|${FREE_VISIT_AS_LONG_AS_CONDITION_SOURCE}|${FREE_VISIT_APPROVAL_QUALIFIER_SOURCE}|only\\s+after\\s+(?:(?:the|an?|your|our|their)\\s+)?[\\w\\x27\\u2019-]+\\b)`;
 const FREE_VISIT_PREPOSED_CONDITION_RE = new RegExp(`^\\s*${FREE_VISIT_CONDITION_SOURCE}`, 'i');
 const FREE_VISIT_POSTCLAIM_CONDITION_RE = new RegExp(`^\\s*,?\\s*(?:but\\s+)?(?:(?:only\\s+)?(?:if|unless)\\b|${FREE_VISIT_CONDITION_SOURCE})`, 'i');
+const FREE_VISIT_SHARED_CONDITION_INTRO_RE = new RegExp(`^\\s*(?:(?:only\\s+)?(?:if|unless)\\b|${FREE_VISIT_CONDITION_SOURCE})[^,;.!?]*,\\s*`, 'i');
 // A condition can introduce a separate instruction after an asserted promise.
 // Require a predicate before the imperative so "if you call us" remains a gate.
 const FREE_VISIT_CONDITIONAL_FOLLOWUP_RE = /^\s*,?\s*(?:if|unless)\s+you\s+(?:have|need|want|notice|experience|find|get|receive)\b[^.!?;]*?\s+(?:please\s+)?(?<!\bto\s)(?<!\band\s)(?<!\bor\s)(?<!\b(?:and|or)\s+(?:then|[a-z]+ly)\s)(?:call|contact|ask|tell|let|reach|give|check|email|text|message)\b/i;
@@ -601,11 +602,22 @@ function freeVisitHasPostclaimQualifier(tail, claim) {
 function freeVisitConditionPrefix(prefix, sentencePrefix = '') {
   // The comma closes the conditional instruction before this new assertion.
   if (FREE_VISIT_CONDITIONAL_FOLLOWUP_RE.test(prefix) && /,\s*$/.test(prefix)) return '';
+  if (freeVisitHasSharedPreposedCondition(sentencePrefix)) return sentencePrefix;
   // The shared clause splitter can end a preposed condition at a coordinated
   // verb ("if you have approval and give us the number"). Retain that one
   // comma-closed introduction, but not a separate conditional instruction.
   return FREE_VISIT_PREPOSED_COORDINATED_CONDITION_RE.test(sentencePrefix)
     && !FREE_VISIT_CONDITIONAL_FOLLOWUP_RE.test(sentencePrefix) ? sentencePrefix : prefix;
+}
+function freeVisitHasSharedPreposedCondition(sentencePrefix) {
+  const introduction = FREE_VISIT_SHARED_CONDITION_INTRO_RE.exec(sentencePrefix);
+  if (!introduction || FREE_VISIT_CONDITIONAL_FOLLOWUP_RE.test(introduction[0])) return false;
+  // Extend a condition across explicit coordinators, but not contrast or a
+  // sentence boundary. The existing comma-introduction path remains separate.
+  const results = sentencePrefix.slice(introduction[0].length).replace(/\b(and|or)\s+then\b/gi, '$1');
+  return /\b(?:and|or)\s*$/i.test(results)
+    && !/(?:[.!?;:]|[—–]|\b(?:but|though|although|however|yet|so|while|because)\b)/i.test(results)
+    && !/,(?!\s*(?:and|or)\b)/i.test(results);
 }
 const FOLLOWUP_QUESTION_RE = /(?:,\s*|\s+(?:and|but|so)\s+)(?:(?:and|but|so)\s+)?(?:did|do|does|is|are|was|were|will|would|can|could|should|has|have|had|what|who|why|how|where|when)\b/i;
 const FREE_VISIT_LEADING_QUESTION_RE = /^(?!\s*(?:do|does|did)\s+not\b)\s*(?:did|do|does|is|are|was|were|will|would|can|could|should|has|have|had|what|who|why|how)\b[^,;:]*$/i;
@@ -701,7 +713,7 @@ function no_free_visit_promise(value, record, { spoken }) {
           freeVisitConditionPrefix(prefix, sentencePrefix).replace(/^\s*whether\b[^,;.!?]*\bor\b[^,;.!?]*,\s*/i, '')
             .replace(/\beven\s+if\b/gi, 'even when'),
         )
-          || FREE_VISIT_PREPOSED_CONDITION_RE.test(freeVisitConditionPrefix(clausePrefix))
+          || FREE_VISIT_PREPOSED_CONDITION_RE.test(freeVisitConditionPrefix(clausePrefix, sentencePrefix))
           || freeVisitHasPostclaimQualifier(text.slice(match.index + match[0].length), match[0]);
         if (!governingCondition && !trailingRetraction && !freeVisitIsRefused(prefix)
             && !propositionIsExplicitlyDenied(text, match.index)) {

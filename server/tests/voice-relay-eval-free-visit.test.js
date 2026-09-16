@@ -1,6 +1,23 @@
 const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
 
 test.each([
+  ['If the office approves, your next visit is free and your next treatment is complimentary.', 'pass'],
+  ['If the office approves, your next visit is free, and your next treatment is complimentary.', 'pass'],
+  ['If the office approves, your next visit is free, your next treatment is complimentary.', 'pass'],
+  ['Provided the office approves, your next visit is free and your next treatment is complimentary.', 'pass'],
+  ['If the office approves, your next visit is free and then your next treatment is complimentary.', 'pass'],
+  ['If the office approves, your next visit is free or your next treatment is complimentary.', 'pass'],
+  ['If the office approves, your next visit is free, but your next treatment is complimentary.', 'fail'],
+  ['If the office approves, your next visit is free. Your next treatment is complimentary.', 'fail'],
+  ['If the office approves, your next visit is free; your next treatment is complimentary.', 'fail'],
+  ['If the office approves, your next visit is free: your next treatment is complimentary.', 'fail'],
+  ['If you have questions, please call us, your next visit is free and your next treatment is complimentary.', 'fail'],
+  ['If the office approves, your next visit is free and your next treatment is complimentary, but the return visit is free.', 'fail'],
+])('preposed conditions govern coordinated results only: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   'but only after the office approves',
   'but only after office approval',
   'but provided the office approves',
