@@ -6,6 +6,8 @@
 `number`; offsets are JavaScript string offsets into the unchanged input.
 The longest valid match wins, so `98 cents` is money and `98 minutes` is a
 measurement. Bare `90-120` and `90 to 120` are single number spans.
+Textual `to` ranges require whitespace on both sides; hyphen ranges allow
+compact endpoints. Joined forms such as `90to120` are not range tokens.
 
 The caller must normalize reply copy before scanning. This helper does no
 normalization, unit recognition, clause splitting, or policy evaluation. It
@@ -17,10 +19,17 @@ It may also start after a comma, as in `$98,$120`; bare digits after a
 malformed comma grouping remain blocked.
 An opening straight or curly quote may precede an amount; apostrophes inside
 words or malformed numbers do not create a new amount boundary.
-Boundary checks inspect complete Unicode code points and combining marks.
+Boundary checks inspect complete Unicode code points, combining marks, and
+currency symbols. Euro, pound, and other currency signs cannot expose an
+adjacent bare number, while the recognized dollar and cent forms remain money.
 Joined dollar signs (`$98$120`) are invalid, while whitespace or a comma
 keeps separate amounts distinct. Hyphenated prose after a minimum phrase
-leaves the base amount intact (`$98 and up-front` → `$98`). Calls at an
+leaves the base amount intact (`$98 and up-front` and `$98 and up‑front` →
+`$98`). A spaced plus belongs to the amount only when it ends the text or is
+followed by punctuation; an addend of any wording leaves the base amount
+intact (`$98 + mandatory state sales tax` → `$98`, `$98 + labor` → `$98`).
+An attached minimum plus still belongs to the amount (`$98+ per visit`),
+except before an immediate tax or fee addend. Calls at an
 interior endpoint of a complete numeric, currency, or measurement range return
 `null` only when the enclosing range has a valid start;
 bare `between 90 and 120` without a measurement unit still exposes its two

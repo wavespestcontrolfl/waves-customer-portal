@@ -19,7 +19,10 @@ describe('bounded anchored email reply amount lexer', () => {
       expect(matchAt(text)).toEqual(token('money', '$98'));
     },
   );
-  test.each(['$98 and up-front', '$98 or more-or-less', '$98 and up-é', '$98 and up-𐐀'])(
+  test.each([
+    '$98 and up-front', '$98 or more-or-less', '$98 and up-é', '$98 and up-𐐀',
+    '$98 and up‐front', '$98 and up‑front', '$98 or more‐or‐less', '$98 or more‑or‑less',
+  ])(
     'keeps the base money before a hyphenated non-minimum suffix: %s', (source) => {
       expect(matchAt(source)).toEqual(token('money', '$98'));
     },
@@ -67,6 +70,42 @@ describe('bounded anchored email reply amount lexer', () => {
     expect(matchAt(text)).toEqual(token('number', text));
   });
 
+  test.each(['90to120', '$90to120', '90to120minutes'])(
+    'rejects an unspaced textual range: %s', (source) => {
+      expect(matchAt(source)).toBeNull();
+    },
+  );
+  test.each(['90 -120', '90- 120', '$90-$120', '30-45 minutes'])(
+    'retains compact hyphen ranges: %s', (source) => {
+      expect(matchAt(source)?.text).toBe(source);
+    },
+  );
+
+  test.each([
+    '$98 + sales tax', '$98 + applicable taxes', '$98 + processing fees',
+    '$98 + mandatory state sales tax', '$98 + labor', '$98 + materials',
+    '$98 + $20 labor', '$98 + USD 20 labor', '$98 + 20 labor',
+    '$98 + 𐐀', '$98 + €20',
+  ])('keeps the base amount before an additive charge: %s', (source) => {
+    expect(matchAt(source)).toEqual(token('money', '$98'));
+  });
+  test.each(['$98 +', '$98 +  ', '$98 +,', '$98 +.'])(
+    'keeps a spaced terminal or punctuation-delimited minimum plus: %s', (source) => {
+      expect(matchAt(source)).toEqual(token('money', '$98 +'));
+    },
+  );
+  test.each(['$98+', '$98+ per visit', 'USD 98+ for each visit'])(
+    'retains an attached minimum plus: %s', (source) => {
+      const expected = source.startsWith('USD') ? 'USD 98+' : '$98+';
+      expect(matchAt(source)).toEqual(token('money', expected));
+    },
+  );
+  test.each(['$98+ tax', '$98+ fees'])(
+    'does not absorb a compact plus before an immediate tax or fee: %s', (source) => {
+      expect(matchAt(source)).toEqual(token('money', '$98'));
+    },
+  );
+
   test('chooses the longest anchored kind and keeps offsets in the original source', () => {
     expect(matchAt('98 cents')).toEqual(token('money', '98 cents'));
     expect(matchAt('98 minutes')).toEqual(token('measurement', '98 minutes'));
@@ -103,6 +142,12 @@ describe('bounded anchored email reply amount lexer', () => {
     expect(matchAt('98𐐀')).toBeNull();
     expect(matchAt('$98-𐐀')).toBeNull();
     expect(matchAt('$98e\u0301')).toBeNull();
+  });
+  test.each([
+    ['€98', 1], ['£98', 1], ['98€', 0], ['98£', 0],
+    ['₹98', 1], ['98₹', 0],
+  ])('does not expose bare digits joined to another currency sign: %s', (source, at) => {
+    expect(matchAt(source, at)).toBeNull();
   });
 
   test('allows opening straight and curly quotes before an amount', () => {

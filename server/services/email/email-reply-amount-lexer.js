@@ -3,7 +3,8 @@
 const MAX_SOURCE_BYTES = 8192;
 
 const DIGITS = '(?:\\d{1,3}(?:,\\d{3}){1,3}|\\d{1,9})(?:\\.\\d{1,2})?';
-const NUMERIC_RANGE = `${DIGITS}(?:\\s*(?:-|to)\\s*(?:(?:\\$\\s*|usd\\s+))?${DIGITS})?`;
+const RANGE_JOIN = '(?:\\s*-\\s*|\\s+to\\s+)';
+const NUMERIC_RANGE = `${DIGITS}(?:${RANGE_JOIN}(?:(?:\\$\\s*|usd\\s+))?${DIGITS})?`;
 const ONE_TO_NINETEEN = '(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen)';
 const TENS = '(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)';
 const UNDER_HUNDRED = `(?:${ONE_TO_NINETEEN}|${TENS}(?:[-\\s](?:one|two|three|four|five|six|seven|eight|nine))?)`;
@@ -11,12 +12,13 @@ const WORD_JOIN = '(?:\\s+|-)';
 const WRITTEN = `(?:(?:a|one|two|three|four|five|six|seven|eight|nine)${WORD_JOIN}hundred(?:${WORD_JOIN}(?:and${WORD_JOIN})?${UNDER_HUNDRED})?|${UNDER_HUNDRED})`;
 const PREFIXED_VALUE = `(?:\\.\\d{1,2}|${NUMERIC_RANGE})`;
 const CURRENCY = `(?:(?:\\$\\s*|\\busd\\s+)${PREFIXED_VALUE}|\\b${NUMERIC_RANGE}(?:\\s+|-)(?:dollars?|bucks?|cents?|usd)\\b|\\b${WRITTEN}(?:\\s+|-)(?:dollars?|bucks?|cents?)\\b|\\b${DIGITS}\\s*¢)`;
-const MONEY = `(?:${CURRENCY})(?:\\s*\\+(?!\\s*(?:tax(?:es)?|fees?)\\b)|\\s+(?:and\\s+up(?!\\s+to\\b)|or\\s+more)\\b(?!-))?`;
+const ADDEND = '(?:(?:[a-z]+\\s+)?(?:tax(?:es)?|fees?)\\b|\\$\\s*(?:\\d|\\.\\d)|usd\\s+(?:\\d|\\.\\d)|\\d)';
+const MONEY = `(?:${CURRENCY})(?:\\+(?!\\s*${ADDEND})|\\s+\\+(?=\\s*(?:$|[.,!?;:)]))|\\s+(?:and\\s+up(?!\\s+to\\b)|or\\s+more)\\b(?![-\u2010\u2011]))?`;
 
 const DURATION = '(?:minutes?|hours?|days?|weeks?|months?|years?|mins?|hrs?)';
-const MEASURE_SPAN = `(?:between\\s+${DIGITS}\\s+and\\s+${DIGITS}|from\\s+${DIGITS}\\s+to\\s+${DIGITS}|${DIGITS}\\s*(?:-|to)\\s*${DIGITS}|${DIGITS}|${WRITTEN})`;
+const MEASURE_SPAN = `(?:between\\s+${DIGITS}\\s+and\\s+${DIGITS}|from\\s+${DIGITS}\\s+to\\s+${DIGITS}|${DIGITS}${RANGE_JOIN}${DIGITS}|${DIGITS}|${WRITTEN})`;
 const MEASUREMENT = `(?:${MEASURE_SPAN}\\s+(?:${DURATION}|photos?|pictures?|points?|ounces?|gallons?|reminders?)|${DIGITS}(?:mins?|hrs?))\\b`;
-const NUMBER = `(?:${DIGITS}\\s*(?:-|to)\\s*${DIGITS}|${DIGITS})`;
+const NUMBER = `(?:${DIGITS}${RANGE_JOIN}${DIGITS}|${DIGITS})`;
 
 const MATCHERS = [
   ['money', MONEY],
@@ -25,9 +27,9 @@ const MATCHERS = [
 ].map(([kind, source]) => ({ kind, re: new RegExp(source, 'iy') }));
 const DIGITS_AT = new RegExp(DIGITS, 'iy');
 
-const LEFT_JOIN = /[\p{L}\p{M}\p{N}_.$¢,'‘’\-]/u;
+const LEFT_JOIN = /[\p{L}\p{M}\p{N}\p{Sc}_.,'‘’\-]/u;
 const LETTER = /\p{L}/u;
-const RIGHT_JOIN = /[\p{L}\p{M}\p{N}_¢]/u;
+const RIGHT_JOIN = /[\p{L}\p{M}\p{N}\p{Sc}_]/u;
 const DIGIT = /\d/;
 const OPEN_QUOTE_PUNCT = new Set(['(', '[', '{', ':', ';', ',', '"', '“', '‘']);
 const WRITTEN_PREFIX_WORDS = new Set([
