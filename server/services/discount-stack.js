@@ -507,20 +507,32 @@ function stackDocumentDiscounts({ lines, documentTerms }) {
   // a document term here computed against every line regardless of scope,
   // so an unrelated service got discounted too, and a scoped free_service
   // term could zero the WHOLE invoice instead of just its own line.
-  // Resolved one term at a time, in the order given, against its own
-  // eligible pool's CURRENT remainder — an unscoped term still reaches
-  // every line still carrying a balance and, since its pool then equals
-  // the old finalBase, compounds to the identical total a document-wide
-  // percentage always had. Per-line allocation is a natural side effect of
-  // needing a real per-term pool at all now (the old "no consumer needs a
-  // per-line share" reasoning no longer holds once scoping requires this
-  // pool in the first place), and it's what actually lets the eligible
-  // line's own `net` reflect the discount instead of just the aggregate
-  // `documentTerms[].dollars` figure.
+  // Resolved one term at a time against its own eligible pool's CURRENT
+  // remainder — an unscoped term still reaches every line still carrying a
+  // balance and, since its pool then equals the old finalBase, compounds
+  // to the identical total a document-wide percentage always had. Per-line
+  // allocation is a natural side effect of needing a real per-term pool at
+  // all now (the old "no consumer needs a per-line share" reasoning no
+  // longer holds once scoping requires this pool in the first place), and
+  // it's what actually lets the eligible line's own net reflect the
+  // discount instead of just the aggregate documentTerms[].dollars figure.
+  //
+  // Processed in the SAME canonical order stackOrder gives stackDiscounts
+  // (Codex pre-push audit P1, round 2): percentages here used to compound
+  // in plain input order, so the shared engine disagreed with itself — the
+  // exact discounts entered in the same order gave a different total
+  // through stackDocumentDiscounts than through stackDiscounts. Running
+  // stackOrder over just the non-fixed terms (it already sorts percentages
+  // rate-descending, index tiebreak, and free_service last) and mapping its
+  // sub-list index back to each term's real position in docTerms keeps
+  // every term's own eligibleLines and its docDollars/result slot exactly
+  // where the caller put it — only the ORDER they're resolved in changes.
   const docNonFixedIdx = docTerms
     .map((t, i) => (!isFixedDiscountType(t?.discountType) ? i : -1))
     .filter((i) => i >= 0);
-  for (const termIdx of docNonFixedIdx) {
+  const docNonFixedOrder = stackOrder(docNonFixedIdx.map((i) => docTerms[i]));
+  for (const { index: subIdx } of docNonFixedOrder) {
+    const termIdx = docNonFixedIdx[subIdx];
     const term = docTerms[termIdx];
     const pool = state.filter((line, i) => line.remaining > 0 && termReachesLine(term, i));
     const poolTotal = cents(pool.reduce((sum, line) => sum + line.remaining, 0));

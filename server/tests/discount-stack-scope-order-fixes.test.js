@@ -183,3 +183,71 @@ describe('P2 — compound:false (legacy) never lets the aggregate exceed the bas
     expect(result.net).toBe(0);
   });
 });
+
+describe('cross-export agreement — the same discounts, the same order, the same total, whichever export you call', () => {
+  test('the exact reported repro: stackDocumentDiscounts now agrees with stackDiscounts in both orders', () => {
+    const termsA = [
+      { discountType: 'percentage', amount: 10 },
+      { discountType: 'percentage', amount: 50, maxDiscountDollars: 10 },
+    ];
+    const termsB = [termsA[1], termsA[0]]; // reversed input order, same two discounts
+
+    const sdA = stackDiscounts(100, termsA);
+    const sdB = stackDiscounts(100, termsB);
+    const docA = stackDocumentDiscounts({ lines: [{ gross: 100, terms: [] }], documentTerms: termsA });
+    const docB = stackDocumentDiscounts({ lines: [{ gross: 100, terms: [] }], documentTerms: termsB });
+
+    // Both exports, both input orders: the same $81 net (before this fix,
+    // stackDocumentDiscounts gave $80 for termsA and $81 for termsB —
+    // order-dependent AND disagreeing with stackDiscounts' own $81).
+    expect(sdA.net).toBe(81);
+    expect(sdB.net).toBe(81);
+    expect(docA.lines[0].net).toBe(81);
+    expect(docB.lines[0].net).toBe(81);
+
+    // Per-term dollars still map back to each export's own input order,
+    // and the two exports agree on that mapping too.
+    expect(sdA.items.map((i) => i.dollars)).toEqual([9, 10]);
+    expect(docA.documentTerms.map((t) => t.dollars)).toEqual([9, 10]);
+    expect(sdB.items.map((i) => i.dollars)).toEqual([10, 9]);
+    expect(docB.documentTerms.map((t) => t.dollars)).toEqual([10, 9]);
+  });
+
+  test('a scoped document term keeps its own eligibleLines and result slot through the reordering', () => {
+    const res = stackDocumentDiscounts({
+      lines: [{ gross: 100, terms: [] }, { gross: 100, terms: [] }],
+      documentTerms: [
+        { discountType: 'percentage', amount: 10, eligibleLines: [0] }, // smaller rate, listed first
+        { discountType: 'percentage', amount: 50, maxDiscountDollars: 10, eligibleLines: [1] }, // larger rate, processed first
+      ],
+    });
+    // Canonical order processes the 50% term first, but it only ever
+    // reaches line 1 (its own scope) — line 0 still gets exactly its own
+    // 10%, unaffected by which term compounds first.
+    expect(res.lines.map((l) => l.net)).toEqual([90, 90]);
+    expect(res.documentTerms.map((t) => t.dollars)).toEqual([10, 10]); // mapped back to input order
+  });
+
+  test('stackVisitDiscounts agrees where it actually delegates: a LINE\'s own multi-term stack (via stackDocumentDiscounts, which calls stackDiscounts for line terms) matches stackDiscounts directly', () => {
+    // stackVisitDiscounts itself has only ONE discount slot per line (no
+    // multi-percentage order to canonicalize there — see the P2 fix in
+    // this same round, which only touched stackDiscounts/stackOrder and
+    // stackDocumentDiscounts' document-term pass). Where this module DOES
+    // delegate multiple same-line percentages to stackDiscounts — a
+    // document line's own `terms` list, in stackDocumentDiscounts' step 3
+    // — it must still agree with calling stackDiscounts on that same list
+    // directly, in both input orders.
+    const termsA = [
+      { discountType: 'percentage', amount: 10 },
+      { discountType: 'percentage', amount: 50, maxDiscountDollars: 10 },
+    ];
+    const termsB = [termsA[1], termsA[0]];
+    const sdA = stackDiscounts(100, termsA);
+    const sdB = stackDiscounts(100, termsB);
+    const lineA = stackDocumentDiscounts({ lines: [{ gross: 100, terms: termsA }], documentTerms: [] });
+    const lineB = stackDocumentDiscounts({ lines: [{ gross: 100, terms: termsB }], documentTerms: [] });
+    expect(lineA.lines[0].net).toBe(sdA.net);
+    expect(lineB.lines[0].net).toBe(sdB.net);
+    expect(lineA.lines[0].net).toBe(lineB.lines[0].net);
+  });
+});
