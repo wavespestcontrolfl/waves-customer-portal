@@ -569,7 +569,11 @@ const FREE_VISIT_TEMPORAL_PARENTHETICAL_RE = /,\s*(?:as of (?:today|now)|since (
 // A conditional "provided/providing/only after" needs a subject and finite
 // predicate. A participial effect ("providing protection") is not a gate.
 const FREE_VISIT_PRONOUN_CONDITION_PREDICATE_SOURCE = `(?:${CLAUSE_FINITE_PREDICATE_RE.source}|\\b(?:approv(?:e|es|ed)|confirm(?:s|ed)?|authoriz(?:e|es|ed)|agree(?:s|d)?|qualif(?:y|ies|ied)|consent(?:s|ed)?|accept(?:s|ed)?|decid(?:e|es|ed)|request(?:s|ed)?|pay|pays|paid|sign(?:s|ed)?)\\b)`;
-const FREE_VISIT_PROVIDED_CONDITION_SOURCE = `(?:provided|providing)(?:\\s+that)?\\s+(?:(?:i|we|you|he|she|they|it)\\s+${FREE_VISIT_PRONOUN_CONDITION_PREDICATE_SOURCE}|(?:the|an?|your|our|their|this|that)\\s+[\\w\\x27\\u2019-]+\\s+(?:${CLAUSE_FINITE_PREDICATE_RE.source}|[\\w\\x27\\u2019-]+(?:s|ed)\\b))`;
+// Longer noun subjects need a known finite predicate: otherwise a double
+// object effect ("providing the billing office treatment reports") looks
+// like an office condition merely because "reports" ends in "s".
+const FREE_VISIT_MULTIWORD_CONDITION_SOURCE = `(?:the|an?|your|our|their|this|that)\\s+(?:[\\w\\x27\\u2019-]+\\s+){2,4}${FREE_VISIT_PRONOUN_CONDITION_PREDICATE_SOURCE}`;
+const FREE_VISIT_PROVIDED_CONDITION_SOURCE = `(?:provided|providing)(?:\\s+that)?\\s+(?:(?:i|we|you|he|she|they|it)\\s+${FREE_VISIT_PRONOUN_CONDITION_PREDICATE_SOURCE}|${FREE_VISIT_MULTIWORD_CONDITION_SOURCE}|(?:the|an?|your|our|their|this|that)\\s+[\\w\\x27\\u2019-]+\\s+(?:${CLAUSE_FINITE_PREDICATE_RE.source}|[\\w\\x27\\u2019-]+(?:s|ed)\\b))`;
 const FREE_VISIT_CONDITION_SOURCE = `(?:${FREE_VISIT_PROVIDED_CONDITION_SOURCE}|only\\s+after\\s+(?:(?:the|an?|your|our|their)\\s+)?[\\w\\x27\\u2019-]+\\b)`;
 const FREE_VISIT_PREPOSED_CONDITION_RE = new RegExp(`^\\s*${FREE_VISIT_CONDITION_SOURCE}`, 'i');
 const FREE_VISIT_POSTCLAIM_CONDITION_RE = new RegExp(`^\\s*,?\\s*(?:(?:only\\s+)?(?:if|unless)\\b|but\\s+only\\s+if\\b|${FREE_VISIT_CONDITION_SOURCE})`, 'i');
