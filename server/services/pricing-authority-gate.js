@@ -12,6 +12,7 @@
 // not throw, and textual booleans must not pass).
 const { isEnabled } = require('../config/feature-gates');
 const { isProposalAuthoredByEditor } = require('./estimate-proposal');
+const { annualPlanPublicReplayBlocked } = require('./estimate-offer-version');
 
 const SERVER_PRICING_AUTHORITY_SQL = "UPPER(pricing_authority) = 'SERVER'";
 // Acceptance rewrites pricing_authority to LOCKED — the price is frozen and
@@ -84,6 +85,13 @@ function applyLinkVisibleSiblingScope(qb, now = new Date()) {
       .orWhereIn('status', LINK_VISIBLE_TERMINAL_STATUSES));
 }
 
+// Exact annual-offer delivery is a full-row fingerprint, so it cannot be
+// expressed by the SQL candidate scope above. Filter its returned rows with
+// this shared public-link verdict before judging their pricing authority.
+function filterLinkVisibleSiblingRows(siblings) {
+  return (Array.isArray(siblings) ? siblings : []).filter((row) => !annualPlanPublicReplayBlocked(row));
+}
+
 async function groupPassesGatedSendAuthority(database, row = {}, now = new Date()) {
   if (!row?.estimate_group_id) return true;
   let siblings;
@@ -93,11 +101,11 @@ async function groupPassesGatedSendAuthority(database, row = {}, now = new Date(
         .where({ estimate_group_id: row.estimate_group_id })
         .whereNot({ id: row.id }),
       now,
-    ).select('id', 'status', 'price_locked_at', 'pricing_authority', 'estimate_data');
+    ).select('*');
   } catch {
     return false;
   }
-  return (Array.isArray(siblings) ? siblings : []).every((sibling) => rowPassesGatedSendAuthority(sibling));
+  return filterLinkVisibleSiblingRows(siblings).every((sibling) => rowPassesGatedSendAuthority(sibling));
 }
 
 // The one question every customer-facing rail asks while the gate is on:
@@ -118,6 +126,7 @@ module.exports = {
   groupPassesGatedSendAuthority,
   estimateDeliverableUnderGate,
   applyLinkVisibleSiblingScope,
+  filterLinkVisibleSiblingRows,
   LINK_VISIBLE_LIVE_STATUSES,
   LINK_VISIBLE_TERMINAL_STATUSES,
 };

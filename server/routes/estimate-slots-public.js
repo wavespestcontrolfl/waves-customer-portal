@@ -635,6 +635,7 @@ router.post('/:token/card-hold-intent', depositLimiter, async (req, res) => {
     if (estimate.status === 'accepted') return res.status(409).json({ error: 'Estimate already accepted' });
     if (!isEstimateAcceptActive(estimate)) return res.status(409).json({ error: 'Estimate is no longer active' });
     await reconcileFrozenMembershipSnapshot(estimate);
+    if (!isEstimateAcceptActive(estimate)) return res.status(409).json({ error: 'Estimate is no longer active' });
 
     const estData = parseEstimateData(estimate);
     const pricingBundle = await buildPricingBundle(estimate);
@@ -742,6 +743,7 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
     if (estimate.status === 'accepted') return res.status(409).json({ error: 'Estimate already accepted' });
     if (!isEstimateAcceptActive(estimate)) return res.status(409).json({ error: 'Estimate is no longer active' });
     await reconcileFrozenMembershipSnapshot(estimate);
+    if (!isEstimateAcceptActive(estimate)) return res.status(409).json({ error: 'Estimate is no longer active' });
 
     const estData = parseEstimateData(estimate);
     const pricingBundle = await buildPricingBundle(estimate);

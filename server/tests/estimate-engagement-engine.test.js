@@ -22,6 +22,7 @@ jest.mock('../config/feature-gates', () => ({
   // Every gate on — except the pricing-authority send gate (#3750), whose
   // verdict these unstamped fixtures don't model.
   isEnabled: jest.fn((key) => key !== 'sendRequiresServerPricing'),
+  termiteAnnualPlanSelectionEnabled: jest.requireActual('../config/feature-gates').termiteAnnualPlanSelectionEnabled,
 }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
@@ -373,6 +374,40 @@ describe('processDueJobs', () => {
     // job status update + estimate bump resolve via builder defaults
   }
   const EXPIRING_RULE = { rule_key: 'expiring_engaged', enabled: true, trigger_type: 'time_sweep', priority: 40, template_key: 'estimate.engage_expiring', params: {} };
+
+  test('annual reminders wait without a claim until the exact issued offer is restored', async () => {
+    const { annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
+    const previousAnnual = process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const previousCancel = process.env.GATE_CANCEL_FLOW_V2;
+    const row = baseEstimate({ estimate_data: {
+      result: { lineItems: [{ service: 'termite_bait', plan: 'annual_protection', annual: 299 }] },
+    } });
+    const delivered = { ...row, estimate_data: { ...row.estimate_data, deliveryState: {
+      firstDeliveredAt: '2026-09-12T00:00:00Z', annualPlanOfferFingerprint: annualPlanOfferFingerprint(row),
+    } } };
+    try {
+      process.env.GATE_TERMITE_ANNUAL_PLAN = 'false';
+      process.env.GATE_CANCEL_FLOW_V2 = 'false';
+      for (const blocked of [row, { ...delivered, notes: 'changed after handoff' }]) {
+        writes.length = 0;
+        enqueueProcessorHappyPath({ est: blocked });
+        expect(await Engine.processDueJobs(NOW)).toEqual({ sent: 0, shadow: 0 });
+        expect(followupShared.claimFollowupSend).not.toHaveBeenCalled();
+        expect(followupShared.sendDualChannel).not.toHaveBeenCalled();
+        expect(writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop().payload)
+          .toEqual(expect.objectContaining({ due_at: new Date(NOW.getTime() + 6 * H) }));
+      }
+      enqueueProcessorHappyPath({ est: delivered });
+      expect((await Engine.processDueJobs(NOW)).sent).toBe(1);
+      expect(followupShared.claimFollowupSend).toHaveBeenCalledTimes(1);
+      expect(followupShared.sendDualChannel).toHaveBeenCalledTimes(1);
+    } finally {
+      if (previousAnnual === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      else process.env.GATE_TERMITE_ANNUAL_PLAN = previousAnnual;
+      if (previousCancel === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
+      else process.env.GATE_CANCEL_FLOW_V2 = previousCancel;
+    }
+  });
 
   test('pricing gate (#3750): an unverified delivered row is not claimed or emailed; the job is re-dated, not skipped, so an engine re-save gets its reminder', async () => {
     isEnabled.mockImplementation(() => true); // every gate on, the pricing gate included
@@ -965,4 +1000,3 @@ describe('processDueJobs', () => {
     expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped', outcome_reason: 'estimate-inactive' }));
   });
 });
-

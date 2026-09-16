@@ -148,3 +148,38 @@ describe('GET /:token/data — regulated certificate surface', () => {
     });
   });
 });
+
+
+describe('annual document payload after live billing reconciliation', () => {
+  test.each([false, true])('mode=pdf only returns the still-issued offer (billing reprice=%s)', async (reprice) => {
+    const { annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
+    const gates = require('../config/feature-gates');
+    const priorAnnual = process.env.GATE_TERMITE_ANNUAL_PLAN;
+    process.env.GATE_TERMITE_ANNUAL_PLAN = 'false';
+    gates.isEnabled.mockImplementation((gate) => gate === 'estimateDocPdf');
+    const row = estimateRow({ viewed_at: new Date().toISOString() });
+    row.estimate_data.result.lineItems = [{ service: 'termite_bait', plan: 'annual_protection' }];
+    row.estimate_data.deliveryState = { firstDeliveredAt: new Date().toISOString(),
+      annualPlanOfferFingerprint: annualPlanOfferFingerprint(row) };
+    dbRows = { estimates: row };
+    const billing = jest.spyOn(require('../services/estimate-proposal-billing'), 'resolveProposalBillingContext')
+      .mockImplementation(async (estimate) => {
+        if (reprice) estimate.monthly_total = 99;
+        return { billsPerApplication: false, livePricing: null };
+      });
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/estimates/regulatedsurfacetoken/data?mode=pdf&refresh=1`);
+        expect(billing).toHaveBeenCalled();
+        expect(res.status).toBe(reprice ? 404 : 200);
+        if (reprice) expect(await res.json()).toEqual({ error: 'Estimate not found' });
+        else expect((await res.json()).estimate.id).toBe(row.id);
+      });
+    } finally {
+      billing.mockRestore();
+      gates.isEnabled.mockImplementation(() => false);
+      if (priorAnnual === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      else process.env.GATE_TERMITE_ANNUAL_PLAN = priorAnnual;
+    }
+  });
+});

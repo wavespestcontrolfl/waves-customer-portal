@@ -24,7 +24,8 @@ jest.mock('../services/waveguard-existing-services', () => ({
   isActivePlanCustomer: jest.fn(async () => false),
 }));
 
-const { handleEstimateView, handleEstimateAsk } = require('../routes/estimate-public');
+const publicRouter = require('../routes/estimate-public');
+const { handleEstimateView, handleEstimateAsk, applyServiceMixChange } = publicRouter;
 const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
 
 const FUTURE = new Date(Date.now() + 86400000).toISOString();
@@ -80,7 +81,7 @@ const ESTIMATE_MOUNT = '/estimate/tok-ssr-gate'; // app.get('/estimate/:token') 
 const API_MOUNT = '/tok-ssr-gate'; // app.use('/api/estimates') — no SPA fallthrough
 
 describe('handleEstimateView — SSR viewability gate', () => {
-  test.each([API_MOUNT, ESTIMATE_MOUNT, 'ask'])('rechecks the annual witness after membership repricing on %s', async (mount) => {
+  test.each([API_MOUNT, ESTIMATE_MOUNT, 'ask', 'select-tier', 'preferences', 'service-opt-out', 'warranty-comparison/pdf'])('rechecks the annual witness after membership repricing on %s', async (mount) => {
     const { annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
     const persistence = require('../services/admin-estimate-persistence');
     const result = { lineItems: [{ service: 'termite_bait', plan: 'annual_protection' }] };
@@ -92,6 +93,9 @@ describe('handleEstimateView — SSR viewability gate', () => {
     const reprice = jest.spyOn(persistence, 'serverRecomputeFromEstimateData').mockResolvedValue({
       recomputed: true, serverResult: result, serverTotals: { monthlyTotal: 40, annualTotal: 480, onetimeTotal: 0 },
     });
+    const comparison = require('../services/termite-warranty-comparison');
+    const comparisonGate = jest.spyOn(comparison, 'termiteComparisonGateOn').mockReturnValue(true);
+    const comparisonBuild = jest.spyOn(comparison, 'buildTermiteComparisonData');
     const priorGate = process.env.GATE_TERMITE_ANNUAL_PLAN;
     delete process.env.GATE_TERMITE_ANNUAL_PLAN;
     try {
@@ -107,6 +111,20 @@ describe('handleEstimateView — SSR viewability gate', () => {
         await handleEstimateAsk(req, res, (error) => { throw error; });
         expect(res.statusCode).toBe(409);
         expect(res.body).toEqual({ error: 'estimate_expired' });
+      } else if (mount === 'service-opt-out') {
+        const outcome = await applyServiceMixChange({ estimate: row, body: { serviceKey: 'pest', included: false, dryRun: true } });
+        expect(outcome).toEqual({ status: 404, body: { error: 'Estimate not found' } });
+      } else if (['select-tier', 'preferences', 'warranty-comparison/pdf'].includes(mount)) {
+        currentRow = row;
+        const route = publicRouter.stack.find((layer) => layer.route?.path === `/:token/${mount}`).route;
+        const handler = route.stack[route.stack.length - 1].handle;
+        const req = makeReq(`/tok-ssr-gate/${mount}`);
+        req.body = { selectedTier: 'Bronze', interiorSpray: false };
+        res = makeRes(); res.json = res.send;
+        await handler(req, res, (error) => { throw error; });
+        expect(res.statusCode).toBe(404);
+        expect(res.body).toEqual({ error: 'Estimate not found' });
+        expect(comparisonBuild).not.toHaveBeenCalled();
       } else ({ res, next } = await runView(row, mount));
       expect(reprice).toHaveBeenCalled();
       if (mount === API_MOUNT) {
@@ -118,8 +136,41 @@ describe('handleEstimateView — SSR viewability gate', () => {
       }
     } finally {
       reprice.mockRestore();
+      comparisonGate.mockRestore();
+      comparisonBuild.mockRestore();
       if (priorGate === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
       else process.env.GATE_TERMITE_ANNUAL_PLAN = priorGate;
+    }
+  });
+
+  test('ordinary PDF fallback rechecks after live billing reconciliation before rendering', async () => {
+    const { annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
+    const row = { ...PII, id: 'annual-pdf', status: 'sent', expires_at: FUTURE, monthly_total: 30,
+      estimate_data: { result: { lineItems: [{ service: 'termite_bait', plan: 'annual_protection' }] } } };
+    row.estimate_data.deliveryState = { firstDeliveredAt: new Date().toISOString(),
+      annualPlanOfferFingerprint: annualPlanOfferFingerprint(row) };
+    const billing = jest.spyOn(require('../services/estimate-proposal-billing'), 'resolveProposalBillingContext')
+      .mockImplementation(async (estimate) => { estimate.monthly_total = 40; return {}; });
+    const render = jest.spyOn(require('../services/pdf/estimate-pdf'), 'generateEstimateProposalPDF').mockImplementation(() => {});
+    const priorAnnual = process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const priorPdf = process.env.GATE_ESTIMATE_DOC_PDF;
+    process.env.GATE_TERMITE_ANNUAL_PLAN = 'false';
+    process.env.GATE_ESTIMATE_DOC_PDF = 'false';
+    try {
+      currentRow = row;
+      const route = publicRouter.stack.find((layer) => layer.route?.path === '/:token/pdf').route;
+      const res = makeRes(); res.json = res.send;
+      await route.stack[route.stack.length - 1].handle(makeReq('/tok-ssr-gate/pdf'), res, (error) => { throw error; });
+      expect(billing).toHaveBeenCalledWith(row);
+      expect(res.statusCode).toBe(404);
+      expect(res.body).toEqual({ error: 'Estimate not found' });
+      expect(render).not.toHaveBeenCalled();
+    } finally {
+      billing.mockRestore(); render.mockRestore();
+      if (priorAnnual === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      else process.env.GATE_TERMITE_ANNUAL_PLAN = priorAnnual;
+      if (priorPdf === undefined) delete process.env.GATE_ESTIMATE_DOC_PDF;
+      else process.env.GATE_ESTIMATE_DOC_PDF = priorPdf;
     }
   });
 

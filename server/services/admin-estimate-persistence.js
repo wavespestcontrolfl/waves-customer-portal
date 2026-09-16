@@ -2347,7 +2347,7 @@ function revisionGroupLockIds(row, writeFields) {
 // them — the same verdict the send claims apply, mirrored here because the
 // join itself publishes them (GH codex P1 r10).
 async function assertLiveRowMayJoinGroup(trx, row, writeFields) {
-  const { applyLinkVisibleSiblingScope, rowPassesGatedSendAuthority } = require('./pricing-authority-gate');
+  const { applyLinkVisibleSiblingScope, filterLinkVisibleSiblingRows, rowPassesGatedSendAuthority } = require('./pricing-authority-gate');
   for (const groupId of liveGroupMoveDestinationIds(row, writeFields)) {
     // The siblings the joined link will actually render — the shared
     // link-visible scope (uncapped codex P1 r19), terminal rows included.
@@ -2355,8 +2355,8 @@ async function assertLiveRowMayJoinGroup(trx, row, writeFields) {
       trx('estimates')
         .where({ estimate_group_id: groupId })
         .whereNot({ id: row?.id }),
-    ).select('id', 'status', 'price_locked_at', 'pricing_authority', 'estimate_data');
-    for (const sibling of siblings) {
+    ).select('*');
+    for (const sibling of filterLinkVisibleSiblingRows(siblings)) {
       // The ONE shared row verdict (uncapped codex P1 r21).
       if (rowPassesGatedSendAuthority(sibling)) continue;
       throw errorWithStatus(

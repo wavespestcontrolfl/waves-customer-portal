@@ -54,7 +54,7 @@ const {
   takePendingInvalidation,
 } = require('../services/admin-estimate-persistence');
 const { selectedTermiteAnnualPlanRows } = require('../services/estimate-termite-program-rows');
-const { estimateOfferVersion, annualPlanOfferFingerprint, annualPlanHasDeliveredOffer } = require('../services/estimate-offer-version');
+const { estimateOfferVersion, annualPlanOfferFingerprint, annualPlanHasDeliveredOffer, annualPlanPublicReplayBlocked } = require('../services/estimate-offer-version');
 const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
 const {
   inferEstimateServiceInterest,
@@ -337,6 +337,7 @@ const {
   gatedSendAuthorityPredicateApplies,
   rowPassesGatedSendAuthority,
   applyLinkVisibleSiblingScope,
+  filterLinkVisibleSiblingRows,
   estimateDeliverableUnderGate,
   groupPassesGatedSendAuthority,
 } = require('../services/pricing-authority-gate');
@@ -484,8 +485,14 @@ async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend 
       // (GH codex P2 r2 on #4309).
       .orWhere((fixed) => fixed.whereIn('status', ['sending', 'sent', 'viewed', 'expired']).whereRaw(`NOT (${FIXED_BID_VALIDITY_ABSENT_SQL})`)));
   if (forUpdate) query = query.forUpdate();
-  const siblings = await query.select('id', 'status', 'price_locked_at', 'pricing_authority', 'estimate_data');
+  const siblings = await query.select('*');
   for (const sibling of siblings) {
+    // The link-visible SQL branch is only a candidate scope: an undelivered
+    // annual revision stops rendering when either switch closes. Preserve
+    // publishable drafts and fixed-bid holds, which remain separate blockers.
+    if (['sending', 'sent', 'viewed'].includes(sibling.status)
+      && !hasFixedBidValidity(sibling)
+      && !filterLinkVisibleSiblingRows([sibling]).length) continue;
     if (sendAt && ['draft', 'scheduled', 'sending', 'send_failed', 'sent', 'viewed', 'expired'].includes(sibling.status)) {
       assertBidSendDate(sibling, sendAt);
     }
@@ -5199,13 +5206,21 @@ router.patch('/:id', async (req, res, next) => {
         "COALESCE(estimate_data->'proposal'->'commercialTerms'->>'paymentTerms', '') = ''",
       );
     }
-    const updatedCount = changesDeliveryOptions ? await db.transaction(async (trx) => {
-      // Published siblings stay sent/viewed during a group handoff. Use the
-      // same group-then-row lock and in-flight guard as a full revision.
-      await lockScheduledGroupGuardGroups(trx, estimate);
+    const updatedCount = changesDeliveryOptions || updates.status === 'declined' ? await db.transaction(async (trx) => {
+      // Published siblings stay sent/viewed during a group handoff. Delivery
+      // edits use the same group-then-row lock and in-flight guard as a full revision.
+      if (changesDeliveryOptions) await lockScheduledGroupGuardGroups(trx, estimate);
       const locked = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
-      if (!locked || estimateEditVersion(locked) !== estimateEditVersion(estimate)) return 0;
-      await assertNoRevisionDuringGroupSend(trx, locked);
+      if (!locked || locked.status !== estimate.status
+        || (changesDeliveryOptions && estimateEditVersion(locked) !== estimateEditVersion(estimate))) return 0;
+      if (changesDeliveryOptions) await assertNoRevisionDuringGroupSend(trx, locked);
+      if (updates.status === 'declined'
+        && (annualPlanPublicReplayBlocked(locked)
+          || annualPlanPublicReplayBlocked({ ...locked, ...updates, status: locked.status }))) {
+        const err = new Error('This annual plan offer has not been delivered in its current form. Re-issue it before declining.');
+        err.statusCode = 409;
+        throw err;
+      }
       return updateQuery.transacting(trx).update(updates);
     }) : await updateQuery.update(updates);
     if (!updatedCount) {

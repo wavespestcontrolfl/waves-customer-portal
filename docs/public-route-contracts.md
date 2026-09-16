@@ -1038,7 +1038,13 @@ The legacy view and `/data` withhold ineligible offers; `/accept` returns its
 inactive 409. Document-render pins cannot bypass annual withholding. Decline and
 extension claims recheck the annual verdict under their existing locks before
 transitioning or notifying. A previously issued ask token cannot query a withheld
-annual offer, including after membership reconciliation. Accepted and declined terminal views retain their existing guards.
+annual offer, including after membership reconciliation. Tier, preference and service-mix
+changes, card setup and PDF rendering also recheck after reconciliation, including
+the final document JSON payload. Staff
+decline checks the locked offer before making it terminal; already-declined
+views and reason edits retain their existing guards. Follow-up reminders stop
+before claiming or sending a withheld annual link. Grouped pricing authority
+checks exclude annual siblings that the customer link withholds.
 Browser-authored delivery receipts are stripped; staff revisions preserve the
 locked row's receipt, whose fingerprint cannot authorize changed terms.
 Supported customer revision history is a separate prerequisite before activation.

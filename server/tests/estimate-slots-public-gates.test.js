@@ -57,6 +57,7 @@ jest.mock('../routes/estimate-public', () => ({
     return true;
   },
   isEstimateAcceptActive: jest.fn(() => true),
+  reconcileFrozenMembershipSnapshot: jest.fn(),
   isStructuralOneTimeOnlyEstimate: jest.fn(() => false),
   isRodentGuaranteeOnlyEstimate: jest.fn(() => false),
   estimateTrenchingReviewRequired: jest.fn(() => false),
@@ -182,6 +183,32 @@ describe('issued annual protection after the gates close', () => {
     else process.env.GATE_TERMITE_ANNUAL_PLAN = previousAnnual;
     if (previousCancel === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
     else process.env.GATE_CANCEL_FLOW_V2 = previousCancel;
+  });
+
+  test.each(['card-hold-intent', 'recurring-card-intent'])('%s rechecks a delivered offer after membership repricing', async (route) => {
+    const { annualPlanOfferFingerprint, annualPlanPublicReplayBlocked } = require('../services/estimate-offer-version');
+    const publicRoute = require('../routes/estimate-public');
+    const holds = require('../services/estimate-card-holds');
+    process.env.GATE_TERMITE_ANNUAL_PLAN = 'false';
+    process.env.GATE_CANCEL_FLOW_V2 = 'false';
+    currentEstimate = { id: 'annual-repriced', status: 'sent', monthly_total: 30,
+      estimate_data: { result: { lineItems: [{ service: 'termite_bait', plan: 'annual_protection' }] } } };
+    currentEstimate.estimate_data.deliveryState = { firstDeliveredAt: '2026-09-12T00:00:00Z',
+      annualPlanOfferFingerprint: annualPlanOfferFingerprint(currentEstimate) };
+    expect(annualPlanPublicReplayBlocked(currentEstimate)).toBe(false);
+    publicRoute.isEstimateAcceptActive.mockImplementation((row) => !annualPlanPublicReplayBlocked(row));
+    publicRoute.reconcileFrozenMembershipSnapshot.mockImplementation(async (row) => { row.monthly_total = 40; });
+    holds.createCardHoldSetupIntentForEstimate.mockClear();
+    try {
+      const res = await fetch(`${base}/${TOKEN}/${route}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ error: 'Estimate is no longer active' });
+      expect(publicRoute.reconcileFrozenMembershipSnapshot).toHaveBeenCalledWith(currentEstimate);
+      expect(holds.createCardHoldSetupIntentForEstimate).not.toHaveBeenCalled();
+    } finally {
+      publicRoute.isEstimateAcceptActive.mockImplementation(() => true);
+      publicRoute.reconcileFrozenMembershipSnapshot.mockReset();
+    }
   });
 
   test('exact delivered offer can browse and reserve; missing or stale handoff cannot', async () => {

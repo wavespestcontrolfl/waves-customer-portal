@@ -345,7 +345,7 @@ describe('findGroupSiblingBlockingSend — grouped schedules preflight every sib
   const { findGroupSiblingBlockingSend } = adminEstimatesRouter._internals;
   const anchor = { id: 'est-anchor', estimate_group_id: 'grp-1', pricing_authority: 'SERVER', estimate_data: '{}' };
   function fakeDatabase(rows) {
-    const calls = { wheres: [], whereNots: [], whereNulls: [], whereIns: [], orWhereIns: [], forUpdate: false };
+    const calls = { wheres: [], whereNots: [], whereNulls: [], whereIns: [], orWhereIns: [], selects: [], forUpdate: false };
     const builder = {
       forUpdate: () => { calls.forUpdate = true; return builder; },
       where: (c) => { if (typeof c === 'function') c(builder); else calls.wheres.push(c); return builder; },
@@ -355,7 +355,7 @@ describe('findGroupSiblingBlockingSend — grouped schedules preflight every sib
       whereRaw: () => builder,
       whereIn: (col, vals) => { calls.whereIns.push([col, vals]); return builder; },
       orWhereIn: (col, vals) => { calls.orWhereIns.push([col, vals]); return builder; },
-      select: async () => rows,
+      select: async (...columns) => { calls.selects.push(columns); return rows; },
     };
     const database = jest.fn(() => builder);
     return { database, calls };
@@ -384,6 +384,7 @@ describe('findGroupSiblingBlockingSend — grouped schedules preflight every sib
       ['status', ['sending', 'sent', 'viewed']],
     ]));
     expect(calls.orWhereIns).toEqual([['status', ['accepted', 'declined']]]);
+    expect(calls.selects).toEqual([['*']]);
     expect(calls.forUpdate).toBe(false);
   });
 
@@ -410,6 +411,35 @@ describe('findGroupSiblingBlockingSend — grouped schedules preflight every sib
     const viewedNull = { id: 'est-sib-viewed', status: 'viewed', pricing_authority: null, estimate_data: '{}' };
     expect(await findGroupSiblingBlockingSend(anchor, { database: fakeDatabase([viewedNull]).database, autoSend: true }))
       .toMatchObject({ statusCode: 422, code: 'PRICING_AUTHORITY_NOT_SERVER' });
+  });
+
+  test('annual-blocked live siblings are hidden, while published witnesses and publishable/fixed blockers remain judged', async () => {
+    const { annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
+    const priorAnnual = process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const priorCancel = process.env.GATE_CANCEL_FLOW_V2;
+    const sibling = { id: 'est-annual', status: 'sent', pricing_authority: 'CLIENT_FALLBACK',
+      estimate_data: { result: { lineItems: [{ service: 'termite_bait', plan: 'annual_protection', annual: 299 }] } } };
+    const delivered = { ...sibling, estimate_data: { ...sibling.estimate_data, deliveryState: {
+      firstDeliveredAt: '2026-09-12T00:00:00Z', annualPlanOfferFingerprint: annualPlanOfferFingerprint(sibling),
+    } } };
+    try {
+      process.env.GATE_TERMITE_ANNUAL_PLAN = 'false';
+      process.env.GATE_CANCEL_FLOW_V2 = 'false';
+      expect(await findGroupSiblingBlockingSend(anchor, { database: fakeDatabase([sibling]).database })).toBeNull();
+      expect(await findGroupSiblingBlockingSend(anchor, { database: fakeDatabase([{ ...delivered, notes: 'revised' }]).database })).toBeNull();
+      expect(await findGroupSiblingBlockingSend(anchor, { database: fakeDatabase([delivered]).database }))
+        .toMatchObject({ code: 'CLIENT_FALLBACK_PRICING' });
+      for (const stillBlocked of [{ ...sibling, status: 'draft' },
+        { ...sibling, estimate_data: { ...sibling.estimate_data, proposal: { validThrough: '2027-12-31' } } }]) {
+        expect(await findGroupSiblingBlockingSend(anchor, { database: fakeDatabase([stillBlocked]).database }))
+          .toMatchObject({ code: 'CLIENT_FALLBACK_PRICING' });
+      }
+    } finally {
+      if (priorAnnual === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      else process.env.GATE_TERMITE_ANNUAL_PLAN = priorAnnual;
+      if (priorCancel === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
+      else process.env.GATE_CANCEL_FLOW_V2 = priorCancel;
+    }
   });
 
   test('gate on: an ACCEPTED (locked) sibling passes a manual send but never automation (uncapped codex P1 r21)', async () => {
@@ -455,14 +485,14 @@ describe('pricing-authority-gate — the one verdict shared by sends, follow-ups
 describe('pricing-authority-gate — group-aware verdict (GH codex P1 r14)', () => {
   const gate = require('../services/pricing-authority-gate');
   function fakeDb(siblings, { throwOnRead = false } = {}) {
-    const calls = { whereIns: [], orWhereIns: [], whereFns: 0 };
+    const calls = { whereIns: [], orWhereIns: [], whereFns: 0, selects: [] };
     const chain = {
       where: (c) => { if (typeof c === 'function') { calls.whereFns += 1; c(chain); } return chain; },
       orWhere: (c) => { if (typeof c === 'function') c(chain); return chain; },
       whereNot: () => chain, whereNull: () => chain, whereRaw: () => chain,
       whereIn: (col, vals) => { calls.whereIns.push([col, vals]); return chain; },
       orWhereIn: (col, vals) => { calls.orWhereIns.push([col, vals]); return chain; },
-      select: async () => { if (throwOnRead) throw new Error('db down'); return siblings; },
+      select: async (...columns) => { calls.selects.push(columns); if (throwOnRead) throw new Error('db down'); return siblings; },
     };
     const database = jest.fn(() => chain);
     return { database, calls };
@@ -479,6 +509,7 @@ describe('pricing-authority-gate — group-aware verdict (GH codex P1 r14)', () 
     expect(bad.calls.whereIns).toEqual([['status', ['sending', 'sent', 'viewed']]]);
     expect(bad.calls.orWhereIns).toEqual([['status', ['accepted', 'declined']]]);
     expect(bad.calls.whereFns).toBeGreaterThanOrEqual(2);
+    expect(bad.calls.selects).toEqual([['*']]);
     const good = fakeDb([
       { id: 'est-b', pricing_authority: 'SERVER', estimate_data: '{}' },
       { id: 'est-c', pricing_authority: null, estimate_data: JSON.stringify({ proposal: { enabled: true, provenance: { source: 'proposal-editor' } } }) },
@@ -487,6 +518,35 @@ describe('pricing-authority-gate — group-aware verdict (GH codex P1 r14)', () 
     const ungrouped = fakeDb([{ id: 'x', pricing_authority: 'CLIENT_FALLBACK' }]);
     expect(await gate.estimateDeliverableUnderGate(ungrouped.database, { ...anchor, estimate_group_id: null })).toBe(true);
     expect(ungrouped.database).not.toHaveBeenCalled();
+  });
+
+  test('a hidden annual sibling does not veto its anchor; an exactly delivered sibling still does', async () => {
+    const { annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
+    const priorAnnual = process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const priorCancel = process.env.GATE_CANCEL_FLOW_V2;
+    const sibling = { id: 'est-annual', status: 'sent', pricing_authority: 'CLIENT_FALLBACK',
+      customer_email: 'owner@example.test', estimate_data: {
+        result: { lineItems: [{ service: 'termite_bait', plan: 'annual_protection', annual: 299 }] },
+      } };
+    const delivered = { ...sibling, estimate_data: { ...sibling.estimate_data, deliveryState: {
+      firstDeliveredAt: '2026-09-12T00:00:00Z', annualPlanOfferFingerprint: annualPlanOfferFingerprint(sibling),
+    } } };
+    try {
+      process.env.GATE_TERMITE_ANNUAL_PLAN = 'false';
+      process.env.GATE_CANCEL_FLOW_V2 = 'false';
+      mockGateState.sendRequiresServerPricing = true;
+      for (const hidden of [sibling, { ...delivered, notes: 'changed after handoff' }]) {
+        expect(await gate.estimateDeliverableUnderGate(fakeDb([hidden]).database, anchor)).toBe(true);
+      }
+      expect(await gate.estimateDeliverableUnderGate(fakeDb([delivered]).database, anchor)).toBe(false);
+      expect(gate.filterLinkVisibleSiblingRows([sibling, delivered])).toEqual([delivered]);
+    } finally {
+      if (priorAnnual === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      else process.env.GATE_TERMITE_ANNUAL_PLAN = priorAnnual;
+      if (priorCancel === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
+      else process.env.GATE_CANCEL_FLOW_V2 = priorCancel;
+      mockGateState.sendRequiresServerPricing = false;
+    }
   });
 
   test('fails closed on a sibling read error; gate off is always deliverable; a fallback anchor never reaches the group read', async () => {

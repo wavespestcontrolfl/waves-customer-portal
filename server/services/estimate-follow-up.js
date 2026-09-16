@@ -27,6 +27,7 @@ const { sendCustomerMessage } = require("./messaging/send-customer-message");
 const { inferEstimateServiceInterest } = require("./estimate-service-lines");
 const { isEnabled } = require("../config/feature-gates");
 const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require("./pricing-authority-gate");
+const { annualPlanPublicReplayBlocked } = require("./estimate-offer-version");
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require("../constants/business");
 const {
   assessDepositFollowUpEligibility,
@@ -150,6 +151,11 @@ function estimateOptedOutOfFollowups(est) {
 async function safetyGate(est, now = new Date(), { replay = false } = {}) {
   if (TERMINAL_STATUSES.has(est.status))
     return { skip: true, reason: `terminal-status:${est.status}` };
+  // Every stage and the quiet-hours replay carries the same bearer link as
+  // the public estimate page. A stale or missing annual delivery witness
+  // makes that link unavailable after either annual switch closes.
+  if (annualPlanPublicReplayBlocked(est))
+    return { skip: true, reason: 'annual-plan-offer-withheld' };
   // Engine-authoritative pricing gate (#3750, GH codex P1 r12): while
   // GATE_SEND_REQUIRES_SERVER_PRICING is on, no automated lane may nudge a
   // customer to open or accept a price the engine never verified — a

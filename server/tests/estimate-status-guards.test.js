@@ -63,6 +63,9 @@ jest.mock('../services/admin-estimate-persistence', () => ({
   createOrReuseAdminEstimate: jest.fn(),
   estimateExpiresAt: jest.fn(),
   estimateViewUrl: jest.fn(),
+  estimateEditVersion: jest.fn(() => 'unchanged'),
+  lockScheduledGroupGuardGroups: jest.fn(async () => {}),
+  assertNoRevisionDuringGroupSend: jest.fn(async () => {}),
 }));
 jest.mock('../routes/estimate-public', () => ({
   acceptanceServiceLists: jest.fn(),
@@ -74,6 +77,7 @@ jest.mock('../services/sendgrid-mail', () => ({ isConfigured: jest.fn(() => fals
 const db = require('../models/db');
 const adminEstimatesRouter = require('../routes/admin-estimates');
 const { resolveEstimateStatusPatch } = adminEstimatesRouter._internals;
+const { annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
 
 function routeHandler(router, path, method) {
   const layer = router.stack.find((entry) => (
@@ -85,7 +89,7 @@ function routeHandler(router, path, method) {
 
 function makeBuilder({ first = null, updateCount = 1 } = {}) {
   const builder = {};
-  for (const m of ['where', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereIn', 'andWhere', 'whereRaw', 'orderBy', 'limit']) {
+  for (const m of ['where', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereIn', 'andWhere', 'whereRaw', 'orderBy', 'limit', 'forUpdate', 'transacting']) {
     builder[m] = jest.fn(() => builder);
   }
   builder.modify = jest.fn((fn) => { fn(builder); return builder; });
@@ -157,6 +161,8 @@ describe('PATCH /api/admin/estimates/:id status guard', () => {
 
   beforeEach(() => {
     db.mockReset();
+    db.transaction.mockClear();
+    db.transaction.mockImplementation(async (callback) => callback(db));
   });
 
   test('409s on accepted→declined without touching the row', async () => {
@@ -183,8 +189,9 @@ describe('PATCH /api/admin/estimates/:id status guard', () => {
 
   test('sent→declined updates with an optimistic status guard and stamps declined_at', async () => {
     const readBuilder = makeBuilder({ first: { id: 'e1', status: 'sent' } });
+    const lockedBuilder = makeBuilder({ first: { id: 'e1', status: 'sent' } });
     const writeBuilder = makeBuilder({ updateCount: 1 });
-    db.mockImplementationOnce(() => readBuilder).mockImplementationOnce(() => writeBuilder);
+    db.mockImplementationOnce(() => readBuilder).mockImplementationOnce(() => writeBuilder).mockImplementationOnce(() => lockedBuilder);
 
     const res = makeRes();
     await patchHandler({ params: { id: 'e1' }, body: { status: 'declined', declineReason: 'price' } }, res, jest.fn());
@@ -213,8 +220,9 @@ describe('PATCH /api/admin/estimates/:id status guard', () => {
 
   test('the status UPDATE itself carries the hold predicate (a hold landing after the pre-read parks as a 409)', async () => {
     const readBuilder = makeBuilder({ first: { id: 'e1', status: 'sent' } });
+    const lockedBuilder = makeBuilder({ first: { id: 'e1', status: 'sent' } });
     const writeBuilder = makeBuilder({ updateCount: 0 });
-    db.mockImplementationOnce(() => readBuilder).mockImplementationOnce(() => writeBuilder);
+    db.mockImplementationOnce(() => readBuilder).mockImplementationOnce(() => writeBuilder).mockImplementationOnce(() => lockedBuilder);
 
     const res = makeRes();
     await patchHandler({ params: { id: 'e1' }, body: { status: 'declined', declineReason: 'price' } }, res, jest.fn());
@@ -225,8 +233,9 @@ describe('PATCH /api/admin/estimates/:id status guard', () => {
 
   test('409s when a concurrent accept wins the race (0 rows updated)', async () => {
     const readBuilder = makeBuilder({ first: { id: 'e1', status: 'viewed' } });
+    const lockedBuilder = makeBuilder({ first: { id: 'e1', status: 'viewed' } });
     const writeBuilder = makeBuilder({ updateCount: 0 });
-    db.mockImplementationOnce(() => readBuilder).mockImplementationOnce(() => writeBuilder);
+    db.mockImplementationOnce(() => readBuilder).mockImplementationOnce(() => writeBuilder).mockImplementationOnce(() => lockedBuilder);
 
     const res = makeRes();
     await patchHandler({ params: { id: 'e1' }, body: { status: 'declined', declineReason: 'No response' } }, res, jest.fn());
@@ -266,6 +275,114 @@ describe('PATCH /api/admin/estimates/:id status guard', () => {
     expect(written).toMatchObject({ decline_reason: 'timing', disposition: 'declined_timing', disposition_source: 'staff' });
     expect(written.declined_at).toBeUndefined();
     expect(written.status).toBeUndefined();
+    expect(res.json).toHaveBeenCalledWith({ success: true });
+  });
+});
+
+describe('PATCH /api/admin/estimates/:id annual decline replay guard', () => {
+  const patchHandler = routeHandler(adminEstimatesRouter, '/:id', 'patch');
+  const priorGates = [process.env.GATE_TERMITE_ANNUAL_PLAN, process.env.GATE_CANCEL_FLOW_V2];
+  const annualRow = () => ({
+    id: 'e1', status: 'sent', monthly_total: 0, annual_total: 299,
+    onetime_total: 450, show_one_time_option: false, bill_by_invoice: false,
+    estimate_data: { result: { lineItems: [{ service: 'termite_bait', plan: 'annual_protection', stations: 15 }] } },
+  });
+  const deliveredRow = () => {
+    const row = annualRow();
+    row.estimate_data.deliveryState = {
+      firstDeliveredAt: '2026-01-01T12:00:00Z',
+      annualPlanOfferFingerprint: annualPlanOfferFingerprint(row),
+    };
+    return row;
+  };
+  const decline = (other = {}) => ({ status: 'declined', declineReason: 'price', ...other });
+  const mockRows = (preRead, locked, updateCount = 1) => {
+    const readBuilder = makeBuilder({ first: preRead });
+    const lockedBuilder = makeBuilder({ first: locked });
+    const writeBuilder = makeBuilder({ updateCount });
+    db.mockImplementationOnce(() => readBuilder)
+      .mockImplementationOnce(() => writeBuilder)
+      .mockImplementationOnce(() => lockedBuilder);
+    return { lockedBuilder, writeBuilder };
+  };
+
+  beforeEach(() => {
+    db.mockReset();
+    db.transaction.mockClear();
+    db.transaction.mockImplementation(async (callback) => callback(db));
+    process.env.GATE_TERMITE_ANNUAL_PLAN = 'false';
+    process.env.GATE_CANCEL_FLOW_V2 = 'false';
+  });
+  afterAll(() => {
+    ['GATE_TERMITE_ANNUAL_PLAN', 'GATE_CANCEL_FLOW_V2'].forEach((key, index) => {
+      if (priorGates[index] === undefined) delete process.env[key];
+      else process.env[key] = priorGates[index];
+    });
+  });
+
+  test('declines the exact delivered annual offer under closed gates', async () => {
+    const row = deliveredRow();
+    const { lockedBuilder, writeBuilder } = mockRows(row, row);
+    const res = makeRes();
+    await patchHandler({ params: { id: 'e1' }, body: decline() }, res, jest.fn());
+    expect(lockedBuilder.forUpdate).toHaveBeenCalled();
+    expect(writeBuilder.transacting).toHaveBeenCalledWith(db);
+    expect(writeBuilder.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'declined' }));
+    expect(res.json).toHaveBeenCalledWith({ success: true });
+  });
+
+  test.each([
+    ['missing delivery witness', annualRow],
+    ['stale delivery witness', () => ({ ...deliveredRow(), annual_total: 399 })],
+  ])('409s on a %s before making the row terminal', async (_label, makeRow) => {
+    const row = makeRow();
+    const { writeBuilder } = mockRows(row, row);
+    const res = makeRes();
+    await patchHandler({ params: { id: 'e1' }, body: decline() }, res, jest.fn());
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(writeBuilder.update).not.toHaveBeenCalled();
+  });
+
+  test('uses the fresh locked offer if delivery changes after the pre-read', async () => {
+    const preRead = deliveredRow();
+    const locked = { ...preRead, annual_total: 399 };
+    const { writeBuilder } = mockRows(preRead, locked);
+    const res = makeRes();
+    await patchHandler({ params: { id: 'e1' }, body: decline() }, res, jest.fn());
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(writeBuilder.update).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['showOneTimeOption', true],
+    ['billByInvoice', true],
+  ])('rejects a combined %s edit and decline that changes the delivered offer', async (field, value) => {
+    const row = deliveredRow();
+    const { writeBuilder } = mockRows(row, row);
+    const res = makeRes();
+    await patchHandler({ params: { id: 'e1' }, body: decline({ [field]: value }) }, res, jest.fn());
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(writeBuilder.update).not.toHaveBeenCalled();
+  });
+
+  test('409s when the locked row was accepted after the pre-read', async () => {
+    const row = deliveredRow();
+    const { writeBuilder } = mockRows(row, { ...row, status: 'accepted' });
+    const res = makeRes();
+    await patchHandler({ params: { id: 'e1' }, body: decline() }, res, jest.fn());
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(writeBuilder.update).not.toHaveBeenCalled();
+  });
+
+  test('an already-declined annual row can still edit its reason without re-stamping', async () => {
+    const row = { ...annualRow(), status: 'declined' };
+    const readBuilder = makeBuilder({ first: row });
+    const writeBuilder = makeBuilder({ updateCount: 1 });
+    db.mockImplementationOnce(() => readBuilder).mockImplementationOnce(() => writeBuilder);
+    const res = makeRes();
+    await patchHandler({ params: { id: 'e1' }, body: decline({ declineReason: 'timing' }) }, res, jest.fn());
+    expect(writeBuilder.update.mock.calls[0][0].declined_at).toBeUndefined();
+    expect(db.transaction).not.toHaveBeenCalled();
     expect(res.json).toHaveBeenCalledWith({ success: true });
   });
 });

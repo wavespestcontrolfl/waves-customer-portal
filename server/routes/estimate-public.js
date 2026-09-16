@@ -14020,6 +14020,7 @@ router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) 
     // Reconcile before this handler recomputes + persists, so a stale
     // "existing customer" classification isn't written back into estimate_data.
     await reconcileFrozenMembershipSnapshot(estimate);
+    if (annualPlanPublicReplayBlocked(estimate)) return res.status(404).json({ error: 'Estimate not found' });
 
     const { selectedTier } = req.body;
     const ALLOWED_TIERS = ['Bronze', 'Silver', 'Gold', 'Platinum'];
@@ -15025,6 +15026,7 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     // and unlike those routes this one WRITES the repriced result back.
     // In-memory only; the write below persists whatever it corrected.
     await reconcileFrozenMembershipSnapshot(estimate);
+    if (annualPlanPublicReplayBlocked(estimate)) return { status: 404, body: { error: 'Estimate not found' } };
 
     const serviceKey = String(body.serviceKey || '');
     if (!serviceKey) return { status: 400, body: ({ error: 'serviceKey is required' }) };
@@ -15601,6 +15603,7 @@ router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) 
     // Reconcile before this handler recomputes + persists, so a stale
     // "existing customer" classification isn't written back into estimate_data.
     await reconcileFrozenMembershipSnapshot(estimate);
+    if (annualPlanPublicReplayBlocked(estimate)) return res.status(404).json({ error: 'Estimate not found' });
 
     // Only accept known pref keys; coerce to boolean.
     const patch = {};
@@ -24809,8 +24812,10 @@ router.get('/:token/pdf', estimatePdfLimiter, async (req, res, next) => {
     // persisted snapshot flags freeze at send time and would let this document
     // contradict the estimate the customer is looking at.
     const { resolveProposalBillingContext } = require('../services/estimate-proposal-billing');
+    const billingContext = await resolveProposalBillingContext(estimate);
+    if (annualPlanPublicReplayBlocked(estimate)) return res.status(404).json({ error: 'Estimate not found' });
     generateEstimateProposalPDF(estimate, res, {
-      ...(await resolveProposalBillingContext(estimate)),
+      ...billingContext,
       // The recorded acceptance rides the fallback too (pre-push Codex P1):
       // a downloaded accepted document must never omit its record.
       acceptance: await acceptanceRecordForEstimate(estimate, { strict: true }),
@@ -25186,6 +25191,7 @@ router.get('/:token/warranty-comparison/pdf', dataLimiter, async (req, res, next
     // existing-member artifacts in estimate_data, and replaying them would
     // print lower totals than the estimate page shows.
     await reconcileFrozenMembershipSnapshot(estimate);
+    if (annualPlanPublicReplayBlocked(estimate)) return notFound();
     let estData = {};
     try {
       estData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {});
@@ -26288,14 +26294,20 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       } catch (e) { logger.error(`[notifications] Estimate viewed notification failed: ${e.message}`); }
     }
 
-    res.json(await composeEstimateDataPayload(estimate, {
+    const payload = await composeEstimateDataPayload(estimate, {
       adminDraftPreview,
       isPdfRenderPass,
       docRenderPin,
       verifiedStaffPreview,
       currentViewRecorded,
       isInternalRefresh,
-    }));
+    });
+    // Proposal billing can reconcile membership again while building the
+    // document payload. Its final terms must still match the issued offer.
+    if (!adminDraftPreview && annualPlanPublicReplayBlocked(estimate)) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    res.json(payload);
   } catch (err) { next(err); }
 });
 

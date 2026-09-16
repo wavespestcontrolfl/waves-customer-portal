@@ -1352,14 +1352,14 @@ describe('a LIVE row moving into a group has the destination judged and locked, 
   const liveRow = { id: 'est-live', estimate_group_id: null, sent_at: '2026-07-10T11:59:00Z' };
 
   function fakeTrx(siblings) {
-    const calls = { whereIns: [], orWhereIns: [] };
+    const calls = { whereIns: [], orWhereIns: [], selects: [] };
     const chain = {
       where: (c) => { if (typeof c === 'function') c(chain); return chain; },
       orWhere: (c) => { if (typeof c === 'function') c(chain); return chain; },
       whereNot: () => chain, whereNull: () => chain, whereRaw: () => chain, orWhereRaw: () => chain,
       whereIn: (col, vals) => { calls.whereIns.push([col, vals]); return chain; },
       orWhereIn: (col, vals) => { calls.orWhereIns.push([col, vals]); return chain; },
-      select: async () => siblings,
+      select: async (...columns) => { calls.selects.push(columns); return siblings; },
     };
     const trx = jest.fn(() => chain);
     trx.raw = jest.fn(async () => ({}));
@@ -1387,6 +1387,7 @@ describe('a LIVE row moving into a group has the destination judged and locked, 
     // The link-visible scope (shared helper): live unexpired + terminal rows.
     expect(calls.whereIns).toEqual([['status', ['sending', 'sent', 'viewed']]]);
     expect(calls.orWhereIns).toEqual([['status', ['accepted', 'declined']]]);
+    expect(calls.selects).toEqual([['*']]);
     const ok = fakeTrx([
       { id: 'est-a', pricing_authority: 'SERVER', estimate_data: '{}' },
       { id: 'est-b', pricing_authority: null, estimate_data: JSON.stringify({ proposal: { enabled: true, provenance: { source: 'proposal-editor' } } }) },
@@ -1401,6 +1402,32 @@ describe('a LIVE row moving into a group has the destination judged and locked, 
     await assertLiveRowMayJoinGroup(quiet.trx, { ...liveRow, estimate_group_id: 'grp-dest' }, { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' });
     await assertLiveRowMayJoinGroup(quiet.trx, { id: 'est-draft', estimate_group_id: null }, { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' });
     expect(quiet.trx).not.toHaveBeenCalled();
+  });
+
+  test('a destination group ignores hidden annual revisions but judges their exact issued offer', async () => {
+    const { annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
+    const priorAnnual = process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const priorCancel = process.env.GATE_CANCEL_FLOW_V2;
+    const sibling = { id: 'est-annual', status: 'sent', pricing_authority: 'CLIENT_FALLBACK',
+      estimate_data: { result: { lineItems: [{ service: 'termite_bait', plan: 'annual_protection', annual: 299 }] } } };
+    const delivered = { ...sibling, estimate_data: { ...sibling.estimate_data, deliveryState: {
+      firstDeliveredAt: '2026-09-12T00:00:00Z', annualPlanOfferFingerprint: annualPlanOfferFingerprint(sibling),
+    } } };
+    try {
+      process.env.GATE_TERMITE_ANNUAL_PLAN = 'false';
+      process.env.GATE_CANCEL_FLOW_V2 = 'false';
+      for (const hidden of [sibling, { ...delivered, notes: 'revised' }]) {
+        await expect(assertLiveRowMayJoinGroup(fakeTrx([hidden]).trx, liveRow,
+          { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' })).resolves.toBeUndefined();
+      }
+      await expect(assertLiveRowMayJoinGroup(fakeTrx([delivered]).trx, liveRow,
+        { pricing_authority: 'SERVER', estimate_group_id: 'grp-dest' })).rejects.toMatchObject({ statusCode: 409 });
+    } finally {
+      if (priorAnnual === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      else process.env.GATE_TERMITE_ANNUAL_PLAN = priorAnnual;
+      if (priorCancel === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
+      else process.env.GATE_CANCEL_FLOW_V2 = priorCancel;
+    }
   });
 });
 

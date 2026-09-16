@@ -27,7 +27,11 @@ jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async 
 jest.mock('../services/estimate-lead-linkage', () => ({ leadIdForEstimate: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/estimate-service-lines', () => ({ inferEstimateServiceInterest: jest.fn(), inferEstimateServiceLines: jest.fn(() => []) }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false), gateEnvValue: jest.fn(() => false) }));
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: jest.fn(() => false),
+  gateEnvValue: jest.fn(() => false),
+  termiteAnnualPlanSelectionEnabled: jest.requireActual('../config/feature-gates').termiteAnnualPlanSelectionEnabled,
+}));
 jest.mock('../services/estimate-deposits', () => ({}));
 jest.mock('../services/estimate-conversion-guard', () => ({
   customerConvertedSince: jest.fn(async () => ({ converted: false })),
@@ -56,6 +60,33 @@ describe('safetyGate honors the durable engagement opt-out', () => {
   test('a normal estimate still passes the gate', async () => {
     const gate = await safetyGate({ ...base, estimate_data: '{}' });
     expect(gate).toEqual({ skip: false });
+  });
+});
+
+describe('safetyGate annual offer replay', () => {
+  const { annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
+  const row = { id: 'est-annual', status: 'sent', customer_email: 'owner@example.test',
+    estimate_data: { result: { lineItems: [{ service: 'termite_bait', plan: 'annual_protection', annual: 299 }] } } };
+  const delivered = { ...row, estimate_data: { ...row.estimate_data, deliveryState: {
+    firstDeliveredAt: '2026-09-12T00:00:00Z', annualPlanOfferFingerprint: annualPlanOfferFingerprint(row),
+  } } };
+  const previousAnnual = process.env.GATE_TERMITE_ANNUAL_PLAN;
+  const previousCancel = process.env.GATE_CANCEL_FLOW_V2;
+  beforeEach(() => { process.env.GATE_TERMITE_ANNUAL_PLAN = 'false'; process.env.GATE_CANCEL_FLOW_V2 = 'false'; });
+  afterAll(() => {
+    if (previousAnnual === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    else process.env.GATE_TERMITE_ANNUAL_PLAN = previousAnnual;
+    if (previousCancel === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
+    else process.env.GATE_CANCEL_FLOW_V2 = previousCancel;
+  });
+
+  test('missing and stale witnesses suppress every follow-up before conversion; exact handoff remains eligible', async () => {
+    customerConvertedSince.mockClear();
+    for (const blocked of [row, { ...delivered, notes: 'revised after handoff' }]) {
+      expect(await safetyGate(blocked)).toEqual({ skip: true, reason: 'annual-plan-offer-withheld' });
+    }
+    expect(customerConvertedSince).not.toHaveBeenCalled();
+    expect(await safetyGate(delivered)).toEqual({ skip: false });
   });
 });
 

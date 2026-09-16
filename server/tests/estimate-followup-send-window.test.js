@@ -47,6 +47,7 @@ jest.mock('../config/twilio-numbers', () => ({
 }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
+  termiteAnnualPlanSelectionEnabled: jest.requireActual('../config/feature-gates').termiteAnnualPlanSelectionEnabled,
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(),
@@ -205,5 +206,32 @@ describe('estimate follow-up sendDualChannel send-window hold', () => {
       retryable: true,
     });
     db._firstImpl = null;
+  });
+
+  test('quiet-hours replay rechecks an annual offer’s exact handoff before dispatch', async () => {
+    const { deferredFollowupStillEligible } = require('../services/estimate-follow-up');
+    const { annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
+    const priorAnnual = process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const priorCancel = process.env.GATE_CANCEL_FLOW_V2;
+    const row = { id: 'est-annual', status: 'sent', customer_email: 'owner@example.test',
+      estimate_data: { result: { lineItems: [{ service: 'termite_bait', plan: 'annual_protection', annual: 299 }] } } };
+    const delivered = { ...row, estimate_data: { ...row.estimate_data, deliveryState: {
+      firstDeliveredAt: '2026-09-12T00:00:00Z', annualPlanOfferFingerprint: annualPlanOfferFingerprint(row),
+    } } };
+    try {
+      process.env.GATE_TERMITE_ANNUAL_PLAN = 'false';
+      process.env.GATE_CANCEL_FLOW_V2 = 'false';
+      for (const [estimate, eligible] of [[row, false], [{ ...delivered, notes: 'revised' }, false], [delivered, true]]) {
+        db._firstImpl = (table) => table === 'estimates' ? estimate : null;
+        expect(await deferredFollowupStillEligible(estimate.id)).toEqual(eligible
+          ? { eligible: true } : { eligible: false, reason: 'annual-plan-offer-withheld' });
+      }
+    } finally {
+      db._firstImpl = null;
+      if (priorAnnual === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      else process.env.GATE_TERMITE_ANNUAL_PLAN = priorAnnual;
+      if (priorCancel === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
+      else process.env.GATE_CANCEL_FLOW_V2 = priorCancel;
+    }
   });
 });

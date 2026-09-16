@@ -34,6 +34,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('./pricing-authority-gate');
+const { annualPlanPublicReplayBlocked } = require('./estimate-offer-version');
 // A pricing-authority block is TEMPORARY (the operator re-saves the row
 // through the engine), so the job is deferred — never made terminal — and
 // re-judged on this cadence without burning its attempts (uncapped codex P1
@@ -532,6 +533,12 @@ async function processDueBatch(now = new Date()) {
       const est = await db('estimates').where({ id: job.estimate_id }).first();
       if (!est || est.archived_at || !ACTIVE_STATUSES.includes(est.status) || TERMINAL_STATUSES.has(est.status)) {
         await markJob(job.id, 'skipped', 'estimate-inactive');
+        continue;
+      }
+      // The same full-row replay verdict as the public estimate page. Hold
+      // this job for a real handoff instead of burning its one-shot claim.
+      if (annualPlanPublicReplayBlocked(est)) {
+        await deferOrShadow(live, job, new Date(nowMs + PRICING_AUTHORITY_RECHECK_MS), 'annual-plan-offer-withheld');
         continue;
       }
       // The runner is the SEND choke point — enforcing the opt-out here
