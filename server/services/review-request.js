@@ -22,6 +22,7 @@ const {
   reserveForRequest,
   releaseUnsent: releaseUnsentReservation,
   promote: promoteReviewSmsReservation,
+  countStaleUnresolved: countStaleUnresolvedReservations,
 } = require("./messaging/review-ask-reservation");
 
 // An explicit 'uncertain' deliveryOutcome (the provider handoff crossed the
@@ -3483,8 +3484,22 @@ const ReviewService = {
       if (batch.length < PAGE) { cursor = null; break; }
     }
     strandedSweepCursor = cursor;
-    if (finished || released) logger.info(`[review] stranded sends reconciled (finished=${finished} released=${released})`);
-    return { finished, released };
+    // Operator-facing visibility for a review-ask reservation this sweep
+    // itself never touches: one whose OWNING review_requests row settled to
+    // something other than 'sending' (an uncertain outcome parked it
+    // 'pending' with a future retryAt, keeping the reservation as spacing
+    // evidence) is invisible to _strandedSendPage's status='sending' scan,
+    // so a crash-before-delivery placeholder on such a row would otherwise
+    // never surface anywhere. Folded into this existing log line rather
+    // than a new view (pre-push audit: the smallest honest exposure).
+    const staleReservations = await countStaleUnresolvedReservations().catch((err) => {
+      logger.warn(`[review] stale reservation count failed: ${err.message}`);
+      return null;
+    });
+    if (finished || released || staleReservations) {
+      logger.info(`[review] stranded sends reconciled (finished=${finished} released=${released}${staleReservations ? ` staleReservations=${staleReservations}` : ""})`);
+    }
+    return { finished, released, staleReservations };
   },
 
   /** One keyset page of stale claims, oldest first. */
