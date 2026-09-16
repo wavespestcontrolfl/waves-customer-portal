@@ -1882,7 +1882,8 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
 
       const request = await ReviewService.create({ customerId: 'unc-tech', serviceRecordId: 'sr-unc-tech', triggeredBy: 'tech' });
 
-      expect(request.sendOutcome).toEqual({ sent: false, uncertain: true, nextAllowedAt: null });
+      expect(request.sendOutcome).toMatchObject({ sent: false, uncertain: true, nextAllowedAt: null });
+      expect(request.sendOutcome.deferred).toBeUndefined();
       expect(mock.__state.rows.review_requests[0].status).toBe('sending');
     });
 
