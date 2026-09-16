@@ -70,6 +70,43 @@ function cents(value) {
   return Math.round((Number(value) || 0) * 100) / 100;
 }
 
+// Dollars -> integer cents, and back. Every dollar amount that reaches this
+// module (gross, remaining, a stored discount amount) is already meant to
+// be cent-precision — `cents()` above is the existing normalization for
+// that — so `dollarsToCents` just rounds to the nearest integer cent,
+// which is a no-op except for absorbing float noise left over from a
+// caller's own arithmetic (e.g. 0.1 + 0.2). A genuinely sub-cent input
+// (an operator or an upstream calc that hands this module $1.005) is
+// normalized the same way money always is at the boundary: round HALF UP
+// to the nearest cent, both here and in `cents()` above — never truncated,
+// never banker's-rounded.
+function dollarsToCents(dollars) {
+  return Math.round((Number(dollars) || 0) * 100);
+}
+
+function centsToDollars(intCents) {
+  return intCents / 100;
+}
+
+// Half-up round of the exact rational `numerator / denominator` (both
+// non-negative integers) to the nearest integer, computed with NO
+// intermediate floating-point division of the two operands — only the
+// well-known integer identity floor((2n + d) / (2d)), whose own division
+// is exact because 2n+d and 2d are both integers and the true quotient
+// lands exactly on an integer whenever the halfway case is the question
+// (the case ordinary `Math.round(n / d)` gets wrong: dividing dollars by
+// a fraction first, e.g. 20.70 * 0.05, can leave the product one ulp
+// below the true half-cent boundary — 1.035 comes back as
+// 1.0349999999999999 in IEEE754 double — so an ordinary Math.round on
+// that already-corrupted value rounds DOWN to $1.03 instead of the
+// correct half-up $1.04). Working entirely in integers until this one
+// division sidesteps that: the boundary is only ever crossed by the true
+// mathematical value, never by representation error.
+function roundHalfUpCents(numerator, denominator) {
+  if (!(denominator > 0)) return 0;
+  return Math.floor((numerator * 2 + denominator) / (denominator * 2));
+}
+
 function capDollars(dollars, maxDiscountDollars) {
   if (maxDiscountDollars == null || maxDiscountDollars === '') return dollars;
   const cap = Number(maxDiscountDollars);
@@ -82,7 +119,18 @@ function discountStepDollars(discount, remaining) {
   const amount = Number(discount.amount ?? discount.discountAmount) || 0;
   let dollars = 0;
   if (isPercentDiscountType(discount.discountType)) {
-    dollars = capDollars(remaining * (amount / 100), discount.maxDiscountDollars);
+    // Integer-cents basis-point math (Codex P1): remainingCents and
+    // pctBasisPoints are both exact integers, so roundHalfUpCents' single
+    // division depends only on the true mathematical ratio, never on the
+    // float noise `remaining * (amount / 100)` used to produce (dollars *
+    // 0.05-ish fraction, then round). amount is normalized to hundredths
+    // of a percent (2 more decimal digits than the percent itself) —
+    // plenty of precision for any catalog or operator-entered rate, and
+    // documented here as the one place that precision is decided.
+    const remainingCents = dollarsToCents(remaining);
+    const pctBasisPoints = Math.round(amount * 100);
+    const dollarsCents = roundHalfUpCents(remainingCents * pctBasisPoints, 10000);
+    dollars = capDollars(centsToDollars(dollarsCents), discount.maxDiscountDollars);
   } else if (isFixedDiscountType(discount.discountType)) {
     dollars = amount;
   } else if (discount.discountType === 'free_service') {
@@ -101,36 +149,67 @@ function stackOrder(discounts) {
 }
 
 // Spread `totalDollars` pro rata across `poolLines` by `weightOf(line)`,
-// the LAST line absorbing the rounding remainder so the shares always sum
-// to exactly totalDollars (never more, by a cent, than what the discount
-// itself resolved to). `pool` is the caller's own sum of weightOf(line)
-// over poolLines — passed in rather than recomputed here because the
-// caller already needed it to size totalDollars via discountStepDollars/
-// stackDiscounts before allocating it. Calls `apply(line, share)` to let
-// the caller fold each share into its own line shape. Shared by
-// stackVisitDiscounts (the fixed-appointment-credit pass and the
-// percentage/free-service pass) and stackDocumentDiscounts (the analogous
-// fixed-document-credit pass) — same technique, same rounding, so a line's
-// pro-rata share means the same cent-for-cent thing on every surface.
+// in integer cents, with a deterministic largest-remainder rounding so the
+// shares always sum to exactly totalDollars. `pool` is the caller's own
+// sum of weightOf(line) over poolLines — passed in rather than recomputed
+// here because the caller already needed it to size totalDollars via
+// discountStepDollars/stackDiscounts before allocating it. Calls
+// `apply(line, share)` to let the caller fold each share into its own line
+// shape. Shared by stackVisitDiscounts (the fixed-appointment-credit pass
+// and the percentage/free-service pass) and stackDocumentDiscounts (the
+// analogous fixed-document-credit pass) — same technique, same rounding,
+// so a line's pro-rata share means the same cent-for-cent thing on every
+// surface.
+//
+// weightOf(line) doubles as each line's own CEILING here — every current
+// caller passes the line's own remaining balance as the weight, which is
+// exactly the amount that line has left to absorb, so a share can never
+// exceed weightOf(line) without over-discounting that line specifically.
+// The old "last line takes the undistributed remainder" technique (Codex
+// #4405 r3, fixed there for the negative-share case) didn't enforce that
+// per-line ceiling: it only kept every share >= 0 and the total exactly
+// right, so an unlucky split could still hand the LAST line more than its
+// own balance holds — an $0.08 credit over $0.04/$0.04/$0.04/$0.01
+// balances rounded three shares up to $0.02 each (proportional, floor-then-
+// bump), leaving $0.02 for a line that only has $0.01 (Codex P1).
+//
+// This version floors every line's raw proportional share first (which,
+// since totalCents <= poolCents by construction, can never floor ABOVE
+// that line's own cap), then hands out the few leftover cents one at a
+// time — largest fractional remainder first, line index as the tiebreak
+// for determinism — skipping any line already at its cap. A line at its
+// cap already has a raw share with zero fractional remainder (a whole
+// number of cents divides its own cap exactly), so it always sorts behind
+// every line that still has room; the total headroom left across the pool
+// is provably >= the leftover being distributed, so this always finishes
+// in one pass over `poolLines`, never exceeding any line's own balance.
 function allocateProRata(poolLines, pool, weightOf, totalDollars, apply) {
-  let allocated = 0;
-  poolLines.forEach((line, i) => {
-    // Each preliminary share rounds independently, so several can round UP
-    // and together exceed the amount being split — $0.03 over weights
-    // 3/1/1/1 rounds to $0.02/$0.01/$0.01 and leaves the last line
-    // -$0.01. A negative share is not a discount: downstream it lands as a
-    // negative appointment share on a visit line, and addonOnlyTotal drops
-    // it, misbilling a covered-series add-on by a cent (Codex #4405 r3).
-    // Clamping every share to what is still undistributed keeps the
-    // remainder method honest — shares stay >= 0 and still sum to exactly
-    // totalDollars, with the last line absorbing whatever is left.
-    const undistributed = cents(totalDollars - allocated);
-    const share = i === poolLines.length - 1
-      ? Math.max(0, undistributed)
-      : Math.max(0, Math.min(undistributed, cents(totalDollars * (weightOf(line) / pool))));
-    allocated = cents(allocated + share);
-    apply(line, share);
-  });
+  if (!poolLines.length) return;
+  const poolCents = dollarsToCents(pool);
+  // totalDollars is always <= pool by construction (discountStepDollars
+  // clamps whatever it resolves to the pool it was computed against), but
+  // clamp again here defensively so a future caller bug can never demand
+  // more than the pool actually holds.
+  const totalCents = Math.max(0, Math.min(dollarsToCents(totalDollars), poolCents));
+  if (poolCents <= 0 || totalCents <= 0) {
+    poolLines.forEach((line) => apply(line, 0));
+    return;
+  }
+  const capCents = poolLines.map((line) => Math.max(0, dollarsToCents(weightOf(line))));
+  const shares = capCents.map((cap) => Math.floor((totalCents * cap) / poolCents));
+  const remainders = capCents.map((cap, i) => (totalCents * cap) / poolCents - shares[i]);
+  let leftover = totalCents - shares.reduce((sum, share) => sum + share, 0);
+  const order = shares
+    .map((_, i) => i)
+    .sort((a, b) => remainders[b] - remainders[a] || a - b);
+  for (const idx of order) {
+    if (leftover <= 0) break;
+    if (shares[idx] < capCents[idx]) {
+      shares[idx] += 1;
+      leftover -= 1;
+    }
+  }
+  poolLines.forEach((line, i) => apply(line, centsToDollars(shares[i])));
 }
 
 /**
