@@ -11,6 +11,7 @@ const { runExclusive } = require('../utils/cron-lock');
 const { recordAuditEvent } = require('./audit-log');
 const NotificationService = require('./notification-service');
 const { validate: isUuid } = require('uuid');
+const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { hashExtractionSource, recordExtractionAttempt, shouldSkipExtraction, TERMINAL_STATUSES } = require('./data-hygiene/source-extraction-store');
 const { stalePendingExtractionProposals, findPendingExtractionProposal, upsertSensitiveProposal, findSmsExtractionProposals, buildIdempotencyKey } = require('./data-hygiene/proposal-store');
 const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue } = require('./data-hygiene/property-preferences');
@@ -243,7 +244,9 @@ async function scheduledSourceMessage(conn, message) {
 async function loadMessageContext(conn, message) {
   message = await scheduledSourceMessage(conn, message);
   const [history, properties, preferences] = await Promise.all([
-    conn('sms_log').where({ customer_id: message.customer_id }).where('created_at', '<', new Date(message.created_at))
+    // codex #4331 P2 (structural pass): an unresolved review-ask reservation
+    // must not read as prior history for this operational-action extraction.
+    excludeUnresolvedSendReservations(conn('sms_log').where({ customer_id: message.customer_id }).where('created_at', '<', new Date(message.created_at)))
       .where(function endpoints() {
         this.where({ from_phone: message.from_phone, to_phone: message.to_phone })
           .orWhere({ from_phone: message.to_phone, to_phone: message.from_phone });

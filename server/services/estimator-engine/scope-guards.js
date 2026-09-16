@@ -28,6 +28,7 @@
 
 const logger = require('../logger');
 const { last10 } = require('../external-phone');
+const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-reservation');
 const { sameStreetAddress, STREET_TOKEN_ALIASES, canonicalizeRouteTokens } = require('./address-compare');
 
 // Pure directional tokens — shared by the city-boundary walk (a city may
@@ -718,7 +719,9 @@ async function loadTriageInner({ phone, triggerBody, triggerSmsLogId, deadline =
   if (digits) {
     try {
       assertTime();
-      const priorTexts = await bounded(db('sms_log')
+      // codex #4331 P2 (structural pass): an unresolved review-ask
+      // reservation must not ground the estimator as a delivered message.
+      const priorTexts = await bounded(excludeUnresolvedSendReservations(db('sms_log'))
         .where(function threadEitherDirection() {
           this.whereRaw("regexp_replace(coalesce(from_phone, ''), '\\D', '', 'g') LIKE ?", [`%${digits}`])
             .orWhereRaw("regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g') LIKE ?", [`%${digits}`]);
