@@ -24,6 +24,7 @@
  *   GATE_BLOG_BODY_IMAGES=true  (autonomous posts get ≥2 generated in-article images)
  *   GATE_CRON_JOBS=true         (enable all automated cron jobs)
  *   GATE_WEBHOOKS=true          (enable inbound webhook processing)
+ *   GATE_TERMITE_ANNUAL_PLAN=true (estimator emits the Subterranean Termite Protection plan — station setup fee + prepaid annual fee, 1 inspection/yr — when an estimate requests plan 'annual_protection'; also requires GATE_CANCEL_FLOW_V2 for online nonrenewal; dark = today's quarterly program; flip only after the agreement v3 sign-off, ruling A-11)
  *   GATE_ONE_TIME_WELCOME_EMAIL=true (welcome email for eligible first one-time bookings; enqueue + delivery opt-in, SMS unchanged)
  *     RETIRED BY OWNER DECISION 2026-09-09: one-time customers do not get a welcome email — the booking confirmation
  *     plus the en-route app-intro email (GATE_APP_INTRO_EMAIL) is the whole one-time onboarding. Unset in prod the
@@ -1431,6 +1432,8 @@ const gates = {
   // env at call time via gateEnvValue('GATE_CANCEL_FLOW_V2'); kill switch =
   // unset. Owner flips with the C1 portal flow.
   cancelFlowV2: process.env.GATE_CANCEL_FLOW_V2 === 'true',
+  // Boot diagnostics show the effective conjunction; selection reads it at call time.
+  termiteAnnualPlan: termiteAnnualPlanSelectionEnabled(),
   // Schedule-integrity watchdog: daily cron paging two silent-loss classes —
   // past-dated visits stuck in on_site/en_route (performed but never
   // completed → no service record, invoice, report, or post-service SMS;
@@ -2704,6 +2707,12 @@ function discountStackingLive() {
   return process.env.GATE_DISCOUNT_STACKING === 'true';
 }
 
+// Fresh annual contracts require the term-aware cancellation path. Read both
+// switches at call time so pricing, availability and delivery agree.
+function termiteAnnualPlanSelectionEnabled() {
+  return gateEnvValue('GATE_TERMITE_ANNUAL_PLAN') && gateEnvValue('GATE_CANCEL_FLOW_V2');
+}
+
 // Timestamp-valued gate parsed at CALL time (rollout EPOCHS such as
 // GATE_PEST_STRANDED_RECOVERY). STRICT: a full ISO-8601 timestamp WITH an
 // explicit offset (`2026-08-28T14:00:00Z` / `2026-08-28T10:00:00-04:00`)
@@ -2745,5 +2754,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, termiteAnnualPlanSelectionEnabled };
 // gates 1775330914
