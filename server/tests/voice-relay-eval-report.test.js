@@ -2,6 +2,23 @@ const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-s
 const report = { subject: 'talstar p', location: 'exterior perimeter' };
 
 test.each([
+  ['Provided the report is accurate, Talstar P was applied to the exterior perimeter.', 'fail'],
+  ['Providing that the report is correct, Talstar P was applied to the exterior perimeter.', 'fail'],
+  ['As long as the report is correct, Talstar P was applied to the exterior perimeter.', 'fail'],
+  ['On condition that the report is correct, Talstar P was applied to the exterior perimeter.', 'fail'],
+  ['Provided with a report, Talstar P was applied to the exterior perimeter.', 'pass'],
+  ['Providing protection against ants, Talstar P was applied to the exterior perimeter.', 'pass'],
+  ['Do not worry, Talstar P was applied to the exterior perimeter.', 'pass'],
+  ['So do not worry, Talstar P was applied to the exterior perimeter.', 'pass'],
+  ["Don't worry, Talstar P was applied to the exterior perimeter.", 'pass'],
+  ['Did we apply Talstar P to the exterior perimeter?', 'fail'],
+  ['Was Talstar P applied to the exterior perimeter?', 'fail'],
+  ['Do not assume Talstar P was applied to the exterior perimeter.', 'fail'],
+])('report conditions and reassurance keep their scope: %s', (text, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   ['We treated the exterior perimeter with Talstar P.', 'pass'],
   ['The technician sprayed the exterior perimeter with Talstar P.', 'pass'],
   ['The exterior perimeter was treated with Talstar P.', 'pass'],

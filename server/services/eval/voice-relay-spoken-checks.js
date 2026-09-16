@@ -1382,7 +1382,9 @@ function reportTrailingNoncompletion(text) {
 // unknown qualifiers can describe proposed treatment and are not evidence.
 const REPORT_CONCISE_COMPLETION_RE = new RegExp(`^(?:(?:(?:was|were|is|are|has been|have been|had been)\\s+)?(?:(?:already|actually|just)\\s+)*completed(?:\\s+${REPORT_COMPLETION_TIME})?|as\\s+(?:noted|documented|recorded|shown)\\s+in\\s+the\\s+report)?\\s*$`, 'i');
 const REPORT_HYPOTHETICAL_QUALIFIER_RE = /\b(?:only|just|merely)\s+(?:in\s+theory|hypothetically|on\s+paper)\b/i;
-const REPORT_HYPOTHETICAL_GOVERNOR_RE = /^\s*(?:suppose|supposing|assuming|imagine|let['’]s\s+say)\b/i;
+const REPORT_HYPOTHETICAL_GOVERNOR_RE = new RegExp(
+  `^\\s*(?:suppose|supposing|assuming|imagine|let['’]s\\s+say|${FREE_VISIT_PROVIDED_CONDITION_SOURCE}|as\\s+long\\s+as|on\\s+condition\\s+that)\\b`, 'i',
+);
 const REPORT_ASSERTION_START = `(?:(?:the|a|an|your|our|their|his|her|my|its)\\s+)?(?:[\\w'\u2019-]+\\s+){1,4}(?:(?:(?:was|were|is|are|has|have|had|got)\\s+(?:\\w+ly\\s+)?)?(?:${REPORT_FINDING_VERB_RE.source}|\\b(?:receiving|getting)\\b))`;
 const REPORT_VERBLESS_PRODUCT_LOCATION_START = `(?:(?:the|a|an|your|our|their|his|her|my|its)\\s+)?(?:(?:granular|gel|liquid|residual)\\s+)?(?:bait|dust|foam|granules?|product|treatment)\\s+${REPORT_TREATMENT_LOCATION_LINK_RE.source}`;
 const REPORT_ASSERTION_BOUNDARY_RE = new RegExp(`(?:,\\s*|\\b(?:with|and|before|after)\\s+)(?=${REPORT_ASSERTION_START})|\\bwith\\s+(?=${REPORT_VERBLESS_PRODUCT_LOCATION_START})`, 'gi');
@@ -1720,7 +1722,7 @@ function report_readback_confirms(value, record, { spoken }) {
       // A question about a finding does not confirm that finding.
       const [clauseStart, clauseEnd] = reportClauseBounds(text, m.index);
       const sentencePrefix = text.slice(0, m.index).split(/[.!?;]/).pop();
-      const interrogative = /^\s*(?:(?:and|but|so)\s+)?(?:was|were|is|are|has|have|had|did|do|does|can|could|would|will|should|what|where|when|why|how)\b/i.test(sentencePrefix);
+      const interrogative = /^(?!\s*(?:(?:and|but|so)\s+)?(?:do|does|did)\s+not\b)\s*(?:(?:and|but|so)\s+)?(?:was|were|is|are|has|have|had|did|do|does|can|could|would|will|should|what|where|when|why|how)\b/i.test(sentencePrefix);
       const coordinatedQuestion = new RegExp(
         `^(?:or\\b|and\\s+(?=(?:${REPORT_ASSERTION_START}|${REPORT_VERBLESS_PRODUCT_LOCATION_START})))[^.!?;]*\\?`,
         'i',
