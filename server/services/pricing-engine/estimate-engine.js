@@ -1062,6 +1062,9 @@ function generateEstimate(input) {
       const wantsRental = rentalGateOn && String(termiteOptions.ownership || '').toLowerCase() === 'rent';
       const result = priceTermiteBait(property, {
         ...termiteOptions,
+        // This slice defines the pricing model only. A posted service option
+        // must not select it before the gated selection/replay rail lands.
+        plan: null,
         system: termiteOptions.system || 'trelona',
         monitoringTier: termiteOptions.monitoringTier || 'basic',
         ownership: wantsRental ? 'rent' : 'own',

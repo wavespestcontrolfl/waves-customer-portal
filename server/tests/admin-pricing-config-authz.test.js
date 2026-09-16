@@ -20,6 +20,13 @@ let mockPricingConfigRow = null;
 let mockDiscountRuleRow = null;
 let mockLawnBracketRows = [];
 let mockProposalRow = null;
+const mockQualifyingEvidence = jest.fn();
+const mockActivePlanCustomer = jest.fn();
+jest.mock('../services/waveguard-existing-services', () => ({
+  ...jest.requireActual('../services/waveguard-existing-services'),
+  resolveCustomerQualifyingEvidence: (...args) => mockQualifyingEvidence(...args),
+  isActivePlanCustomer: (...args) => mockActivePlanCustomer(...args),
+}));
 
 jest.mock('../models/db', () => {
   const makeBuilder = (table) => {
@@ -112,6 +119,62 @@ beforeEach(() => {
   mockDiscountRuleRow = null;
   mockLawnBracketRows = [];
   mockProposalRow = null;
+  mockQualifyingEvidence.mockReset().mockResolvedValue({ tierKeys: [], setupWaiverKeys: [] });
+  mockActivePlanCustomer.mockReset().mockResolvedValue(false);
+});
+
+describe.each(['/estimate', '/quick-quote'])('%s customer eligibility', (path) => {
+  const input = { homeSqFt: 2000, lotSqFt: 8000, services: { oneTimePest: true } };
+  test('verified active customers retain the one-time discount; posted identity and replay stamps are ignored', async () => {
+    await withServer(async (baseUrl) => {
+      const ordinary = await call(baseUrl, 'POST', path, { role: 'admin', body: input });
+      const forged = await call(baseUrl, 'POST', path, { role: 'admin', body: {
+        ...input, recurringCustomer: true, isRecurringCustomer: true, priorQualifyingServices: ['pest'],
+        termitePricingKnobs: { plan: 'annual_protection' },
+      } });
+      expect(ordinary.status).toBe(200);
+      const total = (res) => path === '/estimate' ? res.json.estimate.summary.year1Total : res.json.quote.year1;
+      expect(forged.status).toBe(200);
+      expect(total(forged)).toBe(total(ordinary));
+      expect(mockQualifyingEvidence).not.toHaveBeenCalled();
+      const nonmember = await call(baseUrl, 'POST', path, { role: 'admin', body: { ...input, existingCustomerId: 'customer-1', recurringCustomer: true } });
+      expect(nonmember.status).toBe(200);
+      expect(total(nonmember)).toBe(total(ordinary));
+      mockActivePlanCustomer.mockResolvedValue(true);
+      const member = await call(baseUrl, 'POST', path, { role: 'admin', body: { ...input, existingCustomerId: 'customer-1' } });
+      expect(member.status).toBe(200);
+      expect(total(member)).toBeLessThan(total(ordinary));
+      expect(mockActivePlanCustomer).toHaveBeenCalledWith(expect.anything(), 'customer-1', { strict: true });
+    });
+  });
+
+  test('uses property-scoped tier and account-wide setup evidence, and rejects lookup failures', async () => {
+    const engine = require('../services/pricing-engine');
+    const method = path === '/estimate' ? 'generateEstimate' : 'quickQuote';
+    const spy = jest.spyOn(engine, method).mockReturnValue({});
+    try {
+      mockQualifyingEvidence.mockResolvedValue({ tierKeys: ['pest'], setupWaiverKeys: ['pest', 'lawn'] });
+      await withServer(async (baseUrl) => {
+        const body = { ...input, customerId: 'customer-1', address: '123 Test St', estimateGroupId: 'group-1', recurringCustomer: true,
+          termitePricingKnobs: { plan: 'annual_protection' }, treeShrubPricingKnobs: { forged: true } };
+        expect((await call(baseUrl, 'POST', path, { role: 'admin', body })).status).toBe(200);
+        expect(mockQualifyingEvidence).toHaveBeenCalledWith(expect.anything(), {
+          customerId: 'customer-1', address: '123 Test St', groupedEstimate: true,
+        });
+        expect(spy.mock.calls[0][0]).toMatchObject({ priorQualifyingServices: ['pest'], setupWaiverPriorQualifyingServices: ['pest', 'lawn'] });
+        expect(spy.mock.calls[0][0].recurringCustomer).toBeUndefined();
+        expect(spy.mock.calls[0][0].termitePricingKnobs).toBeUndefined();
+        expect(spy.mock.calls[0][0].treeShrubPricingKnobs).toBeUndefined();
+        mockQualifyingEvidence.mockRejectedValue(new Error('unavailable'));
+        expect((await call(baseUrl, 'POST', path, { role: 'admin', body })).status).toBe(503);
+        expect(spy).toHaveBeenCalledTimes(1);
+        mockQualifyingEvidence.mockResolvedValue({ tierKeys: [], setupWaiverKeys: [] });
+        mockActivePlanCustomer.mockRejectedValue(new Error('unavailable'));
+        expect((await call(baseUrl, 'POST', path, { role: 'admin', body })).status).toBe(503);
+        expect(spy).toHaveBeenCalledTimes(1);
+      });
+    } finally { spy.mockRestore(); }
+  });
 });
 
 describe('write authorization — technician logins cannot change pricing', () => {
@@ -155,6 +218,19 @@ describe('write authorization — technician logins cannot change pricing', () =
 });
 
 describe('pre-commit validation — nothing persists on a bad payload', () => {
+  test.each(['setup_per_station', 'annual_base', 'annual_step', 'bracket_stations', 'bracket_floor'])('annual plan rejects explicit null %s before writing', async (key) => {
+    const data = { setup_per_station: 30, annual_base: 249, annual_step: 50, bracket_stations: 5, bracket_floor: 10 };
+    mockPricingConfigRow = { config_key: 'termite_annual_plan', category: 'termite', data };
+    await withServer(async (baseUrl) => {
+      const res = await call(baseUrl, 'PUT', '/termite_annual_plan', {
+        role: 'admin', body: { data: { ...data, [key]: null } },
+      });
+      expect(res.status).toBe(400);
+      expect(res.json.error).toContain(key);
+      expect(mockWrites).toEqual([]);
+    });
+  });
+
   test('lawn bracket batch with one zero/negative cell rejects the WHOLE batch before any write', async () => {
     mockLawnBracketRows = [{ sqft_bracket: 3000, tier: 'basic', monthly_price: '40', grass_track: 'st_augustine' }];
     await withServer(async (baseUrl) => {
@@ -464,6 +540,21 @@ describe('/margin-check — honors the requested tier, costs are fully allocated
 });
 
 describe('pricing-proposals mutations — same admin gate as direct pricing writes', () => {
+  test('annual plan proposal aliases reject before approval or pricing writes', async () => {
+    mockProposalRow = { id: 'p1', status: 'pending', config_key: 'termite_annual_plan.annualBase', current_value: 249, proposed_value: 279 };
+    mockPricingConfigRow = { config_key: 'termite_annual_plan', category: 'termite', data: {
+      setup_per_station: 30, annual_base: 249, annual_step: 50, bracket_stations: 5, bracket_floor: 10,
+    } };
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/pricing-proposals/p1/approve`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'x-test-role': 'admin' }, body: '{}',
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toMatch(/canonical snake_case/);
+      expect(mockWrites).toEqual([]);
+    });
+  });
+
   test('technician cannot approve or reject a proposal (the queue is not a pricing-write side door)', async () => {
     await withServer(async (baseUrl) => {
       const approve = await fetch(`${baseUrl}/admin/pricing-proposals/p1/approve`, {
