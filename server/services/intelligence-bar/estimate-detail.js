@@ -329,9 +329,15 @@ const money = (value) => value == null || value === '' || !Number.isFinite(Numbe
 
 function depositEntry(deposit) {
   const collected = COLLECTED_DEPOSIT_STATUSES.has(deposit.status);
+  const amount = money(deposit.amount);
+  const surcharge = money(deposit.card_surcharge);
+  // Stale captures can enter refunding/refunded without receipt stamping.
+  // Their default zero surcharge is not evidence of the amount paid.
+  const receiptRecorded = !!deposit.received_at;
   return {
-    amount: money(deposit.amount), card_surcharge: money(deposit.card_surcharge), collected,
-    total_paid: collected ? money(Number(deposit.amount || 0) + Number(deposit.card_surcharge || 0)) : null,
+    amount, card_surcharge: receiptRecorded ? surcharge : null, collected,
+    total_paid: collected && receiptRecorded && amount !== null && surcharge !== null
+      ? money(amount + surcharge) : null,
     credited: money(deposit.credited_amount), refunded: money(deposit.refunded_amount),
     refunded_surcharge: money(deposit.refunded_surcharge),
     status: deposit.status, received_at: deposit.received_at,

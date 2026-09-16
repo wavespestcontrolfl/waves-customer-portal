@@ -613,6 +613,29 @@ test('deposit statuses distinguish captured cash from abandoned or unknown inten
   }
 });
 
+test.each(['refunding', 'refunded'])('unstamped stale %s deposits do not invent captured totals from default surcharge', async (status) => {
+  db.__rows = (q) => /from "estimates"/.test(q.sql) ? [estimateRow()] : [{
+    estimate_id: 'est-1', amount: '49.00', card_surcharge: '0.00',
+    refunded_amount: status === 'refunded' ? '49.00' : '0.00', status, received_at: null,
+  }];
+  const out = await getEstimateDetail({ estimate_id: 'est-1' });
+  expect(out.estimates[0].deposits[0]).toMatchObject({
+    amount: 49, collected: true, status, received_at: null, card_surcharge: null, total_paid: null,
+  });
+});
+
+test.each([
+  ['49.00', '0.00', 49],
+  [null, '1.42', null],
+  ['49.00', null, null],
+])('recorded deposits require both amounts while retaining genuine zero surcharge (%s, %s)', async (amount, card_surcharge, total_paid) => {
+  db.__rows = (q) => /from "estimates"/.test(q.sql) ? [estimateRow()] : [{
+    estimate_id: 'est-1', amount, card_surcharge, status: 'received', received_at: '2026-09-06T00:00:00Z',
+  }];
+  const out = await getEstimateDetail({ estimate_id: 'est-1' });
+  expect(out.estimates[0].deposits[0]).toMatchObject({ collected: true, total_paid });
+});
+
 test('a failed deposit query reports unavailable, not a falsely empty ledger', async () => {
   db.__rows = (q) => {
     if (/estimate_deposits/.test(q.sql)) throw new Error('deposit table unavailable');
