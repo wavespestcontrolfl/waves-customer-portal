@@ -122,7 +122,7 @@ function makeMock(initial = {}, opts = {}) {
       orderBy(c, d = 'asc') { this.order = [c, d]; return this; },
       orderByRaw() { return this; }, groupBy() { return this; }, groupByRaw() { return this; },
       limit(n) { this.limitValue = n; return this; },
-      async first() { return filtered(this)[0] || null; },
+      async first() { if (opts.onFirst) opts.onFirst(this.table, this, state); return filtered(this)[0] || null; },
       count() { return { first: async () => ({ count: String(filtered(this).length), c: String(filtered(this).length) }) }; },
       insert(row) {
         if (!state.rows[this.table]) state.rows[this.table] = [];
@@ -1657,6 +1657,51 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(out).toMatchObject({ deferred: 'provider_retry' });
       const row = mock.__state.rows.review_requests[0];
       expect(row.status).toBe('pending');
+    });
+
+    test('a cadence enrollment racing the retirement recheck wins the row — it stays suppressed, not requeued (codex #4333 P1, GitHub round)', async () => {
+      // The exact race under audit: sendSMS's own activeSeq check finds NO
+      // active sequence yet (the concurrent startReviewSequence's
+      // review_sequences INSERT hasn't landed), but between that read and
+      // this function's own write, the SAME concurrent enrollment's
+      // supersedeQueuedAsks — which takes a FOR UPDATE lock on this exact
+      // row before suppressing it — commits first and flips the row to
+      // 'suppressed'. The conditional WHERE on this function's own write
+      // (status still 'pending' at write time) is what actually prevents
+      // it from silently overwriting that suppression back to 'pending'.
+      mockGates.reviewSequences = true;
+      const due = new Date(Date.now() - 60000);
+      const mock = makeMock({
+        customers: [{ id: 'uq-race', first_name: 'Ida', phone: '+19410000170', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-uq-race', customer_id: 'uq-race', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tuqrace', location_id: 'venice', created_at: new Date(), scheduled_for: due }],
+        // No active review_sequences row YET — its INSERT hasn't landed by
+        // the time sendSMS's own activeSeq read runs.
+      }, {
+        onFirst: (table, _q, state) => {
+          if (table !== 'review_sequences') return;
+          // The moment sendSMS checks for an active cadence (and finds
+          // none), the concurrent enrollment's OWN supersede commits —
+          // simulated here as an external mutation racing in right at that
+          // read, before this function's own conditional write runs.
+          const row = state.rows.review_requests.find((r) => r.id === 'rr-uq-race');
+          if (row) row.status = 'suppressed';
+        },
+      });
+      db.mockImplementation(mock);
+      mockSendCustomerMessage.mockResolvedValueOnce({
+        sent: false, blocked: false, deliveryOutcome: 'not_sent', retryable: true,
+        nextAllowedAt: new Date(Date.now() + 5 * 60000).toISOString(), code: 'PROVIDER_FAILURE',
+      });
+
+      const out = await ReviewService.sendSMS('rr-uq-race');
+
+      expect(out).toEqual({ sent: false, failed: 'superseded_by_cadence' });
+      // The row stays exactly as the racing enrollment left it — never
+      // flipped back to 'pending' or requeued alongside the cadence's own
+      // touch (scheduled_for is irrelevant once status is 'suppressed' —
+      // processScheduled only ever selects 'pending' rows).
+      const row = mock.__state.rows.review_requests[0];
+      expect(row.status).toBe('suppressed');
     });
 
     test('an accepted send whose post-stamp reservation release throws promotes the reservation instead of losing it (codex #4331 P1, structural pass, finding 5)', async () => {

@@ -2358,29 +2358,67 @@ const ReviewService = {
         reservation = null;
         const deferredRetryAt = retryAtForDeferredSend(result);
         if (deferredRetryAt) {
-          // codex #4331 P1 (structural pass, finding 3): supersedeQueuedAsks
-          // deliberately left this row alone WHILE its reservation stood —
-          // on the assumption the in-flight attempt would resolve one way
-          // or the other. A definitive not_sent proves it did not reach the
-          // customer, but a cadence can have enrolled THIS customer during
-          // the attempt and already queued its own Day-0 touch; nothing
-          // re-ran supersedeQueuedAsks against this row once its protecting
-          // reservation was gone. Recheck now, under no lock but immediately
-          // after releasing that reservation, and retire this now-obsolete
-          // ask instead of requeuing it alongside the cadence's own touch.
-          if (OUTREACH.isAskTemplate(request.template_key) && require("../config/feature-gates").isEnabled("reviewSequences")) {
-            const activeSeq = await db("review_sequences")
-              .where({ customer_id: request.customer_id, status: "active" }).first("id");
-            if (activeSeq) {
-              await ownLegacyRow().update({ status: "suppressed" });
-              logger.info(`[review] Suppressed a proven-unsent ask superseded by an active cadence (requestId=${requestId} sequenceId=${activeSeq.id})`);
-              return { sent: false, failed: "superseded_by_cadence" };
-            }
+          // codex #4331 P1 (structural pass, finding 3) / codex #4333 P1
+          // (GitHub round, "serialize failed-send retirement with cadence
+          // enrollment"): supersedeQueuedAsks deliberately left this row
+          // alone WHILE its reservation stood — on the assumption the
+          // in-flight attempt would resolve one way or the other. A
+          // definitive not_sent proves it did not reach the customer, but a
+          // cadence can have enrolled THIS customer during the attempt and
+          // already queued its own Day-0 touch. An unlocked read-then-write
+          // recheck here is itself racy: supersedeQueuedAsks takes a FOR
+          // UPDATE lock on this exact row before suppressing it, and an
+          // enrollment landing in the gap between this function's own read
+          // (activeSeq) and write (requeue) could flip the row to
+          // 'suppressed' and then have this write silently overwrite it
+          // back to 'pending', requeuing the obsolete ask alongside the
+          // cadence's own touch. Take the SAME row lock supersedeQueuedAsks
+          // honours, inside one transaction, so the two can never
+          // interleave on this row — AND condition every write in here on
+          // status still being 'pending' at write time, which is what
+          // actually closes the race (the lock alone only helps once both
+          // sides take it; the conditional WHERE is correct even if a
+          // caller elsewhere still doesn't).
+          let outcome;
+          try {
+            outcome = await db.transaction(async (trx) => {
+              await trx("review_requests").where({ id: requestId }).forUpdate().first("id");
+              let activeSeq = null;
+              if (OUTREACH.isAskTemplate(request.template_key) && require("../config/feature-gates").isEnabled("reviewSequences")) {
+                activeSeq = await trx("review_sequences")
+                  .where({ customer_id: request.customer_id, status: "active" }).first("id");
+              }
+              if (activeSeq) {
+                const suppressed = await trx("review_requests")
+                  .where({ id: requestId, status: "pending" }).update({ status: "suppressed" });
+                return suppressed ? { supersededBy: activeSeq.id } : { alreadyHandled: true };
+              }
+              const requeued = await trx("review_requests")
+                .where({ id: requestId, status: "pending" })
+                .update({ status: "pending", scheduled_for: deferredRetryAt });
+              return requeued ? { requeued: true } : { alreadyHandled: true };
+            });
+          } catch (lockErr) {
+            // Fail safe, not fail closed: the lock/transaction itself is
+            // what's unavailable here, not the send outcome — an
+            // unconditional requeue outside the lock is the same
+            // (narrower, pre-existing) exposure this fix closes, not a new
+            // one, and a due row that goes unretried is worse than that.
+            logger.warn(`[review] cadence-retirement recheck failed (requestId=${requestId} errType=${lockErr?.name || "Error"}) — requeuing without the recheck`);
+            await ownLegacyRow().update({ status: "pending", scheduled_for: deferredRetryAt });
+            outcome = { requeued: true };
           }
-          await ownLegacyRow().update({
-            status: "pending",
-            scheduled_for: deferredRetryAt,
-          });
+          if (outcome.supersededBy) {
+            logger.info(`[review] Suppressed a proven-unsent ask superseded by an active cadence (requestId=${requestId} sequenceId=${outcome.supersededBy})`);
+            return { sent: false, failed: "superseded_by_cadence" };
+          }
+          if (outcome.alreadyHandled) {
+            // A concurrent writer (almost certainly this same cadence-
+            // supersede race) already moved the row off 'pending' between
+            // our own read and write — leave it exactly as they left it.
+            logger.info(`[review] Proven-unsent ask already moved by a concurrent writer before the retirement recheck (requestId=${requestId})`);
+            return { sent: false, failed: "superseded_by_cadence" };
+          }
           logger.info(
             `[review] SMS DEFERRED (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || "n/a"} code=${result.code}) (queued for retry at ${deferredRetryAt.toISOString()})`,
           );
@@ -3130,6 +3168,20 @@ const ReviewService = {
       return false;
     }
     if (evidence.unavailable) return false;
+    // codex #4333 P1 (GitHub round, "correlate lock-held reservations with
+    // the review request"): a proven-unsent claim can still leave an
+    // orphaned sms_log reservation behind — the composer's lock-held
+    // reservation (admin-communications.js's claimed-link seam) now
+    // carries this exact review_request_id (see the reservation-creation
+    // site), so it is reachable here the same way _reconcileStrandedBatch
+    // reaches one on the scheduled path (auto_inline rows are explicitly
+    // excluded from that sweep — this reconciliation IS their only path).
+    // Left standing, that orphan reads as a prior ask for the full 72h
+    // spacing window and blocks the very recovery this function just
+    // proved should proceed.
+    await releaseUnsentReservation({ requestId }).catch((err) => {
+      logger.warn(`[review] stale inline claim reservation release failed (requestId=${requestId}): ${err.message}`);
+    });
     const reclaimToken = new Date();
     const reclaimed = await db("review_requests")
       .where({ id: requestId, triggered_by: "auto_inline", status: "sending" })
