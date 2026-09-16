@@ -158,6 +158,18 @@ test.each([
 });
 
 test.each([
+  ['Was bait applied indoors, but Talstar P was applied to the exterior perimeter.', 'pass'],
+  ['Did we apply bait indoors, and Talstar P was applied to the exterior perimeter.', 'pass'],
+  ['Was bait applied indoors; Talstar P was applied to the exterior perimeter.', 'pass'],
+  ['Was bait applied indoors, but was Talstar P applied to the exterior perimeter?', 'fail'],
+  ['Was bait and Talstar P applied to the indoors and exterior perimeter?', 'fail'],
+  ['Was bait applied indoors and Talstar P to the exterior perimeter?', 'fail'],
+  ['Was Talstar P applied to the exterior perimeter, but bait was applied indoors.', 'fail'],
+])('report question scope follows the matched assertion: %s', (text, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   { subject: 'Talstar P', location: 'exterior perimeter' },
   { subject: '\\btalstar\\b', location: 'exterior perimeter' },
   { subject: 'Talstar P', location: '\\b(?:exterior|perimeter)\\b' },

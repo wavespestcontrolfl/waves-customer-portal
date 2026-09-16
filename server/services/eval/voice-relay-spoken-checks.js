@@ -1891,8 +1891,8 @@ function report_readback_confirms(value, record, { spoken }) {
       // Preserve the sentence's question mark before clauseOf removes it.
       // A question about a finding does not confirm that finding.
       const [clauseStart, clauseEnd] = reportClauseBounds(text, m.index);
-      const sentencePrefix = text.slice(0, m.index).split(/[.!?;]/).pop();
-      const interrogative = /^(?!\s*(?:(?:and|but|so)\s+)?(?:do|does|did)\s+not\b)\s*(?:(?:and|but|so)\s+)?(?:was|were|is|are|has|have|had|did|do|does|can|could|would|will|should|what|where|when|why|how)\b/i.test(sentencePrefix);
+      const clausePrefix = text.slice(clauseStart, m.index);
+      const interrogative = /^(?!\s*(?:(?:and|but|so)\s+)?(?:do|does|did)\s+not\b)\s*(?:(?:and|but|so)\s+)?(?:was|were|is|are|has|have|had|did|do|does|can|could|would|will|should|what|where|when|why|how)\b/i.test(clausePrefix);
       const coordinatedQuestion = new RegExp(
         `^(?:or\\b|and\\s+(?=(?:${REPORT_ASSERTION_START}|${REPORT_VERBLESS_PRODUCT_LOCATION_START})))[^.!?;]*\\?`,
         'i',
