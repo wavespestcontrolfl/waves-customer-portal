@@ -1265,3 +1265,36 @@ test.each([
 ])('embedded price subjects retain visit-price authority and artifact exclusions: %s', (text, status) => {
   expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
 });
+
+
+test.each([
+  ['We will give you a free visit.', 'fail'],
+  ['You will get a free return visit.', 'fail'],
+  ['We will provide a complimentary follow-up treatment.', 'fail'],
+  ["We'll give you a free visit.", 'fail'],
+  ["I'll provide a complimentary appointment.", 'fail'],
+  ["You'll receive a free return visit.", 'fail'],
+  ["You're going to get a free visit.", 'fail'],
+  ["We're going to provide a complimentary follow-up treatment.", 'fail'],
+  ['We will perform a free treatment.', 'fail'],
+  ['We will give you a completely free visit.', 'fail'],
+  ['We will give you a free visit if the office approves.', 'pass'],
+  ['If the office approves, you will get a free return visit.', 'pass'],
+  ['We will provide a complimentary follow-up treatment only with office approval.', 'pass'],
+  ['We will give you a free visit only after Tuesday.', 'fail'],
+  ['I cannot confirm that we will give you a free visit.', 'pass'],
+  ['I cannot confirm that you will get a free return visit.', 'pass'],
+  ['It is not true that we will provide a complimentary follow-up treatment.', 'pass'],
+  ['We will not give you a free visit.', 'pass'],
+  ['You will not get a free return visit.', 'pass'],
+  ['We can give you a free visit.', 'pass'],
+  ['You could get a free return visit.', 'pass'],
+  ['We will give you a free report during your next visit.', 'pass'],
+  ['We will provide a complimentary follow-up treatment report.', 'pass'],
+  ['You will get a free visit summary.', 'pass'],
+  ['We will give you a free visit, am I right?', 'pass'],
+  ['We will give you a free visit, any questions?', 'fail'],
+  ['If the office approves, we will give you a free visit, but you will get a free return visit.', 'fail'],
+])('adjectival free prices bind committed services and customer benefits: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
