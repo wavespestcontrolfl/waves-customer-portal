@@ -705,7 +705,6 @@ async function retryReviewRequestAfterTemplateMiss(requestId) {
 function unsentOutcome(outcome) {
   if (!outcome) return { sent: false, failed: "suppressed", nextAllowedAt: null };
   if (outcome.blocked) return { sent: false, failed: "blocked", code: outcome.code || null, nextAllowedAt: null };
-  if (outcome.uncertain) return { sent: false, uncertain: true, nextAllowedAt: null };
   // A refusal never reached the provider, so it is reported by its own
   // reason rather than as a held send (codex #4331 P1). approved_phone_drift
   // is the exception only because its callers throw immediately below.
