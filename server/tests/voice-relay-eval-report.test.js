@@ -2,6 +2,21 @@ const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-s
 const report = { subject: 'talstar p', location: 'exterior perimeter' };
 
 test.each([
+  ['we only planned on applying it', 'fail'],
+  ['we considered applying it', 'fail'],
+  ['we only planned on applying it there', 'fail'],
+  ['we considered applying Talstar P to the exterior perimeter', 'fail'],
+  ['the technician only planned on spraying it there', 'fail'],
+  ['we only planned to apply it there', 'fail'],
+  ['we considered applying it indoors', 'pass'],
+  ['we considered applying bait there', 'pass'],
+  ['we finished applying it there', 'pass'],
+])('gerund noncompletion retracts only the matched report finding: %s', (tail, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter, but ${tail}.`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
+test.each([
   ['are you sure?', 'fail'],
   ['are you certain?', 'fail'],
   ['are you sure about that?', 'fail'],

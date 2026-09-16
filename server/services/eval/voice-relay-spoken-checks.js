@@ -1376,6 +1376,7 @@ const REPORT_TRAILING_UNCERTAINTY_RE = new RegExp(
 );
 const REPORT_RETRACTION_ACTOR = `(?:i|we|you|he|she|they|(?:(?:the|our)\\s+)?(?:technician|tech|crew|team))`;
 const REPORT_ANAPHORIC_ACTION = `(?:(?:do|did|done)\\s+(?:that|so|it)|(?:appl(?:y|ied)|spray(?:ed)?|us(?:e|ed)|place[ds]?|put|treat(?:ed)?)\\s+(?:it|that))`;
+const REPORT_ANAPHORIC_GERUND = `(?:doing|applying|spraying|using|placing|putting|treating)\\s+(?:it|that|so)`;
 const REPORT_TRAILING_DENIAL_RE = new RegExp(
   `^(?:actually\\s+)?(?:not(?:\\s+(?:really|actually))?(?:\\s+${REPORT_FINDING_VERB_RE.source})?|no|`
     + `(?:it|that|this)\\s+(?:was|is)\\s+(?:(?:really|completely|entirely|totally|absolutely)\\s+)?(?:false|untrue|incorrect|inaccurate|wrong|not\\s+what\\s+happened)|(?:it|that|this)\\s+(?:never\\s+(?:actually\\s+)?(?:happened|occurred|took\\s+place)|did(?:n['’]t|\\s+not)\\s+(?:actually\\s+)?(?:happen|occur|take\\s+place)|(?:has|had)(?:n['’]t|\\s+not)\\s+(?:happened|occurred|taken\\s+place))|(?:it|that|this)\\s+(?:was|is|has|had)(?:n[\x27\u2019]t|\\s+(?:not|never))(?:\\s+been)?(?:\\s+(?:true|correct|accurate|(?:actually\\s+)?${REPORT_FINDING_VERB_RE.source}))?|${REPORT_RETRACTION_ACTOR}\\s+(?:(?:did|have|has|had)(?:n[\x27\u2019]t|\\s+not)|never)\\s+(?:actually\\s+)?${REPORT_ANAPHORIC_ACTION})(?:\\s+(?:there|at\\s+that\\s+location))?(?:\\s+at\\s+all)?(?:\\s*,\\s*(?:sorry|my\\s+mistake|my\\s+apologies))?\\s*$`,
@@ -1385,7 +1386,7 @@ const REPORT_CONCISE_NONCOMPLETION_RE = /^\s*(?:(?:(?:is|are|was|were|has|have|h
 function reportTrailingNoncompletion(text) {
   const qualifier = text.trim();
   const anaphoric = /^(?:it|this|that)\s+(.+)$/i.exec(qualifier)
-    || new RegExp(`^${REPORT_RETRACTION_ACTOR}\\s+(.+?)\\s+to\\s+${REPORT_ANAPHORIC_ACTION}\\s*$`, 'i').exec(qualifier);
+    || new RegExp(`^${REPORT_RETRACTION_ACTOR}\\s+(.+?)\\s+(?:to\\s+${REPORT_ANAPHORIC_ACTION}|(?:on\\s+)?${REPORT_ANAPHORIC_GERUND})(?:\\s+(?:there|at\\s+that\\s+location))?\\s*$`, 'i').exec(qualifier);
   return Boolean(anaphoric && REPORT_CONCISE_NONCOMPLETION_RE.test(anaphoric[1]));
 }
 // Qualified shorthand must positively state completion or cite the report;
