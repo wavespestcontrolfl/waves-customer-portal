@@ -19,6 +19,11 @@ describe('bounded anchored email reply amount lexer', () => {
       expect(matchAt(text)).toEqual(token('money', '$98'));
     },
   );
+  test.each(['$98 and up-front', '$98 or more-or-less', '$98 and up-é', '$98 and up-𐐀'])(
+    'keeps the base money before a hyphenated non-minimum suffix: %s', (source) => {
+      expect(matchAt(source)).toEqual(token('money', '$98'));
+    },
+  );
   test.each(['$1234,567', '1234,567', '$12345,678', '$12,34,567'])(
     'rejects malformed grouped amounts: %s', (text) => {
       expect(matchAt(text)).toBeNull();
@@ -71,6 +76,21 @@ describe('bounded anchored email reply amount lexer', () => {
     expect(matchAt('$$98', 1)).toBeNull();
   });
 
+  test('rejects a joined second dollar sign but preserves distinct amounts', () => {
+    expect(matchAt('$98$120')).toBeNull();
+    expect(matchAt('98$120')).toBeNull();
+    expect(matchAt('$98 $120')).toEqual(token('money', '$98'));
+    expect(matchAt('$98 $120', 4)).toEqual(token('money', '$120', 4));
+    expect(matchAt('$98,$120')).toEqual(token('money', '$98'));
+    expect(matchAt('$98,$120', 4)).toEqual(token('money', '$120', 4));
+  });
+  test('checks full Unicode code points at the right edge', () => {
+    expect(matchAt('$98𐐀')).toBeNull();
+    expect(matchAt('98𐐀')).toBeNull();
+    expect(matchAt('$98-𐐀')).toBeNull();
+    expect(matchAt('$98e\u0301')).toBeNull();
+  });
+
   test('allows opening straight and curly quotes before an amount', () => {
     expect(matchAt("'$98 per visit'", 1)).toEqual(token('money', '$98', 1));
     expect(matchAt("'98 dollars per visit'", 1)).toEqual(token('money', '98 dollars', 1));
@@ -98,6 +118,41 @@ describe('bounded anchored email reply amount lexer', () => {
     expect(matchAt('90-120', 3)).toBeNull();
     expect(matchAt('$98', 1)).toBeNull();
     expect(matchAt('ninety-eight cents', 7)).toBeNull();
+    expect(matchAt('𐐀98', 2)).toBeNull();
+    expect(matchAt('e\u030198', 2)).toBeNull();
+    expect(matchAt('𐐀$98', 2)).toEqual(token('money', '$98', 2));
+  });
+
+  test.each([
+    '90 to 120', '90 - 120', 'between 90 and 120 minutes',
+    'from 90 to 120 minutes',
+  ])('does not start at a spaced range endpoint: %s', (source) => {
+    expect(matchAt(source, source.indexOf('120'))).toBeNull();
+  });
+  test.each(['between 90 and 120 minutes', 'from 90 to 120 minutes'])(
+    'does not start at the first endpoint of a complete prose range: %s', (source) => {
+      expect(matchAt(source, source.indexOf('90'))).toBeNull();
+    },
+  );
+  test('does not let an invalid earlier start hide an independent later amount', () => {
+    expect(matchAt('A90 - 120 dollars', 1)).toBeNull();
+    expect(matchAt('A90 - 120 dollars', 6)).toEqual(token('money', '120 dollars', 6));
+    expect(matchAt('A90 to 120 dollars', 1)).toBeNull();
+    expect(matchAt('A90 to 120 dollars', 7)).toEqual(token('money', '120 dollars', 7));
+  });
+  test.each([
+    ['$90 to $120', 7], ['$90 - $120', 6],
+    ['USD 90 to USD 120', 10], ['USD 90 to USD 120', 14],
+  ])('does not start at an explicit-currency endpoint inside a full range: %s', (source, at) => {
+    expect(matchAt(source, at)).toBeNull();
+  });
+  test('keeps amounts after a conjunction or separator distinct from ranges', () => {
+    expect(matchAt('90 and 120', 7)).toEqual(token('number', '120', 7));
+    expect(matchAt('between 90 and 120', 8)).toEqual(token('number', '90', 8));
+    expect(matchAt('between 90 and 120', 15)).toEqual(token('number', '120', 15));
+    expect(matchAt('$90 and $120', 8)).toEqual(token('money', '$120', 8));
+    expect(matchAt('We paid 90, then 120', 17)).toEqual(token('number', '120', 17));
+    expect(matchAt('USD 90 and USD 120', 11)).toEqual(token('money', 'USD 120', 11));
   });
 
   test.each([

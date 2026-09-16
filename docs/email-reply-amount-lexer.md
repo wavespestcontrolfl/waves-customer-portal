@@ -17,6 +17,14 @@ It may also start after a comma, as in `$98,$120`; bare digits after a
 malformed comma grouping remain blocked.
 An opening straight or curly quote may precede an amount; apostrophes inside
 words or malformed numbers do not create a new amount boundary.
+Boundary checks inspect complete Unicode code points and combining marks.
+Joined dollar signs (`$98$120`) are invalid, while whitespace or a comma
+keeps separate amounts distinct. Hyphenated prose after a minimum phrase
+leaves the base amount intact (`$98 and up-front` → `$98`). Calls at an
+interior endpoint of a complete numeric, currency, or measurement range return
+`null` only when the enclosing range has a valid start;
+bare `between 90 and 120` without a measurement unit still exposes its two
+historical number tokens because it has no full range token.
 
 The finite currency scope is dollar signs, USD, dollars, bucks, cents, and
 the cent sign (`98¢`). It recognizes numeric and bounded written amounts,
