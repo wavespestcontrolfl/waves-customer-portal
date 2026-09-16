@@ -207,3 +207,22 @@ test.each([
 ])('acknowledgment tags do not turn a free-visit promise into a question: %s', (text, status) => {
   expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
 });
+
+test.each([
+  ['Your next visit is free, any questions?', 'fail'],
+  ['We will cover your next visit, anything else I can help with?', 'fail'],
+  ['Your next visit is free, what day works for you?', 'fail'],
+  ['Your next visit is free, will you be home?', 'fail'],
+  ['Your next visit is free, are there other concerns?', 'fail'],
+  ['Your next visit is free any questions?', 'fail'],
+  ['Your next visit is free anything else?', 'fail'],
+  ['Your next visit is free do you have any questions?', 'fail'],
+  ['Your next visit is free what day works for you?', 'fail'],
+  ['Your next visit is free or paid?', 'pass'],
+  ['Your next visit is free maybe?', 'pass'],
+  ['Your next visit is free?', 'pass'],
+  ['Your next visit is free, is that true?', 'pass'],
+  ['Is your next visit free, and does Tuesday work for you?', 'pass'],
+])('a later inquiry does not question the free-visit claim: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});

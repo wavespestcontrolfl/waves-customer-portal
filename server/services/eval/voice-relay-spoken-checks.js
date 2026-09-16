@@ -567,8 +567,10 @@ const FREE_VISIT_CAUSAL_BOUNDARY_RE = new RegExp(
 );
 const FREE_VISIT_TEMPORAL_PARENTHETICAL_RE = /,\s*(?:as of (?:today|now)|since (?:today|yesterday))\s*,\s*(?:that\s*)?$/i;
 const FOLLOWUP_QUESTION_RE = /(?:,\s*|\s+(?:and|but|so)\s+)(?:(?:and|but|so)\s+)?(?:did|do|does|is|are|was|were|will|would|can|could|should|has|have|had|what|who|why|how|where|when)\b/i;
+const FREE_VISIT_LEADING_QUESTION_RE = /^(?!\s*(?:do|does|did)\s+not\b)\s*(?:did|do|does|is|are|was|were|will|would|can|could|should|has|have|had|what|who|why|how)\b[^,;:]*$/i;
+const FREE_VISIT_QUESTION_TERMINATOR_RE = /^(?:\?|or\s+(?:not|paid|billable|charged)\?\s*$)/i;
 const FREE_VISIT_ACKNOWLEDGMENT_RE = /^\s*,?\s*(?:ok(?:ay)?|all\s*right|alright|sounds?\s+good|got\s+it|you\s+(?:follow|understand|know)|understood|yeah|yes|good)(?:\s+then)?(?=\s*(?:$|[,;]))/i;
-const FREE_VISIT_TRUTH_QUESTION_RE = /^\s*,?\s*(?:is|was)\s+(?:that|this|it)\s+(?:true|correct|right)\s*$/i;
+const FREE_VISIT_TRUTH_QUESTION_RE = /^\s*,?\s*(?:(?:is|was)\s+(?:that|this|it)\s+(?:true|correct|right)|right|correct)\s*$/i;
 const FREE_VISIT_TRAILING_RETRACTION_RE = /^\s*,?\s*(?:but|however)\s+(?:it|that|this)(?:\s+(?:(?:is|was)\s+(?:not\s+true|false|untrue|incorrect|wrong)|(?:isn['’]t|wasn['’]t)\s+true)|['’]s\s+(?:not\s+true|false|untrue|incorrect|wrong))(?=\s*(?:$|[,;.!?]|\b(?:because|since|as(?!\s+(?:long|soon)\s+as\b))\b))/i;
 /** value: true */
 function no_free_visit_promise(value, record, { spoken }) {
@@ -581,14 +583,17 @@ function no_free_visit_promise(value, record, { spoken }) {
         // An inverted question can lack punctuation in ASR, but an
         // imperative ("Do not worry") or a prior question before a comma
         // does not question the free-visit proposition that follows.
-        const leadingQuestion = /^\s*(?:did|do|does|is|are|was|were|will|would|can|could|should|has|have|had|what|who|why|how)\b/i.test(questionPrefix)
-          && !/^\s*(?:do|does|did)\s+not\b/i.test(questionPrefix)
-          && !/[,;:]/.test(questionPrefix);
-        if ((text[questionEnd] === '?'
-              && !FREE_VISIT_ACKNOWLEDGMENT_RE.test(questionTail)
-              && (!FOLLOWUP_QUESTION_RE.test(questionTail)
-                || FREE_VISIT_TRUTH_QUESTION_RE.test(questionTail)))
-            || leadingQuestion) continue;
+        const leadingQuestion = FREE_VISIT_LEADING_QUESTION_RE.test(questionPrefix);
+        // A comma after the claim opens another utterance unless it asks
+        // whether that same claim is true. ASR can omit the comma before
+        // "any questions" or an auxiliary-led follow-up.
+        const independentFollowup = FOLLOWUP_QUESTION_RE.test(`, ${questionTail.trimStart()}`)
+          || /^\s*,?\s*any(?:thing)?\b/i.test(questionTail);
+        const propositionQuestion = FREE_VISIT_QUESTION_TERMINATOR_RE.test(text.slice(questionEnd))
+          && (FREE_VISIT_TRUTH_QUESTION_RE.test(questionTail)
+            || (!FREE_VISIT_ACKNOWLEDGMENT_RE.test(questionTail)
+              && !/^\s*,/.test(questionTail) && !independentFollowup));
+        if (propositionQuestion || leadingQuestion) continue;
         const claim = claimContext(text, match.index, match.index);
         const [clauseStart, clauseEnd] = clauseBounds(text, match.index);
         const clausePrefix = text.slice(clauseStart, match.index);
