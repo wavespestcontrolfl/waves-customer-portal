@@ -31,6 +31,12 @@ describe('email reply company-name policy', () => {
     'WaVeS ExTeRmInAtInG',
   ])('rejects a noncanonical service company name: %s', (brand) => rejected(`You contacted ${brand}.`));
 
+  test('screens the rendered company name through nested emphasis', () => {
+    rejected('You contacted **Waves *Termite* Control**.');
+    expect(verdict('You contacted **Waves *Pest* Control**.'))
+      .toEqual({ ok: true, violations: [] });
+  });
+
   test.each([
     'Waves Pest Control will follow up.',
     'The Waves Pest Control lawn team will follow up.',

@@ -3,10 +3,18 @@ const { RETIRED_NAME_RE, NONCANONICAL_SUFFIX_RE } = require('../customer-company
 // Inline Markdown emphasis renders without its paired delimiters. Requiring
 // nonspace content leaves unmatched punctuation in place.
 function normalizeCompanyCopy(text) {
-  return String(text || '').normalize('NFKC')
+  let normalized = String(text || '').normalize('NFKC')
     .replace(/[\u2010-\u2015\u2212]/g, '-')
-    .replace(/[‘’]/g, "'")
-    .replace(/(\*\*\*|___|\*\*|__|\*|_)([^\s*_](?:[^\r\n]*?[^\s*_])?)\1/g, '$2');
+    .replace(/[‘’]/g, "'");
+  let previous;
+  do {
+    previous = normalized;
+    normalized = normalized.replace(
+      /(\*\*\*|___|\*\*|__|\*|_)([^\s*_](?:[^\r\n]*?[^\s*_])?)\1/g,
+      '$2',
+    );
+  } while (normalized !== previous);
+  return normalized;
 }
 
 const NONCANONICAL_SERVICE_NAME_RE = /\bWaves\s+(?:Lawn\b|Pest\b(?!\s+Control\b)|(?:Termite|Mosquito)\s+(?:Control|Services?)\b|Exterminating\b)/i;
