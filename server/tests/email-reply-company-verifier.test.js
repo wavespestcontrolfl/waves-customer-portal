@@ -35,11 +35,14 @@ describe('email reply company-name policy', () => {
 
   test('screens the rendered company name through nested emphasis and inline code', () => {
     rejected('You contacted **Waves *Termite* Control**.');
+    rejected('You contacted Waves **Termite\nControl**.');
     rejected('You contacted Waves `Termite` Control.');
     rejected('You contacted Waves ``Termite`` Control.');
     rejected('You contacted Waves `Termite\n` Control.');
     rejected('You contacted Waves ``Termite\r\nControl`` Services.');
     expect(verdict('You contacted **Waves *Pest* Control**.'))
+      .toEqual({ ok: true, violations: [] });
+    expect(verdict('You contacted Waves **Pest\nControl**.'))
       .toEqual({ ok: true, violations: [] });
     expect(verdict('You contacted Waves `Pest` Control.'))
       .toEqual({ ok: true, violations: [] });
@@ -68,12 +71,16 @@ describe('email reply company-name policy', () => {
   test('screens bounded introduced company-name shapes outside the service taxonomy', () => {
     rejected('You contacted Waves Ant Control.');
     rejected('You contacted Waves Home Services.');
+    rejected('You contacted the company Waves Ant Control.');
+    rejected('You emailed the business Waves Home Services.');
     rejected('The company name is waves indoor ant solutions.');
     expect(verdict('You contacted Waves about ant control.'))
       .toEqual({ ok: true, violations: [] });
     expect(verdict('You contacted Waves for home services.'))
       .toEqual({ ok: true, violations: [] });
     expect(verdict('Sound waves affect home services in coastal areas.'))
+      .toEqual({ ok: true, violations: [] });
+    expect(verdict('You contacted the company about waves and ant control.'))
       .toEqual({ ok: true, violations: [] });
   });
 

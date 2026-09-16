@@ -7,16 +7,17 @@ truncated lawn and pest names, and service-style aliases such as Waves Termite
 Control, Waves Mosquito Services, Waves Rodent Control, and Waves Exterminating.
 Paired inline Markdown emphasis and code spans are removed before screening so
 formatting cannot hide a rendered company name; unmatched delimiters remain.
-Line endings inside paired code spans render as spaces. CommonMark punctuation
-escapes are rendered before screening, and Unicode dashes are folded for suffix
-matching. The canonical Waves Pest Control name, service descriptors followed
-by a team role, and ordinary lowercase `waves` prose remain valid. A lowercase
+Rendered whitespace is folded before inline formatting is removed, including
+line endings inside emphasis and code spans. CommonMark punctuation escapes are
+rendered before screening, and Unicode dashes are folded for suffix matching.
+The canonical Waves Pest Control name, service descriptors followed by a team
+role, and ordinary lowercase `waves` prose remain valid. A lowercase
 name-shaped phrase is treated as a company alias only after a clear company
-introduction such as `contacted` or `the company name is`; title- and mixed-case
-aliases from the service taxonomy remain name-shaped on their own. An
-introduced alias outside that taxonomy is screened when one to three service
-words lead into a company noun. Prepositional references such as `contacted
-Waves about ant control` remain valid.
+introduction such as `contacted`, `contacted the company`, or `the company name
+is`; title- and mixed-case aliases from the service taxonomy remain name-shaped
+on their own. An introduced alias outside that taxonomy is screened when one to
+three service words lead into a company noun. Prepositional references such as
+`contacted Waves about ant control` remain valid.
 
 The shared retired-name and suffix patterns live in
 `server/services/customer-company-name.js`. `previsit-brief.js` imports those
