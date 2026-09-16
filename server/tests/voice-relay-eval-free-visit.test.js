@@ -100,3 +100,14 @@ test.each([
 ])('question wording governs only its own free-visit proposition: %s', (text, status) => {
   expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
 });
+
+test.each([
+  ['The claim that your next visit is free is true but the date is false.', 'fail'],
+  ['The claim that your next visit is free is true and the appointment date is false.', 'fail'],
+  ['The claim that your next visit is free is true because the date is false.', 'fail'],
+  ['The claim that your next visit is free is false but the date is true.', 'pass'],
+  ['The claim that your next visit is free is false and the date is true.', 'pass'],
+  ['The claim that your next visit is free is false, but your next treatment is free.', 'fail'],
+])('a denial of a later claim does not retract a free-visit promise: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
