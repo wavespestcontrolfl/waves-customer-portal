@@ -5,6 +5,8 @@ test.each([
   ["that's not true", 'fail'],
   ["that's false", 'fail'],
   ['that’s incorrect', 'fail'],
+  ["that's not the case", 'fail'],
+  ["that isn't the case", 'fail'],
   ["it's only planned", 'fail'],
   ["it's not applied", 'fail'],
   ["we've not applied it", 'fail'],
@@ -12,6 +14,25 @@ test.each([
   ["it's only planned indoors", 'pass'],
   ["we've not applied it indoors", 'pass'],
 ])('contracted report retractions keep their scope: %s', (tail, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter, but ${tail}.`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
+test.each([
+  ['that is not the case', 'fail'],
+  ["that wasn't the case", 'fail'],
+  ['we cannot confirm whether it was', 'fail'],
+  ["we can't confirm whether it was", 'fail'],
+  ['we cannot confirm whether it was applied there', 'fail'],
+  ['we cannot confirm whether it was applied to the exterior perimeter', 'fail'],
+  ['we cannot confirm whether it was applied indoors', 'pass'],
+  ["we can't confirm whether it was applied indoors", 'pass'],
+  ['we cannot confirm whether it was applied to the garage', 'pass'],
+  ['we cannot confirm whether the appointment was today', 'pass'],
+  ['that is not the case for the appointment', 'pass'],
+  ["that wasn't the case for the appointment", 'pass'],
+  ['that is not the case indoors', 'pass'],
+])('direct report denial and uncertainty retain their scope: %s', (tail, status) => {
   const spoken = [`Talstar P was applied to the exterior perimeter, but ${tail}.`];
   expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
 });
