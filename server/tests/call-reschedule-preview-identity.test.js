@@ -1,9 +1,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/scheduling/window-rules', () => ({ ...jest.requireActual('../services/scheduling/window-rules'), probeSlotOverlap: jest.fn().mockResolvedValue([]) }));
 jest.mock('../services/call-booking-catalog', () => ({ ...jest.requireActual('../services/call-booking-catalog'), planCallFollowUpShift: jest.fn().mockResolvedValue([]) }));
 const { previewProposal, applyProposal } = require('../services/call-reschedule-proposals');
-const { probeSlotOverlap } = require('../services/scheduling/window-rules');
 describe('proposal preview identity', () => {
   test.each(['service_id', 'service_type', 'service_address_state', 'deleted_at', 'address_missing'])('changing %s after preview cannot apply the old approval', async (field) => {
     const priorGate = process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
@@ -30,10 +28,11 @@ describe('proposal preview identity', () => {
       return query;
     };
     conn.transaction = async (fn) => fn(conn);
-    const rebooker = { collectiveMoveGateOn: () => false, reschedule: jest.fn() };
+    const rebooker = { collectiveMoveGateOn: () => false, reschedule: jest.fn(), previewMoveConflicts: jest.fn() };
     try {
-      probeSlotOverlap.mockReset().mockResolvedValue(field === 'service_address_state' ? [{
-        id: 'conflict-1', scheduled_date: '2099-09-10', window_start: '13:30:00', window_end: '15:30:00',
+      rebooker.previewMoveConflicts.mockResolvedValue(field === 'service_address_state' ? [{
+        target_id: 'visit', target_date: '2099-09-10', target_start: '14:00', target_end: '15:00',
+        conflict_id: 'conflict-1', conflict_date: '2099-09-10', conflict_start: '13:30', conflict_end: '15:30',
         status: 'confirmed', service_type: 'Conflicting service',
       }] : []);
       const preview = await previewProposal(conn, 'card', { visitId: 'visit', now, rebooker });
@@ -42,8 +41,8 @@ describe('proposal preview identity', () => {
         expect(preview.overlap).toEqual({ count: 1, appointments: [{ id: 'conflict-1', scheduled_date: '2099-09-10',
           current_window: { start_at: '2099-09-10T17:30:00.000Z', end_at: '2099-09-10T19:30:00.000Z' },
           status: 'confirmed', service_name: 'Conflicting service' }] });
-        expect(probeSlotOverlap).toHaveBeenCalledWith(expect.objectContaining({ date: '2099-09-10',
-          windowStart: '14:00', windowEnd: '15:00', excludeServiceIds: ['visit'] }));
+        expect(rebooker.previewMoveConflicts).toHaveBeenCalledWith('visit', '2099-09-10', { start: '14:00', end: '15:00' },
+          { conn: expect.any(Function), adminWindowRules: true, overlapAdvisory: true, seriesPolicy: 'single' });
       }
       if (field === 'deleted_at') tables.customers[0].deleted_at = now;
       else if (field === 'address_missing') tables.customers[0].address_line1 = null;
@@ -57,5 +56,3 @@ describe('proposal preview identity', () => {
     }
   });
 });
-
-

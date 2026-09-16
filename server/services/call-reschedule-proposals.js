@@ -6,7 +6,6 @@ const { parseETDateTime } = require('../utils/datetime-et');
 const { arrivalWindowRange } = require('../utils/sms-time-format');
 const { lockTriageCall } = require('../utils/triage-locks');
 const { recordAuditEvent } = require('./audit-log');
-const { probeSlotOverlap } = require('./scheduling/window-rules');
 const { etWallClockOfConfirmedStart } = require('./call-triage-flags');
 const { loadCandidates, planRescheduleFromCall, applyReviewedCallReschedule, humanHandledRescheduleCard, ACTIVITY_ACTION } = require('./call-reschedule-apply');
 
@@ -40,15 +39,29 @@ function exactAppointmentWindow(date, start, end) {
 
 function overlapSummary(rows) {
   const appointments = (rows || []).map((row) => ({
-    id: row.id,
-    scheduled_date: row.scheduled_date instanceof Date ? row.scheduled_date.toISOString().slice(0, 10) : String(row.scheduled_date).slice(0, 10),
-    current_window: exactAppointmentWindow(row.scheduled_date, row.window_start, row.window_end),
+    id: row.conflict_id,
+    scheduled_date: row.conflict_date,
+    current_window: exactAppointmentWindow(row.conflict_date, row.conflict_start, row.conflict_end),
     status: row.status,
-    service_name: row.service_type || 'Service',
+    service_name: row.warning || row.service_type || 'Service',
   })).sort((a, b) => a.scheduled_date.localeCompare(b.scheduled_date)
     || String(a.current_window.start_at || '').localeCompare(String(b.current_window.start_at || ''))
     || String(a.id).localeCompare(String(b.id)));
   return { count: appointments.length, appointments };
+}
+
+function recurringConflicts(rows, selectedId) {
+  const byOccurrence = new Map();
+  for (const row of rows) {
+    if (row.target_id === selectedId) continue;
+    if (!byOccurrence.has(row.target_id)) byOccurrence.set(row.target_id, {
+      occurrenceId: row.target_id, date: row.target_date, appointments: [],
+    });
+    byOccurrence.get(row.target_id).appointments.push({ id: row.conflict_id,
+      service_name: row.warning || row.service_type || 'Service', status: row.status,
+      window_start: row.conflict_start, window_end: row.conflict_end });
+  }
+  return [...byOccurrence.values()];
 }
 
 function reviewedMoves(selected, plan, series) {
@@ -217,15 +230,16 @@ async function previewProposal(conn, id, { visitId, now = new Date(), rebooker =
   const selected = candidates.find((visit) => visit.id === selection);
   const mover = rebooker || require('./rebooker');
   const series = mover.collectiveMoveGateOn()
-    ? await mover.previewSeriesMove(selection, plan.newDate, plan.newWindow, { adminWindowRules: true, overlapAdvisory: true }) : { collective: false };
-  const overlapRows = await conn.transaction((trx) => probeSlotOverlap({
-    trx,
-    date: plan.newDate,
-    windowStart: plan.newWindow.start,
-    windowEnd: plan.newWindow.end,
-    excludeServiceIds: series.occurrenceIds?.length ? series.occurrenceIds : [selection],
-  }));
-  const overlap = overlapSummary(overlapRows);
+    ? await mover.previewSeriesMove(selection, plan.newDate, plan.newWindow, { conn, adminWindowRules: true, overlapAdvisory: true }) : { collective: false };
+  const conflictSnapshot = series.collective ? series.conflictSnapshot
+    : await mover.previewMoveConflicts(selection, plan.newDate, plan.newWindow, {
+      conn, adminWindowRules: true, overlapAdvisory: true, seriesPolicy: 'single',
+    });
+  const overlap = overlapSummary(conflictSnapshot.filter((row) => row.target_id === selection));
+  if (series.collective) {
+    series.conflicts = recurringConflicts(conflictSnapshot, selection);
+    series.conflictCount = series.conflicts.length;
+  }
   const moves = reviewedMoves(selected, plan, series);
   if (await hasLinkedFollowUps(conn, moves)) {
     throw fail('This visit has a linked follow-up. Use Pick another time to review both appointments together.');
@@ -244,10 +258,10 @@ async function previewProposal(conn, id, { visitId, now = new Date(), rebooker =
       service_address_city: selected.service_address_city, service_address_state: selected.service_address_state,
       service_address_zip: selected.service_address_zip,
     },
-    target: v2.scheduling.proposed_start_at, series, overlap,
+    target: v2.scheduling.proposed_start_at, series, overlap, conflictSnapshot,
   };
   return { preview_hash: digest(snapshot), card, call, customer, candidates, v2, plan, selected, series,
-    overlap, displayAddress: proposalAddress(selected, customer) };
+    overlap, conflictSnapshot, displayAddress: proposalAddress(selected, customer) };
 }
 
 async function applyProposal(conn, id, { actorId, visitId, previewHash, now = new Date(), rebooker = null } = {}) {
@@ -259,6 +273,7 @@ async function applyProposal(conn, id, { actorId, visitId, previewHash, now = ne
     conn, call, customer, candidates, v2, visitId: selected.id, actorId, now, rebooker,
     operationKey: `proposal:${id}:${previewHash}`, proposalCardId: id,
     occurrenceIds: series.occurrenceIds || [], occurrences: series.occurrences,
+    conflictSnapshot: preview.conflictSnapshot,
     guard: async (trx) => {
       if (!enabled()) throw fail('Reschedule proposals are disabled');
       if (await hasLinkedFollowUps(trx, reviewedMoves(selected, preview.plan, series))) {

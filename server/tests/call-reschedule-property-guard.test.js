@@ -1,15 +1,15 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/scheduling/window-rules', () => ({ ...jest.requireActual('../services/scheduling/window-rules'), probeSlotOverlap: jest.fn().mockResolvedValue([]) }));
 jest.mock('../services/call-booking-catalog', () => ({ ...jest.requireActual('../services/call-booking-catalog'), planCallFollowUpShift: jest.fn().mockResolvedValue([]) }));
 jest.mock('../services/call-reschedule-apply', () => ({
   ...jest.requireActual('../services/call-reschedule-apply'),
   applyReviewedCallReschedule: jest.fn(async ({ conn, guard }) => { await guard(conn); return { applied: true }; }),
 }));
 const { previewProposal, applyProposal } = require('../services/call-reschedule-proposals');
+const { applyReviewedCallReschedule } = require('../services/call-reschedule-apply');
 
-test('an unchanged saved property passes the preview-to-apply identity guard', async () => {
+test.each(['single', 'series', 'arrival-route'])('%s preview binds disclosed conflicts and saved property through Apply', async (mode) => {
   const previousGate = process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
   process.env.GATE_RESCHEDULE_PROPOSAL_CARD = 'true';
   const now = new Date('2099-09-09T08:00:00-04:00');
@@ -46,12 +46,31 @@ test('an unchanged saved property passes the preview-to-apply identity guard', a
   };
   conn.transaction = async (fn) => fn(conn);
   conn.raw = jest.fn().mockResolvedValue({ rows: [] });
-  const rebooker = { collectiveMoveGateOn: () => false };
+  const conflicts = [{ target_id: 'visit', target_date: '2099-09-10', target_start: '14:00', target_end: '15:00',
+    conflict_id: 'other-visit', conflict_date: '2099-09-10', conflict_start: '14:30', conflict_end: '15:30',
+    reason: null, warning: null, status: 'confirmed', service_type: 'Other service' }];
+  if (mode === 'arrival-route') Object.assign(conflicts[0], { conflict_id: 'infeasible:arrival_window',
+    reason: 'arrival_window', warning: 'The arrival window does not fit the route.' });
+  if (mode === 'series') conflicts.push({ ...conflicts[0], target_id: 'later', target_date: '2099-10-10',
+    conflict_id: 'later-conflict', conflict_date: '2099-10-10' });
+  const rebooker = { collectiveMoveGateOn: () => mode === 'series',
+    previewMoveConflicts: jest.fn(async () => conflicts),
+    previewSeriesMove: jest.fn(async () => ({ collective: true, occurrenceIds: ['visit', 'later'],
+      conflictSnapshot: conflicts })) };
   try {
     const preview = await previewProposal(conn, 'card', { visitId: 'visit', now, rebooker });
     expect(preview.displayAddress.address_line1).toBe('Saved property');
+    expect(preview.overlap.appointments[0].service_name).toBe(conflicts[0].warning || 'Other service');
+    if (mode === 'series') expect(preview.series.conflicts).toEqual([{ occurrenceId: 'later', date: '2099-10-10',
+      appointments: [{ id: 'later-conflict', service_name: 'Other service', status: 'confirmed', window_start: '14:30', window_end: '15:30' }] }]);
     await expect(applyProposal(conn, 'card', { actorId: 'staff', visitId: 'visit', now, rebooker,
       previewHash: preview.preview_hash })).resolves.toEqual({ applied: true });
+    expect(applyReviewedCallReschedule).toHaveBeenLastCalledWith(expect.objectContaining({ conflictSnapshot: conflicts }));
+    const originalId = conflicts.at(-1).conflict_id;
+    conflicts.at(-1).conflict_id = 'replacement-with-same-count';
+    await expect(applyProposal(conn, 'card', { actorId: 'staff', visitId: 'visit', now, rebooker,
+      previewHash: preview.preview_hash })).rejects.toMatchObject({ status: 409 });
+    conflicts.at(-1).conflict_id = originalId;
     tables.customer_properties[0].address_line1 = 'Changed property';
     await expect(applyProposal(conn, 'card', { actorId: 'staff', visitId: 'visit', now, rebooker,
       previewHash: preview.preview_hash })).rejects.toMatchObject({ status: 409 });
