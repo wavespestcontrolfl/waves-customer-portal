@@ -83,8 +83,32 @@ async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3) {
     if (!held) throw holdError(new Error('Scheduled review claim lost while holding uncertain delivery'));
     return { ...outcome, sent: false, scheduledHold: true, attemptsExhausted, nextAllowedAt };
   };
+  const holdReservationFailure = async () => {
+    const retryAt = new Date(Date.now() + 15 * 60000);
+    const heldAt = new Date();
+    // Refund the attempt this claim consumed: the provider was never
+    // contacted, so nothing was actually tried against it.
+    const held = await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+      status: 'scheduled',
+      scheduled_for: retryAt,
+      updated_at: heldAt,
+      metadata: db.raw(`COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+        'scheduled_sms_attempts', GREATEST(CASE
+          WHEN COALESCE(metadata->>'scheduled_sms_attempts', '') ~ '^[0-9]+$'
+            THEN (metadata->>'scheduled_sms_attempts')::int - 1
+          ELSE 0 END, 0))`),
+    });
+    if (!held) throw new Error('Scheduled review claim lost while recovering a pre-provider reservation failure');
+    return { sent: false, scheduledHold: true, retryable: true, code: 'REVIEW_RESERVATION_FAILED', nextAllowedAt: retryAt };
+  };
   const dispatch = async () => {
     let result;
+    // Set immediately before the provider call, same shape review-request.js's
+    // send paths use (providerStarted) — distinguishes a failure that never
+    // reached Twilio (ordinary transient error, e.g. the reservation write
+    // itself throwing) from one that did (genuinely ambiguous delivery).
+    // Only the latter deserves the 72h uncertainty hold.
+    let providerStarted = false;
     try {
       if (reviewAsk) {
         // Persist conservative evidence BEFORE the provider boundary. If
@@ -104,6 +128,7 @@ async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3) {
         });
         if (!reserved) throw new Error('Scheduled review claim lost before provider dispatch');
       }
+      providerStarted = true;
       result = await send();
       // sendCustomerMessage always names its outcome (#4338); a legacy
       // sender shape that reports sent:true with no outcome is still an
@@ -125,6 +150,12 @@ async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3) {
       return result;
     } catch (err) {
       if (err.reviewUncertaintyHoldFailed) throw err;
+      // The provider was never contacted — most commonly the reservation
+      // UPDATE above throwing on a transient DB error. There is no
+      // ambiguous delivery to protect against here, only a plain retry;
+      // classifying it as uncertain would needlessly hold even a bundled
+      // completion message (report/receipt links) for 72 hours.
+      if (reviewAsk && !providerStarted) return holdReservationFailure();
       err.scheduledReviewAsk = reviewAsk;
       if (result) err.providerOutcome = result;
       const accepted = await acceptedScheduledSms(msg.id, err);

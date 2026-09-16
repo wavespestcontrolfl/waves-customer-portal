@@ -388,3 +388,51 @@ test('an exhausted uncertain review returns to the terminal rail without a fourt
   expect(send).not.toHaveBeenCalled();
   expect(history.lastDeliveredAskAt).not.toHaveBeenCalled();
 });
+
+// Codex P1 on PR #4334: a transient failure on the reservation write itself
+// (before the provider is ever contacted) must not be classified the same
+// way as a genuinely ambiguous provider handoff — that unnecessarily delays
+// even a bundled completion message (report/receipt links) by 72 hours.
+test('a reservation write that throws before the provider is contacted refunds the attempt and retries on the short rail, not the 72h hold', async () => {
+  const original = db.getMockImplementation();
+  db.mockImplementation((...args) => {
+    const query = original(...args);
+    const update = query.update;
+    query.update = async patch => {
+      if (patch.metadata?.sql?.includes("jsonb_build_object('review_ask_reservation', true")) {
+        throw new Error('connection reset');
+      }
+      return update(patch);
+    };
+    return query;
+  });
+  const send = jest.fn();
+
+  const result = await dispatchScheduledSms(row, row.metadata, send);
+
+  expect(send).not.toHaveBeenCalled();
+  expect(result).toMatchObject({ sent: false, scheduledHold: true, retryable: true, code: 'REVIEW_RESERVATION_FAILED' });
+  expect(row.status).toBe('scheduled');
+  // Ordinary short retry (matches the file's other 15-minute rails), not the
+  // 72-hour ask-spacing hold.
+  expect(row.scheduled_for.getTime()).toBe(Date.now() + 15 * 60000);
+  expect(row.metadata.review_ask_reservation).toBeUndefined();
+  expect(row.metadata.review_delivery_uncertain_exhausted).toBeUndefined();
+  // The claimed attempt is refunded — nothing reached the provider.
+  const refundPatch = updates.at(-1).patch;
+  expect(refundPatch.status).toBe('scheduled');
+  expect(refundPatch.metadata.sql).toContain('scheduled_sms_attempts');
+  expect(refundPatch.metadata.sql).toContain('- 1');
+});
+
+test('a provider error after the reservation was set still holds the full 72h uncertainty window (existing behavior)', async () => {
+  const send = jest.fn(async () => { throw new Error('twilio timeout'); });
+
+  const result = await dispatchScheduledSms(row, row.metadata, send);
+
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(result).toMatchObject({ sent: false, scheduledHold: true, deliveryOutcome: 'uncertain' });
+  expect(row.status).toBe('scheduled');
+  expect(row.metadata.review_ask_reservation).toBe(true);
+  expect(row.scheduled_for.getTime()).toBe(Date.now() + 72 * 3600000);
+});
