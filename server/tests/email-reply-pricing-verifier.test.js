@@ -69,4 +69,28 @@ describe('email reply visit-pricing policy', () => {
     expect(verdict('Waves Lawn Care says the treatment is EPA-certified.')).toEqual({ ok: true, violations: [] });
     expect(verdict('Your balance is $999.')).toEqual({ ok: true, violations: [] });
   });
+  test('screens nested emphasis while preserving valid price units', () => {
+    rejected('**USD *98* per visit**');
+    rejected('__Each visit costs **98 dollars**__');
+    expect(verdict('**USD *98* per application**')).toEqual({ ok: true, violations: [] });
+  });
+
+  test.each([
+    'Our per-visit price is $98', 'For each visit, the price is $98',
+    'For every scheduled visit, we charge $98', 'Our per-visit fee is USD 98',
+    '$98 (per visit)', '$98: per visit', '$98 — per visit',
+    'USD 98 (for each visit)', '$1,298.50 per visit', '98.50 dollars per visit',
+    'The rate per visit is $98', 'Our rate is per visit',
+  ])('recognizes unit-first and punctuated pricing: %s', rejected);
+
+  test.each([
+    'Your balance is $98. For each visit, we send one reminder',
+    'Your balance is $98.50. For each visit, we send one reminder',
+    'Your balance is USD 1,098.50. Every visit gets a reminder',
+    'Please rate each visit', 'You can rate a scheduled visit in the portal',
+    'For each visit, we check your yard. The price is $98 per application.',
+  ])('keeps separate sentences and feedback verbs outside pricing: %s', (text) => {
+    expect(verdict(text)).toEqual({ ok: true, violations: [] });
+  });
+
 });
