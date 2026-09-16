@@ -22,6 +22,52 @@ test('a noncompletion at the matched adverb location still retracts that finding
 });
 
 test.each([
+  ['it was only planned for the garage', 'pass'],
+  ['Talstar P was only planned in the garage', 'pass'],
+  ['Talstar P was scheduled to be applied to the garage', 'pass'],
+  ['it was only planned for the exterior perimeter', 'fail'],
+  ['Talstar P was scheduled to be applied to the exterior perimeter', 'fail'],
+  ['it was only planned there', 'fail'],
+  ['it was only planned', 'fail'],
+])('proposed treatment retracts only its named location: %s', (tail, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter, but ${tail}.`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
+test.each([
+  ['we have never applied it there', 'fail'],
+  ["we've never applied it there", 'fail'],
+  ["I've never applied it there", 'fail'],
+  ['he has never applied it there', 'fail'],
+  ["he's never applied it there", 'fail'],
+  ["we'd never applied it there", 'fail'],
+  ["Talstar P's never been applied there", 'fail'],
+  ["Talstar P's only planned there", 'fail'],
+  ["we'd only planned to apply it there", 'fail'],
+  ['we have never applied it indoors', 'pass'],
+  ["he's never applied it indoors", 'pass'],
+  ["Talstar P's only planned indoors", 'pass'],
+])('perfect tense retractions retain product and place scope: %s', (tail, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter, but ${tail}.`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
+test.each([
+  ['but are you sure?', 'fail'],
+  ['and is that correct?', 'fail'],
+  ['did we apply it there?', 'fail'],
+  ['can you confirm that?', 'fail'],
+  ['is that what the report says?', 'fail'],
+  ['but do you have any questions?', 'pass'],
+  ['can you confirm the appointment date?', 'pass'],
+  ['did we apply it indoors?', 'pass'],
+  ['and bait was applied indoors, but are you sure?', 'pass'],
+])('inline confirmation questions keep their report scope: %s', (tail, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter, ${tail}`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
+test.each([
   ['Talstar P was applied to the exterior perimeter, subject to office approval.', 'fail'],
   ['Subject to office approval, Talstar P was applied to the exterior perimeter.', 'fail'],
   ['Talstar P was applied to the exterior perimeter, but only with office approval.', 'fail'],

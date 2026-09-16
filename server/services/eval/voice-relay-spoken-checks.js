@@ -1390,18 +1390,22 @@ const REPORT_ANAPHORIC_ACTION = `(?:(?:do|did|done)\\s+(?:that|so|it)|(?:appl(?:
 const REPORT_ANAPHORIC_GERUND = `(?:doing|applying|spraying|using|placing|putting|treating)\\s+(?:it|that|so)`;
 const REPORT_TRAILING_DENIAL_RE = new RegExp(
   `^(?:actually\\s+)?(?:not(?:\\s+(?:really|actually))?(?:\\s+${REPORT_FINDING_VERB_RE.source})?|no|`
-    + `(?:it|that|this)\\s+(?:was|is)\\s+(?:(?:really|completely|entirely|totally|absolutely)\\s+)?(?:false|untrue|incorrect|inaccurate|wrong|not\\s+what\\s+happened)|(?:it|that|this)\\s+(?:never\\s+(?:actually\\s+)?(?:happened|occurred|took\\s+place)|did(?:n['’]t|\\s+not)\\s+(?:actually\\s+)?(?:happen|occur|take\\s+place)|(?:has|had)(?:n['’]t|\\s+not)\\s+(?:happened|occurred|taken\\s+place))|(?:it|that|this)\\s+(?:was|is|has|had)(?:n[\x27\u2019]t|\\s+(?:not|never))(?:\\s+been)?(?:\\s+(?:true|correct|accurate|(?:actually\\s+)?${REPORT_FINDING_VERB_RE.source}))?|${REPORT_RETRACTION_ACTOR}\\s+(?:(?:did|have|has|had)(?:n[\x27\u2019]t|\\s+not)|never)\\s+(?:actually\\s+)?${REPORT_ANAPHORIC_ACTION})(?:\\s+(?:there|at\\s+that\\s+location))?(?:\\s+at\\s+all)?(?:\\s*,\\s*(?:sorry|my\\s+mistake|my\\s+apologies))?\\s*$`,
+    + `(?:it|that|this)\\s+(?:was|is)\\s+(?:(?:really|completely|entirely|totally|absolutely)\\s+)?(?:false|untrue|incorrect|inaccurate|wrong|not\\s+what\\s+happened)|(?:it|that|this)\\s+(?:never\\s+(?:actually\\s+)?(?:happened|occurred|took\\s+place)|did(?:n['’]t|\\s+not)\\s+(?:actually\\s+)?(?:happen|occur|take\\s+place)|(?:has|had)(?:n['’]t|\\s+not)\\s+(?:happened|occurred|taken\\s+place))|(?:it|that|this)\\s+(?:was|is|has|had)(?:n[\x27\u2019]t|\\s+(?:not|never))(?:\\s+been)?(?:\\s+(?:true|correct|accurate|(?:actually\\s+)?${REPORT_FINDING_VERB_RE.source}))?|${REPORT_RETRACTION_ACTOR}\\s+(?:(?:did|have|has|had)(?:n[\x27\u2019]t|\\s+(?:not|never))|never)\\s+(?:actually\\s+)?${REPORT_ANAPHORIC_ACTION})(?:\\s+(?:there|at\\s+that\\s+location))?(?:\\s+at\\s+all)?(?:\\s*,\\s*(?:sorry|my\\s+mistake|my\\s+apologies))?\\s*$`,
   'i',
 );
 const REPORT_CONCISE_NONCOMPLETION_RE = /^\s*(?:(?:(?:is|are|was|were|has|have|had)(?:\s+(?:been|being))?\s+)?(?:(?:only|just|merely|simply|still)\s+)*(?:(?:the|our|your|their|his|her|my|its)\s+)?(?:(?:recommended|scheduled|planned|intended|proposed|suggested|considered|expected|required|needed|pending)\b|(?:an?\s+)?(?:recommendation|plan|proposal|suggestion|possibility)\b|under\s+consideration\b|(?:for\s+)?(?:tomorrow|tonight|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b)|(?:will|shall|would|should|can|could|may|might|must|is going to|are going to|was going to|were going to)\b)/i;
 function reportTrailingNoncompletion(text) {
   const qualifier = text.trim();
-  const anaphoric = /^(?:it|this|that)\s+(.+)$/i.exec(qualifier)
-    || new RegExp(`^${REPORT_RETRACTION_ACTOR}\\s+(.+?)\\s+(?:to\\s+${REPORT_ANAPHORIC_ACTION}|(?:on\\s+)?${REPORT_ANAPHORIC_GERUND})(?:\\s+(?:there|at\\s+that\\s+location))?\\s*$`, 'i').exec(qualifier);
-  // A different locative adverb qualifies that place, not this finding.
-  // The scenario's own location has already been normalized to "there".
-  return Boolean(anaphoric && REPORT_CONCISE_NONCOMPLETION_RE.test(anaphoric[1])
-    && !/\b(?:indoors|outdoors|inside|outside|upstairs|downstairs)\b/i.test(anaphoric[1]));
+  const actor = new RegExp(`^${REPORT_RETRACTION_ACTOR}\\s+(.+?)\\s+(?:to\\s+${REPORT_ANAPHORIC_ACTION}|(?:on\\s+)?${REPORT_ANAPHORIC_GERUND})(?:\\s+(?:there|at\\s+that\\s+location))?\\s*$`, 'i').exec(qualifier);
+  if (actor) return REPORT_CONCISE_NONCOMPLETION_RE.test(actor[1]);
+  const anaphoric = /^(?:it|this|that)\s+(.+)$/i.exec(qualifier);
+  if (!anaphoric) return false;
+  const noncompletion = REPORT_CONCISE_NONCOMPLETION_RE.exec(anaphoric[1]);
+  if (!noncompletion) return false;
+  // A proposed treatment elsewhere does not retract the completed finding.
+  // The matched location is normalized to "there" before this check.
+  const remainder = anaphoric[1].slice(noncompletion[0].length);
+  return /^\s*(?:(?:to\s+)?(?:(?:be|have\s+been)\s+)?(?:applied|sprayed|treated|placed|used|put)(?:\s+(?:it|that))?)?\s*(?:(?:(?:to|at|in|on|around|along|for)\s+)?(?:there|at\s+that\s+location)|(?:for\s+)?(?:tomorrow|tonight|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)))?\s*$/i.test(remainder);
 }
 // Qualified shorthand must positively state completion or cite the report;
 // unknown qualifiers can describe proposed treatment and are not evidence.
@@ -1669,26 +1673,45 @@ function reportClauseBounds(text, at) {
     ? [sentenceStart, sentenceEnd] : ordinary;
 }
 
-function reportRetractionClause(text, subject, location) {
-  // Explanations do not undo a retraction. Stop at an independent clause or
-  // the same causal boundary used for free-visit claims, not an arbitrary word cap.
-  // Here "do so" refers to the finding; its "so" is not a new clause.
-  const anaphoric = text.replace(/\b(?:actually|in\s+fact)\b[,\s]*/gi, '')
-    .replace(/\b(it|that|this)['’]s\b/gi, '$1 is')
-    .replace(/\b(we|they|you)['’]ve\b/gi, '$1 have')
-    .replace(/\b(do|did|done)\s+so\b/gi, '$1 that');
-  const qualifier = clauseOf(anaphoric, 0).split(CLAIM_CAUSAL_BOUNDARY_RE)[0]
-    .split(/\bsince\b/i)[0].trim().replace(/,\s*$/, '');
+function reportNormalizeReferences(text, subject, location) {
   // Repeated scenario names refer to the same treatment as "it". Normalize
   // only that product and its matched location before the anchored retraction
   // checks; a denial about bait or an indoor treatment remains independent.
   const product = new RegExp(`(?:(?:the|your|our)\\s+)?(?:${subject})(?:\\s+[a-z0-9]\\b)?`, 'gi');
   const place = new RegExp(
-    `(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+)?${REPORT_LOCATION_NOUN_PREFIX}`
+    `(?:(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source}|\\bfor\\b)\\s+)?${REPORT_LOCATION_NOUN_PREFIX}`
       + `(?:${location})(?:\\s+(?:perimeter|area|walls?|zone|edge))?`,
     'gi',
   );
-  return qualifier.replace(product, 'it').replace(place, 'there');
+  return text.replace(product, 'it').replace(place, 'there')
+    .replace(/\b(i|we|you|he|she|they|it|this|that)['’]ve\b/gi, '$1 have')
+    .replace(/\b(i|we|you|he|she|they|it|this|that)['’]s\b/gi, (match, actor, at, full) => {
+      const next = full.slice(at + match.length);
+      const perfect = /^\s+(?:never|not|already|just|actually)\s+(?:been|applied|sprayed|treated|placed|used|put)\b/i.test(next);
+      return `${actor} ${perfect ? 'has' : 'is'}`;
+    })
+    .replace(/\b(i|we|you|he|she|they|it|this|that)['’]d\b/gi, (match, actor, at, full) => {
+      const next = full.slice(at + match.length);
+      const perfect = /^\s+(?:(?:only|just|never|not|already|still|actually)\s+)*(?:planned|scheduled|considered|recommended|applied|sprayed|treated|placed|used|been)\b/i.test(next);
+      return `${actor} ${perfect ? 'had' : 'would'}`;
+    });
+}
+
+function reportRetractionClause(text, subject, location) {
+  // Explanations do not undo a retraction. Stop at an independent clause or
+  // the same causal boundary used for free-visit claims, not an arbitrary word cap.
+  // Here "do so" refers to the finding; its "so" is not a new clause.
+  const anaphoric = text.replace(/\b(?:actually|in\s+fact)\b[,\s]*/gi, '')
+    .replace(/\b(do|did|done)\s+so\b/gi, '$1 that');
+  const qualifier = clauseOf(anaphoric, 0).split(CLAIM_CAUSAL_BOUNDARY_RE)[0]
+    .split(/\bsince\b/i)[0].trim().replace(/,\s*$/, '');
+  return reportNormalizeReferences(qualifier, subject, location);
+}
+
+function reportConfirmationQuestion(text, subject, location) {
+  const normalized = reportNormalizeReferences(text.split(/[.!?;]/)[0], subject, location);
+  const confirmation = /^\s*(?:,\s*)?(?:(?:and|but|so)\s+)?(?:are\s+you\s+(?:sure|certain)(?:\s+(?:about|of)\s+(?:it|this|that))?|(?:is|was)\s+(?:it|this|that)\s+(?:right|correct|true)|is\s+(?:it|this|that)\s+what\s+the\s+report\s+says|(?:can|could|would|will)\s+you\s+confirm\s+(?:it|this|that)|did\s+(?:we|they|you)\s+(?:apply|spray|treat|place|use|put)\s+(?:it|that)\s+(?:there|at\s+that\s+location)|(?:was|is|has)\s+(?:it|this|that)|did\s+(?:we|they))\s*$/i;
+  return confirmation.test(normalized);
 }
 
 function reportSharedLocationContinuation(text, clauseEnd, location, subject) {
@@ -1753,15 +1776,25 @@ function report_readback_confirms(value, record, { spoken }) {
       const coordinatedQuestion = new RegExp(
         `^(?:or\\b|and\\s+(?=(?:${REPORT_ASSERTION_START}|${REPORT_VERBLESS_PRODUCT_LOCATION_START})))[^.!?;]*\\?`,
         'i',
-      ).test(text.slice(clauseEnd));
+      ).test(text.slice(clauseEnd).split(/,?\s*\b(?:but|however|though|yet|so|then)\b/i)[0]);
       const sharedLocation = reportSharedLocationContinuation(text, clauseEnd, value.location, value.subject);
       const asrTagQuestion = /(?:,\s*(?:right|correct)|\b(?:wasn['’]t\s+it|isn['’]t\s+it|aren['’]t\s+they|didn['’]t\s+(?:we|they)))\s*$/i
         .test(text.slice(clauseStart, clauseEnd))
         || /(?:,\s*|\s+)(?:(?:is|was|has|had)\s+(?:that|this|it)(?:\s+(?:right|correct|true))?|(?:did|do)\s+(?:we|they)|(?:are|were)\s+(?:you|we|they)\s+(?:sure|certain)(?:\s+(?:about|of)\s+(?:it|this|that))?)\s*$/i
           .test(text.slice(clauseStart, clauseEnd));
       const independentFollowupQuestion = FOLLOWUP_QUESTION_RE.test(text.slice(m.index + m[0].length, clauseEnd));
+      const firstLocation = new RegExp(value.location, 'i').exec(text.slice(clauseStart, clauseEnd));
+      const findingEnd = Math.max(m.index + m[0].length,
+        firstLocation ? clauseStart + firstLocation.index + firstLocation[0].length : 0);
+      const inlineQuestion = reportConfirmationQuestion(
+        text.slice(findingEnd, clauseEnd), value.subject, value.location,
+      );
+      const continuationQuestion = reportConfirmationQuestion(
+        text.slice(clauseEnd), value.subject, value.location,
+      );
       if ((text[clauseEnd] === '?' && !independentFollowupQuestion)
-          || interrogative || coordinatedQuestion || sharedLocation.unconfirmed || asrTagQuestion) continue;
+          || interrogative || coordinatedQuestion || sharedLocation.unconfirmed || asrTagQuestion
+          || inlineQuestion || continuationQuestion) continue;
       const reportClause = text.slice(clauseStart, clauseEnd) + sharedLocation.text;
       if (REPORT_TRAILING_DENIAL_RE.test(reportRetractionClause(
         reportClause.slice(reportClause.lastIndexOf(',') + 1), value.subject, value.location,
