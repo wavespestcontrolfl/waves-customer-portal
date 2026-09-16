@@ -1528,6 +1528,42 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect((mock.__state.rows.sms_log || []).filter((r) => r.status === 'sending')).toHaveLength(0);
     });
 
+    test('(c) an uncertain outcome after renewing a stale reservation schedules retryAt in the future, not the past (codex #4331 P1, pre-push audit on the seam itself)', async () => {
+      // A reservation from a PRIOR attempt survived past its own 72h hold
+      // (crashed/never settled) — this attempt's reserveForRequest call
+      // must renew it (reset created_at to now) rather than reuse its stale
+      // timestamp as-is. Before the fix, reservation.reservedAt stayed the
+      // 73h-old created_at, so an uncertain outcome's
+      // `reservedAt + ASK_SPACING_MS` retryAt landed roughly an hour in the
+      // PAST — a "retry" processScheduled would treat as already due.
+      const staleAt = new Date(Date.now() - 73 * 3600000);
+      const due = new Date(Date.now() - 60000);
+      const mock = makeMock({
+        customers: [{ id: 'uq-renew', first_name: 'Ida', phone: '+19410000168', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-uq-renew', customer_id: 'uq-renew', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tuqrenew', location_id: 'venice', created_at: new Date(), scheduled_for: due }],
+        sms_log: [{
+          id: 'res-uq-renew', customer_id: 'uq-renew', direction: 'outbound', status: 'sending',
+          message_body: 'Would you leave us a quick review?', to_phone: '+19410000168',
+          metadata: { review_ask_reservation: true, review_request_id: 'rr-uq-renew' },
+          created_at: staleAt, updated_at: staleAt,
+        }],
+      });
+      db.mockImplementation(mock);
+      mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_UNKNOWN' });
+
+      const out = await ReviewService.sendSMS('rr-uq-renew');
+
+      expect(out.deferred).toBe('provider_uncertain');
+      expect(out.nextAllowedAt).toBeInstanceOf(Date);
+      expect(out.nextAllowedAt.getTime()).toBeGreaterThan(Date.now());
+      // Exactly one reservation for the request — renewed in place, never a
+      // second row.
+      const reservations = (mock.__state.rows.sms_log || []).filter((r) => r.status === 'sending');
+      expect(reservations).toHaveLength(1);
+      expect(reservations[0].id).toBe('res-uq-renew');
+      expect(reservations[0].created_at.getTime()).toBeGreaterThan(staleAt.getTime());
+    });
+
     test('a freshCreate reservation-write failure throws through to _createGated instead of parking a null-schedule row (codex #4331 P1, structural pass, finding 1)', async () => {
       const mock = makeMock({
         customers: [{ id: 'fresh-res', first_name: 'Ida', phone: '+19410000180', nearest_location_id: 'venice' }],
