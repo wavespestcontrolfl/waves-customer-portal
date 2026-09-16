@@ -40,6 +40,8 @@ describe('email reply company-name policy', () => {
     rejected('You contacted Waves ``Termite`` Control.');
     rejected('You contacted Waves `Termite\n` Control.');
     rejected('You contacted Waves ``Termite\r\nControl`` Services.');
+    rejected('You contacted Waves Termite\\\nControl.');
+    rejected('You contacted Waves Termite&#32;Control.');
     expect(verdict('You contacted **Waves *Pest* Control**.'))
       .toEqual({ ok: true, violations: [] });
     expect(verdict('You contacted Waves **Pest\nControl**.'))
@@ -47,6 +49,10 @@ describe('email reply company-name policy', () => {
     expect(verdict('You contacted Waves `Pest` Control.'))
       .toEqual({ ok: true, violations: [] });
     expect(verdict('You contacted Waves ``Pest`` Control.'))
+      .toEqual({ ok: true, violations: [] });
+    expect(verdict('You contacted Waves Pest\\\nControl.'))
+      .toEqual({ ok: true, violations: [] });
+    expect(verdict('You contacted Waves Pest&#32;Control.'))
       .toEqual({ ok: true, violations: [] });
     expect(verdict('You contacted Waves `Pest Control.'))
       .toEqual({ ok: true, violations: [] });
@@ -72,6 +78,8 @@ describe('email reply company-name policy', () => {
     rejected('You contacted Waves Ant Control.');
     rejected('You contacted Waves Home Services.');
     rejected('You contacted the company Waves Ant Control.');
+    rejected('You contacted: Waves Ant Control.');
+    rejected('You contacted “Waves Ant Control”.');
     rejected('You emailed the business Waves Home Services.');
     rejected('The company name is waves indoor ant solutions.');
     expect(verdict('You contacted Waves about ant control.'))
@@ -89,11 +97,14 @@ describe('email reply company-name policy', () => {
       .toEqual({ ok: true, violations: [] });
     expect(verdict('The Waves Pest Control wildlife services crew will follow up.'))
       .toEqual({ ok: true, violations: [] });
+    expect(verdict('You contacted the Waves Pest Control lawn care team.'))
+      .toEqual({ ok: true, violations: [] });
     rejected('You contacted Waves Pest Control lawn care.');
     rejected('The Waves Pest Control lawn care division will follow up.');
     rejected('You contacted Waves Pest Control Termite Services.');
     rejected('You contacted Waves Pest Control Mosquito Control.');
     rejected('The company name is Waves Pest Control termite services.');
+    rejected('The company name is Waves Pest Control Lawn Care Team.');
     expect(verdict('Waves Pest Control termite service is scheduled.'))
       .toEqual({ ok: true, violations: [] });
     expect(verdict('Waves Pest Control mosquito control remains scheduled.'))
