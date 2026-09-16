@@ -51,8 +51,17 @@ test.each([
   ["You won't have to pay for your next visit.", 'fail'],
   ['We waived the charge for your next visit.', 'fail'],
   ['We will waive the charge for your next visit.', 'fail'],
+  ["We'll waive the charge for your next visit.", 'fail'],
+  ['We’ll waive the charge for your next visit.', 'fail'],
+  ["I'll waive the charge for the return visit.", 'fail'],
+  ["We've waived the charge for your next visit.", 'fail'],
+  ["We're waiving the charge for your next visit.", 'fail'],
+  ["I'm waiving the charge for your next visit.", 'fail'],
+  ["We haven't waived the charge for your next visit.", 'pass'],
+  ['We could waive the charge for your next visit.', 'pass'],
   ['We will cover your next visit.', 'fail'],
   ['We will waive the charge for your next visit if the office approves.', 'pass'],
+  ["We'll waive the charge for your next visit if the office approves.", 'pass'],
   ['Your next visit is free, but only if the office approves.', 'pass'],
   ['Your next visit is free, but the office sends a report only if requested.', 'fail'],
   ['Whether the office approves or not, your next visit is free.', 'fail'],
@@ -97,6 +106,24 @@ test.each([
   ['Your next visit may be completely free.', 'pass'],
   ['The appointment is mostly free.', 'pass'],
 ])('uncontracted cost and full-free wording retain claim scope: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['Your next visit includes a report that is complimentary.', 'pass'],
+  ['Your next visit includes a report that is free.', 'pass'],
+  ["Your next visit includes a report that's free.", 'pass'],
+  ['Your next visit is not something that is complimentary.', 'pass'],
+  ['Your next visit is something that is complimentary.', 'fail'],
+  ['The next visit that is complimentary is Tuesday.', 'fail'],
+  ["That's free.", 'fail'],
+  ['Your next visit is complimentary.', 'fail'],
+  ['Your next visit already costs you nothing.', 'fail'],
+  ['Your next visit will be absolutely complimentary.', 'fail'],
+  ['Your next visit has been waived.', 'fail'],
+  ["Your next visit's waived.", 'fail'],
+  ['Your next visit’s waived.', 'fail'],
+])('a visit price predicate stays with the visit: %s', (text, status) => {
   expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
 });
 
