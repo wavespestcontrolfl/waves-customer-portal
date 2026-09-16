@@ -285,6 +285,15 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
     && (humanOverride || visit.customer_confirmed !== true)) {
     return skip('office_review_unconfirmed', { visitId: visit.id });
   }
+  // Reviewed Apply deliberately asks the mover to restore pending
+  // confirmation. A dispatch-owned row may already be confirmed and visible,
+  // but sending it through that contract would hide it from the customer
+  // schedule again. Keep the whole source-owned workflow in the schedule
+  // editor; the automatic path retains its narrower pending-row guard.
+  if (humanOverride && visit.source_action
+    && DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(visit.source_action)) {
+    return skip('dispatch_owned_workflow', { visitId: visit.id });
+  }
   if (visit.source_action && DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(visit.source_action) && visit.status === 'pending') {
     return skip('dispatch_owned_pending', { visitId: visit.id });
   }

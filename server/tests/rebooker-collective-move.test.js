@@ -121,7 +121,7 @@ function anchorRow(overrides = {}) {
 // what that read returns; defaults to the same rows), same-series clash
 // probe, then one UPDATE chain per sibling in order.
 function wireSeriesMocks(siblings, { anchor = anchorRow(), priorMove = null, updateResults = null, freshAnchor = null,
-  lockedSiblings = null, lockedParent = null, reviewedMaintenanceLocked = true } = {}) {
+  lockedSiblings = null, lockedParent = null, reviewedMaintenanceLocked = true, reviewedStopLocked = true } = {}) {
   const anchorLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
   const parentLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
   const siblingsQuery = chain({ select: jest.fn().mockResolvedValue(siblings) });
@@ -147,7 +147,7 @@ function wireSeriesMocks(siblings, { anchor = anchorRow(), priorMove = null, upd
   });
   const ordinaryRaw = rawFactory('trx.raw');
   trx.raw = jest.fn((sql, bindings) => String(sql).includes('pg_try_advisory_xact_lock')
-    ? Promise.resolve({ rows: [{ locked: reviewedMaintenanceLocked }] })
+    ? Promise.resolve({ rows: [{ locked: bindings?.[0] === 'visit.stop' ? reviewedStopLocked : reviewedMaintenanceLocked }] })
     : ordinaryRaw(sql, bindings));
   trx.fn = { now: jest.fn(() => 'NOW()') };
   db.transaction = jest.fn(async (callback) => callback(trx));
@@ -941,6 +941,28 @@ describe('rescheduleSeries — one recorded operation', () => {
     })).rejects.toMatchObject({ statusCode: 409, code: 'VISIT_CHANGED_RETRY', message: expect.stringContaining('reload') });
     expect(beforeMove).not.toHaveBeenCalled();
     expect(updates[0].update).not.toHaveBeenCalled();
+  });
+
+  test.each([1, 2])('reviewed Apply refuses busy stop %i without waiting behind an ordinary series move', async (busyStop) => {
+    const { trx, updates, seriesMovesInsert } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1)]);
+    const originalRaw = trx.raw.getMockImplementation();
+    let stopCount = 0;
+    trx.raw.mockImplementation((sql, bindings) => {
+      if (bindings?.[0] === 'visit.stop' && sql.includes('pg_try') && ++stopCount === busyStop) {
+        return Promise.resolve({ rows: [{ locked: false }] });
+      }
+      return originalRaw(sql, bindings);
+    });
+    const moveGuard = jest.fn();
+    await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
+      ...ADMIN_OPTS, beforeMove: jest.fn(), moveGuard, expectOccurrenceIds: ['svc-1', 'svc-2'],
+    })).rejects.toMatchObject({ statusCode: 409, code: 'VISIT_CHANGED_RETRY' });
+    expect(trx.raw).toHaveBeenCalledWith(expect.stringContaining('pg_try_advisory_xact_lock'), ['visit.stop', expect.any(String)]);
+    expect(trx.raw.mock.calls.some(([sql, bindings]) => bindings?.[0] === 'visit.stop' && !sql.includes('pg_try'))).toBe(false);
+    expect(moveGuard).not.toHaveBeenCalled();
+    for (const update of updates) expect(update.update).not.toHaveBeenCalled();
+    expect(stopCount).toBe(busyStop);
+    expect(seriesMovesInsert.insert).not.toHaveBeenCalled();
   });
 
   test('a series that changed between the unlocked read and the locked re-read (an auto-extend child landed) aborts 409 SERIES_CHANGED — nothing written, failure recorded', async () => {
