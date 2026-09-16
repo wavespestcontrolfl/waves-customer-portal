@@ -2,7 +2,7 @@
 // decides what a monetary or measurement token means in its clause.
 const MAX_SOURCE_BYTES = 8192;
 
-const DIGITS = '\\d{1,9}(?:,\\d{3}){0,3}(?:\\.\\d{1,2})?';
+const DIGITS = '(?:\\d{1,3}(?:,\\d{3}){1,3}|\\d{1,9})(?:\\.\\d{1,2})?';
 const NUMERIC_RANGE = `${DIGITS}(?:\\s*(?:-|to)\\s*(?:(?:\\$\\s*|usd\\s+))?${DIGITS})?`;
 const ONE_TO_NINETEEN = '(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen)';
 const TENS = '(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)';
@@ -11,7 +11,7 @@ const WORD_JOIN = '(?:\\s+|-)';
 const WRITTEN = `(?:(?:a|one|two|three|four|five|six|seven|eight|nine)${WORD_JOIN}hundred(?:${WORD_JOIN}(?:and${WORD_JOIN})?${UNDER_HUNDRED})?|${UNDER_HUNDRED})`;
 const PREFIXED_VALUE = `(?:\\.\\d{1,2}|${NUMERIC_RANGE})`;
 const CURRENCY = `(?:(?:\\$\\s*|\\busd\\s+)${PREFIXED_VALUE}|\\b${NUMERIC_RANGE}(?:\\s+|-)(?:dollars?|bucks?|cents?|usd)\\b|\\b${WRITTEN}(?:\\s+|-)(?:dollars?|bucks?|cents?)\\b|\\b${DIGITS}\\s*¢)`;
-const MONEY = `(?:${CURRENCY})(?:\\s*\\+(?!\\s*(?:tax(?:es)?|fees?)\\b)|\\s+(?:and\\s+up|or\\s+more))?`;
+const MONEY = `(?:${CURRENCY})(?:\\s*\\+(?!\\s*(?:tax(?:es)?|fees?)\\b)|\\s+(?:and\\s+up|or\\s+more)\\b)?`;
 
 const DURATION = '(?:minutes?|hours?|days?|weeks?|months?|years?|mins?|hrs?)';
 const MEASURE_SPAN = `(?:between\\s+${DIGITS}\\s+and\\s+${DIGITS}|from\\s+${DIGITS}\\s+to\\s+${DIGITS}|${DIGITS}\\s*(?:-|to)\\s*${DIGITS}|${DIGITS}|${WRITTEN})`;
