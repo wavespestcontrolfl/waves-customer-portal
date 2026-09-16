@@ -11,7 +11,9 @@ visit units, including modified visit nouns, singular/plural forms, and
 price/billing verbs without an amount. Monetary forms include dollar symbols,
 USD prefixes/suffixes, and amounts followed by `dollars` or `bucks`; the USD
 prefix and bucks forms match the established vocabulary in `comms-lint.js`.
-Unicode typography and paired inline Markdown emphasis are normalized.
+Invoice wording, bounded price modifiers and ranges, comma-separated units,
+and duration-qualified visits are included. Unicode typography, punctuation
+escapes, and paired inline Markdown emphasis/code spans are normalized.
 
 Only explicit boolean `commercialProposal: true` exempts visit-price wording.
 A future caller must obtain that context from trusted proposal data; words in

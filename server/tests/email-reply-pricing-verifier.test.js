@@ -93,4 +93,32 @@ describe('email reply visit-pricing policy', () => {
     expect(verdict(text)).toEqual({ ok: true, violations: [] });
   });
 
+  test.each([
+    'We invoice per visit', 'You will be invoiced per visit', 'Your invoice is per visit',
+    'Invoicing is per visit', 'Each visit is invoiced at $98',
+    'Each visit costs only $98', 'Each visit is just $98', 'Each visit costs about $98',
+    'Each visit will cost approximately USD 98', 'Visits are only $98 each',
+    'Our fee is $98, per visit', 'The cost is $98, for each visit',
+    '$98-120 per visit', '$98–120 per visit', 'USD 98-120 per visit', '$98 to 120 per visit',
+    'Each visit costs $98-120', '98-120 dollars per visit',
+    '$98 per 30-minute visit', '$98 for each 2-hour visit', 'Each 90-minute visit costs $98',
+    'USD 98 per 1.5-hour visit', 'Rate per visit',
+  ])('rejects invoice, qualified, range, and duration pricing: %s', rejected);
+
+  test.each([
+    'Your invoice is pending. Each visit gets a reminder.',
+    'Each 90-minute visit includes an inspection.',
+    'The cost is about $98 per application.', 'USD 98-120 per application',
+    'Your balance is $98. Each 30-minute visit gets a reminder.',
+    'Your invoice covers three applications. We send one reminder per visit.',
+  ])('preserves unrelated invoice, range, and duration prose: %s', (text) => {
+    expect(verdict(text)).toEqual({ ok: true, violations: [] });
+  });
+
+  test.each(["USD `98` per visit","$98 per\\-visit","USD ``98`` per visit","**USD `98` per visit**"])('screens rendered code spans and escapes: %s', rejected);
+
+  test.each(["USD `98` per application","USD ``98` per visit","The note contains an unmatched ` character.","The note contains a backslash before \\q."])('preserves valid units and unmatched formatting: %s', (text) => {
+    expect(verdict(text)).toEqual({ ok: true, violations: [] });
+  });
+
 });
