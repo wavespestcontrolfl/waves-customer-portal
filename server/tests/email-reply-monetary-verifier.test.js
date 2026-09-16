@@ -102,6 +102,33 @@ describe('email reply monetary visit-pricing policy', () => {
   ])('rejects hyphenated modifiers beginning with stop words: %s', rejected);
 
   test.each([
+    '$98 per 30 minute visit', 'USD 98 for each 2 hour visit',
+    '$98 per 1.5 hour visit',
+  ])('rejects unhyphenated duration-qualified visit prices: %s', rejected);
+
+  test.each([
+    'There is a $98 visit fee', 'A $98 service-visit charge applies',
+    'The USD 98 scheduled visit cost applies',
+  ])('rejects amounts followed by bounded visit-fee phrases: %s', rejected);
+
+  test.each([
+    'Each visit: $98', 'First visit — USD 98', 'Visit: $98',
+  ])('rejects visit labels followed by amounts: %s', rejected);
+
+  test.each([
+    'Ninety-eight dollars per visit', 'One hundred dollars for each visit',
+    'Each visit costs a hundred bucks', 'Each visit costs two hundred and fifty dollars',
+  ])('rejects bounded written-number prices: %s', rejected);
+
+  test.each([
+    'The service costs 98 per visit', 'Pest control runs 98 per visit',
+    'Our service is priced at 98 per visit', 'Our services cost 98 per visit',
+    'The service was priced at 98 per visit',
+    'Your service will be priced at 98 per visit',
+    'Pest control will cost 98 per visit',
+  ])('rejects bare amounts after explicit service pricing predicates: %s', rejected);
+
+  test.each([
     'USD `98` per visit', '$98 per\\-visit', 'USD ``98`` per visit',
     '**USD `98` per visit**', 'USD `98\n` per visit', 'USD 98\\\nper visit',
     '$98\\\r\nfor each visit', 'USD 98 per&#32;visit', 'USD **98\nper visit**',
@@ -142,6 +169,16 @@ describe('email reply monetary visit-pricing policy', () => {
     'Please pay $98 on your next visit.', 'We received $98 on your last visit.',
     'Your $98 payment is due on the next scheduled visit.',
     'We received $98 plus a tax refund before your next visit.',
+    'There is a $98 account fee before the next visit.',
+    'A $98 service charge applies before the visit.',
+    'Each visit: 98 minutes.', 'First visit - 90 minutes.',
+    'Ninety-eight minutes per visit.', 'One hundred photos for each visit.',
+    'Each visit costs a hundred minutes.',
+    'The service takes 98 minutes per visit.',
+    'Pest control uses 98 ounces per visit.',
+    'Pest control runs 98 minutes per visit.',
+    'The $98 payment posted 30 minutes before the visit.',
+    'Our services take 98 minutes per visit.',
   ])('preserves application prices and unrelated visit prose: %s', (text) => {
     expect(verdict(text)).toEqual({ ok: true, violations: [] });
   });

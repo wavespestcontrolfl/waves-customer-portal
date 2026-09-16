@@ -19,6 +19,12 @@ one-off payment reminder for the next visit remains valid. Billing verbs may
 put the visit before the amount, and `has a price/cost/amount of` forms are
 recognized. A single `plus`/`before` tax-or-fee qualifier may sit between an
 amount and its visit unit.
+Amount-first visit fees (`$98 visit fee` and `$98 service-visit charge`) and
+visit labels with a colon or dash are recognized. Written amounts are bounded
+to values below one thousand expressed with units, tens, and hundreds followed
+by `dollars` or `bucks`. Bare digits after the explicit `service` or `pest
+control` predicates `costs`, `runs`, or `is priced at` are also recognized;
+counts and durations without currency remain valid.
 Visit noun phrases allow at most eight modifiers and stop at clause words,
 prepositions, determiners, and account/payment/access nouns. Thus an account
 payment followed later by visit timing, such as `We received $98 for your
@@ -26,6 +32,8 @@ account before the next visit`, does not become a visit price. Stop words apply
 only as standalone tokens, preserving modifiers such as `on-site`, `in-home`,
 and `after-hours`. Plan predicates such as `includes` and `covers` also stop the
 noun phrase, so a plan amount followed by its included visits remains valid.
+Duration modifiers accept one bounded number plus a singular/plural time unit,
+with either a hyphen or one space (`30-minute` / `30 minute`).
 
 The shared `email-reply-copy-normalizer` bounds raw input at 8,192 UTF-8 bytes,
 512 whitespace-delimited tokens, and eight formatting passes before matching.
