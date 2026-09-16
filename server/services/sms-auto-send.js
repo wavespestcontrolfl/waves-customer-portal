@@ -627,12 +627,23 @@ async function reconcileAutoSendClaims({ orphanMinutes = 30, uncertainReconcilia
   // either deletes it as a confirmed duplicate or promotes it to the durable
   // sent record when no separate provider log exists, so it must stay out of
   // this sweep regardless of age.
+  //
+  // scheduled_for IS NULL is the positive marker for "synthetic placeholder":
+  // review-request.js#reserveReviewSms never sets it. A real scheduled row
+  // (scheduled-sms-delivery.js stamps the same marker on it before its
+  // provider call) always carries a scheduled_for from its original queueing
+  // and keeps it for life — nothing ever nulls it. Age alone can't tell them
+  // apart: claimDueScheduledSms flips a due retry to 'sending' without
+  // touching created_at, so a freshly reclaimed real row can sit exactly at
+  // this cutoff and must never be eligible here (codex P1, review-ask-queued
+  // #4334) — losing it strands its retry and terminal-hook obligations.
   let reviewReservationsExpired = 0;
   try {
     const reviewCutoff = new Date(Date.now() - ASK_SPACING_MS);
     reviewReservationsExpired = await db('sms_log')
       .where({ direction: 'outbound', status: 'sending' })
       .whereRaw("metadata->>'review_ask_reservation' = 'true'")
+      .whereNull('scheduled_for')
       .where('created_at', '<', reviewCutoff)
       .del();
   } catch (err) {
