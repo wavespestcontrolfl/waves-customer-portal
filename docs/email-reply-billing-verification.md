@@ -31,14 +31,22 @@ colon, comma, and dash separators, including after a copula. Bare `rate` is
 classified as billing only with a billing copula, `per`, or one of those label
 separators, preserving feedback requests such as `Please rate each visit`.
 Separate-billing language is screened with the adverb before or after the
-billing verb.
+billing verb, including `get`, `gets`, and `got` passive forms. The explicit
+unit remains prohibited when connected by bounded `not` or `never` negation.
+Duration modifiers accept hyphenated and spaced numeric forms such as
+`30-minute` and `30 minute`.
 
-Monetary clauses such as `$98 per visit`, `the rate is 98 per visit`, or `each
-visit is billed at 98` belong to the separately reviewed monetary sibling and
-are deliberately outside this verifier. It also does not check presentation,
-company names, regulatory language, account facts, or permission to create or
-send a draft. No runtime caller, provider request, database access, or sending
-integration is included.
+Monetary recognition belongs to the separately reviewed monetary sibling, but
+the lexical policies can overlap: `The $98 fee is per visit` contains the
+amountless `fee is per visit` form and is rejected here too. The local
+composition check deduplicates the shared `customer_copy_compliance` violation;
+a future combined verifier must do the same. This slice does not add broad
+monetary-anchor parsing merely to divide that overlap;
+amount-only forms such as `$98 per visit`, `the rate is 98 per visit`, or `each
+visit is billed at 98` remain the monetary sibling's responsibility. It also
+does not check presentation, company names, regulatory language, account facts,
+or permission to create or send a draft. No runtime caller, provider request,
+database access, or sending integration is included.
 
 This recut preserves the amountless billing behavior from the frozen pricing
 source at `4f944d3868` and adds the unresolved plural-copula cases without

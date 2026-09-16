@@ -9,6 +9,8 @@ describe('email reply amountless billing policy', () => {
     'Payments are per visit', 'You pay per visit', 'The fee will be per routine visit',
     'Our rate is per visit', 'Rate per visit',
     'Billing is per 30-minute scheduled visit',
+    'Billing is per 30 minute visit', 'The fee is for each 2 hour visit',
+    'Our rates are per 1.5 hours scheduled visit',
     'Billing is per on-site visit', 'Billing is per in-home visit',
     'Billing is per after-hours visit', 'Every in-home visit is billed separately',
     'Our fees are per scheduled routine quarterly residential exterior preventive ongoing planned visit',
@@ -25,6 +27,8 @@ describe('email reply amountless billing policy', () => {
     'We bill separately for each visit', 'We charge individually on every visit',
     'We billed separately for each visit', 'We separately bill for each visit',
     'Each visit is separately billed', 'Routine visits were individually charged',
+    'Each visit gets billed separately', 'Visits get charged individually',
+    'Routine visits got invoiced separately', 'Each visit gets separately billed',
   ])('rejects unit-first separate billing: %s', rejected);
 
   test.each([
@@ -34,6 +38,8 @@ describe('email reply amountless billing policy', () => {
     'Billing — per visit', 'Our fees, per routine visit',
     'Rate: per visit', 'Rates — per visit',
     'Billing is: per visit', 'Rate is — per routine visit',
+    'Our fees are not per visit', 'Billing is never per visit',
+    'Billing: not per visit', 'Rates are not per routine visit',
   ])('screens rendered amountless billing: %s', rejected);
 
   test.each([
@@ -58,6 +64,9 @@ describe('email reply amountless billing policy', () => {
     'Your invoice is for this visit.',
     'This payment is for your last visit.',
     'The charge is for the scheduled visit.',
+    'Our fees are not per application.',
+    'Billing is not for your recent visit.',
+    'Each visit runs 30 minutes.', 'Each visit runs 1.5 hours.',
     'The notes contain an unmatched * or ` and a backslash before \\q.',
   ])('preserves ordinary and per-application prose: %s', (text) => {
     expect(verdict(text)).toEqual({ ok: true, violations: [] });
@@ -73,8 +82,12 @@ describe('email reply amountless billing policy', () => {
     '$98 per visit', 'USD 98 for each scheduled visit', 'The rate is 98 per visit',
     'We charge 98 per visit', 'Each visit costs 98', 'Each visit is billed at 98',
     'Each visit is billed $98', 'Every visit is charged USD 98',
-  ])('leaves monetary clauses to the monetary sibling: %s', (text) => {
+  ])('leaves amount-anchored clauses without amountless billing wording to the monetary sibling: %s', (text) => {
     expect(verdict(text)).toEqual({ ok: true, violations: [] });
+  });
+
+  test('documents overlap when a monetary clause also contains amountless billing wording', () => {
+    rejected('The $98 fee is per visit.');
   });
 
   test('requires an explicit trusted boolean for the commercial exemption', () => {
