@@ -93,3 +93,8 @@ test('screens rendered multiline code claims while preserving registered wording
   expect(verifyEmailReplyClaims({ text: 'The treatment has EPA `certification\n`.' }).ok).toBe(false);
   expect(verifyEmailReplyClaims({ text: 'The treatment is EPA `registered\r\n`.' }).ok).toBe(true);
 });
+
+test('screens soft breaks inside paired emphasis', () => {
+ expect(verifyEmailReplyClaims({ text: 'The treatment has EPA **formal\ncertification**.' }).ok).toBe(false);
+ expect(verifyEmailReplyClaims({ text: 'The treatment is **EPA\nregistered**.' }).ok).toBe(true);
+});

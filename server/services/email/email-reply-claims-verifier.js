@@ -10,7 +10,8 @@ function normalizeCopy(text) {
     .replace(/[‘’]/g, "'")
     // CommonMark punctuation escapes render without the backslash. Keep
     // unmatched backslashes and escapes before nonpunctuation characters.
-    .replace(/\\([-!"#$%&'()*+,.\/:;<=>?@[\]^_`{|}~\\])/g, '$1');
+    .replace(/\\([-!"#$%&'()*+,.\/:;<=>?@[\]^_`{|}~\\])/g, '$1')
+    .replace(/\s+/g, ' ');
   // Peel paired inline-code and emphasis layers until stable; every changed
   // pass removes delimiters, including nested wrappers, while leaving stray
   // punctuation.
