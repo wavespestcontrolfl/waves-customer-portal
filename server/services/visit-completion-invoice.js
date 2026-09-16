@@ -20,6 +20,35 @@ function visitBusy(error) {
     { code: 'visit_busy', status: 409, statusCode: 409, isOperational: true });
 }
 
+async function acceptanceTaxRefusal({ invoice, members, customer, trx }) {
+  const taxableBase = Number(invoice.subtotal) - Number(invoice.discount_amount || 0);
+  const baseCents = Math.round(taxableBase * 100);
+  let currentRate = 0;
+  let expectedTaxCents = 0;
+  if (['commercial', 'business'].includes(customer.property_type)) {
+    const rates = new Set();
+    let authority;
+    for (const member of members) {
+      const tax = await require('./tax-calculator').calculateTax(
+        customer.id, member.service_type, taxableBase, { database: trx },
+      );
+      rates.add(Number(tax.rate));
+      authority ||= tax;
+    }
+    if (rates.size !== 1) return 'mixed_tax_treatment';
+    [currentRate] = rates;
+    expectedTaxCents = Math.round(Number(authority.amount) * 100);
+  }
+  const savedTaxCents = Math.round(Number(invoice.tax_amount) * 100);
+  if (![currentRate, Number(invoice.tax_rate)].every(Number.isFinite)
+      || ![baseCents, savedTaxCents, expectedTaxCents].every(Number.isSafeInteger)
+      || Math.min(currentRate, baseCents, savedTaxCents, expectedTaxCents) < 0
+      || currentRate !== Number(invoice.tax_rate) || savedTaxCents !== expectedTaxCents) {
+    return 'invoice_tax_mismatch';
+  }
+  return null;
+}
+
 async function memberBillingEligibility(member, customer, trx) {
   const notes = member.record_notes || {};
   if ([notes.backfill, notes.invoiceAlreadySent].some(Boolean)) {
@@ -164,17 +193,11 @@ async function mintPacketInvoice({ packet, visit, members, customer, trx }) {
     if (hasAcceptanceCandidate) {
       const adoptionIds = new Set(adoptionMembers.map((member) => member.id));
       if (billed.some(({ member }) => !adoptionIds.has(member.id))) return office('existing_member_invoice');
-      // An accepted invoice carries one tax rate from its linked owner. It
-      // cannot represent a commercial stop whose completed base applications
-      // have different tax treatment, including zero/unpriced same-trip rows.
-      if (['commercial', 'business'].includes(customer.property_type)) {
-        const rates = new Set();
-        for (const member of adoptionMembers) {
-          const tax = await require('./tax-calculator')
-            .calculateTax(customer.id, member.service_type, 100, { database: trx });
-          rates.add(tax.rate);
-        }
-        if (rates.size !== 1) return office('mixed_tax_treatment');
+      if (existing.length === 1) {
+        const taxRefusal = await acceptanceTaxRefusal({
+          invoice: existing[0], members: adoptionMembers, customer, trx,
+        });
+        if (taxRefusal) return office(taxRefusal);
       }
       return adoptAcceptanceInvoice({ packet, members: adoptionMembers, customer, trx, invoices: existing });
     }
