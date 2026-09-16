@@ -551,11 +551,13 @@ const FREE_VISIT_FREE_PRICE_SOURCE = `(?:(?:(?:completely|totally|entirely|absol
 const FREE_VISIT_PRICE_MODIFIER_SOURCE = `(?:(?:already|actually|just|now|still|completely|totally|entirely|absolutely|fully)\\s+){0,2}`;
 const FREE_VISIT_PRICE_COMPLEMENT_SOURCE = `(?:waived|no cost|free of charge|complimentary|at no cost|at no charge)`;
 const FREE_VISIT_COVER_PREDICATE_SOURCE = `(?:\\s+(?:cover|covered|will\\s+cover|(?:am|are)\\s+(?:covering|going\\s+to\\s+cover)|(?:have|has|had)\\s+covered)|['’](?:ll\\s+cover|(?:m|re)\\s+(?:covering|going\\s+to\\s+cover)|ve\\s+covered))`;
+const FREE_VISIT_DIRECT_PAY_SOURCE = `(?:(?:(?:you['’]ll|will|(?:you['’]re|are)\\s+going\\s+to)\\s+)?pay\\s+(?:us\\s+)?nothing|(?:will\\s+not|won['’]t|do\\s+not|don['’]t|(?:you['’]re\\s+not|are\\s+not|aren['’]t)\\s+going\\s+to)\\s+pay\\s+(?:us\\s+)?(?:anything|a\\s+thing|a\\s+dime|a\\s+penny))`;
 const FREE_VISIT_PROMISE_RES = Object.freeze(
 [
   `\\b(?:next|your next|the next|your|that|this|the|the return|the follow-up|the follow up)\\s+(?:visit|one|service|treatment|appointment)(?:['’]s(?: going to be)?|\\s+(?:is(?: going to be)?|will be|would be|comes))\\s+${FREE_VISIT_FREE_PRICE_SOURCE}\\b`,
   `\\b(?:it|that|this)(?:['’]s|\\s+(?:is|will be|would be))\\s+${FREE_VISIT_FREE_PRICE_SOURCE}\\b`,
   "\\b(?:won['’]t|will not|not going to|don['’]t|do not) have to pay\\s+(?:(?:anything|a thing|a dime|a penny)\\s+)?(?:for|toward)\\s+(?:the\\s+|your\\s+)?(?:next|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b",
+  `\\b${FREE_VISIT_DIRECT_PAY_SOURCE}\\s+${FREE_VISIT_PAYMENT_LINK}`,
   "\\b(?:we|i)['’]ll cover (?:it|that|this)\\b",
   `\\b(?:we|i)${FREE_VISIT_COVER_PREDICATE_SOURCE}\\s+${FREE_VISIT_PAYMENT_TARGET}`,
   `\\b(?:we|i)${FREE_VISIT_COVER_PREDICATE_SOURCE}\\s+(?:the|your|our)\\s+(?:cost|charge|fee)\\s+of\\s+${FREE_VISIT_PAYMENT_TARGET}`,
@@ -588,33 +590,45 @@ const FREE_VISIT_CONDITION_SOURCE = `(?:${FREE_VISIT_PROVIDED_CONDITION_SOURCE}|
 const FREE_VISIT_PREPOSED_CONDITION_RE = new RegExp(`^\\s*${FREE_VISIT_CONDITION_SOURCE}`, 'i');
 const FREE_VISIT_POSTCLAIM_CONDITION_RE = new RegExp(`^\\s*,?\\s*(?:but\\s+)?(?:(?:only\\s+)?(?:if|unless)\\b|${FREE_VISIT_CONDITION_SOURCE})`, 'i');
 const FREE_VISIT_SHARED_CONDITION_INTRO_RE = new RegExp(`^\\s*(?:(?:only\\s+)?(?:if|unless)\\b|${FREE_VISIT_CONDITION_SOURCE})[^,;.!?]*,\\s*`, 'i');
+const FREE_VISIT_CONVERSATIONAL_IF_SOURCE = `if\\s+(?:(?:that|this|it)\\s+helps?(?:\\s+you)?|you\\s+ask\\s+me)`;
+const FREE_VISIT_CONVERSATIONAL_IF_RE = new RegExp(`\\b${FREE_VISIT_CONVERSATIONAL_IF_SOURCE}(?=\\s*(?:[,;.!?]|$))`, 'gi');
+const FREE_VISIT_CONVERSATIONAL_IF_LEADING_RE = new RegExp(`^\\s*${FREE_VISIT_CONVERSATIONAL_IF_SOURCE}\\s*,\\s*`, 'i');
 // A condition can introduce a separate instruction after an asserted promise.
 // Require a predicate before the imperative so "if you call us" remains a gate.
 const FREE_VISIT_CONDITIONAL_FOLLOWUP_RE = /^\s*,?\s*(?:if|unless)\s+you\s+(?:have|need|want|notice|experience|find|get|receive)\b[^.!?;]*?\s+(?:please\s+)?(?<!\bto\s)(?<!\band\s)(?<!\bor\s)(?<!\b(?:and|or)\s+(?:then|[a-z]+ly)\s)(?:call|contact|ask|tell|let|reach|give|check|email|text|message)\b/i;
 const FREE_VISIT_PREPOSED_COORDINATED_CONDITION_RE = /^\s*(?:only\s+)?(?:if|unless)\b[^,;.!?]*\band\b[^,;.!?]*,\s*$/i;
-const FREE_VISIT_DEFERRABLE_PAYMENT_RE = /^(?:(?:won['’]t|will not|not going to|don['’]t|do not)\s+have to pay|(?:won['’]t|will not|not going to|never|no need to)\s+(?:bill|charge|invoice)|(?:you\s+)?(?:won['’]t|will not|don['’]t|do not)\s+owe|owe\s+(?:us\s+)?nothing|no\s+(?:bill|charge|cost|fee))\b/i;
+const FREE_VISIT_DEFERRABLE_PAYMENT_RE = new RegExp(`^(?:${FREE_VISIT_DIRECT_PAY_SOURCE}|(?:won['’]t|will not|not going to|don['’]t|do not)\\s+have to pay|(?:won['’]t|will not|not going to|never|no need to)\\s+(?:bill|charge|invoice)|(?:you\\s+)?(?:won['’]t|will not|don['’]t|do not)\\s+owe|owe\\s+(?:us\\s+)?nothing|no\\s+(?:bill|charge|cost|fee))\\b`, 'i');
 const FREE_VISIT_PAYMENT_DEFERRAL_RE = /^\s*,?\s*(?:until|before)\s+(?![.!?;:,])\S/i;
 function freeVisitHasPostclaimQualifier(tail, claim) {
-  return (FREE_VISIT_POSTCLAIM_CONDITION_RE.test(tail)
+  const conditionalTail = tail.replace(FREE_VISIT_CONVERSATIONAL_IF_RE, '').replace(/^(?:\s*,\s*)+/, ', ');
+  return (FREE_VISIT_POSTCLAIM_CONDITION_RE.test(conditionalTail)
     && !FREE_VISIT_CONDITIONAL_FOLLOWUP_RE.test(tail))
     || (FREE_VISIT_DEFERRABLE_PAYMENT_RE.test(claim) && FREE_VISIT_PAYMENT_DEFERRAL_RE.test(tail));
 }
 function freeVisitConditionPrefix(prefix, sentencePrefix = '') {
   // The comma closes the conditional instruction before this new assertion.
   if (FREE_VISIT_CONDITIONAL_FOLLOWUP_RE.test(prefix) && /,\s*$/.test(prefix)) return '';
-  if (freeVisitHasSharedPreposedCondition(sentencePrefix)) return sentencePrefix;
+  const scopedSentencePrefix = sentencePrefix.replace(FREE_VISIT_CONVERSATIONAL_IF_LEADING_RE, '');
+  if (FREE_VISIT_SHARED_CONDITION_INTRO_RE.test(scopedSentencePrefix)
+    && /,\s*$/.test(scopedSentencePrefix)
+    && !FREE_VISIT_CONDITIONAL_FOLLOWUP_RE.test(scopedSentencePrefix)) return scopedSentencePrefix;
+  if (freeVisitHasSharedPreposedCondition(sentencePrefix)) {
+    return scopedSentencePrefix;
+  }
   // The shared clause splitter can end a preposed condition at a coordinated
   // verb ("if you have approval and give us the number"). Retain that one
   // comma-closed introduction, but not a separate conditional instruction.
-  return FREE_VISIT_PREPOSED_COORDINATED_CONDITION_RE.test(sentencePrefix)
-    && !FREE_VISIT_CONDITIONAL_FOLLOWUP_RE.test(sentencePrefix) ? sentencePrefix : prefix;
+  return (FREE_VISIT_PREPOSED_COORDINATED_CONDITION_RE.test(sentencePrefix)
+    && !FREE_VISIT_CONDITIONAL_FOLLOWUP_RE.test(sentencePrefix) ? sentencePrefix : prefix)
+    .replace(FREE_VISIT_CONVERSATIONAL_IF_RE, '');
 }
 function freeVisitHasSharedPreposedCondition(sentencePrefix) {
-  const introduction = FREE_VISIT_SHARED_CONDITION_INTRO_RE.exec(sentencePrefix);
+  const scopedPrefix = sentencePrefix.replace(FREE_VISIT_CONVERSATIONAL_IF_LEADING_RE, '');
+  const introduction = FREE_VISIT_SHARED_CONDITION_INTRO_RE.exec(scopedPrefix);
   if (!introduction || FREE_VISIT_CONDITIONAL_FOLLOWUP_RE.test(introduction[0])) return false;
   // Extend a condition across explicit coordinators, but not contrast or a
   // sentence boundary. The existing comma-introduction path remains separate.
-  const results = sentencePrefix.slice(introduction[0].length).replace(/\b(and|or)\s+then\b/gi, '$1');
+  const results = scopedPrefix.slice(introduction[0].length).replace(/\b(and|or)\s+then\b/gi, '$1');
   return /\b(?:and|or)\s*$/i.test(results)
     && !/(?:[.!?;:]|[—–]|\b(?:but|though|although|however|yet|so|while|because)\b)/i.test(results)
     && !/,(?!\s*(?:and|or)\b)/i.test(results);
@@ -627,15 +641,17 @@ const FREE_VISIT_TRUTH_QUESTION_RE = /^\s*,?\s*(?:(?:is|was)\s+(?:that|this|it)\
 const FREE_VISIT_TRAILING_RETRACTION_RE = /^\s*,?\s*(?:but|however)\s+(?:it|that|this)(?:\s+(?:(?:is|was)\s+(?:not\s+true|false|untrue|incorrect|wrong)|(?:isn['’]t|wasn['’]t)\s+true)|['’]s\s+(?:not\s+true|false|untrue|incorrect|wrong))(?=\s*(?:$|[,;.!?]|\b(?:because|since|as(?!\s+(?:long|soon)\s+as\b))\b))/i;
 const FREE_VISIT_NOUN_REFUSAL_RE = /\b(?:no|not\s+a)\s+(?:guarantees?|promises?)\s+(?:that\s+)?(?:(?:i|we|you|he|she|they|the\s+(?:office|team))\s+)?$/i;
 const FREE_VISIT_PERFECT_REFUSAL_RE = /\b(?:haven['’]t|hasn['’]t|hadn['’]t|(?:have|has|had)\s+not)\s+(?:actually\s+)?(?:verified|confirmed|said|told(?:\s+you)?|promised|guaranteed|checked|known|thought|believed)\s+(?:that\s+)?$/i;
+const FREE_VISIT_INFLECTED_REFUSAL_RE = /\b(?:not|never|cannot|can['’]t|\w+n['’]t)\s+(?:(?:actually|really|explicitly|personally|yet)\s+)?(?:promis(?:ed|ing)|guarantee(?:d|ing)|confirm(?:ed|ing)|check(?:ed|ing)|verif(?:ied|ying)|say(?:ing)?|said|tell(?:ing)?(?:\s+you)?|told(?:\s+you)?|think(?:ing)?|thought|believ(?:ed|ing)|mention(?:ed|ing)?)\s+(?:that\s+)?(?:(?:i|we|you|he|she|they|the\s+(?:office|team|technician))\s+)?$/i;
 const FREE_VISIT_RELATIVE_ANTECEDENT_RE = /\b(?:(?:a|an|the|your|our|this|that)\s+(?:[\w'’-]+\s+){0,2}([\w'’-]+)|(something|anything|nothing))\s*$/i;
 const FREE_VISIT_RELATIVE_VISIT_IDENTITY_RE = /\b(?:visit|one|service|treatment|appointment)\s+(?:is|was|will be|would be|has been)\s+(not\s+)?$/i;
 const FREE_VISIT_ADMINISTRATIVE_FREEDOM_RE = /^\s+to\s+(?:cancel|reschedule)\b/i;
-const FREE_VISIT_DEBTOR_CLAIM_RE = /^(?:(?:you\s+)?(?:won['’]t|will not|not going to|don['’]t|do not)\s+have to pay|(?:you\s+)?(?:won['’]t|will not|don['’]t|do not)\s+owe|owe\s+(?:us\s+)?nothing)\b/i;
-const FREE_VISIT_DEBTOR_SUBJECT_RE = /\b(i|we|you|he|she|they|(?:(?:the|an?|our|your)\s+(?:[\w'’-]+\s+){0,3}[\w'’-]+))\s*$/i;
+const FREE_VISIT_DEBTOR_CLAIM_RE = new RegExp(`^(?:${FREE_VISIT_DIRECT_PAY_SOURCE}|(?:you\\s+)?(?:won['’]t|will not|not going to|don['’]t|do not)\\s+have to pay|(?:you\\s+)?(?:won['’]t|will not|don['’]t|do not)\\s+owe|owe\\s+(?:us\\s+)?nothing)\\b`, 'i');
+const FREE_VISIT_DEBTOR_SUBJECT_RE = /\b((?:i|we|you|he|she|they)(?:['’](?:re|ll))?|(?:(?:the|an?|our|your)\s+(?:[\w'’-]+\s+){0,3}[\w'’-]+))\s*$/i;
 const FREE_VISIT_CUSTOMER_SUBJECT_RE = /^(?:you|your\b|(?:the|an?)\s+(?:[\w'’-]+\s+){0,3}(?:customer|client|homeowner|resident))\b/i;
 function freeVisitIsRefused(prefix) {
   return FREE_VISIT_NOUN_REFUSAL_RE.test(prefix)
-    || FREE_VISIT_PERFECT_REFUSAL_RE.test(prefix) || clauseIsEpistemicallyHedged(prefix);
+    || FREE_VISIT_PERFECT_REFUSAL_RE.test(prefix) || FREE_VISIT_INFLECTED_REFUSAL_RE.test(prefix)
+    || clauseIsEpistemicallyHedged(prefix);
 }
 function freeVisitIsNonvisitRelativeThat(text, match) {
   if (!/^that(?:['’]s|\s+(?:is|will be|would be))\b/i.test(match[0])) return false;
@@ -656,7 +672,9 @@ function freeVisitIsAdministrativeFreedom(text, match) {
 function freeVisitHasOtherDebtor(text, match) {
   if (!FREE_VISIT_DEBTOR_CLAIM_RE.test(match[0])) return false;
   const [clauseStart] = clauseBounds(text, match.index);
-  const subject = FREE_VISIT_DEBTOR_SUBJECT_RE.exec(text.slice(clauseStart, match.index));
+  const prefix = text.slice(clauseStart, match.index);
+  if (/\b(?:may|might|can|cannot|can['’]t|could|would|should|not|never|don['’]t)\s*$/i.test(prefix)) return true;
+  const subject = FREE_VISIT_DEBTOR_SUBJECT_RE.exec(prefix);
   return Boolean(subject && !FREE_VISIT_CUSTOMER_SUBJECT_RE.test(subject[1]));
 }
 /** value: true */

@@ -1,6 +1,67 @@
 const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
 
 test.each([
+  ['Your next visit is free, if that helps.', 'fail'],
+  ['Your next visit is free if it helps you.', 'fail'],
+  ['Your next visit is free, if this helps.', 'fail'],
+  ['Your next visit is free, if you ask me.', 'fail'],
+  ['If you ask me, your next visit is free.', 'fail'],
+  ['If that helps, your next visit is free.', 'fail'],
+  ['If you ask me, your next visit is free and your next treatment is complimentary.', 'fail'],
+  ['If you ask me, if the office approves, your next visit is free and your next treatment is complimentary.', 'pass'],
+  ['Your next visit is free if the office approves.', 'pass'],
+  ['Your next visit is free if that helps and the office approves.', 'pass'],
+  ['Your next visit is free, if that helps, if the office approves.', 'pass'],
+])('conversational if-asides do not condition visit prices: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['You will pay nothing for your next visit.', 'fail'],
+  ['You will not pay anything for your next visit.', 'fail'],
+  ["You'll pay nothing for your next visit.", 'fail'],
+  ['You’ll pay nothing for your next visit.', 'fail'],
+  ["You won't pay a dime for the return visit.", 'fail'],
+  ['You pay nothing for your next visit.', 'fail'],
+  ['You do not pay anything for your next visit.', 'fail'],
+  ["You're going to pay nothing for your next visit.", 'fail'],
+  ["You aren't going to pay anything for your next visit.", 'fail'],
+  ['The customer will pay nothing for your next visit.', 'fail'],
+  ['The technician will pay nothing for your next visit.', 'pass'],
+  ['We will not pay anything for your next visit.', 'pass'],
+  ['I will pay nothing for your next visit.', 'pass'],
+  ['You might pay nothing for your next visit.', 'pass'],
+  ['You could pay nothing for your next visit.', 'pass'],
+  ['You cannot pay nothing for your next visit.', 'pass'],
+  ['You do not pay nothing for your next visit.', 'pass'],
+  ['You will pay nothing for your next visit if the office approves.', 'pass'],
+  ['You will not pay anything for your next visit until next month.', 'pass'],
+  ['You will pay nothing for your next visit before next month.', 'pass'],
+  ['You will pay nothing for your next visit, but the report will wait until next month.', 'fail'],
+  ['You will pay nothing for the report.', 'pass'],
+])('direct customer payment claims keep debtor and qualifier scope: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['I am not promising that your next visit is free.', 'pass'],
+  ['We never said that your next visit is free.', 'pass'],
+  ['I was not confirming that your next visit is free.', 'pass'],
+  ['I did not mention that your next visit is free.', 'pass'],
+  ['We never told you that your next visit is free.', 'pass'],
+  ['I am not guaranteeing that your next visit is free.', 'pass'],
+  ['We are not checking that your next visit is free.', 'pass'],
+  ['I am not promising that you will pay nothing for your next visit.', 'pass'],
+  ['I am not promising the report is free, but your next visit is free.', 'fail'],
+  ['We never said the estimate was free, but your next visit is free.', 'fail'],
+  ['I am not promising that your next visit is free, but the return visit is complimentary.', 'fail'],
+  ['We said that your next visit is free.', 'fail'],
+  ['We promised that your next visit is free.', 'fail'],
+])('inflected reporting refusals stay with their claim: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   ['If the office approves, your next visit is free and your next treatment is complimentary.', 'pass'],
   ['If the office approves, your next visit is free, and your next treatment is complimentary.', 'pass'],
   ['If the office approves, your next visit is free, your next treatment is complimentary.', 'pass'],
