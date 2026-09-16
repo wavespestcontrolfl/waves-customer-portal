@@ -2184,15 +2184,21 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
   if (linkPromiseVerdict && linkPromiseVerdict.kind === 'send_reschedule_link' && linkPromiseVerdict.party === 'waves') {
     await require('../utils/triage-locks').lockTriageCall(conn, linkPromiseVerdict.call_log_id);
   }
-  // Confirm's own pre-read, deliberately separate from `before` (which only
-  // covers reopen/edit) so an ordinary callback Confirm never starts
-  // fetching a row the callback branch below has no use for and would
-  // otherwise mistake for licence to record a callback_confirm audit event
-  // that has never existed for this action. human_state/status are read
-  // here, before the patch below overwrites them, because the transition
-  // rule (see the branch after the switch) turns on what they WERE.
+  // Confirm's own LOCKED pre-read, deliberately separate from `before`
+  // (which only covers reopen/edit) so an ordinary callback Confirm never
+  // feeds the callback audit branch below. human_state/status are read before
+  // the patch overwrites them because the transition rule turns on what they
+  // WERE. The lock makes that classification and the UPDATE one serialized
+  // decision: without it, a concurrent Edit could land after this read, the
+  // promise sweep could cancel that edited attempt, and Confirm could then
+  // overwrite human_state from the stale snapshot without renewing the
+  // generation, stranding an open/confirmed promise behind its cancelled row.
+  // renewPromiseOnOfficeVerdict takes no advisory lock and locks only this
+  // same call_commitments row (its outbox lookup is an unlocked SELECT), so
+  // this keeps the module's documented single-resource exception and cannot
+  // invert the advisory-first paths.
   const linkPromiseConfirm = action === 'confirm'
-    ? await conn('call_commitments').where({ id }).first('kind', 'party', 'human_state', 'status') : null;
+    ? await conn('call_commitments').where({ id }).forUpdate().first('kind', 'party', 'human_state', 'status') : null;
   const patch = { reviewed_by: reviewedBy || null, reviewed_at: new Date(), updated_at: new Date() };
   if (note !== undefined) patch.human_note = note ? String(note).slice(0, 2000) : null;
   switch (action) {

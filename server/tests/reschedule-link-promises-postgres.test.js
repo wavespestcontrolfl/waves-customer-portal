@@ -69,6 +69,40 @@ function delayTable(base, table, ms) {
   return wrapped;
 }
 
+// Pauses the first query against one table only after PostgreSQL has returned
+// it. If that query used FOR UPDATE, the row lock is already held throughout
+// the pause. The transaction wrapper keeps the interception inside helpers
+// that create their own transaction, such as applyHumanUpdate.
+function pauseFirstTableRead(base, table) {
+  let paused = false;
+  let reachedResolve;
+  let releaseResolve;
+  const reached = new Promise((resolve) => { reachedResolve = resolve; });
+  const released = new Promise((resolve) => { releaseResolve = resolve; });
+  const wrap = (database) => {
+    const wrapped = (name, ...args) => {
+      const qb = database(name, ...args);
+      if (name !== table || paused) return qb;
+      const originalThen = qb.then.bind(qb);
+      qb.then = (onFulfilled, onRejected) => originalThen(async (result) => {
+        if (!paused) {
+          paused = true;
+          reachedResolve();
+          await released;
+        }
+        return result;
+      }).then(onFulfilled, onRejected);
+      return qb;
+    };
+    wrapped.transaction = (handler, ...args) => database.transaction((trx) => handler(wrap(trx)), ...args);
+    wrapped.raw = (...args) => database.raw(...args);
+    wrapped.fn = database.fn;
+    wrapped.isTransaction = database.isTransaction;
+    return wrapped;
+  };
+  return { conn: wrap(base), reached, release: releaseResolve };
+}
+
 postgres('reschedule-link-promises against PostgreSQL', () => {
   beforeAll(async () => {
     if (!/^\/(waves_test|waves_qa_[a-f0-9]+)$/.test(new URL(connection).pathname)) {
@@ -1550,6 +1584,64 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
     const promiseNow = new Date('2030-01-07T14:00:00Z'); // 9:00 AM ET — inside the send window
     const stubBuildLink = async () => ({ url: 'https://example.com/reschedule/token' });
     const stubRender = async () => 'Your reschedule link: https://example.com/reschedule/token';
+
+    test('Confirm serializes its prior-state decision with a concurrent Edit and sweep', async () => {
+      const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
+      const priorCallCommitments = gates.callCommitments;
+      try {
+        process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'true';
+        gates.callCommitments = true;
+        const callId = randomUUID();
+        await mockPg('call_log').insert({ id: callId, direction: 'inbound', processing_generation: 0 });
+        const [commitment] = await mockPg('call_commitments').insert({
+          call_log_id: callId, commitment_key: 'send_reschedule_link:1', party: 'waves', kind: 'send_reschedule_link',
+          description: 'send a reschedule link', source: 'ai', status: 'open', human_state: null,
+          last_seen_generation: 0, processing_generation: 0,
+        }).returning('id');
+        const outboxId = randomUUID();
+        await mockPg('outbox_messages').insert({ id: outboxId, channel: 'sms', status: 'pending', payload: {},
+          commitment_id: commitment.id, commitment_generation: 0, related_call_log_id: callId });
+
+        // Pause Confirm after its prior-state read. With FOR UPDATE, it owns
+        // the commitment row at this point; before the fix this was an
+        // unlocked snapshot and the concurrent Edit plus sweep completed in
+        // the gap, cancelling generation zero before Confirm restored
+        // human_state='confirmed' without renewing it.
+        const pausedConfirm = pauseFirstTableRead(mockPg, 'call_commitments');
+        const confirmPromise = applyHumanUpdate(pausedConfirm.conn, commitment.id,
+          { action: 'confirm', reviewedBy: randomUUID() });
+        await pausedConfirm.reached;
+
+        let editAndSweepFinished = false;
+        const editAndSweep = (async () => {
+          await applyHumanUpdate(mockPg, commitment.id,
+            { action: 'edit', description: 'send the corrected reschedule link', reviewedBy: randomUUID() });
+          const attempt = await mockPg('outbox_messages').where({ id: outboxId }).first();
+          await links.runOne(mockPg, attempt, { now: new Date('2030-01-07T14:05:00Z') });
+          editAndSweepFinished = true;
+        })();
+
+        // The concurrent operation must still be waiting on Confirm's row
+        // lock. This is the deterministic fork: without FOR UPDATE it finishes
+        // during the pause and creates the stranded confirmed/cancelled state.
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        const finishedBeforeConfirmReleased = editAndSweepFinished;
+        pausedConfirm.release();
+        await Promise.all([confirmPromise, editAndSweep]);
+
+        expect(finishedBeforeConfirmReleased).toBe(false);
+        const afterCommitment = await mockPg('call_commitments').where({ id: commitment.id }).first();
+        const afterAttempt = await mockPg('outbox_messages').where({ id: outboxId }).first();
+        // Confirm serialized first, then the genuinely later Edit wins. The
+        // cancelled attempt therefore corresponds to a still-blocking edited
+        // promise, never an open/confirmed promise stranded at generation zero.
+        expect(afterCommitment).toMatchObject({ status: 'open', human_state: 'edited', processing_generation: 0 });
+        expect(afterAttempt).toMatchObject({ status: 'cancelled', commitment_generation: 0 });
+      } finally {
+        if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
+        gates.callCommitments = priorCallCommitments;
+      }
+    });
 
     test('edited-while-open promise -> sweep cancels -> staff Confirm -> the next sweep stages and sends a fresh attempt', async () => {
       const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
