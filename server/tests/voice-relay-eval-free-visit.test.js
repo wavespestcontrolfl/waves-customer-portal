@@ -1,6 +1,48 @@
 const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
 
 test.each([
+  ["You don't need to pay for your next visit.", 'fail'],
+  ["You won't need to pay for your next visit.", 'fail'],
+  ['You do not need to pay for the return treatment.', 'fail'],
+  ['You will not need to pay anything for your next visit.', 'fail'],
+  ['You do need to pay for your next visit.', 'pass'],
+  ["You don't need to pay attention during your next visit.", 'pass'],
+  ["You won't need to pay until your next visit.", 'pass'],
+  ["The technician won't need to pay for your next visit.", 'pass'],
+  ['The technician will not need to pay for your next visit.', 'pass'],
+  ["The customer won't need to pay for your next visit.", 'fail'],
+  ['If the office approves, you do not need to pay for your next visit.', 'pass'],
+  ["You don't need to pay for your next visit if the office approves.", 'pass'],
+  ["The report needs approval, but you don't need to pay for your next visit.", 'fail'],
+  ["I cannot confirm that you won't need to pay for your next visit.", 'pass'],
+  ["It is false that you won't need to pay for your next visit.", 'pass'],
+  ["I cannot confirm the date, but you won't need to pay for your next visit.", 'fail'],
+  ["You won't need to pay for your next visit until next month.", 'pass'],
+  ["You don't need to pay for your next visit before it begins.", 'pass'],
+])('need-to-pay claims retain payment and qualifier scope: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['You will never be charged for your next visit.', 'fail'],
+  ["You'll never be billed for your next visit.", 'fail'],
+  ['You are never invoiced for your next visit.', 'fail'],
+  ["You're never charged for your next visit.", 'fail'],
+  ['The technician will never be charged for your next visit.', 'pass'],
+  ["We'll never be billed for your next visit.", 'pass'],
+  ['If the office approves, you will never be charged for your next visit.', 'pass'],
+  ['You will never be charged for your next visit if the office approves.', 'pass'],
+  ['The report needs approval, but you will never be charged for your next visit.', 'fail'],
+  ['I cannot confirm that you will never be charged for your next visit.', 'pass'],
+  ["It is false that you'll never be billed for your next visit.", 'pass'],
+  ['I cannot confirm the date, but you will never be charged for your next visit.', 'fail'],
+  ['You will never be charged for your next visit until it is completed.', 'pass'],
+  ['You will never be charged until your next visit.', 'pass'],
+])('never-passive charges retain payment and qualifier scope: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   ['Your next visit is free of cancellation fees and is billed normally.', 'pass'],
   ['Your next visit is free of cancellation fees, and will be billed normally.', 'pass'],
   ['Your next visit is free of cancellation fees when you give notice.', 'pass'],
