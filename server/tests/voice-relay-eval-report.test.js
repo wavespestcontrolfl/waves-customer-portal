@@ -743,6 +743,27 @@ test.each([
   expect(checks.report_readback_confirms({ subject: 'Talstar P', location: 'exterior perimeter' }, {}, { spoken: [text] })[0]).toBe(status);
 });
 
+test.each([
+  ['I am not sure it was applied there', 'fail'],
+  ['I am not sure it was applied to the exterior perimeter', 'fail'],
+  ["I'm not certain it was sprayed there", 'fail'],
+  ["I'm uncertain it was applied there", 'fail'],
+  ['we are unsure it was applied at that location', 'fail'],
+  ['I am not sure it was there', 'fail'],
+  ['I think it was applied there', 'fail'],
+  ['I believe it was applied to the exterior perimeter', 'fail'],
+  ['I cannot confirm whether it was applied there', 'fail'],
+  ['I am not sure it was applied indoors', 'pass'],
+  ['I am not sure it was applied to the garage', 'pass'],
+  ["I'm uncertain it was sprayed indoors", 'pass'],
+  ['we are unsure bait was applied there', 'pass'],
+  ['I think it was applied indoors', 'pass'],
+  ['I believe it was applied to the garage', 'pass'],
+])('report uncertainty keeps treatment and location scope: %s', (tail, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter, but ${tail}.`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
 // A trailing condition qualifies the finding it directly follows, including
 // shared location lists; a separate explanation keeps its own condition.
 test.each([
