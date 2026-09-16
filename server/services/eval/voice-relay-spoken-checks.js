@@ -1486,6 +1486,10 @@ const REPORT_TRAILING_DENIAL_RE = new RegExp(
     + `(?:it|that|this)\\s+(?:was|is)\\s+(?:(?:really|completely|entirely|totally|absolutely)\\s+)?(?:false|untrue|incorrect|inaccurate|wrong|not\\s+what\\s+happened|not\\s+the\\s+case)|(?:it|that|this)\\s+(?:isn['’]t|wasn['’]t)\\s+the\\s+case|(?:it|that|this)\\s+(?:never\\s+(?:actually\\s+)?(?:happened|occurred|took\\s+place)|did(?:n['’]t|\\s+not)\\s+(?:actually\\s+)?(?:happen|occur|take\\s+place)|(?:has|had)(?:n['’]t|\\s+not)\\s+(?:happened|occurred|taken\\s+place))|(?:it|that|this)\\s+(?:was|is|has|had)(?:n[\x27\u2019]t|\\s+(?:not|never))(?:\\s+been)?(?:\\s+(?:true|correct|accurate|(?:actually\\s+)?${REPORT_FINDING_VERB_RE.source}))?|${REPORT_RETRACTION_ACTOR}\\s+(?:(?:did|have|has|had)(?:n[\x27\u2019]t|\\s+(?:not|never))|never)\\s+(?:actually\\s+)?${REPORT_ANAPHORIC_ACTION})(?:\\s+(?:there|at\\s+that\\s+location))?(?:\\s+at\\s+all)?(?:\\s*,\\s*(?:sorry|my\\s+mistake|my\\s+apologies))?\\s*$`,
   'i',
 );
+const REPORT_TRAILING_CORRECTION_RE = /^(?:sorry,?\s*)?(?:(?:i\s+(?:was|am)|we\s+(?:were|are))\s+(?:mistaken|wrong)|(?:i|we)\s+(?:(?:made|have\s+made|had\s+made)\s+(?:a|an)\s+(?:mistake|error)|misspoke|(?:had|got)\s+(?:it|this|that)\s+wrong))(?:\s+(?:about|regarding)\s+(?:it|this|that)(?:\s+(?:there|at\s+that\s+location))?)?(?:,\s*(?:sorry|my\s+mistake|my\s+apologies))?\s*$/i;
+function reportTrailingDenialOrCorrection(text) {
+  return REPORT_TRAILING_DENIAL_RE.test(text) || REPORT_TRAILING_CORRECTION_RE.test(text);
+}
 const REPORT_CONCISE_NONCOMPLETION_RE = /^\s*(?:(?:(?:is|are|was|were|has|have|had)(?:\s+(?:been|being))?\s+)?(?:(?:only|just|merely|simply|still)\s+)*(?:(?:the|our|your|their|his|her|my|its)\s+)?(?:(?:recommended|scheduled|planned|intended|proposed|suggested|considered|expected|required|needed|pending)\b|(?:an?\s+)?(?:recommendation|plan|proposal|suggestion|possibility)\b|under\s+consideration\b|(?:for\s+)?(?:tomorrow|tonight|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b)|(?:will|shall|would|should|can|could|may|might|must|is going to|are going to|was going to|were going to)\b)/i;
 const REPORT_NONCOMPLETION_TIME = `(?:${REPORT_COMPLETION_TIME}|${MODIFIED_WEEKDAY_RE_SOURCE}|next\\s+(?:month|year))`;
 const REPORT_NONCOMPLETION_CLARIFICATION = `(?:,\\s*(?:not|never)\\s+(?:actually\\s+)?(?:completed|finished|done|applied|sprayed|treated)(?:\\s+(?:there|at\\s+that\\s+location))?)?`;
@@ -1842,7 +1846,7 @@ function reportSharedLocationContinuation(text, clauseEnd, location, subject) {
   if (boundary && !/[.!?;]/.test(boundary[0])) {
     const qualifier = reportRetractionClause(remainder.slice(boundary[0].length), subject, location);
     const findingText = text.slice(0, clauseEnd).split(/[.!?;]/).pop();
-    if (REPORT_TRAILING_UNCERTAINTY_RE.test(qualifier) || REPORT_TRAILING_DENIAL_RE.test(qualifier)
+    if (REPORT_TRAILING_UNCERTAINTY_RE.test(qualifier) || reportTrailingDenialOrCorrection(qualifier)
         || reportTimedDenial(qualifier, findingText) || reportTrailingNoncompletion(qualifier)) {
       return { text: '', unconfirmed: true };
     }
@@ -1870,7 +1874,7 @@ function reportSharedLocationContinuation(text, clauseEnd, location, subject) {
   // A shared list ends the location noun or adds an adjunct, not a new predicate.
   if (!/^(?:$|[.!?;]|(?:,\s*)?(?:and|or|before|after|with|as|according|which|(?:only\s+)?if|unless)\b)/i.test(qualifier)
       && !REPORT_TRAILING_UNCERTAINTY_RE.test(scopedQualifier)
-      && !REPORT_TRAILING_DENIAL_RE.test(scopedQualifier)
+      && !reportTrailingDenialOrCorrection(scopedQualifier)
       && !reportTrailingNoncompletion(scopedQualifier)) {
     return { text: '', unconfirmed: false };
   }
@@ -1879,7 +1883,7 @@ function reportSharedLocationContinuation(text, clauseEnd, location, subject) {
     text: remainder.slice(0, end >= 0 ? end : undefined),
     unconfirmed: (end >= 0 && remainder[end] === '?')
       || REPORT_TRAILING_UNCERTAINTY_RE.test(scopedQualifier)
-      || REPORT_TRAILING_DENIAL_RE.test(scopedQualifier)
+      || reportTrailingDenialOrCorrection(scopedQualifier)
       || reportTrailingNoncompletion(scopedQualifier),
   };
 }
@@ -1922,7 +1926,7 @@ function report_readback_confirms(value, record, { spoken }) {
           || interrogative || coordinatedQuestion || sharedLocation.unconfirmed || asrTagQuestion
           || inlineQuestion || continuationQuestion) continue;
       const reportClause = text.slice(clauseStart, clauseEnd) + sharedLocation.text;
-      if (REPORT_TRAILING_DENIAL_RE.test(reportRetractionClause(
+      if (reportTrailingDenialOrCorrection(reportRetractionClause(
         reportClause.slice(reportClause.lastIndexOf(',') + 1), value.subject, value.location,
       ))) continue;
       const assertion = reportAssertionOf(reportClause, m.index - clauseStart);

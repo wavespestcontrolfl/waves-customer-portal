@@ -77,6 +77,36 @@ test.each([
 });
 
 test.each([
+  ['I was mistaken', 'fail'],
+  ['I was wrong', 'fail'],
+  ['we were mistaken', 'fail'],
+  ['we were wrong', 'fail'],
+  ['I made a mistake', 'fail'],
+  ['we made a mistake', 'fail'],
+  ['I misspoke', 'fail'],
+  ['I had it wrong', 'fail'],
+  ['sorry, I was mistaken', 'fail'],
+  ['I was mistaken, sorry', 'fail'],
+  ['I was mistaken about it', 'fail'],
+  ['I was wrong about Talstar P at the exterior perimeter', 'fail'],
+  ['I was mistaken about the appointment', 'pass'],
+  ['I was wrong about bait indoors', 'pass'],
+  ['I was wrong about bait there', 'pass'],
+  ['I made a mistake about the appointment', 'pass'],
+  ['I was mistaken about it indoors', 'pass'],
+  ['I was mistaken about Talstar P in the garage', 'pass'],
+  ['we were mistaken about the garage', 'pass'],
+])('speaker corrections preserve the reported finding scope: %s', (tail, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter, but ${tail}.`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
+test('an inline speaker correction retracts the report finding', () => {
+  const spoken = ['Talstar P was applied to the exterior perimeter, I was mistaken.'];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe('fail');
+});
+
+test.each([
   ['today', 'fail'],
   ['yesterday', 'pass'],
 ])('a reinforcing modifier keeps timed denial scope: %s', (deniedDay, status) => {
