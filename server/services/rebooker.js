@@ -1466,7 +1466,7 @@ class SmartRebooker {
         if (String(currentVisitId || '') !== String(service.visit_id || '')) {
           throw Object.assign(new Error('Cannot reschedule — the visit changed concurrently'), { statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED' });
         }
-        // Re-run the COMPLETE frozen verdict under the stop lock. Status alone
+        // Re-run the complete frozen verdict under the stop lock. Status alone
         // misses a still-open visit whose packet/artifact/payment or completion
         // claim appeared after moveVisitAsUnit returned its solo fallback.
         const verdict = await vg.frozenVisitVerdict(trx, currentVisitId);
@@ -2360,9 +2360,9 @@ class SmartRebooker {
             await lockTechDays(trx, techDays);
           }
           await runBeforeMove();
-          // Visit stop locks for EVERY swept occurrence, right after
-          // rung 1 — the same occupancy-then-stop order the single-row
-          // writers take (codex #3609 r31 P1 + uncapped audit):
+          // Visit stop locks for EVERY swept occurrence, after the reviewed
+          // maintenance/comms preflight — the same occupancy-first order the
+          // single-row writers take (codex #3609 r31 P1 + uncapped audit):
           // createOrJoinVisit serializes on the stop lock, never on the
           // occupancy/maintenance locks, so a grouping racing this sweep
           // either committed (visible in the locked read below) or waits
@@ -2379,6 +2379,9 @@ class SmartRebooker {
               .filter((x) => sweptSet.has(String(x.id)))
               .map((r) => vg.stopBaseKey({ propertyId: r.property_id, customerId: service.customer_id, scheduledDate: r.scheduled_date })))].sort();
             for (const vgKey of keys) {
+              // Ordinary series moves own stop before maintenance. Reviewed
+              // moves already own maintenance, so waiting here would invert
+              // that order when their destination dates do not overlap.
               const lockSql = reviewedMaintenancePreflightRan
                 ? 'SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked'
                 : 'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))';
@@ -2390,9 +2393,9 @@ class SmartRebooker {
               }
             }
           }
-          // Rung 1 → the per-parent recurring-series maintenance lock, the
-          // order update-details already takes (occupancy, then
-          // maintenance, then comms). Byte-identical key to admin-schedule's
+          // Acquire the per-parent recurring-series maintenance lock; reviewed
+          // Apply already owns it from the nonblocking preflight above, so
+          // this is reentrant. Byte-identical key to admin-schedule's
           // acquireRecurringSeriesMaintenanceLock (a service cannot import
           // a route file): it serializes this sweep against the completion
           // auto-extend, the series cancel and the plan-length reconcile,
