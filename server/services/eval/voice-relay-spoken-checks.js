@@ -1342,14 +1342,16 @@ const REPORT_TRAILING_UNCERTAINTY_RE = new RegExp(
   + `|^\\s*,?\\s*(?:${REPORT_COMPLETION_TIME}\\s*,?\\s*)?(?:only\\s+)?(?:if|unless|until|whether|assuming|provided(?!\\s+by\\b)|providing(?=\\s+(?:that\\b|(?:[\\w\x27\u2019-]+\\s+){1,5}${CLAUSE_FINITE_PREDICATE_RE.source}))|on\\s+condition\\s+that|as\\s+long\\s+as)\\b`,
   'i',
 );
+const REPORT_RETRACTION_ACTOR = `(?:i|we|you|he|she|they|(?:(?:the|our)\\s+)?(?:technician|tech|crew|team))`;
 const REPORT_TRAILING_DENIAL_RE = new RegExp(
   `^(?:actually\\s+)?(?:not(?:\\s+(?:really|actually))?(?:\\s+${REPORT_FINDING_VERB_RE.source})?|no|`
-    + `(?:it|that|this)\\s+(?:was|is)\\s+(?:(?:really|completely|entirely|totally|absolutely)\\s+)?(?:false|untrue|incorrect|inaccurate|wrong|not\\s+what\\s+happened)|(?:it|that|this)\\s+(?:never\\s+(?:actually\\s+)?(?:happened|occurred|took\\s+place)|did(?:n['’]t|\\s+not)\\s+(?:actually\\s+)?(?:happen|occur|take\\s+place)|(?:has|had)(?:n['’]t|\\s+not)\\s+(?:happened|occurred|taken\\s+place))|(?:it|that|this)\\s+(?:was|is|has|had)(?:n[\x27\u2019]t|\\s+not)(?:\\s+been)?(?:\\s+(?:true|correct|accurate|(?:actually\\s+)?${REPORT_FINDING_VERB_RE.source}))?)(?:\\s+(?:there|at\\s+that\\s+location))?(?:\\s+at\\s+all)?(?:\\s*,\\s*(?:sorry|my\\s+mistake|my\\s+apologies))?\\s*$`,
+    + `(?:it|that|this)\\s+(?:was|is)\\s+(?:(?:really|completely|entirely|totally|absolutely)\\s+)?(?:false|untrue|incorrect|inaccurate|wrong|not\\s+what\\s+happened)|(?:it|that|this)\\s+(?:never\\s+(?:actually\\s+)?(?:happened|occurred|took\\s+place)|did(?:n['’]t|\\s+not)\\s+(?:actually\\s+)?(?:happen|occur|take\\s+place)|(?:has|had)(?:n['’]t|\\s+not)\\s+(?:happened|occurred|taken\\s+place))|(?:it|that|this)\\s+(?:was|is|has|had)(?:n[\x27\u2019]t|\\s+not)(?:\\s+been)?(?:\\s+(?:true|correct|accurate|(?:actually\\s+)?${REPORT_FINDING_VERB_RE.source}))?|${REPORT_RETRACTION_ACTOR}\\s+(?:(?:did|have|has|had)(?:n[\x27\u2019]t|\\s+not)|never)\\s+(?:actually\\s+)?(?:do|did|done)\\s+(?:that|so|it))(?:\\s+(?:there|at\\s+that\\s+location))?(?:\\s+at\\s+all)?(?:\\s*,\\s*(?:sorry|my\\s+mistake|my\\s+apologies))?\\s*$`,
   'i',
 );
 const REPORT_CONCISE_NONCOMPLETION_RE = /^\s*(?:(?:(?:is|are|was|were|has|have|had)(?:\s+(?:been|being))?\s+)?(?:(?:only|just|merely|simply|still)\s+)*(?:(?:the|our|your|their|his|her|my|its)\s+)?(?:(?:recommended|scheduled|planned|intended|proposed|suggested|considered|expected|required|needed|pending)\b|(?:an?\s+)?(?:recommendation|plan|proposal|suggestion|possibility)\b|under\s+consideration\b|(?:for\s+)?(?:tomorrow|tonight|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b)|(?:will|shall|would|should|can|could|may|might|must|is going to|are going to|was going to|were going to)\b)/i;
 function reportTrailingNoncompletion(text) {
-  const anaphoric = /^(?:it|this|that)\s+(.+)$/i.exec(text.trim());
+  const anaphoric = /^(?:it|this|that)\s+(.+)$/i.exec(text.trim())
+    || new RegExp(`^${REPORT_RETRACTION_ACTOR}\\s+(.+?)\\s+to\\s+do\\s+(?:that|so|it)\\s*$`, 'i').exec(text.trim());
   return Boolean(anaphoric && REPORT_CONCISE_NONCOMPLETION_RE.test(anaphoric[1]));
 }
 // Qualified shorthand must positively state completion or cite the report;

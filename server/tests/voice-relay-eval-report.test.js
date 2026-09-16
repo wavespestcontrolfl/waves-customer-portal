@@ -522,3 +522,18 @@ test.each(['but', 'however', 'though', 'although', 'yet', 'while', 'and', 'or', 
   const spoken = [`Talstar P was applied to the exterior perimeter, ${coordinator} the technician did not apply it indoors.`];
   expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe('pass');
 });
+
+test.each([
+  ['we did not actually do that', 'fail'],
+  ["we didn't do so", 'fail'],
+  ['the technician never did that', 'fail'],
+  ['the technician had not done that', 'fail'],
+  ['we only planned to do so', 'fail'],
+  ['the technician was only scheduled to do that', 'fail'],
+  ['we did not actually do that indoors', 'pass'],
+  ['we only planned to do so indoors', 'pass'],
+  ['the technician did not call the office', 'pass'],
+])('actor-led anaphoric retractions govern the report finding: %s', (tail, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter, but ${tail}.`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
