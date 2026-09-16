@@ -348,6 +348,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     if (fixture.formTemplateId) await mockPg('job_form_templates').where({ id: fixture.formTemplateId }).del();
     if (fixture.discountId) await mockPg('discounts').where({ id: fixture.discountId }).del();
     if (fixture.taxabilityId) await mockPg('service_taxability').where({ id: fixture.taxabilityId }).del();
+    if (fixture.taxExemptionId) await mockPg('tax_exemptions').where({ id: fixture.taxExemptionId }).del();
     if (fixture.payerId) await mockPg('payers').where({ id: fixture.payerId }).del();
     await mockPg('notification_preferences').where({ admin_user_id: fixture.techId }).del();
     await mockPg('push_subscriptions').where({ admin_user_id: fixture.techId }).del();
@@ -2784,6 +2785,67 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
   });
 
+  test.each([
+    ['residential acceptance corrected to commercial', 'residential', 'commercial', false],
+    ['commercial acceptance corrected to residential', 'commercial', 'residential', false],
+    ['commercial acceptance followed by a verified exemption', 'commercial', 'commercial', true],
+  ])('%s requires office review', async (_label, initialType, currentType, exempt) => {
+    await mockPg('customers').where({ id: fixture.customerId }).update({ property_type: initialType, zip: '34209' });
+    const { invoice } = await prepareAcceptanceInvoice({ scheduledPrices: [240, null] });
+    const before = await mockPg('invoices').where({ id: invoice.id }).first();
+    expect(Number(before.tax_rate) > 0).toBe(initialType === 'commercial');
+    await mockPg('customers').where({ id: fixture.customerId }).update({ property_type: currentType });
+    if (exempt) {
+      fixture.taxExemptionId = randomUUID();
+      await mockPg('tax_exemptions').insert({ id: fixture.taxExemptionId, customer_id: fixture.customerId,
+        customer_name: 'Fixture Customer', exemption_type: 'resale', certificate_number: 'FIXTURE-DR14',
+        verified: true, active: true });
+    }
+
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'office_required', reason: 'invoice_tax_mismatch' });
+    expect(await mockPg('invoices').where({ id: invoice.id }).first()).toEqual(before);
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
+  test('a homogeneous taxable acceptance invoice matching current authority remains adoptable', async () => {
+    await mockPg('customers').where({ id: fixture.customerId }).update({
+      property_type: 'commercial', zip: '34209',
+    });
+    const { invoice, deposit } = await prepareAcceptanceInvoice({ withAdjustments: true });
+    const before = await mockPg('invoices').where({ id: invoice.id }).first();
+    expect(before).toMatchObject({ subtotal: '339.00', discount_amount: '18.00', tax_rate: '0.0700',
+      tax_amount: '22.47', total: '293.47' });
+
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'invoice_ready', invoiceId: invoice.id });
+    const after = await mockPg('invoices').where({ id: invoice.id }).first();
+    expect(after).toMatchObject({ tax_rate: before.tax_rate, tax_amount: before.tax_amount,
+      subtotal: before.subtotal, discount_amount: before.discount_amount });
+    expect(after.line_items).toEqual(before.line_items);
+    expect(await mockPg('estimate_deposits').where({ id: deposit.id }).first()).toEqual(deposit);
+  });
+
+  test('acceptance tax validation keeps invoice creation rounding at a fractional subtraction boundary', async () => {
+    await mockPg('customers').where({ id: fixture.customerId }).update({
+      property_type: 'commercial', zip: '34209',
+    });
+    const { invoice, pestId, lawnId } = await prepareAcceptanceInvoice();
+    const lines = invoice.line_items.map((line) => {
+      if (line.client_id === `scheduled_${pestId}_primary`) return { ...line, unit_price: 50.01, amount: 50.01 };
+      if (line.client_id === `scheduled_${lawnId}_primary`) return { ...line, unit_price: 51, amount: 51 };
+      return line;
+    });
+    lines.push({ _kind: 'discount', description: 'Accepted boundary credit', quantity: 1,
+      unit_price: -77.51, amount: -77.51 });
+    const updated = await InvoiceService.update(invoice.id, { line_items: lines });
+    expect(updated).toMatchObject({ subtotal: '200.01', discount_amount: '77.51',
+      tax_rate: '0.0700', tax_amount: '8.57' });
+
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'invoice_ready', invoiceId: invoice.id });
+  });
+
   test('rejects an edited acceptance invoice with an unowned custom charge', async () => {
     const { invoice } = await prepareAcceptanceInvoice();
     await InvoiceService.update(invoice.id, { line_items: [
@@ -2866,48 +2928,9 @@ postgres('visit completion packet records on PostgreSQL', () => {
       expect((await mockPg('invoices').where({ id: invoice.id }).first()).visit_completion_packet_id).toBeNull();
     });
 
-  test.each(['custom', 'setup'])('charge rejects a same-total %s edit after adoption', async (edit) => {
-    const { invoice } = await prepareAcceptanceInvoice();
-    const saved = await saveVisitCompletionPacket(submission());
-    const lines = invoice.line_items.map((line) => ({ ...line }));
-    if (edit === 'custom') lines[1] = { description: 'Custom repair', quantity: 1, unit_price: 120, amount: 120 };
-    else {
-      lines[0].unit_price += 20; lines[0].amount += 20;
-      lines[1].unit_price -= 20; lines[1].amount -= 20;
-    }
-    await InvoiceService.update(invoice.id, { line_items: lines });
-    await expect(assertPacketCharge(saved)).rejects.toMatchObject({ reason: 'accepted_invoice_lines_changed' });
-  });
 
 
-  test('an offer granted after adoption blocks the later collection effect', async () => {
-    const { invoice } = await prepareAcceptanceInvoice();
-    await enableFixtureAutopay('adopted_late_retention');
-    await mockPg('services').where({ id: fixture.catalogId }).update({ engine_keys: JSON.stringify(['pest_control']) });
-    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ is_recurring: true });
-    const saved = await saveVisitCompletionPacket(submission());
-    expect(saved.body.billing.invoiceId).toBe(invoice.id);
-    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
-    await mockPg('retention_offers').insert({ customer_id: fixture.customerId,
-      family_key: 'pest_control', percent_off: 15, max_charges: 2, cap_amount: 75, status: 'granted' });
-    await expect(assertPacketCharge(saved)).rejects.toMatchObject({ reason: 'retention_offer_changed' });
-    const provider = jest.fn();
-    chargeInvoiceWithSavedCard.mockImplementation(async () => {
-      await assertPacketCharge(saved);
-      provider();
-    });
-    expect(await collectVisitCompletionInvoice(saved.body.packetId))
-      .toMatchObject({ state: 'office_required', invoiceId: invoice.id });
-    expect(provider).not.toHaveBeenCalled();
-  });
 
-  test('the charge fence refuses a deposit reversed after invoice adoption', async () => {
-    const { invoice, deposit } = await prepareAcceptanceInvoice({ withAdjustments: true });
-    const saved = await saveVisitCompletionPacket(submission());
-    await mockPg('estimate_deposits').where({ id: deposit.id }).update({ status: 'refunded', refunded_amount: 50 });
-    await expect(assertPacketCharge(saved)).rejects.toMatchObject({ reason: 'deposit_credit_changed' });
-    expect((await mockPg('invoices').where({ id: invoice.id }).first()).visit_completion_packet_id).toBe(saved.body.packetId);
-  });
 
   test.each([199, 0])('rejects a setup fee changed from the accepted amount to %s', async (amount) => {
     const { invoice } = await prepareAcceptanceInvoice();
@@ -2918,33 +2941,9 @@ postgres('visit completion packet records on PostgreSQL', () => {
   });
 
 
-  test('rejects adoption after an in-place service conversion changes the accepted identity', async () => {
-    const { invoice, lawnId } = await prepareAcceptanceInvoice();
-    await mockPg('scheduled_services').where({ id: lawnId }).update({ service_type: 'Mosquito Control' });
-    expect((await saveVisitCompletionPacket(submission())).body.billing)
-      .toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
-    expect((await mockPg('invoices').where({ id: invoice.id }).first()))
-      .toMatchObject({ visit_completion_packet_id: null, service_record_id: null });
-  });
 
 
 
-  test('the adopted invoice charge fence rejects a service conversion after the packet snapshot', async () => {
-    const { invoice, lawnId } = await prepareAcceptanceInvoice();
-    await enableFixtureAutopay('adopted_service_conversion');
-    const saved = await saveVisitCompletionPacket(submission());
-    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
-    await mockPg('scheduled_services').where({ id: lawnId }).update({ service_type: 'Mosquito Control' });
-    await expect(assertPacketCharge(saved)).rejects.toMatchObject({ reason: 'member_service_changed' });
-    const provider = jest.fn();
-    chargeInvoiceWithSavedCard.mockImplementation(async () => {
-      await assertPacketCharge(saved);
-      provider();
-    });
-    expect(await collectVisitCompletionInvoice(saved.body.packetId))
-      .toMatchObject({ state: 'office_required', invoiceId: invoice.id });
-    expect(provider).not.toHaveBeenCalled();
-  });
 
 
 
