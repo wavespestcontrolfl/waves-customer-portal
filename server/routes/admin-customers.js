@@ -3,9 +3,8 @@ const Joi = require('joi');
 const { normalizeContactRole } = require('../constants/contact-roles');
 const router = express.Router();
 const db = require('../models/db');
-const { addETDays } = require('../utils/datetime-et');
+const { technicianCurrentVisitFilter, technicianServicesCustomer } = require('../services/technician-visit-scope');
 const LeadScorer = require('../services/lead-scorer');
-const PipelineManager = require('../services/pipeline-manager');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { stageLifecycleStamps } = require('../services/customer-stages');
@@ -44,31 +43,8 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // to that tech. Admin requests are unscoped. Endpoints with no tech surface
 // at all (comms, timeline, credits, pipeline, CRM writes) are requireAdmin
 // outright.
-// Assignment currency — ONE predicate for every technician access path
-// (per-customer proxy AND the directory subquery): dead statuses never
-// authorize, and everything else (pending/confirmed/en_route/on_site/
-// completed) must sit inside the ET date window. Completed visits stay
-// accessible for post-visit paperwork; a stale never-actioned pending row
-// or a years-old completion grants nothing.
-const TECH_ACCESS_DEAD_STATUSES = ['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show'];
-const TECH_ACCESS_WINDOW_DAYS = 7;
-const techAccessCutoff = () => etDateString(addETDays(new Date(), -TECH_ACCESS_WINDOW_DAYS));
-
-function currentAssignmentFilter(q, technicianId) {
-  return q
-    .where('scheduled_services.technician_id', technicianId)
-    .whereNotIn('scheduled_services.status', TECH_ACCESS_DEAD_STATUSES)
-    .where('scheduled_services.scheduled_date', '>=', techAccessCutoff());
-}
-
-async function technicianServicesCustomer(req, customerId) {
-  if (req.techRole !== 'technician') return true;
-  const assigned = await currentAssignmentFilter(
-    db('scheduled_services').where({ customer_id: customerId }),
-    req.technicianId,
-  ).first('id');
-  return !!assigned;
-}
+// Assignment currency is shared with schedule, protocols and turf profiles
+// through technician-visit-scope; directory and detail must use the same rule.
 
 // Fields stripped from list rows for technician tokens. The field flows
 // that search customers (estimate builder, project-report picker) render
@@ -144,6 +120,103 @@ const TECH_360_STRIPPED_CUSTOMER_FIELDS = [
   'servicePausedAt', 'servicePausedOn', 'servicePauseReason',
 ];
 
+// Technician Customer 360 is a field-context view, not a raw database-row
+// export. Keep the service-history fields its three live consumers render and
+// exclude report credentials plus the job-cost columns on service_records.
+const TECH_360_SERVICE_FIELDS = [
+  'id', 'customer_id', 'technician_id', 'scheduled_service_id', 'service_id',
+  'service_date', 'service_type', 'service_line', 'status',
+  'technician_notes', 'notes', 'products_used', 'areas_treated', 'technician_name',
+  'soil_temp', 'thatch_measurement', 'soil_ph', 'soil_moisture', 'areas_serviced',
+  'customer_interaction', 'is_callback', 'completion_source',
+  'protocol_defaults_used', 'protocol_name', 'tech_attestation_text',
+  'customer_interaction_source', 'service_tier', 'service_tier_source',
+  'visit_number', 'started_at', 'arrived_at', 'actual_start_time', 'check_in_time',
+  'ended_at', 'completed_at', 'actual_end_time', 'check_out_time',
+  'created_at', 'updated_at',
+];
+
+// Customer 360 appointment consumers need identity, timing, assignment and
+// recurrence context. Pricing, payer/prepay/discount state, estimate lineage,
+// and prep-page credentials remain office-only and are deliberately absent.
+const TECH_360_SCHEDULED_FIELDS = [
+  'id', 'customer_id', 'technician_id', 'property_id', 'service_id', 'visit_id',
+  'scheduled_date', 'window_start', 'window_end', 'service_type',
+  'service_key_snapshot', 'service_category_snapshot', 'status', 'notes',
+  'internal_notes', 'customer_confirmed', 'confirmed_at', 'field_confirmed_at',
+  'technician_name', 'tech_name', 'is_recurring', 'recurring_parent_id',
+  'recurring_pattern', 'recurring_ongoing', 'recurring_nth',
+  'recurring_weekday', 'recurring_interval_days', 'skip_weekends',
+  'weekend_shift', 'zone', 'route_order', 'estimated_duration_minutes',
+  'service_address_line1', 'service_address_line2', 'service_address_city',
+  'service_address_state', 'service_address_zip', 'lat', 'lng',
+  'actual_start_time', 'actual_end_time', 'completed_at', 'created_at', 'updated_at',
+];
+
+function pickFields(source, fields) {
+  if (!source || typeof source !== 'object') return {};
+  return Object.fromEntries(fields.filter((field) => Object.prototype.hasOwnProperty.call(source, field))
+    .map((field) => [field, source[field]]));
+}
+
+function techSafeAuditRecord(record) {
+  if (!record || typeof record !== 'object') return null;
+  const safe = pickFields(record, [
+    'advisory', 'reasonCode', 'note', 'approvedByRole', 'approvedAt',
+    'recordedByRole', 'recordedAt', 'notRecorded', 'missing',
+    'cleanoutCompleted', 'cleanoutMethod', 'lastProductInTank', 'equipmentName',
+  ]);
+  if (Array.isArray(record.blocks)) {
+    safe.blocks = record.blocks.map((block) => pickFields(block, [
+      'code', 'message', 'source', 'productId', 'productName',
+    ]));
+  }
+  if (Array.isArray(record.warnings)) {
+    safe.warnings = record.warnings.map((warning) => pickFields(warning, ['code', 'message']));
+  }
+  return safe;
+}
+
+function techSafeInventoryDeduction(item) {
+  return pickFields(item, [
+    'productId', 'productName', 'amount', 'amountUnit', 'status', 'warning',
+    'deductedAmount', 'inventoryUnit',
+    // Older stored snapshots use snake_case; the live renderer supports both.
+    'product_id', 'product_name', 'amount_unit', 'deducted_amount', 'inventory_unit',
+  ]);
+}
+
+function techSafeStructuredNotes(value) {
+  let notes = value;
+  if (typeof notes === 'string') {
+    try { notes = JSON.parse(notes); } catch { return {}; }
+  }
+  if (!notes || typeof notes !== 'object' || Array.isArray(notes)) return {};
+  const safe = pickFields(notes, ['projectCompletion', 'projectType', 'portalAttached']);
+  for (const field of [
+    'waveguardManagerApproval', 'waveguardBlackoutApproval',
+    'waveguardNLimitApproval', 'waveguardInventoryAdvisory', 'waveguardTankCleanout',
+  ]) {
+    if (notes[field]) safe[field] = techSafeAuditRecord(notes[field]);
+  }
+  if (Array.isArray(notes.inventoryDeductions)) {
+    safe.inventoryDeductions = notes.inventoryDeductions.map(techSafeInventoryDeduction);
+  }
+  return safe;
+}
+
+function techSafeServiceRecord(record) {
+  const safe = pickFields(record, TECH_360_SERVICE_FIELDS);
+  if (record && Object.prototype.hasOwnProperty.call(record, 'structured_notes')) {
+    safe.structured_notes = techSafeStructuredNotes(record.structured_notes);
+  }
+  return safe;
+}
+
+function techSafeScheduledService(service) {
+  return pickFields(service, TECH_360_SCHEDULED_FIELDS);
+}
+
 // Appointment history for the customer-detail payload (`scheduled`): past +
 // future, all statuses, capped to the rows NEAREST ET-today (ties: newest
 // first). Consumers (ScheduleCustomerSidebar, MobileCustomerDetailSheet,
@@ -178,6 +251,9 @@ function techSafe360Payload(payload) {
   for (const key of TECH_360_STRIPPED_KEYS) delete out[key];
   out.customer = { ...payload.customer };
   for (const field of TECH_360_STRIPPED_CUSTOMER_FIELDS) delete out.customer[field];
+  out.services = (payload.services || []).map(techSafeServiceRecord);
+  out.scheduled = (payload.scheduled || []).map(techSafeScheduledService);
+  out.upcomingScheduled = (payload.upcomingScheduled || []).map(techSafeScheduledService);
   return out;
 }
 
@@ -2316,9 +2392,9 @@ router.get('/', async (req, res, next) => {
     const isTechRequest = req.techRole === 'technician';
     const scopeTechAssigned = (q) => {
       if (isTechRequest) {
-        q.whereIn('customers.id', currentAssignmentFilter(
+        q.whereIn('customers.id', technicianCurrentVisitFilter(
+          req,
           db('scheduled_services').select('customer_id'),
-          req.technicianId,
         ));
       }
       return q;
@@ -2976,7 +3052,7 @@ router.get('/:id/latest-scheduled-service', async (req, res, next) => {
       // TECH'S OWN latest visit — without this, an office-scheduled
       // follow-up assigned to another tech leaks into the project modal.
       .modify((q) => {
-        if (req.techRole === 'technician') currentAssignmentFilter(q, req.technicianId);
+        technicianCurrentVisitFilter(req, q);
       })
       .orderBy('scheduled_date', 'desc')
       .orderBy('created_at', 'desc')
@@ -3563,7 +3639,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         member_since: etDateString(),
         referral_code: code, lead_source: normalized.leadSource,
         pipeline_stage: normalized.pipelineStage,
-        pipeline_stage_changed_at: new Date(),
+        ...stageLifecycleStamps(null, normalized.pipelineStage, {}, { today: etDateString() }),
         assigned_to: req.technicianId,
         company_name: normalized.companyName, property_type: normalized.propertyType, contact_role: normalized.contactRole.value, crm_notes: normalized.notes,
       }).returning('*');
@@ -3591,10 +3667,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
       return { ...created, _attachedToExistingAccount: !!account.existingCustomer, _existingCustomer: account.existingCustomer, _propertyCount: Number(siblingCount?.count || 0) + 1 };
     });
 
-    // Intentional fire-and-forget: derived pipeline/score state can lag the
-    // create response, and failures should not roll back the durable customer.
-    void PipelineManager.onEvent(customer.id, 'lead_created')
-      .catch(err => logger.warn(`[customers:${customer.id}] pipeline lead_created failed: ${err.message}`));
+    // The transaction already saved the chosen stage (default: new_lead).
+    // Replaying lead_created here would overwrite an explicit stage choice.
+    // Derived scoring can lag the response and must not roll back creation.
     void LeadScorer.calculateScore(customer.id)
       .catch(err => logger.warn(`[customers:${customer.id}] lead score failed: ${err.message}`));
     await auditCustomerMutation(req, 'customer.create', customer.id, {
@@ -3801,11 +3876,10 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         // Handle empty strings for numeric/date fields
         if (v === 'waveguard_tier') {
           updates[v] = req.body[k];
-          // A human set (or cleared) the tier: record 'manual' provenance so
-          // the auto-tier machinery (GATE_AUTO_WAVEGUARD_TIER realignment +
-          // label-only messaging suppression) never treats an admin-chosen
-          // tier as a derived label it may move. Clearing the tier clears
-          // provenance with it. Ships with migration 20260728000001.
+          // A changed (or cleared) tier is a human decision: record 'manual'
+          // provenance so the auto-tier machinery never moves it. The locked
+          // row below distinguishes that from a full-form echo of an unchanged
+          // auto-derived label, whose factual provenance must be preserved.
           updates.waveguard_tier_source = req.body[k] ? 'manual' : null;
         }
         else if (v === 'monthly_rate') { updates[v] = req.body[k] === '' ? 0 : parseFloat(req.body[k]) || 0; }
@@ -3879,6 +3953,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     // guarantees the locking transaction below ran and reassigned this.)
     let contactAuditBefore = before;
     let contactAuditAt = null;
+    // Membership lifecycle and sensitive-audit decisions must describe the
+    // transition that actually committed. The initial read is validation/UI
+    // context only; an overlapping save can commit while this request waits
+    // for the customer row lock.
+    let committedBefore = before;
+    let committedAfter = { ...before, ...updates };
     const laneStampEligible = req.body.billingMode === undefined && updates.billing_mode === undefined;
     if (Object.keys(updates).length) {
       const contactConflict = await findCrossAccountContactConflict(
@@ -3898,7 +3978,6 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
 
       const sensitiveFields = SENSITIVE_CUSTOMER_FIELDS;
       const changed = Object.keys(updates).filter(field => before && before[field] !== updates[field]);
-      const after = { ...before, ...updates };
       // PRESENCE-triggered, not diff-triggered — matching the IB update path
       // (and the geocode block below): resaving an unchanged address must
       // still self-heal a primary-property mirror or lead/estimate snapshot
@@ -3955,18 +4034,30 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           const lockedBefore = await trx('customers').where({ id: req.params.id }).forUpdate().first() || before;
           contactAuditBefore = lockedBefore;
           contactAuditAt = new Date();
+          // Directory saves submit the complete form, including an unchanged
+          // tier. An auto-derived label stays auto when the LOCKED row confirms
+          // the submitted tier is unchanged; only an actual tier choice earns
+          // manual/null provenance. Compare against the committed tier seen
+          // under the lock, rather than the earlier validation read.
+          if (updates.waveguard_tier !== undefined
+            && lockedBefore.waveguard_tier_source === 'auto'
+            && membershipTierKey(updates.waveguard_tier) === membershipTierKey(lockedBefore.waveguard_tier)) {
+            delete updates.waveguard_tier_source;
+          }
           // Implied-monthly stamp (#3140), decided from the LOCKED row: only
           // when this lane-less save still transitions the locked state into
           // the inferred-monthly shape — a concurrent explicit lane
           // committed before our lock leaves billing_mode set and the stamp
           // off. Mutating `updates` here also rides into lockedAfter and the
-          // UPDATE below; `changed`/`after` are patched post-commit.
+          // UPDATE below; `changed` is recomputed post-commit.
           if (laneStampEligible) {
             const { impliedMonthlyStampForWrite } = require('../services/billing-lane');
             impliedLaneStamp = impliedMonthlyStampForWrite(lockedBefore, { ...lockedBefore, ...updates });
             if (impliedLaneStamp) updates.billing_mode = impliedLaneStamp;
           }
           const lockedAfter = { ...lockedBefore, ...updates };
+          committedBefore = lockedBefore;
+          committedAfter = lockedAfter;
           // Assigning an email serializes against a customer-merge UNDO
           // checking whether that address is claimed (customer-dedupe.js
           // revertMerge — customers.email has NO unique constraint, so only
@@ -4067,7 +4158,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
               .syncScalarWriteToLedger(trx, req.params.id, updates.monthly_rate, { source: 'admin_edit' });
           }
           if (addressChanged) {
-            await require('../services/customer-properties').syncPrimaryAddress(lockedAfter, trx);
+            await require('../services/customer-properties').syncPrimaryAddress(lockedAfter, trx, {
+              // A line-1 edit also rewrites line 2 from the normalized address:
+              // propagate its null on a street move instead of retaining a
+              // stale unit from the former primary-property row.
+              explicitLine2: updates.address_line2 !== undefined,
+            });
             // Open leads/estimates snapshot the address at creation and never
             // re-read customers.* — sync the copies that still match the old
             // address (matching rules in the fan-out service header).
@@ -4108,13 +4204,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         }
         return next(e);
       }
-      if (impliedLaneStamp && !changed.includes('billing_mode')) {
-        // The stamp was decided under the lock, after `changed`/`after`
-        // were snapshotted — patch both so the sensitive audit records the
-        // lane write and the membership-email logic sees the real outcome.
-        changed.push('billing_mode');
-        after.billing_mode = impliedLaneStamp;
-      }
+      // Refresh the pre-lock audit diff from the authoritative locked
+      // transition. This retains the existing audit/lane behavior while
+      // preventing a stale editor from auditing or messaging a transition
+      // another request already committed.
+      changed.splice(0, changed.length, ...Object.keys(updates)
+        .filter((field) => committedBefore[field] !== committedAfter[field]));
       if (emailSync?.heldNewsletterResume) {
         // Deferred held-newsletter DOI (2026-07-30 lane) — execute now that
         // the edit committed. Fire-and-forget WITH an owner (Codex #3084
@@ -4161,20 +4256,20 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       // membership in this same save (rate/lane set) correctly counts as a
       // membership start, because the label side evaluates to non-member.
       const { isAutoDerivedTierLabelRow } = require('../services/self-booking-plan-sync');
-      const beforeHasMembership = hasMembership(before) && !isAutoDerivedTierLabelRow(before);
-      const afterHasMembership = hasMembership(after) && !isAutoDerivedTierLabelRow(after);
-      const membershipFieldChanged = membershipDetailsChanged(before, after);
+      const beforeHasMembership = hasMembership(committedBefore) && !isAutoDerivedTierLabelRow(committedBefore);
+      const afterHasMembership = hasMembership(committedAfter) && !isAutoDerivedTierLabelRow(committedAfter);
+      const membershipFieldChanged = membershipDetailsChanged(committedBefore, committedAfter);
       const membershipEventAt = new Date();
-      if (updates.active === false && before.active !== false && beforeHasMembership) {
+      if (updates.active === false && committedBefore.active !== false && beforeHasMembership) {
         void AccountMembershipEmail.sendMembershipCanceled({
           customerId: req.params.id,
           effectiveDate: membershipEventAt,
           reason: req.body.churnReason || 'Account deactivated',
-          membershipTier: before.waveguard_tier,
-          monthlyRate: before.monthly_rate,
+          membershipTier: committedBefore.waveguard_tier,
+          monthlyRate: committedBefore.monthly_rate,
           idempotencyKey: adminMembershipDailyIdempotencyKey('membership.canceled', req.params.id, 'admin', membershipEventAt),
         }).catch(err => logger.warn(`[customers] membership.canceled email failed for ${req.params.id}: ${err.message}`));
-      } else if (updates.active === true && before.active === false && afterHasMembership) {
+      } else if (updates.active === true && committedBefore.active === false && afterHasMembership) {
         void AccountMembershipEmail.sendMembershipReactivated({
           customerId: req.params.id,
           effectiveDate: membershipEventAt,
@@ -4182,50 +4277,48 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         }).catch(err => logger.warn(`[customers] membership.reactivated email failed for ${req.params.id}: ${err.message}`));
       } else if (!beforeHasMembership && afterHasMembership) {
         // Effective-membership transition alone is the trigger (Codex #3011
-        // r9): a label becoming a REAL membership can happen WITHOUT the
-        // tier/rate fields changing — re-saving the same tier flips
-        // provenance to 'manual', or an established billing lane is selected
-        // — and membershipDetailsChanged compares only tier and rate.
+        // r9): an auto label can become a REAL membership without its tier
+        // changing when this save establishes a paid rate/lane, while
+        // membershipDetailsChanged compares only tier and rate.
         void AccountMembershipEmail.sendMembershipStarted({
           customerId: req.params.id,
           effectiveDate: membershipEventAt,
-          membershipTier: after.waveguard_tier,
-          monthlyRate: after.monthly_rate,
+          membershipTier: committedAfter.waveguard_tier,
+          monthlyRate: committedAfter.monthly_rate,
           // Explicit lane from this save's own outcome — the send is
           // fire-and-forget, so the row-fallback could race a concurrent
           // edit; null rides the resolver fallback (#3140).
-          billingLane: after.billing_mode || null,
+          billingLane: committedAfter.billing_mode || null,
           sourceId: `admin_membership_start:${req.params.id}:${etDateString(membershipEventAt)}`,
-          idempotencyKey: adminMembershipStartIdempotencyKey(req.params.id, before, after, membershipEventAt),
+          idempotencyKey: adminMembershipStartIdempotencyKey(req.params.id, committedBefore, committedAfter, membershipEventAt),
         }).catch(err => logger.warn(`[customers] membership.started email failed for ${req.params.id}: ${err.message}`));
       } else if (beforeHasMembership && !afterHasMembership) {
         void AccountMembershipEmail.sendMembershipCanceled({
           customerId: req.params.id,
           effectiveDate: membershipEventAt,
           reason: 'Membership removed',
-          membershipTier: before.waveguard_tier,
-          monthlyRate: before.monthly_rate,
+          membershipTier: committedBefore.waveguard_tier,
+          monthlyRate: committedBefore.monthly_rate,
           idempotencyKey: adminMembershipDailyIdempotencyKey('membership.canceled', req.params.id, 'admin_membership_removed', membershipEventAt),
         }).catch(err => logger.warn(`[customers] membership.canceled email failed for ${req.params.id}: ${err.message}`));
       } else if (membershipFieldChanged && afterHasMembership) {
         void AccountMembershipEmail.sendMembershipUpdated({
           customerId: req.params.id,
-          before,
-          after,
+          before: committedBefore,
+          after: committedAfter,
           effectiveDate: membershipEventAt,
         }).catch(err => logger.warn(`[customers] membership.updated email failed for ${req.params.id}: ${err.message}`));
       }
     }
 
-    // If address changed, re-geocode (clear lat/lng first so ensureCustomerGeocoded refreshes)
+    // Address normalization deliberately rewrites line 1 for a line-2 edit;
+    // retain the existing presence-triggered clear/re-geocode self-heal.
     const addressChanged = ['address_line1', 'city', 'state', 'zip'].some(f => updates[f] !== undefined);
     if (addressChanged) {
-      // lat/lng were already cleared inside the update transaction (gh-r46).
-      // Re-geocode the customer, then mirror the fresh coords onto the primary
-      // property — syncPrimaryAddress cleared them on the address edit, so without
-      // this the property row would stay permanently null after every address edit.
-      void require('../services/geocoder').ensureCustomerGeocoded(req.params.id)
-        .then((coords) => coords && require('../services/customer-properties').syncPrimaryCoordsFromCustomer(req.params.id))
+      // The guarded helper compares the full address snapshot before writing
+      // and mirrors customer/property coordinates in one transaction, so a
+      // slow response for an older edit cannot overwrite a newer address.
+      void require('../services/geocoder').regeocodeCustomerAddressGuarded(req.params.id)
         .catch(() => {});
     }
 
@@ -5697,7 +5790,6 @@ router._private = {
   SCHEDULED_HISTORY_LIMIT,
   customerScheduledHistoryQuery,
   customerScheduledHistory,
-  technicianServicesCustomer,
   techSafeListRow,
   techSafeListFilters,
   techSafeSort,
@@ -5705,7 +5797,6 @@ router._private = {
   TECH_LIST_STRIPPED_FIELDS,
   TECH_360_STRIPPED_KEYS,
   TECH_360_STRIPPED_CUSTOMER_FIELDS,
-  TECH_ACCESS_DEAD_STATUSES,
   adminMembershipDailyIdempotencyKey,
   adminMembershipStartIdempotencyKey,
   adminNotificationPrefsDbUpdates,

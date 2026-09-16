@@ -1114,10 +1114,13 @@ const InvoiceService = {
       throw new Error('Visit invoice creation requires its owning transaction');
     }
     let linkedScheduledServiceId = scheduledServiceId;
-    if (!linkedScheduledServiceId && serviceRecordId) {
+    let linkedRecordServiceDate = null;
+    if (serviceRecordId) {
       const linkedRecord = await database('service_records')
-        .where({ id: serviceRecordId, customer_id: customerId }).first('scheduled_service_id');
-      linkedScheduledServiceId = linkedRecord?.scheduled_service_id || null;
+        .where({ id: serviceRecordId, customer_id: customerId })
+        .first('scheduled_service_id', 'service_date');
+      if (!linkedScheduledServiceId) linkedScheduledServiceId = linkedRecord?.scheduled_service_id || null;
+      linkedRecordServiceDate = linkedRecord?.service_date || null;
     }
 
     // Phase 2 atomicity: a NET-terms accrual (statement get/create + invoice
@@ -1148,7 +1151,7 @@ const InvoiceService = {
     // (the best-effort tax/discount catches then abort with it — accepted
     // for linked money writes; plain unlinked creates keep the
     // untransacted path).
-    const stampedEstimateIdInNotes = (String(notes || "").match(/accepted estimate #([0-9a-fA-F-]{8,})/) || [])[1] || null;
+    const stampedEstimateIdInNotes = require('./setup-fee-alert-reconcile').acceptedEstimateIdFromNotes(notes);
     if (linkedScheduledServiceId || stampedEstimateIdInNotes) {
       if (database && database.isTransaction) {
         if (linkedScheduledServiceId) {
@@ -1170,6 +1173,87 @@ const InvoiceService = {
       await assertScheduledInvoiceNotPacketOwned(database, linkedScheduledServiceId, packetWrite?.packetId);
     } else if (packetWrite) {
       throw new Error('Visit invoice requires a billed member');
+    }
+    // A stamped writer may have waited behind packet adoption. Recheck its
+    // owner inside the mint transaction, before creating another charge.
+    if (stampedEstimateIdInNotes) {
+      const packetConflict = () => Object.assign(
+        new Error('This estimate is billed by its saved visit closeout. Resume that closeout.'),
+        { status: 409, statusCode: 409, isOperational: true, code: 'VISIT_PACKET_OWNS_BILLING' });
+      const contention = (error) => {
+        if (error?.code !== '55P03') throw error;
+        throw Object.assign(new Error('Estimate billing is being updated. Retry in a moment.'),
+          { status: 409, statusCode: 409, isOperational: true, code: 'VISIT_PACKET_OWNS_BILLING' });
+      };
+      // Match the date create() will persist: explicit input wins, then a
+      // service record's own completion date, then a scheduled-only visit.
+      // Pin a derived value so the later context read cannot validate one
+      // date here and insert another after a concurrent edit.
+      if (!serviceDate && serviceRecordId) serviceDate = linkedRecordServiceDate;
+      if (!serviceDate && !serviceRecordId && scheduledServiceId) {
+        const linkedScheduled = await database('scheduled_services')
+          .where({ id: scheduledServiceId, customer_id: customerId }).first('scheduled_date');
+        serviceDate = linkedScheduled?.scheduled_date || null;
+      }
+      let packetOwners;
+      try {
+        packetOwners = await database('invoices as i')
+          .join('visit_completion_packet_items as p', 'p.invoice_id', 'i.id')
+          .join('scheduled_services as s', 's.id', 'p.scheduled_service_id')
+          .where({ 'i.customer_id': customerId })
+          .whereRaw('s.source_estimate_id::text = ?', [stampedEstimateIdInNotes])
+          .whereNotNull('i.visit_completion_packet_id').orderBy('i.id')
+          .forUpdate('i').noWait().select('i.id', 'i.status', 'i.service_date', 'i.line_items', 'i.notes');
+      } catch (error) { contention(error); }
+      const { invoiceContainsOnlySetupFeeCharges, invoiceContainsSetupFeeLine,
+        sumPositiveSetupFeeCents } = require('./estimate-first-application-invoice');
+      // Compare the calculated invoice amounts, not caller-supplied amount.
+      const normalizedSetupLines = normalizeInvoiceLineItems(lineItems || []);
+      const hasSetupFee = invoiceContainsSetupFeeLine({ line_items: normalizedSetupLines });
+      const separateSetupFee = invoiceContainsOnlySetupFeeCharges({ line_items: normalizedSetupLines })
+        && normalizedSetupLines.filter((line) => line.amount > 0)
+          .every((line) => /^WaveGuard Membership — one-time setup fee$/i.test(String(line.description || '').trim()))
+        && packetOwners.every((owner) => {
+          const lines = parseInvoiceLineItems(owner.line_items);
+          return lines.length > 0 && lines.every((line) => line && Number.isFinite(Number(line.amount)));
+        });
+      let separateSetupFeeAllowed = separateSetupFee;
+      if (packetOwners.length && separateSetupFee) {
+        // The estimate advisory lock serializes concurrent replacement writers.
+        // Lock their fee coverage too, failing operationally on a busy row.
+        let stampedCoverage;
+        try {
+          stampedCoverage = await database('invoices').where({ customer_id: customerId })
+            .where('notes', 'ilike', `%accepted estimate #${stampedEstimateIdInNotes}%`)
+            .orderBy('id').forUpdate().noWait().select('id');
+        } catch (error) { contention(error); }
+        const obligation = await require('./setup-fee-obligation').findUnmintedSetupFeeObligation({
+          sourceEstimateId: stampedEstimateIdInNotes, customerId,
+        }, database);
+        // The obligation reader counts stamped rows. Packet ownership also
+        // survives edited notes; count each unstamped owner once, and retain
+        // refunded cents as covered so deliberately refunded fees are not rebilled.
+        const stampedIds = new Set(stampedCoverage.map((row) => String(row.id)));
+        const unstampedOwners = [...new Map(packetOwners.map((row) => [String(row.id), row])).values()]
+          .filter((row) => !stampedIds.has(String(row.id)) && !['void', 'canceled', 'cancelled'].includes(row.status));
+        const packetFeeCents = unstampedOwners.reduce((sum, row) => sum + sumPositiveSetupFeeCents(row), 0);
+        separateSetupFeeAllowed = obligation.owed && Number.isSafeInteger(obligation.setupFeeRemainingCents)
+          && sumPositiveSetupFeeCents({ line_items: normalizedSetupLines }) <= obligation.setupFeeRemainingCents - packetFeeCents;
+      }
+      // Application ownership is visit-date scoped, matching the inverse
+      // packet guard: an explicit other date is a different application,
+      // while either side missing a date fails closed. Setup-fee coverage is
+      // estimate-wide and therefore deliberately uses every packet owner.
+      const { dateOnly } = require('./visit-groups');
+      const stampedServiceDate = dateOnly(serviceDate);
+      const matchingPacketOwners = stampedServiceDate
+        ? packetOwners.filter((owner) => {
+          const ownerServiceDate = dateOnly(owner.service_date);
+          return !ownerServiceDate || ownerServiceDate === stampedServiceDate;
+        })
+        : packetOwners;
+      if ((hasSetupFee && packetOwners.length && (!separateSetupFee || !separateSetupFeeAllowed))
+        || (!hasSetupFee && matchingPacketOwners.length)) throw packetConflict();
     }
     const customer = await database("customers").where({ id: customerId }).first();
     if (!customer) throw new Error("Customer not found");
