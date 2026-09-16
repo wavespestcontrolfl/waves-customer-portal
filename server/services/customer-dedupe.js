@@ -1157,13 +1157,29 @@ function rowLevelMergeConflict(winner, loser) {
  * rowLevelMergeConflict, but each needs a query, so they live in one
  * async rule the executor throws on and the IB preview runs before it
  * builds a card (codex #4348 r7 P2: an operator was still able to approve
- * a legacy/special billing-mode pair, or a loser belonging to a
- * multi-property account with other live members, and watch the executor
- * refuse it). `database` is any knex handle — the preview reads unlocked,
- * executeMerge re-reads under its row locks. Returns { code, message } or
- * null.
+ * a legacy/special billing-mode pair, a loser belonging to a multi-property
+ * account with other live members, or an addressed winner whose only primary
+ * property is inactive, and watch the executor refuse it). `database` is any
+ * knex handle — the preview reads unlocked, executeMerge re-reads under its
+ * row locks. Returns { code, message } or null.
  */
 async function dbLevelMergeConflict(database, winner, loser) {
+  // An incompatible winner address must be anchored before the property sweep.
+  // ensurePrimaryProperty deliberately preserves an existing inactive primary,
+  // so this state can never satisfy the executor's active-primary invariant.
+  // Refuse it in the shared preflight so previews never offer an approval that
+  // the locked write will deterministically reject.
+  if (!isEmptyValue(winner.address_line1) && addressCompat(winner, loser).status !== 'match') {
+    const primary = await database('customer_properties')
+      .where({ customer_id: winner.id, is_primary: true })
+      .first('id', 'active');
+    if (primary?.active === false) {
+      return {
+        code: 'inactive_primary_property_conflict',
+        message: 'surviving customer has an inactive primary property — reactivate it or reconcile saved properties before merging',
+      };
+    }
+  }
   // Legacy NULL is a real cadence too — the monthly cron treats NULL as
   // monthly membership, and completion billing reads the SURVIVOR's mode.
   // Mixing a special-mode side with a legacy side is only safe when the
@@ -1526,7 +1542,11 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // locks and run unlocked by the IB preview so the operator never
     // approves a card this executor would refuse.
     const dbConflict = await dbLevelMergeConflict(trx, winner, loser);
-    if (dbConflict) throw new Error(`executeMerge: ${dbConflict.message}`);
+    if (dbConflict) {
+      const err = new Error(`executeMerge: ${dbConflict.message}`);
+      err.mergeConflictCode = dbConflict.code;
+      throw err;
+    }
     // Same-account primary handoff (shared notification/channel prefs
     // resolve via (account_id, is_primary_profile=true)) is decided by
     // promoteWinnerAsPrimaryRule inside predictWinnerBackfills below.

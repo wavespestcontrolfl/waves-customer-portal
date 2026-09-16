@@ -1056,7 +1056,10 @@ describe('executeMerge', () => {
     db.transaction.mockImplementation(async (fn) => fn(trx));
 
     await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' }))
-      .rejects.toThrow(/could not preserve .* primary property/);
+      .rejects.toMatchObject({
+        mergeConflictCode: 'inactive_primary_property_conflict',
+        message: expect.stringMatching(/inactive primary property.*reconcile/i),
+      });
     expect(state.retired).toBeNull();
     expect(state.repointUpdates).toEqual([]);
   });
@@ -2944,12 +2947,29 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
 describe('dbLevelMergeConflict (the executor\'s DB-dependent refusals, shared with the preview — Codex r7 P2)', () => {
   const winner = { id: 'W', billing_mode: null, account_id: null };
   const loser = { id: 'L', billing_mode: 'per_application', account_id: null };
-  function install({ artifacts = {}, sibling = null } = {}) {
+  function install({ artifacts = {}, sibling = null, primary = null } = {}) {
     installDb((table, q) => {
       if (table === 'customers') return sibling;
+      if (table === 'customer_properties') return primary;
       return artifacts[q.args('where')[0].customer_id] ? { id: 'row-1' } : null;
     });
   }
+
+  it('refuses an incompatible addressed winner whose only primary property is inactive', async () => {
+    const addressedWinner = { ...winner, address_line1: '100 Main St' };
+    const otherPremise = { ...loser, billing_mode: null, address_line1: '200 Oak Ave' };
+    install({ primary: { id: 'inactive-primary', active: false } });
+    expect(await dedupe.dbLevelMergeConflict(db, addressedWinner, otherPremise)).toEqual({
+      code: 'inactive_primary_property_conflict',
+      message: expect.stringMatching(/inactive primary property.*reconcile/i),
+    });
+
+    install({ primary: { id: 'active-primary', active: true } });
+    expect(await dedupe.dbLevelMergeConflict(db, addressedWinner, otherPremise)).toBeNull();
+
+    install({ primary: { id: 'inactive-primary', active: false } });
+    expect(await dedupe.dbLevelMergeConflict(db, addressedWinner, { ...otherPremise, address_line1: '100 Main Street' })).toBeNull();
+  });
 
   it('refuses a legacy/special billing-mode pair only when the flipping side has live billing history', async () => {
     // The winner is the flipping side (null mode adopting per_application).
