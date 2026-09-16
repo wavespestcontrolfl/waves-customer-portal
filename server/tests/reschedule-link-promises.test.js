@@ -1,11 +1,11 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }));
-jest.mock('../services/triage-auto-resolve', () => ({ resolveRescheduleCards: jest.fn(async () => 1) }));
+jest.mock('../services/call-reschedule-apply', () => ({ resolveRescheduleCards: jest.fn(async () => 1) }));
 jest.mock('../utils/triage-locks', () => ({ lockTriageCall: jest.fn(async () => {}) }));
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => {}) }));
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { resolveRescheduleCards } = require('../services/triage-auto-resolve');
+const { resolveRescheduleCards } = require('../services/call-reschedule-apply');
 const realLinks = require('../services/reschedule-link-promises');
 // Pin fixture clocks explicitly; production uses the fresh wall clock.
 const links = { ...realLinks,
@@ -1240,7 +1240,7 @@ test('a replay that moved nothing closes no cards; a real self-serve move does',
 
   const moved = fakeConn({ outbox: [sentRow], selfServe: { id: 'log' } });
   expect(await links.resolveUsedLink(moved.conn, 'visit')).toBe(1);
-  expect(resolveRescheduleCards).toHaveBeenCalledWith(moved.conn, 'call', expect.any(String), 'visit');
+  expect(resolveRescheduleCards).toHaveBeenCalledWith(moved.conn, 'call', expect.any(String), { visitId: 'visit' });
   expect(moved.seen.updates).toEqual([expect.objectContaining({ table: 'outbox_messages', eq: { id: 'outbox' } })]);
 });
 
@@ -1251,7 +1251,7 @@ test('a link used after the row was parked still closes its cards and the call',
   // Parked rows are inside the reconciliation allowlist (an attempt was made
   // even though the carrier receipt never arrived).
   expect(seen.statusAllowlist).toContain('review');
-  expect(resolveRescheduleCards).toHaveBeenCalledWith(conn, 'call', expect.any(String), 'visit');
+  expect(resolveRescheduleCards).toHaveBeenCalledWith(conn, 'call', expect.any(String), { visitId: 'visit' });
   // The promise's own exception card closes, and review_status resyncs.
   expect(seen.updates).toContainEqual(expect.objectContaining({ table: 'triage_items', patch: expect.objectContaining({ status: 'resolved' }) }));
   expect(seen.updates).toContainEqual(expect.objectContaining({ table: 'call_log', patch: expect.objectContaining({ review_status: 'resolved' }) }));
@@ -1269,7 +1269,7 @@ test('markLinkUsed re-reads the row status FRESH under the lock — a stale call
   const { conn, seen } = fakeConn({ outbox: [currentlyParked],
     cards: [{ id: 'card', payload: { reschedule_link_promise: { commitment_id: 'commitment', commitment_ids: ['commitment'] } } }] });
   await links.markLinkUsed(conn, stale);
-  expect(resolveRescheduleCards).toHaveBeenCalledWith(conn, 'call', expect.any(String), 'visit');
+  expect(resolveRescheduleCards).toHaveBeenCalledWith(conn, 'call', expect.any(String), { visitId: 'visit' });
   expect(seen.updates).toContainEqual(expect.objectContaining({ table: 'triage_items', patch: expect.objectContaining({ status: 'resolved' }) }));
   expect(seen.updates).toContainEqual(expect.objectContaining({ table: 'call_log', patch: expect.objectContaining({ review_status: 'resolved' }) }));
   // The reconciliation stamp still lands, in the SAME transaction.

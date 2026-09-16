@@ -466,6 +466,11 @@ export default function TriageInboxTabV2() {
       })
       .catch((err) => {
         setActioning(null);
+        if (err?.status === 409) {
+          load(mode, status, autoOnly);
+          setError("This card changed since it loaded — review the refreshed card before marking it handled.");
+          return;
+        }
         setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Action failed — try again.");
       });
   };

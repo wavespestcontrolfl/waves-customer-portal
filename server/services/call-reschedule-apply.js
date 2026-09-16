@@ -341,14 +341,22 @@ async function loadCandidates(conn, customerId, now = new Date(), { includePast 
 
 // Resolve the call's open reschedule cards and re-sync review_status —
 // admin-triage transitionCore's rule: open/in_progress cards remaining keep
-// the call 'open', otherwise it takes the applied status.
-async function resolveRescheduleCards(conn, callLogId, note) {
+// the call 'open', otherwise it takes the applied status. The call apply
+// lane resolves all its cards; a self-service move supplies a visitId option
+// and resolves only cards positively bound to the visit that actually moved.
+// A supplied but missing visitId must fail closed, not fall back to all cards.
+async function resolveRescheduleCards(conn, callLogId, note, options = {}) {
+  const visitBound = Object.hasOwn(options, 'visitId');
+  const { visitId } = options;
+  if (visitBound && !visitId) return 0;
   const now = new Date();
   return conn.transaction(async (trx) => {
     await lockTriageCall(trx, callLogId);
-    const resolved = await trx('triage_items')
+    const query = trx('triage_items')
       .where({ call_log_id: callLogId, status: 'open' })
-      .whereIn('reason_code', CARD_REASON_CODES)
+      .whereIn('reason_code', CARD_REASON_CODES);
+    if (visitBound) query.where({ related_scheduled_service_id: visitId });
+    const resolved = await query
       .update({ status: 'resolved', resolution_note: note, resolution_source: 'auto', resolved_at: now, updated_at: now })
       .returning('id');
     if (!resolved.length) return 0;
