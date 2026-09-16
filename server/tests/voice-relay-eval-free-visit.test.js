@@ -1,6 +1,18 @@
 const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
 
 test.each([
+  ["It's not true that your next visit is free.", 'pass'],
+  ["That's false that your next visit is free.", 'pass'],
+  ["This's not the case that your next visit is free.", 'pass'],
+  ['It’s untrue that your next visit is free.', 'pass'],
+  ["It's not true that we will cover your next visit.", 'pass'],
+  ["It's not true that the report is free, but your next visit is free.", 'fail'],
+  ["It's true that your next visit is free.", 'fail'],
+])('contracted explicit denials preserve proposition scope: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   ['Your next visit is definitely free.', 'fail'],
   ['Your next visit is certainly on us.', 'fail'],
   ['Your next visit is really on the house.', 'fail'],
@@ -1296,5 +1308,31 @@ test.each([
   ['We will give you a free visit, any questions?', 'fail'],
   ['If the office approves, we will give you a free visit, but you will get a free return visit.', 'fail'],
 ])('adjectival free prices bind committed services and customer benefits: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+
+test.each([
+  ['You will not pay for your next visit report.', 'pass'],
+  ['You will not be charged for your next visit summary.', 'pass'],
+  ["You won't pay for your return treatment estimate.", 'pass'],
+  ['You will pay nothing for your next visit report.', 'pass'],
+  ['You will not have to pay for your next visit summary.', 'pass'],
+  ["You don't owe anything for your next visit report.", 'pass'],
+  ['There is no charge for your next visit estimate.', 'pass'],
+  ["We won't charge you for your next visit summary.", 'pass'],
+  ['We will waive the fee for your next visit report.', 'pass'],
+  ['We will cover your next visit report.', 'pass'],
+  ['We will cover your next treatment summary.', 'pass'],
+  ['We will cover the cost of your next visit estimate.', 'pass'],
+  ['You will not pay for your next visit.', 'fail'],
+  ['You will not be charged for your next visit.', 'fail'],
+  ["We won't charge you for your next visit.", 'fail'],
+  ['We will waive the fee for your next visit.', 'fail'],
+  ['We will cover your next visit.', 'fail'],
+  ['We will cover the cost of your next visit.', 'fail'],
+  ['You will not pay for your next visit report, but your next visit is free.', 'fail'],
+  ['We will cover your next visit summary, but we will cover your next visit.', 'fail'],
+])('payment and coverage targets exclude compound report artifacts: %s', (text, status) => {
   expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
 });
