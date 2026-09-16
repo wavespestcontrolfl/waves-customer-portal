@@ -3468,6 +3468,8 @@ function foldTermiteRentalIntoBait(services = []) {
 //                                place that knows Waves keeps title; the
 //                                install visit that creates the pins can't
 //                                see it)
+//   annual protection plan    → true  (the setup fee does not buy stations;
+//                                Waves keeps title without a rental rider)
 //   purchased bait, no rental  → false (a former renter buying outright must
 //                                not keep the renter flag — new pins would
 //                                stamp owned_by='waves' and mark customer
@@ -3479,6 +3481,10 @@ function foldTermiteRentalIntoBait(services = []) {
 function termiteStationsRentedUpdate(recurringServices = [], { suppressRecurringConversion = false } = {}) {
   if (suppressRecurringConversion) return {};
   if (recurringServices.some(isTermiteStationRentalLine)) return { termite_stations_rented: true };
+  if (recurringServices.some((svc) => recurringServiceKey(svc) === 'termite_bait'
+    && svc.plan === 'annual_protection' && svc.stationsOwnedBy === 'waves')) {
+    return { termite_stations_rented: true };
+  }
   if (recurringServices.some((svc) => recurringServiceKey(svc) === 'termite_bait')) {
     return { termite_stations_rented: false };
   }
@@ -3600,6 +3606,12 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
   // legacy-preservation contract — no visitsPerYear, no series; office
   // schedules follow-ups and the flat-monthly-derived fee stands.
   if (key === 'termite_bait') {
+    if (svc.plan === 'annual_protection' && svc.stationsOwnedBy === 'waves') {
+      return pattern === 'annual' && visitsPerYearForRecurringService(svc) === 1
+        && !visitCountFieldsConflict(svc) && !visitCountFieldsInvalid(svc)
+        && [null, 'annual'].includes(explicitCadenceFieldForService(svc))
+        && svc.isCommercial !== true && !isCommercialRecurringLine(svc, parentRow);
+    }
     return pattern === 'quarterly' && visitsPerYearForRecurringService(svc) === 4;
   }
   // Tree & Shrub programs (owner six-visit mandate; T&S audit 2026-07-18 P1:
@@ -4037,6 +4049,11 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency, acceptedPlanFr
     && !svc.isCommercial && !isCommercialRecurringLine(svc)) {
     return RecurringAppointmentSeeder.normalizeRecurringPattern(acceptedPlanFrequency);
   }
+  // The annual termite line has no frequency text; generic inference reads a
+  // plan-level fallback before its one-visit count. Record the same annual
+  // cadence its follow-up series will seed, including beside a monthly plan.
+  if (seedingFamilyKey(svc) === 'termite_bait'
+    && supportsConverterFollowUpSeeding(svc, {}, 'annual')) return 'annual';
   if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'mosquito'
     && visitsPerYearForRecurringService(svc) === 9) {
     return RecurringAppointmentSeeder.SEASONAL_FEB_OCT;
@@ -4140,6 +4157,31 @@ function annualPrepayCoverageVisits(svc = {}, cadence, acceptedPlanFrequency) {
   const acceptedVisits = acceptedPestSelectionVisits(svc, acceptedPlanFrequency);
   if (acceptedVisits && acceptedVisits === cadenceVisits) return acceptedVisits;
   return visitsPerYearForRecurringService(svc) || cadenceVisits || null;
+}
+
+// Reserved mixed-plan accepts promote a bait line that could not combine with
+// the held primary visit. Resolve its scheduling shape once for both the
+// sorted-lock pre-pass and the actual parent/series insert. The quarterly
+// bond rider keeps its existing visit identity; annual bait needs the plan
+// and ownership stamp so the seeding gate can recognize its one-visit term.
+function promotedTermiteUnitForRemaining(line, fallbackFrequency, acceptedPlanFrequency) {
+  const key = String(recurringServiceKey(line) || '');
+  const isBond = key.startsWith('termite_bond');
+  if (key !== 'termite_bait' && !isBond) return null;
+  const name = line.name || line.serviceName || line.service_name || (isBond ? 'Termite Bond' : 'Termite Bait');
+  const annualPlan = key === 'termite_bait' && line.plan === 'annual_protection';
+  if (annualPlan) {
+    if (converterFollowUpSeedingPattern(line, { service_type: name }, fallbackFrequency, acceptedPlanFrequency) !== 'annual') return null;
+  } else if (visitsPerYearForRecurringService(line) !== 4) {
+    return null;
+  }
+  return {
+    service: annualPlan
+      ? { ...line, name, frequency: 'annual', visitsPerYear: 1 }
+      : { name, frequency: 'quarterly', visitsPerYear: 4 },
+    catalogServiceKey: isBond ? (line.service || null) : 'termite_bait',
+    pricingLine: line,
+  };
 }
 
 // Roll a seasonal first visit into Feb–Oct and re-nudge it off closed days
@@ -5233,13 +5275,9 @@ const EstimateConverter = {
                 }
                 continue;
               }
-              if ((key === 'termite_bait' || key.startsWith('termite_bond'))
-                && visitsPerYearForRecurringService(svc) === 4) {
-                const isBond = key.startsWith('termite_bond');
-                await addUnit(
-                  svc.name || svc.serviceName || svc.service_name || (isBond ? 'Termite Bond' : 'Termite Bait'),
-                  isBond ? (svc.service || null) : 'termite_bait',
-                );
+              const termiteUnit = promotedTermiteUnitForRemaining(svc, inferredFrequencyKey, acceptedPlanFrequency);
+              if (termiteUnit) {
+                await addUnit(termiteUnit.service.name, termiteUnit.catalogServiceKey);
                 continue;
               }
               if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'mosquito') {
@@ -5364,40 +5402,19 @@ const EstimateConverter = {
         // schedule other `remaining` lines (adjudicated semantic intact) —
         // EXCEPT promoted termite below.
         //
-        // Termite promotion (codex #2911 r3 P1): a quarterly termite line
+        // Termite promotion (codex #2911 r3 P1): a termite line
         // beside a monthly/bimonthly plan can't combine, and per the owner
         // 2026-07-20 directive it is a billed-per-application program — an
         // accept that billed it while scheduling nothing would sell a
         // program that silently doesn't exist. Same remedy shape as the
         // rodent promotion above; all other remaining lines keep the
         // adjudicated 2026-06-12 semantic (owner decision).
+        // Bond riders promote too (codex #2915 r2): when the pest route
+        // consumes bait, the bond remains billed and needs a visit identity.
+        // Annual bait keeps its own one-visit cadence and Waves title.
         const promotedTermiteUnits = (remaining || [])
-          .filter((line) => {
-            const key = String(recurringServiceKey(line) || '');
-            // Bond riders promote too (codex #2915 r2): when the pest route
-            // consumed the bait line, the bond stays in `remaining` — billed
-            // but otherwise never scheduled, so no visit ever carries
-            // "Termite Bond" and the lifecycle sync never mints the warranty.
-            return (key === 'termite_bait' || key.startsWith('termite_bond'))
-              && visitsPerYearForRecurringService(line) === 4;
-          })
-          .map((line) => {
-            const isBond = String(recurringServiceKey(line) || '').startsWith('termite_bond');
-            return {
-              service: {
-                name: line.name || line.serviceName || line.service_name || (isBond ? 'Termite Bond' : 'Termite Bait'),
-                frequency: 'quarterly',
-                visitsPerYear: 4,
-              },
-              // Bond rows resolve their own catalog identity (internal-only
-              // billing-rider completion profile); bait resolves the station
-              // service.
-              catalogServiceKey: isBond ? (line.service || null) : 'termite_bait',
-              // The scheduling shape above is name/cadence only; the split
-              // below prices from the accepted LINE (codex #3938 r1 P1).
-              pricingLine: line,
-            };
-          });
+          .map((line) => promotedTermiteUnitForRemaining(line, inferredFrequencyKey, acceptedPlanFrequency))
+          .filter(Boolean);
         // Mosquito promotion (codex r16 P1): a recurring mosquito line beside
         // a non-combining plan (pest + mosquito share no cadence route) sits
         // in `remaining` and — per the adjudicated 2026-06-12 semantic — was
@@ -7766,6 +7783,7 @@ module.exports.estimateOperatorSetupFeeWaived = estimateOperatorSetupFeeWaived;
 module.exports.recurringMixHasMembershipFeeService = recurringMixHasMembershipFeeService;
 module.exports.shouldCreateDraftInvoiceForRecurring = shouldCreateDraftInvoiceForRecurring;
 module.exports.converterFollowUpSeedingPattern = converterFollowUpSeedingPattern;
+module.exports.promotedTermiteUnitForRemaining = promotedTermiteUnitForRemaining;
 module.exports.annualPrepayCoverageCadence = annualPrepayCoverageCadence;
 module.exports.annualPrepayCoverageVisits = annualPrepayCoverageVisits;
 module.exports.riderAwareSingleUnitVisits = riderAwareSingleUnitVisits;

@@ -37,6 +37,11 @@ function annualPlanOfferFingerprint(estimate) {
   for (const key of ['groupPublishedByEstimateId', 'proposalDelivery', 'leadServiceHandoffAt', 'leadServiceHandoffParkId', 'viewedMonthlyTotal', 'followupOwnershipFrom']) {
     delete offerData[key];
   }
+  if (offerData.automation) {
+    offerData.automation = { ...offerData.automation };
+    delete offerData.automation.autoSend;
+    if (!Object.keys(offerData.automation).length) delete offerData.automation;
+  }
   // JSONB reorders object keys, and pg returns numeric columns as strings.
   // Witness the persisted value rather than its pre-UPDATE JS representation.
   const canonicalData = JSON.parse(JSON.stringify(offerData, (_key, value) => (

@@ -29,6 +29,8 @@ const { capacityForServices } = require('../services/combined-visit-capacity');
 const converter = require('../services/estimate-converter');
 const { reserveSlot, commitReservation } = require('../services/slot-reservation');
 const { resolveEstimateSlotProfile } = require('../services/estimate-slot-availability');
+const { generateEstimate } = require('../services/pricing-engine/estimate-engine');
+const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
 const { signSlotOffer, appendOfferToSlotId, CAPACITY_OFFER_POLICY } = require('../utils/slot-offer-token');
 const AppointmentReminders = require('../services/appointment-reminders');
 const connection = process.env.COMBINED_VISIT_TEST_DATABASE_URL;
@@ -96,6 +98,59 @@ postgres('combined capacity conversion on the migrated application schema', () =
     delete process.env.GATE_VISIT_COMBINED_CAPACITY;
     delete process.env.GATE_SEPARATE_COMBO_VISITS;
     if (mockPg) await mockPg.destroy();
+  });
+
+  test('a reserved pest visit promotes the real annual termite plan as a separate annual parent', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    const priorAnnual = process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const priorCancellation = process.env.GATE_CANCEL_FLOW_V2;
+    mockPg = trx;
+    try {
+      process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
+      process.env.GATE_CANCEL_FLOW_V2 = 'true';
+      const mapped = mapV1ToLegacyShape(generateEstimate({
+        homeSqFt: 2000, lotSqFt: 8000, propertyType: 'single_family',
+        services: { pest: { frequency: 'quarterly' }, termite: { system: 'trelona', plan: 'annual_protection' } },
+      }));
+      const annualLine = mapped.recurring.services.find((line) => line.service === 'termite_bait');
+      expect(annualLine).toMatchObject({ plan: 'annual_protection', stationsOwnedBy: 'waves', visitsPerYear: 1 });
+      const f = await fixture(trx, [lines[0], termiteLine]);
+      await trx('estimates').where({ id: f.estimateId }).update({
+        estimate_data: { result: mapped, customerSelection: { frequency: 'quarterly' } },
+        monthly_total: mapped.recurring.monthlyTotal,
+        annual_total: mapped.recurring.annualTotal,
+        onetime_total: mapped.oneTime.total,
+      });
+      await trx('scheduled_services').where({ id: f.anchor.id }).update({
+        customer_id: f.customerId, reservation_expires_at: null,
+        reservation_service_mix: null, estimated_duration_minutes: 60,
+      });
+      await converter.convertEstimate(f.estimateId, { ...options, database: trx });
+      const parents = await trx('scheduled_services').where({ source_estimate_id: f.estimateId })
+        .whereNull('recurring_parent_id');
+      const baitCatalog = await trx('services').where({ service_key: 'termite_bait' }).first('id');
+      expect(parents.some((parent) => parent.id === f.anchor.id)).toBe(true);
+      const annualParents = parents.filter((parent) => parent.service_id === baitCatalog.id);
+      expect(annualParents).toHaveLength(1);
+      const [annualParent] = annualParents;
+      expect(annualParent.id).not.toBe(f.anchor.id);
+      expect(annualParent).toMatchObject({
+        service_id: baitCatalog.id, service_type: annualLine.name,
+        recurring_pattern: 'annual', is_recurring: true,
+      });
+      // One inspection is due in this prepaid coverage year. The seeder
+      // stamps the parent as annual and creates no extra visit this year.
+      expect(await trx('scheduled_services').where({ recurring_parent_id: annualParent.id })).toEqual([]);
+      expect((await trx('customers').where({ id: f.customerId }).first()).termite_stations_rented).toBe(true);
+    } finally {
+      mockPg = pool;
+      if (priorAnnual === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      else process.env.GATE_TERMITE_ANNUAL_PLAN = priorAnnual;
+      if (priorCancellation === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
+      else process.env.GATE_CANCEL_FLOW_V2 = priorCancellation;
+      await trx.rollback();
+    }
   });
 
   test.each([

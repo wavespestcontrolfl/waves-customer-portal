@@ -104,6 +104,14 @@ function expectConflict(fn) {
 }
 
 describe('delivered annual public revisions', () => {
+  test('post-handoff automatic-send bookkeeping does not change the offer witness', () => {
+    const row = deliveredAnnual();
+    row.estimate_data.automation = { autoSend: { attemptedAt: new Date().toISOString(), result: 'sent',
+      sentChannels: ['email'], failedChannels: [] } };
+    expect(annualPlanHasDeliveredOffer(row)).toBe(true);
+    row.estimate_data.automation.offerScope = 'changed';
+    expect(annualPlanHasDeliveredOffer(row)).toBe(false);
+  });
   test('the witness survives decimal-string totals and JSONB object key ordering', () => {
     const source = deliveredAnnual();
     const writes = stampAnnualPlanPublicRevision(captureAnnualPlanPublicRevision(source), {

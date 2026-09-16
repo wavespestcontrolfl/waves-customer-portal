@@ -848,7 +848,13 @@ function mapV1ToLegacyShape(v1Result) {
     });
   }
   if (tbLI && !tbLI.quoteRequired && !tbLI.requiresMeasurement) {
-    svcAdd('Termite Bait', tbLI, { service: 'termite_bait' });
+    svcAdd('Termite Bait', tbLI, {
+      service: 'termite_bait',
+      // The setup fee does not transfer station title. Keep the annual
+      // program's ownership on the recurring line conversion consumes.
+      ...(tbLI.plan === 'annual_protection' && tbLI.stationsOwnedBy === 'waves'
+        ? { plan: 'annual_protection', stationsOwnedBy: 'waves' } : {}),
+    });
     // Termite bond rider (owner 2026-07-20) — standalone recurring line in
     // the totals, NOT tier-counted and NOT bundle-discountable (fixed
     // warranty rate; same posture as Recurring Foam). The row name is the

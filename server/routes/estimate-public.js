@@ -8409,6 +8409,13 @@ async function handleEstimateView(req, res, next) {
 
     await reconcileFrozenMembershipSnapshot(estimate);
 
+    // Membership reconciliation can change the offer after the initial
+    // publication check. Match /data and /accept on the repriced row.
+    if (annualPlanPublicReplayBlocked(estimate)) {
+      if (req.path.startsWith('/estimate/')) return next();
+      return res.status(404).set('Content-Type', 'text/html').send(renderEstimateNotFoundPage());
+    }
+
     // Parsed once here (post-reconcile) so the V2 gate's one-time check below
     // can read it; reused by the rest of the handler.
     const estData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;

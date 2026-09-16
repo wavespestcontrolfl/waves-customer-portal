@@ -16,6 +16,10 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 const mockDb = jest.fn();
 mockDb.schema = { hasTable: jest.fn(async () => true) };
 jest.mock('../models/db', () => mockDb);
+jest.mock('../services/waveguard-existing-services', () => ({
+  ...jest.requireActual('../services/waveguard-existing-services'),
+  isActivePlanCustomer: jest.fn(async () => false),
+}));
 
 const { handleEstimateView } = require('../routes/estimate-public');
 
@@ -70,6 +74,37 @@ const ESTIMATE_MOUNT = '/estimate/tok-ssr-gate'; // app.get('/estimate/:token') 
 const API_MOUNT = '/tok-ssr-gate'; // app.use('/api/estimates') — no SPA fallthrough
 
 describe('handleEstimateView — SSR viewability gate', () => {
+  test.each([API_MOUNT, ESTIMATE_MOUNT])('rechecks the annual witness after membership repricing on %s', async (mount) => {
+    const { annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
+    const persistence = require('../services/admin-estimate-persistence');
+    const result = { lineItems: [{ service: 'termite_bait', plan: 'annual_protection' }] };
+    const row = { ...PII, id: 'annual-member', customer_id: 'lapsed-member', status: 'sent',
+      expires_at: FUTURE, use_v2_view: false, monthly_total: 30,
+      estimate_data: { result, membershipSnapshot: { isExistingCustomer: true } } };
+    row.estimate_data.deliveryState = { firstDeliveredAt: new Date().toISOString(),
+      annualPlanOfferFingerprint: annualPlanOfferFingerprint(row) };
+    const reprice = jest.spyOn(persistence, 'serverRecomputeFromEstimateData').mockResolvedValue({
+      recomputed: true, serverResult: result, serverTotals: { monthlyTotal: 40, annualTotal: 480, onetimeTotal: 0 },
+    });
+    const priorGate = process.env.GATE_TERMITE_ANNUAL_PLAN;
+    delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    try {
+      const { res, next } = await runView(row, mount);
+      expect(reprice).toHaveBeenCalled();
+      if (mount === API_MOUNT) {
+        expect(res.statusCode).toBe(404);
+        expect(res.body).not.toContain(PII.customer_email);
+      } else {
+        expect(next).toHaveBeenCalledTimes(1);
+        expect(res.sent).toBe(false);
+      }
+    } finally {
+      reprice.mockRestore();
+      if (priorGate === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      else process.env.GATE_TERMITE_ANNUAL_PLAN = priorGate;
+    }
+  });
+
   test('a revised annual offer without a matching handoff never renders through the legacy token', async () => {
     const priorAnnual = process.env.GATE_TERMITE_ANNUAL_PLAN;
     const priorCancel = process.env.GATE_CANCEL_FLOW_V2;
