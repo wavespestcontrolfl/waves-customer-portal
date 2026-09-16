@@ -13,12 +13,16 @@ describe('email reply report and regulatory claims policy', () => {
   test.each([
     'Your home is pest-free.', 'Your home is pest‑free.',
     'Your home is pest\\-free.',
+    'Your home is pest&#45;free.', 'Your home is pest&#x2D;free.',
+    'Your home is pest&hyphen;free.',
+    'Your home is pest\nfree.', 'Your home is pest\tfree.',
     'Your home is pest-***free***.', 'No ___infestation___ remains.',
     'Your home is pest-**free**.', 'Your home is pest-*free*.',
     'No **infestation** remains.', 'No __infestation__ remains.',
     'The product is EPA-**approved**.',
     'Your home is now clear.', 'The problem is resolved.',
     'The treatment is pet-safe.', 'The product is EPA-approved.',
+    'The product is EPA — approved.', 'The product is EPA &mdash; approved.',
     'The treatment is EPA\\-certified.',
     'The treatment is EPA-certified.', 'The treatment is EPA certified.',
     'The treatment is EPAcertified.',
@@ -27,6 +31,10 @@ describe('email reply report and regulatory claims policy', () => {
     'The treatment has certification from US EPA.',
     'This treatment has certification from the EPA.', 'This carries certification by EPA.',
     'The EPA has certified this treatment.', 'This product carries EPA certification.',
+    'The EPA recently certified this treatment.',
+    'The EPA has formally certified this treatment.',
+    'These products carry EPA certifications.',
+    'The certifications are from EPA.',
     "This treatment has the EPA's certification.", 'This treatment has the EPA’s certification.',
     "This treatment has the EPA's official certification.",
     'This treatment has the EPA’s formal certification.',
@@ -42,6 +50,8 @@ describe('email reply report and regulatory claims policy', () => {
   test.each([
     'The product is EPA-registered.',
     'The product is EPA-exempt.',
+    'The product is EPA&#45;registered.',
+    'The product is EPA &mdash; exempt.',
     'The product is EPA\\-registered.',
     'The product is EPA\\-exempt.',
     'The product is EPA-`registered`.',
@@ -49,6 +59,10 @@ describe('email reply report and regulatory claims policy', () => {
     'The notes quote EPA-``certified` with unequal markers.',
     'The product is EPA-`exempt`.',
     'The technician will confirm when the application is dry.',
+    'The EPA recently registered this product.',
+    'The certification paperwork came from the vendor.',
+    'The pest\ninspection is scheduled.',
+    'AT&amp;T appears in the account note.',
     'There is no **new** infestation claim in this scheduling note.',
     'The notes contain an unmatched * character.',
     'The notes contain an unmatched ` character.',
@@ -73,4 +87,9 @@ describe('email reply report and regulatory claims policy', () => {
     rejected("__This treatment has the **EPA's certification**.__");
     expect(verdict('**The product is EPA-*registered*.**')).toEqual({ ok: true, violations: [] });
   });
+});
+
+test('screens rendered multiline code claims while preserving registered wording', () => {
+  expect(verifyEmailReplyClaims({ text: 'The treatment has EPA `certification\n`.' }).ok).toBe(false);
+  expect(verifyEmailReplyClaims({ text: 'The treatment is EPA `registered\r\n`.' }).ok).toBe(true);
 });

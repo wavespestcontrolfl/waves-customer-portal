@@ -1,10 +1,11 @@
 const { findBannedCustomerCopy } = require('../service-report/activity-indicators');
 const { reentrySafetyClaimFinding } = require('../content/content-guardrails');
+const { decodeHTML } = require('entities');
 
 // Normalize typography before matching the customer-visible copy. This
 // includes nonbreaking hyphens in compliance claims.
 function normalizeCopy(text) {
-  let copy = String(text || '').normalize('NFKC')
+  let copy = decodeHTML(String(text || '')).normalize('NFKC')
     .replace(/[\u2010-\u2015\u2212]/g, '-')
     .replace(/[‘’]/g, "'")
     // CommonMark punctuation escapes render without the backslash. Keep
@@ -17,13 +18,15 @@ function normalizeCopy(text) {
   do {
     previous = copy;
     copy = copy
-      .replace(/(?<!`)(`+)(?!`)([^`\r\n]+?)\1(?!`)/g, '$2')
+      .replace(/(?<!`)(`+)(?!`)([^`]+?)\1(?!`)/g, (_, delimiter, contents) => contents.replace(/\r\n?|\n/g, ' '))
       .replace(/(\*\*\*|___|\*\*|__|\*|_)([^\s*_](?:[^\r\n]*?[^\s*_])?)\1/g, '$2');
   } while (copy !== previous);
-  return copy;
+  return copy
+    .replace(/\bEPA\s*-\s*(?=(?:approved|certif(?:ied|ies|ications?)|registered|exempt)\b)/gi, 'EPA-')
+    .replace(/\s+/g, ' ');
 }
 
-const EPA_CERTIFIED_RE = /\bEPA(?:'s\s+(?:(?:full|formal|official|officially)\s+)?|[\s-]*(?:(?:has|have|had)\s+)?(?:officially\s+)?)certif(?:ied|ies|ication)\b|\bcertif(?:ied|ication)\b[^.!?]{0,20}\b(?:by|from)\s+(?:the\s+)?(?:U\.?S\.?\s+)?EPA\b/i;
+const EPA_CERTIFIED_RE = /\bEPA(?:'s\s+(?:(?:full|formal|official|officially)\s+)?|[\s-]*(?:(?:has|have|had)\s+)?(?:(?:full|formal|formally|official|officially|recent|recently)\s+)?)certif(?:ied|ies|ications?)\b|\bcertif(?:ied|ies|ications?)\b[^.!?]{0,20}\b(?:by|from)\s+(?:the\s+)?(?:U\.?S\.?\s+)?EPA\b/i;
 
 // A claims-only, inactive policy. Factual grounding and send authorization
 // require separate checks; passing this screen establishes neither.

@@ -6,15 +6,18 @@ It is an inactive, copy-only policy with no customer or account context.
 
 The helper reuses the canonical `findBannedCustomerCopy` report screen and
 `reentrySafetyClaimFinding` instead of maintaining another list of those
-claims. Unicode dashes are folded before report screening. Paired inline
-Markdown emphasis and inline-code delimiters are removed so rendered formatting
-cannot hide a banned phrase. CommonMark escapes before ASCII punctuation are
-rendered before screening; unmatched marks, backslashes, and escapes before
-nonpunctuation characters remain in place. EPA certification wording is
-rejected in direct, reverse, and possessive forms, including `EPA's
-certification`, `EPA’s certification`, and the explicit possessive modifiers
-`full`, `formal`, and `official`. `EPA-registered` and `EPA-exempt` remain
-valid, including their rendered escaped and inline-code forms.
+claims. HTML character references are decoded, Unicode dashes are folded, and
+rendered whitespace is collapsed before report screening. Whitespace around an
+EPA claim dash is collapsed into the rendered compound. Paired inline Markdown
+emphasis and inline-code delimiters are removed so formatting cannot hide a
+banned phrase; line endings inside code spans render as spaces. CommonMark
+escapes before ASCII punctuation are rendered before screening; unmatched
+marks, backslashes, and escapes before nonpunctuation characters remain in
+place. EPA certification wording is rejected in singular and plural direct,
+reverse, and possessive forms. Bounded direct modifiers include `recently` and
+`formally`; possessive modifiers include `full`, `formal`, and `official`.
+`EPA-registered` and `EPA-exempt` remain valid, including rendered entity,
+escaped, spaced-dash, and inline-code forms.
 
 The canonical report-copy policy rejects `resolved` without a subject check.
 This inactive helper conservatively retains that ban, including copy such as
