@@ -456,3 +456,17 @@ test.each([
   if (valid) expect(problems).toEqual([]);
   else expect(problems.join('\n')).toMatch(/value must be/);
 });
+
+test.each([
+  ['but it was not applied there.', 'fail'],
+  ["but it wasn't actually applied there.", 'fail'],
+  ['but it was not applied at that location.', 'fail'],
+  ['but that is false, sorry.', 'fail'],
+  ['but that is false, my mistake.', 'fail'],
+  ['but it was not applied there, sorry.', 'fail'],
+  ['but it was not applied indoors, sorry.', 'pass'],
+  ['but the appointment date was wrong, sorry.', 'pass'],
+])('report retractions retain anaphoric locations and apologies: %s', (tail, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter, ${tail}`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
