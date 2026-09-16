@@ -2,6 +2,14 @@ const { matchEmailReplyUnitAt: match } = require('../services/email/email-reply-
 
 describe('inactive email pricing unit lexer', () => {
   test.each([
+    ['réapplication', 2], ['éper visit', 1], ['𝒙application', 2],
+    ['visit-by-visitation', 0], ['visit-by-visit-related', 0],
+    ['per visité', 0], ['per visit-é', 0], ['per visit\u0301', 0], ['per visit𐐀', 0],
+  ])('does not create unit evidence inside Unicode words or literal continuations: %s', (source, at) => {
+    expect(match(source, at)).toBeNull();
+  });
+
+  test.each([
     ['per visit', 'unit'], ['for each visit', 'unit'], ['for every visit', 'unit'],
     ['per the visit', 'unit'], ['/ each visit', 'unit'], ['by the visit', 'unit'],
     ['on a visit-by-visit basis', 'unit'], ['on every scheduled visit', 'unit'],
@@ -32,7 +40,7 @@ describe('inactive email pricing unit lexer', () => {
     ['$98 / month', 4, '/ month', 'month'], ['$1176/year', 5, '/year', 'year'],
     ['per month', 0, 'per month', 'month'], ['per year', 0, 'per year', 'year'],
     ['monthly', 0, 'monthly', 'month'], ['yearly', 0, 'yearly', 'year'],
-    ['annually', 0, 'annually', 'year'],
+    ['annually', 0, 'annually', 'year'], ['annual', 0, 'annual', 'year'],
   ])('retains a bounded plan period in %s', (source, start, text, period) => {
     expect(match(source, start)).toEqual({ kind: 'period', text, period, start, end: start + text.length });
   });

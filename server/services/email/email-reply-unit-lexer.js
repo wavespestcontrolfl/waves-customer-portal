@@ -34,7 +34,7 @@ const APPLICATION = `(?:${MODIFIER}\\s+){0,4}applications?\\b(?!-[a-z])`;
 const PREFIXED_APPLICATION = `(?:${APPLICATION_DET}\\s+)?${APPLICATION}`;
 
 const PATTERNS = [
-  ['unit', `(?:(?:on\\s+(?:a|the)\\s+)?visit-by-visit(?:\\s+basis)?|(?:-?per[\\s-]+|/\\s*|by\\s+)${PREFIXED_VISIT}|(?:for|on|at)\\s+${RECURRING})`],
+  ['unit', `(?:(?:on\\s+(?:a|the)\\s+)?visit-by-visit(?:\\s+basis)?\\b(?!-[a-z])|(?:-?per[\\s-]+|/\\s*|by\\s+)${PREFIXED_VISIT}|(?:for|on|at)\\s+${RECURRING})`],
   ['application', `(?:-?per[\\s-]+|for\\s+|/\\s*)${PREFIXED_APPLICATION}`],
   ['application', PREFIXED_APPLICATION],
   ['timing', `(?:on|at)\\s+(?:${TEMPORAL_POSSESSIVE}\\s+${VISIT}|${SINGLE_VISIT})`],
@@ -43,18 +43,26 @@ const PATTERNS = [
   ['visits', MANY_VISITS],
   ['visit', ONE_VISIT],
   ['period', '(?:/\\s*|per\\s+)(?:months?|mos?|years?|yrs?)\\b(?!-[a-z])'],
-  ['period', '(?:monthly|yearly|annually)\\b(?!-[a-z])'],
+  ['period', '(?:monthly|yearly|annually|annual)\\b(?!-[a-z])'],
 ].map(([kind, source]) => ({ kind, re: new RegExp(source, 'iy') }));
+
+function previousCharacter(source, at) {
+  const previousCodeUnit = source.charCodeAt(at - 1);
+  const previousWidth = previousCodeUnit >= 0xdc00 && previousCodeUnit <= 0xdfff ? 2 : 1;
+  return source.slice(Math.max(0, at - previousWidth), at);
+}
 
 function matchEmailReplyUnitAt(source, at = 0) {
   if (typeof source !== 'string' || source.length > 8192
     || Buffer.byteLength(source, 'utf8') > 8192
     || !Number.isInteger(at) || at < 0 || at >= source.length) return null;
-  if (at > 0 && /[a-z0-9_]/i.test(source[at - 1]) && !/[-/]/.test(source[at])) return null;
+  if (/[\p{L}\p{N}\p{M}_]/u.test(previousCharacter(source, at)) && !/[-/]/.test(source[at])) return null;
   let longest = null;
   for (const pattern of PATTERNS) {
     pattern.re.lastIndex = at;
     const matched = pattern.re.exec(source);
+    if (matched && /^(?:[\p{L}\p{N}\p{M}_]|-[\p{L}\p{N}\p{M}_])/u
+      .test(source.slice(at + matched[0].length))) continue;
     if (matched && (!longest || matched[0].length > longest.text.length)) {
       longest = { kind: pattern.kind, text: matched[0], start: at, end: at + matched[0].length };
     }

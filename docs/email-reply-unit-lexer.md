@@ -21,7 +21,7 @@ retain the predecessor's tested behavior. Hyphenated noun continuations
 such as `application-related` do not become partial units.
 
 The period forms `/mo`, `/month`, `/yr`, `/year`, `per month`, `per year`,
-`monthly`, `yearly`, and `annually` are recognition evidence only. A separate
+`monthly`, `yearly`, `annual`, and `annually` are recognition evidence only. A separate
 plan-total policy must relate a period to an amount and enforce trusted
 exemptions. Currency/measurement parsing and clause boundaries belong to
 separate modules. This is one prerequisite in the approved split of #4562;
