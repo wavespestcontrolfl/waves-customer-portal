@@ -124,15 +124,18 @@ function verifiedAppointmentIdentityClaims(claims, transcript, reference) {
 
 // The transcript, not the model's list, establishes both coverage and roles.
 // Called on extraction AND on persisted rows immediately before selection.
-function verifyRescheduleDateClaims(claims, transcript, reference, timing = {}) {
+function verifyRescheduleDateClaims(claims, transcript, reference, timing = {}, options = {}) {
   if (!Array.isArray(claims)) return false;
   const { dates, complete } = transcriptDates(transcript, reference);
   if (!complete) return false;
   const deliveryDates = dates.filter(date => date.binding === 'delivery');
+  // Only a caller that independently proved a confirmed office timing edit
+  // may override delivery timing. Calendar roles and coverage still apply.
+  const verifyTiming = options.timingVerifiedByOffice !== true;
   // An empty delivery list proves no timestamp, even when appointment dates
   // are present. Never let an invented floor delay a date-free promise.
-  if (!deliveryDates.length && timing.due_at != null) return false;
-  return deliveryDates.every(date => deliveryTimingMatches(date, timing, reference))
+  if (verifyTiming && !deliveryDates.length && timing.due_at != null) return false;
+  return (!verifyTiming || deliveryDates.every(date => deliveryTimingMatches(date, timing, reference)))
     && dates.every(date => claims.some(claim => claimCoversDate(claim, date)))
     && claims.every(claim => dates.some(date => claimCoversDate(claim, date)));
 }
