@@ -69,6 +69,20 @@ test.each([
 });
 
 test.each([
+  ['There is no guarantee that your next visit is free.', 'pass'],
+  ['There is no promise that your next visit is free.', 'pass'],
+  ['There are no guarantees we will cover your next visit.', 'pass'],
+  ['I make no promises that we will cover your next visit.', 'pass'],
+  ['There is not a guarantee that your next visit is free.', 'pass'],
+  ['There is no guarantee that the appointment is tomorrow, but your next visit is free.', 'fail'],
+  ['There is no promise that bait is included, so we will cover your next visit.', 'fail'],
+  ['There is no guarantee that your next visit is free, but we will cover your next visit.', 'fail'],
+  ['The office gave no guarantee about pricing; your next visit is free.', 'fail'],
+])('noun-form refusals govern only their free-visit proposition: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   ['You have nothing to worry about as your next visit is free.', 'fail'],
   ['Since there is no balance your next visit is free.', 'fail'],
   ['Because there is no fee your next visit is free.', 'fail'],
@@ -296,5 +310,19 @@ test.each([
   ['Provided with a report, your next visit is free.', 'fail'],
   ['Your next visit is free, but the office provided a report.', 'fail'],
 ])('a finite provided condition qualifies only the visit promise: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['Your next visit is free, subject to office approval.', 'pass'],
+  ['We will cover your next visit, but only with office approval.', 'pass'],
+  ['Your next visit is free only with manager authorization.', 'pass'],
+  ['Subject to office approval, your next visit is free.', 'pass'],
+  ['Only with office approval, we will cover your next visit.', 'pass'],
+  ['Your next visit is free, but the report is subject to office approval.', 'fail'],
+  ['The report is subject to office approval, but your next visit is free.', 'fail'],
+  ['Subject to office approval, the report will be sent, but your next visit is free.', 'fail'],
+  ['Only with office approval, the report can be sent; your next visit is free.', 'fail'],
+])('approval qualifiers govern only their free-visit claim: %s', (text, status) => {
   expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
 });

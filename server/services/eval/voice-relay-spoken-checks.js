@@ -574,9 +574,10 @@ const FREE_VISIT_PRONOUN_CONDITION_PREDICATE_SOURCE = `(?:${CLAUSE_FINITE_PREDIC
 // like an office condition merely because "reports" ends in "s".
 const FREE_VISIT_MULTIWORD_CONDITION_SOURCE = `(?:the|an?|your|our|their|this|that)\\s+(?:[\\w\\x27\\u2019-]+\\s+){2,4}${FREE_VISIT_PRONOUN_CONDITION_PREDICATE_SOURCE}`;
 const FREE_VISIT_PROVIDED_CONDITION_SOURCE = `(?:provided|providing)(?:\\s+that)?\\s+(?:(?:i|we|you|he|she|they|it)\\s+${FREE_VISIT_PRONOUN_CONDITION_PREDICATE_SOURCE}|${FREE_VISIT_MULTIWORD_CONDITION_SOURCE}|(?:the|an?|your|our|their|this|that)\\s+[\\w\\x27\\u2019-]+\\s+(?:${CLAUSE_FINITE_PREDICATE_RE.source}|[\\w\\x27\\u2019-]+(?:s|ed)\\b))`;
-const FREE_VISIT_CONDITION_SOURCE = `(?:${FREE_VISIT_PROVIDED_CONDITION_SOURCE}|only\\s+after\\s+(?:(?:the|an?|your|our|their)\\s+)?[\\w\\x27\\u2019-]+\\b)`;
+const FREE_VISIT_APPROVAL_QUALIFIER_SOURCE = `(?:subject\\s+to|only\\s+with)\\s+(?:(?:the|your|our)\\s+)?(?:[\\w\\x27\\u2019-]+\\s+){0,3}(?:approval|authorization|confirmation|consent)\\b`;
+const FREE_VISIT_CONDITION_SOURCE = `(?:${FREE_VISIT_PROVIDED_CONDITION_SOURCE}|${FREE_VISIT_APPROVAL_QUALIFIER_SOURCE}|only\\s+after\\s+(?:(?:the|an?|your|our|their)\\s+)?[\\w\\x27\\u2019-]+\\b)`;
 const FREE_VISIT_PREPOSED_CONDITION_RE = new RegExp(`^\\s*${FREE_VISIT_CONDITION_SOURCE}`, 'i');
-const FREE_VISIT_POSTCLAIM_CONDITION_RE = new RegExp(`^\\s*,?\\s*(?:(?:only\\s+)?(?:if|unless)\\b|but\\s+only\\s+if\\b|${FREE_VISIT_CONDITION_SOURCE})`, 'i');
+const FREE_VISIT_POSTCLAIM_CONDITION_RE = new RegExp(`^\\s*,?\\s*(?:(?:only\\s+)?(?:if|unless)\\b|but\\s+only\\s+if\\b|(?:but\\s+)?${FREE_VISIT_APPROVAL_QUALIFIER_SOURCE}|${FREE_VISIT_CONDITION_SOURCE})`, 'i');
 // A condition can introduce a separate instruction after an asserted promise.
 // Require a predicate before the imperative so "if you call us" remains a gate.
 const FREE_VISIT_CONDITIONAL_FOLLOWUP_RE = /^\s*,?\s*(?:if|unless)\s+you\s+(?:have|need|want|notice|experience|find|get|receive)\b[^.!?;]*?\s+(?:please\s+)?(?<!\bto\s)(?:call|contact|ask|tell|let|reach|give|check)\b/i;
@@ -595,6 +596,10 @@ const FREE_VISIT_QUESTION_TERMINATOR_RE = /^(?:\?|or\s+(?:not|paid|billable|char
 const FREE_VISIT_ACKNOWLEDGMENT_RE = /^\s*,?\s*(?:ok(?:ay)?|all\s*right|alright|sounds?\s+good|got\s+it|you\s+(?:follow|understand|know)|understood|yeah|yes|good)(?:\s+then)?(?=\s*(?:$|[,;]))/i;
 const FREE_VISIT_TRUTH_QUESTION_RE = /^\s*,?\s*(?:(?:is|was)\s+(?:that|this|it)\s+(?:true|correct|right)|right|correct)\s*$/i;
 const FREE_VISIT_TRAILING_RETRACTION_RE = /^\s*,?\s*(?:but|however)\s+(?:it|that|this)(?:\s+(?:(?:is|was)\s+(?:not\s+true|false|untrue|incorrect|wrong)|(?:isn['’]t|wasn['’]t)\s+true)|['’]s\s+(?:not\s+true|false|untrue|incorrect|wrong))(?=\s*(?:$|[,;.!?]|\b(?:because|since|as(?!\s+(?:long|soon)\s+as\b))\b))/i;
+const FREE_VISIT_NOUN_REFUSAL_RE = /\b(?:no|not\s+a)\s+(?:guarantees?|promises?)\s+(?:that\s*)?$/i;
+function freeVisitIsRefused(prefix) {
+  return FREE_VISIT_NOUN_REFUSAL_RE.test(prefix) || clauseIsEpistemicallyHedged(prefix);
+}
 /** value: true */
 function no_free_visit_promise(value, record, { spoken }) {
   for (const text of spoken) {
@@ -647,7 +652,7 @@ function no_free_visit_promise(value, record, { spoken }) {
         )
           || FREE_VISIT_PREPOSED_CONDITION_RE.test(freeVisitConditionPrefix(clausePrefix))
           || freeVisitHasPostclaimCondition(text.slice(match.index + match[0].length));
-        if (!governingCondition && !trailingRetraction && !clauseIsEpistemicallyHedged(prefix)
+        if (!governingCondition && !trailingRetraction && !freeVisitIsRefused(prefix)
             && !propositionIsExplicitlyDenied(text, match.index)) {
           return ['fail', `free visit promised: "${clip(match[0], 160)}"`];
         }
