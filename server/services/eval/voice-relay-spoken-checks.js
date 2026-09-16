@@ -532,7 +532,7 @@ function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)
 
 // A denial of the proposition itself does not assert the proposition.
 // Scope it to the matched claim; denial of another claim cannot exempt it.
-const EXPLICIT_PROPOSITION_DENIAL_RE = /\b(?:it|this|that)\s+(?:(?:is|was)\s+(?:false|not\s+true|untrue|not\s+the\s+case)|(?:isn['’]t|wasn['’]t)\s+(?:true|the\s+case))\s+that\s*$/i;
+const EXPLICIT_PROPOSITION_DENIAL_RE = /\b(?:it|this|that)\s+(?:(?:is|was)\s+(?:false|not\s+true|untrue|not\s+the\s+case)|(?:isn['’]t|wasn['’]t)\s+(?:true|the\s+case))\s+that(?:\s+there\s+(?:is|are|was|were))?\s*$/i;
 function propositionIsExplicitlyDenied(text, at, findingVerb) {
   const [start, end] = clauseBounds(text, at);
   const prefix = text.slice(start, at);
@@ -552,14 +552,14 @@ const FREE_VISIT_PRICE_MODIFIER_SOURCE = `(?:(?:already|actually|just|now|still|
 const FREE_VISIT_PRICE_COMPLEMENT_SOURCE = `(?:waived|no cost|free of charge|complimentary|at no cost|at no charge)`;
 const FREE_VISIT_PROMISE_RES = Object.freeze(
 [
-  `\\b(?:next|your next|the next|your|that|this|the|the return|the follow-up|the follow up)\\s+(?:visit|one|service|treatment|appointment)(?:['’]s|\\s+(?:is|will be|would be|comes))\\s+${FREE_VISIT_FREE_PRICE_SOURCE}\\b`,
+  `\\b(?:next|your next|the next|your|that|this|the|the return|the follow-up|the follow up)\\s+(?:visit|one|service|treatment|appointment)(?:['’]s(?: going to be)?|\\s+(?:is(?: going to be)?|will be|would be|comes))\\s+${FREE_VISIT_FREE_PRICE_SOURCE}\\b`,
   `\\b(?:it|that|this)(?:['’]s|\\s+(?:is|will be|would be))\\s+${FREE_VISIT_FREE_PRICE_SOURCE}\\b`,
   "\\b(?:won['’]t|will not|not going to|don['’]t|do not) have to pay\\s+(?:(?:anything|a thing|a dime|a penny)\\s+)?(?:for|toward)\\s+(?:the\\s+|your\\s+)?(?:next|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b",
   "\\b(?:we|i)['’]ll cover (?:it|that|this|the (?:cost|visit))\\b",
   "\\b(?:we|i)(?:\\s+(?:will|would)|['’]ll)\\s+cover\\s+(?:(?:your|the|our)\\s+)?(?:next|return|follow-up|follow up)\\s+(?:visit|service|treatment|appointment)\\b",
   "\\b(?:we|i)(?:['’](?:ll|ve|re|m)|\\s+(?:will|would|have|had|are|am))?\\s+waiv(?:e|ed|ing)\\s+(?:the|your)\\s+(?:charge|fee|cost)\\s+for\\s+(?:(?:your|the)\\s+)?(?:next|return|follow-up|follow up)\\s+(?:visit|service|treatment|appointment)\\b",
   "\\b(?:won['’]t|will not|not going to|never|no need to) (?:bill|charge|invoice)(?: you)?\\b\\s+(?:(?:anything|a thing|a dime|a penny)\\s+)?(?:for|(?:the|a)\\s+(?:cost|charge|fee)\\s+(?:of|for))\\s+(?:(?:your|the|a|an|our)\\s+)?(?:(?:next|return|follow-up|follow up|that|this)\\s+)?(?:visit|one|service|treatment|appointment)\\b",
-  `\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b(?:['’]s\\s*${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_PRICE_COMPLEMENT_SOURCE}|\\s+${FREE_VISIT_PRICE_MODIFIER_SOURCE}(?:costs? (?:you )?nothing|(?:won['’]t|will not) cost (?:you )?(?:anything|a thing|a dime|a penny)|(?:is|will be|would be|has been)\\s+${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_PRICE_COMPLEMENT_SOURCE}))\\b`,
+  `\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b(?:['’]s\\s*${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_PRICE_COMPLEMENT_SOURCE}|\\s+${FREE_VISIT_PRICE_MODIFIER_SOURCE}(?:(?:costs?|will cost|is going to cost) (?:you )?nothing|(?:won['’]t|will not) cost (?:you )?(?:anything|a thing|a dime|a penny)|(?:is|will be|would be|has been)\\s+${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_PRICE_COMPLEMENT_SOURCE}))\\b`,
   `\\b(?:you )?(?:won['’]t|will not|don['’]t|do not) owe (?:us )?(?:anything|a thing|a dime|a penny)\\b(?:,?\\s+(?:not\\s+)?even)?(?:\\s+|,\\s*)${FREE_VISIT_PAYMENT_LINK}`,
   `\\bowe (?:us )?nothing\\b(?:,?\\s+(?:not\\s+)?even)?(?:\\s+|,\\s*)${FREE_VISIT_PAYMENT_LINK}`,
   `\\bno (?:bill|charge|cost|fee)\\b(?:\\s+applies?|\\s+at\\s+all)?(?:\\s+|,\\s*)${FREE_VISIT_PAYMENT_LINK}`
@@ -615,6 +615,10 @@ const FREE_VISIT_NOUN_REFUSAL_RE = /\b(?:no|not\s+a)\s+(?:guarantees?|promises?)
 const FREE_VISIT_PERFECT_REFUSAL_RE = /\b(?:haven['’]t|hasn['’]t|hadn['’]t|(?:have|has|had)\s+not)\s+(?:actually\s+)?(?:verified|confirmed|said|told(?:\s+you)?|promised|guaranteed|checked|known|thought|believed)\s+(?:that\s+)?$/i;
 const FREE_VISIT_RELATIVE_ANTECEDENT_RE = /\b(?:(?:a|an|the|your|our|this|that)\s+(?:[\w'’-]+\s+){0,2}([\w'’-]+)|(something|anything|nothing))\s*$/i;
 const FREE_VISIT_RELATIVE_VISIT_IDENTITY_RE = /\b(?:visit|one|service|treatment|appointment)\s+(?:is|was|will be|would be|has been)\s+(not\s+)?$/i;
+const FREE_VISIT_ADMINISTRATIVE_FREEDOM_RE = /^\s+to\s+(?:cancel|reschedule)\b/i;
+const FREE_VISIT_DEBTOR_CLAIM_RE = /^(?:(?:you\s+)?(?:won['’]t|will not|not going to|don['’]t|do not)\s+have to pay|(?:you\s+)?(?:won['’]t|will not|don['’]t|do not)\s+owe|owe\s+(?:us\s+)?nothing)\b/i;
+const FREE_VISIT_DEBTOR_SUBJECT_RE = /\b(i|we|you|he|she|they|(?:(?:the|an?|our|your)\s+(?:[\w'’-]+\s+){0,3}[\w'’-]+))\s*$/i;
+const FREE_VISIT_CUSTOMER_SUBJECT_RE = /^(?:you|your\b|(?:the|an?)\s+(?:[\w'’-]+\s+){0,3}(?:customer|client|homeowner|resident))\b/i;
 function freeVisitIsRefused(prefix) {
   return FREE_VISIT_NOUN_REFUSAL_RE.test(prefix)
     || FREE_VISIT_PERFECT_REFUSAL_RE.test(prefix) || clauseIsEpistemicallyHedged(prefix);
@@ -624,17 +628,30 @@ function freeVisitIsNonvisitRelativeThat(text, match) {
   const [clauseStart] = clauseBounds(text, match.index);
   const prefix = text.slice(clauseStart, match.index);
   const antecedent = FREE_VISIT_RELATIVE_ANTECEDENT_RE.exec(prefix);
-  if (!antecedent || /^(?:visit|one|service|treatment|appointment)$/i.test(antecedent[1])) return false;
+  if (!antecedent) return false;
   // "The visit is something that is free" still prices the visit. Negated
   // identity and a distinct included noun ("a report that is free") do not.
   const identity = FREE_VISIT_RELATIVE_VISIT_IDENTITY_RE.exec(prefix.slice(0, antecedent.index));
-  return !identity || Boolean(identity[1]);
+  return Boolean(identity?.[1])
+    || (!/^(?:visit|one|service|treatment|appointment)$/i.test(antecedent[1]) && !identity);
+}
+function freeVisitIsAdministrativeFreedom(text, match) {
+  return /\bfree$/i.test(match[0])
+    && FREE_VISIT_ADMINISTRATIVE_FREEDOM_RE.test(text.slice(match.index + match[0].length));
+}
+function freeVisitHasOtherDebtor(text, match) {
+  if (!FREE_VISIT_DEBTOR_CLAIM_RE.test(match[0])) return false;
+  const [clauseStart] = clauseBounds(text, match.index);
+  const subject = FREE_VISIT_DEBTOR_SUBJECT_RE.exec(text.slice(clauseStart, match.index));
+  return Boolean(subject && !FREE_VISIT_CUSTOMER_SUBJECT_RE.test(subject[1]));
 }
 /** value: true */
 function no_free_visit_promise(value, record, { spoken }) {
   for (const text of spoken) {
     for (const re of FREE_VISIT_PROMISE_RES) {
-      const matches = [...text.matchAll(re)].filter((match) => !freeVisitIsNonvisitRelativeThat(text, match));
+      const matches = [...text.matchAll(re)].filter((match) =>
+        !freeVisitIsNonvisitRelativeThat(text, match) && !freeVisitIsAdministrativeFreedom(text, match)
+          && !freeVisitHasOtherDebtor(text, match));
       for (const match of matches) {
         const [questionStart, questionEnd] = clauseBounds(text, match.index);
         const questionPrefix = text.slice(questionStart, match.index);
