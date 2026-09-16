@@ -1356,12 +1356,12 @@ const REPORT_RETRACTION_ACTOR = `(?:i|we|you|he|she|they|(?:(?:the|our)\\s+)?(?:
 const REPORT_ANAPHORIC_ACTION = `(?:(?:do|did|done)\\s+(?:that|so|it)|(?:appl(?:y|ied)|spray(?:ed)?|us(?:e|ed)|place[ds]?|put|treat(?:ed)?)\\s+(?:it|that))`;
 const REPORT_TRAILING_DENIAL_RE = new RegExp(
   `^(?:actually\\s+)?(?:not(?:\\s+(?:really|actually))?(?:\\s+${REPORT_FINDING_VERB_RE.source})?|no|`
-    + `(?:it|that|this)\\s+(?:was|is)\\s+(?:(?:really|completely|entirely|totally|absolutely)\\s+)?(?:false|untrue|incorrect|inaccurate|wrong|not\\s+what\\s+happened)|(?:it|that|this)\\s+(?:never\\s+(?:actually\\s+)?(?:happened|occurred|took\\s+place)|did(?:n['’]t|\\s+not)\\s+(?:actually\\s+)?(?:happen|occur|take\\s+place)|(?:has|had)(?:n['’]t|\\s+not)\\s+(?:happened|occurred|taken\\s+place))|(?:it|that|this)\\s+(?:was|is|has|had)(?:n[\x27\u2019]t|\\s+not)(?:\\s+been)?(?:\\s+(?:true|correct|accurate|(?:actually\\s+)?${REPORT_FINDING_VERB_RE.source}))?|${REPORT_RETRACTION_ACTOR}\\s+(?:(?:did|have|has|had)(?:n[\x27\u2019]t|\\s+not)|never)\\s+(?:actually\\s+)?${REPORT_ANAPHORIC_ACTION})(?:\\s+(?:there|at\\s+that\\s+location))?(?:\\s+at\\s+all)?(?:\\s*,\\s*(?:sorry|my\\s+mistake|my\\s+apologies))?\\s*$`,
+    + `(?:it|that|this)\\s+(?:was|is)\\s+(?:(?:really|completely|entirely|totally|absolutely)\\s+)?(?:false|untrue|incorrect|inaccurate|wrong|not\\s+what\\s+happened)|(?:it|that|this)\\s+(?:never\\s+(?:actually\\s+)?(?:happened|occurred|took\\s+place)|did(?:n['’]t|\\s+not)\\s+(?:actually\\s+)?(?:happen|occur|take\\s+place)|(?:has|had)(?:n['’]t|\\s+not)\\s+(?:happened|occurred|taken\\s+place))|(?:it|that|this)\\s+(?:was|is|has|had)(?:n[\x27\u2019]t|\\s+(?:not|never))(?:\\s+been)?(?:\\s+(?:true|correct|accurate|(?:actually\\s+)?${REPORT_FINDING_VERB_RE.source}))?|${REPORT_RETRACTION_ACTOR}\\s+(?:(?:did|have|has|had)(?:n[\x27\u2019]t|\\s+not)|never)\\s+(?:actually\\s+)?${REPORT_ANAPHORIC_ACTION})(?:\\s+(?:there|at\\s+that\\s+location))?(?:\\s+at\\s+all)?(?:\\s*,\\s*(?:sorry|my\\s+mistake|my\\s+apologies))?\\s*$`,
   'i',
 );
 const REPORT_CONCISE_NONCOMPLETION_RE = /^\s*(?:(?:(?:is|are|was|were|has|have|had)(?:\s+(?:been|being))?\s+)?(?:(?:only|just|merely|simply|still)\s+)*(?:(?:the|our|your|their|his|her|my|its)\s+)?(?:(?:recommended|scheduled|planned|intended|proposed|suggested|considered|expected|required|needed|pending)\b|(?:an?\s+)?(?:recommendation|plan|proposal|suggestion|possibility)\b|under\s+consideration\b|(?:for\s+)?(?:tomorrow|tonight|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b)|(?:will|shall|would|should|can|could|may|might|must|is going to|are going to|was going to|were going to)\b)/i;
 function reportTrailingNoncompletion(text) {
-  const qualifier = text.replace(/\b(?:actually|in\s+fact)\b[,\s]*/gi, '').trim();
+  const qualifier = text.trim();
   const anaphoric = /^(?:it|this|that)\s+(.+)$/i.exec(qualifier)
     || new RegExp(`^${REPORT_RETRACTION_ACTOR}\\s+(.+?)\\s+to\\s+${REPORT_ANAPHORIC_ACTION}\\s*$`, 'i').exec(qualifier);
   return Boolean(anaphoric && REPORT_CONCISE_NONCOMPLETION_RE.test(anaphoric[1]));
@@ -1634,7 +1634,8 @@ function reportRetractionClause(text) {
   // Explanations do not undo a retraction. Stop at an independent clause or
   // the same causal boundary used for free-visit claims, not an arbitrary word cap.
   // Here "do so" refers to the finding; its "so" is not a new clause.
-  const anaphoric = text.replace(/\b(do|did|done)\s+so\b/gi, '$1 that');
+  const anaphoric = text.replace(/\b(?:actually|in\s+fact)\b[,\s]*/gi, '')
+    .replace(/\b(do|did|done)\s+so\b/gi, '$1 that');
   return clauseOf(anaphoric, 0).split(CLAIM_CAUSAL_BOUNDARY_RE)[0]
     .split(/\bsince\b/i)[0].trim().replace(/,\s*$/, '');
 }

@@ -582,3 +582,18 @@ test.each(['because it rained', 'since it rained', 'as it was raining', 'given t
   const spoken = [`Talstar P was applied to the exterior perimeter, but the office did not call ${explanation}.`];
   expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe('pass');
 });
+
+test.each([
+  ['it was never applied', 'fail'],
+  ['it has never been applied', 'fail'],
+  ['it had never been applied', 'fail'],
+  ['it has never actually been applied', 'fail'],
+  ['it was actually never applied', 'fail'],
+  ['actually, it was not applied', 'fail'],
+  ['in fact, it was never applied', 'fail'],
+  ['it was never applied indoors', 'pass'],
+  ['actually, it was never applied indoors', 'pass'],
+])('passive never retractions retain their finding scope: %s', (tail, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter, but ${tail}.`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
