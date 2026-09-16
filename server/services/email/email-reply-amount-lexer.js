@@ -30,6 +30,11 @@ const LETTER = /\p{L}/u;
 const RIGHT_JOIN = /[\p{L}\p{M}\p{N}_¢]/u;
 const DIGIT = /\d/;
 const OPEN_QUOTE_PUNCT = new Set(['(', '[', '{', ':', ';', ',', '"', '“', '‘']);
+const WRITTEN_PREFIX_WORDS = new Set([
+  'a', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine',
+  'hundred', 'and', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy',
+  'eighty', 'ninety',
+]);
 
 function previousCodePoint(source, at) {
   if (at < 1) return null;
@@ -88,6 +93,11 @@ function previousToken(source, at) {
   return { text: source.slice(start, end).toLowerCase(), start, end };
 }
 
+function previousWrittenWord(source, at) {
+  const token = previousToken(source, at);
+  return token?.text === '-' ? previousToken(source, token.start) : token;
+}
+
 function fullDigitsAt(source, token) {
   DIGITS_AT.lastIndex = token.start;
   const match = DIGITS_AT.exec(source);
@@ -137,11 +147,24 @@ function insideEarlierRange(source, at) {
   return longerRangeCovers(source, intro.start, at);
 }
 
+function insideEarlierWrittenAmount(source, at) {
+  if (!/[a-z]/i.test(source[at])) return false;
+  let before = at;
+  for (let words = 0; words < 4; words += 1) {
+    const previous = previousWrittenWord(source, before);
+    if (!previous || !WRITTEN_PREFIX_WORDS.has(previous.text)) return false;
+    if (longerRangeCovers(source, previous.start, at)) return true;
+    before = previous.start;
+  }
+  return false;
+}
+
 function matchEmailReplyAmountAt(source, at = 0) {
   if (typeof source !== 'string' || Buffer.byteLength(source, 'utf8') > MAX_SOURCE_BYTES
     || !Number.isInteger(at) || at < 0 || at >= source.length) return null;
   if (!validStart(source, at)) return null;
   if (insideEarlierRange(source, at)) return null;
+  if (insideEarlierWrittenAmount(source, at)) return null;
 
   let longest = null;
   for (const { kind, re } of MATCHERS) {

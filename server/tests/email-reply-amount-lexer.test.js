@@ -141,6 +141,27 @@ describe('bounded anchored email reply amount lexer', () => {
     expect(matchAt('A90 to 120 dollars', 7)).toEqual(token('money', '120 dollars', 7));
   });
   test.each([
+    ['one hundred and twenty dollars', 'twenty', 'money'],
+    ['one hundred twenty minutes', 'twenty', 'measurement'],
+    ['one-hundred and twenty dollars', 'twenty', 'money'],
+    ['one hundred-and twenty dollars', 'twenty', 'money'],
+    ['ninety eight dollars', 'eight', 'money'],
+    ['twenty one dollars', 'one', 'money'],
+    ['one hundred and twenty eight dollars', 'eight', 'money'],
+  ])('does not start inside a complete written amount: %s', (source, interior, kind) => {
+    expect(matchAt(source)).toEqual(token(kind, source));
+    expect(matchAt(source, source.lastIndexOf(interior))).toBeNull();
+  });
+  test('keeps later written amounts separate when no enclosing token covers them', () => {
+    const separate = 'one hundred dollars and twenty dollars';
+    expect(matchAt(separate, separate.lastIndexOf('twenty')))
+      .toEqual(token('money', 'twenty dollars', separate.lastIndexOf('twenty')));
+    const invalidPrefix = 'Aone hundred twenty dollars';
+    expect(matchAt(invalidPrefix, invalidPrefix.indexOf('one'))).toBeNull();
+    expect(matchAt(invalidPrefix, invalidPrefix.indexOf('twenty')))
+      .toEqual(token('money', 'twenty dollars', invalidPrefix.indexOf('twenty')));
+  });
+  test.each([
     ['$90 to $120', 7], ['$90 - $120', 6],
     ['USD 90 to USD 120', 10], ['USD 90 to USD 120', 14],
   ])('does not start at an explicit-currency endpoint inside a full range: %s', (source, at) => {

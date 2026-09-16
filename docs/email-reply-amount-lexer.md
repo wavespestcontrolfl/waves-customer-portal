@@ -25,6 +25,10 @@ interior endpoint of a complete numeric, currency, or measurement range return
 `null` only when the enclosing range has a valid start;
 bare `between 90 and 120` without a measurement unit still exposes its two
 historical number tokens because it has no full range token.
+The same enclosure rule checks at most four earlier written-number words,
+including hyphen joins, so the `twenty` inside `one hundred and twenty
+dollars` is not a second amount. A later unrelated `twenty dollars` still
+matches independently.
 
 The finite currency scope is dollar signs, USD, dollars, bucks, cents, and
 the cent sign (`98¢`). It recognizes numeric and bounded written amounts,
