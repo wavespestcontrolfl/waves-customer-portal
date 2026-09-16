@@ -547,17 +547,17 @@ function propositionIsExplicitlyDenied(text, at, findingVerb) {
 // The vocabulary from the existing fixture; only its refusal scope changes.
 const FREE_VISIT_PROMISE_RES = Object.freeze(
 [
-  "\\b(?:next|your next|the next|your)\\s+(?:visit|one|service|treatment|appointment)(?:['’]s|\\s+(?:is|will be|would be|comes))\\s+(?:free|on us|at no charge|no charge|at no cost|no cost|complimentary|on the house)\\b",
+  "\\b(?:next|your next|the next|your|that|this|the|the return|the follow-up|the follow up)\\s+(?:visit|one|service|treatment|appointment)(?:['’]s|\\s+(?:is|will be|would be|comes))\\s+(?:free|on us|at no charge|no charge|at no cost|no cost|complimentary|on the house)\\b",
   "\\b(?:it|that|this)(?:['’]s|\\s+(?:is|will be|would be))\\s+(?:free|on us|at no charge|no charge|at no cost|no cost|complimentary|on the house)\\b",
   "\\b(?:won['’]t|will not|not going to|don['’]t|do not) have to pay\\s+(?:(?:anything|a thing|a dime|a penny)\\s+)?(?:for|toward)\\s+(?:the\\s+|your\\s+)?(?:next|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b",
   "\\b(?:we|i)['’]ll cover (?:it|that|this|the (?:cost|visit))\\b",
   "\\b(?:we|i)(?:\\s+(?:will|would)|['’]ll)\\s+cover\\s+(?:(?:your|the|our)\\s+)?(?:next|return|follow-up|follow up)\\s+(?:visit|service|treatment|appointment)\\b",
   "\\b(?:we|i)\\s+(?:(?:will|would)\\s+)?waiv(?:e|ed)\\s+(?:the|your)\\s+(?:charge|fee|cost)\\s+for\\s+(?:(?:your|the)\\s+)?(?:next|return|follow-up|follow up)\\s+(?:visit|service|treatment|appointment)\\b",
   "\\b(?:won['’]t|will not|not going to|never|no need to) (?:bill|charge|invoice)(?: you)?\\b\\s+(?:(?:anything|a thing|a dime|a penny)\\s+)?(?:for|(?:the|a)\\s+(?:cost|charge|fee)\\s+(?:of|for))\\s+(?:(?:your|the|a|an|our)\\s+)?(?:(?:next|return|follow-up|follow up|that|this)\\s+)?(?:visit|one|service|treatment|appointment)\\b",
-  "\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b[^.!?]{0,20}?\\b(?:costs? (?:you )?nothing|won['’]t cost (?:you )?(?:anything|a thing|a dime|a penny)|(?:is|will be|would be|has been|['’]s) (?:waived|no cost|free of charge|complimentary|at no cost|at no charge))\\b",
-  "\\b(?:you )?(?:won['’]t|will not|don['’]t|do not) owe (?:us )?(?:anything|a thing|a dime|a penny)\\b[^.!?]{0,40}?\\b(?:visit|one|service|treatment|appointment)\\b",
-  "\\bowe (?:us )?nothing\\b[^.!?]{0,40}?\\b(?:visit|one|service|treatment|appointment)\\b",
-  "\\bno (?:bill|charge|cost|fee)\\b[^.!?]{0,30}?\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b"
+  "\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b[^.!?;:]{0,20}?\\b(?:costs? (?:you )?nothing|won['’]t cost (?:you )?(?:anything|a thing|a dime|a penny)|(?:is|will be|would be|has been|['’]s) (?:waived|no cost|free of charge|complimentary|at no cost|at no charge))\\b",
+  "\\b(?:you )?(?:won['’]t|will not|don['’]t|do not) owe (?:us )?(?:anything|a thing|a dime|a penny)\\b[^.!?;:]{0,40}?\\b(?:visit|one|service|treatment|appointment)\\b",
+  "\\bowe (?:us )?nothing\\b[^.!?;:]{0,40}?\\b(?:visit|one|service|treatment|appointment)\\b",
+  "\\bno (?:bill|charge|cost|fee)\\b[^.!?;:]{0,30}?\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b"
 ].map((source) => new RegExp(source, 'gi')));
 const CLAIM_CAUSAL_BOUNDARY_RE = new RegExp(
   `\\b(?:as(?!\\s+of\\b)|since(?!\\s+(?:today|yesterday|now)\\b)|now\\s+that|given\\s+that|due\\s+to\\s+the\\s+fact\\s+that)\\b(?=\\s+(?:(?:i|we|you|he|she|they|it)\\s+|`
@@ -573,14 +573,16 @@ const FREE_VISIT_PRONOUN_CONDITION_PREDICATE_SOURCE = `(?:${CLAUSE_FINITE_PREDIC
 // object effect ("providing the billing office treatment reports") looks
 // like an office condition merely because "reports" ends in "s".
 const FREE_VISIT_MULTIWORD_CONDITION_SOURCE = `(?:the|an?|your|our|their|this|that)\\s+(?:[\\w\\x27\\u2019-]+\\s+){2,4}${FREE_VISIT_PRONOUN_CONDITION_PREDICATE_SOURCE}`;
-const FREE_VISIT_PROVIDED_CONDITION_SOURCE = `(?:provided|providing)(?:\\s+that)?\\s+(?:(?:i|we|you|he|she|they|it)\\s+${FREE_VISIT_PRONOUN_CONDITION_PREDICATE_SOURCE}|${FREE_VISIT_MULTIWORD_CONDITION_SOURCE}|(?:the|an?|your|our|their|this|that)\\s+[\\w\\x27\\u2019-]+\\s+(?:${CLAUSE_FINITE_PREDICATE_RE.source}|[\\w\\x27\\u2019-]+(?:s|ed)\\b))`;
+const FREE_VISIT_FINITE_CONDITION_SOURCE = `(?:(?:i|we|you|he|she|they|it)\\s+${FREE_VISIT_PRONOUN_CONDITION_PREDICATE_SOURCE}|${FREE_VISIT_MULTIWORD_CONDITION_SOURCE}|(?:the|an?|your|our|their|this|that)\\s+[\\w\\x27\\u2019-]+\\s+(?:${CLAUSE_FINITE_PREDICATE_RE.source}|[\\w\\x27\\u2019-]+(?:s|ed)\\b))`;
+const FREE_VISIT_PROVIDED_CONDITION_SOURCE = `(?:provided|providing)(?:\\s+that)?\\s+${FREE_VISIT_FINITE_CONDITION_SOURCE}`;
+const FREE_VISIT_AS_LONG_AS_CONDITION_SOURCE = `as\\s+long\\s+as\\s+${FREE_VISIT_FINITE_CONDITION_SOURCE}`;
 const FREE_VISIT_APPROVAL_QUALIFIER_SOURCE = `(?:subject\\s+to|only\\s+with)\\s+(?:(?:the|your|our)\\s+)?(?:[\\w\\x27\\u2019-]+\\s+){0,3}(?:approval|authorization|confirmation|consent)\\b`;
-const FREE_VISIT_CONDITION_SOURCE = `(?:${FREE_VISIT_PROVIDED_CONDITION_SOURCE}|${FREE_VISIT_APPROVAL_QUALIFIER_SOURCE}|only\\s+after\\s+(?:(?:the|an?|your|our|their)\\s+)?[\\w\\x27\\u2019-]+\\b)`;
+const FREE_VISIT_CONDITION_SOURCE = `(?:${FREE_VISIT_PROVIDED_CONDITION_SOURCE}|${FREE_VISIT_AS_LONG_AS_CONDITION_SOURCE}|${FREE_VISIT_APPROVAL_QUALIFIER_SOURCE}|only\\s+after\\s+(?:(?:the|an?|your|our|their)\\s+)?[\\w\\x27\\u2019-]+\\b)`;
 const FREE_VISIT_PREPOSED_CONDITION_RE = new RegExp(`^\\s*${FREE_VISIT_CONDITION_SOURCE}`, 'i');
 const FREE_VISIT_POSTCLAIM_CONDITION_RE = new RegExp(`^\\s*,?\\s*(?:(?:only\\s+)?(?:if|unless)\\b|but\\s+only\\s+if\\b|(?:but\\s+)?${FREE_VISIT_APPROVAL_QUALIFIER_SOURCE}|${FREE_VISIT_CONDITION_SOURCE})`, 'i');
 // A condition can introduce a separate instruction after an asserted promise.
 // Require a predicate before the imperative so "if you call us" remains a gate.
-const FREE_VISIT_CONDITIONAL_FOLLOWUP_RE = /^\s*,?\s*(?:if|unless)\s+you\s+(?:have|need|want|notice|experience|find|get|receive)\b[^.!?;]*?\s+(?:please\s+)?(?<!\bto\s)(?<!\band\s)(?<!\bor\s)(?:call|contact|ask|tell|let|reach|give|check)\b/i;
+const FREE_VISIT_CONDITIONAL_FOLLOWUP_RE = /^\s*,?\s*(?:if|unless)\s+you\s+(?:have|need|want|notice|experience|find|get|receive)\b[^.!?;]*?\s+(?:please\s+)?(?<!\bto\s)(?<!\band\s)(?<!\bor\s)(?:call|contact|ask|tell|let|reach|give|check|email|text|message)\b/i;
 const FREE_VISIT_PREPOSED_COORDINATED_CONDITION_RE = /^\s*(?:only\s+)?(?:if|unless)\b[^,;.!?]*\band\b[^,;.!?]*,\s*$/i;
 function freeVisitHasPostclaimCondition(tail) {
   return FREE_VISIT_POSTCLAIM_CONDITION_RE.test(tail)
@@ -599,11 +601,13 @@ const FOLLOWUP_QUESTION_RE = /(?:,\s*|\s+(?:and|but|so)\s+)(?:(?:and|but|so)\s+)
 const FREE_VISIT_LEADING_QUESTION_RE = /^(?!\s*(?:do|does|did)\s+not\b)\s*(?:did|do|does|is|are|was|were|will|would|can|could|should|has|have|had|what|who|why|how)\b[^,;:]*$/i;
 const FREE_VISIT_QUESTION_TERMINATOR_RE = /^(?:\?|or\s+(?:not|paid|billable|charged)\?\s*$)/i;
 const FREE_VISIT_ACKNOWLEDGMENT_RE = /^\s*,?\s*(?:ok(?:ay)?|all\s*right|alright|sounds?\s+good|got\s+it|you\s+(?:follow|understand|know)|understood|yeah|yes|good)(?:\s+then)?(?=\s*(?:$|[,;]))/i;
-const FREE_VISIT_TRUTH_QUESTION_RE = /^\s*,?\s*(?:(?:is|was)\s+(?:that|this|it)\s+(?:true|correct|right)|right|correct)\s*$/i;
+const FREE_VISIT_TRUTH_QUESTION_RE = /^\s*,?\s*(?:(?:is|was)\s+(?:that|this|it)\s+(?:true|correct|right)|(?:isn['’]t|wasn['’]t|won['’]t|wouldn['’]t)\s+it|right|correct)\s*$/i;
 const FREE_VISIT_TRAILING_RETRACTION_RE = /^\s*,?\s*(?:but|however)\s+(?:it|that|this)(?:\s+(?:(?:is|was)\s+(?:not\s+true|false|untrue|incorrect|wrong)|(?:isn['’]t|wasn['’]t)\s+true)|['’]s\s+(?:not\s+true|false|untrue|incorrect|wrong))(?=\s*(?:$|[,;.!?]|\b(?:because|since|as(?!\s+(?:long|soon)\s+as\b))\b))/i;
 const FREE_VISIT_NOUN_REFUSAL_RE = /\b(?:no|not\s+a)\s+(?:guarantees?|promises?)\s+(?:that\s+)?(?:(?:i|we|you|he|she|they|the\s+(?:office|team))\s+)?$/i;
+const FREE_VISIT_PERFECT_REFUSAL_RE = /\b(?:haven['’]t|hasn['’]t|hadn['’]t|(?:have|has|had)\s+not)\s+(?:actually\s+)?(?:verified|confirmed|said|told(?:\s+you)?|promised|guaranteed|checked|known|thought|believed)\s+(?:that\s+)?$/i;
 function freeVisitIsRefused(prefix) {
-  return FREE_VISIT_NOUN_REFUSAL_RE.test(prefix) || clauseIsEpistemicallyHedged(prefix);
+  return FREE_VISIT_NOUN_REFUSAL_RE.test(prefix)
+    || FREE_VISIT_PERFECT_REFUSAL_RE.test(prefix) || clauseIsEpistemicallyHedged(prefix);
 }
 /** value: true */
 function no_free_visit_promise(value, record, { spoken }) {
