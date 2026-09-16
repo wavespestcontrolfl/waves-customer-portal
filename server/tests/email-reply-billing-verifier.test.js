@@ -8,6 +8,8 @@ describe('email reply amountless billing policy', () => {
     'The rate is per visit', 'Billing is per visit', 'You will be billed per visit',
     'Payments are per visit', 'You pay per visit', 'The fee will be per routine visit',
     'Our rate is per visit', 'Rate per visit',
+    'Billing is per 30-minute scheduled visit',
+    'Our fees are per scheduled routine quarterly residential exterior preventive ongoing planned visit',
     'We invoice per visit', 'You will be invoiced per visit', 'Your invoice is per visit',
     'Invoicing is per visit', 'Our prices are per visit', 'Our fees are per visit',
     'Rates are per visit', 'Our amounts are per visit', 'Our costs are per visit',
@@ -32,6 +34,11 @@ describe('email reply amountless billing policy', () => {
     'Please rate each visit.', 'You can rate a scheduled visit in the portal.',
     'Our prices are per application.', 'Each visit is billed per application.',
     'The rate is 98 per application. We confirm each visit.',
+    'Please pay the outstanding balance before our next visit.',
+    'Please pay your outstanding balance before the next visit.',
+    'Please pay the invoice before your next visit.',
+    'Payment is the account balance due before the scheduled visit.',
+    'Please pay the balance after we confirm access for your visit.',
     'The notes contain an unmatched * or ` and a backslash before \\q.',
   ])('preserves ordinary and per-application prose: %s', (text) => {
     expect(verdict(text)).toEqual({ ok: true, violations: [] });

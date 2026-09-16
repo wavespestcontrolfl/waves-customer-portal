@@ -17,6 +17,9 @@ Only explicit boolean `commercialProposal: true` exempts recognized billing
 wording. A future caller must obtain that context from trusted proposal data;
 words in the draft cannot grant the exemption. Ordinary reminders, access
 discussions, feedback uses of `rate`, and per-application billing remain valid.
+Visit modifiers are capped at eight words and stop at clause, preposition, or
+determiner boundaries, so a payment reminder such as `pay the outstanding
+balance before our next visit` is not mistaken for per-visit billing.
 
 Monetary clauses such as `$98 per visit`, `the rate is 98 per visit`, or `each
 visit is billed at 98` belong to the separately reviewed monetary sibling and
