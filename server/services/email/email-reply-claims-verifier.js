@@ -6,18 +6,24 @@ const { reentrySafetyClaimFinding } = require('../content/content-guardrails');
 function normalizeCopy(text) {
   let copy = String(text || '').normalize('NFKC')
     .replace(/[\u2010-\u2015\u2212]/g, '-')
-    .replace(/[‘’]/g, "'");
-  // Peel paired emphasis layers until stable; every changed pass removes
-  // delimiters, including nested wrappers, while leaving stray punctuation.
+    .replace(/[‘’]/g, "'")
+    // CommonMark punctuation escapes render without the backslash. Keep
+    // unmatched backslashes and escapes before nonpunctuation characters.
+    .replace(/\\([-!"#$%&'()*+,.\/:;<=>?@[\]^_`{|}~\\])/g, '$1');
+  // Peel paired inline-code and emphasis layers until stable; every changed
+  // pass removes delimiters, including nested wrappers, while leaving stray
+  // punctuation.
   let previous;
   do {
     previous = copy;
-    copy = copy.replace(/(\*\*\*|___|\*\*|__|\*|_)([^\s*_](?:[^\r\n]*?[^\s*_])?)\1/g, '$2');
+    copy = copy
+      .replace(/(?<!`)(`+)(?!`)([^`\r\n]+?)\1(?!`)/g, '$2')
+      .replace(/(\*\*\*|___|\*\*|__|\*|_)([^\s*_](?:[^\r\n]*?[^\s*_])?)\1/g, '$2');
   } while (copy !== previous);
   return copy;
 }
 
-const EPA_CERTIFIED_RE = /\bEPA(?:'s)?[\s-]*(?:(?:has|have|had)\s+)?(?:officially\s+)?certif(?:ied|ies|ication)\b|\bcertif(?:ied|ication)\b[^.!?]{0,20}\b(?:by|from)\s+(?:the\s+)?(?:U\.?S\.?\s+)?EPA\b/i;
+const EPA_CERTIFIED_RE = /\bEPA(?:'s\s+(?:(?:full|formal|official|officially)\s+)?|[\s-]*(?:(?:has|have|had)\s+)?(?:officially\s+)?)certif(?:ied|ies|ication)\b|\bcertif(?:ied|ication)\b[^.!?]{0,20}\b(?:by|from)\s+(?:the\s+)?(?:U\.?S\.?\s+)?EPA\b/i;
 
 // A claims-only, inactive policy. Factual grounding and send authorization
 // require separate checks; passing this screen establishes neither.
