@@ -3269,14 +3269,30 @@ router.delete('/scheduled/:id', async (req, res, next) => {
     await db.transaction(async (trx) => {
       if (threadLast10) await lockSuggestThread(trx, threadLast10);
 
-      // Atomic delete-with-returning: if the dispatch cron claimed the row
-      // (status flipped to 'sending') between the peek and this delete,
+      // A queued review-ask retry (scheduled-sms-delivery.js's uncertain-send
+      // hold) carries the review_ask_reservation marker as the ONLY evidence
+      // that attempt ever happened. Deleting it would let the next ask bypass
+      // the 72-hour spacing hold, so cancel it in place — a canceled row with
+      // that marker is still an unresolved reservation to review-ask-history's
+      // lastManualAskAt, which reads it regardless of status. Every other
+      // scheduled row cancels the existing way: physically deleted.
+      const claimed = await trx('sms_log')
+        .where({ id: req.params.id, status: 'scheduled' })
+        .first('metadata');
+      const isReviewReservation = parseJson(claimed?.metadata, {}).review_ask_reservation === true;
+
+      // Atomic mutate-with-returning: if the dispatch cron claimed the row
+      // (status flipped to 'sending') between the peek and this point,
       // zero rows return and we must NOT touch the decisions — the SMS is
       // about to send and fire-time resolution owns them.
-      const deleted = await trx('sms_log')
-        .where({ id: req.params.id, status: 'scheduled' })
-        .del(['id', 'metadata', 'created_at']);
-      const row = deleted?.[0];
+      const mutated = isReviewReservation
+        ? await trx('sms_log')
+          .where({ id: req.params.id, status: 'scheduled' })
+          .update({ status: 'canceled', updated_at: new Date() }, ['id', 'metadata', 'created_at'])
+        : await trx('sms_log')
+          .where({ id: req.params.id, status: 'scheduled' })
+          .del(['id', 'metadata', 'created_at']);
+      const row = mutated?.[0];
       if (!row) return;
 
       const meta = parseJson(row.metadata, {});
