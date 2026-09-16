@@ -74,6 +74,41 @@ describe('bounded email reply pricing clause recognition', () => {
   });
 
   test.each([
+    ['per the application', 'application'],
+    ['per each application', 'application'],
+    ['/ the application', 'application'],
+    ['/ each application', 'application'],
+    ['per the visit', 'unit'],
+    ['/ each visit', 'unit'],
+  ])('accepts bounded determiners after a per/slash prefix: %s', (unit, kind) => {
+    expect(tokens(`$98 ${unit}`)).toEqual([
+      { kind: 'money', text: '$98' }, { kind, text: unit },
+    ]);
+  });
+
+  test.each([
+    ['We credited $98 for application-related damage', 'application-related'],
+    ['$98 for visit-related damage', 'visit-related'],
+    ['$98 per-visit-fee', 'per-visit-fee'],
+  ])('does not classify a partial hyphenated noun: %s', (text, noun) => {
+    expect(tokens(text).some(({ kind }) => ['application', 'forVisit', 'unit'].includes(kind))).toBe(false);
+    expect(tokens(text)).toContainEqual({ kind: 'word', text: noun });
+  });
+
+  test('recognizes bounded numeric ordinal modifiers', () => {
+    expect(tokens('$98 for the 1st visit')).toEqual([
+      { kind: 'money', text: '$98' }, { kind: 'forVisit', text: 'for the 1st visit' },
+    ]);
+    expect(tokens('$98 for the 2nd application')).toEqual([
+      { kind: 'money', text: '$98' }, { kind: 'application', text: 'for the 2nd application' },
+    ]);
+  });
+
+  test('keeps inherited object property names as ordinary string tokens', () => {
+    expect(tokens('constructor')).toEqual([{ kind: 'word', text: 'constructor' }]);
+  });
+
+  test.each([
     'for this application', 'for my next application',
     'for their application', 'for his application', 'for her application',
   ])('recognizes complete application determiners: %s', (unit) => {

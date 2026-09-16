@@ -30,6 +30,11 @@ duration unit remains a `measurement`.
 Compound predicates such as `pay-per-visit` emit `word pay` followed by
 `unit -per-visit`; the same boundary preserves `-per-application` as an
 `application` token. Application units accept the full visit determiner set.
+That same finite determiner set follows `per` or `/` before application and
+visit nouns. A hyphenated continuation such as `application-related` or
+`visit-related` cannot be truncated into an application or visit token.
+Bounded numeric ordinals (`1st`, `2nd`, and similar forms up to three digits)
+may modify a visit or application noun.
 One-off `on`/`at` timing also accepts possessive today, tomorrow, yesterday,
 and weekday names (with optional this/next/last for weekdays).
 
@@ -40,6 +45,8 @@ from the verb `pay`. The `+` operator before tax or fees becomes `word plus`;
 otherwise it stays attached to a minimum-price `money` token. Neither this
 module nor its tokens declare a pricing-policy violation; the monetary and
 amountless adapters decide that from clause relationships.
+Unknown words, including JavaScript object property names such as
+`constructor`, keep string token text.
 
 The same 8,192-byte, 512-token, eight-format-pass normalization limits apply.
 This inactive helper has no runtime caller, database access, provider call, or

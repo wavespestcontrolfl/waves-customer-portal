@@ -34,9 +34,9 @@ const STOP_WORDS = [
 ];
 const STOP = `(?:${[...new Set(STOP_WORDS)].join('|')})`;
 const DURATION = '(?:minutes?|hours?|days?|weeks?|months?|years?)';
-const MODIFIER = `(?!(?:applications?|${STOP})(?=\\s|$))(?:[a-z]+(?:-(?!(?:dollars?|bucks?)\\b)[a-z]+)*|\\d{1,9}(?:\\.\\d{1,2})?(?:-(?:minute|hour|day|week|month|year)s?|\\s+${DURATION}))`;
-const VISIT = `(?:${MODIFIER}\\s+){0,8}(?:service-)?visit\\b`;
-const VISITS = `(?:${MODIFIER}\\s+){0,8}(?:service-)?visits\\b`;
+const MODIFIER = `(?!(?:applications?|${STOP})(?=\\s|$))(?:[a-z]+(?:-(?!(?:dollars?|bucks?)\\b)[a-z]+)*|\\d{1,3}(?:st|nd|rd|th)|\\d{1,9}(?:\\.\\d{1,2})?(?:-(?:minute|hour|day|week|month|year)s?|\\s+${DURATION}))`;
+const VISIT = `(?:${MODIFIER}\\s+){0,8}(?:service-)?visit\\b(?!-[a-z])`;
+const VISITS = `(?:${MODIFIER}\\s+){0,8}(?:service-)?visits\\b(?!-[a-z])`;
 const SINGULAR_DET = '(?:a|an|one|the|your|our|my|their|his|her|its|this|that)';
 const PLURAL_DET = '(?:the|your|our|my|their|his|her|its|these|those)';
 const APPLICATION_DET = `(?:each|every|any|${SINGULAR_DET}|${PLURAL_DET})`;
@@ -45,9 +45,11 @@ const MANY_VISITS = `(?:${PLURAL_DET}\\s+)?${VISITS}`;
 const EACH_VISIT = `(?:each|every|any)\\s+(?:${VISIT}|${VISITS})`;
 const RECURRING = `(?:${EACH_VISIT}|${MANY_VISITS})`;
 const SINGLE_VISIT = `(?:${ONE_VISIT})`;
+const PREFIXED_VISIT = `(?:${EACH_VISIT}|${ONE_VISIT}|${MANY_VISITS})`;
 const WEEKDAY = '(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)';
 const TEMPORAL_POSSESSIVE = `(?:today|tomorrow|yesterday|(?:(?:this|next|last)\\s+)?${WEEKDAY})'s`;
-const APPLICATION = `(?:${MODIFIER}\\s+){0,4}applications?\\b`;
+const APPLICATION = `(?:${MODIFIER}\\s+){0,4}applications?\\b(?!-[a-z])`;
+const PREFIXED_APPLICATION = `(?:${APPLICATION_DET}\\s+)?${APPLICATION}`;
 
 const DIGITS = '\\d{1,9}(?:,\\d{3}){0,3}(?:\\.\\d{1,2})?';
 const NUMERIC_RANGE = `${DIGITS}(?:\\s*(?:-|to)\\s*(?:(?:\\$\\s*|usd\\s+))?${DIGITS})?`;
@@ -64,8 +66,8 @@ const MEASURE = `${MEASURE_SPAN}\\s+(?:minutes?|hours?|days?|weeks?|months?|year
 // Longest anchored match wins. The stable order breaks equal-length ties;
 // unit/application/measurement forms precede their shorter constituents.
 const PATTERNS = [
-  ['unit', `(?:(?:on\\s+(?:a|the)\\s+)?visit-by-visit(?:\\s+basis)?|(?:-?per[\\s-]+|/\\s*|by\\s+(?:(?:the|each)\\s+)?)${VISIT}|(?:-?per[\\s-]+|/\\s*|by\\s+(?:(?:the|each)\\s+)?)${VISITS}|(?:for|on|at)\\s+${RECURRING})`],
-  ['application', `(?:-?per[\\s-]+|for\\s+(?:${APPLICATION_DET}\\s+)?|/\\s*)${APPLICATION}`],
+  ['unit', `(?:(?:on\\s+(?:a|the)\\s+)?visit-by-visit(?:\\s+basis)?|(?:-?per[\\s-]+|/\\s*|by\\s+)${PREFIXED_VISIT}|(?:for|on|at)\\s+${RECURRING})`],
+  ['application', `(?:-?per[\\s-]+|for\\s+|/\\s*)${PREFIXED_APPLICATION}`],
   ['timing', `(?:on|at)\\s+(?:${TEMPORAL_POSSESSIVE}\\s+${VISIT}|${SINGLE_VISIT})`],
   ['forVisit', `for\\s+${SINGLE_VISIT}`],
   ['eachVisit', EACH_VISIT],
@@ -81,6 +83,11 @@ const PATTERNS = [
   ['sep', '[,:()\\-]'],
   ['word', '[a-z]+(?:-(?!per-)[a-z]+)*\\b'],
 ].map(([kind, source]) => ({ kind, re: new RegExp(source, 'iy') }));
+
+function wordText(text) {
+  if (text === '+') return 'plus';
+  return Object.hasOwn(STEM, text) ? STEM[text] : text;
+}
 
 function recognizeEmailReplyPricingClauses(text = '') {
   const normalized = normalizeEmailReplyCopy(text);
@@ -109,7 +116,7 @@ function recognizeEmailReplyPricingClauses(text = '') {
     }
     if (longest) {
       clause.push({ kind: longest.kind, text: longest.kind === 'word'
-        ? (longest.text === '+' ? 'plus' : STEM[longest.text] || longest.text) : longest.text });
+        ? wordText(longest.text) : longest.text });
       at += longest.text.length;
     } else {
       // Never erase syntax the bounded grammar cannot classify.
