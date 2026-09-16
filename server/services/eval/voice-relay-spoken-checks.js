@@ -1612,16 +1612,14 @@ function reportClauseBounds(text, at) {
 
 function reportSharedLocationContinuation(text, clauseEnd, location) {
   const remainder = text.slice(clauseEnd);
-  const dashQualifier = remainder.replace(/^[—–]\s*/, '').split(/[.!?;]/)[0];
-  if (/^[—–]/.test(remainder) && (REPORT_TRAILING_UNCERTAINTY_RE.test(dashQualifier)
-      || REPORT_TRAILING_DENIAL_RE.test(dashQualifier) || reportTrailingNoncompletion(dashQualifier))) {
-    return { text: `, ${dashQualifier}`, unconfirmed: true };
-  }
-  const contrastQualifier = remainder.replace(/^(?:but|however)\s*,?\s*/i, '').split(/[.!?;]/)[0];
-  if (/^(?:but|however)\b/i.test(remainder)
-      && (REPORT_TRAILING_DENIAL_RE.test(contrastQualifier) || REPORT_TRAILING_UNCERTAINTY_RE.test(contrastQualifier)
-        || reportTrailingNoncompletion(contrastQualifier))) {
-    return { text: '', unconfirmed: true };
+  // Reuse the splitter's actual boundaries so a retraction is not lost at
+  // "though", "yet", or another coordinator the splitter already recognizes.
+  // Sentence terminators still end the statement rather than qualify it.
+  const boundary = new RegExp(`^(?:${CLAUSE_BOUNDARY_TOKEN_RE.source})\\s*,?\\s*`, 'i').exec(remainder);
+  if (boundary && !/[.!?;]/.test(boundary[0])) {
+    const qualifier = remainder.slice(boundary[0].length).split(/[.!?;]/)[0];
+    if (REPORT_TRAILING_UNCERTAINTY_RE.test(qualifier) || REPORT_TRAILING_DENIAL_RE.test(qualifier)
+        || reportTrailingNoncompletion(qualifier)) return { text: '', unconfirmed: true };
   }
   const locationTail = new RegExp(
     `^and\\s+(?:(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+)?`

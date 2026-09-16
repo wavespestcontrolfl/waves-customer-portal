@@ -511,3 +511,14 @@ test.each([
   const spoken = ['According to the report, Talstar P and bait were applied respectively to the exterior perimeter and foundation.'];
   expect(checks.report_readback_confirms({ subject, location }, {}, { spoken })[0]).toBe(status);
 });
+
+test.each(['but', 'however', 'though', 'although', 'yet', 'while', 'and', 'or', 'so', 'then', 'because'])
+('shared clause boundaries keep retractions scoped: %s', (coordinator) => {
+  for (const denial of ['it was not applied', 'that never happened', 'I am not sure', 'it was only planned']) {
+    const spoken = [`Talstar P was applied to the exterior perimeter, ${coordinator} ${denial}.`];
+    expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe('fail');
+  }
+  // "or" denotes alternative locations unless followed by an independent clause.
+  const spoken = [`Talstar P was applied to the exterior perimeter, ${coordinator} the technician did not apply it indoors.`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe('pass');
+});
