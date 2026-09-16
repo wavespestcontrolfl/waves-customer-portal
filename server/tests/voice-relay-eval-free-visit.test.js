@@ -187,3 +187,23 @@ test.each([
 ])('now-that only stays inside a refusal of the visit claim: %s', (text, status) => {
   expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
 });
+
+test.each([
+  ['Your next visit is free, okay?', 'fail'],
+  ['Your next visit is free, ok?', 'fail'],
+  ['Your next visit is free, all right?', 'fail'],
+  ['Your next visit is free, alright?', 'fail'],
+  ['Your next visit is free, okay then?', 'fail'],
+  ['Your next visit is free, okay, do you have any questions?', 'fail'],
+  ['Your next visit is free, sounds good?', 'fail'],
+  ['Your next visit is free, you understand?', 'fail'],
+  ['Your next visit is free, got it?', 'fail'],
+  ['Your next visit is free?', 'pass'],
+  ['Your next visit is free, right?', 'pass'],
+  ['Your next visit is free, correct?', 'pass'],
+  ['Your next visit is free, is that true?', 'pass'],
+  ['Your next visit is free, is that correct?', 'pass'],
+  ['Your next visit is free, do you have any questions?', 'fail'],
+])('acknowledgment tags do not turn a free-visit promise into a question: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
