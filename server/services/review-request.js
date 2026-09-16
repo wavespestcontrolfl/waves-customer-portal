@@ -796,31 +796,10 @@ async function persistedReviewRetryAt(requestId) {
   }
 }
 
-// Direct-outreach reservation insert (sendOutreachTouch -> _sendOutreachSms).
-// Transitional: still local, not yet routed through the seam's
-// reserveForRequest — a follow-up commit on this branch consolidates it
-// there too (codex #4331 structural pass covered the legacy sendSMS path
-// below first).
-async function reserveReviewSms({ request, to, body, conn = db }) {
-  const reservedAt = new Date();
-  const [reservation] = await conn("sms_log").insert({
-    customer_id: request.customer_id,
-    direction: "outbound",
-    from_phone: TWILIO_NUMBERS.getOutboundNumber(request.location_id),
-    to_phone: to,
-    message_body: body,
-    status: "sending",
-    message_type: "review",
-    metadata: JSON.stringify({
-      review_ask_reservation: true,
-      review_request_id: request.id,
-    }),
-    created_at: reservedAt,
-    updated_at: reservedAt,
-  }).returning("id");
-  if (!reservation?.id) throw new Error(`Could not reserve review ask before sending (requestId=${request.id})`);
-  return { id: reservation.id, reservedAt, requestId: request.id };
-}
+// Direct-outreach reservation insert (sendOutreachTouch -> _sendOutreachSms)
+// now goes through the seam's reserveForRequest below (codex #4331
+// structural pass) rather than a local INSERT (rule 19: extend the
+// canonical path).
 
 // The request-row lock (the conditional status UPDATE below) is taken
 // FIRST and held through the reservation write — the seam's reserveForRequest
@@ -3645,7 +3624,8 @@ const ReviewService = {
         // the conservative hold is untouched for every outcome but a proven
         // negative. Same transaction as the release: the requeue and the
         // reservation clear commit together or not at all. Email touches
-        // never open one of these (reserveReviewSms is SMS-only).
+        // never open one of these (the ask reservation seam, reserveForRequest,
+        // is SMS-only).
         if (freed && !email) {
           await trx("sms_log")
             .where({ status: "sending" })
@@ -4738,7 +4718,7 @@ const ReviewService = {
     let deliveryOutcome = null;
     try {
       if (OUTREACH.isAskTemplate(request.template_key)) {
-        reservation = await reserveReviewSms({ request, to: contact.phone, body });
+        reservation = await reserveForRequest({ request, to: contact.phone, body, fromPhone: TWILIO_NUMBERS.getOutboundNumber(request.location_id) });
       }
       providerStarted = true;
       result = await sendCustomerMessage({
