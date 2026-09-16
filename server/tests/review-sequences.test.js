@@ -1689,6 +1689,66 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(reservation.status).toBe('sent');
     });
 
+    test('a delivered ask whose reservation-release throws is deduped against the real provider log, not double-counted as a manual ask (codex #4333 P1, seam pre-push audit)', async () => {
+      // "Reservation cleanup fails" from the audit: the sent stamp on
+      // review_requests SUCCEEDS (sms_sent_at is set), but the reservation
+      // release that follows it throws. sendCustomerMessage's OWN send
+      // ALSO logs its own row under the same review_request_id — exactly
+      // what the real pipeline does independently of this reservation
+      // (twilio.js's own sms_log insert). Before the fix, promote() would
+      // have marked the placeholder 'sent' too, leaving TWO outbound
+      // 'sent' rows for one ask; lastManualAskAt pairs at most one row per
+      // sms_sent_at, so the extra row reads as an unmatched manual ask and
+      // would permanently stop the next cadence step (manual_ask_recent)
+      // that never actually saw a manual send.
+      let delAttempts = 0;
+      const due = new Date(Date.now() - 60000);
+      const mock = makeMock({
+        customers: [{ id: 'uq-dedup', first_name: 'Ida', phone: '+19410000169', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-uq-dedup', customer_id: 'uq-dedup', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tuqdedup', location_id: 'venice', created_at: new Date(), scheduled_for: due }],
+      }, {
+        onDelete: (table) => {
+          if (table !== 'sms_log') return;
+          delAttempts += 1;
+          // The FIRST delete is the original post-stamp release — it
+          // throws (the reservation-cleanup failure under audit). The
+          // SECOND is promote()'s own dedup release once it finds the
+          // real provider row — it must succeed.
+          if (delAttempts === 1) throw new Error('pg blip on reservation release');
+        },
+      });
+      db.mockImplementation(mock);
+      mockSendCustomerMessage.mockImplementationOnce(async () => {
+        mock.__state.rows.sms_log.push({
+          id: 'real-send-1', customer_id: 'uq-dedup', direction: 'outbound', status: 'sent',
+          message_body: 'Would you leave us a quick review?', twilio_sid: 'SM-real',
+          metadata: { review_request_id: 'rr-uq-dedup' }, created_at: new Date(), updated_at: new Date(),
+        });
+        return { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-real' };
+      });
+
+      const out = await ReviewService.sendSMS('rr-uq-dedup');
+
+      expect(out).toEqual({ sent: true, unrecorded: true });
+      expect(delAttempts).toBeGreaterThanOrEqual(2);
+      // Deduplicated: the reservation was released (not promoted) once the
+      // real provider row was found — exactly ONE 'sent'/'delivered'
+      // outbound row for this request, not two.
+      const sentRows = (mock.__state.rows.sms_log || []).filter((r) => ['sent', 'delivered'].includes(r.status));
+      expect(sentRows).toHaveLength(1);
+      expect(sentRows[0].id).toBe('real-send-1');
+
+      // The stamp DID land before the release threw, so review-ask-
+      // history's pairing correctly recognizes this as the pipeline's own
+      // touch, not a manual ask — the next cadence step is not wrongly
+      // blocked by manual_ask_recent.
+      const row = mock.__state.rows.review_requests[0];
+      expect(row.sms_sent_at).toBeTruthy();
+      const history = require('../services/review-ask-history');
+      const manualAt = await history.lastManualAskAt('uq-dedup', { since: new Date(Date.now() - 86400000) });
+      expect(manualAt).toBeNull();
+    });
+
     test('reconciliation proving a stranded ask unsent also clears its reservation, so the requeued retry is not held by the 3-day rule (codex #4331 P1)', async () => {
       const staleClaimedAt = new Date(Date.now() - 20 * 60000); // past INLINE_CLAIM_STALE_MS (10 min)
       const mock = makeMock({
