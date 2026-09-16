@@ -664,7 +664,14 @@ describe('executeMerge', () => {
         const rows = state.propertyRows.filter((row) => matches(row, where));
         if (q.called('first')) return rows[0] || null;
         if (q.called('insert')) {
-          const row = { id: `property-${state.propertyRows.length + 1}`, ...q.args('insert')[0] };
+          const input = q.args('insert')[0];
+          if (input.active && state.propertyRows.some((row) => row.active
+            && row.customer_id === input.customer_id && row.address_key === input.address_key)) {
+            const err = new Error('duplicate key value violates customer_properties address-key unique constraint');
+            err.code = '23505';
+            throw err;
+          }
+          const row = { id: `property-${state.propertyRows.length + 1}`, ...input };
           state.propertyRows.push(row);
           state.events.push(['property_insert', row.customer_id]);
           return [{ id: row.id }];
@@ -1036,6 +1043,38 @@ describe('executeMerge', () => {
     expect(state.events.findIndex(([event]) => event === 'property_insert'))
       .toBeLessThan(state.events.findIndex(([event]) => event === 'property_repoint'));
     expect(JSON.parse(state.journal.repointed_ids).collision_handlers).toContain('customer_properties');
+  });
+
+  it('promotes the winner account address saved as an active secondary instead of inserting a duplicate', async () => {
+    const winner = {
+      id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003',
+      address_line1: '100 Main St', city: 'Bradenton', state: 'FL', zip: '34205',
+    };
+    const loser = {
+      id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003',
+      address_line1: '200 Oak Ave', city: 'Sarasota', state: 'FL', zip: '34236',
+    };
+    const savedAccount = {
+      id: 'saved-account', customer_id: WINNER, is_primary: false, active: true,
+      address_line1: '100 Main Street', address_line2: null, city: 'Bradenton', zip: '34205-1234',
+      address_key: '100mainstreetbradenton34205', label: 'Front house', source: 'manual', occupancy_type: 'tenant',
+    };
+    const { trx, state } = buildTrx({
+      winner,
+      loser,
+      fkRows: [{ table_name: 'leads', column_name: 'customer_id' }],
+      propertyRows: [savedAccount],
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+
+    await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+
+    expect(state.propertyRows).toHaveLength(1);
+    expect(state.propertyRows[0]).toMatchObject({
+      id: savedAccount.id, is_primary: true, active: true,
+      label: savedAccount.label, source: savedAccount.source, occupancy_type: savedAccount.occupancy_type,
+    });
+    expect(state.events).not.toContainEqual(expect.arrayContaining(['property_insert']));
   });
 
   it('fails closed before repoints when an incompatible addressed winner has only an inactive primary', async () => {

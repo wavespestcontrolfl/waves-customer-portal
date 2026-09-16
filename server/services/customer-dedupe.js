@@ -1582,15 +1582,29 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // path: their missing components may enrich the winner below, and creating
     // a pre-enrichment primary here would leave that mirror stale. Run the
     // canonical lazy creator on this transaction, under the customer locks
-    // above, then require an ACTIVE primary: a 23505 from an unrelated property
-    // unique or an inactive legacy primary must not be mistaken for success.
+    // above. A legacy winner can already have this exact account address saved
+    // as an active secondary; promote that row first so the address-key unique
+    // does not reject a duplicate insert and its identity/metadata survive.
+    // Then require an ACTIVE primary: a 23505 from an unrelated property unique
+    // or an inactive legacy primary must not be mistaken for success.
     if (!isEmptyValue(winner.address_line1) && addr.status !== 'match') {
-      await require('./customer-properties').ensurePrimaryProperty(winner, {
-        conn: trx,
-      });
-      const winnerPrimary = await trx('customer_properties')
-        .where({ customer_id: winnerId, is_primary: true, active: true })
-        .first('id');
+      const { addressKey, ensurePrimaryProperty } = require('./customer-properties');
+      const winnerProperties = await trx('customer_properties')
+        .where({ customer_id: winnerId, active: true })
+        .select('id', 'is_primary', 'address_line1', 'address_line2', 'city', 'zip');
+      let winnerPrimary = winnerProperties.find((row) => row.is_primary === true) || null;
+      if (!winnerPrimary) {
+        const winnerAddressKey = addressKey(winner);
+        const savedAccountRow = winnerProperties.find((row) => addressKey(row) === winnerAddressKey);
+        if (savedAccountRow) {
+          await trx('customer_properties').where({ id: savedAccountRow.id })
+            .update({ is_primary: true, updated_at: trx.fn.now() });
+        }
+        await ensurePrimaryProperty(winner, { conn: trx });
+        winnerPrimary = await trx('customer_properties')
+          .where({ customer_id: winnerId, is_primary: true, active: true })
+          .first('id');
+      }
       if (!winnerPrimary) {
         throw new Error('executeMerge: could not preserve the surviving customer account address as its primary property');
       }
@@ -5181,11 +5195,11 @@ async function predictCollisionFolds(database, winner, loser) {
   const winnerRows = propertyRows.filter((row) => String(row.customer_id) === String(winnerId));
   const winnerHasPrimary = winnerRows.some((row) => row.is_primary === true);
   const winnerHasActivePrimary = winnerRows.some((row) => row.is_primary === true && row.active === true);
-  const winnerWillCreatePrimary = !winnerHasPrimary
+  const winnerWillEstablishPrimary = !winnerHasPrimary
     && !isEmptyValue(winner.address_line1)
     && addressCompat(winner, loser).status !== 'match';
   const loserHasPrimary = propertyRows.some((row) => String(row.customer_id) === String(loserId) && row.is_primary === true);
-  if (loserHasPrimary && (winnerHasActivePrimary || winnerWillCreatePrimary)) {
+  if (loserHasPrimary && (winnerHasActivePrimary || winnerWillEstablishPrimary)) {
     details.customer_properties = 'the archived record\'s primary property will be demoted because the surviving account keeps its own primary address';
   }
   const tagRows = await read('customer_tags', ['customer_id', 'tag']);
