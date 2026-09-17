@@ -2229,7 +2229,7 @@ const ReviewService = {
       deliveryOutcome = result?.deliveryOutcome;
       const sentinel = require("./sms-auto-send").suppressedSendSentinel(result);
       if (sentinel) {
-        await releaseUnsentReservation({ requestId });
+        await releaseUnsentReservation({ requestId, customerId: request.customer_id });
         reservation = null;
         await ownLegacyRow().update({ status: "suppressed", scheduled_for: fencedFrom });
         return { blocked: true, code: result.code || sentinel };
@@ -2256,7 +2256,7 @@ const ReviewService = {
           await promoteReviewSmsReservation({ reservation });
           return { sent: true, unrecorded: true };
         }
-        await releaseUnsentReservation({ requestId });
+        await releaseUnsentReservation({ requestId, customerId: request.customer_id });
         reservation = null;
         // PII: ID-only per AGENTS.md.
         logger.info(
@@ -2268,7 +2268,7 @@ const ReviewService = {
         // written now would land on the owner's marker, and that owner may
         // already have reached the provider.
         logger.warn(`[review] SMS handoff found the claim taken by another sender (requestId=${requestId}) — leaving the row to its owner`);
-        await releaseUnsentReservation({ requestId });
+        await releaseUnsentReservation({ requestId, customerId: request.customer_id });
         return { sent: false, claimLost: true, reason: "review_claim_lost", requestId };
       } else if (result.deliveryOutcome === "not_sent"
         && !["VISIT_SUMMARY_UNCERTAIN", "VISIT_SUMMARY_STATE_UNAVAILABLE", "REVIEW_CLAIM_LOST"].includes(result.code)) {
@@ -2335,12 +2335,12 @@ const ReviewService = {
         // pending unconditionally, requeueing an ask another worker may
         // already have sent.
         await this._parkAskAtProviderBoundary(request);
-        await releaseUnsentReservation({ requestId });
+        await releaseUnsentReservation({ requestId, customerId: request.customer_id });
         return { deferred: "summary_uncertain", nextAllowedAt: null };
       } else if (result.blocked && result.code === "VISIT_SUMMARY_STATE_UNAVAILABLE") {
         const retryAt = new Date(Date.now() + 30 * 60 * 1000);
         await this._deferAskForUnavailableSummary({ id: requestId }, retryAt);
-        await releaseUnsentReservation({ requestId });
+        await releaseUnsentReservation({ requestId, customerId: request.customer_id });
         logger.info(`[review] SMS deferred: summary state unavailable (requestId=${requestId}) (queued for retry at ${retryAt.toISOString()})`);
         return { deferred: "summary_unavailable", nextAllowedAt: retryAt };
 
@@ -2354,7 +2354,7 @@ const ReviewService = {
           logger.warn(`[review] SMS delivery uncertain; reservation held (customerId=${customer.id} requestId=${requestId})`);
           return { deferred: "provider_uncertain", nextAllowedAt: retryAt };
         }
-        await releaseUnsentReservation({ requestId });
+        await releaseUnsentReservation({ requestId, customerId: request.customer_id });
         reservation = null;
         const deferredRetryAt = retryAtForDeferredSend(result);
         if (deferredRetryAt) {
@@ -2400,13 +2400,22 @@ const ReviewService = {
             });
           } catch (lockErr) {
             // Fail safe, not fail closed: the lock/transaction itself is
-            // what's unavailable here, not the send outcome — an
-            // unconditional requeue outside the lock is the same
-            // (narrower, pre-existing) exposure this fix closes, not a new
-            // one, and a due row that goes unretried is worse than that.
+            // what's unavailable here, not the send outcome — a due row
+            // that goes unretried is worse than a best-effort requeue
+            // without the lock's protection. But the fallback exists for
+            // the SAME reason the locked write is conditional (codex #4333
+            // P1, GitHub round): if a concurrent cadence enrollment's own
+            // supersedeQueuedAsks suppressed this row WHILE the transaction
+            // above was failing, an unconditional write here would revive
+            // the obsolete ask right alongside the cadence's own touch —
+            // the exact bug this whole recheck exists to prevent. Mirror
+            // the locked path's own condition instead of dropping it just
+            // because the lock itself didn't come through.
             logger.warn(`[review] cadence-retirement recheck failed (requestId=${requestId} errType=${lockErr?.name || "Error"}) — requeuing without the recheck`);
-            await ownLegacyRow().update({ status: "pending", scheduled_for: deferredRetryAt });
-            outcome = { requeued: true };
+            const requeued = await db("review_requests")
+              .where({ id: requestId, status: "pending" })
+              .update({ status: "pending", scheduled_for: deferredRetryAt });
+            outcome = requeued ? { requeued: true } : { alreadyHandled: true };
           }
           if (outcome.supersededBy) {
             logger.info(`[review] Suppressed a proven-unsent ask superseded by an active cadence (requestId=${requestId} sequenceId=${outcome.supersededBy})`);
@@ -2519,7 +2528,7 @@ const ReviewService = {
             status: "sent",
             scheduled_for: fencedFrom,
           });
-          await releaseUnsentReservation({ requestId });
+          await releaseUnsentReservation({ requestId, customerId: request.customer_id });
           reservation = null;
           logger.error(
             `[review] SMS accepted but its audit write failed (requestId=${requestId} errType=${err?.name || "Error"})`,
@@ -2583,7 +2592,7 @@ const ReviewService = {
         const retryAt = uncertain
           ? new Date(reservation.reservedAt.getTime() + ASK_SPACING_MS)
           : new Date(Date.now() + 5 * 60 * 1000);
-        if (!uncertain) await releaseUnsentReservation({ requestId });
+        if (!uncertain) await releaseUnsentReservation({ requestId, customerId: request.customer_id });
         await db("review_requests").where({ id: requestId }).update({
           scheduled_for: retryAt,
         });
@@ -3179,7 +3188,7 @@ const ReviewService = {
     // Left standing, that orphan reads as a prior ask for the full 72h
     // spacing window and blocks the very recovery this function just
     // proved should proceed.
-    await releaseUnsentReservation({ requestId }).catch((err) => {
+    await releaseUnsentReservation({ requestId, customerId: row.customer_id }).catch((err) => {
       logger.warn(`[review] stale inline claim reservation release failed (requestId=${requestId}): ${err.message}`);
     });
     const reclaimToken = new Date();

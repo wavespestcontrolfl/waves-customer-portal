@@ -1704,6 +1704,57 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(row.status).toBe('suppressed');
     });
 
+    test('the retirement fallback (transaction unavailable) does not revive a row a concurrent cadence just suppressed (codex #4333 P1, GitHub round)', async () => {
+      // Same race as above, but this time the transaction ITSELF fails
+      // (a blip on its own write) after the concurrent enrollment's
+      // supersede already committed — exercising the catch(lockErr)
+      // fallback rather than the in-transaction alreadyHandled branch. The
+      // fallback's write must carry the SAME `status = 'pending'`
+      // condition as the locked path, or it blindly revives the row the
+      // race already suppressed.
+      mockGates.reviewSequences = true;
+      const due = new Date(Date.now() - 60000);
+      let updateAttempts = 0;
+      const mock = makeMock({
+        customers: [{ id: 'uq-fb', first_name: 'Ida', phone: '+19410000171', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-uq-fb', customer_id: 'uq-fb', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tuqfb', location_id: 'venice', created_at: new Date(), scheduled_for: due }],
+      }, {
+        onFirst: (table, _q, state) => {
+          if (table !== 'review_sequences') return;
+          // The concurrent enrollment's own supersede commits right as
+          // this transaction's activeSeq check runs (finds no active
+          // sequence — the enrollment's own INSERT hasn't landed either).
+          const row = state.rows.review_requests.find((r) => r.id === 'rr-uq-fb');
+          if (row) row.status = 'suppressed';
+        },
+        onUpdate: (table, patch) => {
+          if (table !== 'review_requests' || patch.status !== 'pending' || !patch.scheduled_for) return;
+          updateAttempts += 1;
+          // The FIRST such write is the transaction's own "requeued" write
+          // — it throws (the transaction itself is unavailable, per the
+          // audit). The SECOND is the fallback's write, which must succeed
+          // (and, by then, correctly match zero rows).
+          if (updateAttempts === 1) throw new Error('pg blip on retirement transaction');
+        },
+      });
+      db.mockImplementation(mock);
+      mockSendCustomerMessage.mockResolvedValueOnce({
+        sent: false, blocked: false, deliveryOutcome: 'not_sent', retryable: true,
+        nextAllowedAt: new Date(Date.now() + 5 * 60000).toISOString(), code: 'PROVIDER_FAILURE',
+      });
+
+      const out = await ReviewService.sendSMS('rr-uq-fb');
+
+      expect(updateAttempts).toBe(2);
+      expect(out).toEqual({ sent: false, failed: 'superseded_by_cadence' });
+      // The row stays exactly as the racing enrollment left it — the
+      // fallback's conditional write found status no longer 'pending' and
+      // left it alone, instead of blindly reviving it alongside the
+      // cadence's own touch.
+      const row = mock.__state.rows.review_requests[0];
+      expect(row.status).toBe('suppressed');
+    });
+
     test('an accepted send whose post-stamp reservation release throws promotes the reservation instead of losing it (codex #4331 P1, structural pass, finding 5)', async () => {
       // The sent stamp on review_requests SUCCEEDS (a real, confirmed
       // delivery), but the reservation cleanup DELETE that follows it
