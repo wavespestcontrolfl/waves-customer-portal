@@ -62,6 +62,72 @@ test.each(['The treatment is risk-free.', 'The treatment is free of risk.', "The
 );
 
 test.each([
+  ['Is the treatment risk-free?', 'risk'],
+  ['Does the treatment pose no risk to dogs?', 'pose no risk'],
+])('risk-absence candidates retain the full proposition for polarity policy: %s', (text, predicate) => {
+  expect(recognizeSafetyQuestion(text)).toMatchObject({
+    text: text.slice(0, -1), positive: null, harm: { predicate, negatedAuxiliary: false },
+  });
+});
+
+test.each([
+  'Should the treatment be safe for dogs?',
+  'Was the bait safe for pets?',
+  'Were the treatments safe for dogs?',
+  'May the treatment be safe for dogs?',
+  'Might the treatment be safe for dogs?',
+  'Has the treatment been safe for dogs?',
+  'Have the treatments been safe for dogs?',
+  'Had the treatment been safe for dogs?',
+  'Shall the treatment be safe for dogs?',
+  'Must the treatment be safe for dogs?',
+])(
+  'shared question auxiliary retains product-safety evidence: %s', (text) => {
+    expect(recognizeSafetyQuestion(text).positive)
+      .toMatchObject({ negatedAuxiliary: false });
+  },
+);
+
+test.each(["Wasn't the bait safe for pets?", "Weren't the treatments safe for dogs?", "Shouldn't the treatment be safe for dogs?"])(
+  'negated shared auxiliary retains its own polarity: %s', (text) => {
+    expect(recognizeSafetyQuestion(text).positive).toMatchObject({ negatedAuxiliary: true });
+  },
+);
+
+test.each(['The treatment is generally safe.', 'The treatment is usually safe.', 'Bora-Care is typically safe.'])(
+  'qualified safe wording retains its lexical safety claim: %s', (text) => {
+    expect(recognizeSafetyResponse(text).guarantees.length).toBeGreaterThan(0);
+  },
+);
+
+test.each(['The treatment is not generally safe.', 'The treatment is never usually safe.', 'Bora-Care is not typically safe.'])(
+  'qualified safe wording retains negation rather than an affirmative claim: %s', (text) => {
+    expect(recognizeSafetyResponse(text).guarantees).toEqual([]);
+  },
+);
+
+test.each([
+  'The bait will not be toxic to pets.',
+  'The treatment cannot be harmful to dogs.',
+  'The bait would not be harmful to pets.',
+  "The treatment can't be harmful to dogs.",
+  'The bait won’t be toxic to pets.',
+])('modal negated-harm predicates retain their negation: %s', (text) => {
+  const candidates = recognizeSafetyResponse(text).guarantees;
+  expect(candidates.length).toBeGreaterThan(0);
+  for (const { match } of candidates) {
+    expect(match[0]).toMatch(/not|cannot|can['’]t|won['’]t/);
+    expect(text.slice(match.index, match.index + match[0].length)).toBe(match[0]);
+  }
+});
+
+test.each(['The bait may be toxic to pets.', 'The treatment could be harmful to dogs.'])(
+  'positive modal harm predicates are not safety guarantees: %s', (text) => {
+    expect(recognizeSafetyResponse(text).guarantees).toEqual([]);
+  },
+);
+
+test.each([
   ['If my dog eats the bait, is it safe?', ['if my dog eats the bait']],
   ['Is it safe if my dog eats the bait?', ['if my dog eats the bait']],
   ['If swallowed, is the bait safe?', ['if swallowed']],
@@ -72,6 +138,11 @@ test.each([
   ['If it is dry, is the bait safe if my dog eats it?', ['if dry', 'if my dog eats it']],
   ['The bait is safe once dry.', ['when dry']],
   ['Once it is dry, is the bait safe?', ['when dry']],
+  ['Once it is dry is the bait safe?', ['when dry']],
+  ['If swallowed is the bait safe?', ['if swallowed']],
+  ['If my dog eats the bait is it safe?', ['if my dog eats the bait']],
+  ['If it is dry is Bora-Care safe?', ['if dry']],
+  ['I cannot confirm if it is safe.', []],
 ])('circumstance recognition retains exposure scope outside complements: %s', (text, conditions) => {
   expect(safetyCircumstanceScopes(text)).toEqual(conditions);
 });
