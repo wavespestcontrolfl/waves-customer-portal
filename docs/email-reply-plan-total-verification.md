@@ -21,9 +21,11 @@ month`, `$98 each month`, `$1176 every year`) or a
 bounded monthly/yearly/annual pricing predicate in either order (`monthly
 price is $98`, `$98 is the yearly fee`). Bare numbers need an explicit
 pricing word, such as `price`, `cost`, `fee`, `rate`, `charge`, or `total`.
+The live rule's `dues` and `subscription` labels also count as pricing cues.
 The adapter joins canonical `a/each/every` and `month/mo/year/yr` word tokens
-locally; the prerequisite scanner is unchanged. Only tokens in the same clause
-are considered. A barrier,
+locally; the prerequisite scanner is unchanged. `a month/year` (including
+`mo/yr`) immediately followed by `ago` remains temporal wording rather than a
+recurring period. Only tokens in the same clause are considered. A barrier,
 conjunction, sentence boundary, or visit/application unit breaks the
 relationship; account events and schedule prose without a price claim
 are left alone. This is a finite policy, not a general English parser.

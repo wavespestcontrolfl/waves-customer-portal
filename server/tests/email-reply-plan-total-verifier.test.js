@@ -282,6 +282,28 @@ describe('inactive email reply plan-total policy', () => {
     'Your yearly payment will be at least $1176 after your credit posted',
   ])('recognizes actual bounded payment copulas in both period orders: %s', (text) => rejected(text));
 
+  test.each([
+    'Monthly dues are $98', 'Your monthly subscription is $98',
+    'The annual subscription is $1176', 'Monthly dues are 98',
+    'Your yearly subscription is 1176',
+    'The monthly subscription is only $98 after your payment posted',
+    'We paid $98 a month', 'We paid $1176 a year',
+    'We refunded $98 a month ago; monthly dues are $98',
+  ])('recognizes live billing labels and preserves recurring totals: %s', (text) => rejected(text));
+
+  test.each([
+    'We refunded $98 a month ago', 'We received $98 a year ago',
+    'We credited $98 a mo ago', 'We received $1176 a yr ago',
+    'The price was $98 a month ago', 'We refunded 98 a month ago',
+  ])('keeps a bounded ago continuation temporal rather than recurring: %s', (text) => allowed(text));
+
+  test('applies billing-label legacy exemptions only to monthly dues', () => {
+    allowed('Monthly dues are $98', { legacyMonthlyPlan: true });
+    allowed('Your monthly subscription is $98', { legacyMonthlyPlan: true });
+    rejected('Yearly dues are $1176', { legacyMonthlyPlan: true });
+    rejected('Your annual subscription is $1176', { legacyMonthlyPlan: true });
+  });
+
   test('keeps the trailing-period copula exemption monthly-only', () => {
     allowed('The plan is only $98 monthly after your payment posted.', { legacyMonthlyPlan: true });
     rejected('The plan is only $1176 yearly after your payment posted.', { legacyMonthlyPlan: true });

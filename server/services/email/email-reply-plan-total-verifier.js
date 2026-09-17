@@ -4,6 +4,7 @@ const { recognizeEmailReplyPricingClauses } = require('./email-reply-pricing-cla
 // joins a price amount to a month/year token only inside one clause.
 const PRICE_WORDS = new Set([
   'price', 'cost', 'fee', 'rate', 'charge', 'bill', 'invoice', 'amount', 'total', 'run',
+  'dues', 'subscription',
 ]);
 const PLAN_WORDS = new Set(['plan', 'program', 'package']);
 const PRICING_LABEL_WORDS = new Set([...PRICE_WORDS, ...PLAN_WORDS]);
@@ -41,7 +42,9 @@ function withDeterminedPeriods(clause) {
   const tokens = [];
   for (let index = 0; index < clause.length; index += 1) {
     if (isWord(clause[index], PERIOD_DETERMINERS)
-      && isWord(clause[index + 1] || {}, PERIOD_NOUNS)) {
+      && isWord(clause[index + 1] || {}, PERIOD_NOUNS)
+      && !(clause[index].text === 'a' && clause[index + 2]?.kind === 'word'
+        && clause[index + 2].text === 'ago')) {
       tokens.push({ kind: 'period', text: `${clause[index].text} ${clause[index + 1].text}` });
       index += 1;
     } else tokens.push(clause[index]);
