@@ -47,7 +47,7 @@ jest.mock('../services/email-template-library', () => {
     loadTemplateByKey: jest.fn(async (key) => ({ template: { ...template, template_key: key }, activeVersion: version })),
     renderTemplate,
     renderVersion: jest.fn(async (id, payload) => renderTemplate({ template, version: { id }, payload })),
-    sendTemplate: jest.fn(async () => ({ sent: true, message: { provider_message_id: 'synthetic-email-accepted' } })),
+    sendTemplate: jest.fn(async () => ({ sent: true, providerAttempted: true, providerAccepted: true, message: { provider_message_id: 'synthetic-email-accepted' } })),
   };
 });
 jest.mock('../services/estimate-lead-linkage', () => ({ leadIdForEstimate: jest.fn(async () => null) }));
@@ -195,7 +195,7 @@ beforeEach(() => {
   sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM-synthetic-reviewed' });
   email.sendTemplate.mockImplementation(async ({ onQueued }) => {
     await onQueued?.();
-    return { sent: true, message: { provider_message_id: 'synthetic-email-accepted' } };
+    return { sent: true, providerAttempted: true, providerAccepted: true, message: { provider_message_id: 'synthetic-email-accepted' } };
   });
   email.loadTemplateByKey.mockImplementation(async (key) => ({ template: { template_key: key }, activeVersion: { id: 'synthetic-email-version' } }));
   buildPricingBundle.mockResolvedValue({ services: [] });
@@ -788,6 +788,273 @@ describe('group publication navigation', () => {
     expect(dataOf(row).groupLinkViewableThrough).toBe('2099-01-08T12:00:00.000Z');
     expect(dataOf(older).groupLinkViewableThrough).toBe('2099-01-08T12:00:00.000Z');
     expect(require('../services/logger').error).toHaveBeenCalledWith(expect.stringContaining('publication attempt 3 failed'));
+  });
+});
+
+describe('annual provider delivery receipts', () => {
+  const { annualPlanOfferFingerprint, annualPlanHasDeliveredOffer } = require('../services/estimate-offer-version');
+  const annualData = (fee = 299) => ({ results: { tmBait: { plan: 'annual_protection', annualFee: fee } } });
+
+  test.each(['email', 'sms'])('a real %s handoff records a root-shaped annual offer', async (method) => {
+    row.estimate_data = annualData();
+    const fingerprint = annualPlanOfferFingerprint(row);
+    const result = await router.sendEstimateNow(structuredClone(row), method, { callerPreClaimed: true });
+    expect(result.sent).toBe(true);
+    expect(result.channels[method]).toMatchObject(method === 'email' ? { providerAttempted: true } : { real: true });
+    expect(dataOf().deliveryState.annualPlanOfferFingerprint).toBe(fingerprint);
+    expect(dataOf().deliveryState.deliveredAt).toEqual([dataOf().deliveryState.lastDeliveredAt]);
+    expect(annualPlanHasDeliveredOffer(row)).toBe(true);
+  });
+
+  test('SMTP acceptance records an annual receipt after the transport resolves', async () => {
+    const priorPassword = process.env.GOOGLE_SMTP_PASSWORD;
+    process.env.GOOGLE_SMTP_PASSWORD = 'synthetic-password';
+    row.estimate_data = annualData();
+    sendgrid.isConfigured.mockReturnValue(false);
+    require('../services/email-fallback-gate').smtpFallbackAllowed.mockReturnValueOnce(true);
+    const sendMail = jest.fn(async () => {
+      expect(dataOf().deliveryState).toBeUndefined();
+    });
+    require('nodemailer').createTransport.mockReturnValueOnce({ sendMail });
+    try {
+      const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+      expect(result.channels.email).toMatchObject({ providerAttempted: true, providerAccepted: true, provider: 'smtp_fallback' });
+      expect(sendMail).toHaveBeenCalledTimes(1);
+      expect(annualPlanHasDeliveredOffer(row)).toBe(true);
+    } finally {
+      if (priorPassword === undefined) delete process.env.GOOGLE_SMTP_PASSWORD;
+      else process.env.GOOGLE_SMTP_PASSWORD = priorPassword;
+    }
+  });
+
+  test.each(['quarterly', 'annual_protection'])('historical %s email dedupe cannot witness revised annual terms', async (plan) => {
+    row.status = 'draft';
+    row.estimate_data = { results: { tmBait: { plan, annualFee: 299 } } };
+    expect((await invoke('/:id/send', 'post', { sendMethod: 'email' })).body.sent).toBe(true);
+    const priorDelivery = structuredClone(dataOf().deliveryState);
+    dataOf().results.tmBait = { plan: 'annual_protection', annualFee: 399 };
+    row.annual_total = '399';
+    row.status = 'draft';
+    email.sendTemplate.mockResolvedValueOnce({ sent: true, deduped: true,
+      message: { status: 'sent', provider_message_id: 'synthetic-prior-email' } });
+    const response = await invoke('/:id/send', 'post', { sendMethod: 'email' });
+    expect(response.statusCode).toBe(200);
+    expect(response.body.channels.email).toMatchObject({ ok: true, providerAttempted: false });
+    expect(email.sendTemplate.mock.calls[1][0].idempotencyKey).toBe(email.sendTemplate.mock.calls[0][0].idempotencyKey);
+    for (const key of ['firstDeliveredAt', 'lastDeliveredAt', 'deliveredAt', 'annualPlanOfferFingerprint']) {
+      expect(dataOf().deliveryState[key]).toEqual(priorDelivery[key]);
+    }
+    expect(annualPlanHasDeliveredOffer(row)).toBe(false);
+  });
+
+  test.each([undefined, false])('historical exact-offer dedupe preserves a prior receipt (providerAttempted=%s)', async (providerAttempted) => {
+    row.estimate_data = annualData();
+    dataOf().deliveryState = { firstDeliveredAt: '2026-01-01T12:00:00Z', lastDeliveredAt: '2026-01-01T12:00:00Z',
+      deliveredAt: ['2026-01-01T12:00:00Z'], annualPlanOfferFingerprint: annualPlanOfferFingerprint(row) };
+    const priorDelivery = structuredClone(dataOf().deliveryState);
+    email.sendTemplate.mockResolvedValueOnce({ sent: true, deduped: true, providerAttempted });
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(result.channels.email.providerAttempted).toBe(false);
+    expect(dataOf().deliveryState).toMatchObject(priorDelivery);
+    expect(annualPlanHasDeliveredOffer(row)).toBe(true);
+  });
+
+  test('historical annual email dedupe preserves the frozen billing bundle after configuration changes', async () => {
+    row.status = 'draft';
+    row.estimate_data = annualData();
+    buildPricingBundle.mockResolvedValue({ services: [], billingTerms: { cadence: 'annual', amount: 299 } });
+    expect((await invoke('/:id/send', 'post', { sendMethod: 'email' })).body.sent).toBe(true);
+    const priorSnapshot = structuredClone(dataOf().sendSnapshot);
+    const priorDelivery = structuredClone(dataOf().deliveryState);
+    buildPricingBundle.mockClear();
+    buildPricingBundle.mockResolvedValue({ services: [], billingTerms: { cadence: 'monthly', amount: 999 } });
+    email.sendTemplate.mockResolvedValueOnce({ sent: true, deduped: true });
+    const response = await invoke('/:id/send', 'post', { sendMethod: 'email' });
+    expect(response.statusCode).toBe(200);
+    expect(response.body.channels.email.providerAccepted).toBe(false);
+    expect(buildPricingBundle).not.toHaveBeenCalled();
+    expect(dataOf().sendSnapshot).toEqual(priorSnapshot);
+    expect(dataOf().deliveryState).toMatchObject({ firstDeliveredAt: priorDelivery.firstDeliveredAt,
+      lastDeliveredAt: priorDelivery.lastDeliveredAt, deliveredAt: priorDelivery.deliveredAt,
+      annualPlanOfferFingerprint: priorDelivery.annualPlanOfferFingerprint });
+    expect(annualPlanHasDeliveredOffer(row)).toBe(true);
+  });
+
+  test.each(['email', 'both'].flatMap(method => [false, true].map(issued => [method, issued])))('historical proposal %s dedupe preserves only unchanged PDF receipts (issued=%s)', async (method, issued) => {
+    row.status = 'draft';
+    row.estimate_data = { proposal: { enabled: true, buildings: [{ name: 'Synthetic building',
+      lineItems: [{ id: 'application', description: 'Synthetic application', quantity: 1, unitPrice: 299, frequency: 'one_time' }] }] } };
+    expect((await invoke('/:id/send', 'post', { sendMethod: 'email' })).body.sent).toBe(true);
+    if (!issued) {
+      const proposal = structuredClone(dataOf().proposal); proposal.buildings[0].lineItems[0].unitPrice = 399;
+      expect((await invoke('/:id/proposal', 'put', { proposal })).statusCode).toBe(200);
+      expect(dataOf().proposalDelivery).toBeUndefined();
+    }
+    const priorReceipt = structuredClone(dataOf().proposalDelivery);
+    const priorSnapshot = structuredClone(dataOf().sendSnapshot);
+    if (issued) expect(priorReceipt.pdfEmailed).toBe(true);
+    buildPricingBundle.mockClear();
+    buildPricingBundle.mockResolvedValue({ services: [], billingTerms: { amount: 999 } });
+    email.sendTemplate.mockResolvedValueOnce({ sent: true, deduped: true });
+    const response = await invoke('/:id/send', 'post', { sendMethod: method });
+    expect(response.statusCode).toBe(200);
+    expect(response.body.channels.email.providerAccepted).toBe(false);
+    if (method === 'email' || issued) expect(dataOf().proposalDelivery).toEqual(priorReceipt);
+    else expect(dataOf().proposalDelivery.pdfEmailed).toBe(false);
+    if (method === 'email') {
+      expect(dataOf().sendSnapshot).toEqual(priorSnapshot); expect(buildPricingBundle).not.toHaveBeenCalled();
+    } else {
+      expect(response.body.channels.sms.real).toBe(true); expect(buildPricingBundle).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  test('dedupe after a real superseded provider attempt still witnesses the annual offer', async () => {
+    row.estimate_data = annualData();
+    email.sendTemplate.mockResolvedValueOnce({ sent: true, deduped: true, superseded: true, providerAttempted: true, providerAccepted: true });
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(result.channels.email.providerAttempted).toBe(true);
+    expect(annualPlanHasDeliveredOffer(row)).toBe(true);
+  });
+
+  test('a rejected superseded provider attempt cannot mint an annual receipt', async () => {
+    row.estimate_data = annualData();
+    email.sendTemplate.mockResolvedValueOnce({ sent: true, deduped: true, superseded: true,
+      providerAttempted: true, providerAccepted: false });
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(result.channels.email).toMatchObject({ ok: true, providerAttempted: true, providerAccepted: false });
+    expect(dataOf().deliveryState.annualPlanOfferFingerprint).toBeUndefined();
+    expect(dataOf().deliveryState.firstDeliveredAt).toBeUndefined();
+    expect(annualPlanHasDeliveredOffer(row)).toBe(false);
+  });
+
+  test.each([
+    ['email rejection', 'email', () => email.sendTemplate.mockRejectedValueOnce(new Error('Template disabled'))],
+    ['suppressed SMS', 'sms', () => sendCustomerMessage.mockResolvedValueOnce({ sent: true, reason: 'SMS suppressed' })],
+  ])('%s cannot issue an annual receipt', async (_name, method, arrange) => {
+    row.estimate_data = annualData();
+    arrange();
+    expect((await router.sendEstimateNow(structuredClone(row), method, { callerPreClaimed: true })).sent).toBe(false);
+    expect(dataOf().deliveryState).toBeUndefined();
+    expect(annualPlanHasDeliveredOffer(row)).toBe(false);
+  });
+
+  test.each([false, true])('terminal anchor receipt merge requires an actual handoff (actual=%s)', async (actual) => {
+    row.estimate_data = annualData();
+    email.sendTemplate.mockImplementationOnce(async () => {
+      row.status = 'accepted';
+      row.price_locked_at = new Date();
+      row.annual_total = '777';
+      return { sent: true, providerAttempted: actual, providerAccepted: actual };
+    });
+    const fingerprint = annualPlanOfferFingerprint(row);
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(result.superseded).toBe(true);
+    expect(row.status).toBe('accepted');
+    expect(row.annual_total).toBe('777');
+    expect(dataOf().deliveryState?.annualPlanOfferFingerprint).toBe(actual ? fingerprint : undefined);
+  });
+
+  describe('group publication', () => {
+    let sibling;
+    beforeEach(() => {
+      row.status = 'draft';
+      row.estimate_group_id = 'synthetic-group';
+      row.estimate_data = annualData(399);
+      sibling = savedEstimate({ id: 'annual-sibling', status: 'draft', estimate_group_id: row.estimate_group_id,
+        address: 'Synthetic second property', estimate_data: annualData() });
+      groupRows.push(sibling);
+      db.mockImplementation((table) => {
+        const builder = estimateDatabase(table);
+        const originalWhere = builder.where;
+        builder.where = jest.fn((key, value) => {
+          // Visibility OR branches have separate contract coverage.
+          if (typeof key === 'function') return builder;
+          if (key?.updated_at != null) {
+            const { updated_at: _ignored, ...fields } = key;
+            return originalWhere(fields);
+          }
+          return originalWhere(key, value);
+        });
+        builder.orWhere = jest.fn(() => builder);
+        builder.orWhereIn = jest.fn(() => builder);
+        builder.then = (resolve, reject) => builder.select().then(resolve, reject);
+        const update = builder.update;
+        builder.update = jest.fn(async (patch) => {
+          const priorData = structuredClone(dataOf(sibling));
+          const result = await update(patch);
+          // Model the terminal sibling scope + receipt SQL merge as well.
+          if (result && patch.estimate_data?.sql?.startsWith("jsonb_set(COALESCE(estimate_data, '{}'::jsonb),") && patch.estimate_data.bindings?.[1]) {
+            sibling.estimate_data = { ...priorData,
+              sendSnapshot: { ...priorData.sendSnapshot, ...JSON.parse(patch.estimate_data.bindings[0]) },
+              ...JSON.parse(patch.estimate_data.bindings[1]) };
+          }
+          return result;
+        });
+        return builder;
+      });
+    });
+
+    test.each(['quarterly', 'annual_protection'])('%s anchor publishes the sibling’s own fingerprint and bounded history', async (plan) => {
+      dataOf().results.tmBait.plan = plan;
+      dataOf(sibling).deliveryState = { firstDeliveredAt: '2025-01-01T12:00:00Z', deliveredAt: Array(25).fill('2025-01-01T12:00:00Z') };
+      const fingerprint = annualPlanOfferFingerprint(sibling);
+      const result = await invoke('/:id/send', 'post', { sendMethod: 'email' });
+      expect(result.statusCode).toBe(200);
+      expect(sibling.status).toBe('sent');
+      expect(dataOf(sibling).deliveryState).toMatchObject({ firstDeliveredAt: '2025-01-01T12:00:00Z', annualPlanOfferFingerprint: fingerprint });
+      expect(dataOf(sibling).deliveryState.annualPlanOfferFingerprint).not.toBe(dataOf().deliveryState.annualPlanOfferFingerprint);
+      expect(dataOf(sibling).deliveryState.deliveredAt).toHaveLength(25);
+      expect(dataOf(sibling).deliveryState.deliveredAt.at(-1)).toBe(dataOf().deliveryState.lastDeliveredAt);
+      expect(annualPlanHasDeliveredOffer(sibling)).toBe(true);
+    });
+
+    test('historical group dedupe preserves both frozen billing bundles after configuration changes', async () => {
+      buildPricingBundle.mockImplementation(async (estimate) => ({ services: [], billingTerms: { cadence: 'annual', amount: estimate.id === sibling.id ? 299 : 399 } }));
+      expect((await invoke('/:id/send', 'post', { sendMethod: 'email' })).body.sent).toBe(true);
+      const priorSnapshots = [row, sibling].map((estimate) => structuredClone(dataOf(estimate).sendSnapshot));
+      const priorSiblingDelivery = structuredClone(dataOf(sibling).deliveryState);
+      // Exercise the claimed publication path while retaining the issued offer.
+      row.status = sibling.status = 'draft';
+      buildPricingBundle.mockClear();
+      buildPricingBundle.mockResolvedValue({ services: [], billingTerms: { cadence: 'monthly', amount: 999 } });
+      email.sendTemplate.mockResolvedValueOnce({ sent: true, deduped: true });
+      const response = await invoke('/:id/send', 'post', { sendMethod: 'email' });
+      expect(response.statusCode).toBe(200);
+      expect(response.body.channels.email.providerAccepted).toBe(false);
+      expect(buildPricingBundle).not.toHaveBeenCalled();
+      expect([row, sibling].map((estimate) => dataOf(estimate).sendSnapshot)).toEqual(priorSnapshots);
+      expect(dataOf(sibling).deliveryState).toEqual(priorSiblingDelivery);
+      expect(sibling.status).toBe('sent');
+      expect(dataOf(sibling).groupPublishedByEstimateId).toBe(row.id);
+      expect(sibling.expires_at).toBeTruthy();
+      expect(annualPlanHasDeliveredOffer(sibling)).toBe(true);
+    });
+
+    test.each([false, true])('historical dedupe preserves sibling evidence (issued=%s)', async (issued) => {
+      if (issued) dataOf(sibling).deliveryState = { firstDeliveredAt: '2025-01-01T12:00:00Z',
+        annualPlanOfferFingerprint: annualPlanOfferFingerprint(sibling), deliveredAt: ['2025-01-01T12:00:00Z'] };
+      const priorDelivery = structuredClone(dataOf(sibling).deliveryState);
+      email.sendTemplate.mockResolvedValueOnce({ sent: true, deduped: true });
+      const result = await invoke('/:id/send', 'post', { sendMethod: 'email' });
+      expect(result.statusCode).toBe(200);
+      expect(dataOf(sibling).deliveryState).toEqual(priorDelivery);
+      expect(annualPlanHasDeliveredOffer(sibling)).toBe(issued);
+    });
+
+    test.each([false, true])('terminal sibling receipt merge requires an actual handoff (actual=%s)', async (actual) => {
+      const fingerprint = annualPlanOfferFingerprint(sibling);
+      email.sendTemplate.mockImplementationOnce(async () => {
+        sibling.status = 'accepted';
+        sibling.price_locked_at = new Date();
+        sibling.annual_total = '777';
+        return { sent: true, providerAttempted: actual, providerAccepted: actual };
+      });
+      const result = await invoke('/:id/send', 'post', { sendMethod: 'email' });
+      expect(result.statusCode).toBe(200);
+      expect(sibling.status).toBe('accepted');
+      expect(sibling.annual_total).toBe('777');
+      expect(dataOf(sibling).deliveryState?.annualPlanOfferFingerprint).toBe(actual ? fingerprint : undefined);
+    });
   });
 });
 
