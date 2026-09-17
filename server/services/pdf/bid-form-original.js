@@ -55,7 +55,6 @@ function pageResourceHash(document, page) {
     if (key.toString() === '/Font' && dict instanceof PDFDict) {
       hash.update('<<');
       for (const [fontKey, fontValue] of sortedEntries(dict)) {
-        if (/^\/Helvetica-\d+$/.test(fontKey.toString())) continue;
         hash.update(fontKey.toString());
         visit(fontValue);
       }

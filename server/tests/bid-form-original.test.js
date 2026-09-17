@@ -23,6 +23,15 @@ describe('bid form original integrity beyond the content streams', () => {
     stream.dict.set(PDFName.of(key), key === 'Filter' ? PDFName.of('ASCIIHexDecode') : doc.context.obj({ Predictor: 12 }));
     expect(() => form.assertOriginalBidForm(doc, 'north_port_pr27_02', 1)).toThrow(/does not match/);
   });
+  test('referenced Helvetica resources cannot be replaced without invalidating the original', async () => {
+    const sourcePdf = await blankPage(); await approve(sourcePdf);
+    const doc = await PDFDocument.load(sourcePdf);
+    const fonts = doc.getPage(0).node.Resources().lookup(PDFName.of('Font'));
+    const [name, reference] = fonts.entries()[0];
+    expect(name.toString()).toMatch(/^\/Helvetica-\d+$/);
+    doc.context.lookup(reference).set(PDFName.of('BaseFont'), PDFName.of('Courier-Bold'));
+    expect(() => form.assertOriginalBidForm(doc, 'north_port_pr27_02', 1)).toThrow(/does not match/);
+  });
   test('the reviewer script fingerprint is stable across reloads and includes resources', async () => {
     const sourcePdf = await blankPage();
     const a = await PDFDocument.load(sourcePdf); const b = await PDFDocument.load(sourcePdf);
