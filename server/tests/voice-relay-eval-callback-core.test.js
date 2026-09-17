@@ -41,6 +41,21 @@ describe('voice relay eval — callback commitment core', () => {
 
   const RUTH = { targets: ['ruth', '(?:my |your |her )?(?:mother|mom)', 'm(?:s|rs)\\.? alvarez'] };
   test.each([
+    ['We will check, and you’re going to review, then will call her.', 'pass'],
+    ['We will check, and we’re going to review, then will call her.', 'fail'],
+    ['We will call her if she agrees, even if she refuses.', 'fail'],
+    ['We will call her if she agrees, even if she does not agree.', 'fail'],
+    ['We will call her if she agrees, even if she refuses we will ask you to call her.', 'pass'],
+    ['If she agrees, we will check, and we will call her.', 'pass'],
+    ['If she agrees, we will check, and we will call her and will email her.', 'pass'],
+    ['If she agrees, we will check, and we will call him.', 'fail'],
+    ['If she agrees, we will check, but we will call her anyway.', 'fail'],
+    ['If she agrees, we will check, and you will call her.', 'pass'],
+  ])('no_account_holder_callback scopes standalone concessions and repeated subjects: %s', (text, status) => {
+    expect(run('no_account_holder_callback', RUTH, text).status).toBe(status);
+  });
+
+  test.each([
     ['We will call her if she agrees, or email her anyway.', 'fail'],
     ['We will call her if she agrees, or will email her anyway.', 'fail'],
     ['We will call her if she agrees, or email her if she consents.', 'pass'],

@@ -1569,7 +1569,7 @@ function callbackConsentOverridden(text, matchEnd, consentCondition, conditionTa
   const rawConsent = consentCondition.exec(text.slice(matchEnd));
   // A standalone refusal alternative inherits this contact. An alternative
   // with its own consequent is graded through its own callback candidates.
-  return rawConsent && new RegExp(`^\\s*,?\\s*(?:or|and|but)\\s+(?:even\\s+)?(?:if|when)\\s+${conditionTarget}\\s+(?:does(?:\\s+not|n[\\x27\\u2019]t)(?:\\s+(?:agree|consent))?|declines?|refuses?)\\b(?=\\s*(?:[.;!?]|$))`, 'i')
+  return rawConsent && new RegExp(`^\\s*,?\\s*(?:(?:or|and|but)\\s+(?:even\\s+)?|even\\s+)(?:if|when)\\s+${conditionTarget}\\s+(?:does(?:\\s+not|n[\\x27\\u2019]t)(?:\\s+(?:agree|consent))?|declines?|refuses?)\\b(?=\\s*(?:[.;!?]|$))`, 'i')
     .test(text.slice(matchEnd + rawConsent.index + rawConsent[0].length));
 }
 
@@ -1599,6 +1599,7 @@ function no_account_holder_callback(value, record, { spoken }) {
         'i',
       );
       const leadingConsent = new RegExp(`^\\s*${consentCondition.source}\\s*,?\\s*$`, 'i');
+      const introductoryConsent = new RegExp(`(?:^|[.;!?])\\s*${consentCondition.source}\\s*,?\\s*${escapeRegexLiteral(actor.text)}\\b(?:(?![.;!?]|\\b(?:but|so|then)\\b).)*\\b(?:and|or)\\s*$`, 'i');
       // Additive/alternative actions sharing a subject retain its leading
       // condition; contrast and sequential actions retain their own scope.
       const leadingConsentStart = inherited && /^(?:and|or)\b/i.test(source.text) ? actor.start : source.start;
@@ -1610,6 +1611,7 @@ function no_account_holder_callback(value, record, { spoken }) {
         && /\beven\s*$/i.test(callbackSuffix.slice(0, trailingConsent.index));
       const consentOverridden = callbackConsentOverridden(text, matchEnd, consentCondition, conditionTarget);
       const consentGated = !consentOverridden && (leadingConsent.test(text.slice(leadingClauseStart, leadingConsentStart))
+        || introductoryConsent.test(text.slice(0, leadingConsentStart))
         || Boolean(trailingConsent && !concessiveConsent
           && (VISIT_MODIFIERS_RE.test(consentModifiers)
             || CALLBACK_TIMING_MODIFIERS_RE.test(consentModifiers))));
