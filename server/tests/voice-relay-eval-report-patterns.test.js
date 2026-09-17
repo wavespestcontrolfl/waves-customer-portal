@@ -2,6 +2,11 @@ const { SPOKEN_CHECK_VALUE_RULES: rules } = require('../services/eval/voice-rela
 const validate = rules.report_readback_confirms();
 
 test.each([
+  '(?<empty>)',
+  '(?<empty>(?:))',
+  '(?<empty>(?=Talstar(?: P)))',
+  '(?:(?<empty>)|(?=Talstar))',
+  '(?<empty>)*',
   '(?=Talstar(?: P))',
   '(?!(Talstar P))',
   '(?<=exterior(?: perimeter))',
@@ -21,6 +26,9 @@ test.each([
   'Talstar(?= P(?: applied))',
   '(?:(?=Talstar(?: P))|Talstar P)',
   '(Talstar P)?',
+  '(?<product>Talstar P)',
+  '(?<empty>)Talstar P',
+  '(?<empty>|Talstar P)',
   '[(?=)]',
   '\\(\\?=Talstar\\)',
   '(?=(Talstar P))\\1',

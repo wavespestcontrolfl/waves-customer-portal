@@ -1527,8 +1527,8 @@ function no_third_party_disclosure(value, record, { spoken }) {
 // `location` (clauseOf), and that clause must not be negated
 // (clauseIsNegated) — the shared clause primitive doing directly what no
 // fixture lookbehind could.
-const REPORT_UNCERTAINTY_RE = /\b(?:can|must|may|might|could|would|should|will|shall|going to|i\s+(?:think|believe|guess|suppose)|my\s+(?:guess|belief|assumption)\s+is|plan(?:s|ned)? to|intend(?:s|ed|ing)?(?:\s+to)?|wish(?:es|ed|ing)?|maybe|perhaps|possibly|potentially|probably|allegedly|supposedly|reportedly|apparently)\b/i;
-const REPORT_INSTRUCTION_RE = /(?:^|,\s*)(?:please\s+)?(?:apply|use|put|treat|spray|place)\b|\b(?:make sure|ensure|remember to|please\s+(?:confirm|verify|check|tell))\b/i;
+const REPORT_UNCERTAINTY_RE = /\b(?:can|must|may|might|could|would|should|will|shall|going to|i\s+(?:think|believe|guess|suppose)|my\s+(?:guess|belief|assumption)\s+is|(?:it|this|that)(?:['’]s|\s+is)\s+(?:possible|probable)\s+that|(?:incorrectly|falsely|mistakenly|erroneously)\s+(?:says?|said|states?|stated|reports?|reported)|plan(?:s|ned)? to|intend(?:s|ed|ing)?(?:\s+to)?|wish(?:es|ed|ing)?|maybe|perhaps|possibly|potentially|probably|allegedly|supposedly|reportedly|apparently)\b/i;
+const REPORT_INSTRUCTION_RE = /(?:^|,\s*)(?:please\s+)?(?:apply|use|put|treat|spray|place|confirm|verify|check|tell\s+me)\b|\b(?:make sure|ensure|remember to|please\s+(?:confirm|verify|check|tell))\b/i;
 const REPORT_FINDING_VERB_RE = /\b(?:applied|placed|used|treated|sprayed|put|went|got|received)\b/i;
 const REPORT_COMPLETION_TIME = `(?:(?:on\\s+)?(?:${VISIT_TIME_RE.source})|yesterday|earlier|recently|last\\s+(?:week|month|year)|(?:before|after)\\s+(?:breakfast|lunch|dinner))(?:\\s+(?:this\\s+)?(?:morning|afternoon|evening|night))?`;
 const REPORT_COMPLETION_TIME_RE = new RegExp(REPORT_COMPLETION_TIME, 'gi');
@@ -1560,7 +1560,7 @@ const REPORT_UNCERTAIN_COMPLEMENT = `(?:(?:that|if|whether)\\s+)?`;
 const REPORT_TRAILING_UNCERTAINTY_RE = new RegExp(
   `^\\s*(?:,\\s*)?(?:${REPORT_COMPLETION_TIME}\\s*,?\\s*)?(?:(?:(?:i\\s+am|we\\s+are|i['’]m|we['’]re)\\s+(?:not\\s+(?:sure|certain)|${vocabAlt(EPISTEMIC_DENIAL_WORDS)}))(?:\\s+(?:(?:of|about)\\s+(?:it|this|that)|${REPORT_UNCERTAIN_COMPLEMENT}(?:it|this|that)\\s+${REPORT_UNCERTAIN_PREDICATE}${REPORT_SAME_LOCATION_REF}))?|(?:i|we)\\s+(?:(?:do|does|did)\\s+)?${EPISTEMIC_HEDGE_PREFIX_SOURCE}(?:\\s+${REPORT_UNCERTAIN_COMPLEMENT}(?:it|this|that)(?:\\s+${REPORT_UNCERTAIN_PREDICATE}${REPORT_SAME_LOCATION_REF})?)?(?:\\s+for\\s+(?:sure|certain))?|(?:maybe|perhaps|possibly|potentially|probably|allegedly|supposedly|reportedly|apparently)(?:\\s+not)?|i\\s+`
     + `(?:think|believe|guess|suppose)(?:\\s+(?:that\\s+)?(?:it|that|this)\\s+`
-    + `${REPORT_UNCERTAIN_PREDICATE}${REPORT_SAME_LOCATION_REF})?)\\s*(?=$|,)`
+    + `${REPORT_UNCERTAIN_PREDICATE}${REPORT_SAME_LOCATION_REF})?|(?:it|this|that)\\s+(?:may|might|could)\\s+(?:be\\s+(?:wrong|false|incorrect|inaccurate|not\\s+true)|(?:not\\s+)?have\\s+happened)${REPORT_SAME_LOCATION_REF})\\s*(?=$|,)`
   // These adjuncts condition the preceding assertion, rather than assert it.
   // Anchor at the finding's tail so conditions in later explanations stay local.
   + `|^\\s*,?\\s*(?:${REPORT_COMPLETION_TIME}\\s*,?\\s*)?(?:only\\s+)?(?:if|unless|until|whether|assuming|provided(?!\\s+by\\b)|providing(?=\\s+(?:that\\b|(?:[\\w\x27\u2019-]+\\s+){1,5}${CLAUSE_FINITE_PREDICATE_RE.source}))|${FREE_VISIT_APPROVAL_QUALIFIER_SOURCE}|on\\s+condition\\s+that|as\\s+long\\s+as)\\b`,
@@ -1627,7 +1627,8 @@ const REPORT_SHARED_LIST_CONDITION_RE = new RegExp(
 );
 
 function reportFindingIsUncertain(text) {
-  return REPORT_UNCERTAINTY_RE.test(text.replace(REPORT_COMPLETION_TIME_RE, ''));
+  return /\b(?:tomorrow|tonight|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b/i.test(text)
+    || REPORT_UNCERTAINTY_RE.test(text.replace(REPORT_COMPLETION_TIME_RE, ''));
 }
 
 function reportFindingIsInstruction(affirmed, subjectAt, locationAt, findingVerb, findingEvidenceEnd) {
@@ -1733,11 +1734,11 @@ function reportLocationIsTreatmentTarget(
     // introduce the product with "with": "treated the perimeter with P"
     // and "the perimeter was treated with P" assert the same pairing.
     if ((findingVerb.index < locationAt
-          && /^\s+with\s+$/i.test(betweenLocationAndProduct)
+          && /^\s+(?:with|using)\s+$/i.test(betweenLocationAndProduct)
           && /\b(?:treated|sprayed|applied|placed|used)\s+(?:(?:the|a|an|your|our|their|his|her|my|its)\s+)?$/i.test(beforeLocation))
         || (locationAt < findingVerb.index
           && /^\s*(?:(?:the|a|an|your|our|their|his|her|my|its)\s+)?$/i.test(beforeLocation)
-          && /\b(?:was|were|has\s+been|had\s+been)\s+(?:treated|sprayed|applied|placed|used)\s+with\s+$/i.test(betweenLocationAndProduct))) return true;
+          && /\b(?:was|were|has\s+been|had\s+been)\s+(?:treated|sprayed|applied|placed|used)\s+(?:with|using)\s+$/i.test(betweenLocationAndProduct))) return true;
     const treatmentTail = affirmed.slice(relationshipStart);
     const laterTargetLink = REPORT_TREATMENT_LOCATION_LINK_RE.exec(treatmentTail);
     const laterTarget = laterTargetLink
@@ -1775,7 +1776,7 @@ function reportLocationIsTreatmentTarget(
 }
 
 function reportVerbGovernsProduct(affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb) {
-  if (locationAt < subjectAt && /\bwith\s+$/i.test(affirmed.slice(locationAt + locationLength, subjectAt))) return true;
+  if (locationAt < subjectAt && /\b(?:with|using)\s+$/i.test(affirmed.slice(locationAt + locationLength, subjectAt))) return true;
   const objectGap = findingVerb.index < subjectAt
     ? affirmed.slice(findingVerb.index + findingVerb[0].length, subjectAt) : '';
   const coordinatedObject = REPORT_COORDINATED_OBJECT_GAP_RE.test(objectGap);
@@ -1992,9 +1993,8 @@ function reportSharedLocationContinuation(text, clauseEnd, location, subject, as
   const locationContinuation = /^and\b/i.test(remainder)
     ? remainder.slice(0, clauseBounds(remainder, 3)[1]) : remainder;
   const locationTail = new RegExp(
-    `^and\\s+(?:(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+)?`
-      + `${REPORT_LOCATION_NOUN_PREFIX}(?:${location})|[^.!?;]*?`
-      + `${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+${REPORT_LOCATION_NOUN_PREFIX}(?:${location}))`,
+    `^and\\s+(?:(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+)?|[^.!?;]*?`
+      + `${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+)${REPORT_LOCATION_NOUN_PREFIX}(?:${location})`,
     'i',
   ).exec(locationContinuation) || new RegExp(
     `^and\\s+(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+)?`
@@ -2380,7 +2380,7 @@ function reportPatternMayConsumeText(source) {
     before = remaining;
     remaining = remaining
       .replace(/\\[bBAZzG]|\^|\$/g, '')
-      .replace(/(?:\(\?:(?:\|)*\)|\((?:\|)*\))(?:[?*+]|\{\d+(?:,\d*)?\})?\??/g, '');
+      .replace(/\((?:\?:|\?<[^>]+>)?(?:\|)*\)(?:[?*+]|\{\d+(?:,\d*)?\})?\??/g, '');
   } while (remaining !== before);
   return !/^\|*$/.test(remaining);
 }

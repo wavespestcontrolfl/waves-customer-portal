@@ -1498,3 +1498,55 @@ test.each(['I think', 'I believe', 'I guess', 'I suppose'])
   expect(checks.report_readback_confirms(report, {}, { spoken: [`We applied Talstar P to the exterior perimeter, foundation, and garage ${qualifier}.`] })[0]).toBe('fail');
   expect(checks.report_readback_confirms(report, {}, { spoken: [`We applied Talstar P to the exterior perimeter, foundation, and garage. ${qualifier} the office is closed.`] })[0]).toBe('pass');
 });
+
+
+test.each([
+  ['It is possible that Talstar P was applied to the exterior perimeter.', 'fail'],
+  ['It is probable that Talstar P was applied to the exterior perimeter.', 'fail'],
+  ["It's possible that Talstar P was applied to the exterior perimeter.", 'fail'],
+  ['It is possible that bait was placed indoors, but Talstar P was applied to the exterior perimeter.', 'pass'],
+  ['It is probable that Talstar P was applied indoors. Talstar P was applied to the exterior perimeter.', 'pass'],
+  ['Talstar P was applied to the exterior perimeter. That may be wrong.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter. Actually, that might not have happened.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, but that could be incorrect.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter. The appointment may be wrong.', 'pass'],
+  ['Talstar P was applied to the exterior perimeter. That might not have happened indoors.', 'pass'],
+  ['Talstar P was applied to the exterior perimeter. That may be wrong about the invoice.', 'pass'],
+  ['Talstar P was applied to the exterior perimeter. That may be wrong. Talstar P was applied to the exterior perimeter.', 'pass'],
+  ['Confirm that Talstar P was applied to the exterior perimeter.', 'fail'],
+  ['Verify that Talstar P was applied to the exterior perimeter.', 'fail'],
+  ['Check that Talstar P was applied to the exterior perimeter.', 'fail'],
+  ['Tell me that Talstar P was applied to the exterior perimeter.', 'fail'],
+  ['We confirm that Talstar P was applied to the exterior perimeter.', 'pass'],
+  ['I verify that Talstar P was applied to the exterior perimeter.', 'pass'],
+  ['Check the invoice, Talstar P was applied to the exterior perimeter.', 'pass'],
+  ['The report incorrectly says Talstar P was applied to the exterior perimeter.', 'fail'],
+  ['The report falsely states Talstar P was applied to the exterior perimeter.', 'fail'],
+  ['The report mistakenly says Talstar P was applied to the exterior perimeter.', 'fail'],
+  ['The report erroneously says Talstar P was applied to the exterior perimeter.', 'fail'],
+  ['The report incorrectly says bait was placed indoors, but Talstar P was applied to the exterior perimeter.', 'pass'],
+  ['The report correctly says Talstar P was applied to the exterior perimeter.', 'pass'],
+  ['We treated the exterior perimeter using Talstar P.', 'pass'],
+  ['The exterior perimeter was treated using Talstar P.', 'pass'],
+  ['The exterior perimeter has been sprayed using Talstar P.', 'pass'],
+  ['The exterior perimeter was not treated using Talstar P.', 'fail'],
+  ['We might have treated the exterior perimeter using Talstar P.', 'fail'],
+  ['We treated the garage using Talstar P.', 'fail'],
+  ['We treated the exterior perimeter using bait.', 'fail'],
+  ['Talstar P applied tomorrow to the exterior perimeter.', 'fail'],
+  ['Talstar P applied next week to the exterior perimeter.', 'fail'],
+  ['Talstar P was applied tomorrow to the exterior perimeter.', 'fail'],
+  ['Talstar P was applied next Monday to the exterior perimeter.', 'fail'],
+  ['Talstar P was applied yesterday to the exterior perimeter.', 'pass'],
+  ['Talstar P was applied last week to the exterior perimeter.', 'pass'],
+  ['Talstar P was applied to the exterior perimeter. The next appointment is tomorrow.', 'pass'],
+])('round-two report matching retains completion and proposition scope: %s', (text, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each(['(?<place>exterior perimeter)', '(?<place>(exterior perimeter))', '(?<place>exterior perimeter)|garage'])
+('shared location continuations preserve named location groups: %s', (location) => {
+  const value = { subject: 'Talstar P', location };
+  expect(checks.report_readback_confirms(value, {}, { spoken: ['Talstar P was applied to the exterior perimeter.'] })[0]).toBe('pass');
+  expect(checks.report_readback_confirms(value, {}, { spoken: ['Talstar P was applied to the exterior perimeter, but it was not applied there.'] })[0]).toBe('fail');
+});
