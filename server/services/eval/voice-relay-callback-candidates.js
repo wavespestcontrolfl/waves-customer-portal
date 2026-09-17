@@ -18,7 +18,7 @@ const CALLBACK_MODAL = `(?:[\\x27\\u2019]ll|[\\x27\\u2019](?:re|s) going to|[\\x
 const CALLBACK_COORDINATED_MODAL = '(?:will|can|could|promise(?:s|d)? to|(?:am|are|is) going to|(?:am|are|is) scheduled to)';
 const CALLBACK_GOVERNING_MODAL = '(?:is|are|was|were|will|would|can|could|do|does|did|has|have|had|should|shall|may|might|must|cannot|can[\\x27\\u2019]t|could not|couldn[\\x27\\u2019]t|will not|won[\\x27\\u2019]t)';
 const CALLBACK_COORDINATED_SUBJECT_RE = new RegExp(
-  `(?:^|[,;:]|\\b(?:and|but|so|then)\\b)\\s*(?<subject>${CALLBACK_PROMISER}|(?:[a-z][\\w\\x27\\u2019.-]*\\s+){0,4}[a-z][\\w\\x27\\u2019.-]*)(?:\\s+${CALLBACK_GOVERNING_MODAL}|[\\x27\\u2019]ll)\\b`,
+  `(?:^|[,;:]|\\b(?:and|but|so|then)\\b)\\s*(?:(?:and|but|so|then)\\b\\s*)*(?<subject>${CALLBACK_PROMISER}|(?:[a-z][\\w\\x27\\u2019.-]*\\s+){0,4}[a-z][\\w\\x27\\u2019.-]*)(?:\\s+${CALLBACK_GOVERNING_MODAL}|[\\x27\\u2019]ll)\\b`,
   'gi',
 );
 // Two branches, deliberately not one: a BASE verb may sit up to three filler
@@ -44,7 +44,7 @@ const CALLBACK_ACTION = `(?:${CALLBACK_ACTION_LEAD}${CALLBACK_VERB}|${CALLBACK_A
 // her") — its own ACTION table below. Caller advice such as "You can ask
 // the office to call her" has no Waves promiser/modal and is not a promise.
 const CALLBACK_DELEGATE = `(?:${TEAM_PROMISERS.filter((actor) => !/^(?:I|we)$/i.test(actor)).join('|')})`;
-const CALLBACK_DELEGATION_INFINITIVE = `(?:(?:have|get|ask) ${CALLBACK_DELEGATE}(?: to)?|(?:tell|let) ${CALLBACK_DELEGATE} (?:know )?to|arrange for ${CALLBACK_DELEGATE} to)`;
+const CALLBACK_DELEGATION_INFINITIVE = `(?:(?:have|get|ask) ${CALLBACK_DELEGATE}(?: to)?|tell ${CALLBACK_DELEGATE} (?:know )?to|let ${CALLBACK_DELEGATE}|arrange for ${CALLBACK_DELEGATE} to)`;
 const CALLBACK_DELEGATION_FINITE = `(?:(?:make sure|see (?:to it )?that) ${CALLBACK_DELEGATE}|set it up so ${CALLBACK_DELEGATE}|pass (?:this|it) (?:along|on) so ${CALLBACK_DELEGATE})`;
 // The FINITE (3rd-person indicative) form of the same verbs, for the FINITE
 // delegation shapes above.
