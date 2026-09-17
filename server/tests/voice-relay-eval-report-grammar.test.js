@@ -15,6 +15,13 @@ test.each([
   ['Talstar P was likely applied to the exterior perimeter.', true],
   ['Talstar P likely was applied to the exterior perimeter.', true],
   ['Talstar P has likely been applied to the exterior perimeter.', true],
+  ['The technician Will applied Talstar P to the exterior perimeter.', false],
+  ['The technician May applied Talstar P to the exterior perimeter.', false],
+  ['The technician Will may have applied Talstar P to the exterior perimeter.', true],
+  ['The technician May will apply Talstar P to the exterior perimeter.', true],
+  ['Talstar P could already have been applied to the exterior perimeter.', true],
+  ['Talstar P should be applied to the exterior perimeter.', true],
+  ['The report might show that Talstar P was applied to the exterior perimeter.', true],
   ['We pretended that Talstar P was applied to the exterior perimeter.', true],
   ['Talstar P was applied tomorrow to the exterior perimeter.', true],
   ['Talstar P was applied yesterday to the exterior perimeter.', false],
@@ -67,6 +74,9 @@ test.each([
   ['Talstar P went around the exterior perimeter.', 'Talstar P', true],
   ['We applied the Talstar P container to the exterior perimeter.', 'Talstar P', false],
   ['We applied Talstar P liquid to the exterior perimeter.', 'Talstar P', true],
+  ['We used Talstar P concentrate at the exterior perimeter.', 'Talstar P', true],
+  ['We applied Talstar P liquid to the exterior perimeter.', 'Talstar', true],
+  ['We applied Talstar P bottle to the exterior perimeter.', 'Talstar', false],
   ['We used Talstar P and drove to the exterior perimeter.', 'Talstar P', false],
   ['We used Talstar P and then drove to the exterior perimeter.', 'Talstar P', false],
   ['We used Talstar P and quickly walked to the exterior perimeter.', 'Talstar P', false],
@@ -124,10 +134,62 @@ test.each([
   ['We attempted to have applied Talstar P to the exterior perimeter.', 'Talstar P', false],
   ['We tried to have applied Talstar P to the exterior perimeter.', 'Talstar P', false],
   ['We hoped to have applied Talstar P to the exterior perimeter.', 'Talstar P', false],
+  ['We were hoping to have applied Talstar P to the exterior perimeter.', 'Talstar P', false],
+  ['We were hoping to have finished applying Talstar P to the exterior perimeter.', 'Talstar P', false],
+  ['Talstar P was used for ants reported at the exterior perimeter.', 'Talstar P', false],
+  ['Talstar P was used with equipment sitting at the exterior perimeter.', 'Talstar P', false],
+  ['Talstar P was used with a sprayer leaning at the exterior perimeter.', 'Talstar P', false],
+  ['Talstar P was used for ants observed near equipment at the exterior perimeter.', 'Talstar P', false],
+  ['We applied Talstar P after lunch to the exterior perimeter.', 'Talstar P', true],
+  ['We applied Talstar P before dinner to the exterior perimeter.', 'Talstar P', true],
+  ['We applied Talstar P after treating bait to the exterior perimeter.', 'Talstar P', false],
+  ['Talstar P was also applied to the exterior perimeter.', 'Talstar P', true],
+  ['Talstar P has also been applied to the exterior perimeter.', 'Talstar P', true],
+  ['Talstar P was also not applied to the exterior perimeter.', 'Talstar P', false],
+  ['Talstar P was also supposed to have been applied to the exterior perimeter.', 'Talstar P', false],
+  ['Talstar P and bait were applied to the exterior perimeter, and their amounts were 2 and 3 gallons, respectively.', 'Talstar P', true],
+  ['Talstar P and bait were applied to the exterior perimeter, and their amounts were 2 and 3 gallons, respectively.', 'bait', true],
 ])('completed treatment and product ownership: %s / %s', (text, subject, completed) => {
-  const verb = /\b(?:apply|applying|applied|placed|placing|used|using|treated|treating|sprayed|spraying|put|went|got|received)\b/i.exec(text);
+  const verb = /\b(?:apply|applying|applied|place|placed|placing|use|used|using|treat|treated|treating|spray|sprayed|spraying|put|went|got|received)\b/i.exec(text);
   expect(grammar.reportHasCompletedFinding(text, text.indexOf(subject), subject.length,
     text.indexOf('exterior perimeter'), 18, verb)).toBe(completed);
+});
+
+test.each([
+  'We applied Talstar P and bait respectively to the exterior perimeter and foundation.',
+  'According to the report, Talstar P, bait, and dust were applied to the exterior perimeter, foundation and garage, respectively.',
+  'Yesterday, according to the report, Talstar P, bait and dust were applied respectively to the exterior perimeter, foundation and garage.',
+  'Talstar P, bait and dust were applied respectively to the exterior perimeter, foundation and garage, as recorded in the report.',
+  'Talstar P, bait and dust were applied respectively to the exterior perimeter, foundation and garage, which the technician documented.',
+  'Talstar P, bait and dust were applied respectively to the exterior perimeter, foundation and garage, yesterday morning.',
+])('respectively retains supported introduction and target-list positions: %s', (text) => {
+  const products = text.includes('dust') ? ['Talstar P', 'bait', 'dust'] : ['Talstar P', 'bait'];
+  const locations = products.length === 3 ? ['exterior perimeter', 'foundation', 'garage'] : ['exterior perimeter', 'foundation'];
+  products.forEach((product, productIndex) => locations.forEach((location, locationIndex) => {
+    expect(grammar.reportHasCompletedFinding(text, text.indexOf(product), product.length,
+      text.indexOf(location), location.length, /applied/.exec(text))).toBe(productIndex === locationIndex);
+  }));
+});
+
+test.each(['use', 'spray', 'treat', 'place'])('did %s requires completed emphasis and direct product scope', (action) => {
+  for (const [prefix, completed] of [['We did', true], ['We did also', true], ['We', false], ['We did not', false], ['We planned to', false]]) {
+    const text = `${prefix} ${action} Talstar P around the exterior perimeter.`;
+    expect(grammar.reportHasCompletedFinding(text, text.indexOf('Talstar P'), 9,
+      text.indexOf('exterior perimeter'), 18, new RegExp(`\\b${action}\\b`).exec(text))).toBe(completed);
+  }
+  const text = `We did ${action} a substitute for Talstar P around the exterior perimeter.`;
+  expect(grammar.reportHasCompletedFinding(text, text.indexOf('Talstar P'), 9,
+    text.indexOf('exterior perimeter'), 18, new RegExp(`\\b${action}\\b`).exec(text))).toBe(false);
+});
+
+test.each(['exterior perimeter', 'garage'])('location-first coordination targets %s', (location) => {
+  for (const text of ['The exterior perimeter and garage were treated with Talstar P.', 'We treated the exterior perimeter and garage using Talstar P.']) {
+    expect(grammar.reportHasCompletedFinding(text, text.indexOf('Talstar P'), 9,
+      text.indexOf(location), location.length, /treated/.exec(text))).toBe(true);
+  }
+  const text = 'The exterior perimeter and equipment stored in the garage were treated with Talstar P.';
+  expect(grammar.reportHasCompletedFinding(text, text.indexOf('Talstar P'), 9,
+    text.indexOf(location), location.length, /treated/.exec(text))).toBe(false);
 });
 
 test.each(['spraying', 'treating', 'placing', 'using'])('completed %s retains governor and product scope', (action) => {
@@ -192,6 +254,11 @@ test.each([
   ['Please confirm that, Talstar P was applied to the exterior perimeter.', true],
   ['We confirm that bait, Talstar P, and dust were applied to the exterior perimeter.', false],
   ['Confirm that the invoice is paid, Talstar P was applied to the exterior perimeter.', false],
+  ['I need you to confirm that Talstar P was applied to the exterior perimeter.', true],
+  ['I want you to verify that Talstar P was applied to the exterior perimeter.', true],
+  ['Please let me know whether Talstar P was applied to the exterior perimeter.', true],
+  ['I need you to confirm the invoice, Talstar P was applied to the exterior perimeter.', false],
+  ['I need you at the office, Talstar P was applied to the exterior perimeter.', false],
   ['We confirm that Talstar P was applied to the exterior perimeter.', false],
 ])('governing instruction detection: %s', (text, instruction) => {
   expect(grammar.reportFindingIsInstruction(text, text.indexOf('Talstar P'),
