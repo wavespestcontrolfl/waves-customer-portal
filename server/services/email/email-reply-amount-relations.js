@@ -47,13 +47,12 @@ function recognizeClause(clause) {
     let end = anchor.end;
     if (predicate) {
       end = at('participant', end)?.end ?? end;
-      if (wordIn(end, AT)) end += 1;
+      if (!at('qualifier', end) && wordIn(end, AT)) end += 1;
     } else end = copulaEnd(end, true, true);
     if (wordIn(end, ARTICLES)) end += 1;
     const qualifier = at('qualifier', end);
     if (qualifier) end = qualifier.end;
-    if (wordIn(end, RANGE_INTRODUCERS)) end += 1;
-    const record = amounts.get(end);
+    const record = amounts.get(end + Number(wordIn(end, RANGE_INTRODUCERS)));
     if (record) add(record, predicate ? 'predicate_amount' : 'head_amount', anchor, qualifier);
   }
 

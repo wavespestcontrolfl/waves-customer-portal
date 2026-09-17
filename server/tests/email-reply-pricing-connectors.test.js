@@ -213,4 +213,11 @@ describe('bounded shared pricing connectors', () => {
   ('does not infer a has bridge from unrelated prefixes: %s', (text) => {
     expect(edges(text)).toEqual([]);
   });
+
+  test.each(['at most', 'at least'])('does not consume the start of %s as a connector', (qualifier) => {
+    const clause = recognize(`for each visit, customers pay ${qualifier} $98`).clauses[0];
+    const original = clause.phrases.find((p) => p.type === 'qualifier');
+    expect(clause.amountRelations[0].candidates[0].qualifier).toBe(original);
+    expect(clause.unitRelations[0].candidates.length).toBeGreaterThan(0);
+  });
 });
