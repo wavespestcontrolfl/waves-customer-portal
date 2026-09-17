@@ -90,6 +90,7 @@ const { computeProposalTotals, normalizeProposal } = require('../services/estima
 const { gateEnvValue } = require('../config/feature-gates');
 const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
 const { buildPricingBundle } = require('../routes/estimate-public');
+const { estimateOfferVersion } = require('../services/estimate-offer-version');
 jest.mock('../services/pricing-authority-gate', () => {
   const actual = jest.requireActual('../services/pricing-authority-gate');
   return { ...actual, gatedSendAuthorityPredicateApplies: jest.fn(() => false) };
@@ -204,19 +205,104 @@ beforeEach(() => {
 describe('commercial bid authoring', () => {
   beforeEach(() => gateEnvValue.mockImplementation((key) => key === 'GATE_COMMERCIAL_BID_BUILDER'));
   const proposal = () => ({ enabled: true, validThrough: '2099-12-21', buildings: [{ name: 'Synthetic field', lineItems: [{ id: 'application', description: 'Synthetic application', quantity: 25.8, unit: 'acre', unitPrice: 100, frequency: 'one_time' }] }] });
-  test('PUT stores fractional quote totals and fixed expiry atomically', async () => {
+  const costing = { revenueYears: 1, rows: [{ category: 'labor', phase: 'Phase A', description: 'PRIVATE CREW COST', quantity: 40, unit: 'hour', unitCost: 35, occurrences: 4 }] };
+  test('the admin proposal read returns private costs beside the normalized customer proposal', async () => {
+    row.estimate_data = { proposal: proposal(), proposalCosting: costing };
+    const res = await invoke('/:id/proposal', 'get');
+    expect(res.statusCode).toBe(200);
+    expect(res.body.projectCosting).toEqual(costing);
+    expect(JSON.stringify(res.body.proposal)).not.toContain('PRIVATE CREW COST');
+  });
+  test.each([['costing only', false, false], ['a changed line', true, false], ['costing only, legacy lines given ids on load', false, true]])('re-saving a delivered proposal with %s keeps or drops the emailed-PDF marker (GH codex P2 on #4270)', async (name, changed, legacy) => {
+    const savedProposal = proposal();
+    // A legacy delivered proposal has no line ids; the editor mints them on
+    // load and the next cost-only save sends them (GH codex P2 r12 on #4270).
+    if (legacy) delete savedProposal.buildings[0].lineItems[0].id;
+    Object.assign(row, { status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'), estimate_data: { proposal: savedProposal, proposalDelivery: { pdfEmailed: true } } });
+    const incoming = proposal();
+    if (legacy) incoming.buildings[0].lineItems[0].id = 'generated-on-load';
+    if (changed) incoming.buildings[0].lineItems[0].unitPrice = 101;
+    const res = await invoke('/:id/proposal', 'put', { expectedEditVersion: persistence.estimateEditVersion(row), proposal: incoming, projectCosting: costing });
+    expect(res.statusCode).toBe(200);
+    expect(dataOf().proposalCosting).toEqual(costing);
+    if (changed) expect(dataOf().proposalDelivery).toBeUndefined();
+    else expect(dataOf().proposalDelivery).toEqual({ pdfEmailed: true });
+  });
+  test('PUT stores fractional quote totals, fixed expiry and private costing atomically', async () => {
     row.status = 'draft';
-    const res = await invoke('/:id/proposal', 'put', { expectedEditVersion: persistence.estimateEditVersion(row), proposal: proposal() });
+    const res = await invoke('/:id/proposal', 'put', { expectedEditVersion: persistence.estimateEditVersion(row), proposal: proposal(), projectCosting: costing });
     expect(res.statusCode).toBe(200);
     // The response carries the version this write committed (pre-push codex P1 r3).
     expect(res.body.editVersion).toBe(persistence.estimateEditVersion(row));
     expect(row.onetime_total).toBe(2580);
     expect(row.expires_at.toISOString()).toBe('2099-12-22T04:59:59.999Z');
+    expect(dataOf().proposalCosting).toEqual(costing);
+    expect(JSON.stringify(dataOf().proposal)).not.toContain('PRIVATE CREW COST');
     expect(dataOf().proposal.buildings[0].lineItems[0]).toMatchObject({ quantity: 25.8, unit: 'acre', amount: 2580 });
+  });
+  test.each(['private costing', 'changed quote', 'already stale review'])('scheduled execution after %s preserves only the offer staff reviewed', async (change) => {
+    row.status = 'draft';
+    expect((await invoke('/:id/proposal', 'put', { proposal: proposal() })).statusCode).toBe(200);
+    const { entry, scheduledAt } = scheduledAttempt();
+    entry.scheduleReview.reviewedOffer = change === 'already stale review' ? 'stale-offer' : estimateOfferVersion(row);
+    row.status = 'scheduled'; row.scheduled_at = scheduledAt;
+    row.estimate_data = { ...dataOf(), manualSendAttempts: [entry] };
+    const incoming = proposal();
+    if (change === 'changed quote') incoming.buildings[0].lineItems[0].unitPrice = 101;
+    const saved = await invoke('/:id/proposal', 'put', { proposal: incoming, projectCosting: costing });
+    expect(saved.statusCode).toBe(200);
+    expect(saved.body.editVersion).toBe(persistence.estimateEditVersion(row));
+    row.status = 'sending';
+    if (change === 'private costing') {
+      expect(dataOf().manualSendAttempts[0].scheduleReview.reviewedOffer).toBe(estimateOfferVersion(row));
+      const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+      expect(result.channels.email.ok).toBe(true);
+      expect(email.sendTemplate).toHaveBeenCalledTimes(1);
+    } else {
+      await expect(router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true }))
+        .rejects.toMatchObject({ code: 'ESTIMATE_REVIEW_STALE' });
+      expect(email.sendTemplate).not.toHaveBeenCalled();
+    }
+  });
+  test('adding costs while enabling a synthesized proposal keeps the scheduled approval stale', async () => {
+    Object.assign(row, { monthly_total: 100, annual_total: 1200, onetime_total: 0, estimate_data: {} });
+    const incoming = normalizeProposal(row);
+    expect(incoming).toMatchObject({ enabled: false, synthesized: true });
+    const { entry, scheduledAt } = scheduledAttempt();
+    const reviewedOffer = estimateOfferVersion(row);
+    entry.scheduleReview.reviewedOffer = reviewedOffer;
+    row.status = 'scheduled'; row.scheduled_at = scheduledAt;
+    row.estimate_data = { manualSendAttempts: [entry] };
+    const saved = await invoke('/:id/proposal', 'put', { proposal: { ...incoming, enabled: true, synthesized: false }, projectCosting: costing });
+    expect(saved.statusCode).toBe(200);
+    expect(dataOf().proposal.enabled).toBe(true);
+    expect(dataOf().manualSendAttempts[0].scheduleReview.reviewedOffer).toBe(reviewedOffer);
+    expect(estimateOfferVersion(row)).not.toBe(reviewedOffer);
+    row.status = 'sending';
+    await expect(router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true }))
+      .rejects.toMatchObject({ code: 'ESTIMATE_REVIEW_STALE' });
+    expect(email.sendTemplate).not.toHaveBeenCalled();
+  });
+  test('a private-cost-only sibling save preserves matching pending group reviews without endorsing stale reviews', async () => {
+    row.status = 'draft';
+    expect((await invoke('/:id/proposal', 'put', { proposal: proposal() })).statusCode).toBe(200);
+    row.estimate_group_id = 'synthetic-group';
+    const priorVersion = estimateOfferVersion(row);
+    const { entry, scheduledAt } = scheduledAttempt();
+    entry.scheduleReview.reviewedGroupVersions = { [row.id]: priorVersion, other: 'other-offer' };
+    const staleEntry = structuredClone(entry); staleEntry.key = 'stale-group-review';
+    staleEntry.scheduleReview.reviewedGroupVersions[row.id] = 'stale-offer';
+    const anchor = savedEstimate({ id: 'scheduled-anchor', status: 'scheduled', estimate_group_id: row.estimate_group_id,
+      scheduled_at: scheduledAt, estimate_data: { manualSendAttempts: [entry, staleEntry] } });
+    groupRows = [anchor];
+    expect((await invoke('/:id/proposal', 'put', { proposal: proposal(), projectCosting: costing })).statusCode).toBe(200);
+    expect(dataOf(anchor).manualSendAttempts[0].scheduleReview.reviewedGroupVersions)
+      .toEqual({ [row.id]: estimateOfferVersion(row), other: 'other-offer' });
+    expect(dataOf(anchor).manualSendAttempts[1].scheduleReview.reviewedGroupVersions[row.id]).toBe('stale-offer');
   });
   test('PUT rejects stale editing and invalid quantities without replacing saved prices', async () => {
     row.status = 'draft';
-    const stale = await invoke('/:id/proposal', 'put', { expectedEditVersion: 'stale-version', proposal: proposal() });
+    const stale = await invoke('/:id/proposal', 'put', { expectedEditVersion: 'stale-version', proposal: proposal(), projectCosting: costing });
     expect(stale.statusCode).toBe(409);
     expect(mutations).toHaveLength(0);
     const invalid = proposal(); invalid.buildings[0].lineItems[0].quantity = 0.00001;
@@ -507,7 +593,7 @@ describe('commercial bid authoring', () => {
   });
   test('a legacy editor cannot discard saved units by omitting line identifiers while the gate is off', async () => {
     gateEnvValue.mockReturnValue(false);
-    row.status = 'draft'; row.estimate_data = { proposal: proposal() };
+    row.status = 'draft'; row.estimate_data = { proposal: proposal(), proposalCosting: costing };
     const incoming = proposal();
     delete incoming.buildings[0].lineItems[0].id;
     delete incoming.buildings[0].lineItems[0].unit;
@@ -529,17 +615,18 @@ describe('commercial bid authoring', () => {
     expect(row.expires_at?.toISOString() ?? null).toBe(expected);
     if (!sentAt && !scheduledAt) expect(row.status).toBe('draft');
   });
-  test.each(['validity', 'unit'])('the disabled gate refuses new %s from a stale editor without changing the saved bid', async (field) => {
-    row.status = 'draft'; row.estimate_data = { proposal: proposal() };
+  test.each(['validity', 'costing', 'unit'])('the disabled gate refuses new %s from a stale editor without changing the saved bid', async (field) => {
+    row.status = 'draft'; row.estimate_data = { proposal: proposal(), proposalCosting: costing };
     const body = { proposal: proposal() };
     if (field === 'validity') body.proposal.validThrough = null;
+    if (field === 'costing') body.projectCosting = { ...costing, rows: [] };
     if (field === 'unit') body.proposal.buildings[0].lineItems[0].unit = 'sqft';
     gateEnvValue.mockReturnValue(false);
     const res = await invoke('/:id/proposal', 'put', body);
     expect(res.statusCode).toBe(409);
     expect(res.body.error).toMatch(/Bid authoring is currently disabled/);
     expect(mutations).toHaveLength(0);
-    expect(dataOf()).toEqual({ proposal: proposal() });
+    expect(dataOf()).toEqual({ proposal: proposal(), proposalCosting: costing });
   });
   test('an expired fixed bid can be explicitly revised and its expiry disposition is cleared', async () => {
     row.status = 'expired'; row.sent_at = new Date('2026-01-01T12:00:00Z');
