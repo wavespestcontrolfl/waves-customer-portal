@@ -201,6 +201,19 @@ describe('admin estimate persistence', () => {
     expect(fields.service_interest).toBe('Lawn Care + Pest Control');
   });
 
+  test('browser estimate data cannot author delivery receipts on create', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      estimateData: { ...baseBody.estimateData,
+        deliveryState: { firstDeliveredAt: '2026-09-12T00:00:00Z', annualPlanOfferFingerprint: 'forged' },
+        manualSendAttempts: [{ id: 'forged' }],
+      },
+    });
+    const stored = JSON.parse(fields.estimate_data);
+    expect(stored.deliveryState).toBeUndefined();
+    expect(stored.manualSendAttempts).toBeUndefined();
+  });
+
   test('pricing_version stamps only on SERVER authority - fallback rows keep the column default', () => {
     // On CLIENT_FALLBACK the estimateData blob is still the caller-supplied
     // payload; a stale engineVersion riding it (e.g. from an earlier server
