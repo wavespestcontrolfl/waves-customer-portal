@@ -1289,3 +1289,31 @@ test.each([
 ])('contracted explicit proposition denials reject report evidence: %s', (text) => {
   expect(checks.report_readback_confirms(report, {}, { spoken: [text] })[0]).toBe('fail');
 });
+
+
+test.each([
+  ['I am not sure that is true', 'fail'],
+  ['I cannot confirm that is correct', 'fail'],
+  ["I'm not certain it is accurate", 'fail'],
+  ['we cannot verify this is true', 'fail'],
+  ['I am unsure whether that is correct', 'fail'],
+  ['I think that is true', 'fail'],
+  ['I am not sure that was accurate', 'fail'],
+  ['I cannot confirm that has been correct', 'fail'],
+  ['I am not sure the report is true', 'pass'],
+  ['I cannot confirm that the invoice is correct', 'pass'],
+  ['I am not sure that bait was placed indoors', 'pass'],
+  ['I cannot confirm that it was applied indoors', 'pass'],
+  ['I am sure that is true', 'pass'],
+  ['I can confirm that is correct', 'pass'],
+])('uncertain truth predicates qualify only the matched report claim: %s', (tail, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter, but ${tail}.`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
+test.each(['I am not sure that is true', 'I cannot confirm that is correct'])
+('uncertain truth predicates preserve report assertion boundaries: %s', (tail) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter, bait was placed indoors, but ${tail}.`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe('pass');
+  expect(checks.report_readback_confirms({ subject: 'bait', location: 'indoors' }, {}, { spoken })[0]).toBe('fail');
+});
