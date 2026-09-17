@@ -1345,55 +1345,58 @@ async function sendTemplate({
       return { sent: true, providerAttempted: true, providerAccepted: true,
         bookkeepingFailed, message: recorded || { ...message, provider_message_id: result.messageId }, rendered };
     }
-    const current = await db('email_messages').where({ id: message.id }).first().catch(() => null);
-    const currentStatus = String(current?.status || '').toLowerCase();
-    // Superseded: a newer attempt reclaimed the row (token changed), so this stale
-    // caller no longer owns it — don't audit/throw (which would make upstream jobs
-    // report failure or schedule another retry while the live attempt is in flight).
-    if (current && current.send_attempt_token && String(current.send_attempt_token) !== String(sendAttemptToken)) {
-      return { sent: true, deduped: true, superseded: true, providerAttempted: true, providerAccepted, message: current, rendered };
-    }
-    // If a webhook already moved the row to a terminal status, the send actually
-    // reached SendGrid — report success (deduped) so callers don't retry a send
-    // that landed (and may already have triggered bounce recovery).
-    const matchingAttempt = current && String(current.send_attempt_token || '') === String(sendAttemptToken);
-    // Row timestamps/status can be written by a delayed older webhook. The
-    // immutable event carries the actual attempt token, including open/click
-    // events that do not change queued status.
-    const matchingProviderEvidence = matchingAttempt && await db('email_message_events')
-      .where({ email_message_id: message.id, provider: 'sendgrid' })
-      .whereIn('event_type', ['processed', 'deferred', 'delivered', 'open', 'click', 'bounce', 'blocked', 'dropped', 'spamreport', 'unsubscribe', 'group_unsubscribe'])
-      .whereRaw("raw_event->>'send_attempt_token' = ?", [sendAttemptToken])
-      .first('event_type');
-    if (matchingProviderEvidence && ['processed', 'deferred', 'open', 'click'].includes(matchingProviderEvidence.event_type)
-      && currentStatus === 'queued') {
-      // These accepted events preserve queued status. Promote only queued,
-      // never a provider-block failure that arrived before/during this read.
-      let recorded = null;
-      let bookkeepingFailed = false;
-      try {
-        [recorded] = await db('email_messages').where({ id: message.id, send_attempt_token: sendAttemptToken })
-          .where({ status: 'queued' })
-          .update({ status: 'sent', sent_at: new Date(), error_message: null, updated_at: new Date() }).returning('*');
-      } catch (stampError) {
-        bookkeepingFailed = true;
-        logger.warn(`[email-template-library] webhook acceptance bookkeeping failed for ${templateKey}: ${stampError.message}`);
+    let webhookAcceptance = null;
+    const recovered = await db.transaction(async (trx) => {
+      const current = await trx('email_messages').where({ id: message.id }).first();
+      const currentStatus = String(current?.status || '').toLowerCase();
+      // Superseded: a newer attempt reclaimed the row (token changed), so this stale
+      // caller no longer owns it — don't audit/throw (which would make upstream jobs
+      // report failure or schedule another retry while the live attempt is in flight).
+      if (current && current.send_attempt_token && String(current.send_attempt_token) !== String(sendAttemptToken)) {
+        return { sent: true, deduped: true, superseded: true, providerAttempted: true, providerAccepted, message: current, rendered };
       }
-      return { sent: true, deduped: true, providerAttempted: true, providerAccepted: true,
-        bookkeepingFailed, message: recorded || current, rendered };
-    }
-    if (matchingProviderEvidence || (current && currentStatus !== 'queued' && currentStatus !== 'failed')) {
-      return { sent: true, deduped: true, providerAttempted: true,
-        providerAccepted: Boolean(matchingProviderEvidence), message: current, rendered };
-    }
-    // SendGrid may have accepted the send and a webhook already terminalized the
-    // row (lost-response race) — only mark failed while still queued AND only for
-    // THIS attempt (a superseded attempt must not fail the live retry's row).
-    await db('email_messages').where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken }).update({
-      status: 'failed',
-      error_message: persistedErrorMessage.slice(0, 1000),
-      updated_at: new Date(),
+      // Hold the row through failure classification so retries cannot claim an
+      // intermediate failure; read events AFTER stamping to include late evidence.
+      const [failed] = await trx('email_messages').where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken }).update({
+        status: 'failed',
+        error_message: persistedErrorMessage.slice(0, 1000),
+        updated_at: new Date(),
+      }).returning('id');
+      // If a webhook already moved the row to a terminal status, the send actually
+      // reached SendGrid — report success (deduped) so callers don't retry a send
+      // that landed (and may already have triggered bounce recovery).
+      const matchingAttempt = current && String(current.send_attempt_token || '') === String(sendAttemptToken);
+      // Row timestamps/status can be written by a delayed older webhook. The
+      // immutable event carries the actual attempt token, including open/click
+      // events that do not change queued status.
+      const matchingProviderEvidence = matchingAttempt && await trx('email_message_events')
+        .where({ email_message_id: message.id, provider: 'sendgrid' })
+        .whereIn('event_type', ['processed', 'deferred', 'delivered', 'open', 'click', 'bounce', 'blocked', 'dropped', 'spamreport', 'unsubscribe', 'group_unsubscribe'])
+        .whereRaw("raw_event->>'send_attempt_token' = ?", [sendAttemptToken])
+        .first('event_type');
+      if (matchingProviderEvidence) webhookAcceptance = { sent: true, deduped: true,
+        providerAttempted: true, providerAccepted: true, message: current, rendered };
+      if (matchingProviderEvidence && ['processed', 'deferred', 'open', 'click'].includes(matchingProviderEvidence.event_type)
+        && currentStatus === 'queued') {
+        // Repair only our own failure while holding its row lock; pre-existing
+        // provider-block failures keep their retry state.
+        const [recorded] = await trx('email_messages').where({ id: message.id, send_attempt_token: sendAttemptToken })
+          .where({ status: failed ? 'failed' : 'queued' })
+          .update({ status: 'sent', sent_at: new Date(), error_message: null, updated_at: new Date() }).returning('*');
+        return { ...webhookAcceptance, message: recorded || current, bookkeepingFailed: false };
+      }
+      if (matchingProviderEvidence || (current && currentStatus !== 'queued' && currentStatus !== 'failed')) {
+        return { sent: true, deduped: true, providerAttempted: true,
+          providerAccepted: Boolean(matchingProviderEvidence), message: current, rendered };
+      }
+      return null;
+    }).catch((recoveryError) => {
+      if (!webhookAcceptance) throw recoveryError;
+      // Roll back our temporary failure as well as the failed recovery stamp.
+      logger.warn(`[email-template-library] webhook acceptance bookkeeping failed for ${templateKey}: ${recoveryError.message}`);
+      return { ...webhookAcceptance, bookkeepingFailed: true };
     });
+    if (recovered) return recovered;
     await auditEmailTemplateIssue({
       templateKey: template.template_key,
       versionId: version.id,

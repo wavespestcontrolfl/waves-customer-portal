@@ -42,6 +42,7 @@ function setDbQueues(queues) {
     if (!queue || !queue.length) throw new Error(`Unexpected db table ${table}`);
     return queue.shift();
   });
+  db.transaction = jest.fn(async callback => callback(db));
   // sendTemplate guards the post-send status with a CASE expression.
   db.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
 }
@@ -432,17 +433,23 @@ describe('email template library rendering', () => {
     expect(retry.update.mock.calls[0][0].status).not.toBe('failed');
   });
 
-  test.each(['opened_at', 'clicked_at', 'processed', 'deferred'])('matching %s evidence survives lost SDK response with queued status', async (field) => {
+  test.each(['opened_at', 'clicked_at', 'processed', 'deferred'].flatMap(field => [false, true].map(fails => [field, fails])))('matching %s evidence survives lost response (recovery fails=%s)', async (field, fails) => {
     const queuedMessage = { id: 'msg-engaged', status: 'queued', subject_snapshot: 'S' };
     const current = { ...queuedMessage, [field]: '2026-01-01T00:00:00Z' };
     const promote = chain({ returning: [{ ...current, status: 'sent' }] });
+    if (fails) promote.returning.mockRejectedValueOnce(new Error('recovery write unavailable'));
     const insert = chain({ returning: [queuedMessage] });
-    const event = chain({ first: { event_type: field === 'opened_at' ? 'open' : field === 'clicked_at' ? 'click' : field } });
+    const failure = chain({ returning: [{ id: queuedMessage.id }] });
+    const event = chain();
+    event.first.mockImplementation(async () => {
+      expect(failure.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed' }));
+      return { event_type: field === 'opened_at' ? 'open' : field === 'clicked_at' ? 'click' : field };
+    });
     setDbQueues({
       email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
       email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
       email_suppressions: [chain({ result: [] })],
-      email_messages: [insert, chain({ first: current }), promote],
+      email_messages: [insert, chain({ first: current }), failure, promote],
       email_message_events: [event],
     });
     sendgrid.sendOne.mockImplementationOnce(async ({ customArgs }) => {
@@ -453,8 +460,9 @@ describe('email template library rendering', () => {
       templateKey: 'estimate.expiring_notice', to: 'sam@example.com',
       payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
     });
-    expect(result).toMatchObject({ sent: true, providerAccepted: true });
+    expect(result).toMatchObject({ sent: true, providerAccepted: true, bookkeepingFailed: fails });
     expect(promote.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'sent', sent_at: expect.any(Date) }));
+    expect(promote.where).toHaveBeenCalledWith({ status: 'failed' });
     expect(event.whereRaw).toHaveBeenCalledWith("raw_event->>'send_attempt_token' = ?", [current.send_attempt_token]);
   });
 
@@ -501,7 +509,7 @@ describe('email template library rendering', () => {
       email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
       email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
       email_suppressions: [chain({ result: [] })],
-      email_messages: [chain({ returning: [queued] }), chain({ first: current }), promotion],
+      email_messages: [chain({ returning: [queued] }), chain({ first: current }), chain(), promotion],
       // Both processed and provider-block bounce exist; an unordered first may return processed.
       email_message_events: [chain({ first: { event_type: 'processed' } })],
     });

@@ -2950,7 +2950,9 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       ...(stampChannels.length ? { sendSnapshot: snapshot.sendSnapshot || {} } : {}),
       ...deliveryStatePatch,
     };
-    if (proposalEnabledForDelivery && stampChannels.length) {
+    // Proposal saves clear stale receipts; SMS alone preserves a surviving PDF receipt.
+    if (proposalEnabledForDelivery && stampChannels.length
+      && (channels.email?.providerAccepted || !parseEstimateData(freshForSnapshot.estimate_data)?.proposalDelivery)) {
       mergePatch.proposalDelivery = {
         stampedAt: now().toISOString(),
         pdfEmailed: proposalPdfEmailed,

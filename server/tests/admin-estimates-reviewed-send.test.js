@@ -880,25 +880,32 @@ describe('annual provider delivery receipts', () => {
     expect(annualPlanHasDeliveredOffer(row)).toBe(true);
   });
 
-  test.each([false, true])('historical proposal email dedupe preserves receipt keys without minting them (issued=%s)', async (issued) => {
+  test.each(['email', 'both'].flatMap(method => [false, true].map(issued => [method, issued])))('historical proposal %s dedupe preserves only unchanged PDF receipts (issued=%s)', async (method, issued) => {
     row.status = 'draft';
     row.estimate_data = { proposal: { enabled: true, buildings: [{ name: 'Synthetic building',
       lineItems: [{ id: 'application', description: 'Synthetic application', quantity: 1, unitPrice: 299, frequency: 'one_time' }] }] } };
-    if (issued) expect((await invoke('/:id/send', 'post', { sendMethod: 'email' })).body.sent).toBe(true);
-    else dataOf().proposal.buildings[0].lineItems[0].unitPrice = 399;
+    expect((await invoke('/:id/send', 'post', { sendMethod: 'email' })).body.sent).toBe(true);
+    if (!issued) {
+      const proposal = structuredClone(dataOf().proposal); proposal.buildings[0].lineItems[0].unitPrice = 399;
+      expect((await invoke('/:id/proposal', 'put', { proposal })).statusCode).toBe(200);
+      expect(dataOf().proposalDelivery).toBeUndefined();
+    }
     const priorReceipt = structuredClone(dataOf().proposalDelivery);
     const priorSnapshot = structuredClone(dataOf().sendSnapshot);
     if (issued) expect(priorReceipt.pdfEmailed).toBe(true);
     buildPricingBundle.mockClear();
     buildPricingBundle.mockResolvedValue({ services: [], billingTerms: { amount: 999 } });
     email.sendTemplate.mockResolvedValueOnce({ sent: true, deduped: true });
-    const response = await invoke('/:id/send', 'post', { sendMethod: 'email' });
+    const response = await invoke('/:id/send', 'post', { sendMethod: method });
     expect(response.statusCode).toBe(200);
     expect(response.body.channels.email.providerAccepted).toBe(false);
-    expect(dataOf().proposalDelivery).toEqual(priorReceipt);
-    expect(dataOf().sendSnapshot).toEqual(priorSnapshot);
-    expect(buildPricingBundle).not.toHaveBeenCalled();
-    if (!issued) expect(dataOf().deliveryState.firstDeliveredAt).toBeUndefined();
+    if (method === 'email' || issued) expect(dataOf().proposalDelivery).toEqual(priorReceipt);
+    else expect(dataOf().proposalDelivery.pdfEmailed).toBe(false);
+    if (method === 'email') {
+      expect(dataOf().sendSnapshot).toEqual(priorSnapshot); expect(buildPricingBundle).not.toHaveBeenCalled();
+    } else {
+      expect(response.body.channels.sms.real).toBe(true); expect(buildPricingBundle).toHaveBeenCalledTimes(1);
+    }
   });
 
   test('dedupe after a real superseded provider attempt still witnesses the annual offer', async () => {
