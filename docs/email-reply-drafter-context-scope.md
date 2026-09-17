@@ -152,6 +152,13 @@ labelled untrusted, exactly as the SMS drafter does.
 - Extend `sms-voice-corpus-miner` with a third source, `email_human_reply`:
   Waves-authored `SENT` rows to a non-Waves address, paired with the inbound
   they answered in the same thread, quoted history stripped, ops mail excluded.
+  Before admitting a pair, apply the context contract’s direction-aware
+  authentication, unique-customer ownership and complete To/Cc/Reply-To
+  validation to the inbound, outbound and supporting thread rows. Missing
+  participant evidence, foreign participants or forwarded/relayed content
+  without established ownership excludes the pair before corpus persistence.
+  The miner must use these same checks even when the context assembler is
+  not wired into drafting.
   Apply both `redactAccessCodes` and sensitive-identifier redaction to each
   inbound/outbound exemplar before persistence and again before prompt assembly,
   including SMS fallback exemplars. The current corpus PII redactor and
@@ -168,7 +175,13 @@ labelled untrusted, exactly as the SMS drafter does.
   and retain the existing `(source, source_id)` idempotency key. The 326
   non-empty sent bodies are an upper bound, not 300 verified usable pairs.
   Review source selectors/readers so the new rows do not silently change
-  SMS examples or the shared profile distillation input.
+  SMS examples or the shared profile distillation input. The distiller’s
+  `newCorpus`, `newSincePending`, watermarks and prompt selection must all
+  use the same consumed-source allowlist (`call_transcript`,
+  `sms_human_reply` in phase 1). Email-only arrivals must neither trigger
+  DEEP nor create/supersede a profile version or invalidate SMS evidence,
+  including while the email profile gate is off. Adding email to distillation
+  requires a separately scoped and evaluated change.
 - Drafters fetch up to 4 `email_human_reply` exemplars by intent (reuse the
   SMS intent classifier on the inbound email; fall back to the nearest
   supported intent, then to SMS pairs), through the same `exemplarLooksClean`
@@ -222,8 +235,21 @@ labelled untrusted, exactly as the SMS drafter does.
   deterministic credential-output rejection in addition to input redaction;
   gate, garage and lockbox examples must fail without entering retry prompts
   or unredacted diagnostics.
-- No exemplar fact leakage (same `few_shot_leak` check the SMS pathology
-  ledger uses).
+- Reject exemplar fact leakage before either entrypoint returns a draft or
+  creates a Gmail draft. `few_shot_leak` is an after-the-fact pathology label,
+  not an executable verifier. Require typed bindings for every visible
+  service, location, amount, date and commitment to the current customer’s
+  allowlisted facts or explicitly attributed inbound evidence. Validate
+  those bindings against the visible text using supported deterministic
+  intent/template rules; model-provided source IDs alone are insufficient.
+  Compare normalized exemplar-specific values against the draft to catch
+  copied facts, but never treat absence of an exact match as proof: paraphrases
+  and free-form factual clauses outside the supported rules are `uncertain`
+  and withheld for operator review. Exemplar IDs are never admissible fact
+  sources. Test copied and paraphrased foreign services, locations and promises,
+  fabricated bindings, and coincidentally equal values independently supported
+  by the current customer’s evidence. This verifier ships in the shared
+  drafting slice before any live draft creation.
 - No links except customer-scoped, explicitly approved URLs in the facts.
 - Amount/date matching must bind to the correct fact and meaning: an old
   invoice amount is not today's balance; a proposed visit is not booked.
@@ -373,12 +399,14 @@ restores the legacy path without deleting existing operator drafts.
 | Slice | Deliverable | Required evidence before completion |
 | --- | --- | --- |
 | 1. Context contract | Shared assembler and fact projection, no live wiring | Fixtures for aligned/failed/missing auth, spoofed matching From plus attacker Reply-To, unique/shared/deleted sender matches, and relayed mail review; direction-aware ownership for every thread row, including legitimate SENT rows with null sender IDs, conflicting IDs, foreign To/Cc, verified-empty Cc and failed legacy-header retrieval; rejection before context reads/model egress; absent vs unavailable; payer billing; archived estimates; cancelled visits; pending-estimate monthly totals excluded; redacted SMS/email access codes and credential-output rejection; bounded history and prompt injection. PostgreSQL verification of added/changed queries on a dedicated dev/preview database. |
-| 2. Corpus source | Idempotent, gated human email pairs | Automated mail excluded; multi-inbound ambiguous pairs excluded; access-code and sensitive-identifier redaction on both exemplar sides before storage and model egress, including fallback examples; injection rejection; replay holdouts excluded; repeated mining inserts no duplicates; SMS/profile readers unchanged unless explicitly scoped. |
-| 3. Shared drafting | Both entrypoints use the context, dispatcher, style and verifier | Gate-off parity and gate-on manual vendor B2B parity without customer-context reads; profile revoke/failure fallback and canonical-name rejection; complaint/high-severity policy and fallback parity; customer-reported date/amount attribution cannot become authoritative facts; manual instructions remain untrusted data; no exemplar facts or forged signatures; bounded retry; dispatcher failure; invalid drafts withheld; multipart fixtures with omitted first/middle/last items, conjunctions, implicit requests, false answer-ID mappings and budget pressure fail closed or require review, while supported complete answers pass; terminal rejection survives repeated classification and reconciler runs without redrafting, and explicit operator retry is guarded; transient/ambiguous recovery, existing claim, dedupe, live-thread and recipient guards pass. |
+| 2. Corpus source | Idempotent, gated human email pairs | Same direction-aware auth/ownership and complete participant checks as slice 1 before corpus persistence; forwarded/foreign/missing-participant fixtures excluded; automated mail excluded; multi-inbound ambiguous pairs excluded; access-code and sensitive-identifier redaction on both exemplar sides before storage and model egress, including fallback examples; injection rejection; replay holdouts excluded; repeated mining inserts no duplicates; SMS exemplar selection unchanged; distiller counts, watermarks and prompt sources share the consumed-source allowlist; email-only arrivals cause no DEEP call or approved-profile version change, including with email profile gate off. |
+| 3. Shared drafting | Both entrypoints use the context, dispatcher, style and verifier | Gate-off parity and gate-on manual vendor B2B parity without customer-context reads; profile revoke/failure fallback and canonical-name rejection; complaint/high-severity policy and fallback parity; customer-reported date/amount attribution cannot become authoritative facts; manual instructions remain untrusted data; deterministic source binding rejects copied/paraphrased exemplar services, locations and commitments, fabricated bindings and unsupported factual clauses before Gmail creation; independently supported equal values pass; no forged signatures; bounded retry; dispatcher failure; invalid drafts withheld; multipart fixtures with omitted first/middle/last items, conjunctions, implicit requests, false answer-ID mappings and budget pressure fail closed or require review, while supported complete answers pass; terminal rejection survives repeated classification and reconciler runs without redrafting, and explicit operator retry is guarded; transient/ambiguous recovery, existing claim, dedupe, live-thread and recipient guards pass. |
 | 4. Shadow and measurement | Internal comparison and correctly paired outcome metrics | Zero Gmail/send/claim side effects in shadow, including provider/storage failure; redacted evidence and retention contract; reply vs adoption distinction; reproducible cohort counts and reviewed promotion evidence. |
 
-Slice 1 is the next implementation step. Slices 1 and 2 can proceed
-independently; slice 3 depends on both, and slice 4 must provide evidence
+Slice 1 is the next implementation step. Slice 2 may develop its extraction
+and redaction separately, but corpus ingestion depends on the shared
+authentication/participant validation from slice 1 and its own source-filtered
+distiller counters. Slice 3 depends on both, and slice 4 must provide evidence
 before live activation. No runtime tests or migrations are implied by this
 scope-only PR; each implementation PR supplies its relevant checks.
 
