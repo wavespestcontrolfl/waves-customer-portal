@@ -32,6 +32,19 @@ test('recognition retains refused and qualified propositions for context policy'
   for (const { text: claim, index } of claims) expect(text.slice(index, index + claim.length)).toBe(claim);
 });
 
+test.each(['That is true.', "That's true.", 'That’s true.', 'This is true.', "It's true.", 'It is true.'])(
+  'referential truth emits proposition confirmation rather than answer polarity: %s', (text) => {
+    expect(recognizeSafetyResponse(text).answers[0]).toMatchObject({ confirmation: true, affirmative: false, negative: false });
+    expect(recognizeSafetyResponse(text).guarantees).toEqual([]);
+  },
+);
+
+test.each(['That is not true.', "That's untrue.", 'That is true about the schedule.', 'Is that true?'])(
+  'negated, expanded, or interrogative truth is not a bare confirmation: %s', (text) => {
+    expect(recognizeSafetyResponse(text).answers[0].confirmation).toBe(false);
+  },
+);
+
 test.each([
   ['Roundup is safe.', true],
   ['Bifenthrin is safe.', true],
