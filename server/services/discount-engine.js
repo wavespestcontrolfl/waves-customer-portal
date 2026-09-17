@@ -1,6 +1,55 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { isMembershipCustomerRow } = require('./waveguard-existing-services');
+const { stackDiscounts } = require('./discount-stack');
+const { discountStackingLive } = require('../config/feature-gates');
+
+// The /api/admin/discounts/calculate preview used to compute each
+// percentage independently against the untouched subtotal (additive) while
+// server/services/discount-stack.js compounds — two arithmetic engines for
+// the same "how do several discounts combine" question (CLAUDE.md rule 15
+// / AGENTS.md "extend the existing mechanism"). Delegating here means the
+// preview and a later save always agree: gate off, this reproduces the
+// pre-lane additive math exactly (compound:false); gate on, it compounds
+// the same way a save will (compound:true) — see discountStackingLive()
+// (server/config/feature-gates.js) for why that's the one canonical
+// call-time read, not a cached isEnabled().
+//
+// `applied` is already priority-ordered and already eligibility-filtered
+// by the caller; this only does the per-discount dollar math, mapping the
+// catalog's snake_case shape to discount-stack.js's and back. compound:
+// false preserves that priority order exactly (stackDiscounts' compound:
+// false path walks discounts in the order given, not a canonicalized one,
+// specifically so a delegation like this one stays a byte-identical parity
+// shim for whatever order each caller already had — see stackDiscounts'
+// own comment). The one place old and new legitimately disagree: the old
+// `Math.round(subtotal * (amount / 100) * 100) / 100` formula shares the
+// same float half-cent drift discount-stack.js's own percentage math was
+// fixed for elsewhere (Codex pre-push audit P1) — 5% of $20.70 rounded
+// down to $1.03 under the old formula, never the correct half-up $1.04.
+// That was always a bug, not a feature to preserve; the delegated preview
+// reports the same, now-correct, $1.04 a save would.
+function applyDiscountArithmetic(subtotal, applied, { compound }) {
+  const terms = applied.map((disc) => ({
+    discountType: disc.discount_type,
+    amount: Number(disc.amount),
+    maxDiscountDollars: disc.max_discount_dollars,
+  }));
+  const stacked = stackDiscounts(subtotal, terms, { compound });
+  const discounts = applied
+    .map((disc, i) => ({
+      id: disc.id,
+      discount_key: disc.discount_key,
+      name: disc.name,
+      discount_type: disc.discount_type,
+      amount: Number(disc.amount),
+      discount_dollars: stacked.items[i].dollars,
+      color: disc.color,
+      icon: disc.icon,
+    }))
+    .filter((discount) => discount.discount_dollars > 0);
+  return { discounts, totalDiscount: stacked.totalDollars, afterDiscount: stacked.net };
+}
 
 // Cache tier discounts for 5 minutes to avoid repeated DB hits
 let tierCache = null;
@@ -244,45 +293,14 @@ const DiscountEngine = {
       applied.push(disc);
     }
 
-    // Calculate dollar amounts
-    let totalDiscount = 0;
-    const results = applied.map(disc => {
-      let dollars = 0;
-      if (disc.discount_type === 'percentage' || disc.discount_type === 'variable_percentage') {
-        dollars = Math.round(subtotal * (Number(disc.amount) / 100) * 100) / 100;
-        if (disc.max_discount_dollars) dollars = Math.min(dollars, Number(disc.max_discount_dollars));
-      } else if (disc.discount_type === 'fixed_amount' || disc.discount_type === 'variable_amount') {
-        dollars = Number(disc.amount);
-      } else if (disc.discount_type === 'free_service') {
-        dollars = subtotal; // entire service is free
-      }
-      // Allocate only the remaining invoice subtotal. Keeping each result row
-      // bounded makes invoice_discounts and usage totals reconcile with the
-      // aggregate returned below when several fixed/free discounts stack.
-      dollars = Math.min(Math.max(0, dollars), Math.max(0, Number(subtotal) - totalDiscount));
-      dollars = Math.round(dollars * 100) / 100;
-      totalDiscount += dollars;
-      return {
-        id: disc.id,
-        discount_key: disc.discount_key,
-        name: disc.name,
-        discount_type: disc.discount_type,
-        amount: Number(disc.amount),
-        discount_dollars: dollars,
-        color: disc.color,
-        icon: disc.icon,
-      };
-    }).filter((discount) => discount.discount_dollars > 0);
+    // Calculate dollar amounts — delegated to discount-stack.js, the
+    // single arithmetic core (rule 15): compound follows the live gate, so
+    // this preview always agrees with what a save will compute, off or on.
+    const { discounts, totalDiscount, afterDiscount } = applyDiscountArithmetic(subtotal, applied, {
+      compound: discountStackingLive(),
+    });
 
-    // Don't let total discount exceed subtotal
-    if (totalDiscount > subtotal) totalDiscount = subtotal;
-
-    return {
-      discounts: results,
-      totalDiscount: Math.round(totalDiscount * 100) / 100,
-      afterDiscount: Math.round((subtotal - Math.min(totalDiscount, subtotal)) * 100) / 100,
-      subtotal,
-    };
+    return { discounts, totalDiscount, afterDiscount, subtotal };
   },
 
   /**
@@ -442,5 +460,10 @@ const DiscountEngine = {
   /** Bust the tier cache (called after admin edits tier discounts). */
   clearCache() { tierCache = null; tierCacheTime = 0; serviceRulesCache = null; serviceRulesCacheTime = 0; },
 };
+
+// Exposed for direct arithmetic parity testing without a DB mock — the
+// same reasoning as admin-schedule.js's `_test` / invoice.js's
+// `_internals` exports elsewhere in this codebase.
+DiscountEngine._internals = { applyDiscountArithmetic };
 
 module.exports = DiscountEngine;
