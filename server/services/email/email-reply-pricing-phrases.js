@@ -12,8 +12,11 @@ const DETERMINERS = new Set(['a', 'an', 'the', 'this', 'that', 'these', 'those',
 const PARTICIPANTS = new Set(['customer', 'customers', 'client', 'clients', 'account', 'accounts']);
 const NOUNS = new Set(['bill', 'charge', 'invoice', 'fee', 'rate', 'amount', 'balance', 'total',
   'cost', 'price', 'payment', 'dues', 'subscription', 'subscriptions', 'spread', 'surcharge', 'surcharges']);
-const ACTIONS = new Set(['bill', 'charge', 'pay', 'invoice', 'price', 'cost', 'run', 'incur',
-  'generate', 'apply', 'occur', 'has', 'due', 'required', 'payable', 'total', 'totals', 'equal', 'equals', 'range']);
+const PRICE_ACTIONS = new Set(['bill', 'charge', 'pay', 'invoice', 'price', 'cost', 'run', 'incur',
+  'total', 'totals', 'equal', 'equals', 'come to', 'amount to']);
+// These generic actions need separate currency or nominal price evidence.
+const GENERIC_ACTIONS = new Set(['generate', 'apply', 'occur', 'has', 'due', 'required', 'payable', 'range']);
+const ACTIONS = new Set([...PRICE_ACTIONS, ...GENERIC_ACTIONS]);
 const HEADS = new Map([...NOUNS].map((head) => [head, { head, roles: ['noun'] }]));
 for (const head of ACTIONS) {
   HEADS.set(head, { head, roles: [...(HEADS.get(head)?.roles ?? []), 'action'] });
@@ -51,6 +54,7 @@ function predicateAt(tokens, start) {
     if (action?.roles.includes('action')) {
       candidate = span(tokens, 'predicate', start, action.end, {
         head: action.head, headStart: at, headEnd: action.end, negated,
+        priceCue: PRICE_ACTIONS.has(action.head),
         prefix: tokens.slice(start, at).map((token, offset) => ({
           start: start + offset, end: start + offset + 1, text: token.text,
         })),

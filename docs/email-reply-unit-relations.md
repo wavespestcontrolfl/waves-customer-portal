@@ -47,18 +47,27 @@ Examples include `$98 per visit`, `each visit costs $98`,
 One additional fronted form is supported: unit, one comma, optionally one
 existing participant phrase, then an existing amount-candidate span. For
 example, `for each visit, we charge $98`. This comma form requires an
-amount-candidate anchor; it does not join a unit to a bare amount across a
-comma by itself. A single trailing comma is also a supported connector.
+amount-candidate anchor when a participant is present. A bare amount can
+also follow one comma, colon, or hyphen, optionally one qualifier and
+`from`/`between`, as in `per visit: only $98`. A single trailing comma
+is also a supported connector.
 
 Additional finite connectors retain their full token evidence:
 
 - A unit followed by a copula, optionally `not`/`never`, one qualifier, and
   `a`/`an`, then an amount span; reverse attachment accepts one copula.
-- A possessive, or an existing `has` predicate with optional `a`/`an`,
+  A separate modal plus one qualifier may precede the copula, as in
+  `each visit will only be $98`.
+- A possessive, or an existing `has` predicate with optional qualifier and `a`/`an`,
   between a unit and an existing nominal amount candidate.
 - A fronted comma followed by `the`/`our`/`your`/`a`/`an` and a nominal
-  amount candidate; or an optional comma then `there`, a copula, and
-  optional `a`/`an` before an amount span.
+  amount candidate; or an optional comma then `there` and the same bounded
+  copula form before an amount span.
+- An existing `apply`/`occur`/`due`/`required`/`payable` predicate occupying
+  the full gap between an amount span and a unit. Its original negation
+  evidence remains in the clause; the edge does not imply an affirmative price.
+- A single `pay` token before a scanner unit beginning `-per-`, as in
+  `$98 pay-per-visit`. This does not skip a free-standing payment verb.
 - `plus`/`before` followed by `tax`/`taxes`/`fee` between an amount span and
   a unit. This retains tax language without computing or validating it.
 - One crossed parenthesis delimiter from a matched pair immediately around
@@ -77,6 +86,9 @@ This module provides lexical attachment evidence, not pricing claims,
 coordination, unit precedence, exemptions, or compliance verdicts. It cannot
 approve a reply, including when every unit has a candidate. Consumers must
 retain uncertainty and assess the complete original evidence.
+For example, `We refunded the $98 charge — each visit remains included`
+has a lexical edge across the dash but needs account-event and clause
+interpretation before any policy can call it recurring pricing.
 
 Normalization, amount/unit vocabulary, phrase recognition, and amount
 relationships remain owned by the existing upstream modules. Their finite

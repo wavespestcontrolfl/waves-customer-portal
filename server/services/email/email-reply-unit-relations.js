@@ -1,11 +1,13 @@
 const { recognizeEmailReplyAmountRelations } = require('./email-reply-amount-relations');
 
 const UNITS = new Set(['unit', 'application', 'timing', 'forVisit', 'eachVisit', 'visits', 'visit', 'period']);
-const SEPARATORS = new Set([':', '-']);
+const SINGLE_GAPS = [new Set(['sep::', 'sep:-', 'sep:,', 'be']), new Set(['sep::', 'sep:-'])];
 const ARTICLES = new Set(['a', 'an']);
 const NOMINAL_DETERMINERS = new Set(['the', 'our', 'your', 'a', 'an']);
 const NEGATIONS = new Set(['not', 'never']);
 const TAX_HEADS = new Set(['tax', 'taxes', 'fee']);
+const TRAILING_PREDICATES = new Set(['apply', 'occur', 'due', 'required', 'payable']);
+const RANGE_INTRODUCERS = new Set(['from', 'between']);
 const wordIn = (token, words) => token?.kind === 'word' && words.has(token.text);
 
 function nominal(chosen) {
@@ -14,8 +16,15 @@ function nominal(chosen) {
 }
 
 function copulaGap(tokens, phrases, start, end) {
-  if (tokens[start]?.kind !== 'be') return false;
-  let at = start + 1;
+  let at = start;
+  if (tokens[at]?.kind === 'modal') {
+    at += 1;
+    const prefix = phrases.find((phrase) => phrase.type === 'qualifier' && phrase.start === at);
+    if (!prefix) return false;
+    at = prefix.end;
+  }
+  if (tokens[at]?.kind !== 'be') return false;
+  at += 1;
   let qualifier = phrases.find((phrase) => phrase.type === 'qualifier' && phrase.start === at);
   if (!qualifier && tokens[at]?.kind === 'word' && NEGATIONS.has(tokens[at].text)) at += 1;
   qualifier = phrases.find((phrase) => phrase.type === 'qualifier' && phrase.start === at);
@@ -30,10 +39,7 @@ function frontedGap(tokens, phrases, start, end, chosen) {
   if (comma) at += 1;
   if (tokens[at]?.kind === 'word' && tokens[at].text === 'there') {
     at += 1;
-    if (tokens[at]?.kind !== 'be') return false;
-    at += 1;
-    if (wordIn(tokens[at], ARTICLES)) at += 1;
-    return at === end;
+    return copulaGap(tokens, phrases, at, end);
   }
   if (!comma || chosen.anchor === null) return false;
   const participant = phrases.find((phrase) => phrase.type === 'participant' && phrase.start === at);
@@ -50,22 +56,36 @@ function nominalGap(tokens, phrases, start, end, chosen) {
   if (!predicate) return false;
   // A dual-role noun can be the retained predicate head in "has price".
   // Its existing prefix still records the bounded has chain up to the noun.
-  let at = predicate.head === 'has' ? predicate.end : predicate.headStart;
-  if (tokens[at - 1]?.kind !== 'word' || tokens[at - 1].text !== 'has') return false;
+  let at = predicate.head === 'has' ? predicate.end
+    : predicate.prefix.findLast((part) => part.text === 'has')?.end;
+  if (at === undefined) return false;
+  at = phrases.find((phrase) => phrase.type === 'qualifier' && phrase.start === at)?.end ?? at;
   if (tokens[at]?.kind === 'word' && ARTICLES.has(tokens[at].text)) at += 1;
+  return at === end;
+}
+
+function labelGap(tokens, phrases, start, end) {
+  if (tokens[start]?.kind !== 'sep' || ![',', ':', '-'].includes(tokens[start].text)) return false;
+  let at = start + 1;
+  at = phrases.find((phrase) => phrase.type === 'qualifier' && phrase.start === at)?.end ?? at;
+  if (wordIn(tokens[at], RANGE_INTRODUCERS)) at += 1;
   return at === end;
 }
 
 function connected(tokens, phrases, start, end, after, chosen) {
   if (start === end) return true;
-  if (end === start + 1 && tokens[start]?.kind === 'sep') {
-    if (SEPARATORS.has(tokens[start].text) || (!after && tokens[start].text === ',')) return true;
-  }
+  const first = tokens[start];
+  const single = first.kind === 'sep' ? `sep:${first.text}` : first.kind;
+  if (end === start + 1 && SINGLE_GAPS[Number(after)].has(single)) return true;
   if (after) return copulaGap(tokens, phrases, start, end)
     || nominalGap(tokens, phrases, start, end, chosen)
-    || frontedGap(tokens, phrases, start, end, chosen);
-  if (end === start + 1 && tokens[start]?.kind === 'be') return true;
-  return end === start + 2 && tokens[start]?.kind === 'word'
+    || frontedGap(tokens, phrases, start, end, chosen)
+    || labelGap(tokens, phrases, start, end);
+  const predicate = phrases.find((phrase) => phrase.type === 'predicate' && phrase.start === start);
+  if (predicate?.end === end && TRAILING_PREDICATES.has(predicate.head)) return true;
+  if (end === start + 1 && tokens[start].text === 'pay'
+    && tokens[end].text.startsWith('-per-')) return true;
+  return end === start + 2 && tokens[start].kind === 'word'
     && ['plus', 'before'].includes(tokens[start].text) && tokens[start + 1]?.kind === 'word'
     && TAX_HEADS.has(tokens[start + 1].text);
 }
