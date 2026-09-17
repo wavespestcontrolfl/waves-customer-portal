@@ -263,7 +263,7 @@ describe('buildActivity digests', () => {
   it('a resolved finding (fall-off rule) reads as completed · cleared, even a FIX', () => {
     const { items } = buildActivity({
       digests: [
-        { id: 'r1', title: 'FIX: schedule integrity — 3 overlapping visits', body: 'x', link: '/admin/agents?tab=activity', metadata: { opsKey: 'e22-schedule-integrity:overlaps', source: 'ops-crons', resolved: true, resolvedAt: '2026-09-14T11:26:00Z', resolvedBy: 'ops-crons:3-clean-runs' }, read_at: '2026-09-14T11:26:00Z', created_at: '2026-09-11T11:26:00Z' },
+        { id: 'r1', title: 'FIX: schedule integrity — 3 overlapping visits', body: 'x', link: '/admin/agents?tab=activity', metadata: { opsKey: 'e22-schedule-integrity:overlaps', source: 'ops-crons', resolved: true, resolvedAt: '2026-09-14T11:26:00Z', resolvedBy: 'ops-crons:3-clean-runs' }, read_at: '2026-09-12T11:26:00Z', created_at: '2026-09-11T11:26:00Z' },
         { id: 'r2', title: 'ACT: 2 unreturned voicemails', body: 'y', link: null, metadata: JSON.stringify({ opsKey: 'd15:unreturned', resolved: true }), read_at: '2026-09-12T11:26:00Z', created_at: '2026-09-11T11:26:00Z' },
       ],
     });
@@ -271,6 +271,8 @@ describe('buildActivity digests', () => {
       ['digest:r1', 'completed', 'e22 schedule integrity:overlaps · cleared'],
       ['digest:r2', 'completed', 'd15:unreturned · cleared'],
     ]);
+    expect(items[0].finishedAt).toBe('2026-09-14T11:26:00.000Z');
+    expect(items[1].finishedAt).toBe('2026-09-12T11:26:00.000Z');
   });
 });
 

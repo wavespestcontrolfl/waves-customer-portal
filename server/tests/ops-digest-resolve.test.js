@@ -23,7 +23,8 @@ const { resolveOpsDigest, readCleanWatermark, cleanWatermarkKey, CATEGORY } = re
 
 function chain(updateResult) {
   const q = {};
-  q.where = jest.fn(() => q);
+  q.where = jest.fn((arg) => { if (typeof arg === 'function') arg(q); return q; });
+  q.orWhere = jest.fn((arg) => { if (typeof arg === 'function') arg(q); return q; });
   q.whereNull = jest.fn(() => q);
   q.whereRaw = jest.fn(() => q);
   q.update = jest.fn(async () => updateResult);
@@ -52,6 +53,14 @@ test('retires not-yet-resolved rows (read or unread) by opsKey + source and stam
   const merged = JSON.parse(patch.metadata.bindings[0]);
   expect(merged).toMatchObject({ resolved: true, resolvedBy: 'ops-crons:3-clean-runs' });
   expect(typeof merged.resolvedAt).toBe('string');
+});
+
+test('source: null scopes to rows with NO source (the in-process senders)', async () => {
+  const q = chain(1);
+  mockDb.mockReturnValue(q);
+  expect(await resolveOpsDigest({ key: 'lead-to-cash-invariants', source: null })).toBe(1);
+  expect(q.whereRaw).toHaveBeenCalledWith("metadata->>'source' IS NULL");
+  expect(q.whereRaw).not.toHaveBeenCalledWith("metadata->>'source' = ?", expect.anything());
 });
 
 test('no source filter when source is omitted; blank key is a no-op', async () => {
@@ -95,6 +104,71 @@ test('notAfter: only rows observed at or before the clean run retire (metadata.o
   // Event time wins over insertion time: a 10:00 failure ingested at 10:20
   // must clear under a delayed 10:10 clean run. Legacy rows use created_at.
   expect(q.whereRaw).toHaveBeenCalledWith("COALESCE(NULLIF(metadata->>'observedAt', '')::timestamptz, created_at) <= ?::timestamptz", ['2026-09-11T11:10:00.000Z']);
+});
+
+test('alsoRetire: digest and opened/unread companion bells retire atomically within the same source scope', async () => {
+  const main = chain(1); const companion = chain(2);
+  mockDb.mockReturnValueOnce(main).mockReturnValueOnce(companion);
+  const n = await resolveOpsDigest({ key: 'call-extraction-eval', source: null, alsoRetire: { category: 'eval_regression', field: 'evalKey' } });
+  expect(n).toBe(1);
+  expect(companion.where).toHaveBeenCalledWith({ recipient_type: 'admin', category: 'eval_regression' });
+  expect(mockDb.transaction).toHaveBeenCalledTimes(1);
+  expect(companion.whereNull).not.toHaveBeenCalled();
+  expect(companion.whereRaw).toHaveBeenCalledWith("metadata->>'source' IS NULL");
+  expect(companion.whereRaw).toHaveBeenCalledWith("COALESCE(metadata->>'resolved', '') <> 'true'");
+  expect(companion.whereRaw).toHaveBeenCalledWith('metadata->>? = ?', ['evalKey', 'call-extraction-eval']);
+  expect(companion.update).toHaveBeenCalledTimes(1);
+  expect(companion.update.mock.calls[0][0].read_at.sql).toBe('COALESCE(read_at, NOW())');
+  expect(companion.update.mock.calls[0][0].metadata.sql).toContain("- 'dedupeKey'");
+});
+
+test('legacy companion selection uses its specific title namespace only when its stable metadata key is absent', async () => {
+  const main = chain(1); const companion = chain(1);
+  mockDb.mockReturnValueOnce(main).mockReturnValueOnce(companion);
+  await resolveOpsDigest({ key: 'gbp-sync-health', source: null,
+    alsoRetire: { category: 'review', field: 'opsKey', legacyTitlePrefix: 'Review sync health escalation [' } });
+  expect(companion.whereRaw).toHaveBeenCalledWith('metadata->>? = ?', ['opsKey', 'gbp-sync-health']);
+  expect(companion.whereRaw).toHaveBeenCalledWith('metadata->>? IS NULL', ['opsKey']);
+  expect(companion.where).toHaveBeenCalledWith('title', 'like', 'Review sync health escalation [%');
+  expect(companion.whereRaw).toHaveBeenCalledWith("metadata->>'source' IS NULL");
+});
+
+test('companion failure rolls back digest retirement and preserves both rows for a healthy retry', async () => {
+  const rows = { digestResolved: false, companionResolved: false };
+  let failCompanion = true;
+  const atomicTransaction = async (callback) => {
+    const staged = { ...rows };
+    const trx = (table) => {
+      expect(table).toBe('notifications');
+      const q = chain(1);
+      q.where.mockImplementation((arg) => {
+        if (typeof arg === 'function') arg(q);
+        if (arg?.category) q.category = arg.category;
+        return q;
+      });
+      q.update.mockImplementation(async () => {
+        if (q.category === CATEGORY) staged.digestResolved = true;
+        else {
+          if (failCompanion) throw new Error('companion update unavailable');
+          staged.companionResolved = true;
+        }
+        return 1;
+      });
+      return q;
+    };
+    trx.raw = mockDb.raw;
+    const result = await callback(trx);
+    Object.assign(rows, staged);
+    return result;
+  };
+  mockDb.transaction.mockImplementationOnce(atomicTransaction);
+  const args = { key: 'gbp-sync-health', source: null, alsoRetire: { category: 'review', field: 'opsKey' } };
+  expect(await resolveOpsDigest(args)).toBe(0);
+  expect(rows).toEqual({ digestResolved: false, companionResolved: false });
+  failCompanion = false;
+  mockDb.transaction.mockImplementationOnce(atomicTransaction);
+  expect(await resolveOpsDigest(args)).toBe(1);
+  expect(rows).toEqual({ digestResolved: true, companionResolved: true });
 });
 
 test('a clean run writes its durable per-key watermark even when no bell row stood', async () => {

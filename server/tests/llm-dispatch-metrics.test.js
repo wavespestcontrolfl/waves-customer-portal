@@ -83,6 +83,27 @@ describe('llm-dispatch-metrics', () => {
   });
   afterAll(() => { process.env = ORIGINAL_ENV; });
 
+  it('keeps unchanged exception lists stable across observation dates', async () => {
+    const mockDeliver = jest.fn(async () => ({ ok: true }));
+    jest.doMock('../services/ops-digest', () => ({ deliverOpsDigest: mockDeliver }));
+    try {
+      const { _private: { emailExceptions } } = load();
+      const exceptions = [{ policy: 'report', detail: 'all providers failed' }];
+      await emailExceptions('2026-09-11', exceptions);
+      await emailExceptions('2026-09-12', exceptions);
+      const [first, second] = mockDeliver.mock.calls.map(([arg]) => arg);
+      expect(first.subject).toBe(second.subject);
+      expect(first.html).toBe(second.html);
+      expect(first.subject).not.toContain('2026-09-11');
+      expect(first.html).not.toContain('2026-09-11');
+      expect(first.sendEmail).toBeInstanceOf(Function);
+      expect(first).toMatchObject({ fallOff: true, dedupeKey: 'ops-digest:llm-dispatch-exceptions',
+        dedupeWindowMs: 604800000, refreshOnDedupe: true });
+    } finally {
+      jest.dontMock('../services/ops-digest');
+    }
+  });
+
   describe('policyLabel', () => {
     it('names TEXT_POLICIES entries by their registry key', () => {
       const { policyLabel } = load();
@@ -419,11 +440,19 @@ describe('llm-dispatch-metrics', () => {
   describe('alertRecorderUnreachable', () => {
     it('emails when the INDEPENDENT connection probe fails (a genuine outage)', async () => {
       process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      process.env.GATE_OPS_DIGESTS_IN_APP = 'true';
+      process.env.GATE_AGENT_ACTIVITY = 'true';
+      const deliver = jest.fn(() => { throw new Error('DB-dependent bell must not be attempted'); });
+      jest.doMock('../services/ops-digest', () => ({ deliverOpsDigest: deliver }));
       mockEmailSend.mockResolvedValue({ ok: true });
       mockPgConnect.mockRejectedValue(new Error('connection refused'));
-      const { alertRecorderUnreachable } = load();
-      await expect(alertRecorderUnreachable('no_connection')).resolves.toEqual({ ok: true });
-      expect(mockEmailSend.mock.calls[0][0].body).toMatch(/database was unreachable/);
+      try {
+        const { alertRecorderUnreachable } = load();
+        await expect(alertRecorderUnreachable('no_connection')).resolves.toEqual({ ok: true });
+        expect(mockEmailSend.mock.calls[0][0].body).toMatch(/database was unreachable/);
+        expect(deliver).not.toHaveBeenCalled();
+        expect(mockDb).not.toHaveBeenCalled();
+      } finally { jest.dontMock('../services/ops-digest'); }
     });
 
     it('stands down when a FRESH connection succeeds — pool saturation is not an outage', async () => {
@@ -660,15 +689,36 @@ describe('llm-dispatch-metrics', () => {
       // (missing table / dead DB) the alert has to go out over SMTP, which
       // does not depend on the database being reported on.
       process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      process.env.GATE_OPS_DIGESTS_IN_APP = 'true';
+      process.env.GATE_AGENT_ACTIVITY = 'true';
+      const deliver = jest.fn(() => { throw new Error('DB-dependent bell must not be attempted'); });
+      jest.doMock('../services/ops-digest', () => ({ deliverOpsDigest: deliver }));
       mockEmailSend.mockResolvedValue({ ok: true });
       // A truly missing table fails the READS, not just the delete — this is
       // how the real failure presents (codex r3 caught the earlier version
       // simulating it via an impossible prune-only failure).
       armDb({ yesterdayRows: [], priorRows: [], statsError: 'relation "llm_dispatch_log" does not exist' });
-      const { runLlmDispatchDigest } = load();
-      await expect(runLlmDispatchDigest()).rejects.toThrow(/does not exist/);
-      expect(mockEmailSend).toHaveBeenCalledTimes(1);
-      expect(mockEmailSend.mock.calls[0][0].body).toMatch(/could not read llm_dispatch_log/);
+      try {
+        const { runLlmDispatchDigest } = load();
+        await expect(runLlmDispatchDigest()).rejects.toThrow(/does not exist/);
+        expect(mockEmailSend).toHaveBeenCalledTimes(1);
+        expect(mockEmailSend.mock.calls[0][0].body).toMatch(/could not read llm_dispatch_log/);
+        expect(deliver).not.toHaveBeenCalled();
+        expect(mockDb).toHaveBeenCalledTimes(7);
+      } finally { jest.dontMock('../services/ops-digest'); }
+    });
+
+    it('retires the standing exception bell on a proven clean day under its delivery lock', async () => {
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      armDb({ yesterdayRows: [{ policy: 'report', total: '3', fallbacks: '0', failed: '0' }], priorRows: [] });
+      const retire = jest.fn(async () => 1);
+      jest.doMock('../services/ops-digest-fall-off', () => ({ retireIfClean: retire }));
+      try {
+        const { runLlmDispatchDigest } = load();
+        expect((await runLlmDispatchDigest()).exceptions).toEqual([]);
+        expect(retire).toHaveBeenCalledWith('llm-dispatch-exceptions', { lockKey: 'ops-digest:llm-dispatch-exceptions' });
+        expect(mockEmailSend).not.toHaveBeenCalled();
+      } finally { jest.dontMock('../services/ops-digest-fall-off'); }
     });
 
     it('marks its own already-alerted failures so the scheduler cannot double-email', async () => {

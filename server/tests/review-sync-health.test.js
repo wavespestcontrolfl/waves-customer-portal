@@ -13,6 +13,8 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mo
 const mockEmailSend = jest.fn(async () => ({ ok: true }));
 jest.mock('../services/email', () => ({ send: (...a) => mockEmailSend(...a) }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: async (_k, fn) => fn() }));
+const mockRetireIfClean = jest.fn(async () => 1);
+jest.mock('../services/ops-digest-fall-off', () => ({ retireIfClean: (...args) => mockRetireIfClean(...args) }));
 
 const db = require('../models/db');
 db.raw = (sql) => sql;
@@ -114,7 +116,13 @@ describe('_assessReviewSyncHealth (escalation)', () => {
           this._notifQuery = a && a.recipient_type === 'admin';
           return this;
         }),
-        first: jest.fn(async () => recentNotification),
+        whereRaw: jest.fn(function (sql) {
+          if (sql.includes("metadata->>'resolved'")) this._unresolvedOnly = true;
+          return this;
+        }),
+        first: jest.fn(async function () {
+          return this._unresolvedOnly && recentNotification?.metadata?.resolved === true ? null : recentNotification;
+        }),
       };
       // The _stats select resolves via .select() being awaited after .where()
       q.select = jest.fn(function () {
@@ -132,6 +140,7 @@ describe('_assessReviewSyncHealth (escalation)', () => {
     jest.useFakeTimers().setSystemTime(NOW);
     mockEmailSend.mockClear();
     mockNotifyAdmin.mockClear();
+    mockRetireIfClean.mockClear();
     delete process.env.REVIEW_SYNC_HEALTH_EMAIL;
   });
 
@@ -156,6 +165,9 @@ describe('_assessReviewSyncHealth (escalation)', () => {
     expect(out).toEqual({ healthy: true });
     expect(mockEmailSend).not.toHaveBeenCalled();
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    expect(mockRetireIfClean).toHaveBeenCalledWith('gbp-sync-health', {
+      alsoRetire: { category: 'review', field: 'opsKey', legacyTitlePrefix: 'Review sync health escalation [' },
+    });
   });
 
   test('problems email contact@ FIRST with the ACT:/FIX: subject and bell as dedupe marker', async () => {
@@ -172,7 +184,7 @@ describe('_assessReviewSyncHealth (escalation)', () => {
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
     // The dedupe/backup bell must survive GATE_ADMIN_BELL_POLICY — without
     // the explicit tag the marker vanishes and the email resends hourly.
-    expect(mockNotifyAdmin.mock.calls[0][3]).toMatchObject({ bell: true });
+    expect(mockNotifyAdmin.mock.calls[0][3]).toMatchObject({ bell: true, metadata: { opsKey: 'gbp-sync-health' } });
     // Marker-first ordering: the durable claim lands BEFORE the SMTP send.
     expect(mockNotifyAdmin.mock.invocationCallOrder[0])
       .toBeLessThan(mockEmailSend.mock.invocationCallOrder[0]);
@@ -192,6 +204,21 @@ describe('_assessReviewSyncHealth (escalation)', () => {
     const out = await gbp._assessReviewSyncHealth({ venice: 'gbp' });
     expect(out).toEqual({ deduped: true });
     expect(mockEmailSend).not.toHaveBeenCalled();
+  });
+
+  test('a retired review marker permits the same finding to recur inside its former dedupe window', async () => {
+    installDb({ aggregates: [], stats: [], recentNotification: { id: 'n_retired', metadata: { resolved: true, opsKey: 'gbp-sync-health' } } });
+    const out = await gbp._assessReviewSyncHealth({ venice: 'gbp' });
+    expect(out.emailed).toBe(true);
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    expect(mockEmailSend).toHaveBeenCalledTimes(1);
+    expect(mockRetireIfClean).not.toHaveBeenCalled();
+  });
+
+  test('an unproven clean cycle with a database failure cannot retire earlier findings', async () => {
+    db.mockImplementationOnce(() => { throw new Error('review inventory unavailable'); });
+    await expect(gbp._assessReviewSyncHealth({ venice: 'gbp' })).rejects.toThrow('review inventory unavailable');
+    expect(mockRetireIfClean).not.toHaveBeenCalled();
   });
 
   test('email failure still leaves the full escalation on the bell', async () => {
@@ -225,6 +252,7 @@ describe('_assessReviewSyncHealth (escalation)', () => {
     expect(out).toEqual({ skipped: 'partial_cycle' });
     expect(mockEmailSend).not.toHaveBeenCalled();
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    expect(mockRetireIfClean).not.toHaveBeenCalled();
   });
 
   test('kill switch REVIEW_SYNC_HEALTH_EMAIL=off disables the whole check', async () => {
@@ -232,5 +260,6 @@ describe('_assessReviewSyncHealth (escalation)', () => {
     const out = await gbp._assessReviewSyncHealth({ venice: 'none' });
     expect(out).toEqual({ skipped: 'disabled' });
     expect(mockEmailSend).not.toHaveBeenCalled();
+    expect(mockRetireIfClean).not.toHaveBeenCalled();
   });
 });

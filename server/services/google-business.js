@@ -6,6 +6,7 @@ function getGoogle() {
 }
 const logger = require('./logger');
 const { deliverOpsDigest } = require('./ops-digest');
+const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const MODELS = require('../config/models');
@@ -1772,7 +1773,14 @@ class GoogleBusinessService {
       });
       if (verdict) findings.push({ loc, ...verdict });
     }
-    if (!findings.length) return { healthy: true };
+    if (!findings.length) {
+      // Use the escalation's existing lock so a clean cycle cannot race its
+      // marker write. The legacy title namespace belongs only to this alert.
+      await runExclusive('gbp-sync-health-notify', () => retireIfClean('gbp-sync-health', {
+        alsoRetire: { category: 'review', field: 'opsKey', legacyTitlePrefix: 'Review sync health escalation [' },
+      }), { recordHealth: false });
+      return { healthy: true };
+    }
 
     const anyFix = findings.some((f) => f.severity === 'FIX');
     // Signature-keyed dedupe (pre-push audit): a constant title would let one
@@ -1785,6 +1793,7 @@ class GoogleBusinessService {
       const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
       const recent = await db('notifications')
         .where({ recipient_type: 'admin', title })
+        .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
         .where('created_at', '>', dayAgo)
         .first();
       if (recent) return { deduped: true };
@@ -1812,7 +1821,7 @@ class GoogleBusinessService {
         `${subject}\n\n${body}`,
         // bell: true — GATE_ADMIN_BELL_POLICY suppressing this row would
         // erase the dedupe marker (codex #3298 r1).
-        { link: '/admin/reviews', bell: true },
+        { link: '/admin/reviews', bell: true, metadata: { opsKey: 'gbp-sync-health' } },
       );
       if (!marker) return { skipped: 'marker_failed' };
 
@@ -1822,6 +1831,7 @@ class GoogleBusinessService {
         // The 'review' bell above stays the claim; in-app mode adds the
         // ops_digest row the Activity feed lists (email cadence).
         const sent = await deliverOpsDigest({
+          fallOff: true, // retired by retireIfClean on the clean run
           key: 'gbp-sync-health',
           subject,
           text: body,
