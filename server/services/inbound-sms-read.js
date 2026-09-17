@@ -111,16 +111,16 @@ async function phonesWithLiveUnlinkedBell(candidateRows) {
 }
 
 // Include promoted threads while their phone still owns an unlinked bell.
-async function resolveUnknownSenderPhoneMembership(mirrorSids) {
+async function resolveUnknownSenderPhoneMembership(scopedSids) {
   const unknownSenderSids = new Set();
   const phones = new Set();
-  if (!mirrorSids.length) return { unknownSenderSids, phones };
+  if (!scopedSids.length) return { unknownSenderSids, phones };
   const candidateRows = await db('messages as m')
     .join('conversations as c', 'c.id', 'm.conversation_id')
     .leftJoin('sms_log as l', function join() {
       this.on('l.twilio_sid', '=', 'm.twilio_sid').andOnVal('l.direction', 'inbound');
     })
-    .whereIn('m.twilio_sid', mirrorSids)
+    .whereIn('m.twilio_sid', scopedSids)
     .select('m.twilio_sid', 'c.customer_id', db.raw('COALESCE(l.from_phone, c.contact_phone) as contact_phone'));
   const phonesWithLiveBell = await phonesWithLiveUnlinkedBell(candidateRows);
   for (const row of candidateRows) {
@@ -179,6 +179,10 @@ async function markInboundSmsRead({ messageIds = [], conversationIds = [], readB
   const q = () => db('messages').where({ channel: 'sms', direction: 'inbound' })
     .andWhere(function unreadOnly() { this.where({ is_read: false }).orWhereNull('is_read'); })
     .andWhere(scope);
+  // Reconcile every requested inbound SID, including already-read rows:
+  // a prior read can commit while its later bell reconciliation times out.
+  const scopedSids = (await db('messages').where({ channel: 'sms', direction: 'inbound' })
+    .andWhere(scope).whereNotNull('twilio_sid').pluck('twilio_sid')).filter(Boolean);
   const mirrorSids = (await q().whereNotNull('twilio_sid').pluck('twilio_sid')).filter(Boolean);
   const updated = await q().update({ is_read: true, read_at: now, read_by_admin_user_id: adminUserId || null, updated_at: now });
   if (mirrorSids.length) {
@@ -196,9 +200,9 @@ async function markInboundSmsRead({ messageIds = [], conversationIds = [], readB
   //     so the customer-scoped clear below can never reach its bells; the
   //     bell carries the SID it rang for (codex #4210 P2).
   const unknownSenderSids = new Set();
-  if (mirrorSids.length) {
+  if (scopedSids.length) {
     try {
-      const membership = await resolveUnknownSenderPhoneMembership(mirrorSids);
+      const membership = await resolveUnknownSenderPhoneMembership(scopedSids);
       for (const sid of membership.unknownSenderSids) unknownSenderSids.add(sid);
       for (const phone of membership.phones) {
         notificationsCleared += await retargetOrClearUnknownSenderBell(phone, now, role);
@@ -207,7 +211,7 @@ async function markInboundSmsRead({ messageIds = [], conversationIds = [], readB
     // The unknown-sender SIDs above are fully handled (retargeted or
     // cleared) inside the per-phone lock; only known-customer SIDs still
     // need the ordinary by-SID clear.
-    const knownSids = mirrorSids.filter((sid) => !unknownSenderSids.has(sid));
+    const knownSids = scopedSids.filter((sid) => !unknownSenderSids.has(sid));
     if (knownSids.length) {
       try {
         notificationsCleared += await NotificationService.markInboundSmsReadAdmin({ twilioSids: knownSids, before: now, role });

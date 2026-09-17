@@ -267,6 +267,23 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
     });
   }, 30000);
 
+  test.each(['message IDs', 'conversation IDs'])('retrying %s reconciles a bell after the first read lock times out', async input => {
+    await withSender({}, async ({ phone, messageIds, conversationIds, readBell }) => {
+      const scope = input === 'message IDs' ? { messageIds }
+        : { conversationIds, readBefore: new Date() };
+      const lock = await mockPg.transaction();
+      try {
+        await lock.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`inbound_sms_bell_retarget:${phone}`]);
+        expect(await markInboundSmsRead({ ...scope, role: 'admin' })).toMatchObject({ updated: 2, notificationsCleared: 0 });
+        expect((await readBell()).read_at).toBeNull();
+      } finally { await lock.rollback(); }
+      // Both rows are already read, so the retry updates no messages. It
+      // must still revisit the sender bell that the timed-out attempt left.
+      expect(await markInboundSmsRead({ ...scope, role: 'admin' })).toMatchObject({ updated: 0, notificationsCleared: 1 });
+      expect((await readBell()).read_at).not.toBeNull();
+    });
+  }, 30000);
+
   test('technician reads cannot retarget or clear hidden sender bells', async () => {
     await withSender({}, async ({ messageIds, sids, readBell }) => {
       // Legacy metadata without a techVisible trigger is hidden by default.
