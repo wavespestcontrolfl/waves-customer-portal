@@ -126,7 +126,7 @@ const PITCH = 'Are you open to more booked jobs? Reply "NO" if you need me to st
 const savedGate = process.env.GATE_SMS_SPAM_CLASSIFIER;
 const savedOwner = process.env.ADAM_PHONE;
 
-async function receive(body, to = numbers.locations.parrish.number) {
+async function receive(body, to = numbers.locations.parrish.number, expectedStatus = 200) {
   const res = new EventEmitter();
   res.statusCode = 200;
   res.status = (code) => { res.statusCode = code; return res; };
@@ -137,8 +137,8 @@ async function receive(body, to = numbers.locations.parrish.number) {
     Body: body, MessageSid: 'SM-synthetic-solicitation',
   } }, res);
   await new Promise(setImmediate);
-  expect(require('../services/logger').error).not.toHaveBeenCalled();
-  expect(res.statusCode).toBe(200);
+  if (expectedStatus === 200) expect(require('../services/logger').error).not.toHaveBeenCalled();
+  expect(res.statusCode).toBe(expectedStatus);
   return res;
 }
 
@@ -299,18 +299,16 @@ test.each(['shadow', 'true'])('the %s model cannot start until the unified inbox
   expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
 });
 
-test.each(['shadow', 'true'])('failed unified persistence bypasses %s screening and retains ordinary SMS logging', async (mode) => {
+test.each(['shadow', 'true'])('failed unified persistence returns 503 before %s screening or effects', async (mode) => {
   process.env.GATE_SMS_SPAM_CLASSIFIER = mode;
   recordTouchpoint.mockResolvedValueOnce(null);
-  await receive('Our software team wants to discuss a partnership.');
-  // A failed unified save bypasses the CLASSIFIER (gated on the unified
-  // message id) — relationship resolution for STOP/HELP/START is
-  // independent of that save and still runs.
+  await receive('Our software team wants to discuss a partnership.', undefined, 503);
   expect(dispatchWithFallback).not.toHaveBeenCalled();
-  const row = mockWrites.find(({ table }) => table === 'sms_log').row;
-  expect(row.message_body).toBe('Our software team wants to discuss a partnership.');
-  expect(JSON.parse(row.metadata).spam_verdict).toBeUndefined();
-  expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
+  expect(mockWrites).toHaveLength(0);
+  expect(startSmsThreadDraft).not.toHaveBeenCalled();
+  expect(sendSMS).not.toHaveBeenCalled();
+  expect(require('../services/messaging/inbound-dedupe').releaseInboundWebhook)
+    .toHaveBeenCalledWith('SM-synthetic-solicitation');
 });
 
 test.each(['missing', 'error'])('failed verdict attachment (%s) leaves the message actionable', async (failure) => {
@@ -637,10 +635,30 @@ test('a failed unified persistence bypass still honors a known service contact\'
   process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
   recordTouchpoint.mockResolvedValueOnce(null);
   findKnownCallerCustomer.mockResolvedValueOnce({ id: 'contact-1', first_name: 'Service', last_name: 'Contact' });
-  const res = await receive('Reply STOP to stop messages');
-  expect(res.body).toContain('unsubscribed');
+  const res = await receive('Reply STOP to stop messages', undefined, 503);
+  expect(res.body).toBe('<Response></Response>');
   expect(recordSuppression).toHaveBeenCalledTimes(1);
-  expect(mockWrites.find(({ table }) => table === 'sms_log').row.message_type).toBe('opt_out');
+  expect(mockWrites.filter(({ table }) => table === 'sms_log')).toHaveLength(0);
   // The classifier gate itself never ran — persistence failed before it.
   expect(dispatchWithFallback).not.toHaveBeenCalled();
+});
+
+
+test('a rejected inbox write can be redelivered without repeating downstream effects', async () => {
+  recordTouchpoint.mockRejectedValueOnce(new Error('database unavailable'));
+  await receive('Please help with ants.', undefined, 503);
+  expect(mockWrites).toHaveLength(0);
+  expect(startSmsThreadDraft).not.toHaveBeenCalled();
+  require('../services/logger').error.mockClear();
+  await receive('Please help with ants.');
+  expect(mockWrites.filter(({ table }) => table === 'sms_log')).toHaveLength(1);
+  expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
+});
+
+test('an inbox failure never releases another delivery claim', async () => {
+  const dedupe = require('../services/messaging/inbound-dedupe');
+  dedupe.tryClaimInboundWebhook.mockResolvedValueOnce({ processable: true, owned: false });
+  recordTouchpoint.mockResolvedValueOnce(null);
+  await receive('Please help with ants.', undefined, 503);
+  expect(dedupe.releaseInboundWebhook).not.toHaveBeenCalled();
 });

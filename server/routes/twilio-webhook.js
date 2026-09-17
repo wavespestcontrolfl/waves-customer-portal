@@ -360,11 +360,9 @@ router.post('/sms', async (req, res) => {
       else logger.warn(`[contact-correction] enqueue deferred to stale sweep for customer ${customer.id}, sms_log ${smsLogId || 'n/a'}`);
     };
 
-    // Dual-write to unified messages table. Awaited (fail-soft — the catch
-    // keeps the legacy sms_log path serving Virginia's inbox on error) so the
-    // message row exists BEFORE the sms_reply bell below is written: the
-    // thread-read bell cross-clear only clears bells for threads with no
-    // unread message, which needs message-before-bell ordering (hook P1).
+    // The unified inbox is required before acknowledging an accepted SMS.
+    // STOP suppression still runs below if this write fails; all other effects
+    // wait for a durable message so redelivery can safely resume processing.
     const inboundTouchpoint = await require('../services/conversations').recordTouchpoint({
       customerId: customer?.id,
       channel: 'sms',
@@ -384,6 +382,11 @@ router.post('/sms', async (req, res) => {
       messageType: quietReaction ? 'sms_reaction' : undefined,
       metadata: { location: numberConfig?.label, numberType: numberConfig?.type, ...(courtesyOnly ? { courtesyOnly: true } : {}) },
     }).catch(() => {});
+
+    sourcePersistenceFailed = !inboundTouchpoint?.message?.id;
+    const requireInboxMessage = () => {
+      if (sourcePersistenceFailed) throw new Error('Inbound SMS inbox persistence failed');
+    };
 
     // ── Resolve the sender relationship FIRST, before any screening or
     // opt-out handling (codex round 3 design fix, 2026-09-11 — see the PR's
@@ -447,7 +450,8 @@ router.post('/sms', async (req, res) => {
 
     // Save the inbox message before any classifier await: the durable SID
     // claim suppresses retries even if the process dies during a model call.
-    // A failed unified write bypasses screening and keeps the legacy path.
+    // On failure only STOP suppression may precede the retryable response.
+    if (optCommand.action !== 'opt_out') requireInboxMessage();
     let solicitation = null;
     let verdictMessage = null;
     try {
@@ -506,6 +510,10 @@ router.post('/sms', async (req, res) => {
         }
         logger.info(`[sms-optout] ${customer ? `Customer ${customer.id}` : `Unknown sender ${maskPhone(From)}`} opted out of SMS via ${optCommand.detectionMethod}`);
       } catch (e) { logger.error(`[sms-optout] Failed to update prefs: ${e.message}`); }
+
+      // Suppression/prefs are idempotent and must survive an inbox outage.
+      // Stop before logs, alerts, corrections, or a successful TwiML response.
+      requireInboxMessage();
 
       let optOutSmsLogId = null;
       try {
