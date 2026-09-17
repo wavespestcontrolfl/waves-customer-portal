@@ -15,6 +15,10 @@ describe('bounded email copy normalization', () => {
     ['$98\\\r\nfor each visit', '$98 for each visit'],
     ['USD 98 per&#32;visit', 'USD 98 per visit'],
     ['ＵＳＤ ９８ per‑visit', 'USD 98 per-visit'],
+    ['$98 per visit—plus tax', '$98 per visit - plus tax'],
+    ['$98 per visit&ndash;plus tax', '$98 per visit - plus tax'],
+    ['$98 per visit&#x2014;plus tax', '$98 per visit - plus tax'],
+    ['visit-related and per‐visit', 'visit-related and per-visit'],
     ['Your visit’s price is $98.', "Your visit's price is $98."],
     ['A stray * or ` and a \\q remain.', 'A stray * or ` and a \\q remain.'],
     ['The amount is $98.\nFor each visit, send a reminder.', 'The amount is $98. For each visit, send a reminder.'],
@@ -50,6 +54,7 @@ describe('bounded email copy normalization', () => {
     expect(normalize('a '.repeat(COPY_LIMITS.tokens)).ok).toBe(true);
     expect(normalize('a '.repeat(COPY_LIMITS.tokens + 1)).reason).toBe('copy_tokens');
     expect(normalize('a&#32;'.repeat(COPY_LIMITS.tokens + 1)).reason).toBe('copy_tokens');
+    expect(normalize('a—'.repeat(256) + 'a').reason).toBe('copy_tokens');
   });
 
   test('fails closed on deeply nested formatting within the byte limit', () => {

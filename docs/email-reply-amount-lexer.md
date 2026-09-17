@@ -51,9 +51,10 @@ It does not parse arbitrary natural-language money descriptions.
 Focused check from the repository root:
 `TZ=UTC node node_modules/jest/bin/jest.js --runInBand --no-coverage server/tests/email-reply-amount-lexer.test.js`.
 
-Known deferred grammar boundaries: normalization loses the distinction
-between adjacent punctuation dashes and joined hyphens, so a normalized
-`Price-$98` can remain unrecognized. Currency-aware `between ... and ...`
+Known deferred grammar boundaries: an ASCII joined hyphen (or folded
+mathematical minus) before an amount, such as `Price-$98`, can remain
+unrecognized. The normalizer now spaces U+2012–U+2015 punctuation dashes
+separately. Currency-aware `between ... and ...`
 phrases can remain separate amount tokens. The arbitrary interior-offset
 call for digits after hyphenated USD endpoints (`$90-USD 120`, offset 8)
 can still return a number; advancing to the complete range token’s `end`
