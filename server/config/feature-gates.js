@@ -24,6 +24,7 @@
  *   GATE_BLOG_BODY_IMAGES=true  (autonomous posts get ≥2 generated in-article images)
  *   GATE_CRON_JOBS=true         (enable all automated cron jobs)
  *   GATE_WEBHOOKS=true          (enable inbound webhook processing)
+ *   GATE_TERMITE_ANNUAL_PLAN=true (estimator emits the Subterranean Termite Protection plan — station setup fee + prepaid annual fee, 1 inspection/yr — when an estimate requests plan 'annual_protection'; also requires GATE_CANCEL_FLOW_V2 for online nonrenewal; dark = today's quarterly program; flip only after the agreement v3 sign-off, ruling A-11)
  *   GATE_ONE_TIME_WELCOME_EMAIL=true (welcome email for eligible first one-time bookings; enqueue + delivery opt-in, SMS unchanged)
  *     RETIRED BY OWNER DECISION 2026-09-09: one-time customers do not get a welcome email — the booking confirmation
  *     plus the en-route app-intro email (GATE_APP_INTRO_EMAIL) is the whole one-time onboarding. Unset in prod the
@@ -551,6 +552,28 @@ const gates = {
   // any non-'true' value; sibling rows already rewritten are not reversed
   // when it flips.
   editApptPriceServiceScope: process.env.GATE_EDIT_APPT_PRICE_SERVICE_SCOPE === 'true',
+
+  // Multiple discounts on one service, and the one rule for how they combine
+  // (owner ruling 2026-09-11, "the lesser of the two"): dollar credits come
+  // off first, then percentages compound on what is left (10% then 5% off
+  // $111 is $16.10, never an additive $16.65), with one WaveGuard tier per
+  // document. The rule lives in server/services/discount-stack.js
+  // (stackDiscounts / stackVisitDiscounts / stackDocumentDiscounts) and
+  // GET /api/admin/discounts/stacking reports this value for pickers to
+  // read. discount-engine.js's /calculate preview and invoice.js's manual-
+  // discount save both already import discount-stack.js for its cent-exact
+  // percentage rounding (live regardless of this gate), but neither reads
+  // this gate to decide whether to COMPOUND — the preview always calls
+  // stackDiscounts with compound:false, and the save doesn't compound at
+  // all yet, so flipping this gate today changes nothing observable: off
+  // OR on, every existing total stays byte-identical (rounding-corrected)
+  // until slice 5 (invoice/document calculation) wires both the preview
+  // and invoice.js's line-item/manual-discount save to read the live gate
+  // TOGETHER. This map entry is for logGateStatus only — the canonical
+  // CALL-TIME reader is discountStackingLive() below (strict 'true');
+  // every caller, present and future, must use that, not this cached-at-
+  // load value, so a flip needs no redeploy.
+  discountStacking: process.env.GATE_DISCOUNT_STACKING === 'true',
 
   // Collective series moves on every staff surface (owner rulings 2026-07-30
   // + 2026-08-28): with the gate on, ANY date move of a cadence visit that
@@ -1415,6 +1438,8 @@ const gates = {
   // env at call time via gateEnvValue('GATE_CANCEL_FLOW_V2'); kill switch =
   // unset. Owner flips with the C1 portal flow.
   cancelFlowV2: process.env.GATE_CANCEL_FLOW_V2 === 'true',
+  // Boot diagnostics show the effective conjunction; selection reads it at call time.
+  termiteAnnualPlan: termiteAnnualPlanSelectionEnabled(),
   // Schedule-integrity watchdog: daily cron paging two silent-loss classes —
   // past-dated visits stuck in on_site/en_route (performed but never
   // completed → no service record, invoice, report, or post-service SMS;
@@ -2643,6 +2668,17 @@ const gates = {
 
   opsDigestsInApp: gateEnvValue('GATE_OPS_DIGESTS_IN_APP'),
 
+  // Ops digest ingest — routes/ops-digest-ingest.js, POST /api/ops/digest.
+  // The external Waves ops crons on the owner's Mac (~/waves-ops/ops-crons,
+  // 35 read-only checks) post their FIX:/ACT: findings here so they
+  // land as ops_digest bell rows (the Waves Ops lane in Agents → Activity)
+  // instead of emails to contact@ (owner ask 2026-09-11). Machine auth via
+  // the OPS_DIGEST_INGEST_TOKEN bearer; the route 404s while the token is
+  // unset, 409s while GATE_OPS_DIGESTS_IN_APP / GATE_AGENT_ACTIVITY are off,
+  // and the caller emails on any non-2xx. Kill switch: unset the token.
+  // Presence-only here for logGateStatus; the route reads env at CALL time.
+  opsDigestIngest: Boolean(process.env.OPS_DIGEST_INGEST_TOKEN),
+
   // Closeout money + comms alerts — services/closeout-alerts.js maps three
   // more closeout facts to operator issues: comms failed (completion notice
   // rejected by the provider), invoice pending on an actionable reason
@@ -2671,6 +2707,27 @@ const gates = {
 // truth: '1' / 'true' / 'on', case-insensitive.
 function gateEnvValue(envName) {
   return ['1', 'true', 'on'].includes(String(process.env[envName] || '').toLowerCase());
+}
+
+// GATE_DISCOUNT_STACKING read at CALL time — strict `=== 'true'`, NOT
+// gateEnvValue's more permissive '1'/'true'/'on' case-insensitive rule,
+// because this gate's documented contract (and the endpoint test locking it
+// in) is that any other spelling or casing — 'TRUE', '1', unset — is off.
+// The `discountStacking` gates-map entry above is for logGateStatus only;
+// this is the one canonical reader every caller must use — today
+// server/routes/admin-discounts.js's GET /stacking, and later whichever
+// schedule/invoice slice wires an actual caller — so none of them can drift
+// from what the endpoint reports (Codex pre-push audit P1: the route used
+// to read the load-time gates-map value via isEnabled(), which never sees a
+// flip until the process restarts).
+function discountStackingLive() {
+  return process.env.GATE_DISCOUNT_STACKING === 'true';
+}
+
+// Fresh annual contracts require the term-aware cancellation path. Read both
+// switches at call time so pricing, availability and delivery agree.
+function termiteAnnualPlanSelectionEnabled() {
+  return gateEnvValue('GATE_TERMITE_ANNUAL_PLAN') && gateEnvValue('GATE_CANCEL_FLOW_V2');
 }
 
 // Timestamp-valued gate parsed at CALL time (rollout EPOCHS such as
@@ -2714,5 +2771,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, termiteAnnualPlanSelectionEnabled };
 // gates 1775330914

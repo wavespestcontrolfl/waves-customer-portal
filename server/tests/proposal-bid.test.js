@@ -62,6 +62,20 @@ describe('bid quantity and costing authority', () => {
     expect(proposalRevenueIssue({ buildings: [{ lineItems: [{ description: 'Quarterly', quantity: 1, unitPrice: 200 }, { description: '  ', quantity: 2, unitPrice: 50 }] }] })).toMatch(/need a description before they count toward revenue/);
     expect(proposalRevenueIssue({ buildings: [{ lineItems: [{ description: 'Quarterly', quantity: 1, unitPrice: 200 }, { description: '', quantity: 1, unitPrice: 0 }] }] })).toBeNull();
   });
+  test.each([
+    { quantity: '1.00001' }, { quantity: '' }, { quantity: 1000000001 },
+    { unitPrice: '1.00001' }, { unitPrice: '' }, { unitPrice: 100000000 }, { unit: 'unsupported' },
+  ])('withholds margins when a described building line is unsaveable: %o', (invalid) => {
+    const proposal = { buildings: [{ lineItems: [line('valid', 1, 200), { ...line('invalid', 1, 50), ...invalid }] }] };
+    const revenueIssue = proposalRevenueIssue(proposal);
+    expect(revenueIssue).toBeTruthy();
+    expect(validateBidFields(proposal)).toBe(revenueIssue);
+    const rows = [{ category: 'labor', description: 'Synthetic cost', quantity: 1, unit: 'hour', unitCost: 10, occurrences: 1 }];
+    expect(computeProjectCosts({ rows }, { oneTime: 250 }, { revenueIssue })).toMatchObject({ costsComplete: false, profit: null, marginPercent: null });
+  });
+  test('accepts saved building precision and omitted legacy quantity/price defaults for margins', () => {
+    expect(proposalRevenueIssue({ buildings: [{ lineItems: [line('valid', '1.2345000', '1.2345e2'), { description: 'Legacy defaults' }] }] })).toBeNull();
+  });
   test.each([['', null], ['abc', null], [0, null], [31, null], [2.5, null], ['3', 3], [undefined, 1]])('a present revenue period of %s never silently compares one year (GH codex P2 on #4270)', (revenueYears, expected) => {
     const rows = [{ category: 'labor', description: 'Synthetic complete cost', quantity: 1, unit: 'hour', unitCost: 10, occurrences: 1 }];
     const result = computeProjectCosts(revenueYears === undefined ? { rows } : { revenueYears, rows }, { oneTime: 100, annualRecurring: 50 });

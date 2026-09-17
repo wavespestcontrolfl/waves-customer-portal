@@ -3,9 +3,9 @@
  * behavior when off).
  *
  * When ON, the shared admin bell rings ONLY for the lanes the owner actually
- * acts on: new leads, inbound SMS, voicemail callbacks, accepted estimates,
- * and money failures (payment failures, billing exceptions, disputes, refund
- * failures, PCI events) — plus twilio_failure (infra-down must keep ringing).
+ * acts on: a customer reaching out on any channel (new lead, text, email,
+ * voicemail, missed call, reschedule note), accepted estimates (site-tagged
+ * bell:true) and failed customer payments (owner ruling 2026-09-11).
  * Everything else is silenced at the NotificationService.create chokepoint
  * (no row inserted), with a per-category owner override so any silenced
  * category can be re-enabled from Settings → Notifications.
@@ -36,8 +36,14 @@ const TRIGGER_BELL_ALLOWLIST = new Set([
   'customer_email_received',        // a customer emailed
   'customer_voicemail_callback',    // a customer left a voicemail
   'customer_missed_call',           // a customer called, nobody answered, no voicemail
-  'repeat_caller',                  // one number has called 3+ times in 3 hours
   'appointment_reschedule_intent',  // a customer texted a reschedule / away note
+  // Owner ruling 2026-09-11: a declined card / returned ACH is the one money
+  // failure that must ring regardless of the payment category override —
+  // before this it reached the owner only via the billing follow-up
+  // proposal days later (7 rang before 08-08, 0 after). Still 'payment'
+  // category, so payment_succeeded stays denylisted and every other payment
+  // bell stays behind the category toggle.
+  'payment_failed',
 ]);
 
 
@@ -46,6 +52,12 @@ const TRIGGER_BELL_DENYLIST = new Set([
   'payment_refunded',
   'dashboard_alert',
   'internal_admin_alert',
+  // Owner ruling 2026-09-11: the repeat-caller lane is retired from the
+  // bell. Denylisted (not merely dropped from the allowlist) because the
+  // trigger carries the allowlisted missed_call category — the category
+  // would ring it anyway, and the underlying missed calls already ring
+  // one bell each via customer_missed_call.
+  'repeat_caller',
 ]);
 
 

@@ -105,6 +105,13 @@ function proposalRevenueIssue({ buildings = [], programs = [], correctiveWork = 
   // is revenue the sidebar sums but the reload never shows; hold the margin
   // until it is described or cleared (GH codex P2 r9 on #4270).
   if (lines.some((i) => !String(i?.description ?? '').trim() && proposalLineAmount({ quantity: i?.quantity, unitPrice: i?.unitPrice ?? i?.unit_price ?? i?.price }) > 0)) return 'Priced building lines need a description before they count toward revenue.';
+  for (const line of lines.filter((i) => String(i?.description ?? '').trim())) {
+    const quantity = Object.hasOwn(line, 'quantity') ? line.quantity : 1;
+    const priceKey = ['unitPrice', 'unit_price', 'price'].find((key) => Object.hasOwn(line, key));
+    if (!decimalValid(quantity, { min: 0.0001, max: 1000000000 })) return 'Line quantities must be positive, at most one billion, and have no more than four decimal places.';
+    if (!decimalValid(priceKey ? line[priceKey] : 0)) return 'Unit prices must be nonnegative dollar amounts with no more than four decimal places.';
+    if (line.unit && !Object.hasOwn(PROPOSAL_UNITS, line.unit)) return 'Choose a supported unit for each proposal line.';
+  }
   if (correctiveWork.some((w) => Number(w?.amount ?? w?.price) < 0)) return 'Corrective work amounts cannot be negative.';
   if (correctiveWork.some((w) => !wholeCents(Number(w?.amount ?? w?.price ?? 0)))) return 'Corrective work amounts must be whole-cent dollar values.';
   return null;

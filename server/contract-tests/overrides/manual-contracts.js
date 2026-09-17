@@ -41,4 +41,75 @@ module.exports = {
   update_lead_pipeline: { sideEffects: true, reason: 'updates leads.pipeline stage, inserts lead_activities' },
   queue_for_adam:     { sideEffects: true, reason: 'inserts lead_agent_responses queue rows' },
   save_lead_response_report: { sideEffects: true, reason: 'inserts lead_agent_responses report rows (write path swallowed its own failure during smoke)' },
+
+  // The tool's queries live in estimate-detail.js rather than the
+  // registered estimate-tools.js source path. Cover its row, provenance,
+  // membership, acceptance, and composer dependencies here.
+  get_estimate_detail: {
+    tables: ['estimates', 'estimate_acceptances', 'estimate_deposits', 'call_log', 'leads', 'scheduled_services', 'services', 'customers', 'annual_prepay_terms', 'autopay_log', 'payment_methods', 'payment_method_consents', 'payers', 'referral_program_settings'],
+    columns: {
+      // The estimate row is selected in full for the public composer.
+      estimates: [
+        'id', 'customer_id', 'customer_name', 'address', 'status', 'disposition', 'disposition_note',
+        'decline_reason', 'category', 'service_interest', 'waveguard_tier', 'pricing_version', 'bill_by_invoice',
+        'monthly_total', 'annual_total', 'onetime_total', 'accepted_at', 'accepted_service_mode',
+        'accepted_frequency_key', 'notes', 'token', 'sent_at', 'viewed_at', 'view_count', 'declined_at',
+        'expires_at', 'archived_at', 'created_at', 'updated_at', 'estimate_data',
+        'price_locked_at', 'customer_phone', 'customer_email', 'terms_version', 'property_id', 'estimate_group_id',
+      ],
+      // acceptanceRecordForEstimate reads the latest persisted acceptance
+      // whenever an accepted estimate carries a terms-version stamp.
+      estimate_acceptances: [
+        'id', 'estimate_id', 'terms_version', 'terms_text', 'accepted_at', 'ip', 'user_agent',
+      ],
+      estimate_deposits: [
+        'estimate_id', 'amount', 'card_surcharge', 'credited_amount', 'refunded_amount',
+        'refunded_surcharge', 'status', 'received_at', 'created_at',
+      ],
+      // callSideBlockForEstimateData's own reads, reached from estimateLinks
+      // for an engine-drafted row (estimatorEngine.callLogId): the blocking
+      // verdict + in-flight markers off call_log, then the sid-owned /
+      // stamped lead resolution when the draft is durably lead-linked.
+      call_log: [
+        'id', 'metadata', 'processing_token', 'processing_status', 'extraction_attempts',
+        'created_at', 'twilio_call_sid',
+      ],
+      leads: ['id', 'twilio_call_sid', 'deleted_at', 'created_at', 'estimate_id', 'first_name', 'last_name', 'email', 'phone', 'address'],
+      // composeEstimateDataPayload's per-estimate appointment adoption read
+      // (findLinkedUpcomingAppointment): the filtered columns plus the
+      // catalog identity it left-joins for.
+      scheduled_services: [
+        'id', 'status', 'scheduled_date', 'customer_id', 'reservation_expires_at',
+        'is_callback', 'service_id', 'source_estimate_id',
+        'window_start', 'window_end', 'window_display', 'service_type', 'property_id',
+        'payer_id', 'po_number', 'self_pay_override',
+        'is_recurring', 'estimated_price', 'annual_prepay_term_id', 'prepaid_amount', 'prepaid_method',
+        'primary_line_price', 'line_discount_dollars', 'discount_id', 'discount_type', 'discount_dollars', 'source',
+        'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip',
+      ],
+      services: ['id', 'service_key', 'name', 'billing_type'],
+      // The customer row the composer reads on two paths: every linked
+      // estimate through estimateRendersMonthlyBilling → billing-cadence
+      // (pipeline_stage, monthly_rate, billing_mode — codex round 7 P2),
+      // an authored proposal through resolveProposalBillingContext, and
+      // strict membership reconciliation through isActivePlanCustomer
+      // (active, waveguard_tier).
+      customers: ['id', 'active', 'waveguard_tier', 'waveguard_tier_source', 'payer_id', 'autopay_enabled', 'autopay_paused_until', 'ach_status', 'autopay_payment_method_id', 'deleted_at', 'updated_at', 'pipeline_stage', 'monthly_rate', 'billing_mode', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'first_name', 'last_name', 'email', 'phone'],
+      annual_prepay_terms: ['source_estimate_id'],
+      // Recurring-card policy reads consent, chargeability and effective payer.
+      autopay_log: ['customer_id', 'event_type', 'created_at'],
+      payment_methods: ['id', 'customer_id', 'processor', 'method_type', 'stripe_payment_method_id', 'is_default', 'created_at', 'updated_at', 'autopay_enabled', 'exp_month', 'exp_year', 'ach_status'],
+      payment_method_consents: ['customer_id', 'stripe_payment_method_id', 'consent_text_version', 'source'],
+      payers: ['id', 'active', 'tax_exempt', 'payment_terms', 'display_name', 'company_name', 'ap_email', 'billing_address_line1', 'billing_city', 'billing_state', 'billing_zip'],
+      referral_program_settings: ['id', 'program_active', 'base_url'],
+    },
+    optionalColumns: {
+      scheduled_services: [ // payer and qualifying-service readers explicitly check column availability
+        'self_pay_override', 'is_recurring', 'estimated_price', 'annual_prepay_term_id', 'prepaid_amount', 'prepaid_method',
+        'primary_line_price', 'line_discount_dollars', 'discount_id', 'discount_type', 'discount_dollars', 'source',
+      ],
+      customers: ['waveguard_tier_source'], // qualifying-service reader checks column availability
+    },
+    reason: 'get_estimate_detail\'s DB reads live in estimate-detail.js, not its registered sourcePath (estimate-tools.js) — the automatic scan can\'t see them.',
+  },
 };

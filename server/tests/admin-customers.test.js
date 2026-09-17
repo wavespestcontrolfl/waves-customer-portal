@@ -1224,9 +1224,9 @@ describe('admin customer writes stamp the implied monthly lane (source pins)', (
     // be overwritten by the stamp.
     expect(src).toContain('impliedLaneStamp = impliedMonthlyStampForWrite(lockedBefore, { ...lockedBefore, ...updates });');
     expect(src).toContain('if (impliedLaneStamp) updates.billing_mode = impliedLaneStamp;');
-    // The stamp lands after changed/after were snapshotted — both are
-    // patched post-commit so the sensitive audit records the lane write.
-    expect(src).toContain("changed.push('billing_mode');");
+    // The stamp lands after changed was snapshotted — it is rebuilt from the
+    // locked transition so the sensitive audit records the lane write.
+    expect(src).toContain('changed.splice(0, changed.length, ...Object.keys(updates)');
   });
 
   test('both stamp sites surface an owner review notification', () => {

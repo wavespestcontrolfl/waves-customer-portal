@@ -8,6 +8,7 @@ const { VERSION, stringifySmsEvidence } = require('./sms-operational-extractor')
 const { hashExtractionSource } = require('./data-hygiene/source-extraction-store');
 const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey, scopeKeysShareLocality, scopeKeyLacksLocality } = require('./estimate-property-linkage');
 const { handedOffWithin, handoffOrder, HANDOFF_COLS, witnessAt, whereEstimateCustomerOwnership } = require('./call-commitments');
+const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 
 const LIMIT = 50;
 // A logged move: both dates present and either the date or the window
@@ -48,7 +49,9 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
   const customerId = message.customer_id;
   const peer = message.direction === 'inbound' ? message.from_phone : message.to_phone;
   const sources = {
-    sms: conn('sms_log').where({ customer_id: customerId, direction: 'outbound' })
+    // codex #4331 P2 (structural pass): an unresolved review-ask reservation
+    // must not read as fulfillment evidence for an unrelated commitment.
+    sms: excludeUnresolvedSendReservations(conn('sms_log').where({ customer_id: customerId, direction: 'outbound' }))
       .whereRaw("RIGHT(regexp_replace(to_phone, '[^0-9]', '', 'g'), 10) = ?", [phone(peer)])
       .where('created_at', '>', after).where('created_at', '<=', now).orderBy('created_at', 'desc').limit(LIMIT + 1)
       .select('id', 'status', 'message_type', 'message_body', 'created_at'),

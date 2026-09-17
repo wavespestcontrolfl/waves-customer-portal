@@ -302,7 +302,7 @@ class PushNotificationService {
   // beforeDispatch runs after the subscription lookup and immediately before
   // the first provider handoff, so a caller's durable "push started" claim
   // is never burned by a lookup that failed or found nothing to send.
-  async sendToAdminUsers(adminUserIds, notificationForUser, { beforeDispatch = null } = {}) {
+  async sendToAdminUsers(adminUserIds, notificationForUser, { beforeDispatch = null, deliveredSubscriptionIds = null } = {}) {
     const ids = [...new Set((adminUserIds || []).filter(Boolean))];
     if (ids.length === 0) return summarize([], 0);
     const subs = await db('push_subscriptions as ps')
@@ -316,13 +316,23 @@ class PushNotificationService {
       return { ...summarize([], subs.length), superseded: true };
     }
     const results = [];
+    const delivered = new Set(deliveredSubscriptionIds || []);
     for (const sub of subs) {
+      if (delivered.has(sub.id)) {
+        results.push({ sent: true, deduped: true });
+        continue;
+      }
       const notification = typeof notificationForUser === 'function'
         ? notificationForUser(sub.admin_user_id, sub)
         : notificationForUser;
-      results.push(await sendSubscription(sub, notification));
+      const result = await sendSubscription(sub, notification)
+        .catch(() => ({ sent: false, failed: true, reason: 'provider_failure' }));
+      results.push(result);
+      if (result.sent) delivered.add(sub.id);
     }
-    return summarize(results, subs.length);
+    return { ...summarize(results, subs.length),
+      ...(deliveredSubscriptionIds ? { deliveredSubscriptionIds: [...delivered] } : {}),
+    };
   }
 
   async sendToAdminUser(adminUserId, notification) {

@@ -2,6 +2,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { dispatchWithFallback } = require('../llm/call');
+const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-reservation');
 
 // Structured-output contract (llm/call.js jsonSchema). The confidence floor
 // and the type map below still decide which signals are recorded.
@@ -261,11 +262,12 @@ class SignalDetector {
 
     // ── Communication Signals ────────────────────────────────────
     try {
-      const outbound = await db('sms_log')
-        .where('customer_id', customerId)
-        .where('direction', 'outbound')
-        .where('created_at', '>', new Date(now - 30 * 86400000))
-        .count('* as count').first();
+      const outbound = await excludeUnresolvedSendReservations(
+        db('sms_log')
+          .where('customer_id', customerId)
+          .where('direction', 'outbound')
+          .where('created_at', '>', new Date(now - 30 * 86400000)),
+      ).count('* as count').first();
 
       const inbound = await db('sms_log')
         .where('customer_id', customerId)

@@ -41,6 +41,7 @@ const {
 const { agentEstimatePreviewFingerprint, agentEngineResultDigest } = require('../agent-estimate-preview');
 const { clearEstimatePricingCache } = require('../estimate-pricing-cache');
 const { executeProcurementTool } = require('./procurement-tools');
+const { GET_ESTIMATE_DETAIL_TOOL, getEstimateDetail } = require('./estimate-detail');
 
 const PROPERTY_FACT_TOKEN_TTL_MS = 15 * 60 * 1000;
 const PROPERTY_FACT_FALLBACK_SECRET = crypto.randomBytes(32);
@@ -165,6 +166,7 @@ Use for: change-of-pricing context before drafting an estimate.`,
       },
     },
   },
+  GET_ESTIMATE_DETAIL_TOOL,
   {
     name: 'find_similar_estimates',
     description: `Find recent estimates with similar monthly_total and/or service interest. Pulls calibration anchors so the agent can sanity-check ("we quoted a similar property last month at $X"). Returns up to 10 estimates.
@@ -363,6 +365,7 @@ async function executeEstimateTool(toolName, input, actionContext = {}) {
       case 'read_pricing_config': return await readPricingConfig(input);
       case 'recent_pricing_changes': return await recentPricingChanges(input);
       case 'find_similar_estimates': return await findSimilarEstimates(input);
+      case 'get_estimate_detail': return await getEstimateDetail(input);
       case 'match_existing_customer': return await matchExistingCustomer(input, actionContext.readCustomerIds);
       case 'get_waveguard_tiers': return await getWaveGuardTiers();
       case 'get_neighborhood_grass_profile': return await getNeighborhoodGrassProfile(input);
@@ -896,6 +899,10 @@ function extractStatusCode(err) {
   return message.match(/\b(\d{3})\b/)?.[1] || null;
 }
 
+const { CLIENT_IDENTITY_FIELDS } = require('../estimate-client-identity-fields');
+
+const normalizeAgentPricingInputKey = (key) => String(key).toLowerCase().replace(/[^a-z0-9]/g, '');
+
 const AGENT_FORBIDDEN_PRICING_INPUT_KEYS = new Set([
   'allowingredientaliases',
   'allowwarrantyoverride',
@@ -908,7 +915,6 @@ const AGENT_FORBIDDEN_PRICING_INPUT_KEYS = new Set([
   'customproductozperfinishedgallon',
   'discountoverride',
   'fixedprice',
-  'isrecurringcustomer',
   'lawnlaborminutesbase',
   'lawnlaborminutesperk',
   'lawnmaterialcostperk',
@@ -923,8 +929,12 @@ const AGENT_FORBIDDEN_PRICING_INPUT_KEYS = new Set([
   'operatorpriceadjustment',
   'priceoverride',
   'pricingconfig',
-  'priorqualifyingservices',
-  'recurringcustomer',
+  // Recurring-customer identity + stored-estimate replay stamps
+  // (termitePricingKnobs, treeShrubPricingKnobs, …): the SAME list the
+  // persistence save path strips, read from its one home so a model-supplied
+  // replay stamp can never price a gated program (annual termite plan) past
+  // its gate, and a key added there is refused here without a second edit.
+  ...CLIENT_IDENTITY_FIELDS.map(normalizeAgentPricingInputKey),
   'routedriveminutes',
   'servicespecificcredits',
   'servicespecificdiscounts',
@@ -952,7 +962,7 @@ function findForbiddenAgentPricingInputs(value, path = [], found = []) {
     return found;
   }
   for (const [key, nested] of Object.entries(value)) {
-    const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const normalized = normalizeAgentPricingInputKey(key);
     if (AGENT_FORBIDDEN_PRICING_INPUT_KEYS.has(normalized)
       || AGENT_FORBIDDEN_PRICING_INPUT_PATTERN.test(normalized)) {
       found.push([...path, key].join('.'));

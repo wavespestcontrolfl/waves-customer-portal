@@ -23,7 +23,9 @@
  *    instead of reading as "invoice-less" and arming a ladder that could
  *    double-collect alongside the invoice/dunning lane.
  */
-jest.mock('stripe', () => jest.fn(() => ({})));
+const mockConstructEvent = jest.fn();
+jest.mock('stripe', () => jest.fn(() => ({ webhooks: { constructEvent: mockConstructEvent } })));
+jest.mock('@sentry/node', () => ({ captureException: jest.fn() }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../config/stripe-config', () => ({ secretKey: 'sk_test_mock', webhookSecret: 'whsec_mock' }));
 jest.mock('../routes/stripe-webhook-helpers', () => ({
@@ -34,7 +36,7 @@ jest.mock('../routes/stripe-webhook-helpers', () => ({
   savedCardCreditAdjustment: jest.fn(() => null),
   STALE_CLAIM_WINDOW_MS: 60000,
 }));
-jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn() }));
+jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({ bellWritten: true })) }));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(async () => ({ sent: true })),
 }));
@@ -53,6 +55,9 @@ jest.mock('../services/invoice-helpers', () => ({ INVOICE_UNCOLLECTIBLE_STATUSES
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn(() => 'https://portal.test') }));
 jest.mock('../services/payment-lifecycle-email', () => ({ sendPaymentFailed: jest.fn(async () => {}) }));
 jest.mock('../services/receipt-delivery-queue', () => ({}));
+jest.mock('../services/payment-failure-notifications', () => ({
+  enqueuePaymentFailureNotification: jest.fn(async () => ({ enqueued: true })),
+}));
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn() }));
 jest.mock('../services/estimate-deposits', () => ({ handleDepositChargeReversed: jest.fn(async () => ({ handled: false })) }));
 jest.mock('../services/stripe', () => ({
@@ -72,6 +77,7 @@ function resetMockState() {
     processingRow: null,   // payments row matched by { pi, status: 'processing' }
     paymentRow: null,      // payments row matched by { pi } alone
     invoiceRow: null,      // invoices row matched by the PI
+    webhookEvent: null,
     failInvoiceLookup: false, // invoices .first() throws (fail-closed path)
     priorFailedCount: 0,   // payments count() result (prior attempts)
     customer: { id: 'cust-1', first_name: 'Pat', phone: '+15550001111' },
@@ -96,6 +102,7 @@ function mockMakeBuilder(table, sink) {
   b.count = () => { b._counted = true; return b; };
   b.columnInfo = async () => ({ stripe_event_id: {} });
   b.first = async () => {
+    if (table === 'stripe_webhook_events') return mockState.webhookEvent;
     if (table === 'payments') {
       if (b._counted) return { cnt: mockState.priorFailedCount };
       const wantsProcessing = b._wheres.some((w) => w && w.status === 'processing');
@@ -119,10 +126,16 @@ function mockMakeBuilder(table, sink) {
   // these tests on the arming contract.
   b.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
   b.update = async (patch) => {
+    if (table === 'stripe_webhook_events') Object.assign(mockState.webhookEvent, patch);
     sink.push({ table, wheres: b._wheres, patch });
     return 1;
   };
-  b.insert = async () => [];
+  b.insert = (row) => {
+    if (table !== 'stripe_webhook_events') return Promise.resolve([]);
+    const inserted = !mockState.webhookEvent;
+    if (inserted) mockState.webhookEvent = row;
+    return { onConflict: () => ({ ignore: () => ({ returning: async () => inserted ? [{ id: row.id }] : [] }) }) };
+  };
   return b;
 }
 
@@ -294,5 +307,54 @@ describe('async monthly-autopay bounce arming', () => {
     expect(arms).toHaveLength(1);
     expect(logAutopay).toHaveBeenCalledWith('cust-1', 'charge_failed',
       expect.objectContaining({ details: expect.objectContaining({ billed_month: '2026-06' }) }));
+  });
+});
+
+describe('payment_failed durable notification enqueue', () => {
+  const { enqueuePaymentFailureNotification } = require('../services/payment-failure-notifications');
+  const { triggerNotification } = require('../services/notification-triggers');
+  beforeEach(() => {
+    enqueuePaymentFailureNotification.mockReset().mockResolvedValue({ enqueued: true });
+  });
+
+  test('acknowledges the event after enqueue without waiting for phone delivery', async () => {
+    triggerNotification.mockImplementation(() => new Promise(() => {}));
+    await handlePaymentIntentFailed(achBouncePI(), 'evt_queued');
+    expect(enqueuePaymentFailureNotification).toHaveBeenCalledWith(
+      achBouncePI(), 'Payment could not be completed.', 'evt_queued');
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('the webhook returns 500 on enqueue failure, then acknowledges successful replay', async () => {
+    const router = require('../routes/stripe-webhook');
+    const route = router.stack.find((layer) => layer.route?.path === '/').route;
+    const handler = route.stack[route.stack.length - 1].handle;
+    const { classifyExistingWebhookEvent } = require('../routes/stripe-webhook-helpers');
+    classifyExistingWebhookEvent.mockImplementation((row) => row.processed ? 'duplicate' : 'reclaim');
+    mockConstructEvent.mockReturnValue({ id: 'evt_http_replay', type: 'payment_intent.payment_failed',
+      data: { object: achBouncePI() } });
+    enqueuePaymentFailureNotification.mockRejectedValueOnce(new Error('Synthetic enqueue outage'));
+    const post = async () => {
+      const res = { status: jest.fn(() => res), json: jest.fn(() => res), send: jest.fn(() => res) };
+      await handler({ headers: { 'stripe-signature': 'synthetic-signature' }, body: Buffer.from('{}') }, res);
+      return res;
+    };
+    expect((await post()).status).toHaveBeenCalledWith(500);
+    expect(mockState.webhookEvent.processed).toBe(false);
+    expect((await post()).status).toHaveBeenCalledWith(200);
+    expect(mockState.webhookEvent.processed).toBe(true);
+    expect((await post()).json).toHaveBeenCalledWith({ received: true, duplicate: true });
+    expect(enqueuePaymentFailureNotification).toHaveBeenCalledTimes(2);
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('an enqueue outage does not block the independent customer failure email', async () => {
+    const lifecycleEmail = require('../services/payment-lifecycle-email');
+    enqueuePaymentFailureNotification.mockRejectedValueOnce(new Error('Synthetic enqueue outage'));
+    const cardFailure = achBouncePI({ metadata: {}, last_payment_error: {
+      message: 'declined', code: 'card_declined', payment_method: { type: 'card' },
+    } });
+    await expect(handlePaymentIntentFailed(cardFailure, 'evt_card')).rejects.toThrow('enqueue outage');
+    expect(lifecycleEmail.sendPaymentFailed).toHaveBeenCalledWith({ paymentIntentId: 'pi_ach_1', attemptId: 'ch_1' });
   });
 });

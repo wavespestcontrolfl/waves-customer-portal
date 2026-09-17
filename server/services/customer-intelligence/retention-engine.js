@@ -4,6 +4,7 @@ const { CUSTOMER_STAGES } = require('../customer-stages');
 const MODELS = require('../../config/models');
 const { isEnabled } = require('../../config/feature-gates');
 const { dispatchWithFallback } = require('../llm/call');
+const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-reservation');
 
 // Structured-output contract for an owner-approved retention draft
 // (llm/call.js jsonSchema). Nothing here sends — rows park as
@@ -67,8 +68,12 @@ class RetentionEngine {
 
     let recentSMS = '';
     try {
-      const msgs = await db('sms_log')
-        .where('customer_id', customerId)
+      // codex #4331 P2 (structural pass, finding 4): an unresolved review-ask
+      // reservation ('sending', synthetic) must not be presented to the model
+      // as a message Waves definitely sent — the provider may never have
+      // received it.
+      const msgs = await excludeUnresolvedSendReservations(db('sms_log')
+        .where('customer_id', customerId))
         .orderBy('created_at', 'desc')
         .limit(5)
         .select('direction', 'message_body');

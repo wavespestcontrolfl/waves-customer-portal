@@ -1,0 +1,137 @@
+const verifier = require('../services/email/email-reply-company-verifier');
+
+const { verifyEmailReplyCompanyName } = verifier;
+const verdict = (text) => verifyEmailReplyCompanyName({ text });
+const rejected = (text) => expect(verdict(text).violations).toContain('customer_copy_compliance');
+
+describe('email reply company-name policy', () => {
+  test('exports only the company-name policy', () => {
+    expect(verifier).toEqual({ verifyEmailReplyCompanyName });
+    expect(verdict('')).toEqual({ ok: true, violations: [] });
+  });
+
+  test.each([
+    'Waves Lawn & Pest', 'Waves Lawn and Pest', 'Waves  Lawn & Pest',
+    'Waves Lawn-Pest', 'Waves Lawn + Pest', 'Waves Lawn/Pest',
+    'Waves Pest & Lawn', 'Waves Pest Control and Lawn', 'Waves Pest / Lawn',
+    'Waves Pest Control & Lawn Care',
+    'Waves Pest Control LLC', 'Waves Pest Control – LLC', 'Waves Pest Control \\- LLC',
+    'Waves Pest Control Group', 'Waves Pest Control Florida',
+    'Waves Pest Control Pest Services',
+    'Waves Lawn Care', 'Waves Pest Services', 'Waves **Lawn Care**',
+    'Waves Lawn Services', 'Waves Pest', 'Waves Lawn',
+  ])('rejects a retired or alternate company name: %s', (brand) => rejected(`You contacted ${brand}.`));
+
+  test.each([
+    'Waves Termite Control',
+    'WAVES TERMITE CONTROL',
+    'Waves Mosquito Services',
+    'waves mosquito services',
+    'Waves Rodent Control',
+    'Waves Wildlife Services',
+    'Waves Exterminating',
+    'WaVeS ExTeRmInAtInG',
+  ])('rejects a noncanonical service company name: %s', (brand) => rejected(`You contacted ${brand}.`));
+
+  test('screens the rendered company name through nested emphasis and inline code', () => {
+    rejected('You contacted **Waves *Termite* Control**.');
+    rejected('You contacted Waves **Termite\nControl**.');
+    rejected('You contacted Waves `Termite` Control.');
+    rejected('You contacted Waves ``Termite`` Control.');
+    rejected('You contacted Waves `Termite\n` Control.');
+    rejected('You contacted Waves ``Termite\r\nControl`` Services.');
+    rejected('You contacted Waves Termite\\\nControl.');
+    rejected('You contacted Waves Termite&#32;Control.');
+    expect(verdict('You contacted **Waves *Pest* Control**.'))
+      .toEqual({ ok: true, violations: [] });
+    expect(verdict('You contacted Waves **Pest\nControl**.'))
+      .toEqual({ ok: true, violations: [] });
+    expect(verdict('You contacted Waves `Pest` Control.'))
+      .toEqual({ ok: true, violations: [] });
+    expect(verdict('You contacted Waves ``Pest`` Control.'))
+      .toEqual({ ok: true, violations: [] });
+    expect(verdict('You contacted Waves Pest\\\nControl.'))
+      .toEqual({ ok: true, violations: [] });
+    expect(verdict('You contacted Waves Pest&#32;Control.'))
+      .toEqual({ ok: true, violations: [] });
+    expect(verdict('You contacted Waves `Pest Control.'))
+      .toEqual({ ok: true, violations: [] });
+    expect(verdict('The note contains Waves ``Termite` Control punctuation.'))
+      .toEqual({ ok: true, violations: [] });
+    expect(verdict('The note contains Waves `Termite`` Control punctuation.'))
+      .toEqual({ ok: true, violations: [] });
+  });
+
+  test('distinguishes name-shaped aliases from ordinary waves prose', () => {
+    expect(verdict('Sound waves pest repellers can be ineffective.'))
+      .toEqual({ ok: true, violations: [] });
+    expect(verdict('Sound waves mosquito control devices can be ineffective.'))
+      .toEqual({ ok: true, violations: [] });
+    rejected('You contacted waves mosquito services.');
+    rejected('You contacted waves pest.');
+    rejected('The company name is waves wildlife services.');
+    rejected('waves MOSQUITO SERVICES will follow up.');
+    rejected('Thank you for choosing waves Termite Control.');
+  });
+
+  test('screens bounded introduced company-name shapes outside the service taxonomy', () => {
+    rejected('You contacted Waves Ant Control.');
+    rejected('You contacted Waves Home Services.');
+    rejected('You contacted the company Waves Ant Control.');
+    rejected('You contacted: Waves Ant Control.');
+    rejected('You contacted “Waves Ant Control”.');
+    rejected('You emailed the business Waves Home Services.');
+    rejected('The company name is waves indoor ant solutions.');
+    expect(verdict('You contacted Waves about ant control.'))
+      .toEqual({ ok: true, violations: [] });
+    expect(verdict('You contacted Waves for home services.'))
+      .toEqual({ ok: true, violations: [] });
+    expect(verdict('Sound waves affect home services in coastal areas.'))
+      .toEqual({ ok: true, violations: [] });
+    expect(verdict('You contacted the company about waves and ant control.'))
+      .toEqual({ ok: true, violations: [] });
+  });
+
+  test('allows service descriptors only when they lead into a canonical company role or plan', () => {
+    expect(verdict('The Waves Pest Control lawn care team will follow up.'))
+      .toEqual({ ok: true, violations: [] });
+    expect(verdict('The Waves Pest Control wildlife services crew will follow up.'))
+      .toEqual({ ok: true, violations: [] });
+    expect(verdict('You contacted the Waves Pest Control lawn care team.'))
+      .toEqual({ ok: true, violations: [] });
+    expect(verdict('The Waves Pest Control lawn care plan is scheduled.'))
+      .toEqual({ ok: true, violations: [] });
+    expect(verdict('The Waves Pest Control mosquito control program remains scheduled.'))
+      .toEqual({ ok: true, violations: [] });
+    rejected('You contacted Waves Pest Control lawn care.');
+    rejected('The Waves Pest Control lawn care division will follow up.');
+    rejected('You contacted Waves Pest Control Termite Services.');
+    rejected('You contacted Waves Pest Control Mosquito Control.');
+    rejected('The company name is Waves Pest Control termite services.');
+    rejected('The company name is Waves Pest Control Lawn Care Team.');
+    rejected('The company name is Waves Pest Control Lawn Care Plan.');
+    expect(verdict('Waves Pest Control termite service is scheduled.'))
+      .toEqual({ ok: true, violations: [] });
+    expect(verdict('Waves Pest Control mosquito control remains scheduled.'))
+      .toEqual({ ok: true, violations: [] });
+    expect(verdict('You contacted Waves Pest Control about termite services.'))
+      .toEqual({ ok: true, violations: [] });
+  });
+
+  test.each([
+    'Waves Pest Control will follow up.',
+    'The Waves Pest Control lawn team will follow up.',
+    'The Waves Pest Control termite team will follow up.',
+    'The Waves Pest Control mosquito team will follow up.',
+    'The ocean waves are calm today.',
+    'The waves may affect the shoreline.',
+    'Service is USD 98 per visit.',
+    'This treatment has the EPA’s certification.',
+  ])('accepts the canonical company name and ordinary prose: %s', (copy) => {
+    expect(verdict(copy)).toEqual({ ok: true, violations: [] });
+  });
+});
+
+test.each(['You contacted Waves-Termite Control', 'You contacted Waves Termite-Control'])('rejects a punctuated alias: %s', (text) => {
+ expect(verifyEmailReplyCompanyName({ text }).ok).toBe(false);
+});
