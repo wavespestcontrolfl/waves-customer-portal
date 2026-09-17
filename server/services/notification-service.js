@@ -90,6 +90,7 @@ async function existingCustomerNotification(customerId, dedupeKey, connection = 
 const { stripEmoji } = require('../utils/strip-emoji');
 
 const NotificationService = {
+  scopeAdminFeedToRole,
   // Create a notification.
   // `bell` (admin recipients only) is an explicit site-level policy tag:
   // true always rings, false never rings — see notification-bell-policy.js.

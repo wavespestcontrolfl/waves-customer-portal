@@ -28,7 +28,7 @@ function nextMillisecondBoundary(date) {
   return new Date(date.getTime() + 1);
 }
 
-async function retargetOrClearUnknownSenderBell(phone, cutoff) {
+async function retargetOrClearUnknownSenderBell(phone, cutoff, role) {
   if (!phone) return 0;
   try {
     return await db.transaction(async (trx) => {
@@ -49,7 +49,7 @@ async function retargetOrClearUnknownSenderBell(phone, cutoff) {
         .first('m.twilio_sid');
       // Match the bell's current target and preserve customer-linked bells.
       const bellCutoff = nextMillisecondBoundary(cutoff);
-      const liveBell = () => trx('notifications')
+      const liveBell = () => NotificationService.scopeAdminFeedToRole(trx('notifications'), role)
         .where({ recipient_type: 'admin', category: 'inbound_sms', link: '/admin/communications' })
         .whereNull('read_at')
         .where('created_at', '<', bellCutoff)
@@ -201,7 +201,7 @@ async function markInboundSmsRead({ messageIds = [], conversationIds = [], readB
       const membership = await resolveUnknownSenderPhoneMembership(mirrorSids);
       for (const sid of membership.unknownSenderSids) unknownSenderSids.add(sid);
       for (const phone of membership.phones) {
-        notificationsCleared += await retargetOrClearUnknownSenderBell(phone, now);
+        notificationsCleared += await retargetOrClearUnknownSenderBell(phone, now, role);
       }
     } catch (e) { logger.warn('[inbound-sms-read] unknown-sender bell retarget failed', { code: e.code || 'unknown' }); }
     // The unknown-sender SIDs above are fully handled (retargeted or

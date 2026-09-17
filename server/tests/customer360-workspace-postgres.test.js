@@ -26,7 +26,10 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
-jest.mock('../services/notification-service', () => ({ markInboundSmsReadAdmin: jest.fn().mockResolvedValue(0) }));
+jest.mock('../services/notification-service', () => ({
+  markInboundSmsReadAdmin: jest.fn().mockResolvedValue(0),
+  scopeAdminFeedToRole: (...args) => jest.requireActual('../services/notification-service').scopeAdminFeedToRole(...args),
+}));
 const { randomUUID, randomBytes } = require('node:crypto');
 const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 const { invoiceOverdueSql, invoiceDaysOverdue } = require('../services/collections/account-anchor');
@@ -261,6 +264,18 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
       expect((await mockPg('messages').where({ id: messageIds[1] }).first()).is_read).toBe(false);
       await markInboundSmsRead({ messageIds: [messageIds[1]], role: 'admin' });
       expect((await readBell()).read_at).not.toBeNull();
+    });
+  }, 30000);
+
+  test('technician reads cannot retarget or clear hidden sender bells', async () => {
+    await withSender({}, async ({ messageIds, sids, readBell }) => {
+      // Legacy metadata without a techVisible trigger is hidden by default.
+      await markInboundSmsRead({ messageIds: [messageIds[0]], role: 'technician' });
+      expect((await readBell()).metadata.payload.twilioSid).toBe(sids[0]);
+      expect((await readBell()).read_at).toBeNull();
+      await markInboundSmsRead({ messageIds: [messageIds[1]], role: 'technician' });
+      expect((await readBell()).metadata.payload.twilioSid).toBe(sids[0]);
+      expect((await readBell()).read_at).toBeNull();
     });
   }, 30000);
 
