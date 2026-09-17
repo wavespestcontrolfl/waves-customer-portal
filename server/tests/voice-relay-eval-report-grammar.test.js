@@ -81,6 +81,11 @@ test.each([
   ['We used Talstar P and took equipment to the exterior perimeter.', 'Talstar P', false],
   ['We used Talstar P and sent the technician to the exterior perimeter.', 'Talstar P', false],
   ['We used Talstar P and then sat at the exterior perimeter.', 'Talstar P', false],
+  ['We used Talstar P and saw ants at the exterior perimeter.', 'Talstar P', false],
+  ['We used Talstar P and heard noises at the exterior perimeter.', 'Talstar P', false],
+  ['We used Talstar P and bought equipment at the exterior perimeter.', 'Talstar P', false],
+  ['We applied Talstar P and freshly mixed bait to the exterior perimeter.', 'Talstar P', true],
+  ['We applied Talstar P and suspend polyzone to the exterior perimeter.', 'Talstar P', false],
   ['We used Talstar P and sprayed the exterior perimeter.', 'Talstar P', false],
   ['We used Talstar P and applied bait to the exterior perimeter.', 'Talstar P', false],
   ['We used Talstar P and bait to the exterior perimeter.', 'Talstar P', true],
@@ -95,6 +100,9 @@ test.each([
   ['At the exterior perimeter, Talstar P was applied at 9 AM indoors.', 'Talstar P', false],
   ['At the exterior perimeter, Talstar P was applied at 9 AM only indoors.', 'Talstar P', false],
   ['At the exterior perimeter, Talstar P was applied at 9 AM.', 'Talstar P', true],
+  ['At the exterior perimeter, Talstar P was applied at 9 AM in the garage.', 'Talstar P', false],
+  ['At the exterior perimeter, Talstar P was applied on Monday inside the garage.', 'Talstar P', false],
+  ['At the exterior perimeter, Talstar P was applied at 9 AM with a backpack sprayer stored indoors.', 'Talstar P', true],
   ['At the exterior perimeter, Talstar P was applied outdoors.', 'Talstar P', false],
   ['At the exterior perimeter, Talstar P was applied inside.', 'Talstar P', false],
   ['At the exterior perimeter, Talstar P was applied outside.', 'Talstar P', false],
@@ -110,10 +118,36 @@ test.each([
   ['We applied only the diluted Talstar P to the exterior perimeter.', 'Talstar P', true],
   ['We applied bait while mixing Talstar P to the exterior perimeter.', 'Talstar P', false],
   ['We applied a container of diluted Talstar P to the exterior perimeter.', 'Talstar P', false],
+  ['Talstar P was used with equipment stored at the exterior perimeter.', 'Talstar P', false],
+  ['Talstar P was used for ants found at the exterior perimeter.', 'Talstar P', false],
+  ['Talstar P was applied with a backpack sprayer at the exterior perimeter.', 'Talstar P', true],
+  ['We attempted to have applied Talstar P to the exterior perimeter.', 'Talstar P', false],
+  ['We tried to have applied Talstar P to the exterior perimeter.', 'Talstar P', false],
+  ['We hoped to have applied Talstar P to the exterior perimeter.', 'Talstar P', false],
 ])('completed treatment and product ownership: %s / %s', (text, subject, completed) => {
-  const verb = /\b(?:apply|applying|applied|placed|used|treated|sprayed|put|went|got|received)\b/i.exec(text);
+  const verb = /\b(?:apply|applying|applied|placed|placing|used|using|treated|treating|sprayed|spraying|put|went|got|received)\b/i.exec(text);
   expect(grammar.reportHasCompletedFinding(text, text.indexOf(subject), subject.length,
     text.indexOf('exterior perimeter'), 18, verb)).toBe(completed);
+});
+
+test.each(['spraying', 'treating', 'placing', 'using'])('completed %s retains governor and product scope', (action) => {
+  for (const [prefix, completed] of [['We finished', true], ['We completed', true], ['We were supposed to have finished', false], ['We almost finished', false], ['We did not finish', false], ['We tried to have finished', false], ['We are', false]]) {
+    const text = `${prefix} ${action} Talstar P to the exterior perimeter.`;
+    expect(grammar.reportHasCompletedFinding(text, text.indexOf('Talstar P'), 9,
+      text.indexOf('exterior perimeter'), 18, new RegExp(action).exec(text))).toBe(completed);
+  }
+  const text = `We finished ${action} bait after discussing Talstar P to the exterior perimeter.`;
+  expect(grammar.reportHasCompletedFinding(text, text.indexOf('Talstar P'), 9,
+    text.indexOf('exterior perimeter'), 18, new RegExp(action).exec(text))).toBe(false);
+});
+
+test.each(['inside', 'within'])('%s introduces a named treatment target', (link) => {
+  const text = `We applied Talstar P ${link} the garage.`;
+  expect(grammar.reportHasCompletedFinding(text, text.indexOf('Talstar P'), 9,
+    text.indexOf('garage'), 6, /applied/.exec(text))).toBe(true);
+  const unrelated = `We applied Talstar P with equipment stored ${link} the garage.`;
+  expect(grammar.reportHasCompletedFinding(unrelated, unrelated.indexOf('Talstar P'), 9,
+    unrelated.indexOf('garage'), 6, /applied/.exec(unrelated))).toBe(false);
 });
 
 test('an unrelated product alternative does not govern a definite treatment', () => {
@@ -122,6 +156,12 @@ test('an unrelated product alternative does not govern a definite treatment', ()
   const assertion = text.slice(start, end);
   expect(grammar.reportHasCompletedFinding(assertion, assertion.indexOf('Talstar P'), 9,
     assertion.indexOf('exterior perimeter'), 18, /applied/.exec(assertion))).toBe(true);
+});
+
+test.each([['Talstar P', 'exterior perimeter', true], ['Talstar P', 'garage', false], ['bait', 'garage', true], ['bait', 'exterior perimeter', false]])('active respectively pairs %s with %s', (subject, location, completed) => {
+  const text = 'We applied Talstar P and bait to the exterior perimeter and garage, respectively.';
+  expect(grammar.reportHasCompletedFinding(text, text.indexOf(subject), subject.length,
+    text.indexOf(location), location.length, /applied/.exec(text))).toBe(completed);
 });
 
 test.each([
@@ -185,6 +225,12 @@ test.each([
   ['Talstar P was applied to the exterior perimeter with either a backpack or a hand sprayer', '', false],
   ['Talstar P was applied to the exterior perimeter at 9 AM or 10 AM', '', false],
   ['Talstar P was applied to the exterior perimeter or the foundation before lunch', '', true],
+  ['We treated the exterior perimeter using Talstar P or bait.', '', true],
+  ['The exterior perimeter was treated with Talstar P or bait.', '', true],
+  ['We treated the exterior perimeter using either a backpack or a hand sprayer.', '', false],
+  ['The exterior perimeter was treated with either a backpack or a hand sprayer.', '', false],
+  ['We treated the exterior perimeter using Talstar P', 'or the technician can explain', false],
+  ['The exterior perimeter was treated with Talstar P', 'or the office can explain', false],
 ])('location alternative detection: %s / %s', (text, tail, alternative) => {
   expect(grammar.reportHasAlternativeLocation(text, text.indexOf('exterior perimeter'), tail)).toBe(alternative);
 });
