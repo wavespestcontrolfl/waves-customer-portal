@@ -18,22 +18,27 @@ const isBillingNoun = (token) => isKind(token, 'word') && BILLING_NOUNS.has(toke
 const isChargeNoun = (token) => isKind(token, 'word') && CHARGE_NOUNS.has(token.text);
 const isSeparate = (token) => isKind(token, 'word') && SEPARATE_WORDS.has(token.text);
 const isRecipient = (token) => isWord(token, 'you', 'us', 'them', 'him', 'her', 'customer', 'customers', 'client', 'clients');
+const isDeterminer = (token) => isWord(token, 'a', 'an', 'one', 'the', 'your', 'our', 'my', 'their', 'his', 'her', 'its', 'this', 'that', 'these', 'those', 'each', 'every', 'any');
 
 function skipSeparators(tokens, from) {
-  return isKind(tokens[from], 'sep') ? from + 1 : from;
+  let next = from;
+  while (isKind(tokens[next], 'sep')) next += 1;
+  return next;
 }
 
 function skipRecipient(tokens, from) {
   if (isRecipient(tokens[from])) return from + 1;
-  if (isWord(tokens[from], 'a', 'an', 'one', 'the', 'your', 'our', 'my', 'their', 'his', 'her', 'its', 'this', 'that', 'these', 'those')
+  if (isDeterminer(tokens[from])
     && isWord(tokens[from + 1], 'account', 'customer', 'customers', 'client', 'clients')) return from + 2;
   return from;
 }
 
 function isFeedbackRate(tokens, at) {
+  const object = isDeterminer(tokens[at + 1]) ? at + 2 : at + 1;
   return isWord(tokens[at], 'rate')
     && (isWord(tokens[at - 1], 'please') || isKind(tokens[at - 1], 'modal')
-      || isWord(tokens[at + 1], 'how'));
+      || isWord(tokens[at + 1], 'how')
+      || isWord(tokens[object], 'technician', 'technicians', 'service', 'services'));
 }
 
 function hasBillingUnit(tokens, at) {
@@ -48,6 +53,9 @@ function hasBillingUnit(tokens, at) {
   }
   if (isWord(tokens[next], 'frequency')) next += 1;
   if (isKind(tokens[next], 'modal')) next += 1;
+  if (isWord(tokens[next], 'not', 'never')) next += 1;
+  if (isWord(tokens[next], 'do', 'does', 'did', 'has')) next += 1;
+  if (isWord(tokens[next], 'not', 'never')) next += 1;
   if (isKind(tokens[next], 'be') || isWord(tokens[next], 'occur', 'apply')) next += 1;
   next = skipSeparators(tokens, next);
   if (isWord(tokens[next], 'not', 'never')) next += 1;
@@ -57,7 +65,8 @@ function hasBillingUnit(tokens, at) {
 
 function hasInverseBillingUnit(tokens, at) {
   if (!isKind(tokens[at], 'unit')) return false;
-  const next = skipSeparators(tokens, at + 1);
+  let next = skipSeparators(tokens, at + 1);
+  if (isDeterminer(tokens[next])) next += 1;
   return isBillingNoun(tokens[next]) && !isFeedbackRate(tokens, next)
     && !isWord(tokens[next + 1], 'reminder', 'reminders', 'status');
 }
@@ -66,8 +75,11 @@ function hasSeparatePredicate(tokens, at) {
   if (!isVisit(tokens[at])) return false;
   let next = at + 1;
   if (isKind(tokens[next], 'modal')) next += 1;
+  const separateBeforeCopula = isSeparate(tokens[next]);
+  if (separateBeforeCopula) next += 1;
   if (!isKind(tokens[next], 'be')) return false;
   next += 1;
+  if (separateBeforeCopula && isBillingVerb(tokens[next])) return true;
   if (isSeparate(tokens[next]) && isBillingVerb(tokens[next + 1])) return true;
   if (!isBillingVerb(tokens[next])) return false;
   return isSeparate(tokens[next + 1])
@@ -98,7 +110,7 @@ function hasNominalBillingPredicate(tokens, at) {
   if (!isWord(tokens[next], 'has', 'incur', 'generate')) return false;
   next += 1;
   if (isWord(tokens[next], 'its', 'their')) {
-    if (!['has', 'generate'].includes(action) || !isWord(tokens[next + 1], 'own')) return false;
+    if (!isWord(tokens[next + 1], 'own')) return false;
     next += 2;
   } else if (isWord(tokens[next], 'a', 'an')) {
     next += 1;

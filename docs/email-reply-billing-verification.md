@@ -45,6 +45,11 @@ invoice. Bounded `occurs`, `applies`, and `frequency is` connectors join a
 billing term to an explicit unit. The explicit unit remains prohibited when
 connected by bounded `not` or `never` negation. Duration modifiers accept
 hyphenated and spaced numeric forms such as `30-minute` and `30 minute`.
+Recipient and inverse-noun determiners are bounded, including `each`, `every`,
+and `any`. Connector auxiliaries accept emphatic/perfect forms and negation;
+separate adverbs may precede the copula. Possessive fees also follow `incur`.
+Consecutive separators remain within the scanner token bound. Direct-object
+feedback about a technician or service remains valid after a fronted unit.
 
 Monetary recognition belongs to the separately reviewed monetary sibling, but
 the lexical policies can overlap: `The $98 fee is per visit` contains the

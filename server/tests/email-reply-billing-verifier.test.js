@@ -123,6 +123,43 @@ describe('email reply amountless billing policy', () => {
   ])('keeps actual billing assertions blocked around reminder and status wording: %s', rejected);
 
   test.each([
+    ['possessive incur fees', [
+      'Each visit incurs its own fee.', 'Every visit incurred its own charge.',
+      'Our visits may incur their own invoice.',
+    ], ['Each visit incurs its own review step.', 'Every visit may incur its own reminder.']],
+    ['quantified recipients', [
+      'We invoice each customer per visit.', 'We bill every client for each visit.',
+      'We charge any customer by visit.',
+    ], ['We invoice each customer per application.', 'We bill every client after the visit.']],
+    ['direct-object feedback', [
+      'Per visit, rate is due.', 'For each visit, our rate applies.',
+      'Rate per visit.',
+    ], ['For each visit, rate your technician.', 'Per visit, rate the service.']],
+    ['determined inverse nouns', [
+      'Per visit, the fee is due.', 'For each visit, a payment is required.',
+      'By visit, our price applies.',
+    ], ['Per visit, the payment status is checked.', 'For each visit, a payment reminder is sent.']],
+    ['emphatic and perfect connectors', [
+      'Charges do apply per visit.', 'Billing does occur per visit.',
+      'Fees have applied per visit.', 'Charges did apply per visit.',
+    ], ['Charges do apply per application.', 'Fees have applied after the visit.']],
+    ['separate adverbs before copulas', [
+      'Each visit can separately be billed.', 'Every visit may individually be charged.',
+      'Visits separately are invoiced.',
+    ], ['Each visit can separately be scheduled.', 'Visits may individually be confirmed.']],
+    ['negated connectors', [
+      'Billing may not apply per visit.', 'Fees should not be per visit.',
+      'Charges can never occur per visit.', 'Fees may not have applied per visit.',
+    ], ['Billing may not apply per application.', 'Charges can never occur before your next visit.']],
+    ['consecutive separators', [
+      'Billing is: (per visit)', 'Fees: — per visit', 'Price — (per visit)',
+    ], ['Billing is: (per application)', 'Billing is: pending; per visit, we send a reminder.']],
+  ])('covers bounded %s with nonbilling controls', (_name, claims, controls) => {
+    claims.forEach(rejected);
+    controls.forEach((text) => expect(verdict(text)).toEqual({ ok: true, violations: [] }));
+  });
+
+  test.each([
     'Billing is' + String.fromCharCode(92, 10) + 'per visit',
     'Billing is per&#32;visit', '`Billing` is per visit',
     '**Our *fees* are per visit**', 'Billing: per visit',
