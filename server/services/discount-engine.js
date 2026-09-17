@@ -36,10 +36,21 @@ const { stackDiscounts } = require('./discount-stack');
 // same float half-cent drift discount-stack.js's own percentage math was
 // fixed for elsewhere (Codex pre-push audit P1) — 5% of $20.70 rounded
 // down to $1.03 under the old formula, never the correct half-up $1.04.
-// That was always a bug, not a feature to preserve; the delegated preview
-// reports the same, now-correct, $1.04 a save would. compound is still a
-// parameter (not hardcoded inside the function) so the parity test can
-// exercise both paths directly and slice 5 has one line to change.
+// That was always a bug, not a feature to preserve.
+//
+// CORRECTION (Codex pre-push audit P1, round 4 audit): an earlier version
+// of this comment claimed the save "would" already report the corrected
+// $1.04 — false at the time. invoice.js's manual-discount line used the
+// SAME buggy float formula independently, unfixed, so a stacking-disabled
+// invoice still saved $1.03 while this preview showed $1.04. Fixed by
+// exporting discount-stack.js's percentageDiscountDollars — the exact cent-
+// exact function discountStepDollars (and so this preview, transitively,
+// via stackDiscounts) already uses — and calling it directly at the one
+// expression in invoice.js that used to run the old formula. Both sides
+// now share the identical rounding implementation, not two copies that
+// happen to agree by coincidence. compound is still a parameter (not
+// hardcoded inside the function) so the parity test can exercise both
+// paths directly and slice 5 has one line to change.
 function applyDiscountArithmetic(subtotal, applied, { compound }) {
   const terms = applied.map((disc) => ({
     discountType: disc.discount_type,

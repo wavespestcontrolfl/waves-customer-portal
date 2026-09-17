@@ -289,24 +289,38 @@ function compareDiscountScope(a, b) {
   return 0;
 }
 
+// A percentage discount's dollars against `baseDollars`, cent-exact:
+// integer-cents basis-point math (Codex P1), so roundHalfUpCents' single
+// division depends only on the true mathematical ratio, never the float
+// noise `baseDollars * (ratePercent / 100)` produces (dollars * 0.05-ish
+// fraction, then round) — 5% of $20.70 is the correct half-up $1.04, never
+// the $1.03 that ordinary float multiplication-then-round gives.
+// `ratePercent` is normalized to hundredths of a percent (2 more decimal
+// digits than the percent itself) — plenty of precision for any catalog or
+// operator-entered rate, and documented here as the one place that
+// precision is decided. Exported (Codex pre-push audit P1, round 6) so a
+// caller that hasn't been migrated onto the full stackDiscounts/
+// stackDocumentDiscounts/stackVisitDiscounts API yet — today,
+// invoice.js's manual-discount line, which still computes its own
+// percentages outside this module pending slice 5 — can still round the
+// ONE way this module ever rounds a percentage, rather than maintaining
+// an independent (and, until this fix, independently-buggy) copy of the
+// same formula. discountStepDollars below is this function's own first
+// caller, not a parallel implementation.
+function percentageDiscountDollars(baseDollars, ratePercent, maxDiscountDollars) {
+  const baseCents = dollarsToCents(baseDollars);
+  const pctBasisPoints = Math.round((Number(ratePercent) || 0) * 100);
+  const dollarsCents = roundHalfUpCents(baseCents * pctBasisPoints, 10000);
+  return capDollars(centsToDollars(dollarsCents), maxDiscountDollars);
+}
+
 // Dollars ONE discount takes off `remaining`, clamped to [0, remaining].
 function discountStepDollars(discount, remaining) {
   if (!discount || !(remaining > 0)) return 0;
   const amount = resolveDiscountAmount(discount);
   let dollars = 0;
   if (isPercentDiscountType(discount.discountType)) {
-    // Integer-cents basis-point math (Codex P1): remainingCents and
-    // pctBasisPoints are both exact integers, so roundHalfUpCents' single
-    // division depends only on the true mathematical ratio, never on the
-    // float noise `remaining * (amount / 100)` used to produce (dollars *
-    // 0.05-ish fraction, then round). amount is normalized to hundredths
-    // of a percent (2 more decimal digits than the percent itself) —
-    // plenty of precision for any catalog or operator-entered rate, and
-    // documented here as the one place that precision is decided.
-    const remainingCents = dollarsToCents(remaining);
-    const pctBasisPoints = Math.round(amount * 100);
-    const dollarsCents = roundHalfUpCents(remainingCents * pctBasisPoints, 10000);
-    dollars = capDollars(centsToDollars(dollarsCents), discount.maxDiscountDollars);
+    dollars = percentageDiscountDollars(remaining, amount, discount.maxDiscountDollars);
   } else if (isFixedDiscountType(discount.discountType)) {
     dollars = amount;
   } else if (discount.discountType === 'free_service') {
@@ -803,6 +817,7 @@ module.exports = {
   isPercentDiscountType,
   isFixedDiscountType,
   isVariableOrCustomDiscountPreset,
+  percentageDiscountDollars,
   stackDiscounts,
   stackVisitDiscounts,
   stackDocumentDiscounts,
