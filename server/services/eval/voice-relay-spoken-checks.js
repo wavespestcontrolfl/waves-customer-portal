@@ -413,7 +413,7 @@ const NEGATION_RE = /\b(?:not(?!\s+only\b)|never|cannot|can[\x27\u2019]?t|\w+n[\
 // cap can't see — and, symmetrically, drops a refusal that sits a little
 // further from its claim than the cap happens to reach. Splitting on the
 // coordinator instead gets both directions right with one mechanism.
-const CLAUSE_BOUNDARY_TOKEN_RE = /[.!?;:]|[—–]|\b(?:but|and|or|though|although|however|yet|so|then|while|because|pero|sin embargo|aunque)\b/gi;
+const CLAUSE_BOUNDARY_TOKEN_RE = /(?<!\d)\.|\.(?!\d)|[!?;:]|[—–]|\b(?:but|and|or|though|although|however|yet|so|then|while|because|pero|sin embargo|aunque)\b/gi;
 const COORDINATED_REPORT_VERBS = vocabAlt([...EPISTEMIC_REFUSAL_VERBS, 'deny']);
 const REFUND_PAYMENT_ACTION_RE = /\b(?:refund(?:ed|ing)?|revers(?:e|ed|ing)|return(?:ed|ing)?)\s+(?:(?:your|the|that|a|an)\s+)?(?:last\s+|full\s+|partial\s+|original\s+)?(?:payment|charge|amount)\b/i;
 const CLAUSE_FINITE_PREDICATE_RE = /\b(?:is|are|was|were|has|have|had|will|would|should|can|cannot|could|did|does|do|\w+n[\x27\u2019]t|applied|placed|processed|refunded|came)\b/i;
@@ -565,7 +565,7 @@ function propositionIsExplicitlyDenied(text, at, findingVerb) {
 const FREE_VISIT_NONARTIFACT_TARGET_SUFFIX_SOURCE = `(?!\\s+(?:report|summary|estimate)\\b)`;
 const FREE_VISIT_PAYMENT_TARGET = `(?:(?:your|the|a|an|our|that|this)\\s+)?(?:(?:next|return|follow-up|follow up|upcoming|scheduled)\\s+)?(?:visit|one|service|treatment|appointment)\\b${FREE_VISIT_NONARTIFACT_TARGET_SUFFIX_SOURCE}`;
 const FREE_VISIT_PAYMENT_LINK = `(?:for|toward|on|about|regarding|to)\\s+(?:(?:(?:the|your)\\s+)?(?:cost|charge|fee)\\s+of\\s+)?${FREE_VISIT_PAYMENT_TARGET}`;
-const FREE_VISIT_ZERO_PRICE_SOURCE = `(?:zero(?:\\s+dollars?)?|\\$?0+(?:\\.0+)?(?:\\s+dollars?)?)(?!\\d|[.,]\\d)`;
+const FREE_VISIT_ZERO_PRICE_SOURCE = `(?:zero(?:\\s+dollars?)?|\\$?0+(?:\\.0+)?(?:\\s+dollars?)?)(?!\\d|[.,]\\d|\\s+(?:dollars?\\b|point\\b|and\\s+(?:0*[1-9]\\d*|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[ -](?:one|two|three|four|five|six|seven|eight|nine))?)\\s+cents?\\b))`;
 const FREE_VISIT_FREE_PRICE_SOURCE = `(?:(?:(?:completely|totally|entirely|absolutely|fully)\\s+)?(?:free of charge|free)|on us|at no charge|no charge|at no cost|no cost|complimentary|on the house|${FREE_VISIT_ZERO_PRICE_SOURCE})`;
 const FREE_VISIT_PRICE_MODIFIER_SOURCE = `(?:(?:already|actually|just|now|still|completely|totally|entirely|absolutely|fully|definitely|certainly|surely|undoubtedly|unquestionably|truly|really)\\s+){0,2}`;
 const FREE_VISIT_PRICE_COMPLEMENT_SOURCE = `(?:waived|${FREE_VISIT_FREE_PRICE_SOURCE})`;
