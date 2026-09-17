@@ -2,25 +2,31 @@ const { recognizeEmailReplyPricingClauses } = require('./email-reply-pricing-cla
 const { normalizeEmailReplyCopy } = require('./email-reply-copy-normalizer');
 
 const BILLING_WORDS = new Set([
-  'bill', 'charge', 'cost', 'fee', 'invoice', 'payment', 'pay', 'price', 'amount', 'rate',
+  'bill', 'charge', 'cost', 'fee', 'invoice', 'payment', 'pay', 'price', 'amount', 'rate', 'surcharge', 'surcharges',
 ]);
 const BILLING_VERBS = new Set(['bill', 'charge', 'invoice', 'pay', 'price']);
-const BILLING_NOUNS = new Set(['bill', 'charge', 'cost', 'fee', 'invoice', 'payment', 'price', 'amount', 'rate']);
+const BILLING_NOUNS = new Set(['bill', 'charge', 'cost', 'fee', 'invoice', 'payment', 'price', 'amount', 'rate', 'surcharge', 'surcharges']);
 const SEPARATE_WORDS = new Set(['separately', 'individually']);
-const CHARGE_NOUNS = new Set(['charge', 'fee', 'invoice']);
+const CHARGE_NOUNS = new Set(['charge', 'fee', 'invoice', 'surcharge', 'surcharges']);
+const APPLICATION_CONTINUATIONS = new Set(['after', 'before', 'when', 'while', 'with', 'without', 'including', 'excluding', 'plus', 'and', 'or', 'but', 'for', 'on', 'at', 'to', 'as']);
 
 const isKind = (token, kind) => token?.kind === kind;
 const isAmount = (token) => ['money', 'number'].includes(token?.kind);
 const isWord = (token, ...words) => isKind(token, 'word') && words.includes(token.text);
 const isVisit = (token) => ['visit', 'visits', 'eachVisit'].includes(token?.kind);
+const isBareRecurringPassive = (visit, afterVerb) => ['eachVisit', 'visits'].includes(visit.kind)
+  && (!afterVerb || isKind(afterVerb, 'sep'));
 const isUnit = (token) => ['unit', 'visit', 'visits', 'eachVisit'].includes(token?.kind);
 const isBillingWord = (token) => isKind(token, 'word') && BILLING_WORDS.has(token.text);
 const isBillingVerb = (token) => isKind(token, 'word') && BILLING_VERBS.has(token.text);
 const isBillingNoun = (token) => isKind(token, 'word') && BILLING_NOUNS.has(token.text);
 const isChargeNoun = (token) => isKind(token, 'word') && CHARGE_NOUNS.has(token.text);
 const isSeparate = (token) => isKind(token, 'word') && SEPARATE_WORDS.has(token.text);
-const isApplicationObject = (token, separated) => isKind(token, 'application')
-  && (!separated || /^(?:-?per\b|for\b|\/)/.test(token.text));
+const isApplicationObject = (tokens, at, separated) => isKind(tokens[at], 'application')
+  && (!separated || /^(?:-?per\b|for\b|\/)/.test(tokens[at].text))
+  && (!tokens[at + 1] || isKind(tokens[at + 1], 'sep')
+    || (isKind(tokens[at + 1], 'word') && APPLICATION_CONTINUATIONS.has(tokens[at + 1].text))
+    || (isWord(tokens[at + 1], 'only') && (!tokens[at + 2] || isKind(tokens[at + 2], 'sep'))));
 const isRecipient = (token) => isWord(token, 'you', 'us', 'them', 'him', 'her', 'customer', 'customers', 'client', 'clients');
 const isDeterminer = (token) => isWord(token, 'a', 'an', 'one', 'the', 'your', 'our', 'my', 'their', 'his', 'her', 'its', 'this', 'that', 'these', 'those', 'each', 'every', 'any');
 
@@ -28,6 +34,18 @@ function skipSeparators(tokens, from) {
   let next = from;
   while (isKind(tokens[next], 'sep')) next += 1;
   return next;
+}
+
+function skipCopulas(tokens, from) {
+  let next = from;
+  while (isKind(tokens[next], 'be')) next += 1;
+  return next;
+}
+
+function skipSubject(tokens, from) {
+  if (isWord(tokens[from], 'we', 'you', 'they', 'he', 'she', 'it', 'there')) return from + 1;
+  const noun = isDeterminer(tokens[from]) ? from + 1 : from;
+  return isWord(tokens[noun], 'customer', 'customers', 'client', 'clients') ? noun + 1 : from;
 }
 
 function skipRecipient(tokens, from) {
@@ -60,7 +78,7 @@ function hasBillingUnit(tokens, at) {
   if (isWord(tokens[next], 'not', 'never')) next += 1;
   if (isWord(tokens[next], 'do', 'does', 'did', 'has')) next += 1;
   if (isWord(tokens[next], 'not', 'never')) next += 1;
-  if (isKind(tokens[next], 'be')) next += 1;
+  next = skipCopulas(tokens, next);
   if (isWord(tokens[next], 'not', 'never')) next += 1;
   if (isWord(tokens[next], 'occur', 'apply')) next += 1;
   const afterSeparators = skipSeparators(tokens, next);
@@ -78,7 +96,7 @@ function hasApplicationComplement(tokens, at) {
   if (isWord(tokens[next], 'not', 'never')) return false;
   if (isWord(tokens[next], 'do', 'does', 'did', 'has')) next += 1;
   if (isWord(tokens[next], 'not', 'never')) return false;
-  if (isKind(tokens[next], 'be')) next += 1;
+  next = skipCopulas(tokens, next);
   if (isWord(tokens[next], 'not', 'never')) return false;
   if (isSeparate(tokens[next])) next += 1;
   if (isWord(tokens[next], 'apply', 'occur')) next += 1;
@@ -89,7 +107,7 @@ function hasApplicationComplement(tokens, at) {
   if (isAmount(tokens[next])) next += 1;
   next = skipSeparators(tokens, next);
   if (isWord(tokens[next], 'not', 'never')) return false;
-  return isApplicationObject(tokens[next], true);
+  return isApplicationObject(tokens, next, true);
 }
 
 function hasBillingObjectPredicate(tokens, at, passive) {
@@ -111,7 +129,7 @@ function hasBillingObjectPredicate(tokens, at, passive) {
   if (isDeterminer(tokens[object])) object += 1;
   if (isWord(tokens[object], 'separate', 'individual')) object += 1;
   const noun = isBillingNoun(tokens[object]);
-  const application = isApplicationObject(tokens[object], separated);
+  const application = isApplicationObject(tokens, object, separated);
   if (application || (noun && hasApplicationComplement(tokens, object))) return false;
   return passive || recipient || amount || isKind(tokens[object], 'unit') || noun;
 }
@@ -119,21 +137,26 @@ function hasBillingObjectPredicate(tokens, at, passive) {
 function hasInverseBillingUnit(tokens, at) {
   if (!isKind(tokens[at], 'unit')) return false;
   let next = skipSeparators(tokens, at + 1);
-  if (isWord(tokens[next], 'we', 'you', 'they', 'he', 'she', 'it', 'there')) {
-    next += 1;
+  const afterSubject = skipSubject(tokens, next);
+  if (afterSubject !== next) {
+    next = afterSubject;
     if (isKind(tokens[next], 'modal')) next += 1;
     if (isWord(tokens[next], 'not', 'never')) next += 1;
     if (isWord(tokens[next], 'do', 'does', 'did', 'has')) next += 1;
     if (isWord(tokens[next], 'not', 'never')) next += 1;
     const passive = isKind(tokens[next], 'be');
-    if (passive) next += 1;
+    if (passive) next = skipCopulas(tokens, next);
     if (isWord(tokens[next], 'not', 'never')) next += 1;
     if (isBillingVerb(tokens[next])) return hasBillingObjectPredicate(tokens, next, passive);
   }
   if (isDeterminer(tokens[next])) next += 1;
   if (isWord(tokens[next], 'separate', 'individual')) next += 1;
   if (!isBillingNoun(tokens[next]) || isFeedbackRate(tokens, next)) return false;
-  if (isWord(tokens[next + 1], 'reminder', 'reminders', 'status')) {
+  if (isWord(tokens[next], 'amount') && isWord(tokens[next + 1], 'of')
+    && isWord(tokens[next + 2], 'product', 'products')) {
+    return isBillingNoun(tokens[next + 3]) && !hasApplicationComplement(tokens, next + 3);
+  }
+  if (isWord(tokens[next + 1], 'reminder', 'reminders', 'status', 'method', 'methods', 'detail', 'details')) {
     return isBillingNoun(tokens[next + 2]) && !hasApplicationComplement(tokens, next + 2);
   }
   return !hasApplicationComplement(tokens, next);
@@ -147,12 +170,13 @@ function hasSeparatePredicate(tokens, at) {
   const separateBeforeCopula = isSeparate(tokens[next]);
   if (separateBeforeCopula) next += 1;
   if (!isKind(tokens[next], 'be')) return false;
-  next += 1;
+  next = skipCopulas(tokens, next);
   if (isWord(tokens[next], 'not', 'never')) next += 1;
   if (separateBeforeCopula && isBillingVerb(tokens[next])) return hasBillingObjectPredicate(tokens, next, true);
   if (isSeparate(tokens[next]) && isBillingVerb(tokens[next + 1])) return hasBillingObjectPredicate(tokens, next + 1, true);
   if (!isBillingVerb(tokens[next])) return false;
   if (!hasBillingObjectPredicate(tokens, next, true)) return false;
+  if (isBareRecurringPassive(tokens[at], tokens[next + 1])) return true;
   let object = next + 1;
   if (isWord(tokens[object], 'a', 'an')) {
     object += 1;

@@ -67,6 +67,10 @@ Only affirmative application complements exempt a predicate; `not`/`never`
 cannot grant that exception. Separators may also intervene after an amount.
 Across object punctuation, only prefixed `per/for/slash` application units
 exempt billing; unrelated application nouns cannot shield a visit assertion.
+Progressive copulas, fronted customer/client subjects, bare recurring passives,
+and surcharge heads are screened. Operational method/details/product phrases
+remain valid. An application unit must end or continue through finite pricing
+joins; directly following instruction/direction/tax noun phrases cannot exempt.
 Reminder/status modifiers retain a following billing head. Feedback also
 permits experience, appointment, and pronoun objects; singular pay-a-visit
 idioms permit the scanner's determiner and modifier variants.

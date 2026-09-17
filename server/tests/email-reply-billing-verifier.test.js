@@ -375,6 +375,18 @@ describe('email reply amountless billing policy', () => {
   });
 
   test.each([
+    [['Fees are being applied per visit.', 'Charges will be being applied for each visit.', 'Each visit is being billed separately.'], ['Fees are being applied per application.', 'Each visit is being billed a fee per application.']],
+    [['For each visit, the customer is billed a fee.', 'Per visit, each customer is charged.', 'For each visit, customers pay a fee.', 'For each visit, our clients will be invoiced.'], ['For each visit, the customer is billed per application.', 'For each visit, clients pay attention to access instructions.']],
+    [['Each visit is billed.', 'Every visit is charged.', 'All visits are invoiced.', 'Each visit is not billed.', 'Each visit is billed, reminders follow.'], ['Each visit is billed per application.', 'Each visit is billed $98.', 'Each visit is paid in full.']],
+    [['For each visit, payment method fees apply.', 'Per visit, invoice details surcharge is due.', 'For each visit, the amount of product fee applies.'], ['For each visit, the payment method on file is reviewed.', 'Per visit, the invoice details are available.', 'For each visit, the amount of product used is recorded.']],
+    [['Each visit is billed separately, per application instructions are provided.', 'Each visit incurs a fee, per application directions are included.', 'For each visit, we charge you $98, per application instructions are provided.', 'We bill each visit, per application directions are provided.', 'Each visit incurs a fee, per application tax records are provided.', 'Each visit is billed separately, per application tax instructions are included.', 'Each visit incurs a fee, per application only instructions are provided.'], ['Each visit is billed separately, per application.', 'Each visit incurs a fee per application after service.', 'Each visit incurs a fee per application only.', 'Each visit incurs a fee per application plus tax.', 'For each visit, we charge you $98 per application, instructions are provided.']],
+    [['A surcharge applies per visit.', 'There is a surcharge for each visit.', 'We add a surcharge per visit.', 'Surcharges are per visit.', 'Each visit incurs a surcharge.'], ['A surcharge applies per application.', 'For each visit, the surcharge is per application.']],
+  ])('covers R4 bounded grammar and modifier complements: %j', (blocked, permitted) => {
+    blocked.forEach(rejected);
+    permitted.forEach((text) => expect(verdict(text)).toEqual({ ok: true, violations: [] }));
+  });
+
+  test.each([
     ['type', { text: {}, commercialProposal: true }, 'copy_type'],
     ['size', { text: 'x'.repeat(8193), commercialProposal: true }, 'copy_size'],
     ['tokens', { text: 'x '.repeat(513), commercialProposal: true }, 'copy_tokens'],
