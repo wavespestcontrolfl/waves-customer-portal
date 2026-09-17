@@ -363,7 +363,44 @@ describe('email template library rendering', () => {
       payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
     });
 
-    expect(result).toEqual(expect.objectContaining({ sent: true, deduped: true, superseded: true }));
+    expect(result).toEqual(expect.objectContaining({ sent: true, deduped: true, superseded: true, providerAccepted: true }));
+  });
+
+  test.each(['queued', 'failed', 'sent'])('a rejected superseded attempt cannot borrow newer %s acceptance', async (status) => {
+    const queuedMessage = { id: 'msg-stale', status: 'queued', subject_snapshot: 'S' };
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+      email_messages: [chain({ returning: [queuedMessage] }), chain(),
+        chain({ first: { ...queuedMessage, status, send_attempt_token: 'newer-attempt' } })],
+    });
+    sendgrid.sendOne.mockRejectedValueOnce(new Error('provider rejected stale attempt'));
+    const result = await EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice', to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
+    });
+    expect(result).toMatchObject({ sent: true, superseded: true, providerAttempted: true, providerAccepted: false });
+  });
+
+  test.each(['delivered', 'bounced'])('a matching %s webhook proves acceptance after a lost SDK response', async (status) => {
+    const queuedMessage = { id: 'msg-webhook', status: 'queued', subject_snapshot: 'S' };
+    const current = { ...queuedMessage, status };
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+      email_messages: [chain({ returning: [queuedMessage] }), chain(), chain({ first: current })],
+    });
+    sendgrid.sendOne.mockImplementationOnce(async ({ customArgs }) => {
+      current.send_attempt_token = customArgs.send_attempt_token;
+      throw new Error('response lost after provider acceptance');
+    });
+    const result = await EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice', to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
+    });
+    expect(result).toMatchObject({ sent: true, providerAttempted: true, providerAccepted: true });
   });
 
   test('onQueued resolving false ABORTS before dispatch: row marked failed (pre-provider), no sendOne (codex #3565 gh-r20)', async () => {
