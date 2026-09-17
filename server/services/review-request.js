@@ -3551,7 +3551,7 @@ const ReviewService = {
     if (finished || released || staleReservations) {
       logger.info(`[review] stranded sends reconciled (finished=${finished} released=${released}${staleReservations ? ` staleReservations=${staleReservations}` : ""})`);
     }
-    return { finished, released, staleReservations };
+    return { finished, released };
   },
 
   /** One keyset page of stale claims, oldest first. */
