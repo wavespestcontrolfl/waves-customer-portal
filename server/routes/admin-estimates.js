@@ -60,7 +60,8 @@ const {
   inferEstimateServiceLines,
 } = require('../services/estimate-service-lines');
 const { normalizeProposal, computeProposalTotals, isCommercialProposalData } = require('../services/estimate-proposal');
-const { proposalExpiry, groupLinkViewableThrough, hasFixedBidValidity, assertBidSendDate, assertBidScheduleDate, earliestScheduledDelivery, latestReachableSchedule, validateBidFields, FIXED_BID_VALIDITY_ABSENT_SQL } = require('../services/proposal-bid');
+const { programRevenueIssue } = require('../../shared/proposal-bid.cjs');
+const { proposalExpiry, groupLinkViewableThrough, hasFixedBidValidity, assertBidSendDate, assertBidScheduleDate, earliestScheduledDelivery, latestReachableSchedule, validateBidFields, normalizeProjectCosting, FIXED_BID_VALIDITY_ABSENT_SQL } = require('../services/proposal-bid');
 const { publishedGroupLinks, publishedOfferExpiry, extendPublishedGroupLinks } = require('../services/estimate-group-navigation');
 const { generateEstimateProposalPDF } = require('../services/pdf/estimate-pdf');
 const {
@@ -3794,6 +3795,8 @@ router.get('/:id/proposal', async (req, res, next) => {
       proposal,
       totals: computeProposalTotals(proposal),
       bidToolsEnabled: gateEnvValue('GATE_COMMERCIAL_BID_BUILDER'),
+      // Private operator inputs live beside the public proposal allowlist.
+      projectCosting: parseEstimateData(estimate.estimate_data)?.proposalCosting || null,
       // Engine-composed prospect research (commercial proposal lane) — the
       // builder page shows it read-only above the line items. Additive:
       // null for operator-originated proposals.
@@ -3896,7 +3899,7 @@ router.put('/:id/proposal', async (req, res, next) => {
     // Older proposal editors do not send the new date field. An omission
     // preserves the authored hold; clearing it requires an explicit null.
     if (!Object.hasOwn(incoming, 'validThrough')) incoming.validThrough = savedProposal.validThrough;
-    const bidValidation = validateBidFields(incoming);
+    const bidValidation = validateBidFields(incoming, req.body?.projectCosting);
     if (bidValidation) return res.status(400).json({ error: bidValidation });
     // Programs-only callers may omit buildings entirely — normalize once
     // and use the array everywhere (pre-push codex P1: undefined.some threw).
@@ -3906,9 +3909,9 @@ router.put('/:id/proposal', async (req, res, next) => {
       const incomingLines = incomingBuildings.flatMap((building) => building.lineItems || building.line_items || []);
       const omittedIdentifiers = [...savedUnits.values()].some(Boolean) && incomingLines.some((line) => !line.id);
       const unitsChanged = omittedIdentifiers || incomingLines.some((line) => (line.unit || null) !== (savedUnits.get(line.id) || null));
-      if (unitsChanged
+      if (Object.hasOwn(req.body || {}, 'projectCosting') || unitsChanged
         || (incoming.validThrough || null) !== (savedProposal.validThrough || null)) {
-        return res.status(409).json({ error: 'Bid authoring is currently disabled. Reload the proposal before editing; saved bid units and validity dates remain in place.' });
+        return res.status(409).json({ error: 'Bid authoring is currently disabled. Reload the proposal before editing; saved bid units, costs and validity dates remain in place.' });
       }
     }
     const hasBuildings = incomingBuildings.length > 0;
@@ -3932,18 +3935,13 @@ router.put('/:id/proposal', async (req, res, next) => {
         return res.status(400).json({ error: 'Proposals are limited to 10 service programs.' });
       }
       for (const program of incomingPrograms) {
-        const freq = Number(program?.frequencyPerYear ?? program?.visitsPerYear);
-        if (!Number.isInteger(freq) || freq < 1 || freq > 52) {
-          return res.status(400).json({ error: 'Each program needs a whole-number service frequency between 1 and 52 visits per year.' });
-        }
-        // Finite, positive, cent-representable — 0.001 or Infinity would
-        // normalize to a dropped program and rewrite the authoritative
-        // totals to zero (pre-push codex P0).
-        const price = Number(program?.pricePerApplication ?? program?.perApplication);
-        if (!Number.isFinite(price) || price < 0.01
-          || Math.abs(price * 100 - Math.round(price * 100)) > 1e-6) {
-          return res.status(400).json({ error: 'Each program needs a per-application price of at least $0.01, in whole cents.' });
-        }
+        // Whole-number 1–52 frequency; finite, positive, cent-representable
+        // price — 0.001 or Infinity would normalize to a dropped program and
+        // rewrite the authoritative totals to zero (pre-push codex P0). The
+        // predicate is shared with the builder's costing card (GH codex P2
+        // r8 on #4270).
+        const programIssue = programRevenueIssue(program);
+        if (programIssue) return res.status(400).json({ error: programIssue });
         if (String(program?.label ?? program?.name ?? '').length > 120) {
           return res.status(400).json({ error: 'Program names are limited to 120 characters.' });
         }
@@ -4159,6 +4157,7 @@ router.put('/:id/proposal', async (req, res, next) => {
     const revivingBid = expiredRecovery && (expiryUpdate > new Date() || (hadFixedValidity && !expiryUpdate));
     const nextData = {
       ...existingData,
+      ...(Object.hasOwn(req.body || {}, 'projectCosting') ? { proposalCosting: normalizeProjectCosting(req.body.projectCosting) } : {}),
       proposal: {
         ...normalized,
         updatedAt: new Date().toISOString(),
@@ -4173,7 +4172,22 @@ router.put('/:id/proposal', async (req, res, next) => {
     // drop it — the public copy falls back to "your account manager has the
     // proposal" until the next send re-stamps proposalDelivery against the new
     // PDF. Otherwise the link would keep saying the edited proposal was emailed.
-    clearStaleProposalDelivery(nextData);
+    // A private-cost-only save leaves the customer proposal and its PDF
+    // exactly as delivered, so the emailed marker stays true (GH codex P2 on
+    // #4270). Anything that changes the normalized proposal drops it.
+    // Customer-visible content only: line `id`s exist for the bid-form row
+    // mapping and are minted client-side for legacy lines on load, so they
+    // must not turn a cost-only save into a "changed proposal" (GH codex P2
+    // r12 on #4270).
+    const proposalContent = (value) => {
+      const { updatedAt, provenance, buildings, ...rest } = value || {};
+      const visibleLine = (line) => { const { id, ...visible } = line || {}; return visible; };
+      return JSON.stringify({ ...rest, buildings: (Array.isArray(buildings) ? buildings : []).map((b) => ({ ...b, lineItems: (Array.isArray(b?.lineItems) ? b.lineItems : []).map(visibleLine) })) });
+    };
+    const privateCostOnly = Object.hasOwn(req.body || {}, 'projectCosting') && proposalContent(normalized) === proposalContent({ ...savedProposal, enabled: true, synthesized: false });
+    if (!privateCostOnly) {
+      clearStaleProposalDelivery(nextData);
+    }
     // Make the authored proposal sendable: clear the auto-quote-required
     // booleans the commercial estimate was created with, and resolve any
     // blocking lead/draft automation status. proposal.enabled (set above) is
@@ -4345,7 +4359,42 @@ router.put('/:id/proposal', async (req, res, next) => {
     // keys its next save and its delivery review on it, so a save that lands
     // in the window before the editor's reload cannot be adopted as if it
     // were this one (pre-push codex P1 r3 on #4305).
-    const committed = await trx('estimates').where({ id: estimate.id }).first();
+    let committed = await trx('estimates').where({ id: estimate.id }).first();
+    // A private-cost-only save can change bookkeeping and DB representations
+    // without changing the offer staff scheduled. Preserve ONLY reviews that
+    // still matched the locked old offer; an already-stale review stays stale.
+    // Keep the persisted hash format unchanged for existing scheduled sends.
+    const reviewComparableData = { ...nextData, proposal: lockedData.proposal };
+    if (Object.hasOwn(lockedData, 'proposalCosting')) reviewComparableData.proposalCosting = lockedData.proposalCosting;
+    else delete reviewComparableData.proposalCosting;
+    const priorOfferVersion = estimateOfferVersion(locked);
+    if (privateCostOnly && savedProposal.enabled === true && savedProposal.synthesized !== true && committed
+      && estimateOfferVersion({ ...locked, estimate_data: reviewComparableData }) === priorOfferVersion
+      && Number(locked.monthly_total) === totals.monthlyEquivalent
+      && Number(locked.annual_total) === totals.annualRecurring
+      && Number(locked.onetime_total) === totals.oneTime) {
+      const committedOfferVersion = estimateOfferVersion(committed);
+      const scheduledRows = groupId
+        ? await trx('estimates').where({ estimate_group_id: groupId, status: 'scheduled' }).whereNull('archived_at').forUpdate().select()
+        : (committed.status === 'scheduled' ? [committed] : []);
+      for (const scheduledRow of scheduledRows) {
+        const scheduledData = parseEstimateData(scheduledRow.estimate_data) || {};
+        let reviewUpdated = false;
+        for (const attempt of scheduledData.manualSendAttempts || []) {
+          const review = attempt.scheduleReview;
+          if (!review || attempt.startedAt || attempt.result
+            || !scheduledRow.scheduled_at || review.scheduledAt !== new Date(scheduledRow.scheduled_at).toISOString()) continue;
+          if (scheduledRow.id === locked.id && review.reviewedOffer === priorOfferVersion) {
+            review.reviewedOffer = committedOfferVersion; reviewUpdated = true;
+          }
+          if (review.reviewedGroupVersions?.[locked.id] === priorOfferVersion) {
+            review.reviewedGroupVersions[locked.id] = committedOfferVersion; reviewUpdated = true;
+          }
+        }
+        if (reviewUpdated) await trx('estimates').where({ id: scheduledRow.id }).update({ estimate_data: JSON.stringify(scheduledData) });
+      }
+      committed = await trx('estimates').where({ id: estimate.id }).first();
+    }
     return { updatedCount: count, editVersion: committed ? estimateEditVersion(committed) : null };
     });
     if (!updatedCount) {
