@@ -59,6 +59,8 @@ Fronted active verbs need a billing object or recipient; passive assertions
 also count. `pay attention` and attached per-application billing stay valid.
 Noun and verb predicates share the bounded application-complement check,
 including copulas, connectors, punctuation, amounts, and modifier fee heads.
+Recipient, passive, and amount shortcuts apply only after the complete bounded
+object has been checked for an attached application complement.
 Reminder/status modifiers retain a following billing head. Feedback also
 permits experience, appointment, and pronoun objects; singular pay-a-visit
 idioms permit the scanner's determiner and modifier variants.

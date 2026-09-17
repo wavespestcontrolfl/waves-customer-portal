@@ -321,6 +321,18 @@ describe('email reply amountless billing policy', () => {
     rejected('For each visit, the fee is per application; each visit incurs its own fee.');
   });
 
+  test.each(['you', 'them', 'the customer', 'each client'])('inspects application objects before recipient shortcuts: %s', (recipient) => {
+    for (const object of ['a fee', 'a $98 fee', '$98 charge', 'an invoice $98', '$98', 'a fee of $98', 'a fee at $98', 'a separate $98 fee', '$98 individual charge']) {
+      expect(verdict(`For each visit, we charge ${recipient} ${object} per application.`)).toEqual({ ok: true, violations: [] });
+      rejected(`For each visit, we charge ${recipient} ${object} per visit.`);
+    }
+  });
+  test('inspects application objects before passive and amount shortcuts', () => {
+    ['you will be charged a fee per application', 'you are billed a $98 fee per application', 'you are charged $98 fee per application', 'we charge $98 fee per application'].forEach((predicate) => expect(verdict(`For each visit, ${predicate}.`)).toEqual({ ok: true, violations: [] }));
+    rejected('For each visit, we charge you a fee per application; each visit incurs its own fee.');
+    rejected('For each visit, you will be charged a fee.');
+  });
+
   test.each([
     ['type', { text: {}, commercialProposal: true }, 'copy_type'],
     ['size', { text: 'x'.repeat(8193), commercialProposal: true }, 'copy_size'],

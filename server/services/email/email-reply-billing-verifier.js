@@ -79,6 +79,8 @@ function hasApplicationComplement(tokens, at) {
   if (isWord(tokens[next], 'apply', 'occur')) next += 1;
   next = skipSeparators(tokens, next);
   if (isWord(tokens[next], 'not', 'never')) next += 1;
+  if (isWord(tokens[next], 'of', 'at')
+    && (isKind(tokens[next + 1], 'money') || isKind(tokens[next + 1], 'number'))) next += 1;
   if (isKind(tokens[next], 'money') || isKind(tokens[next], 'number')) next += 1;
   return isKind(tokens[next], 'application') && /^(?:-?per\b|for\b|\/)/.test(tokens[next].text);
 }
@@ -86,12 +88,16 @@ function hasApplicationComplement(tokens, at) {
 function hasFrontedBillingPredicate(tokens, at, passive) {
   if (hasApplicationComplement(tokens, at)) return false;
   let object = skipRecipient(tokens, at + 1);
-  const amount = isKind(tokens[object], 'money') || isKind(tokens[object], 'number');
-  if (isKind(tokens[object], 'application') || (amount && isKind(tokens[object + 1], 'application'))) return false;
-  if (passive || object > at + 1 || amount || isKind(tokens[object], 'unit')) return true;
+  const recipient = object > at + 1;
   if (isDeterminer(tokens[object])) object += 1;
   if (isWord(tokens[object], 'separate', 'individual')) object += 1;
-  return isBillingNoun(tokens[object]) && !hasApplicationComplement(tokens, object);
+  const amount = isKind(tokens[object], 'money') || isKind(tokens[object], 'number');
+  if (amount) object += 1;
+  if (isDeterminer(tokens[object])) object += 1;
+  if (isWord(tokens[object], 'separate', 'individual')) object += 1;
+  const noun = isBillingNoun(tokens[object]);
+  if (isKind(tokens[object], 'application') || (noun && hasApplicationComplement(tokens, object))) return false;
+  return passive || recipient || amount || isKind(tokens[object], 'unit') || noun;
 }
 
 function hasInverseBillingUnit(tokens, at) {
