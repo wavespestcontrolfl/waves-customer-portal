@@ -27,6 +27,9 @@ describe('callback commitment candidates', () => {
     ['Your mother will receive a call from the office.', 'recipient-first', 'the office', 'Your mother'],
     ['We will check, and the office will review, then will call her.', 'coordinated', 'the office', 'her'],
     ['We will check, and we will review, then will call her.', 'coordinated', 'we', 'her'],
+    ['We will check, or will call her.', 'coordinated', 'We', 'her'],
+    ['We will check, or call her.', 'bare-coordinated', 'We', 'her'],
+    ['We will check, or the office will review, then will call her.', 'coordinated', 'the office', 'her'],
     ['We will check, and will call her.', 'coordinated', 'We', 'her'],
     ['We will check, and call her.', 'bare-coordinated', 'We', 'her'],
     ['Sure. We will check; the office will review, then will call her.', 'coordinated', 'the office', 'her'],
@@ -44,12 +47,12 @@ describe('callback commitment candidates', () => {
     expect(candidate.recipient.end).toBeLessThanOrEqual(candidate.source.end);
   });
 
-  test('a modal-only coordinated candidate retains its non-Waves governing actor', () => {
-    const text = 'The caller will check, and will call her.';
+  test.each(['and', 'or'])('a %s modal-only coordinated candidate retains its non-Waves governing actor', (link) => {
+    const text = `The caller will check, ${link} will call her.`;
     const [candidate] = recognizeCallbackCandidates(text, TARGETS);
     expect(candidate.kind).toBe('coordinated');
     expect(candidate.actor).toEqual({ text: 'The caller', start: 0, end: 10, waves: false });
-    expect(text.slice(candidate.source.start, candidate.source.end)).toBe('and will call her');
+    expect(text.slice(candidate.source.start, candidate.source.end)).toBe(`${link} will call her`);
   });
 
   test.each([

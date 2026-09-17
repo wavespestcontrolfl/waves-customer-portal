@@ -18,7 +18,7 @@ const CALLBACK_MODAL = `(?:[\\x27\\u2019]ll|[\\x27\\u2019](?:re|s) going to|[\\x
 const CALLBACK_COORDINATED_MODAL = '(?:will|can|could|promise(?:s|d)? to|(?:am|are|is) going to|(?:am|are|is) scheduled to)';
 const CALLBACK_GOVERNING_MODAL = '(?:is|are|was|were|will|would|can|could|do|does|did|has|have|had|should|shall|may|might|must|cannot|can[\\x27\\u2019]t|could not|couldn[\\x27\\u2019]t|will not|won[\\x27\\u2019]t)';
 const CALLBACK_COORDINATED_SUBJECT_RE = new RegExp(
-  `(?:^|[,;:]|\\b(?:and|but|so|then)\\b)\\s*(?:(?:and|but|so|then)\\b\\s*)*(?<subject>${CALLBACK_PROMISER}|(?:[a-z][\\w\\x27\\u2019.-]*\\s+){0,4}[a-z][\\w\\x27\\u2019.-]*)(?:\\s+${CALLBACK_GOVERNING_MODAL}|[\\x27\\u2019]ll)\\b`,
+  `(?:^|[,;:]|\\b(?:and|or|but|so|then)\\b)\\s*(?:(?:and|or|but|so|then)\\b\\s*)*(?<subject>${CALLBACK_PROMISER}|(?:[a-z][\\w\\x27\\u2019.-]*\\s+){0,4}[a-z][\\w\\x27\\u2019.-]*)(?:\\s+${CALLBACK_GOVERNING_MODAL}|[\\x27\\u2019]ll)\\b`,
   'gi',
 );
 // Two branches, deliberately not one: a BASE verb may sit up to three filler
@@ -100,9 +100,9 @@ function recognizeCallbackCandidates(text, valueTargets) {
     targets, `${CALLBACK_ADVERB}${CALLBACK_VERB}`, `${CALLBACK_ADVERB}${CALLBACK_LIGHT_VERB}`,
   );
   const barePromisedContact = `(?:${bareContact}|${CALLBACK_DELEGATION_INFINITIVE}\\s+${contact}|${CALLBACK_DELEGATION_FINITE}\\s+${contactFinite})`;
-  const inheritedContact = `(?:and|but|so|then)\\s+${CALLBACK_COORDINATED_MODAL}\\s+${promisedContact}`;
+  const inheritedContact = `(?:and|or|but|so|then)\\s+${CALLBACK_COORDINATED_MODAL}\\s+${promisedContact}`;
   const shiftedRecipient = '(?:you|me|us|him|her|them|(?:your|my|our|his|their)\\s+[a-z][\\w\\x27\\u2019-]*)';
-  const inheritedBareContact = `(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+(?:(?![.!?;]|\\b${CALLBACK_ACTOR_SHIFT}\\s+${shiftedRecipient}\\b|${CALLBACK_COORDINATED_SUBJECT_RE.source}).){1,120}?\\b(?:and|but|so|then)\\s+${barePromisedContact}`;
+  const inheritedBareContact = `(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+(?:(?![.!?;]|\\b${CALLBACK_ACTOR_SHIFT}\\s+${shiftedRecipient}\\b|${CALLBACK_COORDINATED_SUBJECT_RE.source}).){1,120}?\\b(?:and|or|but|so|then)\\s+${barePromisedContact}`;
   const wavesActor = `(?:${CALLBACK_PROMISER}|me|us)\\b(?![\\x27\\u2019]s\\b)${CALLBACK_PHRASE_END}`;
   const recipientFirst = `${recipientTargets}${CALLBACK_MODAL}\\s+${CALLBACK_ADVERB}${CALLBACK_RECIPIENT_ACTION}\\s+${wavesActor}`;
   const re = new RegExp(
@@ -122,7 +122,7 @@ function recognizeCallbackCandidates(text, valueTargets) {
   return matches.map(({ match, bare }) => {
     const start = match.index;
     const end = start + match[0].length;
-    const inherited = /^(?:and|but|so|then)\b/i.test(match[0]);
+    const inherited = /^(?:and|or|but|so|then)\b/i.test(match[0]);
     const recipientMatches = [...match[0].matchAll(new RegExp(`\\b(?:she|he|they|${targets})\\b`, 'gi'))];
     const recipientMatch = recipientMatches[recipientMatches.length - 1];
     const recipient = recipientMatch ? {
