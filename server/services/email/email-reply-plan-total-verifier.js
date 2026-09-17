@@ -81,7 +81,7 @@ function periodDescribesActivity(clause, at) {
 function isPlanTotalPair(clause, amountAt, periodAt, context, legacyMonthlyPlan) {
   const amount = clause[amountAt];
   const period = clause[periodAt];
-  if (legacyMonthlyPlan === true && /\b(?:mo|month|monthly)\b/.test(period.text)) return false;
+  if (legacyMonthlyPlan === true && /\b(?:mos?|months?|monthly)\b/.test(period.text)) return false;
   if (periodDescribesActivity(clause, periodAt)) return false;
   const first = Math.min(amountAt, periodAt);
   const last = Math.max(amountAt, periodAt);

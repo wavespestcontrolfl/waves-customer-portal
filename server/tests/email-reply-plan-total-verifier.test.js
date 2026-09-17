@@ -139,6 +139,7 @@ describe('inactive email reply plan-total policy', () => {
   test.each([
     '$98/mo', '$98 a month', '$98 each month', '$98 every month',
     'The monthly payment is $98', 'The monthly price is 98',
+    '$98/month', '$98/months', '$98/mos', '$98 per months', '$98 per mos',
   ])('permits only the legacy plan\'s own monthly unit: %s', (text) => {
     allowed(text, { legacyMonthlyPlan: true });
   });
@@ -147,9 +148,16 @@ describe('inactive email reply plan-total policy', () => {
     '$1176/yr', '$1176 a year', '$1176 each year', '$1176 every year',
     'The annual price is $1176', 'The yearly price is 1176',
     '$98/mo, $1176/yr', '$98 a month; the annual total is $1176',
+    '$1176/year', '$1176/years', '$1176/yrs', '$1176 per years', '$1176 per yrs',
   ])('rejects yearly aggregates even for a trusted monthly legacy plan: %s', (text) => {
     rejected(text, { legacyMonthlyPlan: true });
   });
+
+  test.each([
+    '98 a month', '98 each month', '1176 every year',
+    'Our monthly plan is 98', 'Our plan is 98 every month',
+    'Your monthly payment of 98 posted, prices remain unchanged',
+  ])('still requires a pricing predicate for bare determined-period numbers: %s', (text) => allowed(text));
 
   test.each([
     'The monthly payment is $98', 'Your monthly payment amount is $98',
