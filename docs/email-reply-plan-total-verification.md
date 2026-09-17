@@ -21,13 +21,16 @@ month`, `$98 each month`, `$1176 every year`) or a
 bounded monthly/yearly/annual pricing predicate in either order (`monthly
 price is $98`, `$98 is the yearly fee`). Bare numbers need an explicit
 pricing word, such as `price`, `cost`, `fee`, `rate`, `charge`, or `total`.
-The live rule's `dues` and `subscription` labels also count as pricing cues.
+The live rule's `dues`, `subscription`, and `spread` labels also count as pricing
+cues; `annualized` is classified locally as a yearly period. Bare percentages
+and the finite distance units following a number are excluded; currency
+amounts remain prices. A single copula can directly join currency and period.
 The adapter joins canonical `a/each/every` and `month/mo/year/yr` word tokens
 locally; the prerequisite scanner is unchanged. `a month/year` (including
 `mo/yr`) immediately followed by `ago` remains temporal wording rather than a
 recurring period. Only tokens in the same clause are considered. A barrier,
 conjunction, sentence boundary, or visit/application unit breaks the
-relationship; account events and schedule prose without a price claim
+relationship, apart from the explicit continuations below; account events and schedule prose without a price claim
 are left alone. This is a finite policy, not a general English parser.
 Explicit payment predicates (`The monthly payment is $98`) and account
 price labels (`The monthly account fee is $98`) remain price claims.
@@ -56,6 +59,10 @@ visit/application noun to an earlier amount. One comma immediately after a
 fronted monthly/yearly/annually period at the beginning of its claim is
 permitted (`Annually, we charge
 $1176`); a second comma still breaks the claim.
+`For the monthly plan, the price is $98` may retain its comma when a bounded
+fronted plan noun phrase continues into a pricing copula. An asserted price
+may retain `and` immediately before a copular billing predicate and period
+(`The plan is $98 and is billed monthly`); independent facts still break.
 Colons, dashes, and parentheses before unrelated application/visit nouns
 cannot exempt an amount; an actual attached unit such as `: per application`
 can. Pairing considers adjacent amount/period anchors up to a claim boundary,
@@ -71,6 +78,11 @@ tested application-price, account-event, and activity-cadence exceptions.
 Its unit-specific legacy-monthly exception is preserved here. This is the
 proposed justification for the separate inactive adapter, subject to review;
 no runtime migration is authorized and the live lint remains unchanged.
+
+Deferred P2 #4032339326 (`server/services/email/email-reply-plan-total-verifier.js:179`): the recognizer call receives shared
+normalization that collapses newlines. Preserving line/bullet boundaries needs
+a coordinated shared normalizer/scanner change and sibling regression review;
+it exceeds this adapter-only scope. Punctuation still establishes boundaries.
 
 Focused check from the repository root:
 `TZ=UTC node node_modules/jest/bin/jest.js --runInBand --no-coverage server/tests/email-reply-plan-total-verifier.test.js`.

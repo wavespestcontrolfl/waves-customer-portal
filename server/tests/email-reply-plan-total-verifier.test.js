@@ -317,6 +317,22 @@ describe('inactive email reply plan-total policy', () => {
     allowed('We received your annual payment of $1176 for the plan.', { legacyMonthlyPlan: true });
   });
 
+  test.each([
+    [['Your annualized plan total is $1176', 'Annualized subscription is 1176'], ['Annualized reminders mention the $98 initial price; payments are received.']],
+    [['Your monthly spread is $98', 'The annual spread is 1176'], ['We received your monthly payment of $98 after the spread adjustment.']],
+    [['For the monthly plan, the price is $98', 'For our yearly package, the fee is $1176', 'The plan is $98 and is billed monthly', 'The price is only $1176 and will be charged yearly'], ['Your payment was $98, monthly prices remain unchanged.', 'We received $98 and it was billed monthly.', 'The plan is $98 and visits occur monthly.', 'For the monthly plan, your payment posted for $98.']],
+    [['$98 is per month', '$1176 was per year', '$98 will be monthly', '$1176 is yearly after your payment posted'], ['Your payment of $98 monthly posted.', 'Your refund was $98; service is monthly.']],
+    [['Our annual renewal rate is 98', 'Monthly routes run 98', 'Monthly price is $98'], ['Our annual renewal rate is 98 percent', 'Our annual renewal rate is 98%', 'Monthly routes run 98 miles', 'Monthly routes run 98 kilometers']],
+  ])('covers supported R3 forms with independent-fact controls: %j', (blocked, permitted) => {
+    blocked.forEach((text) => rejected(text));
+    permitted.forEach((text) => allowed(text));
+  });
+  test('keeps R3 pricing exceptions unit-specific and trusted', () => {
+    for (const text of ['Your monthly spread is $98', 'For the monthly plan, the price is $98', 'The plan is $98 and is billed monthly', '$98 is per month']) allowed(text, { legacyMonthlyPlan: true });
+    for (const text of ['Your annualized plan total is $1176', '$1176 was per year', 'The plan is $1176 and is billed yearly']) rejected(text, { legacyMonthlyPlan: true });
+    allowed('Your annualized plan total is $1176', { commercialProposal: true });
+  });
+
   test('uses only trusted literal true exemption flags', () => {
     allowed('$98/mo', { commercialProposal: true });
     allowed('$98/mo', { legacyMonthlyPlan: true });

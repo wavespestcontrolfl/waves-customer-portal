@@ -4,7 +4,7 @@ const { recognizeEmailReplyPricingClauses } = require('./email-reply-pricing-cla
 // joins a price amount to a month/year token only inside one clause.
 const PRICE_WORDS = new Set([
   'price', 'cost', 'fee', 'rate', 'charge', 'bill', 'invoice', 'amount', 'total', 'run',
-  'dues', 'subscription',
+  'dues', 'subscription', 'spread',
 ]);
 const PLAN_WORDS = new Set(['plan', 'program', 'package']);
 const PRICING_LABEL_WORDS = new Set([...PRICE_WORDS, ...PLAN_WORDS]);
@@ -29,8 +29,18 @@ const PERIOD_ACTIVITY_WORDS = new Set([
 const CLAIM_BREAK_WORDS = new Set(['and', 'or', 'but']);
 const PERIOD_DETERMINERS = new Set(['a', 'each', 'every']);
 const PERIOD_NOUNS = new Set(['month', 'mo', 'year', 'yr']);
+const MEASUREMENT_WORDS = new Set(['percent', 'percentage', 'mile', 'miles', 'kilometer', 'kilometers', 'kilometre', 'kilometres', 'foot', 'feet', 'inch', 'inches', 'yard', 'yards']);
+const BILLING_PREDICATES = new Set(['bill', 'charge', 'invoice', 'pay']);
+const FRONTED_PLAN = new RegExp(`^for (?:(?:${[...JOIN_WORDS].join('|')}) )?<period> (?:${[...PLAN_WORDS].join('|')})$`);
+const PRICING_START = new RegExp(`^(?:(?:${[...JOIN_WORDS].join('|')}) )?(?:${[...PRICING_LABEL_WORDS].join('|')}) <(?:be|pastBe)>(?: |$)`);
 const isWord = (token, words) => token?.kind === 'word' && words.has(token.text);
 const isAmount = (token) => token.kind === 'money' || token.kind === 'number';
+const isDirectGap = (gap) => gap.every((token) => token.kind === 'sep' || token.kind === 'be')
+  && gap.filter((token) => token.kind === 'be').length <= 1;
+const isBareMeasurement = (clause, at) => clause[at].kind === 'number'
+  && (isWord(clause[at + 1], MEASUREMENT_WORDS) || clause[at + 1]?.text === '%');
+const isExplicitCurrencyPeriod = (amount, period, gap) => amount.kind === 'money' && isDirectGap(gap)
+  && (/^(?:\/|per\b|a\b|each\b|every\b)/.test(period.text) || gap.some((token) => token.kind === 'be'));
 
 function canonicalToken(token) {
   if (token.kind === 'word') return token.text;
@@ -47,7 +57,8 @@ function withDeterminedPeriods(clause) {
         && clause[index + 2].text === 'ago')) {
       tokens.push({ kind: 'period', text: `${clause[index].text} ${clause[index + 1].text}` });
       index += 1;
-    } else tokens.push(clause[index]);
+    } else tokens.push(clause[index].kind === 'word' && clause[index].text === 'annualized'
+      ? { kind: 'period', text: 'annualized' } : clause[index]);
   }
   return tokens;
 }
@@ -72,17 +83,29 @@ function tiedToVisitOrApplication(clause, at) {
   return false;
 }
 
+function continuesPrice(clause, at, start) {
+  const label = clause.slice(Math.max(start, at - 14), at - 1).map(canonicalToken).join(' ');
+  return clause[at].kind === 'word' && clause[at].text === 'and'
+    && clause[at - 1] && isAmount(clause[at - 1])
+    && (PRICE_LABEL.test(label) || PAYMENT_LABEL.test(label))
+    && clause[at + 1]?.kind === 'be' && isWord(clause[at + 2], BILLING_PREDICATES)
+    && clause[at + 3]?.kind === 'period';
+}
+
 function breaksClaim(clause, at, start) {
   const token = clause[at];
   const frontedPeriod = at - 1 === start && clause[at - 1]?.kind === 'period'
     && /^(?:monthly|yearly|annually)$/.test(clause[at - 1].text);
+  const frontedPlan = at - start <= 4
+    && FRONTED_PLAN.test(clause.slice(start, at).map(canonicalToken).join(' '))
+    && PRICING_START.test(clause.slice(at + 1, at + 5).map(canonicalToken).join(' '));
   return token.kind === 'barrier' || UNIT_KINDS.has(token.kind)
-    || (token.kind === 'sep' && token.text === ',' && !frontedPeriod)
-    || isWord(token, CLAIM_BREAK_WORDS);
+    || (token.kind === 'sep' && token.text === ',' && !frontedPeriod && !frontedPlan)
+    || (isWord(token, CLAIM_BREAK_WORDS) && !continuesPrice(clause, at, start));
 }
 
 function periodDescribesActivity(clause, at) {
-  if (!/^(?:monthly|yearly|annual|annually)$/.test(clause[at].text)) return false;
+  if (!/^(?:monthly|yearly|annual|annually|annualized)$/.test(clause[at].text)) return false;
   // At most four ordinary modifiers may precede a cadence/activity noun.
   for (let index = at + 1; index <= at + 5 && index < clause.length; index += 1) {
     const token = clause[index];
@@ -99,6 +122,7 @@ function periodDescribesActivity(clause, at) {
 function isPlanTotalPair(clause, amountAt, periodAt, context, legacyMonthlyPlan) {
   const amount = clause[amountAt];
   const period = clause[periodAt];
+  if (isBareMeasurement(clause, amountAt)) return false;
   if (legacyMonthlyPlan === true && /\b(?:mos?|months?|monthly)\b/.test(period.text)) return false;
   if (periodDescribesActivity(clause, periodAt)) return false;
   const first = Math.min(amountAt, periodAt);
@@ -112,8 +136,8 @@ function isPlanTotalPair(clause, amountAt, periodAt, context, legacyMonthlyPlan)
   if (PAYMENT_LABEL.test(amountLabel) || PAYMENT_SUFFIX.test(amountTail)) return true;
   const priceCue = context.some((token) => isWord(token, PRICE_WORDS));
   const planCue = context.some((token) => isWord(token, PLAN_WORDS));
-  const direct = gap.every((token) => token.kind === 'sep');
-  if (amount.kind === 'money' && direct && /^(?:\/|per\b|a\b|each\b|every\b)/.test(period.text)) return true;
+  const direct = isDirectGap(gap);
+  if (isExplicitCurrencyPeriod(amount, period, gap)) return true;
   const assertionLabels = amountAt < periodAt ? [...gap, clause[periodAt + 1] || {}] : gap;
   const assertedPrice = PRICE_LABEL.test(amountLabel) || PRICE_SUFFIX.test(amountTail)
     || (BE_AMOUNT.test(amountLabel)
