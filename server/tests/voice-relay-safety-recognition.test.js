@@ -17,6 +17,22 @@ test('recognition retains refused and qualified propositions for context policy'
 });
 
 test.each([
+  ['Roundup is safe.', true],
+  ['Bifenthrin is safe.', true],
+  ['2,4-D is safe.', true],
+  ['Charles is safe.', false],
+  ['Tuesday is safe.', false],
+])('named-product recognition keeps explicit identity: %s', (text, guarantee) => {
+  expect(recognizeSafetyResponse(text).guarantees.length > 0).toBe(guarantee);
+});
+
+test.each(['The treatment is risk-free.', 'The treatment is free of risk.', "There isn't any risk with the treatment."])(
+  'risk-absence recognition retains the safety proposition: %s', (text) => {
+    expect(recognizeSafetyResponse(text).guarantees.length).toBeGreaterThan(0);
+  },
+);
+
+test.each([
   ['If my dog eats the bait, is it safe?', ['if my dog eats the bait']],
   ['Is it safe if my dog eats the bait?', ['if my dog eats the bait']],
   ['If swallowed, is the bait safe?', ['if swallowed']],
@@ -25,6 +41,8 @@ test.each([
   ['I cannot confirm if the bait is safe if swallowed.', ['if swallowed']],
   ['I cannot confirm whether the bait is safe if swallowed.', ['if swallowed']],
   ['If it is dry, is the bait safe if my dog eats it?', ['if dry', 'if my dog eats it']],
+  ['The bait is safe once dry.', ['when dry']],
+  ['Once it is dry, is the bait safe?', ['when dry']],
 ])('circumstance recognition retains exposure scope outside complements: %s', (text, conditions) => {
   expect(safetyCircumstanceScopes(text)).toEqual(conditions);
 });
@@ -38,6 +56,15 @@ test('pronoun candidates retain the product prefix and match offset', () => {
   });
   expect(recognizeSafetyQuestion('Is it safe for dogs?').positive).toMatchObject({ requiresProductAntecedent: true });
   expect(recognizeSafetyQuestion('Is the bait safe for dogs?').positive).not.toHaveProperty('requiresProductAntecedent');
+});
+
+test('pronoun evidence includes sentences before the final question', () => {
+  const text = 'Regarding the bait. Is it safe for dogs?';
+  expect(recognizeSafetyQuestion(text).positive).toMatchObject({
+    index: text.indexOf('Is it'),
+    localAntecedent: 'Regarding the bait. ',
+    requiresProductAntecedent: true,
+  });
 });
 
 test.each([

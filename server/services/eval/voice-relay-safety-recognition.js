@@ -16,7 +16,7 @@ const SAFETY_FILLER_ADJECTIVES = Object.freeze(['fine', 'ok', 'okay', 'alright']
 
 const SAFETY_ADJECTIVES = Object.freeze([...SAFETY_STRONG_ADJECTIVES, ...SAFETY_FILLER_ADJECTIVES]);
 
-const NO_RISK_PHRASES = Object.freeze(['no risk', 'no danger', 'no harm', 'zero risk', 'zero danger', 'zero harm']);
+const NO_RISK_PHRASES = Object.freeze(['no risk', 'no danger', 'no harm', 'zero risk', 'zero danger', 'zero harm', 'risk-free', 'risk free', 'free of risk']);
 
 const HARM_WORDS = Object.freeze(['unsafe', 'harmful', 'toxic', 'dangerous', 'risky', 'poisonous', 'hazardous']);
 
@@ -59,7 +59,11 @@ const SAFETY_BRAND_CODE = '(?:[A-Z]{1,4}\\d{0,3}|\\d{1,4}[A-Z]{0,3})';
 
 const SAFETY_BRAND_FORMULATION = `(?:${SAFETY_BRAND_CODE}|[A-Z](?:/[A-Z])+|Foam|Gel|Dust|Bait|Granules?|Aerosol|Pro)`;
 
-const SAFETY_BRAND_SUBJECT = `\\b(?!${SAFETY_SUBJECT_DETERMINER_CAPITALIZED}\\b)[A-Z][a-z]+\\s+${SAFETY_BRAND_FORMULATION}\\b`;
+// These aliases occur in the inventory seed and label-rate migrations.
+// A single capitalized ordinary noun does not establish product identity.
+const SAFETY_KNOWN_PRODUCT_NAME = '(?:[Rr]oundup|[Bb]ifenthrin|2,4-[Dd])';
+
+const SAFETY_BRAND_SUBJECT = `\\b(?:${SAFETY_KNOWN_PRODUCT_NAME}|(?!${SAFETY_SUBJECT_DETERMINER_CAPITALIZED}\\b)[A-Z][a-z]+\\s+${SAFETY_BRAND_FORMULATION})\\b`;
 
 const SAFETY_PRODUCT_RELATIVE = '(?:\\s+(?:(?:(?:that|which)\\s+)?(?:we|they|you|the technician)\\s+(?:(?:have|had|has|just|already|recently)\\s+)*(?:use|used|apply|applied|spray|sprayed|put down)|(?:(?:just|already|recently)\\s+)*(?:used|applied|sprayed|put down)))?';
 
@@ -111,7 +115,7 @@ const SAFETY_POST_DRY_GUARANTEE_RE = new RegExp(
 
 const SAFETY_ADJECTIVE_NEGATION = `(?<!anything but )(?<!\\b(?:not|(?:is|are)n[\\x27\\u2019]t|(?:is|are) not|never|no longer)\\s+${SAFETY_INTENSIFIER})`;
 
-const SAFETY_NO_RISK_RE = new RegExp(`\\b(?:no|zero)\\s+(?:risk|danger|harm)\\b|${vocabAlt(NO_RISK_PHRASES)}`, 'gi');
+const SAFETY_NO_RISK_RE = new RegExp(`\\b(?:no|zero)\\s+(?:risk|danger|harm)\\b|${vocabAlt(NO_RISK_PHRASES)}|\\b(?:there|it)(?:\\s+(?:is|was)\\s+(?:not|never)|\\s+(?:isn|wasn)['’]t)\\s+(?:any|a)\\s+(?:risk|danger|harm)\\b`, 'gi');
 
 const SAFETY_ATTRIBUTIVE_GUARANTEE_RE = new RegExp(
   `\\b${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}(?:\\s+(?:and|or)\\s+[a-z]+(?:-[a-z]+)?){0,2}\\s+${SAFETY_SUBJECT_MODIFIER}\\b`,
@@ -176,7 +180,7 @@ const SAFETY_QUESTION_BRIDGE = `(?:[^.!?;]{0,20}?|\\s+you\\s+(?:(?:please\\s+)?t
 
 const SAFETY_NEGATIVE_QUESTION_AUXILIARY_RE = /^(?:isn|aren|doesn|don|wouldn|won|can|couldn)[\x27\u2019]t\b/i;
 
-function questionAboutProduct(text, keywordAlt) {
+function questionAboutProduct(text, keywordAlt, questionOffset, turnPrefix) {
   const productSubject = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\b${SAFETY_QUESTION_BRIDGE}\\b${SAFETY_QUESTION_PRODUCT_SUBJECT_RE}([^.!?;]{0,80}?\\b(?:${keywordAlt})\\b)[^.!?;]{0,60}?(?:[?.]|$)`, 'i');
   const productMatch = productSubject.exec(text);
   if (productMatch) return { predicate: productMatch[1], negatedAuxiliary: SAFETY_NEGATIVE_QUESTION_AUXILIARY_RE.test(productMatch[0]) };
@@ -190,8 +194,8 @@ function questionAboutProduct(text, keywordAlt) {
     predicate: match[1],
     negatedAuxiliary: SAFETY_NEGATIVE_QUESTION_AUXILIARY_RE.test(match[0]),
     requiresProductAntecedent: true,
-    index: match.index,
-    localAntecedent: text.slice(0, match.index),
+    index: questionOffset + match.index,
+    localAntecedent: `${turnPrefix}${text.slice(0, match.index)}`,
   };
 }
 
@@ -203,6 +207,8 @@ const SAFETY_KEYWORDS_HARM = `${SAFETY_NON_PREFIX}(?:${HARM_ADJECTIVE}|${SAFETY_
 
 function recognizeSafetyQuestion(text) {
   const questionText = latestInterrogativeSegment(text) || text;
+  const questionOffset = Math.max(0, text.lastIndexOf(questionText));
+  const turnPrefix = text.slice(0, questionOffset);
   const schedulingSafety = /\b(?:is|are|would|will|can|could)\s+(?:it|that|this)\s+[^.!?;]{0,20}?\bsafe\s+to\s+(?:reschedule|schedule|move|change|cancel|book)\b/i.test(questionText);
   const drying = SAFETY_ELLIPTICAL_WET_QUESTION_RE.exec(questionText);
   const dryingSuffix = drying ? questionText.slice(drying[0].length) : '';
@@ -211,8 +217,8 @@ function recognizeSafetyQuestion(text) {
     && SAFETY_FOLLOWUP_CONFIRMATION_QUESTION_RE.test(dryingSuffix.slice(independentQuestion.index).replace(/^[,;]\s*/, ''));
   return {
     text: questionText,
-    positive: schedulingSafety ? null : questionAboutProduct(questionText, SAFETY_KEYWORDS_POSITIVE),
-    harm: questionAboutProduct(questionText, SAFETY_KEYWORDS_HARM),
+    positive: schedulingSafety ? null : questionAboutProduct(questionText, SAFETY_KEYWORDS_POSITIVE, questionOffset, turnPrefix),
+    harm: questionAboutProduct(questionText, SAFETY_KEYWORDS_HARM, questionOffset, turnPrefix),
     dryingFollowup: Boolean(drying && (!independentQuestion || confirmsProposition)),
   };
 }
@@ -299,7 +305,7 @@ function safetyProductScope(text) {
   return scopes;
 }
 
-const SAFETY_CIRCUMSTANCE_RE = /\b(if|unless|when|while|before|after|provided(?:\s+that)?|as\s+long\s+as)\s+([^.!?;,:—–]+)/gi;
+const SAFETY_CIRCUMSTANCE_RE = /\b(if|unless|when|while|before|after|once|provided(?:\s+that)?|as\s+long\s+as)\s+([^.!?;,:—–]+)/gi;
 
 function safetyCircumstanceScopes(text) {
   const predicate = SAFETY_REFUSED_CLAIM_RE.exec(text);
@@ -314,7 +320,7 @@ function safetyCircumstanceScopes(text) {
   const trailingConditions = [...text.slice(predicate.index + predicate[0].length).matchAll(SAFETY_CIRCUMSTANCE_RE)];
   return [...leadingConditions, ...trailingConditions]
     .filter((condition) => !CONVERSATIONAL_CONDITION_RE.test(condition[2].replace(/^\s*(?:it|they)\s+(?:is|are|was|were)\s+/i, '')))
-    .map((condition) => `${condition[1]} ${condition[2]}`.toLowerCase()
+    .map((condition) => `${/^once$/i.test(condition[1]) ? 'when' : condition[1]} ${condition[2]}`.toLowerCase()
       .replace(/\b(?:it|they)\s+(?:is|are|was|were)\s+/g, '')
       .replace(/\s+/g, ' ').trim());
 }
