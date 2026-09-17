@@ -430,13 +430,13 @@ describe('email template library rendering', () => {
     expect(retry.update.mock.calls[0][0].status).not.toBe('failed');
   });
 
-  test.each(['opened_at', 'clicked_at'])('matching %s evidence survives lost SDK response with queued status', async (field) => {
+  test.each(['opened_at', 'clicked_at', 'processed', 'deferred'])('matching %s evidence survives lost SDK response with queued status', async (field) => {
     const queuedMessage = { id: 'msg-engaged', status: 'queued', subject_snapshot: 'S' };
     const current = { ...queuedMessage, [field]: '2026-01-01T00:00:00Z' };
     const failWrite = chain();
     const promote = chain({ returning: [{ ...current, status: 'sent' }] });
     const insert = chain({ returning: [queuedMessage] });
-    const event = chain({ first: { event_type: field === 'opened_at' ? 'open' : 'click' } });
+    const event = chain({ first: { event_type: field === 'opened_at' ? 'open' : field === 'clicked_at' ? 'click' : field } });
     setDbQueues({
       email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
       email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],

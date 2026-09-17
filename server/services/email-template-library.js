@@ -1370,13 +1370,13 @@ async function sendTemplate({
     // events that do not change queued status.
     const matchingProviderEvidence = matchingAttempt && await db('email_message_events')
       .where({ email_message_id: message.id, provider: 'sendgrid' })
-      .whereIn('event_type', ['delivered', 'open', 'click', 'bounce', 'dropped', 'spamreport', 'unsubscribe', 'group_unsubscribe'])
+      .whereIn('event_type', ['processed', 'deferred', 'delivered', 'open', 'click', 'bounce', 'dropped', 'spamreport', 'unsubscribe', 'group_unsubscribe'])
       .whereRaw("raw_event->>'send_attempt_token' = ?", [sendAttemptToken])
       .first('event_type');
-    if (matchingProviderEvidence && ['open', 'click'].includes(matchingProviderEvidence.event_type)
+    if (matchingProviderEvidence && ['processed', 'deferred', 'open', 'click'].includes(matchingProviderEvidence.event_type)
       && ['queued', 'failed'].includes(currentStatus)) {
-      // Open/click events preserve status. Promote their matching attempt so
-      // the next idempotent invocation cannot retry an email already opened.
+      // These accepted events preserve status. Promote their matching attempt
+      // so an idempotent invocation cannot redispatch provider-owned mail.
       let recorded = null;
       let bookkeepingFailed = false;
       try {
