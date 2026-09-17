@@ -83,8 +83,11 @@ test('a throwing check fails CLOSED — an unverifiable send never dispatches', 
 
 test('a passing check dispatches, and the callback never reaches the provider input', async () => {
   const check = jest.fn(async () => ({ ok: true }));
+  const sentAt = '2026-08-30T15:00:00Z';
+  sendViaTwilio.mockResolvedValueOnce({ sent: true, provider: 'twilio', deliveryOutcome: 'accepted', providerMessageId: 'SM-real', sentAt });
   const result = await sendCustomerMessage({ ...BASE_INPUT, preDispatchCheck: check });
   expect(result.sent).toBe(true);
+  expect(result.sentAt).toBe(sentAt);
   expect(check).toHaveBeenCalledTimes(1);
   const providerInput = sendViaTwilio.mock.calls[0][0];
   expect(providerInput.preDispatchCheck).toBeUndefined();
@@ -114,6 +117,23 @@ test.each([
   expect(persistAudit).toHaveBeenCalledWith(expect.objectContaining({
     input: expect.not.objectContaining({ preSendCheck: expect.anything() }),
     validatorsFailed: ['pre_send_check_boundary'],
+  }));
+});
+
+test('a promised-link pre-provider check runs at handoff and stays out of serialized input', async () => {
+  const check = jest.fn(async () => ({ ok: false, code: 'LINK_SOURCE_CHANGED', reason: 'visit changed' }));
+  sendViaTwilio.mockImplementationOnce(async (providerInput, hooks) => {
+    expect(await hooks.preSendCheck()).toMatchObject({ ok: false, code: 'LINK_SOURCE_CHANGED' });
+    expect(providerInput.preProviderCheck).toBeUndefined();
+    return { sent: false, provider: 'twilio', deliveryOutcome: 'not_sent' };
+  });
+
+  const result = await sendCustomerMessage({ ...BASE_INPUT, preProviderCheck: check });
+  expect(check).toHaveBeenCalledTimes(1);
+  expect(result).toMatchObject({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'LINK_SOURCE_CHANGED' });
+  expect(persistAudit).toHaveBeenCalledWith(expect.objectContaining({
+    input: expect.not.objectContaining({ preProviderCheck: expect.anything() }),
+    validatorsFailed: ['pre_provider_check_boundary'],
   }));
 });
 
@@ -224,6 +244,18 @@ test('lead handoff closure reaches only the provider hook, never message or audi
   expect(sendViaTwilio.mock.calls[0][1].withSmsHandoff).toEqual(expect.any(Function));
   expect(sendViaTwilio.mock.calls[0][0]).not.toHaveProperty('withSmsHandoff');
   expect(persistAudit.mock.calls[0][0].input).not.toHaveProperty('withSmsHandoff');
+});
+
+test('promised reschedule link can use the locked SMS handoff only with its delivery identity', async () => {
+  const valid = { ...BASE_INPUT, audience: 'customer', purpose: 'appointment', entryPoint: 'reschedule-link-promise',
+    metadata: { original_message_type: 'reschedule_link_promise', followThroughCommitmentId: 'promise-1' },
+    withSmsHandoff: jest.fn() };
+  expect((await sendCustomerMessage(valid)).sent).toBe(true);
+  expect(sendViaTwilio.mock.calls[0][1].withSmsHandoff).toEqual(expect.any(Function));
+  sendViaTwilio.mockClear();
+  expect(await sendCustomerMessage({ ...valid, metadata: { original_message_type: 'reschedule_link_promise' } }))
+    .toMatchObject({ sent: false, blocked: true, code: 'UNSUPPORTED_SMS_HANDOFF' });
+  expect(sendViaTwilio).not.toHaveBeenCalled();
 });
 
 test.each([

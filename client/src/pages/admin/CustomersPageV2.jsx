@@ -891,21 +891,22 @@ const VIEWS = [
   { key: "intelligence", label: "Opportunities", Icon: Sparkles },
 ];
 
-function CustomersCommandHeader({ view, onViewChange, onAddCustomer, canAdd }) {
+function CustomersCommandHeader({ view, onViewChange, onAddCustomer, isAdmin }) {
   const density = useUiDensity();
-  const activeConfig = VIEWS.find((v) => v.key === view) || VIEWS[0];
+  const views = VIEWS.filter((v) => isAdmin || v.key !== "intelligence");
+  const activeConfig = views.find((v) => v.key === view) || views[0];
 
   return (
     <AdminCommandHeader
       variant={density === 'legacy' ? 'framed' : 'workspace'}
       title="Customers"
       icon={activeConfig.Icon}
-      sections={VIEWS}
+      sections={views}
       activeKey={view}
       onSectionChange={onViewChange}
       ariaLabel="Customers section"
       action={
-        canAdd
+        isAdmin
           ? {
               label: "Add Customer",
               icon: UserPlus,
@@ -1689,7 +1690,10 @@ export default function CustomersPageV2() {
   // Default is Directory on both mobile and desktop (list-first).
   // Explicit ?view=… URLs win — deep-links still work.
   const rawView = searchParams.get("view");
-  const view = rawView === "health" ? "directory" : rawView || "directory";
+  const view = new Map([
+    ["health", "directory"],
+    ["intelligence", isAdmin ? "intelligence" : "directory"],
+  ]).get(rawView) || rawView || "directory";
 
   // Usage beacon for the view that actually RENDERS. `view` is taken from
   // the URL unvalidated, and an unknown value matches none of the render
@@ -2099,7 +2103,7 @@ export default function CustomersPageV2() {
         view={view}
         onViewChange={changeView}
         onAddCustomer={() => openAddCustomer()}
-        canAdd={isAdmin}
+        isAdmin={isAdmin}
       />
       {view === "directory" && (
         <div className="customer-directory-tools flex items-center gap-2 mb-4">

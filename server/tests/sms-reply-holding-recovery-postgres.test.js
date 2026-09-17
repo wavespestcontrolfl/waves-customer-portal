@@ -197,6 +197,35 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
     expect(await trx('sms_log').where({ id: reservationId }).first('id')).toMatchObject({ id: reservationId });
   });
 
+  test('a freshly reclaimed real scheduled review row survives the sweep even at the exact age cutoff (codex P1, review-ask-queued #4334)', async () => {
+    // claimDueScheduledSms (scheduler.js) flips a due retry's status to
+    // 'sending' WITHOUT touching created_at, so a real scheduled review-ask
+    // row can land in this sweep's status='sending' + past-cutoff shape at
+    // the exact moment it is reclaimed for its next attempt — age alone
+    // can't tell it apart from an orphaned synthetic placeholder. Only its
+    // scheduled_for column can: a synthetic reservation (review-request.js
+    // #reserveReviewSms) never sets it, a real scheduled row always keeps
+    // the one it was queued with. Losing this row here would strand its
+    // retry and terminal-hook obligations.
+    const reservationId = await reviewReservation({ createdAt: pastAskSpacingWindow() });
+    await trx('sms_log').where({ id: reservationId }).update({ scheduled_for: new Date() });
+
+    expect(await autoSend.reconcileAutoSendClaims({ orphanMinutes: 30 })).toMatchObject({ reviewReservationsExpired: 0 });
+    expect(await trx('sms_log').where({ id: reservationId }).first('id')).toMatchObject({ id: reservationId });
+  });
+
+  test('a synthetic placeholder reservation (no scheduled_for) still expires past its window', async () => {
+    // Companion to the case above: confirms the scheduled_for guard narrows
+    // the sweep rather than disabling it — an orphaned manual/inline
+    // reservation (never carries scheduled_for) must still be swept.
+    const reservationId = await reviewReservation({ createdAt: pastAskSpacingWindow() });
+    expect(await trx('sms_log').where({ id: reservationId }).first('scheduled_for'))
+      .toMatchObject({ scheduled_for: null });
+
+    expect(await autoSend.reconcileAutoSendClaims({ orphanMinutes: 30 })).toMatchObject({ reviewReservationsExpired: 1 });
+    expect(await trx('sms_log').where({ id: reservationId }).first('id')).toBeUndefined();
+  });
+
   test('an auto-send claim past the reconciliation window fails like any other orphan, freeing its reservation once the parked side reopens', async () => {
     const used = await decision({ workflow: autoSend.AUTOSEND_WORKFLOW, status: autoSend.CLAIM_STATUS });
     const parked = await decision({ message: 'Human review fallback.' });

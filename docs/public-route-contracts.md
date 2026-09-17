@@ -55,6 +55,16 @@ fallback until an approved manual primary-property change freezes it. Contact
 recipients, third-party Bill-To authority, amounts, and permanent receipt tokens
 are unchanged; snapshots remain authoritative when the rollout gate is off.
 
+Invoice line-item ownership metadata: `/api/pay/:token` and
+`/api/receipt/:token` return the invoice's persisted `line_items` as `lineItems`.
+On itemized accepted-plan invoices, each base-application row intentionally may
+include `client_id` (`scheduled_<scheduled-service UUID>_primary`),
+`accepted_service_type`, and `accepted_service_id` (the catalog service UUID).
+These values freeze the billed row's service ownership for combined-visit
+closeout. They are opaque, non-bearer references that grant no read or write
+access; no sibling invoice, report, receipt, or other bearer token rides a line
+item. Legacy and unrelated invoice rows may omit the ownership fields.
+
 `/api/pay/:token`
 (+ `/setup`, `/quote`, `/finalize`, `/confirm`, `/consent`,
 `/capture-setup`, `/setup-complete`, `/update-amount`, `/error`,
@@ -590,7 +600,12 @@ and keys via the shared /64-collapsing `rateLimitKey`). Eligibility
 requires a PUBLISHED estimate (sent_at/viewed_at set — the expiration
 sweep flips never-sent drafts to 'expired' too, and those must never
 qualify) that is past expires_at or sweep-expired, not
-accepted/declined/archived. Concurrency: the 24h dedupe stamp and the
+accepted/declined/archived. Fixed-validity bids and groups containing any live
+fixed-validity sibling (draft, scheduled, mid-send, published or expired —
+not only the rows an extension would revive) are ineligible before
+any claim: both the POST and the expired `/data` response use generic 404
+without the extension-offer bit. Admin extensions refuse the whole group
+before changing any expiry. Concurrency: the 24h dedupe stamp and the
 lifetime auto-grant burn live in DEDICATED estimates columns
 (`extension_requested_at` / `extension_auto_granted_at`, migration
 20260711000001 — never estimate_data, whose full-blob writers could erase
@@ -990,8 +1005,29 @@ against all live tokens 2026-08-07); accept/decline carry a 10/hr
 limiter — the two heaviest public money-adjacent writes; select-tier/
 preferences ride estimateToggleLimiter, data/pdf ride dataLimiter).
 Authored commercial proposals expose reviewed four-decimal quantities and unit
-rates, explicit unit labels and cent-rounded line amounts through the existing
-normalized proposal and document output. These additions do not widen draft access.
+rates, explicit unit labels, cent-rounded line amounts, and the fixed
+`validThrough` date in their normalized proposal and document output. A fixed
+price hold governs expiry even after resends and cannot be changed by the
+generic extension or auto-renew paths; these additions do not widen draft access.
+A delivered group anchor may remain navigable through its stored
+`estimate_data.groupLinkViewableThrough` after its own offer expires, in both
+the HTML and `/data` views, so valid siblings remain reachable. Expired legacy
+anchors with this navigation window route to the React property-group view
+(the API HTML mount redirects to `/estimate/:token`). This window
+never changes offer deadlines, acceptance, CTA eligibility or reminder copy.
+Archived, unpublished, send-failed and off-surface rows remain withheld, and
+the call-side block still overrides navigation access. During an admitted group
+navigation window, eligible published expired members remain in `propertyGroup`
+with `status: expired`; a member whose own link is no longer viewable omits
+`token` and renders as a nonclickable expired summary.
+An active anchor's own unexpired deadline also permits these summaries; receipt
+visibility alone after acceptance or decline does not extend this window. Expired
+navigation-only pages hide the unavailable PDF download. Legacy token redirects
+retain no-store privacy headers. An expired anchor without a live window can
+recover a missed grant on HTML or `/data` access after a temporary call block
+clears: the shared transaction pins its id, token and group, requires current
+published/call-clear eligibility, and updates only navigation metadata from
+eligible actual offer deadlines.
 The `/estimate/:token?website=1` SPA uses the website's compact pricing →
 scheduling → Auto Pay presentation over these same APIs. `embed=1` permits
 framing only while `GATE_WEBSITE_QUOTE_BOOKING` is on and only from the
@@ -1860,6 +1896,46 @@ tools may be added here — the write surface stays IB-only behind
 write-gates. JSON-RPC batches are capped at 20; GET returns 405 (stateless
 server, no SSE). Treat the auth ordering and the read-only tool surface as
 security-critical).
+`/api/ops/digest` and `/api/ops/digest/resolve` (POST; machine-to-machine
+— the external Waves ops crons on the owner's Mac post their FIX:/ACT:
+findings so they land as `ops_digest` admin bell rows (the Waves Ops lane
+in Agents → Activity) instead of emails to contact@, and retire a finding's
+standing rows once its check has run clean N times (fall-off rule, owner
+2026-09-11). Token-only auth: `OPS_DIGEST_INGEST_TOKEN` via
+`Authorization: Bearer`, constant-time compare. Privacy baseline on every
+outcome (`Cache-Control: no-store`, `X-Robots-Tag: noindex`,
+`Referrer-Policy: no-referrer` via middleware/no-store.js). Fail-closed in
+ordered layers, the dark check FIRST — a pre-router `app.use('/api/ops/digest')`
+gate in server/index.js mounted ahead of the global `cors()` (so even an
+OPTIONS preflight reads 404 while dark), the global `/api/` limiter, and a
+pre-parser chain (`ingestPreParsers`: dark gate → own limiter → bearer auth
+→ 1 MB JSON parse → JSON body-error handler) mounted ahead of the global
+JSON parser, same pattern as `/api/mcp`. While the token is unset every
+request reads the SAME generic 404 an unknown route gets (`Route not
+found: METHOD path`), never a revealing 429, 400 or 413; with the token set
+a malformed or oversized body is parsed only AFTER auth, so an
+unauthenticated caller sees 401, never 400/413. Layers: 404 while the token
+is unset (that IS the kill switch), then 120/15-min per-IP limiter
+(/64-collapsed), 401 on mismatch,
+409 while `GATE_OPS_DIGESTS_IN_APP` / `GATE_AGENT_ACTIVITY` are off, 400 on
+a rejected payload (kinds other than FIX/ACT are refused — routine/FYI
+reporting stays on email), 503 when no row landed; the caller emails on
+any non-2xx so nothing is lost. A failure observed at or before this key's
+latest clean observation returns 200 `{ ok: true, stale: true }` without a
+bell or email fallback. `/resolve` shares the 404 → limiter → 401
+→ 400 layers but deliberately has NO 409: retiring history must never
+depend on the ingest lane being on. Under the same per-key advisory lock
+as ingest, it atomically retires rows by observation time (using created_at
+only when no observation stamp exists) and advances a durable clean watermark
+even when no rows stand; success answers 200 `{ resolved: N }` (N may be 0),
+and a DB failure answers retryable 503, never false success. Writes exactly
+one admin `ops_digest` row
+(bell:true, dedupe on the check+key pair inside a rolling day; links must
+be `/admin`-relative; subject/body/metadata size-capped) or marks rows
+read + `metadata.resolved` — never deletes, never touches customer rows.
+No customer PII may be posted here (the ops-cron contract is id prefixes
+and masked phones). Treat the auth ordering and the exceptions-only kind
+allowlist as security/ruling-critical).
 `/api/client-errors` (POST; unauthenticated client error telemetry. An
 anonymous surface — /admin/login, a public token route, or any page — can
 crash in the browser, so the reporter cannot require auth. Error reports

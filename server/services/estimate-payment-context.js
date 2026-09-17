@@ -22,6 +22,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { lineIsBaseApplication } = require('./invoice');
 // Shared terminal-status set so "remaining" counts visits the same way the
 // prepaid-series banner and Customer 360 rollup do.
 const { TERMINAL_STATUSES } = require('./prepaid-series');
@@ -36,6 +37,8 @@ const INVOICE_DEAD_STATUSES = ['void', 'cancelled', 'canceled', 'refunded'];
 
 const SETUP_FEE_RE = /setup fee/i;
 const FIRST_APPLICATION_RE = /first (service )?application/i;
+const isFirstApplicationLine = (line) => lineIsBaseApplication(line)
+  || FIRST_APPLICATION_RE.test(String(line?.description || ''));
 
 function num(v) {
   const n = Number(v);
@@ -65,11 +68,13 @@ function lineAmount(li) {
 // Exact dollars a matching line item actually billed. Null (not 0) when no
 // line matches, so the card can distinguish "no setup fee on this plan" from
 // "setup fee of $0".
-function sumMatchingLines(invoice, re) {
+function sumMatchingLines(invoice, matcher) {
   let found = false;
   let total = 0;
   for (const li of lineItemsArray(invoice)) {
-    if (!re.test(String(li?.description || ''))) continue;
+    const matches = typeof matcher === 'function'
+      ? matcher(li) : matcher.test(String(li?.description || ''));
+    if (!matches) continue;
     found = true;
     total += lineAmount(li);
   }
@@ -335,7 +340,7 @@ async function buildEstimatePaymentContext(estimate, { scheduledServiceId = null
         paidAt: inv.paid_at || null,
         total: num(inv.total),
         setupFeeAmount: sumMatchingLines(inv, SETUP_FEE_RE),
-        firstApplicationAmount: sumMatchingLines(inv, FIRST_APPLICATION_RE),
+        firstApplicationAmount: sumMatchingLines(inv, isFirstApplicationLine),
       };
     }
     // The canonical detector ALWAYS decides (Codex PR r8 P1): a partial

@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const SignalDetector = require('../services/customer-intelligence/signal-detector');
 const HealthScorer = require('../services/customer-intelligence/health-scorer');
 const RetentionEngine = require('../services/customer-intelligence/retention-engine');
@@ -9,7 +9,9 @@ const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+// CRM health, pricing, retention drafts and outcomes are office-only, even
+// when the requesting technician has a visit assigned to the customer.
+router.use(adminAuthenticate, requireAdmin);
 
 // GET /api/admin/customers/intelligence — full overview
 router.get('/', async (req, res, next) => {
@@ -153,7 +155,7 @@ router.post('/:id/retention-outreach', async (req, res, next) => {
 });
 
 // PUT /api/admin/customers/intelligence/retention/:id/approve — approve and send
-router.put('/retention/:id/approve', requireAdmin, async (req, res, next) => {
+router.put('/retention/:id/approve', async (req, res, next) => {
   try {
     const outreach = await db('retention_outreach').where('id', req.params.id).first();
     if (!outreach) return res.status(404).json({ error: 'Outreach not found' });
@@ -240,7 +242,7 @@ router.put('/retention/:id/approve', requireAdmin, async (req, res, next) => {
 });
 
 // PUT /api/admin/customers/intelligence/retention/:id/skip — skip outreach
-router.put('/retention/:id/skip', requireAdmin, async (req, res, next) => {
+router.put('/retention/:id/skip', async (req, res, next) => {
   try {
     const [updated] = await db('retention_outreach')
       .where({ id: req.params.id, status: 'pending_approval' })

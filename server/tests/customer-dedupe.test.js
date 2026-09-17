@@ -32,7 +32,7 @@ function makeChain(table, route) {
   const q = { _table: table, _calls: [] };
   const methods = [
     'where', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereNot', 'select', 'groupBy',
-    'orderBy', 'forUpdate', 'update', 'insert', 'del', 'count', 'onConflict',
+    'orderBy', 'forUpdate', 'skipLocked', 'update', 'insert', 'del', 'count', 'onConflict',
     'ignore', 'returning', 'first', 'increment', 'limit',
   ];
   for (const m of methods) {
@@ -624,13 +624,23 @@ describe('executeMerge', () => {
   const WINNER = 'bbbbbbbb-0000-0000-0000-000000000001';
   const LOSER = 'bbbbbbbb-0000-0000-0000-000000000002';
 
-  function buildTrx({ winner, loser, fkRows, updates = {}, journalId = 'j1', prefsConflict = false, sessions = null, queueCustomers = null }) {
+  function buildTrx({ winner, loser, fkRows, updates = {}, journalId = 'j1', prefsConflict = false, sessions = null, queueCustomers = null, propertyRows = [] }) {
     // `events` is an ORDERED log (the stamped-session reads and every repoint
     // update) so a test can assert what the executor does before the sweep.
-    const state = { repointUpdates: [], retired: null, backfilled: null, journal: null, prefsDeleted: false, prefsMerged: null, events: [] };
+    const state = {
+      repointUpdates: [], retired: null, backfilled: null, journal: null,
+      prefsDeleted: false, prefsMerged: null, events: [],
+      propertyRows: propertyRows.map((row) => ({ ...row })),
+    };
     const route = (table, q) => {
       if (table === 'customers') {
-        if (q.called('forUpdate')) return [winner, loser].filter(Boolean);
+        if (q.called('forUpdate')) {
+          if (q.called('first')) {
+            const id = q.args('where')?.[0]?.id;
+            return [winner, loser].find((row) => row?.id === id) || null;
+          }
+          return [winner, loser].filter(Boolean);
+        }
         if (q.called('increment')) { state.credited = q.args('increment'); return 1; }
         if (q.called('update')) {
           const payload = q.args('update')[0];
@@ -644,6 +654,43 @@ describe('executeMerge', () => {
         // The unlocked scan behind requireQueueEligibility (findDuplicateGroups):
         // tests that need a live queue plant its rows here; default = empty.
         return queueCustomers || [];
+      }
+      if (table === 'customer_properties') {
+        const matches = (row, where) => Object.entries(where || {}).every(([key, value]) => row[key] === value);
+        const whereArgs = q.args('where');
+        const where = typeof whereArgs?.[0] === 'object'
+          ? whereArgs[0]
+          : { [whereArgs?.[0]]: whereArgs?.[1] };
+        const rows = state.propertyRows.filter((row) => matches(row, where));
+        if (q.called('first')) return rows[0] || null;
+        if (q.called('insert')) {
+          const input = q.args('insert')[0];
+          if (input.active && state.propertyRows.some((row) => row.active
+            && row.customer_id === input.customer_id && row.address_key === input.address_key)) {
+            const err = new Error('duplicate key value violates customer_properties address-key unique constraint');
+            err.code = '23505';
+            throw err;
+          }
+          const row = { id: `property-${state.propertyRows.length + 1}`, ...input };
+          state.propertyRows.push(row);
+          state.events.push(['property_insert', row.customer_id]);
+          return [{ id: row.id }];
+        }
+        if (q.called('select')) return rows.map((row) => ({ ...row }));
+        if (q.called('update')) {
+          const payload = q.args('update')[0];
+          const movingPrimary = rows.some((row) => row.is_primary) && payload.customer_id === winner.id
+            && payload.is_primary !== false;
+          if (movingPrimary && state.propertyRows.some((row) => row.customer_id === winner.id && row.is_primary)) {
+            const err = new Error('duplicate key value violates unique constraint');
+            err.code = '23505';
+            throw err;
+          }
+          for (const row of rows) Object.assign(row, payload);
+          state.events.push(['property_repoint', rows.map((row) => row.id)]);
+          return rows.length;
+        }
+        return [];
       }
       if (table === 'customer_merge_journal') {
         state.journal = q.args('insert')[0];
@@ -720,6 +767,7 @@ describe('executeMerge', () => {
     trx.raw = jest.fn(async () => ({ rows: fkRows }));
     trx.transaction = jest.fn(async (fn) => fn(trx));
     trx.fn = { now: () => 'NOW()' };
+    trx.isTransaction = true;
     return { trx, state };
   }
 
@@ -956,6 +1004,103 @@ describe('executeMerge', () => {
     expect(JSON.parse(state.journal.loser_snapshot).phone).toBe('6124074763');
     expect(result.journalId).toBe('j1');
     expect(result.loserSnapshot.id).toBe(LOSER);
+    // Even with no loser property FK to move, the merge establishes the
+    // addressed survivor's canonical primary before the route can add the
+    // loser's account address as a secondary property post-commit.
+    expect(state.propertyRows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ customer_id: WINNER, is_primary: true, active: true, address_line1: winner.address_line1 }),
+    ]));
+  });
+
+  it('creates the addressed winner primary before moving the loser primary, preserving both premises and refusing lossy undo', async () => {
+    const winner = {
+      id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003',
+      address_line1: '100 Main St', city: 'Bradenton', state: 'FL', zip: '34205',
+    };
+    const loser = {
+      id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003',
+      address_line1: '200 Oak Ave', city: 'Sarasota', state: 'FL', zip: '34236',
+    };
+    const { trx, state } = buildTrx({
+      winner,
+      loser,
+      fkRows: [{ table_name: 'customer_properties', column_name: 'customer_id' }],
+      propertyRows: [{
+        id: 'loser-primary', customer_id: LOSER, is_primary: true, active: true,
+        address_line1: loser.address_line1, city: loser.city, state: loser.state, zip: loser.zip,
+      }],
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+
+    await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+
+    const winnerPrimary = state.propertyRows.find((row) => row.customer_id === WINNER && row.is_primary);
+    const movedLoserProperty = state.propertyRows.find((row) => row.id === 'loser-primary');
+    expect(winnerPrimary).toMatchObject({
+      address_line1: winner.address_line1, city: winner.city, zip: winner.zip, source: 'backfill', active: true,
+    });
+    expect(movedLoserProperty).toMatchObject({ customer_id: WINNER, is_primary: false, active: true, address_line1: loser.address_line1 });
+    expect(state.events.findIndex(([event]) => event === 'property_insert'))
+      .toBeLessThan(state.events.findIndex(([event]) => event === 'property_repoint'));
+    expect(JSON.parse(state.journal.repointed_ids).collision_handlers).toContain('customer_properties');
+  });
+
+  it('promotes the winner account address saved as an active secondary instead of inserting a duplicate', async () => {
+    const winner = {
+      id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003',
+      address_line1: '100 Main St', city: 'Bradenton', state: 'FL', zip: '34205',
+    };
+    const loser = {
+      id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003',
+      address_line1: '200 Oak Ave', city: 'Sarasota', state: 'FL', zip: '34236',
+    };
+    const savedAccount = {
+      id: 'saved-account', customer_id: WINNER, is_primary: false, active: true,
+      address_line1: '100 Main Street', address_line2: null, city: 'Bradenton', zip: '34205-1234',
+      address_key: '100mainstreetbradenton34205', label: 'Front house', source: 'manual', occupancy_type: 'tenant',
+    };
+    const { trx, state } = buildTrx({
+      winner,
+      loser,
+      fkRows: [{ table_name: 'leads', column_name: 'customer_id' }],
+      propertyRows: [savedAccount],
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+
+    await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+
+    expect(state.propertyRows).toHaveLength(1);
+    expect(state.propertyRows[0]).toMatchObject({
+      id: savedAccount.id, is_primary: true, active: true,
+      label: savedAccount.label, source: savedAccount.source, occupancy_type: savedAccount.occupancy_type,
+    });
+    expect(state.events).not.toContainEqual(expect.arrayContaining(['property_insert']));
+  });
+
+  it('fails closed before repoints when an incompatible addressed winner has only an inactive primary', async () => {
+    const winner = {
+      id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003',
+      address_line1: '100 Main St', city: 'Bradenton', state: 'FL', zip: '34205',
+    };
+    const loser = {
+      id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003',
+      address_line1: '200 Oak Ave', city: 'Sarasota', state: 'FL', zip: '34236',
+    };
+    const { trx, state } = buildTrx({
+      winner,
+      loser,
+      fkRows: [{ table_name: 'leads', column_name: 'customer_id' }],
+      propertyRows: [{ id: 'inactive-primary', customer_id: WINNER, is_primary: true, active: false }],
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' }))
+      .rejects.toMatchObject({
+        mergeConflictCode: 'inactive_primary_property_conflict',
+        message: expect.stringMatching(/inactive primary property.*reconcile/i),
+      });
+    expect(state.retired).toBeNull();
+    expect(state.repointUpdates).toEqual([]);
   });
 
   it('aborts the merge on an unexpected repoint failure (non-droppable table)', async () => {
@@ -1788,11 +1933,15 @@ describe('executeMerge', () => {
       id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003',
       address_line1: '5350 Desoto Rd Apt 1418', address_line2: null, zip: '34243',
     };
-    const { trx } = buildTrx({ winner, loser, fkRows: FK_ROWS });
+    const { trx, state } = buildTrx({ winner, loser, fkRows: FK_ROWS });
     db.transaction.mockImplementation(async (fn) => fn(trx));
     const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
     // Case preserved from the loser's raw line1.
     expect(result.backfills.address_line2).toBe('Apt 1418');
+    // Same-premises enrichment keeps the existing inheritance path. The merge
+    // service does not create a stale pre-backfill primary; the route's
+    // post-commit property recorder receives the enriched loser address.
+    expect(state.propertyRows).toEqual([]);
   });
 
   it('promotes the winner when retiring the same-account primary profile', async () => {
@@ -1936,16 +2085,16 @@ describe('executeMerge', () => {
     await expect(mk(['cus_x'], ['cus_y'])).rejects.toThrow(/different Stripe profile/);
   });
 
-  it('backfills the address as a whole tuple — never the loser street with winner stale city', async () => {
+  it('backfills the address as a whole tuple for an addressless placeholder — never the loser street with winner stale city', async () => {
     const winner = {
       id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003',
-      address_line1: null, address_line2: null, city: 'Sarasota', state: 'FL', zip: '34236',
+      address_line1: 'Unknown', address_line2: null, city: 'Sarasota', state: 'FL', zip: '34236',
     };
     const loser = {
       id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003',
       address_line1: '100 Main St', address_line2: 'Apt 2', city: 'Bradenton', state: 'FL', zip: '34205',
     };
-    const { trx } = buildTrx({ winner, loser, fkRows: FK_ROWS });
+    const { trx, state } = buildTrx({ winner, loser, fkRows: FK_ROWS });
     db.transaction.mockImplementation(async (fn) => fn(trx));
     const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
     expect(result.backfills).toMatchObject({
@@ -1955,6 +2104,7 @@ describe('executeMerge', () => {
       state: 'FL',
       zip: '34205',
     });
+    expect(state.propertyRows).toEqual([]);
   });
 
   it('repoints customer-typed data-hygiene proposal scopes and resources', async () => {
@@ -2404,6 +2554,20 @@ describe('predictWinnerBackfills (pure — the executor\'s rule, disclosed by th
     expect(backfills).toMatchObject({ billing_mode: 'per_application', per_application_fee: '85.00', payer_id: 'payer-1' });
   });
 
+  it('never mixes address components across incompatible premises, while enriching a proven same-premises tuple', () => {
+    const winner = { id: 'W', address_line1: '100 Main St', address_line2: null, city: null, state: 'FL', zip: null };
+    const otherPremise = { id: 'L', address_line1: '200 Oak Ave', address_line2: 'Unit 7', city: 'Sarasota', state: 'FL', zip: '34236' };
+    expect(dedupe.predictWinnerBackfills(winner, otherPremise).backfills).toEqual({});
+
+    const zipConflict = { ...otherPremise, address_line1: '100 Main Street' };
+    expect(dedupe.predictWinnerBackfills({ ...winner, zip: '34205' }, zipConflict).backfills).toEqual({});
+
+    const samePremise = { ...otherPremise, address_line1: '100 Main Street', zip: '34205' };
+    expect(dedupe.predictWinnerBackfills(winner, samePremise).backfills).toMatchObject({
+      address_line2: 'Unit 7', city: 'Sarasota', zip: '34205',
+    });
+  });
+
   it('a loser-only Stripe profile (or the executor\'s saved-card derivation) transfers; contact slots move slot-wise with their consent stamp only when the winner had none', () => {
     const winner = { id: 'W', stripe_customer_id: null, service_contact_name: null, service_contact_phone: null, service_contact_email: null, service_contact_role: null, service_contacts_consent_at: null };
     const loser = { id: 'L', stripe_customer_id: null, service_contact_name: 'Pat', service_contact_phone: '9415550199', service_contact_email: null, service_contact_role: 'tenant', service_contacts_consent_at: '2026-08-01T00:00:00Z', service_contacts_consent_source: 'portal', service_contacts_consent_text_version: 'v3' };
@@ -2473,7 +2637,7 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
       if (table === 'referral_promoters') return null;
       // The collision-fold prediction reads both sides' rows of each
       // unique-keyed table (predictCollisionFolds).
-      if (['notification_prefs', 'property_preferences', 'customer_tags', 'conversations'].includes(table)) return collisions[table] || [];
+      if (['notification_prefs', 'property_preferences', 'customer_properties', 'customer_tags', 'conversations'].includes(table)) return collisions[table] || [];
       if (table === 'payment_methods') {
         const owner = q.args('where')[0].customer_id;
         if (q.called('first')) return defaults[owner] ? { id: `${owner}-default` } : null;
@@ -2504,6 +2668,16 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
     // A pref row on ONE side only, tags that do not overlap, threads on different endpoints: nothing folds.
     install({}, { collisions: { property_preferences: [{ customer_id: 'L' }], customer_tags: [{ customer_id: 'W', tag: 'a' }, { customer_id: 'L', tag: 'b' }], conversations: [{ customer_id: 'W', channel: 'sms', our_endpoint_id: 'ep1' }, { customer_id: 'L', channel: 'sms', our_endpoint_id: 'ep2' }] } });
     expect((await dedupe.describeMergeEffects(db, winner, loser)).financial_effects.predicted_collision_handlers).toEqual([]);
+  });
+
+  it('predicts the property-primary collision created when an addressed winner is anchored before the sweep', async () => {
+    install({}, { collisions: {
+      customer_properties: [{ customer_id: 'L', is_primary: true, active: true }],
+    } });
+    const out = await dedupe.describeMergeEffects(db, winner, { ...loser, address_line1: '200 Oak Ave' });
+    expect(out.financial_effects.predicted_collision_handlers).toEqual(['customer_properties']);
+    expect(out.financial_effects.predicted_collision_folds.customer_properties).toMatch(/demoted/);
+    expect(out.financial_effects.revertible_from_queue).toBe(false);
   });
 
   it('renders and pins transferred timestamps as ISO strings — Postgres returns a Date, a Date has no own keys, so it used to serialize as {} in both the card and the fingerprint (Codex r15 P1)', async () => {
@@ -2761,7 +2935,7 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
     const route = (counts) => (table, q) => {
       if (table === 'referral_promoters') return null;
       if (table === 'payment_methods') return q.called('first') ? null : [];
-      if (['notification_prefs', 'property_preferences', 'customer_tags', 'conversations'].includes(table)) return [];
+      if (['notification_prefs', 'property_preferences', 'customer_properties', 'customer_tags', 'conversations'].includes(table)) return [];
       if (table === 'invoices' && !q.called('count')) return [];
       if (table === 'customer_plan_rates') return { n: 0 };
       return { n: counts[table] || 0 };
@@ -2812,12 +2986,29 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
 describe('dbLevelMergeConflict (the executor\'s DB-dependent refusals, shared with the preview — Codex r7 P2)', () => {
   const winner = { id: 'W', billing_mode: null, account_id: null };
   const loser = { id: 'L', billing_mode: 'per_application', account_id: null };
-  function install({ artifacts = {}, sibling = null } = {}) {
+  function install({ artifacts = {}, sibling = null, primary = null } = {}) {
     installDb((table, q) => {
       if (table === 'customers') return sibling;
+      if (table === 'customer_properties') return primary;
       return artifacts[q.args('where')[0].customer_id] ? { id: 'row-1' } : null;
     });
   }
+
+  it('refuses an incompatible addressed winner whose only primary property is inactive', async () => {
+    const addressedWinner = { ...winner, address_line1: '100 Main St' };
+    const otherPremise = { ...loser, billing_mode: null, address_line1: '200 Oak Ave' };
+    install({ primary: { id: 'inactive-primary', active: false } });
+    expect(await dedupe.dbLevelMergeConflict(db, addressedWinner, otherPremise)).toEqual({
+      code: 'inactive_primary_property_conflict',
+      message: expect.stringMatching(/inactive primary property.*reconcile/i),
+    });
+
+    install({ primary: { id: 'active-primary', active: true } });
+    expect(await dedupe.dbLevelMergeConflict(db, addressedWinner, otherPremise)).toBeNull();
+
+    install({ primary: { id: 'inactive-primary', active: false } });
+    expect(await dedupe.dbLevelMergeConflict(db, addressedWinner, { ...otherPremise, address_line1: '100 Main Street' })).toBeNull();
+  });
 
   it('refuses a legacy/special billing-mode pair only when the flipping side has live billing history', async () => {
     // The winner is the flipping side (null mode adopting per_application).
@@ -2858,7 +3049,7 @@ describe('previewCollectionCaseReconciliation (the executor\'s reconcile rule, d
     installDb((table, q) => {
       if (table === 'referral_promoters') return null;
       if (table === 'payment_methods') return [];
-      if (['notification_prefs', 'property_preferences', 'customer_tags', 'conversations'].includes(table)) return [];
+      if (['notification_prefs', 'property_preferences', 'customer_properties', 'customer_tags', 'conversations'].includes(table)) return [];
       if (table === 'invoices' && !q.called('count')) return [];
       return { n: 0 };
     });
