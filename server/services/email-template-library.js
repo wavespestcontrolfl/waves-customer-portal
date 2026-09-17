@@ -1345,14 +1345,6 @@ async function sendTemplate({
       return { sent: true, providerAttempted: true, providerAccepted: true,
         bookkeepingFailed, message: recorded || { ...message, provider_message_id: result.messageId }, rendered };
     }
-    // SendGrid may have accepted the send and a webhook already terminalized the
-    // row (lost-response race) — only mark failed while still queued AND only for
-    // THIS attempt (a superseded attempt must not fail the live retry's row).
-    await db('email_messages').where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken }).update({
-      status: 'failed',
-      error_message: persistedErrorMessage.slice(0, 1000),
-      updated_at: new Date(),
-    });
     const current = await db('email_messages').where({ id: message.id }).first().catch(() => null);
     const currentStatus = String(current?.status || '').toLowerCase();
     // Superseded: a newer attempt reclaimed the row (token changed), so this stale
@@ -1374,14 +1366,14 @@ async function sendTemplate({
       .whereRaw("raw_event->>'send_attempt_token' = ?", [sendAttemptToken])
       .first('event_type');
     if (matchingProviderEvidence && ['processed', 'deferred', 'open', 'click'].includes(matchingProviderEvidence.event_type)
-      && ['queued', 'failed'].includes(currentStatus)) {
-      // These accepted events preserve status. Promote their matching attempt
-      // so an idempotent invocation cannot redispatch provider-owned mail.
+      && currentStatus === 'queued') {
+      // These accepted events preserve queued status. Promote only queued,
+      // never a provider-block failure that arrived before/during this read.
       let recorded = null;
       let bookkeepingFailed = false;
       try {
         [recorded] = await db('email_messages').where({ id: message.id, send_attempt_token: sendAttemptToken })
-          .whereIn('status', ['queued', 'failed'])
+          .where({ status: 'queued' })
           .update({ status: 'sent', error_message: null, updated_at: new Date() }).returning('*');
       } catch (stampError) {
         bookkeepingFailed = true;
@@ -1394,6 +1386,14 @@ async function sendTemplate({
       return { sent: true, deduped: true, providerAttempted: true,
         providerAccepted: Boolean(matchingProviderEvidence), message: current, rendered };
     }
+    // SendGrid may have accepted the send and a webhook already terminalized the
+    // row (lost-response race) — only mark failed while still queued AND only for
+    // THIS attempt (a superseded attempt must not fail the live retry's row).
+    await db('email_messages').where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken }).update({
+      status: 'failed',
+      error_message: persistedErrorMessage.slice(0, 1000),
+      updated_at: new Date(),
+    });
     await auditEmailTemplateIssue({
       templateKey: template.template_key,
       versionId: version.id,

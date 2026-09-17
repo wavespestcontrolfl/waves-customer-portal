@@ -374,7 +374,7 @@ describe('email template library rendering', () => {
       email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
       email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
       email_suppressions: [chain({ result: [] })],
-      email_messages: [chain({ returning: [queuedMessage] }), chain(),
+      email_messages: [chain({ returning: [queuedMessage] }),
         chain({ first: { ...queuedMessage, status, send_attempt_token: 'newer-attempt' } })],
     });
     sendgrid.sendOne.mockRejectedValueOnce(new Error('provider rejected stale attempt'));
@@ -392,7 +392,7 @@ describe('email template library rendering', () => {
       email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
       email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
       email_suppressions: [chain({ result: [] })],
-      email_messages: [chain({ returning: [queuedMessage] }), chain(), chain({ first: current })],
+      email_messages: [chain({ returning: [queuedMessage] }), chain({ first: current }), chain()],
       email_message_events: [chain({ first: { event_type: status === 'delivered' ? 'delivered' : 'bounce' } })],
     });
     sendgrid.sendOne.mockImplementationOnce(async ({ customArgs }) => {
@@ -433,7 +433,6 @@ describe('email template library rendering', () => {
   test.each(['opened_at', 'clicked_at', 'processed', 'deferred'])('matching %s evidence survives lost SDK response with queued status', async (field) => {
     const queuedMessage = { id: 'msg-engaged', status: 'queued', subject_snapshot: 'S' };
     const current = { ...queuedMessage, [field]: '2026-01-01T00:00:00Z' };
-    const failWrite = chain();
     const promote = chain({ returning: [{ ...current, status: 'sent' }] });
     const insert = chain({ returning: [queuedMessage] });
     const event = chain({ first: { event_type: field === 'opened_at' ? 'open' : field === 'clicked_at' ? 'click' : field } });
@@ -441,7 +440,7 @@ describe('email template library rendering', () => {
       email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
       email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
       email_suppressions: [chain({ result: [] })],
-      email_messages: [insert, failWrite, chain({ first: current }), promote],
+      email_messages: [insert, chain({ first: current }), promote],
       email_message_events: [event],
     });
     sendgrid.sendOne.mockImplementationOnce(async ({ customArgs }) => {
@@ -468,7 +467,7 @@ describe('email template library rendering', () => {
       email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
       email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
       email_suppressions: [chain({ result: [] })],
-      email_messages: [chain({ returning: [queuedMessage] }), chain(), chain({ first: current })],
+      email_messages: [chain({ returning: [queuedMessage] }), chain({ first: current }), chain()],
       email_message_events: [event],
     });
     const rejection = new Error('new attempt rejected');
@@ -483,6 +482,38 @@ describe('email template library rendering', () => {
     if (status === 'queued') await expect(send).rejects.toBe(rejection);
     else expect(await send).toMatchObject({ providerAccepted: false });
     expect(event.where).toHaveBeenCalledWith({ email_message_id: queuedMessage.id, provider: 'sendgrid' });
+  });
+
+  test.each(['before', 'during'])('processed evidence preserves a provider block arriving %s recovery', async (timing) => {
+    const queued = { id: 'msg-block-race', status: 'queued', subject_snapshot: 'S' };
+    const current = { ...queued, status: timing === 'before' ? 'failed' : 'queued' };
+    const durable = { ...queued, status: 'failed', provider_retry_next_at: '2026-01-01T00:00:00Z' };
+    const promotion = chain();
+    promotion.returning.mockImplementation(async () => {
+      const statusGuard = promotion.where.mock.calls.find(([filter]) => filter.status)?.[0].status;
+      if (durable.status !== statusGuard) return [];
+      Object.assign(durable, promotion.update.mock.calls[0][0]);
+      return [durable];
+    });
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+      email_messages: [chain({ returning: [queued] }), chain({ first: current }), promotion],
+      // Both processed and provider-block bounce exist; an unordered first may return processed.
+      email_message_events: [chain({ first: { event_type: 'processed' } })],
+    });
+    sendgrid.sendOne.mockImplementationOnce(async ({ customArgs }) => {
+      current.send_attempt_token = customArgs.send_attempt_token;
+      throw new Error('response lost');
+    });
+    const result = await EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice', to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
+    });
+    expect(result.providerAccepted).toBe(true);
+    expect(durable).toMatchObject({ status: 'failed', provider_retry_next_at: '2026-01-01T00:00:00Z' });
+    if (timing === 'before') expect(promotion.update).not.toHaveBeenCalled();
   });
 
   test('onQueued resolving false ABORTS before dispatch: row marked failed (pre-provider), no sendOne (codex #3565 gh-r20)', async () => {
@@ -1149,8 +1180,8 @@ describe('email template library rendering', () => {
       email_suppressions: [chain({ result: [] })],
       email_messages: [
         queueInsert,
-        failUpdate,
         chain({ first: { ...queuedMessage, status: 'failed' } }),
+        failUpdate,
       ],
     });
     // SendGrid 4xx bodies can echo the recipient address.
