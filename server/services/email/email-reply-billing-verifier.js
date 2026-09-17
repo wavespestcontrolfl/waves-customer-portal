@@ -57,10 +57,12 @@ function hasBillingUnit(tokens, at) {
   if (isWord(tokens[next], 'do', 'does', 'did', 'has')) next += 1;
   if (isWord(tokens[next], 'not', 'never')) next += 1;
   if (isKind(tokens[next], 'be') || isWord(tokens[next], 'occur', 'apply')) next += 1;
-  next = skipSeparators(tokens, next);
+  const afterSeparators = skipSeparators(tokens, next);
+  const hasSeparator = afterSeparators !== next;
+  next = afterSeparators;
   if (isWord(tokens[next], 'not', 'never')) next += 1;
   if (isWord(tokens[at], 'rate') && !isKind(tokens[next], 'unit')) return false;
-  return isUnit(tokens[next]);
+  return hasSeparator ? isKind(tokens[next], 'unit') : isUnit(tokens[next]);
 }
 
 function hasInverseBillingUnit(tokens, at) {

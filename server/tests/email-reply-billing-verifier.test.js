@@ -259,6 +259,21 @@ describe('email reply amountless billing policy', () => {
     rejected('The $98 fee is per visit.');
   });
 
+  test.each([
+    'We refunded the $98 charge — each visit remains included at no additional cost.',
+    'We refunded the charge, every visit remains included.',
+    'Your payment posted: routine visits remain included.',
+    'The fee was credited — (each visit is scheduled separately).',
+  ])('does not attach a later visit subject across billing punctuation: %s', (text) => {
+    expect(verdict(text)).toEqual({ ok: true, violations: [] });
+  });
+
+  test.each([
+    'The charge — for each visit.', 'Fees: — per visit.',
+    'Billing is: (on every visit).', 'Payments, not per visit.',
+    'We charge each visit.', 'We refunded the fee — each visit incurs its own charge.',
+  ])('preserves explicit unit and independent billing relationships: %s', rejected);
+
   test('requires an explicit trusted boolean for the commercial exemption', () => {
     const text = 'Billing is per visit.';
     rejected(text);

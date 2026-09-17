@@ -50,6 +50,9 @@ and `any`. Connector auxiliaries accept emphatic/perfect forms and negation;
 separate adverbs may precede the copula. Possessive fees also follow `incur`.
 Consecutive separators remain within the scanner token bound. Direct-object
 feedback about a technician or service remains valid after a fronted unit.
+After billing punctuation, a classified unit such as `for each visit` is
+required; a later bare visit subject does not attach to an earlier refunded
+charge. Independent visit-billing predicates still reject.
 
 Monetary recognition belongs to the separately reviewed monetary sibling, but
 the lexical policies can overlap: `The $98 fee is per visit` contains the
