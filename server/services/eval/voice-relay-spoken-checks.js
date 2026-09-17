@@ -1567,7 +1567,9 @@ function callbackAgreementAction(additionalComplement = '') {
 
 function callbackConsentOverridden(text, matchEnd, consentCondition, conditionTarget) {
   const rawConsent = consentCondition.exec(text.slice(matchEnd));
-  return rawConsent && new RegExp(`^\\s*,?\\s*(?:or|and|but)\\s+(?:even\\s+)?(?:if|when)\\s+${conditionTarget}\\s+(?:does(?:\\s+not|n[\\x27\\u2019]t)|declines?|refuses?)\\b`, 'i')
+  // A standalone refusal alternative inherits this contact. An alternative
+  // with its own consequent is graded through its own callback candidates.
+  return rawConsent && new RegExp(`^\\s*,?\\s*(?:or|and|but)\\s+(?:even\\s+)?(?:if|when)\\s+${conditionTarget}\\s+(?:does(?:\\s+not|n[\\x27\\u2019]t)(?:\\s+(?:agree|consent))?|declines?|refuses?)\\b(?=\\s*(?:[.;!?]|$))`, 'i')
     .test(text.slice(matchEnd + rawConsent.index + rawConsent[0].length));
 }
 
@@ -1609,8 +1611,9 @@ function no_account_holder_callback(value, record, { spoken }) {
             || CALLBACK_TIMING_MODIFIERS_RE.test(consentModifiers))));
       const claim = (bare ? source.text.replace(/\bif\b.*?(?=,?\s+\b(?:and|but|so|then)\b)/gi, '')
         : inherited ? text.slice(source.start, matchEnd) : claimContext(text, source.start, matchEnd))
-        .replace(/^.*\bbut\s+/i, '')
+        .replace(/^.*\b(?:but|then)\s+/i, '')
         .replace(/^\s*(?:if|unless)\b[^,]*,\s*/i, '')
+        .replace(new RegExp(`^\\s*(?:if|unless)\\b[^,]*?(?=${escapeRegexLiteral(source.text)})`, 'i'), '')
         .replace(/^\s*(?:whether\s+(?:or\s+not\b[^,]*|[^,]*\bor\s+not)|(?:even\s+(?:if|though)|regardless|irrespective)\b[^,]*)\s*,\s*/i, '');
       const speculative = /^\s*(?:maybe|perhaps|i (?:think|believe)(?: that)?|it is possible(?: that)?)\s*$/i.test(text.slice(clauseStart, source.start));
       const callbackPolarity = claim.replace(/\b(?:not forget|never fail|not fail)\s+to\b/gi, '');
