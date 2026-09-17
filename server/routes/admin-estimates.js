@@ -1,7 +1,7 @@
 const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
 const express = require('express');
 const crypto = require('crypto');
-const { estimateOfferVersion } = require('../services/estimate-offer-version');
+const { estimateOfferVersion, annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
 const { gateEnvValue } = require('../config/feature-gates');
 const router = express.Router();
 const db = require('../models/db');
@@ -60,7 +60,8 @@ const {
   inferEstimateServiceLines,
 } = require('../services/estimate-service-lines');
 const { normalizeProposal, computeProposalTotals, isCommercialProposalData } = require('../services/estimate-proposal');
-const { proposalExpiry, groupLinkViewableThrough, hasFixedBidValidity, assertBidSendDate, assertBidScheduleDate, earliestScheduledDelivery, latestReachableSchedule, validateBidFields, FIXED_BID_VALIDITY_ABSENT_SQL } = require('../services/proposal-bid');
+const { programRevenueIssue } = require('../../shared/proposal-bid.cjs');
+const { proposalExpiry, groupLinkViewableThrough, hasFixedBidValidity, assertBidSendDate, assertBidScheduleDate, earliestScheduledDelivery, latestReachableSchedule, validateBidFields, normalizeProjectCosting, FIXED_BID_VALIDITY_ABSENT_SQL } = require('../services/proposal-bid');
 const { publishedGroupLinks, publishedOfferExpiry, extendPublishedGroupLinks } = require('../services/estimate-group-navigation');
 const { generateEstimateProposalPDF } = require('../services/pdf/estimate-pdf');
 const {
@@ -116,6 +117,24 @@ function parseEstimateData(estimateData) {
   return typeof estimateData === 'object' ? estimateData : null;
 }
 
+
+// A group handoff delivers each published property's own offer and history.
+function publishedSiblingDeliveryPatch(sibling, anchorDeliveryState, deliveredAt) {
+  const prior = parseEstimateData(sibling.estimate_data);
+  const fingerprint = annualPlanOfferFingerprint(sibling);
+  const priorDeliveredAt = Array.isArray(prior?.deliveryState?.deliveredAt)
+    ? prior.deliveryState.deliveredAt.filter((time) => typeof time === 'string')
+    : [];
+  return {
+    deliveryState: {
+      ...anchorDeliveryState,
+      firstDeliveredAt: prior?.deliveryState?.firstDeliveredAt || deliveredAt,
+      lastDeliveredAt: deliveredAt,
+      deliveredAt: [...priorDeliveredAt, deliveredAt].slice(-DELIVERY_HISTORY_MAX),
+      annualPlanOfferFingerprint: fingerprint || null,
+    },
+  };
+}
 
 // When an operator authors a commercial proposal, their line items ARE the
 // quote — so the auto-quote-required state a commercial estimate is created
@@ -858,7 +877,7 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
       if (result.blocked) {
         return { ok: false, blocked: true, error: result.reason || 'Email suppressed', template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' };
       }
-      return { ok: !!result.sent, messageId: result.message?.provider_message_id || null, template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' };
+      return { ok: !!result.sent, providerAttempted: result.providerAttempted === true, providerAccepted: result.providerAccepted === true, messageId: result.message?.provider_message_id || null, template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' };
     } catch (err) {
       if (versionId || !canFallbackFromTemplateEmailError(err)) {
         throw err;
@@ -907,7 +926,7 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
     text,
     ...(smtpAttachments.length ? { attachments: smtpAttachments } : {}),
   });
-  return { ok: true, provider: 'smtp_fallback' };
+  return { ok: true, providerAttempted: true, providerAccepted: true, provider: 'smtp_fallback' };
 }
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -2746,13 +2765,13 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             onDispatch: () => { emailDispatchStarted = true; },
           });
           channels.email = result.ok
-            ? { ok: true, provider: result.template || result.provider || 'email' }
+            ? { ok: true, providerAttempted: result.providerAttempted, providerAccepted: result.providerAccepted, provider: result.template || result.provider || 'email' }
             : { ok: false, error: result.error || 'Email send failed' };
-          if (result.ok) {
+          if (result.ok && result.providerAccepted) {
             if (options.leadShapeRef) options.leadShapeRef.delivered = true;
             await stampLeadHandoffWitness(estimate, options);
           }
-          if (proposalMode && result.ok && proposalAttachments.length > 0) {
+          if (proposalMode && result.ok && result.providerAccepted && proposalAttachments.length > 0) {
             proposalPdfEmailed = true;
           }
         }
@@ -2768,10 +2787,9 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
 
   const sentChannels = requestedChannels.filter((ch) => channels[ch]?.ok);
   const failedChannels = requestedChannels.filter((ch) => !channels[ch]?.ok);
-  // Channels whose delivery counts as a first response: sms only when the
-  // provider send was REAL (not a suppression sentinel); email's ok already
-  // implies a real handoff.
-  const stampChannels = sentChannels.filter((ch) => (ch === 'sms' ? channels.sms?.real === true : true));
+  // Historical email idempotency hits report success without a handoff.
+  // Only this invocation's real provider delivery advances a witness.
+  const stampChannels = sentChannels.filter((ch) => (ch === 'sms' ? channels.sms?.real === true : channels.email?.providerAccepted === true));
   // A REAL provider handoff succeeded: the customer holds the single-service
   // quote, so the send-time park must NEVER be reverted from here on — even
   // if the snapshot read or the status finalize below throws. A suppressed
@@ -2867,6 +2885,9 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // forward untouched by suppressed attempts.
   const priorDeliveredAt = Array.isArray(priorDeliveryState?.deliveredAt) ? priorDeliveryState.deliveredAt.filter((t) => typeof t === 'string') : [];
   const deliveredAt = (stampChannels.length ? [...priorDeliveredAt, lastDeliveredAt] : priorDeliveredAt).slice(-DELIVERY_HISTORY_MAX);
+  const deliveredAnnualFingerprint = stampChannels.length
+    ? annualPlanOfferFingerprint(estimate)
+    : priorDeliveryState?.annualPlanOfferFingerprint;
   const deliveryStatePatch = {
     deliveryState: {
       attemptedAt: now().toISOString(),
@@ -2876,6 +2897,8 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       ...(firstDeliveredAt ? { firstDeliveredAt } : {}),
       ...(lastDeliveredAt ? { lastDeliveredAt } : {}),
       ...(deliveredAt.length ? { deliveredAt } : {}),
+      // Suppressed or historical deduped attempts retain the prior receipt.
+      ...(deliveredAnnualFingerprint ? { annualPlanOfferFingerprint: deliveredAnnualFingerprint } : {}),
     },
     // The per-park handoff witness rides the finalization write too, so a
     // transient failure of the in-branch stamp can never leave a delivered
@@ -2910,7 +2933,11 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // into ITS audit snapshot too (GH codex P2 on #3628).
   let builtSendSnapshot = null;
   try {
-    const snapshot = await buildEstimateSendSnapshot({ ...freshForSnapshot, expires_at: nextExpiresAt }, now, { delivered: stampChannels.length > 0, deliveredAt: lastDeliveredAt });
+    // A historical success cannot replace the delivered billing terms with
+    // current configuration. Only a real handoff freezes a new quote.
+    const snapshot = stampChannels.length
+      ? await buildEstimateSendSnapshot({ ...freshForSnapshot, expires_at: nextExpiresAt }, now, { deliveredAt: lastDeliveredAt })
+      : (parseEstimateData(freshForSnapshot.estimate_data) || {});
     // Only a VALIDATED bundle feeds the audit — same rule as the sibling
     // and superseded branches (codex pre-push P1).
     builtSendSnapshot = snapshot.sendSnapshot && !snapshot.sendSnapshot.pricingBundleError
@@ -2921,10 +2948,12 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     // by a full estimate_data write. proposalDelivery is a sibling of proposal,
     // never a nested write, so the `||` merge can't drop the proposal itself.
     const mergePatch = {
-      sendSnapshot: snapshot.sendSnapshot || {},
+      ...(stampChannels.length ? { sendSnapshot: snapshot.sendSnapshot || {} } : {}),
       ...deliveryStatePatch,
     };
-    if (proposalEnabledForDelivery) {
+    // Proposal saves clear stale receipts; SMS alone preserves a surviving PDF receipt.
+    if (proposalEnabledForDelivery && stampChannels.length
+      && (channels.email?.providerAccepted || !parseEstimateData(freshForSnapshot.estimate_data)?.proposalDelivery)) {
       mergePatch.proposalDelivery = {
         stampedAt: now().toISOString(),
         pdfEmailed: proposalPdfEmailed,
@@ -3041,15 +3070,18 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       let preAcceptData = estimate.estimate_data;
       if (typeof preAcceptData === 'string') { try { preAcceptData = JSON.parse(preAcceptData); } catch { preAcceptData = {}; } }
       preAcceptData = preAcceptData || {};
-      // ONLY a bundle rebuilt from the PRE-DELIVERY claimed row is
-      // send-time truth — builtSendSnapshot came from freshForSnapshot,
+      // For a real delivery, ONLY a bundle rebuilt from the PRE-DELIVERY
+      // claimed row is send-time truth — builtSendSnapshot came from freshForSnapshot,
       // which post-dates delivery and can carry the acceptance rewrite,
       // and a prior send's stored sendSnapshot is equally stale. When the
       // rebuild fails, the audit goes out with NO bundle rather than a
-      // wrong one (codex pre-push P1).
+      // wrong one (codex pre-push P1). Historical success retains its prior
+      // snapshot because no new offer reached the provider.
       let raceBundle = null;
       try {
-        const rebuilt = await buildEstimateSendSnapshot({ ...estimate, expires_at: nextExpiresAt }, now);
+        const rebuilt = stampChannels.length
+          ? await buildEstimateSendSnapshot({ ...estimate, expires_at: nextExpiresAt }, now)
+          : preAcceptData;
         if (rebuilt?.sendSnapshot && !rebuilt.sendSnapshot.pricingBundleError) raceBundle = rebuilt.sendSnapshot;
       } catch { /* no validated pre-delivery bundle */ }
       const { sendSnapshot: stalePriorSnapshot, ...preAcceptSansSnapshot } = preAcceptData;
@@ -3113,11 +3145,17 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // A sibling is delivered by the anchor's handoff — the same
           // real-channel test decides whether its scope stamp moves.
           const siblingExpiry = proposalExpiry(sibling) || ordinaryGroupExpiry;
-          const snapshot = await buildEstimateSendSnapshot({ ...sibling, expires_at: siblingExpiry }, now, { delivered: stampChannels.length > 0, deliveredAt: lastDeliveredAt });
-          if (!snapshot?.sendSnapshot || snapshot.sendSnapshot.pricingBundleError) {
+          const snapshot = stampChannels.length
+            ? await buildEstimateSendSnapshot({ ...sibling, expires_at: siblingExpiry }, now, { deliveredAt: lastDeliveredAt })
+            : (parseEstimateData(sibling.estimate_data) || {});
+          if (stampChannels.length && (!snapshot?.sendSnapshot || snapshot.sendSnapshot.pricingBundleError)) {
             throw new Error(`sibling send snapshot did not freeze pricing${snapshot?.sendSnapshot?.pricingBundleError ? `: ${snapshot.sendSnapshot.pricingBundleError}` : ''}`);
           }
-          siblingSnapshotPatch = { ...siblingSnapshotPatch, sendSnapshot: snapshot.sendSnapshot };
+          const siblingDeliveryStatePatch = stampChannels.length > 0
+            ? publishedSiblingDeliveryPatch(sibling, deliveryStatePatch.deliveryState, lastDeliveredAt)
+            : {};
+          siblingSnapshotPatch = { ...siblingSnapshotPatch,
+            ...(stampChannels.length ? { sendSnapshot: snapshot.sendSnapshot } : {}), ...siblingDeliveryStatePatch };
           const updated = await publishClaimedGroupSibling(estimate, sibling, siblingExpiry, siblingSnapshotPatch);
           if (!updated) {
             // Zero rows is EITHER a mid-publication acceptance (price-locked,
@@ -3140,7 +3178,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // the same (GH codex P2 r3).
           shadowLogFallbackDelivery(sibling, { handoff: stampChannels.length > 0 });
           if (!updated) {
-            await recordTerminalSiblingDelivery(sibling, snapshot, { delivered: stampChannels.length > 0, sendMethod, deliveryStatePatch });
+            await recordTerminalSiblingDelivery(sibling, snapshot, { delivered: stampChannels.length > 0, sendMethod, deliveryStatePatch: siblingDeliveryStatePatch });
           } else {
             await snapshotPublishedSibling(sibling, siblingSnapshotPatch, { now, nextExpiresAt, sendMethod });
           }
@@ -3757,6 +3795,8 @@ router.get('/:id/proposal', async (req, res, next) => {
       proposal,
       totals: computeProposalTotals(proposal),
       bidToolsEnabled: gateEnvValue('GATE_COMMERCIAL_BID_BUILDER'),
+      // Private operator inputs live beside the public proposal allowlist.
+      projectCosting: parseEstimateData(estimate.estimate_data)?.proposalCosting || null,
       // Engine-composed prospect research (commercial proposal lane) — the
       // builder page shows it read-only above the line items. Additive:
       // null for operator-originated proposals.
@@ -3859,7 +3899,7 @@ router.put('/:id/proposal', async (req, res, next) => {
     // Older proposal editors do not send the new date field. An omission
     // preserves the authored hold; clearing it requires an explicit null.
     if (!Object.hasOwn(incoming, 'validThrough')) incoming.validThrough = savedProposal.validThrough;
-    const bidValidation = validateBidFields(incoming);
+    const bidValidation = validateBidFields(incoming, req.body?.projectCosting);
     if (bidValidation) return res.status(400).json({ error: bidValidation });
     // Programs-only callers may omit buildings entirely — normalize once
     // and use the array everywhere (pre-push codex P1: undefined.some threw).
@@ -3869,9 +3909,9 @@ router.put('/:id/proposal', async (req, res, next) => {
       const incomingLines = incomingBuildings.flatMap((building) => building.lineItems || building.line_items || []);
       const omittedIdentifiers = [...savedUnits.values()].some(Boolean) && incomingLines.some((line) => !line.id);
       const unitsChanged = omittedIdentifiers || incomingLines.some((line) => (line.unit || null) !== (savedUnits.get(line.id) || null));
-      if (unitsChanged
+      if (Object.hasOwn(req.body || {}, 'projectCosting') || unitsChanged
         || (incoming.validThrough || null) !== (savedProposal.validThrough || null)) {
-        return res.status(409).json({ error: 'Bid authoring is currently disabled. Reload the proposal before editing; saved bid units and validity dates remain in place.' });
+        return res.status(409).json({ error: 'Bid authoring is currently disabled. Reload the proposal before editing; saved bid units, costs and validity dates remain in place.' });
       }
     }
     const hasBuildings = incomingBuildings.length > 0;
@@ -3895,18 +3935,13 @@ router.put('/:id/proposal', async (req, res, next) => {
         return res.status(400).json({ error: 'Proposals are limited to 10 service programs.' });
       }
       for (const program of incomingPrograms) {
-        const freq = Number(program?.frequencyPerYear ?? program?.visitsPerYear);
-        if (!Number.isInteger(freq) || freq < 1 || freq > 52) {
-          return res.status(400).json({ error: 'Each program needs a whole-number service frequency between 1 and 52 visits per year.' });
-        }
-        // Finite, positive, cent-representable — 0.001 or Infinity would
-        // normalize to a dropped program and rewrite the authoritative
-        // totals to zero (pre-push codex P0).
-        const price = Number(program?.pricePerApplication ?? program?.perApplication);
-        if (!Number.isFinite(price) || price < 0.01
-          || Math.abs(price * 100 - Math.round(price * 100)) > 1e-6) {
-          return res.status(400).json({ error: 'Each program needs a per-application price of at least $0.01, in whole cents.' });
-        }
+        // Whole-number 1–52 frequency; finite, positive, cent-representable
+        // price — 0.001 or Infinity would normalize to a dropped program and
+        // rewrite the authoritative totals to zero (pre-push codex P0). The
+        // predicate is shared with the builder's costing card (GH codex P2
+        // r8 on #4270).
+        const programIssue = programRevenueIssue(program);
+        if (programIssue) return res.status(400).json({ error: programIssue });
         if (String(program?.label ?? program?.name ?? '').length > 120) {
           return res.status(400).json({ error: 'Program names are limited to 120 characters.' });
         }
@@ -4122,6 +4157,7 @@ router.put('/:id/proposal', async (req, res, next) => {
     const revivingBid = expiredRecovery && (expiryUpdate > new Date() || (hadFixedValidity && !expiryUpdate));
     const nextData = {
       ...existingData,
+      ...(Object.hasOwn(req.body || {}, 'projectCosting') ? { proposalCosting: normalizeProjectCosting(req.body.projectCosting) } : {}),
       proposal: {
         ...normalized,
         updatedAt: new Date().toISOString(),
@@ -4136,7 +4172,22 @@ router.put('/:id/proposal', async (req, res, next) => {
     // drop it — the public copy falls back to "your account manager has the
     // proposal" until the next send re-stamps proposalDelivery against the new
     // PDF. Otherwise the link would keep saying the edited proposal was emailed.
-    clearStaleProposalDelivery(nextData);
+    // A private-cost-only save leaves the customer proposal and its PDF
+    // exactly as delivered, so the emailed marker stays true (GH codex P2 on
+    // #4270). Anything that changes the normalized proposal drops it.
+    // Customer-visible content only: line `id`s exist for the bid-form row
+    // mapping and are minted client-side for legacy lines on load, so they
+    // must not turn a cost-only save into a "changed proposal" (GH codex P2
+    // r12 on #4270).
+    const proposalContent = (value) => {
+      const { updatedAt, provenance, buildings, ...rest } = value || {};
+      const visibleLine = (line) => { const { id, ...visible } = line || {}; return visible; };
+      return JSON.stringify({ ...rest, buildings: (Array.isArray(buildings) ? buildings : []).map((b) => ({ ...b, lineItems: (Array.isArray(b?.lineItems) ? b.lineItems : []).map(visibleLine) })) });
+    };
+    const privateCostOnly = Object.hasOwn(req.body || {}, 'projectCosting') && proposalContent(normalized) === proposalContent({ ...savedProposal, enabled: true, synthesized: false });
+    if (!privateCostOnly) {
+      clearStaleProposalDelivery(nextData);
+    }
     // Make the authored proposal sendable: clear the auto-quote-required
     // booleans the commercial estimate was created with, and resolve any
     // blocking lead/draft automation status. proposal.enabled (set above) is
@@ -4308,7 +4359,42 @@ router.put('/:id/proposal', async (req, res, next) => {
     // keys its next save and its delivery review on it, so a save that lands
     // in the window before the editor's reload cannot be adopted as if it
     // were this one (pre-push codex P1 r3 on #4305).
-    const committed = await trx('estimates').where({ id: estimate.id }).first();
+    let committed = await trx('estimates').where({ id: estimate.id }).first();
+    // A private-cost-only save can change bookkeeping and DB representations
+    // without changing the offer staff scheduled. Preserve ONLY reviews that
+    // still matched the locked old offer; an already-stale review stays stale.
+    // Keep the persisted hash format unchanged for existing scheduled sends.
+    const reviewComparableData = { ...nextData, proposal: lockedData.proposal };
+    if (Object.hasOwn(lockedData, 'proposalCosting')) reviewComparableData.proposalCosting = lockedData.proposalCosting;
+    else delete reviewComparableData.proposalCosting;
+    const priorOfferVersion = estimateOfferVersion(locked);
+    if (privateCostOnly && savedProposal.enabled === true && savedProposal.synthesized !== true && committed
+      && estimateOfferVersion({ ...locked, estimate_data: reviewComparableData }) === priorOfferVersion
+      && Number(locked.monthly_total) === totals.monthlyEquivalent
+      && Number(locked.annual_total) === totals.annualRecurring
+      && Number(locked.onetime_total) === totals.oneTime) {
+      const committedOfferVersion = estimateOfferVersion(committed);
+      const scheduledRows = groupId
+        ? await trx('estimates').where({ estimate_group_id: groupId, status: 'scheduled' }).whereNull('archived_at').forUpdate().select()
+        : (committed.status === 'scheduled' ? [committed] : []);
+      for (const scheduledRow of scheduledRows) {
+        const scheduledData = parseEstimateData(scheduledRow.estimate_data) || {};
+        let reviewUpdated = false;
+        for (const attempt of scheduledData.manualSendAttempts || []) {
+          const review = attempt.scheduleReview;
+          if (!review || attempt.startedAt || attempt.result
+            || !scheduledRow.scheduled_at || review.scheduledAt !== new Date(scheduledRow.scheduled_at).toISOString()) continue;
+          if (scheduledRow.id === locked.id && review.reviewedOffer === priorOfferVersion) {
+            review.reviewedOffer = committedOfferVersion; reviewUpdated = true;
+          }
+          if (review.reviewedGroupVersions?.[locked.id] === priorOfferVersion) {
+            review.reviewedGroupVersions[locked.id] = committedOfferVersion; reviewUpdated = true;
+          }
+        }
+        if (reviewUpdated) await trx('estimates').where({ id: scheduledRow.id }).update({ estimate_data: JSON.stringify(scheduledData) });
+      }
+      committed = await trx('estimates').where({ id: estimate.id }).first();
+    }
     return { updatedCount: count, editVersion: committed ? estimateEditVersion(committed) : null };
     });
     if (!updatedCount) {
