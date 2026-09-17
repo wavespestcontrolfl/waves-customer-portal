@@ -2104,6 +2104,18 @@ describe('Communications review ask serialization', () => {
     expect(reservationVisibleBeforeSecondAcquire).toBe(true);
   });
 
+  test('the lock-held reservation is correlated by review_request_id, so a crash before sendAndSettle leaves no unfindable orphan (codex #4333 P1)', async () => {
+    const reservations = wireReservationLedger();
+    await withServer(async baseUrl => {
+      const response = await send(baseUrl, inline);
+      expect(response.status).toBe(200);
+    });
+    const reservation = reservations().find(row => row.customer_id === 'cust-A' && row.metadata?.review_ask_reservation === true);
+    expect(reservation).toBeTruthy();
+    expect(reservation.metadata.review_request_id).toBe('rr-1');
+    expect(reservation.metadata.manual_send_reservation).toBe(true);
+  });
+
   test('a claimed-link ask refused by the spacing check BEFORE provider entry hands its lock-held reservation back (pre-push codex P1 on #4331)', async () => {
     // The claimed-link seam reserves sms_log evidence under the first lock
     // hold; dispatchReviewAsk then refuses (another ask is inside the
@@ -2164,7 +2176,10 @@ describe('Communications review ask serialization', () => {
       if (table === 'customers') b.first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
       if (table === 'review_requests') b.first.mockResolvedValue({ id: 'rr-1', customer_id: 'cust-A', status: 'pending', sms_sent_at: null, triggered_by: 'auto_inline', token: 'tok-abc123' });
       if (table === 'sms_log') {
-        if (tracked) b.first.mockResolvedValue({ id: 'provider-log' });
+        // The FIRST first() call is reserveForRequest's own idempotent lookup
+        // (codex #4333 P1) — nothing exists yet, so it inserts. Every SUBSEQUENT
+        // call is the post-send twilio_sid correlation this test models.
+        if (tracked) b.first.mockResolvedValueOnce(null).mockResolvedValue({ id: 'provider-log' });
         b.insert.mockImplementation(values => {
           expect(held.has('review-send:cust-A')).toBe(true);
           expect(JSON.parse(values.metadata).review_ask_reservation).toBe(true);
