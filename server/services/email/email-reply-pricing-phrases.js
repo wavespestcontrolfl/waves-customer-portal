@@ -13,7 +13,7 @@ const PARTICIPANTS = new Set(['customer', 'customers', 'client', 'clients', 'acc
 const NOUNS = new Set(['bill', 'charge', 'invoice', 'fee', 'rate', 'amount', 'balance', 'total',
   'cost', 'price', 'payment', 'dues', 'subscription', 'subscriptions', 'spread', 'surcharge', 'surcharges']);
 const ACTIONS = new Set(['bill', 'charge', 'pay', 'invoice', 'price', 'cost', 'run', 'incur',
-  'generate', 'apply', 'occur', 'has', 'due', 'required', 'payable', 'total', 'totals', 'equal', 'equals']);
+  'generate', 'apply', 'occur', 'has', 'due', 'required', 'payable', 'total', 'totals', 'equal', 'equals', 'range']);
 const HEADS = new Map([...NOUNS].map((head) => [head, { head, roles: ['noun'] }]));
 for (const head of ACTIONS) {
   HEADS.set(head, { head, roles: [...(HEADS.get(head)?.roles ?? []), 'action'] });

@@ -35,6 +35,8 @@ supported prefix found for a given head, with at most 12 prefix tokens.
 An isolated action-shaped word can itself be a predicate candidate; this is
 lexical evidence rather than a grammatical assertion. The source's finite
 vocabulary and focused tests define coverage; no completeness is claimed.
+The scanner stem `range` is also an action candidate for local range-introducer
+relationships; it does not establish pricing context by itself.
 
 ## Boundaries and uncertainty
 
