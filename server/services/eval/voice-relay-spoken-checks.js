@@ -1950,7 +1950,8 @@ function reportVerbGovernsProduct(affirmed, subjectAt, subjectLength, locationAt
     return REPORT_PRODUCT_OBJECT_VERB_RE.test(findingVerb[0])
       && REPORT_DIRECT_OBJECT_GAP_RE.test(evidence.slice(findingVerb.index + findingVerb[0].length, subjectAt));
   }
-  const predicatePrefix = evidence.slice(subjectAt + subjectLength, findingVerb.index);
+  const predicatePrefix = evidence.slice(subjectAt + subjectLength, findingVerb.index)
+    .replace(/,\s*according\s+to\s+the\s+report\s*,/gi, (aside) => ' '.repeat(aside.length));
   if (/^went$/i.test(findingVerb[0])) {
     return REPORT_NOUN_LED_PREFIX_RE.test(evidence.slice(0, subjectAt) + predicatePrefix)
       && REPORT_WENT_LOCATION_RE.test(evidence.slice(findingVerb.index + findingVerb[0].length, locationAt + locationLength));
@@ -1989,7 +1990,8 @@ function reportLocationIsTreatmentTarget(affirmed, subjectAt, subjectLength, loc
       && REPORT_ADVERBIAL_LOCATION_GAP_RE.test(locationLink)) return true;
   const links = [...locationLink.matchAll(new RegExp(REPORT_TREATMENT_LOCATION_LINK_RE.source, 'gi'))];
   if (links.length !== 1 || REPORT_LOCATION_DETOUR_RE.test(locationLink)) return false;
-  const targetPrefix = locationLink.slice(links[0].index + links[0][0].length);
+  const targetPrefix = locationLink.slice(links[0].index + links[0][0].length)
+    .replace(/^\s*(?:apply|place|put|spray|treat|use)\s+/i, '');
   const leadingGap = locationLink.slice(0, links[0].index)
     .replace(/^\s*(?:(?:already|also|just|now|again|only|\w+ly)\s+)*/i, '').trim();
   return REPORT_LOCATION_TARGET_PREFIX_RE.test(targetPrefix)

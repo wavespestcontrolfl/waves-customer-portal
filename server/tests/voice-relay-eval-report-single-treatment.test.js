@@ -276,3 +276,18 @@ test.each([
   expect(grammar.reportHasCompletedFinding(text, text.indexOf('Talstar P'), 9,
     text.indexOf('exterior perimeter'), 18, /\b(?:applied|used|treated)\b/.exec(text))).toBe(false);
 });
+
+// Preserve established report findings when the product has a reporting aside
+// or a completed use names its treatment purpose explicitly.
+test.each([
+  ['Talstar P, according to the report, was applied to the exterior perimeter.', true],
+  ['Talstar P, according to the report, was not applied to the exterior perimeter.', false],
+  ['Talstar P, next to the report, was applied to the exterior perimeter.', false],
+  ['The technician used Talstar P to treat the exterior perimeter.', true],
+  ['The technician used Talstar P to inspect the exterior perimeter.', false],
+  ['The technician used Talstar P to plan to treat the exterior perimeter.', false],
+])('single finding preserves reporting and treatment complements: %s', (text, completed) => {
+  const verb = /\b(?:applied|used)\b/i.exec(text);
+  expect(grammar.reportHasCompletedFinding(text, text.indexOf('Talstar P'), 9,
+    text.indexOf('exterior perimeter'), 18, verb)).toBe(completed);
+});
