@@ -132,13 +132,6 @@ function mockMakeBuilder(table, sink) {
     sink.push({ table, wheres: b._wheres, patch });
     return 1;
   };
-  b.del = async () => {
-    if (table !== 'stripe_payment_notification_log') throw new Error('Unexpected delete');
-    const claim = b._wheres[0];
-    return Number(mockState.notificationClaims.delete(JSON.stringify([
-      claim.payment_intent_id, claim.outcome, claim.attempt_id,
-    ])));
-  };
   b.insert = (row) => {
     if (table !== 'stripe_webhook_events') return Promise.resolve([]);
     const inserted = !mockState.webhookEvent;
@@ -153,8 +146,14 @@ jest.mock('../models/db', () => {
   db.raw = jest.fn(async () => ({ rowCount: 0 }));
   db.transaction = jest.fn(async (fn) => {
     const trx = jest.fn((table) => mockMakeBuilder(table, mockState.trxUpdates));
-    trx.raw = jest.fn(async () => {});
-    return fn(trx);
+    trx.raw = db.raw;
+    const claimsBefore = new Set(mockState.notificationClaims);
+    try {
+      return await fn(trx);
+    } catch (err) {
+      mockState.notificationClaims = claimsBefore;
+      throw err;
+    }
   });
   return db;
 });
@@ -417,6 +416,16 @@ describe('payment_failed notification replay', () => {
     const duplicate = await post();
     expect(duplicate.json).toHaveBeenCalledWith({ received: true, duplicate: true });
     expect(triggerNotification).toHaveBeenCalledTimes(2);
+  });
+
+  test('an admin delivery outage does not block the independent customer failure email', async () => {
+    const lifecycleEmail = require('../services/payment-lifecycle-email');
+    triggerNotification.mockResolvedValueOnce({ bellWritten: false, prefsUnavailable: true });
+    const cardFailure = achBouncePI({ metadata: {}, last_payment_error: {
+      message: 'declined', code: 'card_declined', payment_method: { type: 'card' },
+    } });
+    await expect(handlePaymentIntentFailed(cardFailure, 'evt_card')).rejects.toThrow('not delivered');
+    expect(lifecycleEmail.sendPaymentFailed).toHaveBeenCalledWith({ paymentIntentId: 'pi_ach_1', attemptId: 'ch_1' });
   });
 
   test('a lookup exception after taking the claim releases it for replay', async () => {

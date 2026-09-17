@@ -3008,13 +3008,6 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
     await handleAchFailure(paymentIntent, failureMessage, eventId);
   }
 
-  // ── Bell + push for the admin team ──
-  //
-  // A transient notification failure must leave this webhook retryable.
-  // The helper releases its per-attempt claim unless delivery succeeded
-  // or the notification was deliberately suppressed.
-  await notifyPaymentFailed(paymentIntent, friendlyFailure, eventId);
-
   // ── Customer email for interactive (non-autopay, non-ACH) failures ──
   //
   // Autopay failures are already covered by billing-cron, which sends the
@@ -3048,6 +3041,13 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
       logger.warn(`[stripe-webhook] payment_failed customer email failed: ${err.message}`);
     });
   }
+
+  // ── Bell + push for the admin team ──
+  //
+  // A transient notification failure must leave this webhook retryable.
+  // The helper releases its per-attempt claim unless delivery succeeded
+  // or the notification was deliberately suppressed.
+  await notifyPaymentFailed(paymentIntent, friendlyFailure, eventId);
 }
 
 async function notifyPaymentFailed(paymentIntent, friendlyFailure, eventId) {
@@ -3081,22 +3081,24 @@ async function notifyPaymentFailed(paymentIntent, friendlyFailure, eventId) {
     logger.info(`[stripe-webhook] payment_failed for PI ${piId} arrived after the ledger row settled (${ledgerRow.status}) — no admin bell`);
     return;
   }
-  const claim = await db.raw(
-    `INSERT INTO stripe_payment_notification_log (payment_intent_id, outcome, attempt_id)
-     VALUES (?, ?, ?)
-     ON CONFLICT (payment_intent_id, outcome, attempt_id) DO NOTHING
-     RETURNING payment_intent_id`,
-    [piId, 'failed', attemptId]
-  );
-  if (claim.rowCount === 0) {
-    logger.info(`[stripe-webhook] payment_failed notification already dispatched for PI ${piId} attempt ${attemptId}, skipping`);
-    return;
-  }
-  try {
-    const failedInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first();
+  // Keep the claim provisional until delivery or deliberate suppression.
+  // A database outage rolls it back without requiring a cleanup query.
+  await db.transaction(async (trx) => {
+    const claim = await trx.raw(
+      `INSERT INTO stripe_payment_notification_log (payment_intent_id, outcome, attempt_id)
+       VALUES (?, ?, ?)
+       ON CONFLICT (payment_intent_id, outcome, attempt_id) DO NOTHING
+       RETURNING payment_intent_id`,
+      [piId, 'failed', attemptId]
+    );
+    if (claim.rowCount === 0) {
+      logger.info(`[stripe-webhook] payment_failed notification already dispatched for PI ${piId} attempt ${attemptId}, skipping`);
+      return;
+    }
+    const failedInvoice = await trx('invoices').where({ stripe_payment_intent_id: piId }).first();
     const customerId = failedInvoice?.customer_id || ledgerRow?.customer_id
       || paymentIntent.metadata?.waves_customer_id || null;
-    const customer = customerId ? await db('customers').where({ id: customerId }).first() : null;
+    const customer = customerId ? await trx('customers').where({ id: customerId }).first() : null;
     const result = await triggerNotification('payment_failed', {
       amount: (paymentIntent.amount || 0) / 100,
       customerName: customerLabel(customer),
@@ -3118,12 +3120,7 @@ async function notifyPaymentFailed(paymentIntent, friendlyFailure, eventId) {
     if (![bellWritten, suppressed, policySilenced, push?.sent > 0].some(Boolean)) {
       throw new Error('Payment failure notification was not delivered');
     }
-  } catch (err) {
-    await db('stripe_payment_notification_log')
-      .where({ payment_intent_id: piId, outcome: 'failed', attempt_id: attemptId })
-      .del();
-    throw err;
-  }
+  });
 }
 
 /**
