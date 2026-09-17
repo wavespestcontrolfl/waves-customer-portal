@@ -97,7 +97,7 @@ function isPlanTotalPair(clause, amountAt, periodAt, context, legacyMonthlyPlan)
   const assertionLabels = amountAt < periodAt ? [...gap, clause[periodAt + 1] || {}] : gap;
   const amountLabel = clause.slice(Math.max(0, amountAt - 2), amountAt).reverse()
     .find((token) => token.kind !== 'sep');
-  const assertedPrice = isWord(amountLabel, PRICE_WORDS)
+  const assertedPrice = paymentPredicate || isWord(amountLabel, PRICE_WORDS)
     || (gap.some((token) => token.kind === 'be')
       && assertionLabels.some((token) => isWord(token, PRICING_LABEL_WORDS)));
   if (accountEvent && !assertedPrice) return false;

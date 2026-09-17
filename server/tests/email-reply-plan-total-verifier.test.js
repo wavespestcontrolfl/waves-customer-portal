@@ -211,6 +211,21 @@ describe('inactive email reply plan-total policy', () => {
     '$1176 per year was the payment that posted.',
   ])('preserves explicit price assertions even beside account-event prose: %s', (text) => rejected(text));
 
+  test.each([
+    'The monthly payment is $98 after your payment posted.',
+    'The annual payment is $1176 after your payment posted.',
+    'The yearly payment is $1176 after your payment posted.',
+    'The monthly payment is 98 after your payment posted.',
+  ])('retains an explicit payment predicate beside an earlier account event: %s', (text) => rejected(text));
+
+  test('applies legacy monthly exemptions to payment predicates without exempting yearly aggregates', () => {
+    allowed('The monthly payment is $98 after your payment posted.', { legacyMonthlyPlan: true });
+    rejected('The yearly payment is $1176 after your payment posted.', { legacyMonthlyPlan: true });
+    rejected('The annual payment is $1176 after your payment posted.', { legacyMonthlyPlan: true });
+    allowed('Your monthly payment of $98 posted after the fee adjustment.', { legacyMonthlyPlan: true });
+    allowed('We received your annual payment of $1176 for the plan.', { legacyMonthlyPlan: true });
+  });
+
   test('uses only trusted literal true exemption flags', () => {
     allowed('$98/mo', { commercialProposal: true });
     allowed('$98/mo', { legacyMonthlyPlan: true });
