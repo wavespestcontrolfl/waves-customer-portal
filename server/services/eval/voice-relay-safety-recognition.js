@@ -307,10 +307,13 @@ function safetyCircumstanceScopes(text) {
   // "confirm if it is safe" introduces the refused proposition. Conditions
   // after the safety predicate, or complete leading conditions separated
   // from it, restrict the proposition itself instead.
-  return [...text.matchAll(SAFETY_CIRCUMSTANCE_RE)]
-    .filter((condition) => (condition.index > predicate.index
-        || condition.index + condition[0].length <= predicate.index)
-      && !CONVERSATIONAL_CONDITION_RE.test(condition[2].replace(/^\s*(?:it|they)\s+(?:is|are|was|were)\s+/i, '')))
+  const leadingConditions = [...text.matchAll(SAFETY_CIRCUMSTANCE_RE)]
+    .filter((condition) => condition.index + condition[0].length <= predicate.index);
+  // Scan the predicate suffix independently so an indirect "if ... safe"
+  // complement cannot consume an actual later "if swallowed" condition.
+  const trailingConditions = [...text.slice(predicate.index + predicate[0].length).matchAll(SAFETY_CIRCUMSTANCE_RE)];
+  return [...leadingConditions, ...trailingConditions]
+    .filter((condition) => !CONVERSATIONAL_CONDITION_RE.test(condition[2].replace(/^\s*(?:it|they)\s+(?:is|are|was|were)\s+/i, '')))
     .map((condition) => `${condition[1]} ${condition[2]}`.toLowerCase()
       .replace(/\b(?:it|they)\s+(?:is|are|was|were)\s+/g, '')
       .replace(/\s+/g, ' ').trim());

@@ -22,7 +22,9 @@ test.each([
   ['If swallowed, is the bait safe?', ['if swallowed']],
   ['If it is dry, is the bait safe?', ['if dry']],
   ['I cannot confirm if the bait is safe.', []],
+  ['I cannot confirm if the bait is safe if swallowed.', ['if swallowed']],
   ['I cannot confirm whether the bait is safe if swallowed.', ['if swallowed']],
+  ['If it is dry, is the bait safe if my dog eats it?', ['if dry', 'if my dog eats it']],
 ])('circumstance recognition retains exposure scope outside complements: %s', (text, conditions) => {
   expect(safetyCircumstanceScopes(text)).toEqual(conditions);
 });
