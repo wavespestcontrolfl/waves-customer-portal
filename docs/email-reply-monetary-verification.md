@@ -20,6 +20,9 @@ and recurring `payment` nouns. Fronted monetary unit labels (`Per visit: $98`)
 and amount-first copular nouns (`$98 is the price per visit`) remain supported.
 Fronted labels require explicit money; measurements and application units remain
 distinct in all these orders.
+Perfect predicates, fronted existential fees, and `amount to` connectors are
+supported. A separated amount-first claim requires an explicit visit unit,
+preserving refund facts followed by an independent visit subject.
 
 Normalization failures reject before the strict boolean
 `commercialProposal === true` exemption. A future caller must derive that

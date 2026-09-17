@@ -138,6 +138,29 @@ describe('email reply monetary visit-pricing policy', () => {
   });
 
   test.each([
+    ['nounless apply', ['$98 applies per visit', 'USD 98 may apply for each visit'],
+      ['$98 applies per application', '$98 applies before your next visit']],
+    ['occur connectors', ['A $98 fee occurs per visit', 'The $98 charge may occur on each visit'],
+      ['A $98 fee occurs per application', 'The $98 charge occurs before your next visit']],
+    ['qualifier-article order', ['Each visit has only a $98 fee', 'Every visit may have just a USD 98 charge'],
+      ['Each visit has only a 98 minute delay', 'Each application has only a $98 fee']],
+    ['fronted existential prices', ['Per visit, there is a $98 fee', 'For each visit, there may be only a $98 fee'],
+      ['Per visit, there is a 98 minute delay', 'Per application, there is a $98 fee']],
+    ['amounts-to connectors', ['The cost per visit amounts to $98', 'The rate for each visit amounts to USD 98'],
+      ['The cost per visit amounts to 98 minutes', 'The cost per application amounts to $98']],
+    ['passive bare amounts', ['98 is charged per visit', '98 will be billed for each visit'],
+      ['98 minutes are charged per visit', '98 is charged per application']],
+    ['unit relationships after punctuation', ['$98 charge — per visit', '$98 each visit', '$98 (per visit)'],
+      ['We refunded the $98 charge — each visit remains included at no additional cost',
+        'Your $98 payment is pending, and each visit remains included']],
+    ['perfect predicates', ['Each visit has cost $98', 'Each visit has generated a $98 invoice'],
+      ['Each visit has cost 98 minutes', 'Each application has generated a $98 invoice']],
+  ])('covers bounded %s while preserving unrelated facts', (_name, prices, controls) => {
+    prices.forEach(rejected);
+    controls.forEach((text) => expect(verdict(text)).toEqual({ ok: true, violations: [] }));
+  });
+
+  test.each([
     'Per visit: $98', 'For each visit: $98',
     'Per scheduled visit - USD 98', 'For every visit, ninety-eight dollars',
     'Per visit: only $98', 'For each visit: between $90 and $120',
