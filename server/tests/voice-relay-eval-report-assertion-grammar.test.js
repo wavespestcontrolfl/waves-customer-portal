@@ -273,3 +273,11 @@ test.each(['even once', 'yet', 'ever', 'always', 'usually', 'again', 'at all'])(
   expect(grammar.reportClaimIsDenied(text, text, text.indexOf('Talstar P'),
     text.indexOf('exterior perimeter'), verb, '')).toBe(true);
 });
+
+// A past-tense finding embedded in an imagined assertion remains hypothetical.
+test.each([
+  'The technician imagined that Talstar P was applied to the exterior perimeter.',
+  'We imagine that Talstar P was applied to the exterior perimeter.',
+])('imagined assertions retain uncertainty: %s', (text) => {
+  expect(grammar.reportFindingIsUncertain(text)).toBe(true);
+});
