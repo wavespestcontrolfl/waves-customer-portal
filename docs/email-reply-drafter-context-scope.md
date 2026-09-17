@@ -96,15 +96,29 @@ Reused by both drafters. Given an `emails` row:
      chronologically ordered after selection; always include the triggering
      inbound, strip quoted history, exclude drafts and later messages in replay.
      Validate every selected row, not just the triggering row or thread ID:
-     require a non-null `customer_id` equal to the validated customer, the
-     expected mailbox, and verified participants belonging only to that
-     mailbox's configured Waves identities and that customer. Inbound rows
-     also need aligned sender auth; validate From, To, Cc and effective
-     Reply-To ownership in both directions. Null/conflicting customer IDs,
-     foreign recipients, missing participant evidence, or an unverified row
-     make thread context unsafe and require review before model egress.
-     A Gmail thread ID alone is not an ownership boundary.
-   - last 10 SMS from `smsHistory`, with timestamps.
+     require the expected mailbox and verified participants belonging only
+     to that mailbox's configured Waves identities and the validated customer.
+     Inbound rows require aligned sender auth and a non-null `customer_id`
+     matching that customer. Waves-authored SENT rows intentionally have null
+     sender-linked `customer_id` (the owned-sender guard and migration
+     `20260903000070` enforce this); derive their ownership from authenticated
+     mailbox provenance, an owned From identity, and validated customer To/Cc
+     recipients. Never relink an owned sender to a customer. Validate effective
+     Reply-To in both directions; conflicting IDs or foreign participants fail
+     closed. Outbound null sender IDs alone are not a rejection.
+     Today's Gmail parser/schema do not persist Cc. Before this contract is
+     wired, capture complete To/Cc/Reply-To participant evidence with an explicit
+     verified-empty versus unavailable distinction. Backfill existing rows from
+     their authenticated mailbox/Gmail message IDs, or retrieve trusted live
+     headers on demand; missing, failed or mismatched retrieval requires review
+     before context/model egress. Never interpret an absent stored Cc field as
+     an empty list. A Gmail thread ID alone is not an ownership boundary.
+   - last 10 SMS from `smsHistory`, with timestamps. Redact access credentials
+     from SMS bodies, triggering/thread email bodies, snippets, and the derived
+     timeline before prompt assembly or evidence persistence, using the existing
+     `context-aggregator.redactAccessCodes` and sensitive-value redactor. Raw SMS
+     bodies are currently unredacted; selecting them is not a safe projection.
+     Gate/garage/lockbox credentials must never become allowlisted reply facts.
    - last 3 call summaries from `recentCalls`, with dates and outcomes;
      omit raw transcripts and treat summaries as reported conversation,
      not authoritative proof of a payment or completed booking.
@@ -114,6 +128,11 @@ Reused by both drafters. Given an `emails` row:
      invoice, not arbitrary lists or customer-facing URLs. Broader lists or
      links require a separately tested extension to its canonical selectors;
      phase 1 omits unavailable links rather than constructing guessed URLs.
+     Project pending estimates field by field: exclude `monthlyTotal` and
+     combined residential recurring totals, as the SMS facts builder does.
+     Phase 1 may describe estimate status but must omit pricing unless a
+     separately tested canonical selector supplies authoritative per-application
+     pricing; numeric membership cannot make a prohibited price customer-safe.
 4. Emit a facts block in the same shape `sms-shadow-drafter.buildFactsBlock`
    emits, plus a short "what happened recently" timeline (merged SMS, call,
    email, visit, estimate, invoice events, newest last, capped at 12 lines).
@@ -176,6 +195,10 @@ labelled untrusted, exactly as the SMS drafter does.
 - Complete request coverage proved, within the limited supported contract
   below; a model's assertion that it answered everything is not proof.
 - No prices, dates, or amounts that do not appear in the facts block.
+- No access credentials in output, even if present in source history: run a
+  deterministic credential-output rejection in addition to input redaction;
+  gate, garage and lockbox examples must fail without entering retry prompts
+  or unredacted diagnostics.
 - No exemplar fact leakage (same `few_shot_leak` check the SMS pathology
   ledger uses).
 - No links except customer-scoped, explicitly approved URLs in the facts.
@@ -232,7 +255,13 @@ failures return a usable error to the UI without creating a live auto claim.
   version.
 - `draftEmailReply` (IB and button): route through `dispatchWithFallback`
   on the `customerCopy` policy instead of a direct Anthropic call, and use
-  the same assembler. Operator `instructions` stay as a user-channel line.
+  the same assembler for the validated customer branch. Preserve the existing
+  recognized-vendor B2B path before customer-only assembly: it uses the existing
+  vendor-domain context and manual-only response contract, never customer facts
+  or automatic Gmail draft creation. The context gate must not require a vendor
+  to resolve as a customer; unknown customer-path failures must not use the
+  vendor bypass. Gate-on/off vendor parity tests are required.
+  Operator `instructions` stay as a user-channel line.
   Preserve target-resolution and task-customer ownership checks, the tool
   write-confirmation boundary, and the successful response fields (`draft`,
   `email_id`, `thread_id`, `replying_to`, `subject`, `reply_draft`, `note`).
@@ -317,9 +346,9 @@ restores the legacy path without deleting existing operator drafts.
 
 | Slice | Deliverable | Required evidence before completion |
 | --- | --- | --- |
-| 1. Context contract | Shared assembler and fact projection, no live wiring | Fixtures for aligned/failed/missing auth, spoofed matching From plus attacker Reply-To, unique/shared/deleted sender matches, and relayed mail review; every thread row checked for customer ID, mailbox and participants, including null IDs and foreign To/Cc; rejection before context reads/model egress; absent vs unavailable; payer billing; archived estimates; cancelled visits; redacted access codes; bounded history and prompt injection. PostgreSQL verification of added/changed queries on a dedicated dev/preview database. |
+| 1. Context contract | Shared assembler and fact projection, no live wiring | Fixtures for aligned/failed/missing auth, spoofed matching From plus attacker Reply-To, unique/shared/deleted sender matches, and relayed mail review; direction-aware ownership for every thread row, including legitimate SENT rows with null sender IDs, conflicting IDs, foreign To/Cc, verified-empty Cc and failed legacy-header retrieval; rejection before context reads/model egress; absent vs unavailable; payer billing; archived estimates; cancelled visits; pending-estimate monthly totals excluded; redacted SMS/email access codes and credential-output rejection; bounded history and prompt injection. PostgreSQL verification of added/changed queries on a dedicated dev/preview database. |
 | 2. Corpus source | Idempotent, gated human email pairs | Automated mail excluded; inbound pairing correct; redaction and injection rejection; replay holdouts excluded; repeated mining inserts no duplicates; SMS/profile readers unchanged unless explicitly scoped. |
-| 3. Shared drafting | Both entrypoints use the context, dispatcher, style and verifier | Gate-off parity; profile revoke/failure fallback; manual instructions remain untrusted data; no exemplar facts or forged signatures; bounded retry; dispatcher failure; invalid drafts withheld; multipart fixtures with omitted first/middle/last items, conjunctions, implicit requests, false answer-ID mappings and budget pressure fail closed or require review, while supported complete answers pass; terminal rejection survives repeated classification and reconciler runs without redrafting, and explicit operator retry is guarded; transient/ambiguous recovery, existing claim, dedupe, live-thread and recipient guards pass. |
+| 3. Shared drafting | Both entrypoints use the context, dispatcher, style and verifier | Gate-off parity and gate-on manual vendor B2B parity without customer-context reads; profile revoke/failure fallback; manual instructions remain untrusted data; no exemplar facts or forged signatures; bounded retry; dispatcher failure; invalid drafts withheld; multipart fixtures with omitted first/middle/last items, conjunctions, implicit requests, false answer-ID mappings and budget pressure fail closed or require review, while supported complete answers pass; terminal rejection survives repeated classification and reconciler runs without redrafting, and explicit operator retry is guarded; transient/ambiguous recovery, existing claim, dedupe, live-thread and recipient guards pass. |
 | 4. Shadow and measurement | Internal comparison and correctly paired outcome metrics | Zero Gmail/send/claim side effects in shadow, including provider/storage failure; redacted evidence and retention contract; reply vs adoption distinction; reproducible cohort counts and reviewed promotion evidence. |
 
 Slice 1 is the next implementation step. Slices 1 and 2 can proceed
