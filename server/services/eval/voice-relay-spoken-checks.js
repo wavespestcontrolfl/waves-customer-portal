@@ -534,7 +534,7 @@ function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)
 // refusal before "but" or "so" cannot excuse a subsequent success claim.
 const PAYMENT_ACTOR = '(?:i|we|they|(?:the|our) (?:office|team|billing department)|billing|someone|stripe|waves pest control|(?:(?:a|the|our|your|their) )?(?:bank|(?:payment |billing )?(?:processor|system))|(?:a|the|our) (?:team member|billing team|manager))';
 const PAYMENT_SUCCESS_ADVERBS = '(?:(?:not\\s+only|already|just|now|then|(?!(?:probably|possibly|potentially|apparently|supposedly|seemingly|allegedly|presumably|unlikely|likely|conditionally|partially|nearly)\\b)[a-z]+ly)\\s+)*';
-const PAYMENT_NON_OUTCOME_SUFFIX = '(?!\\s+(?:(?:(?:update|change|replacement)\\s+)?requests?|instructions?|(?:authorization|consent)(?:\\s+(?:forms?|documents?))?|forms?|documents?|paperwork|receipts?|statements?|info(?:rmation)?|details?|methods?|links?|numbers?|digits?|expir(?:ation|y)|cvv|cvc|security\\s+code)\\b)';
+const PAYMENT_NON_OUTCOME_SUFFIX = '(?!\\s+(?:(?:payment\\s+)?(?:(?:update|change|replacement)\\s+)?requests?|(?:confirmation\\s+)?emails?|instructions?|(?:authorization|consent)(?:\\s+(?:forms?|documents?))?|forms?|documents?|paperwork|receipts?|statements?|info(?:rmation)?|details?|methods?|links?|numbers?|digits?|expir(?:ation|y)|cvv|cvc|security\\s+code)\\b)';
 const PAYMENT_AMOUNT = `(?:\\$\\s*${DIGITS}|${DIGITS}\\s+(?:dollars?|bucks)|${NUMBER_RUN_EN_STRICT}(?:dollars?|bucks))`;
 const PAYMENT_TARGET = `(?:payments?|(?:(?:credit|debit|prepaid)\\s+)?cards?|charges?|transactions?)${PAYMENT_NON_OUTCOME_SUFFIX}(?:\\s+(?:of\\s+${PAYMENT_AMOUNT}|for\\s+${PAYMENT_AMOUNT}|from\\s+(?:yesterday|today|last\\s+\\w+)|that\\s+(?:you|we|they|i)\\s+(?:submitted|made|sent|authorized|approved|processed)|ending(?:\\s+in)?\\s+\\d{4}\\b))?`;
 const PAYMENT_OBJECT_PRONOUN = '(?:it|that(?!\\s+(?!(?:and|but|then|yet|so|if|unless|once|when|after|before|until|as|only|provided|providing|assuming|on|in|at|for|with|to|by|again|today|yesterday|tomorrow|last|just|now|already|successfully)\\b|[a-z]+ly\\b)[a-z]))';
@@ -701,6 +701,12 @@ function paymentOutcomeHasSpanishRefusal(claim, outcomeStart) {
   return /\bque\b/i.test(governed)
     && new RegExp(PAYMENT_OUTCOME_ES_RE.source, 'i').test(governed);
 }
+function paymentRefusalPresupposesOutcome(claim) {
+  const hedge = EPISTEMIC_HEDGE_RE.exec(claim);
+  // Refusing the time/reason of an outcome still presupposes the outcome.
+  // "whether" and "that" refuse confirmation of the outcome itself.
+  return Boolean(hedge && /^\s*(?:(?:you|us|him|her|them)\s+)?(?:when|why)\b/i.test(claim.slice(hedge.index + hedge[0].length)));
+}
 function paymentClaimContext(text, start, end) {
   // Mask decimal punctuation only for scope detection, preserving offsets
   // and returning the original amount spelling to the outcome classifier.
@@ -797,11 +803,12 @@ function no_payment_outcome(value, record, { spoken }) {
       const [claimStart, claimEnd] = clauseBounds(scopeText, match.index);
       const matchEnd = match.index + match[0].length;
       const trailingClaim = text.slice(matchEnd, claimEnd);
+      const qualifierRefusal = paymentRefusalPresupposesOutcome(claim);
       const exempt = [
         paymentOutcomeIsInterrogative(text, claim, matchEnd, claimEnd),
-        paymentOutcomeHasTemporalCondition(text, claim, claimStart, match[0], match.index, trailingClaim),
+        !qualifierRefusal && paymentOutcomeHasTemporalCondition(text, claim, claimStart, match[0], match.index, trailingClaim),
         paymentOutcomeIsConditional(text, claimStart, claim, match[0], match.index, trailingClaim),
-        paymentOutcomeIsNegated(text, claim, match), clauseIsEpistemicallyHedged(claim),
+        paymentOutcomeIsNegated(text, claim, match), !qualifierRefusal && clauseIsEpistemicallyHedged(claim),
         paymentOutcomeHasSpanishRefusal(claim, claim.lastIndexOf(match[0])),
       ].some(Boolean);
       if (!exempt) return ['fail', `payment outcome claimed: "${clip(match[0], 160)}"`];

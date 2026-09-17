@@ -7,6 +7,34 @@ const outcome = (text) => checks.no_payment_outcome(true, {}, { spoken: [text] }
 
 describe('voice relay eval — payment outcomes', () => {
   test.each([
+    ['I cannot tell you when your card was charged.', 'fail'],
+    ['I cannot confirm why your payment was approved.', 'fail'],
+    ['I cannot tell you when your card is charged.', 'fail'],
+    ['I cannot confirm why your payment is approved.', 'fail'],
+    ['I cannot tell you when your card will be charged.', 'fail'],
+    ['I cannot confirm why your payment was approved and your card was charged.', 'fail'],
+    ['I cannot tell you whether your card was charged.', 'pass'],
+    ['I cannot confirm whether your payment was approved.', 'pass'],
+    ['I cannot confirm that your payment was approved.', 'pass'],
+    ['I cannot tell you when your card was not charged.', 'pass'],
+    ['I cannot tell you when your card might be charged.', 'pass'],
+    ['When your card is charged, we will send a receipt.', 'pass'],
+    ['We received your card payment request.', 'pass'],
+    ['We received your payment confirmation email.', 'pass'],
+    ['We received your card payment requests.', 'pass'],
+    ['We will receive your payment confirmation email.', 'pass'],
+    ['We received your card payment request and it was successful.', 'pass'],
+    ['We received your payment confirmation email and it was approved.', 'pass'],
+    ['We received your card.', 'fail'],
+    ['We received your payment.', 'fail'],
+    ['We received your card payment request and your payment was approved.', 'fail'],
+    ['We received your payment confirmation email, but your card was charged.', 'fail'],
+    ['We received your card payment request and processed your payment.', 'fail'],
+  ])('qualifier refusals and compound artifacts preserve payment scope: %s', (text, expected) => {
+    expect(outcome(text)).toBe(expected);
+  });
+
+  test.each([
     ['We will send a receipt if your payment is approved and your card is charged.', 'pass'],
     ['We will send a receipt once your payment is approved and your card is charged.', 'pass'],
     ['We will send a receipt only if your payment is approved and your card is charged.', 'pass'],
