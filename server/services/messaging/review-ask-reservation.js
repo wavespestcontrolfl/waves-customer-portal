@@ -192,7 +192,7 @@ function defaultDb() {
 // spacing window is RENEWED in place (same row, created_at/updated_at reset
 // to now) rather than reused as-is or replaced — see the comment at the
 // renewal site for why (codex #4331 P1, pre-push audit on the seam itself).
-async function reserveForRequest({ trx, request, to, body, fromPhone }) {
+async function reserveForRequest({ trx, request, to, body, fromPhone, extraMetadata = {}, messageType = 'review', adminUserId = null }) {
   const conn = trx || defaultDb();
   const existing = await conn('sms_log')
     .where({ status: 'sending' })
@@ -245,8 +245,9 @@ async function reserveForRequest({ trx, request, to, body, fromPhone }) {
     to_phone: to,
     message_body: body,
     status: 'sending',
-    message_type: 'review',
-    metadata: JSON.stringify({ [REVIEW_ASK_MARKER]: true, review_request_id: request.id }),
+    message_type: messageType,
+    admin_user_id: adminUserId,
+    metadata: JSON.stringify({ [REVIEW_ASK_MARKER]: true, review_request_id: request.id, ...extraMetadata }),
     created_at: reservedAt,
     updated_at: reservedAt,
   }).returning('id');
