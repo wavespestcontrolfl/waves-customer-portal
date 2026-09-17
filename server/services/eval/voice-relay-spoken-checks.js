@@ -1989,14 +1989,20 @@ function safetyCallerContext(text, previousProposition, previousProduct, anteced
     return followupText.toLowerCase().startsWith(conditionLead)
       && !QUESTION_LEAD_RE.test(followupText.slice(conditionLead.length));
   });
+  // A complete acknowledgment leaves the pending proposition unchanged.
+  // Prefix acknowledgments cannot hide a new request or declarative topic.
+  const acknowledgmentText = text.replace(/[.!]+\s*$/, '').trim();
+  const acknowledgment = FREE_VISIT_ACKNOWLEDGMENT_RE.exec(acknowledgmentText)
+    || SAFETY_ANSWER_ACKNOWLEDGMENT_RE.exec(acknowledgmentText);
+  const preservesPending = previousQuestion && (SHORT_AFFIRMATION_RE.test(text)
+    || acknowledgment?.[0].trim() === acknowledgmentText);
   const inheritsSafety = previousQuestion && !polarity.positive && !polarity.harm
-    && (candidate.dryingFollowup || conditionFollowup);
-  const resolvedQuestion = inheritsSafety
-    ? `${previousQuestion.replace(/[.!?;]+\s*$/, '')}. ${candidate.text.replace(/[.!?;]+\s*$/, '')}?` : text;
+    && (candidate.dryingFollowup || conditionFollowup || preservesPending);
+  const resolvedQuestion = preservesPending ? previousQuestion : (inheritsSafety
+    ? `${previousQuestion.replace(/[.!?;]+\s*$/, '')}. ${candidate.text.replace(/[.!?;]+\s*$/, '')}?` : text);
   const resolvedPolarity = inheritsSafety ? previousProposition.polarity : polarity;
   const proposition = polarity.positive || polarity.harm || inheritsSafety
-    ? { text: resolvedQuestion, polarity: resolvedPolarity }
-    : (latestInterrogativeSegment(text) ? null : previousProposition);
+    ? { text: resolvedQuestion, polarity: resolvedPolarity } : null;
   return {
     proposition,
     polarity: resolvedPolarity,
