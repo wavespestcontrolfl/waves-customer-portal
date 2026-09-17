@@ -1745,7 +1745,7 @@ function safetyOnceDryQualifies(text, claim, questionText = null, antecedentText
 }
 
 const SAFETY_NO_RISK_NEGATION_RE = new RegExp(
-  `(?:\\b(?:not|never)\\s+${SAFETY_INTENSIFIER}|\\b(?:do|does|did)(?:\\s+not|n[\\x27\\u2019]t)\\s+mean(?:\\s+there\\s+(?:is|was))?\\s*)$`,
+  `(?:\\b(?:not|never|(?:isn|aren|wasn|weren)[\\x27\\u2019]t)\\s+${SAFETY_INTENSIFIER}|\\b(?:do|does|did)(?:\\s+not|n[\\x27\\u2019]t)\\s+mean(?:\\s+there\\s+(?:is|was))?\\s*)$`,
   'i',
 );
 
