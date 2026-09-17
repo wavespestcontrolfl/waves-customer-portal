@@ -4,6 +4,7 @@ const {
   buildPrepayCoverageSummary,
   buildCoverageVisits,
   resolveInvoiceTermId,
+  loadInvoiceAnnualPrepay,
 } = require('../services/invoice-prepay');
 
 describe('invoice-prepay helpers', () => {
@@ -250,5 +251,31 @@ describe('invoice-prepay helpers', () => {
       const id = await resolveInvoiceTermId({ id: 'I', scheduled_service_id: 'V', total: 400 }, throwing);
       expect(id).toBeNull();
     });
+  });
+
+  test('transactional annual enrichment uses savepoints and never falls back to the root connection', async () => {
+    const queried = [];
+    const child = (table) => {
+      queried.push(table);
+      const query = {
+        where: () => query,
+        columnInfo: async () => ({ coverage_service_type: {}, coverage_visit_count: {}, coverage_cadence: {} }),
+        first: async () => ({ id: 'term-1', status: 'payment_pending', plan_label: 'Annual',
+          monthly_rate: 50, prepay_amount: 500, term_start: '2026-09-01', term_end: '2027-08-31',
+          coverage_service_type: 'Pest Control', coverage_visit_count: 4, coverage_cadence: 'quarterly' }),
+      };
+      return query;
+    };
+    child.schema = { hasTable: jest.fn(async () => true) };
+    const trx = jest.fn(() => { throw new Error('root transaction connection used directly'); });
+    trx.isTransaction = true;
+    trx.transaction = jest.fn(async (callback) => callback(child));
+
+    const result = await loadInvoiceAnnualPrepay({ id: 'inv-1', annual_prepay_term_id: 'term-1', line_items: [] }, trx);
+
+    expect(result).toMatchObject({ id: 'term-1', coverageVisitCount: 4 });
+    expect(trx).not.toHaveBeenCalled();
+    expect(trx.transaction).toHaveBeenCalled();
+    expect(queried).toContain('annual_prepay_terms');
   });
 });

@@ -70,6 +70,7 @@ const { chargeInvoiceWithSavedCard } = require('../services/stripe');
 const InvoiceService = require('../services/invoice');
 const { acquireScheduledInvoiceMintLock, mintScheduledServiceInvoiceWithDeposit } = require('../services/scheduled-invoice-mint');
 const { createVisitCompletionInvoice } = require('../services/visit-completion-invoice');
+const { acquireEstimateDepositLedgerLock } = require('../services/estimate-deposits');
 const { collectVisitCompletionInvoice, assertVisitCompletionCharge } = require('../services/visit-completion-payment');
 const EstimateConverter = require('../services/estimate-converter');
 const { reserveSlot, commitReservation } = require('../services/slot-reservation');
@@ -2719,6 +2720,57 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(invoice.line_items.find((line) => line.category === 'deposit_credit')).toMatchObject({ amount: -70, estimate_id: estimateId });
     expect((await saveVisitCompletionPacket(submission())).body.billing.invoiceId).toBe(invoice.id);
     expect(Number((await mockPg('estimate_deposits').where({ estimate_id: estimateId }).first()).credited_amount)).toBe(70);
+  });
+
+  test('packet mint waits for a concurrent deposit receipt before reading its ledger', async () => {
+    const estimateId = randomUUID();
+    fixture.estimateIds.push(estimateId);
+    await mockPg('estimates').insert({ id: estimateId, customer_id: fixture.customerId, status: 'accepted' });
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ source_estimate_id: estimateId });
+    let releaseLedger;
+    const held = new Promise((resolve) => { releaseLedger = resolve; });
+    let ledgerReady;
+    const ready = new Promise((resolve) => { ledgerReady = resolve; });
+    const receipt = mockPg.transaction(async (trx) => {
+      await acquireEstimateDepositLedgerLock(trx, estimateId);
+      ledgerReady();
+      await held;
+      await trx('estimate_deposits').insert({ estimate_id: estimateId,
+        amount: 70, status: 'received', stripe_payment_intent_id: `pi_fixture_${randomUUID()}` });
+    });
+    await ready;
+    let reachedLock;
+    const attempted = new Promise((resolve) => { reachedLock = resolve; });
+    const observedAdvisory = [];
+    const observe = (query) => {
+      if (query.sql.includes('pg_advisory')) observedAdvisory.push({ sql: query.sql, bindings: query.bindings });
+      if (query.sql.includes('pg_advisory_xact_lock')
+        && query.bindings?.[0] === 'estimate.deposit.ledger'
+        && query.bindings?.[1] === estimateId) reachedLock();
+    };
+    mockPg.on('query', observe);
+    const packet = saveVisitCompletionPacket(submission());
+    let lockTimer;
+    try {
+      await Promise.race([
+        attempted,
+        packet.then((result) => { throw new Error(`Packet finished before deposit lock: ${JSON.stringify(result.body?.billing)}`); }),
+        new Promise((_, reject) => { lockTimer = setTimeout(() => reject(new Error(`Packet never reached deposit lock: ${JSON.stringify(observedAdvisory)}`)), 60000); }),
+      ]);
+      releaseLedger();
+      await receipt;
+      const saved = await packet;
+      const invoice = await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).first();
+      expect(Number(invoice.total)).toBe(170);
+      expect(invoice.line_items.filter((line) => line.category === 'deposit_credit')).toHaveLength(1);
+      expect(Number((await mockPg('estimate_deposits').where({ estimate_id: estimateId }).first()).credited_amount)).toBe(70);
+    } finally {
+      clearTimeout(lockTimer);
+      releaseLedger();
+      mockPg.removeListener('query', observe);
+      await receipt;
+      await packet.catch(() => {});
+    }
   });
 
   test('individual scheduled, record-linked and recovery mints refuse packet-owned members', async () => {

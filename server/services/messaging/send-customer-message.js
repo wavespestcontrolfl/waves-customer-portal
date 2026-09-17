@@ -271,7 +271,7 @@ async function sendCustomerMessageCore(input) {
 
   // 3. Normalize recipient + clone input so downstream sees the canonical
   //    form. Caller closures stay outside message state and audit payloads.
-  const { preDispatchCheck, preProviderCheck, preSendCheck, withSmsHandoff, ...inputRest } = input;
+  const { preDispatchCheck, preProviderCheck, preSendCheck, withSmsHandoff, withProviderHandoff, ...inputRest } = input;
   const normalizedTo = normalizeRecipient(input.to);
   const sendInput = { ...inputRest, to: normalizedTo };
   // Request lifecycle email companions have no text leg. Keep their App
@@ -301,6 +301,20 @@ async function sendCustomerMessageCore(input) {
   if (typeof preSendCheck === 'function' && withSmsHandoff) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SEND_GUARD_COMBINATION',
       reason: 'A caller pre-send check cannot be combined with a locked SMS handoff' };
+  }
+  // Invoice delivery needs one lock boundary that covers whichever provider
+  // the canonical router actually chooses (push-first, push+SMS, or Twilio).
+  // Keep this narrowly scoped to the invoice-send entry point: other callers
+  // use the stronger recipient/consent handoffs above, whose transaction is
+  // also threaded into their fresh suppression reads.
+  const providerHandoffAllowed = input.audience === 'customer'
+    && sendInput.channel === 'sms'
+    && input.purpose === 'payment_link'
+    && input.entryPoint === 'invoice_send_via_sms';
+  if (withProviderHandoff
+    && (typeof withProviderHandoff !== 'function' || !providerHandoffAllowed || withSmsHandoff)) {
+    return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_PROVIDER_HANDOFF',
+      reason: 'Locked provider handoff is restricted to invoice delivery' };
   }
   // SMS link schemes are removed before audit counting, matching the final
   // Twilio boundary for direct callers.
@@ -608,7 +622,7 @@ async function sendCustomerMessageCore(input) {
   providerPreSendCheck.isStillValid = () => checkSendWindow(sendInput, policy, contactState)?.ok === true;
 
   providerOutcome = { sent: false, deliveryOutcome: 'uncertain' };
-  providerOutcome = await dispatchToProvider(sendInput, {
+  const dispatchProvider = () => dispatchToProvider(sendInput, {
     // The caller's handoff receives (trx, onProviderStart): the callback fires
     // immediately before the provider request, after the rechecks below, so a
     // caller can tell a failed recheck (nothing sent) from a failed request.
@@ -637,6 +651,9 @@ async function sendCustomerMessageCore(input) {
     })),
     preSendCheck: providerPreSendCheck,
   });
+  providerOutcome = withProviderHandoff
+    ? await withProviderHandoff(dispatchProvider)
+    : await dispatchProvider();
 
   // Push fan-out normalizes a provider-hook refusal to false and therefore
   // loses its code. Restore that boundary refusal only when the provider
