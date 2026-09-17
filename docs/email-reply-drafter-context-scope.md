@@ -151,11 +151,20 @@ labelled untrusted, exactly as the SMS drafter does.
 
 - Extend `sms-voice-corpus-miner` with a third source, `email_human_reply`:
   Waves-authored `SENT` rows to a non-Waves address, paired with the inbound
-  they answered in the same thread, redacted with the existing redactor,
-  quoted history stripped, ops mail excluded. A SENT label alone does not
+  they answered in the same thread, quoted history stripped, ops mail excluded.
+  Apply both `redactAccessCodes` and sensitive-identifier redaction to each
+  inbound/outbound exemplar before persistence and again before prompt assembly,
+  including SMS fallback exemplars. The current corpus PII redactor and
+  `exemplarLooksClean` injection check do not remove access credentials; neither
+  is sufficient alone. Failed redaction validation excludes the pair, and raw
+  credentials must not enter corpus storage, logs or model prompts. A SENT label alone does not
   prove human authorship: exclude automated/template replies and only admit
-  pairs whose human provenance can be established. Pair with the preceding
-  inbound, exclude held-out evaluation threads and customer identities,
+  pairs whose human provenance can be established. Admit a preceding-inbound
+  pair only when exactly one inbound message occurred since the prior human
+  outbound (or thread start); multiple inbound messages before the answer are
+  ambiguous and excluded in phase 1, matching measurement exclusions. Do not
+  select only the last message of an ambiguous run. Exclude held-out evaluation
+  threads and customer identities,
   and retain the existing `(source, source_id)` idempotency key. The 326
   non-empty sent bodies are an upper bound, not 300 verified usable pairs.
   Review source selectors/readers so the new rows do not silently change
@@ -165,7 +174,12 @@ labelled untrusted, exactly as the SMS drafter does.
   supported intent, then to SMS pairs), through the same `exemplarLooksClean`
   gate. If none pass, draft without examples; never borrow example facts.
 - Read only `getApprovedVoiceProfile`, reuse the existing profile sanitation
-  and composition rules, and record the applied profile version. Missing,
+  and composition rules, and record the applied profile version. Reject profile
+  instructions or sign-offs that identify Waves by any name other than
+  "Waves Pest Control"; repeat this check on the final visible draft. Existing
+  profile sanitation does not enforce this name, and approval alone is not an
+  exemption. Exclude unsafe profile content and use base style rather than
+  preserving an alternate company name verbatim. Missing,
   revoked, rejected, or unreadable profiles use the base email style.
   The email-specific gate below controls this consumer independently of SMS.
 
@@ -194,7 +208,16 @@ labelled untrusted, exactly as the SMS drafter does.
 - Word budget respected.
 - Complete request coverage proved, within the limited supported contract
   below; a model's assertion that it answered everything is not proof.
-- No prices, dates, or amounts that do not appear in the facts block.
+- Prices, dates and amounts need typed, source-bound evidence. Account facts
+  remain authoritative. Values from the triggering inbound may be admitted only
+  as explicitly customer-proposed/customer-reported evidence with source spans;
+  for example, "I will check whether October 5 is available" may refer to the
+  requested date without claiming a booking. The verifier must preserve that
+  attribution and uncertainty, never promote it to a booked date or verified
+  balance, and enforce all price/privacy exclusions regardless of source.
+- Use "Waves Pest Control" when naming Waves; reject alternate names for Waves
+  introduced by profiles, exemplars or sign-offs before returning or persisting
+  the draft.
 - No access credentials in output, even if present in source history: run a
   deterministic credential-output rejection in addition to input redaction;
   gate, garage and lockbox examples must fail without entering retry prompts
@@ -254,7 +277,10 @@ failures return a usable error to the UI without creating a live auto claim.
   their reconciliation exclusions as specified above. Bump the lane prompt
   version.
 - `draftEmailReply` (IB and button): route through `dispatchWithFallback`
-  on the `customerCopy` policy instead of a direct Anthropic call, and use
+  instead of a direct Anthropic call. Reuse the existing response-drafter
+  severity selection: complaints and other high-stakes intents use
+  `TEXT_POLICIES.highStakes`, ordinary customer copy uses `customerCopy`;
+  preserve the selected policy through fallback and test both provider legs. Use
   the same assembler for the validated customer branch. Preserve the existing
   recognized-vendor B2B path before customer-only assembly: it uses the existing
   vendor-domain context and manual-only response contract, never customer facts
@@ -347,8 +373,8 @@ restores the legacy path without deleting existing operator drafts.
 | Slice | Deliverable | Required evidence before completion |
 | --- | --- | --- |
 | 1. Context contract | Shared assembler and fact projection, no live wiring | Fixtures for aligned/failed/missing auth, spoofed matching From plus attacker Reply-To, unique/shared/deleted sender matches, and relayed mail review; direction-aware ownership for every thread row, including legitimate SENT rows with null sender IDs, conflicting IDs, foreign To/Cc, verified-empty Cc and failed legacy-header retrieval; rejection before context reads/model egress; absent vs unavailable; payer billing; archived estimates; cancelled visits; pending-estimate monthly totals excluded; redacted SMS/email access codes and credential-output rejection; bounded history and prompt injection. PostgreSQL verification of added/changed queries on a dedicated dev/preview database. |
-| 2. Corpus source | Idempotent, gated human email pairs | Automated mail excluded; inbound pairing correct; redaction and injection rejection; replay holdouts excluded; repeated mining inserts no duplicates; SMS/profile readers unchanged unless explicitly scoped. |
-| 3. Shared drafting | Both entrypoints use the context, dispatcher, style and verifier | Gate-off parity and gate-on manual vendor B2B parity without customer-context reads; profile revoke/failure fallback; manual instructions remain untrusted data; no exemplar facts or forged signatures; bounded retry; dispatcher failure; invalid drafts withheld; multipart fixtures with omitted first/middle/last items, conjunctions, implicit requests, false answer-ID mappings and budget pressure fail closed or require review, while supported complete answers pass; terminal rejection survives repeated classification and reconciler runs without redrafting, and explicit operator retry is guarded; transient/ambiguous recovery, existing claim, dedupe, live-thread and recipient guards pass. |
+| 2. Corpus source | Idempotent, gated human email pairs | Automated mail excluded; multi-inbound ambiguous pairs excluded; access-code and sensitive-identifier redaction on both exemplar sides before storage and model egress, including fallback examples; injection rejection; replay holdouts excluded; repeated mining inserts no duplicates; SMS/profile readers unchanged unless explicitly scoped. |
+| 3. Shared drafting | Both entrypoints use the context, dispatcher, style and verifier | Gate-off parity and gate-on manual vendor B2B parity without customer-context reads; profile revoke/failure fallback and canonical-name rejection; complaint/high-severity policy and fallback parity; customer-reported date/amount attribution cannot become authoritative facts; manual instructions remain untrusted data; no exemplar facts or forged signatures; bounded retry; dispatcher failure; invalid drafts withheld; multipart fixtures with omitted first/middle/last items, conjunctions, implicit requests, false answer-ID mappings and budget pressure fail closed or require review, while supported complete answers pass; terminal rejection survives repeated classification and reconciler runs without redrafting, and explicit operator retry is guarded; transient/ambiguous recovery, existing claim, dedupe, live-thread and recipient guards pass. |
 | 4. Shadow and measurement | Internal comparison and correctly paired outcome metrics | Zero Gmail/send/claim side effects in shadow, including provider/storage failure; redacted evidence and retention contract; reply vs adoption distinction; reproducible cohort counts and reviewed promotion evidence. |
 
 Slice 1 is the next implementation step. Slices 1 and 2 can proceed
