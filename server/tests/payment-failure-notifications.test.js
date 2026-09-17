@@ -198,6 +198,68 @@ test('undelivered jobs survive and retry with the same bell dedupe key', async (
   ]);
 });
 
+test('a delivered bell with retryable push failure retains the pending job', async () => {
+  rows = [job()];
+  triggerNotification.mockResolvedValueOnce({ bellWritten: true, retryable: true,
+    push: { sent: 0, failed: 1, deliveredSubscriptionIds: [] } });
+  expect(await processPendingPaymentFailureNotifications()).toEqual({ processed: 0, failed: 1, skipped: 0 });
+  expect(rows[0].pending_payload).toMatchObject({ reason: 'Card declined', deliveredSubscriptionIds: [] });
+  expect(rows[0].notified_at).toBeGreaterThan(100);
+  expect((await processPendingPaymentFailureNotifications()).processed).toBe(1);
+});
+
+test.each([null, undefined, { bellWritten: true, error: 'Push unavailable' }, { prefsUnavailable: true }])(
+  'null or explicit failure outcomes remain pending: %j', async (result) => {
+    rows = [job()];
+    triggerNotification.mockResolvedValueOnce(result);
+    expect((await processPendingPaymentFailureNotifications()).failed).toBe(1);
+    expect(rows[0].pending_payload).not.toBeNull();
+  });
+
+test('accepted pushes survive a retryable bell failure and are forwarded on retry', async () => {
+  rows = [job()];
+  rows[0].pending_payload.deliveredSubscriptionIds = ['sub_prior'];
+  triggerNotification.mockResolvedValueOnce({ bellWritten: false, retryable: true,
+    push: { sent: 2, failed: 0, deliveredSubscriptionIds: ['sub_prior', 'sub_new'] } });
+  expect(await processPendingPaymentFailureNotifications()).toEqual({ processed: 0, failed: 1, skipped: 0 });
+  expect(rows[0].pending_payload.deliveredSubscriptionIds).toEqual(['sub_prior', 'sub_new']);
+  expect(triggerNotification.mock.calls[0][2].deliveredSubscriptionIds).toEqual(['sub_prior']);
+  triggerNotification.mockResolvedValueOnce({ bellWritten: true, retryable: false,
+    push: { sent: 2, failed: 0, deliveredSubscriptionIds: ['sub_prior', 'sub_new'] } });
+  expect((await processPendingPaymentFailureNotifications()).processed).toBe(1);
+  expect(triggerNotification.mock.calls[1][2].deliveredSubscriptionIds).toEqual(['sub_prior', 'sub_new']);
+  expect(rows[0].pending_payload).toBeNull();
+});
+
+test('partial push acceptance accumulates across retries without losing prior IDs', async () => {
+  rows = [job()];
+  triggerNotification.mockResolvedValueOnce({ bellWritten: true, retryable: true,
+    push: { sent: 1, failed: 2, deliveredSubscriptionIds: ['sub_first'] } });
+  triggerNotification.mockResolvedValueOnce({ bellWritten: true, retryable: true,
+    push: { sent: 2, failed: 1, deliveredSubscriptionIds: ['sub_second'] } });
+  expect((await processPendingPaymentFailureNotifications()).failed).toBe(1);
+  expect((await processPendingPaymentFailureNotifications()).failed).toBe(1);
+  expect(rows[0].pending_payload.deliveredSubscriptionIds).toEqual(['sub_first', 'sub_second']);
+});
+
+test.each([{ suppressed: true }, { policySilenced: true }])('deliberate suppression completes even a retryable result: %j', async (suppression) => {
+  rows = [job()];
+  triggerNotification.mockResolvedValueOnce({ retryable: true, ...suppression });
+  expect((await processPendingPaymentFailureNotifications()).processed).toBe(1);
+  expect(rows[0].pending_payload).toBeNull();
+});
+
+test('settlement observed before push completes a partially delivered retryable job', async () => {
+  rows = [job()];
+  triggerNotification.mockImplementationOnce(async (_key, _payload, options) => {
+    ledger = { id: 'pmt_now_paid', status: 'paid' };
+    expect(await options.beforePush()).toBe(false);
+    return { bellWritten: true, retryable: true };
+  });
+  expect((await processPendingPaymentFailureNotifications()).processed).toBe(1);
+  expect(rows[0].pending_payload).toBeNull();
+});
+
 test('a failed first job does not prevent the remaining bounded batch from dispatching', async () => {
   rows = [job('pi_poison'), { ...job('pi_healthy'), notified_at: 2 }, { ...job('pi_later'), notified_at: 3 }];
   triggerNotification.mockRejectedValueOnce(new Error('Transient delivery failure'));

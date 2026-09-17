@@ -530,6 +530,19 @@ describe('payment failure settlement recheck', () => {
     expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
   });
 
+  test('partial phone failure stays retryable even after the bell is written', async () => {
+    PushService.sendToAdminUsers.mockResolvedValueOnce({ sent: 1, failed: 1, deliveredSubscriptionIds: ['sub-accepted'] });
+    const shouldContinue = jest.fn(async () => true);
+    const result = await triggerNotification('payment_failed', { paymentIntentId: 'pi_synthetic' }, {
+      dedupeKey: 'payment-failed:pi_synthetic:ch_synthetic', shouldContinue,
+      beforePush: shouldContinue, deliveredSubscriptionIds: ['sub-prior'],
+    });
+    expect(result).toMatchObject({ bellWritten: true, retryable: true,
+      push: { deliveredSubscriptionIds: ['sub-accepted'] } });
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledWith(expect.any(Array), expect.any(Function),
+      expect.objectContaining({ deliveredSubscriptionIds: ['sub-prior'] }));
+  });
+
   test('settlement after bell persistence prevents provider fan-out', async () => {
     const shouldContinue = jest.fn().mockResolvedValueOnce(true).mockResolvedValue(false);
     const result = await triggerNotification('payment_failed', { paymentIntentId: 'pi_synthetic' }, {
