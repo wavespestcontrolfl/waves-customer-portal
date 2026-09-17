@@ -2,6 +2,32 @@ const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-s
 const report = { subject: 'talstar p', location: 'exterior perimeter' };
 
 test.each([
+  ['Actually, Talstar P was not applied to the exterior perimeter; it was applied indoors.', 'fail'],
+  ['Actually, Talstar P was not applied to the exterior perimeter today.', 'fail'],
+  ['Actually, Talstar P was not applied to the exterior perimeter yesterday.', 'pass'],
+  ['Actually, Talstar P was not applied indoors.', 'pass'],
+  ['Actually, bait was not applied to the exterior perimeter.', 'pass'],
+  ['Actually, it was not applied there.', 'pass'],
+])('later explicit report corrections retain named fact and date scope: %s', (tail, status) => {
+  const spoken = [
+    'Talstar P was applied to the exterior perimeter today.',
+    'Let me double-check the report.',
+    tail,
+  ];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
+test('a later affirmative correction can reconfirm a retracted report finding', () => {
+  const spoken = [
+    'Talstar P was applied to the exterior perimeter.',
+    'Let me double-check the report.',
+    'Actually, Talstar P was not applied to the exterior perimeter.',
+    'The technician confirmed Talstar P was applied to the exterior perimeter.',
+  ];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe('pass');
+});
+
+test.each([
   ['Actually, it was not applied there.', 'fail'],
   ['Sorry, it was not applied there.', 'fail'],
   ['Sorry, that was false.', 'fail'],

@@ -2001,6 +2001,19 @@ function* reportContentMatches(text, regex) {
   }
 }
 
+function reportHasLaterExplicitRetraction(text, after, subject, location, findingText) {
+  const product = new RegExp(subject, 'i');
+  const place = new RegExp(location, 'i');
+  return text.slice(after).split(/[.!?;]/).some((statement) => {
+    // A distant pronoun has no reliable antecedent. Require both named facts;
+    // immediate anaphoric corrections are handled by the continuation check.
+    if (!product.test(statement) || !place.test(statement)) return false;
+    const qualifier = reportRetractionClause(statement, subject, location);
+    return reportTrailingDenialOrCorrection(qualifier)
+      || reportTimedDenial(qualifier, findingText) || reportTrailingNoncompletion(qualifier);
+  });
+}
+
 /** value: { subject: "<regex>", location: "<regex>" } */
 function report_readback_confirms(value, record, { spoken }) {
   const subjectRe = new RegExp(value.subject, 'gi');
@@ -2108,7 +2121,8 @@ function report_readback_confirms(value, record, { spoken }) {
           && !alternativeLocation
           && reportRespectivelyPairsFinding(affirmed, subjectAt, locationAt, findingVerb)
           && (completedFinding || conciseFinding)
-          && !reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb, text.slice(0, clauseStart))) {
+          && !reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb, text.slice(0, clauseStart))
+          && !reportHasLaterExplicitRetraction(text, clauseEnd, value.subject, value.location, affirmed)) {
         return ['pass', `readback confirmed: "${clip(clause.trim(), 160)}"`];
       }
     }
