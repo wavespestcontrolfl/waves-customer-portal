@@ -101,6 +101,74 @@ describe('inactive email reply plan-total policy', () => {
     allowed(text);
   });
 
+  test.each([
+    'The plan costs $98 a month', '$98 each month', '$1,176 every year',
+    'USD 98 every month', '$1176 a year', '98 dollars each month',
+    'The price is 98 a month', 'The yearly price is 1176 every year',
+  ])('recognizes determined month/year words without changing the scanner: %s', (text) => rejected(text));
+
+  test.each([
+    'The monthly plan costs $98: applications are scheduled separately',
+    'The monthly plan costs $98 - applications are scheduled separately',
+    'The monthly plan costs $98 (applications are scheduled separately)',
+    'The annual price is $1176: visits are scheduled separately',
+    'The monthly price is $98 applications are scheduled separately',
+  ])('does not treat later noun prose as an amount unit: %s', (text) => rejected(text));
+
+  test.each([
+    'The monthly plan costs $98: per application',
+    'The monthly plan costs $98 - for each application',
+    'The monthly plan costs $98 (per application)',
+    'The annual price is $1176: per visit',
+    'Monthly application price is $98',
+  ])('preserves real sibling pricing units: %s', (text) => allowed(text));
+
+  test.each([
+    'The monthly price of the standard plan for your home is $98',
+    'The total annual cost for your pest-control service is $1176',
+    '$98 is the price of the standard plan for your home monthly',
+    'The yearly price of our standard program for your account is 1176',
+  ])('follows a price relationship to its claim boundary: %s', (text) => rejected(text));
+
+  test('handles a long bounded claim and repeated nearest anchors', () => {
+    rejected(`The monthly price for your ${'standard '.repeat(400)}plan is $98`);
+    allowed(Array(80).fill('98 monthly payment posted,').join(' '));
+    rejected(`${Array(70).fill('$98 monthly payment posted,').join(' ')}$1176/yr`);
+  });
+
+  test.each([
+    '$98/mo', '$98 a month', '$98 each month', '$98 every month',
+    'The monthly payment is $98', 'The monthly price is 98',
+  ])('permits only the legacy plan\'s own monthly unit: %s', (text) => {
+    allowed(text, { legacyMonthlyPlan: true });
+  });
+
+  test.each([
+    '$1176/yr', '$1176 a year', '$1176 each year', '$1176 every year',
+    'The annual price is $1176', 'The yearly price is 1176',
+    '$98/mo, $1176/yr', '$98 a month; the annual total is $1176',
+  ])('rejects yearly aggregates even for a trusted monthly legacy plan: %s', (text) => {
+    rejected(text, { legacyMonthlyPlan: true });
+  });
+
+  test.each([
+    'The monthly payment is $98', 'Your monthly payment amount is $98',
+    'The monthly account fee is $98', 'The annual account fee is $1176',
+    'The monthly payment is 98', 'Monthly reminder fee is $98',
+    'Monthly service reminders cost $98',
+  ])('keeps account and activity nouns inside explicit pricing predicates: %s', (text) => rejected(text));
+
+  test.each([
+    'The monthly payment of $98 posted', 'Your monthly payment was $98 and it cleared',
+    'We received your monthly payment of $98',
+    'Your account balance of $98 remains unchanged, monthly prices are unchanged',
+    'Monthly reminder mentions the $98 initial-service price',
+    'Monthly service reminders mention the $98 initial-service price',
+    'Yearly service update mentions the $1176 initial-service cost',
+    'Annual scheduled appointment details mention the $98 initial-service price',
+    'Monthly reminder mentions the price of the standard application for your home: $98',
+  ])('preserves account events and singular or modified activity cadence: %s', (text) => allowed(text));
+
   test('uses only trusted literal true exemption flags', () => {
     allowed('$98/mo', { commercialProposal: true });
     allowed('$98/mo', { legacyMonthlyPlan: true });
