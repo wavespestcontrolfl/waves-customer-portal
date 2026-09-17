@@ -1599,17 +1599,21 @@ function no_account_holder_callback(value, record, { spoken }) {
         'i',
       );
       const leadingConsent = new RegExp(`^\\s*${consentCondition.source}\\s*,?\\s*$`, 'i');
+      // Additive/alternative actions sharing a subject retain its leading
+      // condition; contrast and sequential actions retain their own scope.
+      const leadingConsentStart = inherited && /^(?:and|or)\b/i.test(source.text) ? actor.start : source.start;
+      const [leadingClauseStart] = clauseBounds(text, leadingConsentStart);
       const trailingConsent = consentCondition.exec(callbackSuffix);
       const consentModifiers = trailingConsent
         ? callbackSuffix.slice(0, trailingConsent.index).replace(/,\s*$/, '') : '';
       const concessiveConsent = trailingConsent
         && /\beven\s*$/i.test(callbackSuffix.slice(0, trailingConsent.index));
       const consentOverridden = callbackConsentOverridden(text, matchEnd, consentCondition, conditionTarget);
-      const consentGated = !consentOverridden && (leadingConsent.test(text.slice(clauseStart, source.start))
+      const consentGated = !consentOverridden && (leadingConsent.test(text.slice(leadingClauseStart, leadingConsentStart))
         || Boolean(trailingConsent && !concessiveConsent
           && (VISIT_MODIFIERS_RE.test(consentModifiers)
             || CALLBACK_TIMING_MODIFIERS_RE.test(consentModifiers))));
-      const claim = (bare ? source.text.replace(/\bif\b.*?(?=,?\s+\b(?:and|but|so|then)\b)/gi, '')
+      const claim = (bare ? source.text.replace(/\bif\b.*?(?=,?\s+\b(?:and|or|but|so|then)\b)/gi, '')
         : inherited ? text.slice(source.start, matchEnd) : claimContext(text, source.start, matchEnd))
         .replace(/^.*\b(?:but|then)\s+/i, '')
         .replace(/^\s*(?:if|unless)\b[^,]*,\s*/i, '')
