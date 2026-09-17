@@ -19,22 +19,6 @@ const s3 = new S3Client({
     : undefined,
 });
 
-function getExtension(contentType) {
-  switch ((contentType || '').split(';')[0].toLowerCase()) {
-    case 'image/jpeg':
-    case 'image/jpg':
-      return 'jpg';
-    case 'image/png':
-      return 'png';
-    case 'image/gif':
-      return 'gif';
-    case 'image/webp':
-      return 'webp';
-    default:
-      return 'bin';
-  }
-}
-
 function parseStoredMedia(value) {
   if (!value) return [];
   if (Array.isArray(value)) return value;
@@ -138,7 +122,10 @@ async function uploadTwilioMedia(body = {}) {
       if (!response.ok) throw new Error(`Twilio media fetch failed (${response.status})`);
       const contentType = response.headers.get('content-type') || item.contentType || 'application/octet-stream';
       const bytes = Buffer.from(await response.arrayBuffer());
-      const key = `${PREFIX}inbound/${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${item.index}.${getExtension(contentType)}`;
+      // Re-delivery after an inbox failure reuses the same object instead of
+      // leaving an unreferenced random-key upload on every attempt.
+      const identity = JSON.stringify([body.AccountSid || config.twilio.accountSid, body.MessageSid, item.index]);
+      const key = `${PREFIX}inbound/${crypto.createHash('sha256').update(identity).digest('hex')}`;
       await s3.send(new PutObjectCommand({
         Bucket: config.s3.bucket,
         Key: key,

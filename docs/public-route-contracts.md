@@ -330,6 +330,9 @@ successful acknowledgment or ordinary downstream processing. A missing message
 returns 503 and releases only this delivery's owned inbound claim. Eligible
 STOP requests still persist suppression, recipient decline, and preference
 updates before that error; non-idempotent logs and alerts wait for redelivery.
+Inbound media uses stable account/message/index storage keys across retries.
+Stale contact-correction reservations require a saved unified inbox message
+before promotion; failed route cancellation cannot replay an unrecorded source.
 Provider retry/fallback remains governed by the configured Twilio policy.
 
 `/api/webhooks/twilio/outbound-amd` +
