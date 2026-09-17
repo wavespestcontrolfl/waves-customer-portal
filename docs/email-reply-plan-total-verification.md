@@ -33,6 +33,10 @@ Received/posted payment events do not become prices merely because later
 descriptions mention a plan or fee; overriding an event requires a pricing
 assertion joining the period and amount, or an explicit direct currency/unit
 total such as `$98/mo`.
+An asserted price label also permits up to three qualifiers from the monetary
+adapter's finite vocabulary (`only`, `exactly`, `at least`, `as low as`, and
+the other supported approximations); unknown descriptions do not join the
+label to an account-event amount.
 Singular/plural activity nouns allow up to four ordinary modifiers (`Monthly
 service reminders mention the $98 initial-service price`); an activity fee
 or cost predicate still counts as pricing.

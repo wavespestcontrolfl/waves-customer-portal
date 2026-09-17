@@ -218,6 +218,32 @@ describe('inactive email reply plan-total policy', () => {
     'The monthly payment is 98 after your payment posted.',
   ])('retains an explicit payment predicate beside an earlier account event: %s', (text) => rejected(text));
 
+  test.each([
+    'The monthly plan costs only $98 after your payment posted.',
+    'Your annual plan costs exactly $1176 after the credit posted.',
+    'The monthly plan costs just about $98 after your payment posted.',
+    'Your yearly plan costs at least $1176 after the credit posted.',
+    'The monthly plan costs as low as $98 after your payment posted.',
+    'The annual plan costs only roughly exactly $1176 after your payment posted.',
+    'The annual plan costs up to at least as low as $1176 after your payment posted.',
+    'Monthly fee only about: $98 after your payment posted.',
+    'The monthly plan costs just 98 after your payment posted.',
+  ])('retains finite qualified price assertions beside account events: %s', (text) => rejected(text));
+
+  test.each([
+    'We received your monthly payment of only $98 for the plan.',
+    'Your monthly payment of exactly $98 posted after the fee adjustment.',
+    'We received your monthly payment only just $98 for the plan.',
+    'Your annual payment amount of exactly $1176 posted after the fee adjustment.',
+    'Your monthly payment of at least $98 posted after the cost adjustment.',
+    'We received your monthly payment of $98 for the plan that costs only $1176.',
+  ])('preserves qualified account notices and separate unpaired amounts: %s', (text) => allowed(text));
+
+  test('preserves monthly-only legacy exemptions for qualified pricing assertions', () => {
+    allowed('The monthly plan costs only $98 after your payment posted.', { legacyMonthlyPlan: true });
+    rejected('The annual plan costs exactly $1176 after the credit posted.', { legacyMonthlyPlan: true });
+  });
+
   test('applies legacy monthly exemptions to payment predicates without exempting yearly aggregates', () => {
     allowed('The monthly payment is $98 after your payment posted.', { legacyMonthlyPlan: true });
     rejected('The yearly payment is $1176 after your payment posted.', { legacyMonthlyPlan: true });

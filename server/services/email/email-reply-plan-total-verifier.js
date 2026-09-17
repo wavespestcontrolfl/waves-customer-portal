@@ -7,6 +7,8 @@ const PRICE_WORDS = new Set([
 ]);
 const PLAN_WORDS = new Set(['plan', 'program', 'package']);
 const PRICING_LABEL_WORDS = new Set([...PRICE_WORDS, ...PLAN_WORDS]);
+const PRICE_QUALIFIER = '(?:only|just|about|around|approximately|roughly|exactly|nearly|almost|up to|at least|as low as)';
+const PRICE_LABEL = new RegExp(`(?:^| )(?:${[...PRICE_WORDS].join('|')})(?: ${PRICE_QUALIFIER}){0,3}(?: <sep>)?$`);
 const ACCOUNT_WORDS = new Set([
   'account', 'balance', 'payment', 'refund', 'credit', 'deposit', 'receipt',
   'received', 'pay', 'due',
@@ -95,9 +97,11 @@ function isPlanTotalPair(clause, amountAt, periodAt, context, legacyMonthlyPlan)
   const direct = gap.every((token) => token.kind === 'sep');
   if (amount.kind === 'money' && direct && /^(?:\/|per\b|a\b|each\b|every\b)/.test(period.text)) return true;
   const assertionLabels = amountAt < periodAt ? [...gap, clause[periodAt + 1] || {}] : gap;
-  const amountLabel = clause.slice(Math.max(0, amountAt - 2), amountAt).reverse()
-    .find((token) => token.kind !== 'sep');
-  const assertedPrice = paymentPredicate || isWord(amountLabel, PRICE_WORDS)
+  // A price word, three qualifiers of up to three words, and a separator fit
+  // within eleven canonical tokens. Unknown descriptions cannot join them.
+  const amountLabel = clause.slice(Math.max(0, amountAt - 11), amountAt)
+    .map((token) => (token.kind === 'word' ? token.text : `<${token.kind}>`)).join(' ');
+  const assertedPrice = paymentPredicate || PRICE_LABEL.test(amountLabel)
     || (gap.some((token) => token.kind === 'be')
       && assertionLabels.some((token) => isWord(token, PRICING_LABEL_WORDS)));
   if (accountEvent && !assertedPrice) return false;
