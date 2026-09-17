@@ -113,7 +113,9 @@ describe('inactive shared billing frames', () => {
     },
   );
 
-  test.each(['We charge attention to access instructions.', 'Each visit generates a report.',
+  test.each(['We charge you a the fee.', 'We charge you a an fee.',
+    'We charge you a separate individual fee.',
+    'We charge attention to access instructions.', 'Each visit generates a report.',
     'Every visit incurs a review step.', 'Your visit has a reminder.'])(
     'does not invent an object from unknown words: %s', (text) => {
       const frames = clause(text).predicateFrames;

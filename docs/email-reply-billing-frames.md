@@ -8,12 +8,14 @@ There is no runtime caller, provider/DB operation, exemption, or policy verdict.
 
 Each clause adds `nominalFrames` and `predicateFrames`:
 
-- A nominal frame holds `{start, end, head, modifiers}`. `head` is an original
+- A nominal frame holds `{start, end, head, modifiers, frequency}`. `head` is an original
   noun-role billing phrase. Up to six following word tokens can extend a compound
   to a later nominal head, stopping at syntax, coordination, negation, or an
   intervening recognized action/participant. Thus `payment receipt fee` retains
   the terminal fee, while `payment receipt` stops at payment and leaves receipt
-  unresolved. This is a lexical candidate, not a completed assertion.
+  unresolved. A bill head followed immediately by `frequency` retains that
+  bounded suffix and its original token in `frequency`; other heads do not
+  consume it. This is a lexical candidate, not a completed assertion.
 - A predicate frame holds `{start, end, predicate, recipient, separate, object}`.
   The predicate and optional recipient reference original phrases. Separate
   adverbs may flank the recipient; `on its/their own` is retained too.
@@ -22,6 +24,8 @@ Each clause adds `nominalFrames` and `predicateFrames`:
   optional nominal, and an amount after the nominal (directly or via `of`/`at`).
   Visit and amount references are the original unit/amount records. This retains
   `pay a visit fee` distinctly from `pay a visit`, without judging either.
+  Another modifier prefix requires an intervening visit or amount; repeated
+  determiners or separation modifiers do not supply an object.
 
 Ranges, currency, unit modifiers, normalization and predicate negation stay
 owned by the existing recognizers. Unknown object words remain outside frames;

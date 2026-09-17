@@ -54,6 +54,24 @@ describe('inactive shared billing relationships', () => {
     expect(edge.frame).toBe(application.candidates.find((entry) => entry.frameType === 'predicate').frame);
     expect(edge.end).toBe(visit.unit.end);
   });
+  test.each([['', false], ['not', true], ['never', true], ['not more than', false], ['no more than', false]])(
+    'retains amount bridge polarity for %s', (prefix, negated) => {
+      const result = clause(`The fee is ${prefix} $98 per application and per visit.`);
+      const direct = result.billingRelations[0].candidates.find((edge) => edge.amountRelation);
+      expect(direct.connector.negated).toBe(negated);
+      expect(result.amountRelations[0].candidates).toContain(direct.amountRelation);
+      const coordinated = result.billingRelations[1].candidates.find((edge) => edge.amountRelation);
+      expect(coordinated.amountRelation).toBe(direct.amountRelation);
+      expect(coordinated.connector.negated).toBe(negated);
+    },
+  );
+  test('represents the supported billing frequency construction explicitly', () => {
+    const result = clause('The billing frequency is per visit.');
+    const edge = result.billingRelations[0].candidates.find((item) => item.frameType === 'nominal');
+    expect(edge.frame.frequency.token).toBe(result.tokens[edge.frame.frequency.start]);
+    expect(edge.frame.frequency.token.text).toBe('frequency');
+    expect(edge.connector.start).toBe(edge.frame.frequency.end);
+  });
   test('preserves connector negation through coordination', () => {
     const result = clause('The fee is not per application and per visit.');
     expect(result.billingRelations[1].candidates.find((edge) => edge.frameType === 'nominal').connector.negated).toBe(true);
@@ -65,7 +83,8 @@ describe('inactive shared billing relationships', () => {
       expect(result.billingRelations.every((record) => record.candidates.every((edge) => edge.via === null))).toBe(true);
     },
   );
-  test.each(['The fee is pending per visit.', 'The fee is is per visit.',
+  test.each(['The fee will per visit.', 'The fee may not per visit.', 'The fee frequency per visit.',
+    'The fee is pending per visit.', 'The fee is is per visit.',
     'The fee is (per visit.', 'The fee is ((per visit).', 'The fee is ) per visit.', 'The fee: : : : per visit.',
     'The fee to your account per visit.', 'The fee was refunded — each visit remains included.'])(
     'does not skip unsupported trailing connectors: %s', (text) => {

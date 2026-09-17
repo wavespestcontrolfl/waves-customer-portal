@@ -9,15 +9,16 @@ function trailing(clause, from, to) {
   const { tokens, phrases } = clause;
   let at = from;
   let negated = false;
-  if (tokens[at]?.text === 'frequency') at += 1;
   const predicate = phrases.find((phrase) => phrase.type === 'predicate' && phrase.start === at
     && COMPLEMENTS.has(phrase.head) && phrase.end <= to);
   if (predicate) { at = predicate.end; negated = predicate.negated; }
-  if (!predicate) {
+  else {
+    const modal = tokens[at].kind === 'modal';
     for (const kind of ['modal', 'negative', 'be', 'negative']) {
       const negative = kind === 'negative' && isWord(tokens[at], NEGATIONS);
-      if (negative || tokens[at]?.kind === kind) { at += 1; negated ||= negative; }
+      if (negative || tokens[at].kind === kind) { at += 1; negated ||= negative; }
     }
+    if (modal && !tokens.slice(from, at).some((token) => token.kind === 'be')) return null;
   }
   // At most three local separators; parenthesized units must be matched.
   const separatorEnd = Math.min(to, at + 3);
@@ -50,11 +51,16 @@ function leading(clause, from, to, frameType) {
 }
 
 function endings(clause, frame, frameType) {
-  if (frameType !== 'nominal') return [frame.end];
+  const direct = { end: frame.end, amountRelation: null, negated: false };
+  if (frameType !== 'nominal') return [direct];
   const amounts = clause.amountRelations.flatMap(({ candidates }) => candidates
     .filter((candidate) => candidate.anchor === frame.head && candidate.start >= frame.start)
-    .map((candidate) => candidate.end));
-  return [...new Set([frame.end, ...amounts])];
+    .map((candidate) => ({ end: candidate.end, amountRelation: candidate,
+      negated: clause.tokens.slice(frame.end, candidate.end).some((token, offset) => (
+        isWord(token, NEGATIONS) && !(candidate.qualifier
+          && frame.end + offset >= candidate.qualifier.start && frame.end + offset < candidate.qualifier.end)
+      )) })));
+  return [direct, ...amounts];
 }
 
 function recognizeClause(clause) {
@@ -78,12 +84,12 @@ function recognizeClause(clause) {
           start: unit.start, end: frame.end, position: link.position,
           connector: { start: unit.end, end: frame.start, negated: link.negated }, via: null });
       }
-      for (const end of endings(clause, frame, frameType)) {
+      for (const { end, amountRelation, negated } of endings(clause, frame, frameType)) {
         if (end > unit.start) continue;
         const link = trailing(clause, end, unit.start);
         if (link) record.candidates.push({ relation: 'frame_unit', frameType, frame,
-          start: frame.start, end: unit.end, position: 'before',
-          connector: { start: end, end: unit.start, negated: link.negated }, via: null });
+          start: frame.start, end: unit.end, position: 'before', amountRelation,
+          connector: { start: end, end: unit.start, negated: link.negated || negated }, via: null });
       }
     }
   }

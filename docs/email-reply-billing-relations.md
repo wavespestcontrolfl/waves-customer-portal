@@ -13,7 +13,10 @@ and `via`. Token spans remain clause-local and end-exclusive.
   a bounded copular label, existing apply/occur/due/required/payable predicate,
   or up to three separators. A crossed opening parenthesis requires a closing
   parenthesis immediately after the unit. Original nominal amount relations
-  supply alternative endings for `fee is $98 per visit`.
+  supply alternative endings for `fee is $98 per visit` and are retained in
+  `amountRelation`. Their connector negation carries through to coordinated
+  units; comparative qualifiers such as `not more than` are not negation.
+  A modal connector requires a copula (`will be`, not bare `will`).
 - `unit_frame` retains immediate, comma-fronted, and possessive relationships.
   Fronted subjects use recognized participants; nominal determiners and the
   finite existential `there is` form are supported. Unknown words stop a link.

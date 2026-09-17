@@ -37,7 +37,10 @@ function nominalAt(clause, start) {
       && ['predicate', 'participant'].includes(phrase.type))) break;
     if (['and', 'or', 'but', 'not', 'never'].includes(tokens[at].text)) break;
   }
-  return { start, end: head.end, head, modifiers: tokens.slice(first.end, head.start) };
+  const frequency = head.head === 'bill' && tokens[head.end]?.text === 'frequency'
+    ? { start: head.end, end: head.end + 1, token: tokens[head.end] } : null;
+  return { start, end: frequency?.end ?? head.end, head, frequency,
+    modifiers: tokens.slice(first.end, head.start) };
 }
 
 function separationAt(tokens, start) {
@@ -56,7 +59,7 @@ function objectAt(clause, start) {
   at = visitModifiers.end;
   let amount = amountRelations.find((record) => record.amount.start === at)?.amount ?? null;
   if (amount) at = amount.end;
-  const inner = modifiersAt(tokens, at);
+  const inner = amount ? modifiersAt(tokens, at) : { end: at, separate: [] };
   const nominal = nominalAt(clause, inner.end);
   if (nominal) at = nominal.end;
   if (!amount && nominal) {
