@@ -1,7 +1,7 @@
 const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
 const express = require('express');
 const crypto = require('crypto');
-const { estimateOfferVersion } = require('../services/estimate-offer-version');
+const { estimateOfferVersion, annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
 const { gateEnvValue } = require('../config/feature-gates');
 const router = express.Router();
 const db = require('../models/db');
@@ -117,6 +117,24 @@ function parseEstimateData(estimateData) {
   return typeof estimateData === 'object' ? estimateData : null;
 }
 
+
+// A group handoff delivers each published property's own offer and history.
+function publishedSiblingDeliveryPatch(sibling, anchorDeliveryState, deliveredAt) {
+  const prior = parseEstimateData(sibling.estimate_data);
+  const fingerprint = annualPlanOfferFingerprint(sibling);
+  const priorDeliveredAt = Array.isArray(prior?.deliveryState?.deliveredAt)
+    ? prior.deliveryState.deliveredAt.filter((time) => typeof time === 'string')
+    : [];
+  return {
+    deliveryState: {
+      ...anchorDeliveryState,
+      firstDeliveredAt: prior?.deliveryState?.firstDeliveredAt || deliveredAt,
+      lastDeliveredAt: deliveredAt,
+      deliveredAt: [...priorDeliveredAt, deliveredAt].slice(-DELIVERY_HISTORY_MAX),
+      annualPlanOfferFingerprint: fingerprint || null,
+    },
+  };
+}
 
 // When an operator authors a commercial proposal, their line items ARE the
 // quote — so the auto-quote-required state a commercial estimate is created
@@ -859,7 +877,7 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
       if (result.blocked) {
         return { ok: false, blocked: true, error: result.reason || 'Email suppressed', template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' };
       }
-      return { ok: !!result.sent, messageId: result.message?.provider_message_id || null, template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' };
+      return { ok: !!result.sent, providerAttempted: result.providerAttempted === true, providerAccepted: result.providerAccepted === true, messageId: result.message?.provider_message_id || null, template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' };
     } catch (err) {
       if (versionId || !canFallbackFromTemplateEmailError(err)) {
         throw err;
@@ -908,7 +926,7 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
     text,
     ...(smtpAttachments.length ? { attachments: smtpAttachments } : {}),
   });
-  return { ok: true, provider: 'smtp_fallback' };
+  return { ok: true, providerAttempted: true, providerAccepted: true, provider: 'smtp_fallback' };
 }
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -2747,13 +2765,13 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             onDispatch: () => { emailDispatchStarted = true; },
           });
           channels.email = result.ok
-            ? { ok: true, provider: result.template || result.provider || 'email' }
+            ? { ok: true, providerAttempted: result.providerAttempted, providerAccepted: result.providerAccepted, provider: result.template || result.provider || 'email' }
             : { ok: false, error: result.error || 'Email send failed' };
-          if (result.ok) {
+          if (result.ok && result.providerAccepted) {
             if (options.leadShapeRef) options.leadShapeRef.delivered = true;
             await stampLeadHandoffWitness(estimate, options);
           }
-          if (proposalMode && result.ok && proposalAttachments.length > 0) {
+          if (proposalMode && result.ok && result.providerAccepted && proposalAttachments.length > 0) {
             proposalPdfEmailed = true;
           }
         }
@@ -2769,10 +2787,9 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
 
   const sentChannels = requestedChannels.filter((ch) => channels[ch]?.ok);
   const failedChannels = requestedChannels.filter((ch) => !channels[ch]?.ok);
-  // Channels whose delivery counts as a first response: sms only when the
-  // provider send was REAL (not a suppression sentinel); email's ok already
-  // implies a real handoff.
-  const stampChannels = sentChannels.filter((ch) => (ch === 'sms' ? channels.sms?.real === true : true));
+  // Historical email idempotency hits report success without a handoff.
+  // Only this invocation's real provider delivery advances a witness.
+  const stampChannels = sentChannels.filter((ch) => (ch === 'sms' ? channels.sms?.real === true : channels.email?.providerAccepted === true));
   // A REAL provider handoff succeeded: the customer holds the single-service
   // quote, so the send-time park must NEVER be reverted from here on — even
   // if the snapshot read or the status finalize below throws. A suppressed
@@ -2868,6 +2885,9 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // forward untouched by suppressed attempts.
   const priorDeliveredAt = Array.isArray(priorDeliveryState?.deliveredAt) ? priorDeliveryState.deliveredAt.filter((t) => typeof t === 'string') : [];
   const deliveredAt = (stampChannels.length ? [...priorDeliveredAt, lastDeliveredAt] : priorDeliveredAt).slice(-DELIVERY_HISTORY_MAX);
+  const deliveredAnnualFingerprint = stampChannels.length
+    ? annualPlanOfferFingerprint(estimate)
+    : priorDeliveryState?.annualPlanOfferFingerprint;
   const deliveryStatePatch = {
     deliveryState: {
       attemptedAt: now().toISOString(),
@@ -2877,6 +2897,8 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       ...(firstDeliveredAt ? { firstDeliveredAt } : {}),
       ...(lastDeliveredAt ? { lastDeliveredAt } : {}),
       ...(deliveredAt.length ? { deliveredAt } : {}),
+      // Suppressed or historical deduped attempts retain the prior receipt.
+      ...(deliveredAnnualFingerprint ? { annualPlanOfferFingerprint: deliveredAnnualFingerprint } : {}),
     },
     // The per-park handoff witness rides the finalization write too, so a
     // transient failure of the in-branch stamp can never leave a delivered
@@ -2911,7 +2933,11 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // into ITS audit snapshot too (GH codex P2 on #3628).
   let builtSendSnapshot = null;
   try {
-    const snapshot = await buildEstimateSendSnapshot({ ...freshForSnapshot, expires_at: nextExpiresAt }, now, { delivered: stampChannels.length > 0, deliveredAt: lastDeliveredAt });
+    // A historical success cannot replace the delivered billing terms with
+    // current configuration. Only a real handoff freezes a new quote.
+    const snapshot = stampChannels.length
+      ? await buildEstimateSendSnapshot({ ...freshForSnapshot, expires_at: nextExpiresAt }, now, { deliveredAt: lastDeliveredAt })
+      : (parseEstimateData(freshForSnapshot.estimate_data) || {});
     // Only a VALIDATED bundle feeds the audit — same rule as the sibling
     // and superseded branches (codex pre-push P1).
     builtSendSnapshot = snapshot.sendSnapshot && !snapshot.sendSnapshot.pricingBundleError
@@ -2922,10 +2948,12 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     // by a full estimate_data write. proposalDelivery is a sibling of proposal,
     // never a nested write, so the `||` merge can't drop the proposal itself.
     const mergePatch = {
-      sendSnapshot: snapshot.sendSnapshot || {},
+      ...(stampChannels.length ? { sendSnapshot: snapshot.sendSnapshot || {} } : {}),
       ...deliveryStatePatch,
     };
-    if (proposalEnabledForDelivery) {
+    // Proposal saves clear stale receipts; SMS alone preserves a surviving PDF receipt.
+    if (proposalEnabledForDelivery && stampChannels.length
+      && (channels.email?.providerAccepted || !parseEstimateData(freshForSnapshot.estimate_data)?.proposalDelivery)) {
       mergePatch.proposalDelivery = {
         stampedAt: now().toISOString(),
         pdfEmailed: proposalPdfEmailed,
@@ -3042,15 +3070,18 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       let preAcceptData = estimate.estimate_data;
       if (typeof preAcceptData === 'string') { try { preAcceptData = JSON.parse(preAcceptData); } catch { preAcceptData = {}; } }
       preAcceptData = preAcceptData || {};
-      // ONLY a bundle rebuilt from the PRE-DELIVERY claimed row is
-      // send-time truth — builtSendSnapshot came from freshForSnapshot,
+      // For a real delivery, ONLY a bundle rebuilt from the PRE-DELIVERY
+      // claimed row is send-time truth — builtSendSnapshot came from freshForSnapshot,
       // which post-dates delivery and can carry the acceptance rewrite,
       // and a prior send's stored sendSnapshot is equally stale. When the
       // rebuild fails, the audit goes out with NO bundle rather than a
-      // wrong one (codex pre-push P1).
+      // wrong one (codex pre-push P1). Historical success retains its prior
+      // snapshot because no new offer reached the provider.
       let raceBundle = null;
       try {
-        const rebuilt = await buildEstimateSendSnapshot({ ...estimate, expires_at: nextExpiresAt }, now);
+        const rebuilt = stampChannels.length
+          ? await buildEstimateSendSnapshot({ ...estimate, expires_at: nextExpiresAt }, now)
+          : preAcceptData;
         if (rebuilt?.sendSnapshot && !rebuilt.sendSnapshot.pricingBundleError) raceBundle = rebuilt.sendSnapshot;
       } catch { /* no validated pre-delivery bundle */ }
       const { sendSnapshot: stalePriorSnapshot, ...preAcceptSansSnapshot } = preAcceptData;
@@ -3114,11 +3145,17 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // A sibling is delivered by the anchor's handoff — the same
           // real-channel test decides whether its scope stamp moves.
           const siblingExpiry = proposalExpiry(sibling) || ordinaryGroupExpiry;
-          const snapshot = await buildEstimateSendSnapshot({ ...sibling, expires_at: siblingExpiry }, now, { delivered: stampChannels.length > 0, deliveredAt: lastDeliveredAt });
-          if (!snapshot?.sendSnapshot || snapshot.sendSnapshot.pricingBundleError) {
+          const snapshot = stampChannels.length
+            ? await buildEstimateSendSnapshot({ ...sibling, expires_at: siblingExpiry }, now, { deliveredAt: lastDeliveredAt })
+            : (parseEstimateData(sibling.estimate_data) || {});
+          if (stampChannels.length && (!snapshot?.sendSnapshot || snapshot.sendSnapshot.pricingBundleError)) {
             throw new Error(`sibling send snapshot did not freeze pricing${snapshot?.sendSnapshot?.pricingBundleError ? `: ${snapshot.sendSnapshot.pricingBundleError}` : ''}`);
           }
-          siblingSnapshotPatch = { ...siblingSnapshotPatch, sendSnapshot: snapshot.sendSnapshot };
+          const siblingDeliveryStatePatch = stampChannels.length > 0
+            ? publishedSiblingDeliveryPatch(sibling, deliveryStatePatch.deliveryState, lastDeliveredAt)
+            : {};
+          siblingSnapshotPatch = { ...siblingSnapshotPatch,
+            ...(stampChannels.length ? { sendSnapshot: snapshot.sendSnapshot } : {}), ...siblingDeliveryStatePatch };
           const updated = await publishClaimedGroupSibling(estimate, sibling, siblingExpiry, siblingSnapshotPatch);
           if (!updated) {
             // Zero rows is EITHER a mid-publication acceptance (price-locked,
@@ -3141,7 +3178,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // the same (GH codex P2 r3).
           shadowLogFallbackDelivery(sibling, { handoff: stampChannels.length > 0 });
           if (!updated) {
-            await recordTerminalSiblingDelivery(sibling, snapshot, { delivered: stampChannels.length > 0, sendMethod, deliveryStatePatch });
+            await recordTerminalSiblingDelivery(sibling, snapshot, { delivered: stampChannels.length > 0, sendMethod, deliveryStatePatch: siblingDeliveryStatePatch });
           } else {
             await snapshotPublishedSibling(sibling, siblingSnapshotPatch, { now, nextExpiresAt, sendMethod });
           }
