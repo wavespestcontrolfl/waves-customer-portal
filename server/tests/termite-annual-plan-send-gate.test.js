@@ -108,7 +108,7 @@ test.each([
   ['notes', 'changed'], ['customer_id', 'other'], ['property_id', 'other'], ['estimate_group_id', 'other'],
   ['customer_phone', '9415550101'], ['customer_email', 'other@example.test'], ['customer_name', 'Other'],
   ['address', 'Other synthetic property'], ['show_one_time_option', true], ['bill_by_invoice', true],
-  ['annual_total', 399],
+  ['annual_total', 399], ['waveguard_tier', 'Gold'], ['service_interest', 'termite'], ['category', 'COMMERCIAL'], ['source', 'plan_restart'],
 ])('a changed %s cannot reuse delivery authority', (key, value) => {
   const estimate = delivered(); estimate[key] = value;
   expect(caught(estimate)?.code).toBe('TERMITE_ANNUAL_PLAN_DISABLED');

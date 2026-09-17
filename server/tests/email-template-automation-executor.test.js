@@ -1,3 +1,5 @@
+const mockAutoRenewHandoff = jest.fn();
+jest.mock('../services/estimate-auto-renew', () => ({ withProviderHandoff: mockAutoRenewHandoff }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(),
@@ -733,6 +735,68 @@ describe('email template automation executor', () => {
     }));
     expect(sentRunQuery.update).toHaveBeenCalledWith(expect.objectContaining({
       status: 'sent',
+    }));
+  });
+
+  test.each(['scheduled', 'retry_scheduled'])('a persisted %s renewal run rechecks its entity at the actual provider handoff', async (status) => {
+    const queuedRun = run({ status, attempts: status === 'retry_scheduled' ? 1 : 0 });
+    const skippedQuery = chain({ returning: [{ ...queuedRun, status: 'skipped' }] });
+    setDbQueues({
+      email_template_automation_runs: [
+        chain({ returning: [{ ...queuedRun, status: 'running' }] }), skippedQuery,
+      ],
+      email_template_automation_run_events: [
+        chain({ returning: [{ id: 'attempt-event' }] }),
+        chain({ returning: [{ id: 'skip-event' }] }),
+      ],
+      estimates: [chain({ first: { id: queuedRun.entity_id, status: 'sent', renewal_count: 1 } })],
+    });
+    const provider = jest.fn();
+    mockAutoRenewHandoff.mockResolvedValueOnce({ ok: false });
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      const verdict = await withProviderHandoff(provider);
+      return { sent: verdict.ok, aborted: !verdict.ok, reason: 'annual offer withheld' };
+    });
+
+    const result = await AutomationExecutor.executeRun(queuedRun, { automation: automation() });
+
+    expect(mockAutoRenewHandoff).toHaveBeenCalledWith(queuedRun.entity_id, provider);
+    expect(provider).not.toHaveBeenCalled();
+    expect(result.status).toBe('skipped');
+    expect(skippedQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'skipped', exit_reason: 'annual offer withheld',
+    }));
+  });
+
+  test('a renewal provider-guard infrastructure error stays on the automation retry path', async () => {
+    const queuedRun = run();
+    const retryQuery = chain({ returning: [{ ...queuedRun, status: 'retry_scheduled' }] });
+    setDbQueues({
+      email_template_automation_runs: [
+        chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] }), retryQuery,
+      ],
+      email_template_automation_run_events: [
+        chain({ returning: [{ id: 'attempt-event' }] }),
+        chain({ returning: [{ id: 'retry-event' }] }),
+      ],
+      estimates: [chain({ first: { id: queuedRun.entity_id, status: 'sent', renewal_count: 1 } })],
+    });
+    const provider = jest.fn();
+    mockAutoRenewHandoff.mockRejectedValueOnce(new Error('synthetic lock timeout'));
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      // The real library records a pre-provider guard error as an abort.
+      try { await withProviderHandoff(provider); } catch {
+        return { sent: false, aborted: true, reason: 'aborted_by_caller_before_dispatch' };
+      }
+      throw new Error('expected guard rejection');
+    });
+
+    const result = await AutomationExecutor.executeRun(queuedRun, { automation: automation() });
+
+    expect(provider).not.toHaveBeenCalled();
+    expect(result.status).toBe('retry_scheduled');
+    expect(retryQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'retry_scheduled', last_error: 'synthetic lock timeout',
     }));
   });
 

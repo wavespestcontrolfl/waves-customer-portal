@@ -793,6 +793,73 @@ describe('group publication navigation', () => {
 });
 
 describe('reviewed send attempt receipts', () => {
+  test('an unchanged issued annual offer can still be resent after the gates close', async () => {
+    const { annualPlanOfferFingerprint, annualPlanHasDeliveredOffer } = require('../services/estimate-offer-version');
+    const priorAnnual = process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const priorCancel = process.env.GATE_CANCEL_FLOW_V2;
+    process.env.GATE_TERMITE_ANNUAL_PLAN = process.env.GATE_CANCEL_FLOW_V2 = 'false';
+    row.status = 'sent';
+    row.estimate_data = { result: { results: { tmBait: { plan: 'annual_protection', annualFee: 299 } } } };
+    dataOf().deliveryState = { firstDeliveredAt: '2026-01-01T12:00:00Z',
+      annualPlanOfferFingerprint: annualPlanOfferFingerprint(row) };
+    try {
+      const response = await invoke('/:id/send', 'post', { sendMethod: 'email' });
+      expect(response.statusCode).toBe(200);
+      expect(response.body.sent).toBe(true);
+      expect(annualPlanHasDeliveredOffer(row)).toBe(true);
+      expect(email.sendTemplate).toHaveBeenCalledTimes(1);
+    } finally {
+      if (priorAnnual === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      else process.env.GATE_TERMITE_ANNUAL_PLAN = priorAnnual;
+      if (priorCancel === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
+      else process.env.GATE_CANCEL_FLOW_V2 = priorCancel;
+    }
+  });
+
+  test.each(['quarterly to annual', 'issued annual repriced'])('an unversioned send refuses %s committed before its status claim', async (revision) => {
+    const { annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
+    const priorAnnual = process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const priorCancel = process.env.GATE_CANCEL_FLOW_V2;
+    process.env.GATE_TERMITE_ANNUAL_PLAN = process.env.GATE_CANCEL_FLOW_V2 = 'false';
+    row.status = 'sent';
+    row.estimate_data = { result: { results: { tmBait: { plan: revision === 'quarterly to annual' ? 'quarterly' : 'annual_protection', annualFee: 299 } } } };
+    dataOf().deliveryState = { firstDeliveredAt: '2026-01-01T12:00:00Z',
+      annualPlanOfferFingerprint: annualPlanOfferFingerprint(row) };
+    let revised = false;
+    db.mockImplementation((table) => {
+      const builder = estimateDatabase(table);
+      const originalUpdate = builder.update;
+      builder.update = jest.fn(async (patch) => {
+        if (table === 'estimates' && patch.status === 'sending' && !revised) {
+          // The server revision wins after the send's pre-read/sendability
+          // check, before its unversioned standalone status claim executes.
+          dataOf().result.results.tmBait = { plan: 'annual_protection', annualFee: 399 };
+          row.annual_total = '399';
+          revised = true;
+        }
+        return originalUpdate(patch);
+      });
+      return builder;
+    });
+    try {
+      const response = await invoke('/:id/send', 'post', { sendMethod: 'both' });
+      expect(revised).toBe(true);
+      expect(response.statusCode).toBe(422);
+      expect(response.body.code).toBe('TERMITE_ANNUAL_PLAN_DISABLED');
+      expect(row.status).toBe('sent');
+      expect(dataOf().result.results.tmBait.annualFee).toBe(399);
+      expect(dataOf().estimatorEngine?.delivering_at).toBeUndefined();
+      expect(mutations.some(({ patch }) => patch.estimate_data)).toBe(false);
+      expect(email.sendTemplate).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    } finally {
+      if (priorAnnual === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      else process.env.GATE_TERMITE_ANNUAL_PLAN = priorAnnual;
+      if (priorCancel === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
+      else process.env.GATE_CANCEL_FLOW_V2 = priorCancel;
+    }
+  });
+
   test.each([
     ['email rejection', 'email', () => email.sendTemplate.mockRejectedValueOnce(new Error('Template disabled'))],
     ['suppressed SMS', 'sms', () => sendCustomerMessage.mockResolvedValueOnce({ sent: true, reason: 'SMS suppressed' })],

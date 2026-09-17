@@ -24,6 +24,7 @@ const { isEnabled } = require('../config/feature-gates');
 const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('./pricing-authority-gate');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { smtpFallbackAllowed } = require('./email-fallback-gate');
+const { annualPlanPublicReplayBlocked } = require('./estimate-offer-version');
 
 const RENEWAL_DAYS = 7;
 const { FIXED_BID_VALIDITY_ABSENT_SQL } = require('./proposal-bid');
@@ -54,7 +55,36 @@ function estimateOptedOutOfAutoRenew(est) {
   }
 }
 
+// Group membership can change after the candidate scan. Match proposal saves
+// and grouped sends: peek membership, lock that group, then lock the full row.
+// A membership change during locking is left for the next sweep. Both renewal
+// and dispatch use this order so edits cannot invalidate a checked handoff.
+async function lockCurrentEstimate(trx, id) {
+  const peek = await trx('estimates').where({ id }).first('estimate_group_id');
+  if (!peek) return null;
+  const groupId = peek.estimate_group_id || null;
+  if (groupId) {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['estimate-group-send', String(groupId)]);
+  }
+  const current = await trx('estimates').where({ id }).forUpdate().first();
+  return current && (current.estimate_group_id || null) === groupId ? current : null;
+}
+
+// Email preparation may acquire customer/comms locks on pooled connections.
+// Pin the estimate only around the provider request, after preparation, so a
+// concurrent offer edit cannot turn a checked annual link into a dead one.
+async function withAutoRenewProviderHandoff(estimateId, dispatch) {
+  return db.transaction(async (trx) => {
+    const row = await lockCurrentEstimate(trx, estimateId);
+    if (!row || estimateOptedOutOfAutoRenew(row) || annualPlanPublicReplayBlocked(row)) return { ok: false };
+    await dispatch();
+    return { ok: true };
+  });
+}
+
 const EstimateAutoRenew = {
+  withProviderHandoff: withAutoRenewProviderHandoff,
   async checkAll() {
     let renewed = 0;
     try {
@@ -88,34 +118,16 @@ const EstimateAutoRenew = {
           }
           const newExpiry = new Date(Date.now() + RENEWAL_DAYS * 86400000);
           const updated = await db.transaction(async (trx) => {
-            // GH codex P2 r4 on #4309: `est` can be stale by the time this
-            // transaction runs — moved into, out of, or between groups. Lock
-            // and evaluate the row's CURRENT membership (not the outer
-            // read's), then pin that same membership on the write below so a
-            // membership change between the re-read and the update makes the
-            // update match nothing rather than silently renewing (and
-            // emailing) a now-grouped estimate a fixed sibling should block.
-            // Lock ORDER matches proposal saves and grouped sends (group
-            // advisory lock first, row lock second), so the membership is
-            // peeked without a row lock, the group lock is taken, and only
-            // then is the row locked and its membership confirmed.
-            const peek = await trx('estimates').where({ id: est.id }).first('estimate_group_id');
-            if (!peek) return 0;
-            let current = peek;
-            const currentGroupId = peek.estimate_group_id || null;
-            if (currentGroupId) {
-              // Same lock proposal saves, grouped sends and extensions take,
-              // then the fixed verdict is re-read under it before writing.
-              await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-                ['estimate-group-send', String(currentGroupId)]);
-              current = await trx('estimates').where({ id: est.id }).forUpdate().first();
-              if (!current || (current.estimate_group_id || null) !== currentGroupId) return 0;
-              if (await fixedBidBlocksExtension(trx, current)) return 0;
-            }
+            const current = await lockCurrentEstimate(trx, est.id);
+            if (!current) return 0;
+            if (estimateOptedOutOfAutoRenew(current) || annualPlanPublicReplayBlocked(current)) return 0;
+            if (await fixedBidBlocksExtension(trx, current)) return 0;
+            // The sibling read yields: honor a switch closed before the write.
+            if (annualPlanPublicReplayBlocked(current)) return 0;
             return trx('estimates').where({ id: est.id })
               .whereRaw(FIXED_BID_VALIDITY_ABSENT_SQL)
-              .modify((qb) => (currentGroupId
-                ? qb.where({ estimate_group_id: currentGroupId })
+              .modify((qb) => (current.estimate_group_id
+                ? qb.where({ estimate_group_id: current.estimate_group_id })
                 : qb.whereNull('estimate_group_id')))
               .update({
                 expires_at: newExpiry,
@@ -124,87 +136,104 @@ const EstimateAutoRenew = {
           });
           if (!updated) continue;
 
-          const firstName = (est.customer_name || '').split(' ')[0] || 'there';
-          const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
-          const url = await shortenOrPassthrough(longUrl, { kind: 'estimate', entityType: 'estimates', entityId: est.id, customerId: est.customer_id });
+          // Dispatch reads must see the committed renewal_count: automation
+          // conditions refresh it through their own database connection.
+          // Reacquire the same locks and judge the full current offer again.
+          const current = await db.transaction(async (trx) => {
+            const row = await lockCurrentEstimate(trx, est.id);
+            return row && !estimateOptedOutOfAutoRenew(row) && !annualPlanPublicReplayBlocked(row) ? row : null;
+          });
+          if (!current) { renewed++; continue; }
+
+          // Shortening and email preparation acquire customer/comms locks on
+          // pooled connections. Keep those outside the estimate row lock.
+          // Only the actual provider handoff pins the full current offer.
+          const withProviderHandoff = (dispatch) => withAutoRenewProviderHandoff(est.id, dispatch);
+
+          const firstName = (current.customer_name || '').split(' ')[0] || 'there';
+          const longUrl = `https://portal.wavespestcontrol.com/estimate/${current.token}`;
+          const url = await shortenOrPassthrough(longUrl, { kind: 'estimate', entityType: 'estimates', entityId: current.id, customerId: current.customer_id });
+
           // Customer SMS removed 2026-07-06 — the estimate_auto_renewed
           // template is retired; the renewal still extends expires_at and
           // notifies by email below.
-          if (est.customer_email) {
+          // The gate can close during shortening: check the locked offer
+          // again at dispatch, including each fallback provider boundary.
+          if (current.customer_email && !annualPlanPublicReplayBlocked(current)) {
             try {
               let sentWithTemplateLibrary = false;
               const formattedExpiry = newExpiry.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' });
               const extensionPayload = {
-                estimate_id: est.id,
-                customer_id: est.customer_id || '',
-                customer_email: est.customer_email,
+                estimate_id: current.id,
+                customer_id: current.customer_id || '',
+                customer_email: current.customer_email,
                 first_name: firstName,
                 estimate_url: url,
                 new_expires_at: formattedExpiry,
-                estimate_status: est.status,
-                status: est.status,
-                renewal_count: Number(est.renewal_count || 0) + 1,
+                estimate_status: current.status,
+                status: current.status,
+                renewal_count: Number(current.renewal_count || 0),
               };
               if (sendgrid.isConfigured()) {
                 try {
                   if (isEnabled('emailTemplateAutomations')) {
                     const result = await EmailTemplateAutomationExecutor.processTrigger({
                       triggerEventKey: 'estimate.auto_renewed',
-                      triggerEventId: `estimate_auto_renew:${est.id}`,
+                      triggerEventId: `estimate_auto_renew:${current.id}`,
                       entityType: 'estimate',
-                      entityId: est.id,
+                      entityId: current.id,
                       recipient: {
-                        email: est.customer_email,
-                        type: est.customer_id ? 'customer' : 'lead',
-                        id: est.customer_id || '',
+                        email: current.customer_email,
+                        type: current.customer_id ? 'customer' : 'lead',
+                        id: current.customer_id || '',
                       },
                       payload: extensionPayload,
                       executeImmediately: true,
                     });
                     if (result.automation_count > 0) {
                       const statuses = result.results.map((r) => r.run?.status).filter(Boolean).join(', ') || 'queued';
-                      logger.info(`[est-auto-renew] Email automation handled estimate ${est.id}: ${statuses}`);
+                      logger.info(`[est-auto-renew] Email automation handled estimate ${current.id}: ${statuses}`);
                       sentWithTemplateLibrary = true;
                     }
                   }
 
-                  if (!sentWithTemplateLibrary) {
+                  if (!sentWithTemplateLibrary && !annualPlanPublicReplayBlocked(current)) {
                     const result = await EmailTemplateLibrary.sendTemplate({
                       templateKey: 'estimate.extension_notice',
-                      to: est.customer_email,
+                      to: current.customer_email,
                       payload: extensionPayload,
-                      recipientType: est.customer_id ? 'customer' : 'lead',
-                      recipientId: est.customer_id || null,
-                      triggerEventId: `estimate_auto_renew:${est.id}`,
+                      recipientType: current.customer_id ? 'customer' : 'lead',
+                      recipientId: current.customer_id || null,
+                      triggerEventId: `estimate_auto_renew:${current.id}`,
                       categories: ['estimate_auto_renew'],
+                      withProviderHandoff,
                     });
                     if (result.blocked) {
-                      logger.warn(`[est-auto-renew] Email suppressed for estimate ${est.id}: ${result.reason || 'suppressed'}`);
+                      logger.warn(`[est-auto-renew] Email suppressed for estimate ${current.id}: ${result.reason || 'suppressed'}`);
                     }
                     sentWithTemplateLibrary = true;
                   }
                 } catch (e) {
                   if (!canFallbackFromTemplateEmailError(e) && !canFallbackFromAutomationEmailError(e)) throw e;
-                  logger.warn(`[est-auto-renew] Template unavailable for estimate ${est.id}; falling back to SMTP: ${e.message}`);
+                  logger.warn(`[est-auto-renew] Template unavailable for estimate ${current.id}; falling back to SMTP: ${e.message}`);
                 }
               }
-              if (!sentWithTemplateLibrary) {
+              if (!sentWithTemplateLibrary && !annualPlanPublicReplayBlocked(current)) {
                 if (!smtpFallbackAllowed()) {
-                  logger.error(`[est-auto-renew] SMTP fallback disabled in production for estimate ${est.id} — SendGrid template send required`);
+                  logger.error(`[est-auto-renew] SMTP fallback disabled in production for estimate ${current.id} — SendGrid template send required`);
                 } else {
-                  await EmailService.send({
-                    to: est.customer_email,
+                  await withProviderHandoff(() => EmailService.send({
+                    to: current.customer_email,
                     subject: 'Your Waves estimate was extended',
                     heading: `Hey ${firstName} — we extended your estimate`,
                     body: `<p>Your Waves Pest Control estimate was about to expire, so we went ahead and extended it by another few days. It's still good — take another look whenever you're ready.</p><p>Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.</p>`,
                     ctaUrl: url,
                     ctaLabel: 'View Your Estimate',
-                  });
+                  }));
                 }
               }
             } catch (e) { logger.error(`[est-auto-renew] Email failed: ${e.message}`); }
           }
-
           renewed++;
         } catch (e) { logger.error(`[est-auto-renew] Failed to renew estimate ${est.id}: ${e.message}`); }
       }

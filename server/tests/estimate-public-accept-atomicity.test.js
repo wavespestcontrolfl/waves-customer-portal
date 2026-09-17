@@ -366,6 +366,35 @@ beforeEach(() => {
 });
 
 describe('FIX 1 — standard recurring conversion is atomic with acceptance', () => {
+  test.each([
+    ['waveguard_tier', 'Gold'], ['service_interest', 'termite'],
+    ['category', 'COMMERCIAL'], ['source', 'plan_restart'],
+  ])('an annual offer with changed row scope %s is refused before acceptance', async (field, value) => {
+    const row = recurringPestEstimate();
+    const data = JSON.parse(row.estimate_data);
+    data.result.results = { tmBait: { plan: 'annual_protection' } };
+    row.estimate_data = data;
+    data.deliveryState = {
+      firstDeliveredAt: '2026-09-12T00:00:00Z',
+      annualPlanOfferFingerprint: require('../services/estimate-offer-version').annualPlanOfferFingerprint(row),
+    };
+    row.estimate_data = JSON.stringify(data);
+    row[field] = value;
+    resetStore(row);
+    const prior = process.env.GATE_TERMITE_ANNUAL_PLAN;
+    delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    try {
+      const response = await putAccept('tok-atomic-1-x0123456789', {});
+      expect(response.status).toBe(409);
+      expect(storedEstimate().status).toBe('sent');
+      expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+      expect(InvoiceService.create).not.toHaveBeenCalled();
+    } finally {
+      if (prior === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      else process.env.GATE_TERMITE_ANNUAL_PLAN = prior;
+    }
+  });
+
   test.each(['accept', 'decline'])('a new annual offer committed after preflight is refused under the %s lock', async (action) => {
     resetStore(recurringPestEstimate());
     const prior = process.env.GATE_TERMITE_ANNUAL_PLAN;

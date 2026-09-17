@@ -2490,6 +2490,14 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       if (options.reviewedOffer && estimateOfferVersion(verdictRow) !== options.reviewedOffer) {
         return 'saved_offer_changed';
       }
+      // Legacy sends have no reviewed-offer pin. A revision committed before
+      // the standalone status claim must not borrow the pre-read annual
+      // delivery witness; judge the full locked row before stamping a claim.
+      if (annualPlanPublicReplayBlocked(verdictRow)) {
+        throw Object.assign(new Error('The saved annual protection offer changed or has not been delivered while the annual plan is disabled. Nothing was sent.'), {
+          statusCode: 422, code: 'TERMITE_ANNUAL_PLAN_DISABLED',
+        });
+      }
       let data;
       try {
         data = typeof verdictRow.estimate_data === 'string'

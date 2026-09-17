@@ -222,7 +222,7 @@ async function openEstimatesText(customerId, { tier = 'redacted' } = {}) {
     .select('id', 'status', 'service_type', 'created_at', 'sent_at', 'expires_at', 'archived_at',
       'monthly_total', 'annual_total', 'onetime_total', 'estimate_data',
       'customer_id', 'property_id', 'customer_name', 'customer_phone', 'customer_email',
-      'address', 'notes', 'show_one_time_option', 'bill_by_invoice', 'waveguard_tier',
+      'address', 'notes', 'show_one_time_option', 'bill_by_invoice', 'waveguard_tier', 'service_interest', 'category', 'source',
       // The pricing-authority verdict reads these (uncapped codex P1 r28).
       'pricing_authority', 'price_locked_at', 'estimate_group_id');
   // ⭐ STATUS IS NOT THE SAME QUESTION AS "CAN THE CUSTOMER SEE THIS?".

@@ -1142,6 +1142,8 @@ async function withPrepSendLock(run, fn) {
 // row, or { skipReason } when the page belongs to another guide; rethrows a
 // send failure for executeRun's retry / fail decision.
 async function dispatchRun(run, automation, executionPayload) {
+  const isEstimateRenewal = run.trigger_event_key === 'estimate.auto_renewed' && run.entity_type === 'estimate';
+  let handoffError;
   const prepClaim = await claimPrepPageForRun(run);
   if (!prepClaim.owned) return { skipReason: prepClaim.delivered ? 'prep guide already delivered for this visit' : 'prep page owned by another guide' };
   let prepDispatched = false;
@@ -1160,7 +1162,27 @@ async function dispatchRun(run, automation, executionPayload) {
       suppressionGroupKey: automation.suppression_group_key || undefined,
       // Fires immediately before the provider call — the dispatch boundary.
       onQueued: () => { prepDispatched = true; },
+      // Persisted trigger/entity fields also cover scheduled runs and retries.
+      // Preparation above is outside the estimate lock; only the actual
+      // provider call pins and rechecks the full current annual offer.
+      withProviderHandoff: isEstimateRenewal
+        ? async (dispatch) => {
+          try {
+            return await require('./estimate-auto-renew').withProviderHandoff(run.entity_id, dispatch);
+          } catch (err) {
+            handoffError = err;
+            throw err;
+          }
+        }
+        : undefined,
     });
+    if (isEstimateRenewal && result.aborted) {
+      // The library turns a pre-provider guard exception into an abort.
+      // Keep infrastructure failures on the existing retry path; only a
+      // deliberate annual-offer refusal is a terminal skip.
+      if (handoffError) throw handoffError;
+      return { skipReason: result.reason || 'provider handoff refused', skipGuard: 'provider_handoff' };
+    }
     const { status, updated } = await finalizeSentRun(run, result);
     await settlePrepAfterSend(run, prepClaim, status);
     return { updated };
@@ -1278,7 +1300,7 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
     }
     const outcome = await withPrepSendLock(claimedRun, () => dispatchRun(claimedRun, resolvedAutomation, executionPayload));
     if (outcome.skipReason) {
-      return markRunSkipped(claimedRun, outcome.skipReason, { guard: 'prep_page_owned', attempt: attemptNumber });
+      return markRunSkipped(claimedRun, outcome.skipReason, { guard: outcome.skipGuard || 'prep_page_owned', attempt: attemptNumber });
     }
     return outcome.updated;
   } catch (err) {

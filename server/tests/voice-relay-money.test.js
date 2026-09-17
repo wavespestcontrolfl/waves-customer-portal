@@ -299,7 +299,7 @@ describe('get_open_estimates — SENT-price doctrine', () => {
     await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
     const selected = builders.estimates.select.mock.calls.flat();
     for (const col of ['customer_id', 'property_id', 'estimate_group_id', 'customer_name', 'customer_phone',
-      'customer_email', 'address', 'notes', 'show_one_time_option', 'bill_by_invoice', 'waveguard_tier',
+      'customer_email', 'address', 'notes', 'show_one_time_option', 'bill_by_invoice', 'waveguard_tier', 'service_interest', 'category', 'source',
       'monthly_total', 'annual_total', 'onetime_total', 'estimate_data']) {
       expect(selected).toContain(col);
     }
@@ -323,7 +323,9 @@ describe('get_open_estimates — SENT-price doctrine', () => {
       const quoted = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
       expect(quoted).toMatch(/Open estimates on this account/);
       expect(buildPricingBundle).toHaveBeenCalledTimes(1);
-      for (const blocked of [row, { ...delivered, notes: 'revised after delivery' }]) {
+      for (const blocked of [row, { ...delivered, notes: 'revised after delivery' },
+        { ...delivered, waveguard_tier: 'Gold' }, { ...delivered, service_interest: 'changed scope' },
+        { ...delivered, category: 'COMMERCIAL' }, { ...delivered, source: 'plan_restart' }]) {
         buildPricingBundle.mockClear();
         primeDb({ estimates: [blocked] });
         const hidden = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });

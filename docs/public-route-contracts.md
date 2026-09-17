@@ -1032,7 +1032,8 @@ Termite annual protection is selectable only while both
 `GATE_TERMITE_ANNUAL_PLAN` and `GATE_CANCEL_FLOW_V2` are enabled. With either
 gate off, an unaccepted annual offer remains viewable and acceptable only
 when its server-owned `deliveryState` records a real provider handoff and a
-fingerprint matching the current customer, property, scope, terms and price.
+fingerprint matching the current customer, property, scope, terms and price,
+including the persisted tier, service interest, category and source.
 Pricing stamps, suppressed sends and earlier quarterly handoffs do not qualify.
 The legacy view and `/data` withhold ineligible offers; `/accept` returns its
 inactive 409. Document-render pins cannot bypass annual withholding. Decline and
@@ -1043,7 +1044,10 @@ changes, card setup and PDF rendering also recheck after reconciliation, includi
 the final document JSON payload. Staff
 decline checks the locked offer before making it terminal; already-declined
 views and reason edits retain their existing guards. Follow-up reminders stop
-before claiming or sending a withheld annual link. Grouped pricing authority
+before claiming or sending a withheld annual link. Automatic renewals check the
+locked full offer before extending it and again before notification. Delivery
+claims recheck the locked offer even when no edit-version pin was supplied.
+Grouped pricing authority
 checks exclude annual siblings that the customer link withholds.
 Browser-authored delivery receipts are stripped; staff revisions preserve the
 locked row's receipt, whose fingerprint cannot authorize changed terms.

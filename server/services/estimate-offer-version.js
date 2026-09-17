@@ -20,7 +20,7 @@ function estimateOfferVersion(row) {
     delete data.estimatorEngine.delivering_at;
     delete data.estimatorEngine.delivering_token;
   }
-  const fields = ['customer_id', 'property_id', 'estimate_group_id', 'customer_name', 'customer_phone', 'customer_email', 'address', 'notes', 'monthly_total', 'annual_total', 'onetime_total', 'show_one_time_option', 'bill_by_invoice'];
+  const fields = ['customer_id', 'property_id', 'estimate_group_id', 'customer_name', 'customer_phone', 'customer_email', 'address', 'notes', 'monthly_total', 'annual_total', 'onetime_total', 'show_one_time_option', 'bill_by_invoice', 'waveguard_tier', 'service_interest', 'category', 'source'];
   return crypto.createHash('sha256').update(JSON.stringify([fields.map((key) => row[key]), data])).digest('hex');
 }
 

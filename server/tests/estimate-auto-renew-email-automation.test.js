@@ -64,6 +64,7 @@ jest.mock('../services/sendgrid-mail', () => ({
 }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: mockIsEnabled,
+  termiteAnnualPlanSelectionEnabled: jest.requireActual('../config/feature-gates').termiteAnnualPlanSelectionEnabled,
 }));
 jest.mock('../routes/admin-sms-templates', () => ({
   getTemplate: mockGetTemplate,
@@ -189,11 +190,11 @@ describe('estimate auto-renew email automation cutover', () => {
     const estimate = staleEstimate();
     const reread = query(estimate);
     const update = query(1);
-    mockDb.__estimateQueries.push(query([estimate]), reread, update);
+    mockDb.__estimateQueries.push(query([estimate]), query(estimate), reread, update, query(estimate), query({ ...estimate, renewal_count: 1 }));
 
     await expect(EstimateAutoRenew.checkAll()).resolves.toEqual({ renewed: 1 });
 
-    expect(reread.forUpdate).not.toHaveBeenCalled();
+    expect(reread.forUpdate).toHaveBeenCalled();
     expect(mockDb.raw).not.toHaveBeenCalledWith(expect.stringMatching(/pg_advisory_xact_lock/), expect.anything());
     expect(update.whereNull).toHaveBeenCalledWith('estimate_group_id');
     expect(update.update).toHaveBeenCalled();
@@ -201,7 +202,7 @@ describe('estimate auto-renew email automation cutover', () => {
 
   test('uses the email template automation executor when the gate is enabled', async () => {
     const estimate = staleEstimate();
-    mockDb.__estimateQueries.push(query([estimate]), query(estimate), query(1));
+    mockDb.__estimateQueries.push(query([estimate]), query(estimate), query(estimate), query(1), query(estimate), query({ ...estimate, renewal_count: 1 }));
 
     await expect(EstimateAutoRenew.checkAll()).resolves.toEqual({ renewed: 1 });
 
@@ -240,7 +241,7 @@ describe('estimate auto-renew email automation cutover', () => {
       estimate_data: JSON.stringify({ noEngagementAutomation: true }),
     });
     const normal = staleEstimate();
-    mockDb.__estimateQueries.push(query([optedOut, normal]), query(normal), query(1));
+    mockDb.__estimateQueries.push(query([optedOut, normal]), query(normal), query(normal), query(1), query(normal), query({ ...normal, renewal_count: 1 }));
 
     await expect(EstimateAutoRenew.checkAll()).resolves.toEqual({ renewed: 1 });
 
@@ -268,7 +269,7 @@ describe('estimate auto-renew email automation cutover', () => {
   test('keeps the direct template send fallback when the automation gate is disabled', async () => {
     mockIsEnabled.mockReturnValue(false);
     const estimate = staleEstimate();
-    mockDb.__estimateQueries.push(query([estimate]), query(estimate), query(1));
+    mockDb.__estimateQueries.push(query([estimate]), query(estimate), query(estimate), query(1), query(estimate), query({ ...estimate, renewal_count: 1 }));
 
     await expect(EstimateAutoRenew.checkAll()).resolves.toEqual({ renewed: 1 });
 
@@ -286,6 +287,240 @@ describe('estimate auto-renew email automation cutover', () => {
       }),
     }));
   });
+  describe('annual offer replay at renewal and dispatch boundaries', () => {
+    const { annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
+    let previousAnnual;
+    let previousCancel;
+
+    function annualEstimate() {
+      return staleEstimate({
+        estimate_data: { result: { lineItems: [{ service: 'termite_bait', plan: 'annual_protection', annual: 299 }] } },
+      });
+    }
+
+    function deliveredAnnualEstimate() {
+      const row = annualEstimate();
+      return { ...row, estimate_data: { ...row.estimate_data, deliveryState: {
+        firstDeliveredAt: '2026-09-12T00:00:00Z',
+        annualPlanOfferFingerprint: annualPlanOfferFingerprint(row),
+      } } };
+    }
+
+    beforeEach(() => {
+      previousAnnual = process.env.GATE_TERMITE_ANNUAL_PLAN;
+      previousCancel = process.env.GATE_CANCEL_FLOW_V2;
+      process.env.GATE_TERMITE_ANNUAL_PLAN = 'false';
+      process.env.GATE_CANCEL_FLOW_V2 = 'false';
+    });
+    afterEach(() => {
+      if (previousAnnual === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      else process.env.GATE_TERMITE_ANNUAL_PLAN = previousAnnual;
+      if (previousCancel === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
+      else process.env.GATE_CANCEL_FLOW_V2 = previousCancel;
+    });
+
+    test.each(['missing', 'stale'])('the locked annual row with a %s witness neither consumes its renewal nor emails', async (witness) => {
+      // The candidate looked valid before the lock. An editor changed its
+      // offer or removed the witness before renewal acquired the full row.
+      const outer = deliveredAnnualEstimate();
+      const current = witness === 'missing' ? annualEstimate() : { ...outer, notes: 'synthetic revision' };
+      const reread = query(current);
+      const update = query(1);
+      mockDb.__estimateQueries = [query([outer]), query(current), reread, update];
+
+      await expect(EstimateAutoRenew.checkAll()).resolves.toEqual({ renewed: 0 });
+
+      expect(reread.forUpdate).toHaveBeenCalled();
+      expect(reread.first).toHaveBeenCalledWith();
+      expect(update.update).not.toHaveBeenCalled();
+      expect(mockShorten).not.toHaveBeenCalled();
+      expect(mockProcessTrigger).not.toHaveBeenCalled();
+      expect(mockSendTemplate).not.toHaveBeenCalled();
+      expect(mockEmailSend).not.toHaveBeenCalled();
+    });
+
+    test('closure during the locked fixed-sibling read refuses the renewal update', async () => {
+      process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
+      process.env.GATE_CANCEL_FLOW_V2 = 'true';
+      const estimate = { ...annualEstimate(), estimate_group_id: 'synthetic-group' };
+      const siblingRead = query([]);
+      siblingRead.select.mockImplementationOnce(async () => {
+        process.env.GATE_TERMITE_ANNUAL_PLAN = 'false';
+        return [];
+      });
+      const update = query(1);
+      mockDb.__estimateQueries = [query([estimate]), query([]), query(estimate), query(estimate), siblingRead, update];
+
+      await expect(EstimateAutoRenew.checkAll()).resolves.toEqual({ renewed: 0 });
+
+      expect(update.update).not.toHaveBeenCalled();
+      expect(mockProcessTrigger).not.toHaveBeenCalled();
+      expect(mockSendTemplate).not.toHaveBeenCalled();
+      expect(mockEmailSend).not.toHaveBeenCalled();
+    });
+
+    test('an exact delivered annual offer still renews while dark with shortening and automation preparation outside the lock', async () => {
+      const estimate = deliveredAnnualEstimate();
+      const reread = query(estimate);
+      const update = query(1);
+      mockDb.__estimateQueries = [query([estimate]), query(estimate), reread, update, query(estimate), query({ ...estimate, renewal_count: 1 })];
+      let transactionActive = false;
+      const originalTransaction = mockDb.transaction.getMockImplementation();
+      mockDb.transaction.mockImplementation(async (run) => {
+        transactionActive = true;
+        try { return await run(mockDb); } finally { transactionActive = false; }
+      });
+      mockShorten.mockImplementationOnce(async () => {
+        expect(transactionActive).toBe(false);
+        return 'https://portal.example/estimate/short';
+      });
+      mockProcessTrigger.mockImplementationOnce(async () => {
+        expect(transactionActive).toBe(false);
+        return { automation_count: 1, results: [] };
+      });
+      try {
+        await expect(EstimateAutoRenew.checkAll()).resolves.toEqual({ renewed: 1 });
+        expect(update.update).toHaveBeenCalledWith(expect.objectContaining({
+          expires_at: expect.any(Date), renewal_count: expect.any(String),
+        }));
+        expect(mockProcessTrigger).toHaveBeenCalledTimes(1);
+        expect(mockDb.__estimateQueries).toHaveLength(0);
+      } finally {
+        mockDb.transaction.mockImplementation(originalTransaction);
+      }
+    });
+
+    test.each(['GATE_TERMITE_ANNUAL_PLAN', 'GATE_CANCEL_FLOW_V2'])('closure of %s during shortening suppresses dispatch of a committed renewal', async (switchName) => {
+      process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
+      process.env.GATE_CANCEL_FLOW_V2 = 'true';
+      const estimate = annualEstimate();
+      const update = query(1);
+      mockDb.__estimateQueries = [query([estimate]), query(estimate), query(estimate), update, query(estimate), query({ ...estimate, renewal_count: 1 })];
+      mockShorten.mockImplementationOnce(async () => {
+        process.env[switchName] = 'false';
+        return 'https://portal.example/estimate/short';
+      });
+
+      await expect(EstimateAutoRenew.checkAll()).resolves.toEqual({ renewed: 1 });
+
+      expect(update.update).toHaveBeenCalled();
+      expect(mockProcessTrigger).not.toHaveBeenCalled();
+      expect(mockSendTemplate).not.toHaveBeenCalled();
+      expect(mockEmailSend).not.toHaveBeenCalled();
+    });
+
+    test.each([null, 'synthetic-group'])('the dispatch lock rejects an annual offer edited after renewal (group %s)', async (groupId) => {
+      const estimate = { ...deliveredAnnualEstimate(), estimate_group_id: groupId };
+      // Fingerprint includes group membership, so stamp the grouped shape.
+      estimate.estimate_data.deliveryState.annualPlanOfferFingerprint = annualPlanOfferFingerprint(estimate);
+      const dispatchRow = { ...estimate, notes: 'synthetic edit after renewal', renewal_count: 1 };
+      const update = query(1);
+      const dispatchRead = query(dispatchRow);
+      mockDb.__estimateQueries = [query([estimate])];
+      if (groupId) mockDb.__estimateQueries.push(query([]));
+      mockDb.__estimateQueries.push(query(estimate), query(estimate));
+      if (groupId) mockDb.__estimateQueries.push(query([]));
+      mockDb.__estimateQueries.push(update, query(dispatchRow), dispatchRead);
+
+      await expect(EstimateAutoRenew.checkAll()).resolves.toEqual({ renewed: 1 });
+
+      expect(update.update).toHaveBeenCalled();
+      expect(dispatchRead.forUpdate).toHaveBeenCalled();
+      expect(mockDb.transaction).toHaveBeenCalledTimes(2);
+      expect(mockShorten).not.toHaveBeenCalled();
+      expect(mockProcessTrigger).not.toHaveBeenCalled();
+      expect(mockSendTemplate).not.toHaveBeenCalled();
+      expect(mockEmailSend).not.toHaveBeenCalled();
+      expect(mockDb.__estimateQueries).toHaveLength(0);
+      if (groupId) expect(mockDb.raw).toHaveBeenCalledWith(expect.stringMatching(/pg_advisory_xact_lock/), ['estimate-group-send', groupId]);
+    });
+
+    test.each(['missing', 'stale', 'delivered', 'ordinary'])('the actual provider handoff judges a %s current witness under the row lock', async (witness) => {
+      const current = witness === 'missing' ? annualEstimate()
+        : witness === 'stale' ? { ...deliveredAnnualEstimate(), notes: 'synthetic revised terms' }
+          : witness === 'delivered' ? deliveredAnnualEstimate() : staleEstimate();
+      const reread = query(current);
+      mockDb.__estimateQueries = [query(current), reread];
+      const provider = jest.fn(async () => undefined);
+
+      await expect(EstimateAutoRenew.withProviderHandoff(current.id, provider))
+        .resolves.toEqual({ ok: ['delivered', 'ordinary'].includes(witness) });
+
+      expect(reread.forUpdate).toHaveBeenCalled();
+      expect(provider).toHaveBeenCalledTimes(['delivered', 'ordinary'].includes(witness) ? 1 : 0);
+      expect(mockDb.__estimateQueries).toHaveLength(0);
+    });
+
+    test('a template preparation edit is rejected at its definitive provider boundary', async () => {
+      mockIsEnabled.mockReturnValue(false);
+      const estimate = deliveredAnnualEstimate();
+      const changed = { ...estimate, notes: 'synthetic edit during template preparation', renewal_count: 1 };
+      mockDb.__estimateQueries = [query([estimate]), query(estimate), query(estimate), query(1),
+        query(estimate), query({ ...estimate, renewal_count: 1 }), query(changed), query(changed)];
+      const provider = jest.fn();
+      mockSendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+        const verdict = await withProviderHandoff(provider);
+        return { sent: verdict.ok, aborted: !verdict.ok };
+      });
+
+      await expect(EstimateAutoRenew.checkAll()).resolves.toEqual({ renewed: 1 });
+
+      expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+      expect(provider).not.toHaveBeenCalled();
+      expect(mockEmailSend).not.toHaveBeenCalled();
+      expect(mockDb.__estimateQueries).toHaveLength(0);
+    });
+
+    test('an edit during template failure is also refused by the SMTP provider guard', async () => {
+      mockIsEnabled.mockReturnValue(false);
+      const estimate = deliveredAnnualEstimate();
+      const changed = { ...estimate, notes: 'synthetic edit during template failure', renewal_count: 1 };
+      mockDb.__estimateQueries = [query([estimate]), query(estimate), query(estimate), query(1),
+        query(estimate), query({ ...estimate, renewal_count: 1 }), query(changed), query(changed)];
+      mockSendTemplate.mockRejectedValueOnce(new Error('active template not found'));
+
+      await expect(EstimateAutoRenew.checkAll()).resolves.toEqual({ renewed: 1 });
+
+      expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+      expect(mockEmailSend).not.toHaveBeenCalled();
+      expect(mockDb.__estimateQueries).toHaveLength(0);
+    });
+
+    test('a gate closed after template failure suppresses SMTP fallback', async () => {
+      process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
+      process.env.GATE_CANCEL_FLOW_V2 = 'true';
+      mockIsEnabled.mockReturnValue(false);
+      const estimate = annualEstimate();
+      mockDb.__estimateQueries = [query([estimate]), query(estimate), query(estimate), query(1), query(estimate), query({ ...estimate, renewal_count: 1 })];
+      mockSendTemplate.mockImplementationOnce(async () => {
+        process.env.GATE_TERMITE_ANNUAL_PLAN = 'false';
+        throw new Error('active template not found');
+      });
+
+      await expect(EstimateAutoRenew.checkAll()).resolves.toEqual({ renewed: 1 });
+
+      expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+      expect(mockEmailSend).not.toHaveBeenCalled();
+    });
+
+    test('a gate closed after automation lookup suppresses the template fallback', async () => {
+      process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
+      process.env.GATE_CANCEL_FLOW_V2 = 'true';
+      const estimate = annualEstimate();
+      mockDb.__estimateQueries = [query([estimate]), query(estimate), query(estimate), query(1), query(estimate), query({ ...estimate, renewal_count: 1 })];
+      mockProcessTrigger.mockImplementationOnce(async () => {
+        process.env.GATE_TERMITE_ANNUAL_PLAN = 'false';
+        return { automation_count: 0, results: [] };
+      });
+
+      await expect(EstimateAutoRenew.checkAll()).resolves.toEqual({ renewed: 1 });
+
+      expect(mockProcessTrigger).toHaveBeenCalledTimes(1);
+      expect(mockSendTemplate).not.toHaveBeenCalled();
+      expect(mockEmailSend).not.toHaveBeenCalled();
+    });
+  });
+
 });
 
 test('a grouped candidate whose membership moves between the group lock and the row lock is left for the next sweep (GH codex P2 r4 on #4309)', async () => {

@@ -73,6 +73,11 @@ describe('isEstimateCustomerViewable (React /:token/data security gate)', () => 
       } };
       expect(isEstimateCustomerViewable(delivered)).toBe(true);
       expect(isEstimateAcceptActive(delivered)).toBe(true);
+      for (const scope of [{ waveguard_tier: 'Gold' }, { service_interest: 'changed scope' }, { category: 'COMMERCIAL' }, { source: 'plan_restart' }]) {
+        const changedScope = { ...delivered, ...scope };
+        expect(isEstimateCustomerViewable(changedScope)).toBe(false);
+        expect(isEstimateAcceptActive(changedScope)).toBe(false);
+      }
       const revised = { ...delivered, estimate_data: { ...delivered.estimate_data,
         result: { lineItems: [{ ...annualLine, annual: 399 }] },
       } };
