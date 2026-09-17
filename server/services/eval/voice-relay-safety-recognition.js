@@ -304,10 +304,12 @@ const SAFETY_CIRCUMSTANCE_RE = /\b(if|unless|when|while|before|after|provided(?:
 function safetyCircumstanceScopes(text) {
   const predicate = SAFETY_REFUSED_CLAIM_RE.exec(text);
   if (!predicate) return [];
-  // "confirm if it is safe" introduces the refused proposition. A condition
-  // after its safety predicate restricts the proposition itself instead.
+  // "confirm if it is safe" introduces the refused proposition. Conditions
+  // after the safety predicate, or complete leading conditions separated
+  // from it, restrict the proposition itself instead.
   return [...text.matchAll(SAFETY_CIRCUMSTANCE_RE)]
-    .filter((condition) => condition.index > predicate.index
+    .filter((condition) => (condition.index > predicate.index
+        || condition.index + condition[0].length <= predicate.index)
       && !CONVERSATIONAL_CONDITION_RE.test(condition[2].replace(/^\s*(?:it|they)\s+(?:is|are|was|were)\s+/i, '')))
     .map((condition) => `${condition[1]} ${condition[2]}`.toLowerCase()
       .replace(/\b(?:it|they)\s+(?:is|are|was|were)\s+/g, '')

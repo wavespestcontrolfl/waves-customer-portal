@@ -1,6 +1,7 @@
 const {
   recognizeSafetyResponse,
   recognizeSafetyQuestion,
+  safetyCircumstanceScopes,
 } = require('../services/eval/voice-relay-safety-recognition');
 
 test('recognition retains refused and qualified propositions for context policy', () => {
@@ -13,6 +14,17 @@ test('recognition retains refused and qualified propositions for context policy'
     { text: 'The bait is safe', index: text.indexOf('The bait is safe') },
   ]));
   for (const { text: claim, index } of claims) expect(text.slice(index, index + claim.length)).toBe(claim);
+});
+
+test.each([
+  ['If my dog eats the bait, is it safe?', ['if my dog eats the bait']],
+  ['Is it safe if my dog eats the bait?', ['if my dog eats the bait']],
+  ['If swallowed, is the bait safe?', ['if swallowed']],
+  ['If it is dry, is the bait safe?', ['if dry']],
+  ['I cannot confirm if the bait is safe.', []],
+  ['I cannot confirm whether the bait is safe if swallowed.', ['if swallowed']],
+])('circumstance recognition retains exposure scope outside complements: %s', (text, conditions) => {
+  expect(safetyCircumstanceScopes(text)).toEqual(conditions);
 });
 
 test('pronoun candidates retain the product prefix and match offset', () => {
