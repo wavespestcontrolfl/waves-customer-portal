@@ -87,6 +87,88 @@ test.each([
   expect(recognizeSafetyResponse(text).guarantees).toEqual([]);
 });
 
+test.each([
+  ['The treatment will keep your dog safe.', 'dog'],
+  ['Bora-Care keeps children safe.', 'child'],
+  ['Bora-Care KEEPS children SAFE.', 'child'],
+  ['Example X will keep your pets safe.', 'pet'],
+])('noncopular product guarantees retain protected audiences: %s', (text, audience) => {
+  const candidates = recognizeSafetyResponse(text).guarantees;
+  expect(candidates.length).toBeGreaterThan(0);
+  expect(safetyAudienceScopes(text)).toEqual(new Set([audience]));
+  for (const { match } of candidates) expect(text.slice(match.index, match.index + match[0].length)).toBe(match[0]);
+});
+
+test.each([
+  'The appointment will keep your dog safe.',
+  'Blue sky keeps children safe.',
+  'Example x will keep your pets safe.',
+  'The treatment will not keep your dog safe.',
+  'Bora-Care keeps children unsafe.',
+])('noncopular controls do not establish a product safety guarantee: %s', (text) => {
+  expect(recognizeSafetyResponse(text).guarantees).toEqual([]);
+});
+
+test.each([
+  'The bait that was applied is safe.',
+  'The product which was used is safe.',
+  'The treatment that has been applied is safe.',
+])('passive product-relative clauses retain the whole claim: %s', (text) => {
+  expect(recognizeSafetyResponse(text).guarantees.map(({ match }) => match[0])).toContain(text.slice(0, -1));
+});
+
+test.each([
+  'The appointment which was scheduled is safe.',
+  'The bait that was applied is not safe.',
+  'The product which was used is unsafe.',
+  'The product which was used is a reference.',
+])('passive controls preserve ordinary subjects and claim negation: %s', (text) => {
+  expect(recognizeSafetyResponse(text).guarantees).toEqual([]);
+});
+
+test.each([
+  ['The treatment is safe for dogs, right?', 'positive', 'safe', 'dog'],
+  ['Bora-Care is harmless to children, isn’t it?', 'positive', 'harmless', 'child'],
+  ['Example X is safe for cats, right?', 'positive', 'safe', 'cat'],
+  ['The treatment is not safe for dogs, right?', 'positive', 'not safe', 'dog'],
+  ['The treatment is harmful to pets, right?', 'harm', 'harmful', 'pet'],
+  ['The treatment is not harmful to pets, isn’t it?', 'harm', 'not harmful', 'pet'],
+])('declarative tags retain assertion polarity independently of the tag: %s', (text, kind, predicate, audience) => {
+  expect(recognizeSafetyQuestion(text)[kind]).toMatchObject({ predicate, negatedAuxiliary: false });
+  expect(safetyAudienceScopes(text)).toEqual(new Set([audience]));
+});
+
+test.each(['Blue sky is safe, right?', 'The appointment is safe, right?', 'It is safe to reschedule, right?'])(
+  'declarative tag controls preserve product identity and calendar scope: %s', (text) => {
+    expect(recognizeSafetyQuestion(text).positive).toBeNull();
+  },
+);
+
+test('declarative pronoun tags retain antecedent and source offset', () => {
+  const text = 'Regarding the bait. It is safe for dogs, right?';
+  expect(recognizeSafetyQuestion(text).positive).toMatchObject({
+    index: text.indexOf('It is'), localAntecedent: 'Regarding the bait. ', requiresProductAntecedent: true,
+  });
+});
+
+test.each(['It will be.', 'They will be.', "It'll be.", 'They’ll be.'])(
+  'bare future copular echoes retain affirmative answer polarity: %s', (text) => {
+    expect(recognizeSafetyResponse(text).answers[0]).toMatchObject({ affirmative: true, negative: false, confirmation: false });
+  },
+);
+
+test.each(['It will not be.', 'They won’t be.'])(
+  'negated future copular echoes retain negative answer polarity: %s', (text) => {
+    expect(recognizeSafetyResponse(text).answers[0]).toMatchObject({ affirmative: false, negative: true });
+  },
+);
+
+test.each(['It will be scheduled.', 'It will be reviewed by the office.', 'They will be arriving tomorrow.'])(
+  'independent future predicates are not bare copular answers: %s', (text) => {
+    expect(recognizeSafetyResponse(text).answers[0]).toMatchObject({ affirmative: false, negative: false });
+  },
+);
+
 test.each(['The treatment is risk-free.', 'The treatment is free of risk.', "There isn't any risk with the treatment."])(
   'risk-absence recognition retains the safety proposition: %s', (text) => {
     expect(recognizeSafetyResponse(text).guarantees.length).toBeGreaterThan(0);

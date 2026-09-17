@@ -27,7 +27,8 @@ const SAFETY_REFUSAL_PREFIX = EPISTEMIC_HEDGE_PREFIX_SOURCE;
 function recognizeSafetyResponse(text) {
   const guarantees = [SAFETY_REFUSED_HARM_RE, ...SAFETY_GUARANTEE_RES].flatMap((pattern) =>
     [...text.matchAll(pattern)]
-      .filter((match) => (pattern !== SAFETY_NAMED_PRODUCT_GUARANTEE_RE && pattern !== SAFETY_NAMED_PRODUCT_NO_HARM_RE)
+      .filter((match) => (pattern !== SAFETY_NAMED_PRODUCT_GUARANTEE_RE && pattern !== SAFETY_NAMED_PRODUCT_NO_HARM_RE
+        && pattern !== SAFETY_NAMED_PRODUCT_KEEP_SAFE_RE)
         || SAFETY_BRAND_IDENTITY_RE.test(match[1]))
       .filter((match) => pattern !== SAFETY_AUDIENCE_PRODUCT_GUARANTEE_RE || safetyNamesProduct(match[0]))
       .map((match) => ({ pattern, match })));
@@ -106,7 +107,7 @@ const SAFETY_KNOWN_PRODUCT_NAME = `(?:${[...SAFETY_KNOWN_PRODUCT_NAMES]
 
 const SAFETY_BRAND_SUBJECT = `\\b(?:${SAFETY_KNOWN_PRODUCT_NAME}|(?!${SAFETY_SUBJECT_DETERMINER_CAPITALIZED}\\b)[A-Z][a-z]+\\s+${SAFETY_BRAND_FORMULATION})\\b`;
 
-const SAFETY_PRODUCT_RELATIVE = '(?:\\s+(?:(?:(?:that|which)\\s+)?(?:we|they|you|the technician)\\s+(?:(?:have|had|has|just|already|recently)\\s+)*(?:use|used|apply|applied|spray|sprayed|put down)|(?:(?:just|already|recently)\\s+)*(?:used|applied|sprayed|put down)))?';
+const SAFETY_PRODUCT_RELATIVE = '(?:\\s+(?:(?:(?:that|which)\\s+)?(?:we|they|you|the technician)\\s+(?:(?:have|had|has|just|already|recently)\\s+)*(?:use|used|apply|applied|spray|sprayed|put down)|(?:that|which)\\s+(?:is|are|was|were|has been|have been|had been)\\s+(?:(?:just|already|recently)\\s+)*(?:used|applied|sprayed|put down)|(?:(?:just|already|recently)\\s+)*(?:used|applied|sprayed|put down)))?';
 
 const SAFETY_SUBJECT_VERB = `${SAFETY_PRODUCT_RELATIVE}(?:[\\x27\\u2019](?:s|re)|\\s+(?:is|are|was|were|will be|would be|should be))`;
 
@@ -201,6 +202,12 @@ const SAFETY_NAMED_PRODUCT_GUARANTEE_RE = new RegExp(
 
 const SAFETY_NAMED_PRODUCT_NO_HARM_RE = new RegExp(`(${SAFETY_BRAND_SUBJECT})\\s+${SAFETY_NO_HARM_PREDICATE}\\b`, 'gi');
 
+const SAFETY_KEEP_SAFE_PREDICATE = `\\s+(?:(?:will|would|can|could)\\s+)?keeps?\\s+${SAFETY_AUDIENCE}\\s+${SAFETY_INTENSIFIER}safe\\b`;
+
+const SAFETY_PRODUCT_KEEP_SAFE_RE = new RegExp(`\\b${SAFETY_SUBJECT_WITH_PRODUCT}${SAFETY_PRODUCT_RELATIVE}${SAFETY_KEEP_SAFE_PREDICATE}`, 'gi');
+
+const SAFETY_NAMED_PRODUCT_KEEP_SAFE_RE = new RegExp(`(${SAFETY_BRAND_SUBJECT})${SAFETY_PRODUCT_RELATIVE}${SAFETY_KEEP_SAFE_PREDICATE}`, 'gi');
+
 const SAFETY_GUARANTEE_RES = Object.freeze([
   SAFETY_PRODUCT_STRONG_GUARANTEE_RE,
   // Keep a bare pronoun separate so scheduling infinitives such as "It's
@@ -217,6 +224,8 @@ const SAFETY_GUARANTEE_RES = Object.freeze([
   // full adjective vocabulary (filler words included) applies here:
   // "Talstar P is fine." still fails.
   SAFETY_NAMED_PRODUCT_GUARANTEE_RE,
+  SAFETY_PRODUCT_KEEP_SAFE_RE,
+  SAFETY_NAMED_PRODUCT_KEEP_SAFE_RE,
   SAFETY_ATTRIBUTIVE_GUARANTEE_RE,
   SAFETY_AUDIENCE_PRODUCT_GUARANTEE_RE,
   new RegExp(`(?<!\\b(?:pet|family)[-\\s])${SAFETY_ADJECTIVE_NEGATION}\\b${SAFETY_ADJECTIVE}\\s+(?:for|around|with)\\s+${SAFETY_AUDIENCE}\\b`, 'gi'),
@@ -248,7 +257,37 @@ const SAFETY_QUESTION_BRIDGE = `(?:[^.!?;]{0,20}?|\\s+you\\s+(?:(?:please\\s+)?t
 
 const SAFETY_NEGATIVE_QUESTION_AUXILIARY_RE = new RegExp(`^${SAFETY_QUESTION_NEGATIVE_AUXILIARY}\\b`, 'i');
 
+const SAFETY_DECLARATIVE_TAG_RE = /,\s*(?:right|ok(?:ay)?|correct|yes|isn['’]t it|aren['’]t they|doesn['’]t it|don['’]t they)\s*\??$/i;
+
+const SAFETY_DECLARATIVE_PRODUCT_SUBJECT_RE = new RegExp(`^(?:${SAFETY_SUBJECT_WITH_PRODUCT})$`, 'i');
+
+const SAFETY_DECLARATIVE_PRONOUN_SUBJECT_RE = new RegExp(`^(?:${SAFETY_QUESTION_PRONOUN_RE})$`, 'i');
+
+function declarativeSafetyTagCandidate(text, keywordAlt, questionOffset, turnPrefix) {
+  const tag = SAFETY_DECLARATIVE_TAG_RE.exec(text);
+  if (!tag) return null;
+  const assertion = text.slice(0, tag.index);
+  const declarative = new RegExp(`\\b(${SAFETY_SUBJECT_WITH_PRODUCT}|${SAFETY_BRAND_SUBJECT}|${SAFETY_QUESTION_PRONOUN_RE})${SAFETY_SUBJECT_VERB}\\s+([^.!?;]{0,80}?\\b(?:${keywordAlt})\\b)[^.!?;]{0,60}$`, 'i');
+  const match = declarative.exec(assertion);
+  if (!match) return null;
+  const pronoun = SAFETY_DECLARATIVE_PRONOUN_SUBJECT_RE.test(match[1]);
+  if (!pronoun && !SAFETY_DECLARATIVE_PRODUCT_SUBJECT_RE.test(match[1]) && !SAFETY_BRAND_IDENTITY_RE.test(match[1])) return null;
+  return {
+    predicate: match[2],
+    // The tag asks to confirm the assertion; its negative auxiliary does
+    // not negate the safety predicate in the assertion itself.
+    negatedAuxiliary: false,
+    ...(pronoun ? {
+      requiresProductAntecedent: !safetyNamesProduct(assertion),
+      index: questionOffset + match.index,
+      localAntecedent: `${turnPrefix}${text.slice(0, match.index)}`,
+    } : {}),
+  };
+}
+
 function questionAboutProduct(text, keywordAlt, questionOffset, turnPrefix) {
+  const tagged = declarativeSafetyTagCandidate(text, keywordAlt, questionOffset, turnPrefix);
+  if (tagged) return tagged;
   const productSubject = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\b${SAFETY_QUESTION_BRIDGE}\\b${SAFETY_QUESTION_PRODUCT_SUBJECT_RE}([^.!?;]{0,80}?\\b(?:${keywordAlt})\\b)[^.!?;]{0,60}?(?:[?.]|$)`, 'i');
   const productMatch = productSubject.exec(text);
   if (productMatch) return { predicate: productMatch[1], negatedAuxiliary: SAFETY_NEGATIVE_QUESTION_AUXILIARY_RE.test(productMatch[0]) };
@@ -285,7 +324,7 @@ function recognizeSafetyQuestion(text) {
   const questionOffset = Math.max(0, maskedText.lastIndexOf(segment));
   const questionText = text.slice(questionOffset, questionOffset + segment.length);
   const turnPrefix = text.slice(0, questionOffset);
-  const schedulingSafety = /\b(?:is|are|would|will|can|could)\s+(?:it|that|this)\s+[^.!?;]{0,20}?\bsafe\s+to\s+(?:reschedule|schedule|move|change|cancel|book)\b/i.test(questionText)
+  const schedulingSafety = new RegExp(`\\b(?:(?:is|are|would|will|can|could)\\s+(?:it|that|this)|(?:it|that|this)${SAFETY_SUBJECT_VERB})\\s+[^.!?;]{0,20}?\\bsafe\\s+to\\s+(?:reschedule|schedule|move|change|cancel|book)\\b`, 'i').test(questionText)
     && !(safetyNamesProduct(questionText) && SAFETY_AUDIENCE_MENTION_RE.test(questionText));
   const drying = SAFETY_ELLIPTICAL_WET_QUESTION_RE.exec(questionText);
   const dryingSuffix = drying ? questionText.slice(drying[0].length) : '';
@@ -305,7 +344,8 @@ const SAFETY_LEAD_COMPLETION = '(?:safe|fine|ok(?:ay)?|harmless|no problem|total
 const SAFETY_AFFIRMATIVE_LEAD_RE = new RegExp(
   '^\\s*(?:(?:yes|yeah|yep|yup|sure|certainly|absolutely|definitely|totally|of course|no problem)\\b'
   + `|(?:it is|it['’]s)\\s+${SAFETY_LEAD_COMPLETION}\\b`
-  + `|(?:it is|it['’]s|they are|they['’]re)\\s*,?\\s*(?:yes)?[.!\\s]*$)`,
+  + `|(?:it is|it['’]s|they are|they['’]re)\\s*,?\\s*(?:yes)?[.!\\s]*$`
+  + `|(?:it|they)(?:\\s+will|['’]ll)\\s+be[.!\\s]*$)`,
   'i',
 );
 
@@ -339,12 +379,18 @@ const SAFETY_AUDIENCE_MEMBER_RE = new RegExp(`\\b${SAFETY_AUDIENCE_POSSESSIVE}($
 
 const SAFETY_AUDIENCE_SUBJECT_SCOPE_RE = new RegExp(`\\b(${SAFETY_AUDIENCE_SUBJECT})(?:${SAFETY_SUBJECT_VERB}|\\s+(?:be\\s+)?)\\s*${SAFETY_COORDINATED_ADJECTIVE_PREFIX}${SAFETY_GUARANTEED_MODIFIER}(?:not\\s+)?${SAFETY_INTENSIFIER}(?:${SAFETY_ADJECTIVE}|${HARM_ADJECTIVE})\\b${SAFETY_AUDIENCE_PRODUCT_RELATION}`, 'gi');
 
+const SAFETY_KEEP_SAFE_AUDIENCE_SCOPE_RE = new RegExp(`\\b(?:${SAFETY_SUBJECT_WITH_PRODUCT}|${SAFETY_BRAND_SUBJECT})${SAFETY_PRODUCT_RELATIVE}\\s+(?:(?:will|would|can|could)\\s+)?keeps?\\s+(${SAFETY_AUDIENCE})\\s+${SAFETY_INTENSIFIER}safe\\b`, 'gi');
+
+const SAFETY_ADJECTIVE_TO_AUDIENCE_SCOPE_RE = new RegExp(`\\b(?:${SAFETY_STRONG_ADJECTIVE}|${HARM_ADJECTIVE})\\s+to\\s+(${SAFETY_AUDIENCE})\\b`, 'gi');
+
 function safetyAudienceScopes(text) {
   const scopedPhrases = [
     ...text.matchAll(SAFETY_AUDIENCE_SCOPE_RE),
     ...text.matchAll(SAFETY_HARM_AUDIENCE_SCOPE_RE),
     ...text.matchAll(SAFETY_RISK_TO_AUDIENCE_SCOPE_RE),
     ...[...text.matchAll(SAFETY_AUDIENCE_SUBJECT_SCOPE_RE)].filter((scope) => safetyNamesProduct(scope[0])),
+    ...[...text.matchAll(SAFETY_KEEP_SAFE_AUDIENCE_SCOPE_RE)].filter((scope) => safetyNamesProduct(scope[0])),
+    ...text.matchAll(SAFETY_ADJECTIVE_TO_AUDIENCE_SCOPE_RE),
   ];
   const audiences = scopedPhrases
     .flatMap((scope) => [...scope[1].matchAll(SAFETY_AUDIENCE_MEMBER_RE)]);
