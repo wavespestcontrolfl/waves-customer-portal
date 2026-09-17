@@ -197,4 +197,20 @@ describe('bounded shared pricing connectors', () => {
     expect(eligible('98 per visit')).toBe(false);
     expect(eligible('our service is priced at 98 per visit')).toBe(true);
   });
+
+  test.each(['price', 'cost', 'charge'])('preserves article-free has before %s', (noun) => {
+    for (const prefix of ['has', 'may have', 'does not have']) {
+      const result = recognize(`each visit ${prefix} ${noun} of $98`);
+      const clause = result.clauses[0];
+      const nominal = clause.amountRelations[0].candidates.find((c) => c.relation === 'head_amount');
+      expect(clause.unitRelations[0].candidates).toContainEqual(expect.objectContaining({ anchor: nominal }));
+      expect(result.disposition).toBe('needs_review');
+    }
+  });
+
+  test.each(['each visit may price of $98', 'each visit has mystery price of $98',
+    'each visit is price of 98 minutes'])
+  ('does not infer a has bridge from unrelated prefixes: %s', (text) => {
+    expect(edges(text)).toEqual([]);
+  });
 });

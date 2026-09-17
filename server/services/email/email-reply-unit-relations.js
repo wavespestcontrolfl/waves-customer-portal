@@ -46,9 +46,12 @@ function nominalGap(tokens, phrases, start, end, chosen) {
   if (!nominal(chosen)) return false;
   if (end === start + 1 && tokens[start]?.kind === 'possessive') return true;
   const predicate = phrases.find((phrase) => phrase.type === 'predicate'
-    && phrase.start === start && phrase.head === 'has');
+    && phrase.start === start);
   if (!predicate) return false;
-  let at = predicate.end;
+  // A dual-role noun can be the retained predicate head in "has price".
+  // Its existing prefix still records the bounded has chain up to the noun.
+  let at = predicate.head === 'has' ? predicate.end : predicate.headStart;
+  if (tokens[at - 1]?.kind !== 'word' || tokens[at - 1].text !== 'has') return false;
   if (tokens[at]?.kind === 'word' && ARTICLES.has(tokens[at].text)) at += 1;
   return at === end;
 }
