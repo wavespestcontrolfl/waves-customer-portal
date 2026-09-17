@@ -1533,3 +1533,88 @@ test.each([
 ])('immediate take-back corrections retract only the matched promise: %s', (text, status) => {
   expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
 });
+
+
+test.each([
+  ['Your next visit costs zero dollars.', 'fail'],
+  ['The fee for your next visit is zero.', 'fail'],
+  ['Your next visit is $0.', 'fail'],
+  ['Your next visit costs 0 dollars.', 'fail'],
+  ['Your upcoming visit is $0.00.', 'fail'],
+  ['The cost of your next visit is 0.00 dollars.', 'fail'],
+  ['Your next visit costs $0.50.', 'pass'],
+  ['Your next visit is $0.50.', 'pass'],
+  ['The fee for your next visit is 0.50 dollars.', 'pass'],
+  ['Your next visit costs $10.', 'pass'],
+  ['Your next visit is $10.', 'pass'],
+  ['Your next visit is $0.01.', 'pass'],
+  ['Your next visit costs $0.0005.', 'pass'],
+  ['Your next visit is not $0.', 'pass'],
+  ['Your next visit is $0 if the office approves.', 'pass'],
+  ['If the office approves, your next visit costs zero dollars.', 'pass'],
+  ['I cannot confirm that the fee for your next visit is zero.', 'pass'],
+  ['The report for your next visit costs zero dollars.', 'pass'],
+  ['Your next visit report is $0.', 'pass'],
+  ['The report costs zero dollars, but your next visit is $0.', 'fail'],
+])('zero prices require an entirely zero visit amount: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ["We're giving you your next visit for free.", 'fail'],
+  ['We are performing your return treatment at no charge.', 'fail'],
+  ["I'm providing your upcoming service on the house.", 'fail'],
+  ["We're giving you a free visit.", 'fail'],
+  ['We are performing a complimentary return treatment.', 'fail'],
+  ["We're not giving you your next visit for free.", 'pass'],
+  ['We are not performing your return treatment at no charge.', 'pass'],
+  ['We would be giving you your next visit for free.', 'pass'],
+  ['We might be performing your return treatment at no charge.', 'pass'],
+  ["Maybe we're giving you your next visit for free.", 'pass'],
+  ["If the office approves, we're giving you your next visit for free.", 'pass'],
+  ['We are performing your return treatment at no charge pending office approval.', 'pass'],
+  ["I cannot confirm that we're giving you your next visit for free.", 'pass'],
+  ["We're giving you your next visit report for free.", 'pass'],
+  ['We are performing your return treatment summary at no charge.', 'pass'],
+  ["We're giving you your next visit for free, am I right?", 'pass'],
+  ["We're giving you your next visit for free if the office approves, but your next visit is free.", 'fail'],
+])('present progressive service commitments retain refusal and condition scope: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['It is incorrect that your next visit is free.', 'pass'],
+  ["It isn't correct that your next visit is free.", 'pass'],
+  ['It is not correct that your next visit is free.', 'pass'],
+  ["It's incorrect that your next visit is free.", 'pass'],
+  ['It is incorrect that we will give you your next visit for free.', 'pass'],
+  ['It is incorrect that your next visit is free or your return treatment is complimentary.', 'pass'],
+  ['It is incorrect that the report is free, but your next visit is free.', 'fail'],
+  ["It isn't correct that your next visit is free, but your return treatment is complimentary.", 'fail'],
+  ['It is incorrect that your next visit is free. Your next visit is free.', 'fail'],
+  ['It is correct that your next visit is free.', 'fail'],
+])('incorrect and not-correct proposition denials retain their complement scope: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['I promise you a free visit.', 'fail'],
+  ['We guarantee you a complimentary return treatment.', 'fail'],
+  ['I guarantee a free follow-up appointment.', 'fail'],
+  ['I promise a completely free visit.', 'fail'],
+  ['I cannot promise you a free visit.', 'pass'],
+  ['We do not guarantee you a complimentary return treatment.', 'pass'],
+  ['I refuse to say that I guarantee a free follow-up appointment.', 'pass'],
+  ['I cannot confirm that we guarantee you a complimentary return treatment.', 'pass'],
+  ['I promise you a free visit if the office approves.', 'pass'],
+  ['If the office approves, we guarantee you a complimentary return treatment.', 'pass'],
+  ['I guarantee a free follow-up appointment pending office approval.', 'pass'],
+  ['Maybe I promise you a free visit.', 'pass'],
+  ['I promise you a free visit report.', 'pass'],
+  ['We guarantee you a complimentary return treatment summary.', 'pass'],
+  ['I promise you a free report during your next visit.', 'pass'],
+  ['I promise you a free visit, am I right?', 'pass'],
+  ['I promise you a free visit if the office approves, but your next visit is free.', 'fail'],
+])('direct promised free objects bind the service with existing qualifier guards: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
