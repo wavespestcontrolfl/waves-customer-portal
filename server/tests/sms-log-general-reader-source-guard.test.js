@@ -62,6 +62,11 @@ const WINDOW_SPAN = 15;
 // apply. Default is ZERO — every OTHER unwrapped site fails.
 const ALLOWLIST = [
   {
+    file: 'services/scheduled-sms-delivery.js',
+    snippet: "const row = await db('sms_log').where({ direction: 'outbound' })",
+    reason: 'status-scoped to queued / sent / delivered, which excludes sending, so an unresolved reservation structurally cannot match; it is also keyed to one scheduled row by scheduled_sms_log_id.',
+  },
+  {
     file: 'services/review-request.js',
     snippet: 'const reservationRow = await db("sms_log")',
     reason: 'reservation-lifecycle bookkeeping, not a general reader: looks a review-ask reservation up BY its own marker to mark a stuck one release_pending for the stranded-send sweep; excluding reservations here would hide the very rows it exists to process (same class as the sms-auto-send sweep).',
@@ -372,11 +377,6 @@ const ALLOWLIST = [
     file: 'services/review-request.js',
     snippet: 'const rows = await db("sms_log")',
     reason: 'status filtered to a set that excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
-  },
-  {
-    file: 'services/scheduler.js',
-    snippet: 'const providerRow = await db(\'sms_log\')',
-    reason: 'keyed by twilio_sid — a send reservation never has one until it is promoted to a real send, at which point it is legitimate delivery evidence, not a placeholder. (also status-scoped in the same window).',
   },
   {
     file: 'services/sms-additional-properties.js',

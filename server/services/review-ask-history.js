@@ -1,7 +1,6 @@
 const db = require('../models/db');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { ASK_TOUCH_SQL } = require('./review-outreach-templates');
-const { isUnresolvedReviewAskReservation } = require('./messaging/review-ask-reservation');
 
 const ASK_SPACING_MS = 72 * 3600000;
 const REVIEW_LINK_RE = /g\.page\/(?:r\/)?[^\s/]+\/review\b|writereview|writeareview|facebook\.com\/[^\s/]+\/reviews\b/i;
@@ -124,7 +123,11 @@ async function lastManualAskAt(customerId, { since, includeReservations = true, 
     // confirmation must not be lost just because the placeholder predates
     // the boundary (codex P1, review-request.js:1476).
     .whereRaw('(created_at >= ? OR updated_at >= ?)', [fetchFloor, fetchFloor])
-    .whereNotIn('status', ['scheduled', 'canceled', 'cancelled', 'failed', 'undelivered', 'blocked'])
+    .where(q => q.whereNotIn('status', ['scheduled', 'canceled', 'cancelled', 'failed', 'undelivered', 'blocked'])
+      // Finalize-only replay already delivered, even while bookkeeping retries.
+      .orWhereRaw("metadata->>'finalize_only' = 'true'")
+      // Stale-claim recovery can requeue/fail a possibly accepted attempt.
+      .orWhereRaw("metadata->>'review_ask_reservation' = 'true'"))
     .orderBy('created_at', 'desc')
     .select('id', 'message_body', 'created_at', 'updated_at', 'status', 'metadata');
   // The caller's OWN in-flight reservation (already inserted under the same
@@ -138,21 +141,34 @@ async function lastManualAskAt(customerId, { since, includeReservations = true, 
     catch { return {}; }
   };
   const isReviewReservation = row => metadata(row).review_ask_reservation === true;
+  const isConfirmed = row => ['sent', 'delivered'].includes(row.status) || metadata(row).finalize_only === true;
   // An unresolved provider attempt conservatively holds the same 72-hour
   // window only when the caller includes reservations. A confirmed marker
   // belongs in candidates below: it is durable delivery evidence even when
   // its short-link body is not independently recognizable as a review ask,
   // and the normal request/log correlation must still distinguish an
   // automated pipeline send from a staff ask.
+  // Deliberately NOT the shared isUnresolvedReviewAskReservation predicate the
+  // general sms_log readers use. That one hides only a still-in-flight
+  // placeholder (status 'sending'); spacing evidence needs the wider notion —
+  // any reservation that is not CONFIRMED delivered, including the ones
+  // stale-claim recovery requeued or failed, still holds the 72-hour window
+  // because the provider may have taken the text anyway. Must stay the same
+  // predicate the candidates filter below excludes on, or a recovered
+  // reservation would fall out of both and lose the hold entirely.
   const reservations = includeReservations
-    ? outbound.filter(row => isUnresolvedReviewAskReservation(row))
+    ? outbound.filter(row => isReviewReservation(row) && !isConfirmed(row))
     : [];
   const reservedAt = reservations.reduce((latest, row) => {
     const at = new Date(row.created_at);
     return at >= sinceAt && (!latest || at > latest) ? at : latest;
   }, null);
-  const candidates = outbound.filter(row => row.status !== 'sending'
-    && (isReviewReservation(row) || looksLikeReviewAsk(row.message_body)));
+  const candidates = outbound.filter(row => {
+    const meta = metadata(row);
+    if ((isReviewReservation(row) && !isConfirmed(row)) || (row.status === 'sending' && !meta.finalize_only)) return false;
+    return isReviewReservation(row) || looksLikeReviewAsk(row.message_body)
+      || !!(meta.bundled_review_request_id || meta.review_ask_delivered_at);
+  });
   // A resolved reservation's real ask-evidence time is its provider
   // confirmation (updated_at), not the placeholder's created_at: the
   // reservation is opened before the send, so its created_at can land

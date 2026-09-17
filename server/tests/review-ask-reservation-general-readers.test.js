@@ -30,10 +30,16 @@ describe('isUnresolvedReviewAskReservation — the shared predicate', () => {
     expect(isUnresolvedReviewAskReservation({ status: 'sending', metadata: { review_ask_reservation: true } })).toBe(true);
   });
 
-  test('false once the row resolves to a real status, even though the marker survives', () => {
-    for (const status of ['sent', 'delivered', 'failed', 'undelivered', 'blocked', 'canceled']) {
+  test('confirmed sends surface, while requeued or failed uncertain attempts remain hidden', () => {
+    for (const status of ['sent', 'delivered']) {
       expect(isUnresolvedReviewAskReservation({ status, metadata: { review_ask_reservation: true } })).toBe(false);
     }
+    for (const status of ['scheduled', 'sending', 'failed', 'undelivered', 'blocked', 'canceled']) {
+      expect(isUnresolvedReviewAskReservation({ status, metadata: { review_ask_reservation: true } })).toBe(true);
+    }
+    expect(isUnresolvedReviewAskReservation({ status: 'scheduled', metadata: {
+      review_ask_reservation: true, finalize_only: true,
+    } })).toBe(false);
   });
 
   test('a reply reservation is NOT review-ask spacing evidence, but IS a placeholder general readers hide — while its hold runs', () => {
@@ -46,8 +52,8 @@ describe('isUnresolvedReviewAskReservation — the shared predicate', () => {
       // Past the reconciliation hold it SURFACES as the unresolved attempt it is.
       expect(isUnresolvedSendReservation({ status: 'sending', metadata: { [marker]: true }, created_at: stale })).toBe(false);
     }
-    // A review-ask reservation outlives the reply hold (25h < its own 72h
-    // bound) — still hidden here, unlike the reply markers above.
+    // A review-ask reservation is unconditional (any age) — still hidden
+    // here, unlike the reply markers above, which age out past their hold.
     expect(isUnresolvedSendReservation({ status: 'sending', metadata: { review_ask_reservation: true }, created_at: stale })).toBe(true);
   });
 
@@ -88,10 +94,12 @@ describe('isUnresolvedReviewAskReservation — the shared predicate', () => {
 });
 
 describe('excludeUnresolvedSendReservations — SQL-level exclusion', () => {
-  test('compiles a NOT(status=sending AND marker) filter against the bare table', () => {
+  test('excludes uncertain reviews across recovery statuses and in-flight reply holds', () => {
     const knex = require('knex')({ client: 'pg' });
     const { sql } = excludeUnresolvedSendReservations(knex('sms_log')).toSQL();
-    expect(sql).toContain("NOT (sms_log.status = 'sending'");
+    expect(sql).toContain("sms_log.status NOT IN ('sent', 'delivered')");
+    expect(sql).toContain("sms_log.status = 'sending'");
+    expect(sql).toContain("sms_log.metadata->>'finalize_only'");
     expect(sql).toContain("sms_log.metadata->>'review_ask_reservation'");
     expect(sql).toContain("sms_log.metadata->>'manual_send_reservation'");
     expect(sql).toContain("sms_log.metadata->>'auto_send_reservation'");
@@ -104,7 +112,8 @@ describe('excludeUnresolvedSendReservations — SQL-level exclusion', () => {
   test('qualifies an aliased/joined table when given', () => {
     const knex = require('knex')({ client: 'pg' });
     const { sql } = excludeUnresolvedSendReservations(knex('sms_log as reply'), 'reply').toSQL();
-    expect(sql).toContain("NOT (reply.status = 'sending'");
+    expect(sql).toContain("reply.status NOT IN ('sent', 'delivered')");
+    expect(sql).toContain("reply.status = 'sending'");
   });
 });
 
@@ -376,7 +385,7 @@ describe('admin-communications ai-draft context — excludes only the unresolved
         this.where('from_phone', 'like', '%5551234').orWhere('to_phone', 'like', '%5551234');
       }),
     ).orderBy('created_at', 'desc').limit(5).toSQL();
-    expect(sql).toContain("NOT (sms_log.status = 'sending'");
+    expect(sql).toContain("sms_log.status NOT IN ('sent', 'delivered')");
 
     const matched = rows.filter((r) => !isUnresolvedReviewAskReservation(r))
       .sort((a, b) => b.created_at - a.created_at)
@@ -410,7 +419,7 @@ describe('review-ask-drafter recentSmsThread — the grounding window excludes o
     const { sql } = excludeUnresolvedSendReservations(knex('sms_log').where({ customer_id: 'cust-1' }))
       .where('created_at', '>', new Date(Date.UTC(2026, 7, 1)))
       .orderBy('created_at', 'desc').limit(6).toSQL();
-    expect(sql).toContain("NOT (sms_log.status = 'sending'");
+    expect(sql).toContain("sms_log.status NOT IN ('sent', 'delivered')");
 
     const matched = [...real, reservation].filter((r) => !isUnresolvedReviewAskReservation(r))
       .sort((a, b) => b.created_at - a.created_at).slice(0, 6);

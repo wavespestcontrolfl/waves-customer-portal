@@ -9,16 +9,22 @@
 // separately-logged provider row was found, flips this same row's status
 // to 'sent' in place (promote — admin-communications.js's
 // settleReviewReservation does the equivalent for its own reservation).
+// Scheduled review sends can also hold an uncertain attempt as 'scheduled'
+// while retaining the marker. That row remains unconfirmed until a later
+// accepted send removes the marker or durable finalization confirms it.
+// review-ask-history.js separately treats unconfirmed reservations as spacing
+// evidence, including requeued and failed rows.
 //
 // This module is the SINGLE owner of the review-ask reservation's
 // lifecycle (codex #4331 structural pass): every review-request.js /
-// admin-communications.js call site that creates, releases, or promotes one
-// of these rows goes through reserveForRequest / releaseUnsent / releaseById
-// / promote here, rather than each keeping its own inline INSERT/UPDATE/DELETE.
-// Six P1/P2 findings on this stack were all instances of ONE class — a
-// reservation some release/retry/cleanup/reader path didn't account for —
-// and every one of them was a consequence of the lifecycle being
-// reimplemented ad hoc at each call site instead of owned in one place.
+// admin-communications.js / scheduled-sms-delivery.js call site that
+// creates, releases, or promotes one of these rows goes through
+// reserveForRequest / releaseUnsent / releaseById / promote here, rather
+// than each keeping its own inline INSERT/UPDATE/DELETE. Six P1/P2
+// findings on this stack were all instances of ONE class — a reservation
+// some release/retry/cleanup/reader path didn't account for — and every
+// one of them was a consequence of the lifecycle being reimplemented ad
+// hoc at each call site instead of owned in one place.
 //
 // A Communications reply reservation (sms-suggest-mode's
 // createReplyHoldingReservation, marker manual_send_reservation) and the
@@ -33,20 +39,17 @@
 // message context fed to composers, unanswered-thread checks — must not
 // treat either still-unresolved placeholder as a message Waves definitely
 // sent: the provider may never have received it (Codex #4331 P2; pre-push
-// P1 on the reply marker). Once the row resolves to a real status it IS a
-// real message like any other row and must not be hidden.
+// P1 on the reply marker). Review attempts need confirmed delivery or a
+// finalize-only handoff; an uncertain requeue or terminal failure is not it.
 //
-// review-ask-history.js's own spacing-evidence reader already tests exactly
-// this (status === 'sending' + the marker) — this module is the one place
-// both it and every general reader share, so the semantics can't drift.
-//
-// REBUTTED FINDING (structural pass, "finding 6" / codex #4331 P1 pre-push
-// audit on this seam): a review-ask reservation was given the SAME 72h age
-// bound as a reply reservation, on the theory that a never-resolved
-// placeholder should not hide from general readers forever. That bound has
-// been REMOVED again for review-ask placeholders — they are excluded from
-// general readers UNCONDITIONALLY, regardless of age. The two families are
-// not the same risk:
+// REBUTTED FINDING (structural pass "finding 6", then a pre-push audit P1
+// on the seam itself): a review-ask reservation was briefly given the same
+// 72h age bound as a reply reservation in the general-reader hide below, on
+// the theory that a never-resolved placeholder should not hide from every
+// reader forever. REBUTTED and reverted: a review-ask placeholder is
+// excluded from general readers UNCONDITIONALLY, at any age, ACROSS EVERY
+// UNRESOLVED STATUS (not only 'sending' — a scheduled retry included). The
+// two reservation families are not the same risk:
 //   - A reply reservation guards an AMBIGUOUS AUTOMATIC reply that may have
 //     actually reached the customer. Hiding it forever would bury a real
 //     sent message, so it surfaces after REPLY_RESERVATION_HOLD_HOURS for an
@@ -54,13 +57,14 @@
 //   - A review-ask reservation is SYNTHETIC. It is never itself a delivered
 //     message — it is placeholder spacing evidence for an attempt that
 //     either lands (and gets its own separately-logged row, or is promoted
-//     to 'sent' in place) or doesn't. Letting an aged one surface to a
-//     general reader is pure harm, not a safety net: these readers are not
-//     display-only (csr-coach.verifyFollowUps marks a follow-up task
-//     VERIFIED off exactly this kind of read; ContextAggregator feeds
-//     composers a body with the reservation's status stripped) — an aged
-//     'sending' placeholder from a crash before delivery would read as
-//     genuine evidence the ask went out, when it never did.
+//     to 'sent'/left in place across scheduled/terminal recovery statuses)
+//     or doesn't. Letting an aged one surface to a general reader is pure
+//     harm, not a safety net: these readers are not display-only
+//     (csr-coach.verifyFollowUps marks a follow-up task VERIFIED off exactly
+//     this kind of read; ContextAggregator feeds composers a body with the
+//     reservation's status stripped) — an aged 'sending'/'scheduled'
+//     placeholder from a crash before delivery would read as genuine
+//     evidence the ask went out, when it never did.
 // A stale, never-resolved review-ask reservation is instead resolved by the
 // stranded-send reconciliation (review-request.js#_reconcileStrandedBatch:
 // promote on provider evidence, release via releaseUnsent on proven-unsent)
@@ -78,14 +82,8 @@ function parseMetadata(value) {
   }
 }
 
-// True only while the reservation is still in flight/unconfirmed. A row
-// that has since resolved to any other status (sent, delivered, failed,
-// undelivered, blocked, canceled…) is a real message and returns false.
-// Every 'sending' placeholder a general reader must not mistake for a sent
-// message: the review-ask reservation, the Communications reply reservation
-// (manual_send_reservation) and the automatic reply reservation
-// (auto_send_reservation, sms-auto-send). Only the FIRST is review-ask
-// spacing evidence — history readers use the narrow predicate.
+// Review reservations remain unresolved across scheduled/terminal recovery
+// statuses. Reply reservations are hidden only during their sending hold.
 const REVIEW_ASK_MARKER = 'review_ask_reservation';
 const REPLY_RESERVATION_MARKERS = ['manual_send_reservation', 'auto_send_reservation'];
 const SEND_RESERVATION_MARKERS = [REVIEW_ASK_MARKER, ...REPLY_RESERVATION_MARKERS];
@@ -97,18 +95,19 @@ const REPLY_RESERVATION_HOLD_HOURS = 24;
 const REPLY_RESERVATION_HOLD_MS = REPLY_RESERVATION_HOLD_HOURS * 60 * 60 * 1000;
 // NOT a general-reader hide bound (see the REBUTTED FINDING note above — a
 // review-ask reservation is excluded from those readers unconditionally,
-// any age). This is the ask-SPACING window only, mirroring ASK_SPACING_MS
-// in review-ask-history.js, used in exactly two places: reserveForRequest's
-// reuse-vs-renew decision (an existing unresolved reservation older than
-// this is renewed in place rather than reused with a stale timestamp — a
-// fresh delivery attempt must not compute its own retry math off a
-// timestamp from a previous, long-over attempt) and the stale-reservation
-// count reconcileStrandedSends logs for operator visibility.
+// any age, any unresolved status). This is the ask-SPACING window only,
+// mirroring ASK_SPACING_MS in review-ask-history.js, used in exactly two
+// places: reserveForRequest's reuse-vs-renew decision (an existing
+// unresolved reservation older than this is renewed in place rather than
+// reused with a stale timestamp — a fresh delivery attempt must not compute
+// its own retry math off a timestamp from a previous, long-over attempt)
+// and the stale-reservation count reconcileStrandedSends logs for operator
+// visibility (countStaleUnresolved below).
 const REVIEW_ASK_RESERVATION_HOLD_HOURS = 72;
 const REVIEW_ASK_RESERVATION_HOLD_MS = REVIEW_ASK_RESERVATION_HOLD_HOURS * 60 * 60 * 1000;
 
-function unresolvedMetadata(row) {
-  if (!row || row.status !== 'sending') return null;
+function reservationMetadata(row) {
+  if (!row) return null;
   return typeof row.metadata === 'string' ? parseMetadata(row.metadata) : row.metadata;
 }
 
@@ -121,27 +120,31 @@ function unresolvedMetadata(row) {
 // its own lookback window (typically ASK_SPACING_MS itself), so bounding it
 // here too would just duplicate that window in a second place.
 function isUnresolvedReviewAskReservation(row) {
-  return unresolvedMetadata(row)?.[REVIEW_ASK_MARKER] === true;
+  const metadata = reservationMetadata(row);
+  return metadata?.[REVIEW_ASK_MARKER] === true
+    && !['sent', 'delivered'].includes(row.status)
+    && metadata.finalize_only !== true;
 }
 
 // True while ANY send reservation is still in flight — what general readers
-// (history, counts, context, unanswered-thread checks) must hide.
+// (history, counts, context, unanswered-thread checks) must hide. A
+// review-ask placeholder is excluded UNCONDITIONALLY (any age) across every
+// unresolved status (a scheduled retry included, not only 'sending') — see
+// the REBUTTED FINDING note at the top of this file: it is synthetic and
+// never itself a delivered message, so letting an aged one surface once it
+// ages past some window would read as genuine delivery evidence for an ask
+// that may never have gone out. A reply placeholder is different — it
+// guards an ambiguous AUTOMATIC reply that may have actually reached the
+// customer — so it stays scoped to its 'sending' hold and surfaces past
+// REPLY_RESERVATION_HOLD_HOURS for an operator to see and settle.
 function isUnresolvedSendReservation(row, now = Date.now()) {
-  const metadata = unresolvedMetadata(row);
+  const metadata = reservationMetadata(row);
   if (!metadata) return false;
-  // A review-ask placeholder is excluded UNCONDITIONALLY, any age (see the
-  // REBUTTED FINDING note at the top of this file) — it is synthetic and
-  // never itself a delivered message, so a general reader (csr-coach
-  // follow-up verification, a composer's grounding context, an outbound
-  // count) must never admit it once it ages past some window. It is
-  // resolved by the stranded-send reconciliation, or surfaced to an
-  // operator through that reconciliation's own stale-reservation count —
-  // never by this predicate letting it through.
-  if (metadata[REVIEW_ASK_MARKER] === true) return true;
+  if (metadata[REVIEW_ASK_MARKER] === true) {
+    return !['sent', 'delivered'].includes(row.status) && metadata.finalize_only !== true;
+  }
+  if (row.status !== 'sending') return false;
   if (!REPLY_RESERVATION_MARKERS.some(marker => metadata[marker] === true)) return false;
-  // A reply reservation guards an ambiguous AUTOMATIC reply that may have
-  // actually reached the customer — bounded so a real send doesn't hide
-  // forever (see REPLY_RESERVATION_HOLD_HOURS above).
   const createdAt = row.created_at ? new Date(row.created_at).getTime() : NaN;
   return !Number.isFinite(createdAt) || createdAt >= now - REPLY_RESERVATION_HOLD_MS;
 }
@@ -152,13 +155,16 @@ function isUnresolvedSendReservation(row, now = Date.now()) {
 // history window. `table` lets a caller that aliases or joins sms_log
 // qualify the column; default matches a bare `db('sms_log')` query. Mirrors
 // isUnresolvedSendReservation exactly: the review-ask arm is unconditional
-// (any age), only the reply-marker arm carries an age bound.
+// (any age) across every unresolved status, the reply arm stays scoped to
+// 'sending' within its 24h hold.
 function excludeUnresolvedSendReservations(query, table = 'sms_log') {
   const replyMarkers = REPLY_RESERVATION_MARKERS.map(marker => `COALESCE(${table}.metadata->>'${marker}', 'false') = 'true'`).join(' OR ');
   return query.whereRaw(
-    `NOT (${table}.status = 'sending' AND (`
-      + `COALESCE(${table}.metadata->>'${REVIEW_ASK_MARKER}', 'false') = 'true'`
-      + ` OR ((${replyMarkers}) AND ${table}.created_at >= NOW() - INTERVAL '${REPLY_RESERVATION_HOLD_HOURS} hours')))`,
+    `NOT ((COALESCE(${table}.metadata->>'${REVIEW_ASK_MARKER}', 'false') = 'true'`
+      + ` AND ${table}.status NOT IN ('sent', 'delivered')`
+      + ` AND COALESCE(${table}.metadata->>'finalize_only', 'false') <> 'true')`
+      + ` OR (${table}.status = 'sending' AND (${replyMarkers})`
+      + ` AND ${table}.created_at >= NOW() - INTERVAL '${REPLY_RESERVATION_HOLD_HOURS} hours'))`,
   );
 }
 
