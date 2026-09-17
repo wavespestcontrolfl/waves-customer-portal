@@ -125,6 +125,50 @@ const FUTURE = new Date(Date.now() + 60 * 60 * 1000).toISOString();
 describe('schedule-send atomic claim', () => {
   beforeEach(() => jest.clearAllMocks());
 
+  test.each([
+    // The worker runs on five-minute ticks: 04:55Z (23:55 ET) is the last
+    // schedule the fixed 2099-12-21 hold can reach; 04:55:00.001Z is first
+    // claimed at 05:00Z, after the day ends (GH codex P2 on #4309).
+    ...['draft', 'scheduled', 'sending', 'send_failed', 'sent', 'viewed', 'expired'].flatMap(status => [
+      [status, '2099-12-22T05:00:00Z', 409], [status, '2099-12-22T04:59:59.999Z', 409], [status, '2099-12-22T04:55:00.001Z', 409], [status, '2099-12-22T04:55:00Z', 200],
+    ]),
+    ['accepted', '2099-12-22T05:00:00Z', 200],
+  ])('checks a %s sibling against the scheduled send time %s', async (status, scheduledAt, expected) => {
+    const sibling = { id: 'synthetic-bid-sibling', status, pricing_authority: 'SERVER',
+      estimate_data: { proposal: { enabled: true, validThrough: '2099-12-21' } } };
+    const builder = makeBuilder(estimateRow({ estimate_group_id: 'synthetic-bid-group' }), { selectResult: [sibling] });
+    db.mockImplementation(() => builder);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/est-1/send`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sendMethod: 'both', scheduledAt }),
+      });
+      expect(res.status).toBe(expected);
+      if (expected === 409) expect(builder.update).not.toHaveBeenCalled();
+      else expect((await res.json()).scheduled).toBe(true);
+    });
+  });
+
+  test.each([
+    ['2099-12-22T04:58:00Z', 409, /too close to the end of the bid validity day/],
+    ['2099-12-22T05:00:00Z', 409, /validity date has passed/],
+    ['2099-12-22T04:55:00Z', 200, null],
+  ])('validates the anchor\'s own fixed hold at the first scheduler tick for %s', async (scheduledAt, expected, message) => {
+    const builder = makeBuilder(estimateRow({ estimate_data: { proposal: { enabled: true, validThrough: '2099-12-21' } } }));
+    db.mockImplementation(() => builder);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/est-1/send`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sendMethod: 'both', scheduledAt }),
+      });
+      expect(res.status).toBe(expected);
+      if (message) {
+        expect((await res.json()).error).toMatch(message);
+        expect(builder.update).not.toHaveBeenCalled();
+      } else expect((await res.json()).scheduled).toBe(true);
+    });
+  });
+
   test('schedules through the claim filters when the row is claimable', async () => {
     const builder = makeBuilder(estimateRow(), { updateResult: 1 });
     db.mockImplementation(() => builder);
