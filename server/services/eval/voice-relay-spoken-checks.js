@@ -1801,16 +1801,11 @@ const SAFETY_REFERENTIAL_DRYING_WITHDRAWAL_RE = /\b(?:that|this|it)\s+(?:also\s+
 
 const SAFETY_ANSWER_POLARITY_PREFIX_RE = /^\s*(?:(?:yes|yeah|yep|yup|sure|certainly|absolutely|definitely|totally|of course|no problem|no|nope|nah|not at all|not really|never)(?:\s+not)?)[\s,:—–-]*/i;
 
-const SAFETY_ELLIPTICAL_ANSWER_RE = /^\s*(?:(?:it|this|that)[\x27\u2019]s\s+not|(?:it|this|that|they)\s+(?:(?:is|are|was|were|does|do|did|will|would|can|could)(?:\s+not)?|(?:isn|aren|wasn|weren|doesn|don|didn|won|wouldn|can|couldn)[\x27\u2019]t))(?=\s*(?:[,;:—–-]|$))/i;
+const SAFETY_ELLIPTICAL_ANSWER_RE = /^\s*(?:(?:it|this|that)[\x27\u2019]s\s+not|(?:it|this|that|they)\s+(?:(?:is|are|was|were|does|do|did)(?:\s+not)?|(?:will|would|can|could|cannot)(?:\s+not)?(?:\s+be)?|(?:isn|aren|wasn|weren|doesn|don|didn|won|wouldn|can|couldn)[\x27\u2019]t(?:\s+be)?))(?=\s*(?:[,;:—–-]|$))/i;
 
 const SAFETY_REFERENTIAL_CONFIRMATION_RE = /^\s*(?:it|this|that)(?:[\x27\u2019]s|\s+(?:is|was))\s+(?:correct|right|true)\s*$/i;
 
-const SAFETY_EXPLICIT_ANSWER_PROPOSITION_RE = /^\s*(?:i|we|you|he|she|they|it|this|that|there|(?:the|our|your|my|this|that|a|an)\s+[a-z][\w\x27\u2019-]*(?:\s+[a-z][\w\x27\u2019-]*){0,2})(?:(?:\s+(?:am|is|are|was|were|can|could|will|would|shall|should|may|might|must|have|has|had|do|does|did|cannot|can[\x27\u2019]t|won[\x27\u2019]t))\b|[\x27\u2019](?:m|re|s|ll|d|ve)\b|\s+[a-z]+(?:s|ed|ing)\b)/i;
-
-const SAFETY_ANSWER_GUIDANCE_RE = new RegExp(
-  `\\b${SAFETY_STAFF_ROLE}\\b[^.!?;]{0,100}?\\b(?:go(?:es)? over|review(?:s)?|explain(?:s)?|(?:talk|walk)(?:s)?(?:\\s+you)?\\s+through|follow(?:s)?)\\b[^.!?;]{0,60}?\\b(?:everything|products?|labels?|precautions?)\\b`,
-  'i',
-);
+const SAFETY_EXPLICIT_ANSWER_PROPOSITION_RE = /^\s*(?:i|we|you|he|she|they|it|this|that|there|(?:the|our|your|my|this|that|a|an)\s+[a-z][\w\x27\u2019-]*(?:\s+[a-z][\w\x27\u2019-]*){0,2})(?:(?:\s+(?:am|is|are|was|were|can|could|will|would|shall|should|may|might|must|have|has|had|do|does|did|cannot|(?:isn|aren|wasn|weren|doesn|don|didn|won|wouldn|can|couldn)[\x27\u2019]t))\b|[\x27\u2019](?:m|re|s|ll|d|ve)\b|\s+[a-z]+(?:s|ed|ing)\b)/i;
 
 const SAFETY_ANSWER_ACKNOWLEDGMENT_RE = /^\s*(?:i|we)\s+(?:understand|hear|follow|see|get)\b/i;
 
@@ -1828,9 +1823,11 @@ function safetyAnswerAddressesQuestion(clause, questionText) {
     return !questionProducts.size
       || [...answerProducts].some((product) => questionProducts.has(product));
   }
-  return !lead || !SAFETY_EXPLICIT_ANSWER_PROPOSITION_RE.test(proposition)
-    || SAFETY_ANSWER_RELEVANCE_RE.test(proposition)
-    || SAFETY_ANSWER_GUIDANCE_RE.test(proposition);
+  // Explicit warnings and facts carry their own meaning. A refusal after
+  // "Yes" or "No" still has to qualify that lead's inherited assurance.
+  return !SAFETY_EXPLICIT_ANSWER_PROPOSITION_RE.test(proposition)
+    || Boolean(lead && safetyExemptSpans(proposition).some(([start, end]) =>
+      SAFETY_ANSWER_RELEVANCE_RE.test(proposition.slice(start, end))));
 }
 
 const SAFETY_REFUSED_AFFIRMATIVE_HARM_RE = new RegExp(
