@@ -10,6 +10,7 @@ const SEPARATE_WORDS = new Set(['separately', 'individually']);
 const CHARGE_NOUNS = new Set(['charge', 'fee', 'invoice']);
 
 const isKind = (token, kind) => token?.kind === kind;
+const isAmount = (token) => ['money', 'number'].includes(token?.kind);
 const isWord = (token, ...words) => isKind(token, 'word') && words.includes(token.text);
 const isVisit = (token) => ['visit', 'visits', 'eachVisit'].includes(token?.kind);
 const isUnit = (token) => ['unit', 'visit', 'visits', 'eachVisit'].includes(token?.kind);
@@ -18,6 +19,8 @@ const isBillingVerb = (token) => isKind(token, 'word') && BILLING_VERBS.has(toke
 const isBillingNoun = (token) => isKind(token, 'word') && BILLING_NOUNS.has(token.text);
 const isChargeNoun = (token) => isKind(token, 'word') && CHARGE_NOUNS.has(token.text);
 const isSeparate = (token) => isKind(token, 'word') && SEPARATE_WORDS.has(token.text);
+const isApplicationObject = (token, separated) => isKind(token, 'application')
+  && (!separated || /^(?:-?per\b|for\b|\/)/.test(token.text));
 const isRecipient = (token) => isWord(token, 'you', 'us', 'them', 'him', 'her', 'customer', 'customers', 'client', 'clients');
 const isDeterminer = (token) => isWord(token, 'a', 'an', 'one', 'the', 'your', 'our', 'my', 'their', 'his', 'her', 'its', 'this', 'that', 'these', 'those', 'each', 'every', 'any');
 
@@ -82,17 +85,18 @@ function hasApplicationComplement(tokens, at) {
   next = skipSeparators(tokens, next);
   if (isWord(tokens[next], 'not', 'never')) return false;
   if (isWord(tokens[next], 'of', 'at')
-    && (isKind(tokens[next + 1], 'money') || isKind(tokens[next + 1], 'number'))) next += 1;
-  if (isKind(tokens[next], 'money') || isKind(tokens[next], 'number')) next += 1;
+    && isAmount(tokens[next + 1])) next += 1;
+  if (isAmount(tokens[next])) next += 1;
   next = skipSeparators(tokens, next);
   if (isWord(tokens[next], 'not', 'never')) return false;
-  return isKind(tokens[next], 'application') && /^(?:-?per\b|for\b|\/)/.test(tokens[next].text);
+  return isApplicationObject(tokens[next], true);
 }
 
 function hasBillingObjectPredicate(tokens, at, passive) {
   if (hasApplicationComplement(tokens, at)) return false;
   let object = skipRecipient(tokens, at + 1);
   const recipient = object > at + 1;
+  let separated = isKind(tokens[object], 'sep');
   object = skipSeparators(tokens, object);
   if (isSeparate(tokens[object])) object += 1;
   if (isWord(tokens[object], 'on') && isWord(tokens[object + 1], 'its', 'their')
@@ -100,13 +104,15 @@ function hasBillingObjectPredicate(tokens, at, passive) {
   if (isDeterminer(tokens[object])) object += 1;
   if (isWord(tokens[object], 'own')) object += 1;
   if (isWord(tokens[object], 'separate', 'individual')) object += 1;
-  const amount = isKind(tokens[object], 'money') || isKind(tokens[object], 'number');
+  const amount = isAmount(tokens[object]);
   if (amount) object += 1;
+  separated = separated || isKind(tokens[object], 'sep');
   object = skipSeparators(tokens, object);
   if (isDeterminer(tokens[object])) object += 1;
   if (isWord(tokens[object], 'separate', 'individual')) object += 1;
   const noun = isBillingNoun(tokens[object]);
-  if (isKind(tokens[object], 'application') || (noun && hasApplicationComplement(tokens, object))) return false;
+  const application = isApplicationObject(tokens[object], separated);
+  if (application || (noun && hasApplicationComplement(tokens, object))) return false;
   return passive || recipient || amount || isKind(tokens[object], 'unit') || noun;
 }
 

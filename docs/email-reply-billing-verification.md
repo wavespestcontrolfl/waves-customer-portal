@@ -65,6 +65,8 @@ Visit-subject passive/separate predicates, nominal charge heads, and direct
 bare-visit objects use the same guard; explicit per-visit units still reject.
 Only affirmative application complements exempt a predicate; `not`/`never`
 cannot grant that exception. Separators may also intervene after an amount.
+Across object punctuation, only prefixed `per/for/slash` application units
+exempt billing; unrelated application nouns cannot shield a visit assertion.
 Reminder/status modifiers retain a following billing head. Feedback also
 permits experience, appointment, and pronoun objects; singular pay-a-visit
 idioms permit the scanner's determiner and modifier variants.

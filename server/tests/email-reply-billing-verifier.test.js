@@ -367,6 +367,13 @@ describe('email reply amountless billing policy', () => {
     }
   });
 
+  test.each(['We bill each visit', 'For each visit, we charge you $98', 'Each visit is separately billed $98'])('requires pricing units across object punctuation: %s', (head) => {
+    for (const separator of [',', ':', ' —']) {
+      rejected(`${head}${separator} applications are scheduled separately.`);
+      expect(verdict(`${head}${separator} per application.`)).toEqual({ ok: true, violations: [] });
+    }
+  });
+
   test.each([
     ['type', { text: {}, commercialProposal: true }, 'copy_type'],
     ['size', { text: 'x'.repeat(8193), commercialProposal: true }, 'copy_size'],
