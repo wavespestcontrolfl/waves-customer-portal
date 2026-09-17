@@ -1,11 +1,11 @@
 const { recognizeEmailReplyPricingPhrases } = require('./email-reply-pricing-phrases');
 
 const AMOUNTS = new Set(['money', 'number']);
-const DETERMINERS = new Set(['a', 'an', 'the']);
+const DETERMINERS = new Set(['a', 'an', 'the', 'our', 'your']);
 const NEGATIONS = new Set(['not', 'never']);
 const ARTICLES = new Set(['a', 'an']);
 const RANGE_INTRODUCERS = new Set(['from', 'between']);
-const AT = new Set(['at']);
+const PREDICATE_CONNECTORS = new Set(['at', 'for']);
 const NOUN_CONNECTORS = new Set(['word:of', 'sep::', 'sep:-']);
 
 function recognizeClause(clause) {
@@ -47,7 +47,7 @@ function recognizeClause(clause) {
     let end = anchor.end;
     if (predicate) {
       end = at('participant', end)?.end ?? end;
-      if (!at('qualifier', end) && wordIn(end, AT)) end += 1;
+      if (!at('qualifier', end) && wordIn(end, PREDICATE_CONNECTORS)) end += 1;
     } else end = copulaEnd(end, true, true);
     if (wordIn(end, ARTICLES)) end += 1;
     const qualifier = at('qualifier', end);

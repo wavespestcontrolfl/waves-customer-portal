@@ -111,10 +111,11 @@ describe('inactive bounded unit relation candidates', () => {
     expect(clause.unitRelations[0].candidates.every((c) => c.anchor !== null)).toBe(true);
   });
 
-  test('fronted comma accepts an amount-to-head anchor but excludes its bare path', () => {
+  test('fronted comma retains both bare and amount-to-head paths', () => {
     const clause = recognize('each visit, $98 fee').clauses[0];
     const original = clause.amountRelations[0];
     expect(clause.unitRelations[0].candidates).toEqual([
+      candidate(0, 3, original.amount, null, span(1, 2, ',')),
       candidate(0, 4, original.amount, original.candidates[0], span(1, 2, ',')),
     ]);
   });
@@ -138,8 +139,7 @@ describe('inactive bounded unit relation candidates', () => {
     ]);
   });
 
-  test.each(['each visit, $98',
-    'each visit,, costs $98', 'each visit, we you charge $98',
+  test.each(['each visit,, costs $98', 'each visit, we you charge $98',
     'each visit, mystery charge $98', 'each visit we charge $98',
     'each visit: we charge $98', 'each visit, : charge $98', 'each visit - - $98'])
   ('leaves unsupported comma and separator forms unresolved: %s', (text) => {

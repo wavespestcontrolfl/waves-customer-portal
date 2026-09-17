@@ -40,14 +40,15 @@ connector retains its actual tokens without claiming semantic polarity.
 ## Finite supported forms
 
 - `predicate_amount`: a predicate, optionally one participant, optionally
-  `at`, optionally `a`/`an`, optionally one qualifier, optionally
+  `at`/`for`, optionally `a`/`an`, optionally one qualifier, optionally
   `from`/`between`, then an amount. For example, `charge $98`, `pay you $98`,
-  and `costs up to $98`.
+  and `costs up to $98`. A qualifier beginning with `at` takes precedence
+  over consuming `at` as a connector, preserving `pay at most $98`.
 - `head_amount`: a noun-role billing head, optionally a copula or one of
   `of`, colon, or hyphen, optionally `a`/`an`, optionally one qualifier,
   optionally `from`/`between`, then an amount. For example, `fee $98` or `total is $98`.
-- `amount_head`: an amount, optionally a copula, optionally `a`, `an`, or
-  `the`, then a noun-role billing head. For example, `$98 fee` or
+- `amount_head`: an amount, optionally a copula, optionally `a`, `an`,
+  `the`, `our`, or `your`, then a noun-role billing head. For example, `$98 fee` or
   `$98 is the price`.
 
 A copula is one scanner `be` token, optionally followed by one explicit
