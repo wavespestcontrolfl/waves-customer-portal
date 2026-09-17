@@ -214,8 +214,10 @@ test('drying followup evidence retains its original conditional phrase', () => {
   const text = 'The bait was applied at 4 p.m. What about while it is wet?';
   const question = recognizeSafetyQuestion(text);
   expect(question.dryingFollowup).toBe(true);
-  expect(question.dryingEvidence.conditions[0].marker).toMatchObject({ text: 'while', index: text.indexOf('while') });
-  expect(question.dryingEvidence.conditions[0].body.text).toBe(' it is wet');
+  expect(question.dryingEvidence.adjacentConnectives[0].marker).toMatchObject({ text: 'while', index: text.indexOf('while') });
+  expect(question.dryingEvidence.adjacentConnectives[0].body.text).toBe(' it is wet');
+  expect(question.dryingEvidence.adjacentConnectives[0].relation).toBe('unresolved');
+  expect(question.dryingEvidence.conditions).toEqual([]);
   expect(text.slice(question.dryingEvidence.index, question.dryingEvidence.end)).toBe(question.dryingEvidence.text);
 });
 

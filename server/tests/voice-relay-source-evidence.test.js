@@ -98,10 +98,11 @@ test.each(['The bait is safe while it is dry.', 'While it is dry, the bait is sa
   'while conditions retain exact evidence: %s', (source) => {
     const index = source.indexOf('safe');
     const evidence = localCandidateEvidence(source, 'adjective', index, index + 4);
-    expect(evidence.conditions).toHaveLength(1);
-    expect(evidence.conditions[0].marker.text.toLowerCase()).toBe('while');
-    expect(evidence.conditions[0].body.text.trim()).toBe('it is dry');
-    expectExact(source, evidence.conditions[0]);
+    expect(evidence.conditions).toEqual([]);
+    expect(evidence.adjacentConnectives).toHaveLength(1);
+    expect(evidence.adjacentConnectives[0].marker.text.toLowerCase()).toBe('while');
+    expect(evidence.adjacentConnectives[0].body.text.trim()).toBe('it is dry');
+    expectExact(source, evidence.adjacentConnectives[0]);
   },
 );
 
@@ -233,3 +234,62 @@ test('both comma-separated subclauses inherit their selected parent sentence', (
   const independent = splitSourceSpans(source, /;/, source.indexOf('The office'))[0];
   expect(independent.ambiguousBoundaries).toEqual([]);
 });
+
+
+test.each(['The bait is safe so long as dry.', 'So long as dry, the bait is safe.'])(
+  'so long as retains its exact lexical condition: %s', (source) => {
+    const evidence = localCandidateEvidence(source, 'adjective', source.indexOf('safe'), source.indexOf('safe') + 4);
+    expect(evidence.conditions[0].marker.text.toLowerCase()).toBe('so long as');
+    expect(evidence.conditions[0].body.text.trim()).toBe('dry');
+    expectExact(source, evidence.conditions[0]);
+  },
+);
+
+test('neither and nor retain exact negation positions', () => {
+  const source = 'I can neither confirm nor deny the bait is safe.';
+  const evidence = localCandidateEvidence(source, 'adjective', source.indexOf('safe'), source.indexOf('safe') + 4);
+  expect(evidence.negations.map((span) => span.text)).toEqual(['neither', 'nor']);
+  for (const span of evidence.negations) expectExact(source, span);
+});
+
+test('a decimal token cannot detach the earlier lexical refusal', () => {
+  const source = 'I cannot confirm that the 0.5% bait is safe.';
+  const evidence = localCandidateEvidence(source, 'adjective', source.indexOf('safe'), source.indexOf('safe') + 4);
+  expect(evidence.clause.text).toBe(source.slice(0, -1));
+  expect(evidence.negations[0]).toMatchObject({ text: 'cannot', index: source.indexOf('cannot') });
+  expectExact(source, evidence.clause);
+});
+
+test.each(['The spray is not safe, while the bait is safe.', 'The spray is not safe while the bait is safe.'])(
+  'contrastive while preserves each assertion and its negation: %s', (source) => {
+    const sprayIndex = source.indexOf('safe');
+    const baitIndex = source.lastIndexOf('safe');
+    const spray = localCandidateEvidence(source, 'adjective', sprayIndex, sprayIndex + 4);
+    const bait = localCandidateEvidence(source, 'adjective', baitIndex, baitIndex + 4);
+    expect(spray.clause.text).not.toContain('the bait');
+    expect(spray.negations.map((span) => span.text)).toEqual(['not']);
+    expect(bait.clause.text.trim()).toBe('the bait is safe');
+    expect(bait.negations).toEqual([]);
+    expect(spray.conditions).toEqual([]);
+    expect(bait.conditions).toEqual([]);
+    for (const evidence of [spray, bait]) {
+      expect(evidence.adjacentConnectives[0].body.text.trim()).toBe('the bait is safe');
+      expectExact(source, evidence.adjacentConnectives[0]);
+      expectExact(source, evidence.adjacentConnectives[0].marker);
+      expectExact(source, evidence.adjacentConnectives[0].body);
+      expect(evidence.adjacentConnectives[0]).toMatchObject({ relation: 'unresolved' });
+      expect(evidence.adjacentConnectives[0]).not.toHaveProperty('qualified');
+    }
+  },
+);
+
+
+test.each(['The bait is safe while dry.', 'While dry, the bait is safe.'])(
+  'bare while body remains unresolved adjacent evidence: %s', (source) => {
+    const evidence = localCandidateEvidence(source, 'adjective', source.indexOf('safe'), source.indexOf('safe') + 4);
+    expect(evidence.adjacentConnectives[0]).toMatchObject({ relation: 'unresolved' });
+    expect(evidence.adjacentConnectives[0].body.text.trim()).toBe('dry');
+    expect(evidence.conditions).toEqual([]);
+    expectExact(source, evidence.adjacentConnectives[0]);
+  },
+);
