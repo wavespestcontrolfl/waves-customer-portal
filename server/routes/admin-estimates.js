@@ -2932,7 +2932,11 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // into ITS audit snapshot too (GH codex P2 on #3628).
   let builtSendSnapshot = null;
   try {
-    const snapshot = await buildEstimateSendSnapshot({ ...freshForSnapshot, expires_at: nextExpiresAt }, now, { delivered: stampChannels.length > 0, deliveredAt: lastDeliveredAt });
+    // A historical success cannot replace the delivered billing terms with
+    // current configuration. Only a real handoff freezes a new quote.
+    const snapshot = stampChannels.length
+      ? await buildEstimateSendSnapshot({ ...freshForSnapshot, expires_at: nextExpiresAt }, now, { deliveredAt: lastDeliveredAt })
+      : (parseEstimateData(freshForSnapshot.estimate_data) || {});
     // Only a VALIDATED bundle feeds the audit — same rule as the sibling
     // and superseded branches (codex pre-push P1).
     builtSendSnapshot = snapshot.sendSnapshot && !snapshot.sendSnapshot.pricingBundleError
@@ -2943,10 +2947,10 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     // by a full estimate_data write. proposalDelivery is a sibling of proposal,
     // never a nested write, so the `||` merge can't drop the proposal itself.
     const mergePatch = {
-      sendSnapshot: snapshot.sendSnapshot || {},
+      ...(stampChannels.length ? { sendSnapshot: snapshot.sendSnapshot || {} } : {}),
       ...deliveryStatePatch,
     };
-    if (proposalEnabledForDelivery) {
+    if (proposalEnabledForDelivery && stampChannels.length) {
       mergePatch.proposalDelivery = {
         stampedAt: now().toISOString(),
         pdfEmailed: proposalPdfEmailed,
@@ -3063,15 +3067,18 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       let preAcceptData = estimate.estimate_data;
       if (typeof preAcceptData === 'string') { try { preAcceptData = JSON.parse(preAcceptData); } catch { preAcceptData = {}; } }
       preAcceptData = preAcceptData || {};
-      // ONLY a bundle rebuilt from the PRE-DELIVERY claimed row is
-      // send-time truth — builtSendSnapshot came from freshForSnapshot,
+      // For a real delivery, ONLY a bundle rebuilt from the PRE-DELIVERY
+      // claimed row is send-time truth — builtSendSnapshot came from freshForSnapshot,
       // which post-dates delivery and can carry the acceptance rewrite,
       // and a prior send's stored sendSnapshot is equally stale. When the
       // rebuild fails, the audit goes out with NO bundle rather than a
-      // wrong one (codex pre-push P1).
+      // wrong one (codex pre-push P1). Historical success retains its prior
+      // snapshot because no new offer reached the provider.
       let raceBundle = null;
       try {
-        const rebuilt = await buildEstimateSendSnapshot({ ...estimate, expires_at: nextExpiresAt }, now);
+        const rebuilt = stampChannels.length
+          ? await buildEstimateSendSnapshot({ ...estimate, expires_at: nextExpiresAt }, now)
+          : preAcceptData;
         if (rebuilt?.sendSnapshot && !rebuilt.sendSnapshot.pricingBundleError) raceBundle = rebuilt.sendSnapshot;
       } catch { /* no validated pre-delivery bundle */ }
       const { sendSnapshot: stalePriorSnapshot, ...preAcceptSansSnapshot } = preAcceptData;
@@ -3135,14 +3142,17 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // A sibling is delivered by the anchor's handoff — the same
           // real-channel test decides whether its scope stamp moves.
           const siblingExpiry = proposalExpiry(sibling) || ordinaryGroupExpiry;
-          const snapshot = await buildEstimateSendSnapshot({ ...sibling, expires_at: siblingExpiry }, now, { delivered: stampChannels.length > 0, deliveredAt: lastDeliveredAt });
-          if (!snapshot?.sendSnapshot || snapshot.sendSnapshot.pricingBundleError) {
+          const snapshot = stampChannels.length
+            ? await buildEstimateSendSnapshot({ ...sibling, expires_at: siblingExpiry }, now, { deliveredAt: lastDeliveredAt })
+            : (parseEstimateData(sibling.estimate_data) || {});
+          if (stampChannels.length && (!snapshot?.sendSnapshot || snapshot.sendSnapshot.pricingBundleError)) {
             throw new Error(`sibling send snapshot did not freeze pricing${snapshot?.sendSnapshot?.pricingBundleError ? `: ${snapshot.sendSnapshot.pricingBundleError}` : ''}`);
           }
           const siblingDeliveryStatePatch = stampChannels.length > 0
             ? publishedSiblingDeliveryPatch(sibling, deliveryStatePatch.deliveryState, lastDeliveredAt)
             : {};
-          siblingSnapshotPatch = { ...siblingSnapshotPatch, sendSnapshot: snapshot.sendSnapshot, ...siblingDeliveryStatePatch };
+          siblingSnapshotPatch = { ...siblingSnapshotPatch,
+            ...(stampChannels.length ? { sendSnapshot: snapshot.sendSnapshot } : {}), ...siblingDeliveryStatePatch };
           const updated = await publishClaimedGroupSibling(estimate, sibling, siblingExpiry, siblingSnapshotPatch);
           if (!updated) {
             // Zero rows is EITHER a mid-publication acceptance (price-locked,
