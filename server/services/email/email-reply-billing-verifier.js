@@ -87,6 +87,7 @@ function hasActiveSeparateBilling(tokens, at) {
 function hasNominalBillingPredicate(tokens, at) {
   if (!isVisit(tokens[at])) return false;
   let next = at + 1;
+  if (isKind(tokens[next], 'modal')) next += 1;
   const action = tokens[next]?.text;
   if (!isWord(tokens[next], 'has', 'incur', 'generate')) return false;
   next += 1;

@@ -60,6 +60,24 @@ describe('email reply amountless billing policy', () => {
   ])('rejects unit-first separate billing: %s', rejected);
 
   test.each([
+    'Each visit will incur a fee.',
+    'Each visit may generate its own invoice.',
+    'Each visit can have a separate charge.',
+    'Our visits should incur an individual fee.',
+    'Our visits might generate their own invoice.',
+    'Every visit must have an individual invoice.',
+  ])('rejects nominal billing predicates after a modal: %s', rejected);
+
+  test.each([
+    'Each visit will have a separate reminder.',
+    'Each visit may generate its own report.',
+    'Every visit should incur a review step.',
+    'Each visit can be scheduled separately.',
+  ])('preserves ordinary modal scheduling predicates: %s', (text) => {
+    expect(verdict(text)).toEqual({ ok: true, violations: [] });
+  });
+
+  test.each([
     'Billing is' + String.fromCharCode(92, 10) + 'per visit',
     'Billing is per&#32;visit', '`Billing` is per visit',
     '**Our *fees* are per visit**', 'Billing: per visit',
