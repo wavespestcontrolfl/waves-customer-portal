@@ -4204,9 +4204,24 @@ const ReviewService = {
           }
           const deliveryOutcome = result?.deliveryOutcome;
           if (["VISIT_SUMMARY_UNCERTAIN", "VISIT_SUMMARY_STATE_UNAVAILABLE"].includes(result?.code)) {
-            await db("review_requests").where({ id: request.id }).update({
+            // The authoritative summary handoff refused before ever reaching
+            // the provider -- a definite non-delivery, exactly like the
+            // "Definite non-delivery" branch below. A transient DB error here
+            // must not silently strand the row stamped followup_sent=true
+            // with nothing sent -- retry once through the same reconciliation
+            // path (codex P2, review-ask-legacy-serialization #4333). No
+            // separate sms_log reservation exists to release for this call
+            // site: this code returns BEFORE dispatch() ever runs (no
+            // provider call, no seam reservation -- reviewSendThroughSummaryHandoff
+            // only claims an sms_log-backed reservation when called with a
+            // requestId, which this follow-up send never passes), so the
+            // review_requests row's own followup_sent/followup_reserved_at
+            // fields are the only reservation state to release here, same as
+            // the sibling branch.
+            const released = await stampWithRetry(() => db("review_requests").where({ id: request.id }).update({
               followup_sent: false, followup_sent_at: null, followup_reserved_at: null,
-            });
+            }), `follow-up summary-block reservation release (requestId=${request.id})`);
+            if (!released) unrecordedReleases++;
             return;
           }
           if (deliveryOutcome !== "accepted" && deliveryOutcome !== "not_sent") {
