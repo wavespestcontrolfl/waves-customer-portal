@@ -24,7 +24,8 @@ describe('inactive shared billing relationships', () => {
       expect(edges(text, 'fee').some((edge) => edge.connector.negated)).toBe(true);
     },
   );
-  test.each(['Per visit, the fee is due.', 'For each visit, a fee applies.',
+  test.each(['For each visit there is a fee.', 'For each visit, there is a fee.',
+    'Per visit, the fee is due.', 'For each visit, a fee applies.',
     'Each visit, our fee is payable.', "Each visit's fee applies.", "All visits' fee applies."])(
     'links fronted and possessive nouns: %s', (text) => {
       expect(edges(text, 'fee').some((edge) => edge.relation === 'unit_frame')).toBe(true);
@@ -53,6 +54,13 @@ describe('inactive shared billing relationships', () => {
     expect(edge.via).toBe(application.unit);
     expect(edge.frame).toBe(application.candidates.find((entry) => entry.frameType === 'predicate').frame);
     expect(edge.end).toBe(visit.unit.end);
+  });
+  test.each(['and', 'or'])('coordinates a prefixed singular visit with %s', (join) => {
+    const [application, visit] = clause(`The fee is not per application ${join} for a visit.`).billingRelations;
+    const edge = visit.candidates.find((entry) => entry.frameType === 'nominal');
+    expect(edge.via).toBe(application.unit);
+    expect(edge.frame).toBe(application.candidates[0].frame);
+    expect(edge.connector.negated).toBe(true);
   });
   test.each([['', false], ['not', true], ['never', true], ['not more than', false], ['no more than', false]])(
     'retains amount bridge polarity for %s', (prefix, negated) => {
@@ -91,7 +99,8 @@ describe('inactive shared billing relationships', () => {
       expect(edges(text, 'fee')).toHaveLength(0);
     },
   );
-  test.each(['For each visit, we send a fee.', 'For each visit, unknown fee applies.',
+  test.each(['For each visit the fee is due.', 'For each visit there a fee.',
+    'For each visit, we send a fee.', 'For each visit, unknown fee applies.',
     'For each visit: the fee is due.'])(
     'does not skip unknown fronted syntax: %s', (text) => {
       expect(edges(text, 'fee')).toHaveLength(0);

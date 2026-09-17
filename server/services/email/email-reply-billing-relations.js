@@ -38,11 +38,14 @@ function leading(clause, from, to, frameType) {
     return { position: 'possessive', negated: false };
   }
   let at = from;
-  if (tokens[at]?.kind !== 'sep' || tokens[at].text !== ',') return null;
-  at += 1;
-  const participant = phrases.find((phrase) => phrase.type === 'participant' && phrase.start === at);
-  if (participant && frameType === 'predicate') at = participant.end;
+  const comma = tokens[at].text === ',';
+  if (comma) at += 1;
   if (tokens[at]?.text === 'there' && tokens[at + 1]?.kind === 'be') at += 2;
+  else {
+    if (!comma) return null;
+    const participant = phrases.find((phrase) => phrase.type === 'participant' && phrase.start === at);
+    if (participant && frameType === 'predicate') at = participant.end;
+  }
   if (frameType === 'nominal') {
     if (isWord(tokens[at], DETERMINERS)) at += 1;
     if (['separate', 'individual'].includes(tokens[at]?.text)) at += 1;
@@ -97,7 +100,7 @@ function recognizeClause(clause) {
   for (let index = 1; index < billingRelations.length; index += 1) {
     const prior = billingRelations[index - 1];
     const current = billingRelations[index];
-    const explicit = ['unit', 'period'].includes(current.unit.kind)
+    const explicit = ['unit', 'period', 'forVisit'].includes(current.unit.kind)
       || (current.unit.kind === 'application' && /^(?:-?per\b|for\b|\/)/.test(current.unit.text));
     if (!explicit) continue;
     const gap = tokens.slice(prior.unit.end, current.unit.start);

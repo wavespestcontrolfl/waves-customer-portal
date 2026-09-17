@@ -31,10 +31,10 @@ function nominalAt(clause, start) {
   // Only word modifiers between known nominal heads can extend a nominal span.
   for (let at = first.end; at < Math.min(tokens.length, first.end + 6); at += 1) {
     if (tokens[at].kind !== 'word') break;
+    if (phrases.some((phrase) => phrase.start === at
+      && ['predicate', 'participant'].includes(phrase.type))) break;
     const next = heads.find((candidate) => candidate.start === at);
     if (next) head = next;
-    else if (phrases.some((phrase) => phrase.start === at
-      && ['predicate', 'participant'].includes(phrase.type))) break;
     if (['and', 'or', 'but', 'not', 'never'].includes(tokens[at].text)) break;
   }
   const frequency = head.head === 'bill' && tokens[head.end]?.text === 'frequency'

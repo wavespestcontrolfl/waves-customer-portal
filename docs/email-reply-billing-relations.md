@@ -19,12 +19,14 @@ and `via`. Token spans remain clause-local and end-exclusive.
   A modal connector requires a copula (`will be`, not bare `will`).
 - `unit_frame` retains immediate, comma-fronted, and possessive relationships.
   Fronted subjects use recognized participants; nominal determiners and the
-  finite existential `there is` form are supported. Unknown words stop a link.
+  finite existential `there is` form are supported, with an optional comma
+  before the existential. Ordinary fronted subjects require the comma.
+  Unknown words stop a link.
 - `frame_object` retains a visit embedded in an original predicate object,
   including both `pay a visit` and `pay a visit fee`. Interpretation is deferred.
 - Immediately adjacent `and`/`or` plus an explicit unit can inherit a trailing
   link. `via` references the preceding unit; the frame identity is unchanged.
-  Chained links retain connector negation. A bare later visit/application
+  Chained links retain connector negation, including `for a visit` units. A bare later visit/application
   subject does not qualify as an explicit coordinated unit.
 
 The connector stores `{start, end, negated}`; predicate negation also remains

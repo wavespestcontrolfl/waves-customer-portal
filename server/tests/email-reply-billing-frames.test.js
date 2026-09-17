@@ -136,6 +136,10 @@ describe('inactive shared billing frames', () => {
     expect(clause('Payment and fee.').nominalFrames[0].head.head).toBe('payment');
     expect(clause('Payment applies fee.').nominalFrames[0].head.head).toBe('payment');
     expect(clause('Payment you charge.').nominalFrames[0].head.head).toBe('payment');
+    const result = clause('The fee costs $98 per visit.');
+    expect(result.nominalFrames[0].head.head).toBe('fee');
+    expect(result.tokens[result.nominalFrames[0].end].text).toBe('cost');
+    expect(result.predicateFrames.find((frame) => frame.predicate.head === 'cost').object.amount.text).toBe('$98');
   });
 
   test('calls upstream once and preserves all evidence references', () => {
