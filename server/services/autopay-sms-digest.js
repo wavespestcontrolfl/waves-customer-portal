@@ -248,6 +248,10 @@ async function runAutopaySmsDigest(opts = {}) {
   }
 
   const composed = composeAutopaySmsDigest(rows);
+  // No fall-off here on purpose (codex P1 r2 on #4397): an empty incremental
+  // send window means no autopay text went out since the watermark — it is
+  // not evidence that a reported billing-lane mismatch was corrected. The
+  // FIX stays until the owner clears it.
   if (!composed) return { skipped: 'nothing_found' };
 
   if (digestDisabled()) {
