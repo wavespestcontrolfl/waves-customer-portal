@@ -1042,11 +1042,14 @@ transitioning or notifying. A previously issued ask token cannot query a withhel
 annual offer, including after membership reconciliation. Tier, preference and service-mix
 changes, card setup and PDF rendering also recheck after reconciliation, including
 the final document JSON payload. Staff
-decline checks the locked offer before making it terminal; already-declined
-views and reason edits retain their existing guards. Follow-up reminders stop
+decline checks the locked offer before making it terminal; terminal customer-visible
+option changes cannot bypass the delivery witness. Unchanged terminal views,
+same-value options and reason edits retain their existing guards. Follow-up reminders stop
 before claiming or sending a withheld annual link. Automatic renewals check the
 locked full offer before extending it and again before notification. Delivery
 claims recheck the locked offer even when no edit-version pin was supplied.
+Grouped sends recheck claimed annual siblings before handoff and release all
+owned claims when a pre-handoff refusal sends nothing.
 Grouped pricing authority
 checks exclude annual siblings that the customer link withholds.
 Browser-authored delivery receipts are stripped; staff revisions preserve the

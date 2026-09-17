@@ -1269,6 +1269,242 @@ describe('fixed bid deadline at the provider handoff (GH codex P2 r4 on #4309)',
   });
 });
 
+describe('grouped annual delivery gate races', () => {
+  let priorAnnual;
+  let priorCancel;
+  let sibling;
+  beforeEach(() => {
+    priorAnnual = process.env.GATE_TERMITE_ANNUAL_PLAN;
+    priorCancel = process.env.GATE_CANCEL_FLOW_V2;
+    process.env.GATE_TERMITE_ANNUAL_PLAN = process.env.GATE_CANCEL_FLOW_V2 = 'true';
+    row.status = 'draft';
+    row.estimate_group_id = 'synthetic-group';
+    row.estimate_data = { result: { results: { tmBait: { plan: 'quarterly' } } } };
+    sibling = savedEstimate({ id: 'annual-sibling', status: 'scheduled', estimate_group_id: row.estimate_group_id,
+      scheduled_at: new Date(Date.now() + 86400000),
+      estimate_data: { result: { results: { tmBait: { plan: 'annual_protection', annualFee: 299 } } } } });
+    groupRows.push(sibling, savedEstimate({ id: 'other-sibling', status: 'draft', estimate_group_id: row.estimate_group_id }));
+    db.mockImplementation((table) => {
+      const builder = estimateDatabase(table);
+      const originalWhere = builder.where;
+      builder.where = jest.fn((key, value) => {
+        // Nested OR visibility predicates are covered by separate scope
+        // tests; compare cloned updated_at dates by their persisted value.
+        if (typeof key === 'function') return builder;
+        if (key?.updated_at != null) {
+          const { updated_at: _ignored, ...fields } = key;
+          return originalWhere(fields);
+        }
+        return originalWhere(key, value);
+      });
+      builder.orWhere = jest.fn(() => builder);
+      builder.orWhereIn = jest.fn(() => builder);
+      builder.then = (resolve, reject) => builder.select().then(resolve, reject);
+      return builder;
+    });
+  });
+  afterEach(() => {
+    if (priorAnnual === undefined) delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    else process.env.GATE_TERMITE_ANNUAL_PLAN = priorAnnual;
+    if (priorCancel === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
+    else process.env.GATE_CANCEL_FLOW_V2 = priorCancel;
+  });
+
+  test.each(['anchor', 'sibling'].flatMap((annualLocation) => ['GATE_TERMITE_ANNUAL_PLAN', 'GATE_CANCEL_FLOW_V2']
+    .flatMap((gate) => ['after group claim', 'during preparation'].map((phase) => [annualLocation, gate, phase]))))(
+    'annual %s releases every claim when %s closes %s', async (annualLocation, gate, phase) => {
+      if (annualLocation === 'anchor') {
+        row.estimate_data = structuredClone(sibling.estimate_data);
+        sibling.estimate_data = { result: { results: { tmBait: { plan: 'quarterly' } } } };
+      }
+      const priorDue = sibling.scheduled_at.toISOString();
+      if (phase === 'after group claim') {
+        db.transaction.mockImplementationOnce(async (callback) => {
+          const result = await callback(db);
+          expect([row, ...groupRows].every((estimate) => estimate.status === 'sending')).toBe(true);
+          process.env[gate] = 'false';
+          return result;
+        });
+      } else {
+        shortenOrPassthrough.mockImplementationOnce(async (url) => {
+          process.env[gate] = 'false';
+          return url;
+        });
+      }
+      const response = await invoke('/:id/send', 'post', { sendMethod: 'both' });
+      expect(response.body.error).toMatch(/annual protection|not sent on any/);
+      expect(response.statusCode).toBe(422);
+      expect(row.status).toBe('draft');
+      expect(sibling.status).toBe('scheduled');
+      expect(sibling.scheduled_at.toISOString()).toBe(priorDue);
+      expect(groupRows[1].status).toBe('draft');
+      for (const estimate of [row, ...groupRows]) {
+        expect(dataOf(estimate).deliveryState?.annualPlanOfferFingerprint).toBeUndefined();
+        expect(dataOf(estimate).estimatorEngine?.delivering_at).toBeUndefined();
+      }
+      expect(email.sendTemplate).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(mutations.filter(({ patch }) => patch.status === 'scheduled')).toHaveLength(1);
+    },
+  );
+
+  test('a direct grouped sender restores its owned anchor and siblings on the final annual rejection', async () => {
+    db.transaction.mockImplementationOnce(async (callback) => {
+      const result = await callback(db);
+      process.env.GATE_TERMITE_ANNUAL_PLAN = 'false';
+      return result;
+    });
+    await expect(router.sendEstimateNow(structuredClone(row), 'email'))
+      .rejects.toMatchObject({ code: 'TERMITE_ANNUAL_PLAN_DISABLED' });
+    expect(row.status).toBe('draft');
+    expect(sibling.status).toBe('scheduled');
+    expect(groupRows[1].status).toBe('draft');
+    expect(email.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('an uncertain immediate attempt cancels the anchor schedule instead of restoring it early', async () => {
+    row.status = 'scheduled';
+    row.scheduled_at = new Date(Date.now() + 86400000);
+    sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('Synthetic outcome unknown'), {
+      providerOutcome: { sent: false, terminal: false },
+    }));
+    const response = await invoke('/:id/send', 'post', { sendMethod: 'sms', idempotencyKey: 'synthetic-group-uncertain' });
+    expect(response.statusCode).toBe(422);
+    expect(response.body.channels.sms.uncertain).toBe(true);
+    expect(row.status).toBe('send_failed');
+    expect(row.scheduled_at).toBeNull();
+    expect(sibling.status).toBe('scheduled');
+    expect(mutations.filter(({ patch }) => patch.status === 'scheduled')).toHaveLength(1);
+  });
+
+  test.each(['sms', 'email'].flatMap((method) => ['GATE_TERMITE_ANNUAL_PLAN', 'GATE_CANCEL_FLOW_V2'].map((gate) => [method, gate])))(
+    '%s refuses %s closed during transport preparation at its actual provider hook', async (method, gate) => {
+      const provider = jest.fn();
+      if (method === 'sms') {
+        sendCustomerMessage.mockImplementationOnce(async ({ preProviderCheck }) => {
+          process.env[gate] = 'false';
+          await preProviderCheck();
+          provider();
+          return { sent: true, providerMessageId: 'SM-synthetic-must-not-send' };
+        });
+      } else {
+        email.sendTemplate.mockImplementationOnce(async ({ onQueued, withProviderHandoff }) => {
+          await onQueued?.();
+          process.env[gate] = 'false';
+          try {
+            await withProviderHandoff(async () => { provider(); });
+          } catch {
+            // The real library records a pre-provider abort when the
+            // caller's handoff guard throws before dispatch.
+            return { sent: false, aborted: true };
+          }
+          return { sent: true };
+        });
+      }
+      const response = await invoke('/:id/send', 'post', { sendMethod: method });
+      expect(response.statusCode).toBe(422);
+      expect(response.body.channels[method]).toMatchObject({ ok: false, uncertain: false });
+      expect(provider).not.toHaveBeenCalled();
+      expect(row.status).toBe('draft');
+      expect(sibling.status).toBe('scheduled');
+      expect(groupRows[1].status).toBe('draft');
+      expect(dataOf(sibling).deliveryState?.annualPlanOfferFingerprint).toBeUndefined();
+      expect(mutations.filter(({ patch }) => patch.status === 'scheduled')).toHaveLength(1);
+    },
+  );
+
+  test('SMTP rechecks the claimed annual sibling after transport preparation', async () => {
+    const smtpPassword = process.env.GOOGLE_SMTP_PASSWORD;
+    process.env.GOOGLE_SMTP_PASSWORD = 'synthetic-password';
+    sendgrid.isConfigured.mockReturnValue(false);
+    require('../services/email-fallback-gate').smtpFallbackAllowed.mockReturnValueOnce(true);
+    const provider = jest.fn();
+    require('nodemailer').createTransport.mockImplementationOnce(() => {
+      process.env.GATE_TERMITE_ANNUAL_PLAN = 'false';
+      return { sendMail: provider };
+    });
+    try {
+      const response = await invoke('/:id/send', 'post', { sendMethod: 'email' });
+      expect(response.statusCode).toBe(422);
+      expect(response.body.channels.email).toMatchObject({ ok: false, uncertain: false });
+      expect(provider).not.toHaveBeenCalled();
+      expect(row.status).toBe('draft');
+      expect(sibling.status).toBe('scheduled');
+      expect(dataOf(sibling).deliveryState?.annualPlanOfferFingerprint).toBeUndefined();
+    } finally {
+      if (smtpPassword === undefined) delete process.env.GOOGLE_SMTP_PASSWORD;
+      else process.env.GOOGLE_SMTP_PASSWORD = smtpPassword;
+    }
+  });
+
+  test('the provider hook honors a gate closed during its final fixed-sibling read', async () => {
+    const groupDatabase = db.getMockImplementation();
+    const provider = jest.fn();
+    let atProvider = false;
+    let closed = false;
+    db.mockImplementation((table) => {
+      const builder = groupDatabase(table);
+      const select = builder.select;
+      builder.select = jest.fn(async (...fields) => {
+        const rows = await select(...fields);
+        if (atProvider && fields[0] === 'estimate_data') {
+          process.env.GATE_CANCEL_FLOW_V2 = 'false';
+          closed = true;
+        }
+        return rows;
+      });
+      return builder;
+    });
+    sendCustomerMessage.mockImplementationOnce(async ({ preProviderCheck }) => {
+      atProvider = true;
+      await preProviderCheck();
+      provider();
+      return { sent: true, providerMessageId: 'SM-synthetic-must-not-send' };
+    });
+    const response = await invoke('/:id/send', 'post', { sendMethod: 'sms' });
+    expect(closed).toBe(true);
+    expect(response.statusCode).toBe(422);
+    expect(response.body.channels.sms).toMatchObject({ ok: false, uncertain: false });
+    expect(provider).not.toHaveBeenCalled();
+    expect(row.status).toBe('draft');
+    expect(sibling.status).toBe('scheduled');
+    expect(dataOf(sibling).deliveryState?.annualPlanOfferFingerprint).toBeUndefined();
+  });
+
+  test('an issued annual sibling remains authorized when gates close after group claims', async () => {
+    const { annualPlanOfferFingerprint, annualPlanHasDeliveredOffer } = require('../services/estimate-offer-version');
+    dataOf(sibling).deliveryState = { firstDeliveredAt: '2026-01-01T12:00:00Z',
+      annualPlanOfferFingerprint: annualPlanOfferFingerprint(sibling) };
+    db.transaction.mockImplementationOnce(async (callback) => {
+      const result = await callback(db);
+      process.env.GATE_TERMITE_ANNUAL_PLAN = process.env.GATE_CANCEL_FLOW_V2 = 'false';
+      return result;
+    });
+    const response = await invoke('/:id/send', 'post', { sendMethod: 'email' });
+    expect(response.statusCode).toBe(200);
+    expect(response.body.sent).toBe(true);
+    expect(sibling.status).toBe('sent');
+    expect(annualPlanHasDeliveredOffer(sibling)).toBe(true);
+    expect(email.sendTemplate).toHaveBeenCalledTimes(1);
+  });
+
+  test('a real first-channel delivery retains the annual sibling witness when the gates close before email', async () => {
+    const { annualPlanHasDeliveredOffer } = require('../services/estimate-offer-version');
+    sendCustomerMessage.mockImplementationOnce(async () => {
+      process.env.GATE_TERMITE_ANNUAL_PLAN = process.env.GATE_CANCEL_FLOW_V2 = 'false';
+      return { sent: true, providerMessageId: 'SM-synthetic-before-gate-close' };
+    });
+    const response = await invoke('/:id/send', 'post', { sendMethod: 'both' });
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toMatchObject({ sent: true, partialFailure: true,
+      channels: { sms: { ok: true, real: true }, email: { ok: false, uncertain: false } } });
+    expect(sibling.status).toBe('sent');
+    expect(annualPlanHasDeliveredOffer(sibling)).toBe(true);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(email.sendTemplate).not.toHaveBeenCalled();
+  });
+});
+
 describe('grouped send claim uses the locked anchor offer', () => {
   beforeEach(() => {
     row.estimate_group_id = 'synthetic-group';

@@ -148,7 +148,15 @@ const EstimateAutoRenew = {
           // Shortening and email preparation acquire customer/comms locks on
           // pooled connections. Keep those outside the estimate row lock.
           // Only the actual provider handoff pins the full current offer.
-          const withProviderHandoff = (dispatch) => withAutoRenewProviderHandoff(est.id, dispatch);
+          let handoffError;
+          const withProviderHandoff = async (dispatch) => {
+            try {
+              return await withAutoRenewProviderHandoff(est.id, dispatch);
+            } catch (err) {
+              handoffError = err;
+              throw err;
+            }
+          };
 
           const firstName = (current.customer_name || '').split(' ')[0] || 'there';
           const longUrl = `https://portal.wavespestcontrol.com/estimate/${current.token}`;
@@ -208,7 +216,11 @@ const EstimateAutoRenew = {
                       categories: ['estimate_auto_renew'],
                       withProviderHandoff,
                     });
-                    if (result.blocked) {
+                    // The library records a pre-provider guard exception as
+                    // an abort. Preserve failures for the existing email-error
+                    // handler; an explicit withheld offer remains a no-send.
+                    if (result.aborted && handoffError) throw handoffError;
+                    if (result.blocked || result.aborted) {
                       logger.warn(`[est-auto-renew] Email suppressed for estimate ${current.id}: ${result.reason || 'suppressed'}`);
                     }
                     sentWithTemplateLibrary = true;

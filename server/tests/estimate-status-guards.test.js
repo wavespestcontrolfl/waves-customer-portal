@@ -374,6 +374,39 @@ describe('PATCH /api/admin/estimates/:id annual decline replay guard', () => {
     expect(writeBuilder.update).not.toHaveBeenCalled();
   });
 
+  test.each([
+    ['declined', 'showOneTimeOption'], ['declined', 'billByInvoice'],
+    ['accepted', 'showOneTimeOption'], ['accepted', 'billByInvoice'],
+  ])('a %s annual offer cannot change %s through the terminal exemption', async (status, field) => {
+    const row = { ...deliveredRow(), status };
+    const { lockedBuilder, writeBuilder } = mockRows(row, row);
+    const res = makeRes();
+    await patchHandler({ params: { id: 'e1' }, body: { [field]: true } }, res, jest.fn());
+    expect(lockedBuilder.forUpdate).toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(writeBuilder.update).not.toHaveBeenCalled();
+  });
+
+  test('a same-value option on a declined annual offer preserves terminal access', async () => {
+    const row = { ...annualRow(), status: 'declined' };
+    const { writeBuilder } = mockRows(row, row);
+    const res = makeRes();
+    await patchHandler({ params: { id: 'e1' }, body: { showOneTimeOption: false } }, res, jest.fn());
+    expect(writeBuilder.update).toHaveBeenCalledWith(expect.objectContaining({ show_one_time_option: false }));
+    expect(res.json).toHaveBeenCalledWith({ success: true });
+  });
+
+  test('a quarterly declined offer retains ordinary delivery-option edits', async () => {
+    const row = { ...annualRow(), status: 'declined', estimate_data: { result: { lineItems: [
+      { service: 'termite_bait', plan: 'quarterly' },
+    ] } } };
+    const { writeBuilder } = mockRows(row, row);
+    const res = makeRes();
+    await patchHandler({ params: { id: 'e1' }, body: { billByInvoice: true } }, res, jest.fn());
+    expect(writeBuilder.update).toHaveBeenCalledWith(expect.objectContaining({ bill_by_invoice: true }));
+    expect(res.json).toHaveBeenCalledWith({ success: true });
+  });
+
   test('an already-declined annual row can still edit its reason without re-stamping', async () => {
     const row = { ...annualRow(), status: 'declined' };
     const readBuilder = makeBuilder({ first: row });

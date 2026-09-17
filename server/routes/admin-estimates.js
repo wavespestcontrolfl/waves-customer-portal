@@ -866,7 +866,7 @@ async function buildEstimateSendPreview(estimate) {
   };
 }
 
-async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idempotencyKey, attachments = [], proposalMode = false, versionId = null, expectedContentHash = null, reviewedProvider = null, onDispatch = null }) {
+async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idempotencyKey, attachments = [], proposalMode = false, versionId = null, expectedContentHash = null, reviewedProvider = null, onDispatch = null, withProviderHandoff = null }) {
   const provider = sendgrid.isConfigured() ? 'sendgrid' : 'smtp';
   if (reviewedProvider && reviewedProvider !== provider) return { ok: false, error: 'The reviewed email provider changed. Review the message again before sending.' };
   if (reviewedProvider === 'smtp') {
@@ -888,6 +888,7 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
         categories: ['estimate_delivery'],
         attachments: Array.isArray(attachments) ? attachments : [],
         onQueued: onDispatch,
+        withProviderHandoff,
       });
       if (result.blocked) {
         return { ok: false, blocked: true, error: result.reason || 'Email suppressed', template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' };
@@ -932,15 +933,21 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
     content: Buffer.from(a.content, 'base64'),
     contentType: a.type || 'application/pdf',
   }));
-  onDispatch?.();
-  await transporter.sendMail({
-    from: '"Waves Pest Control, LLC" <contact@wavespestcontrol.com>',
-    to: estimate.customer_email,
-    subject: 'Your Waves Pest Control Estimate is Ready',
-    html,
-    text,
-    ...(smtpAttachments.length ? { attachments: smtpAttachments } : {}),
-  });
+  const dispatch = async () => {
+    onDispatch?.();
+    await transporter.sendMail({
+      from: '"Waves Pest Control, LLC" <contact@wavespestcontrol.com>',
+      to: estimate.customer_email,
+      subject: 'Your Waves Pest Control Estimate is Ready',
+      html,
+      text,
+      ...(smtpAttachments.length ? { attachments: smtpAttachments } : {}),
+    });
+  };
+  if (withProviderHandoff) {
+    const verdict = await withProviderHandoff(dispatch);
+    if (verdict?.ok !== true) return { ok: false, error: 'Estimate delivery was blocked before the provider handoff' };
+  } else await dispatch();
   return { ok: true, provider: 'smtp_fallback' };
 }
 
@@ -2128,6 +2135,14 @@ async function clearEstimateDeliveryClaim(estimateId, deliveryClaimToken) {
   }
 }
 
+function assertAnnualPlanDeliveryAllowed(estimate) {
+  if (annualPlanPublicReplayBlocked(estimate)) {
+    throw Object.assign(new Error('The saved annual protection offer changed or has not been delivered while the annual plan is disabled. Nothing was sent.'), {
+      statusCode: 422, code: 'TERMITE_ANNUAL_PLAN_DISABLED',
+    });
+  }
+}
+
 // Last-instant re-check before each provider handoff (codex P0 r23, P1 GH
 // r5): the verdict lock released moments ago, and BOTH an estimate marker
 // AND a call-side correction can commit in between — a retry can stamp a
@@ -2139,15 +2154,30 @@ async function clearEstimateDeliveryClaim(estimateId, deliveryClaimToken) {
 // on the markers, so a message that still slips out carries a link that
 // serves nothing. DB failure fails CLOSED (the leg is retryable);
 // unparseable estimate_data proceeds, matching the verdict read.
-async function estimateInvalidatedJustBeforeHandoff(estimateId, now = null) {
-  const row = await db('estimates').where({ id: estimateId }).first('id', 'estimate_group_id', 'archived_at', 'estimate_data');
+async function estimateInvalidatedJustBeforeHandoff(estimateId, now = null, claimedSiblings = []) {
+  const deliveryRows = await db.transaction(async (trx) => {
+    if (claimedSiblings.length) await trx.raw(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['estimate-group-send', String(claimedSiblings[0].estimate_group_id)],
+    );
+    const anchor = await trx('estimates').where({ id: estimateId }).forUpdate().first();
+    if (!anchor) return null;
+    const rows = [anchor];
+    for (const sibling of claimedSiblings) {
+      const current = await trx('estimates').where({ id: sibling.id }).forUpdate().first();
+      if (!current || current.archived_at) return null;
+      rows.push(current);
+    }
+    return rows;
+  });
+  const row = deliveryRows?.[0];
   if (!row) return true;
   if (row.archived_at) return true;
   let data;
   try {
     data = typeof row.estimate_data === 'string'
       ? JSON.parse(row.estimate_data) : (row.estimate_data || {});
-  } catch { return false; }
+  } catch { data = null; }
   const eng = data?.estimatorEngine;
   if (eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) return true;
   // A bedroom re-price in flight (estimate-clarify-asks): the draft's
@@ -2173,6 +2203,9 @@ async function estimateInvalidatedJustBeforeHandoff(estimateId, now = null) {
     }
     assertBidSendDate(row, at);
   }
+  // The linkage/fixed-hold reads above yield after the row locks release.
+  // Read the switches synchronously after every await at the SDK boundary.
+  for (const current of deliveryRows) assertAnnualPlanDeliveryAllowed(current);
   return false;
 }
 
@@ -2213,7 +2246,7 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   // its return value) so a throw after the park — the invalidation verdict,
   // a provider error — still reaches the compensation below (pre-push codex
   // P1).
-  const leadShapeRef = { parkedKey: null, delivered: false };
+  const leadShapeRef = { parkedKey: null, delivered: false, groupClaims: [] };
   let result;
   let thrown = null;
   try {
@@ -2222,6 +2255,9 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
     thrown = err;
   } finally {
     await clearEstimateDeliveryClaim(estimate?.id, deliveryClaimToken);
+    // Normal results already release/publish siblings in the inner send.
+    // Only a throw before any real handoff needs this fallback release.
+    if (thrown && !leadShapeRef.delivered) await releaseGroupSiblingClaims(leadShapeRef.groupClaims);
   }
   // When NO channel delivered, the customer never saw the single-service
   // shape, so the park is compensated — the line is restored through the
@@ -2456,6 +2492,10 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     });
     claimedGroupSiblings = groupClaim.claimed;
     estimate = groupClaim.anchor;
+    // Route callers release their anchor with uncertainty/schedule handling;
+    // direct callers also need their newly owned anchor restored on abort.
+    options.leadShapeRef.groupClaims = groupClaim.anchorClaimedInLock && !options.claimState
+      ? [...claimedGroupSiblings, groupClaim.anchor] : claimedGroupSiblings;
     // Signal claim ownership to the caller AFTER the claim transaction
     // committed. Ownership = this send claimed in-lock, or its CALLER
     // pre-claimed (scheduled cron / lead auto-send) — a bare 'sending'
@@ -2481,6 +2521,10 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     // can slip in between this lock releasing and the provider handoff —
     // the lock itself is never held across provider calls.
     const invalidatedNow = await db.transaction(async (trx) => {
+      if (estimate.estimate_group_id) await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['estimate-group-send', String(estimate.estimate_group_id)],
+      );
       const verdictRow = await trx('estimates')
         .where({ id: estimate.id })
         .forUpdate()
@@ -2493,10 +2537,13 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       // Legacy sends have no reviewed-offer pin. A revision committed before
       // the standalone status claim must not borrow the pre-read annual
       // delivery witness; judge the full locked row before stamping a claim.
-      if (annualPlanPublicReplayBlocked(verdictRow)) {
-        throw Object.assign(new Error('The saved annual protection offer changed or has not been delivered while the annual plan is disabled. Nothing was sent.'), {
-          statusCode: 422, code: 'TERMITE_ANNUAL_PLAN_DISABLED',
-        });
+      const deliveryRows = [verdictRow];
+      // Publication witnesses every claimed property, including annual
+      // siblings of a quarterly anchor. Gates can close after group claims.
+      for (const sibling of claimedGroupSiblings) {
+        const current = await trx('estimates').where({ id: sibling.id }).forUpdate().first();
+        if (!current || current.archived_at) return 'invalidated_before_delivery';
+        deliveryRows.push(current);
       }
       let data;
       try {
@@ -2520,6 +2567,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       // the very reconcile meant to stop this send.
       const staleLinkage = await staleCallLinkageReason(trx, data);
       if (staleLinkage) return staleLinkage;
+      for (const current of deliveryRows) assertAnnualPlanDeliveryAllowed(current);
       // Unparseable estimate_data: verdict passes (matches the prior
       // read-only behavior) but no claim is stamped — a blind rewrite
       // would clobber whatever is in the column.
@@ -2573,6 +2621,15 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   if (leadShape.parkedKey) await stampLeadHandoffAttempt(estimate, options);
 
   const now = typeof options.now === 'function' ? options.now : () => new Date();
+  const preProviderCheck = async () => ({
+    ok: !(await estimateInvalidatedJustBeforeHandoff(estimate.id, now, claimedGroupSiblings)),
+  });
+  const withProviderHandoff = async (dispatch) => {
+    const verdict = await preProviderCheck();
+    if (!verdict.ok) return verdict;
+    await dispatch();
+    return { ok: true };
+  };
   assertBidSendDate(estimate, now());
   // This row's OWN offer deadline, never widened by a sibling (owner ruling
   // 2026-09-11 on #4309 round 7). Group entry access is a separate concept
@@ -2670,7 +2727,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             ? options.reviewedMessages.sms?.split(stripSmsUrlScheme(longUrl)).join(stripSmsUrlScheme(smsViewUrl))
             : currentSmsBody;
           if (!smsBody) throw new Error('The reviewed text message is unavailable; nothing was sent');
-          if (await estimateInvalidatedJustBeforeHandoff(estimate.id, now)) {
+          if (await estimateInvalidatedJustBeforeHandoff(estimate.id, now, claimedGroupSiblings)) {
             throw new Error('invalidated_before_delivery');
           }
           const result = await sendCustomerMessage({
@@ -2688,6 +2745,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
               capturedAt: estimate.created_at || new Date().toISOString(),
             },
             entryPoint: 'admin_estimate_send',
+            preProviderCheck,
             metadata: {
               original_message_type: 'estimate_sent',
             },
@@ -2770,7 +2828,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // SendGrid price summary / details match the attached PDF if totals
           // changed mid-send. The PDF was built from freshEstimate above.
           const freshPriceLine = estimateEmailPriceLine(freshEstimate);
-          if (await estimateInvalidatedJustBeforeHandoff(estimate.id, now)) {
+          if (await estimateInvalidatedJustBeforeHandoff(estimate.id, now, claimedGroupSiblings)) {
             throw new Error('invalidated_before_delivery');
           }
           if (options.reviewedMessages && !options.reviewedMessages.email) throw new Error('The reviewed email template was unavailable. Review a new message before sending.');
@@ -2786,10 +2844,11 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             expectedContentHash: options.reviewedMessages?.email?.contentHash || null,
             reviewedProvider: options.reviewedMessages?.email?.provider || null,
             onDispatch: () => { emailDispatchStarted = true; },
+            withProviderHandoff,
           });
           channels.email = result.ok
             ? { ok: true, provider: result.template || result.provider || 'email' }
-            : { ok: false, error: result.error || 'Email send failed' };
+            : { ok: false, uncertain: false, error: result.error || 'Email send failed' };
           if (result.ok) {
             if (options.leadShapeRef) options.leadShapeRef.delivered = true;
             await stampLeadHandoffWitness(estimate, options);
@@ -5222,6 +5281,16 @@ router.patch('/:id', async (req, res, next) => {
       if (!locked || locked.status !== estimate.status
         || (changesDeliveryOptions && estimateEditVersion(locked) !== estimateEditVersion(estimate))) return 0;
       if (changesDeliveryOptions) await assertNoRevisionDuringGroupSend(trx, locked);
+      // Terminal access preserves the offer the customer already received;
+      // it is not authority to publish different terms after gate closure.
+      // No-op options and staff-only reason/priority edits keep working.
+      const changesTerminalOffer = ['accepted', 'declined'].includes(locked.status)
+        && changesDeliveryOptions && estimateOfferVersion(locked) !== estimateOfferVersion({ ...locked, ...updates });
+      if (changesTerminalOffer && annualPlanPublicReplayBlocked({ ...locked, ...updates, status: 'sent' })) {
+        const err = new Error('This annual plan offer cannot change customer-visible terms while the annual plan is disabled.');
+        err.statusCode = 409;
+        throw err;
+      }
       if (updates.status === 'declined'
         && (annualPlanPublicReplayBlocked(locked)
           || annualPlanPublicReplayBlocked({ ...locked, ...updates, status: locked.status }))) {

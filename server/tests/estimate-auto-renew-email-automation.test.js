@@ -468,6 +468,35 @@ describe('estimate auto-renew email automation cutover', () => {
       expect(mockSendTemplate).toHaveBeenCalledTimes(1);
       expect(provider).not.toHaveBeenCalled();
       expect(mockEmailSend).not.toHaveBeenCalled();
+      expect(mockLogger.error).not.toHaveBeenCalled();
+      expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining('Email suppressed'));
+      expect(mockDb.__estimateQueries).toHaveLength(0);
+    });
+
+    test('a direct-template provider-guard infrastructure error is reported as an email failure', async () => {
+      mockIsEnabled.mockReturnValue(false);
+      const estimate = deliveredAnnualEstimate();
+      const update = query(1);
+      const guardRead = query(estimate);
+      guardRead.first.mockRejectedValueOnce(new Error('synthetic lock timeout'));
+      mockDb.__estimateQueries = [query([estimate]), query(estimate), query(estimate), update,
+        query(estimate), query({ ...estimate, renewal_count: 1 }), query(estimate), guardRead];
+      const provider = jest.fn();
+      mockSendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+        // The real library converts a pre-provider guard error to an abort.
+        try { await withProviderHandoff(provider); } catch {
+          return { sent: false, aborted: true, reason: 'aborted_by_caller_before_dispatch' };
+        }
+        throw new Error('expected guard rejection');
+      });
+
+      await expect(EstimateAutoRenew.checkAll()).resolves.toEqual({ renewed: 1 });
+
+      expect(update.update).toHaveBeenCalled();
+      expect(provider).not.toHaveBeenCalled();
+      expect(mockEmailSend).not.toHaveBeenCalled();
+      expect(mockLogger.error).toHaveBeenCalledWith('[est-auto-renew] Email failed: synthetic lock timeout');
+      expect(mockLogger.warn).not.toHaveBeenCalledWith(expect.stringContaining('Email suppressed'));
       expect(mockDb.__estimateQueries).toHaveLength(0);
     });
 
