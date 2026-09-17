@@ -1593,3 +1593,100 @@ test.each([
 ])('direct promised free objects bind the service with existing qualifier guards: %s', (text, status) => {
   expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
 });
+
+
+test.each([
+  ['We provide your next visit for free.', 'fail'],
+  ['We do your return treatment at no charge.', 'fail'],
+  ['I give you a complimentary follow-up appointment.', 'fail'],
+  ['We do not provide your next visit for free.', 'pass'],
+  ["We don't do your return treatment at no charge.", 'pass'],
+  ['Do we provide your next visit for free?', 'pass'],
+  ['We provide your next visit for free, am I right?', 'pass'],
+  ['We provide your next visit for free if the office approves.', 'pass'],
+  ['If the office approves, we do your return treatment at no charge.', 'pass'],
+  ['We provide your next visit report for free.', 'pass'],
+  ['We do not provide your next visit for free, but your return visit is complimentary.', 'fail'],
+])('simple present commitments retain existing claim scope: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['Not a single visit is free.', 'pass'],
+  ['Not one appointment is complimentary.', 'pass'],
+  ['Not a single return treatment is free.', 'pass'],
+  ['Not one application is complimentary.', 'pass'],
+  ['Not one appointment is complimentary, but your next visit is free.', 'fail'],
+  ['Not a single visit is free. Your next appointment is complimentary.', 'fail'],
+  ['One appointment is complimentary.', 'fail'],
+  ['A visit is free.', 'fail'],
+  ['Not just one appointment is complimentary.', 'fail'],
+])('explicit negative singular subjects do not promise a free service: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['It is unlikely that your next visit is free.', 'pass'],
+  ["It's improbable that your next treatment is complimentary.", 'pass'],
+  ['That is unlikely that your next visit is free.', 'pass'],
+  ['It is not unlikely that your next visit is free.', 'fail'],
+  ["It isn't improbable that your next treatment is complimentary.", 'fail'],
+  ['It is unlikely that the report is free, but your next visit is free.', 'fail'],
+  ['It is unlikely that your next visit is free. Your return treatment is complimentary.', 'fail'],
+  ['It is unlikely that your next visit is free, but your return appointment is free.', 'fail'],
+])('explicit improbability remains scoped to its proposition: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['Your next visit is free of fleas.', 'pass'],
+  ['Your next treatment is free from ticks.', 'pass'],
+  ['Your next appointment is free of wasps.', 'pass'],
+  ['Your next visit is free of flea infestations.', 'pass'],
+  ['Your next visit is free of fleas and ticks.', 'pass'],
+  ['Your next visit is free of fleas, but your return treatment is complimentary.', 'fail'],
+  ['Your next visit is free of ticks and is free of charge.', 'fail'],
+  ['Your next visit is free of wasps and treatment charges.', 'fail'],
+  ['Your next visit is free of charge.', 'fail'],
+])('pest-free states retain independent price assertions: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['Your next application is free.', 'fail'],
+  ['We will provide your next application at no charge.', 'fail'],
+  ['You will not pay for your next application.', 'fail'],
+  ['We provide your next application for free.', 'fail'],
+  ["We're performing your return application at no charge.", 'fail'],
+  ['I promise you a free application.', 'fail'],
+  ['We will give you a complimentary return application.', 'fail'],
+  ['The fee for your next application is waived.', 'fail'],
+  ['Your next application costs nothing.', 'fail'],
+  ['We will waive the fee for this application.', 'fail'],
+  ['We will cover your next application.', 'fail'],
+  ['Your next application is not free.', 'pass'],
+  ['Your next application is free if the office approves.', 'pass'],
+  ['Your next application report is free.', 'pass'],
+  ['We will provide your next application summary at no charge.', 'pass'],
+  ['You will not pay for your next application estimate.', 'pass'],
+  ['Your next application is free of fleas.', 'pass'],
+  ['The report on your next application is free.', 'pass'],
+  ['Your next application is a treatment that is free.', 'fail'],
+])('application uses the existing singular service target and artifact guards: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['The cancellation fee for your next visit is waived.', 'pass'],
+  ['The rescheduling charge for your next appointment is waived.', 'pass'],
+  ['The booking fee for your next application is waived.', 'pass'],
+  ['I confirm that the cancellation fee for your next visit is waived.', 'pass'],
+  ['The cancellation fee for your next visit is free.', 'pass'],
+  ['The cancellation fee for your next visit is waived, but your return treatment is free.', 'fail'],
+  ['The rescheduling charge for your next appointment is waived. Your next visit is complimentary.', 'fail'],
+  ['The fee for your next visit is waived.', 'fail'],
+  ['The full fee for your next visit is waived.', 'fail'],
+  ['The charge for your next application is waived.', 'fail'],
+])('passive ancillary fee waivers do not waive the service price: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
