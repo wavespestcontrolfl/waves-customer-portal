@@ -560,13 +560,19 @@ const gates = {
   // document. The rule lives in server/services/discount-stack.js
   // (stackDiscounts / stackVisitDiscounts / stackDocumentDiscounts) and
   // GET /api/admin/discounts/stacking reports this value for pickers to
-  // read. This slice ships the engine and the gate read only — no route or
-  // service imports discount-stack.js yet, so the flip is inert until a
-  // later slice wires a caller. Off (default, and everywhere until then):
-  // byte-identical to today. This map entry is for logGateStatus only — the
-  // canonical CALL-TIME reader is discountStackingLive() below (strict
-  // 'true'); every caller, the stacking endpoint included, must use that,
-  // not this cached-at-load value, so a flip needs no redeploy.
+  // read. discount-engine.js's /calculate preview and invoice.js's manual-
+  // discount save both already import discount-stack.js for its cent-exact
+  // percentage rounding (live regardless of this gate), but neither reads
+  // this gate to decide whether to COMPOUND — the preview always calls
+  // stackDiscounts with compound:false, and the save doesn't compound at
+  // all yet, so flipping this gate today changes nothing observable: off
+  // OR on, every existing total stays byte-identical (rounding-corrected)
+  // until slice 5 (invoice/document calculation) wires both the preview
+  // and invoice.js's line-item/manual-discount save to read the live gate
+  // TOGETHER. This map entry is for logGateStatus only — the canonical
+  // CALL-TIME reader is discountStackingLive() below (strict 'true');
+  // every caller, present and future, must use that, not this cached-at-
+  // load value, so a flip needs no redeploy.
   discountStacking: process.env.GATE_DISCOUNT_STACKING === 'true',
 
   // Collective series moves on every staff surface (owner rulings 2026-07-30

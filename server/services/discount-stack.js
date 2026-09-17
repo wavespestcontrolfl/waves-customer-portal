@@ -27,11 +27,26 @@
  *      remainder — the #4405 product rule, "a stored visit stamp rides
  *      the invoice stack frozen and ahead of the rest"; $100 with a line
  *      10% and a document 50%-capped-$10 is $80 either way, never $81 —
- *      slot outranks rate). stackVisitDiscounts and stackDocumentDiscounts
- *      implement this natively (their line/appointment and line/document-
- *      term splits ARE the two slots); stackDiscounts has no lines of its
- *      own, so a discount MAY carry `slot: 'document'` — everything else
- *      defaults to 'line'.
+ *      slot outranks rate). "Fixed dollar credits, any slot, first" means
+ *      exactly that: a line's own fixed credit and a document/appointment
+ *      fixed credit are ONE ordered pass, not "every line credit,
+ *      unconditionally, then the document credit" — that split (fixed
+ *      through round 6) still let a narrower line credit run before a
+ *      WIDER document credit that should have gone first per step 5 below
+ *      (Codex pre-push audit P1, round 7: $50/$100 lines, a line-0 $80
+ *      credit plus an $80 document/appointment credit netted $20 running
+ *      line-first, never the $46.67 the wider credit gives running
+ *      first — the total already enforced when both were document
+ *      terms). stackVisitDiscounts and stackDocumentDiscounts implement
+ *      the PERCENT/free_service half of this split natively (their line/
+ *      appointment and line/document-term structure IS the two slots);
+ *      for FIXED credits specifically, both merge every line's own fixed
+ *      term and every document/appointment fixed term into one list —
+ *      each line term tagged with a synthetic single-line scope purely so
+ *      step 5's scope comparator can rank it against a document term —
+ *      and run stackOrder over the WHOLE list before any of them apply.
+ *      stackDiscounts has no lines of its own, so a discount MAY carry
+ *      `slot: 'document'` — everything else defaults to 'line'.
  *   2. KIND — within a slot, fixed before percentage before free_service.
  *   3. VALUE — among terms of the same kind and slot, the larger `amount`
  *      first: for percentages this is RATE (Codex pre-push audit P2,
@@ -89,18 +104,30 @@
  *      kind rather than a kind-dependent tie-break; it is not claimed to
  *      always minimize a scoped-percentage tie, only to make it
  *      deterministic, which is the property actually required.
- *   6. INDEX — the caller's own input position, used ONLY when two terms
- *      are byte-identical in slot, kind, rate, cap, AND scope (order
- *      provably cannot matter between them).
+ *   6. IDENTITY — among terms tied on everything above, a stable id
+ *      (a term's `id`, or `discount_key` if that's what it carries)
+ *      beats input position: two DISTINCT catalog discounts that happen
+ *      to tie on slot/kind/value/cap/scope used to fall back to array
+ *      position, so which discount got credited with which dollar figure
+ *      could swap whenever a picker listed them in a different order —
+ *      invisible to the total, but not to DiscountEngine's own
+ *      bookkeeping, which maps figures back to catalog rows and rolls
+ *      per-discount usage totals through recordInvoiceDiscounts (Codex
+ *      pre-push audit P2, round 7). A term with no identity at all still
+ *      falls straight through to index, same as every term did before
+ *      this step existed.
+ *   7. INDEX — the caller's own input position, used ONLY when two terms
+ *      are byte-identical in slot, kind, value, cap, scope, AND identity
+ *      (order provably cannot matter between them).
  *
  * This key governs every place this module orders discounts: stackOrder
- * (used directly by stackDiscounts, and internally by
- * stackDocumentDiscounts for each line's own terms) AND
- * stackDocumentDiscounts' two document-term passes, fixed and non-fixed
- * alike (Codex pre-push audit P1, round 5: the fixed-document-term pass
- * used to iterate in plain input order with NO canonicalization at all —
- * a service-scoped $80 credit and an unscoped $80 credit on $50/$100
- * lines left $20 net in one order and $46.67 in the other, because the
+ * (used directly by stackDiscounts, and internally by both
+ * stackVisitDiscounts and stackDocumentDiscounts) AND
+ * stackDocumentDiscounts' fixed and non-fixed document-term passes alike
+ * (Codex pre-push audit P1, round 5: the fixed-document-term pass used to
+ * iterate in plain input order with NO canonicalization at all — a
+ * service-scoped $80 credit and an unscoped $80 credit on $50/$100 lines
+ * left $20 net in one order and $46.67 in the other, because the
  * unscoped credit spread across both lines FIRST whenever it happened to
  * be listed first). Per-item `dollars` always maps back to the caller's
  * OWN input position — only the SEQUENCE they compound in is
@@ -289,6 +316,32 @@ function compareDiscountScope(a, b) {
   return 0;
 }
 
+// A term's stable identity for the LAST tiebreak before input index — the
+// catalog id (or discount_key, whichever a caller's term shape carries),
+// not the array position. Two DISTINCT discounts that tie on every other
+// attribute (slot, kind, value, cap, scope) used to fall straight to
+// index, so which discount got credited with which per-term dollar figure
+// swapped whenever a picker happened to list them in a different order —
+// invisible to totals, but not to DiscountEngine's own bookkeeping, which
+// maps figures back to catalog rows and rolls per-discount usage totals
+// through recordInvoiceDiscounts (Codex pre-push audit P2, round 7).
+// `undefined` (neither field present) means there's no identity to sort
+// by at all, and the comparator falls straight through to index — exactly
+// the pre-this-round behavior for a term that never carried one.
+function resolveDiscountId(discount) {
+  return discount?.id ?? discount?.discount_key ?? undefined;
+}
+
+function compareDiscountIdentity(a, b) {
+  const idA = resolveDiscountId(a);
+  const idB = resolveDiscountId(b);
+  if (idA === undefined || idB === undefined) return 0;
+  const strA = String(idA);
+  const strB = String(idB);
+  if (strA === strB) return 0;
+  return strA < strB ? -1 : 1;
+}
+
 // A percentage discount's dollars against `baseDollars`, cent-exact:
 // integer-cents basis-point math (Codex P1), so roundHalfUpCents' single
 // division depends only on the true mathematical ratio, never the float
@@ -379,6 +432,11 @@ function stackOrder(discounts) {
       // straight through to index, the finding at :578).
       const scopeDiff = compareDiscountScope(a.discount, b.discount);
       if (scopeDiff !== 0) return scopeDiff;
+      // IDENTITY: a stable catalog id/discount_key beats input position
+      // for two DISTINCT discounts that tie on everything above (round 7)
+      // — a term with no identity at all still falls through to index.
+      const identityDiff = compareDiscountIdentity(a.discount, b.discount);
+      if (identityDiff !== 0) return identityDiff;
       return a.index - b.index;
     });
 }
@@ -552,24 +610,57 @@ function stackVisitDiscounts({ lines, appointmentDiscount, compound = true }) {
   // used to appear, inverted, in both conditions separately.
   const apptInFixedPass = compound && !!appt && isFixedDiscountType(appt.discountType);
 
-  // 1. Fixed line credits (legacy: every line credit, in one pass).
-  for (const line of state) {
-    if (!compound || isFixedDiscountType(line.lineDiscount?.discountType)) {
+  // 1 & 2. Fixed credits. Legacy (compound:false): every line's own
+  // discount, whatever its type, resolves here unconditionally, in given
+  // order — no canonicalization for the gate-off path (see stackDiscounts'
+  // own compound:false comment for why: it exists to reproduce a caller's
+  // pre-lane math, not to compound). Compounding (compound:true): ALL
+  // fixed credits, line AND appointment alike, are ordered by the
+  // module's ONE canonical key before ANY of them apply — not "every
+  // line credit first, then the appointment credit," which bypassed the
+  // header's own "fixed dollar credits, any slot, first" rule and let an
+  // unconditional line-first pass beat a wider appointment credit that
+  // should have run first (Codex pre-push audit P1, round 7): $50/$100
+  // lines, an $80 line-0 credit and an $80 appointment credit used to net
+  // $20 running line-first, never the $46.67 the wider appointment
+  // credit gives when it rightly runs first — the same total
+  // stackDocumentDiscounts already produced when both were document
+  // terms. A line's own fixed credit is tagged with a synthetic single-
+  // line `eligibleLines` purely so compareDiscountScope sees it as
+  // narrower than the appointment credit (which carries no eligibleLines
+  // of its own, reading as unscoped/widest by default); nothing else
+  // reads that synthetic tag — the actual dollar computation below still
+  // reads the line's real, untagged `lineDiscount`.
+  let appointmentDiscountDollars = 0;
+  if (!compound) {
+    for (const line of state) {
       line.lineDiscountDollars = discountStepDollars(line.lineDiscount, line.remaining);
       line.remaining = cents(line.remaining - line.lineDiscountDollars);
     }
-  }
-
-  // 2. Fixed appointment credit, spread pro rata over the eligible lines.
-  let appointmentDiscountDollars = 0;
-  if (apptInFixedPass) {
-    const eligible = state.filter((line) => line.eligible && line.remaining > 0);
-    const pool = cents(eligible.reduce((sum, line) => sum + line.remaining, 0));
-    appointmentDiscountDollars = discountStepDollars(appt, pool);
-    allocateProRata(eligible, pool, (line) => line.remaining, appointmentDiscountDollars, (line, share) => {
-      line.remaining = cents(Math.max(0, line.remaining - share));
-      line.appointmentDiscountDollars = cents(line.appointmentDiscountDollars + share);
+  } else {
+    const fixedOps = [];
+    state.forEach((line, lineIdx) => {
+      if (isFixedDiscountType(line.lineDiscount?.discountType)) {
+        fixedOps.push({ kind: 'line', lineIdx, discount: { ...line.lineDiscount, eligibleLines: [lineIdx] } });
+      }
     });
+    if (apptInFixedPass) fixedOps.push({ kind: 'appt', discount: appt });
+    for (const { index: opIdx } of stackOrder(fixedOps.map((op) => op.discount))) {
+      const op = fixedOps[opIdx];
+      if (op.kind === 'line') {
+        const line = state[op.lineIdx];
+        line.lineDiscountDollars = discountStepDollars(line.lineDiscount, line.remaining);
+        line.remaining = cents(line.remaining - line.lineDiscountDollars);
+      } else {
+        const eligible = state.filter((l) => l.eligible && l.remaining > 0);
+        const pool = cents(eligible.reduce((sum, l) => sum + l.remaining, 0));
+        appointmentDiscountDollars = discountStepDollars(appt, pool);
+        allocateProRata(eligible, pool, (l) => l.remaining, appointmentDiscountDollars, (l, share) => {
+          l.remaining = cents(Math.max(0, l.remaining - share));
+          l.appointmentDiscountDollars = cents(l.appointmentDiscountDollars + share);
+        });
+      }
+    }
   }
 
   // 3. Line percentages / free service, each on what its line still carries.
@@ -656,30 +747,23 @@ function stackDocumentDiscounts({ lines, documentTerms }) {
     return { gross, terms, termDollars: new Array(terms.length).fill(0), remaining: gross };
   });
 
-  // 1. Fixed LINE terms, each line on its own gross.
-  for (const line of state) {
-    const fixedIdx = line.terms
-      .map((t, i) => (isFixedDiscountType(t?.discountType) ? i : -1))
-      .filter((i) => i >= 0);
-    const stacked = stackDiscounts(line.gross, fixedIdx.map((i) => line.terms[i]), { compound: true });
-    fixedIdx.forEach((termIdx, i) => { line.termDollars[termIdx] = stacked.items[i].dollars; });
-    line.remaining = stacked.net;
-  }
-
-  // 2. Fixed DOCUMENT terms, spread pro rata over lines that still carry a
-  // balance after step 1, in CANONICAL order (Codex pre-push audit P1,
-  // round 5): this used to walk `docFixedIdx` in plain input order, so a
-  // service-scoped $80 credit and an unscoped $80 credit on $50/$100
-  // lines left $20 net in one order and $46.67 in the other — the
-  // unscoped credit spreads across BOTH lines and eats into the scoped
-  // credit's one shared line first whenever it happens to be listed
-  // first. stackOrder over just the fixed terms fixes it: wider scope
-  // (the module header's SCOPE step) resolves first among same-rank
-  // fixed terms, same as it does for percentages.
+  // 1 & 2. Fixed credits — LINE terms and DOCUMENT terms alike, ordered
+  // by the module's ONE canonical key before ANY of them apply (Codex
+  // pre-push audit P1, round 7). The old split — every line's own fixed
+  // terms first, unconditionally, THEN document fixed terms in their own
+  // canonical order (round 5) — still bypassed the header's own "fixed
+  // dollar credits, any slot, first" rule whenever a document credit was
+  // WIDER than a line's own credit: $50/$100 lines, a line-0 $80 credit
+  // plus an $80 document credit used to net $20 running line-first, never
+  // the $46.67 the wider document credit gives when it rightly runs first
+  // — the total already enforced when BOTH were document terms (round 5).
+  // A line's own fixed term is tagged with a synthetic single-line
+  // `eligibleLines` purely so compareDiscountScope treats it as narrower
+  // than a same-or-wider document term; the actual computation below
+  // still reads each term's real, untagged shape, and two fixed terms
+  // sharing one line still compare on VALUE (checked before SCOPE) same
+  // as always, unaffected by the tag they now share.
   const docDollars = new Array(docTerms.length).fill(0);
-  const docFixedIdx = docTerms
-    .map((t, i) => (isFixedDiscountType(t?.discountType) ? i : -1))
-    .filter((i) => i >= 0);
   // A document term normally reaches EVERY line. `eligibleLines` (an array
   // of line indexes) restricts one to a subset — the invoice replay of a
   // scheduled appointment discount narrowed to one service through
@@ -693,18 +777,37 @@ function stackDocumentDiscounts({ lines, documentTerms }) {
   const termReachesLine = (term, lineIdx) => (
     !Array.isArray(term?.eligibleLines) || term.eligibleLines.includes(lineIdx)
   );
-  const docFixedOrder = stackOrder(docFixedIdx.map((i) => docTerms[i]));
-  for (const { index: subIdx } of docFixedOrder) {
-    const termIdx = docFixedIdx[subIdx];
-    const term = docTerms[termIdx];
-    const pool = state.filter((line, i) => line.remaining > 0 && termReachesLine(term, i));
-    const poolTotal = cents(pool.reduce((sum, line) => sum + line.remaining, 0));
-    const dollars = discountStepDollars(term, poolTotal);
-    docDollars[termIdx] = dollars;
-    if (!pool.length) continue;
-    allocateProRata(pool, poolTotal, (line) => line.remaining, dollars, (line, share) => {
-      line.remaining = cents(Math.max(0, line.remaining - share));
+  const fixedOps = [];
+  state.forEach((line, lineIdx) => {
+    line.terms.forEach((term, termIdx) => {
+      if (isFixedDiscountType(term?.discountType)) {
+        fixedOps.push({ kind: 'line', lineIdx, termIdx, discount: { ...term, eligibleLines: [lineIdx] } });
+      }
     });
+  });
+  docTerms.forEach((term, termIdx) => {
+    if (isFixedDiscountType(term?.discountType)) {
+      fixedOps.push({ kind: 'document', termIdx, discount: term });
+    }
+  });
+  for (const { index: opIdx } of stackOrder(fixedOps.map((op) => op.discount))) {
+    const op = fixedOps[opIdx];
+    if (op.kind === 'line') {
+      const line = state[op.lineIdx];
+      const dollars = discountStepDollars(line.terms[op.termIdx], line.remaining);
+      line.termDollars[op.termIdx] = dollars;
+      line.remaining = cents(line.remaining - dollars);
+    } else {
+      const term = docTerms[op.termIdx];
+      const pool = state.filter((line, i) => line.remaining > 0 && termReachesLine(term, i));
+      const poolTotal = cents(pool.reduce((sum, line) => sum + line.remaining, 0));
+      const dollars = discountStepDollars(term, poolTotal);
+      docDollars[op.termIdx] = dollars;
+      if (!pool.length) continue;
+      allocateProRata(pool, poolTotal, (line) => line.remaining, dollars, (line, share) => {
+        line.remaining = cents(Math.max(0, line.remaining - share));
+      });
+    }
   }
 
   // 3. LINE percent/free_service terms, on what's left after steps 1-2.

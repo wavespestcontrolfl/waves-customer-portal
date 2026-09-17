@@ -53,6 +53,14 @@ const { stackDiscounts } = require('./discount-stack');
 // paths directly and slice 5 has one line to change.
 function applyDiscountArithmetic(subtotal, applied, { compound }) {
   const terms = applied.map((disc) => ({
+    // A stable identity (Codex pre-push audit P2, round 7): stackOrder's
+    // canonical key uses this — before input index — to keep two
+    // DISTINCT discounts tied on every other attribute from swapping
+    // which one gets credited with which dollar figure depending on
+    // priority order. This module is the one place discount rows become
+    // discount-stack.js terms, so it's the one place that has to carry
+    // the id across.
+    id: disc.id,
     discountType: disc.discount_type,
     amount: Number(disc.amount),
     maxDiscountDollars: disc.max_discount_dollars,

@@ -17,16 +17,40 @@
  * AND cap, but scoped to different (overlapping) line sets, were still
  * order-dependent at cent precision.
  *
+ * ROUND 7 — two more instances of the SAME class, which is why the
+ * property test below was widened rather than given a fourth one-off
+ * "exact repro" test:
+ *
+ * P1 (:560): the fixed-credit pass split fixed credits into "every
+ * line's own fixed term first, unconditionally" THEN "document fixed
+ * terms, in canonical order" — a line-first split that bypassed the
+ * header's own "fixed dollar credits, any slot, first" rule whenever a
+ * document credit was WIDER than a line's own credit. Fixed in
+ * stackVisitDiscounts and stackDocumentDiscounts alike by merging line-
+ * scope and document-scope fixed credits into ONE canonically-ordered
+ * pass, each line's own fixed term tagged with a synthetic single-line
+ * scope purely so the SAME scope comparator governs both.
+ *
+ * P2 (:382): two distinct catalog discounts tied on slot/kind/value/cap/
+ * scope fell back to input position, so DiscountEngine's own per-
+ * discount bookkeeping (usage totals rolled up by id) could attribute a
+ * different dollar figure to the same discount id depending on picker
+ * order. Fixed with an IDENTITY tiebreak (id / discount_key) that runs
+ * before index — a term with no identity at all still falls through to
+ * index, unchanged from before this round.
+ *
  * Both are fixed by the module's now-COMPLETE canonical key (see the
- * header's CANONICAL ORDER section): slot, kind, rate, cap, scope,
- * index — applied uniformly by stackOrder AND by both of
- * stackDocumentDiscounts' document-term passes. The property test at the
- * bottom of this file is what actually closes the class: instead of
- * adding one more "exact repro, both orders" test per attribute forever,
- * it shuffles thousands of randomly-generated stacks (random line counts,
- * random terms mixing every slot/kind/rate/cap/scope combination) and
- * asserts the total and every per-line net survive the shuffle
- * unchanged, through every export.
+ * header's CANONICAL ORDER section): slot, kind, value, cap, scope,
+ * IDENTITY, index — applied uniformly by stackOrder and by every fixed/
+ * non-fixed pass in stackVisitDiscounts and stackDocumentDiscounts
+ * alike. The property test below is what actually closes the class:
+ * every generated term now carries a unique id (so per-term dollar
+ * stability under a shuffle is a meaningful, checkable claim rather than
+ * "ties may legitimately swap credit," which round 3's version of this
+ * file had to concede for anonymous terms), and lines now carry their
+ * OWN random fixed/percent terms alongside document terms — round 3's
+ * generator never mixed the two, which is exactly why P1 (:560) shipped
+ * undetected for two more rounds after the class was first "closed."
  */
 const {
   stackDiscounts,
@@ -64,23 +88,15 @@ function randMoney(rand, lo, hi) {
   return Math.round((rand() * (hi - lo) + lo) * 100) / 100;
 }
 
-// One random discount, any kind. Two independently-generated discounts
-// can land on the exact same (kind, rate, cap, scope, slot) tuple by
-// chance — most likely for free_service, which has no rate or cap to
-// distinguish it at all — and when that happens they are GENUINELY tied
-// under the module's own canonical order, with nothing left to break the
-// tie except which one the caller happened to list first. Shuffling two
-// truly-tied terms can legitimately swap WHICH ONE gets credited (one
-// free_service takes the whole remaining pool, the other gets $0) even
-// though the AGGREGATE never moves — so this property test asserts what
-// the audit actually asked for (totals and per-line nets), not a per-
-// term identity mapping that ties make impossible to guarantee in
-// general. The dedicated "exact reported repros" below use deliberately
-// DISTINCT terms specifically so their per-term mapping is meaningful.
-function randomDiscount(rand, { numLines, allowScope, allowSlot }) {
+let nextId = 0;
+// One random discount, any kind, ALWAYS carrying a unique id (round 7 —
+// see the top comment: this is what makes per-term dollar stability under
+// a shuffle a meaningful, always-checkable property instead of one that
+// ties make impossible to guarantee in general).
+function randomDiscount(rand, { allowScope, allowSlot, numLines }) {
   const kindRoll = rand();
   const discountType = kindRoll < 0.45 ? 'percentage' : kindRoll < 0.85 ? 'fixed_amount' : 'free_service';
-  const discount = { discountType };
+  const discount = { id: `term-${nextId++}`, discountType };
   if (discountType === 'percentage') {
     discount.amount = randInt(rand, 1, 60);
     if (rand() < 0.4) discount.maxDiscountDollars = randMoney(rand, 1, 80);
@@ -99,14 +115,31 @@ function randomDiscount(rand, { numLines, allowScope, allowSlot }) {
   return discount;
 }
 
-describe('property: shuffling term order never changes the total or any per-line net', () => {
-  test('stackDiscounts — 5000 random flat stacks, terms across kinds/rates/caps/(flat) slots', () => {
+// Maps a result's items/documentTerms array (parallel to the INPUT array
+// it came from) back to a Map keyed by each term's own id — the per-term
+// assertion tool every property test below uses instead of comparing by
+// array position, which a shuffle deliberately scrambles.
+function byId(resultItems, inputTerms) {
+  const map = new Map();
+  inputTerms.forEach((term, i) => map.set(term.id, resultItems[i].dollars));
+  return map;
+}
+
+function expectSameDollarsById(map1, map2) {
+  expect(map1.size).toBe(map2.size);
+  for (const [id, dollars] of map1) {
+    expect(map2.get(id)).toBe(dollars);
+  }
+}
+
+describe('property: shuffling term order never changes the total, any per-line net, or any per-id dollar figure', () => {
+  test('stackDiscounts — 5000 random flat stacks, terms across kinds/values/caps/(flat) slots', () => {
     const rand = mulberry32(20260916);
     let trials = 0;
     for (let t = 0; t < 5000; t++) {
       const base = randMoney(rand, 1, 500);
       const count = randInt(rand, 1, 6);
-      const terms = Array.from({ length: count }, () => randomDiscount(rand, { numLines: 1, allowScope: false, allowSlot: true }));
+      const terms = Array.from({ length: count }, () => randomDiscount(rand, { allowScope: false, allowSlot: true }));
       const shuffled = shuffle(rand, terms);
 
       const r1 = stackDiscounts(base, terms);
@@ -115,39 +148,55 @@ describe('property: shuffling term order never changes the total or any per-line
 
       expect(r2.net).toBe(r1.net);
       expect(r2.totalDollars).toBe(r1.totalDollars);
+      // Every term carries a unique id now (round 7): per-id dollars must
+      // survive the shuffle exactly, not just the aggregate.
+      expectSameDollarsById(byId(r1.items, terms), byId(r2.items, shuffled));
     }
     expect(trials).toBe(5000);
   });
 
-  test('stackDocumentDiscounts — 5000 random multi-line stacks, document terms across kinds/rates/caps/scopes', () => {
+  test('stackDocumentDiscounts — 5000 random multi-line stacks, LINES carrying their own terms AND document terms across kinds/values/caps/scopes (round 7: the generator that would have caught :560)', () => {
     const rand = mulberry32(45678901);
     let trials = 0;
-    let totalDiscountAgreements = 0;
     for (let t = 0; t < 5000; t++) {
       const numLines = randInt(rand, 1, 4);
+      // Round 7: each line gets a 50% chance of carrying 1-2 of its OWN
+      // terms (any kind, including fixed) — round 3's generator always
+      // used terms:[], which is exactly why a line-fixed-vs-document-
+      // fixed ordering bug (:560) shipped undetected through two more
+      // rounds after this file first claimed to "close the class."
+      const lineTermSets = Array.from({ length: numLines }, () => (
+        rand() < 0.5
+          ? Array.from({ length: randInt(rand, 1, 2) }, () => randomDiscount(rand, { allowScope: false, allowSlot: false }))
+          : []
+      ));
       const grosses = Array.from({ length: numLines }, () => randMoney(rand, 1, 300));
       const termCount = randInt(rand, 0, 5);
-      const documentTerms = Array.from({ length: termCount }, () => randomDiscount(rand, { numLines, allowScope: true, allowSlot: false }));
-      const shuffled = shuffle(rand, documentTerms);
+      const documentTerms = Array.from({ length: termCount }, () => randomDiscount(rand, { allowScope: true, allowSlot: false, numLines }));
+      const shuffledDocTerms = shuffle(rand, documentTerms);
 
-      const lines1 = grosses.map((gross) => ({ gross, terms: [] }));
-      const lines2 = grosses.map((gross) => ({ gross, terms: [] }));
-      const r1 = stackDocumentDiscounts({ lines: lines1, documentTerms });
-      const r2 = stackDocumentDiscounts({ lines: lines2, documentTerms: shuffled });
+      const buildLines = (termSets) => grosses.map((gross, i) => ({ gross, terms: termSets[i].slice() }));
+      const r1 = stackDocumentDiscounts({ lines: buildLines(lineTermSets), documentTerms });
+      const r2 = stackDocumentDiscounts({ lines: buildLines(lineTermSets), documentTerms: shuffledDocTerms });
       trials++;
 
       // Every line's own net survives the document-term shuffle exactly —
-      // lines themselves were never reordered, only documentTerms was.
+      // lines' own terms were never reordered, only documentTerms was.
       for (let i = 0; i < numLines; i++) {
         expect(r2.lines[i].net).toBe(r1.lines[i].net);
       }
-      const total1 = r1.documentTerms.reduce((sum, x) => sum + x.dollars, 0);
-      const total2 = r2.documentTerms.reduce((sum, x) => sum + x.dollars, 0);
-      expect(Math.round(total2 * 100)).toBe(Math.round(total1 * 100));
-      totalDiscountAgreements++;
+      // Every document term's own dollars survive by id too, not just the
+      // per-line net aggregate.
+      expectSameDollarsById(byId(r1.documentTerms, documentTerms), byId(r2.documentTerms, shuffledDocTerms));
+      // And every LINE term's own dollars, read off termDollars by the
+      // same id-tracking technique (each line's terms weren't shuffled,
+      // but a wider document term running before or after them, per
+      // canonical order, must still leave the SAME per-term result).
+      for (let i = 0; i < numLines; i++) {
+        expectSameDollarsById(byId(r1.lines[i].termDollars.map((dollars) => ({ dollars })), lineTermSets[i]), byId(r2.lines[i].termDollars.map((dollars) => ({ dollars })), lineTermSets[i]));
+      }
     }
     expect(trials).toBe(5000);
-    expect(totalDiscountAgreements).toBe(5000);
   });
 
   test('stackDocumentDiscounts — 2500 trials shuffling a SINGLE line\'s own terms (the line-slot side of the same key)', () => {
@@ -156,7 +205,7 @@ describe('property: shuffling term order never changes the total or any per-line
     for (let t = 0; t < 2500; t++) {
       const gross = randMoney(rand, 1, 400);
       const termCount = randInt(rand, 1, 5);
-      const terms = Array.from({ length: termCount }, () => randomDiscount(rand, { numLines: 1, allowScope: false, allowSlot: false }));
+      const terms = Array.from({ length: termCount }, () => randomDiscount(rand, { allowScope: false, allowSlot: false }));
       const shuffled = shuffle(rand, terms);
 
       const r1 = stackDocumentDiscounts({ lines: [{ gross, terms }], documentTerms: [] });
@@ -164,13 +213,51 @@ describe('property: shuffling term order never changes the total or any per-line
       trials++;
 
       expect(r2.lines[0].net).toBe(r1.lines[0].net);
+      expectSameDollarsById(
+        byId(r1.lines[0].termDollars.map((dollars) => ({ dollars })), terms),
+        byId(r2.lines[0].termDollars.map((dollars) => ({ dollars })), shuffled),
+      );
+    }
+    expect(trials).toBe(2500);
+  });
+
+  test('stackVisitDiscounts — 2500 random trials shuffling which slot (line vs appointment) carries the fixed credit (round 7: the generator that would have caught the stackVisitDiscounts side of :560)', () => {
+    const rand = mulberry32(24681012);
+    let trials = 0;
+    for (let t = 0; t < 2500; t++) {
+      const numLines = randInt(rand, 1, 3);
+      const grosses = Array.from({ length: numLines }, () => randMoney(rand, 1, 300));
+      // Randomly assign each line either its own fixed credit or none,
+      // and independently decide whether an appointment fixed credit
+      // exists — every arrangement is a valid input regardless of how
+      // many fixed credits end up in which slot.
+      const lineDiscounts = grosses.map(() => (rand() < 0.5 ? { discountType: 'fixed_amount', amount: randMoney(rand, 1, 150) } : null));
+      const appt = rand() < 0.6 ? { discountType: 'fixed_amount', amount: randMoney(rand, 1, 150) } : null;
+
+      const buildLines = () => grosses.map((gross, i) => ({ gross, lineDiscount: lineDiscounts[i], eligible: true }));
+      // "Shuffle" here means: run it once, then run an independent method
+      // (stackDocumentDiscounts, treating each line credit as a LINE term
+      // and the appointment credit as an unscoped DOCUMENT term) on the
+      // mathematically equivalent input, and require the two exports
+      // agree — the cross-export check IS the shuffle-equivalent property
+      // for a model that has only one slot per line, so there's no
+      // literal array to reorder.
+      const visitRes = stackVisitDiscounts({ lines: buildLines(), appointmentDiscount: appt });
+      const docLines = grosses.map((gross, i) => ({ gross, terms: lineDiscounts[i] ? [lineDiscounts[i]] : [] }));
+      const docTerms = appt ? [appt] : [];
+      const docRes = stackDocumentDiscounts({ lines: docLines, documentTerms: docTerms });
+      trials++;
+
+      const visitTotal = Math.round(visitRes.total * 100);
+      const docTotal = Math.round(docRes.lines.reduce((sum, l) => sum + l.net, 0) * 100);
+      expect(visitTotal).toBe(docTotal);
     }
     expect(trials).toBe(2500);
   });
 });
 
-describe('the two exact reported repros, both orders, through every export that can express them', () => {
-  test('P1 (:578) — a scoped fixed $80 credit vs an unscoped fixed $80 credit on $50/$100 lines', () => {
+describe('the exact reported repros, both orders and both slot assignments, through every export that can express them', () => {
+  test('P1 (:578, round 5) — a scoped fixed $80 credit vs an unscoped fixed $80 credit on $50/$100 lines', () => {
     const scoped = { discountType: 'fixed_amount', amount: 80, eligibleLines: [0] };
     const unscoped = { discountType: 'fixed_amount', amount: 80 };
     const A = stackDocumentDiscounts({ lines: [{ gross: 50, terms: [] }, { gross: 100, terms: [] }], documentTerms: [scoped, unscoped] });
@@ -179,7 +266,56 @@ describe('the two exact reported repros, both orders, through every export that 
     expect(A.lines.map((l) => l.net)).toEqual([0, 46.67]);
   });
 
-  test('P2 (:286) — a scoped 5% vs an unscoped 5% (same rate, same cap) on $50/$99.99 lines', () => {
+  test('P1 (:560, round 7) — a LINE-scope $80 credit vs a DOCUMENT-scope $80 credit on $50/$100 lines, through stackDocumentDiscounts', () => {
+    const lineFixed = { discountType: 'fixed_amount', amount: 80 };
+    const docFixed = { discountType: 'fixed_amount', amount: 80 };
+    // Slot assignment 1: the $80 on line 0 is the LINE's own term, the
+    // other $80 is a DOCUMENT term reaching both lines.
+    const res1 = stackDocumentDiscounts({
+      lines: [{ gross: 50, terms: [lineFixed] }, { gross: 100, terms: [] }],
+      documentTerms: [docFixed],
+    });
+    expect(res1.lines.map((l) => l.net)).toEqual([0, 46.67]);
+
+    // Slot assignment 2 (swapped): now line 1 carries its own $80 and the
+    // document term still reaches both — same total shape, mirrored line.
+    const res2 = stackDocumentDiscounts({
+      lines: [{ gross: 100, terms: [] }, { gross: 50, terms: [docFixed] }],
+      documentTerms: [lineFixed],
+    });
+    expect(res2.lines.map((l) => l.net)).toEqual([46.67, 0]);
+  });
+
+  test('P1 (:560, round 7) — the same shape through stackVisitDiscounts: a line fixed credit vs an appointment fixed credit', () => {
+    const res = stackVisitDiscounts({
+      lines: [
+        { gross: 50, lineDiscount: { discountType: 'fixed_amount', amount: 80 }, eligible: true },
+        { gross: 100, lineDiscount: null, eligible: true },
+      ],
+      appointmentDiscount: { discountType: 'fixed_amount', amount: 80 },
+    });
+    expect(res.total).toBe(46.67);
+
+    // Mirror: the SAME two (gross, discount) pairs, just on the other
+    // line — the appointment credit (wider, reaching both lines) still
+    // runs first regardless of which physical line index holds the
+    // narrower line credit, so the total is unchanged by the mirror.
+    // (Swapping ONLY the discount without its gross would NOT be a valid
+    // mirror here — the two lines carry different gross amounts, so that
+    // would change which balance the credit competes for; this keeps
+    // each gross paired with its own discount and just relabels the
+    // lines.)
+    const mirrored = stackVisitDiscounts({
+      lines: [
+        { gross: 100, lineDiscount: null, eligible: true },
+        { gross: 50, lineDiscount: { discountType: 'fixed_amount', amount: 80 }, eligible: true },
+      ],
+      appointmentDiscount: { discountType: 'fixed_amount', amount: 80 },
+    });
+    expect(mirrored.total).toBe(46.67);
+  });
+
+  test('P2 (:286, round 5) — a scoped 5% vs an unscoped 5% (same rate, same cap) on $50/$99.99 lines', () => {
     const scoped = { discountType: 'percentage', amount: 5, eligibleLines: [0] };
     const unscoped = { discountType: 'percentage', amount: 5 };
     const A = stackDocumentDiscounts({ lines: [{ gross: 50, terms: [] }, { gross: 99.99, terms: [] }], documentTerms: [scoped, unscoped] });
@@ -190,7 +326,24 @@ describe('the two exact reported repros, both orders, through every export that 
     expect(netA).toBe(140.11);
   });
 
-  test('the same P1 shape through stackDiscounts (flat, slot-tagged) agrees with stackDocumentDiscounts\' $46.67', () => {
+  test('P2 (:382, round 7) — two DISTINCT catalog discounts, identical in rate/cap/scope, keep their per-id dollars under reversal', () => {
+    const discountA = { id: 'discount-A', discountType: 'percentage', amount: 10 };
+    const discountB = { id: 'discount-B', discountType: 'percentage', amount: 10 };
+
+    // Through stackDiscounts directly.
+    const flatForward = stackDiscounts(100, [discountA, discountB]);
+    const flatReversed = stackDiscounts(100, [discountB, discountA]);
+    expect(flatForward.items[0].dollars).toBe(flatReversed.items[1].dollars); // A's own figure, either position
+    expect(flatForward.items[1].dollars).toBe(flatReversed.items[0].dollars); // B's own figure, either position
+
+    // Through stackDocumentDiscounts as document terms.
+    const docForward = stackDocumentDiscounts({ lines: [{ gross: 100, terms: [] }], documentTerms: [discountA, discountB] });
+    const docReversed = stackDocumentDiscounts({ lines: [{ gross: 100, terms: [] }], documentTerms: [discountB, discountA] });
+    expect(docForward.documentTerms[0].dollars).toBe(docReversed.documentTerms[1].dollars);
+    expect(docForward.documentTerms[1].dollars).toBe(docReversed.documentTerms[0].dollars);
+  });
+
+  test('the same P1 (:578) shape through stackDiscounts (flat, slot-tagged) agrees with stackDocumentDiscounts\' $46.67', () => {
     const scoped = { discountType: 'fixed_amount', amount: 80, slot: 'document', eligibleLines: [0] };
     const unscoped = { discountType: 'fixed_amount', amount: 80, slot: 'document' };
     // stackDiscounts has no concept of separate lines, so this is the
@@ -203,7 +356,7 @@ describe('the two exact reported repros, both orders, through every export that 
     expect(a.net).toBe(b.net);
   });
 
-  test('an equal-rate, both-uncapped pair no longer produces an inconsistent (NaN-comparator) order — the bug this round found while fixing P2', () => {
+  test('an equal-rate, both-uncapped pair no longer produces an inconsistent (NaN-comparator) order — the bug round 5 found while fixing P2', () => {
     // resolveDiscountCap(a) - resolveDiscountCap(b) is Infinity - Infinity
     // = NaN for two uncapped percentages, which made the comparator
     // return NaN instead of falling through to the scope check — Array.
@@ -215,17 +368,5 @@ describe('the two exact reported repros, both orders, through every export that 
     const A = stackDocumentDiscounts({ lines: [{ gross: 40, terms: [] }, { gross: 60, terms: [] }], documentTerms: [scoped, unscoped] });
     const B = stackDocumentDiscounts({ lines: [{ gross: 40, terms: [] }, { gross: 60, terms: [] }], documentTerms: [unscoped, scoped] });
     expect(A.lines.map((l) => l.net)).toEqual(B.lines.map((l) => l.net));
-  });
-
-  test('stackVisitDiscounts has no same-slot scope tie to break — one discount per line and per appointment', () => {
-    // Same structural point as the earlier rate/cap rounds: there is no
-    // way to hand a stackVisitDiscounts line or the appointment slot a
-    // SECOND scoped term to tie against the first. A single scoped-
-    // looking line discount still agrees with the same term through
-    // stackDiscounts.
-    const term = { discountType: 'fixed_amount', amount: 80 };
-    const visitRes = stackVisitDiscounts({ lines: [{ gross: 50, lineDiscount: term, eligible: true }], appointmentDiscount: null });
-    const sdRes = stackDiscounts(50, [term]);
-    expect(visitRes.lines[0].lineDiscountDollars).toBe(sdRes.items[0].dollars);
   });
 });

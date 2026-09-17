@@ -252,6 +252,25 @@ describe('compound:true is available for slice 5 — not yet wired to the gate, 
     expect(engineResult.totalDiscount).toBe(directResult.totalDollars);
     expect(engineResult.afterDiscount).toBe(directResult.net);
   });
+
+  // Codex pre-push audit P2, round 7: two DISTINCT catalog discounts tied
+  // on rate/cap/scope used to fall back to input position, so which
+  // discount id got credited with which dollar figure could swap depending
+  // on priority order — invisible to the total, but not to
+  // recordInvoiceDiscounts, which rolls per-discount usage totals up BY
+  // id. applyDiscountArithmetic's term construction now carries `id`
+  // through to stackDiscounts specifically so this can't happen.
+  test('two distinct 10% discounts keep their own per-id dollars stable under reversal (identity tiebreak)', () => {
+    const discountA = discountRow({ discount_type: 'percentage', amount: 10 });
+    const discountB = discountRow({ discount_type: 'percentage', amount: 10 });
+    const forward = DiscountEngine._internals.applyDiscountArithmetic(100, [discountA, discountB], { compound: true });
+    const reversed = DiscountEngine._internals.applyDiscountArithmetic(100, [discountB, discountA], { compound: true });
+    const byId = (result) => new Map(result.discounts.map((d) => [d.id, d.discount_dollars]));
+    const forwardById = byId(forward);
+    const reversedById = byId(reversed);
+    expect(reversedById.get(discountA.id)).toBe(forwardById.get(discountA.id));
+    expect(reversedById.get(discountB.id)).toBe(forwardById.get(discountB.id));
+  });
 });
 
 describe('DiscountEngine.calculateDiscounts (full function, DB mocked) — additive regardless of the gate, in this slice', () => {
