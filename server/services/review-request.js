@@ -2271,7 +2271,7 @@ const ReviewService = {
       deliveryOutcome = result?.deliveryOutcome;
       const sentinel = require("./sms-auto-send").suppressedSendSentinel(result);
       if (sentinel) {
-        await releaseUnsentReservation({ requestId });
+        await releaseUnsentReservation({ requestId, customerId: request.customer_id });
         reservation = null;
         await ownLegacyRow().update({ status: "suppressed", scheduled_for: fencedFrom });
         return { blocked: true, code: result.code || sentinel };
@@ -2298,7 +2298,7 @@ const ReviewService = {
           await promoteReviewSmsReservation({ reservation });
           return { sent: true, unrecorded: true };
         }
-        await releaseUnsentReservation({ requestId });
+        await releaseUnsentReservation({ requestId, customerId: request.customer_id });
         reservation = null;
         // PII: ID-only per AGENTS.md.
         logger.info(
@@ -2310,7 +2310,7 @@ const ReviewService = {
         // written now would land on the owner's marker, and that owner may
         // already have reached the provider.
         logger.warn(`[review] SMS handoff found the claim taken by another sender (requestId=${requestId}) — leaving the row to its owner`);
-        await releaseUnsentReservation({ requestId });
+        await releaseUnsentReservation({ requestId, customerId: request.customer_id });
         return { sent: false, claimLost: true, reason: "review_claim_lost", requestId };
       } else if (result.deliveryOutcome === "not_sent"
         && !["VISIT_SUMMARY_UNCERTAIN", "VISIT_SUMMARY_STATE_UNAVAILABLE", "REVIEW_CLAIM_LOST"].includes(result.code)) {
@@ -2377,12 +2377,12 @@ const ReviewService = {
         // pending unconditionally, requeueing an ask another worker may
         // already have sent.
         await this._parkAskAtProviderBoundary(request);
-        await releaseUnsentReservation({ requestId });
+        await releaseUnsentReservation({ requestId, customerId: request.customer_id });
         return { deferred: "summary_uncertain", nextAllowedAt: null };
       } else if (result.blocked && result.code === "VISIT_SUMMARY_STATE_UNAVAILABLE") {
         const retryAt = new Date(Date.now() + 30 * 60 * 1000);
         await this._deferAskForUnavailableSummary({ id: requestId }, retryAt);
-        await releaseUnsentReservation({ requestId });
+        await releaseUnsentReservation({ requestId, customerId: request.customer_id });
         logger.info(`[review] SMS deferred: summary state unavailable (requestId=${requestId}) (queued for retry at ${retryAt.toISOString()})`);
         return { deferred: "summary_unavailable", nextAllowedAt: retryAt };
 
@@ -2396,7 +2396,7 @@ const ReviewService = {
           logger.warn(`[review] SMS delivery uncertain; reservation held (customerId=${customer.id} requestId=${requestId})`);
           return { deferred: "provider_uncertain", nextAllowedAt: retryAt };
         }
-        await releaseUnsentReservation({ requestId });
+        await releaseUnsentReservation({ requestId, customerId: request.customer_id });
         reservation = null;
         const deferredRetryAt = retryAtForDeferredSend(result);
         if (deferredRetryAt) {
@@ -2442,13 +2442,22 @@ const ReviewService = {
             });
           } catch (lockErr) {
             // Fail safe, not fail closed: the lock/transaction itself is
-            // what's unavailable here, not the send outcome — an
-            // unconditional requeue outside the lock is the same
-            // (narrower, pre-existing) exposure this fix closes, not a new
-            // one, and a due row that goes unretried is worse than that.
+            // what's unavailable here, not the send outcome — a due row
+            // that goes unretried is worse than a best-effort requeue
+            // without the lock's protection. But the fallback exists for
+            // the SAME reason the locked write is conditional (codex #4333
+            // P1, GitHub round): if a concurrent cadence enrollment's own
+            // supersedeQueuedAsks suppressed this row WHILE the transaction
+            // above was failing, an unconditional write here would revive
+            // the obsolete ask right alongside the cadence's own touch —
+            // the exact bug this whole recheck exists to prevent. Mirror
+            // the locked path's own condition instead of dropping it just
+            // because the lock itself didn't come through.
             logger.warn(`[review] cadence-retirement recheck failed (requestId=${requestId} errType=${lockErr?.name || "Error"}) — requeuing without the recheck`);
-            await ownLegacyRow().update({ status: "pending", scheduled_for: deferredRetryAt });
-            outcome = { requeued: true };
+            const requeued = await db("review_requests")
+              .where({ id: requestId, status: "pending" })
+              .update({ status: "pending", scheduled_for: deferredRetryAt });
+            outcome = requeued ? { requeued: true } : { alreadyHandled: true };
           }
           if (outcome.supersededBy) {
             logger.info(`[review] Suppressed a proven-unsent ask superseded by an active cadence (requestId=${requestId} sequenceId=${outcome.supersededBy})`);
@@ -2561,7 +2570,7 @@ const ReviewService = {
             status: "sent",
             scheduled_for: fencedFrom,
           });
-          await releaseUnsentReservation({ requestId });
+          await releaseUnsentReservation({ requestId, customerId: request.customer_id });
           reservation = null;
           logger.error(
             `[review] SMS accepted but its audit write failed (requestId=${requestId} errType=${err?.name || "Error"})`,
@@ -2625,7 +2634,7 @@ const ReviewService = {
         const retryAt = uncertain
           ? new Date(reservation.reservedAt.getTime() + ASK_SPACING_MS)
           : new Date(Date.now() + 5 * 60 * 1000);
-        if (!uncertain) await releaseUnsentReservation({ requestId });
+        if (!uncertain) await releaseUnsentReservation({ requestId, customerId: request.customer_id });
         await db("review_requests").where({ id: requestId }).update({
           scheduled_for: retryAt,
         });
@@ -3221,7 +3230,7 @@ const ReviewService = {
     // Left standing, that orphan reads as a prior ask for the full 72h
     // spacing window and blocks the very recovery this function just
     // proved should proceed.
-    await releaseUnsentReservation({ requestId }).catch((err) => {
+    await releaseUnsentReservation({ requestId, customerId: row.customer_id }).catch((err) => {
       logger.warn(`[review] stale inline claim reservation release failed (requestId=${requestId}): ${err.message}`);
     });
     const reclaimToken = new Date();
@@ -4204,9 +4213,24 @@ const ReviewService = {
           }
           const deliveryOutcome = result?.deliveryOutcome;
           if (["VISIT_SUMMARY_UNCERTAIN", "VISIT_SUMMARY_STATE_UNAVAILABLE"].includes(result?.code)) {
-            await db("review_requests").where({ id: request.id }).update({
+            // The authoritative summary handoff refused before ever reaching
+            // the provider -- a definite non-delivery, exactly like the
+            // "Definite non-delivery" branch below. A transient DB error here
+            // must not silently strand the row stamped followup_sent=true
+            // with nothing sent -- retry once through the same reconciliation
+            // path (codex P2, review-ask-legacy-serialization #4333). No
+            // separate sms_log reservation exists to release for this call
+            // site: this code returns BEFORE dispatch() ever runs (no
+            // provider call, no seam reservation -- reviewSendThroughSummaryHandoff
+            // only claims an sms_log-backed reservation when called with a
+            // requestId, which this follow-up send never passes), so the
+            // review_requests row's own followup_sent/followup_reserved_at
+            // fields are the only reservation state to release here, same as
+            // the sibling branch.
+            const released = await stampWithRetry(() => db("review_requests").where({ id: request.id }).update({
               followup_sent: false, followup_sent_at: null, followup_reserved_at: null,
-            });
+            }), `follow-up summary-block reservation release (requestId=${request.id})`);
+            if (!released) unrecordedReleases++;
             return;
           }
           if (deliveryOutcome !== "accepted" && deliveryOutcome !== "not_sent") {
@@ -4662,6 +4686,36 @@ const ReviewService = {
       })
       .returning("*");
 
+    // codex #4331 P2: a prior attempt AT THIS EXACT sequence step that came
+    // back ambiguous (not accepted, not a definitive not_sent) is marked
+    // 'failed' by _applyOutreachSendResult, but its sms_log reservation is
+    // deliberately kept 'sending' as 72h ask-spacing evidence rather than
+    // released there. This fresh row is what the sequence runner minted to
+    // retry that same step — a NEW review_requests id, so the seam can never
+    // key a release/promote back to the old row again once this attempt
+    // takes over. Release it now, before this row's own reservation is
+    // taken, so it stops accumulating as a permanently orphaned reservation
+    // (invisible to reconcileStrandedSends, which only scans review_requests
+    // rows still 'sending' — this one is 'failed'). Best-effort: a failure
+    // here must not block the retry it is only cleaning up after.
+    if (sequenceId != null) {
+      try {
+        const priorAttempts = await db("review_requests")
+          .where({ sequence_id: sequenceId, sequence_step: sequenceStep })
+          .whereNot("id", request.id)
+          // A row still 'sending' is another attempt's live claim — its
+          // provider request may be in flight — never touched here; only
+          // the stranded-send reconciliation resolves that one.
+          .whereNot("status", "sending")
+          .select("id");
+        for (const prior of priorAttempts) {
+          await releaseUnsentReservation({ requestId: prior.id });
+        }
+      } catch (err) {
+        logger.warn(`[review] releasing a prior cadence step's reservation failed (sequenceId=${sequenceId} step=${sequenceStep} errType=${err?.name || "Error"})`);
+      }
+    }
+
     const reviewUrl = await buildReviewUrl(request, customer.id);
 
     // First name only (codex #3235 r2 P2): a full technician name blows the
@@ -4694,20 +4748,33 @@ const ReviewService = {
     const nextAllowedAt = result.nextAllowedAt || new Date(Date.now() + 15 * 60000).toISOString();
     if (actualChannel === "email") {
       // No provider was called and no worker owns an email retry. Remove the
-      // fresh attempt so it cannot inflate email-touch/sent reporting. The
-      // hold itself must survive a cleanup failure: a REVIEW_HISTORY_UNAVAILABLE
-      // caused by the database makes this delete fail for the same reason,
-      // and a throw here would turn the 503 into a generic 500 (or, for the
-      // satisfaction page, an ordinary error that exposes the bare fallback)
-      // (Codex #4332 P2). A leftover pending row is harmless: it carries no
-      // send and the next attempt re-runs the same guard.
-      try {
-        await db.transaction(async (trx) => {
+      // fresh attempt so it cannot inflate email-touch/sent reporting.
+      // Retried once (codex #4332 P2, r2): the delete is a fresh, healthy-DB
+      // write for REVIEW_ASK_SPACING/REVIEW_SEND_BUSY (both decided without
+      // ever touching a flaky resource), so a retry clears the transient
+      // blip that caused the first attempt to fail almost every time it can
+      // occur at all. Only a genuine REVIEW_HISTORY_UNAVAILABLE outage is
+      // likely to survive the retry too.
+      const cleaned = await stampWithRetry(
+        () => db.transaction(async (trx) => {
           const removed = await trx("review_requests").where({ id: request.id, status: "pending" }).del();
           if (removed) await trx("short_codes").where({ kind: "review", entity_type: "review_requests", entity_id: String(request.id) }).del();
-        });
-      } catch (cleanupErr) {
-        logger.warn(`[review] blocked email ask cleanup failed (requestId=${request.id} code=${result.code} errType=${cleanupErr?.name || "Error"})`);
+        }),
+        `blocked email ask cleanup (requestId=${request.id})`,
+      );
+      if (!cleaned) {
+        // Both delete attempts failed. A left-'pending' row has no retry
+        // owner and no scheduled_for — nothing will ever move it again, so
+        // it would sit forever reading as a live queued ask to the review
+        // queue and, worse, accumulate across every future retry that hits
+        // the same outage. Fall back to the same terminal status every
+        // other unsendable ask in this file resolves to (codex #4332 P2,
+        // r2) so it stops looking active. This is a plain single-row
+        // update, not the delete-plus-cascade above, so it survives
+        // everything but the DB itself being unreachable.
+        await db("review_requests").where({ id: request.id, status: "pending" })
+          .update({ status: "suppressed" })
+          .catch((markErr) => logger.error(`[review] blocked email ask fallback suppression failed (requestId=${request.id}): ${markErr.message}`));
       }
       return { ok: false, blocked: true, channel: "email",
         code: result.code, reason: result.reason, nextAllowedAt, httpStatus: result.httpStatus };

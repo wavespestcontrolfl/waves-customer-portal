@@ -201,14 +201,14 @@ function defaultDb() {
 async function reserveForRequest({ trx, request, to, body, fromPhone, extraMetadata = {}, messageType = 'review', adminUserId = null }) {
   const conn = trx || defaultDb();
   const existing = await conn('sms_log')
-    .where({ status: 'sending' })
+    .where({ status: 'sending', customer_id: request.customer_id, direction: 'outbound' })
     .whereRaw("metadata->>'review_request_id' = ?", [String(request.id)])
     .whereRaw(`metadata->>'${REVIEW_ASK_MARKER}' = 'true'`)
     .first('id', 'created_at');
   if (existing) {
     const ageMs = Date.now() - new Date(existing.created_at).getTime();
     if (ageMs < REVIEW_ASK_RESERVATION_HOLD_MS) {
-      return { id: existing.id, reservedAt: new Date(existing.created_at), requestId: request.id, reused: true };
+      return { id: existing.id, reservedAt: new Date(existing.created_at), requestId: request.id, reused: true, customerId: request.customer_id };
     }
     // codex #4331 P1 (pre-push audit on the seam itself): an unresolved
     // reservation older than its own ask-spacing window is from a PRIOR
@@ -241,7 +241,7 @@ async function reserveForRequest({ trx, request, to, body, fromPhone, extraMetad
       created_at: renewedAt,
       updated_at: renewedAt,
     });
-    return { id: existing.id, reservedAt: renewedAt, requestId: request.id, reused: true, renewed: true };
+    return { id: existing.id, reservedAt: renewedAt, requestId: request.id, reused: true, renewed: true, customerId: request.customer_id };
   }
   const reservedAt = new Date();
   const [reservation] = await conn('sms_log').insert({
@@ -258,7 +258,7 @@ async function reserveForRequest({ trx, request, to, body, fromPhone, extraMetad
     updated_at: reservedAt,
   }).returning('id');
   if (!reservation?.id) throw new Error(`Could not reserve review ask before sending (requestId=${request.id})`);
-  return { id: reservation.id, reservedAt, requestId: request.id, reused: false };
+  return { id: reservation.id, reservedAt, requestId: request.id, reused: false, customerId: request.customer_id };
 }
 
 // Deletes every unresolved review-ask reservation for a request. This is
@@ -268,11 +268,21 @@ async function reserveForRequest({ trx, request, to, body, fromPhone, extraMetad
 // that proved no delivery. Deletes rather than merely marking, matching the
 // pre-existing convention (releaseReviewSmsReservation): the request row
 // itself, not this placeholder, is the durable record.
-async function releaseUnsent({ trx, requestId }) {
+// codex #4333 P2 (GitHub round, "scope reservation lookup to the request
+// customer"): sms_log has single-column indexes on customer_id, direction,
+// message_type and created_at — none on status or the jsonb metadata this
+// lookup filters on. Passing customerId (every caller has it — the
+// request/reservation it's already holding) lets Postgres combine the
+// customer_id and direction indexes via a bitmap scan instead of a full
+// table scan on every send attempt; no new index required. Semantics are
+// unchanged — customerId is an optional narrowing predicate, never the
+// identity (review_request_id + the marker still are).
+async function releaseUnsent({ trx, requestId, customerId }) {
   if (!requestId) return 0;
   const conn = trx || defaultDb();
-  return conn('sms_log')
-    .where({ status: 'sending' })
+  const query = conn('sms_log').where({ status: 'sending', direction: 'outbound' });
+  if (customerId) query.where({ customer_id: customerId });
+  return query
     .whereRaw("metadata->>'review_request_id' = ?", [String(requestId)])
     .whereRaw(`metadata->>'${REVIEW_ASK_MARKER}' = 'true'`)
     .del();
@@ -318,8 +328,9 @@ async function promote({ trx, reservation }) {
   const logger = require('../logger');
   try {
     if (reservation.requestId) {
-      const realEvidence = await conn('sms_log')
-        .where({ direction: 'outbound' })
+      let evidenceQuery = conn('sms_log').where({ direction: 'outbound' });
+      if (reservation.customerId) evidenceQuery = evidenceQuery.where({ customer_id: reservation.customerId });
+      const realEvidence = await evidenceQuery
         .whereIn('status', ['sent', 'delivered'])
         .whereNot('id', reservation.id)
         .whereRaw("metadata->>'review_request_id' = ?", [String(reservation.requestId)])
@@ -353,7 +364,7 @@ async function promote({ trx, reservation }) {
 async function countStaleUnresolved({ trx } = {}) {
   const conn = trx || defaultDb();
   const row = await conn('sms_log')
-    .where({ status: 'sending' })
+    .where({ status: 'sending', direction: 'outbound' })
     .whereRaw(`metadata->>'${REVIEW_ASK_MARKER}' = 'true'`)
     .where('created_at', '<', new Date(Date.now() - REVIEW_ASK_RESERVATION_HOLD_MS))
     .count('* as c')

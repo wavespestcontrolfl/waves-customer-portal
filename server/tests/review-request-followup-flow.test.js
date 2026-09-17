@@ -366,6 +366,145 @@ describe('review request follow-up flow', () => {
     }));
   });
 
+  test('a summary-block release that fails once is retried and the row stays scannable (codex P2, review-ask-legacy-serialization #4333)', async () => {
+    // The authoritative summary handoff refuses BEFORE the provider is ever
+    // contacted (VISIT_SUMMARY_UNCERTAIN) — a definite non-delivery. The
+    // review_requests release update throws once (a transient DB blip);
+    // stampWithRetry must retry it, same as the sibling "definite
+    // non-delivery" branch, rather than letting a lone throw fall into the
+    // outer log-only catch with the row permanently stamped followup_sent=true
+    // for a follow-up that never went out.
+    const summary = require('../services/visit-completion-summary');
+    jest.spyOn(summary, 'visitSummaryUncertainForRecord').mockResolvedValue(false);
+    jest.spyOn(summary, 'reviewSendThroughSummaryHandoff')
+      .mockResolvedValue({ ok: false, code: 'VISIT_SUMMARY_UNCERTAIN', reason: 'awaiting recovery' });
+    const failingUpdate = jest.fn().mockRejectedValueOnce(new Error('connection reset'));
+    const retriedUpdate = jest.fn().mockResolvedValue(1);
+    const reviewRequestQueries = [
+      chain(), // deleted-customer follow-up close-out pre-pass
+      collection([]),
+      collection([
+        {
+          id: 'rr-summary-uncertain',
+          customer_id: 'cust-1',
+          sms_sent_at: '2026-05-30T15:00:00.000Z',
+          status: 'sent',
+          score: null,
+        },
+      ]),
+      resolvesTo([]), // dispatchReviewAsk: deliveredAskRows spacing lookup
+      // The callback re-reads the row it is about to send, then checks the
+      // sibling-followup dedup, then writes the pre-handoff reservation.
+      chain({ first: jest.fn().mockResolvedValue({
+        id: 'rr-summary-uncertain',
+        customer_id: 'cust-1',
+        sms_sent_at: '2026-05-30T15:00:00.000Z',
+        status: 'sent',
+        score: null,
+        service_record_id: 'sr-1',
+      }) }),
+      chain({ first: jest.fn().mockResolvedValue(null) }),
+      chain(), // durable pre-provider reservation
+      chain({ update: failingUpdate }), // stampWithRetry's first attempt — throws
+      chain({ update: retriedUpdate }), // stampWithRetry's retry — succeeds
+    ];
+    const customerQuery = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'cust-1',
+        first_name: 'Jamie',
+        last_name: 'Rios',
+        phone: '+19415550123',
+        city: 'Sarasota',
+        has_left_google_review: false,
+      }),
+    });
+
+    db.mockImplementation((table) => {
+      if (table === 'review_requests') return reviewRequestQueries.shift();
+      if (table === 'customers') return customerQuery;
+      if (table === 'sms_log') return resolvesTo([]);
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    getServiceContact.mockReturnValue({ phone: '+19415550123', name: 'Jamie' });
+    getServiceContactSmsRecipient.mockReturnValue({ phone: '+19415550123', name: 'Jamie' });
+    renderSmsTemplate.mockResolvedValue('Please review us');
+
+    const result = await ReviewService.processFollowups();
+
+    // Retried successfully — not counted as an unrecorded loss, and the row
+    // is released back to followup_sent=false so it is scannable again.
+    expect(result).toEqual({ sent: 0, suppressed: 0, internalFollowups: 0 });
+    expect(failingUpdate).toHaveBeenCalledTimes(1);
+    expect(retriedUpdate).toHaveBeenCalledTimes(1);
+    expect(retriedUpdate).toHaveBeenCalledWith({
+      followup_sent: false, followup_sent_at: null, followup_reserved_at: null,
+    });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a summary-block release that fails twice is counted, not silently dropped', async () => {
+    const summary = require('../services/visit-completion-summary');
+    jest.spyOn(summary, 'visitSummaryUncertainForRecord').mockResolvedValue(false);
+    jest.spyOn(summary, 'reviewSendThroughSummaryHandoff')
+      .mockResolvedValue({ ok: false, code: 'VISIT_SUMMARY_STATE_UNAVAILABLE', reason: 'awaiting recovery' });
+    const firstAttempt = jest.fn().mockRejectedValue(new Error('connection reset'));
+    const secondAttempt = jest.fn().mockRejectedValue(new Error('connection reset again'));
+    const reviewRequestQueries = [
+      chain(),
+      collection([]),
+      collection([
+        {
+          id: 'rr-summary-unavailable',
+          customer_id: 'cust-2',
+          sms_sent_at: '2026-05-30T15:00:00.000Z',
+          status: 'sent',
+          score: null,
+        },
+      ]),
+      resolvesTo([]),
+      chain({ first: jest.fn().mockResolvedValue({
+        id: 'rr-summary-unavailable',
+        customer_id: 'cust-2',
+        sms_sent_at: '2026-05-30T15:00:00.000Z',
+        status: 'sent',
+        score: null,
+        service_record_id: 'sr-2',
+      }) }),
+      chain({ first: jest.fn().mockResolvedValue(null) }),
+      chain(),
+      chain({ update: firstAttempt }),
+      chain({ update: secondAttempt }),
+    ];
+    const customerQuery = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'cust-2',
+        first_name: 'Robin',
+        last_name: 'Doe',
+        phone: '+19415550199',
+        city: 'Sarasota',
+        has_left_google_review: false,
+      }),
+    });
+
+    db.mockImplementation((table) => {
+      if (table === 'review_requests') return reviewRequestQueries.shift();
+      if (table === 'customers') return customerQuery;
+      if (table === 'sms_log') return resolvesTo([]);
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    getServiceContact.mockReturnValue({ phone: '+19415550199', name: 'Robin' });
+    getServiceContactSmsRecipient.mockReturnValue({ phone: '+19415550199', name: 'Robin' });
+    renderSmsTemplate.mockResolvedValue('Please review us');
+
+    const result = await ReviewService.processFollowups();
+
+    // Both attempts failed — surfaced as an unrecorded release rather than
+    // silently falling into the outer log-only catch.
+    expect(result).toEqual({ sent: 0, suppressed: 0, internalFollowups: 0, unrecordedReleases: 1 });
+    expect(firstAttempt).toHaveBeenCalledTimes(1);
+    expect(secondAttempt).toHaveBeenCalledTimes(1);
+  });
+
   test('an uncertain follow-up handoff THROWN (not returned) is also held, not left eligible (codex #4338 P1, round 2)', async () => {
     // The old catch only logged and returned — followup_sent stayed unset,
     // so the NEXT run's candidate query re-selected this row and could send
