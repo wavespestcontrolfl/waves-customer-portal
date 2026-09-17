@@ -386,6 +386,15 @@ describe('email reply amountless billing policy', () => {
     permitted.forEach((text) => expect(verdict(text)).toEqual({ ok: true, violations: [] }));
   });
 
+  test.each(['We bill separately each visit', 'We separately bill each visit', 'We bill you separately each visit', 'We bill separately you each visit', 'We separately invoice every client each visit', 'We charge individually routine visits'])('screens recurring separate-billing adverb placements: %s', (predicate) => {
+    rejected(`${predicate}.`);
+    expect(verdict(`${predicate} a fee per application.`)).toEqual({ ok: true, violations: [] });
+    rejected(`${predicate} a fee, not per application.`);
+  });
+  test('preserves singular separate pay-a-visit and application billing', () => {
+    ['We separately pay you a visit.', 'We pay you separately a courtesy visit.', 'We bill separately per application.', 'We separately bill you per application.'].forEach((text) => expect(verdict(text)).toEqual({ ok: true, violations: [] }));
+  });
+
   test.each([
     ['type', { text: {}, commercialProposal: true }, 'copy_type'],
     ['size', { text: 'x'.repeat(8193), commercialProposal: true }, 'copy_size'],

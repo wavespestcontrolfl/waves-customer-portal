@@ -195,9 +195,11 @@ function hasActiveSeparateBilling(tokens, at) {
   else if (isBillingVerb(tokens[next])) {
     next = skipRecipient(tokens, next + 1);
     if (!isSeparate(tokens[next])) return false;
-    next += 1;
+    next = skipRecipient(tokens, next + 1);
   } else return false;
-  return isKind(tokens[next], 'unit');
+  return isKind(tokens[next], 'unit')
+    || (['eachVisit', 'visits'].includes(tokens[next]?.kind)
+      && hasBillingObjectPredicate(tokens, next, true));
 }
 
 function hasNominalBillingPredicate(tokens, at) {
