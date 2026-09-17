@@ -334,6 +334,21 @@ describe('email reply amountless billing policy', () => {
   });
 
   test.each([
+    ['Each visit is charged a fee', 'Every visit is billed an invoice', 'Each visit will not be charged a fee', 'Each visit is separately billed a fee', 'Each visit can separately be billed a fee', 'Each visit is billed separately a fee', 'Each visit is billed on its own a fee'],
+    ['Each visit incurs a fee', 'Every visit has a separate charge', 'Each visit generates its own invoice', 'Each visit does incur a fee', 'Each visit has not incurred a fee', 'Our visits may generate their own invoice'],
+    ['We charge each visit a fee', 'We bill every visit a $98 fee'],
+  ])('checks application objects across every visit-subject predicate family: %j', (...predicates) => {
+    for (const predicate of predicates) {
+      expect(verdict(`${predicate} per application.`)).toEqual({ ok: true, violations: [] });
+      rejected(`${predicate}.`);
+      rejected(`${predicate} per visit.`);
+    }
+  });
+  test('does not let application fee objects shield independent visit billing', () => {
+    rejected('Each visit incurs a fee per application; every visit is billed separately.');
+  });
+
+  test.each([
     ['type', { text: {}, commercialProposal: true }, 'copy_type'],
     ['size', { text: 'x'.repeat(8193), commercialProposal: true }, 'copy_size'],
     ['tokens', { text: 'x '.repeat(513), commercialProposal: true }, 'copy_tokens'],

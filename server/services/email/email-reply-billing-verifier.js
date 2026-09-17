@@ -65,6 +65,7 @@ function hasBillingUnit(tokens, at) {
   next = afterSeparators;
   if (isWord(tokens[next], 'not', 'never')) next += 1;
   if (isWord(tokens[at], 'rate') && !isKind(tokens[next], 'unit')) return false;
+  if (isVisit(tokens[next]) && !hasBillingObjectPredicate(tokens, next, true)) return false;
   return hasSeparator ? isKind(tokens[next], 'unit') : isUnit(tokens[next]);
 }
 
@@ -76,6 +77,7 @@ function hasApplicationComplement(tokens, at) {
   if (isWord(tokens[next], 'not', 'never')) next += 1;
   if (isKind(tokens[next], 'be')) next += 1;
   if (isWord(tokens[next], 'not', 'never')) next += 1;
+  if (isSeparate(tokens[next])) next += 1;
   if (isWord(tokens[next], 'apply', 'occur')) next += 1;
   next = skipSeparators(tokens, next);
   if (isWord(tokens[next], 'not', 'never')) next += 1;
@@ -85,11 +87,15 @@ function hasApplicationComplement(tokens, at) {
   return isKind(tokens[next], 'application') && /^(?:-?per\b|for\b|\/)/.test(tokens[next].text);
 }
 
-function hasFrontedBillingPredicate(tokens, at, passive) {
+function hasBillingObjectPredicate(tokens, at, passive) {
   if (hasApplicationComplement(tokens, at)) return false;
   let object = skipRecipient(tokens, at + 1);
   const recipient = object > at + 1;
+  if (isSeparate(tokens[object])) object += 1;
+  if (isWord(tokens[object], 'on') && isWord(tokens[object + 1], 'its', 'their')
+    && isWord(tokens[object + 2], 'own')) object += 3;
   if (isDeterminer(tokens[object])) object += 1;
+  if (isWord(tokens[object], 'own')) object += 1;
   if (isWord(tokens[object], 'separate', 'individual')) object += 1;
   const amount = isKind(tokens[object], 'money') || isKind(tokens[object], 'number');
   if (amount) object += 1;
@@ -112,7 +118,7 @@ function hasInverseBillingUnit(tokens, at) {
     const passive = isKind(tokens[next], 'be');
     if (passive) next += 1;
     if (isWord(tokens[next], 'not', 'never')) next += 1;
-    if (isBillingVerb(tokens[next])) return hasFrontedBillingPredicate(tokens, next, passive);
+    if (isBillingVerb(tokens[next])) return hasBillingObjectPredicate(tokens, next, passive);
   }
   if (isDeterminer(tokens[next])) next += 1;
   if (isWord(tokens[next], 'separate', 'individual')) next += 1;
@@ -133,14 +139,15 @@ function hasSeparatePredicate(tokens, at) {
   if (!isKind(tokens[next], 'be')) return false;
   next += 1;
   if (isWord(tokens[next], 'not', 'never')) next += 1;
-  if (separateBeforeCopula && isBillingVerb(tokens[next])) return true;
-  if (isSeparate(tokens[next]) && isBillingVerb(tokens[next + 1])) return true;
+  if (separateBeforeCopula && isBillingVerb(tokens[next])) return hasBillingObjectPredicate(tokens, next, true);
+  if (isSeparate(tokens[next]) && isBillingVerb(tokens[next + 1])) return hasBillingObjectPredicate(tokens, next + 1, true);
   if (!isBillingVerb(tokens[next])) return false;
+  if (!hasBillingObjectPredicate(tokens, next, true)) return false;
   let object = next + 1;
   if (isWord(tokens[object], 'a', 'an')) {
     object += 1;
     if (isWord(tokens[object], 'separate', 'individual')) object += 1;
-    return isChargeNoun(tokens[object]);
+    return isChargeNoun(tokens[object]) && !hasApplicationComplement(tokens, object);
   }
   return isSeparate(tokens[next + 1])
     || (isWord(tokens[next + 1], 'on')
@@ -178,7 +185,7 @@ function hasNominalBillingPredicate(tokens, at) {
     if (isWord(tokens[next], 'separate', 'individual')) next += 1;
     else if (action !== 'incur') return false;
   } else return false;
-  return isChargeNoun(tokens[next]);
+  return isChargeNoun(tokens[next]) && !hasApplicationComplement(tokens, next);
 }
 
 function hasBillingClaim(tokens) {

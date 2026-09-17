@@ -61,6 +61,8 @@ Noun and verb predicates share the bounded application-complement check,
 including copulas, connectors, punctuation, amounts, and modifier fee heads.
 Recipient, passive, and amount shortcuts apply only after the complete bounded
 object has been checked for an attached application complement.
+Visit-subject passive/separate predicates, nominal charge heads, and direct
+bare-visit objects use the same guard; explicit per-visit units still reject.
 Reminder/status modifiers retain a following billing head. Feedback also
 permits experience, appointment, and pronoun objects; singular pay-a-visit
 idioms permit the scanner's determiner and modifier variants.
