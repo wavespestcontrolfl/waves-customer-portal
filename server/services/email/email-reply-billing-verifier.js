@@ -219,7 +219,7 @@ function hasNominalBillingPredicate(tokens, at) {
   } else if (isWord(tokens[next], 'a', 'an')) {
     next += 1;
     if (isWord(tokens[next], 'separate', 'individual')) next += 1;
-    else if (action !== 'incur') return false;
+    else if (action !== 'incur' && !['eachVisit', 'visits'].includes(tokens[at].kind)) return false;
   } else return false;
   return isChargeNoun(tokens[next]) && !hasApplicationComplement(tokens, next);
 }

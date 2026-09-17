@@ -73,6 +73,8 @@ remain valid. An application unit must end or continue through finite pricing
 joins; directly following instruction/direction/tax noun phrases cannot exempt.
 Active separate billing also recognizes recurring each/every/plural visit
 objects and bounded recipient placement, preserving singular pay-visit idioms.
+Recurring have/generate predicates also accept unmodified charge nouns;
+singular references and affirmative application complements retain their policy.
 Reminder/status modifiers retain a following billing head. Feedback also
 permits experience, appointment, and pronoun objects; singular pay-a-visit
 idioms permit the scanner's determiner and modifier variants.

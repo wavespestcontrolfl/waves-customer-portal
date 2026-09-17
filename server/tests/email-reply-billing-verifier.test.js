@@ -395,6 +395,17 @@ describe('email reply amountless billing policy', () => {
     ['We separately pay you a visit.', 'We pay you separately a courtesy visit.', 'We bill separately per application.', 'We separately bill you per application.'].forEach((text) => expect(verdict(text)).toEqual({ ok: true, violations: [] }));
   });
 
+  test.each(['Each visit', 'All visits'])('screens unmodified recurring have/generate charge objects: %s', (subject) => {
+    for (const predicate of ['has a fee', 'generates an invoice', 'may have a charge', 'does have a fee', 'has generated an invoice', 'may generate its own invoice', 'has not had a fee', 'does not have a fee']) {
+      rejected(`${subject} ${predicate}.`);
+      expect(verdict(`${subject} ${predicate} per application.`)).toEqual({ ok: true, violations: [] });
+    }
+  });
+  test('preserves singular and noncharge have/generate objects', () => {
+    ['Your visit has a fee.', 'This visit generates an invoice.', 'Each visit has a reminder.', 'Every visit generates a report.'].forEach((text) => expect(verdict(text)).toEqual({ ok: true, violations: [] }));
+    rejected('Each visit has a fee per application; every visit generates an invoice.');
+  });
+
   test.each([
     ['type', { text: {}, commercialProposal: true }, 'copy_type'],
     ['size', { text: 'x'.repeat(8193), commercialProposal: true }, 'copy_size'],
