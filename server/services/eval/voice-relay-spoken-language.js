@@ -127,7 +127,20 @@ function clauseOf(text, at) {
   return text.slice(start, end);
 }
 
+// Shared predicates retain the original spoken-check grammar. Source-evidence
+// consumers supply their own source-backed clause bounds.
+const CERTAINTY_IDIOM_RE = /\b(?:without (?:a |any )?|no |beyond )doubt\b/gi;
+const NEGATION_RE = /\b(?:not(?!\s+only\b)|never|cannot|can[\x27\u2019]?t|\w+n[\x27\u2019]t|whether|if|nothing|nobody|no[- ]one|anything|no|until|unless|before|yet)\b/i;
+/** Does `clause` carry a negation or conditional marker anywhere in it? */
+function clauseIsNegated(clause) {
+  // These reassurance prefixes do not deny the claim that follows them.
+  return NEGATION_RE.test(clause.replace(CERTAINTY_IDIOM_RE, '').replace(/^\s*(?:no worries|no problem|do not worry|don['’]t worry)\b[\s,:—–]*/i, ''));
+}
+/** Does `clause` carry an epistemic hedge or refusal? */
+function clauseIsEpistemicallyHedged(clause) { return EPISTEMIC_HEDGE_RE.test(clause); }
+
 module.exports = {
+  CERTAINTY_IDIOM_RE, EPISTEMIC_HEDGE_RE, clauseIsNegated, clauseIsEpistemicallyHedged,
   SUBJECT,
   REFUND_PAYMENT_ACTION_RE,
   CLAUSE_FINITE_PREDICATE_RE,

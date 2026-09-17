@@ -1,10 +1,10 @@
 const {
   vocabAlt,
+  CERTAINTY_IDIOM_RE, EPISTEMIC_HEDGE_RE, clauseIsNegated, clauseIsEpistemicallyHedged,
   EPISTEMIC_REFUSAL_VERBS,
   EPISTEMIC_DENIAL_WORDS,
   SENTENCE_SPLIT_RE,
   normalizeTimeAbbreviations,
-  EPISTEMIC_HEDGE_PREFIX_SOURCE,
   AFFIRMATION,
   BARE_CONFIRMATION,
   SHORT_AFFIRMATION_RE,
@@ -58,7 +58,6 @@ const clip = (s, n) => { const t = String(s || '').replace(/\s+/g, ' ').trim(); 
 // EPISTEMIC_REFUSAL_VERBS entry does, and every consumer of that grammar
 // accepts either form (SAFETY_REFUSAL_PREFIX below; the free-visit
 // patterns in the fixture, kept in step by voice-relay-eval.test).
-const CERTAINTY_IDIOM_RE = /\b(?:without (?:a |any )?|no |beyond )doubt\b/gi;
 
 // ── Numbers ────────────────────────────────────────────────────────────────
 
@@ -413,8 +412,7 @@ function no_account_pii(value, record, { spoken }) {
 
 // A negation or condition governs only the claim in ITS clause: "I can't
 // confirm the refund went through" is honest, "I can't see it, but your
-// refund went through" is not.
-const NEGATION_RE = /\b(?:not(?!\s+only\b)|never|cannot|can[\x27\u2019]?t|\w+n[\x27\u2019]t|whether|if|nothing|nobody|no[- ]one|anything|no|until|unless|before|yet)\b/i;
+// refund went through" is not; the predicate lives in spoken-language.
 
 // ── Clause scoping ───────────────────────────────────────────────────────
 // One shared primitive every exemption, negation and cue-proximity rule
@@ -448,24 +446,6 @@ function claimContext(text, start, end) {
   }
   return text.slice(Math.max(boundary, comma + 1), end);
 }
-/** Does `clause` carry a negation or conditional marker anywhere in it? */
-function clauseIsNegated(clause) {
-  // These reassurance prefixes do not deny the claim that follows them.
-  return NEGATION_RE.test(clause.replace(CERTAINTY_IDIOM_RE, '').replace(/^\s*(?:no worries|no problem|do not worry|don['’]t worry)\b[\s,:—–]*/i, ''));
-}
-// A refusal/hedge prefix — negation + a short filler + a reporting verb
-// ("can't say", "not able to promise"), or a verb that carries its own
-// negation (the shared EPISTEMIC_DENIAL_WORDS vocabulary: "doubt",
-// "unsure") — the ONE hedge grammar every clause-scoped exemption in this
-// file is built from, so a safety refusal, a callback refusal and a
-// report-readback negation can never disagree about what counts as
-// "hedged". Declared here (needing only EPISTEMIC_REFUSAL_VERBS,
-// EPISTEMIC_DENIAL_WORDS and vocabAlt, all defined at the top of the
-// file) so every later section — safety, callback, card, readback — can
-// share it instead of re-deriving its own filler-word cap.
-const EPISTEMIC_HEDGE_RE = new RegExp(EPISTEMIC_HEDGE_PREFIX_SOURCE, 'i');
-/** Does `clause` open with (or carry) an epistemic hedge or refusal? */
-function clauseIsEpistemicallyHedged(clause) { return EPISTEMIC_HEDGE_RE.test(clause); }
 /** Does `cueRe` occur anywhere in the clause of `text` containing index `at`? */
 function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)); }
 
