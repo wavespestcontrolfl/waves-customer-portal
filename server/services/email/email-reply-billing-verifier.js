@@ -25,14 +25,15 @@ function skipSeparators(tokens, from) {
 
 function skipRecipient(tokens, from) {
   if (isRecipient(tokens[from])) return from + 1;
-  if (isWord(tokens[from], 'your', 'our', 'their', 'his', 'her', 'my', 'the')
-    && isWord(tokens[from + 1], 'account')) return from + 2;
+  if (isWord(tokens[from], 'a', 'an', 'one', 'the', 'your', 'our', 'my', 'their', 'his', 'her', 'its', 'this', 'that', 'these', 'those')
+    && isWord(tokens[from + 1], 'account', 'customer', 'customers', 'client', 'clients')) return from + 2;
   return from;
 }
 
 function isFeedbackRate(tokens, at) {
   return isWord(tokens[at], 'rate')
-    && (isWord(tokens[at - 1], 'please') || isKind(tokens[at - 1], 'modal'));
+    && (isWord(tokens[at - 1], 'please') || isKind(tokens[at - 1], 'modal')
+      || isWord(tokens[at + 1], 'how'));
 }
 
 function hasBillingUnit(tokens, at) {
@@ -46,6 +47,7 @@ function hasBillingUnit(tokens, at) {
     next = afterRecipient;
   }
   if (isWord(tokens[next], 'frequency')) next += 1;
+  if (isKind(tokens[next], 'modal')) next += 1;
   if (isKind(tokens[next], 'be') || isWord(tokens[next], 'occur', 'apply')) next += 1;
   next = skipSeparators(tokens, next);
   if (isWord(tokens[next], 'not', 'never')) next += 1;
@@ -56,7 +58,7 @@ function hasBillingUnit(tokens, at) {
 function hasInverseBillingUnit(tokens, at) {
   if (!isKind(tokens[at], 'unit')) return false;
   const next = skipSeparators(tokens, at + 1);
-  return isBillingNoun(tokens[next]);
+  return isBillingNoun(tokens[next]) && !isFeedbackRate(tokens, next);
 }
 
 function hasSeparatePredicate(tokens, at) {
@@ -70,7 +72,10 @@ function hasSeparatePredicate(tokens, at) {
   return isSeparate(tokens[next + 1])
     || (isWord(tokens[next + 1], 'on')
       && isWord(tokens[next + 2], 'its', 'their')
-      && isWord(tokens[next + 3], 'own'));
+      && isWord(tokens[next + 3], 'own'))
+    || (isWord(tokens[next + 1], 'a', 'an')
+      && isWord(tokens[next + 2], 'separate', 'individual')
+      && isChargeNoun(tokens[next + 3]));
 }
 
 function hasActiveSeparateBilling(tokens, at) {
@@ -92,7 +97,7 @@ function hasNominalBillingPredicate(tokens, at) {
   if (!isWord(tokens[next], 'has', 'incur', 'generate')) return false;
   next += 1;
   if (isWord(tokens[next], 'its', 'their')) {
-    if (action !== 'generate' || !isWord(tokens[next + 1], 'own')) return false;
+    if (!['has', 'generate'].includes(action) || !isWord(tokens[next + 1], 'own')) return false;
     next += 2;
   } else if (isWord(tokens[next], 'a', 'an')) {
     next += 1;

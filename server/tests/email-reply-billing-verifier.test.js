@@ -78,6 +78,35 @@ describe('email reply amountless billing policy', () => {
   });
 
   test.each([
+    'Billing may apply per visit.', 'Charges should occur per visit.',
+    'Payments will apply per routine visit.', 'Billing might occur for each visit.',
+    'Each visit has its own charge.', 'Our visits have their own invoice.',
+    'Each visit may have its own fee.', 'Visits had their own charge.',
+    'We bill the customer per visit.', 'We invoice the client for every visit.',
+    'We bill our customers per visit.', 'We charge a client per routine visit.',
+    'We separately bill those clients for each visit.', 'We invoice this customer per visit.',
+    'For each visit, rate: per visit.', 'Per visit, rate is per visit.',
+    'A per-visit rate applies.',
+    'Each visit is charged a separate fee.', 'Every visit is billed an individual charge.',
+    'Our visits may be invoiced a separate fee.', 'Each visit has been billed an individual invoice.',
+  ])('rejects bounded reviewed billing relationships: %s', rejected);
+
+  test.each([
+    'Billing may apply per application.', 'Charges should occur after your visit.',
+    'Payments will apply to your account before each visit.',
+    'Each visit has its own reminder.', 'Our visits may have their own report.',
+    'Each visit has its reminder.',
+    'We bill the customer after the visit.', 'We invoice our clients per application.',
+    'We bill a customer the account balance before each visit.',
+    'For each visit, rate how we did.', 'Per visit, rate how we did.',
+    'For each visit, please rate how we did.', 'For each visit, you can rate how we did.',
+    'Each visit is charged a separate reminder.', 'Every visit is billed an individual report.',
+    'Each visit can be scheduled a separate reminder.',
+  ])('preserves reviewed reminders, feedback, and application billing: %s', (text) => {
+    expect(verdict(text)).toEqual({ ok: true, violations: [] });
+  });
+
+  test.each([
     'Billing is' + String.fromCharCode(92, 10) + 'per visit',
     'Billing is per&#32;visit', '`Billing` is per visit',
     '**Our *fees* are per visit**', 'Billing: per visit',
