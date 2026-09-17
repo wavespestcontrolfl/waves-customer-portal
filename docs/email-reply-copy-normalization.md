@@ -18,6 +18,9 @@ The helper extracts the lexical normalization from preserved pricing head
 `4f944d3868`: entities, compatibility typography, dashes/apostrophes, Markdown
 escapes/hard breaks, whitespace, and paired code/emphasis. Unmatched delimiters
 remain. It is not a complete CommonMark/HTML renderer or a compliance verdict.
+Punctuation dashes U+2012–U+2015 become spaced ASCII separators; lexical
+hyphens U+2010/U+2011 and the mathematical minus retain joined ASCII folding.
+The whitespace-token bound is checked again after punctuation spacing.
 HTML rendering, presentation completeness, factual grounding, and authorization
 to draft/send remain separate checks. The existing content/MDX normalizer has
 a different rendering contract and is not used as an email parser.

@@ -123,6 +123,31 @@ beforeEach(() => {
   mockActivePlanCustomer.mockReset().mockResolvedValue(false);
 });
 
+test('annual availability follows both prerequisite gates at request time', async () => {
+  const keys = ['GATE_TERMITE_ANNUAL_PLAN', 'GATE_CANCEL_FLOW_V2'];
+  const prior = keys.map((key) => process.env[key]);
+  mockPricingConfigRow = { config_key: 'termite_annual_plan', data: { annual_base: 249 } };
+  try {
+    await withServer(async (baseUrl) => {
+      for (const [annual, cancel, available] of [
+        ['false', 'false', false], ['true', 'false', false],
+        ['false', 'true', false], ['true', 'true', true],
+      ]) {
+        process.env[keys[0]] = annual;
+        process.env[keys[1]] = cancel;
+        const response = await call(baseUrl, 'GET', '/termite_annual_plan', { role: 'admin' });
+        expect(response.status).toBe(200);
+        expect(response.json.featureAvailable).toBe(available);
+      }
+    });
+  } finally {
+    keys.forEach((key, index) => {
+      if (prior[index] === undefined) delete process.env[key];
+      else process.env[key] = prior[index];
+    });
+  }
+});
+
 describe.each(['/estimate', '/quick-quote'])('%s customer eligibility', (path) => {
   const input = { homeSqFt: 2000, lotSqFt: 8000, services: { oneTimePest: true } };
   test('verified active customers retain the one-time discount; posted identity and replay stamps are ignored', async () => {
