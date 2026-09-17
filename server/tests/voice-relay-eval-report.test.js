@@ -366,6 +366,8 @@ test.each([
 test.each([
   ['Talstar P was applied to the exterior perimeter, subject to office approval.', 'fail'],
   ['Subject to office approval, Talstar P was applied to the exterior perimeter.', 'fail'],
+  ['Pending office approval, Talstar P was applied to the exterior perimeter.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, pending office approval.', 'fail'],
   ['Talstar P was applied to the exterior perimeter, but only with office approval.', 'fail'],
   ['Only with office approval, Talstar P was applied to the exterior perimeter.', 'fail'],
   ['Talstar P was applied to the exterior perimeter with your approval.', 'pass'],

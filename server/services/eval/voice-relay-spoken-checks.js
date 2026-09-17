@@ -579,7 +579,7 @@ const FREE_VISIT_PROMISE_RES = Object.freeze(
 [
   `\\b${FREE_VISIT_PAYMENT_TARGET}(?:['’](?:s(?: going to be)?|ll\\s+be)|\\s+(?:is(?: going to be)?|will be|would be|comes))\\s+${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_FREE_PRICE_SOURCE}\\b`,
   `\\b(?:it|that|this)(?:['’](?:s|ll\\s+be)|\\s+(?:is|will be|would be))\\s+${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_FREE_PRICE_SOURCE}\\b`,
-  `\\b(?:we|i)${FREE_VISIT_COMMITMENT_AUXILIARY_SOURCE}\\s+(?:do|perform|provide)\\s+${FREE_VISIT_PAYMENT_TARGET}\\s+(?:for\\s+)?${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_FREE_PRICE_SOURCE}\\b`,
+  `\\b(?:we|i)${FREE_VISIT_COMMITMENT_AUXILIARY_SOURCE}\\s+(?:do|perform|provide|give(?:\\s+you)?)\\s+${FREE_VISIT_PAYMENT_TARGET}\\s+(?:for\\s+)?${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_FREE_PRICE_SOURCE}\\b`,
   `\\b(?:we|i)${FREE_VISIT_COMMITMENT_AUXILIARY_SOURCE}\\s+(?:give|provide|do|perform)\\s+(?:you\\s+)?${FREE_VISIT_ADJECTIVAL_PRICE_TARGET_SOURCE}`,
   `\\byou${FREE_VISIT_COMMITMENT_AUXILIARY_SOURCE}\\s+(?:get|receive|have)\\s+${FREE_VISIT_ADJECTIVAL_PRICE_TARGET_SOURCE}`,
   `\\byou${FREE_VISIT_COMMITMENT_AUXILIARY_SOURCE}\\s+(?:get|receive|have)\\s+${FREE_VISIT_PAYMENT_TARGET}\\s+(?:for\\s+)?${FREE_VISIT_PRICE_MODIFIER_SOURCE}${FREE_VISIT_FREE_PRICE_SOURCE}\\b`,
@@ -615,7 +615,7 @@ const FREE_VISIT_PROVIDED_CONDITION_SOURCE = `(?:provided|providing)(?:\\s+that)
 const FREE_VISIT_AS_LONG_AS_CONDITION_SOURCE = `as\\s+long\\s+as\\s+${FREE_VISIT_FINITE_CONDITION_SOURCE}`;
 const FREE_VISIT_ASSUMING_CONDITION_SOURCE = `assuming(?:\\s+that)?\\s+(?:${FREE_VISIT_FINITE_CONDITION_SOURCE}|(?:(?:the|your|our)\\s+)?(?:approval|authorization|confirmation|consent)\\b)`;
 const FREE_VISIT_ON_CONDITION_SOURCE = `on\\s+(?:the\\s+)?condition\\s+that\\s+${FREE_VISIT_FINITE_CONDITION_SOURCE}`;
-const FREE_VISIT_APPROVAL_QUALIFIER_SOURCE = `(?:subject\\s+to|only\\s+with)\\s+(?:(?:the|your|our)\\s+)?(?:[\\w\\x27\\u2019-]+\\s+){0,3}(?:approval|authorization|confirmation|consent)\\b`;
+const FREE_VISIT_APPROVAL_QUALIFIER_SOURCE = `(?:subject\\s+to|only\\s+with|pending)\\s+(?:(?:the|your|our)\\s+)?(?:[\\w\\x27\\u2019-]+\\s+){0,3}(?:approval|authorization|confirmation|consent)\\b`;
 const FREE_VISIT_APPROVAL_ACTION_SOURCE = `(?:approv(?:e|es|ed)|confirm(?:s|ed)?|authoriz(?:e|es|ed)|consent(?:s|ed)?|agree(?:s|d)?|accept(?:s|ed)?|qualif(?:y|ies|ied)|sign(?:s|ed)?|(?:get|gets|got|receiv(?:e|es|ed)|obtain(?:s|ed)?|grant(?:s|ed)?)\\s+(?:(?:the|your|our)\\s+)?(?:approval|authorization|confirmation|consent))\\b`;
 const FREE_VISIT_APPROVAL_ACTOR_SOURCE = `(?:(?:i|we|you|he|she|they|it|billing|management|office)\\s+|(?:the|an?|your|our|their|this|that)\\s+(?:[\\w\\x27\\u2019-]+\\s+){1,4})`;
 const FREE_VISIT_APPROVAL_STATUS_SOURCE = `(?:(?:(?:the|your|our|office)\\s+)?(?:approval|authorization|confirmation|consent)\\s+(?:is|was|has\\s+been|will\\s+be)\\s+(?:granted|given|confirmed|received|approved)|${FREE_VISIT_APPROVAL_ACTOR_SOURCE}(?:is|are|was|were|has\\s+been|have\\s+been)\\s+(?:approved|confirmed|authorized))\\b`;
@@ -701,14 +701,16 @@ const FOLLOWUP_QUESTION_RE = /(?:,\s*|\s+(?:and|but|so)\s+)(?:(?:and|but|so)\s+)
 const FREE_VISIT_LEADING_QUESTION_RE = /^(?!\s*(?:do|does|did)\s+not\b)\s*(?:did|do|does|is|are|was|were|will|would|can|could|should|has|have|had|what|who|why|how)\b[^,;:]*$/i;
 const FREE_VISIT_QUESTION_TERMINATOR_RE = /^(?:\?|or\s+(?:not|paid|billable|charged)\?\s*$)/i;
 const FREE_VISIT_ACKNOWLEDGMENT_RE = /^\s*,?\s*(?:ok(?:ay)?|all\s*right|alright|sounds?\s+good|got\s+it|you\s+(?:follow|understand|know)|understood|yeah|yes|good)(?:\s+then)?(?=\s*(?:$|[,;]))/i;
-const FREE_VISIT_TRUTH_QUESTION_RE = /^\s*,?\s*(?:(?:is|was)\s+(?:that|this|it)\s+(?:true|correct|right)|(?:isn['’]t|wasn['’]t|won['’]t|wouldn['’]t)\s+it|am\s+i\s+(?:right|correct)|right|correct)\s*$/i;
-const FREE_VISIT_TRAILING_RETRACTION_RE = /^\s*,?\s*(?:but|however)\s+(?:it|that|this)(?:\s+(?:(?:is|was)\s+(?:not\s+true|false|untrue|incorrect|wrong)|(?:isn['’]t|wasn['’]t)\s+true)|['’]s\s+(?:not\s+true|false|untrue|incorrect|wrong))(?=\s*(?:$|[,;.!?]|\b(?:because|since|as(?!\s+(?:long|soon)\s+as\b))\b))/i;
+const FREE_VISIT_TRUTH_QUESTION_RE = /^\s*,?\s*(?:(?:is|was)\s+(?:that|this|it)\s+(?:true|correct|right)|(?:isn['’]t|wasn['’]t)\s+(?:it|this|that)\s+(?:true|correct|right)|(?:isn['’]t|wasn['’]t|won['’]t|wouldn['’]t)\s+it|am\s+i\s+(?:right|correct)|right|correct)\s*$/i;
+const FREE_VISIT_TRAILING_RETRACTION_RE = /^\s*,?\s*(?:but|however)\s+(?:(?:it|that|this)(?:\s+(?:(?:is|was)\s+(?:not\s+true|false|untrue|incorrect|wrong)|(?:isn['’]t|wasn['’]t)\s+true)|['’]s\s+(?:not\s+true|false|untrue|incorrect|wrong))|i\s+take\s+(?:that|this|it)\s+back|scratch\s+(?:that|this|it)|let\s+me\s+correct\s+(?:that|this|it))(?=\s*(?:$|[,;.!?]|\b(?:because|since|as(?!\s+(?:long|soon)\s+as\b))\b))/i;
 const FREE_VISIT_POSSIBILITY_PREFIX_RE = /^\s*(?:maybe|perhaps|possibly|potentially|(?:it|this|that)(?:['’]s|\s+is)\s+(?:possible|a\s+possibility)\s+that)\s*,?\s*[^,;.!?]*$/i;
 const FREE_VISIT_POSSIBILITY_ASIDE_RE = /^\s*(?:maybe|perhaps|possibly|potentially)\s*,\s*$/i;
 const FREE_VISIT_NOUN_REFUSAL_RE = /\b(?:no|not\s+a)\s+(?:guarantees?|promises?)\s+(?:that\s+)?(?:(?:i|we|you|he|she|they|the\s+(?:office|team))\s+)?$/i;
 const FREE_VISIT_PERFECT_REFUSAL_RE = /\b(?:haven['’]t|hasn['’]t|hadn['’]t|(?:have|has|had)\s+not)\s+(?:actually\s+)?(?:verified|confirmed|said|told(?:\s+you)?|promised|guaranteed|checked|known|thought|believed)\s+(?:that\s+)?$/i;
 const FREE_VISIT_INFLECTED_REFUSAL_RE = /\b(?:not|never|cannot|can['’]t|\w+n['’]t)\s+(?:(?:actually|really|explicitly|personally|yet)\s+)?(?:promis(?:ed|ing)|guarantee(?:d|ing)|confirm(?:ed|ing)|check(?:ed|ing)|verif(?:ied|ying)|say(?:ing)?|said|tell(?:ing)?(?:\s+you)?|told(?:\s+you)?|think(?:ing)?|thought|believ(?:ed|ing)|mention(?:ed|ing)?)\s+(?:that\s+)?(?:(?:i|we|you|he|she|they|the\s+(?:office|team|technician))\s+)?$/i;
 const FREE_VISIT_NEGATIVE_REPORTING_SUBJECT_RE = /\b(?:nobody|no[- ]one|neither\s+(?:of\s+(?:us|them)|(?:(?:i|we|you|he|she|they|the\s+(?:office|team))\s+nor\s+)?(?:i|we|you|he|she|they|the\s+(?:office|team))))\s+(?:(?:has|have|had|will|would|can)\s+)?(?:promis(?:e[ds]?|ing)|guarantee[ds]?|confirm(?:ed|s)?|verif(?:ied|ies)|says?|said|tell(?:s|ing)?(?:\s+you)?|told(?:\s+you)?|mention(?:ed|s)?|check(?:ed|s)?|believ(?:ed|es)?|thought|thinks?)\s+(?:that\s+)?(?:(?:i|we|you|he|she|they|the\s+(?:office|team))\s+(?:will\s+)?)?(?:(?:the|your|a|an)\s+)?$/i;
+const FREE_VISIT_VOLITIONAL_REFUSAL_RE = new RegExp(`(?<!\\b(?:not|never|cannot|can['’]t|don['’]t)\\s+)\\b(?:refus(?:e[sd]?|ing)|declin(?:e[sd]?|ing))\\s+to\\s+${vocabAlt(EPISTEMIC_REFUSAL_VERBS)}\\s+(?:that\\s+)?(?:(?:i|we|you|he|she|they|the\\s+(?:office|team|technician))\\s+)?$`, 'i');
+const FREE_VISIT_COORDINATED_NEGATIVE_SUBJECT_RE = new RegExp(`\\b(?:no|neither)\\s+${FREE_VISIT_PAYMENT_TARGET}(?:\\s+(?:or|nor)\\s+${FREE_VISIT_PAYMENT_TARGET})*\\s+(?:or|nor)\\s*$`, 'i');
 const FREE_VISIT_RELATIVE_ANTECEDENT_RE = /\b(?:(?:a|an|the|your|our|this|that)\s+(?:[\w'’-]+\s+){0,2}([\w'’-]+)|(something|anything|nothing))\s*$/i;
 const FREE_VISIT_RELATIVE_VISIT_IDENTITY_RE = /\b(?:visit|one|service|treatment|appointment)\s+(?:is|was|will be|would be|has been)\s+(not\s+)?$/i;
 const FREE_VISIT_NONPRICE_ACTION_RE = /^\s+to\s+(?:cancel|reschedule|schedule|book|view|read|review|download|access|inspect)\b/i;
@@ -723,12 +725,12 @@ const FREE_VISIT_BILLING_CLAIM_RE = new RegExp(`^${FREE_VISIT_NEGATED_BILLING_SO
 const FREE_VISIT_DEBTOR_SUBJECT_RE = new RegExp(`\\b((?:i|we|you|he|she|they)(?:['’](?:ll|m|re|s))?|(?:(?:the|an?|our|your)\\s+(?:[\\w'’-]+\\s+){0,3}[\\w'’-]+))(?:\\s+${CLAIM_FUTURE_ACTOR_AUXILIARY_SOURCE})?\\s*$`, 'i');
 const FREE_VISIT_COMPANY_SUBJECT_RE = /^(?:(?:i|we)(?:['’](?:ll|m|re|ve|s))?|waves(?:\s+pest\s+control)?|billing|management|office|(?:(?:the|an?|our|your)\s+)?(?:[\w'’-]+\s+){0,3}(?:technician|tech|crew|team|office|billing|manager|company))$/i;
 const FREE_VISIT_COPULAR_CLAIM_RE = new RegExp(`^${FREE_VISIT_PAYMENT_TARGET}(?:['’](?:s|ll\\s+be)|\\s+(?:is|will|would|has|comes|costs?))`, 'i');
-const FREE_VISIT_EMBEDDING_PREPOSITION_RE = /\b(?:for|of|from|with|about|regarding|on|at|to)\s+(?:(?:your|the|this|that)\s+)?$/i;
+const FREE_VISIT_EMBEDDING_PREPOSITION_RE = /\b(?:for|of|from|with|about|regarding|on|at|to|(?:report|summary|estimate)\s+(?:during|before|after))\s+(?:(?:your|the|this|that)\s+)?$/i;
 function freeVisitIsEmbeddedVisitSubject(text, match) {
   if (!FREE_VISIT_COPULAR_CLAIM_RE.test(match[0])) return false;
   const [start] = clauseBounds(text, match.index);
   const prefix = text.slice(start, match.index).split(',').pop();
-  if (/\b(?:no|neither)\s*$/i.test(prefix)) return true;
+  if (/\b(?:no|neither)\s*$/i.test(prefix) || FREE_VISIT_COORDINATED_NEGATIVE_SUBJECT_RE.test(prefix)) return true;
   // A cost/price subject prices the visit itself; a report/estimate subject
   // describes a separate artifact even when it names the same visit.
   const priceSubject = /\b(?:(?:the|your|our|this|that|an?)\s+)?(?:(?:total|full|entire|actual|usual|normal|standard)\s+){0,2}(?:cost|price|charge|fee)\s+(?:of|for)\s+$/i.exec(prefix);
@@ -739,7 +741,7 @@ const FREE_VISIT_CUSTOMER_SUBJECT_RE = /^(?:you|your\b|(?:the|an?)\s+(?:[\w'’-
 function freeVisitIsRefused(prefix, clausePrefix) {
   return FREE_VISIT_NOUN_REFUSAL_RE.test(prefix)
     || FREE_VISIT_PERFECT_REFUSAL_RE.test(prefix) || FREE_VISIT_INFLECTED_REFUSAL_RE.test(prefix)
-    || FREE_VISIT_NEGATIVE_REPORTING_SUBJECT_RE.test(prefix)
+    || FREE_VISIT_NEGATIVE_REPORTING_SUBJECT_RE.test(prefix) || FREE_VISIT_VOLITIONAL_REFUSAL_RE.test(prefix)
     || FREE_VISIT_POSSIBILITY_PREFIX_RE.test(prefix) || FREE_VISIT_POSSIBILITY_ASIDE_RE.test(clausePrefix)
     || clauseIsEpistemicallyHedged(prefix);
 }

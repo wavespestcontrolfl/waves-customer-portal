@@ -1446,3 +1446,90 @@ test.each([
 ])('copular prices share scheduled visit targets and contracted futures: %s', (text, status) => {
   expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
 });
+
+
+test.each([
+  ["We'll give you your next visit for free.", 'fail'],
+  ['We will give your upcoming treatment at no charge.', 'fail'],
+  ["We'll give you your next visit for free if the office approves.", 'pass'],
+  ["I cannot confirm that we'll give you your next visit for free.", 'pass'],
+  ["We'll give you your next visit report for free.", 'pass'],
+  ["We'll give you the report for free during your next visit.", 'pass'],
+])('target-first give commitments retain service and qualifier scope: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['Your next visit is free pending office approval.', 'pass'],
+  ['Pending office approval, your next visit is free.', 'pass'],
+  ['Your next visit is free, but pending manager authorization.', 'pass'],
+  ['We will cover your next visit pending office approval.', 'pass'],
+  ['Your next visit is free pending Tuesday.', 'fail'],
+  ['Your next visit is free, but the report is pending office approval.', 'fail'],
+  ['The report is pending office approval, but your next visit is free.', 'fail'],
+  ['Your next visit is free pending office approval, but the return visit is free.', 'fail'],
+])('pending approval qualifies only the governed visit price: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['Neither your next visit nor your return treatment is free.', 'pass'],
+  ['No visit or treatment is free.', 'pass'],
+  ['Neither your next visit nor your upcoming appointment is complimentary.', 'pass'],
+  ['No visit or treatment or appointment is free.', 'pass'],
+  ['Neither your next visit nor your return treatment is free, but your upcoming appointment is free.', 'fail'],
+  ['No visit or treatment is free. Your next visit is free.', 'fail'],
+  ['Your next visit or treatment is free.', 'fail'],
+])('coordinated negative visit subjects deny the whole subject: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['I refuse to say your next visit is free.', 'pass'],
+  ['I decline to confirm your next visit is free.', 'pass'],
+  ['We refused to promise that your next visit is free.', 'pass'],
+  ['I am declining to confirm that we will cover your next visit.', 'pass'],
+  ['I refuse to say the report is free, but your next visit is free.', 'fail'],
+  ['I decline to confirm your next visit is free, but the return visit is free.', 'fail'],
+  ['I say your next visit is free.', 'fail'],
+])('explicit refuse and decline wording withholds only its proposition: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['The report during your next visit is free.', 'pass'],
+  ['The report before your next visit is free.', 'pass'],
+  ['The estimate after your upcoming visit is complimentary.', 'pass'],
+  ['The summary during your scheduled treatment is on us.', 'pass'],
+  ['As I said before your next visit is free.', 'fail'],
+  ['Before tomorrow your next visit is free.', 'fail'],
+  ['The report during your next visit is free, but your next visit is free.', 'fail'],
+])('temporal artifact links retain the actual price subject: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ["Your next visit is free, isn't that right?", 'pass'],
+  ["Your next visit is complimentary, isn't this correct?", 'pass'],
+  ["Your next visit is on us, wasn't that true?", 'pass'],
+  ["Your next visit is free, isn't it right?", 'pass'],
+  ["Your next visit is free, isn't that right about the report?", 'fail'],
+  ["Your next visit is free, isn't the report correct?", 'fail'],
+  ["Your next visit is free, isn't that right? The return visit is free.", 'fail'],
+])('contracted demonstrative truth tags question the matched price: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
+  ['Your next visit is free, but I take that back.', 'pass'],
+  ['Your next visit is free, but scratch that.', 'pass'],
+  ['Your next visit is free, but let me correct that.', 'pass'],
+  ['Your next visit is free, however I take it back.', 'pass'],
+  ['Your next visit is free, but I take that report back.', 'fail'],
+  ['Your next visit is free, but scratch that appointment.', 'fail'],
+  ['Your next visit is free, but let me correct that date.', 'fail'],
+  ['Your next visit is free, but I take that back. The return visit is free.', 'fail'],
+  ['Your next visit is free, but let me correct that; the return visit is complimentary.', 'fail'],
+])('immediate take-back corrections retract only the matched promise: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
