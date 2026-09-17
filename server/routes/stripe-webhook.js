@@ -1253,7 +1253,10 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType, event
           'payment',
           `Statement payment failed: S-${statementId}`,
           `PI ${piId} failed after confirmation — ${reasonMsg}. Statement reopened for collection.`,
-          { icon: '⚠️', link: '/admin/payers' },
+          // bell:true — a confirmed payer payment bouncing is the returned-ACH
+          // case the 2026-09-11 ruling names; a category-only write would
+          // stay silent behind the payment override (codex P2 on #4392).
+          { icon: '⚠️', link: '/admin/payers', bell: true },
         );
       } catch (e) { logger.error(`[stripe-webhook] statement S-${statementId} failure notification insert failed: ${e.message}`); }
       logger.warn(`[stripe-webhook] statement S-${statementId} payment FAILED after confirmation via PI ${piId} (${reasonMsg}) — reverted to payable`);
@@ -3007,15 +3010,10 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
 
   // ── Bell + push for the admin team ──
   //
-  // Fire-and-forget via Promise.catch (NOT awaited) so the webhook 2xx
-  // is not gated on notification fan-out. Same reasoning + dedupe
-  // pattern as the succeeded handler — see notifyPaymentSuccess()
-  // above. Emit even when no invoice is bound — payment_failed is
-  // urgent enough that an orphan PI failure still warrants a bell
-  // entry; link defaults to /admin/revenue in that case.
-  notifyPaymentFailed(paymentIntent, friendlyFailure, eventId).catch((err) => {
-    logger.warn(`[stripe-webhook] payment_failed notify failed: ${err.message}`);
-  });
+  // A transient notification failure must leave this webhook retryable.
+  // The helper releases its per-attempt claim unless delivery succeeded
+  // or the notification was deliberately suppressed.
+  await notifyPaymentFailed(paymentIntent, friendlyFailure, eventId);
 
   // ── Customer email for interactive (non-autopay, non-ACH) failures ──
   //
@@ -3073,6 +3071,16 @@ async function notifyPaymentFailed(paymentIntent, friendlyFailure, eventId) {
   //
   // Codex P1 follow-up to #546.
   const attemptId = paymentIntent.latest_charge || eventId || 'no_charge';
+  // Already settled: Stripe does not order events, and a pay-page PI is
+  // reused across attempts — a late payment_failed from attempt 1 after
+  // attempt 2 settled (or a refund/dispute) must not ring an urgent false
+  // failure. The ledger guard above left the row alone; leave the bell
+  // alone too (codex P2 on #4392).
+  const ledgerRow = await db('payments').where({ stripe_payment_intent_id: piId }).first();
+  if (ledgerRow && ['paid', 'refunded', 'disputed'].includes(ledgerRow.status)) {
+    logger.info(`[stripe-webhook] payment_failed for PI ${piId} arrived after the ledger row settled (${ledgerRow.status}) — no admin bell`);
+    return;
+  }
   const claim = await db.raw(
     `INSERT INTO stripe_payment_notification_log (payment_intent_id, outcome, attempt_id)
      VALUES (?, ?, ?)
@@ -3084,22 +3092,38 @@ async function notifyPaymentFailed(paymentIntent, friendlyFailure, eventId) {
     logger.info(`[stripe-webhook] payment_failed notification already dispatched for PI ${piId} attempt ${attemptId}, skipping`);
     return;
   }
-  const failedInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first();
-  let customer = null;
-  if (failedInvoice?.customer_id) {
-    customer = await db('customers').where({ id: failedInvoice.customer_id }).first();
-  } else {
-    const payment = await db('payments').where({ stripe_payment_intent_id: piId }).first();
-    if (payment?.customer_id) {
-      customer = await db('customers').where({ id: payment.customer_id }).first();
+  try {
+    const failedInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first();
+    const customerId = failedInvoice?.customer_id || ledgerRow?.customer_id
+      || paymentIntent.metadata?.waves_customer_id || null;
+    const customer = customerId ? await db('customers').where({ id: customerId }).first() : null;
+    const result = await triggerNotification('payment_failed', {
+      amount: (paymentIntent.amount || 0) / 100,
+      customerName: customerLabel(customer),
+      reason: friendlyFailure,
+      invoiceId: failedInvoice?.id || null,
+      // The demo / App Store review account must never ring the shared bell
+      // or push: both the trigger-level and the NotificationService
+      // suppression key on this id, and payment_failed now rings through
+      // the bell policy (codex P2 on #4392). The orphan path (no invoice, no
+      // ledger row — no-show-fee intents) falls back to the
+      // waves_customer_id every PI is minted with (services/stripe.js).
+      customerId,
+      // Per-attempt push identity (notification-triggers pushTagFor): two
+      // failures must not replace each other on the phone.
+      paymentIntentId: piId,
+      attemptId,
+    }, { dedupeKey: `payment-failed:${piId}:${attemptId}` });
+    const { bellWritten, suppressed, policySilenced, push } = result || {};
+    if (![bellWritten, suppressed, policySilenced, push?.sent > 0].some(Boolean)) {
+      throw new Error('Payment failure notification was not delivered');
     }
+  } catch (err) {
+    await db('stripe_payment_notification_log')
+      .where({ payment_intent_id: piId, outcome: 'failed', attempt_id: attemptId })
+      .del();
+    throw err;
   }
-  await triggerNotification('payment_failed', {
-    amount: (paymentIntent.amount || 0) / 100,
-    customerName: customerLabel(customer),
-    reason: friendlyFailure,
-    invoiceId: failedInvoice?.id || null,
-  });
 }
 
 /**
