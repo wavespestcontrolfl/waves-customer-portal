@@ -71,6 +71,7 @@ function installMock(initial = {}, { onUpdate = null } = {}) {
     // a WHERE clause treats as false — a NULL column FAILS notIn. Production
     // must pair whereNotIn with a whereNull OR-arm for nullable columns.
     if (op === 'notIn') return l != null && !v.includes(l);
+    if (op === '!=') return l !== v;
     if (l == null) return false;
     return op === '>' ? l > v : op === '<' ? l < v : op === '>=' ? l >= v : op === '<=' ? l <= v : l === v;
   };
@@ -127,6 +128,7 @@ function installMock(initial = {}, { onUpdate = null } = {}) {
       whereRaw() { return this; },
       whereIn() { return this; },
       whereNotIn(c, vals) { this.ops.push([c, 'notIn', vals]); return this; },
+      whereNot(c, v) { this.ops.push([c, '!=', v]); return this; },
       whereNotNull(c) { this.notNull.push(c); return this; },
       whereNull(c) { this.nulls.push(c); return this; },
       leftJoin() { return this; },
@@ -330,6 +332,45 @@ describe('sendGatedAsk — a clean send', () => {
       review_request_id: state.rows.review_requests[0].id,
     });
     expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('an uncertain send whose retry write succeeds but whose verification read fails stays held, never "error" (codex #4331 P2)', async () => {
+    // Distinct from the test above: THIS time the scheduled_for write
+    // succeeds normally (no onUpdate throw) — only the immediate
+    // verification read that follows it fails. persistedReviewRetryAt used
+    // to collapse that into the same null a genuinely-missing schedule
+    // returns, so this branch reported outcome: 'error' — and the
+    // satisfaction route does not treat 'error' as queued/held, so it could
+    // hand the customer the bare Google review URL even though
+    // processScheduled still owns the pending row and will text its
+    // tokenized ask later (an untracked click followed by a second
+    // solicitation).
+    const state = installMock({ customers: [CUSTOMER] });
+    const baseImpl = db.getMockImplementation();
+    db.mockImplementation((tbl) => {
+      const q = baseImpl(tbl);
+      if (String(tbl).split(/\s+as\s+/i)[0] === 'review_requests') {
+        const realFirst = q.first.bind(q);
+        q.first = (...args) => {
+          if (q.notNull.includes('scheduled_for') && q.equals.some(([k]) => k === 'id')) throw new Error('pg connection reset on verification read');
+          return realFirst(...args);
+        };
+      }
+      return q;
+    });
+    mockSendCustomerMessage.mockResolvedValueOnce({
+      sent: false, deliveryOutcome: 'uncertain', retryable: true, code: 'PROVIDER_FAILURE',
+    });
+
+    const result = await ReviewService.sendGatedAsk({
+      customerId: 'cust-1', templateId: 'friendly_ask', triggeredBy: 'portal_satisfaction', manageRetryVia: 'cron',
+    });
+
+    expect(result.outcome).not.toBe('error');
+    expect(result).toMatchObject({ outcome: 'blocked', code: 'SMS_DELIVERY_UNCERTAIN' });
+    // The write itself DID succeed — a real pending retry is queued.
+    expect(state.rows.review_requests[0]).toMatchObject({ status: 'pending' });
+    expect(state.rows.review_requests[0].scheduled_for).toBeTruthy();
   });
 
   test('canonicalTemplate renders the review_request sms_template with the reservice clause', async () => {

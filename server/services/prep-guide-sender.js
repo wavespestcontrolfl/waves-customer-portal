@@ -46,6 +46,7 @@ const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { currentRestrictionPolicy, resolveRestrictionCounty } = require('../config/irrigation-restrictions');
 const { countyConfirmedAfterMove, parseConfirmedFields } = require('./irrigation-schedule-confirmation');
 const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
+const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
 const SERVICE_GROUP = 'service_operational';
@@ -891,9 +892,15 @@ async function priorGuideDelivery(customer, config, pestType) {
       .whereNotIn('status', ['blocked', 'failed'])
       .orderBy('created_at', 'desc')
       .select('status', 'created_at', 'queued_at', 'sent_at', 'provider_message_id'),
-    db('sms_log')
-      .where({ customer_id: customer.id, direction: 'outbound' })
-      .whereRaw('message_body ILIKE ?', [`%${GUIDE_SMS_LINK_SIGNATURE}%`])
+    // A manually-composed reservation body could in principle be pasted
+    // with this same guide link before it sends — exclude in-flight
+    // reservations so a synthetic placeholder is never read as the actual
+    // delivered guide (codex #4333 P2 widened-guard sweep, GitHub round).
+    excludeUnresolvedSendReservations(
+      db('sms_log')
+        .where({ customer_id: customer.id, direction: 'outbound' })
+        .whereRaw('message_body ILIKE ?', [`%${GUIDE_SMS_LINK_SIGNATURE}%`]),
+    )
       .orderBy('created_at', 'desc')
       .first(),
   ]);

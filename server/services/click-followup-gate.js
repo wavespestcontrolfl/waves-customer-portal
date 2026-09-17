@@ -53,6 +53,7 @@ const {
 const { DEPOSIT_FOLLOWUP_WINDOW } = require('./estimate-deposits');
 const { loadSuppressionState } = require('./messaging/validators/suppression');
 const { readCachedLineType, NON_SMS_LINE_TYPES } = require('./messaging/validators/line-type');
+const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 
 // Estimate statuses the cadence treats as terminal (estimate-follow-up.js).
 const TERMINAL_STATUSES = new Set(['declined', 'accepted', 'expired', 'void']);
@@ -110,10 +111,15 @@ async function hasRecentOutboundSms({ customerId, phone }, hours = 48) {
   const ten = last10(phone);
   if (!customerId && !ten) return false;
   try {
-    const q = db('sms_log')
-      .where('direction', 'outbound')
-      .where('created_at', '>=', cutoff)
-      .first('id');
+    // A review-ask/reply reservation is a synthetic in-flight placeholder,
+    // not proof the customer was actually reached — without the exclusion
+    // a stuck 'sending' reservation would hold this gate closed
+    // indefinitely (codex #4333 P2 widened-guard sweep, GitHub round).
+    const q = excludeUnresolvedSendReservations(
+      db('sms_log')
+        .where('direction', 'outbound')
+        .where('created_at', '>=', cutoff),
+    ).first('id');
     q.andWhere(function () {
       if (customerId) this.orWhere('customer_id', customerId);
       if (ten) {

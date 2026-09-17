@@ -6288,6 +6288,153 @@ describe('direct outreach serialization', () => {
     expect(mock.__state.rows.sms_log.some(r => r.id === 'res-prior-1')).toBe(false);
   });
 
+  test('a prior-reservation release that throws once is retried and released, not abandoned (codex #4331 P2, r2)', async () => {
+    const customer = { id: 'cadence-retry-2', first_name: 'Ida', phone: '+19410000189', nearest_location_id: 'venice' };
+    const staleAt = new Date(Date.now() - 3600000);
+    const mock = makeMock({
+      customers: [customer],
+      review_requests: [{
+        id: 'prior-failed-2', customer_id: customer.id, status: 'failed', channel: 'sms',
+        template_key: 'day0_ask', token: 'prior-tok-2', sequence_id: 'seq-retry-2', sequence_step: 1,
+        created_at: staleAt,
+      }],
+      sms_log: [{
+        id: 'res-prior-2', customer_id: customer.id, direction: 'outbound', status: 'sending',
+        message_body: 'Would you leave us a quick review?', to_phone: customer.phone,
+        metadata: { review_ask_reservation: true, review_request_id: 'prior-failed-2' },
+        created_at: staleAt, updated_at: staleAt,
+      }],
+    });
+    // The FIRST sms_log delete in this whole run is the prior reservation's
+    // release (sendOutreachTouch's cleanup runs before this attempt's own
+    // reservation even exists) — throw only on it, so the retry (the
+    // second attempt on the SAME delete) is what's actually verified.
+    let delCalls = 0;
+    db.mockImplementation((tbl) => {
+      const q = mock(tbl);
+      if (String(tbl).split(/\s+as\s+/i)[0] === 'sms_log') {
+        const realDel = q.del.bind(q);
+        q.del = async () => {
+          delCalls += 1;
+          if (delCalls === 1) throw new Error('transient pg blip on release');
+          return realDel();
+        };
+      }
+      return q;
+    });
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-retry-2' });
+
+    const out = await ReviewService.sendOutreachTouch({
+      customer, channel: 'sms', templateId: 'day0_ask',
+      sequenceId: 'seq-retry-2', sequenceStep: 1, manageRetryVia: 'sequence',
+    });
+
+    expect(out).toMatchObject({ ok: true, sent: true });
+    expect(delCalls).toBeGreaterThanOrEqual(2);
+    // Released on retry — no orphan, and never marked release_pending
+    // since the retry itself succeeded.
+    expect(mock.__state.rows.sms_log.some(r => r.id === 'res-prior-2')).toBe(false);
+    expect(mock.__state.rows.sms_log.filter(r => r.status === 'sending')).toHaveLength(0);
+  });
+
+  test('a prior-reservation release that fails twice is marked release_pending, and the stranded-send sweep finishes it (codex #4331 P2, r2)', async () => {
+    const customer = { id: 'cadence-retry-3', first_name: 'Ida', phone: '+19410000190', nearest_location_id: 'venice' };
+    const staleAt = new Date(Date.now() - 3600000);
+    const mock = makeMock({
+      customers: [customer],
+      review_requests: [{
+        id: 'prior-failed-3', customer_id: customer.id, status: 'failed', channel: 'sms',
+        template_key: 'day0_ask', token: 'prior-tok-3', sequence_id: 'seq-retry-3', sequence_step: 1,
+        created_at: staleAt,
+      }],
+      sms_log: [{
+        id: 'res-prior-3', customer_id: customer.id, direction: 'outbound', status: 'sending',
+        message_body: 'Would you leave us a quick review?', to_phone: customer.phone,
+        metadata: { review_ask_reservation: true, review_request_id: 'prior-failed-3' },
+        created_at: staleAt, updated_at: staleAt,
+      }],
+    });
+    // Every sms_log delete in this run is stampWithRetry's own attempt +
+    // retry on the PRIOR reservation's release — an uncertain send outcome
+    // below never releases the NEW row's own reservation (kept live as
+    // spacing evidence by design), so nothing else calls .del() here and
+    // the shared mock's coarse {status,customer_id} filtering (it ignores
+    // the review_request_id predicate) can't collide two reservations for
+    // the same customer together.
+    let delCalls = 0;
+    db.mockImplementation((tbl) => {
+      const q = mock(tbl);
+      if (String(tbl).split(/\s+as\s+/i)[0] === 'sms_log') {
+        q.del = async () => {
+          delCalls += 1;
+          throw new Error('transient pg blip on release');
+        };
+      }
+      return q;
+    });
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_FAILURE' });
+
+    const out = await ReviewService.sendOutreachTouch({
+      customer, channel: 'sms', templateId: 'day0_ask',
+      sequenceId: 'seq-retry-3', sequenceStep: 1, manageRetryVia: 'sequence',
+    });
+
+    expect(out).toMatchObject({ ok: false, deferred: true, reason: 'provider_uncertain' });
+    expect(delCalls).toBe(2); // stampWithRetry's one attempt plus its one retry, then it gives up
+    const priorReservation = mock.__state.rows.sms_log.find(r => r.id === 'res-prior-3');
+    expect(priorReservation).toBeTruthy();
+    expect(priorReservation.status).toBe('sending');
+    const meta = typeof priorReservation.metadata === 'string' ? JSON.parse(priorReservation.metadata) : priorReservation.metadata;
+    expect(meta).toMatchObject({ release_pending: true, review_request_id: 'prior-failed-3' });
+
+    // The sweep runs later (no more forced failures) and finishes what the
+    // inline retry could not.
+    db.mockImplementation(mock);
+    const released = await require('../services/messaging/review-ask-reservation').releasePending();
+    expect(released).toBe(1);
+    expect(mock.__state.rows.sms_log.some(r => r.id === 'res-prior-3')).toBe(false);
+  });
+
+
+  test('persistedReviewRetryAt distinguishes a genuinely missing schedule from a verification read failure (codex #4331 P2)', async () => {
+    const { persistedReviewRetryAt } = ReviewService.__private;
+    const at = new Date(Date.now() + 5 * 60000);
+    const mock = makeMock({
+      review_requests: [
+        { id: 'prat-missing', status: 'pending', scheduled_for: null },
+        { id: 'prat-present', status: 'pending', scheduled_for: at },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    // Confirmed missing: the read SUCCEEDS and genuinely finds nothing —
+    // resolves to null, does not throw.
+    await expect(persistedReviewRetryAt('prat-missing')).resolves.toBeNull();
+    // A real persisted schedule resolves to it.
+    await expect(persistedReviewRetryAt('prat-present')).resolves.toEqual(at);
+
+    // Verification UNAVAILABLE (a transient read error) — the row may
+    // still be exactly as written; only its confirmation failed. Must
+    // THROW rather than collapse into the same null a confirmed-missing
+    // row returns, so a caller with a third "nothing is queued" branch
+    // (sendGatedAsk) can't mistake one for the other. .first() resolves
+    // directly in this file's mock (bypassing its then()-based
+    // throwSelectWhen hook), so the read is broken directly here instead.
+    db.mockImplementation((tbl) => {
+      const q = mock(tbl);
+      if (String(tbl).split(/\s+as\s+/i)[0] === 'review_requests') {
+        const realFirst = q.first.bind(q);
+        q.first = async (...args) => {
+          if (q.notNull.includes('scheduled_for')) throw new Error('pg connection reset');
+          return realFirst(...args);
+        };
+      }
+      return q;
+    });
+    await expect(persistedReviewRetryAt('prat-present')).rejects.toThrow();
+  });
+
+
   test('direct SMS holds the lock through provider acceptance and the durable stamp', async () => {
     const customer = { id: 'direct-lock', first_name: 'Synthetic', phone: '+12025550101' };
     let stampHeld = false;
