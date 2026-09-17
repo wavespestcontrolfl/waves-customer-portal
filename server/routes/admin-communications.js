@@ -39,6 +39,7 @@ const autoSendExecutor = require('../services/sms-auto-send');
 const {
   excludeUnresolvedSendReservations,
   releaseById: releaseReservationById,
+  reserveForRequest,
 } = require('../services/messaging/review-ask-reservation');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -781,7 +782,21 @@ router.post('/sms', async (req, res, next) => {
             // this claim must see the reservation, not just the claimed
             // row's history, or both asks can slip through (GH Codex #4331
             // P2 — the reservation used to land after the lock released).
-            const reservationMetadata = JSON.stringify({ manual_send_reservation: true, review_ask_reservation: true });
+            // codex #4333 P1 (GitHub round, "correlate lock-held
+            // reservations with the review request"): this reservation now
+            // carries review_request_id like every other one on this seam
+            // — a process death after it commits but before sendAndSettle
+            // runs otherwise leaves an orphan no later retry can find (the
+            // retry only excludes the NEW reservation's own id), and the
+            // orphan blocks the recovered send for a full 72h and then
+            // sits hidden and counted as stale. The fresh-insert branch
+            // goes through the seam's reserveForRequest for the same
+            // idempotent lookup-then-insert every other caller gets — a
+            // retry after a lost COMMIT acknowledgement here reuses the
+            // orphan instead of creating a second one, and
+            // claimInlineForSend's stale-claim recovery (review-request.js)
+            // now releases it by this same id.
+            const reservationMetadata = JSON.stringify({ manual_send_reservation: true, review_ask_reservation: true, review_request_id: rr.id });
             const useManualReservation = !!manualReservationId && !claimedDecisionId && parkedThreadIds.length === 0;
             let reservationId;
             try {
@@ -790,13 +805,13 @@ router.post('/sms', async (req, res, next) => {
                   .update({ metadata: reservationMetadata, customer_id: trustedCustomerId }).returning('id');
                 reservationId = reserved?.id;
               } else {
-                const [reservation] = await db('sms_log').insert({
-                  customer_id: trustedCustomerId, direction: 'outbound',
-                  from_phone: fromNumber || TWILIO_NUMBERS.getOutboundNumber(), to_phone: to,
-                  message_body: cleanBody, status: 'sending', message_type: 'manual',
-                  admin_user_id: req.technicianId || null, metadata: reservationMetadata,
-                }).returning('id');
-                reservationId = reservation?.id;
+                const seamReservation = await reserveForRequest({
+                  request: { id: rr.id, customer_id: trustedCustomerId },
+                  to, body: cleanBody, fromPhone: fromNumber || TWILIO_NUMBERS.getOutboundNumber(),
+                  extraMetadata: { manual_send_reservation: true },
+                  messageType: 'manual', adminUserId: req.technicianId || null,
+                });
+                reservationId = seamReservation?.id;
               }
             } catch (reserveErr) {
               // A THROWN reservation write is the same no-reservation outcome

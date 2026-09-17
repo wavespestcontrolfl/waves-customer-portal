@@ -167,3 +167,102 @@ describe('countStaleUnresolved — operator-facing visibility (pre-push audit: "
     expect(count).toBe(2);
   });
 });
+
+describe('promote — deduplicated against the real provider log (codex #4333 P1, seam pre-push audit)', () => {
+  // A fuller fake sms_log table: real filtering across where/whereIn/
+  // whereNot/whereRaw(metadata correlation modeled in JS, not parsed) so
+  // the realEvidence lookup, the dedup release, and the ordinary promote
+  // UPDATE all resolve against the same fixture correctly.
+  function installFullSmsLog(initialRows) {
+    const rows = initialRows.map((r) => ({ ...r }));
+    db.mockImplementation((table) => {
+      if (table !== 'sms_log') throw new Error(`unexpected table ${table}`);
+      let equals = {};
+      let notEquals = {};
+      let ins = {};
+      let metaRequestId = null;
+      const q = {
+        where(cond) {
+          if (cond && typeof cond === 'object') equals = { ...equals, ...cond };
+          return q;
+        },
+        whereNot(col, val) { notEquals[col] = val; return q; },
+        whereIn(col, vals) { ins[col] = vals; return q; },
+        whereRaw(sql, bindings) {
+          if (/review_request_id/.test(sql)) metaRequestId = bindings[0];
+          return q;
+        },
+        matches(r) {
+          if (!Object.entries(equals).every(([k, v]) => r[k] === v)) return false;
+          if (!Object.entries(notEquals).every(([k, v]) => r[k] !== v)) return false;
+          if (!Object.entries(ins).every(([k, vs]) => vs.includes(r[k]))) return false;
+          if (metaRequestId != null && String(r.metadata?.review_request_id) !== String(metaRequestId)) return false;
+          return true;
+        },
+        first() {
+          return Promise.resolve(rows.find((r) => q.matches(r)) || null);
+        },
+        update(patch) {
+          const match = rows.find((r) => q.matches(r));
+          if (match) Object.assign(match, patch);
+          return Promise.resolve(match ? 1 : 0);
+        },
+        del() {
+          const before = rows.length;
+          for (let i = rows.length - 1; i >= 0; i -= 1) {
+            if (q.matches(rows[i])) rows.splice(i, 1);
+          }
+          return Promise.resolve(before - rows.length);
+        },
+      };
+      return q;
+    });
+    return rows;
+  }
+
+  test('releases the placeholder instead of promoting it when a real provider row already exists', async () => {
+    const { promote } = require('../services/messaging/review-ask-reservation');
+    const rows = installFullSmsLog([
+      { id: 'res-1', status: 'sending', direction: 'outbound', metadata: { review_ask_reservation: true, review_request_id: 'rr-1' } },
+      { id: 'real-1', status: 'sent', direction: 'outbound', twilio_sid: 'SM-real', metadata: { review_request_id: 'rr-1' } },
+    ]);
+
+    const result = await promote({ reservation: { id: 'res-1', requestId: 'rr-1' } });
+
+    expect(result).toBe(true);
+    // The placeholder is GONE — released, not promoted — leaving exactly
+    // the one real provider row.
+    expect(rows.find((r) => r.id === 'res-1')).toBeUndefined();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe('real-1');
+    expect(rows[0].status).toBe('sent');
+  });
+
+  test('promotes normally when no separately-logged provider row exists for the request', async () => {
+    const { promote } = require('../services/messaging/review-ask-reservation');
+    const rows = installFullSmsLog([
+      { id: 'res-2', status: 'sending', direction: 'outbound', metadata: { review_ask_reservation: true, review_request_id: 'rr-2' } },
+    ]);
+
+    const result = await promote({ reservation: { id: 'res-2', requestId: 'rr-2' } });
+
+    expect(result).toBe(true);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe('res-2');
+    expect(rows[0].status).toBe('sent');
+  });
+
+  test('a resolved row for a DIFFERENT request never blocks promotion (correlation is exact, not "any other row exists")', async () => {
+    const { promote } = require('../services/messaging/review-ask-reservation');
+    const rows = installFullSmsLog([
+      { id: 'res-3', status: 'sending', direction: 'outbound', metadata: { review_ask_reservation: true, review_request_id: 'rr-3' } },
+      { id: 'unrelated-1', status: 'sent', direction: 'outbound', metadata: { review_request_id: 'rr-other' } },
+    ]);
+
+    const result = await promote({ reservation: { id: 'res-3', requestId: 'rr-3' } });
+
+    expect(result).toBe(true);
+    expect(rows.find((r) => r.id === 'res-3').status).toBe('sent');
+    expect(rows).toHaveLength(2);
+  });
+});

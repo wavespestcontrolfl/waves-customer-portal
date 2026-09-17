@@ -147,7 +147,7 @@ function makeMock(initial = {}, opts = {}) {
       orderBy(c, d = 'asc') { this.order = [c, d]; return this; },
       orderByRaw() { return this; }, groupBy() { return this; }, groupByRaw() { return this; },
       limit(n) { this.limitValue = n; return this; },
-      async first() { return filtered(this)[0] || null; },
+      async first() { if (opts.onFirst) opts.onFirst(this.table, this, state); return filtered(this)[0] || null; },
       count() { return { first: async () => ({ count: String(filtered(this).length), c: String(filtered(this).length) }) }; },
       insert(row) {
         if (!state.rows[this.table]) state.rows[this.table] = [];
@@ -1783,6 +1783,51 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(row.status).toBe('pending');
     });
 
+    test('a cadence enrollment racing the retirement recheck wins the row — it stays suppressed, not requeued (codex #4333 P1, GitHub round)', async () => {
+      // The exact race under audit: sendSMS's own activeSeq check finds NO
+      // active sequence yet (the concurrent startReviewSequence's
+      // review_sequences INSERT hasn't landed), but between that read and
+      // this function's own write, the SAME concurrent enrollment's
+      // supersedeQueuedAsks — which takes a FOR UPDATE lock on this exact
+      // row before suppressing it — commits first and flips the row to
+      // 'suppressed'. The conditional WHERE on this function's own write
+      // (status still 'pending' at write time) is what actually prevents
+      // it from silently overwriting that suppression back to 'pending'.
+      mockGates.reviewSequences = true;
+      const due = new Date(Date.now() - 60000);
+      const mock = makeMock({
+        customers: [{ id: 'uq-race', first_name: 'Ida', phone: '+19410000170', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-uq-race', customer_id: 'uq-race', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tuqrace', location_id: 'venice', created_at: new Date(), scheduled_for: due }],
+        // No active review_sequences row YET — its INSERT hasn't landed by
+        // the time sendSMS's own activeSeq read runs.
+      }, {
+        onFirst: (table, _q, state) => {
+          if (table !== 'review_sequences') return;
+          // The moment sendSMS checks for an active cadence (and finds
+          // none), the concurrent enrollment's OWN supersede commits —
+          // simulated here as an external mutation racing in right at that
+          // read, before this function's own conditional write runs.
+          const row = state.rows.review_requests.find((r) => r.id === 'rr-uq-race');
+          if (row) row.status = 'suppressed';
+        },
+      });
+      db.mockImplementation(mock);
+      mockSendCustomerMessage.mockResolvedValueOnce({
+        sent: false, blocked: false, deliveryOutcome: 'not_sent', retryable: true,
+        nextAllowedAt: new Date(Date.now() + 5 * 60000).toISOString(), code: 'PROVIDER_FAILURE',
+      });
+
+      const out = await ReviewService.sendSMS('rr-uq-race');
+
+      expect(out).toEqual({ sent: false, failed: 'superseded_by_cadence' });
+      // The row stays exactly as the racing enrollment left it — never
+      // flipped back to 'pending' or requeued alongside the cadence's own
+      // touch (scheduled_for is irrelevant once status is 'suppressed' —
+      // processScheduled only ever selects 'pending' rows).
+      const row = mock.__state.rows.review_requests[0];
+      expect(row.status).toBe('suppressed');
+    });
+
     test('an accepted send whose post-stamp reservation release throws promotes the reservation instead of losing it (codex #4331 P1, structural pass, finding 5)', async () => {
       // The sent stamp on review_requests SUCCEEDS (a real, confirmed
       // delivery), but the reservation cleanup DELETE that follows it
@@ -1811,6 +1856,66 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       const reservation = (mock.__state.rows.sms_log || [])[0];
       expect(reservation).toBeTruthy();
       expect(reservation.status).toBe('sent');
+    });
+
+    test('a delivered ask whose reservation-release throws is deduped against the real provider log, not double-counted as a manual ask (codex #4333 P1, seam pre-push audit)', async () => {
+      // "Reservation cleanup fails" from the audit: the sent stamp on
+      // review_requests SUCCEEDS (sms_sent_at is set), but the reservation
+      // release that follows it throws. sendCustomerMessage's OWN send
+      // ALSO logs its own row under the same review_request_id — exactly
+      // what the real pipeline does independently of this reservation
+      // (twilio.js's own sms_log insert). Before the fix, promote() would
+      // have marked the placeholder 'sent' too, leaving TWO outbound
+      // 'sent' rows for one ask; lastManualAskAt pairs at most one row per
+      // sms_sent_at, so the extra row reads as an unmatched manual ask and
+      // would permanently stop the next cadence step (manual_ask_recent)
+      // that never actually saw a manual send.
+      let delAttempts = 0;
+      const due = new Date(Date.now() - 60000);
+      const mock = makeMock({
+        customers: [{ id: 'uq-dedup', first_name: 'Ida', phone: '+19410000169', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-uq-dedup', customer_id: 'uq-dedup', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tuqdedup', location_id: 'venice', created_at: new Date(), scheduled_for: due }],
+      }, {
+        onDelete: (table) => {
+          if (table !== 'sms_log') return;
+          delAttempts += 1;
+          // The FIRST delete is the original post-stamp release — it
+          // throws (the reservation-cleanup failure under audit). The
+          // SECOND is promote()'s own dedup release once it finds the
+          // real provider row — it must succeed.
+          if (delAttempts === 1) throw new Error('pg blip on reservation release');
+        },
+      });
+      db.mockImplementation(mock);
+      mockSendCustomerMessage.mockImplementationOnce(async () => {
+        mock.__state.rows.sms_log.push({
+          id: 'real-send-1', customer_id: 'uq-dedup', direction: 'outbound', status: 'sent',
+          message_body: 'Would you leave us a quick review?', twilio_sid: 'SM-real',
+          metadata: { review_request_id: 'rr-uq-dedup' }, created_at: new Date(), updated_at: new Date(),
+        });
+        return { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-real' };
+      });
+
+      const out = await ReviewService.sendSMS('rr-uq-dedup');
+
+      expect(out).toEqual({ sent: true, unrecorded: true });
+      expect(delAttempts).toBeGreaterThanOrEqual(2);
+      // Deduplicated: the reservation was released (not promoted) once the
+      // real provider row was found — exactly ONE 'sent'/'delivered'
+      // outbound row for this request, not two.
+      const sentRows = (mock.__state.rows.sms_log || []).filter((r) => ['sent', 'delivered'].includes(r.status));
+      expect(sentRows).toHaveLength(1);
+      expect(sentRows[0].id).toBe('real-send-1');
+
+      // The stamp DID land before the release threw, so review-ask-
+      // history's pairing correctly recognizes this as the pipeline's own
+      // touch, not a manual ask — the next cadence step is not wrongly
+      // blocked by manual_ask_recent.
+      const row = mock.__state.rows.review_requests[0];
+      expect(row.sms_sent_at).toBeTruthy();
+      const history = require('../services/review-ask-history');
+      const manualAt = await history.lastManualAskAt('uq-dedup', { since: new Date(Date.now() - 86400000) });
+      expect(manualAt).toBeNull();
     });
 
     test('reconciliation proving a stranded ask unsent also clears its reservation, so the requeued retry is not held by the 3-day rule (codex #4331 P1)', async () => {

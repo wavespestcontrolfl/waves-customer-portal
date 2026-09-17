@@ -198,7 +198,7 @@ function defaultDb() {
 // spacing window is RENEWED in place (same row, created_at/updated_at reset
 // to now) rather than reused as-is or replaced — see the comment at the
 // renewal site for why (codex #4331 P1, pre-push audit on the seam itself).
-async function reserveForRequest({ trx, request, to, body, fromPhone }) {
+async function reserveForRequest({ trx, request, to, body, fromPhone, extraMetadata = {}, messageType = 'review', adminUserId = null }) {
   const conn = trx || defaultDb();
   const existing = await conn('sms_log')
     .where({ status: 'sending' })
@@ -251,8 +251,9 @@ async function reserveForRequest({ trx, request, to, body, fromPhone }) {
     to_phone: to,
     message_body: body,
     status: 'sending',
-    message_type: 'review',
-    metadata: JSON.stringify({ [REVIEW_ASK_MARKER]: true, review_request_id: request.id }),
+    message_type: messageType,
+    admin_user_id: adminUserId,
+    metadata: JSON.stringify({ [REVIEW_ASK_MARKER]: true, review_request_id: request.id, ...extraMetadata }),
     created_at: reservedAt,
     updated_at: reservedAt,
   }).returning('id');
@@ -291,11 +292,46 @@ async function releaseById({ trx, id }) {
 // Turn an ask reservation into durable delivery evidence: the provider
 // accepted, so this is no longer an unresolved in-flight marker and the
 // expiry sweep must never reclaim it.
+//
+// codex #4333 P1 (child-branch pre-push audit, "deduplicate promoted
+// reservations against the actual provider log"): promote() is reached
+// only when the accepted send's OWN separately-logged provider row exists
+// or should exist independently of this placeholder (sendCustomerMessage
+// logs the real send under the same metadata.review_request_id on its own
+// — this reservation is redundant evidence, kept only in case that log
+// write itself is what failed). Promoting unconditionally would leave TWO
+// 'sent' outbound rows for one ask whenever the FAILURE was actually in the
+// review_requests stamp or the reservation release, not the provider log:
+// lastManualAskAt (review-ask-history.js) pairs at most one log row per
+// review_requests.sms_sent_at, so the second row reads as an unmatched
+// manual ask and can permanently stop a cadence (manual_ask_recent) that
+// never saw a real manual send — and every OTHER general reader that
+// counts raw outbound rows (customer-health's engagement score,
+// signal-detector's NO_RESPONSE_MULTIPLE) double-counts the same delivered
+// ask too. Consolidating HERE, before promoting, is what keeps every one
+// of those readers correct at once without teaching each of them to
+// correlate two rows by review_request_id — the invariant (at most one
+// 'sent' row per delivered ask) holds at write time instead.
 async function promote({ trx, reservation }) {
   if (!reservation?.id) return false;
   const conn = trx || defaultDb();
   const logger = require('../logger');
   try {
+    if (reservation.requestId) {
+      const realEvidence = await conn('sms_log')
+        .where({ direction: 'outbound' })
+        .whereIn('status', ['sent', 'delivered'])
+        .whereNot('id', reservation.id)
+        .whereRaw("metadata->>'review_request_id' = ?", [String(reservation.requestId)])
+        .first('id');
+      if (realEvidence) {
+        // The real send already has its own row — this placeholder IS the
+        // duplicate. Release it instead of promoting a second 'sent' row.
+        await conn('sms_log').where({ id: reservation.id }).del();
+        logger.warn(`[review] SMS accepted but its request row is unstamped — a separately-logged provider row already exists, so the reservation was released instead of promoted (requestId=${reservation.requestId})`);
+        return true;
+      }
+    }
     const promoted = await conn('sms_log').where({ id: reservation.id, status: 'sending' })
       .update({ status: 'sent', updated_at: new Date() });
     if (!promoted) return false;
