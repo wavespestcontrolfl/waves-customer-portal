@@ -12,7 +12,7 @@ const PRICE_QUALIFIER = '(?:only|just|about|around|approximately|roughly|exactly
 const PRICE_HEAD = `(?:${[...PRICE_WORDS].join('|')}|(?:${[...PRICING_LABEL_WORDS].join('|')}) <(?:be|pastBe)>)`;
 const QUALIFIED_END = `(?: ${PRICE_QUALIFIER}){0,3}(?: <sep>)?$`;
 const PRICE_LABEL = new RegExp(`(?:^| )${PRICE_HEAD}${QUALIFIED_END}`);
-const PAYMENT_LABEL = new RegExp(`(?:^| )payment (?:<be>|(?:<modal> )?(?:totals?|equals?|comes? to))(?: <period>)?${QUALIFIED_END}`);
+const PAYMENT_LABEL = new RegExp(`(?:^| )(?:payment (?:<be>|(?:<modal> )?(?:totals?|equals?|comes? to))|(?:we|you|they|customers?|clients?) (?:<modal> )?pay)(?: <period>)?${QUALIFIED_END}`);
 const BE_AMOUNT = new RegExp(`(?:^| )<(?:be|pastBe)>${QUALIFIED_END}`);
 const PAYMENT_SUFFIX = /^<(?:money|number)> <be> (?:the |our |your |a )?(?:<period> payment|payment <period>)(?: |$)/;
 const PRICE_SUFFIX = new RegExp(`^<(?:money|number)> <(?:be|pastBe)> (?:the |our |your |a )?(?:<period> (?:${[...PRICING_LABEL_WORDS].join('|')})|(?:${[...PRICING_LABEL_WORDS].join('|')}) <period>)(?: |$)`);
@@ -135,7 +135,7 @@ function isPlanTotalPair(clause, amountAt, periodAt, context, legacyMonthlyPlan)
   const last = Math.max(amountAt, periodAt);
   const gap = clause.slice(first + 1, last);
   const accountEvent = context.some((token) => isWord(token, ACCOUNT_EVENTS));
-  // Payment copulas must join the amount through this finite grammar, rather
+  // Payment assertions must join the amount through this finite grammar, rather
   // than describe a posted/received event. Prefix and suffix scans are bounded.
   const amountLabel = clause.slice(Math.max(0, amountAt - 13), amountAt).map(canonicalToken).join(' ');
   const amountTail = clause.slice(amountAt, amountAt + 5).map(canonicalToken).join(' ');

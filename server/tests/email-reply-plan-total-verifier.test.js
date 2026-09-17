@@ -340,6 +340,15 @@ describe('inactive email reply plan-total policy', () => {
     for (const text of ['The plan costs $98 for the month', 'Your monthly payment totals $98', 'Each month, we charge $98', 'The plan is $98, billed monthly']) allowed(text, { legacyMonthlyPlan: true });
     for (const text of ['The plan costs $1,176 for the year', 'Your yearly payment equals $1,176', 'Per year, the plan costs $1,176', 'The price is $1,176, charged yearly']) rejected(text, { legacyMonthlyPlan: true });
   });
+  test('recognizes active recurring pay assertions without overriding transaction notices', () => {
+    ['You pay $98 monthly', 'You pay $1176 annually', 'Customers may pay $1176 yearly', 'You pay 98 monthly', 'We paid $98 monthly'].forEach((text) => rejected(text));
+    ['We received $98 monthly for the plan', 'Your monthly payment of $98 posted', 'We refunded $1176 a year ago', 'Your monthly payment was paid $98', 'We paid $98 a month ago'].forEach((text) => allowed(text));
+  });
+  test('keeps active pay assertions subject to unit-specific trusted exemptions', () => {
+    allowed('You pay $98 monthly', { legacyMonthlyPlan: true });
+    rejected('You pay $1176 annually', { legacyMonthlyPlan: true });
+    allowed('You pay $1176 annually', { commercialProposal: true });
+  });
   test('keeps R3 pricing exceptions unit-specific and trusted', () => {
     for (const text of ['Your monthly spread is $98', 'For the monthly plan, the price is $98', 'The plan is $98 and is billed monthly', '$98 is per month']) allowed(text, { legacyMonthlyPlan: true });
     for (const text of ['Your annualized plan total is $1176', '$1176 was per year', 'The plan is $1176 and is billed yearly']) rejected(text, { legacyMonthlyPlan: true });

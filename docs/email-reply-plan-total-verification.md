@@ -50,6 +50,9 @@ posted-event descriptions do not turn the notice into a price.
 Payment assertions use a bounded noun/copula/qualifier grammar, including
 `totals`, `equals`, and `comes to` predicates. A copula
 describing `is posted` or `has been received` does not assert the amount.
+Bounded we/you/they/customer/client subjects can assert recurring `pay`
+amounts. The scanner shares the pay/paid stem; active recurring statements
+use the same grammar while temporal and transaction-notice exclusions remain.
 Singular/plural activity nouns allow up to four ordinary modifiers (`Monthly
 service reminders mention the $98 initial-service price`), including service
 and treatment cadence; the final activity noun's fee
