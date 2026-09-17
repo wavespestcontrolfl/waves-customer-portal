@@ -1,6 +1,21 @@
 const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
 
 test.each([
+  ['You will get your next visit for free.', 'fail'],
+  ["You'll receive your next treatment at no charge.", 'fail'],
+  ["You're going to have the return visit on us.", 'fail'],
+  ['You will get your next visit for free if the office approves.', 'pass'],
+  ['If the office approves, you will receive your next treatment at no charge.', 'pass'],
+  ['I cannot confirm that you will get your next visit for free.', 'pass'],
+  ['You will get your next visit report for free.', 'pass'],
+  ['You will get your next visit for free, am I right?', 'pass'],
+  ['Maybe you will get your next visit for free.', 'pass'],
+  ['You will get your next visit for free, but only after Tuesday.', 'fail'],
+])('customer benefit commitments retain trailing price scope: %s', (text, status) => {
+  expect(checks.no_free_visit_promise(true, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each([
   ["It's not true that your next visit is free.", 'pass'],
   ["That's false that your next visit is free.", 'pass'],
   ["This's not the case that your next visit is free.", 'pass'],
