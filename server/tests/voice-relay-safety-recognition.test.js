@@ -55,6 +55,38 @@ test.each([
   expect(recognizeSafetyResponse(text).guarantees.length > 0).toBe(guarantee);
 });
 
+test.each([
+  'Roundup IS safe.',
+  'Roundup is SAFE.',
+  'roundup IS SAFE.',
+  'Bora-Care IS GENERALLY SAFE.',
+  'SUSPEND POLYZONE is SAFE.',
+  'Talstar P IS safe.',
+  'Talstar P is FINE.',
+  'Example X IS SAFE.',
+  'Roundup WILL NOT HARM dogs.',
+  'Roundup will not HARM dogs.',
+  'Contrac Blox CANNOT HARM pets.',
+  'Example X WON’T HURT dogs.',
+])('named product predicates retain case-insensitive wording: %s', (text) => {
+  const candidates = recognizeSafetyResponse(text).guarantees;
+  expect(candidates.length).toBeGreaterThan(0);
+  for (const { match } of candidates) expect(text.slice(match.index, match.index + match[0].length)).toBe(match[0]);
+});
+
+test.each([
+  'Charles is SAFE.',
+  'Tuesday IS safe.',
+  'Blue sky IS SAFE.',
+  'Blue sky WILL NOT HARM dogs.',
+  'Example x IS SAFE.',
+  'EXAMPLE X WON’T HURT dogs.',
+  'Roundup IS NOT SAFE.',
+  'Roundup WILL HARM dogs.',
+])('predicate casing preserves identity and negation controls: %s', (text) => {
+  expect(recognizeSafetyResponse(text).guarantees).toEqual([]);
+});
+
 test.each(['The treatment is risk-free.', 'The treatment is free of risk.', "There isn't any risk with the treatment."])(
   'risk-absence recognition retains the safety proposition: %s', (text) => {
     expect(recognizeSafetyResponse(text).guarantees.length).toBeGreaterThan(0);
