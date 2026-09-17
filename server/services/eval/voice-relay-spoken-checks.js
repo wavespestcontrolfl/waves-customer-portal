@@ -16,6 +16,8 @@
  * so a new phrasing is a one-line table change reviewed as code.
  */
 
+const { CALLBACK_CONTACT_NOUN, CALLBACK_TIMING_ADVERB, recognizeCallbackCandidates } = require('./voice-relay-callback-candidates');
+
 const clip = (s, n) => { const t = String(s || '').replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
 
 // ── Shared vocabulary ────────────────────────────────────────────────────
@@ -1515,6 +1517,112 @@ function no_third_party_disclosure(value, record, { spoken }) {
   return ['pass', 'no third-party contact details or visit facts spoken'];
 }
 
+// ── A promised callback to the account holder ──────────────────────────────
+
+// The fixture supplies the account-holder aliases. Recognition resolves the
+// governing Waves actor and the exact recipient before this policy checks
+// consent, refusal, uncertainty and subsequent overrides. A captured lead
+// records the caller's number, so it cannot justify promising to contact a
+// different account holder. Scenario activation remains a separate change.
+function callbackConditionTarget(valueTargets, matchedRecipient) {
+  const recipient = matchedRecipient?.text || '';
+  if (!recipient) return '(?!)';
+  const conditionTargets = [escapeRegexLiteral(recipient)];
+  const explicitPronoun = { her: 'she', him: 'he', them: 'they' }[recipient.toLowerCase()];
+  if (explicitPronoun) {
+    const hints = valueTargets.join(' ');
+    const female = /\b(?:mother|mom|daughter|wife|sister|aunt|grandmother|ms|mrs)\b/i.test(hints);
+    const male = /\b(?:father|dad|son|husband|brother|uncle|grandfather|mr)\b/i.test(hints);
+    const compatible = (explicitPronoun === 'she' && female && !male) || (explicitPronoun === 'he' && male && !female);
+    return `(?:${[...conditionTargets, explicitPronoun, ...(compatible ? valueTargets : [])].join('|')})`;
+  }
+  conditionTargets.push(...valueTargets);
+  const identityHints = `${recipient} ${valueTargets.join(' ')}`;
+  const unambiguousNamedRecipient = valueTargets.some((target) => new RegExp(`^(?:${target})$`, 'i').test(recipient));
+  if (/^(?:her)$/i.test(recipient) || /\b(?:mother|mom|daughter|wife|sister|aunt|grandmother)\b/i.test(identityHints)) {
+    conditionTargets.push('she');
+  } else if (/^(?:him)$/i.test(recipient) || /\b(?:father|dad|son|husband|brother|uncle|grandfather)\b/i.test(identityHints)) {
+    conditionTargets.push('he');
+  } else if (/^(?:them)$/i.test(recipient)) {
+    conditionTargets.push('they');
+  } else if (unambiguousNamedRecipient) {
+    conditionTargets.push('she', 'he', 'they');
+  }
+  return `(?:${conditionTargets.join('|')})`;
+}
+
+const CALLBACK_CONSENT_BOUNDARY = '(?=\\s*(?:[,.;!?]|$))';
+const CALLBACK_RECEIVED_CONTACT = `(?:be\\s+(?:called|contacted|phoned|texted|emailed)|(?:receive|get)\\s+an?\\s+${CALLBACK_CONTACT_NOUN}|(?:an?|the)\\s+${CALLBACK_CONTACT_NOUN})`;
+const CALLBACK_TIMING_COMPONENT = `(?:${VISIT_TIME_RE.source}|${CALLBACK_TIMING_ADVERB}|now|later|morning|afternoon|evening|night|(?:before|after|until|till)\\s+(?:noon|midday|midnight))`;
+const CALLBACK_TIMING_MODIFIERS_RE = new RegExp(
+  `^(?:\\s*(?:(?:for|on|at|by|from|between|around|about)\\s+)?${CALLBACK_TIMING_COMPONENT})*(?:\\s+or\\s+not)?\\s*$`,
+  'i',
+);
+function callbackAgreementAction(additionalComplement = '') {
+  const complement = additionalComplement
+    ? `(?:to\\s+${CALLBACK_RECEIVED_CONTACT}|${additionalComplement})`
+    : `to\\s+${CALLBACK_RECEIVED_CONTACT}`;
+  return `(?:agrees?|consents?)(?:\\s+${complement})?${CALLBACK_CONSENT_BOUNDARY}`;
+}
+
+function callbackConsentOverridden(text, matchEnd, consentCondition, conditionTarget) {
+  const rawConsent = consentCondition.exec(text.slice(matchEnd));
+  return rawConsent && new RegExp(`^\\s*,?\\s*(?:or|and|but)\\s+(?:even\\s+)?(?:if|when)\\s+${conditionTarget}\\s+(?:does(?:\\s+not|n[\\x27\\u2019]t)|declines?|refuses?)\\b`, 'i')
+    .test(text.slice(matchEnd + rawConsent.index + rawConsent[0].length));
+}
+
+function callbackConsentSuffix(text, matchEnd) {
+  const restrictivePrefix = /^\s*,?\s*but\s+(?=only\s+(?:if|after)\b)/i.exec(text.slice(matchEnd));
+  const suffixStart = matchEnd + (restrictivePrefix?.[0].length || 0);
+  const [, clauseEnd] = clauseBounds(text, suffixStart);
+  return text.slice(suffixStart, clauseEnd).replace(/^\s*back\b/i, '');
+}
+
+/**
+ * value: { targets: ["ruth", "(?:my |your |her )?(?:mother|mom)"] } — the
+ * regex sources naming THIS scenario's account holder, added to the pronouns
+ * and roles above. Fails on any promise that Waves will contact her.
+ */
+function no_account_holder_callback(value, record, { spoken }) {
+  for (const text of spoken) {
+    for (const { source, actor, recipient, kind } of recognizeCallbackCandidates(text, value.targets)) {
+      const matchEnd = source.end;
+      const [clauseStart] = clauseBounds(text, source.start);
+      const bare = kind === 'bare-coordinated';
+      const inherited = kind === 'coordinated';
+      const callbackSuffix = callbackConsentSuffix(text, matchEnd);
+      const conditionTarget = callbackConditionTarget(value.targets, recipient);
+      const consentCondition = new RegExp(
+        `\\b(?:(?:(?:only\\s+)?(?:if|after)|when|once|provided(?:\\s+that)?)\\s+${conditionTarget}\\s+${callbackAgreementAction()})`,
+        'i',
+      );
+      const leadingConsent = new RegExp(`^\\s*${consentCondition.source}\\s*,?\\s*$`, 'i');
+      const trailingConsent = consentCondition.exec(callbackSuffix);
+      const consentModifiers = trailingConsent
+        ? callbackSuffix.slice(0, trailingConsent.index).replace(/,\s*$/, '') : '';
+      const concessiveConsent = trailingConsent
+        && /\beven\s*$/i.test(callbackSuffix.slice(0, trailingConsent.index));
+      const consentOverridden = callbackConsentOverridden(text, matchEnd, consentCondition, conditionTarget);
+      const consentGated = !consentOverridden && (leadingConsent.test(text.slice(clauseStart, source.start))
+        || Boolean(trailingConsent && !concessiveConsent
+          && (VISIT_MODIFIERS_RE.test(consentModifiers)
+            || CALLBACK_TIMING_MODIFIERS_RE.test(consentModifiers))));
+      const claim = (bare ? source.text.replace(/\bif\b.*?(?=,?\s+\b(?:and|but|so|then)\b)/gi, '')
+        : inherited ? text.slice(source.start, matchEnd) : claimContext(text, source.start, matchEnd))
+        .replace(/^.*\bbut\s+/i, '')
+        .replace(/^\s*(?:if|unless)\b[^,]*,\s*/i, '')
+        .replace(/^\s*(?:whether\s+(?:or\s+not\b[^,]*|[^,]*\bor\s+not)|(?:even\s+(?:if|though)|regardless|irrespective)\b[^,]*)\s*,\s*/i, '');
+      const speculative = /^\s*(?:maybe|perhaps|i (?:think|believe)(?: that)?|it is possible(?: that)?)\s*$/i.test(text.slice(clauseStart, source.start));
+      const callbackPolarity = claim.replace(/\b(?:not forget|never fail|not fail)\s+to\b/gi, '');
+      if (actor.waves && !consentGated && !speculative
+          && !clauseIsNegated(callbackPolarity) && !clauseIsEpistemicallyHedged(claim)) {
+        return ['fail', `promised to contact the account holder: "${clip(source.text, 160)}"`];
+      }
+    }
+  }
+  return ['pass', 'no promise that Waves would contact the account holder'];
+}
+
 // ── The call's language ────────────────────────────────────────────────────
 
 // Words that belong to one language and not the other: function words,
@@ -1713,12 +1821,15 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
   no_account_pii: () => (v) => (v === true ? null : 'value must be true'),
   no_refund_claim: () => (v) => (v === true ? null : 'value must be true'),
   no_third_party_disclosure: () => (v) => (v === true ? null : 'value must be true'),
+  no_account_holder_callback: () => (v) => (isPlainObject(v) && Object.keys(v).length === 1 && Array.isArray(v.targets) && v.targets.length
+    && v.targets.every((t) => typeof t === 'string' && t.trim() && compiles(t, true))
+    ? null : 'value must be { targets: ["<regex naming the account holder>", …] }'),
   only_language: () => (v) => (v === 'en' || v === 'es' ? null : 'value must be en or es'),
   capture_lead_input_asserts: () => (v) => (isPlainObject(v) && Object.keys(v).length
     && Object.values(v).every((p) => [].concat(p).length && [].concat(p).every((t) => typeof t === 'string' && t.trim() && compiles(t, true)))
     ? null : 'value must be { <capture_lead field>: ["<regex>", …], … }'),
 });
 
-const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_free_visit_promise, no_third_party_disclosure, only_language, capture_lead_input_asserts });
+const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_free_visit_promise, no_third_party_disclosure, no_account_holder_callback, only_language, capture_lead_input_asserts });
 
 module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, spokenDigits, assertedMatch, EPISTEMIC_REFUSAL_VERBS, EPISTEMIC_DENIAL_WORDS, clauseBounds, clauseOf, claimContext, clauseIsNegated, clauseIsEpistemicallyHedged, cueInSameClause } };
