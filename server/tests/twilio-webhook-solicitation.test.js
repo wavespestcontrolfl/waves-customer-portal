@@ -23,11 +23,13 @@ const mockOutboundHistoryCalls = [];
 // findSingleCustomerByPhone runs a raw db('customers')... query — set this
 // to simulate a matched customer for the sender (null/[] = no match).
 let mockCustomersRows = null;
+const mockOptoutReceipts = new Map();
 function mockDb(table) {
   const query = { rows: table === 'customers' && mockCustomersRows ? mockCustomersRows : [] };
   for (const method of ['where', 'whereNull', 'whereNot', 'whereNotIn', 'orWhereNull', 'orderBy', 'limit']) {
     query[method] = () => query;
   }
+  query.where = (filter) => { query.filter = filter; return query; };
   query.whereIn = () => { query.usedWhereIn = true; return query; };
   // Only queryOutboundHistory's `messages` branch joins — the unrelated
   // read-state checks elsewhere in the handler (`db('messages').where({...
@@ -36,6 +38,7 @@ function mockDb(table) {
   query.join = () => { query.usedJoin = true; return query; };
   query.whereRaw = (...args) => { mockWhereRawCalls.push({ table, args }); return query; };
   query.insert = (row) => {
+    if (table === 'inbound_sms_optout_receipts') mockOptoutReceipts.set(row.message_sid, row);
     mockWrites.push({ table, row });
     query.rows = [{ id: '00000000-0000-4000-8000-000000000001', created_at: new Date(), ...row }];
     // notification_prefs upsert (opt-out prefs write) chains onConflict().merge().
@@ -44,6 +47,7 @@ function mockDb(table) {
     return query;
   };
   query.first = async () => {
+    if (table === 'inbound_sms_optout_receipts') return mockOptoutReceipts.get(query.filter.message_sid) || null;
     if (table === 'messages' && query.usedJoin) {
       mockOutboundHistoryCalls.push(table);
       return mockHistoryResults.length ? mockHistoryResults.shift() : null;
@@ -126,7 +130,7 @@ const PITCH = 'Are you open to more booked jobs? Reply "NO" if you need me to st
 const savedGate = process.env.GATE_SMS_SPAM_CLASSIFIER;
 const savedOwner = process.env.ADAM_PHONE;
 
-async function receive(body, to = numbers.locations.parrish.number, expectedStatus = 200) {
+async function receive(body, to = numbers.locations.parrish.number, expectedStatus = 200, messageSid = 'SM-synthetic-solicitation') {
   const res = new EventEmitter();
   res.statusCode = 200;
   res.status = (code) => { res.statusCode = code; return res; };
@@ -134,7 +138,7 @@ async function receive(body, to = numbers.locations.parrish.number, expectedStat
   res.send = (value) => { res.body = value; return res; };
   await handler({ body: {
     From: '+12025550101', To: to,
-    Body: body, MessageSid: 'SM-synthetic-solicitation',
+    Body: body, MessageSid: messageSid,
   } }, res);
   await new Promise(setImmediate);
   if (expectedStatus === 200) expect(require('../services/logger').error).not.toHaveBeenCalled();
@@ -150,6 +154,7 @@ beforeEach(() => {
   mockHistoryResults = [];
   mockOutboundHistoryCalls.length = 0;
   mockCustomersRows = null;
+  mockOptoutReceipts.clear();
   process.env.GATE_SMS_SPAM_CLASSIFIER = 'shadow';
   process.env.ADAM_PHONE = '+12025550199';
   dispatchWithFallback.mockResolvedValue({ ok: true, json: { solicitation: false, confidence: 0.97 } });
@@ -661,4 +666,35 @@ test('an inbox failure never releases another delivery claim', async () => {
   recordTouchpoint.mockResolvedValueOnce(null);
   await receive('Please help with ants.', undefined, 503);
   expect(dedupe.releaseInboundWebhook).not.toHaveBeenCalled();
+});
+
+test('STOP with a failed inbox, then START, then the old STOP retry preserves newer consent', async () => {
+  mockCustomersRows = [{ id: 'customer-1', first_name: 'Synthetic', last_name: 'Consent', phone: '+12025550101' }];
+  findKnownCallerCustomer.mockResolvedValue(mockCustomersRows[0]);
+  const recipient = require('../services/recipient-optin').markRecipientOptin;
+  const suppression = require('../services/messaging/validators/suppression');
+  recordTouchpoint.mockResolvedValueOnce(null);
+  await receive('STOP', undefined, 503);
+  expect(mockOptoutReceipts.size).toBe(1);
+  expect(recordSuppression).toHaveBeenCalledTimes(1);
+  require('../services/logger').error.mockClear();
+  await receive('START', undefined, 200, 'SM-synthetic-start');
+  expect(suppression.clearSuppression).toHaveBeenCalledTimes(1);
+  const res = await receive('STOP');
+  expect(res.body).toBe('<Response></Response>');
+  expect(recordSuppression).toHaveBeenCalledTimes(1);
+  expect(recipient.mock.calls.map(call => call[1])).toEqual(['declined', 'confirmed']);
+  expect(mockWrites.filter(({ table }) => table === 'notification_prefs').map(({ row }) => row.sms_enabled))
+    .toEqual([false, true]);
+  expect(recordTouchpoint).toHaveBeenCalledTimes(3);
+});
+
+test.each(['suppression', 'recipient'])('a swallowed %s STOP write failure cannot acknowledge or commit a receipt', async (failedWrite) => {
+  findKnownCallerCustomer.mockResolvedValue({ id: 'contact-1' });
+  if (failedWrite === 'suppression') recordSuppression.mockResolvedValueOnce({ ok: false });
+  else require('../services/recipient-optin').markRecipientOptin.mockResolvedValueOnce(false);
+  await receive('STOP', undefined, 503);
+  expect(mockOptoutReceipts.size).toBe(0);
+  expect(mockWrites.filter(({ table }) => table === 'sms_log')).toHaveLength(0);
+  expect(require('../services/messaging/inbound-dedupe').releaseInboundWebhook).toHaveBeenCalledTimes(1);
 });

@@ -330,6 +330,11 @@ successful acknowledgment or ordinary downstream processing. A missing message
 returns 503 and releases only this delivery's owned inbound claim. Eligible
 STOP requests still persist suppression, recipient decline, and preference
 updates before that error; non-idempotent logs and alerts wait for redelivery.
+Those STOP effects and a permanent MessageSid application receipt commit
+atomically under the canonical phone lock. A failed consent transaction also
+returns 503. A retry of an applied STOP saves the inbox and completes deferred
+handling without changing consent again or sending an unsubscribe confirmation;
+it cannot undo a newer START. Receipts must remain for the lifetime of retries.
 Inbound media uses stable account/message/index storage keys across retries.
 Stale contact-correction reservations require a saved unified inbox message
 before promotion; failed route cancellation cannot replay an unrecorded source.

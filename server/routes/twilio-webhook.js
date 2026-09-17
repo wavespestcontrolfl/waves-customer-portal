@@ -1,4 +1,3 @@
-const { lockSmsPhone } = require('../utils/customer-comms-lock');
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
@@ -191,6 +190,7 @@ router.post('/sms', async (req, res) => {
   // duplicate the row. Better to keep the (already-logged) message claimed.
   let persisted = false;
   let sourcePersistenceFailed = false;
+  let optOutPersistenceFailed = false;
   // Contact-correction queue slot + whether a branch actually ran it.
   // Declared out here so the route-level finally can release an un-run
   // reservation on EVERY exit path (round-15) — early returns, throws, and
@@ -487,31 +487,18 @@ router.post('/sms', async (req, res) => {
 
     if (optCommand.action === 'opt_out') {
       const normalizedFrom = normalizeE164(From);
-      await recordSuppression({
+      optOutPersistenceFailed = true;
+      const optOut = await require('../services/messaging/inbound-optout').applyInboundOptout({
+        messageSid: MessageSid,
         phone: normalizedFrom || From,
+        customerId: customer?.id || null,
         reason: optCommand.reason,
         source: `twilio_webhook_${optCommand.detectionMethod}`,
         capturedBody: Body,
       });
-      // Recipient double opt-in: a pending third-party recipient who replies
-      // STOP is recorded as declined (no-op when no recipient row exists).
-      try {
-        await require('../services/recipient-optin').markRecipientOptin(normalizedFrom || From, 'declined');
-      } catch { /* never block the STOP path */ }
-      try {
-        if (customer) {
-          await db.transaction(async trx => {
-            await lockSmsPhone(trx, normalizedFrom || From);
-            await trx('notification_prefs')
-              .insert({ customer_id: customer.id, sms_enabled: false })
-              .onConflict('customer_id')
-              .merge({ sms_enabled: false });
-          });
-        }
-        logger.info(`[sms-optout] ${customer ? `Customer ${customer.id}` : `Unknown sender ${maskPhone(From)}`} opted out of SMS via ${optCommand.detectionMethod}`);
-      } catch (e) { logger.error(`[sms-optout] Failed to update prefs: ${e.message}`); }
-
-      // Suppression/prefs are idempotent and must survive an inbox outage.
+      optOutPersistenceFailed = false;
+      // Receipt + suppression + recipient decline + prefs commit atomically.
+      // A replay after START must not apply those consent effects again.
       // Stop before logs, alerts, corrections, or a successful TwiML response.
       requireInboxMessage();
 
@@ -608,7 +595,9 @@ router.post('/sms', async (req, res) => {
       }
 
       return res.type('text/xml').send(
-        `<Response><Message>You've been unsubscribed from Waves Pest Control SMS. Reply START to re-subscribe.</Message></Response>`
+        optOut.applied
+          ? `<Response><Message>You've been unsubscribed from Waves Pest Control SMS. Reply START to re-subscribe.</Message></Response>`
+          : '<Response></Response>'
       );
     }
 
@@ -1516,7 +1505,7 @@ router.post('/sms', async (req, res) => {
     });
     // An unrecorded source is a webhook failure, never a successful
     // acknowledgment. Provider retry/fallback policy is configured in Twilio.
-    res.status(sourcePersistenceFailed ? 503 : 200).type('text/xml').send('<Response></Response>');
+    res.status(sourcePersistenceFailed || optOutPersistenceFailed ? 503 : 200).type('text/xml').send('<Response></Response>');
   } finally {
     // Release an un-run correction reservation on every exit path — a
     // branch that fired keeps its row (correctionFired is set
