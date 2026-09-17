@@ -7,6 +7,7 @@ const {
   escapeRegexLiteral,
   SHORT_AFFIRMATION_RE,
   latestInterrogativeSegment,
+  QUESTION_AUX_RE_SOURCE,
   QUESTION_AUX_WH_RE_SOURCE,
   CONVERSATIONAL_CONDITION_RE
 } = require('./voice-relay-spoken-language');
@@ -107,7 +108,7 @@ const SAFETY_PRODUCT_RELATIVE = '(?:\\s+(?:(?:(?:that|which)\\s+)?(?:we|they|you
 
 const SAFETY_SUBJECT_VERB = `${SAFETY_PRODUCT_RELATIVE}(?:[\\x27\\u2019](?:s|re)|\\s+(?:is|are|was|were|will be|would be|should be))`;
 
-const SAFETY_INTENSIFIER = '(?:(?:completely|totally|perfectly|entirely|absolutely|fully|100%|very|quite|pretty|always|actually|also)\\s+)?';
+const SAFETY_INTENSIFIER = '(?:(?:completely|totally|perfectly|entirely|absolutely|fully|100%|very|quite|pretty|always|actually|also|generally|usually|typically)\\s+)?';
 
 const SAFETY_COORDINATED_ADJECTIVE_ITEM = '(?:[a-z]+(?:-[a-z]+)?\\s+)?[a-z]+(?:-[a-z]+)?';
 
@@ -216,7 +217,7 @@ const SAFETY_GUARANTEE_RES = Object.freeze([
   SAFETY_POST_DRY_GUARANTEE_RE,
   // "not harmful (at all)", "never toxic", "no longer dangerous" — negating
   // the HARM word is itself the safety claim.
-  new RegExp(`\\b(?:not|never|no longer|(?:is|are)n[\\x27\\u2019]t)\\s+${SAFETY_INTENSIFIER}${HARM_ADJECTIVE}\\b`, 'gi'),
+  new RegExp(`\\b(?:not|never|no longer|cannot|(?:is|are|could|would)n[\\x27\\u2019]t|can[\\x27\\u2019]t|won[\\x27\\u2019]t)\\s+(?:be\\s+)?${SAFETY_INTENSIFIER}${HARM_ADJECTIVE}\\b`, 'gi'),
 ]);
 
 const SAFETY_REFUSED_HARM_RE = new RegExp(
@@ -228,11 +229,13 @@ const SAFETY_QUESTION_PRODUCT_SUBJECT_RE = `(?:(?:this|that|the|our|your|these|t
 
 const SAFETY_QUESTION_PRONOUN_RE = '(?:it|that|they|this|these|those)\\b';
 
-const SAFETY_QUESTION_AUXILIARY = `(?:isn[\\x27\\u2019]t|aren[\\x27\\u2019]t|doesn[\\x27\\u2019]t|don[\\x27\\u2019]t|wouldn[\\x27\\u2019]t|won[\\x27\\u2019]t|can[\\x27\\u2019]t|couldn[\\x27\\u2019]t|is|are|does|do|would|will|can|could)`;
+const SAFETY_QUESTION_NEGATIVE_AUXILIARY = `(?:isn|aren|wasn|weren|doesn|don|didn|wouldn|won|can|couldn|shouldn|shan|mayn|mightn|mustn|hasn|haven|hadn)[\\x27\\u2019]t`;
+
+const SAFETY_QUESTION_AUXILIARY = `(?:${SAFETY_QUESTION_NEGATIVE_AUXILIARY}|${QUESTION_AUX_RE_SOURCE})`;
 
 const SAFETY_QUESTION_BRIDGE = `(?:[^.!?;]{0,20}?|\\s+you\\s+(?:(?:please\\s+)?tell\\s+me|(?:happen\\s+to\\s+)?know|let\\s+me\\s+know|check|confirm)\\s+(?:whether|if)\\s+)`;
 
-const SAFETY_NEGATIVE_QUESTION_AUXILIARY_RE = /^(?:isn|aren|doesn|don|wouldn|won|can|couldn)[\x27\u2019]t\b/i;
+const SAFETY_NEGATIVE_QUESTION_AUXILIARY_RE = new RegExp(`^${SAFETY_QUESTION_NEGATIVE_AUXILIARY}\\b`, 'i');
 
 function questionAboutProduct(text, keywordAlt, questionOffset, turnPrefix) {
   const productSubject = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\b${SAFETY_QUESTION_BRIDGE}\\b${SAFETY_QUESTION_PRODUCT_SUBJECT_RE}([^.!?;]{0,80}?\\b(?:${keywordAlt})\\b)[^.!?;]{0,60}?(?:[?.]|$)`, 'i');
@@ -373,14 +376,25 @@ function safetyProductScope(text) {
 
 const SAFETY_CIRCUMSTANCE_RE = /\b(if|unless|when|while|before|after|once|provided(?:\s+that)?|as\s+long\s+as)\s+([^.!?;,:—–]+)/gi;
 
+const SAFETY_ASR_CONDITION_QUESTION_RE = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\s+(?:${SAFETY_QUESTION_PRODUCT_SUBJECT_RE}|(?:${SAFETY_QUESTION_PRONOUN_RE}|${SAFETY_AUDIENCE_SUBJECT}|${SAFETY_KNOWN_PRODUCT_NAME})\\b)`, 'i');
+
 function safetyCircumstanceScopes(text) {
   const predicate = SAFETY_REFUSED_CLAIM_RE.exec(text);
   if (!predicate) return [];
   // "confirm if it is safe" introduces the refused proposition. Conditions
   // after the safety predicate, or complete leading conditions separated
   // from it, restrict the proposition itself instead.
-  const leadingConditions = [...text.matchAll(SAFETY_CIRCUMSTANCE_RE)]
-    .filter((condition) => condition.index + condition[0].length <= predicate.index);
+  const leadingConditions = [...text.matchAll(SAFETY_CIRCUMSTANCE_RE)].flatMap((condition) => {
+    if (condition.index + condition[0].length <= predicate.index) return [condition];
+    if (condition.index >= predicate.index) return [];
+    const bodyStart = condition.index + condition[0].length - condition[2].length;
+    const leadingBody = text.slice(bodyStart, predicate.index);
+    const questionStart = SAFETY_ASR_CONDITION_QUESTION_RE.exec(leadingBody);
+    // A fresh auxiliary and subject ends an unpunctuated ASR condition.
+    // An indirect "confirm if it is safe" has no such question boundary.
+    return questionStart && questionStart.index > 0
+      ? [{ ...condition, 2: leadingBody.slice(0, questionStart.index).trim() }] : [];
+  });
   // Scan the predicate suffix independently so an indirect "if ... safe"
   // complement cannot consume an actual later "if swallowed" condition.
   const trailingConditions = [...text.slice(predicate.index + predicate[0].length).matchAll(SAFETY_CIRCUMSTANCE_RE)];
