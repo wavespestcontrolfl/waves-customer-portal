@@ -22,11 +22,15 @@ function normalizeEmailReplyCopy(text = '') {
   if ((copy.match(/\S+/g) || []).length > COPY_LIMITS.tokens) return failure('copy_tokens');
 
   copy = copy
+    // Punctuation dashes separate words; lexical hyphens still join them.
+    .replace(/[\u2012-\u2015]/g, ' - ')
     .replace(/[\u2010-\u2015\u2212]/g, '-')
     .replace(/[‘’]/g, "'")
     .replace(/\\(?:\r\n?|\n)/g, ' ')
     .replace(/\\([-!"#$%&'()*+,.\/:;<=>?@[\]^_`{|}~\\])/g, '$1')
     .replace(/\s+/g, ' ');
+
+  if ((copy.match(/\S+/g) || []).length > COPY_LIMITS.tokens) return failure('copy_tokens');
 
   for (let pass = 0; pass < COPY_LIMITS.formatPasses; pass += 1) {
     const next = copy

@@ -190,13 +190,24 @@ function storedTermiteResult(estData = {}) {
   const r = line || {};
   const install = r.installation || {};
   const system = String(firstDefined(m.selectedSystem, m.system, r.selectedSystem, r.system, 'trelona')).toLowerCase();
+  // A mapped result supersedes any retained raw draft. Its missing plan or
+  // stamp cannot inherit an older annual request from engineResult.
+  const storedPlan = String((mapped
+    ? firstDefined(m.plan, m.pricingKnobs?.plan)
+    : firstDefined(r.plan, r.pricingKnobs?.plan)) || '').toLowerCase();
   // The Admin V1 envelope carries BOTH installs (ai = Advance, ti =
   // Trelona); the stored system decides which one this quote sold
   // (codex #4313 r9 P0). Only the other is a fallback when the sold one
   // is absent (older single-system envelopes).
   const mappedInstall = system === 'advance' ? firstDefined(m.ai, m.ti) : firstDefined(m.ti, m.ai);
   return {
-    stamp: firstDefined(m.pricingKnobs, r.pricingKnobs) || null,
+    stamp: (mapped ? m.pricingKnobs : r.pricingKnobs) || null,
+    // Stored-result evidence owns program identity. Leave older rows without
+    // a program stamp alone: they predate annual-plan requests, while every
+    // priced quote created by this lane persists quarterly or annual here.
+    plan: ['annual_protection', 'quarterly'].includes(storedPlan) ? storedPlan : null,
+    planTerms: (mapped ? m.planTerms : r.planTerms) || null,
+    planLabel: (mapped ? m.planLabel : r.planLabel) || null,
     system,
     stations: firstDefined(m.sta, r.stations),
     install: firstDefined(mappedInstall, install.retailValue, install.price),
@@ -222,6 +233,14 @@ function termiteKnobSignalForReplay(estData = {}) {
   const stampedCost = stamp ? Number(stamp.stationCost) : NaN;
   if (Number.isFinite(stampedCost) && stampedCost > 0) {
     const knob = (key) => (Number.isFinite(Number(stamp[key])) ? Number(stamp[key]) : PRE_STAMP_TERMITE_INSTALL_KNOBS[key]);
+    const planKnobs = stored.plan === 'annual_protection'
+      ? {
+        plan: 'annual_protection', setupPerStation: knob('setupPerStation'), annualBase: knob('annualBase'),
+        annualStep: knob('annualStep'), bracketStations: knob('bracketStations'), bracketFloor: knob('bracketFloor'),
+        coverageMonths: stored.planTerms?.coverageMonths, visitsPerYear: stored.planTerms?.visitsPerYear,
+        label: stored.planLabel,
+      }
+      : (stored.plan === 'quarterly' ? { plan: 'quarterly' } : {});
     return {
       system: String(stamp.system || stored.system).toLowerCase(),
       stationCost: stampedCost,
@@ -229,11 +248,19 @@ function termiteKnobSignalForReplay(estData = {}) {
       misc: knob('misc'),
       installMultiplier: knob('installMultiplier'),
       minStations: knob('minStations'),
+      // The annual plan's own constants replay from day one (plan §A2).
+      ...planKnobs,
     };
   }
   const basis = unstampedTermiteInstallBasis(stored.system, stored.stations, stored.install, stored.materialCost, stored.modifiers);
   return basis && Number.isFinite(basis.stationCost)
-    ? { system: stored.system, ...PRE_STAMP_TERMITE_INSTALL_KNOBS, stationCost: basis.stationCost, installMultiplier: basis.installMultiplier }
+    ? {
+      system: stored.system,
+      ...(stored.plan ? { plan: stored.plan } : {}),
+      ...PRE_STAMP_TERMITE_INSTALL_KNOBS,
+      stationCost: basis.stationCost,
+      installMultiplier: basis.installMultiplier,
+    }
     : null;
 }
 
