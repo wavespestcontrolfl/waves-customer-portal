@@ -330,6 +330,21 @@ country codes), or an active
 503 with empty TwiML before either consumer runs; the owned SID claim is
 released before that response. Twilio's configured retry/fallback policy
 governs redelivery),
+Accepted inbound SMS also requires a saved unified inbox message before a
+successful acknowledgment or ordinary downstream processing. A missing message
+returns 503 and releases only this delivery's owned inbound claim. Eligible
+STOP requests still persist suppression, recipient decline, and preference
+updates before that error; non-idempotent logs and alerts wait for redelivery.
+Those STOP effects and a permanent MessageSid application receipt commit
+atomically under the canonical phone lock. A failed consent transaction also
+returns 503. A retry of an applied STOP saves the inbox and completes deferred
+handling without changing consent again or sending an unsubscribe confirmation;
+it cannot undo a newer START. Receipts must remain for the lifetime of retries.
+Inbound media uses stable account/message/index storage keys across retries.
+Stale contact-correction reservations require a saved unified inbox message
+before promotion; failed route cancellation cannot replay an unrecorded source.
+Provider retry/fallback remains governed by the configured Twilio policy.
+
 `/api/webhooks/twilio/outbound-amd` +
 `/api/webhooks/twilio/outbound-dial-complete` (POST; machine-to-machine
 callbacks under the existing Twilio-signature-validated mount. The shared
