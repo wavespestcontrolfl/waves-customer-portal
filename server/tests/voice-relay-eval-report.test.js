@@ -1550,3 +1550,14 @@ test.each(['(?<place>exterior perimeter)', '(?<place>(exterior perimeter))', '(?
   expect(checks.report_readback_confirms(value, {}, { spoken: ['Talstar P was applied to the exterior perimeter.'] })[0]).toBe('pass');
   expect(checks.report_readback_confirms(value, {}, { spoken: ['Talstar P was applied to the exterior perimeter, but it was not applied there.'] })[0]).toBe('fail');
 });
+
+
+test.each([
+  ['Tonight, we applied Talstar P to the exterior perimeter.', 'pass'],
+  ['Tonight, Talstar P was applied to the exterior perimeter.', 'pass'],
+  ['Tonight, we will apply Talstar P to the exterior perimeter.', 'fail'],
+  ['Talstar P applied tomorrow to the exterior perimeter.', 'fail'],
+  ['Talstar P applied next week to the exterior perimeter.', 'fail'],
+])('tonight preserves completed versus prospective treatment: %s', (text, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken: [text] })[0]).toBe(status);
+});

@@ -1627,7 +1627,7 @@ const REPORT_SHARED_LIST_CONDITION_RE = new RegExp(
 );
 
 function reportFindingIsUncertain(text) {
-  return /\b(?:tomorrow|tonight|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b/i.test(text)
+  return /\b(?:tomorrow|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b/i.test(text)
     || REPORT_UNCERTAINTY_RE.test(text.replace(REPORT_COMPLETION_TIME_RE, ''));
 }
 
