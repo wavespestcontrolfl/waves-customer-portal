@@ -56,7 +56,7 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const WAVES_KINDS = Object.freeze([
   'send_estimate', 'send_appointment_confirmation', 'callback', 'send_report',
-  'send_paperwork', 'technician_follow_up', 'schedule_visit',
+  'send_paperwork', 'technician_follow_up', 'schedule_visit', 'send_reschedule_link',
 ]);
 const CUSTOMER_KINDS = Object.freeze([
   'send_photos', 'confirm_date', 'call_back', 'provide_info', 'make_payment',
@@ -76,7 +76,9 @@ const CHANNELS = Object.freeze(['sms', 'email', 'call', 'in_person', 'unknown'])
 
 // Bumped when the derivation rules or the model prompt change, so a row can
 // say which extractor produced it.
-const EXTRACTOR_VERSION = 'commitments-v1';
+const EXTRACTOR_VERSION = 'commitments-v7';
+const IDENTITY_UNRESOLVED_INCOMPLETE = 'incomplete_extraction';
+const IDENTITY_UNRESOLVED_AMBIGUOUS = 'reconciliation_ambiguity';
 
 // Mirrors CALL_PROC_EXTRACT_TIMEOUT_MS in call-recording-processor.js; the
 // claim ceiling counts this leg at the same budget.
@@ -104,7 +106,50 @@ function slug(text) {
 // singular kinds (one estimate, one confirmation, one callback…) key on
 // party:kind alone so a reworded description on reprocess upserts the same
 // row instead of duplicating it.
-const REPEATABLE_KINDS = new Set(['send_report', 'send_paperwork', 'provide_info', 'other']);
+// send_reschedule_link is repeatable for a different reason: one call can
+// promise a link for TWO existing appointments, and a party:kind key would
+// upsert the second over the first, silently dropping one obligation (codex
+// #4293 r2 P2). The quote and current-visit subject give each promise its
+// own row, even when the agent used one sentence for two visits.
+const REPEATABLE_KINDS = new Set(['send_report', 'send_paperwork', 'provide_info', 'send_reschedule_link', 'other']);
+
+function currentVisitDate(subject) {
+  if (!subject || typeof subject !== 'object') return '';
+  const provedIdentity = subject.identity_unresolved === true && Array.isArray(subject.identity_claims);
+  const appointmentClaims = (Array.isArray(provedIdentity ? subject.identity_claims : subject.date_claims)
+    ? (provedIdentity ? subject.identity_claims : subject.date_claims) : [])
+    .filter((claim) => claim?.binding === 'appointment');
+  const fullDates = [...new Set(appointmentClaims
+    .filter((claim) => claim.year && claim.month && claim.day)
+    .map((claim) => `${claim.year}-${String(claim.month).padStart(2, '0')}-${String(claim.day).padStart(2, '0')}`))];
+  const statedDate = String(subject.visit_date || '').trim();
+  return !provedIdentity && /^\d{4}-\d{2}-\d{2}$/.test(statedDate) ? statedDate : (fullDates.length === 1 ? fullDates[0] : '');
+}
+
+function rescheduleSubjectFingerprint(subject) {
+  if (!subject || typeof subject !== 'object') return null;
+  if (subject.identity_unresolved === true && Array.isArray(subject.identity_claims)) {
+    // An incomplete coverage list cannot certify visit_date, service, or
+    // address for automatic selection. The helper independently proved only
+    // these appointment claims; they may separate office ledger identities
+    // while date_claims:null continues to park every automatic delivery.
+    const proved = [...new Set((Array.isArray(subject.identity_claims) ? subject.identity_claims : [])
+      .filter((claim) => claim?.binding === 'appointment')
+      .map((claim) => [claim.year ?? '', claim.month ?? '', claim.day ?? '', claim.weekday ?? ''].join('-')))].sort();
+    return proved.length ? JSON.stringify(['', '', '', ...proved]) : null;
+  }
+  const visitDate = currentVisitDate(subject);
+  // Once the current visit has a full date, a partial/full claim about that
+  // same visit adds evidence, not identity. Likewise one full appointment
+  // claim without visit_date identifies the same absolute date.
+  const appointmentClaims = (Array.isArray(subject.date_claims) ? subject.date_claims : [])
+    .filter((claim) => claim?.binding === 'appointment');
+  const claims = visitDate ? [] : [...new Set(appointmentClaims
+    .map((claim) => [claim.year ?? '', claim.month ?? '', claim.day ?? '', claim.weekday ?? ''].join('-')))]
+    .sort();
+  const parts = [visitDate, normalizeForMatch(subject.service), normalizeForMatch(subject.address), ...claims];
+  return parts.some(Boolean) ? JSON.stringify(parts) : null;
+}
 
 function commitmentKey(item) {
   const party = item.party === 'customer' ? 'customer' : 'waves';
@@ -120,7 +165,10 @@ function commitmentKey(item) {
   const s = anchor
     ? `q${crypto.createHash('sha1').update(anchor).digest('hex').slice(0, 12)}`
     : (slug(item.description) || crypto.createHash('sha1').update(String(item.description || '')).digest('hex').slice(0, 10));
-  return `${party}:${kind}:${s}`.slice(0, 160);
+  const base = `${party}:${kind}:${s}`.slice(0, 160);
+  if (kind !== 'send_reschedule_link') return base;
+  const subject = rescheduleSubjectFingerprint(item.subject);
+  return subject ? `${base}:s${crypto.createHash('sha1').update(subject).digest('hex').slice(0, 12)}` : base;
 }
 
 // ── Evidence ───────────────────────────────────────────────────────────────
@@ -333,7 +381,32 @@ const MODEL_OUTPUT_SCHEMA = {
           channel: { type: ['string', 'null'], enum: [...CHANNELS, null] },
           due_text: { type: ['string', 'null'], maxLength: 80 },
           due_at: { type: ['string', 'null'] },
+          due_type: { type: ['string', 'null'], enum: ['floor', 'deadline', null] },
           confidence: { type: 'number', minimum: 0, maximum: 1 },
+          subject: {
+            type: ['object', 'null'], additionalProperties: false,
+            properties: {
+              visit_date: { type: ['string', 'null'], pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+              service: { type: ['string', 'null'], maxLength: 120 },
+              address: { type: ['string', 'null'], maxLength: 240 },
+              quote: { type: ['string', 'null'], maxLength: 500 },
+              date_claims: {
+                type: 'array', maxItems: 12,
+                items: {
+                  type: 'object', additionalProperties: false,
+                  required: ['binding', 'quote'],
+                  properties: {
+                    binding: { type: 'string', enum: ['appointment', 'requested', 'delivery', 'unresolved'] },
+                    quote: { type: 'string', minLength: 3, maxLength: 500 },
+                    year: { type: 'integer', minimum: 1900, maximum: 2100 },
+                    month: { type: 'integer', minimum: 1, maximum: 12 },
+                    day: { type: 'integer', minimum: 1, maximum: 31 },
+                    weekday: { type: 'integer', minimum: 0, maximum: 6 },
+                  },
+                },
+              },
+            },
+          },
           evidence: {
             type: 'array',
             minItems: 1,
@@ -355,11 +428,13 @@ const MODEL_OUTPUT_SCHEMA = {
 };
 
 let validateModelOutput = null;
+let validateDateClaims = null;
 function getValidator() {
   if (validateModelOutput) return validateModelOutput;
   const Ajv = require('ajv/dist/2020');
   const ajv = new Ajv({ allErrors: true, strict: false });
   validateModelOutput = ajv.compile(MODEL_OUTPUT_SCHEMA);
+  validateDateClaims = ajv.compile(MODEL_OUTPUT_SCHEMA.properties.commitments.items.properties.subject.properties.date_claims);
   return validateModelOutput;
 }
 
@@ -374,11 +449,13 @@ A commitment is something one party explicitly said they would do after the call
 Rules — these are strict:
 1. Only list what was actually SAID. Do not infer a promise from context, tone, or what a good agent would normally do. If nobody committed to anything, return {"commitments": []}.
 2. Every commitment needs at least one VERBATIM quote copied exactly from the transcript (same words, same spelling), with the speaker who said it. Do not paraphrase the quote.
-3. "due_text" is the timing as spoken ("by tomorrow morning", "later today", "after the inspection") or null. "due_at" is an ISO 8601 timestamp with the -04:00/-05:00 Eastern offset ONLY when the spoken timing names a specific day/time relative to the call date (${when} Eastern); otherwise null. Never invent a time.
+3. "due_text" is the timing of THIS promised action as spoken ("by tomorrow morning", "later today", "after the inspection") or null. "due_at" is an ISO 8601 timestamp with the -04:00/-05:00 Eastern offset ONLY when that timing names a specific day/time relative to the call date (${when} Eastern); otherwise null. Never use the existing or requested appointment date as the delivery time. "due_type" is "deadline" ONLY when the agent explicitly promises this action BY, BEFORE, or NO LATER THAN due_at; it is "floor" when the agent says to send it AT or AFTER due_at, and null when due_at is null or timing is unclear. A deadline on another action (such as a callback) does not make the link delivery a deadline.
 4. "confidence" is how sure you are that the quoted words constitute a real commitment (0 to 1).
 5. Use kind "other" only when none of the listed kinds fits.
+   Use send_reschedule_link ONLY when the AGENT promises to send a link for changing an existing appointment. A caller asking for one, a generic website link, a booking link for new service, or a link already sent is not this promise. For EVERY such row supply a subject object with date_claims, even if it has no visit identity. subject.visit_date is ONLY the CURRENT appointment's date (YYYY-MM-DD), never the requested NEW date. Include service, street address, and a verbatim subject.quote only when actually discussed; omit unknown values and never guess the soonest visit.
+   date_claims is a COMPLETE list of every spoken calendar claim relevant to this link and its appointment, including the agent's and caller's words. Use [] ONLY when no such calendar claim was spoken. For each claim copy a verbatim quote from the transcript and classify binding: "appointment" when the date names the EXISTING appointment, "requested" when it clearly names the desired NEW appointment date, "delivery" when it times sending the LINK, or "unresolved" when it could be current or new or its attachment is unclear. A sentence mentioning both dates needs two claims. Include ONLY calendar components the words establish: year (four digits), month (1-12), day (1-31), weekday (0=Sunday through 6=Saturday). Resolve an unambiguous relative date such as "tomorrow" using the call date; a bare weekday with no clear week gets weekday only. "September 20" gets month and day, not an invented year. A date for another action such as a callback is unresolved unless clearly irrelevant to this link. Never omit an ambiguous claim just because subject.visit_date is present.
 6. Output ONLY a JSON object, no prose:
-{"commitments":[{"party":"waves","kind":"send_estimate","description":"...","channel":"email","due_text":"...","due_at":null,"confidence":0.9,"evidence":[{"quote":"...","speaker":"agent"}]}]}
+{"commitments":[{"party":"waves","kind":"send_estimate","description":"...","channel":"email","due_text":"...","due_at":null,"due_type":null,"confidence":0.9,"evidence":[{"quote":"...","speaker":"agent"}]}]}
 
 Transcript:
 ${transcript}`;
@@ -392,18 +469,24 @@ function parseLooseJsonObject(text) {
   return JSON.parse(raw.slice(start, end + 1));
 }
 
-// The transcript's labelled turns, normalized, by speaker. Null when the
-// transcript carries no Agent:/Caller: labels at all (a flat fallback
-// transcript), in which case only flat grounding is possible.
+// The transcript's labelled turns, normalized, by speaker — plus the same
+// turns in spoken order under `ordered` ({ speaker, text }) for a reader
+// that needs to know what came BEFORE what across speakers (the promised-
+// link worker's caller-refusal ordering). Null when the transcript carries
+// no Agent:/Caller: labels at all (a flat fallback transcript), in which
+// case only flat grounding is possible.
 const PARTY_SPEAKER = { waves: 'agent', customer: 'caller' };
 function speakerTurns(transcript) {
-  const turns = { agent: [], caller: [] };
+  const turns = { agent: [], caller: [], ordered: [] };
   let labelled = false;
   for (const line of String(transcript || '').split('\n')) {
     const m = line.match(/^\s*(agent|caller|customer)\s*:\s*(.*)$/i);
     if (!m) continue;
     labelled = true;
-    turns[m[1].toLowerCase() === 'agent' ? 'agent' : 'caller'].push(normalizeForMatch(m[2]));
+    const speaker = m[1].toLowerCase() === 'agent' ? 'agent' : 'caller';
+    const text = normalizeForMatch(m[2]);
+    turns[speaker].push(text);
+    turns.ordered.push({ speaker, text });
   }
   return labelled ? turns : null;
 }
@@ -422,6 +505,7 @@ function speakerTurns(transcript) {
 const KIND_ACTION_WORDS = Object.freeze({
   send_estimate: ['estimate', 'quote', 'pricing', 'price', 'proposal'],
   send_appointment_confirmation: ['confirm', 'confirmation', 'text', 'email', 'details'],
+  send_reschedule_link: ['link', 'reschedule', 'rescheduling'],
   callback: ['call', 'ring', 'phone', 'reach'],
   send_report: ['report', 'summary', 'send'],
   send_paperwork: ['paperwork', 'form', 'agreement', 'contract', 'document', 'send'],
@@ -444,7 +528,34 @@ function quoteExpressesAction(normalizedQuote, item) {
   return words.some((w) => wanted.has(w) || [...wanted].some((k) => k.length >= 4 && w.startsWith(k)));
 }
 
-function groundModelCommitments(items, transcript) {
+// An omitted claim list is NOT an assertion that the transcript contained no
+// date. Preserve that distinction for old rows and malformed model output:
+// the link worker parks them instead of choosing an appointment by default.
+// All claims in an explicit list must be usable; dropping just one would
+// falsely make the remaining list look complete.
+function groundedDateClaims(subject, transcript, reference, timing) {
+  getValidator();
+  if (!subject || !validateDateClaims(subject.date_claims)
+    || !require('./reschedule-date-evidence').verifyRescheduleDateClaims(subject.date_claims, transcript, reference,
+      { ...timing, due_type: timing?.due_type || 'floor' })) return null;
+  return subject.date_claims.map(claim => ({ ...claim, quote: claim.quote.trim() }));
+}
+
+function normalizedRescheduleSubject(item, transcript, reference) {
+  const input = item.subject && typeof item.subject === 'object' ? item.subject : {};
+  const dateClaims = groundedDateClaims(input, transcript, reference, item);
+  // The model cannot write these internal identity fields (its schema
+  // rejects them). Only independently proved appointment claims may
+  // distinguish incomplete obligations in the office ledger.
+  const identityClaims = dateClaims === null && Array.isArray(input.date_claims) && validateDateClaims(input.date_claims)
+    ? require('./reschedule-date-evidence').verifiedAppointmentIdentityClaims(input.date_claims, transcript, reference)
+    : [];
+  return { visit_date: input.visit_date, service: input.service, address: input.address, quote: input.quote,
+    date_claims: dateClaims, ...(dateClaims === null ? { identity_unresolved: true,
+      identity_unresolved_reason: IDENTITY_UNRESOLVED_INCOMPLETE, identity_claims: identityClaims } : {}) };
+}
+
+function groundModelCommitments(items, transcript, reference = null) {
   const flat = normalizeForMatch(transcript);
   const turns = speakerTurns(transcript);
   const kept = [];
@@ -468,6 +579,10 @@ function groundModelCommitments(items, transcript) {
     if (typeof item.confidence !== 'number' || item.confidence < MIN_MODEL_CONFIDENCE) { droppedLowConfidence += 1; continue; }
     const malformedDue = Number.isNaN(parseDueAt(item.due_at));
     if (malformedDue) malformedDueAt += 1;
+    // The model may omit a subject despite the prompt, or produce one bad
+    // claim. Keep its visit fields but mark the claim list incomplete so the
+    // consumer can fail closed. An explicit [] alone means "none spoken".
+    const subject = item.kind === 'send_reschedule_link' ? normalizedRescheduleSubject(item, transcript, reference) : null;
     kept.push({
       party: item.party,
       kind: COMMITMENT_KINDS.includes(item.kind) ? item.kind : 'other',
@@ -480,12 +595,14 @@ function groundModelCommitments(items, transcript) {
       // rather than persisted as "stated" with no instant (Codex r12 P2).
       due_at: malformedDue ? null : isoOrNull(item.due_at),
       due_basis: !malformedDue && item.due_at ? 'stated' : null,
+      due_type: !malformedDue && item.due_at && ['floor', 'deadline'].includes(item.due_type) ? item.due_type : null,
       due_text: item.due_text || (malformedDue ? String(item.due_at).slice(0, 80) : null),
       confidence: item.confidence,
       // With labelled turns the speaker is the one whose turn carried the
       // words, not the model's claim.
       evidence: grounded.map((e) => ({ quote: String(e.quote).trim(), speaker: turns && speaker ? speaker : e.speaker })),
       origin: 'model',
+      subject,
     });
   }
   return { kept, droppedUngrounded, droppedLowConfidence, droppedMismatched, malformedDueAt };
@@ -515,7 +632,7 @@ async function extractCommitmentsWithModel(transcript, { callStartedAt = null, c
   if (!validate(parsed)) {
     return { items: [], skipped: 'schema_failed', errors: validate.errors, model: MODELS.FLAGSHIP, ms: Date.now() - startedAt };
   }
-  const grounded = groundModelCommitments(parsed.commitments, transcript);
+  const grounded = groundModelCommitments(parsed.commitments, transcript, callStartedAt ? new Date(callStartedAt) : null);
   return { items: grounded.kept, droppedUngrounded: grounded.droppedUngrounded, droppedLowConfidence: grounded.droppedLowConfidence, droppedMismatched: grounded.droppedMismatched, malformedDueAt: grounded.malformedDueAt, model: MODELS.FLAGSHIP, ms: Date.now() - startedAt };
 }
 
@@ -534,8 +651,10 @@ function toRow(callLogId, item, { generation, extractorVersion, recordingSid = n
     channel: CHANNELS.includes(item.channel) ? item.channel : 'unknown',
     due_at: item.due_at ? new Date(item.due_at) : null,
     due_basis: item.due_basis || null,
+    due_type: item.due_type || null,
     confidence: typeof item.confidence === 'number' ? Math.max(0, Math.min(1, item.confidence)) : null,
     evidence: JSON.stringify(item.evidence || []),
+    subject: JSON.stringify(item.subject || null),
     source: 'ai',
     processing_generation: generation ?? null,
     last_seen_generation: generation ?? null,
@@ -544,6 +663,112 @@ function toRow(callLogId, item, { generation, extractorVersion, recordingSid = n
     status: 'open',
     updated_at: new Date(),
   };
+}
+
+function parseRescheduleSubject(value) {
+  try { return typeof value === 'string' ? JSON.parse(value) : value; } catch { return null; }
+}
+
+function appointmentConstraints(subject) {
+  const parts = { year: new Set(), month: new Set(), day: new Set(), weekday: new Set() };
+  const date = currentVisitDate(subject);
+  if (date) {
+    const [year, month, day] = date.split('-').map(Number);
+    parts.year.add(year);
+    parts.month.add(month);
+    parts.day.add(day);
+    parts.weekday.add(new Date(Date.UTC(year, month - 1, day)).getUTCDay());
+  }
+  const claims = subject?.identity_unresolved === true && Array.isArray(subject.identity_claims)
+    ? subject.identity_claims : subject?.date_claims;
+  for (const claim of Array.isArray(claims) ? claims : []) {
+    if (claim?.binding !== 'appointment') continue;
+    for (const part of Object.keys(parts)) if (Number.isInteger(claim[part])) parts[part].add(claim[part]);
+  }
+  return parts;
+}
+
+// A prior quote-family key may hold delivery/office history. Compare the
+// known CURRENT-visit fields rather than requiring byte-identical JSON:
+// a reprocess may add a service/address or a richer date claim.
+function legacyRescheduleMatches(oldSubject, newSubject) {
+  const old = parseRescheduleSubject(oldSubject);
+  if (!old || !newSubject) return false;
+  const oldDates = appointmentConstraints(old);
+  const newDates = appointmentConstraints(newSubject);
+  for (const part of Object.keys(oldDates)) {
+    if (oldDates[part].size > 1 || newDates[part].size > 1) return false;
+    if (oldDates[part].size && !newDates[part].has([...oldDates[part]][0])) return false;
+  }
+  const oldFields = [normalizeForMatch(old.service), normalizeForMatch(old.address)];
+  const newFields = [normalizeForMatch(newSubject.service), normalizeForMatch(newSubject.address)];
+  const covered = oldFields.every((value, index) => !value || value === newFields[index]);
+  return covered && (oldFields.some(Boolean) || Object.values(oldDates).some((values) => values.size));
+}
+
+// Disjoint spoken/current appointment components prove different visits,
+// even when neither side has a full year. Missing components, or the same
+// date with changed service/address, prove neither identity and park below.
+function distinctCurrentVisit(oldSubject, newSubject) {
+  const oldDates = appointmentConstraints(parseRescheduleSubject(oldSubject));
+  const newDates = appointmentConstraints(newSubject);
+  return Object.keys(oldDates).some((part) => oldDates[part].size && newDates[part].size
+    && ![...oldDates[part]].some((value) => newDates[part].has(value)));
+}
+
+// These markers are backend-only; the model schema rejects them. A row parked
+// because key reconciliation could not prove one identity remains sticky. A
+// normalized extraction that merely omitted or failed date_claims is marked
+// separately and may recover when a later pass supplies a complete, grounded
+// list. Historical unresolved rows have no reason, so they remain sticky:
+// their origin cannot be proved after the fact.
+function stickyUnresolvedIdentity(value) {
+  const subject = parseRescheduleSubject(value);
+  return subject?.identity_unresolved === true
+    && subject.identity_unresolved_reason !== IDENTITY_UNRESOLVED_INCOMPLETE;
+}
+
+function parkUnresolvedIdentity(row, oldSubject = null) {
+  const subject = parseRescheduleSubject(row.subject);
+  const old = parseRescheduleSubject(oldSubject);
+  row.subject = JSON.stringify({ ...subject, date_claims: null, identity_unresolved: true,
+    identity_unresolved_reason: IDENTITY_UNRESOLVED_AMBIGUOUS,
+    ...(Array.isArray(old?.identity_claims) ? { identity_claims: old.identity_claims } : {}) });
+}
+
+async function reconcileRescheduleKeys(trx, callLogId, rows) {
+  const families = new Map();
+  for (const row of rows.filter((candidate) => candidate.kind === 'send_reschedule_link')) {
+    const base = row.commitment_key.replace(/:s[0-9a-f]{12}$/, '');
+    if (!families.has(base)) families.set(base, []);
+    families.get(base).push(row);
+  }
+  for (const [base, siblings] of families) {
+    const existing = await trx('call_commitments')
+      .where({ call_log_id: callLogId, party: 'waves', kind: 'send_reschedule_link', source: 'ai' })
+      .whereRaw('left(commitment_key, ?) = ?', [base.length, base])
+      .orderBy('commitment_key')
+      .forUpdate()
+      .select('commitment_key', 'subject');
+    if (!existing.length) continue;
+    const exactKeys = new Set(siblings.map((row) => row.commitment_key));
+    for (const row of siblings) {
+      const exact = existing.find((old) => old.commitment_key === row.commitment_key);
+      if (stickyUnresolvedIdentity(exact?.subject)) parkUnresolvedIdentity(row, exact.subject);
+    }
+    const unmatched = siblings.filter((row) => !existing.some((old) => old.commitment_key === row.commitment_key));
+    for (const row of unmatched) {
+      const subject = parseRescheduleSubject(row.subject);
+      const matches = existing.filter((old) => legacyRescheduleMatches(old.subject, subject));
+      const old = matches.length === 1 && !exactKeys.has(matches[0].commitment_key) ? matches[0] : null;
+      if (old && siblings.filter((candidate) => legacyRescheduleMatches(old.subject, parseRescheduleSubject(candidate.subject))).length === 1) {
+        row.commitment_key = old.commitment_key;
+        if (stickyUnresolvedIdentity(old.subject)) parkUnresolvedIdentity(row, old.subject);
+      } else if (!subject || existing.some((prior) => !distinctCurrentVisit(prior.subject, subject))) {
+        parkUnresolvedIdentity(row);
+      }
+    }
+  }
 }
 
 // Upsert the AI's view of this pass. The whole write runs in one
@@ -564,6 +789,32 @@ async function upsertCommitments(conn, callLogId, items, { generation = null, ex
   const rows = [...dedupedByKey.values()].map((item) => toRow(callLogId, item, { generation, extractorVersion, recordingSid }));
 
   return conn.transaction(async (trx) => {
+    // CANONICAL LOCK ORDER (see reschedule-link-promises.js's module doc
+    // comment for the full rebuilt table): the per-call advisory lock FIRST,
+    // before touching call_log OR call_commitments — this function locks
+    // both (the ownership fence below takes call_log FOR SHARE, then the
+    // upsert loop locks the call_commitments row via INSERT ... ON CONFLICT
+    // DO UPDATE) and used to take neither's serializing lock. A concurrent
+    // ledger dismiss/fulfill (call-commitments.applyHumanUpdate) takes this
+    // SAME advisory lock, then locks call_commitments, then — via
+    // retireAttemptsOnLedgerVerdict's clearPromiseException — call_log: the
+    // exact reverse of this function's own call_log-then-call_commitments
+    // order. Two writers on the same call taking locks in opposite orders
+    // with neither serialized behind the advisory lock is a lock-order-
+    // inversion deadlock waiting to happen, and until now this was the one
+    // caller that skipped the lock entirely (codex #4293 P1, this round).
+    // pg_advisory_xact_lock is per-session reentrant, so this is a no-op
+    // when a caller (recordRelayCommitments) already holds it.
+    await require('../utils/triage-locks').lockTriageCall(trx, callLogId);
+    // Fixes the promised-link worker's live-activation boundary, in this
+    // SAME transaction, before anything else writes — a send_reschedule_link
+    // row this pass inserts is judged later against that instant, and a
+    // transient failure recording it must take the whole write down with it
+    // rather than leave the row committed with no boundary on record (codex
+    // #4293 P2 r4; see reschedule-link-promises.recordLiveActivation). A
+    // no-op for every other commitment kind and whenever that gate isn't
+    // live.
+    await require('./reschedule-link-promises').recordLiveActivation(trx);
     // The fence also names the AUDIO this pass heard: an adopted or
     // replaced recording swaps recording_sid without moving the generation,
     // and a pass still enriching the superseded audio must not persist its
@@ -596,6 +847,10 @@ async function upsertCommitments(conn, callLogId, items, { generation = null, ex
         [callLogId, recordingSid],
       );
     }
+    // Reuse quote-family identities before the insert so a re-extraction
+    // that adds an optional subject field cannot bypass a prior dismissal,
+    // fulfillment, or uncertain delivery tied to an older suffixed key.
+    await reconcileRescheduleKeys(trx, callLogId, rows);
     // Recompute unreviewed callback fallbacks after extraction, including
     // source-call timing corrections. Gate-off never references the new column.
     const callbackDeadlineUpdate = require('./callback-cards').enabled()
@@ -609,17 +864,19 @@ async function upsertCommitments(conn, callLogId, items, { generation = null, ex
       // generation so the UI can say "still detected" vs "not seen lately".
       const result = await trx.raw(
         `INSERT INTO call_commitments
-           (call_log_id, commitment_key, party, kind, description, channel, due_at, due_basis, confidence,
-            evidence, source, processing_generation, last_seen_generation, extractor_version, recording_sid, status, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, ?)
+           (call_log_id, commitment_key, party, kind, description, channel, due_at, due_basis, due_type, confidence,
+            evidence, source, processing_generation, last_seen_generation, extractor_version, recording_sid, status, updated_at, subject)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)
          ON CONFLICT (call_log_id, commitment_key) DO UPDATE SET
            ${callbackDeadlineUpdate}
            description = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.description ELSE call_commitments.description END,
            channel = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.channel ELSE call_commitments.channel END,
            due_at = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.due_at ELSE call_commitments.due_at END,
            due_basis = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.due_basis ELSE call_commitments.due_basis END,
+           due_type = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.due_type ELSE call_commitments.due_type END,
            confidence = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.confidence ELSE call_commitments.confidence END,
            evidence = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.evidence ELSE call_commitments.evidence END,
+           subject = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.subject ELSE call_commitments.subject END,
            processing_generation = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.processing_generation ELSE call_commitments.processing_generation END,
            extractor_version = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.extractor_version ELSE call_commitments.extractor_version END,
            recording_sid = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.recording_sid ELSE call_commitments.recording_sid END,
@@ -627,8 +884,8 @@ async function upsertCommitments(conn, callLogId, items, { generation = null, ex
            updated_at = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.updated_at ELSE call_commitments.updated_at END
          RETURNING id, (xmax = 0) AS inserted`,
         [
-          row.call_log_id, row.commitment_key, row.party, row.kind, row.description, row.channel, row.due_at, row.due_basis, row.confidence,
-          row.evidence, row.source, row.processing_generation, row.last_seen_generation, row.extractor_version, row.recording_sid, row.status, row.updated_at,
+          row.call_log_id, row.commitment_key, row.party, row.kind, row.description, row.channel, row.due_at, row.due_basis, row.due_type, row.confidence,
+          row.evidence, row.source, row.processing_generation, row.last_seen_generation, row.extractor_version, row.recording_sid, row.status, row.updated_at, row.subject,
         ],
       );
       written += (result?.rows || []).length;
@@ -688,6 +945,9 @@ async function recordCallCommitments({
       ...item,
       evidence: anchorEvidence(item.evidence, { segments, transcript }),
     }));
+    // upsertCommitments fixes the promised-link activation boundary inside
+    // its own write transaction (see there) — atomic with the commitment
+    // row a live send_reschedule_link promise needs it recorded against.
     const result = await upsertCommitments(conn, call.id, items, { generation: procGeneration, procToken, procGeneration, recordingSid: call?.recording_sid || null });
     summary.written = result.written;
     summary.ownershipLost = result.ownershipLost;
@@ -732,6 +992,7 @@ function normalizeRow(row) {
     // no reader sees a snooze the queue no longer honours.
     ...(row.snoozed_until !== undefined ? { snoozed_until: cardsEnabled ? row.snoozed_until : null } : {}),
     evidence: parse(row.evidence) || [],
+    subject: parse(row.subject),
     fulfillment: parse(row.fulfillment),
     confidence: row.confidence == null ? null : Number(row.confidence),
   };
@@ -1802,6 +2063,17 @@ async function recordRelayCommitments(conn, { callSid, transcript, estimateQueue
   try {
     if (!callSid) return summary;
     return await conn.transaction(async (trx) => {
+      // Same lock-order requirement as upsertCommitments (see its own doc
+      // comment, and reschedule-link-promises.js's module comment): this
+      // transaction locks call_log FOR UPDATE below, then reaches
+      // upsertCommitments, which locks call_commitments — the advisory lock
+      // has to come first, before either. callLogId is not known until
+      // call_log is read, so an unlocked pre-read gets the id the advisory
+      // lock needs before the locked (FOR UPDATE) read that actually reads
+      // this transaction's working snapshot (codex #4293 P1, this round).
+      const pre = await trx('call_log').where({ twilio_call_sid: callSid }).first('id');
+      if (!pre) return summary;
+      await require('../utils/triage-locks').lockTriageCall(trx, pre.id);
       const call = await trx('call_log').where({ twilio_call_sid: callSid }).forUpdate().first('id', 'metadata', 'source', 'call_outcome');
       if (!call) return summary;
       // A voice-agent sandbox call is a test: a promise Sandy makes on it
@@ -1868,10 +2140,78 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
   if (renewalAudit && ['reopen', 'edit'].includes(action) && !conn.isTransaction && typeof conn.transaction === 'function') {
     return conn.transaction((trx) => applyHumanUpdate(trx, id, { action, description, due_at, note, reviewedBy, renewalAudit }));
   }
+  // A dismiss or fulfill recorded straight on the ledger is an explicit
+  // office verdict for a send_reschedule_link commitment (see the branch
+  // below) — reconciling the promise's own outbox rows has to land in the
+  // SAME transaction as this status flip, or an office Reopen racing in
+  // right after could read the commitment as open again before that
+  // reconciliation ever ran (reschedule-link-promises.retireAttemptsOnLedgerVerdict's
+  // own doc comment has the full reasoning). Gated on renewalAudit for the
+  // same reason as the reopen/edit wrap above, not because the flag means
+  // anything for this kind: settleParkedPromiseCard already runs inside its
+  // OWN transaction and passes renewalAudit: false specifically so this
+  // never opens a second, nested one around a connection its caller already
+  // committed to reusing as-is.
+  if (renewalAudit && ['dismiss', 'fulfill'].includes(action) && !conn.isTransaction && typeof conn.transaction === 'function') {
+    return conn.transaction((trx) => applyHumanUpdate(trx, id, { action, description, due_at, note, reviewedBy, renewalAudit }));
+  }
+  // A Confirm recorded on the ledger can ALSO be the office verdict that
+  // revives a send_reschedule_link commitment's generation (see the
+  // linkPromiseConfirm branch below) — that write has to land in the SAME
+  // transaction as the human_state flip, for the identical reason the
+  // reopen/edit and dismiss/fulfill wraps above exist: a separate write
+  // racing a concurrent sweep pass could act on a state this transaction is
+  // about to change out from under it. Its own condition, independent of
+  // the reopen/edit wrap, so an ordinary callback Confirm (which needs none
+  // of this) never pays for a transaction it doesn't use.
+  if (renewalAudit && action === 'confirm' && !conn.isTransaction && typeof conn.transaction === 'function') {
+    return conn.transaction((trx) => applyHumanUpdate(trx, id, { action, description, due_at, note, reviewedBy, renewalAudit }));
+  }
   // Locked: the edit is classified (restated or not) against the row the
   // update will overwrite, never a snapshot another save has since changed.
   const before = renewalAudit && ['reopen', 'edit'].includes(action)
-    ? await conn('call_commitments').where({ id }).forUpdate().first('id', 'kind', 'party', 'description', 'due_at', 'human_state', 'reviewed_at') : null;
+    ? await conn('call_commitments').where({ id }).forUpdate().first('id', 'kind', 'party', 'description', 'due_at', 'human_state', 'reviewed_at', 'subject') : null;
+  // Same kind/party check as `before` above, but scoped to dismiss/fulfill
+  // and independent of renewalAudit (which the callback branch below still
+  // needs `before` — populated only for reopen/edit — to gate on).
+  const linkPromiseVerdict = ['dismiss', 'fulfill'].includes(action)
+    ? await conn('call_commitments').where({ id }).first('kind', 'party', 'call_log_id') : null;
+  // CANONICAL LOCK ORDER for this feature (see the module doc comment near
+  // the top of reschedule-link-promises.js for the full table): advisory
+  // call lock (lockTriageCall) FIRST, then the call_commitments row, then
+  // any outbox_messages rows, then triage_items. Every other multi-lock path
+  // in this feature (settleDelivery, markLinkUsed, applyContextSkip,
+  // parkReview, settleReconciledReceipt, admin-triage's transitionCore)
+  // already takes the locks in this order. This ledger dismiss/fulfill path
+  // used to be the one exception: the UPDATE below used to run first, and
+  // only afterward — inside retireAttemptsOnLedgerVerdict — did it acquire
+  // this SAME advisory lock. A concurrent settleDelivery (or any other
+  // advisory-lock-first path) could hold the advisory lock waiting on this
+  // row while this transaction held the row waiting on the advisory lock:
+  // a lock-order-inversion deadlock, with Postgres aborting one side and
+  // losing either an office verdict or a delivery reconciliation (codex
+  // #4293 P1). Taking the lock here, before the row is ever touched, is
+  // what keeps this path in the same order as every other one — a no-op
+  // (pg_advisory_xact_lock is per-session reentrant) when a caller such as
+  // settleParkedPromiseCard's transitionCore chain already holds it.
+  if (linkPromiseVerdict && linkPromiseVerdict.kind === 'send_reschedule_link' && linkPromiseVerdict.party === 'waves') {
+    await require('../utils/triage-locks').lockTriageCall(conn, linkPromiseVerdict.call_log_id);
+  }
+  // Confirm's own LOCKED pre-read, deliberately separate from `before`
+  // (which only covers reopen/edit) so an ordinary callback Confirm never
+  // feeds the callback audit branch below. human_state/status are read before
+  // the patch overwrites them because the transition rule turns on what they
+  // WERE. The lock makes that classification and the UPDATE one serialized
+  // decision: without it, a concurrent Edit could land after this read, the
+  // promise sweep could cancel that edited attempt, and Confirm could then
+  // overwrite human_state from the stale snapshot without renewing the
+  // generation, stranding an open/confirmed promise behind its cancelled row.
+  // renewPromiseOnOfficeVerdict takes no advisory lock and locks only this
+  // same call_commitments row (its outbox lookup is an unlocked SELECT), so
+  // this keeps the module's documented single-resource exception and cannot
+  // invert the advisory-first paths.
+  const linkPromiseConfirm = action === 'confirm'
+    ? await conn('call_commitments').where({ id }).forUpdate().first('kind', 'party', 'human_state', 'status') : null;
   const patch = { reviewed_by: reviewedBy || null, reviewed_at: new Date(), updated_at: new Date() };
   if (note !== undefined) patch.human_note = note ? String(note).slice(0, 2000) : null;
   switch (action) {
@@ -1913,6 +2253,19 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
         if (Number.isNaN(parsed)) throw Object.assign(new Error('due_at is not a valid date'), { status: 400 });
         patch.due_at = parsed;
         patch.due_basis = parsed ? 'stated' : null;
+        // An office-entered time does not carry the model's original
+        // deadline classification. Default it to the safe send floor.
+        patch.due_type = parsed ? 'floor' : null;
+        if (before?.kind === 'send_reschedule_link' && before.party === 'waves') {
+          const subject = parseRescheduleSubject(before.subject);
+          const marked = subject && typeof subject === 'object' ? { ...subject } : {};
+          // Backend-only provenance for the exact office-entered instant.
+          // The model schema rejects this field. Confirm must still affirm
+          // the edit before the promise worker may trust it.
+          if (parsed) marked.office_due_at = parsed.toISOString();
+          else delete marked.office_due_at;
+          patch.subject = Object.keys(marked).length ? JSON.stringify(marked) : null;
+        }
       }
       // An edited obligation is a NEW obligation: the proof that kept the
       // old wording ("send estimate") is not proof for the new one ("send
@@ -1937,6 +2290,44 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
     await require('./audit-log').recordAuditEvent({ actor_type: reviewedBy ? 'technician' : 'system', actor_id: reviewedBy || null,
       action: `callback_${action}`, resource_type: 'call_commitment', resource_id: id,
       metadata: { via: 'ledger', renewed_at: new Date().toISOString(), ...renewal }, critical: true, trx: conn });
+  } else if (before && before.kind === 'send_reschedule_link' && before.party === 'waves' && action === 'reopen') {
+    // The inverse of a dismiss is not a no-op for this kind: an explicit
+    // office verdict is one of only two things allowed to move the
+    // promised-link ledger's generation/uncertainty bookkeeping (see
+    // reschedule-link-promises.renewPromiseOnOfficeVerdict for the full
+    // reasoning and the delivery-dedup decision).
+    await require('./reschedule-link-promises').renewPromiseOnOfficeVerdict(conn, id, { reviewedBy, trigger: 'reopen' });
+  } else if (linkPromiseVerdict && linkPromiseVerdict.kind === 'send_reschedule_link' && linkPromiseVerdict.party === 'waves'
+    && ['dismiss', 'fulfill'].includes(action)) {
+    // The other half of the same rule: a dismiss or a manual "mark done"
+    // recorded directly on the ledger is exactly the office verdict
+    // settleParkedPromiseCard already retires delivery uncertainty for when
+    // it comes through this promise's own triage card. The ledger path
+    // never touched the outbox at all, so without this an office Reopen
+    // landing before the next sweep could find the old attempt still
+    // flagged uncertain with nothing left to ever clear it (see
+    // retireAttemptsOnLedgerVerdict's own doc comment).
+    await require('./reschedule-link-promises').retireAttemptsOnLedgerVerdict(conn, id,
+      { callLogId: linkPromiseVerdict.call_log_id, action, reviewedBy, note });
+  } else if (linkPromiseConfirm && linkPromiseConfirm.kind === 'send_reschedule_link' && linkPromiseConfirm.party === 'waves'
+    && linkPromiseConfirm.status === 'open' && require('./reschedule-link-promises').humanStateBlocksPromise(linkPromiseConfirm.human_state)) {
+    // Confirm is not always a no-op for this kind either: status 'open'
+    // combined with a genuinely BLOCKING human_state can only mean 'edited'
+    // (a 'dismissed' row's own action always sets status 'dismissed' in the
+    // very same patch, so the two never separate) — an office Edit that the
+    // very next sweep already found blocking (applyContextSkip's
+    // promise_closed branch, humanStateBlocksPromise) and cancelled the
+    // then-current outbox row for, at the commitment's UNCHANGED
+    // processing_generation (edit never bumps it). A later Confirm affirms
+    // the same live obligation is still correct, restoring human_state to
+    // 'confirmed' — but leaves that generation exactly where the cancelled
+    // row already occupies it, so stagePromises' own NOT EXISTS predicate
+    // would exclude this promise from every future sweep forever without
+    // the identical renewal Reopen already gets. Routed through the SAME
+    // helper Reopen uses — never a second, bespoke bump — so this decision
+    // cannot be skipped by a future transition that reaches 'open' +
+    // 'confirmed' some other way.
+    await require('./reschedule-link-promises').renewPromiseOnOfficeVerdict(conn, id, { reviewedBy, trigger: 'confirm' });
   }
   return normalizeRow(await conn('call_commitments').where({ id }).first());
 }
@@ -1996,6 +2387,7 @@ async function addHumanCommitment(conn, callLogId, { party, kind, description, d
     channel: CHANNELS.includes(channel) ? channel : 'unknown',
     due_at: due,
     due_basis: due ? 'stated' : null,
+    due_type: due ? 'floor' : null,
     confidence: null,
     evidence: JSON.stringify([]),
     source: 'human',
@@ -2107,6 +2499,8 @@ module.exports = {
   kindBelongsToParty,
   parseDueAt,
   anchorEvidence,
+  speakerTurns,
+  normalizeForMatch,
   deriveCommitmentsFromExtraction,
   callbackDueAt,
   callEndedAt,

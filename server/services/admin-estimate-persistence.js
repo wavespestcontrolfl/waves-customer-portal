@@ -558,7 +558,9 @@ async function staleCallLinkageReason(dbc, data, {
 }
 
 
-function estimateExpiresAt(now = () => new Date()) {
+function estimateExpiresAt(now = () => new Date(), estimate = null) {
+  const fixed = require('./proposal-bid').proposalExpiry(estimate);
+  if (fixed) return fixed;
   const expiresAt = new Date(now().getTime());
   expiresAt.setDate(expiresAt.getDate() + ESTIMATE_SEND_EXPIRY_DAYS);
   return expiresAt;
@@ -1017,12 +1019,9 @@ function compareClientToServer(clientTotals, serverTotals, now = () => new Date(
 // it would forge a $99 waiver, so it is stripped like the rest; the admin
 // save re-supplies its own ACCOUNT-wide server-derived list (codex #3591
 // r15 P1 / r34 P1).
-const CLIENT_IDENTITY_FIELDS = ['priorQualifyingServices', 'setupWaiverPriorQualifyingServices', 'recurringCustomer', 'isRecurringCustomer', 'treeShrubPricingKnobs', 'termitePricingKnobs', 'palmAnnualRounding', 'commercialFloorsArmedServices', 'commercialFloorsArmed', 'rodentBaitLegacyReplay', 'rodentWaveguardPostureReplay'];
-function sanitizeClientIdentityFields(obj) {
-  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return obj;
-  for (const field of CLIENT_IDENTITY_FIELDS) delete obj[field];
-  return obj;
-}
+// One list, shared with every posted-input door (admin pricing sandbox,
+// Intelligence Bar tools) — see estimate-client-identity-fields.js.
+const { sanitizeClientIdentityFields } = require('./estimate-client-identity-fields');
 
 // A linked draft that must never be reused by the generic create: one that
 // carries ANY stored proposal object — enabled, disabled or scaffold alike.
@@ -1785,7 +1784,12 @@ async function resolveEstimateWritePayload({
   });
   // Delivery receipts are authored only under the send claim. A browser
   // cannot forge a completed attempt or clear the retry guard on revision.
-  if (trustedEstimateData) delete trustedEstimateData.manualSendAttempts;
+  if (trustedEstimateData) {
+    delete trustedEstimateData.manualSendAttempts;
+    // Group publication and promised navigation are server-owned too.
+    delete trustedEstimateData.groupLinkViewableThrough;
+    delete trustedEstimateData.groupPublishedByEstimateId;
+  }
   // Before anything downstream derives from the payload (quoteRequired reads
   // proposal.enabled through buildPricingBundle): the browser's proposal is
   // discarded, the row's own is restored.
@@ -2552,6 +2556,7 @@ function estimateReviseBlock(estimate, estimateData, now = new Date()) {
 // a later stamp-clear skip invalidation and leave the former lead's draft
 // sendable to the wrong recipient.
 const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'scheduled_service_id', 'manualSendAttempts'];
+const GROUP_PUBLICATION_KEYS = ['groupLinkViewableThrough', 'groupPublishedByEstimateId'];
 // Click-to-estimate mints (#3391 audit P0): both markers are
 // lifecycle-critical and PRIOR-WINS across a revise — the zero-comms
 // opt-out is the lane's owner-approved contract (a revise must never
@@ -2732,7 +2737,7 @@ async function reviseAdminEstimate({
       // the row so a revision of a grouped estimate keeps its per-property
       // tier scoping instead of repricing at the combined account tier
       // (codex #3244 r3).
-      estimateGroupId: body.estimateGroupId ?? (estimate.estimate_group_id || undefined),
+      estimateGroupId: body.estimateGroupId === undefined ? (estimate.estimate_group_id || undefined) : body.estimateGroupId,
       satelliteUrl: body.satelliteUrl || (sameAddress ? estimate.satellite_url : null) || null,
     },
     technicianId,
@@ -2794,6 +2799,18 @@ async function reviseAdminEstimate({
         if (existingData[key] !== undefined && nextData[key] === undefined) {
           nextData[key] = existingData[key];
           preserved = true;
+        }
+      }
+      // Publication belongs to the group that sent the link. A move or
+      // explicit removal cannot carry that group's navigation window away.
+      const nextGroupId = writeFields.estimate_group_id === undefined
+        ? estimate.estimate_group_id : writeFields.estimate_group_id;
+      if (estimate.estimate_group_id && String(nextGroupId || '') === String(estimate.estimate_group_id)) {
+        for (const key of GROUP_PUBLICATION_KEYS) {
+          if (existingData[key] !== undefined) {
+            nextData[key] = existingData[key];
+            preserved = true;
+          }
         }
       }
       if (preserveClickMintMarkersAcrossRevise(nextData, existingData)) preserved = true;
@@ -3032,6 +3049,14 @@ async function reviseAdminEstimate({
         if (pendingData && typeof pendingData === 'object' && lockedData && typeof lockedData === 'object') {
           for (const key of REVISE_PRESERVED_ESTIMATE_DATA_KEYS) {
             if (lockedData[key] !== undefined) pendingData[key] = lockedData[key];
+          }
+          const revisedGroupId = revisedFields.estimate_group_id === undefined
+            ? lockedPrior.estimate_group_id : revisedFields.estimate_group_id;
+          const staysInLockedGroup = lockedPrior.estimate_group_id
+            && String(revisedGroupId || '') === String(lockedPrior.estimate_group_id);
+          for (const key of GROUP_PUBLICATION_KEYS) {
+            if (staysInLockedGroup && lockedData[key] !== undefined) pendingData[key] = lockedData[key];
+            else delete pendingData[key];
           }
           preserveClickMintMarkersAcrossRevise(pendingData, lockedData);
           // The server-owned proposal is carried from the LOCKED row, never

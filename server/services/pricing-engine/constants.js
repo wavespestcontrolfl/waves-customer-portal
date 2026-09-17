@@ -1106,6 +1106,41 @@ const TERMITE = {
     recoveryQuarters: 20,
     label: 'Station Rental',
   },
+  // Waves Subterranean Termite Protection — the annual plan (plan
+  // docs/estimator-pricing-plan-2026-09-03.md §A2/§A3; RULING A-1 = shape P1,
+  // owner 2026-09-11). Company-owned Trelona stations; a one-time STATION
+  // SETUP fee (stations × setupPerStation, never tier-discounted, the ~−10 %
+  // setup margin is accepted) plus an ANNUAL PROTECTION fee prepaid for a
+  // 12-month coverage period, one scheduled whole-structure inspection with
+  // every station serviced, tier-discounted like monitoring:
+  //   annual = annualBase + annualStep × max(0, ceil((stations − bracketFloor) / bracketStations))
+  //   ≤10 → $249 · 11-15 → $299 · 16-20 → $349 · …
+  // Emitted ONLY behind GATE_TERMITE_ANNUAL_PLAN (estimate-engine); the
+  // quarterly / rental / bond shapes stay for gate-off and legacy rows.
+  // DB-tunable via pricing_config.termite_annual_plan (db-bridge).
+  annualPlan: {
+    setupPerStation: r(30),
+    annualBase: r(249),
+    annualStep: r(50),
+    bracketStations: 5,
+    bracketFloor: 10,
+    visitsPerYear: 1,
+    coverageMonths: 12,
+    label: 'Subterranean Termite Protection',
+  },
+  // Admin-editable bands for annualPlan — ONE source for the write-time
+  // validator (admin-pricing-config `termite_annual_plan`) and the replay-
+  // stamp acceptance (service-pricing resolveTermiteAnnualPlanBasis): a value
+  // the config could never hold is never priced, and widening a band for a
+  // promo is one edit. Plain numbers (no processing adjustment): whole
+  // dollars for the money knobs, whole stations for the bracket knobs.
+  annualPlanBounds: Object.freeze({
+    setupPerStation: Object.freeze({ min: 1, max: 200, integer: true, label: 'a positive whole-dollar $/station setup no greater than 200' }),
+    annualBase: Object.freeze({ min: 1, max: 2000, integer: true, label: 'a positive whole-dollar annual fee no greater than 2000' }),
+    annualStep: Object.freeze({ min: 0, max: 500, integer: true, label: 'a non-negative whole-dollar bracket step no greater than 500' }),
+    bracketStations: Object.freeze({ min: 1, max: 50, integer: true, label: 'a whole number of stations between 1 and 50' }),
+    bracketFloor: Object.freeze({ min: 0, max: 100, integer: true, label: 'a whole number of stations between 0 and 100' }),
+  }),
 };
 
 // ============================================================

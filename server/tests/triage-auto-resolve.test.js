@@ -21,6 +21,7 @@ const {
   SPAM_AGE_DAYS,
   ADVISORY_AGE_DAYS,
 } = require('../services/triage-auto-resolve');
+const { resolveRescheduleCards } = require('../services/call-reschedule-apply');
 
 const NOW = new Date('2026-07-31T07:20:00Z');
 const FRESH = new Date(NOW.getTime() - 2 * 24 * 3600 * 1000).toISOString();
@@ -269,6 +270,81 @@ describe('moot-condition resolves', () => {
       noBookings, { now: NOW },
     );
     expect(d.rule).toBe('name_moot');
+  });
+});
+
+describe('reschedule card resolution after a self-service move', () => {
+  function fixture(cards) {
+    const call = { id: 'call-1', review_status: 'open' };
+    const tables = { triage_items: cards, call_log: [call] };
+    const trx = (table) => {
+      const predicates = [];
+      const filtered = () => tables[table].filter((row) => predicates.every((testRow) => testRow(row)));
+      const query = {
+        where(values) {
+          predicates.push((row) => Object.entries(values).every(([key, value]) => row[key] === value));
+          return query;
+        },
+        whereIn(key, values) {
+          predicates.push((row) => values.includes(row[key]));
+          return query;
+        },
+        async select() { return filtered().map((row) => ({ ...row })); },
+        update(values) {
+          const updated = filtered();
+          updated.forEach((row) => Object.assign(row, values));
+          return { returning: async (key) => updated.map((row) => ({ [key]: row[key] })) };
+        },
+        count() { return { first: async () => ({ n: filtered().length }) }; },
+      };
+      return query;
+    };
+    trx.raw = jest.fn(async () => {});
+    return { conn: { transaction: (fn) => fn(trx) }, call };
+  }
+
+  test('the moved visit closes only its bound card; another visit and unbound work stay open', async () => {
+    const cards = [
+      { id: 'moved', call_log_id: 'call-1', status: 'open', reason_code: 'reschedule_or_cancel', related_scheduled_service_id: 'visit-1' },
+      { id: 'other', call_log_id: 'call-1', status: 'open', reason_code: 'existing_appointment_coordination', related_scheduled_service_id: 'visit-2' },
+      { id: 'proposal', call_log_id: 'call-1', status: 'open', reason_code: 'reschedule_or_cancel', related_scheduled_service_id: null,
+        payload: { reschedule_proposal: { proposed_start_at: '2030-01-20T14:00:00Z' } } },
+      { id: 'unbound', call_log_id: 'call-1', status: 'open', reason_code: 'existing_appointment_coordination', related_scheduled_service_id: null },
+    ];
+    const { conn, call } = fixture(cards);
+
+    expect(await resolveRescheduleCards(conn, 'call-1', 'Moved through link', { visitId: 'visit-1' })).toBe(1);
+    expect(cards.map(({ status }) => status)).toEqual(['resolved', 'open', 'open', 'open']);
+    expect(call.review_status).toBe('open');
+  });
+
+  test('an unbound card alone does not become evidence for a moved visit', async () => {
+    const cards = [{ id: 'unbound', call_log_id: 'call-1', status: 'open', reason_code: 'reschedule_or_cancel', related_scheduled_service_id: null }];
+    const { conn, call } = fixture(cards);
+
+    expect(await resolveRescheduleCards(conn, 'call-1', 'Moved through link', { visitId: 'visit-1' })).toBe(0);
+    expect(cards[0].status).toBe('open');
+    expect(call.review_status).toBe('open');
+  });
+
+  test('a missing visit on the link path fails closed, while legacy call apply still resolves its call cards', async () => {
+    const cards = [{ id: 'unbound', call_log_id: 'call-1', status: 'open', reason_code: 'reschedule_or_cancel', related_scheduled_service_id: null }];
+    const { conn, call } = fixture(cards);
+
+    expect(await resolveRescheduleCards(conn, 'call-1', 'Moved through link', { visitId: null })).toBe(0);
+    expect(cards[0].status).toBe('open');
+    expect(await resolveRescheduleCards(conn, 'call-1', 'Applied from call')).toBe(1);
+    expect(cards[0].status).toBe('resolved');
+    expect(call.review_status).toBe('resolved');
+  });
+
+  test('a sole card bound to the moved visit closes the call review', async () => {
+    const cards = [{ id: 'moved', call_log_id: 'call-1', status: 'open', reason_code: 'reschedule_or_cancel', related_scheduled_service_id: 'visit-1' }];
+    const { conn, call } = fixture(cards);
+
+    expect(await resolveRescheduleCards(conn, 'call-1', 'Moved through link', { visitId: 'visit-1' })).toBe(1);
+    expect(cards[0].status).toBe('resolved');
+    expect(call.review_status).toBe('resolved');
   });
 });
 

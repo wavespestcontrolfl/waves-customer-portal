@@ -21,6 +21,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { technicianServicesCustomer } = require('../services/technician-visit-scope');
 const logger = require('../services/logger');
 const { COUNTY_CONFIRMED_FIELD, confirmIrrigationFields } = require('../services/irrigation-schedule-confirmation');
 
@@ -129,6 +130,9 @@ function validateProfile(payload) {
 router.get('/:customerId/turf-profile', async (req, res, next) => {
   try {
     const { customerId } = req.params;
+    if (!(await technicianServicesCustomer(req, customerId))) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
@@ -152,6 +156,9 @@ router.get('/:customerId/turf-profile', async (req, res, next) => {
 router.put('/:customerId/turf-profile', async (req, res, next) => {
   try {
     const { customerId } = req.params;
+    if (!(await technicianServicesCustomer(req, customerId))) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 

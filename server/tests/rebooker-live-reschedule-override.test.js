@@ -437,6 +437,18 @@ describe('live-status reschedule override (allowLive)', () => {
     });
   });
 
+  test('a caller that owns its follow-up workflow can suppress the post-commit shift', async () => {
+    const { shiftCallFollowUpsForParentMove } = require('../services/call-booking-catalog');
+    wireRescheduleMocks(liveService('confirmed'));
+
+    await expect(SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'admin',
+      { allowLive: true, skipCallFollowUpShift: true },
+    )).resolves.toMatchObject({ success: true });
+
+    expect(shiftCallFollowUpsForParentMove).not.toHaveBeenCalled();
+  });
+
   // A batch caller (rain-out's per-job loop, an admin-dispatch board move)
   // passes a shared qualityDates Set instead of letting each row's move run
   // its own repair/measurement pass (codex #4295 r2 P2).

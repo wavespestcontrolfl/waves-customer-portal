@@ -142,6 +142,38 @@ describe('SMS operational evidence and ownership', () => {
     expect(result.obligations).toHaveLength(2);
   });
 
+  test('a staff promise to send the reschedule link is grounded', () => {
+    // KIND_EVIDENCE had no entry for send_reschedule_link at all: adding the
+    // kind to the shared COMMITMENT_KINDS enum exposed it to this extractor's
+    // schema without ever telling its grounding filter how to recognize one,
+    // so `undefined?.test(...)` silently dropped every SMS obligation the
+    // model classified with the new kind (codex #4293 P1, sms-operational-extractor).
+    const quote = "I'll send the reschedule link shortly";
+    const message = source(quote, 'outbound');
+    const result = groundExtraction(extracted([obligation(quote, {
+      kind: 'send_reschedule_link', basis: 'promise', description: quote,
+    })]), { message, properties });
+    expect(result.obligations).toHaveLength(1);
+    expect(result.obligations[0]).toMatchObject({ kind: 'send_reschedule_link', basis: 'promise' });
+  });
+
+  test('a bare "link" or a bare "reschedule" alone does not ground the reschedule-link kind', () => {
+    // Neither half alone establishes the specific deliverable — "reschedule"
+    // could just mean the visit already moved, and "link" is too generic on
+    // its own (mirrors why every other kind here needs its own typed noun).
+    const bareLink = "I'll text you a link";
+    const linkMessage = source(bareLink, 'outbound');
+    expect(groundExtraction(extracted([obligation(bareLink, {
+      kind: 'send_reschedule_link', basis: 'promise', description: bareLink,
+    })]), { message: linkMessage, properties }).obligations).toEqual([]);
+
+    const bareReschedule = "I'll reschedule that for you";
+    const rescheduleMessage = source(bareReschedule, 'outbound');
+    expect(groundExtraction(extracted([obligation(bareReschedule, {
+      kind: 'send_reschedule_link', basis: 'promise', description: bareReschedule,
+    })]), { message: rescheduleMessage, properties }).obligations).toEqual([]);
+  });
+
   test('ungrounded due wording cannot establish a deadline', () => {
     const message = source('Please send the report');
     const result = groundExtraction(extracted([obligation(message.message_body, {

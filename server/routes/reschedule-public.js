@@ -56,16 +56,17 @@ const { noStore } = require('../middleware/no-store');
 
 // Token-keyed appointment data (address, visit window) — never cacheable.
 router.use(noStore);
-const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 const { stampedDivergesSql } = require('../services/stamped-address');
 const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
 
-const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
+// The customer-facing appointment verdict (status, dispatch-owned guard,
+// missed-appointment rule) lives in a service so the promised-link worker
+// reaches the SAME answer this page gives (codex #4293 r3 P2).
+const { eligibility, apptDateStr, hhmm } = require('../services/reschedule-eligibility');
 
 // Token format: 64-char lowercase hex (matches encode(gen_random_bytes(32), 'hex')).
 const TOKEN_RE = /^[a-f0-9]{64}$/;
-
-const RESCHEDULABLE_STATUSES = new Set(['pending', 'confirmed', 'rescheduled']);
 
 // Owner ruling 2026-07-13: a BIG pull-forward on a recurring visit re-anchors
 // the whole series (SmartRebooker.rescheduleSeries) so the plan's cadence
@@ -77,10 +78,6 @@ const REANCHOR_PULLFORWARD_DAYS = Math.max(
   1,
   Number(process.env.RESCHEDULE_REANCHOR_PULLFORWARD_DAYS) || 14
 );
-
-// Customer-quoted arrival window: 2 hours from window_start (owner rule —
-// the same promise the page, reminders, and the late detector all quote).
-const ARRIVAL_PROMISE_MINUTES = 120;
 
 // Days the target date sits EARLIER than the visit's current date (negative
 // for push-backs). Both args are YYYY-MM-DD strings; UTC-noon parse avoids
@@ -178,17 +175,6 @@ const findSlotsLimiter = rateLimit({
   message: { error: 'Too many searches. Please try again in a minute.' },
 });
 
-function apptDateStr(scheduledDate) {
-  if (!scheduledDate) return null;
-  return scheduledDate instanceof Date
-    ? scheduledDate.toISOString().slice(0, 10)
-    : String(scheduledDate).slice(0, 10);
-}
-
-function hhmm(t) {
-  return t ? String(t).slice(0, 5) : null;
-}
-
 // '14:00' → '2:00 PM' — for responses that echo a window the availability
 // engine didn't label (e.g. the idempotent-replay short-circuit).
 function label12(t) {
@@ -199,66 +185,6 @@ function label12(t) {
   const suffix = h >= 12 ? 'PM' : 'AM';
   const hour12 = h % 12 || 12;
   return `${hour12}:${String(m || 0).padStart(2, '0')} ${suffix}`;
-}
-
-// Customer-facing eligibility for the appointment behind the token.
-// Returns { ok: true } or { ok: false, reason } with a customer-safe reason:
-//   completed | cancelled | in_progress | past | not_available
-function eligibility(svc, now = new Date()) {
-  const status = String(svc.status || '').toLowerCase();
-  if (status === 'completed') return { ok: false, reason: 'completed' };
-  if (status === 'cancelled' || status === 'canceled') return { ok: false, reason: 'cancelled' };
-  if (status === 'en_route' || status === 'on_site') return { ok: false, reason: 'in_progress' };
-  if (!RESCHEDULABLE_STATUSES.has(status)) return { ok: false, reason: 'not_available' };
-  // Same dispatch-owned guard as the authenticated schedule routes (codex
-  // #3429 r2 P1): a call-created booking the office hasn't reviewed is
-  // hidden from the customer's list/confirm/reschedule, so the bearer-token
-  // page must refuse it too — reminder rows now arm before office confirm,
-  // and reschedule tokens never expire.
-  if (DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(svc.source_action)
-    && status === 'pending'
-    && !svc.customer_confirmed) {
-    return { ok: false, reason: 'not_available' };
-  }
-
-  // A pending/confirmed visit whose time already passed was MISSED, not
-  // served — the customer may rebook it from the same link (owner ruling
-  // 2026-07-13: "we missed each other — pick a new time"). Terminal and
-  // live states were already rejected above; the rebooker only validates
-  // the TARGET date, so a future target on a past visit commits cleanly.
-  // Only pending/confirmed rows qualify: a past 'rescheduled' row is a
-  // pending-rebook PLACEHOLDER other code treats as non-live — reviving it
-  // to confirmed would resurrect a phantom visit.
-  const missable = status === 'pending' || status === 'confirmed';
-  const dateStr = apptDateStr(svc.scheduled_date);
-  const todayEt = etDateString(now);
-  if (dateStr && dateStr < todayEt) {
-    return missable ? { ok: true, missed: true } : { ok: false, reason: 'past' };
-  }
-  if (dateStr === todayEt) {
-    // Same-day: the visit is only MISSED once BOTH the internal job block
-    // (window_end) AND the customer-quoted arrival promise (window_start +
-    // 2h — owner rule, same constant the page displays) have elapsed.
-    // window_end alone is often just the job-duration block: a 9:00 visit
-    // with window_end 10:00 is still legitimately "on the way" at 10:05
-    // inside the quoted 9–11 arrival window, and must not read as missed.
-    const toMin = (t) => {
-      const [h, m] = String(t).split(':').map(Number);
-      return h * 60 + (m || 0);
-    };
-    const candidates = [];
-    const start = hhmm(svc.window_start);
-    const end = hhmm(svc.window_end);
-    if (end) candidates.push(toMin(end));
-    if (start) candidates.push(toMin(start) + ARRIVAL_PROMISE_MINUTES);
-    if (candidates.length) {
-      const nowEt = etParts(now);
-      if (Math.max(...candidates) <= nowEt.hour * 60 + nowEt.minute) {
-        return missable ? { ok: true, missed: true } : { ok: false, reason: 'past' };
-      }
-    }
-  }
-  return { ok: true };
 }
 
 // A grouped visit (two or more live services at one stop) is not customer
@@ -703,6 +629,17 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
           logger.warn(`[reschedule-public] replay series-log lookup failed for ${svc.id}: ${err.message}`);
         }
       }
+      // The original commit's promise hook is best-effort — if it failed, the
+      // retry that lands here is the next chance to close the linked cards
+      // (the background sweep is the last one). Idempotent per promise row,
+      // and evidence-gated: a POST of the CURRENT date/time that never moved
+      // anything finds no customer_self_serve reschedule_log row and closes
+      // nothing (codex #4293 r2 P2).
+      try {
+        await require('../services/reschedule-link-promises').resolveUsedLink(db, svc.id);
+      } catch (err) {
+        logger.warn(`[reschedule-public] promise resolve failed on replay for ${svc.id}: ${err.code || err.name || 'error'}`);
+      }
       return res.json({
         success: true,
         replayed: true,
@@ -912,6 +849,13 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       // The schedule_conflict card itself is rung (marker-fenced) by the
       // series effects pass above; this is the log line only.
       logger.warn(`[reschedule-public] series re-anchor for ${svc.id} committed ${siblingConflicts.length} far-out occurrence(s) windowless (projected window held a seeded placeholder): ${JSON.stringify(siblingConflicts)}`);
+    }
+
+    // Close only proposals linked to a promised link for this exact visit.
+    try {
+      await require('../services/reschedule-link-promises').resolveUsedLink(db, svc.id);
+    } catch (err) {
+      logger.warn(`[reschedule-public] promise resolve failed for ${svc.id}: ${err.code || err.name || 'error'}`);
     }
 
     // Office alert — same internal ping a new self-booked appointment fires.

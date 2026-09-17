@@ -112,6 +112,17 @@ describe('merge eligibility gate', () => {
     expect((await post('/merge', body)).status).toBe(500);
   });
 
+  test('an inactive winner primary conflict from the locked executor is an actionable 409', async () => {
+    mockEligibility.mockResolvedValueOnce({ eligible: true, code: 'eligible', reason: null, candidate: { tier: 'yellow', reasons: ['address_conflict'] } });
+    const err = new Error('executeMerge: surviving customer has an inactive primary property — reconcile saved properties before merging');
+    err.mergeConflictCode = 'inactive_primary_property_conflict';
+    mockExecuteMerge.mockRejectedValueOnce(err);
+
+    const res = await post('/link-as-property', body);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/inactive primary property/);
+  });
+
   test('eligible pair merges with the admin actor identity', async () => {
     mockEligibility.mockResolvedValueOnce({ eligible: true, code: 'eligible', reason: null, candidate: { tier: 'green', reasons: [] } });
     const res = await post('/merge', body);

@@ -325,7 +325,7 @@ export default function EstimateProposalDocument({ data, token }) {
           <div style={{ minWidth: 0 }}>
             <SectionHeader>Estimate details</SectionHeader>
             <InfoRow label="Date">{fmtInstant(estimate.createdAt)}</InfoRow>
-            <InfoRow label="Valid through">{fmtValidThrough(estimate.expiresAt) || '30 days from issue'}</InfoRow>
+            <InfoRow label="Valid through">{fmtValidThrough(proposal.validThrough || estimate.expiresAt) || '7 days after sending'}</InfoRow>
             <InfoRow label="Prepared by">Waves Pest Control, LLC</InfoRow>
             {estimate.licenseNumber ? <InfoRow label="License">{estimate.licenseNumber}</InfoRow> : null}
           </div>
