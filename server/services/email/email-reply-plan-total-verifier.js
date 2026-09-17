@@ -6,6 +6,7 @@ const PRICE_WORDS = new Set([
   'price', 'cost', 'fee', 'rate', 'charge', 'bill', 'invoice', 'amount', 'total', 'run',
 ]);
 const PLAN_WORDS = new Set(['plan', 'program', 'package']);
+const PRICING_LABEL_WORDS = new Set([...PRICE_WORDS, ...PLAN_WORDS]);
 const ACCOUNT_WORDS = new Set([
   'account', 'balance', 'payment', 'refund', 'credit', 'deposit', 'receipt',
   'received', 'pay', 'due',
@@ -19,7 +20,7 @@ const PERIOD_ACTIVITY_WORDS = new Set([
 const CLAIM_BREAK_WORDS = new Set(['and', 'or', 'but']);
 const PERIOD_DETERMINERS = new Set(['a', 'each', 'every']);
 const PERIOD_NOUNS = new Set(['month', 'mo', 'year', 'yr']);
-const isWord = (token, words) => token.kind === 'word' && words.has(token.text);
+const isWord = (token, words) => token?.kind === 'word' && words.has(token.text);
 const isAmount = (token) => token.kind === 'money' || token.kind === 'number';
 
 function withDeterminedPeriods(clause) {
@@ -54,9 +55,9 @@ function tiedToVisitOrApplication(clause, at) {
   return false;
 }
 
-function breaksClaim(clause, at) {
+function breaksClaim(clause, at, start) {
   const token = clause[at];
-  const frontedPeriod = clause[at - 1]?.kind === 'period'
+  const frontedPeriod = at - 1 === start && clause[at - 1]?.kind === 'period'
     && /^(?:monthly|yearly|annually)$/.test(clause[at - 1].text);
   return token.kind === 'barrier' || UNIT_KINDS.has(token.kind)
     || (token.kind === 'sep' && token.text === ',' && !frontedPeriod)
@@ -86,21 +87,22 @@ function isPlanTotalPair(clause, amountAt, periodAt, context, legacyMonthlyPlan)
   const first = Math.min(amountAt, periodAt);
   const last = Math.max(amountAt, periodAt);
   const gap = clause.slice(first + 1, last);
-  const frontedPeriod = periodAt < amountAt && /^(?:monthly|yearly|annually)$/.test(period.text);
-  if (gap.some((token, index) => token.kind === 'sep' && token.text === ','
-    && !(frontedPeriod && index === 0))) return false;
-
+  const accountEvent = context.some((token) => isWord(token, ACCOUNT_EVENTS));
   const paymentPredicate = context.some((token) => token.kind === 'word' && token.text === 'payment')
-    && gap.some((token) => token.kind === 'be' && !/^(?:was|were|had been)$/.test(token.text))
-    && !context.some((token) => isWord(token, ACCOUNT_EVENTS));
+    && gap.some((token) => token.kind === 'be' && !/^(?:was|were|had been)$/.test(token.text));
   const priceCue = paymentPredicate || context.some((token) => isWord(token, PRICE_WORDS));
-  if (amount.kind === 'number') return priceCue;
   const planCue = context.some((token) => isWord(token, PLAN_WORDS));
-  const accountOnly = context.some((token) => isWord(token, ACCOUNT_WORDS))
-    && !priceCue && !planCue;
   const direct = gap.every((token) => token.kind === 'sep');
-  if (direct && /^(?:\/|per\b|a\b|each\b|every\b)/.test(period.text)) return true;
-  return !accountOnly && (direct || priceCue || planCue);
+  if (amount.kind === 'money' && direct && /^(?:\/|per\b|a\b|each\b|every\b)/.test(period.text)) return true;
+  const assertionLabels = amountAt < periodAt ? [...gap, clause[periodAt + 1] || {}] : gap;
+  const amountLabel = clause.slice(Math.max(0, amountAt - 2), amountAt).reverse()
+    .find((token) => token.kind !== 'sep');
+  const assertedPrice = isWord(amountLabel, PRICE_WORDS)
+    || (gap.some((token) => token.kind === 'be')
+      && assertionLabels.some((token) => isWord(token, PRICING_LABEL_WORDS)));
+  if (accountEvent && !assertedPrice) return false;
+  if (amount.kind === 'number') return priceCue;
+  return priceCue || planCue || (direct && !context.some((token) => isWord(token, ACCOUNT_WORDS)));
 }
 
 function containsPlanTotal(clause, legacyMonthlyPlan) {
@@ -110,7 +112,7 @@ function containsPlanTotal(clause, legacyMonthlyPlan) {
   // anchors or claim boundaries, so every token is examined a constant number
   // of times instead of rescanning the clause for every amount/period pair.
   for (let end = 0; end <= clause.length; end += 1) {
-    if (end < clause.length && !breaksClaim(clause, end)) {
+    if (end < clause.length && !breaksClaim(clause, end, start)) {
       if (isAmount(clause[end]) || clause[end].kind === 'period') anchors.push(end);
       continue;
     }

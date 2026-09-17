@@ -102,6 +102,20 @@ describe('inactive email reply plan-total policy', () => {
   });
 
   test.each([
+    '$98 monthly, your payment posted.', '$1176 yearly, your payment posted.',
+    '$98 monthly, your refund cleared.', '$1176 annually, your credit posted.',
+  ])('keeps an explicit trailing period price separate from later account prose: %s', (text) => rejected(text));
+
+  test('permits a fronted period comma only at the beginning of its claim', () => {
+    rejected('Monthly, we charge $98');
+    rejected('Your payment posted, Monthly, we charge $98');
+    rejected('$1176 yearly, your payment posted.', { legacyMonthlyPlan: true });
+    allowed('$98 monthly, your payment posted.', { legacyMonthlyPlan: true });
+    allowed('Your payment was $98, monthly prices remain unchanged.');
+    allowed('Monthly, your payment of $98 posted.');
+  });
+
+  test.each([
     'The plan costs $98 a month', '$98 each month', '$1,176 every year',
     'USD 98 every month', '$1176 a year', '98 dollars each month',
     'The price is 98 a month', 'The yearly price is 1176 every year',
@@ -176,6 +190,26 @@ describe('inactive email reply plan-total policy', () => {
     'Annual scheduled appointment details mention the $98 initial-service price',
     'Monthly reminder mentions the price of the standard application for your home: $98',
   ])('preserves account events and singular or modified activity cadence: %s', (text) => allowed(text));
+
+  test.each([
+    'We received your monthly payment of $98 for the plan.',
+    'Your monthly payment of $98 posted after the fee adjustment.',
+    'Your annual payment of $1176 posted after the plan adjustment.',
+    'We received your monthly payment of 98 for the plan.',
+    'Your monthly payment of 98 posted after the fee adjustment.',
+    'We received your monthly payment after the fee adjustment of $98.',
+    'Your monthly payment after the plan adjustment of $98 posted.',
+  ])('keeps descriptive plan or fee words from repricing an account event: %s', (text) => allowed(text));
+
+  test.each([
+    'The monthly price is $98 after the payment posted.',
+    'The monthly plan is $98 after the payment posted.',
+    '$98 is the monthly price after your payment posted.',
+    'The yearly account fee is $1176 after your payment posted.',
+    'Monthly fee: $98 after your payment posted.',
+    '$98/mo was the payment that posted.',
+    '$1176 per year was the payment that posted.',
+  ])('preserves explicit price assertions even beside account-event prose: %s', (text) => rejected(text));
 
   test('uses only trusted literal true exemption flags', () => {
     allowed('$98/mo', { commercialProposal: true });

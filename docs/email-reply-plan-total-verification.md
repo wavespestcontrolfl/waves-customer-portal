@@ -29,6 +29,10 @@ relationship; account events and schedule prose without a price claim
 are left alone. This is a finite policy, not a general English parser.
 Explicit payment predicates (`The monthly payment is $98`) and account
 price labels (`The monthly account fee is $98`) remain price claims.
+Received/posted payment events do not become prices merely because later
+descriptions mention a plan or fee; overriding an event requires a pricing
+assertion joining the period and amount, or an explicit direct currency/unit
+total such as `$98/mo`.
 Singular/plural activity nouns allow up to four ordinary modifiers (`Monthly
 service reminders mention the $98 initial-service price`); an activity fee
 or cost predicate still counts as pricing.
@@ -37,7 +41,8 @@ and a later price statement after a conjunction or comma does not turn an
 earlier account payment into a plan-total claim.
 Commas also break the amount/period relationship and cannot attach a later
 visit/application noun to an earlier amount. One comma immediately after a
-fronted monthly/yearly/annually period is permitted (`Annually, we charge
+fronted monthly/yearly/annually period at the beginning of its claim is
+permitted (`Annually, we charge
 $1176`); a second comma still breaks the claim.
 Colons, dashes, and parentheses before unrelated application/visit nouns
 cannot exempt an amount; an actual attached unit such as `: per application`
