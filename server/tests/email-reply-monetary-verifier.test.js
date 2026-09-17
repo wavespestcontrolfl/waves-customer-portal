@@ -97,6 +97,47 @@ describe('email reply monetary visit-pricing policy', () => {
   ])('rejects recognized incur predicates with monetary evidence: %s', rejected);
 
   test.each([
+    ['generated charges', [
+      'Each visit generates a $98 charge.', 'Visits generated a USD 98 fee.',
+      'Each visit may generate a $98 invoice.',
+    ], ['Each visit generates 98 photos.', 'Each application generates a $98 charge.']],
+    ['applied amount labels', [
+      'A $98 fee applies per visit.', 'The $98 rate applies on each visit.',
+      'A $98 charge may apply for every visit.',
+    ], ['A $98 fee applies per application.', 'A $98 fee applies before your next visit.']],
+    ['qualified has-price nouns', [
+      'Each visit has a cost of approximately $98.', 'Each visit has a fee of about $98.',
+      'Each visit has a charge of up to USD 98.',
+    ], ['Each visit has a cost of approximately 98 minutes.', 'Each application has a fee of about $98.']],
+    ['introduced bare ranges', [
+      'Each visit costs from 90 to 120.', 'Each visit costs between 90 and 120.',
+      'For each visit, we charge from 90 to 120.',
+    ], ['Each visit costs from 90 to 120 minutes.', 'Each visit costs between 90 and 120 minutes.']],
+    ['modal has-price nouns', [
+      'Each visit will have a $98 charge.', 'Every visit may have a fee of $98.',
+      'Visits could have a cost of roughly USD 98.',
+    ], ['Each visit will have a 98 minute delay.', 'Every application may have a fee of $98.']],
+    ['billing complements', [
+      'Each visit is charged a $98 fee.', 'Each visit is billed for $98.',
+      'Each visit is invoiced for an approximately $98 charge.',
+    ], ['Each visit is charged a 98 minute delay.', 'Each application is billed for $98.']],
+    ['possessive amount-first nouns', [
+      "Each visit's $98 fee includes materials.", "Visits' $98 fees include materials.",
+      'Your visit’s USD 98 charge includes materials.',
+    ], ["Each application's $98 fee includes materials.", "Each visit's 98 minute delay is noted."]],
+    ['recurring payment nouns', [
+      '$98 payment per visit', 'A $98 payment for each visit', '$98 is the payment per visit',
+    ], ['Please pay $98 at your next visit.', '$98 is the payment at your next visit.']],
+    ['copular nominal prices', [
+      'Each visit is a $98 charge.', 'Every visit is a USD 98 fee.',
+      'Each visit is a charge of $98.',
+    ], ['Each visit is a 98 minute appointment.', 'Each application is a charge of $98.']],
+  ])('covers bounded %s without confusing measurements, applications, or timing', (_name, prices, controls) => {
+    prices.forEach(rejected);
+    controls.forEach((text) => expect(verdict(text)).toEqual({ ok: true, violations: [] }));
+  });
+
+  test.each([
     'Per visit: $98', 'For each visit: $98',
     'Per scheduled visit - USD 98', 'For every visit, ninety-eight dollars',
     'Per visit: only $98', 'For each visit: between $90 and $120',

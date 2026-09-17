@@ -12,10 +12,13 @@ numbers require a pricing predicate. Recognized measurements remain distinct
 from numbers, including in `Each visit costs 98 minutes of technician time`.
 One-off `on/at your next visit` payment timing remains distinct from recurring
 visit units. Amountless billing belongs to the billing adapter.
-Supported pricing orders include recognized `incur` predicates (`Each visit
-incurs a $98 charge`), fronted monetary unit labels (`Per visit: $98`), and
-amount-first copular price nouns (`$98 is the price per visit`). Fronted
-labels require explicit money; measurements and application units remain
+Supported pricing orders include recognized `incur`/`generate` predicates,
+bounded billing articles and `for` complements, qualified/modal has-price
+clauses, possessive amount-first fees, and copular nominal charges. Explicit
+pricing predicates accept introduced bare ranges; amount labels accept `apply`
+and recurring `payment` nouns. Fronted monetary unit labels (`Per visit: $98`)
+and amount-first copular nouns (`$98 is the price per visit`) remain supported.
+Fronted labels require explicit money; measurements and application units remain
 distinct in all these orders.
 
 Normalization failures reject before the strict boolean
