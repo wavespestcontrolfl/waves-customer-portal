@@ -1782,7 +1782,8 @@ function reportVerbGovernsProduct(affirmed, subjectAt, subjectLength, locationAt
   const coordinatedObject = REPORT_COORDINATED_OBJECT_GAP_RE.test(objectGap);
   const coordinatedDirectObject = /(?:,|\band)\s*$/i.test(objectGap)
     && !REPORT_TREATMENT_LOCATION_LINK_RE.test(objectGap);
-  if (!REPORT_PARTICIPLE_RE.test(findingVerb[0])) {
+  // Emphatic did-apply uses the same product-object frames as applied.
+  if (!REPORT_PARTICIPLE_RE.test(findingVerb[0].replace(/^apply$/i, 'applied'))) {
     if (/^got$/i.test(findingVerb[0])) {
       return findingVerb.index < subjectAt
         && (REPORT_DIRECT_OBJECT_GAP_RE.test(objectGap) || coordinatedObject || coordinatedDirectObject);

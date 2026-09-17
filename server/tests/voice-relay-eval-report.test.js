@@ -1606,3 +1606,14 @@ test.each(['(?=(Talstar P))\\1', '(Talstar P)', '((Talstar P))', '(?<material>Ta
   expect(checks.report_readback_confirms(value, {}, { spoken: ['Talstar P was not applied indoors but was applied to the exterior perimeter.'] })[0]).toBe('pass');
   expect(checks.report_readback_confirms(value, {}, { spoken: ['Talstar P was applied indoors but was not applied to the exterior perimeter.'] })[0]).toBe('fail');
 });
+
+
+test.each([
+  ['We did apply a substitute for Talstar P to the exterior perimeter.', 'fail'],
+  ['We did apply a replacement for Talstar P to the exterior perimeter.', 'fail'],
+  ['We did apply Talstar P to the exterior perimeter.', 'pass'],
+  ['We did apply only Talstar P to the exterior perimeter.', 'pass'],
+  ['We did not apply Talstar P to the exterior perimeter.', 'fail'],
+])('emphatic application requires the named product as its object: %s', (text, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken: [text] })[0]).toBe(status);
+});
