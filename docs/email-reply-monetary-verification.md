@@ -21,7 +21,8 @@ and amount-first copular nouns (`$98 is the price per visit`) remain supported.
 Fronted labels require explicit money; measurements and application units remain
 distinct in all these orders.
 Perfect predicates, fronted existential fees, and `amount to` connectors are
-supported. A separated amount-first claim requires an explicit visit unit,
+supported, along with recurring amounts marked `due`, qualified modal copulas,
+and `at most` prices. A separated amount-first claim requires an explicit visit unit,
 preserving refund facts followed by an independent visit subject.
 
 Normalization failures reject before the strict boolean

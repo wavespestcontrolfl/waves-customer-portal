@@ -8,7 +8,7 @@ const VISIT = '<(?:visit|visits|eachVisit)>';
 const UNIT = '<(?:unit|forVisit)>';
 const NOUN = '(?:price|amount|cost|charge|rate|fee|invoice|payment)';
 const BILL = '(?:charge|bill|invoice|pay|price)';
-const QUALIFIER = '(?:(?:only|just|about|around|approximately|roughly|exactly|nearly|almost|up to|at least|as low as) ){0,3}';
+const QUALIFIER = '(?:(?:only|just|about|around|approximately|roughly|exactly|nearly|almost|up to|at (?:least|most)|as low as) ){0,3}';
 const SEPARATOR = '(?: <sep>)*';
 const SUBJECT = '(?:(?:we|you|it|customers?|clients?|they) )?';
 const PRICE_PREDICATE = `(?:(?:<modal> )?(?:has )?(?:${BILL}(?: at)?|cost|run|incur|generate|apply|occur)|<be> ${BILL}(?: at)?)`;
@@ -21,13 +21,13 @@ const NOMINAL_PRICE = `(?:${QUALIFIER}${MONEY} ${NOUN}|${NOUN} of ${QUALIFIER}${
 
 const PRICE_CLAUSES = [
   // Amount-first prices, including a fee label or a passive billing predicate.
-  `${MONEY}(?: ${NOUN})?(?: <be>)?(?: ${PRICE_PREDICATE})?${TAX}(?: ${VISIT}|${SEPARATOR} ${UNIT})`,
+  `${MONEY}(?: ${NOUN})?(?: <be>)?(?: (?:${PRICE_PREDICATE}|due))?${TAX}(?: ${VISIT}|${SEPARATOR} ${UNIT})`,
   `<number> <be> ${BILL}${TAX}${SEPARATOR} ${UNIT}`,
   `${MONEY} ${VISIT} ${NOUN}`,
   `${MONEY} <be> (?:the |our |your |a )?${NOUN}${SEPARATOR} ${UNIT}`,
   // Visit subjects and labels. An unmarked number needs a pricing predicate;
   // a plain copula or colon needs an explicitly monetary amount.
-  `${VISIT} (?:<be>|<sep>) ${QUALIFIER}${RANGE_START}${MONEY}`,
+  `${VISIT} (?:(?:<modal> )?${QUALIFIER}<be>|<sep>) ${QUALIFIER}${RANGE_START}${MONEY}`,
   `${VISIT} <be> (?:a|an) ${NOMINAL_PRICE}`,
   `${VISIT} ${PRICE_PREDICATE} ${PRICE_COMPLEMENT}`,
   `${VISIT}(?: <possessive>)? ${NOUN} ${LINK} ${QUALIFIER}${AMOUNT}`,

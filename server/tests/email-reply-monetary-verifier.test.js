@@ -155,6 +155,12 @@ describe('email reply monetary visit-pricing policy', () => {
         'Your $98 payment is pending, and each visit remains included']],
     ['perfect predicates', ['Each visit has cost $98', 'Each visit has generated a $98 invoice'],
       ['Each visit has cost 98 minutes', 'Each application has generated a $98 invoice']],
+    ['recurring amounts due', ['$98 is due per visit', 'A $98 fee is due for each visit'],
+      ['$98 is due on your next visit', 'A $98 fee is due per application']],
+    ['qualified modal copulas', ['Each visit will only be $98', 'Each visit may just be USD 98'],
+      ['Each visit will only be 98 minutes', 'Each application may just be $98']],
+    ['at-most qualifiers', ['Each visit costs at most $98', 'The price per visit is at most $98',
+      'For each visit, customers pay at most $98'], ['Each visit costs at most 98 minutes', 'Each application costs at most $98']],
   ])('covers bounded %s while preserving unrelated facts', (_name, prices, controls) => {
     prices.forEach(rejected);
     controls.forEach((text) => expect(verdict(text)).toEqual({ ok: true, violations: [] }));
