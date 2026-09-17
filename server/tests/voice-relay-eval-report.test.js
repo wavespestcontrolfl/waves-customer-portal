@@ -1355,3 +1355,132 @@ test.each(['we are not sure that happened', 'I cannot confirm that happened'])
   expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe('pass');
   expect(checks.report_readback_confirms({ subject: 'bait', location: 'indoors' }, {}, { spoken })[0]).toBe('fail');
 });
+
+
+test.each([
+  ['Talstar P was allegedly applied to the exterior perimeter.', 'fail'],
+  ['Talstar P was supposedly applied to the exterior perimeter.', 'fail'],
+  ['Talstar P was reportedly applied to the exterior perimeter.', 'fail'],
+  ['Talstar P was apparently applied to the exterior perimeter.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter. Apparently the office is closed.', 'pass'],
+  ['Talstar P was applied to the exterior perimeter. Correction: it was not applied there.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter. Correction: bait was not applied indoors.', 'pass'],
+  ['Talstar P was applied to the exterior perimeter. Correction: it was not applied indoors.', 'pass'],
+  ['Talstar P went to the exterior perimeter.', 'fail'],
+  ['Talstar P went at the exterior perimeter.', 'fail'],
+  ['Talstar P went in the exterior perimeter.', 'fail'],
+  ['The Talstar P container went to the exterior perimeter.', 'fail'],
+  ['Talstar P went around the exterior perimeter.', 'pass'],
+  ['Talstar P went along the exterior perimeter.', 'pass'],
+  ['Assume Talstar P was applied to the exterior perimeter.', 'fail'],
+  ['Please assume Talstar P was applied to the exterior perimeter.', 'fail'],
+  ['Talstar P was applied in the morning to the exterior perimeter.', 'pass'],
+  ['Talstar P was applied in the afternoon to the exterior perimeter.', 'pass'],
+  ['Talstar P was not applied in the morning to the exterior perimeter.', 'fail'],
+  ['Talstar P was applied in the garage to the exterior perimeter.', 'fail'],
+  ['Talstar P was not applied indoors but was applied to the exterior perimeter.', 'pass'],
+  ['Talstar P was applied indoors but was not applied to the exterior perimeter.', 'fail'],
+  ['Talstar P was not applied indoors but bait was applied to the exterior perimeter.', 'fail'],
+])('formal report matching regressions retain assertion scope: %s', (text, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+test.each(['Talstar P', 'bait', 'dust'])('three coordinated products share only the treatment target: %s', (subject) => {
+  for (const spoken of ['We applied Talstar P, bait, and dust to the exterior perimeter.', 'We applied Talstar P, bait and dust to the exterior perimeter.', 'Talstar P, bait, and dust were applied to the exterior perimeter.']) {
+    expect(checks.report_readback_confirms({ subject, location: 'exterior perimeter' }, {}, { spoken: [spoken] })[0]).toBe('pass');
+    expect(checks.report_readback_confirms({ subject, location: 'garage' }, {}, { spoken: [spoken] })[0]).toBe('fail');
+    expect(checks.report_readback_confirms({ subject, location: 'exterior perimeter' }, {}, { spoken: [spoken.replace('We applied', 'We did not apply').replace('were applied', 'were not applied')] })[0]).toBe('fail');
+  }
+});
+
+test.each(['exterior perimeter', 'foundation', 'garage'])('three coordinated locations share the treatment product: %s', (location) => {
+  const spoken = ['We applied Talstar P to the exterior perimeter, foundation, and garage.'];
+  expect(checks.report_readback_confirms({ subject: 'Talstar P', location }, {}, { spoken })[0]).toBe('pass');
+});
+
+
+test.each([
+  ['Talstar P was not applied indoors, and bait was applied indoors but was applied to the exterior perimeter.', 'fail'],
+  ['Talstar P was not applied indoors but was applied to the exterior perimeter, bait was placed indoors.', 'pass'],
+  ['Talstar P was not applied indoors but was applied to the exterior perimeter, but it was not applied there.', 'fail'],
+  ['We applied Talstar P, bait, and dust indoors, but Talstar P was not applied to the exterior perimeter.', 'fail'],
+  ['We applied Talstar P to the exterior perimeter, foundation, and garage, but it was not applied there.', 'fail'],
+  ['We applied Talstar P to the exterior perimeter, foundation, and garage, maybe.', 'fail'],
+])('expanded list and contrast frames preserve product and correction scope: %s', (text, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+
+test.each([
+  ['on Monday, September 7', 'on Monday, September 7', 'fail'],
+  ['on September 7th', 'on September 7', 'fail'],
+  ['on September 7', 'on September 7th', 'fail'],
+  ['on 09/07', 'on 9/7', 'fail'],
+  ['on 9/7', 'on 09/07', 'fail'],
+  ['on Monday, September 7', 'on Tuesday, September 8', 'pass'],
+  ['on September 7', 'on September 8', 'pass'],
+  ['on 09/07', 'on 9/8', 'pass'],
+  ['on September 7 and September 8', 'on September 7', 'pass'],
+])('timed corrections compare equivalent report time references: %s / %s', (findingTime, denialTime, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter ${findingTime}, but it was not applied there ${denialTime}.`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
+
+test('a later completed report finding survives an equivalent-date correction', () => {
+  const spoken = ['Talstar P was applied to the exterior perimeter on September 7th, but it was not applied there on September 7. Talstar P was applied to the exterior perimeter on September 8.'];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe('pass');
+});
+
+
+test.each(['allegedly', 'supposedly', 'reportedly', 'apparently'])('report qualifiers retain matched assertion scope: %s', (qualifier) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken: [`Talstar P was applied to the exterior perimeter, ${qualifier}.`] })[0]).toBe('fail');
+  expect(checks.report_readback_confirms(report, {}, { spoken: [`Bait was ${qualifier} placed indoors, but Talstar P was applied to the exterior perimeter.`] })[0]).toBe('pass');
+});
+
+
+test('an immediate correction marker across speech events retracts only the named finding', () => {
+  const assertion = 'Talstar P was applied to the exterior perimeter.';
+  expect(checks.report_readback_confirms(report, {}, { spoken: [assertion, 'Correction: it was not applied there.'] })[0]).toBe('fail');
+  expect(checks.report_readback_confirms(report, {}, { spoken: [assertion, 'Correction: bait was not placed indoors.'] })[0]).toBe('pass');
+});
+
+
+test.each(['allegedly', 'supposedly', 'reportedly', 'apparently', 'probably', 'possibly', 'potentially'])
+('location lists preserve postfix uncertainty: %s', (qualifier) => {
+  const spoken = [`We applied Talstar P to the exterior perimeter, foundation, and garage ${qualifier}.`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe('fail');
+});
+
+test.each([
+  ['We did not apply bait indoors, but we applied Talstar P to the exterior perimeter, foundation, and garage.', 'pass'],
+  ['Talstar P was not applied indoors, but we applied Talstar P to the exterior perimeter, foundation, and garage.', 'pass'],
+  ['We did not apply Talstar P to the exterior perimeter, foundation, and garage, but bait was placed indoors.', 'fail'],
+  ['Talstar P was not applied indoors, we applied Talstar P to the exterior perimeter, foundation, and garage.', 'pass'],
+])('location lists keep earlier and later assertions independent: %s', (text, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+
+test.each([
+  ['We applied bait to the foundation, garage, and porch, but Talstar P was applied to the exterior perimeter.', 'pass'],
+  ['We applied bait to the foundation, garage, and porch, but Talstar P was not applied to the exterior perimeter.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter, but we applied bait to the foundation, garage, and porch.', 'pass'],
+])('list bounds do not replace an independent report assertion: %s', (text, status) => {
+  expect(checks.report_readback_confirms(report, {}, { spoken: [text] })[0]).toBe(status);
+});
+
+
+test.each([
+  ['on Monday, September 7', 'on Tuesday, September 7', 'pass'],
+  ['on 09/07/2026', 'on 9/7/2025', 'pass'],
+  ['on 09/07/2026', 'on 9/7/2026', 'fail'],
+  ['on 2026-09-07', 'on 2025-09-07', 'pass'],
+  ['at 8 AM', 'at 9 AM', 'pass'],
+  ['at 8 AM', 'at 8 AM', 'fail'],
+  ['at 8 AM', '8 AM', 'fail'],
+  ['8 AM', 'at 8 AM', 'fail'],
+  ['on Monday at 8 AM', 'on Monday at 9 AM', 'pass'],
+])('timed corrections retain explicit weekday, year, and clock differences: %s / %s', (findingTime, denialTime, status) => {
+  const spoken = [`Talstar P was applied to the exterior perimeter ${findingTime}, but it was not applied there ${denialTime}.`];
+  expect(checks.report_readback_confirms(report, {}, { spoken })[0]).toBe(status);
+});
