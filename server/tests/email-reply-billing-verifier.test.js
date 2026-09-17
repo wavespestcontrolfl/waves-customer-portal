@@ -310,6 +310,17 @@ describe('email reply amountless billing policy', () => {
     ['For each visit, we charge a fee.', 'Per visit, you will be billed.', 'For each visit, we bill your account.', 'Per visit, you pay $98.', 'For each visit, we bill per application; each visit incurs its own fee.'].forEach(rejected);
   });
 
+  test.each(['the fee', 'our price', 'an invoice', 'payment reminder fee', 'invoice status fee'])('preserves application complements of fronted billing nouns: %s', (noun) => {
+    for (const join of ['is', 'will be', 'does apply', 'is applied', ':', 'is $98']) {
+      expect(verdict(`For each visit, ${noun} ${join} per application.`)).toEqual({ ok: true, violations: [] });
+      rejected(`For each visit, ${noun} ${join} per visit.`);
+    }
+  });
+  test('preserves application complements of active and passive fronted verbs', () => {
+    ['we bill per application', 'we charge a fee per application', 'we invoice your account per application', 'you will be billed per application', 'we charge $98 per application'].forEach((predicate) => expect(verdict(`For each visit, ${predicate}.`)).toEqual({ ok: true, violations: [] }));
+    rejected('For each visit, the fee is per application; each visit incurs its own fee.');
+  });
+
   test.each([
     ['type', { text: {}, commercialProposal: true }, 'copy_type'],
     ['size', { text: 'x'.repeat(8193), commercialProposal: true }, 'copy_size'],

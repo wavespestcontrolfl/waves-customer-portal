@@ -68,14 +68,30 @@ function hasBillingUnit(tokens, at) {
   return hasSeparator ? isKind(tokens[next], 'unit') : isUnit(tokens[next]);
 }
 
+function hasApplicationComplement(tokens, at) {
+  let next = at + 1;
+  if (isKind(tokens[next], 'modal')) next += 1;
+  if (isWord(tokens[next], 'not', 'never')) next += 1;
+  if (isWord(tokens[next], 'do', 'does', 'did', 'has')) next += 1;
+  if (isWord(tokens[next], 'not', 'never')) next += 1;
+  if (isKind(tokens[next], 'be')) next += 1;
+  if (isWord(tokens[next], 'not', 'never')) next += 1;
+  if (isWord(tokens[next], 'apply', 'occur')) next += 1;
+  next = skipSeparators(tokens, next);
+  if (isWord(tokens[next], 'not', 'never')) next += 1;
+  if (isKind(tokens[next], 'money') || isKind(tokens[next], 'number')) next += 1;
+  return isKind(tokens[next], 'application') && /^(?:-?per\b|for\b|\/)/.test(tokens[next].text);
+}
+
 function hasFrontedBillingPredicate(tokens, at, passive) {
+  if (hasApplicationComplement(tokens, at)) return false;
   let object = skipRecipient(tokens, at + 1);
   const amount = isKind(tokens[object], 'money') || isKind(tokens[object], 'number');
   if (isKind(tokens[object], 'application') || (amount && isKind(tokens[object + 1], 'application'))) return false;
   if (passive || object > at + 1 || amount || isKind(tokens[object], 'unit')) return true;
   if (isDeterminer(tokens[object])) object += 1;
   if (isWord(tokens[object], 'separate', 'individual')) object += 1;
-  return isBillingNoun(tokens[object]) && !isKind(tokens[object + 1], 'application');
+  return isBillingNoun(tokens[object]) && !hasApplicationComplement(tokens, object);
 }
 
 function hasInverseBillingUnit(tokens, at) {
@@ -96,9 +112,9 @@ function hasInverseBillingUnit(tokens, at) {
   if (isWord(tokens[next], 'separate', 'individual')) next += 1;
   if (!isBillingNoun(tokens[next]) || isFeedbackRate(tokens, next)) return false;
   if (isWord(tokens[next + 1], 'reminder', 'reminders', 'status')) {
-    return isBillingNoun(tokens[next + 2]);
+    return isBillingNoun(tokens[next + 2]) && !hasApplicationComplement(tokens, next + 2);
   }
-  return true;
+  return !hasApplicationComplement(tokens, next);
 }
 
 function hasSeparatePredicate(tokens, at) {
