@@ -388,8 +388,8 @@ function CommercialProposalEditor() {
   const revenueIssue = useMemo(
     () => (programsState.some((row) => !programRowIsPriced(row))
       ? 'Every program row needs a name, a per-application price of at least $0.01, and a whole-number frequency (1–52) — fix or remove it.'
-      : proposalRevenueIssue({ buildings: programsMode ? [] : buildings, correctiveWork, programs: programsState })),
-    [programsMode, buildings, correctiveWork, programsState],
+      : proposalRevenueIssue({ buildings: programsMode ? [] : buildings, correctiveWork, programs: programsState, taxRate })),
+    [programsMode, buildings, correctiveWork, programsState, taxRate],
   );
 
   // "Generate from estimate" (slice 1A-ii): pulls DRAFT sections derived

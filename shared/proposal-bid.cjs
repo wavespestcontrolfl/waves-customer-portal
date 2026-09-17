@@ -92,7 +92,7 @@ function programRevenueIssue(program) {
   if (!wholeCents(price) || price < 0.01) return 'Each program needs a per-application price of at least $0.01, in whole cents.';
   return null;
 }
-function proposalRevenueIssue({ buildings = [], programs = [], correctiveWork = [] } = {}) {
+function proposalRevenueIssue({ buildings = [], programs = [], correctiveWork = [], taxRate = 0 } = {}) {
   for (const program of programs) { const issue = programRevenueIssue(program); if (issue) return issue; }
   const lines = buildings.flatMap((b) => (Array.isArray(b?.lineItems || b?.line_items) ? (b.lineItems || b.line_items) : []));
   if (lines.some((i) => Number(i?.unitPrice ?? i?.unit_price ?? i?.price) < 0 || Number(i?.quantity) < 0)) return 'Proposal line items cannot have negative quantities or unit prices.';
@@ -110,6 +110,33 @@ function proposalRevenueIssue({ buildings = [], programs = [], correctiveWork = 
   }
   if (correctiveWork.some((w) => Number(w?.amount ?? w?.price) < 0)) return 'Corrective work amounts cannot be negative.';
   if (correctiveWork.some((w) => !wholeCents(Number(w?.amount ?? w?.price ?? 0)))) return 'Corrective work amounts must be whole-cent dollar values.';
+  // Match the acceptance invoice's first-period bound, not the first-year
+  // total: higher-cadence programs bill only their first application here.
+  // Its recurring/one-time tax buckets round separately, and program tax
+  // rounds per application (buildProposalFirstInvoice's billing policy).
+  const invoiceRound = (value) => Math.round(value * 100) / 100;
+  const rate = Math.min(1, Math.max(0, Number(taxRate) || 0));
+  let subtotal = 0, taxableRecurring = 0, taxableOneTime = 0, programTax = 0;
+  for (const item of lines.filter((line) => String(line?.description ?? '').trim())) {
+    const amount = proposalLineAmount({ quantity: item.quantity ?? 1, unitPrice: item.unitPrice ?? item.unit_price ?? item.price ?? 0 });
+    subtotal = invoiceRound(subtotal + amount);
+    if (item.taxable === true) {
+      if (item.frequency === 'one_time') taxableOneTime = invoiceRound(taxableOneTime + amount);
+      else taxableRecurring = invoiceRound(taxableRecurring + amount);
+    }
+  }
+  for (const program of programs) {
+    const amount = invoiceRound(Number(program.pricePerApplication ?? program.perApplication));
+    subtotal = invoiceRound(subtotal + amount);
+    if (program.taxable === true) programTax = invoiceRound(programTax + invoiceRound(amount * rate));
+  }
+  for (const work of correctiveWork.filter((item) => String(item?.label ?? '').trim())) {
+    const amount = invoiceRound(Number(work.amount ?? work.price ?? 0));
+    subtotal = invoiceRound(subtotal + amount);
+    if (work.taxable === true) taxableOneTime = invoiceRound(taxableOneTime + amount);
+  }
+  const tax = invoiceRound(invoiceRound(taxableRecurring * rate) + invoiceRound(taxableOneTime * rate) + programTax);
+  if (subtotal > 99999999.99 || invoiceRound(subtotal + tax) > 99999999.99) return 'The combined acceptance invoice (first applications plus corrective work and tax) exceeds $99,999,999.99 — reduce the amounts before comparing costs.';
   return null;
 }
 

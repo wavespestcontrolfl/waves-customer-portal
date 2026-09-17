@@ -189,3 +189,17 @@ it('offers neither Review and send nor Mark won while the saved fixed date has p
   expect(screen.getByRole('button', { name: 'Review and send' })).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Mark won' })).toBeInTheDocument();
 });
+
+it('updates costing eligibility when tax pushes the combined first invoice over capacity', async () => {
+  saved.proposal = { ...saved.proposal, taxRate: 0,
+    programs: [{ label: 'Synthetic program', pricePerApplication: 95000000, frequencyPerYear: 1, taxable: true }],
+    correctiveWork: [{ label: 'Synthetic correction', amount: 1000000, taxable: false }],
+  };
+  saved.projectCosting = { revenueYears: 1, rows: [{ category: 'labor', description: 'Synthetic cost', quantity: 1, unit: 'hour', unitCost: 10, occurrences: 1 }] };
+  mount(); await screen.findByText('$95,999,990.00');
+  fireEvent.change(screen.getByLabelText('Tax rate (%) — taxable lines only'), { target: { value: '7' } });
+  expect(screen.queryByText('$95,999,990.00')).not.toBeInTheDocument();
+  expect(screen.getByText(/combined acceptance invoice/)).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText('Tax rate (%) — taxable lines only'), { target: { value: '0' } });
+  expect(screen.getByText('$95,999,990.00')).toBeInTheDocument();
+});

@@ -72,6 +72,27 @@ describe('bid quantity and costing authority', () => {
     expect(computeProjectCosts({ rows }, { [key]: 99999999.99 })).toMatchObject({ costsComplete: true });
     expect(computeProjectCosts({ rows }, { [key]: 120000000 })).toMatchObject({ costsComplete: false, profit: null, marginPercent: null });
   });
+  test.each([
+    [99000000, 1000000, 1, 0, false, false, false],
+    [95000000, 1000000, 1, 0.07, true, false, false],
+    [95000000, 1000000, 1, 0.07, false, true, true],
+    [24000000, 1000000, 4, 0.07, true, true, true],
+    [98999999.99, 1000000, 1, 0, false, false, true],
+  ])('cost margins follow the exact first invoice bound for program %s/corrective %s/cadence %s/tax %s', (price, corrective, frequency, taxRate, programTaxable, workTaxable, saveable) => {
+    const proposal = normalizeProposal({ estimate_data: { proposal: { enabled: true, taxRate,
+      programs: [{ label: 'Synthetic program', pricePerApplication: price, frequencyPerYear: frequency, taxable: programTaxable }],
+      correctiveWork: [{ label: 'Synthetic corrective work', amount: corrective, taxable: workTaxable }],
+    } } });
+    const invoice = buildProposalFirstInvoice(proposal);
+    expect(invoice.subtotal <= 99999999.99 && invoice.total <= 99999999.99).toBe(saveable);
+    const issue = proposalRevenueIssue(proposal);
+    if (saveable) expect(issue).toBeNull();
+    else expect(issue).toMatch(/combined acceptance invoice/);
+    const rows = [{ category: 'labor', description: 'Synthetic cost', quantity: 1, unit: 'hour', unitCost: 10, occurrences: 1 }];
+    const costs = computeProjectCosts({ rows }, computeProposalTotals(proposal), { revenueIssue: issue });
+    expect(costs.costsComplete).toBe(saveable);
+    if (!saveable) expect(costs).toMatchObject({ profit: null, marginPercent: null });
+  });
   test('individually valid building inputs cannot show margins for an overflowing quote', () => {
     const proposal = normalized([line('large', 2, 60000000)]);
     const rows = [{ category: 'labor', description: 'Synthetic cost', quantity: 1, unit: 'hour', unitCost: 10, occurrences: 1 }];

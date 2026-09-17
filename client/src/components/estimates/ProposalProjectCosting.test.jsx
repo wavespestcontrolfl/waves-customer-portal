@@ -4,6 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, expect, it } from 'vitest';
 import ProposalProjectCosting from './ProposalProjectCosting';
+import { proposalRevenueIssue } from '@proposal-bid';
 
 afterEach(cleanup);
 const costing = { revenueYears: 1, rows: [{ category: 'labor', phase: '', description: 'Labor', quantity: 10, unit: 'hour', unitCost: 40, occurrences: 1 }] };
@@ -21,4 +22,11 @@ it('withholds profit and margin while the quoted itemization would be refused by
   expect(screen.queryByText('$600.00')).not.toBeInTheDocument();
   expect(screen.queryByText('60%')).not.toBeInTheDocument();
   expect(screen.getByText(`Fix the quoted itemization before comparing costs: ${issue}`)).toBeInTheDocument();
+});
+
+it('withholds margin for combined first-invoice overflow even when estimate columns fit', () => {
+  const issue = proposalRevenueIssue({ programs: [{ pricePerApplication: 99000000, frequencyPerYear: 1 }], correctiveWork: [{ label: 'Remediation', amount: 1000000 }] });
+  render(<ProposalProjectCosting value={costing} onChange={() => {}} totals={{ annualRecurring: 99000000, monthlyEquivalent: 8250000, oneTime: 1000000 }} revenueIssue={issue} />);
+  expect(screen.getByText(/combined acceptance invoice/)).toBeInTheDocument();
+  expect(screen.getAllByText('—')).toHaveLength(2);
 });
