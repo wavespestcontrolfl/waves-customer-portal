@@ -157,7 +157,9 @@ postgres('queued review ask settlement against migrated PostgreSQL', () => {
   test('a prior reservation survives as standalone evidence when a bundled completion strips its review suffix', async () => {
     const priorAttemptAt = new Date(Date.now() - 3600000);
     const [reviewRequest] = await trx('review_requests').insert({
-      id: randomUUID(), customer_id: customerId, status: 'pending', sms_sent_at: null,
+      id: randomUUID(), customer_id: customerId, token: randomUUID(),
+      channel: 'sms', template_key: 'day0_ask', location_id: 'venice',
+      triggered_by: 'auto', status: 'pending', sms_sent_at: null,
       scheduled_for: new Date(Date.now() - 60000),
     }).returning('*');
     const completionBody = 'Your service is complete: https://portal.test/report/abc'
