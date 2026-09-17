@@ -126,7 +126,19 @@ describe('inactive bounded unit relation candidates', () => {
       original.candidates.map((anchor) => candidate(0, 5, original.amount, anchor, span(1, 3, ', we'))) }]);
   });
 
-  test.each(['each visit, $98', '$98, each visit', 'costs $98, each visit',
+  test.each(['$98, each visit', 'costs $98, each visit'])
+  ('permits one trailing comma with the original amount paths: %s', (text) => {
+    const clause = recognize(text).clauses[0];
+    const original = clause.amountRelations[0];
+    const start = text.startsWith('costs') ? 1 : 0;
+    expect(clause.unitRelations[0].candidates).toEqual([
+      candidate(start, start + 3, original.amount, null, span(start + 1, start + 2, ',')),
+      ...original.candidates.map((anchor) => candidate(0, start + 3, original.amount,
+        anchor, span(start + 1, start + 2, ','))),
+    ]);
+  });
+
+  test.each(['each visit, $98',
     'each visit,, costs $98', 'each visit, we you charge $98',
     'each visit, mystery charge $98', 'each visit we charge $98',
     'each visit: we charge $98', 'each visit, : charge $98', 'each visit - - $98'])

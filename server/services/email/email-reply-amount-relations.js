@@ -3,6 +3,10 @@ const { recognizeEmailReplyPricingPhrases } = require('./email-reply-pricing-phr
 const AMOUNTS = new Set(['money', 'number']);
 const DETERMINERS = new Set(['a', 'an', 'the']);
 const NEGATIONS = new Set(['not', 'never']);
+const ARTICLES = new Set(['a', 'an']);
+const RANGE_INTRODUCERS = new Set(['from', 'between']);
+const AT = new Set(['at']);
+const NOUN_CONNECTORS = new Set(['word:of', 'sep::', 'sep:-']);
 
 function recognizeClause(clause) {
   const { tokens, phrases } = clause;
@@ -10,8 +14,10 @@ function recognizeClause(clause) {
   const amountRelations = tokens.flatMap((token, start) => AMOUNTS.has(token.kind)
     ? [{ amount: { start, end: start + 1, kind: token.kind, text: token.text }, candidates: [] }] : []);
   const amounts = new Map(amountRelations.map((record) => [record.amount.start, record]));
+  const wordIn = (start, words) => tokens[start]?.kind === 'word' && words.has(tokens[start].text);
 
-  function copulaEnd(start, allowQualifier) {
+  function copulaEnd(start, allowQualifier, allowNounConnector = false) {
+    if (allowNounConnector && NOUN_CONNECTORS.has(`${tokens[start]?.kind}:${tokens[start]?.text}`)) return start + 1;
     if (tokens[start]?.kind !== 'be') return start;
     const next = tokens[start + 1];
     // Comparative qualifiers such as "not more than" retain their original phrase span.
@@ -39,17 +45,20 @@ function recognizeClause(clause) {
     const noun = anchor.type === 'billing_head' && anchor.roles.includes('noun');
     if (!predicate && !noun) continue;
     let end = anchor.end;
-    if (predicate) end = at('participant', end)?.end ?? end;
-    else end = copulaEnd(end, true);
+    if (predicate) {
+      end = at('participant', end)?.end ?? end;
+      if (!at('qualifier', end) && wordIn(end, AT)) end += 1;
+    } else end = copulaEnd(end, true, true);
+    if (wordIn(end, ARTICLES)) end += 1;
     const qualifier = at('qualifier', end);
     if (qualifier) end = qualifier.end;
-    const record = amounts.get(end);
+    const record = amounts.get(end + Number(wordIn(end, RANGE_INTRODUCERS)));
     if (record) add(record, predicate ? 'predicate_amount' : 'head_amount', anchor, qualifier);
   }
 
   for (const record of amountRelations) {
     let end = copulaEnd(record.amount.end, false);
-    if (tokens[end]?.kind === 'word' && DETERMINERS.has(tokens[end].text)) end += 1;
+    if (wordIn(end, DETERMINERS)) end += 1;
     for (const anchor of phrases) {
       if (anchor.type === 'billing_head' && anchor.roles.includes('noun') && anchor.start === end) {
         add(record, 'amount_head', anchor);

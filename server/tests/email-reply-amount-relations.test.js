@@ -82,9 +82,10 @@ describe('inactive bounded amount relation candidates', () => {
       candidate('head_amount', 0, 2, noun(0, 'cost', ['noun', 'action'])),
       candidate('predicate_amount', 0, 2, predicate(0, 'cost')),
     ] }]);
-    expect(records('costs from 90 to 120')).toEqual([
-      { amount: amount(2, '90 to 120', 'number'), candidates: [] },
-    ]);
+    expect(records('costs from 90 to 120')).toEqual([{ amount: amount(2, '90 to 120', 'number'), candidates: [
+      candidate('head_amount', 0, 3, noun(0, 'cost', ['noun', 'action']), span(1, 2, 'from')),
+      candidate('predicate_amount', 0, 3, predicate(0, 'cost'), span(1, 2, 'from')),
+    ] }]);
   });
 
   test('keeps distinct noun spans and the amount-to predicate independently', () => {
@@ -144,7 +145,14 @@ describe('inactive bounded amount relation candidates', () => {
     expect(result[0].candidates).toEqual([]);
   });
 
-  test.each([',', ':', '-', '(', ')', '@', '/', 'per visit', 'per application',
+  test.each([':', '-'])('permits a single nominal connector %s only before the amount', (connector) => {
+    expect(records(`fee ${connector} $98`)[0].candidates).toEqual([
+      candidate('head_amount', 0, 3, noun(0, 'fee'), span(1, 2, connector)),
+    ]);
+    expect(records(`$98 ${connector} fee`)[0].candidates).toEqual([]);
+  });
+
+  test.each([',', '(', ')', '@', '/', 'per visit', 'per application',
     '98 minutes', 'at the next visit', 'mystery'])('does not cross %s', (boundary) => {
     expect(records(`fee ${boundary} $98`).at(-1).candidates).toEqual([]);
     expect(records(`$98 ${boundary} fee`)[0].candidates).toEqual([]);

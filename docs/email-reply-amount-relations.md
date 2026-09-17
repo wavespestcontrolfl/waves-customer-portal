@@ -21,8 +21,9 @@ An empty candidate array means no supported local relationship was found.
 It does not mean the amount is compliant. Measurements are not amounts;
 unit, timing, application, and period evidence remains in the original tokens.
 Ranges that the existing amount lexer combines remain single amount tokens.
-`costs 90 to 120` can link; `costs from 90 to 120` stays unlinked because
-`from` is a separate unsupported connector.
+`costs 90 to 120` and `costs from 90 to 120` can link. A leading
+`from` or `between` is retained as connector evidence. Separate currency
+endpoints remain separate amount records; no complete range is inferred.
 
 A candidate has `relation`, `start`, `end`, `anchor`, `connector`, and
 `qualifier`. Its anchor is an existing phrase candidate. Connector evidence
@@ -39,10 +40,12 @@ connector retains its actual tokens without claiming semantic polarity.
 ## Finite supported forms
 
 - `predicate_amount`: a predicate, optionally one participant, optionally
-  one qualifier, then an amount. For example, `charge $98`, `pay you $98`,
+  `at`, optionally `a`/`an`, optionally one qualifier, optionally
+  `from`/`between`, then an amount. For example, `charge $98`, `pay you $98`,
   and `costs up to $98`.
-- `head_amount`: a noun-role billing head, optionally a copula, optionally
-  one qualifier, then an amount. For example, `fee $98` or `total is $98`.
+- `head_amount`: a noun-role billing head, optionally a copula or one of
+  `of`, colon, or hyphen, optionally `a`/`an`, optionally one qualifier,
+  optionally `from`/`between`, then an amount. For example, `fee $98` or `total is $98`.
 - `amount_head`: an amount, optionally a copula, optionally `a`, `an`, or
   `the`, then a noun-role billing head. For example, `$98 fee` or
   `$98 is the price`.
