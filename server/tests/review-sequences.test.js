@@ -24,19 +24,24 @@ jest.mock('../services/review-ask-drafter', () => ({
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 // The per-customer send lock needs a real pool; its own suite covers it.
-jest.mock('../utils/cron-lock', () => ({
-  runExclusive: async (key, fn) => {
-    (global.__reviewLockKeys = global.__reviewLockKeys || []).push(key);
-    const held = global.__reviewLockHeld = global.__reviewLockHeld || new Set();
-    if (held.has(key)) return { skipped: true, reason: 'lease_held' };
-    held.add(key);
-    try { return await fn(); } finally { held.delete(key); }
-  },
-  wasLockSkipped: result => result?.skipped === true,
-}));
+jest.mock('../utils/cron-lock', () => {
+  const context = new (require('async_hooks').AsyncLocalStorage)();
+  return {
+    runExclusive: async (key, fn) => {
+      (global.__reviewLockKeys = global.__reviewLockKeys || []).push(key);
+      if (context.getStore()?.has(key)) return fn();
+      const held = global.__reviewLockHeld = global.__reviewLockHeld || new Set();
+      if (held.has(key)) return { skipped: true, reason: 'lease_held' };
+      held.add(key);
+      try { return await context.run(new Set([...(context.getStore() || []), key]), fn); }
+      finally { held.delete(key); }
+    },
+    wasLockSkipped: result => result?.skipped === true,
+  };
+});
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSendCustomerMessage(...a) }));
 jest.mock('../services/email-template-library', () => ({ sendTemplate: (...a) => mockEmailSendTemplate(...a) }));
-jest.mock('../services/short-url', () => ({ shortenOrPassthrough: async (url) => url, existingShortUrlFor: async () => null }));
+jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async (url) => url), existingShortUrlFor: async () => null }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal.test' }));
 jest.mock('../services/customer-contact', () => ({
   // Honor explicit null/'' so tests can model a customer missing a channel.
@@ -79,6 +84,7 @@ function makeMock(initial = {}, opts = {}) {
   // equals/ops/raws/selected) so a test can break a single lookup and leave
   // the rest of the runner alone.
   const throwSelectWhen = typeof opts.throwSelectWhen === 'function' ? opts.throwSelectWhen : null;
+  const throwDeleteFor = new Set(opts.throwDeleteFor || []);
   function filtered(q) {
     let rows = q.matchNone ? [] : [...(state.rows[q.table] || [])];
     rows = rows.filter((r) => q.equals.every(([k, v]) => valueFor(r, k) === v));
@@ -132,7 +138,7 @@ function makeMock(initial = {}, opts = {}) {
         return { returning: async () => [inserted] };
       },
       async update(patch) { if (opts.onUpdate) opts.onUpdate(this.table, patch, state); if (throwUpdateFor.has(this.table)) throw new Error('pg blip on update'); const rows = filtered(this); rows.forEach((r) => Object.assign(r, patch)); return rows.length; },
-      async del() { if (opts.onDelete) opts.onDelete(this.table, this, state); const rows = filtered(this); const arr = state.rows[this.table] || []; rows.forEach((r) => { const i = arr.indexOf(r); if (i >= 0) arr.splice(i, 1); }); return rows.length; },
+      async del() { if (throwDeleteFor.has(this.table)) throw new Error('pg blip on delete'); if (opts.onDelete) opts.onDelete(this.table, this, state); const rows = filtered(this); const arr = state.rows[this.table] || []; rows.forEach((r) => { const i = arr.indexOf(r); if (i >= 0) arr.splice(i, 1); }); return rows.length; },
       then(res, rej) {
         if (throwSelectWhen && throwSelectWhen(this)) {
           return Promise.reject(new Error('pg blip on select')).then(res, rej);
@@ -341,6 +347,23 @@ describe('review sequences — cadence engine', () => {
     // Body is the friendly-ask copy, not an empty/no_template failure.
     expect(mockSendCustomerMessage.mock.calls[0][0].body).toMatch(/quick Google review/i);
     expect(mock.__state.rows.review_requests[0].template_key).toBe('friendly_ask');
+  });
+
+  test('a suppressed outreach ask does not enter the retry queue', async () => {
+    const mock = makeMock({ customers: [{ id: 'suppressed-ask', first_name: 'Sam', phone: '+19410000001', nearest_location_id: 'bradenton' }] });
+    db.mockImplementation(mock);
+    mockSendCustomerMessage.mockResolvedValueOnce({
+      sent: true, deliveryOutcome: 'not_sent', providerMessageId: 'template-disabled',
+    });
+
+    const out = await ReviewService.sendOutreachTouch({
+      customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', manageRetryVia: 'cron',
+    });
+
+    expect(out).toMatchObject({ ok: false, blocked: true, terminal: true, code: 'template-disabled' });
+    expect(mock.__state.rows.review_requests[0].status).toBe('suppressed');
+    expect(mock.__state.rows.review_requests[0].scheduled_for ?? null).toBeNull();
+    expect(mock.__state.rows.sms_log || []).not.toContainEqual(expect.objectContaining({ status: 'sending' }));
   });
 
   test('an SMS-opted-out customer who allows email gets the email touch instead of stalling', async () => {
@@ -590,6 +613,22 @@ describe('review sequences — cadence engine', () => {
     expect(out.terminal).toBeFalsy();
   });
 
+  test('a non-ask uncertain result with failed bookkeeping surfaces as uncertain, never the retry path (codex #4338 P1 r3)', async () => {
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'uncertain', retryable: true, code: 'PROVIDER_FAILURE' });
+    const mock = makeMock(
+      { customers: [{ id: 'bk-checkin', first_name: 'Bea', phone: '+19410000052', nearest_location_id: 'venice' }] },
+      { throwUpdateFor: ['review_requests'] },
+    );
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.sendOutreachTouch({ customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'resolution_check', manageRetryVia: 'sequence' });
+
+    // The provider may already hold the text — a bookkeeping blip must not
+    // put an explicitly-uncertain check-in back on the retry rail.
+    expect(out).toMatchObject({ ok: false, deferred: true, uncertain: true });
+    expect(out.retryable).toBeUndefined();
+  });
+
   test('a terminal SMS failure (invalid number) is suppressed, not retried forever', async () => {
     mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', terminal: true, retryable: false, code: 'INVALID_NUMBER' });
     const mock = makeMock({ customers: [{ id: 't1', first_name: 'Bad', last_name: 'N', phone: '+10000000000', nearest_location_id: 'bradenton' }] });
@@ -653,7 +692,7 @@ describe('review sequences — cadence engine', () => {
       // The bounce reconciliation parks the sequence between the provider's
       // return and this step's bookkeeping (the packet handoff ends at return).
       Object.assign(mock.__state.rows.review_sequences[0], { status: 'stopped', stop_reason: Summary.PARKED_REVIEW_REASON, completed_at: new Date() });
-      return { sent: true, auditLogId: 'audit-pk' };
+      return { sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-pk' };
     });
 
     await ReviewService.processReviewSequences();
@@ -997,6 +1036,33 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
 
       expect(out.sent).toBe(1);
       expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+
+    test('an uncertain cadence handoff keeps durable evidence and waits 72h before retrying the step', async () => {
+      const mock = makeMock(fixture('seq-uncertain', { lastAskAgoMs: 73 * 3600000 }));
+      db.mockImplementation(mock);
+      mockSendCustomerMessage.mockResolvedValueOnce({
+        sent: false,
+        deliveryOutcome: 'uncertain',
+        retryable: true,
+        code: 'PROVIDER_FAILURE',
+      });
+
+      const out = await ReviewService.processReviewSequences();
+
+      expect(out.sent).toBe(0);
+      const seq = mock.__state.rows.review_sequences[0];
+      expect(seq.current_step).toBe(1);
+      expect(seq.next_run_at.getTime()).toBeGreaterThanOrEqual(Date.now() + 72 * 3600000 - 1000);
+      const attempt = mock.__state.rows.review_requests.find(row => row.sequence_step === 1);
+      expect(attempt.status).toBe('failed');
+      expect(attempt.sms_sent_at).toBeUndefined();
+      const reservation = mock.__state.rows.sms_log[0];
+      expect(reservation.status).toBe('sending');
+      expect(JSON.parse(reservation.metadata)).toMatchObject({
+        review_ask_reservation: true,
+        review_request_id: attempt.id,
+      });
     });
 
     test('a weekdays-only step whose quiet-hours hold names Saturday morning retries Monday morning instead (codex #4330 P2)', async () => {
@@ -4372,7 +4438,12 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
   // used to fall into the generic deferred/transient branch, which reschedules
   // next_run_at +30 minutes — so the NEXT processReviewSequences tick re-ran
   // this same step and sent a second text. The sequence must hold instead.
-  test('an uncertain provider handoff on a cadence step holds the whole sequence — no 30-minute reschedule, no second send', async () => {
+  // #4332 (direct serialization) supersedes the whole-sequence hold for ASK
+  // templates: the sms_log reservation is durable evidence, so the step may be
+  // retried after the full 72-hour ask-spacing window — never the generic
+  // 30-minute reschedule (the #4338 P1). No-link check-ins, which take no
+  // reservation, still hold the sequence (see the deferred-write test below).
+  test('an uncertain provider handoff on a cadence step waits the full ask-spacing window — no 30-minute reschedule, no second send', async () => {
     const mock = makeMock({
       customers: [{ id: 'unc-1', first_name: 'Uma', last_name: 'N', phone: '+19410000090', nearest_location_id: 'bradenton' }],
       review_sequences: [{
@@ -4393,11 +4464,14 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     const seq = mock.__state.rows.review_sequences[0];
     expect(seq.status).toBe('active'); // held, not stopped — an operator/later evidence can still resolve it
     expect(seq.current_step).toBe(0); // not advanced
-    expect(seq.next_run_at).toBeNull(); // NOT rescheduled — the due-sweep will never re-pick this row
-    expect(JSON.parse(seq.decision).reason).toBe('provider_outcome_uncertain');
+    // Rescheduled to the ask-spacing window, never the 30-minute retry.
+    expect(seq.next_run_at.getTime()).toBeGreaterThanOrEqual(Date.now() + 72 * 3600000 - 1000);
+    expect(JSON.parse(seq.decision).reason).toBe('provider_uncertain');
+    // The reservation stays as durable evidence for every other dispatcher.
+    expect(mock.__state.rows.sms_log[0]).toMatchObject({ status: 'sending' });
 
-    // A second cron tick must not re-send: with next_run_at null, this row
-    // never re-enters the due query in the first place.
+    // A second cron tick must not re-send: next_run_at sits 72h out, so this
+    // row does not re-enter the due query.
     mockSendCustomerMessage.mockClear();
     const out2 = await ReviewService.processReviewSequences();
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
@@ -4408,7 +4482,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
   // handoff (audit-persistence failure) instead of returning. _sendOutreachSms's
   // old catch retried blind on ANY throw; this proves the thrown case reaches
   // the SAME sequence-hold behavior as a returned uncertain result above.
-  test('an uncertain provider handoff THROWN (not returned) also holds the sequence, end to end', async () => {
+  test('an uncertain provider handoff THROWN (not returned) also waits the ask-spacing window, end to end', async () => {
     const mock = makeMock({
       customers: [{ id: 'unc-2', first_name: 'Vic', last_name: 'N', phone: '+19410000091', nearest_location_id: 'bradenton' }],
       review_sequences: [{
@@ -4430,10 +4504,11 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(out.sent).toBe(0);
     const seq = mock.__state.rows.review_sequences[0];
     expect(seq.status).toBe('active');
-    expect(seq.next_run_at).toBeNull();
-    expect(JSON.parse(seq.decision).reason).toBe('provider_outcome_uncertain');
+    expect(seq.next_run_at.getTime()).toBeGreaterThanOrEqual(Date.now() + 72 * 3600000 - 1000);
+    expect(JSON.parse(seq.decision).reason).toBe('provider_uncertain');
     const req = mock.__state.rows.review_requests.find((r) => r.sequence_id === 'seq-unc2');
-    expect(req.status).toBe('deferred');
+    expect(req.status).toBe('failed'); // the sequence owns the retry; the reservation holds the evidence
+    expect(mock.__state.rows.sms_log[0]).toMatchObject({ status: 'sending' });
   });
 
   // codex #4338 P1, round 3: a RETURNED uncertain result whose OWN
@@ -4455,8 +4530,11 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       sent: false, blocked: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_FAILURE', auditLogId: 'audit-unc3',
     });
 
+    // A no-link check-in: no reservation, so the deferred-status write IS the
+    // only hold — its failure must still surface as uncertain (ask templates
+    // take the reservation-backed 72h retry above instead).
     const out = await ReviewService.sendOutreachTouch({
-      customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', manageRetryVia: 'sequence',
+      customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'resolution_check', manageRetryVia: 'sequence',
     });
 
     expect(out.ok).toBe(false);
@@ -5630,6 +5708,65 @@ describe('legacy sendSMS — ambiguous returned provider failure', () => {
   });
 });
 
+// Codex P1: sendSMS's `uncertain`/`claimLost` outcomes leave the row exactly
+// as the in-flight attempt found it — no scheduled_for — for the
+// stranded-send reconciliation (or the claim's owner) to resolve;
+// processScheduled only ever selects status='pending' rows WITH a
+// scheduled_for, so neither outcome is a queued retry. unsentOutcome (feeding
+// create()/_createGated, and from there /trigger, /tech-trigger and the
+// Intelligence Bar tool) used to fold both into the same generic `deferred`
+// shape a real cron-owned retry produces, telling the operator a text "will
+// go out automatically" that no cron pass could ever pick up.
+describe('unsentOutcome — uncertain and claim-held sends are not a queued retry', () => {
+  test('an uncertain provider handoff reports a distinct code, not the generic deferred shape', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'unc-out-1', first_name: 'Lee', phone: '+19410000196', nearest_location_id: 'venice' }],
+    });
+    db.mockImplementation(mock);
+    const sendSpy = jest.spyOn(ReviewService, 'sendSMS')
+      .mockResolvedValueOnce({ sent: false, uncertain: true, reason: 'provider_uncertain', requestId: 'ignored' });
+
+    try {
+      const request = await ReviewService.create({ customerId: 'unc-out-1', triggeredBy: 'tech' });
+      expect(request.sendOutcome).toEqual({ sent: false, uncertain: true, reason: 'provider_uncertain', nextAllowedAt: null });
+      // Not the generic deferred shape a real cron-owned retry uses — a
+      // caller keying off `.deferred` to decide whether a retry is queued
+      // must not see one here.
+      expect(request.sendOutcome.deferred).toBeUndefined();
+    } finally { sendSpy.mockRestore(); }
+  });
+
+  test('a claim another sender already holds also reports the distinct code, not the generic deferred shape', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'unc-out-2', first_name: 'Sam', phone: '+19410000197', nearest_location_id: 'venice' }],
+    });
+    db.mockImplementation(mock);
+    const sendSpy = jest.spyOn(ReviewService, 'sendSMS')
+      .mockResolvedValueOnce({ sent: false, claimLost: true, reason: 'review_claim_lost', requestId: 'ignored' });
+
+    try {
+      const request = await ReviewService.create({ customerId: 'unc-out-2', triggeredBy: 'tech' });
+      expect(request.sendOutcome).toEqual({ sent: false, uncertain: true, reason: 'review_claim_lost', nextAllowedAt: null });
+      expect(request.sendOutcome.deferred).toBeUndefined();
+    } finally { sendSpy.mockRestore(); }
+  });
+
+  test('an ordinary provider-retry deferral keeps its real nextAllowedAt (the queued-retry copy stays honest)', async () => {
+    const retryAt = new Date(Date.now() + 5 * 60000).toISOString();
+    const mock = makeMock({
+      customers: [{ id: 'unc-out-3', first_name: 'Di', phone: '+19410000198', nearest_location_id: 'venice' }],
+    });
+    db.mockImplementation(mock);
+    const sendSpy = jest.spyOn(ReviewService, 'sendSMS')
+      .mockResolvedValueOnce({ deferred: 'provider_retry', nextAllowedAt: retryAt });
+
+    try {
+      const request = await ReviewService.create({ customerId: 'unc-out-3', triggeredBy: 'tech' });
+      expect(request.sendOutcome).toEqual({ sent: false, deferred: 'provider_retry', nextAllowedAt: retryAt });
+    } finally { sendSpy.mockRestore(); }
+  });
+});
+
 describe('shared ask history foundation', () => {
   const history = require('../services/review-ask-history');
   const base = new Date('2035-01-01T15:00:00Z').getTime();
@@ -5950,6 +6087,317 @@ test.each(['spacing', 'pin'])('a %s write that loses the pending row cannot revi
   expect(mockSendCustomerMessage).not.toHaveBeenCalled();
 });
 
+describe('direct outreach serialization', () => {
+  test('a transient accepted stamp failure records the send before allowing another outreach attempt', async () => {
+    const customer = { id: 'direct-stamp-retry', first_name: 'Synthetic', phone: '+12025550101' };
+    let failStamp = true;
+    const mock = makeMock({ customers: [customer] }, { onUpdate: (table, patch) => {
+      if (table === 'review_requests' && patch.sms_sent_at && failStamp) {
+        failStamp = false;
+        throw new Error('transient delivery stamp failure');
+      }
+    } });
+    db.mockImplementation(mock);
+
+    expect(await ReviewService.sendOutreachTouch({ customer, channel: 'sms' })).toMatchObject({ ok: true, sent: true });
+    expect(mock.__state.rows.review_requests[0]).toMatchObject({ status: 'sent', sms_sent_at: expect.any(Date) });
+    expect(mock.__state.rows.sms_log).toHaveLength(0);
+    expect(await ReviewService.sendOutreachTouch({ customer, channel: 'sms' })).toMatchObject({ ok: false, deferred: true });
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test.each(['sms', 'email'])('%s respects a delivered staff ask and retains truthful retry ownership', async channel => {
+    const customer = { id: 'direct-spacing', first_name: 'Synthetic', phone: '+12025550101', email: 'synthetic@example.test' };
+    const deliveredAt = new Date();
+    const mock = makeMock({ customers: [customer], notification_prefs: [{ customer_id: customer.id, email_enabled: true, review_request: true }], sms_log: [{ customer_id: customer.id,
+      direction: 'outbound', status: 'sent', message_body: 'Please leave a Google review.', created_at: deliveredAt }] });
+    db.mockImplementation(mock);
+    const result = await ReviewService.sendOutreachTouch({ customer, channel });
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockEmailSendTemplate).not.toHaveBeenCalled();
+    expect(new Date(result.nextAllowedAt).getTime()).toBe(deliveredAt.getTime() + 72 * 3600000);
+    const request = mock.__state.rows.review_requests[0];
+    if (channel === 'sms') {
+      expect(result).toMatchObject({ ok: false, deferred: true });
+      expect(request.status).toBe('pending');
+      expect(request.scheduled_for).toBeTruthy();
+    } else {
+      expect(result).toMatchObject({ ok: false, blocked: true, code: 'REVIEW_ASK_SPACING' });
+      expect(result.deferred).toBeUndefined();
+      expect(request).toBeUndefined();
+      expect(mock.__state.rows.review_requests).toEqual([]);
+    }
+  });
+
+  test('history failure refuses a direct email without promising a queued retry', async () => {
+    const customer = { id: 'direct-history', first_name: 'Synthetic', phone: '+12025550101', email: 'synthetic@example.test' };
+    const mock = makeMock({ customers: [customer], notification_prefs: [{ customer_id: customer.id, email_enabled: true, review_request: true }] }, { throwSelectWhen: q => q.table === 'sms_log' });
+    db.mockImplementation(mock);
+    const result = await ReviewService.sendOutreachTouch({ customer, channel: 'email' });
+    expect(result).toMatchObject({ blocked: true, code: 'REVIEW_HISTORY_UNAVAILABLE', httpStatus: 503 });
+    expect(mockEmailSendTemplate).not.toHaveBeenCalled();
+    expect(mock.__state.rows.review_requests).toEqual([]);
+  });
+
+  // The cleanup delete runs on the SAME database whose outage produced the
+  // 503 in the first place, so it fails for the same reason. Throwing here
+  // would convert a truthful "try again later" hold into a generic 500 — and
+  // on the satisfaction page, into the bare fallback link the hold exists to
+  // suppress (Codex #4332 P2).
+  test('a cleanup delete that fails twice falls back to suppressing the row instead of leaving it pending forever (codex #4332 P2, r2)', async () => {
+    const customer = { id: 'direct-cleanup', first_name: 'Synthetic', phone: '+12025550101', email: 'synthetic@example.test' };
+    const mock = makeMock({ customers: [customer], notification_prefs: [{ customer_id: customer.id, email_enabled: true, review_request: true }] },
+      { throwSelectWhen: q => q.table === 'sms_log', throwDeleteFor: ['review_requests'] });
+    db.mockImplementation(mock);
+    const result = await ReviewService.sendOutreachTouch({ customer, channel: 'email' });
+    expect(result).toMatchObject({ ok: false, blocked: true, code: 'REVIEW_HISTORY_UNAVAILABLE', httpStatus: 503, channel: 'email' });
+    expect(mockEmailSendTemplate).not.toHaveBeenCalled();
+    // Both delete attempts failed (throwDeleteFor) — the fallback plain
+    // UPDATE (not a delete, so it survives everything but the DB itself
+    // being unreachable) marks the row terminal instead of leaving it
+    // 'pending' with no retry owner, accumulating across every future
+    // retry that hits the same outage.
+    expect(mock.__state.rows.review_requests).toHaveLength(1);
+    expect(mock.__state.rows.review_requests[0].status).toBe('suppressed');
+  });
+
+
+  test('a cadence retry releases the PRIOR failed attempt\'s orphaned reservation for the same step (codex #4331 P2)', async () => {
+    // Seeds the exact state an earlier ambiguous-outcome pass on this same
+    // sequence step leaves behind: the request row marked 'failed' by
+    // _applyOutreachSendResult, its sms_log reservation deliberately left
+    // 'sending' as 72h ask-spacing evidence rather than released there.
+    const customer = { id: 'cadence-retry-1', first_name: 'Ida', last_name: 'V', phone: '+19410000188', nearest_location_id: 'venice' };
+    const staleAt = new Date(Date.now() - 3600000);
+    const mock = makeMock({
+      customers: [customer],
+      review_requests: [{
+        id: 'prior-failed-1', customer_id: customer.id, status: 'failed', channel: 'sms',
+        template_key: 'day0_ask', token: 'prior-tok', sequence_id: 'seq-retry-1', sequence_step: 1,
+        created_at: staleAt,
+      }],
+      sms_log: [{
+        id: 'res-prior-1', customer_id: customer.id, direction: 'outbound', status: 'sending',
+        message_body: 'Would you leave us a quick review?', to_phone: customer.phone,
+        metadata: { review_ask_reservation: true, review_request_id: 'prior-failed-1' },
+        created_at: staleAt, updated_at: staleAt,
+      }],
+    });
+    db.mockImplementation(mock);
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-retry-1' });
+
+    const out = await ReviewService.sendOutreachTouch({
+      customer, channel: 'sms', templateId: 'day0_ask',
+      sequenceId: 'seq-retry-1', sequenceStep: 1, manageRetryVia: 'sequence',
+    });
+
+    expect(out).toMatchObject({ ok: true, sent: true });
+    // A fresh row was minted for this retry — the prior one is untouched
+    // except for its now-released reservation.
+    expect(mock.__state.rows.review_requests).toHaveLength(2);
+    expect(mock.__state.rows.review_requests.find(r => r.id === 'prior-failed-1').status).toBe('failed');
+    // No orphaned reservation remains for EITHER request: the prior one was
+    // released by this retry, and the new one's own reservation was
+    // released on acceptance by the ordinary accepted-send bookkeeping.
+    const stillSending = mock.__state.rows.sms_log.filter(r => r.status === 'sending');
+    expect(stillSending).toHaveLength(0);
+    expect(mock.__state.rows.sms_log.some(r => r.id === 'res-prior-1')).toBe(false);
+  });
+
+  test('a prior-reservation release that throws once is retried and released, not abandoned (codex #4331 P2, r2)', async () => {
+    const customer = { id: 'cadence-retry-2', first_name: 'Ida', phone: '+19410000189', nearest_location_id: 'venice' };
+    const staleAt = new Date(Date.now() - 3600000);
+    const mock = makeMock({
+      customers: [customer],
+      review_requests: [{
+        id: 'prior-failed-2', customer_id: customer.id, status: 'failed', channel: 'sms',
+        template_key: 'day0_ask', token: 'prior-tok-2', sequence_id: 'seq-retry-2', sequence_step: 1,
+        created_at: staleAt,
+      }],
+      sms_log: [{
+        id: 'res-prior-2', customer_id: customer.id, direction: 'outbound', status: 'sending',
+        message_body: 'Would you leave us a quick review?', to_phone: customer.phone,
+        metadata: { review_ask_reservation: true, review_request_id: 'prior-failed-2' },
+        created_at: staleAt, updated_at: staleAt,
+      }],
+    });
+    // The FIRST sms_log delete in this whole run is the prior reservation's
+    // release (sendOutreachTouch's cleanup runs before this attempt's own
+    // reservation even exists) — throw only on it, so the retry (the
+    // second attempt on the SAME delete) is what's actually verified.
+    let delCalls = 0;
+    db.mockImplementation((tbl) => {
+      const q = mock(tbl);
+      if (String(tbl).split(/\s+as\s+/i)[0] === 'sms_log') {
+        const realDel = q.del.bind(q);
+        q.del = async () => {
+          delCalls += 1;
+          if (delCalls === 1) throw new Error('transient pg blip on release');
+          return realDel();
+        };
+      }
+      return q;
+    });
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-retry-2' });
+
+    const out = await ReviewService.sendOutreachTouch({
+      customer, channel: 'sms', templateId: 'day0_ask',
+      sequenceId: 'seq-retry-2', sequenceStep: 1, manageRetryVia: 'sequence',
+    });
+
+    expect(out).toMatchObject({ ok: true, sent: true });
+    expect(delCalls).toBeGreaterThanOrEqual(2);
+    // Released on retry — no orphan, and never marked release_pending
+    // since the retry itself succeeded.
+    expect(mock.__state.rows.sms_log.some(r => r.id === 'res-prior-2')).toBe(false);
+    expect(mock.__state.rows.sms_log.filter(r => r.status === 'sending')).toHaveLength(0);
+  });
+
+  test('a prior-reservation release that fails twice is marked release_pending, and the stranded-send sweep finishes it (codex #4331 P2, r2)', async () => {
+    const customer = { id: 'cadence-retry-3', first_name: 'Ida', phone: '+19410000190', nearest_location_id: 'venice' };
+    const staleAt = new Date(Date.now() - 3600000);
+    const mock = makeMock({
+      customers: [customer],
+      review_requests: [{
+        id: 'prior-failed-3', customer_id: customer.id, status: 'failed', channel: 'sms',
+        template_key: 'day0_ask', token: 'prior-tok-3', sequence_id: 'seq-retry-3', sequence_step: 1,
+        created_at: staleAt,
+      }],
+      sms_log: [{
+        id: 'res-prior-3', customer_id: customer.id, direction: 'outbound', status: 'sending',
+        message_body: 'Would you leave us a quick review?', to_phone: customer.phone,
+        metadata: { review_ask_reservation: true, review_request_id: 'prior-failed-3' },
+        created_at: staleAt, updated_at: staleAt,
+      }],
+    });
+    // Every sms_log delete in this run is stampWithRetry's own attempt +
+    // retry on the PRIOR reservation's release — an uncertain send outcome
+    // below never releases the NEW row's own reservation (kept live as
+    // spacing evidence by design), so nothing else calls .del() here and
+    // the shared mock's coarse {status,customer_id} filtering (it ignores
+    // the review_request_id predicate) can't collide two reservations for
+    // the same customer together.
+    let delCalls = 0;
+    db.mockImplementation((tbl) => {
+      const q = mock(tbl);
+      if (String(tbl).split(/\s+as\s+/i)[0] === 'sms_log') {
+        q.del = async () => {
+          delCalls += 1;
+          throw new Error('transient pg blip on release');
+        };
+      }
+      return q;
+    });
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_FAILURE' });
+
+    const out = await ReviewService.sendOutreachTouch({
+      customer, channel: 'sms', templateId: 'day0_ask',
+      sequenceId: 'seq-retry-3', sequenceStep: 1, manageRetryVia: 'sequence',
+    });
+
+    expect(out).toMatchObject({ ok: false, deferred: true, reason: 'provider_uncertain' });
+    expect(delCalls).toBe(2); // stampWithRetry's one attempt plus its one retry, then it gives up
+    const priorReservation = mock.__state.rows.sms_log.find(r => r.id === 'res-prior-3');
+    expect(priorReservation).toBeTruthy();
+    expect(priorReservation.status).toBe('sending');
+    const meta = typeof priorReservation.metadata === 'string' ? JSON.parse(priorReservation.metadata) : priorReservation.metadata;
+    expect(meta).toMatchObject({ release_pending: true, review_request_id: 'prior-failed-3' });
+
+    // The sweep runs later (no more forced failures) and finishes what the
+    // inline retry could not.
+    db.mockImplementation(mock);
+    const released = await require('../services/messaging/review-ask-reservation').releasePending();
+    expect(released).toBe(1);
+    expect(mock.__state.rows.sms_log.some(r => r.id === 'res-prior-3')).toBe(false);
+  });
+
+
+  test('persistedReviewRetryAt distinguishes a genuinely missing schedule from a verification read failure (codex #4331 P2)', async () => {
+    const { persistedReviewRetryAt } = ReviewService.__private;
+    const at = new Date(Date.now() + 5 * 60000);
+    const mock = makeMock({
+      review_requests: [
+        { id: 'prat-missing', status: 'pending', scheduled_for: null },
+        { id: 'prat-present', status: 'pending', scheduled_for: at },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    // Confirmed missing: the read SUCCEEDS and genuinely finds nothing —
+    // resolves to null, does not throw.
+    await expect(persistedReviewRetryAt('prat-missing')).resolves.toBeNull();
+    // A real persisted schedule resolves to it.
+    await expect(persistedReviewRetryAt('prat-present')).resolves.toEqual(at);
+
+    // Verification UNAVAILABLE (a transient read error) — the row may
+    // still be exactly as written; only its confirmation failed. Must
+    // THROW rather than collapse into the same null a confirmed-missing
+    // row returns, so a caller with a third "nothing is queued" branch
+    // (sendGatedAsk) can't mistake one for the other. .first() resolves
+    // directly in this file's mock (bypassing its then()-based
+    // throwSelectWhen hook), so the read is broken directly here instead.
+    db.mockImplementation((tbl) => {
+      const q = mock(tbl);
+      if (String(tbl).split(/\s+as\s+/i)[0] === 'review_requests') {
+        const realFirst = q.first.bind(q);
+        q.first = async (...args) => {
+          if (q.notNull.includes('scheduled_for')) throw new Error('pg connection reset');
+          return realFirst(...args);
+        };
+      }
+      return q;
+    });
+    await expect(persistedReviewRetryAt('prat-present')).rejects.toThrow();
+  });
+
+
+  test('direct SMS holds the lock through provider acceptance and the durable stamp', async () => {
+    const customer = { id: 'direct-lock', first_name: 'Synthetic', phone: '+12025550101' };
+    let stampHeld = false;
+    const mock = makeMock({ customers: [customer] }, { onUpdate: (table, patch) => {
+      if (table === 'review_requests' && patch.sms_sent_at) stampHeld = global.__reviewLockHeld.has('review-send:direct-lock');
+    } });
+    db.mockImplementation(mock);
+    let entered, finish;
+    const started = new Promise(resolve => { entered = resolve; });
+    const wait = new Promise(resolve => { finish = resolve; });
+    mockSendCustomerMessage.mockImplementationOnce(async () => { entered(); await wait; return { sent: true, deliveryOutcome: 'accepted' }; });
+    const first = ReviewService.sendOutreachTouch({ customer, channel: 'sms' });
+    try {
+      await started;
+      const second = await require('../services/review-ask-dispatch').dispatchReviewAsk(customer.id, () => { throw new Error('must not dispatch'); });
+      expect(second.code).toBe('REVIEW_SEND_BUSY');
+    } finally { finish(); }
+    expect(await first).toMatchObject({ ok: true, sent: true });
+    expect(stampHeld).toBe(true);
+    expect(global.__reviewLockHeld.has('review-send:direct-lock')).toBe(false);
+  });
+
+  test.each([
+    ['explicit uncertainty', 'uncertain'],
+    ['a missing outcome', undefined],
+  ])('direct SMS with %s blocks another ask and leaves no confirmed delivery timestamp', async (_label, deliveryOutcome) => {
+    const customer = { id: 'direct-uncertain', first_name: 'Synthetic', phone: '+12025550101', nearest_location_id: 'bradenton' };
+    const mock = makeMock({ customers: [customer] });
+    db.mockImplementation(mock);
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, ...(deliveryOutcome ? { deliveryOutcome } : {}), retryable: true, code: 'PROVIDER_FAILURE' });
+
+    const first = await ReviewService.sendOutreachTouch({ customer, channel: 'sms' });
+    const second = await ReviewService.sendOutreachTouch({ customer, channel: 'sms' });
+
+    expect(first).toMatchObject({ ok: false, deferred: true, reason: 'provider_uncertain' });
+    expect(new Date(first.nextAllowedAt).getTime()).toBeGreaterThanOrEqual(Date.now() + 72 * 3600000 - 1000);
+    expect(second).toMatchObject({ ok: false, deferred: true, code: 'REVIEW_ASK_SPACING' });
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    const firstRequest = mock.__state.rows.review_requests[0];
+    expect(firstRequest.sms_sent_at).toBeUndefined();
+    expect(firstRequest.sent_at).toBeUndefined();
+    const reservation = mock.__state.rows.sms_log[0];
+    expect(reservation.status).toBe('sending');
+    expect(JSON.parse(reservation.metadata).review_request_id).toBe(firstRequest.id);
+  });
+});
+
 
 test.each([false, true])('failed approval persistence parks an existing scheduled row, or reports parking failure (%s)', async parkingFails => {
   let parkedUnderLock = false;
@@ -6050,4 +6498,39 @@ test('failed spacing-retry persistence never deletes an existing queued request'
     .rejects.toMatchObject({ code: 'review_retry_persistence_failed' });
   expect(mock.__state.rows.review_requests).toEqual([queued]);
   expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+});
+
+
+test('a held email deletes its minted short code together with the pending request', async () => {
+  const customer = { id: 'held-email-code', first_name: 'Synthetic', phone: '+12025550101', email: 'synthetic@example.test' };
+  const mock = makeMock({ customers: [customer], short_codes: [],
+    notification_prefs: [{ customer_id: customer.id, email_enabled: true, review_request: true }] },
+  { throwSelectWhen: q => q.table === 'sms_log' });
+  db.mockImplementation(mock);
+  require('../services/short-url').shortenOrPassthrough.mockImplementationOnce(async (url, options) => {
+    mock.__state.rows.short_codes.push({ kind: options.kind, entity_type: options.entityType, entity_id: String(options.entityId), code: 'held-code' });
+    return 'https://portal.test/l/held-code';
+  });
+  const result = await ReviewService.sendOutreachTouch({ customer, channel: 'email' });
+  expect(result).toMatchObject({ blocked: true, code: 'REVIEW_HISTORY_UNAVAILABLE' });
+  expect(mock.__state.rows.review_requests).toEqual([]);
+  expect(mock.__state.rows.short_codes).toEqual([]);
+  expect(mockEmailSendTemplate).not.toHaveBeenCalled();
+});
+
+test('a queued SMS retry renews its expired unsent review link before provider handoff', async () => {
+  const customer = { id: 'expired-retry', first_name: 'Synthetic', phone: '+12025550101', nearest_location_id: 'venice' };
+  const expired = new Date(Date.now() - 86400000);
+  const mock = makeMock({ customers: [customer], review_requests: [{ id: 'expired-ask', customer_id: customer.id,
+    status: 'pending', channel: 'sms', template_key: 'friendly_ask', location_id: 'venice', token: 'expired-token', expires_at: expired,
+    scheduled_for: new Date(Date.now() - 60000), created_at: new Date(Date.now() - 15 * 86400000) }] });
+  db.mockImplementation(mock);
+  const before = Date.now();
+  mockSendCustomerMessage.mockImplementationOnce(async () => {
+    expect(new Date(mock.__state.rows.review_requests[0].expires_at).getTime()).toBeGreaterThanOrEqual(before + 14 * 86400000);
+    return { sent: true, deliveryOutcome: 'accepted' };
+  });
+  await ReviewService.sendSMS('expired-ask');
+  expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+  expect(mock.__state.rows.review_requests[0].sms_sent_at).toBeTruthy();
 });
